@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diffusionrl"
+dynamic = ["version"]
+description = "Diffusion RL training framework"
+readme = "docs/Diffusion_RL_Design_Analysis.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+  { name = "diffusionrl contributors" }
+]
+dependencies = [
+  "numpy>=1.24,<3",
+  "torch>=2.1",
+  "ray[default]>=2.9,<3",
+  "diffusers>=0.30",
+  "transformers>=4.41",
+  "peft>=0.11",
+  "safetensors>=0.4",
+  "Pillow>=10",
+  "requests>=2.31",
+  "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+train = [
+  "wandb>=0.16,<0.20",
+  "aiohttp>=3.9",
+]
+infer = [
+  "accelerate>=0.30",
+]
+eval = [
+  "torchvision>=0.16",
+  "easyocr>=1.7",
+]
+dev = [
+  "pytest>=7.4",
+  "pytest-cov>=4.1",
+  "ruff>=0.6",
+  "pre-commit>=3.6",
+]
+
+[project.scripts]
+diffusionrl = "diffusionrl.cli:main"
+diffusionrl-train = "diffusionrl.train:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = { attr = "diffusionrl.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["diffusionrl*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.isort]
+profile = "black"
+line_length = 120
+known_first_party = ["diffusionrl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["_dev"]
+pythonpath = ["."]

@@ -1,0 +1,539 @@
+"""
+FLUX Image Sampler for GRPO Training (FSDP Engine).
+
+This sampler implements SDE sampling with log probability computation
+for FLUX image models using native PyTorch (FSDP-compatible). It is
+fully aligned with DanceGRPO's implementation.
+
+Reference:
+- DanceGRPO: fastvideo/train_grpo_flux.py
+
+Key alignment points with DanceGRPO:
+- pack_latents(): 2x2 patch packing (line 191-196)
+- unpack_latents(): Reverse unpacking (line 198-211)
+- prepare_latent_image_ids(): Uses latent_h//2, latent_w//2 (line 352)
+- text_ids handling: .repeat(seq_len, 1) (line 244)
+- timesteps: /1000 normalization (line 238)
+- guidance: 3.5 (line 239-243)
+- flux_step(): SDE with log_prob (line 131-170)
+"""
+
+import logging
+import math
+from typing import Dict, List, Optional, Set, Tuple, Any
+import torch
+import torch.nn as nn
+
+from ..base import BaseSampler, SamplerOutput
+from ..log_prob import get_sigma_schedule, sd3_time_shift, flux_sde_step
+from diffusionrl.types import LogProbData, PromptEmbeddings
+
+logger = logging.getLogger(__name__)
+
+
+class FluxSampler(BaseSampler):
+    """
+    FLUX image sampler with log probability computation (FSDP Engine).
+
+    Fully aligned with DanceGRPO's train_grpo_flux.py implementation.
+
+    Key features:
+    - 2x2 patch packing/unpacking for FLUX transformer
+    - SDE solver with score correction
+    - bfloat16 forward + float32 SDE step
+
+    Example:
+        sampler = FluxSampler(
+            model=flux_model.transformer,
+            text_encoder=flux_model.text_encoder,
+            eta=0.7,
+            shift=1.0,
+        )
+        output = sampler.sample(
+            prompts=["A beautiful sunset"],
+            num_inference_steps=28,
+            guidance_scale=3.5,
+        )
+    """
+
+    # FLUX constants
+    SPATIAL_DOWNSAMPLE = 8  # VAE compression
+    IN_CHANNELS = 16  # Latent channels
+    DEFAULT_GUIDANCE = 3.5  # DanceGRPO line 239-243
+    VAE_SCALE = 0.3611  # DanceGRPO line 381
+    VAE_SHIFT = 0.1159  # DanceGRPO line 381
+
+    def __init__(
+        self,
+        model: Optional[nn.Module] = None,
+        text_encoder: Optional[Any] = None,
+        vae: Optional[nn.Module] = None,
+        eta: float = 0.7,
+        sde_type: str = "flux_dance",  # FLUX uses DanceGRPO formulation by default
+        shift: float = 1.0,       # FLUX uses shift=1.0
+        use_sde_solver: bool = True,  # Enable SDE solver correction
+        guidance_scale: float = 3.5,  # Configurable guidance (DanceGRPO default: 3.5)
+    ):
+        """
+        Initialize FLUX sampler.
+
+        Args:
+            model: FLUX transformer model
+            text_encoder: Text encoder (CLIP + T5 wrapper)
+            vae: VAE for encoding/decoding
+            eta: Noise level for SDE (controls stochasticity)
+            sde_type: SDE formulation (use "flux_dance" for DanceGRPO, "flux_flow" for MixGRPO)
+            shift: Time shift parameter (FLUX uses 1.0)
+            use_sde_solver: Enable SDE solver correction
+            guidance_scale: Guidance scale for classifier-free guidance (default: 3.5)
+        """
+        super().__init__(eta=eta, sde_type=sde_type, shift=shift)
+        self.model = model
+        self.text_encoder = text_encoder
+        self.vae = vae
+        self.use_sde_solver = use_sde_solver
+        self.guidance_scale = guidance_scale
+
+    @property
+    def requires_extra_forward_for_log_prob(self) -> bool:
+        return False  # Log prob computed during sampling
+
+    @property
+    def supports_image(self) -> bool:
+        return True
+
+    @property
+    def supports_video(self) -> bool:
+        return False
+
+    def _flux_flow_step(
+        self,
+        model_output: torch.Tensor,
+        latents: torch.Tensor,
+        sigmas: torch.Tensor,
+        index: int,
+        prev_sample: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Flow-GRPO SDE step with log probability computation for FLUX.
+
+        This matches MixGRPO's flow_grpo_step formulation and is used for
+        FLUX Flow-GRPO sampling (flux_flow).
+        """
+        device = model_output.device
+        sigma = sigmas[index].to(device)
+        sigma_next = sigmas[index + 1].to(device)
+        sigma_max = sigmas[1].item()
+        dt = sigma_next - sigma  # negative
+
+        # Predicted clean sample (x0)
+        pred_original_sample = latents - sigma * model_output
+
+        # Standard deviation for SDE
+        std_dev_t = torch.sqrt(
+            sigma / (1 - torch.where(sigma == 1, sigma_max, sigma))
+        ) * self.eta
+
+        # Mean update (flow SDE)
+        prev_sample_mean = (
+            latents * (1 + std_dev_t**2 / (2 * sigma) * dt) +
+            model_output * (1 + std_dev_t**2 * (1 - sigma) / (2 * sigma)) * dt
+        )
+
+        if prev_sample is None:
+            noise = torch.randn_like(prev_sample_mean)
+            prev_sample = prev_sample_mean + std_dev_t * torch.sqrt(-dt) * noise
+
+        log_prob = (
+            -((prev_sample.detach().to(torch.float32) - prev_sample_mean.to(torch.float32)) ** 2)
+            / (2 * ((std_dev_t * torch.sqrt(-dt)) ** 2))
+            - torch.log(std_dev_t * torch.sqrt(-dt))
+            - 0.5 * math.log(2 * math.pi)
+        )
+        log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
+
+        return prev_sample, pred_original_sample, log_prob
+
+    def _resolve_runtime_device(
+        self,
+        prompt_embeds: Optional[torch.Tensor],
+        latents: Optional[torch.Tensor],
+    ) -> torch.device:
+        """
+        Resolve sampling compute device robustly under FSDP CPU offload.
+
+        FSDP with cpu_offload can keep parameters on CPU outside forward, so
+        `next(self.model.parameters()).device` is not a reliable runtime signal.
+        Prefer actual runtime tensors and fallback to current CUDA device.
+        """
+        # Prefer already-CUDA runtime tensors when available.
+        if latents is not None and torch.is_tensor(latents) and latents.is_cuda:
+            return latents.device
+        if prompt_embeds is not None and torch.is_tensor(prompt_embeds) and prompt_embeds.is_cuda:
+            return prompt_embeds.device
+        if torch.cuda.is_available():
+            try:
+                return torch.device(f"cuda:{torch.cuda.current_device()}")
+            except Exception:
+                return torch.device("cuda")
+        if latents is not None and torch.is_tensor(latents):
+            return latents.device
+        if prompt_embeds is not None and torch.is_tensor(prompt_embeds):
+            return prompt_embeds.device
+        return next(self.model.parameters()).device
+
+    def _pack_latents(
+        self,
+        latents: torch.Tensor,
+        batch_size: int,
+        num_channels: int,
+        height: int,
+        width: int,
+    ) -> torch.Tensor:
+        """
+        Pack latents using 2x2 patches for FLUX transformer.
+
+        Aligned with DanceGRPO pack_latents (line 191-196):
+            latents.view(B, C, H//2, 2, W//2, 2)
+            → [B, (H/2)*(W/2), C*4]
+        """
+        latents = latents.view(batch_size, num_channels, height // 2, 2, width // 2, 2)
+        latents = latents.permute(0, 2, 4, 1, 3, 5)
+        latents = latents.reshape(batch_size, (height // 2) * (width // 2), num_channels * 4)
+        return latents
+
+    def _unpack_latents(
+        self,
+        latents: torch.Tensor,
+        height: int,
+        width: int,
+    ) -> torch.Tensor:
+        """
+        Unpack latents from 2x2 patches back to spatial format.
+
+        Aligned with DanceGRPO unpack_latents (line 198-211).
+        """
+        batch_size, num_patches, channels = latents.shape
+
+        # Account for 2x2 packing
+        packed_h = height // 2
+        packed_w = width // 2
+
+        latents = latents.view(batch_size, packed_h, packed_w, channels // 4, 2, 2)
+        latents = latents.permute(0, 3, 1, 4, 2, 5)
+        latents = latents.reshape(batch_size, channels // 4, height, width)
+
+        return latents
+
+    def _prepare_latent_image_ids(
+        self,
+        batch_size: int,
+        height: int,
+        width: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """
+        Prepare latent image IDs for FLUX positional encoding.
+
+        Aligned with DanceGRPO prepare_latent_image_ids (line 178-189).
+        Note: DanceGRPO uses height//2, width//2 AFTER packing (line 352).
+        """
+        # Use packed dimensions (height and width are already latent_h//2, latent_w//2)
+        latent_image_ids = torch.zeros(height, width, 3)
+        latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height)[:, None]
+        latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width)[None, :]
+
+        latent_image_ids = latent_image_ids.reshape(height * width, 3)
+        return latent_image_ids.to(device=device, dtype=dtype)
+
+    def sample(
+        self,
+        prompts: Optional[List[str]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        text_ids: Optional[torch.Tensor] = None,
+        num_inference_steps: int = 28,
+        guidance_scale: Optional[float] = None,  # Override sampler's guidance_scale
+        height: int = 1024,
+        width: int = 1024,
+        latents: Optional[torch.Tensor] = None,
+        generator: Optional[torch.Generator] = None,
+        sde_indices: Optional[Set[int]] = None,
+        init_same_noise: bool = False,
+        num_samples_per_prompt: int = 1,
+        **kwargs,
+    ) -> SamplerOutput:
+        """
+        Execute SDE sampling aligned with DanceGRPO run_sample_step.
+
+        Args:
+            prompts: List of text prompts (used if prompt_embeds not provided)
+            prompt_embeds: Pre-computed prompt embeddings [B, seq, hidden]
+            pooled_prompt_embeds: Pooled prompt embeddings [B, hidden]
+            text_ids: Text position IDs [B, seq, 3]
+            num_inference_steps: Number of denoising steps
+            guidance_scale: Override sampler's guidance_scale (default: self.guidance_scale)
+            height: Output image height
+            width: Output image width
+            latents: Initial latents (if None, sampled from noise)
+            generator: Random number generator
+            sde_indices: Set of timestep indices for SDE (all by default)
+            init_same_noise: Share initial noise across K samples for same prompt (DanceGRPO/MixGRPO)
+            num_samples_per_prompt: Number of samples per prompt (for init_same_noise)
+
+        Returns:
+            SamplerOutput with trajectories, log_probs, etc.
+        """
+        # Use provided guidance_scale or fall back to instance default
+        actual_guidance = guidance_scale if guidance_scale is not None else self.guidance_scale
+        if self.model is None:
+            raise RuntimeError("Model not set. Initialize sampler with model parameter.")
+
+        device = self._resolve_runtime_device(prompt_embeds=prompt_embeds, latents=latents)
+        dtype = torch.bfloat16  # DanceGRPO uses bfloat16
+
+        # Encode prompts if needed
+        if prompt_embeds is None:
+            if prompts is None:
+                raise ValueError("Either prompts or prompt_embeds must be provided")
+            if self.text_encoder is None:
+                raise ValueError("text_encoder required when prompts are provided")
+            prompt_embeds, pooled_prompt_embeds = self.text_encoder.encode_prompt(prompts)
+
+        batch_size = prompt_embeds.shape[0]
+
+        # Move embeddings to device
+        prompt_embeds = prompt_embeds.to(device=device, dtype=dtype)
+        if pooled_prompt_embeds is not None:
+            pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=dtype)
+
+        # Calculate latent dimensions
+        latent_h = height // self.SPATIAL_DOWNSAMPLE
+        latent_w = width // self.SPATIAL_DOWNSAMPLE
+
+        # Initialize latents with optional shared noise (DanceGRPO line 346-350)
+        if latents is None:
+            from ..noise_utils import generate_latents
+            latents = generate_latents(
+                batch_size=batch_size,
+                latent_shape=(self.IN_CHANNELS, latent_h, latent_w),
+                device=device,
+                dtype=dtype,
+                generator=generator,
+                init_same_noise=init_same_noise,
+                num_samples_per_prompt=num_samples_per_prompt,
+            )
+        else:
+            latents = latents.to(device=device, dtype=dtype)
+
+        # Pack latents for FLUX transformer (DanceGRPO line 351)
+        packed_latents = self._pack_latents(
+            latents, batch_size, self.IN_CHANNELS, latent_h, latent_w
+        )
+
+        # Prepare image IDs with packed dimensions (DanceGRPO line 352)
+        # Note: uses latent_h//2, latent_w//2 because packing halves dimensions
+        image_ids = self._prepare_latent_image_ids(
+            batch_size, latent_h // 2, latent_w // 2, device, dtype
+        )
+
+        # Prepare text IDs (DanceGRPO line 244)
+        if text_ids is None:
+            seq_len = prompt_embeds.shape[1]
+            text_ids = torch.zeros(batch_size, seq_len, 3, device=device, dtype=dtype)
+        else:
+            text_ids = text_ids.to(device=device, dtype=dtype)
+
+        # Get sigma schedule (DanceGRPO line 311-313)
+        sigma_schedule = torch.linspace(1, 0, num_inference_steps + 1, device=device)
+        sigma_schedule = sd3_time_shift(self.shift, sigma_schedule).to(device=device, dtype=torch.float32)
+
+        # Default: all timesteps use SDE. For deterministic (dpm2) mode, use ODE only.
+        if sde_indices is None:
+            if self.sde_type == "dpm2":
+                sde_indices = set()  # pure ODE / deterministic steps
+            else:
+                sde_indices = set(range(num_inference_steps))
+
+        # Storage for trajectory and log probs (DanceGRPO line 226-227)
+        all_latents = [packed_latents.clone()]
+        all_log_probs: Dict[int, torch.Tensor] = {}
+
+        # Denoising loop (DanceGRPO line 228-256)
+        z = packed_latents
+        for i in range(num_inference_steps):
+            sigma = sigma_schedule[i]
+            timestep_value = int(sigma.item() * 1000)
+            timesteps = torch.full(
+                [batch_size], timestep_value,
+                device=device, dtype=torch.long
+            )
+
+            # Forward pass (DanceGRPO line 234-249)
+            self.model.eval()
+            with torch.no_grad():
+                with torch.autocast("cuda", torch.bfloat16):
+                    # Note: timestep normalized by /1000 (line 238)
+                    # text_ids: [seq_len, 3] - position IDs for text tokens (all zeros)
+                    # DanceGRPO line 244: txt_ids=text_ids.repeat(encoder_hidden_states.shape[1],1)
+                    # Our text_ids is [B, seq, 3], so we take [0] to get [seq, 3]
+                    pred = self.model(
+                        hidden_states=z,
+                        encoder_hidden_states=prompt_embeds,
+                        timestep=timesteps / 1000,
+                        guidance=torch.tensor(
+                            [actual_guidance],
+                            device=device,
+                            dtype=torch.bfloat16
+                        ).expand(batch_size),
+                        txt_ids=text_ids[0],  # [seq, 3] - same for all batches
+                        pooled_projections=pooled_prompt_embeds,
+                        img_ids=image_ids,
+                        joint_attention_kwargs=None,
+                        return_dict=False,
+                    )[0]
+                    if pred.device != z.device:
+                        pred = pred.to(device=z.device)
+
+            # Check if this step uses SDE
+            if i in sde_indices:
+                # SDE step with log probability
+                if self.sde_type in ("flux_flow", "flow"):
+                    z, pred_original, log_prob = self._flux_flow_step(
+                        pred, z.to(torch.float32), sigma_schedule, index=i, prev_sample=None
+                    )
+                elif self.sde_type in ("flux_dance", "dance", "sde"):
+                    # Default to DanceGRPO-style FLUX SDE
+                    z, pred_original, log_prob = flux_sde_step(
+                        pred, z.to(torch.float32), sigma_schedule, index=i,
+                        eta=self.eta, use_sde_solver=self.use_sde_solver,
+                    )
+                else:
+                    raise ValueError(f"Unsupported FLUX sde_type: {self.sde_type}")
+                z = z.to(torch.bfloat16)
+                # Store log_prob only for SDE steps
+                all_log_probs[i] = log_prob
+            else:
+                # Deterministic ODE step (no log_prob)
+                dsigma = sigma_schedule[i + 1] - sigma
+                z = z + dsigma * pred
+                pred_original = z - sigma * pred
+
+            all_latents.append(z.clone())
+
+        # Unpack final latents for output
+        final_latents = self._unpack_latents(pred_original, latent_h, latent_w)
+
+        # Stack trajectory (DanceGRPO line 255)
+        trajectories = torch.stack(all_latents, dim=1)  # [B, T+1, seq, C*4]
+
+        # Create embeddings bundle
+        embeddings = PromptEmbeddings(
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+            text_ids=text_ids,
+            image_ids=image_ids,
+        )
+
+        return SamplerOutput(
+            latents=final_latents,
+            timesteps=sigma_schedule,
+            trajectories=trajectories,
+            log_probs=LogProbData.from_dict(all_log_probs),
+            embeddings=embeddings,
+            metadata={
+                "sde_indices": sde_indices,
+                "engine_capabilities": {
+                    "supports_logprob": True,
+                    "supports_trajectory": True,
+                    "supports_prompt_embeddings": True,
+                },
+                "trajectory_format": "packed_seq_c4",
+                "timestep_type": "sigma",
+                "timestep_scale": 1.0,
+                "height": height,
+                "width": width,
+                "latent_h": latent_h,
+                "latent_w": latent_w,
+                "guidance_scale": actual_guidance,
+                "use_sde_solver": self.use_sde_solver,
+                "vae_scale": self.VAE_SCALE,
+                "vae_shift": self.VAE_SHIFT,
+            },
+            contract_version="v1",
+            step_indices=torch.arange(sigma_schedule.shape[0], device=sigma_schedule.device, dtype=torch.long),
+        )
+
+    def compute_log_prob_for_training(
+        self,
+        latents: torch.Tensor,
+        prev_latents: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        pooled_prompt_embeds: torch.Tensor,
+        text_ids: torch.Tensor,
+        image_ids: torch.Tensor,
+        timestep_index: int,
+        sigma_schedule: torch.Tensor,
+        guidance_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        """
+        Compute log probability for a single training step.
+
+        Aligned with DanceGRPO's grpo_one_step (line 260-292).
+
+        Args:
+            latents: Current packed latents x_t
+            prev_latents: Previous packed latents x_{t-1}
+            prompt_embeds: Encoder hidden states
+            pooled_prompt_embeds: Pooled projections
+            text_ids: Text position IDs
+            image_ids: Image position IDs
+            timestep_index: Index in sigma schedule
+            sigma_schedule: Full sigma schedule
+            guidance_scale: Override sampler's guidance_scale
+
+        Returns:
+            log_prob: Log probability [B]
+        """
+        device = latents.device
+        batch_size = latents.shape[0]
+
+        # Use provided guidance_scale or fall back to instance default
+        actual_guidance = guidance_scale if guidance_scale is not None else self.guidance_scale
+
+        sigma_schedule = sigma_schedule.to(device=device, dtype=torch.float32)
+        sigma = sigma_schedule[timestep_index]
+        timestep_value = int(sigma.item() * 1000)
+        timesteps = torch.full(
+            [batch_size], timestep_value,
+            device=device, dtype=torch.long
+        )
+
+        # Forward pass with gradients (DanceGRPO line 274-290)
+        self.model.train()
+        with torch.autocast("cuda", torch.bfloat16):
+            pred = self.model(
+                hidden_states=latents,
+                encoder_hidden_states=prompt_embeds,
+                timestep=timesteps / 1000,
+                guidance=torch.tensor(
+                    [actual_guidance],
+                    device=device,
+                    dtype=torch.bfloat16
+                ).expand(batch_size),
+                txt_ids=text_ids[0],  # [seq, 3] - same for all batches
+                pooled_projections=pooled_prompt_embeds,
+                img_ids=image_ids.squeeze(0) if image_ids.dim() > 2 else image_ids,
+                joint_attention_kwargs=None,
+                return_dict=False,
+            )[0]
+
+        # Compute log probability (DanceGRPO line 291)
+        _, _, log_prob = flux_sde_step(
+            pred, latents.to(torch.float32), sigma_schedule,
+            index=timestep_index, eta=self.eta, use_sde_solver=self.use_sde_solver,
+            prev_sample=prev_latents.to(torch.float32),
+        )
+
+        return log_prob

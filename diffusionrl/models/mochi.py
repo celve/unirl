@@ -1,0 +1,472 @@
+"""
+Mochi Video Model Bundle.
+
+Mochi is a video generation model from Genmo with:
+- Single-stream Transformer architecture
+- T5 text encoder
+- 3D VAE for video
+
+Reference: https://github.com/genmoai/mochi
+"""
+import logging
+from typing import List, Optional, Tuple, Type, Union
+
+import torch
+import torch.nn as nn
+
+from .base import ModelBundle
+
+logger = logging.getLogger(__name__)
+
+
+class MochiModelBundle(ModelBundle):
+    """
+    Mochi video model bundle.
+
+    Components:
+    - transformer: Mochi Transformer (single-stream)
+    - vae: 3D VAE for video encoding/decoding
+    - text_encoder: T5 text encoder
+    """
+
+    def __init__(
+        self,
+        pretrained_path: str,
+        device: Optional[Union[str, torch.device]] = None,
+        dtype: torch.dtype = torch.bfloat16,
+        vae_path: Optional[str] = None,
+        text_encoder_path: Optional[str] = None,
+        text_encoder_dtype: torch.dtype = torch.float16,
+        load_on_init: bool = True,
+        **kwargs,
+    ):
+        """
+        Initialize Mochi model bundle.
+
+        Args:
+            pretrained_path: Path to pretrained transformer weights
+            device: Device to load models on
+            dtype: Data type for transformer weights
+            vae_path: Optional separate path for VAE
+            text_encoder_path: Optional separate path for T5 encoder
+            text_encoder_dtype: Data type for text encoder (typically float16)
+            load_on_init: Whether to load models immediately
+            **kwargs: Additional arguments
+        """
+        super().__init__(pretrained_path, device, dtype, **kwargs)
+
+        self.vae_path = vae_path or pretrained_path
+        self.text_encoder_path = text_encoder_path or pretrained_path
+        self.text_encoder_dtype = text_encoder_dtype
+
+        # Text encoder components
+        self._t5_encoder = None
+        self._t5_tokenizer = None
+
+        if load_on_init:
+            self.load()
+
+    @property
+    def model_type(self) -> str:
+        return "mochi"
+
+    def load(self) -> None:
+        """Load all model components."""
+        logger.info("Loading Mochi model bundle...")
+
+        # Load transformer
+        self._load_transformer()
+
+        # Load VAE
+        self._load_vae()
+
+        # Load text encoder
+        self._load_text_encoder()
+
+        logger.info("Mochi model bundle loaded")
+
+    def _load_transformer(self) -> None:
+        """Load the Mochi transformer model."""
+        try:
+            # Try diffusers implementation first
+            from diffusers import MochiTransformer3DModel
+
+            self._transformer = MochiTransformer3DModel.from_pretrained(
+                self.pretrained_path,
+                subfolder="transformer",
+                torch_dtype=self.dtype,
+            )
+            self._transformer.to(self.device)
+            logger.info(f"Loaded Mochi transformer from {self.pretrained_path}")
+
+        except ImportError:
+            logger.warning(
+                "Could not import MochiTransformer3DModel from diffusers. "
+                "Please install diffusers>=0.31.0 with Mochi support."
+            )
+            self._transformer = None
+
+        except Exception as e:
+            logger.warning(f"Could not load Mochi transformer: {e}")
+            self._transformer = None
+
+    def _load_vae(self) -> None:
+        """Load the VAE model."""
+        try:
+            from diffusers import AutoencoderKLMochi
+
+            self._vae = AutoencoderKLMochi.from_pretrained(
+                self.vae_path,
+                subfolder="vae",
+                torch_dtype=self.dtype,
+            )
+            self._vae.to(self.device)
+            self._vae.eval()  # VAE is always in eval mode
+            logger.info(f"Loaded Mochi VAE from {self.vae_path}")
+
+        except ImportError:
+            logger.warning("Could not import AutoencoderKLMochi from diffusers.")
+            self._vae = None
+
+        except Exception as e:
+            logger.warning(f"Could not load Mochi VAE: {e}")
+            self._vae = None
+
+    def _load_text_encoder(self) -> None:
+        """Load the T5 text encoder."""
+        try:
+            from transformers import T5EncoderModel, T5Tokenizer
+
+            # Load T5 encoder
+            self._t5_encoder = T5EncoderModel.from_pretrained(
+                self.text_encoder_path,
+                subfolder="text_encoder",
+                torch_dtype=self.text_encoder_dtype,
+            )
+            self._t5_encoder.to(self.device)
+            self._t5_encoder.eval()
+
+            # Load tokenizer
+            self._t5_tokenizer = T5Tokenizer.from_pretrained(
+                self.text_encoder_path,
+                subfolder="tokenizer",
+            )
+
+            # Wrap for unified interface
+            self._text_encoder = MochiTextEncoderWrapper(
+                encoder=self._t5_encoder,
+                tokenizer=self._t5_tokenizer,
+                device=self.device,
+                dtype=self.text_encoder_dtype,
+            )
+
+            logger.info(f"Loaded T5 text encoder from {self.text_encoder_path}")
+
+        except Exception as e:
+            logger.warning(f"Could not load T5 text encoder: {e}")
+            self._text_encoder = None
+
+    def encode_prompt(
+        self,
+        prompt: Union[str, List[str]],
+        negative_prompt: Optional[Union[str, List[str]]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Encode prompts using T5 text encoder.
+
+        Args:
+            prompt: Text prompt(s)
+            negative_prompt: Optional negative prompt(s)
+
+        Returns:
+            Tuple of (prompt_embeds, pooled_prompt_embeds)
+        """
+        if self._text_encoder is None:
+            raise RuntimeError("Text encoder not loaded")
+
+        # Handle string input
+        if isinstance(prompt, str):
+            prompt = [prompt]
+
+        return self._text_encoder.encode_prompt(prompt, negative_prompt)
+
+    def decode_latents(
+        self,
+        latents: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Decode latents to video frames.
+
+        Args:
+            latents: Latent tensor [B, C, T, H, W]
+
+        Returns:
+            Video tensor [B, C, T, H', W']
+        """
+        if self._vae is None:
+            raise RuntimeError("VAE not loaded")
+
+        with torch.no_grad():
+            # Mochi VAE expects specific latent format
+            # Scale latents
+            latents = latents / self._vae.config.scaling_factor
+
+            # Decode
+            video = self._vae.decode(latents).sample
+
+        return video
+
+    def encode_images(
+        self,
+        images: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Encode images/video to latents.
+
+        Args:
+            images: Video tensor [B, C, T, H, W]
+
+        Returns:
+            Latent tensor [B, C', T', H', W']
+        """
+        if self._vae is None:
+            raise RuntimeError("VAE not loaded")
+
+        with torch.no_grad():
+            # Encode
+            latents = self._vae.encode(images).latent_dist.sample()
+
+            # Scale
+            latents = latents * self._vae.config.scaling_factor
+
+        return latents
+
+    def get_no_split_modules(self) -> Tuple[Type[nn.Module], ...]:
+        """
+        Get module types that should not be split in FSDP.
+
+        For Mochi, we don't split the transformer blocks.
+        """
+        try:
+            from diffusers.models.transformers.transformer_mochi import (
+                MochiTransformerBlock,
+            )
+            return (MochiTransformerBlock,)
+        except ImportError:
+            return ()
+
+    def get_sigma_schedule(
+        self,
+        num_steps: int,
+        shift: float = 4.0,  # Mochi default shift
+    ) -> torch.Tensor:
+        """
+        Get sigma schedule for Mochi.
+
+        Mochi uses a slightly different shift value by default.
+        """
+        from diffusionrl.samplers.log_prob import get_sigma_schedule
+        return get_sigma_schedule(num_steps, shift, self.device)
+
+
+class MochiTextEncoderWrapper:
+    """
+    Wrapper for Mochi's T5 text encoder.
+    """
+
+    def __init__(
+        self,
+        encoder: nn.Module,
+        tokenizer,
+        device: Union[str, torch.device] = "cuda",
+        dtype: torch.dtype = torch.float16,
+        max_length: int = 256,
+    ):
+        """
+        Initialize text encoder wrapper.
+
+        Args:
+            encoder: T5 encoder model
+            tokenizer: T5 tokenizer
+            device: Device
+            dtype: Data type
+            max_length: Maximum sequence length
+        """
+        self.encoder = encoder
+        self.tokenizer = tokenizer
+        self.device = device
+        self.dtype = dtype
+        self.max_length = max_length
+
+    def encode_prompt(
+        self,
+        prompt: List[str],
+        negative_prompt: Optional[List[str]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Encode prompts to embeddings.
+
+        Args:
+            prompt: List of text prompts
+            negative_prompt: Optional negative prompts
+
+        Returns:
+            Tuple of (prompt_embeds, attention_mask)
+        """
+        if self.encoder is None:
+            # Return dummy embeddings if encoder not loaded
+            batch_size = len(prompt)
+            prompt_embeds = torch.zeros(
+                batch_size, self.max_length, 4096,  # T5-XXL dimension
+                dtype=self.dtype,
+                device=self.device,
+            )
+            attention_mask = torch.ones(
+                batch_size, self.max_length,
+                dtype=torch.long,
+                device=self.device,
+            )
+            return prompt_embeds, attention_mask
+
+        with torch.no_grad():
+            # Tokenize
+            text_inputs = self.tokenizer(
+                prompt,
+                padding="max_length",
+                max_length=self.max_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+
+            text_input_ids = text_inputs.input_ids.to(self.device)
+            attention_mask = text_inputs.attention_mask.to(self.device)
+
+            # Encode
+            prompt_embeds = self.encoder(
+                input_ids=text_input_ids,
+                attention_mask=attention_mask,
+            ).last_hidden_state
+
+            prompt_embeds = prompt_embeds.to(dtype=self.dtype)
+
+        # Handle negative prompts
+        if negative_prompt is not None:
+            neg_embeds, neg_mask = self.encode_prompt(negative_prompt, None)
+            # Concatenate for classifier-free guidance
+            prompt_embeds = torch.cat([neg_embeds, prompt_embeds], dim=0)
+            attention_mask = torch.cat([neg_mask, attention_mask], dim=0)
+
+        return prompt_embeds, attention_mask
+
+    def to(self, device: Union[str, torch.device]) -> "MochiTextEncoderWrapper":
+        """Move encoder to device."""
+        self.device = device
+        if self.encoder is not None:
+            self.encoder.to(device)
+        return self
+
+
+class MochiPipeline:
+    """
+    Simplified Mochi pipeline for sampling.
+
+    Provides a clean interface for generating video samples.
+    """
+
+    def __init__(
+        self,
+        model_bundle: MochiModelBundle,
+        scheduler=None,
+    ):
+        """
+        Initialize pipeline.
+
+        Args:
+            model_bundle: MochiModelBundle instance
+            scheduler: Optional noise scheduler
+        """
+        self.model_bundle = model_bundle
+        self.scheduler = scheduler
+
+    @torch.no_grad()
+    def __call__(
+        self,
+        prompt: Union[str, List[str]],
+        negative_prompt: Optional[Union[str, List[str]]] = None,
+        num_frames: int = 25,
+        height: int = 480,
+        width: int = 848,
+        num_inference_steps: int = 50,
+        guidance_scale: float = 4.5,
+        generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """
+        Generate video from prompt.
+
+        Args:
+            prompt: Text prompt(s)
+            negative_prompt: Optional negative prompt(s)
+            num_frames: Number of video frames
+            height: Video height
+            width: Video width
+            num_inference_steps: Number of denoising steps
+            guidance_scale: Classifier-free guidance scale
+            generator: Optional random generator
+
+        Returns:
+            Generated video tensor [B, C, T, H, W]
+        """
+        # Encode prompt
+        prompt_embeds, attention_mask = self.model_bundle.encode_prompt(
+            prompt, negative_prompt
+        )
+
+        batch_size = prompt_embeds.shape[0] // 2 if negative_prompt else prompt_embeds.shape[0]
+
+        # Calculate latent dimensions
+        # Mochi VAE typically has 8x spatial and 4x temporal compression
+        latent_height = height // 8
+        latent_width = width // 8
+        latent_frames = (num_frames - 1) // 4 + 1
+
+        # Initialize latents
+        latent_channels = self.model_bundle.transformer.config.in_channels
+        latents = torch.randn(
+            batch_size, latent_channels, latent_frames, latent_height, latent_width,
+            device=self.model_bundle.device,
+            dtype=self.model_bundle.dtype,
+            generator=generator,
+        )
+
+        # Get sigma schedule
+        sigmas = self.model_bundle.get_sigma_schedule(num_inference_steps)
+
+        # Denoising loop
+        for i, (sigma, sigma_next) in enumerate(zip(sigmas[:-1], sigmas[1:])):
+            # Expand latents for classifier-free guidance
+            if guidance_scale > 1.0:
+                latent_model_input = torch.cat([latents] * 2)
+            else:
+                latent_model_input = latents
+
+            # Predict noise
+            noise_pred = self.model_bundle.transformer(
+                hidden_states=latent_model_input,
+                encoder_hidden_states=prompt_embeds,
+                encoder_attention_mask=attention_mask,
+                timestep=sigma.expand(latent_model_input.shape[0]),
+            ).sample
+
+            # Guidance
+            if guidance_scale > 1.0:
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+            # Euler step
+            dt = sigma_next - sigma
+            latents = latents + dt * noise_pred
+
+        # Decode
+        video = self.model_bundle.decode_latents(latents)
+
+        return video

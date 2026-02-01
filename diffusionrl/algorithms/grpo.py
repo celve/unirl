@@ -1,0 +1,320 @@
+"""
+GRPO Algorithm Implementation.
+
+Standard GRPO with group normalization for advantages.
+"""
+from typing import Any, Dict, List, Optional, Tuple
+
+import torch
+import torch.nn as nn
+
+from .base import BaseAlgorithm, SamplingRequirements
+from diffusionrl.advantages.normalizers import normalize_global, normalize_grouped, build_fixed_size_groups
+
+
+class GRPOAlgorithm(BaseAlgorithm):
+    """
+    Standard GRPO Algorithm.
+
+    Features:
+    - Group normalization for advantages (within prompt groups)
+    - PPO-style clipped objective
+    - Optional KL penalty
+
+    Reference: DanceGRPO, unified_grpo
+    """
+
+    def __init__(
+        self,
+        clip_range: float = 1e-4,
+        kl_coef: float = 0.01,
+        advantage_type: str = "group",
+        eta: float = 1.0,
+        sde_type: str = "sde",
+        epsilon: float = 1e-4,
+        clip_max: float = 5.0,
+        use_per_prompt_tracker: bool = False,
+        per_prompt_mode: str = "running",
+        per_prompt_buffer_size: int = 16,
+        per_prompt_min_count: int = 2,
+        use_running_stats: bool = False,
+        running_stats_warmup: int = 0,
+        use_global_std: bool = False,
+        ignore_last: bool = False,
+        frozen_init_timesteps: int = 0,
+        **kwargs,
+    ):
+        """
+        Initialize GRPO algorithm.
+
+        Args:
+            clip_range: PPO clip range
+            kl_coef: KL penalty coefficient
+            advantage_type: Advantage normalization type ("global", "group", "per_prompt")
+            eta: SDE noise coefficient
+            sde_type: Type of SDE ("sde", "cps", "dance")
+            epsilon: Small value for numerical stability
+            clip_max: Maximum advantage clip value (optional)
+            use_per_prompt_tracker: Use PerPromptStatTracker for cross-batch stats
+            per_prompt_mode: "running" (tracker) or "batch" (per-batch stats)
+            per_prompt_buffer_size: Buffer size for per-prompt tracker
+            per_prompt_min_count: Min samples before using per-prompt stats
+            use_running_stats: Use RunningMeanStd for cross-batch global normalization (DanceGRPO)
+            running_stats_warmup: Warmup batches before using running stats
+            ignore_last: Skip the last timestep (t->0) in training (MixGRPO).
+                The last step has very low noise level, causing unstable log_prob.
+            frozen_init_timesteps: Skip the first N timesteps in training (MixGRPO).
+                Early timesteps may have high variance.
+            **kwargs: Additional arguments
+        """
+        super().__init__(clip_range, kl_coef, advantage_type, epsilon=epsilon, clip_max=clip_max, **kwargs)
+        self.eta = eta
+        self.sde_type = sde_type
+        self.per_prompt_mode = per_prompt_mode
+        self.use_global_std = use_global_std
+
+        # MixGRPO stability controls
+        self.ignore_last = ignore_last
+        self.frozen_init_timesteps = frozen_init_timesteps
+
+        # Per-prompt statistics tracker (for flow_grpo per_prompt advantage type)
+        self.per_prompt_tracker = None
+        if (use_per_prompt_tracker or advantage_type == "per_prompt") and per_prompt_mode == "running":
+            from diffusionrl.advantages.per_prompt_tracker import PerPromptStatTracker
+            self.per_prompt_tracker = PerPromptStatTracker(
+                buffer_size=per_prompt_buffer_size,
+                min_count=per_prompt_min_count,
+                epsilon=epsilon,
+                clip_max=clip_max,
+                use_global_std=use_global_std,
+            )
+
+        # Running statistics for cross-batch global normalization (DanceGRPO)
+        self.running_reward_normalizer = None
+        if use_running_stats or use_global_std:
+            from diffusionrl.advantages.running_stats import RunningRewardNormalizer
+            self.running_reward_normalizer = RunningRewardNormalizer(
+                epsilon=epsilon,
+                clip_max=clip_max,
+                warmup_steps=running_stats_warmup,
+            )
+
+        # Loss function (lazy load to avoid circular imports)
+        self._loss_fn = None
+
+    @property
+    def loss_fn(self):
+        """Lazy load loss function."""
+        if self._loss_fn is None:
+            from diffusionrl.losses import GRPOLoss
+            self._loss_fn = GRPOLoss(
+                clip_range=self.clip_range,
+                use_kl_penalty=self.kl_coef > 0,
+                kl_coef=self.kl_coef,
+                eta=self.eta,
+                sde_type=self.sde_type,
+            )
+        return self._loss_fn
+
+    def get_sampling_requirements(self) -> SamplingRequirements:
+        """Return GRPO sampling requirements."""
+        return SamplingRequirements(
+            requires_trajectory=True,
+            requires_log_prob=True,
+            sde_ratio=1.0,  # All SDE steps
+        )
+
+    def compute_advantages(
+        self,
+        rewards: torch.Tensor,
+        num_samples_per_prompt: int,
+        prompts: Optional[List[str]] = None,
+    ) -> torch.Tensor:
+        """
+        Compute advantages using group normalization.
+
+        For GRPO, we normalize within groups where each group consists of
+        num_samples_per_prompt samples from the same prompt.
+
+        Args:
+            rewards: Reward tensor [batch_size]
+            num_samples_per_prompt: Number of samples per prompt
+            prompts: Optional list of prompt strings (for per_prompt with tracker)
+
+        Returns:
+            Normalized advantage tensor [batch_size]
+        """
+        if self.advantage_type == "global":
+            return self._normalize_global(rewards)
+        elif self.advantage_type == "group":
+            return self._normalize_group(rewards, num_samples_per_prompt)
+        elif self.advantage_type == "per_prompt":
+            if self.per_prompt_mode == "batch":
+                return self._normalize_per_prompt_batch(
+                    rewards, num_samples_per_prompt, prompts
+                )
+            # Use per-prompt tracker if available and prompts provided
+            if self.per_prompt_tracker is not None and prompts is not None:
+                # Expand prompts to match rewards (each prompt repeated num_samples_per_prompt times)
+                if len(prompts) * num_samples_per_prompt == len(rewards):
+                    expanded_prompts = []
+                    for p in prompts:
+                        expanded_prompts.extend([p] * num_samples_per_prompt)
+                    prompts = expanded_prompts
+                return self.per_prompt_tracker.compute_advantages(
+                    prompts, rewards, update_stats=True
+                )
+            # Fall back to batch-level group normalization
+            return self._normalize_group(rewards, num_samples_per_prompt)
+        else:
+            raise ValueError(f"Unknown advantage_type: {self.advantage_type}")
+
+    def _normalize_global(self, rewards: torch.Tensor) -> torch.Tensor:
+        """Global normalization across all samples.
+
+        If running_reward_normalizer is enabled (DanceGRPO mode), uses
+        cross-batch accumulated statistics for stable normalization.
+        Otherwise uses batch-only statistics.
+        """
+        if self.running_reward_normalizer is not None:
+            return self.running_reward_normalizer.normalize(rewards, update_stats=True)
+        return normalize_global(rewards, epsilon=self.epsilon, clip_max=self.clip_max)
+
+    def _normalize_group(
+        self,
+        rewards: torch.Tensor,
+        num_samples_per_prompt: int,
+    ) -> torch.Tensor:
+        """Group normalization within prompt groups."""
+        batch_size = rewards.shape[0]
+        if num_samples_per_prompt <= 0 or batch_size % num_samples_per_prompt != 0:
+            return self._normalize_global(rewards)
+        groups = build_fixed_size_groups(batch_size, num_samples_per_prompt)
+        return normalize_grouped(rewards, groups, epsilon=self.epsilon, clip_max=self.clip_max)
+
+    def _normalize_per_prompt_batch(
+        self,
+        rewards: torch.Tensor,
+        num_samples_per_prompt: int,
+        prompts: Optional[List[str]] = None,
+    ) -> torch.Tensor:
+        """
+        Per-prompt normalization using current batch statistics.
+
+        - Mean is computed per prompt group.
+        - Std is computed per prompt group unless use_global_std=True.
+        """
+        if prompts is None:
+            return self._normalize_group(rewards, num_samples_per_prompt)
+
+        # Expand prompts to per-sample list if needed
+        if len(prompts) * num_samples_per_prompt == len(rewards):
+            expanded_prompts = []
+            for p in prompts:
+                expanded_prompts.extend([p] * num_samples_per_prompt)
+            prompts = expanded_prompts
+        elif len(prompts) != len(rewards):
+            return self._normalize_group(rewards, num_samples_per_prompt)
+
+        # Build prompt -> indices mapping
+        prompt_to_indices: Dict[str, List[int]] = {}
+        for idx, prompt in enumerate(prompts):
+            prompt_to_indices.setdefault(prompt, []).append(idx)
+
+        # Global std (batch or running stats)
+        global_std = None
+        if self.use_global_std:
+            global_std = self._get_global_std(rewards)
+
+        advantages = torch.empty_like(rewards)
+        for prompt, indices in prompt_to_indices.items():
+            idx_tensor = torch.tensor(indices, device=rewards.device, dtype=torch.long)
+            prompt_rewards = rewards.index_select(0, idx_tensor)
+            mean = prompt_rewards.mean()
+            if global_std is None:
+                std = prompt_rewards.std() + self.epsilon
+            else:
+                std = global_std
+            prompt_adv = (prompt_rewards - mean) / std
+            advantages.index_copy_(0, idx_tensor, prompt_adv)
+
+        if self.clip_max is not None:
+            advantages = advantages.clamp(-self.clip_max, self.clip_max)
+
+        return advantages
+
+    def _get_global_std(self, rewards: torch.Tensor) -> torch.Tensor:
+        """Get global std with optional running stats (DanceGRPO style)."""
+        if self.running_reward_normalizer is None:
+            return rewards.std() + self.epsilon
+
+        # Update running stats and respect warmup
+        self.running_reward_normalizer.running_stats.update(rewards)
+        self.running_reward_normalizer._step_count += 1
+        if self.running_reward_normalizer._step_count <= self.running_reward_normalizer.warmup_steps:
+            return rewards.std() + self.epsilon
+
+        std = self.running_reward_normalizer.running_stats.std
+        return torch.tensor(std, device=rewards.device, dtype=rewards.dtype)
+
+    def compute_loss(
+        self,
+        model: nn.Module,
+        batch: Dict[str, Any],
+        timestep_idx: int,
+        advantages: torch.Tensor,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """
+        Compute GRPO loss for a single timestep.
+
+        Args:
+            model: Model being trained
+            batch: Training batch dictionary
+            timestep_idx: Current timestep index
+            advantages: Pre-computed advantages
+            **kwargs: Additional arguments
+
+        Returns:
+            Tuple of (loss tensor, metrics dictionary)
+        """
+        # Extract timestep-specific data
+        samples = self._get_timestep_samples(batch, timestep_idx)
+
+        # Call loss function
+        return self.loss_fn.compute(
+            model=model,
+            samples=samples,
+            timestep_idx=timestep_idx,
+            advantages=advantages,
+            prompt_embeds=batch.get("prompt_embeds"),
+            pooled_prompt_embeds=batch.get("pooled_prompt_embeds"),
+            **kwargs,
+        )
+
+    def _get_timestep_samples(
+        self,
+        batch: Dict[str, Any],
+        timestep_idx: int,
+    ) -> Dict[str, Any]:
+        """Extract samples for a specific timestep."""
+        trajectories = batch.get("trajectories")
+        log_probs_dict = batch.get("log_probs_dict", {})
+        timesteps = batch.get("timesteps")
+
+        samples = {}
+
+        if trajectories is not None:
+            samples["latents"] = trajectories[:, timestep_idx]
+            if timestep_idx + 1 < trajectories.shape[1]:
+                samples["next_latents"] = trajectories[:, timestep_idx + 1]
+
+        if timestep_idx in log_probs_dict:
+            samples["log_probs"] = log_probs_dict[timestep_idx]
+
+        if timesteps is not None:
+            samples["sigma"] = timesteps[timestep_idx]
+            if timestep_idx + 1 < len(timesteps):
+                samples["sigma_next"] = timesteps[timestep_idx + 1]
+
+        return samples

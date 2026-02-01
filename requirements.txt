@@ -1,0 +1,26 @@
+# Core dependency set aligned with:
+#   pip install -e ".[train,infer,eval]"
+#
+# Usage:
+#   pip install -r requirements.txt
+#   pip install -e . --no-deps
+#   pip install flash-attn==2.7.4.post1 --no-build-isolation
+#
+# Optional Geneval/OpenMMLab stack (mmcv/mmdet) is intentionally excluded.
+# Install it separately only when needed:
+#   docs/geneval_mmcv_setup.md
+numpy>=1.24,<3
+torch>=2.1
+ray[default]>=2.9,<3
+diffusers>=0.30
+transformers>=4.41
+peft>=0.11
+safetensors>=0.4
+Pillow>=10
+requests>=2.31
+psutil>=5.9
+wandb>=0.16,<0.20
+aiohttp>=3.9
+accelerate>=0.30
+torchvision>=0.16
+easyocr>=1.7

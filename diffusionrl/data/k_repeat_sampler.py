@@ -1,0 +1,179 @@
+"""
+K-Repeat Sampler for GRPO training.
+
+Samples each prompt K times to generate multiple samples per prompt,
+which is required for computing group-based advantages.
+
+Reference:
+- unified_grpo/data/k_repeat_sampler.py
+- flow_grpo data sampling
+"""
+
+import logging
+from typing import Iterator, List, Sized
+
+import torch
+from torch.utils.data import Sampler
+
+logger = logging.getLogger(__name__)
+
+
+class KRepeatSampler(Sampler[int]):
+    """
+    Sampler that repeats each index K times for group-based sampling.
+
+    This is used to generate K samples per prompt, which allows computing
+    advantages within groups (per-prompt normalization).
+
+    Example with K=4 and batch_size=8:
+        - Each prompt appears 4 times consecutively
+        - Batch contains 2 unique prompts, each repeated 4 times
+        - This allows computing mean/std within each prompt group
+
+    Args:
+        data_source: Dataset to sample from
+        k: Number of times to repeat each sample
+        shuffle: Whether to shuffle the order of prompts
+        seed: Random seed for reproducibility
+    """
+
+    def __init__(
+        self,
+        data_source: Sized,
+        k: int = 4,
+        shuffle: bool = True,
+        seed: int = 42,
+    ):
+        """
+        Initialize K-repeat sampler.
+
+        Args:
+            data_source: Dataset (must have __len__)
+            k: Number of repeats per sample
+            shuffle: Whether to shuffle prompt order
+            seed: Random seed
+        """
+        self.data_source = data_source
+        self.k = k
+        self.shuffle = shuffle
+        self.seed = seed
+
+        self._num_samples = len(data_source)
+        self._generator = torch.Generator()
+        self._generator.manual_seed(seed)
+
+        logger.info(f"KRepeatSampler: {self._num_samples} samples x {k} repeats")
+
+    def __iter__(self) -> Iterator[int]:
+        """Yield indices with K repeats."""
+        # Generate base indices
+        if self.shuffle:
+            indices = torch.randperm(
+                self._num_samples,
+                generator=self._generator
+            ).tolist()
+        else:
+            indices = list(range(self._num_samples))
+
+        # Repeat each index K times
+        for idx in indices:
+            for _ in range(self.k):
+                yield idx
+
+    def __len__(self) -> int:
+        """Total number of samples (original * K)."""
+        return self._num_samples * self.k
+
+    def set_epoch(self, epoch: int) -> None:
+        """
+        Set epoch for reproducible shuffling.
+
+        Args:
+            epoch: Current epoch number
+        """
+        self._generator.manual_seed(self.seed + epoch)
+
+    def set_epoch(self, epoch: int) -> None:
+        self._generator.manual_seed(self.seed + epoch)
+
+
+class GroupedKRepeatSampler(Sampler[List[int]]):
+    """
+    Sampler that yields batches of K repeated indices.
+
+    Unlike KRepeatSampler which yields individual indices,
+    this sampler yields lists of K indices for the same sample.
+    This is useful when you want to process K samples together.
+
+    Example with K=4 and batch_size=2:
+        - Yields: [[0, 0, 0, 0], [1, 1, 1, 1], ...]
+        - Each group contains K copies of the same index
+    """
+
+    def __init__(
+        self,
+        data_source: Sized,
+        k: int = 4,
+        batch_size: int = 4,
+        shuffle: bool = True,
+        seed: int = 42,
+        drop_last: bool = True,
+    ):
+        """
+        Initialize grouped K-repeat sampler.
+
+        Args:
+            data_source: Dataset (must have __len__)
+            k: Number of repeats per sample
+            batch_size: Number of unique prompts per batch
+            shuffle: Whether to shuffle prompt order
+            seed: Random seed
+            drop_last: Whether to drop the last incomplete batch
+        """
+        self.data_source = data_source
+        self.k = k
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.seed = seed
+        self.drop_last = drop_last
+
+        self._num_samples = len(data_source)
+        self._generator = torch.Generator()
+        self._generator.manual_seed(seed)
+
+    def __iter__(self) -> Iterator[List[int]]:
+        """Yield batches of K-repeated indices."""
+        # Generate base indices
+        if self.shuffle:
+            indices = torch.randperm(
+                self._num_samples,
+                generator=self._generator
+            ).tolist()
+        else:
+            indices = list(range(self._num_samples))
+
+        # Yield batches
+        batch = []
+        for idx in indices:
+            # Add K copies of this index
+            batch.extend([idx] * self.k)
+
+            # Yield when batch is full
+            if len(batch) >= self.batch_size * self.k:
+                yield batch[:self.batch_size * self.k]
+                batch = batch[self.batch_size * self.k:]
+
+        # Handle remaining samples
+        if batch and not self.drop_last:
+            yield batch
+
+    def __len__(self) -> int:
+        """Number of batches."""
+        num_batches = self._num_samples // self.batch_size
+        if not self.drop_last and self._num_samples % self.batch_size:
+            num_batches += 1
+        return num_batches
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set epoch for reproducible shuffling."""
+        self._generator.manual_seed(self.seed + epoch)
