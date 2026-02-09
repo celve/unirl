@@ -1,13 +1,13 @@
-"""Sampling mode adapters for train loop orchestration."""
+"""Sampling mode plugins for train loop orchestration."""
 
 from __future__ import annotations
 
 from typing import Any, Dict
 
 
-class SamplingModeAdapter:
+class SamplingModePlugin:
     """
-    Thin adapter interface for sampling backend runtime differences.
+    Thin plugin interface for sampling backend runtime differences.
 
     Keep train loop skeleton stable while isolating mode-specific transitions.
     """

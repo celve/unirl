@@ -15,8 +15,8 @@ Engine:
 See README.md for implementation plans.
 """
 
-from .client_adapter import (
-    SGLangClientAdapter,
+from .client import (
+    SGLangClient,
     SGLangClientError,
     SGLangProtocolError,
     SGLangTimeoutError,
@@ -24,7 +24,7 @@ from .client_adapter import (
 from .engine import SGLangInferenceEngine
 
 __all__ = [
-    "SGLangClientAdapter",
+    "SGLangClient",
     "SGLangClientError",
     "SGLangProtocolError",
     "SGLangTimeoutError",

@@ -93,7 +93,7 @@ class GRPOLoss:
                 The last step has very low noise level, causing unstable log_prob.
             frozen_init_timesteps: Skip the first N timesteps in loss computation (MixGRPO).
                 Early timesteps may have high variance.
-            model_type: Model type for forward adapter selection ("flux", "sd3", "hunyuan", "default").
+            model_type: Model type for forward plugin selection ("flux", "sd3", "hunyuan", "default").
                 If not specified, model type will be auto-detected from the model class name.
         """
         self.clip_range = clip_range
@@ -106,7 +106,7 @@ class GRPOLoss:
         self.ignore_last = ignore_last
         self.frozen_init_timesteps = frozen_init_timesteps
         self.model_type = model_type
-        self._forward_adapter = None  # Lazy loaded
+        self._forward_plugin = None  # Lazy loaded
 
     def get_clip_range(self, progress: float = 0.0) -> float:
         """
@@ -568,24 +568,24 @@ class GRPOLoss:
 
         return total_loss, loss_terms
 
-    def _get_forward_adapter(self, model: nn.Module):
-        """Get or create the forward adapter for this model.
+    def _get_forward_plugin(self, model: nn.Module):
+        """Get or create the forward plugin for this model.
 
-        Lazy loads the adapter on first use, using model_type from config
+        Lazy loads the plugin on first use, using model_type from config
         or auto-detecting from the model class name.
         """
-        if self._forward_adapter is None:
-            from diffusionrl.models.forward_adapters import get_forward_adapter, detect_model_type
+        if self._forward_plugin is None:
+            from diffusionrl.models.forward_plugins import get_forward_plugin, detect_model_type
 
             if self.model_type == "default":
                 # Auto-detect model type from model class
                 detected_type = detect_model_type(model)
-                self._forward_adapter = get_forward_adapter(detected_type)
-                logger.debug(f"Auto-detected model_type={detected_type} for forward adapter")
+                self._forward_plugin = get_forward_plugin(detected_type)
+                logger.debug(f"Auto-detected model_type={detected_type} for forward plugin")
             else:
-                self._forward_adapter = get_forward_adapter(self.model_type)
+                self._forward_plugin = get_forward_plugin(self.model_type)
 
-        return self._forward_adapter
+        return self._forward_plugin
 
     def _default_forward(
         self,
@@ -602,10 +602,10 @@ class GRPOLoss:
         **kwargs,
     ) -> torch.Tensor:
         """
-        Default forward pass using model-specific adapter.
+        Default forward pass using model-specific plugin.
 
-        Delegates to the appropriate forward adapter based on model_type,
-        ensuring model-specific logic is encapsulated in adapters rather
+        Delegates to the appropriate forward plugin based on model_type,
+        ensuring model-specific logic is encapsulated in plugins rather
         than scattered throughout the loss code.
 
         Args:
@@ -624,9 +624,9 @@ class GRPOLoss:
         Returns:
             Model prediction (velocity/noise) [B, C, H, W] or [B, C, T, H, W]
         """
-        adapter = self._get_forward_adapter(model)
+        plugin = self._get_forward_plugin(model)
 
-        return adapter.forward(
+        return plugin.forward(
             model=model,
             latents=latents,
             sigma=sigma,

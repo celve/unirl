@@ -6,7 +6,7 @@ import torch
 
 from ..engine import BaseInferenceEngine, EngineConfig, EngineCapabilities, register_engine
 from diffusionrl.types import SamplerOutput
-from .client_adapter import SGLangClientAdapter
+from .client import SGLangClient
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ class SGLangInferenceEngine(BaseInferenceEngine):
             )
 
         engine_kwargs = dict(self.config.engine_kwargs or {})
-        self.client = SGLangClientAdapter(
+        self.client = SGLangClient(
             server_url=self._server_url,
             handshake_timeout_s=float(engine_kwargs.get("handshake_timeout_s", 5.0)),
             request_timeout_s=float(engine_kwargs.get("request_timeout_s", 60.0)),

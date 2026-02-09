@@ -237,7 +237,7 @@ flowchart TB
 
 `train.py` 是主训练入口（~238 行）。
 
-**v4.0 重构**：引入 `SamplingModeAdapter` 模式适配器，将 offload/onload 状态转换逻辑从主循环中解耦。新增 `weight_sync_mode`（ObjectRef / checkpoint_path）双模式权重同步、`async_pipeline` 异步训练切换、带版本号的权重同步 `_sync_weights_to_rollout()`。
+**v4.0 重构**：引入 `SamplingModePlugin` 模式插件，将 offload/onload 状态转换逻辑从主循环中解耦。新增 `weight_sync_mode`（ObjectRef / checkpoint_path）双模式权重同步、`async_pipeline` 异步训练切换、带版本号的权重同步 `_sync_weights_to_rollout()`。
 
 ```python
 def _sync_weights_to_rollout(args, rollout_id, training_group, rollout_manager,
@@ -281,8 +281,8 @@ def train(args):
     # 3. 创建 Placement Groups (资源分配)
     pgs = create_placement_groups_from_args(args)
 
-    # 4. 创建 SamplingModeAdapter（模式无关的状态转换层）[v4.0 NEW]
-    sampling_mode = create_sampling_mode_adapter(args)
+    # 4. 创建 SamplingModePlugin（模式无关的状态转换层）[v4.0 NEW]
+    sampling_mode = create_sampling_mode_plugin(args)
 
     # 5. 创建 RolloutManager
     rollout_pg_result = sampling_mode.rollout_pg_result(pgs)
@@ -335,13 +335,13 @@ def train(args):
     training_group.dispose()
 ```
 
-#### SamplingModeAdapter 模式适配器 [v4.0 NEW]
+#### SamplingModePlugin 模式插件 [v4.0 NEW]
 
-train.py 通过 `SamplingModeAdapter` 将 offload/onload 状态转换逻辑从主循环中解耦，保持主循环骨架模式无关：
+train.py 通过 `SamplingModePlugin` 将 offload/onload 状态转换逻辑从主循环中解耦，保持主循环骨架模式无关：
 
 ```python
-class SamplingModeAdapter:
-    """采样后端运行时差异的薄适配器"""
+class SamplingModePlugin:
+    """采样后端运行时差异的薄插件"""
     def rollout_pg_result(self, pgs) -> Optional[...]: ...
     def create_training_group(self, pgs, rollout_manager): ...
     def before_rollout(self, rollout_manager) -> None: ...
@@ -353,7 +353,7 @@ class SamplingModeAdapter:
     def before_eval(self, rollout_manager) -> None: ...
 ```
 
-| 适配器 | 说明 | offload/onload 行为 |
+| 插件 | 说明 | offload/onload 行为 |
 |--------|------|---------------------|
 | **InferenceSamplingMode** | 默认模式，独立推理 Actor | 管理 rollout↔train 间的 offload/onload 切换 |
 | **TrainingSamplingMode** | 训练 Actor 兼做采样 | 无需 offload，通过 `attach_sampling_actors()` 连接 |
@@ -508,9 +508,9 @@ diffusionRL/                          # 总计 ~28,217 行 (含测试 ~1,449行)
 ├── runtime/                        # 运行时编排层 (~327行) [v4.0 NEW]
 │   ├── __init__.py                 # 模块导出 (~9行)
 │   ├── async_runtime.py            # AsyncPipelineRuntime 状态机 (~127行)
-│   └── sampling_mode/              # 采样模式适配器
-│       ├── __init__.py             # 工厂函数 create_sampling_mode_adapter (~22行)
-│       ├── base.py                 # SamplingModeAdapter 基类 (~53行)
+│   └── sampling_mode/              # 采样模式插件
+│       ├── __init__.py             # 工厂函数 create_sampling_mode_plugin (~22行)
+│       ├── base.py                 # SamplingModePlugin 基类 (~53行)
 │       ├── inference_mode.py       # InferenceSamplingMode (独立推理Actor) (~90行)
 │       └── training_mode.py        # TrainingSamplingMode (训练Actor兼采样) (~26行)
 │
@@ -557,7 +557,7 @@ diffusionRL/                          # 总计 ~28,217 行 (含测试 ~1,449行)
 │   ├── sglang/                     # SGLang 引擎
 │   │   ├── __init__.py             # 模块导出 (~33行)
 │   │   ├── engine.py               # SGLangInferenceEngine (~178行)
-│   │   └── client_adapter.py       # SGLang 客户端适配器 (~225行) [v4.0 NEW]
+│   │   └── client.py               # SGLang 客户端 (~225行) [v4.0 NEW]
 │   └── schedulers/
 │       ├── __init__.py             # 模块导出 (~27行)
 │       └── timestep_window.py      # 时间步调度器 (~422行)
@@ -578,7 +578,7 @@ diffusionRL/                          # 总计 ~28,217 行 (含测试 ~1,449行)
 │   ├── sd3.py                      # SD3ModelBundle (~461行)
 │   ├── hunyuan.py                  # HunyuanModelBundle (~367行)
 │   ├── mochi.py                    # MochiModelBundle (~472行)
-│   └── forward_adapters.py         # 前向扩散 adapter 工具 (~474行)
+│   └── forward_plugins.py          # 前向扩散 plugin 工具 (~474行)
 │
 ├── data/                           # 数据处理 (~853行)
 │   ├── __init__.py                 # 模块导出 (~27行)
@@ -627,8 +627,8 @@ diffusionRL/                          # 总计 ~28,217 行 (含测试 ~1,449行)
 │   ├── test_weight_sync_checkpoint.py # Checkpoint 原子性 (~37行)
 │   ├── test_wandb_metrics_aggregate.py # 指标聚合 (~41行)
 │   ├── test_args_runtime_modes.py  # 参数解析 (~232行)
-│   ├── test_sglang_client_adapter.py # SGLang 集成 (~188行)
-│   ├── test_sampling_mode_adapters.py # 采样模式适配器 (~166行)
+│   ├── test_sglang_client.py       # SGLang 集成 (~188行)
+│   ├── test_sampling_mode_plugins.py # 采样模式插件 (~166行)
 │   ├── test_data_metadata_passthrough.py # 数据元数据 (~58行)
 │   └── test_training_sampling_state.py # 训练状态恢复 (~49行)
 │
@@ -1821,7 +1821,7 @@ graph TB
     end
 
     subgraph RuntimeLayer["Runtime Layer (运行时编排层) [v4.0 NEW]"]
-        SMA["SamplingModeAdapter<br/>InferenceSamplingMode<br/>TrainingSamplingMode"]
+        SMA["SamplingModePlugin<br/>InferenceSamplingMode<br/>TrainingSamplingMode"]
         APR["AsyncPipelineRuntime<br/>InflightRollout / ResolvedRollout<br/>权重版本追踪"]
         WSC["weight_sync_checkpoint.py<br/>原子 checkpoint 发布"]
     end
@@ -2838,7 +2838,7 @@ MODEL_TYPE_TO_SAMPLER_ENGINE = {
 | **预设配置** | defaults.py 预设系统 | 快速配置不同模型/算法组合 |
 | **FSDP 集成** | 原生支持大模型分布式训练 | 训练更大的模型 |
 | **注册表系统** | Loss/Engine/Strategy 注册表 | 运行时扩展无需改代码 |
-| **SamplingModeAdapter** | 模式适配器解耦 offload/onload 状态转换 | 主循环模式无关 [v4.0] |
+| **SamplingModePlugin** | 模式插件解耦 offload/onload 状态转换 | 主循环模式无关 [v4.0] |
 | **异步训练管道** | AsyncPipelineRuntime 状态机 + 权重版本追踪 | rollout/train 重叠提升吞吐 [v4.0] |
 | **双模式权重同步** | ObjectRef / checkpoint_path 两种传输模式 | 适配单节点/多节点场景 [v4.0] |
 | **原子 checkpoint 发布** | weight_sync_checkpoint.py 原子写入 | 避免读写竞争和数据损坏 [v4.0] |
@@ -2857,7 +2857,7 @@ mindmap
             create_rollout_manager()
             create_training_actor_group()
             get_loss() / create_engine()
-            create_sampling_mode_adapter()
+            create_sampling_mode_plugin()
         注册表模式
             LOSS_REGISTRY
             ENGINE_REGISTRY
@@ -2866,7 +2866,7 @@ mindmap
             Algorithm 选择
             Advantage 归一化策略
             Sampler 选择
-            SamplingModeAdapter
+            SamplingModePlugin
         模板方法
             BaseAlgorithm
             BaseSampler

@@ -229,7 +229,7 @@ diffusionrl/
 │   ├── rollout_manager.py          #   Central orchestrator
 │   ├── actor_group.py              #   Ray actor pool management
 │   └── actors/                     #   Inference and training actors
-├── runtime/                        # Async pipeline and sampling mode adapters
+├── runtime/                        # Async pipeline and sampling mode plugins
 ├── patches/                        # Non-invasive patches for FastVideo
 └── utils/                          # Checkpointing, logging, EMA, weight sync
 ```

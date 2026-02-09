@@ -444,8 +444,8 @@ class TrainingActor(BaseTrainRayActor):
             # Bind model_type for adapter selection in NFT loss.
             if hasattr(self.loss_fn, "model_type"):
                 self.loss_fn.model_type = getattr(self.model_bundle, "model_type", "default")
-            if hasattr(self.loss_fn, "_forward_adapter"):
-                self.loss_fn._forward_adapter = None
+            if hasattr(self.loss_fn, "_forward_plugin"):
+                self.loss_fn._forward_plugin = None
         else:
             # GRPO loss (default)
             self.loss_fn = get_loss(

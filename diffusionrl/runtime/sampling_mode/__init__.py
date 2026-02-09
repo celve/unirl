@@ -1,13 +1,13 @@
-"""Sampling mode adapter selection."""
+"""Sampling mode plugin selection."""
 
 from __future__ import annotations
 
-from .base import SamplingModeAdapter
+from .base import SamplingModePlugin
 from .inference_mode import InferenceSamplingMode
 from .training_mode import TrainingSamplingMode
 
 
-def create_sampling_mode_adapter(args) -> SamplingModeAdapter:
+def create_sampling_mode_plugin(args) -> SamplingModePlugin:
     backend = getattr(args, "sampling_backend", "inference")
     if backend == "training":
         return TrainingSamplingMode(args)
@@ -15,8 +15,8 @@ def create_sampling_mode_adapter(args) -> SamplingModeAdapter:
 
 
 __all__ = [
-    "SamplingModeAdapter",
+    "SamplingModePlugin",
     "InferenceSamplingMode",
     "TrainingSamplingMode",
-    "create_sampling_mode_adapter",
+    "create_sampling_mode_plugin",
 ]

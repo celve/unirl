@@ -1,4 +1,4 @@
-"""HTTP client adapter for external SGLang diffusion service."""
+"""HTTP client for external SGLang diffusion service."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-try:  # keep adapter import-light for test and external client contexts
+try:  # keep client import-light for test and external client contexts
     from diffusionrl.types import SAMPLING_CONTRACT_VERSION
 except Exception:  # pragma: no cover - fallback when diffusionrl package deps are unavailable
     SAMPLING_CONTRACT_VERSION = "v1"
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class SGLangClientError(RuntimeError):
-    """Base error for SGLang client adapter failures."""
+    """Base error for SGLang client failures."""
 
 
 class SGLangTimeoutError(SGLangClientError):
@@ -32,7 +32,7 @@ class SGLangProtocolError(SGLangClientError):
     """Raised when server response is invalid for current client contract."""
 
 
-class SGLangClientAdapter:
+class SGLangClient:
     """Thin HTTP client with capability handshake and bounded concurrency."""
 
     def __init__(

@@ -90,7 +90,7 @@ class NFTLoss:
         self.new_adapter_name = new_adapter_name
         self.kl_coef = kl_coef
         self.model_type = "default"
-        self._forward_adapter = None
+        self._forward_plugin = None
 
     @property
     def requires_trajectory(self) -> bool:
@@ -359,8 +359,8 @@ class NFTLoss:
         prompt_embeds_cast = prompt_embeds.to(model_dtype) if prompt_embeds is not None else None
         pooled_embeds_cast = pooled_prompt_embeds.to(model_dtype) if pooled_prompt_embeds is not None else None
         guidance_scale = getattr(config, "guidance_scale", 3.5) if config is not None else 3.5
-        adapter = self._get_forward_adapter(model)
-        model_kwargs = adapter.prepare_model_kwargs(
+        plugin = self._get_forward_plugin(model)
+        model_kwargs = plugin.prepare_model_kwargs(
             latents=xt_cast,
             sigma=t_shifted,
             prompt_embeds=prompt_embeds_cast,
@@ -475,17 +475,17 @@ class NFTLoss:
 
         return total_loss, loss_terms
 
-    def _get_forward_adapter(self, model: nn.Module):
-        """Get or create forward adapter for current NFT model type."""
-        if self._forward_adapter is None:
-            from diffusionrl.models.forward_adapters import detect_model_type, get_forward_adapter
+    def _get_forward_plugin(self, model: nn.Module):
+        """Get or create forward plugin for current NFT model type."""
+        if self._forward_plugin is None:
+            from diffusionrl.models.forward_plugins import detect_model_type, get_forward_plugin
 
             if self.model_type == "default":
                 detected_type = detect_model_type(model)
-                self._forward_adapter = get_forward_adapter(detected_type)
+                self._forward_plugin = get_forward_plugin(detected_type)
             else:
-                self._forward_adapter = get_forward_adapter(self.model_type)
-        return self._forward_adapter
+                self._forward_plugin = get_forward_plugin(self.model_type)
+        return self._forward_plugin
 
     def compute_batch(
         self,

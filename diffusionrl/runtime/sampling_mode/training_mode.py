@@ -1,4 +1,4 @@
-"""Training-actor sampling mode adapter."""
+"""Training-actor sampling mode plugin."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ import ray
 
 from diffusionrl.ray.actor_group import create_training_actor_group
 
-from .base import SamplingModeAdapter
+from .base import SamplingModePlugin
 
 logger = logging.getLogger(__name__)
 
 
-class TrainingSamplingMode(SamplingModeAdapter):
+class TrainingSamplingMode(SamplingModePlugin):
     """Sampling backend where training actors also serve sampling requests."""
 
     def rollout_pg_result(self, pgs):

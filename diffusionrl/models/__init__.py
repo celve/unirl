@@ -2,30 +2,30 @@
 from typing import Callable, Dict, List, Type
 
 from .base import ModelBundle
-from .forward_adapters import (
-    ModelForwardAdapter,
-    BaseForwardAdapter,
-    FluxForwardAdapter,
-    SD3ForwardAdapter,
-    HunyuanForwardAdapter,
-    DefaultForwardAdapter,
-    get_forward_adapter,
+from .forward_plugins import (
+    ModelForwardPlugin,
+    BaseForwardPlugin,
+    FluxForwardPlugin,
+    SD3ForwardPlugin,
+    HunyuanForwardPlugin,
+    DefaultForwardPlugin,
+    get_forward_plugin,
     detect_model_type,
-    ADAPTER_REGISTRY,
+    PLUGIN_REGISTRY,
 )
 
 __all__ = [
     "ModelBundle",
-    # Forward adapters
-    "ModelForwardAdapter",
-    "BaseForwardAdapter",
-    "FluxForwardAdapter",
-    "SD3ForwardAdapter",
-    "HunyuanForwardAdapter",
-    "DefaultForwardAdapter",
-    "get_forward_adapter",
+    # Forward plugins
+    "ModelForwardPlugin",
+    "BaseForwardPlugin",
+    "FluxForwardPlugin",
+    "SD3ForwardPlugin",
+    "HunyuanForwardPlugin",
+    "DefaultForwardPlugin",
+    "get_forward_plugin",
     "detect_model_type",
-    "ADAPTER_REGISTRY",
+    "PLUGIN_REGISTRY",
     # Lazy import getters
     "get_hunyuan_model_bundle",
     "get_mochi_model_bundle",

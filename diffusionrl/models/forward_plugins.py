@@ -1,10 +1,10 @@
 """
-Model Forward Adapters for GRPO Loss.
+Model Forward Plugins for GRPO Loss.
 
-This module provides adapters that encapsulate model-specific forward pass logic,
+This module provides plugins that encapsulate model-specific forward pass logic,
 allowing the loss function to be agnostic to the underlying model architecture.
 
-Each adapter implements a consistent interface for:
+Each plugin implements a consistent interface for:
 - Preparing inputs (timesteps, guidance, position IDs)
 - Executing the forward pass
 - Handling model-specific quirks (CFG, timestep scaling, etc.)
@@ -25,10 +25,10 @@ import torch.nn as nn
 logger = logging.getLogger(__name__)
 
 
-class ModelForwardAdapter(Protocol):
-    """Protocol defining the interface for model forward adapters.
+class ModelForwardPlugin(Protocol):
+    """Protocol defining the interface for model forward plugins.
 
-    All adapters must implement the forward() method with this signature.
+    All plugins must implement the forward() method with this signature.
     Using Protocol instead of ABC allows duck-typing flexibility.
     """
 
@@ -82,8 +82,8 @@ class ModelForwardAdapter(Protocol):
         ...
 
 
-class BaseForwardAdapter(ABC):
-    """Base class for forward adapters with common utilities."""
+class BaseForwardPlugin(ABC):
+    """Base class for forward plugins with common utilities."""
 
     @abstractmethod
     def prepare_model_kwargs(
@@ -133,8 +133,8 @@ class BaseForwardAdapter(ABC):
         return sigma_expanded.expand(batch_size).to(device, dtype=dtype)
 
 
-class FluxForwardAdapter(BaseForwardAdapter):
-    """Forward adapter for FLUX models.
+class FluxForwardPlugin(BaseForwardPlugin):
+    """Forward plugin for FLUX models.
 
     FLUX models require:
     - guidance tensor input
@@ -227,8 +227,8 @@ class FluxForwardAdapter(BaseForwardAdapter):
         return pred
 
 
-class SD3ForwardAdapter(BaseForwardAdapter):
-    """Forward adapter for SD3 models.
+class SD3ForwardPlugin(BaseForwardPlugin):
+    """Forward plugin for SD3 models.
 
     SD3 models require:
     - timestep * 1000 scaling
@@ -352,8 +352,8 @@ class SD3ForwardAdapter(BaseForwardAdapter):
         return pred
 
 
-class HunyuanForwardAdapter(BaseForwardAdapter):
-    """Forward adapter for Hunyuan video models.
+class HunyuanForwardPlugin(BaseForwardPlugin):
+    """Forward plugin for Hunyuan video models.
 
     Hunyuan models have similar interface to SD3 with some variations
     in how embeddings are handled.
@@ -420,11 +420,11 @@ class HunyuanForwardAdapter(BaseForwardAdapter):
         return pred
 
 
-class DefaultForwardAdapter(BaseForwardAdapter):
-    """Default forward adapter with fallback logic.
+class DefaultForwardPlugin(BaseForwardPlugin):
+    """Default forward plugin with fallback logic.
 
     Tries SD3-style interface first, falls back to generic UNet interface.
-    This adapter is used when the model type is unknown.
+    This plugin is used when the model type is unknown.
 
     Memory optimization: Uses single forward with concatenated inputs for CFG.
     """
@@ -543,35 +543,35 @@ class DefaultForwardAdapter(BaseForwardAdapter):
         return pred
 
 
-# Registry mapping model types to their adapters
-ADAPTER_REGISTRY: Dict[str, Type[BaseForwardAdapter]] = {
-    "flux": FluxForwardAdapter,
-    "sd3": SD3ForwardAdapter,
-    "hunyuan": HunyuanForwardAdapter,
-    "mochi": HunyuanForwardAdapter,  # Mochi uses similar interface to Hunyuan
-    "default": DefaultForwardAdapter,
+# Registry mapping model types to their plugins
+PLUGIN_REGISTRY: Dict[str, Type[BaseForwardPlugin]] = {
+    "flux": FluxForwardPlugin,
+    "sd3": SD3ForwardPlugin,
+    "hunyuan": HunyuanForwardPlugin,
+    "mochi": HunyuanForwardPlugin,  # Mochi uses similar interface to Hunyuan
+    "default": DefaultForwardPlugin,
 }
 
-# Cached adapter instances
-_adapter_cache: Dict[str, BaseForwardAdapter] = {}
+# Cached plugin instances
+_plugin_cache: Dict[str, BaseForwardPlugin] = {}
 
 
-def get_forward_adapter(model_type: str) -> BaseForwardAdapter:
+def get_forward_plugin(model_type: str) -> BaseForwardPlugin:
     """
-    Get the forward adapter for a given model type.
+    Get the forward plugin for a given model type.
 
     Args:
         model_type: Model type identifier (e.g., "flux", "sd3", "hunyuan")
 
     Returns:
-        Configured forward adapter instance
+        Configured forward plugin instance
     """
-    if model_type not in _adapter_cache:
-        adapter_cls = ADAPTER_REGISTRY.get(model_type.lower(), DefaultForwardAdapter)
-        _adapter_cache[model_type] = adapter_cls()
-        logger.debug(f"Created forward adapter for model_type={model_type}: {adapter_cls.__name__}")
+    if model_type not in _plugin_cache:
+        plugin_cls = PLUGIN_REGISTRY.get(model_type.lower(), DefaultForwardPlugin)
+        _plugin_cache[model_type] = plugin_cls()
+        logger.debug(f"Created forward plugin for model_type={model_type}: {plugin_cls.__name__}")
 
-    return _adapter_cache[model_type]
+    return _plugin_cache[model_type]
 
 
 def detect_model_type(model: nn.Module) -> str:

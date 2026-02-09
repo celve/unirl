@@ -89,7 +89,7 @@ def train(args):
     """Main training loop."""
     import ray
     from diffusionrl.ray import create_placement_groups_from_args, create_rollout_manager
-    from diffusionrl.runtime.sampling_mode import create_sampling_mode_adapter
+    from diffusionrl.runtime.sampling_mode import create_sampling_mode_plugin
     from diffusionrl.utils import configure_logger, set_seed
     from diffusionrl.utils.wandb_logger import init_logger, aggregate_metrics
 
@@ -125,8 +125,8 @@ def train(args):
     pgs = create_placement_groups_from_args(args)
     logger.info("Placement groups created")
 
-    # 2. Build sampling mode adapter (keeps train loop skeleton mode-agnostic)
-    sampling_mode = create_sampling_mode_adapter(args)
+    # 2. Build sampling mode plugin (keeps train loop skeleton mode-agnostic)
+    sampling_mode = create_sampling_mode_plugin(args)
 
     # 3. Create Rollout manager (internally loads sampler/reward/algorithm)
     rollout_pg_result = sampling_mode.rollout_pg_result(pgs)
