@@ -151,22 +151,3 @@ def generate_latents(
         )
 
 
-def expand_noise_for_cfg(
-    noise: torch.Tensor,
-    do_classifier_free_guidance: bool = True,
-) -> torch.Tensor:
-    """
-    Expand noise tensor for classifier-free guidance.
-
-    When using CFG, we need to duplicate the noise for unconditional branch.
-
-    Args:
-        noise: Initial noise tensor [B, C, H, W]
-        do_classifier_free_guidance: Whether to expand for CFG
-
-    Returns:
-        Expanded noise [2B, C, H, W] if CFG, else [B, C, H, W]
-    """
-    if do_classifier_free_guidance:
-        return torch.cat([noise] * 2, dim=0)
-    return noise

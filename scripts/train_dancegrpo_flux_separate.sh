@@ -70,11 +70,11 @@ PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMP
 NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
 
 python -m diffusionrl.train \
-    --pretrained-model-path "${PRETRAINED_MODEL}" \
+    --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model-type flux \
     --sampler-path diffusionrl.samplers.fsdp.flux_sampler.FluxSampler \
     --algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward-path diffusionrl.workers.reward.local.LocalRewardWorker \
+    --reward-path diffusionrl.reward.local.LocalRewardWorker \
     --reward-model-name ocr \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \

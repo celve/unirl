@@ -19,7 +19,6 @@ Key alignment points with DanceGRPO:
 """
 
 import logging
-import math
 from typing import Dict, List, Optional, Set, Tuple, Any
 import torch
 import torch.nn as nn
@@ -274,7 +273,6 @@ class FSDPHunyuanSampler(BaseSampler):
                 "use_sde_solver": self.use_sde_solver,
                 "latent_scale": self.LATENT_SCALE,
             },
-            contract_version="v1",
             step_indices=torch.arange(sigma_schedule.shape[0], device=sigma_schedule.device, dtype=torch.long),
         )
 

@@ -103,10 +103,6 @@ class TimestepScheduler(ABC):
         """
         pass
 
-    def get_current_timesteps(self) -> List[int]:
-        """Get list of current SDE timesteps (sorted)."""
-        return sorted(self.get_sde_indices())
-
     def state_dict(self) -> Dict[str, Any]:
         """Get scheduler state for checkpointing."""
         return {"num_timesteps": self.num_timesteps}
@@ -328,12 +324,6 @@ class WindowScheduler(TimestepScheduler):
         """Roll back to initial timestep."""
         self.cur_timestep = self.init_timestep
         self.cur_iter_in_group = 0
-
-    def is_training_complete(self) -> bool:
-        """Check if window has traversed all timesteps."""
-        if self.config.strategy in ("progressive", "decay", "exp_decay"):
-            return self.cur_timestep >= self.num_timesteps - self.config.group_size
-        return False
 
     def state_dict(self) -> Dict[str, Any]:
         """Get scheduler state for checkpointing."""

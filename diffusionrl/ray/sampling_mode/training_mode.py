@@ -6,7 +6,7 @@ import logging
 
 import ray
 
-from diffusionrl.ray.actor_group import create_training_actor_group
+from diffusionrl.ray.groups.factory import create_training_actor_group
 
 from .base import SamplingModePlugin
 

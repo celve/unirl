@@ -12,11 +12,6 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-try:  # keep client import-light for test and external client contexts
-    from diffusionrl.types import SAMPLING_CONTRACT_VERSION
-except Exception:  # pragma: no cover - fallback when diffusionrl package deps are unavailable
-    SAMPLING_CONTRACT_VERSION = "v1"
-
 logger = logging.getLogger(__name__)
 
 
@@ -39,7 +34,6 @@ class SGLangClient:
         self,
         *,
         server_url: str,
-        contract_version: str = SAMPLING_CONTRACT_VERSION,
         handshake_timeout_s: float = 5.0,
         request_timeout_s: float = 60.0,
         max_retries: int = 1,
@@ -56,7 +50,6 @@ class SGLangClient:
             raise ValueError(f"max_retries must be >= 0, got {max_retries}")
 
         self.server_url = server_url.rstrip("/")
-        self.contract_version = contract_version
         self.handshake_timeout_s = float(handshake_timeout_s)
         self.request_timeout_s = float(request_timeout_s)
         self.max_retries = int(max_retries)
@@ -75,10 +68,6 @@ class SGLangClient:
         self._semaphore = threading.BoundedSemaphore(int(max_outstanding_requests))
         self._last_capabilities: Dict[str, Any] = {}
 
-    @property
-    def last_capabilities(self) -> Dict[str, Any]:
-        return dict(self._last_capabilities)
-
     def handshake(self) -> Dict[str, Any]:
         """Negotiate basic capability schema with server."""
         errors: List[str] = []
@@ -90,12 +79,6 @@ class SGLangClient:
                 continue
 
             capabilities = self._normalize_capabilities(payload)
-            server_contract = capabilities.get("contract_version")
-            if server_contract is not None and str(server_contract) != self.contract_version:
-                raise SGLangProtocolError(
-                    f"SGLang contract mismatch: server={server_contract}, client={self.contract_version}"
-                )
-            capabilities.setdefault("contract_version", self.contract_version)
             self._last_capabilities = capabilities
             return capabilities
 
@@ -219,7 +202,4 @@ class SGLangClient:
                     capabilities.update(first["capabilities"])
         else:
             capabilities = dict(payload)
-
-        if "contract_version" not in capabilities and "contract_version" in payload:
-            capabilities["contract_version"] = payload["contract_version"]
         return capabilities

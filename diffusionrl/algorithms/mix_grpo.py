@@ -3,7 +3,7 @@ MixGRPO Algorithm Implementation.
 
 Mixed SDE/ODE GRPO with configurable ratio.
 """
-from typing import Optional, Set
+from typing import Any, Dict, Optional, Set
 
 from .base import SamplingRequirements
 from .grpo import GRPOAlgorithm
@@ -43,6 +43,18 @@ class MixGRPOAlgorithm(GRPOAlgorithm):
 
         # Current SDE indices (updated by scheduler)
         self._current_sde_indices: Optional[Set[int]] = None
+
+    @classmethod
+    def from_args(cls, args: Any) -> "MixGRPOAlgorithm":
+        """Construct MixGRPO algorithm from runtime args."""
+        kwargs: Dict[str, Any] = cls._grpo_kwargs_from_args(args)
+        kwargs.update(
+            {
+                "sde_ratio": getattr(args, "sde_ratio", 1.0),
+                "window_training": getattr(args, "window_training", False),
+            }
+        )
+        return cls(**kwargs)
 
     def get_sampling_requirements(self) -> SamplingRequirements:
         """Return MixGRPO sampling requirements."""

@@ -25,7 +25,7 @@ class EngineConfig:
 
     # Model configuration
     model_path: str = ""
-    pretrained_model_path: str = ""
+    pretrained_model_saved_path: str = ""
 
     # Sampler configuration
     num_inference_steps: int = 50

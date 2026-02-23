@@ -532,38 +532,6 @@ class CheckpointManager:
 
         return path
 
-    def load_latest(
-        self,
-        model: nn.Module,
-        optimizer: Optional[torch.optim.Optimizer] = None,
-        scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
-        **kwargs,
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Load the latest checkpoint if available.
-
-        Args:
-            model: Model to load into
-            optimizer: Optional optimizer
-            scheduler: Optional scheduler
-            **kwargs: Additional arguments for load_checkpoint
-
-        Returns:
-            Checkpoint data if found, None otherwise
-        """
-        latest = get_latest_checkpoint(self.output_dir)
-        if latest is None:
-            logger.info("No checkpoint found, starting fresh")
-            return None
-
-        return load_checkpoint(
-            latest,
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            **kwargs,
-        )
-
     def cleanup(self) -> None:
         """Clean up old checkpoints."""
         cleanup_checkpoints(
@@ -574,20 +542,3 @@ class CheckpointManager:
             metric_mode=self.metric_mode,
         )
 
-    def get_resume_step(self) -> int:
-        """Get the step to resume from."""
-        latest = get_latest_checkpoint(self.output_dir)
-        if latest is None:
-            return 0
-
-        metadata_path = os.path.join(latest, "metadata.json")
-        if os.path.exists(metadata_path):
-            with open(metadata_path, "r") as f:
-                metadata = json.load(f)
-            return metadata.get("rollout_id", 0) + 1
-
-        # Try to parse from directory name
-        try:
-            return int(os.path.basename(latest).split("-")[1]) + 1
-        except (ValueError, IndexError):
-            return 0

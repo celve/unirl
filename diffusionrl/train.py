@@ -5,11 +5,9 @@ diffusionrl Training Entry Point - Minimal Design (<100 lines)
 Reference: slime/train.py
 
 Usage:
-    python -m diffusionrl.train --pretrained-model-path /path/to/model --num-rollout 100
+    python -m diffusionrl.train --pretrained-model-saved-path /path/to/model --num-rollout 100
 """
 import logging
-import os
-import time
 
 from diffusionrl.config import parse_args
 
@@ -26,78 +24,22 @@ def should_eval(rollout_id: int, args) -> bool:
     return (rollout_id + 1) % args.eval_steps == 0
 
 
-def _build_weight_checkpoint_path(args, rollout_id: int) -> str:
-    os.makedirs(args.weight_sync_dir, exist_ok=True)
-    return os.path.join(
-        args.weight_sync_dir,
-        f"weights_rollout_{rollout_id}_{int(time.time_ns())}.pt",
-    )
-
-
-def _sync_weights_to_rollout(
-    args,
-    rollout_id: int,
-    training_group,
-    rollout_manager,
-    *,
-    target_weight_version: int,
-) -> int:
-    """
-    Synchronize weights from training actors to rollout actors.
-
-    Supports both legacy ObjectRef transfer and checkpoint-path transfer.
-    """
-    import ray
-    from diffusionrl.utils.weight_sync_checkpoint import cleanup_published_checkpoint
-
-    if int(target_weight_version) < 0:
-        raise ValueError(f"target_weight_version must be >= 0, got {target_weight_version}")
-
-    if args.weight_sync_mode == "checkpoint_path":
-        checkpoint_path = _build_weight_checkpoint_path(args, rollout_id)
-        training_group.export_weights_to_path(checkpoint_path)
-        ray.get(rollout_manager.onload_weights.remote())
-        ray.get(
-            rollout_manager.update_weights_from_path.remote(
-                checkpoint_path,
-                int(target_weight_version),
-            )
-        )
-        ray.get(rollout_manager.onload_post_update.remote())
-        ray.get(rollout_manager.onload_runtime_cache.remote())
-        ray.get(rollout_manager.assert_inference_weight_version.remote(int(target_weight_version)))
-        cleanup_published_checkpoint(checkpoint_path)
-        return int(target_weight_version)
-
-    # Legacy ObjectRef path
-    weights_ref = training_group.get_weights()
-    ray.wait([weights_ref], num_returns=1)
-    ray.get(rollout_manager.onload_weights.remote())
-    ray.get(
-        rollout_manager.update_weights.remote(
-            weights_ref,
-            int(target_weight_version),
-        )
-    )
-    ray.get(rollout_manager.onload_post_update.remote())
-    ray.get(rollout_manager.onload_runtime_cache.remote())
-    ray.get(rollout_manager.assert_inference_weight_version.remote(int(target_weight_version)))
-    return int(target_weight_version)
-
-
 def train(args):
     """Main training loop."""
     import ray
+
+    from diffusionrl.ray.data_buffer import normalize_rollout_result
     from diffusionrl.ray import create_placement_groups_from_args, create_rollout_manager
-    from diffusionrl.runtime.sampling_mode import create_sampling_mode_plugin
+    from diffusionrl.ray.sampling_mode import create_sampling_mode_plugin
     from diffusionrl.utils import configure_logger, set_seed
-    from diffusionrl.utils.wandb_logger import init_logger, aggregate_metrics
+    from diffusionrl.utils.weight_sync import create_weight_sync_strategy
+    from diffusionrl.utils.wandb_logger import aggregate_metrics, init_logger
 
     configure_logger()
     set_seed(args.seed)
 
     logger.info("Starting GRPO training...")
-    logger.info(f"Model: {args.pretrained_model_path}")
+    logger.info(f"Model: {args.pretrained_model_saved_path}")
     logger.info(f"Algorithm: {args.algorithm_path}")
     logger.info(f"Mode: {'colocate' if args.colocate_inference_training else 'separate'}")
     logger.info(f"Offload train: {args.offload_train}, Offload rollout: {args.offload_rollout}")
@@ -127,6 +69,7 @@ def train(args):
 
     # 2. Build sampling mode plugin (keeps train loop skeleton mode-agnostic)
     sampling_mode = create_sampling_mode_plugin(args)
+    weight_sync_strategy = create_weight_sync_strategy(args)
 
     # 3. Create Rollout manager (internally loads sampler/reward/algorithm)
     rollout_pg_result = sampling_mode.rollout_pg_result(pgs)
@@ -151,32 +94,37 @@ def train(args):
             wandb_logger=wandb_logger,
             should_save_fn=should_save,
             should_eval_fn=should_eval,
-            sync_weights_fn=_sync_weights_to_rollout,
-            initial_weight_version=sampling_mode.current_weight_version,
+            sync_weights_fn=weight_sync_strategy.sync,
         )
         # async loop handles cleanup and exits.
         return
 
     # 6. Core synchronous training loop
+    use_rollout_buffer = bool(getattr(args, "rollout_buffer_enabled", True))
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         sampling_mode.before_rollout(rollout_manager)
 
         # === PHASE 1: Rollout ===
-        # generate() returns ray.put(train_data) - an ObjectRef
-        # ray.get() behavior varies: may or may not auto-resolve nested ObjectRefs
-        rollout_result = ray.get(
-            rollout_manager.generate.remote(rollout_id, world_size=training_group.num_actors)
-        )
-
-        # Handle both cases: result is ObjectRef or actual data
-        if isinstance(rollout_result, list):
-            rollout_data_ref = rollout_result
-        elif isinstance(rollout_result, ray.ObjectRef):
-            # Already an ObjectRef, use directly
-            rollout_data_ref = rollout_result
+        # Buffer-centric path: generate->enqueue and consume in separate calls.
+        # Legacy path: generate() returns serialized payload directly.
+        if use_rollout_buffer:
+            ray.get(rollout_manager.generate_and_buffer.remote(rollout_id))
+            rollout_result = ray.get(
+                rollout_manager.pop_training_data.remote(
+                    world_size=training_group.num_actors
+                )
+            )
         else:
-            # Actual data, need to wrap in ObjectRef for training actors
-            rollout_data_ref = ray.put(rollout_result)
+            # generate() returns ray.put(train_data) - an ObjectRef
+            # ray.get() behavior varies: may or may not auto-resolve nested ObjectRefs
+            rollout_result = ray.get(
+                rollout_manager.generate.remote(
+                    rollout_id,
+                    world_size=training_group.num_actors,
+                )
+            )
+
+        rollout_data_ref = normalize_rollout_result(rollout_result)
 
         sampling_mode.after_rollout(rollout_manager)
 
@@ -208,7 +156,7 @@ def train(args):
             rollout_id=rollout_id,
             training_group=training_group,
             rollout_manager=rollout_manager,
-            sync_weights_fn=_sync_weights_to_rollout,
+            sync_weights_fn=weight_sync_strategy.sync,
         )
 
         # Periodic: evaluate (after weight sync, rollout actors are on GPU)

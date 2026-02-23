@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
+from diffusionrl.config.schema import RewardSchema
 from .base import BaseRewardWorker, RewardRequest, RewardResponse
 from diffusionrl.utils import load_function
 
@@ -58,18 +59,19 @@ class RewardService:
         Initialize RewardService.
 
         Args:
-            args: GRPOArguments instance with reward configuration
+            args: TrainingArguments instance with reward configuration
             reward_pg_result: Optional placement group result for GPU rewards
                              Tuple of (placement_group, bundle_indices, gpu_ids)
         """
         self.args = args
+        self.reward_config = RewardSchema.from_args(args)
         self.reward_pg = reward_pg_result
 
         # Workers list (supports multiple for multi-reward)
         self.workers: List[BaseRewardWorker] = []
 
         # Aggregation configuration
-        self.aggregation = getattr(args, "reward_aggregation", "weighted_sum")
+        self.aggregation = self.reward_config.reward_aggregation
 
         # Initialize workers based on configuration
         self._init_workers()
@@ -82,12 +84,12 @@ class RewardService:
     def _init_workers(self) -> None:
         """Initialize workers based on args configuration."""
         # Parse multi-reward configuration
-        reward_models = getattr(self.args, "reward_models", None)
-        reward_weights = getattr(self.args, "reward_weights", None)
-        reward_service_urls = getattr(self.args, "reward_service_urls", None)
+        reward_models = self.reward_config.reward_models
+        reward_weights = self.reward_config.reward_weights
+        reward_service_urls = self.reward_config.reward_service_urls
 
         # Priority 1: Remote HTTP rewards
-        if self.args.use_http_reward or reward_service_urls:
+        if self.reward_config.use_http_reward or reward_service_urls:
             self._init_http_workers(reward_service_urls)
 
         # Priority 2: GPU-isolated rewards (Ray workers)
@@ -101,8 +103,8 @@ class RewardService:
     def _should_use_ray_workers(self) -> bool:
         """Check if Ray workers should be used."""
         # Use Ray workers if dedicated reward GPU pool is configured and we have a placement group
-        reward_dedicated_num_gpus = getattr(self.args, "reward_dedicated_num_gpus", 0)
-        reward_dedicated_num_nodes = getattr(self.args, "reward_dedicated_num_nodes", 0)
+        reward_dedicated_num_gpus = self.reward_config.reward_dedicated_num_gpus
+        reward_dedicated_num_nodes = self.reward_config.reward_dedicated_num_nodes
 
         has_gpu_config = reward_dedicated_num_gpus > 0 or reward_dedicated_num_nodes > 0
         has_pg = self.reward_pg is not None
@@ -116,8 +118,8 @@ class RewardService:
         """Initialize HTTP reward workers."""
         from .http import HTTPRewardWorker
 
-        urls = urls or [self.args.reward_service_url]
-        reward_weights = getattr(self.args, "reward_weights", None)
+        urls = urls or [self.reward_config.reward_service_url]
+        reward_weights = self.reward_config.reward_weights
 
         for i, url in enumerate(urls):
             if url is None:
@@ -131,8 +133,8 @@ class RewardService:
                 base_url=url,
                 model_name=f"http_{i}",
                 weight=weight,
-                timeout=self.args.reward_timeout,
-                batch_size=self.args.reward_batch_size,
+                timeout=self.reward_config.reward_timeout,
+                batch_size=self.reward_config.reward_batch_size,
             )
             self.workers.append(worker)
             logger.info(f"Added HTTPRewardWorker: {url}")
@@ -146,7 +148,7 @@ class RewardService:
         from .ray_worker import RayRewardWorker
 
         pg, bundle_indices, gpu_ids = self.reward_pg
-        gpus_per_actor = getattr(self.args, "reward_dedicated_gpus_per_actor", 1)
+        gpus_per_actor = self.reward_config.reward_dedicated_gpus_per_actor
 
         if reward_models:
             # Multi-reward: each model gets its own actor(s)
@@ -172,12 +174,12 @@ class RewardService:
                     pg=pg,
                     bundle_indices=bundle_indices[actor_start:actor_end],
                     gpu_ids=gpu_ids[actor_start:actor_end],
-                    reward_path=self.args.reward_path,
-                    model_path=getattr(self.args, "reward_model_path", None),
+                    reward_path=self.reward_config.reward_path,
+                    model_path=self.reward_config.reward_model_saved_path,
                     num_actors=1,
                     gpus_per_actor=gpus_per_actor,
-                    batch_size=self.args.reward_batch_size,
-                    timeout=self.args.reward_timeout,
+                    batch_size=self.reward_config.reward_batch_size,
+                    timeout=self.reward_config.reward_timeout,
                     parallel_mode=False,
                     weight=weight,
                 )
@@ -189,22 +191,22 @@ class RewardService:
             num_actors = len(gpu_ids) // gpus_per_actor
 
             worker = RayRewardWorker(
-                model_name=self.args.reward_model_name,
+                model_name=self.reward_config.reward_model_name,
                 pg=pg,
                 bundle_indices=bundle_indices,
                 gpu_ids=gpu_ids,
-                reward_path=self.args.reward_path,
-                model_path=getattr(self.args, "reward_model_path", None),
+                reward_path=self.reward_config.reward_path,
+                model_path=self.reward_config.reward_model_saved_path,
                 num_actors=num_actors,
                 gpus_per_actor=gpus_per_actor,
-                batch_size=self.args.reward_batch_size,
-                timeout=self.args.reward_timeout,
+                batch_size=self.reward_config.reward_batch_size,
+                timeout=self.reward_config.reward_timeout,
                 parallel_mode=True,  # Distribute batch across actors
                 weight=1.0,
             )
             self.workers.append(worker)
             logger.info(
-                f"Added RayRewardWorker: {self.args.reward_model_name} "
+                f"Added RayRewardWorker: {self.reward_config.reward_model_name} "
                 f"({num_actors} parallel actors)"
             )
 
@@ -220,9 +222,9 @@ class RewardService:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
         reward_path = getattr(
-            self.args,
+            self.reward_config,
             "reward_path",
-            "diffusionrl.workers.reward.local.LocalRewardWorker",
+            "diffusionrl.reward.local.LocalRewardWorker",
         )
         try:
             worker_cls = load_function(reward_path) if reward_path else LocalRewardWorker
@@ -239,8 +241,8 @@ class RewardService:
         def _create_worker(model_name: str, weight: float) -> BaseRewardWorker:
             init_kwargs: Dict[str, Any] = {
                 "weight": weight,
-                "batch_size": self.args.reward_batch_size,
-                "timeout": self.args.reward_timeout,
+                "batch_size": self.reward_config.reward_batch_size,
+                "timeout": self.reward_config.reward_timeout,
                 "device": device,
             }
             if "model_name" in ctor_params:
@@ -267,11 +269,11 @@ class RewardService:
 
         else:
             # Single reward model
-            worker = _create_worker(model_name=self.args.reward_model_name, weight=1.0)
+            worker = _create_worker(model_name=self.reward_config.reward_model_name, weight=1.0)
             self.workers.append(worker)
             logger.info(
                 "Added local reward worker: %s via %s",
-                self.args.reward_model_name,
+                self.reward_config.reward_model_name,
                 worker_cls.__name__,
             )
 
@@ -566,14 +568,3 @@ class RewardService:
         self.workers = []
         logger.info("RewardService disposed")
 
-    def get_worker_info(self) -> List[Dict[str, Any]]:
-        """Get information about configured workers."""
-        return [
-            {
-                "type": type(worker).__name__,
-                "model_name": worker.get_model_name(),
-                "weight": worker.get_weight(),
-                "available": worker.is_available(),
-            }
-            for worker in self.workers
-        ]

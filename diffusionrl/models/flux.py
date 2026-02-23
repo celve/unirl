@@ -34,7 +34,7 @@ class FluxModelBundle(ModelBundle):
         pretrained_path: str,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.bfloat16,
-        vae_path: Optional[str] = None,
+        vae_saved_path: Optional[str] = None,
         text_encoder_path: Optional[str] = None,
         text_encoder_2_path: Optional[str] = None,
         variant: str = "dev",  # "dev" or "schnell"
@@ -54,7 +54,7 @@ class FluxModelBundle(ModelBundle):
             pretrained_path: Path to pretrained transformer weights
             device: Device to load models on
             dtype: Data type for transformer weights
-            vae_path: Optional separate path for VAE
+            vae_saved_path: Optional separate path for VAE
             text_encoder_path: Optional separate path for CLIP encoder
             text_encoder_2_path: Optional separate path for T5 encoder
             variant: FLUX variant ("dev" or "schnell")
@@ -71,7 +71,7 @@ class FluxModelBundle(ModelBundle):
         """
         super().__init__(pretrained_path, device, dtype, **kwargs)
 
-        self.vae_path = vae_path or pretrained_path
+        self.vae_saved_path = vae_saved_path or pretrained_path
         self.text_encoder_path = text_encoder_path or pretrained_path
         self.text_encoder_2_path = text_encoder_2_path or pretrained_path
         self.variant = variant
@@ -94,6 +94,14 @@ class FluxModelBundle(ModelBundle):
     @property
     def model_type(self) -> str:
         return "flux"
+
+    @classmethod
+    def default_sampler_path(cls) -> Optional[str]:
+        return "diffusionrl.samplers.fsdp.flux_sampler.FluxSampler"
+
+    @classmethod
+    def default_sampler_engine(cls) -> Optional[str]:
+        return "fsdp"
 
     def load(self) -> None:
         """Load all model components."""
@@ -164,13 +172,13 @@ class FluxModelBundle(ModelBundle):
             from diffusers import AutoencoderKL
 
             self._vae = AutoencoderKL.from_pretrained(
-                self.vae_path,
+                self.vae_saved_path,
                 subfolder="vae",
                 torch_dtype=self.dtype,
             )
             self._vae.to(self.device)
             self._vae.eval()
-            logger.info(f"Loaded FLUX VAE from {self.vae_path}")
+            logger.info(f"Loaded FLUX VAE from {self.vae_saved_path}")
 
         except ImportError:
             logger.warning("Could not import AutoencoderKL from diffusers.")
@@ -515,165 +523,3 @@ class FluxTextEncoderWrapper:
         return self
 
 
-class FluxPipeline:
-    """
-    Simplified FLUX pipeline for sampling.
-
-    Provides a clean interface for generating image samples.
-    """
-
-    def __init__(
-        self,
-        model_bundle: FluxModelBundle,
-        scheduler=None,
-    ):
-        """
-        Initialize pipeline.
-
-        Args:
-            model_bundle: FluxModelBundle instance
-            scheduler: Optional noise scheduler
-        """
-        self.model_bundle = model_bundle
-        self.scheduler = scheduler
-
-    @torch.no_grad()
-    def __call__(
-        self,
-        prompt: Union[str, List[str]],
-        negative_prompt: Optional[Union[str, List[str]]] = None,
-        height: int = 1024,
-        width: int = 1024,
-        num_inference_steps: int = 28,  # FLUX dev default
-        guidance_scale: float = 3.5,
-        generator: Optional[torch.Generator] = None,
-    ) -> torch.Tensor:
-        """
-        Generate image from prompt.
-
-        Args:
-            prompt: Text prompt(s)
-            negative_prompt: Optional negative prompt(s)
-            height: Image height
-            width: Image width
-            num_inference_steps: Number of denoising steps
-            guidance_scale: Guidance scale (note: FLUX uses different guidance mechanism)
-            generator: Optional random generator
-
-        Returns:
-            Generated image tensor [B, C, H, W]
-        """
-        # Handle string input
-        if isinstance(prompt, str):
-            prompt = [prompt]
-
-        batch_size = len(prompt)
-
-        # Encode prompt
-        prompt_embeds, pooled_prompt_embeds = self.model_bundle.encode_prompt(
-            prompt, negative_prompt
-        )
-
-        # Calculate latent dimensions (FLUX VAE has 8x compression)
-        latent_height = height // 8
-        latent_width = width // 8
-
-        # FLUX uses 16 latent channels
-        latent_channels = 16
-
-        # Initialize latents
-        latents = torch.randn(
-            batch_size, latent_channels, latent_height, latent_width,
-            device=self.model_bundle.device,
-            dtype=self.model_bundle.dtype,
-            generator=generator,
-        )
-
-        # Get sigma schedule
-        sigmas = self.model_bundle.get_sigma_schedule(num_inference_steps)
-
-        # Prepare image ids for positional encoding
-        latent_image_ids = self._prepare_latent_image_ids(
-            batch_size, latent_height, latent_width, self.model_bundle.device, self.model_bundle.dtype
-        )
-
-        # Prepare text ids
-        text_ids = torch.zeros(prompt_embeds.shape[1], 3, device=self.model_bundle.device)
-
-        # Denoising loop
-        for i, (sigma, sigma_next) in enumerate(zip(sigmas[:-1], sigmas[1:])):
-            # Pack latents for FLUX transformer
-            packed_latents = self._pack_latents(latents, latent_height, latent_width)
-
-            # Create timestep
-            timestep = sigma.expand(batch_size)
-
-            # Forward pass
-            noise_pred = self.model_bundle.transformer(
-                hidden_states=packed_latents,
-                encoder_hidden_states=prompt_embeds,
-                pooled_projections=pooled_prompt_embeds,
-                timestep=timestep,
-                img_ids=latent_image_ids,
-                txt_ids=text_ids,
-                guidance=torch.tensor([guidance_scale], device=self.model_bundle.device).expand(batch_size),
-                return_dict=False,
-            )[0]
-
-            # Unpack
-            noise_pred = self._unpack_latents(noise_pred, latent_height, latent_width)
-
-            # Euler step
-            dt = sigma_next - sigma
-            latents = latents + dt * noise_pred
-
-        # Decode
-        images = self.model_bundle.decode_latents(latents)
-
-        return images
-
-    def _prepare_latent_image_ids(
-        self,
-        batch_size: int,
-        height: int,
-        width: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        """Prepare latent image IDs for FLUX positional encoding."""
-        latent_image_ids = torch.zeros(height, width, 3)
-        latent_image_ids[..., 1] = torch.arange(height)[:, None]
-        latent_image_ids[..., 2] = torch.arange(width)[None, :]
-
-        latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
-
-        latent_image_ids = latent_image_ids.reshape(
-            latent_image_id_height * latent_image_id_width, latent_image_id_channels
-        )
-
-        return latent_image_ids.to(device=device, dtype=dtype)
-
-    def _pack_latents(
-        self,
-        latents: torch.Tensor,
-        height: int,
-        width: int,
-    ) -> torch.Tensor:
-        """Pack latents into sequence format for FLUX transformer."""
-        batch_size, channels, _, _ = latents.shape
-        latents = latents.view(batch_size, channels, height, width)
-        latents = latents.permute(0, 2, 3, 1)  # B, H, W, C
-        latents = latents.reshape(batch_size, height * width, channels)
-        return latents
-
-    def _unpack_latents(
-        self,
-        latents: torch.Tensor,
-        height: int,
-        width: int,
-    ) -> torch.Tensor:
-        """Unpack latents from sequence format back to spatial format."""
-        batch_size, _, channels = latents.shape
-        latents = latents.view(batch_size, height, width, channels)
-        latents = latents.permute(0, 3, 1, 2)  # B, C, H, W
-        return latents

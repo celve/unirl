@@ -15,13 +15,13 @@ Reference:
 
 import logging
 from dataclasses import dataclass
+from contextlib import nullcontext
 from typing import Dict, List, Optional, Set, Any, Tuple
 import torch
 import torch.nn as nn
-import math
 
 from ..base import BaseSampler, SamplerOutput
-from ..log_prob import sde_step_with_log_prob, get_sigma_schedule
+from ..log_prob import compute_sde_log_prob, sde_step_with_log_prob, get_sigma_schedule
 from diffusionrl.types import LogProbData, PromptEmbeddings
 
 logger = logging.getLogger(__name__)
@@ -467,9 +467,115 @@ class SD3Sampler(BaseSampler):
                 "width": width,
                 "guidance_scale": guidance_scale,
             },
-            contract_version="v1",
             step_indices=torch.arange(sigmas.shape[0], device=sigmas.device, dtype=torch.long),
         )
+
+    def compute_log_prob_for_training(
+        self,
+        latents: torch.Tensor,
+        prev_latents: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        pooled_prompt_embeds: Optional[torch.Tensor],
+        timestep_index: int,
+        sigma_schedule: torch.Tensor,
+        guidance_scale: Optional[float] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute one-step log probability from replayed SD3 trajectory."""
+        if self.model is None:
+            raise RuntimeError("Model not set. Initialize sampler with model parameter.")
+
+        device = latents.device
+        dtype = latents.dtype
+        batch_size = latents.shape[0]
+        actual_guidance = float(guidance_scale if guidance_scale is not None else 1.0)
+
+        sigma_schedule = sigma_schedule.to(device=device, dtype=torch.float32)
+        if timestep_index < 0 or timestep_index >= int(sigma_schedule.shape[0]) - 1:
+            raise ValueError(
+                "timestep_index out of range for sigma_schedule: "
+                f"index={timestep_index}, len={sigma_schedule.shape[0]}"
+            )
+
+        sigma = sigma_schedule[timestep_index]
+        sigma_next = sigma_schedule[timestep_index + 1]
+        timestep = (sigma * 1000).expand(batch_size).to(dtype=dtype)
+
+        prompt_embeds = prompt_embeds.to(device=device, dtype=dtype)
+        pooled_prompt_embeds = (
+            pooled_prompt_embeds.to(device=device, dtype=dtype)
+            if pooled_prompt_embeds is not None
+            else None
+        )
+        if negative_prompt_embeds is not None:
+            negative_prompt_embeds = negative_prompt_embeds.to(device=device, dtype=dtype)
+        if negative_pooled_prompt_embeds is not None:
+            negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(
+                device=device, dtype=dtype
+            )
+
+        autocast_ctx = (
+            torch.autocast("cuda", torch.bfloat16)
+            if latents.is_cuda
+            else nullcontext()
+        )
+        self.model.train()
+        with autocast_ctx:
+            if actual_guidance > 1.0:
+                noise_pred_uncond = self.model(
+                    hidden_states=latents,
+                    encoder_hidden_states=(
+                        negative_prompt_embeds
+                        if negative_prompt_embeds is not None
+                        else torch.zeros_like(prompt_embeds)
+                    ),
+                    timestep=timestep,
+                    pooled_projections=(
+                        negative_pooled_prompt_embeds
+                        if negative_pooled_prompt_embeds is not None
+                        else (
+                            torch.zeros_like(pooled_prompt_embeds)
+                            if pooled_prompt_embeds is not None
+                            else None
+                        )
+                    ),
+                    return_dict=False,
+                )[0]
+                noise_pred_cond = self.model(
+                    hidden_states=latents,
+                    encoder_hidden_states=prompt_embeds,
+                    timestep=timestep,
+                    pooled_projections=pooled_prompt_embeds,
+                    return_dict=False,
+                )[0]
+                noise_pred = noise_pred_uncond + actual_guidance * (
+                    noise_pred_cond - noise_pred_uncond
+                )
+            else:
+                noise_pred = self.model(
+                    hidden_states=latents,
+                    encoder_hidden_states=prompt_embeds,
+                    timestep=timestep,
+                    pooled_projections=pooled_prompt_embeds,
+                    return_dict=False,
+                )[0]
+
+        log_prob, _ = compute_sde_log_prob(
+            noise_pred=noise_pred,
+            sample=latents,
+            prev_sample=prev_latents,
+            sigma=sigma,
+            sigma_next=sigma_next,
+            eta=self.eta,
+            sde_type=self.sde_type,
+            sigma_max=(
+                float(sigma_schedule[1].item())
+                if int(sigma_schedule.shape[0]) > 1
+                else 1.0
+            ),
+        )
+        return log_prob
 
     def _get_sigma_schedule(
         self,

@@ -10,14 +10,15 @@ from typing import Any, Dict, List, Optional
 import ray
 import torch
 
-from diffusionrl.types import SamplerOutput, InferenceRequest
+from diffusionrl.types.sampling import InferenceRequest, SamplerOutput
 from diffusionrl.samplers.engine import (
     BaseInferenceEngine,
     EngineConfig,
 )
 from diffusionrl.utils import load_function
 from diffusionrl.utils.weight_sync_checkpoint import wait_for_published_checkpoint
-from .base import log_resource_ids, log_gpu_state, tensor_to_pil
+
+from .base import log_gpu_state, log_resource_ids, tensor_to_pil
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ class InferenceActor:
         self.engine: Optional[BaseInferenceEngine] = None
         self._device = None
         self._pending_weight_update_finalize = False
-        self._weight_version = 0
+        self._warned_ignored_prompt_embedding_input = False
 
     def _log_resource_ids(self, tag: str) -> None:
         log_resource_ids(tag, self.rank)
@@ -201,7 +202,7 @@ class InferenceActor:
                 - sampler_engine_type: "fsdp", "fastvideo", or "sglang" (required)
                 - sampler_path: Path to sampler class (required)
                 - model_path: Path to model bundle class
-                - pretrained_model_path: Path to pretrained weights
+                - pretrained_model_saved_path: Path to pretrained weights
                 - num_inference_steps: Number of denoising steps
                 - eta: SDE noise coefficient
                 - sde_type: Type of SDE ("sde", "cps", "dance")
@@ -252,7 +253,7 @@ class InferenceActor:
 
         config = EngineConfig(
             model_path=engine_config.get("model_path", ""),
-            pretrained_model_path=engine_config.get("pretrained_model_path", ""),
+            pretrained_model_saved_path=engine_config.get("pretrained_model_saved_path", ""),
             num_inference_steps=engine_config.get("num_inference_steps", 50),
             eta=engine_config.get("eta", 1.0),
             sde_type=engine_config.get("sde_type", "sde"),
@@ -275,7 +276,6 @@ class InferenceActor:
 
         # Initialize engine
         self.engine.initialize(self._device)
-        self._weight_version = 0
 
         logger.info(f"Rank {self.rank}: Inference actor initialized with {sampler_engine_type} engine")
         self._log_resource_ids("inference_init")
@@ -302,8 +302,8 @@ class InferenceActor:
 
         Args:
             prompts: List of text prompts
-            prompt_embeds: Pre-computed prompt embeddings
-            pooled_prompt_embeds: Pre-computed pooled embeddings
+            prompt_embeds: Deprecated (ignored)
+            pooled_prompt_embeds: Deprecated (ignored)
             encoder_attention_mask: Attention mask
             text_ids: Text position IDs (for FLUX)
             num_inference_steps: Number of denoising steps
@@ -320,6 +320,33 @@ class InferenceActor:
         """
         if self.engine is None:
             raise RuntimeError("Engine not initialized. Call init() first.")
+        if not isinstance(prompts, list) or len(prompts) == 0:
+            raise ValueError(
+                "InferenceActor.generate requires non-empty text prompts. "
+                "Prompt-embedding-only input is no longer supported."
+            )
+
+        ignored_embedding_input = (
+            prompt_embeds is not None
+            or pooled_prompt_embeds is not None
+            or encoder_attention_mask is not None
+            or text_ids is not None
+            or kwargs.get("negative_prompt_embeds") is not None
+            or kwargs.get("negative_pooled_prompt_embeds") is not None
+        )
+        if ignored_embedding_input:
+            if not self._warned_ignored_prompt_embedding_input:
+                logger.warning(
+                    "InferenceActor now uses prompt-only input; external embedding tensors are ignored. "
+                    "Engines are responsible for per-request prompt encoding."
+                )
+                self._warned_ignored_prompt_embedding_input = True
+            prompt_embeds = None
+            pooled_prompt_embeds = None
+            encoder_attention_mask = None
+            text_ids = None
+            kwargs.pop("negative_prompt_embeds", None)
+            kwargs.pop("negative_pooled_prompt_embeds", None)
 
         self._ensure_engine_ready_for_generate()
         engine_caps = self.engine.get_capabilities_dict()
@@ -333,19 +360,8 @@ class InferenceActor:
                 f"but guidance_scale={guidance_scale} was provided."
             )
 
-        # Encode prompts if needed
-        if prompts is not None and prompt_embeds is None:
-            encoded = self.engine.encode_prompt(prompts)
-            prompt_embeds = encoded.get("prompt_embeds")
-            pooled_prompt_embeds = encoded.get("pooled_prompt_embeds", pooled_prompt_embeds)
-            negative_prompt_embeds = encoded.get("negative_prompt_embeds")
-            negative_pooled_prompt_embeds = encoded.get("negative_pooled_prompt_embeds")
-            encoder_attention_mask = encoded.get("encoder_attention_mask", encoder_attention_mask)
-            if text_ids is None:
-                text_ids = encoded.get("text_ids")
-        else:
-            negative_prompt_embeds = None
-            negative_pooled_prompt_embeds = None
+        negative_prompt_embeds = None
+        negative_pooled_prompt_embeds = None
 
         self._log_gpu_state("inference_generate_start")
         # Generate
@@ -370,7 +386,6 @@ class InferenceActor:
         # Attach capability snapshot for control-plane decisions/debugging.
         meta = dict(output.metadata or {})
         meta.setdefault("engine_capabilities", self.engine.get_capabilities_dict())
-        meta.setdefault("weight_version", int(self._weight_version))
         output.metadata = meta
 
         # Decode latents for reward if requested
@@ -387,7 +402,6 @@ class InferenceActor:
                         embeddings=output.embeddings,
                         decoded_images=decoded_images,
                         metadata=output.metadata,
-                        contract_version=output.contract_version,
                         step_indices=output.step_indices,
                     )
                 except Exception as e:
@@ -426,8 +440,6 @@ class InferenceActor:
         for request in requests:
             output = self.generate(
                 prompts=request.prompts,
-                prompt_embeds=request.prompt_embeds,
-                pooled_prompt_embeds=request.pooled_prompt_embeds,
                 num_inference_steps=request.num_inference_steps,
                 guidance_scale=request.guidance_scale,
                 seed=request.seed,
@@ -435,7 +447,7 @@ class InferenceActor:
             outputs.append(output)
         return outputs
 
-    def update_weights(self, state_dict_or_ref, weight_version: Optional[int] = None) -> int:
+    def update_weights(self, state_dict_or_ref) -> None:
         """
         Update model weights from training actor.
 
@@ -445,14 +457,12 @@ class InferenceActor:
         """
         if self.engine is None:
             logger.warning("No engine to update weights")
-            return int(self._weight_version)
+            return
 
         # Support path-based sync for direct checkpoint transfer.
         if isinstance(state_dict_or_ref, str):
-            return self.update_weights_from_path(
-                state_dict_or_ref,
-                weight_version=weight_version,
-            )
+            self.update_weights_from_path(state_dict_or_ref)
+            return
 
         # Handle both ObjectRef and direct dict (Ray auto-dereferences when passing between actors)
         if isinstance(state_dict_or_ref, ray.ObjectRef):
@@ -463,26 +473,16 @@ class InferenceActor:
         self._prepare_engine_for_weight_update()
         self.engine.update_weights(state_dict)
         self._pending_weight_update_finalize = True
-        if weight_version is None:
-            self._weight_version += 1
-        else:
-            self._weight_version = int(weight_version)
-        logger.info(
-            "Rank %s: Weights updated (weight_version=%s)",
-            self.rank,
-            self._weight_version,
-        )
-        return int(self._weight_version)
+        logger.info("Rank %s: Weights updated", self.rank)
 
     def update_weights_from_path(
         self,
         checkpoint_path: str,
-        weight_version: Optional[int] = None,
-    ) -> int:
+    ) -> Dict[str, Any]:
         """Update model weights from a shared checkpoint path."""
         if self.engine is None:
             logger.warning("No engine to update weights")
-            return int(self._weight_version)
+            return {"rank": int(self.rank), "checksum": None}
 
         wait_for_published_checkpoint(checkpoint_path)
         self._prepare_engine_for_weight_update()
@@ -492,17 +492,21 @@ class InferenceActor:
             state_dict = torch.load(checkpoint_path, map_location="cpu")
             self.engine.update_weights(state_dict)
         self._pending_weight_update_finalize = True
-        if weight_version is None:
-            self._weight_version += 1
-        else:
-            self._weight_version = int(weight_version)
-        logger.info(
-            "Rank %s: Weights updated from path %s (weight_version=%s)",
-            self.rank,
-            checkpoint_path,
-            self._weight_version,
-        )
-        return int(self._weight_version)
+        logger.info("Rank %s: Weights updated from path %s", self.rank, checkpoint_path)
+        checksum = None
+        get_checksum_fn = getattr(self.engine, "get_last_weight_checksum", None)
+        if callable(get_checksum_fn):
+            try:
+                raw_checksum = get_checksum_fn()
+                if isinstance(raw_checksum, dict) and raw_checksum:
+                    checksum = {str(k): str(v) for k, v in raw_checksum.items()}
+            except Exception as exc:
+                logger.warning(
+                    "Rank %s: failed to query engine checksum after update: %s",
+                    self.rank,
+                    exc,
+                )
+        return {"rank": int(self.rank), "checksum": checksum}
 
     def offload(self) -> None:
         """Offload engine to CPU to free GPU memory."""
@@ -550,16 +554,3 @@ class InferenceActor:
             return self.engine.get_memory_info()
         return {}
 
-    def get_engine_type(self) -> str:
-        """Get the engine type being used."""
-        if self.engine is None:
-            return "none"
-        return type(self.engine).__name__
-
-    def get_weight_version(self) -> int:
-        """Get current inference-side weight version."""
-        return int(self._weight_version)
-
-    def prepare_for_inference(self) -> None:
-        """Compatibility helper: enforce generate-side readiness."""
-        self._ensure_engine_ready_for_generate()

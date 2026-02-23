@@ -84,11 +84,11 @@ if [ "${NUM_INFERENCE_STEPS}" -lt 2 ]; then
 fi
 
 python -m diffusionrl.train \
-    --pretrained-model-path "${PRETRAINED_MODEL}" \
+    --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model-type sd3 \
     --sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
     --algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward-path diffusionrl.workers.reward.local.LocalRewardWorker \
+    --reward-path diffusionrl.reward.local.LocalRewardWorker \
     --reward-model-name ocr \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \

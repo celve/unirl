@@ -141,7 +141,7 @@ class RayRewardWorker(BaseRewardWorker):
             pg=placement_group,
             bundle_indices=[0],
             gpu_ids=[0],
-            reward_path="diffusionrl.workers.reward.local.LocalRewardWorker",
+            reward_path="diffusionrl.reward.local.LocalRewardWorker",
         )
 
         # Parallel mode (distribute batch across actors)
@@ -150,7 +150,7 @@ class RayRewardWorker(BaseRewardWorker):
             pg=placement_group,
             bundle_indices=[0, 1, 2, 3],
             gpu_ids=[0, 1, 2, 3],
-            reward_path="diffusionrl.workers.reward.local.LocalRewardWorker",
+            reward_path="diffusionrl.reward.local.LocalRewardWorker",
             num_actors=4,
             parallel_mode=True,
         )
@@ -162,7 +162,7 @@ class RayRewardWorker(BaseRewardWorker):
         pg,  # PlacementGroup
         bundle_indices: List[int],
         gpu_ids: List[int],
-        reward_path: str = "diffusionrl.workers.reward.local.LocalRewardWorker",
+        reward_path: str = "diffusionrl.reward.local.LocalRewardWorker",
         model_path: Optional[str] = None,
         num_actors: int = 1,
         gpus_per_actor: int = 1,

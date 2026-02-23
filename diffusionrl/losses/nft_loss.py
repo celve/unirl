@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 from diffusers.utils.torch_utils import randn_tensor
 
-from diffusionrl.types import NFTTrainingBatch, PromptEmbeddings
+from diffusionrl.types import ForwardTrainingBatch, PromptEmbeddings
 from diffusionrl.utils.adapter_utils import switch_adapter
 
 
@@ -490,7 +490,7 @@ class NFTLoss:
     def compute_batch(
         self,
         model: nn.Module,
-        batch: NFTTrainingBatch,
+        batch: ForwardTrainingBatch,
         ref_model: Optional[nn.Module] = None,
         old_model: Optional[nn.Module] = None,
         generator: Optional[torch.Generator] = None,
@@ -499,14 +499,14 @@ class NFTLoss:
         **kwargs,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
-        Compute NFT loss using typed NFTTrainingBatch.
+        Compute NFT loss using typed ForwardTrainingBatch.
 
         This is the typed interface for NFT loss computation. It uses
-        NFTTrainingBatch instead of dictionaries.
+        ForwardTrainingBatch instead of dictionaries.
 
         Args:
             model: The diffusion model being trained
-            batch: Typed NFTTrainingBatch containing clean_latents and embeddings
+            batch: Typed ForwardTrainingBatch containing clean_latents and embeddings
             ref_model: Reference model for KL penalty
             old_model: Old model for positive/negative predictions
             generator: Random number generator

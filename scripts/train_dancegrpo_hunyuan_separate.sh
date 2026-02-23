@@ -113,7 +113,7 @@ FPS=${FPS:-8}
 
 # Reward model
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-"hpsv2"}
-REWARD_PATH=${REWARD_PATH:-"diffusionrl.workers.reward.local.LocalRewardWorker"}
+REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardWorker"}
 
 # Note: shell-level path existence check removed. The Python-level fallback in
 # arguments.py handles missing local paths by falling back to HuggingFace IDs.
@@ -146,7 +146,7 @@ echo " Reward:                 ${REWARD_MODEL_NAME}"
 echo "======================================================"
 
 python -m diffusionrl.train \
-    --pretrained-model-path "${PRETRAINED_MODEL}" \
+    --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model-type hunyuan \
     --sampler-engine-type fsdp \
     --sampler-path diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler \

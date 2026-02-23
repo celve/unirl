@@ -31,11 +31,11 @@ DATA_PATH="${REPO_ROOT}/data/samples/prompts_toy.json"
 if [ "$MODE" == "colocate" ]; then
     # Colocate mode: share 1 GPU for both inference and training
     python -m diffusionrl.train \
-        --pretrained-model-path "${PRETRAINED_MODEL}" \
+        --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
         --model-type sd3 \
         --sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
         --algorithm-path diffusionrl.algorithms.nft.NFTAlgorithm \
-        --reward-path diffusionrl.workers.reward.local.LocalRewardWorker \
+        --reward-path diffusionrl.reward.local.LocalRewardWorker \
         --reward-model-name ocr \
         --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
         --data-path "${DATA_PATH}" \
@@ -76,11 +76,11 @@ if [ "$MODE" == "colocate" ]; then
 elif [ "$MODE" == "training" ]; then
     # Training-actor sampling mode: use training actors for sampling, no inference actors
     python -m diffusionrl.train \
-        --pretrained-model-path "${PRETRAINED_MODEL}" \
+        --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
         --model-type sd3 \
         --sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
         --algorithm-path diffusionrl.algorithms.nft.NFTAlgorithm \
-        --reward-path diffusionrl.workers.reward.local.LocalRewardWorker \
+        --reward-path diffusionrl.reward.local.LocalRewardWorker \
         --reward-model-name ocr \
         --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
         --data-path "${DATA_PATH}" \
@@ -123,11 +123,11 @@ elif [ "$MODE" == "training" ]; then
 else
     # Separate mode: 1 GPU for inference, 1 GPU for training
     python -m diffusionrl.train \
-        --pretrained-model-path "${PRETRAINED_MODEL}" \
+        --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
         --model-type sd3 \
         --sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
         --algorithm-path diffusionrl.algorithms.nft.NFTAlgorithm \
-        --reward-path diffusionrl.workers.reward.local.LocalRewardWorker \
+        --reward-path diffusionrl.reward.local.LocalRewardWorker \
         --reward-model-name ocr \
         --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
         --data-path "${DATA_PATH}" \

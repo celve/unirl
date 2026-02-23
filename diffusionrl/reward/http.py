@@ -9,23 +9,10 @@ import io
 import json
 import time
 from typing import Dict, List, Optional, Any, Union
-from dataclasses import dataclass
 import torch
 from PIL import Image
 
 from .base import BaseRewardWorker, RewardRequest, RewardResponse, RewardType
-
-
-@dataclass
-class HTTPRewardConfig:
-    """Configuration for HTTP reward service."""
-    base_url: str
-    endpoint: str = "/compute_reward"
-    api_key: Optional[str] = None
-    timeout: float = 60.0
-    max_retries: int = 3
-    retry_delay: float = 1.0
-    batch_size: int = 8
 
 
 class HTTPRewardWorker(BaseRewardWorker):
@@ -368,20 +355,3 @@ class AsyncHTTPRewardWorker(HTTPRewardWorker):
 
         raise RuntimeError(f"Failed after {self.max_retries} retries: {last_error}")
 
-    async def compute_rewards_batch_async(
-        self,
-        requests: List[RewardRequest],
-    ) -> List[RewardResponse]:
-        """
-        Compute rewards for multiple requests concurrently.
-
-        Args:
-            requests: List of reward requests
-
-        Returns:
-            List of reward responses
-        """
-        import asyncio
-
-        tasks = [self.compute_rewards_async(req) for req in requests]
-        return await asyncio.gather(*tasks)

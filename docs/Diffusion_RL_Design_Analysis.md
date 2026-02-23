@@ -185,7 +185,7 @@ flowchart TB
         Step1["_distributed_sample()<br/>分发到 N 个 InferenceActor"]
         Step2["_compute_rewards()<br/>调用 RewardWorker"]
         Step3["algorithm.compute_advantages()<br/>奖励 → 优势"]
-        Step4["_convert_to_train_data()<br/>组装 TrainingBatch"]
+        Step4["assemble_backward_training_batch()<br/>组装 TrainingBatch"]
 
         Step1 --> Step2 --> Step3 --> Step4
     end
@@ -429,11 +429,11 @@ class RolloutManager:
 
         # 6. 转换为训练数据格式
         if self.algorithm.get_sampling_requirements().is_forward_process:
-            batch = self._convert_to_nft_train_data(sampler_outputs, advantages)
-            # NFTTrainingBatch: 只需 clean_latents
+            batch = self.assemble_forward_training_batch(sampler_outputs, advantages)
+            # ForwardTrainingBatch: 只需 clean_latents
         else:
-            batch = self._convert_to_train_data(sampler_outputs, advantages)
-            # GRPOTrainingBatch: 需要 trajectories + log_probs
+            batch = self.assemble_backward_training_batch(sampler_outputs, advantages)
+            # BackwardTrainingBatch: 需要 trajectories + log_probs
 
         # 7. 存入 Ray Object Store
         return ray.put(batch)
@@ -480,7 +480,7 @@ class RolloutManager:
 
 ```python
 def create_rollout_manager(
-    args: GRPOArguments,
+    args: TrainingArguments,
     pg_result: Tuple[PlacementGroup, List[int], List[int]],
     reward_pg_result: Optional[Tuple[...]] = None,  # 独立 GPU reward
 ) -> Tuple[ActorHandle, int]:
@@ -503,7 +503,7 @@ diffusionRL/                          # 总计 ~28,217 行 (含测试 ~1,449行)
 ├── __init__.py                     # 模块导出 (~147行)
 ├── train.py                        # 同步训练入口 (~238行)
 ├── train_async.py                  # 异步训练循环 (~145行) [v4.0 NEW]
-├── types.py                        # 核心数据结构 (~820行)
+├── types/                          # 核心数据结构（sampling/training/reward）
 │
 ├── runtime/                        # 运行时编排层 (~327行) [v4.0 NEW]
 │   ├── __init__.py                 # 模块导出 (~9行)
@@ -586,19 +586,17 @@ diffusionRL/                          # 总计 ~28,217 行 (含测试 ~1,449行)
 │   ├── datasets.py                 # TextPromptDataset, FluxRLDataset, SD3RLDataset (~397行)
 │   └── k_repeat_sampler.py         # K-repeat 采样器 (~179行)
 │
-├── workers/                        # Worker 实现 (~2,263行)
-│   ├── __init__.py                 # 模块导出 (~27行)
-│   └── reward/
-│       ├── __init__.py             # 模块导出 (~67行)
-│       ├── base.py                 # BaseRewardWorker, RewardRequest/Response (~242行)
-│       ├── local.py                # LocalRewardWorker (~581行)
-│       ├── http.py                 # HTTPRewardWorker (~387行)
-│       ├── ray_worker.py           # RayRewardWorker (~404行)
-│       └── service.py              # RewardService 统一入口 (~555行)
+├── reward/                         # Reward 实现 (~2,263行)
+│   ├── __init__.py                 # 模块导出 (~67行)
+│   ├── base.py                     # BaseRewardWorker, RewardRequest/Response (~242行)
+│   ├── local.py                    # LocalRewardWorker (~581行)
+│   ├── http.py                     # HTTPRewardWorker (~387行)
+│   ├── ray_worker.py               # RayRewardWorker (~404行)
+│   └── service.py                  # RewardService 统一入口 (~555行)
 │
 ├── config/                         # 配置 (~1,547行)
 │   ├── __init__.py                 # 模块导出 (~67行)
-│   ├── arguments.py                # GRPOArguments (~864行)
+│   ├── arguments.py                # TrainingArguments (~864行)
 │   └── defaults.py                 # 预设配置 HunyuanVideo/Flux/Mochi等 (~616行)
 │
 ├── patches/                        # FastVideo 补丁
@@ -782,9 +780,9 @@ stateDiagram-v2
 | `onload()` | `model.to("cuda")` | `model.to("cuda")` + optimizer state → GPU |
 | `dispose()` | 清理资源 | 清理资源 |
 
-### 3.3 核心数据结构 (types.py ~820行)
+### 3.3 核心数据结构 (types/*)
 
-**v4.0 新增**：`SampleStatus` 枚举（管道中样本状态）、`SAMPLING_CONTRACT_VERSION = "v1"` 契约版本常量、`InferenceRequest` 数据类、`is_grpo_batch()` / `is_nft_batch()` 类型判断函数。
+**v4.0 新增**：`SampleStatus` 枚举（管道中样本状态）、`InferenceRequest` 数据类、`is_backward_batch()` / `is_forward_batch()` 类型判断函数。
 
 ```python
 class SampleStatus(Enum):                  # [v4.0 NEW]
@@ -794,10 +792,8 @@ class SampleStatus(Enum):                  # [v4.0 NEW]
     TRUNCATED = "truncated"
     FAILED = "failed"
 
-SAMPLING_CONTRACT_VERSION = "v1"           # [v4.0 NEW] 采样契约版本
-
-def is_grpo_batch(batch) -> bool: ...      # [v4.0 NEW] 类型判断
-def is_nft_batch(batch) -> bool: ...       # [v4.0 NEW] 类型判断
+def is_backward_batch(batch) -> bool: ...      # [v4.0 NEW] 类型判断
+def is_forward_batch(batch) -> bool: ...       # [v4.0 NEW] 类型判断
 ```
 
 #### 3.3.1 LogProbData - 对数概率存储
@@ -873,13 +869,13 @@ class TimestepData:
     timestep_idx: int           # 时间步索引
 ```
 
-#### 3.3.4 GRPOTrainingBatch - 轨迹型训练批次
+#### 3.3.4 BackwardTrainingBatch - 轨迹型训练批次
 
 **用途**：GRPO/MixGRPO 算法的训练数据包。包含完整的采样轨迹和对数概率，用于计算 PPO 的重要性采样比率 `ratio = exp(log_prob_new - log_prob_old)`。通过 Ray ObjectRef 从 RolloutManager 传递到 TrainingActor。
 
 ```python
 @dataclass
-class GRPOTrainingBatch:
+class BackwardTrainingBatch:
     """
     GRPO/MixGRPO 算法使用的训练批次
     需要完整的采样轨迹和对数概率用于重要性采样
@@ -904,18 +900,18 @@ class GRPOTrainingBatch:
             timestep_idx=t_idx,
         )
 
-    def slice(self, start: int, end: int) -> "GRPOTrainingBatch":
+    def slice(self, start: int, end: int) -> "BackwardTrainingBatch":
         """Batch 维度切片，用于 micro-batch 梯度累积"""
         # 支持 image [B,T,C,H,W] 和 video [B,T,C,F,H,W]
 ```
 
-#### 3.3.5 NFTTrainingBatch - NFT 训练批次
+#### 3.3.5 ForwardTrainingBatch - NFT 训练批次
 
 **用途**：NFT（Noise-Free Training）算法的训练数据包。与 GRPO 不同，NFT 不需要完整轨迹和 log_prob，只需要干净的 latent 和 advantage。训练时在 Loss 内部进行前向扩散（加噪），大幅减少内存占用。
 
 ```python
 @dataclass
-class NFTTrainingBatch:
+class ForwardTrainingBatch:
     """
     NFT (Noise-Free Training) 算法使用的训练批次
     只需要干净的 latent，前向扩散在 loss 中进行
@@ -980,7 +976,7 @@ classDiagram
         +int timestep_idx
     }
 
-    class GRPOTrainingBatch {
+    class BackwardTrainingBatch {
         +Tensor trajectories
         +LogProbData log_probs
         +Tensor timesteps
@@ -989,11 +985,11 @@ classDiagram
         +int batch_size
         +Set~int~ sde_indices
         +get_timestep_data(t_idx) TimestepData
-        +slice(start, end) GRPOTrainingBatch
+        +slice(start, end) BackwardTrainingBatch
         +validate()
     }
 
-    class NFTTrainingBatch {
+    class ForwardTrainingBatch {
         +Tensor clean_latents
         +Tensor advantages
         +PromptEmbeddings embeddings
@@ -1012,11 +1008,11 @@ classDiagram
         +int batch_size
     }
 
-    GRPOTrainingBatch *-- LogProbData : contains
-    GRPOTrainingBatch *-- PromptEmbeddings : contains
-    GRPOTrainingBatch ..> TimestepData : creates
+    BackwardTrainingBatch *-- LogProbData : contains
+    BackwardTrainingBatch *-- PromptEmbeddings : contains
+    BackwardTrainingBatch ..> TimestepData : creates
 
-    NFTTrainingBatch *-- PromptEmbeddings : contains
+    ForwardTrainingBatch *-- PromptEmbeddings : contains
 
     SamplerOutput *-- LogProbData : contains
     SamplerOutput *-- PromptEmbeddings : contains
@@ -1816,7 +1812,7 @@ graph TB
     subgraph EntryLayer["Entry Layer (入口层)"]
         Train["train.py<br/>同步训练入口 (~238行)"]
         TrainAsync["train_async.py<br/>异步训练循环 (~145行)"]
-        Config["config/arguments.py<br/>GRPOArguments<br/>(~864行)"]
+        Config["config/arguments.py<br/>TrainingArguments<br/>(~864行)"]
         Defaults["config/defaults.py<br/>预设配置 (~616行)"]
     end
 
@@ -1855,8 +1851,8 @@ graph TB
 
     subgraph DataLayer["Data Layer (数据层)"]
         Data["data/<br/>DataSource<br/>Dataset, KRepeatSampler"]
-        Reward["workers/reward/<br/>RewardWorker<br/>Local, HTTP"]
-        Types["types.py<br/>LogProbData, PromptEmbeddings<br/>GRPOTrainingBatch, NFTTrainingBatch"]
+        Reward["reward/<br/>RewardWorker<br/>Local, HTTP"]
+        Types["types/<br/>LogProbData, PromptEmbeddings<br/>BackwardTrainingBatch, ForwardTrainingBatch"]
     end
 
     subgraph UtilsLayer["Utilities (工具层)"]
@@ -1938,7 +1934,7 @@ flowchart LR
     RW -->|"rewards"| Algo
     Algo -->|"compute_advantages()"| Adv
     Adv -->|"advantages"| Batch
-    RM -->|"_convert_to_train_data()"| Batch
+    RM -->|"assemble_backward_training_batch()"| Batch
     Batch -->|"ray.get()"| TA
     TA --> FSDP
     FSDP -->|"backward + step"| Weights
@@ -2731,12 +2727,12 @@ reward_placement_strategy: str = "PACK"  # PlacementGroup 策略
 
 ## 9. 配置参数详解
 
-### 9.1 GRPOArguments 主要参数组 (~864 行)
+### 9.1 TrainingArguments 主要参数组 (~864 行)
 
 | 参数组 | 关键参数 | 说明 |
 |-------|---------|------|
 | **动态加载路径** | `algorithm_path`, `sampler_path`, `reward_path`, `model_path` | 支持自定义实现 |
-| **模型配置** | `pretrained_model_path`, `model_type`, `vae_path` | FLUX/SD3/Hunyuan/Mochi |
+| **模型配置** | `pretrained_model_saved_path`, `model_type`, `vae_saved_path` | FLUX/SD3/Hunyuan/Mochi |
 | **算法配置** | `clip_range`, `kl_coef`, `advantage_type`, `sde_type` | PPO 超参数 |
 | **采样配置** | `num_inference_steps`, `eta`, `shift`, `sde_ratio`, `init_same_noise` | SDE 采样控制 |
 | **NFT 配置** | `nft_beta`, `nft_adv_mode`, `use_ema`, `ema_decay`, `nft_timestep_mode`, `nft_shuffle_timesteps`, `nft_apply_shift` | DiffusionNFT 特定 |
@@ -2778,7 +2774,7 @@ reward_placement_strategy: str = "PACK"  # PlacementGroup 策略
 
 #### validate_args() 验证逻辑 (v3.0 新增)
 
-`GRPOArguments.validate_args()` 包含以下验证：
+`TrainingArguments.validate_args()` 包含以下验证：
 - **FLUX SDE 类型标准化**：`model_type=="flux"` 时，`dance` → `flux_dance`，`sde`/`flow` → `flux_flow`
 - **算法-损失一致性验证**：确保算法类型和损失类型匹配
 - **资源配置验证**：检查 GPU 分配合理性

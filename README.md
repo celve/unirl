@@ -151,11 +151,11 @@ Or use the CLI directly:
 
 ```bash
 python -m diffusionrl.train \
-    --pretrained-model-path black-forest-labs/FLUX.1-dev \
+    --pretrained-model-saved-path black-forest-labs/FLUX.1-dev \
     --model-type flux \
     --sampler-path diffusionrl.samplers.fsdp.flux_sampler.FluxSampler \
     --algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward-path diffusionrl.workers.reward.local.LocalRewardWorker \
+    --reward-path diffusionrl.reward.local.LocalRewardWorker \
     --reward-model-name hpsv2 \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path data/samples/prompts_toy.json \
@@ -197,7 +197,7 @@ Each script also has a `*_train_actor_sampling.sh` variant that uses training ac
 
 Arguments in DiffusionRL are organized into the following categories:
 
-1.  **Model arguments**: `--model-type`, `--pretrained-model-path`, `--use-lora`, `--lora-rank`, `--lora-alpha`, etc.
+1.  **Model arguments**: `--model-type`, `--pretrained-model-saved-path`, `--use-lora`, `--lora-rank`, `--lora-alpha`, etc.
 2.  **Sampling arguments**: `--sde-type`, `--eta`, `--num-inference-steps`, `--guidance-scale`, `--shift`, `--timestep-fraction`, etc.
 3.  **Algorithm arguments**: `--algorithm-path`, `--clip-range`, `--use-kl-penalty`, `--advantage-type`, etc.
 4.  **Reward arguments**: `--reward-path`, `--reward-model-name`, `--reward-batch-size`, etc.
@@ -208,13 +208,27 @@ For the full argument reference, please refer to: [diffusionrl/config/arguments.
 
 ## Developer Guide
 
+### Ray Layering
+
+The Ray control plane is split into worker implementations, worker-group orchestration, and train-loop strategy:
+
+- `diffusionrl/ray/actors/`: single worker implementations (`InferenceActor`, `TrainingActor`)
+- `diffusionrl/ray/groups/`: group orchestration (`BaseActorGroup`, `InferenceActorGroup`, `TrainingActorGroup`, factories)
+- `diffusionrl/ray/sampling_mode/`: train-loop strategy plugins (`inference` / `training` backend transitions)
+- `diffusionrl/ray/rollout_manager.py`: control-plane actor
+- `diffusionrl/runtime/**`: Ray-agnostic runtime logic
+
+Detailed layer diagram and migration notes:
+- [docs/Ray_Layering.md](docs/Ray_Layering.md)
+- Legacy `actor_group_*` import paths are kept as compatibility shims for one release cycle.
+
 ### Project Structure
 
 ```
 diffusionrl/
 ├── train.py / train_async.py      # Training entry points
-├── types.py                        # Core data structures (SamplerOutput, TrainingBatch, etc.)
-├── config/                         # Configuration system (GRPOArguments)
+├── types/                          # Canonical shared data types (SamplerOutput, TrainingBatch, Reward, WeightSync)
+├── config/                         # Configuration system (TrainingArguments)
 ├── algorithms/                     # RL algorithms (GRPO, MixGRPO, NFT)
 ├── samplers/                       # Inference engines (FSDP, FastVideo, SGLang)
 │   ├── fsdp/                       #   FSDP-based: FluxSampler, SD3Sampler, HunyuanSampler
@@ -222,24 +236,27 @@ diffusionrl/
 │   └── sglang/                     #   SGLang external service engine
 ├── losses/                         # Loss functions (GRPOLoss, NFTLoss)
 ├── advantages/                     # Advantage computation (global, group, per-prompt)
-├── workers/reward/                 # Reward workers (Local, HTTP, Ray service)
+├── reward/                 # Reward workers (Local, HTTP, Ray service)
 ├── models/                         # Model implementations (FLUX, SD3, Hunyuan, Mochi)
 ├── data/                           # Data loading and datasets
 ├── ray/                            # Ray distributed orchestration
 │   ├── rollout_manager.py          #   Central orchestrator
-│   ├── actor_group.py              #   Ray actor pool management
-│   └── actors/                     #   Inference and training actors
-├── runtime/                        # Async pipeline and sampling mode plugins
+│   ├── actors/                     #   Worker implementations
+│   ├── groups/                     #   Worker-group orchestration
+│   └── sampling_mode/              #   Mode strategies in train loop
+├── runtime/                        # Async runtime + ray-agnostic execution logic
 ├── patches/                        # Non-invasive patches for FastVideo
 └── utils/                          # Checkpointing, logging, EMA, weight sync
 ```
 
 ### Adding a Custom Algorithm
 
-Subclass `BaseAlgorithm` and define your `SamplingRequirements`:
+Subclass `BaseAlgorithm` and define your `SamplingRequirements`.
+For new code, always import shared data types from `diffusionrl.types` (single entry).
 
 ```python
 from diffusionrl.algorithms.base import BaseAlgorithm, SamplingRequirements
+from diffusionrl.types import BackwardTrainingBatch
 
 class MyAlgorithm(BaseAlgorithm):
     def get_sampling_requirements(self) -> SamplingRequirements:
@@ -248,16 +265,23 @@ class MyAlgorithm(BaseAlgorithm):
             requires_log_prob=True,
             sde_ratio=1.0,
         )
+
+    def compute_loss(self, model, batch, timestep_idx, advantages, **kwargs):
+        # Optional typed path if your algorithm uses typed batch data
+        if isinstance(batch, BackwardTrainingBatch):
+            ...
+        ...
 ```
 
 Then pass it via `--algorithm-path your_module.MyAlgorithm`.
+See the full minimal template: [docs/Algorithm_Minimal_Template.md](docs/Algorithm_Minimal_Template.md)
 
 ### Adding a Custom Reward Worker
 
 Subclass `BaseRewardWorker`:
 
 ```python
-from diffusionrl.workers.reward.base import BaseRewardWorker
+from diffusionrl.reward.base import BaseRewardWorker
 
 class MyRewardWorker(BaseRewardWorker):
     def compute_reward(self, images, prompts, **kwargs):

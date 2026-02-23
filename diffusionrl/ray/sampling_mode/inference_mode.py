@@ -6,7 +6,7 @@ import logging
 
 import ray
 
-from diffusionrl.ray.actor_group import create_training_actor_group
+from diffusionrl.ray.groups.factory import create_training_actor_group
 
 from .base import SamplingModePlugin
 
@@ -76,14 +76,10 @@ class InferenceSamplingMode(SamplingModePlugin):
             return
 
         self._ensure_rollout_on_gpu(rollout_manager)
-        self._current_weight_version = int(
-            sync_weights_fn(
-                self.args,
-                rollout_id,
-                training_group,
-                rollout_manager,
-                target_weight_version=self._current_weight_version + 1,
-            )
+        sync_weights_fn(
+            rollout_id=rollout_id,
+            training_group=training_group,
+            rollout_manager=rollout_manager,
         )
 
     def before_eval(self, rollout_manager) -> None:

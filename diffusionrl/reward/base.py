@@ -5,89 +5,10 @@ All reward workers must inherit from BaseRewardWorker.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Union
-from enum import Enum
+from typing import List, Optional
 import time
-import torch
-from PIL import Image
 
-
-class RewardType(Enum):
-    """Types of reward computation."""
-    IMAGE_TEXT_ALIGNMENT = "image_text_alignment"
-    AESTHETIC = "aesthetic"
-    VIDEO_QUALITY = "video_quality"
-    SAFETY = "safety"
-    CUSTOM = "custom"
-
-
-@dataclass
-class RewardRequest:
-    """
-    Request for reward computation.
-
-    Supports both image and video inputs.
-    """
-    # Media inputs (one of these should be provided)
-    images: Optional[List[Union[Image.Image, torch.Tensor]]] = None
-    videos: Optional[List[torch.Tensor]] = None  # [B, T, C, H, W] or [B, C, T, H, W]
-
-    # Text inputs
-    prompts: List[str] = field(default_factory=list)
-
-    # Additional context
-    metadata: Optional[List[Dict[str, Any]]] = None
-
-    # Request options
-    reward_types: List[RewardType] = field(
-        default_factory=lambda: [RewardType.IMAGE_TEXT_ALIGNMENT]
-    )
-    return_components: bool = False  # Return individual reward components
-
-    @property
-    def batch_size(self) -> int:
-        if self.images is not None:
-            return len(self.images)
-        elif self.videos is not None:
-            return len(self.videos)
-        return len(self.prompts)
-
-    @property
-    def is_video(self) -> bool:
-        return self.videos is not None
-
-
-@dataclass
-class RewardResponse:
-    """
-    Response from reward computation.
-
-    Contains both aggregated rewards and optional per-component breakdowns.
-    """
-    # Main rewards [B]
-    rewards: List[float]
-
-    # Per-component rewards (if return_components=True)
-    reward_components: Dict[str, List[float]] = field(default_factory=dict)
-
-    # Status information
-    successes: List[bool] = field(default_factory=list)
-    errors: List[Optional[str]] = field(default_factory=list)
-
-    # Timing
-    compute_time: float = 0.0
-
-    @property
-    def batch_size(self) -> int:
-        return len(self.rewards)
-
-    def to_tensor(self, device: Optional[torch.device] = None) -> torch.Tensor:
-        """Convert rewards to tensor."""
-        tensor = torch.tensor(self.rewards, dtype=torch.float32)
-        if device is not None:
-            tensor = tensor.to(device)
-        return tensor
+from diffusionrl.types.reward import RewardRequest, RewardResponse, RewardType
 
 
 class BaseRewardWorker(ABC):
@@ -182,24 +103,6 @@ class BaseRewardWorker(ABC):
         """
         return self.compute_rewards(request)
 
-    def compute_rewards_batch(
-        self,
-        requests: List[RewardRequest],
-    ) -> List[RewardResponse]:
-        """
-        Compute rewards for multiple requests.
-
-        Default implementation processes sequentially.
-        Subclasses may override for parallel processing.
-
-        Args:
-            requests: List of reward requests
-
-        Returns:
-            List of reward responses
-        """
-        return [self.compute_rewards(req) for req in requests]
-
     def offload(self) -> None:
         """
         Offload model to CPU to free GPU memory.
@@ -238,5 +141,4 @@ class BaseRewardWorker(ABC):
         result = func(*args, **kwargs)
         elapsed = time.time() - start
         return result, elapsed
-
 

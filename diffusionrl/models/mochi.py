@@ -34,7 +34,7 @@ class MochiModelBundle(ModelBundle):
         pretrained_path: str,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.bfloat16,
-        vae_path: Optional[str] = None,
+        vae_saved_path: Optional[str] = None,
         text_encoder_path: Optional[str] = None,
         text_encoder_dtype: torch.dtype = torch.float16,
         load_on_init: bool = True,
@@ -47,7 +47,7 @@ class MochiModelBundle(ModelBundle):
             pretrained_path: Path to pretrained transformer weights
             device: Device to load models on
             dtype: Data type for transformer weights
-            vae_path: Optional separate path for VAE
+            vae_saved_path: Optional separate path for VAE
             text_encoder_path: Optional separate path for T5 encoder
             text_encoder_dtype: Data type for text encoder (typically float16)
             load_on_init: Whether to load models immediately
@@ -55,7 +55,7 @@ class MochiModelBundle(ModelBundle):
         """
         super().__init__(pretrained_path, device, dtype, **kwargs)
 
-        self.vae_path = vae_path or pretrained_path
+        self.vae_saved_path = vae_saved_path or pretrained_path
         self.text_encoder_path = text_encoder_path or pretrained_path
         self.text_encoder_dtype = text_encoder_dtype
 
@@ -69,6 +69,14 @@ class MochiModelBundle(ModelBundle):
     @property
     def model_type(self) -> str:
         return "mochi"
+
+    @classmethod
+    def default_sampler_path(cls) -> Optional[str]:
+        return "diffusionrl.samplers.fastvideo.fastvideo_sampler.FastVideoSampler"
+
+    @classmethod
+    def default_sampler_engine(cls) -> Optional[str]:
+        return "fastvideo"
 
     def load(self) -> None:
         """Load all model components."""
@@ -116,13 +124,13 @@ class MochiModelBundle(ModelBundle):
             from diffusers import AutoencoderKLMochi
 
             self._vae = AutoencoderKLMochi.from_pretrained(
-                self.vae_path,
+                self.vae_saved_path,
                 subfolder="vae",
                 torch_dtype=self.dtype,
             )
             self._vae.to(self.device)
             self._vae.eval()  # VAE is always in eval mode
-            logger.info(f"Loaded Mochi VAE from {self.vae_path}")
+            logger.info(f"Loaded Mochi VAE from {self.vae_saved_path}")
 
         except ImportError:
             logger.warning("Could not import AutoencoderKLMochi from diffusers.")
@@ -366,107 +374,3 @@ class MochiTextEncoderWrapper:
         return self
 
 
-class MochiPipeline:
-    """
-    Simplified Mochi pipeline for sampling.
-
-    Provides a clean interface for generating video samples.
-    """
-
-    def __init__(
-        self,
-        model_bundle: MochiModelBundle,
-        scheduler=None,
-    ):
-        """
-        Initialize pipeline.
-
-        Args:
-            model_bundle: MochiModelBundle instance
-            scheduler: Optional noise scheduler
-        """
-        self.model_bundle = model_bundle
-        self.scheduler = scheduler
-
-    @torch.no_grad()
-    def __call__(
-        self,
-        prompt: Union[str, List[str]],
-        negative_prompt: Optional[Union[str, List[str]]] = None,
-        num_frames: int = 25,
-        height: int = 480,
-        width: int = 848,
-        num_inference_steps: int = 50,
-        guidance_scale: float = 4.5,
-        generator: Optional[torch.Generator] = None,
-    ) -> torch.Tensor:
-        """
-        Generate video from prompt.
-
-        Args:
-            prompt: Text prompt(s)
-            negative_prompt: Optional negative prompt(s)
-            num_frames: Number of video frames
-            height: Video height
-            width: Video width
-            num_inference_steps: Number of denoising steps
-            guidance_scale: Classifier-free guidance scale
-            generator: Optional random generator
-
-        Returns:
-            Generated video tensor [B, C, T, H, W]
-        """
-        # Encode prompt
-        prompt_embeds, attention_mask = self.model_bundle.encode_prompt(
-            prompt, negative_prompt
-        )
-
-        batch_size = prompt_embeds.shape[0] // 2 if negative_prompt else prompt_embeds.shape[0]
-
-        # Calculate latent dimensions
-        # Mochi VAE typically has 8x spatial and 4x temporal compression
-        latent_height = height // 8
-        latent_width = width // 8
-        latent_frames = (num_frames - 1) // 4 + 1
-
-        # Initialize latents
-        latent_channels = self.model_bundle.transformer.config.in_channels
-        latents = torch.randn(
-            batch_size, latent_channels, latent_frames, latent_height, latent_width,
-            device=self.model_bundle.device,
-            dtype=self.model_bundle.dtype,
-            generator=generator,
-        )
-
-        # Get sigma schedule
-        sigmas = self.model_bundle.get_sigma_schedule(num_inference_steps)
-
-        # Denoising loop
-        for i, (sigma, sigma_next) in enumerate(zip(sigmas[:-1], sigmas[1:])):
-            # Expand latents for classifier-free guidance
-            if guidance_scale > 1.0:
-                latent_model_input = torch.cat([latents] * 2)
-            else:
-                latent_model_input = latents
-
-            # Predict noise
-            noise_pred = self.model_bundle.transformer(
-                hidden_states=latent_model_input,
-                encoder_hidden_states=prompt_embeds,
-                encoder_attention_mask=attention_mask,
-                timestep=sigma.expand(latent_model_input.shape[0]),
-            ).sample
-
-            # Guidance
-            if guidance_scale > 1.0:
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-            # Euler step
-            dt = sigma_next - sigma
-            latents = latents + dt * noise_pred
-
-        # Decode
-        video = self.model_bundle.decode_latents(latents)
-
-        return video

@@ -46,7 +46,7 @@ class ImageRLDataSource:
         Initialize data source from arguments.
 
         Args:
-            args: GRPOArguments instance with:
+            args: TrainingArguments instance with:
                 - data_path: Path to data file (JSON or TXT)
                 - model_type: Model type for embedding format
                 - batch_size: Batch size
@@ -212,7 +212,7 @@ class DefaultDataSource:
         Initialize default data source.
 
         Args:
-            args: GRPOArguments instance
+            args: TrainingArguments instance
         """
         self.args = args
         self.batch_size = getattr(args, 'batch_size', 4)

@@ -177,11 +177,11 @@ class FSDPInferenceEngine(BaseInferenceEngine):
             self._init_distributed()
 
         # Load model bundle if configured
-        if self.config.model_path and self.config.pretrained_model_path:
+        if self.config.model_path and self.config.pretrained_model_saved_path:
             model_cls = load_function(self.config.model_path)
             use_lora = bool(self.config.engine_kwargs.get("use_lora", False))
             model_kwargs = {
-                "pretrained_path": self.config.pretrained_model_path,
+                "pretrained_path": self.config.pretrained_model_saved_path,
                 "device": device,
                 "use_lora": use_lora,
             }

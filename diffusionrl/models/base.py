@@ -75,6 +75,16 @@ class ModelBundle(ABC):
         """Return the model type identifier (e.g., 'hunyuan', 'mochi', 'flux')."""
         ...
 
+    @classmethod
+    def default_sampler_path(cls) -> Optional[str]:
+        """Default sampler implementation for this model bundle."""
+        return None
+
+    @classmethod
+    def default_sampler_engine(cls) -> Optional[str]:
+        """Default sampler engine type for this model bundle."""
+        return None
+
     @abstractmethod
     def load(self) -> None:
         """Load all model components."""

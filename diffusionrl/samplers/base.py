@@ -8,8 +8,8 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Set, Any
 import torch
 
-# Import SamplerOutput from types.py to avoid duplicate definitions
-from diffusionrl.types import SamplerOutput, LogProbData, PromptEmbeddings
+# Import shared data types from canonical types package
+from diffusionrl.types import LogProbData, PromptEmbeddings, SamplerOutput
 
 
 class BaseSampler(ABC):
@@ -155,65 +155,6 @@ class TrajectoryReplaySampler(BaseSampler):
     @property
     def requires_extra_forward_for_log_prob(self) -> bool:
         return True
-
-    def compute_log_probs_from_trajectory(
-        self,
-        trajectories: torch.Tensor,
-        timesteps: torch.Tensor,
-        prompt_embeds: torch.Tensor,
-        pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        guidance_scale: float = 3.5,
-        **kwargs,
-    ) -> Dict[int, torch.Tensor]:
-        """
-        Compute log probabilities by replaying the trajectory.
-
-        This performs N extra forward passes (one per timestep) to compute
-        the noise_pred needed for log_prob calculation.
-
-        Args:
-            trajectories: [B, T+1, C, ...] sampled latents at each step
-            timesteps: [T+1] sigma values
-            prompt_embeds: [B, seq, hidden] prompt embeddings
-            pooled_prompt_embeds: [B, hidden] pooled embeddings (optional)
-            guidance_scale: CFG scale
-
-        Returns:
-            Dict mapping step index to log_prob tensor [B]
-        """
-        from .log_prob import compute_sde_log_prob
-
-        log_probs = {}
-        num_steps = trajectories.shape[1] - 1
-        device = trajectories.device
-
-        with torch.no_grad():
-            for t_idx in range(num_steps):
-                x_t = trajectories[:, t_idx]
-                x_t_minus_1 = trajectories[:, t_idx + 1]
-                sigma = timesteps[t_idx].to(device)
-                sigma_next = timesteps[t_idx + 1].to(device)
-
-                # Forward pass to get noise_pred
-                noise_pred = self._forward_model(
-                    x_t, sigma, prompt_embeds, pooled_prompt_embeds,
-                    guidance_scale=guidance_scale, **kwargs
-                )
-
-                # Compute log probability
-                log_prob, _ = compute_sde_log_prob(
-                    noise_pred=noise_pred,
-                    sample=x_t,
-                    prev_sample=x_t_minus_1,
-                    sigma=sigma,
-                    sigma_next=sigma_next,
-                    eta=self.eta,
-                    sde_type=self.sde_type,
-                )
-
-                log_probs[t_idx] = log_prob
-
-        return log_probs
 
     @abstractmethod
     def _forward_model(

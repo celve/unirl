@@ -15,11 +15,6 @@ class SamplingModePlugin:
     def __init__(self, args) -> None:
         self.args = args
         self._rollout_on_gpu = True
-        self._current_weight_version = 0
-
-    @property
-    def current_weight_version(self) -> int:
-        return int(self._current_weight_version)
 
     def rollout_pg_result(self, pgs: Dict[str, Any]):
         raise NotImplementedError

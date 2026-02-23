@@ -24,12 +24,12 @@ Reward Modes:
 
 Example usage:
     # Simple usage via RewardService (recommended)
-    from diffusionrl.workers.reward import RewardService
+    from diffusionrl.reward import RewardService
     service = RewardService(args, reward_pg_result=pgs.get("reward"))
     response = service.compute_rewards(request)
 
     # Direct worker usage (for custom integrations)
-    from diffusionrl.workers.reward import LocalRewardWorker, RewardRequest
+    from diffusionrl.reward import LocalRewardWorker, RewardRequest
     worker = LocalRewardWorker(model_name="hpsv2", weight=1.0)
     response = worker.compute_rewards(RewardRequest(images=imgs, prompts=prompts))
 """

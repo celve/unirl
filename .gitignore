@@ -87,7 +87,11 @@ models/**/*.ckpt
 models/**/*.safetensors
 
 # Local/dev tests only (not for open-source push)
-tests/_dev/
+tests/
+docs/
+
+# Plugins (local development, not yet ready for commit)
+diffusionrl_plugins/
 
 # IDE / editor metadata
 .vscode/

@@ -269,6 +269,14 @@ class SD3ModelBundle(ModelBundle):
     def model_type(self) -> str:
         return "sd3"
 
+    @classmethod
+    def default_sampler_path(cls) -> Optional[str]:
+        return "diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler"
+
+    @classmethod
+    def default_sampler_engine(cls) -> Optional[str]:
+        return "fsdp"
+
     @property
     def transformer(self) -> nn.Module:
         """Get the transformer (DiT) model."""
@@ -424,33 +432,6 @@ class SD3ModelBundle(ModelBundle):
         with torch.no_grad():
             images = self._vae.to(torch.float32).decode(latents).sample
         return images
-
-    def get_trainable_parameters(self) -> List[nn.Parameter]:
-        """Get trainable parameters (LoRA weights)."""
-        if self.use_lora:
-            return [p for p in self._transformer.parameters() if p.requires_grad]
-        else:
-            return list(self._transformer.parameters())
-
-    def get_model_state_dict(self) -> dict:
-        """Get state dict for saving."""
-        if self.use_lora:
-            # Only save LoRA weights
-            return {
-                k: v for k, v in self._transformer.state_dict().items()
-                if "lora" in k.lower()
-            }
-        else:
-            return self._transformer.state_dict()
-
-    def load_model_state_dict(self, state_dict: dict, strict: bool = False) -> None:
-        """Load state dict."""
-        self._transformer.load_state_dict(state_dict, strict=strict)
-
-    @property
-    def model_type(self) -> str:
-        """Return the model type identifier."""
-        return "sd3"
 
     def load(self) -> None:
         """Load all model components (already done in __init__)."""

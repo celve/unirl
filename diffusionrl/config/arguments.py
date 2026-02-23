@@ -9,6 +9,20 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict
 
+from diffusionrl.plugins import validate_plugin_target_path
+from diffusionrl.utils.misc import load_function
+from diffusionrl.config.validation import (
+    get_inference_gpus_per_actor,
+    is_probably_local_weight_sync_dir,
+    normalize_repo_relative_paths,
+    repo_root,
+    resolve_repo_relative_path,
+    resolve_loss_type_requirements,
+    validate_colocate_fractions,
+    validate_engine_loss_compatibility,
+    validate_reward_config,
+)
+
 logger = logging.getLogger(__name__)
 
 ENV_REPO_ROOT = "DIFFUSIONRL_REPO_ROOT"
@@ -57,9 +71,9 @@ MODEL_TYPE_TO_SAMPLER = {
     # Image models - use FSDP engine
     "flux": "diffusionrl.samplers.fsdp.flux_sampler.FluxSampler",
     "sd3": "diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler",
-    # Hunyuan default path uses FSDP sampler to satisfy GRPO contract by default.
+    # Hunyuan default path uses FSDP sampler to satisfy GRPO data requirements by default.
     "hunyuan": "diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler",
-    # Mochi still defaults to FastVideo until a contract-complete FSDP sampler is available.
+    # Mochi still defaults to FastVideo until a requirement-complete FSDP sampler is available.
     "mochi": "diffusionrl.samplers.fastvideo.fastvideo_sampler.FastVideoSampler",
 }
 
@@ -82,7 +96,7 @@ ENGINE_CAPABILITY_REQUIREMENTS: Dict[str, Dict[str, bool]] = {
         "requires_embeddings": False,
     },
     "sglang": {
-        "requires_trajectory": False,
+        "requires_trajectory": True,
         "requires_log_prob": False,
         "requires_embeddings": False,
     },
@@ -101,8 +115,41 @@ LOSS_TYPE_REQUIREMENTS: Dict[str, Dict[str, bool]] = {
     },
 }
 
+
+def _resolve_model_runtime_defaults(model_path: str) -> Dict[str, Optional[str]]:
+    """
+    Best-effort model self-description lookup.
+
+    Returns model-declared defaults when available; falls back to None values.
+    """
+    defaults: Dict[str, Optional[str]] = {
+        "sampler_path": None,
+        "sampler_engine_type": None,
+    }
+
+    try:
+        model_cls = load_function(model_path)
+    except Exception:
+        return defaults
+
+    sampler_path_fn = getattr(model_cls, "default_sampler_path", None)
+    if callable(sampler_path_fn):
+        try:
+            defaults["sampler_path"] = sampler_path_fn()
+        except Exception:
+            defaults["sampler_path"] = None
+
+    engine_type_fn = getattr(model_cls, "default_sampler_engine", None)
+    if callable(engine_type_fn):
+        try:
+            defaults["sampler_engine_type"] = engine_type_fn()
+        except Exception:
+            defaults["sampler_engine_type"] = None
+
+    return defaults
+
 @dataclass
-class GRPOArguments:
+class TrainingArguments:
     """All configuration parameters for GRPO training."""
 
     # ========== Paths (Dynamic Loading) ==========
@@ -111,20 +158,22 @@ class GRPOArguments:
     # Sampler path (e.g., "diffusionrl.samplers.fsdp.flux_sampler.FluxSampler")
     sampler_path: str = "diffusionrl.samplers.fastvideo.fastvideo_sampler.FastVideoSampler"
     # Reward path (e.g., "diffusionrl.rewards.hpsv2.HPSv2Reward")
-    reward_path: str = "diffusionrl.workers.reward.local.LocalRewardWorker"
+    reward_path: str = "diffusionrl.reward.local.LocalRewardWorker"
     # Model path (e.g., "diffusionrl.models.hunyuan.HunyuanModelBundle")
     model_path: str = "diffusionrl.models.hunyuan.HunyuanModelBundle"
     # Data source path
     data_source_path: str = "diffusionrl.data.DefaultDataSource"
+    # Optional custom rollout pipeline function (slime-style pluggable rollout)
+    rollout_pipeline_path: Optional[str] = None
 
     # ========== Model Configuration ==========
-    pretrained_model_path: str = ""
+    pretrained_model_saved_path: str = ""
     model_type: str = "hunyuan"  # hunyuan, mochi, flux, sd3
-    vae_path: Optional[str] = None
+    vae_saved_path: Optional[str] = None
     text_encoder_path: Optional[str] = None
 
     # ========== Reward Configuration ==========
-    reward_model_path: Optional[str] = None
+    reward_model_saved_path: Optional[str] = None
     reward_model_name: str = "hpsv2"  # hpsv2, pickscore, clip, aesthetic
     reward_batch_size: int = 8
     reward_timeout: float = 60.0
@@ -185,7 +234,11 @@ class GRPOArguments:
     sampling_backend: str = "inference"  # inference (default) or training
     # Experimental FastVideo path: replay old log_probs on training actors when
     # inference engine does not return them.
+    replay_log_probs: bool = False
     fastvideo_replay_log_probs: bool = False
+    # Optional explicit sampler path used only by replay_log_probs path.
+    # Useful when rollout sampler/engine does not implement compute_log_prob_for_training.
+    replay_sampler_path: Optional[str] = None
 
     # Shared noise configuration (DanceGRPO, MixGRPO)
     # When enabled, K samples for the same prompt share the same initial noise
@@ -274,6 +327,9 @@ class GRPOArguments:
     # Deprecated/unsupported: reward must not be colocated inside InferenceActor.
     colocate_reward: bool = False
     placement_strategy: str = "PACK"  # PACK or SPREAD
+    # Expert switch: allow colocate mode for sglang when using branches that
+    # already expose release/resume-memory handlers.
+    allow_sglang_colocate_experimental: bool = False
 
     # Colocate GPU fractions (used when colocate_inference_training=True)
     colocate_training_gpu_fraction: float = 0.4
@@ -284,6 +340,24 @@ class GRPOArguments:
 
     # Rollout data partitioning (reduce object store pressure)
     partition_train_data: bool = True
+    # Rollout buffer actor (data-centric handoff with validation/filter plugins)
+    rollout_buffer_enabled: bool = True
+    rollout_buffer_max_queue_size: int = 0  # 0 means unbounded
+    rollout_buffer_drop_invalid: bool = True
+    rollout_buffer_reward_min: Optional[float] = None
+    rollout_buffer_reward_max: Optional[float] = None
+    rollout_buffer_min_samples: int = 1
+    rollout_buffer_grouped: bool = False
+    # Defaults to num_samples_per_prompt when None.
+    rollout_buffer_group_size: Optional[int] = None
+    # Number of prompt-groups merged into one dispatch batch (0 => prompts_per_batch).
+    rollout_buffer_dispatch_groups: int = 0
+    # Allow fallback dispatch of incomplete prompt groups to avoid pipeline stalls.
+    rollout_buffer_allow_partial_group: bool = True
+    rollout_buffer_group_ttl_seconds: float = 0.0
+    rollout_buffer_max_pending_samples: int = 0
+    # Comma-separated plugin dotpaths loaded in RolloutBufferActor.
+    rollout_buffer_plugin_paths: str = ""
 
     # ========== Engine Configuration ==========
     # Sampler engine type: fsdp (native PyTorch), fastvideo, sglang (future)
@@ -358,12 +432,12 @@ class GRPOArguments:
     weight_sync_dir: str = "outputs/weight_sync"
 
 
-def parse_args(argv: Optional[List[str]] = None) -> GRPOArguments:
-    """Parse command line arguments and return GRPOArguments."""
+def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
+    """Parse command line arguments and return TrainingArguments."""
     parser = argparse.ArgumentParser(description="diffusionrl training")
 
-    # Add all arguments from GRPOArguments dataclass
-    args_class = GRPOArguments
+    # Add all arguments from TrainingArguments dataclass
+    args_class = TrainingArguments
 
     for field_name, field_info in args_class.__dataclass_fields__.items():
         field_type = field_info.type
@@ -395,12 +469,12 @@ def parse_args(argv: Optional[List[str]] = None) -> GRPOArguments:
 
     parsed_args = parser.parse_args(argv)
 
-    # Convert to GRPOArguments
+    # Convert to TrainingArguments
     args_dict = vars(parsed_args)
     # Convert hyphens back to underscores
     args_dict = {k.replace('-', '_'): v for k, v in args_dict.items()}
 
-    args = GRPOArguments(**args_dict)
+    args = TrainingArguments(**args_dict)
 
     # Validate and normalize arguments
     args = validate_args(args)
@@ -408,45 +482,95 @@ def parse_args(argv: Optional[List[str]] = None) -> GRPOArguments:
     return args
 
 
-def validate_args(args: GRPOArguments) -> GRPOArguments:
+def validate_args(args: TrainingArguments) -> TrainingArguments:
     """
     Validate and normalize arguments for colocate/offload logic.
 
     Args:
-        args: GRPOArguments instance to validate
+        args: TrainingArguments instance to validate
 
     Returns:
-        Validated and normalized GRPOArguments
+        Validated and normalized TrainingArguments
     """
     explicit_offload_shortcut = bool(getattr(args, "offload", False))
     explicit_offload_train = getattr(args, "offload_train", None) is not None
     explicit_offload_rollout = getattr(args, "offload_rollout", None) is not None
 
     # Path normalization first so later checks use canonical values.
-    _normalize_repo_relative_paths(args)
+    normalize_repo_relative_paths(
+        args,
+        env_repo_root=ENV_REPO_ROOT,
+        env_data_root=ENV_DATA_ROOT,
+        env_model_root=ENV_MODEL_ROOT,
+        local_to_hf_fallback=_LOCAL_TO_HF_FALLBACK,
+    )
 
     # ========== Model type to path mapping ==========
-    # Auto-map model_type to model_path if user hasn't explicitly specified a custom path
+    # Keep default path resolution explicit and local to built-in model types.
+
+    # Auto-map model_type to model_path if user hasn't explicitly specified a custom path.
     default_model_path = "diffusionrl.models.hunyuan.HunyuanModelBundle"
-    if args.model_path == default_model_path and args.model_type in MODEL_TYPE_TO_PATH:
-        args.model_path = MODEL_TYPE_TO_PATH[args.model_type]
-        logger.info(f"Auto-mapped model_type={args.model_type} to model_path={args.model_path}")
+    if args.model_path == default_model_path:
+        if args.model_type in MODEL_TYPE_TO_PATH:
+            args.model_path = MODEL_TYPE_TO_PATH[args.model_type]
+            logger.info(f"Auto-mapped model_type={args.model_type} to model_path={args.model_path}")
+
+    # Resolve model self-declared defaults (sampler/engine) when available.
+    model_defaults = _resolve_model_runtime_defaults(args.model_path)
 
     # Auto-map model_type to sampler_path if user hasn't explicitly specified a custom sampler
     default_sampler_path = "diffusionrl.samplers.fastvideo.fastvideo_sampler.FastVideoSampler"
-    if args.sampler_path == default_sampler_path and args.model_type in MODEL_TYPE_TO_SAMPLER:
-        args.sampler_path = MODEL_TYPE_TO_SAMPLER[args.model_type]
-        logger.info(f"Auto-mapped model_type={args.model_type} to sampler_path={args.sampler_path}")
+    if args.sampler_path == default_sampler_path:
+        model_sampler_path = model_defaults.get("sampler_path")
+        if model_sampler_path:
+            args.sampler_path = model_sampler_path
+            logger.info(
+                "Auto-mapped model_path=%s to sampler_path=%s",
+                args.model_path,
+                args.sampler_path,
+            )
+        elif args.model_type in MODEL_TYPE_TO_SAMPLER:
+            args.sampler_path = MODEL_TYPE_TO_SAMPLER[args.model_type]
+            logger.info(f"Auto-mapped model_type={args.model_type} to sampler_path={args.sampler_path}")
 
     # Auto-select sampler_engine_type based on model_type if not specified
-    if args.sampler_engine_type is None and args.model_type in MODEL_TYPE_TO_SAMPLER_ENGINE:
-        args.sampler_engine_type = MODEL_TYPE_TO_SAMPLER_ENGINE[args.model_type]
-        logger.info(f"Auto-selected sampler_engine_type={args.sampler_engine_type} for model_type={args.model_type}")
+    if args.sampler_engine_type is None:
+        model_engine_type = model_defaults.get("sampler_engine_type")
+        if model_engine_type:
+            args.sampler_engine_type = model_engine_type
+            logger.info(
+                "Auto-selected sampler_engine_type=%s from model_path=%s",
+                args.sampler_engine_type,
+                args.model_path,
+            )
+        elif args.model_type in MODEL_TYPE_TO_SAMPLER_ENGINE:
+            args.sampler_engine_type = MODEL_TYPE_TO_SAMPLER_ENGINE[args.model_type]
+            logger.info(f"Auto-selected sampler_engine_type={args.sampler_engine_type} for model_type={args.model_type}")
 
     # Normalize engine_kwargs early (argparse default for default_factory may be MISSING)
     if not isinstance(args.engine_kwargs, dict):
         logger.warning("engine_kwargs is not a dict. Resetting to empty dict.")
         args.engine_kwargs = {}
+
+    # Explicit plugin path + spec-kind validation.
+    validate_plugin_target_path(target_path=args.model_path, kind="model")
+    validate_plugin_target_path(target_path=args.sampler_path, kind="sampler")
+    if getattr(args, "replay_sampler_path", None):
+        validate_plugin_target_path(target_path=args.replay_sampler_path, kind="sampler")
+    validate_plugin_target_path(target_path=args.algorithm_path, kind="algorithm")
+    validate_plugin_target_path(target_path=args.reward_path, kind="reward")
+    if getattr(args, "rollout_pipeline_path", None):
+        validate_plugin_target_path(
+            target_path=args.rollout_pipeline_path,
+            kind="rollout",
+        )
+    rollout_buffer_plugin_paths = getattr(args, "rollout_buffer_plugin_paths", "") or ""
+    if isinstance(rollout_buffer_plugin_paths, str):
+        for plugin_path in [part.strip() for part in rollout_buffer_plugin_paths.split(",") if part.strip()]:
+            validate_plugin_target_path(
+                target_path=plugin_path,
+                kind="rollout",
+            )
 
     # ========== Sampling backend validation ==========
     sampling_backend = getattr(args, "sampling_backend", "inference")
@@ -489,18 +613,54 @@ def validate_args(args: GRPOArguments) -> GRPOArguments:
         args.offload_train = False
         args.offload_rollout = False
 
+    replay_enabled = bool(
+        getattr(args, "replay_log_probs", False)
+        or getattr(args, "fastvideo_replay_log_probs", False)
+    )
     replay_guard = (
         sampling_backend == "inference"
-        and args.sampler_engine_type == "fastvideo"
         and getattr(args, "loss_type", "grpo") == "grpo"
     )
-    if args.fastvideo_replay_log_probs and not replay_guard:
+    if (
+        not replay_enabled
+        and replay_guard
+        and str(getattr(args, "sampler_engine_type", "")).lower() == "sglang"
+    ):
+        replay_enabled = True
+        args.replay_log_probs = True
+        args.fastvideo_replay_log_probs = True
+        logger.info("Auto-enabled replay_log_probs for sampler_engine_type='sglang' + loss_type='grpo'.")
+    if replay_enabled and not replay_guard:
         logger.warning(
-            "fastvideo_replay_log_probs=true is only valid for "
-            "sampling_backend='inference' + sampler_engine_type='fastvideo' + loss_type='grpo'. "
-            "Disabling fastvideo_replay_log_probs."
+            "replay_log_probs=true is only valid for "
+            "sampling_backend='inference' + loss_type='grpo'. "
+            "Disabling replay_log_probs/fastvideo_replay_log_probs."
         )
+        args.replay_log_probs = False
         args.fastvideo_replay_log_probs = False
+    else:
+        # Keep legacy flag as backward-compatible alias.
+        args.replay_log_probs = replay_enabled
+        if replay_enabled:
+            args.fastvideo_replay_log_probs = True
+
+    # sglang-diffusion colocate mode still needs upstream release/resume handlers.
+    if (
+        sampling_backend == "inference"
+        and str(getattr(args, "sampler_engine_type", "")).lower() == "sglang"
+        and bool(getattr(args, "colocate_inference_training", False))
+    ):
+        if not bool(getattr(args, "allow_sglang_colocate_experimental", False)):
+            raise ValueError(
+                "sampler_engine_type='sglang' currently defaults to separate mode only "
+                "(colocate_inference_training=False). "
+                "To force colocate testing on a branch that implements release/resume-memory "
+                "handlers, set --allow-sglang-colocate-experimental=true."
+            )
+        logger.warning(
+            "allow_sglang_colocate_experimental=true: enabling colocate_inference_training "
+            "for sglang in experimental mode."
+        )
 
     # ========== Handle offload shortcut ==========
     if args.offload:
@@ -514,7 +674,7 @@ def validate_args(args: GRPOArguments) -> GRPOArguments:
         if args.offload_rollout is None:
             args.offload_rollout = True
 
-        _validate_colocate_fractions(args)
+        validate_colocate_fractions(args)
 
     # Set defaults for non-colocate mode
     if args.offload_train is None:
@@ -568,10 +728,48 @@ def validate_args(args: GRPOArguments) -> GRPOArguments:
         raise ValueError(
             f"reward_mix_mode must be one of reward_aggr/advantage_aggr, got: {reward_mix_mode}"
         )
+    if int(getattr(args, "rollout_buffer_max_queue_size", 0)) < 0:
+        raise ValueError(
+            f"rollout_buffer_max_queue_size must be >= 0, got: {args.rollout_buffer_max_queue_size}"
+        )
+    if int(getattr(args, "rollout_buffer_min_samples", 1)) < 1:
+        raise ValueError(
+            f"rollout_buffer_min_samples must be >= 1, got: {args.rollout_buffer_min_samples}"
+        )
+    reward_min = getattr(args, "rollout_buffer_reward_min", None)
+    reward_max = getattr(args, "rollout_buffer_reward_max", None)
+    if reward_min is not None and reward_max is not None and float(reward_min) > float(reward_max):
+        raise ValueError(
+            "rollout_buffer_reward_min must be <= rollout_buffer_reward_max, "
+            f"got min={reward_min}, max={reward_max}"
+        )
+    group_size = getattr(args, "rollout_buffer_group_size", None)
+    if group_size is not None and int(group_size) < 1:
+        raise ValueError(
+            f"rollout_buffer_group_size must be >= 1 when provided, got: {group_size}"
+        )
+    if int(getattr(args, "rollout_buffer_dispatch_groups", 0)) < 0:
+        raise ValueError(
+            "rollout_buffer_dispatch_groups must be >= 0 "
+            f"(0 means prompts_per_batch), got: {args.rollout_buffer_dispatch_groups}"
+        )
+    if float(getattr(args, "rollout_buffer_group_ttl_seconds", 0.0)) < 0:
+        raise ValueError(
+            "rollout_buffer_group_ttl_seconds must be >= 0, "
+            f"got: {args.rollout_buffer_group_ttl_seconds}"
+        )
+    if int(getattr(args, "rollout_buffer_max_pending_samples", 0)) < 0:
+        raise ValueError(
+            "rollout_buffer_max_pending_samples must be >= 0, "
+            f"got: {args.rollout_buffer_max_pending_samples}"
+        )
 
     # ========== Inference actor GPU constraints ==========
     if sampling_backend != "training":
-        inference_gpus = _get_inference_gpus_per_actor(args)
+        inference_gpus = get_inference_gpus_per_actor(
+            args,
+            model_type_to_sampler_engine=MODEL_TYPE_TO_SAMPLER_ENGINE,
+        )
         if inference_gpus > 1 and args.colocate_inference_training:
             raise ValueError(
                 "colocate_inference_training=True does not support multi-GPU inference actors."
@@ -644,7 +842,21 @@ def validate_args(args: GRPOArguments) -> GRPOArguments:
             f"Please either change --loss-type to {expected_loss_type} or use a compatible algorithm."
         )
 
-    _validate_engine_contract_compatibility(args=args, sampling_backend=sampling_backend)
+    validate_engine_loss_compatibility(
+        args=args,
+        sampling_backend=sampling_backend,
+        model_type_to_sampler_engine=MODEL_TYPE_TO_SAMPLER_ENGINE,
+        engine_capability_requirements=ENGINE_CAPABILITY_REQUIREMENTS,
+        loss_type_requirements=LOSS_TYPE_REQUIREMENTS,
+    )
+    validate_plugin_target_path(
+        target_path=args.sampler_path,
+        kind="sampler",
+        required_capabilities=resolve_loss_type_requirements(
+            loss_type=args.loss_type,
+            loss_type_requirements=LOSS_TYPE_REQUIREMENTS,
+        ),
+    )
 
     # Ensure sampling_adapter is propagated to engine_kwargs
     if args.sampling_adapter:
@@ -665,10 +877,35 @@ def validate_args(args: GRPOArguments) -> GRPOArguments:
         )
     if weight_sync_mode == "auto":
         # Prefer path-based sync for local inference engines to avoid driver relay.
-        if args.sampler_engine_type in ("fsdp", "fastvideo") and sampling_backend != "training":
+        if args.sampler_engine_type in ("fsdp", "fastvideo", "sglang") and sampling_backend != "training":
             args.weight_sync_mode = "checkpoint_path"
         else:
             args.weight_sync_mode = "object_ref"
+    if (
+        sampling_backend == "inference"
+        and str(getattr(args, "sampler_engine_type", "")).lower() == "sglang"
+        and args.weight_sync_mode != "checkpoint_path"
+    ):
+        logger.warning(
+            "sampler_engine_type='sglang' does not support object_ref tensor push; "
+            "forcing weight_sync_mode=checkpoint_path."
+        )
+        args.weight_sync_mode = "checkpoint_path"
+
+    # SGLang path sync benefits significantly from tmpfs.
+    # Only rewrite when user keeps the default weight_sync_dir.
+    if (
+        args.weight_sync_mode == "checkpoint_path"
+        and str(getattr(args, "sampler_engine_type", "")).lower() == "sglang"
+    ):
+        root = repo_root(env_repo_root=ENV_REPO_ROOT)
+        default_sync_dir = resolve_repo_relative_path("outputs/weight_sync", root)
+        if os.path.realpath(args.weight_sync_dir) == os.path.realpath(default_sync_dir):
+            args.weight_sync_dir = "/dev/shm/diffusionrl_weight_sync"
+            logger.info(
+                "Auto-switched weight_sync_dir to %s for sglang checkpoint sync performance.",
+                args.weight_sync_dir,
+            )
 
     # Single-PG mode currently ignores reward_placement_strategy; keep only PACK to reduce control-plane branches.
     if getattr(args, "reward_placement_strategy", "PACK") != "PACK":
@@ -685,13 +922,30 @@ def validate_args(args: GRPOArguments) -> GRPOArguments:
             or int(getattr(args, "training_num_nodes", 1)) > 1
             or int(getattr(args, "reward_dedicated_num_nodes", 0)) > 1
         )
-        and _is_probably_local_weight_sync_dir(args.weight_sync_dir)
+        and is_probably_local_weight_sync_dir(
+            args.weight_sync_dir,
+            root=repo_root(env_repo_root=ENV_REPO_ROOT),
+        )
     ):
         raise ValueError(
             "weight_sync_mode=checkpoint_path in multi-node mode requires a shared filesystem path. "
             f"Got local-only weight_sync_dir={args.weight_sync_dir}. "
             "Use a shared mount (e.g. /mnt/shared/... or NFS path)."
         )
+
+    if (
+        sampling_backend == "inference"
+        and str(getattr(args, "sampler_engine_type", "")).lower() == "sglang"
+    ):
+        supported_sglang_prompt_models = {"hunyuan", "flux", "mochi", "sd3"}
+        model_type = str(getattr(args, "model_type", "")).lower()
+        if model_type not in supported_sglang_prompt_models:
+            raise ValueError(
+                "sampler_engine_type='sglang' now uses prompt-only rollout input mode "
+                "(no prompt-embedding input path). "
+                f"Unsupported model_type={args.model_type!r}. "
+                f"Supported model types: {sorted(supported_sglang_prompt_models)}."
+            )
 
     if getattr(args, "async_pipeline", False):
         if args.colocate_inference_training:
@@ -710,257 +964,6 @@ def validate_args(args: GRPOArguments) -> GRPOArguments:
     return args
 
 
-def _repo_root() -> str:
-    env_root = os.getenv(ENV_REPO_ROOT)
-    if env_root:
-        return os.path.abspath(os.path.expanduser(env_root))
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-
-def _normalize_repo_relative_paths(args: GRPOArguments) -> None:
-    repo_root = _repo_root()
-    data_root_env = os.getenv(ENV_DATA_ROOT)
-    model_root_env = os.getenv(ENV_MODEL_ROOT)
-
-    # Always-local path fields.
-    for field_name in ("output_dir", "logging_dir", "weight_sync_dir", "resume_from_checkpoint"):
-        value = getattr(args, field_name, None)
-        if isinstance(value, str) and value:
-            setattr(args, field_name, _resolve_repo_relative_path(value, repo_root))
-
-    data_path = getattr(args, "data_path", None)
-    if isinstance(data_path, str) and data_path:
-        if data_root_env and not os.path.isabs(os.path.expanduser(data_path)):
-            trimmed = data_path[5:] if data_path.startswith("data/") else data_path
-            args.data_path = os.path.abspath(
-                os.path.join(os.path.expanduser(data_root_env), trimmed)
-            )
-        else:
-            args.data_path = _resolve_repo_relative_path(data_path, repo_root)
-
-    # Model fields may be local paths or remote identifiers (e.g., HF repo IDs).
-    for field_name in ("pretrained_model_path", "vae_path", "text_encoder_path", "reward_model_path"):
-        value = getattr(args, field_name, None)
-        if not isinstance(value, str) or not value:
-            continue
-        if not _looks_like_local_path(value, repo_root):
-            continue
-        if model_root_env and not os.path.isabs(os.path.expanduser(value)):
-            trimmed = value[7:] if value.startswith("models/") else value
-            setattr(
-                args,
-                field_name,
-                os.path.abspath(os.path.join(os.path.expanduser(model_root_env), trimmed)),
-            )
-        else:
-            setattr(args, field_name, _resolve_repo_relative_path(value, repo_root))
-
-    # Fallback: if pretrained_model_path resolved to a non-existent local path,
-    # check _LOCAL_TO_HF_FALLBACK and replace with the HuggingFace repo ID.
-    # This lets GitHub users run scripts without local model checkpoints.
-    resolved = getattr(args, "pretrained_model_path", "")
-    if resolved and not os.path.exists(resolved):
-        for local_prefix, hf_id in _LOCAL_TO_HF_FALLBACK.items():
-            abs_local = os.path.join(repo_root, local_prefix)
-            if resolved == abs_local or resolved.endswith("/" + local_prefix):
-                logger.info(
-                    "Local model not found at %s, falling back to HF: %s",
-                    resolved, hf_id,
-                )
-                args.pretrained_model_path = hf_id
-                break
-
-
-def _resolve_repo_relative_path(path: str, repo_root: str) -> str:
-    expanded = os.path.expanduser(path)
-    if os.path.isabs(expanded):
-        return os.path.abspath(expanded)
-    return os.path.abspath(os.path.join(repo_root, expanded))
-
-
-def _looks_like_local_path(path: str, repo_root: str) -> bool:
-    expanded = os.path.expanduser(path)
-    if os.path.isabs(expanded):
-        return True
-    if any(path.startswith(prefix) for prefix in ("./", "../", "~", "data/", "models/", "outputs/", "shared_models/")):
-        return True
-    if os.path.exists(expanded):
-        return True
-    if os.path.exists(os.path.join(repo_root, expanded)):
-        return True
-    if path.count("/") >= 2:
-        return True
-    if path.endswith((".pt", ".pth", ".bin", ".safetensors", ".ckpt", ".json", ".txt")):
-        return True
-    return False
-
-
-def _validate_colocate_fractions(args: GRPOArguments) -> None:
-    if args.colocate_training_gpu_fraction <= 0 or args.colocate_inference_gpu_fraction <= 0:
-        raise ValueError(
-            "colocate_training_gpu_fraction and colocate_inference_gpu_fraction must be > 0"
-        )
-    if args.colocate_training_gpu_fraction + args.colocate_inference_gpu_fraction > 1.0:
-        raise ValueError(
-            "colocate_training_gpu_fraction + colocate_inference_gpu_fraction must be <= 1.0"
-        )
-
-
-def _get_inference_gpus_per_actor(args: GRPOArguments) -> int:
-    sampler_engine_type = args.sampler_engine_type or MODEL_TYPE_TO_SAMPLER_ENGINE.get(args.model_type, "fsdp")
-    if sampler_engine_type == "fastvideo":
-        return args.fastvideo_num_gpus if args.fastvideo_num_gpus else args.sp_size
-    if sampler_engine_type == "fsdp":
-        return args.fsdp_num_gpus
-    return 1
-
-
-def _is_probably_local_weight_sync_dir(path: str) -> bool:
-    """Best-effort guard for local-only paths in multi-node checkpoint sync."""
-    if not path:
-        return True
-    real = os.path.realpath(path)
-    repo_root = _repo_root()
-    local_prefixes = ("/tmp", "/var/tmp", "/dev/shm")
-    for prefix in local_prefixes:
-        if real == prefix or real.startswith(prefix + os.sep):
-            return True
-    if real == repo_root or real.startswith(repo_root + os.sep):
-        return True
-    return False
-
-
-def _resolve_loss_contract_requirements(args: GRPOArguments) -> Dict[str, bool]:
-    requirements = LOSS_TYPE_REQUIREMENTS.get(getattr(args, "loss_type", "grpo"))
-    if requirements is None:
-        raise ValueError(
-            f"Unsupported loss_type={args.loss_type}. "
-            f"Expected one of: {sorted(LOSS_TYPE_REQUIREMENTS.keys())}."
-        )
-    return dict(requirements)
-
-
-def _validate_engine_contract_compatibility(
-    *,
-    args: GRPOArguments,
-    sampling_backend: str,
-) -> None:
-    """
-    Validate algorithm loss requirements against sampler engine capabilities.
-
-    This is a fail-fast guard at config boundary to keep runtime loop clean.
-    """
-    sampler_engine_type = args.sampler_engine_type or MODEL_TYPE_TO_SAMPLER_ENGINE.get(args.model_type, "fsdp")
-    capabilities = ENGINE_CAPABILITY_REQUIREMENTS.get(sampler_engine_type)
-    if capabilities is None:
-        raise ValueError(
-            f"Unknown sampler_engine_type={sampler_engine_type}. "
-            f"Supported: {sorted(ENGINE_CAPABILITY_REQUIREMENTS.keys())}."
-        )
-    capabilities = dict(capabilities)
-
-    # training backend uses training actors for sampling, so infer-engine capability mismatch
-    # checks are only meaningful for inference backend.
-    if sampling_backend == "training":
-        return
-
-    if sampler_engine_type == "sglang":
-        raise ValueError(
-            "sampler_engine_type='sglang' is experimental and currently does not implement "
-            "diffusionrl inference sampling conversion path. Use fsdp or fastvideo."
-        )
-
-    allow_fastvideo_replay = (
-        bool(getattr(args, "fastvideo_replay_log_probs", False))
-        and sampler_engine_type == "fastvideo"
-        and getattr(args, "loss_type", "grpo") == "grpo"
-    )
-    if allow_fastvideo_replay:
-        # Replay happens on training actors; keep it explicit and experimental.
-        capabilities["requires_log_prob"] = True
-        capabilities["requires_embeddings"] = True
-        logger.warning(
-            "fastvideo_replay_log_probs=true enabled: allowing FastVideo+GRPO with "
-            "training-side old-log-prob replay (experimental path)."
-        )
-
-    required = _resolve_loss_contract_requirements(args)
-    missing = [
-        key for key, needed in required.items()
-        if bool(needed) and not bool(capabilities.get(key, False))
-    ]
-    if missing:
-        raise ValueError(
-            f"Engine capability mismatch for loss_type={args.loss_type}: "
-            f"sampler_engine_type={sampler_engine_type} lacks {missing}. "
-            f"engine_capabilities={capabilities}, required={required}. "
-            "Use a compatible engine/loss pair (for example: fsdp+grpo or fsdp+nft)."
-        )
-
-
-def validate_reward_config(args: GRPOArguments) -> None:
-    """
-    Validate reward configuration.
-
-    Args:
-        args: GRPOArguments instance to validate
-
-    Raises:
-        ValueError: If reward configuration is invalid
-    """
-    # 1. reward_dedicated_gpus_per_actor validation
-    if args.reward_dedicated_gpus_per_actor > 1 and args.reward_dedicated_num_gpus > 0:
-        if args.reward_dedicated_num_gpus < args.reward_dedicated_gpus_per_actor:
-            raise ValueError(
-                f"reward_dedicated_num_gpus ({args.reward_dedicated_num_gpus}) must be >= "
-                f"reward_dedicated_gpus_per_actor ({args.reward_dedicated_gpus_per_actor})"
-            )
-        if args.reward_dedicated_num_gpus % args.reward_dedicated_gpus_per_actor != 0:
-            raise ValueError(
-                f"reward_dedicated_num_gpus ({args.reward_dedicated_num_gpus}) must be divisible by "
-                f"reward_dedicated_gpus_per_actor ({args.reward_dedicated_gpus_per_actor})"
-            )
-
-    # 2. reward_dedicated_num_nodes validation
-    if args.reward_dedicated_num_nodes > 0 and args.reward_dedicated_num_gpus_per_node <= 0:
-        raise ValueError(
-            "reward_dedicated_num_gpus_per_node must be > 0 when reward_dedicated_num_nodes > 0"
-        )
-
-    # 3. dedicated reward pool source should be explicit (flat total GPUs OR node-based)
-    if args.reward_dedicated_num_gpus > 0 and args.reward_dedicated_num_nodes > 0:
-        raise ValueError(
-            "reward_dedicated_num_gpus and reward_dedicated_num_nodes are mutually exclusive. "
-            "Use either total dedicated GPUs, or nodes * gpus_per_node."
-        )
-
-    has_dedicated_reward_pool = (
-        args.reward_dedicated_num_gpus > 0 or args.reward_dedicated_num_nodes > 0
-    )
-
-    # 4. colocate reward is deprecated and intentionally unsupported.
-    if args.colocate_reward:
-        raise ValueError(
-            "colocate_reward=True is no longer supported. "
-            "InferenceActor is restricted to prompts->SamplerOutput. "
-            "Use RewardService (CPU/HTTP/independent-GPU reward pools)."
-        )
-
-    # 5. Log reward mode for user clarity
-    if args.use_http_reward:
-        logger.info("Reward mode: HTTP (external service)")
-    elif has_dedicated_reward_pool:
-        total_gpus = args.reward_dedicated_num_gpus
-        if args.reward_dedicated_num_nodes > 0:
-            total_gpus = args.reward_dedicated_num_nodes * args.reward_dedicated_num_gpus_per_node
-        num_actors = total_gpus // args.reward_dedicated_gpus_per_actor
-        logger.info(
-            f"Reward mode: Independent GPU ({total_gpus} GPUs, "
-            f"{num_actors} actors, {args.reward_dedicated_gpus_per_actor} GPUs/actor)"
-        )
-    else:
-        logger.info("Reward mode: CPU (LocalRewardWorker)")
-
-
-def get_default_args() -> GRPOArguments:
+def get_default_args() -> TrainingArguments:
     """Get default arguments without parsing command line."""
-    return GRPOArguments()
+    return TrainingArguments()

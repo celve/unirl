@@ -85,6 +85,26 @@ class NFTAlgorithm(BaseAlgorithm):
         # Loss function (lazy load)
         self._loss_fn = None
 
+    @classmethod
+    def from_args(cls, args: Any) -> "NFTAlgorithm":
+        """Construct NFT algorithm from runtime args."""
+        kwargs = cls._base_kwargs_from_args(args)
+        kwargs.update(
+            {
+                "beta": getattr(args, "nft_beta", 0.1),
+                "adv_clip_max": getattr(args, "nft_adv_clip_max", 5.0),
+                "adv_mode": getattr(args, "nft_adv_mode", "raw"),
+                "use_adaptive_weight": getattr(args, "nft_use_adaptive_weight", True),
+                "shift": getattr(args, "shift", 3.0),
+                "ema_decay": getattr(args, "ema_decay", 0.001),
+                "use_per_prompt_tracker": getattr(args, "use_per_prompt_stat_tracker", False),
+                "per_prompt_buffer_size": getattr(args, "per_prompt_buffer_size", 16),
+                "per_prompt_min_count": getattr(args, "per_prompt_min_count", 2),
+                "use_global_std": getattr(args, "use_global_std", False),
+            }
+        )
+        return cls(**kwargs)
+
     @property
     def loss_fn(self):
         """Lazy load NFT loss function."""

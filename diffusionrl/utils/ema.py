@@ -118,20 +118,6 @@ class EMAModuleWrapper:
             for p in self.ema_parameters
         ]
 
-    @torch.no_grad()
-    def sync_with_model(self, parameters: Iterable[nn.Parameter]) -> None:
-        """
-        Force EMA parameters to match model parameters exactly.
-
-        Useful for creating a snapshot for rollout policy.
-
-        Args:
-            parameters: Model parameters to sync from
-        """
-        parameters = list(parameters)
-        for ema_parameter, parameter in zip(self.ema_parameters, parameters, strict=True):
-            ema_parameter.data.copy_(parameter.detach().data)
-
     def copy_ema_to(
         self,
         parameters: Iterable[nn.Parameter],
@@ -156,22 +142,6 @@ class EMAModuleWrapper:
 
         for ema_parameter, parameter in zip(self.ema_parameters, parameters, strict=True):
             parameter.data.copy_(ema_parameter.to(parameter.device).data)
-
-    def copy_temp_to(self, parameters: Iterable[nn.Parameter]) -> None:
-        """
-        Restore parameters from temporary storage.
-
-        Args:
-            parameters: Model parameters to restore to
-        """
-        if self.temp_stored_parameters is None:
-            raise RuntimeError("No temporary parameters stored. Call copy_ema_to with store_temp=True first.")
-
-        parameters = list(parameters)
-        for temp_parameter, parameter in zip(self.temp_stored_parameters, parameters, strict=True):
-            parameter.data.copy_(temp_parameter.to(parameter.device))
-
-        self.temp_stored_parameters = None
 
     @torch.no_grad()
     def update(
@@ -323,41 +293,3 @@ class DualAdapterEMA:
         except Exception:
             return False
 
-    def sync_adapters(self, model: nn.Module) -> bool:
-        """
-        Sync old adapter to match new adapter exactly.
-
-        Useful for initialization.
-
-        Args:
-            model: Model with dual LoRA adapters
-
-        Returns:
-            True if sync was successful, False otherwise
-        """
-        adapter_model = model.module if hasattr(model, "module") else model
-
-        if not hasattr(adapter_model, "set_adapter"):
-            return False
-
-        try:
-            # Get new adapter parameters
-            adapter_model.set_adapter(self.new_adapter_name)
-            new_params = {
-                name: param.data.clone()
-                for name, param in adapter_model.named_parameters()
-                if "lora" in name.lower()
-            }
-
-            # Copy to old adapter
-            adapter_model.set_adapter(self.old_adapter_name)
-            for name, param in adapter_model.named_parameters():
-                if "lora" in name.lower() and name in new_params:
-                    param.data.copy_(new_params[name])
-
-            # Switch back to new adapter
-            adapter_model.set_adapter(self.new_adapter_name)
-            return True
-
-        except Exception:
-            return False

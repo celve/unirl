@@ -132,75 +132,6 @@ def _reorder_bundles_by_node(
     return bundle_indices, gpu_ids
 
 
-def _group_bundles_by_node(
-    gpu_info: List[Tuple[str, int, int]],
-) -> List[Tuple[str, List[int], List[int]]]:
-    """
-    Group bundles by node and sort GPUs within each node.
-
-    Returns:
-        List of (node_ip, bundle_indices, gpu_ids) in sorted node order.
-    """
-    node_to_entries: Dict[str, List[Tuple[int, int]]] = {}
-    for ip, gpu_id, bundle_idx in gpu_info:
-        node_to_entries.setdefault(ip, []).append((gpu_id, bundle_idx))
-
-    for ip in node_to_entries:
-        node_to_entries[ip].sort(key=lambda x: x[0])
-
-    grouped: List[Tuple[str, List[int], List[int]]] = []
-    for ip in sorted(node_to_entries.keys()):
-        gpu_bundle_pairs = node_to_entries[ip]
-        gpu_ids = [gpu for gpu, _ in gpu_bundle_pairs]
-        bundle_indices = [bundle for _, bundle in gpu_bundle_pairs]
-        grouped.append((ip, bundle_indices, gpu_ids))
-
-    return grouped
-
-
-def _take_nodes(
-    grouped: List[Tuple[str, List[int], List[int]]],
-    start_node: int,
-    num_nodes: int,
-    gpus_per_node: int,
-) -> Tuple[List[int], List[int]]:
-    """
-    Take a contiguous range of nodes and return their bundle indices/GPU ids.
-    """
-    if num_nodes <= 0:
-        return [], []
-    if start_node + num_nodes > len(grouped):
-        raise ValueError(
-            f"Not enough nodes for allocation: requested nodes [{start_node}, {start_node + num_nodes}), "
-            f"available={len(grouped)}"
-        )
-
-    bundle_indices: List[int] = []
-    gpu_ids: List[int] = []
-    for _ip, bundles, gpus in grouped[start_node:start_node + num_nodes]:
-        if gpus_per_node > len(bundles):
-            raise ValueError(
-                f"Not enough GPUs on node for allocation: requested {gpus_per_node}, available {len(bundles)}"
-            )
-        bundle_indices.extend(bundles[:gpus_per_node])
-        gpu_ids.extend(gpus[:gpus_per_node])
-
-    return bundle_indices, gpu_ids
-
-
-def _flatten_grouped(
-    grouped: List[Tuple[str, List[int], List[int]]],
-    start_node: int,
-) -> Tuple[List[int], List[int]]:
-    """Flatten grouped bundles from a starting node index."""
-    bundle_indices: List[int] = []
-    gpu_ids: List[int] = []
-    for _ip, bundles, gpus in grouped[start_node:]:
-        bundle_indices.extend(bundles)
-        gpu_ids.extend(gpus)
-    return bundle_indices, gpu_ids
-
-
 def _create_placement_group(
     num_gpus: int,
     strategy: str = "PACK",
@@ -264,7 +195,7 @@ def create_placement_groups(
     Create placement groups for GRPO training (unified single_pg mode).
 
     Creates one placement group with uniform {"GPU": 1} bundles, then
-    slices bundles by node for inference / training / reward roles.
+    slices bundles by linear offsets for inference / training / reward roles.
 
     Args:
         config: Placement configuration
@@ -282,7 +213,7 @@ def _create_single_pg(
     config: GRPOPlacementConfig,
 ) -> Dict[str, Optional[PlacementGroupResult]]:
     """
-    Create a single placement group and slice bundles by node for inference/training/reward.
+    Create a single placement group and slice bundles by linear offsets.
     """
     result: Dict[str, Optional[PlacementGroupResult]] = {
         "inference": None,
@@ -326,7 +257,7 @@ def _create_single_pg(
 
         return result
 
-    # Non-colocate: single PG sliced by node for inference/training/reward
+    # Non-colocate: single PG sliced by linear offsets for inference/training/reward.
     total_gpus = inference_total_gpus + training_total_gpus + reward_total_gpus
     if total_gpus <= 0:
         return result
@@ -338,97 +269,40 @@ def _create_single_pg(
     )
 
     gpu_info = _get_gpu_info_from_pg(pg, total_gpus)
-    grouped = _group_bundles_by_node(gpu_info)
+    bundle_indices, gpu_ids = _reorder_bundles_by_node(gpu_info)
 
-    # Check if we have a single node scenario requiring GPU-level slicing
-    num_available_nodes = len(grouped)
-    required_nodes = config.inference_num_nodes + config.training_num_nodes
-
-    if num_available_nodes == 1 and required_nodes > 1:
-        # Single node separate mode: slice by GPU index instead of by node
-        # Flatten all GPU info from the single node
-        _, all_bundle_indices, all_gpu_ids = grouped[0]
-        gpu_cursor = 0
-
-        if inference_total_gpus > 0:
-            inf_end = gpu_cursor + inference_total_gpus
-            result["inference"] = (pg, all_bundle_indices[gpu_cursor:inf_end], all_gpu_ids[gpu_cursor:inf_end])
-            gpu_cursor = inf_end
-
-        if training_total_gpus > 0:
-            train_end = gpu_cursor + training_total_gpus
-            result["training"] = (pg, all_bundle_indices[gpu_cursor:train_end], all_gpu_ids[gpu_cursor:train_end])
-            gpu_cursor = train_end
-
-        # Reward allocation from remaining GPUs
-        if reward_total_gpus > 0:
-            reward_end = gpu_cursor + reward_total_gpus
-            if reward_end > len(all_bundle_indices):
-                raise ValueError(
-                    f"Not enough GPUs for reward allocation: requested {reward_total_gpus}, "
-                    f"available {len(all_bundle_indices) - gpu_cursor}"
-                )
-            result["reward"] = (pg, all_bundle_indices[gpu_cursor:reward_end], all_gpu_ids[gpu_cursor:reward_end])
-
-        return result
-
-    # Multi-node scenario: slice by nodes for inference/training
-    node_cursor = 0
+    cursor = 0
     if inference_total_gpus > 0:
-        inf_bundle_indices, inf_gpu_ids = _take_nodes(
-            grouped,
-            node_cursor,
-            config.inference_num_nodes,
-            config.inference_num_gpus_per_node,
-        )
-        node_cursor += config.inference_num_nodes
-        result["inference"] = (pg, inf_bundle_indices, inf_gpu_ids)
+        inf_end = cursor + inference_total_gpus
+        result["inference"] = (pg, bundle_indices[cursor:inf_end], gpu_ids[cursor:inf_end])
+        cursor = inf_end
 
     if training_total_gpus > 0:
-        train_bundle_indices, train_gpu_ids = _take_nodes(
-            grouped,
-            node_cursor,
-            config.training_num_nodes,
-            config.training_num_gpus_per_node,
-        )
-        node_cursor += config.training_num_nodes
-        result["training"] = (pg, train_bundle_indices, train_gpu_ids)
+        train_end = cursor + training_total_gpus
+        result["training"] = (pg, bundle_indices[cursor:train_end], gpu_ids[cursor:train_end])
+        cursor = train_end
 
-    # Reward allocation
     if reward_total_gpus > 0:
-        if config.reward_dedicated_num_nodes > 0:
-            reward_bundle_indices, reward_gpu_ids = _take_nodes(
-                grouped,
-                node_cursor,
-                config.reward_dedicated_num_nodes,
-                config.reward_dedicated_num_gpus_per_node,
+        reward_end = cursor + reward_total_gpus
+        if reward_end > len(bundle_indices):
+            raise ValueError(
+                f"Not enough GPUs for reward allocation: requested {reward_total_gpus}, "
+                f"available {len(bundle_indices) - cursor}"
             )
-            result["reward"] = (pg, reward_bundle_indices, reward_gpu_ids)
-        else:
-            remaining_bundle_indices, remaining_gpu_ids = _flatten_grouped(grouped, node_cursor)
-            if reward_total_gpus > len(remaining_bundle_indices):
-                raise ValueError(
-                    f"Not enough GPUs for reward allocation: requested {reward_total_gpus}, "
-                    f"available {len(remaining_bundle_indices)}"
-                )
-            result["reward"] = (
-                pg,
-                remaining_bundle_indices[:reward_total_gpus],
-                remaining_gpu_ids[:reward_total_gpus],
-            )
+        result["reward"] = (pg, bundle_indices[cursor:reward_end], gpu_ids[cursor:reward_end])
 
     return result
 
 
 def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroupResult]]:
     """
-    Create placement groups from GRPOArguments.
+    Create placement groups from TrainingArguments.
 
     Always uses unified single_pg mode with uniform {"GPU": 1} bundles.
     Multi-GPU engines are handled at the actor level via NOSET + base_gpu_id.
 
     Args:
-        args: GRPOArguments instance
+        args: TrainingArguments instance
 
     Returns:
         Dictionary of placement group results
@@ -459,9 +333,3 @@ def remove_placement_group(pg: PlacementGroup) -> None:
         logger.warning(f"Failed to remove placement group: {e}")
 
 
-def get_bundle_resources(pg: PlacementGroup, bundle_index: int) -> Dict[str, float]:
-    """Get the resources allocated to a specific bundle."""
-    bundle_specs = pg.bundle_specs
-    if bundle_index < len(bundle_specs):
-        return bundle_specs[bundle_index]
-    return {}

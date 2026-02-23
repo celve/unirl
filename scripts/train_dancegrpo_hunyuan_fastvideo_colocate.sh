@@ -101,7 +101,7 @@ FPS=${FPS:-8}
 
 # Reward model
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-"hpsv2"}
-REWARD_PATH=${REWARD_PATH:-"diffusionrl.workers.reward.local.LocalRewardWorker"}
+REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardWorker"}
 # Experimental/ad-hoc bridge:
 # FastVideo rollout old_log_prob is replayed on training actors.
 FASTVIDEO_REPLAY_LOG_PROBS=${FASTVIDEO_REPLAY_LOG_PROBS:-"true"}
@@ -156,7 +156,7 @@ echo " FSDP sharding:          ${FSDP_SHARDING}"
 echo "======================================================"
 
 python -m diffusionrl.train \
-    --pretrained-model-path "${PRETRAINED_MODEL}" \
+    --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model-type hunyuan \
     --sampler-engine-type fastvideo \
     --sampler-path diffusionrl.samplers.fastvideo.fastvideo_sampler.FastVideoSampler \

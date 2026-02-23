@@ -187,7 +187,6 @@ class FastVideoSampler(TrajectoryReplaySampler):
                 "timestep_type": "sigma",
                 "timestep_scale": 1.0,
             },
-            contract_version="v1",
             step_indices=torch.arange(timesteps.shape[0], device=timesteps.device, dtype=torch.long),
         )
 
@@ -252,6 +251,69 @@ class FastVideoSampler(TrajectoryReplaySampler):
                 log_probs[t_idx] = log_prob
 
         return log_probs
+
+    def compute_log_prob_for_training(
+        self,
+        latents: torch.Tensor,
+        prev_latents: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        timestep_index: int,
+        sigma_schedule: torch.Tensor,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        guidance_scale: Optional[float] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Compute one-step log probability from replayed FastVideo trajectory."""
+        if self.model is None:
+            raise RuntimeError(
+                "FastVideoSampler replay requires model to be initialized on training actor."
+            )
+
+        if timestep_index < 0 or timestep_index >= int(sigma_schedule.shape[0]) - 1:
+            raise ValueError(
+                "timestep_index out of range for sigma_schedule: "
+                f"index={timestep_index}, len={sigma_schedule.shape[0]}"
+            )
+
+        device = latents.device
+        sigma_schedule = sigma_schedule.to(device=device, dtype=torch.float32)
+        sigma = sigma_schedule[timestep_index]
+        sigma_next = sigma_schedule[timestep_index + 1]
+
+        prompt_embeds = prompt_embeds.to(device=device)
+        if pooled_prompt_embeds is not None:
+            pooled_prompt_embeds = pooled_prompt_embeds.to(device=device)
+        if encoder_attention_mask is not None:
+            encoder_attention_mask = encoder_attention_mask.to(device=device)
+        actual_guidance = (
+            float(guidance_scale) if guidance_scale is not None else 1.0
+        )
+
+        model_kwargs = dict(kwargs)
+        if encoder_attention_mask is not None:
+            model_kwargs.setdefault("encoder_attention_mask", encoder_attention_mask)
+
+        with torch.no_grad():
+            noise_pred = self._forward_model(
+                latents=latents,
+                sigma=sigma,
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                guidance_scale=actual_guidance,
+                **model_kwargs,
+            )
+
+            log_prob, _ = compute_sde_log_prob(
+                noise_pred=noise_pred,
+                sample=latents,
+                prev_sample=prev_latents,
+                sigma=sigma,
+                sigma_next=sigma_next,
+                eta=self.eta,
+                sde_type=self.sde_type,
+            )
+        return log_prob
 
     def _run_fastvideo_sampling(
         self,

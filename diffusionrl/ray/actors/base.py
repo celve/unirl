@@ -148,15 +148,6 @@ class RayActor:
 
         raise RuntimeError(f"Could not find {consecutive} consecutive free ports")
 
-    def get_master_addr_and_port(self) -> Tuple[str, int]:
-        """
-        Get master address and port for distributed initialization.
-
-        Returns:
-            Tuple of (master_addr, master_port)
-        """
-        return self._get_current_node_ip_and_free_port()
-
 
 class BaseTrainRayActor(RayActor):
     """

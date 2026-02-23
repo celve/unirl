@@ -102,14 +102,6 @@ class DistributedLock:
         logger.debug(f"Lock released by {holder_id}")
         return True
 
-    def is_locked(self) -> bool:
-        """Check if lock is currently held."""
-        return self._locked
-
-    def get_holder(self) -> Optional[str]:
-        """Get the current lock holder."""
-        return self._holder
-
 
 class LockContext:
     """Context manager for distributed lock."""
@@ -449,20 +441,6 @@ def wait_for_placement_group(
     except ray.exceptions.GetTimeoutError:
         return False
 
-
-def get_placement_group_bundles(pg: PlacementGroup) -> List[Dict[str, float]]:
-    """
-    Get bundle specifications from a placement group.
-
-    Args:
-        pg: PlacementGroup
-
-    Returns:
-        List of bundle dicts
-    """
-    # This is a bit hacky but works
-    bundle_specs = pg.bundle_specs
-    return bundle_specs
 
 
 # ============================================================

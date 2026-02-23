@@ -114,7 +114,7 @@ FPS=${FPS:-8}
 
 # Reward model
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-"hpsv2"}
-REWARD_PATH=${REWARD_PATH:-"diffusionrl.workers.reward.local.LocalRewardWorker"}
+REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardWorker"}
 
 # FSDP configuration
 FSDP_SHARDING=${FSDP_SHARDING:-"FULL_SHARD"}
@@ -152,7 +152,7 @@ echo " FSDP CPU offload:       ${FSDP_CPU_OFFLOAD}"
 echo "======================================================"
 
 python -m diffusionrl.train \
-    --pretrained-model-path "${PRETRAINED_MODEL}" \
+    --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model-type hunyuan \
     --sampler-engine-type fsdp \
     --sampler-path diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler \

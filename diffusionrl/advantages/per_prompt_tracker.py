@@ -173,40 +173,6 @@ class PerPromptStatTracker:
             return mean, std
         return self.fallback_mean, self.fallback_std
 
-    def get_prompt_stats(self, prompt_id: str) -> Optional[Tuple[float, float]]:
-        """
-        Get statistics for a specific prompt.
-
-        Args:
-            prompt_id: Prompt identifier
-
-        Returns:
-            Tuple of (mean, std) if prompt has sufficient samples, else None
-        """
-        buf = self.prompt_stats.get(prompt_id, [])
-        if len(buf) < self.min_count:
-            return None
-
-        mean = sum(buf) / len(buf)
-        variance = sum((x - mean) ** 2 for x in buf) / len(buf)
-        std = max(variance ** 0.5, self.epsilon)
-        return mean, std
-
-    def get_stats_summary(self) -> Dict:
-        """Get summary of tracked statistics."""
-        num_prompts = len(self.prompt_stats)
-        total_samples = sum(len(buf) for buf in self.prompt_stats.values())
-        prompts_with_enough = sum(
-            1 for buf in self.prompt_stats.values() if len(buf) >= self.min_count
-        )
-
-        return {
-            "num_prompts": num_prompts,
-            "total_samples": total_samples,
-            "prompts_with_enough_samples": prompts_with_enough,
-            "global_samples": len(self._global_rewards),
-        }
-
     def reset(self) -> None:
         """Reset all statistics."""
         self.prompt_stats.clear()

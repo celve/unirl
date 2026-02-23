@@ -99,6 +99,25 @@ class BaseAlgorithm(ABC):
         self.clip_max = clip_max
         self._extra_kwargs = kwargs
 
+    @classmethod
+    def _base_kwargs_from_args(cls, args: Any) -> Dict[str, Any]:
+        """Build shared constructor kwargs from runtime args."""
+        return {
+            "clip_range": args.clip_range,
+            "kl_coef": getattr(args, "kl_coef", 0.01),
+            "advantage_type": getattr(args, "advantage_type", "group"),
+            "clip_max": getattr(args, "advantage_clip_max", None),
+        }
+
+    @classmethod
+    def from_args(cls, args: Any) -> "BaseAlgorithm":
+        """
+        Construct algorithm instance from TrainingArguments.
+
+        Subclasses can override to parse algorithm-specific parameters.
+        """
+        return cls(**cls._base_kwargs_from_args(args))
+
     @abstractmethod
     def get_sampling_requirements(self) -> SamplingRequirements:
         """

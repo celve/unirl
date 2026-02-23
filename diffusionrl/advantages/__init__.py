@@ -4,18 +4,12 @@ Advantages Module for GRPO Training.
 Provides unified advantage computation with clean separation of concerns:
 - normalizers: Pure mathematical operations
 - strategies: Strategy pattern for different normalization approaches
-- calculator: Unified interface for TrainerEngine
 - utils: Distributed and special-purpose utilities
 
 Usage:
     # Unified function API (recommended)
     from diffusionrl.advantages import compute_advantage
     advantages = compute_advantage(rewards, strategy='group', num_samples_per_prompt=4)
-
-    # Calculator API (for TrainerEngine)
-    from diffusionrl.advantages import AdvantageCalculator, build_advantage_calculator
-    calculator = build_advantage_calculator(config)
-    advantages = calculator.compute(rewards, prompts=prompts)
 
 Copied from unified_grpo/advantages with minimal modifications.
 """
@@ -40,12 +34,6 @@ from .strategies import (
     PerPromptStrategy,
     STRATEGIES,
     get_strategy,
-)
-
-# Calculator
-from .calculator import (
-    AdvantageCalculator,
-    build_advantage_calculator,
 )
 
 # Utilities
@@ -200,82 +188,9 @@ def _compute_single_advantage(
         raise ValueError(f"Unknown strategy: {strategy}")
 
 
-# =============================================================================
-# Deprecated convenience functions (kept for backward compatibility)
-# =============================================================================
-
-
-def compute_group_advantage(
-    rewards: torch.Tensor,
-    num_samples_per_prompt: int = 1,
-    epsilon: float = 1e-8,
-    clip_max: Optional[float] = None,
-    trimmed_ratio: float = 0.0,
-) -> torch.Tensor:
-    """Compute advantages within groups of samples for the same prompt.
-
-    .. deprecated::
-        Use ``compute_advantage(rewards, strategy='group', ...)`` instead.
-    """
-    return compute_advantage(
-        rewards,
-        strategy="group",
-        num_samples_per_prompt=num_samples_per_prompt,
-        epsilon=epsilon,
-        clip_max=clip_max,
-        trimmed_ratio=trimmed_ratio,
-    )
-
-
-def compute_global_advantage(
-    rewards: torch.Tensor,
-    epsilon: float = 1e-8,
-    clip_max: Optional[float] = None,
-) -> torch.Tensor:
-    """Compute advantages using global statistics across all samples.
-
-    .. deprecated::
-        Use ``compute_advantage(rewards, strategy='global', ...)`` instead.
-    """
-    return compute_advantage(
-        rewards,
-        strategy="global",
-        epsilon=epsilon,
-        clip_max=clip_max,
-    )
-
-
-def compute_per_prompt_advantage(
-    rewards: torch.Tensor,
-    prompts: List[str],
-    epsilon: float = 1e-8,
-    clip_max: Optional[float] = None,
-    global_std: bool = False,
-) -> torch.Tensor:
-    """Compute advantages using per-prompt statistics.
-
-    .. deprecated::
-        Use ``compute_advantage(rewards, strategy='per_prompt', ...)`` instead.
-    """
-    return compute_advantage(
-        rewards,
-        strategy="per_prompt",
-        prompts=prompts,
-        epsilon=epsilon,
-        clip_max=clip_max,
-        global_std=global_std,
-    )
-
-
 __all__ = [
     # Primary API
     "compute_advantage",
-    "AdvantageCalculator",
-    "build_advantage_calculator",
-    # Deprecated convenience functions (for backward compatibility)
-    "compute_group_advantage",
-    "compute_global_advantage",
-    "compute_per_prompt_advantage",
     # Low-level components
     "normalize_global",
     "normalize_grouped",

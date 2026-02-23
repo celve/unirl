@@ -89,11 +89,6 @@ class FastVideoInferenceEngine(BaseInferenceEngine):
                 f"num_gpus ({self._num_gpus}) must be divisible by sp_size ({self._sp_size})"
             )
 
-    @property
-    def required_num_gpus(self) -> int:
-        """Number of GPUs required by this engine (for Ray scheduling)."""
-        return self._num_gpus
-
     def initialize(self, device: torch.device) -> None:
         """
         Initialize FastVideo generator.
@@ -135,7 +130,7 @@ class FastVideoInferenceEngine(BaseInferenceEngine):
 
         # Build FastVideoArgs with parallelism settings
         fastvideo_kwargs = {
-            "model_path": self.config.pretrained_model_path,
+            "model_path": self.config.pretrained_model_saved_path,
             "num_gpus": self._num_gpus,
             "sp_size": self._sp_size,
             "tp_size": self._tp_size,
@@ -497,7 +492,6 @@ class FastVideoInferenceEngine(BaseInferenceEngine):
                 "has_prompt_embeds": embeddings is not None,
                 "decoded_videos": decoded_videos,
             },
-            contract_version="v1",
             step_indices=torch.arange(timesteps.shape[0], dtype=torch.long, device=timesteps.device),
         )
 

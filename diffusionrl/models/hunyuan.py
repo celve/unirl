@@ -29,7 +29,7 @@ class HunyuanModelBundle(ModelBundle):
         pretrained_path: str,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.bfloat16,
-        vae_path: Optional[str] = None,
+        vae_saved_path: Optional[str] = None,
         text_encoder_path: Optional[str] = None,
         load_on_init: bool = True,
         **kwargs,
@@ -41,14 +41,14 @@ class HunyuanModelBundle(ModelBundle):
             pretrained_path: Path to pretrained transformer weights
             device: Device to load models on
             dtype: Data type for model weights
-            vae_path: Optional separate path for VAE
+            vae_saved_path: Optional separate path for VAE
             text_encoder_path: Optional separate path for text encoder
             load_on_init: Whether to load models immediately
             **kwargs: Additional arguments
         """
         super().__init__(pretrained_path, device, dtype, **kwargs)
 
-        self.vae_path = vae_path or pretrained_path
+        self.vae_saved_path = vae_saved_path or pretrained_path
         self.text_encoder_path = text_encoder_path or pretrained_path
 
         if load_on_init:
@@ -57,6 +57,14 @@ class HunyuanModelBundle(ModelBundle):
     @property
     def model_type(self) -> str:
         return "hunyuan"
+
+    @classmethod
+    def default_sampler_path(cls) -> Optional[str]:
+        return "diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler"
+
+    @classmethod
+    def default_sampler_engine(cls) -> Optional[str]:
+        return "fsdp"
 
     def load(self) -> None:
         """Load all model components."""
@@ -106,13 +114,13 @@ class HunyuanModelBundle(ModelBundle):
             from diffusers import AutoencoderKLHunyuanVideo
 
             self._vae = AutoencoderKLHunyuanVideo.from_pretrained(
-                self.vae_path,
+                self.vae_saved_path,
                 subfolder="vae",
                 torch_dtype=self.dtype,
             )
             self._vae.to(self.device)
             self._vae.eval()  # VAE is always in eval mode
-            logger.info(f"Loaded VAE from {self.vae_path}")
+            logger.info(f"Loaded VAE from {self.vae_saved_path}")
 
         except ImportError:
             logger.warning("Could not import AutoencoderKLHunyuanVideo from diffusers.")

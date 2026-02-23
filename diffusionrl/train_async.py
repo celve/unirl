@@ -13,6 +13,7 @@ import logging
 from typing import Any, Callable, Optional
 
 import ray
+from diffusionrl.ray.data_buffer import normalize_rollout_result as _normalize_rollout_payload
 from diffusionrl.runtime.async_runtime import AsyncPipelineRuntime
 
 logger = logging.getLogger(__name__)
@@ -20,11 +21,7 @@ logger = logging.getLogger(__name__)
 
 def _normalize_rollout_result(rollout_result: Any) -> Any:
     """Normalize rollout output to an ObjectRef-compatible payload."""
-    if isinstance(rollout_result, list):
-        return rollout_result
-    if isinstance(rollout_result, ray.ObjectRef):
-        return rollout_result
-    return ray.put(rollout_result)
+    return _normalize_rollout_payload(rollout_result)
 
 
 def train_async_loop(
@@ -35,17 +32,23 @@ def train_async_loop(
     wandb_logger: Optional[Any],
     should_save_fn: Callable[[int, Any], bool],
     should_eval_fn: Callable[[int, Any], bool],
-    sync_weights_fn: Callable[..., int],
-    initial_weight_version: int = 0,
+    sync_weights_fn: Callable[..., None],
 ) -> None:
     """Asynchronous train loop with rollout/train overlap."""
     logger.info("Starting async pipeline loop (separate mode)")
     max_inflight = int(getattr(args, "async_max_inflight", 1))
+    update_interval = max(1, int(getattr(args, "update_weights_interval", 1)))
+    use_rollout_buffer = bool(getattr(args, "rollout_buffer_enabled", True))
     runtime = AsyncPipelineRuntime(
         max_inflight=max_inflight,
         initial_rollout_id=args.start_rollout_id,
-        initial_weight_version=int(initial_weight_version),
     )
+    next_rollout_to_launch = int(args.start_rollout_id)
+
+    def _sync_boundary_for(rollout_id: int) -> int:
+        """Largest rollout id allowed before next weight sync boundary."""
+        boundary = ((int(rollout_id) // update_interval) + 1) * update_interval - 1
+        return min(boundary, int(args.num_rollout) - 1)
 
     def _launch_rollout(rollout_id: int) -> None:
         if not runtime.can_launch():
@@ -53,20 +56,31 @@ def train_async_loop(
                 f"Cannot launch rollout {rollout_id}: inflight queue is full "
                 f"(inflight={runtime.inflight_count}, max_inflight={runtime.max_inflight})"
             )
-        rollout_future = rollout_manager.generate.remote(
-            rollout_id,
-            world_size=training_group.num_actors,
-        )
+        if use_rollout_buffer:
+            rollout_future = rollout_manager.generate_and_buffer.remote(rollout_id)
+        else:
+            rollout_future = rollout_manager.generate.remote(
+                rollout_id,
+                world_size=training_group.num_actors,
+            )
         runtime.launch_rollout(
             rollout_id,
             rollout_future,
-            weight_version=runtime.expected_weight_version,
         )
 
-    # Initial rollout launch.
-    _launch_rollout(args.start_rollout_id)
+    def _fill_inflight_window(current_rollout: int) -> None:
+        nonlocal next_rollout_to_launch
+        if next_rollout_to_launch >= int(args.num_rollout):
+            return
+
+        launch_limit = _sync_boundary_for(current_rollout)
+        while runtime.can_launch() and next_rollout_to_launch <= launch_limit:
+            _launch_rollout(next_rollout_to_launch)
+            next_rollout_to_launch += 1
 
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
+        _fill_inflight_window(rollout_id)
+
         # Resolve current rollout payload.
         resolved = runtime.resolve_next_rollout(ray.get)
         if resolved.rollout_id != rollout_id:
@@ -74,15 +88,17 @@ def train_async_loop(
                 f"Async rollout ordering violated: expected rollout_id={rollout_id}, "
                 f"got {resolved.rollout_id}"
             )
-        runtime.ensure_rollout_version(resolved)
-        rollout_data_ref = _normalize_rollout_result(resolved.payload)
+        if use_rollout_buffer:
+            rollout_result = ray.get(
+                rollout_manager.pop_training_data.remote(
+                    world_size=training_group.num_actors
+                )
+            )
+        else:
+            rollout_result = resolved.payload
+        rollout_data_ref = _normalize_rollout_result(rollout_result)
 
-        should_sync = (rollout_id + 1) % args.update_weights_interval == 0
-
-        # Launch next rollout before training only when this step does not sync.
-        # This keeps overlap while avoiding stale-version rollouts around sync boundaries.
-        if rollout_id + 1 < args.num_rollout and not should_sync:
-            _launch_rollout(rollout_id + 1)
+        should_sync = (rollout_id + 1) % update_interval == 0
 
         # Train current rollout.
         metrics = training_group.train(rollout_id, rollout_data_ref)
@@ -105,30 +121,11 @@ def train_async_loop(
         # Bound updates at a generation boundary to avoid update during active generation.
         if should_sync:
             runtime.assert_no_inflight_for_weight_sync()
-            target_weight_version = runtime.expected_weight_version + 1
-            synced_version = sync_weights_fn(
-                args,
-                rollout_id,
-                training_group,
-                rollout_manager,
-                target_weight_version=target_weight_version,
+            sync_weights_fn(
+                rollout_id=rollout_id,
+                training_group=training_group,
+                rollout_manager=rollout_manager,
             )
-            if int(synced_version) != int(target_weight_version):
-                raise RuntimeError(
-                    f"Sync returned unexpected version: expected={target_weight_version}, "
-                    f"got={synced_version}"
-                )
-            new_weight_version = runtime.advance_weight_version()
-            if int(new_weight_version) != int(synced_version):
-                raise RuntimeError(
-                    f"Runtime/rollout version mismatch after sync: runtime={new_weight_version}, "
-                    f"synced={synced_version}"
-                )
-            logger.info(f"[async] Advanced rollout weight version to {new_weight_version}")
-
-            # Relaunch the immediate next rollout after sync with the new weight version.
-            if rollout_id + 1 < args.num_rollout and not runtime.has_rollout(rollout_id + 1):
-                _launch_rollout(rollout_id + 1)
 
         if should_eval_fn(rollout_id, args):
             eval_metrics = ray.get(rollout_manager.eval.remote(rollout_id))

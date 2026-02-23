@@ -8,7 +8,7 @@ from typing import Dict, Tuple
 __version__ = "0.1.0"
 
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
-    # types
+    # shared types
     "SampleStatus": ("diffusionrl.types", "SampleStatus"),
     "SamplerOutputType": ("diffusionrl.types", "SamplerOutput"),
     "InferenceRequest": ("diffusionrl.types", "InferenceRequest"),
@@ -25,13 +25,13 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "get_sigma_schedule": ("diffusionrl.samplers", "get_sigma_schedule"),
     "sde_step_with_log_prob": ("diffusionrl.samplers", "sde_step_with_log_prob"),
     # reward workers
-    "BaseRewardWorker": ("diffusionrl.workers.reward", "BaseRewardWorker"),
-    "RewardRequest": ("diffusionrl.workers.reward", "RewardRequest"),
-    "RewardResponse": ("diffusionrl.workers.reward", "RewardResponse"),
-    "RewardType": ("diffusionrl.workers.reward", "RewardType"),
-    "LocalRewardWorker": ("diffusionrl.workers.reward", "LocalRewardWorker"),
-    "HTTPRewardWorker": ("diffusionrl.workers.reward", "HTTPRewardWorker"),
-    "RewardService": ("diffusionrl.workers.reward", "RewardService"),
+    "BaseRewardWorker": ("diffusionrl.reward", "BaseRewardWorker"),
+    "RewardRequest": ("diffusionrl.types", "RewardRequest"),
+    "RewardResponse": ("diffusionrl.types", "RewardResponse"),
+    "RewardType": ("diffusionrl.types", "RewardType"),
+    "LocalRewardWorker": ("diffusionrl.reward", "LocalRewardWorker"),
+    "HTTPRewardWorker": ("diffusionrl.reward", "HTTPRewardWorker"),
+    "RewardService": ("diffusionrl.reward", "RewardService"),
     # losses / algorithms / advantages
     "GRPOLoss": ("diffusionrl.losses", "GRPOLoss"),
     "BaseAlgorithm": ("diffusionrl.algorithms", "BaseAlgorithm"),
@@ -41,7 +41,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "AdvantageCalculator": ("diffusionrl.advantages", "AdvantageCalculator"),
     "build_advantage_calculator": ("diffusionrl.advantages", "build_advantage_calculator"),
     # config / utils / models
-    "GRPOArguments": ("diffusionrl.config", "GRPOArguments"),
+    "TrainingArguments": ("diffusionrl.config", "TrainingArguments"),
     "parse_args": ("diffusionrl.config", "parse_args"),
     "get_default_args": ("diffusionrl.config", "get_default_args"),
     "load_function": ("diffusionrl.utils", "load_function"),

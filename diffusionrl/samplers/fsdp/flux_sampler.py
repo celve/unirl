@@ -461,7 +461,6 @@ class FluxSampler(BaseSampler):
                 "vae_scale": self.VAE_SCALE,
                 "vae_shift": self.VAE_SHIFT,
             },
-            contract_version="v1",
             step_indices=torch.arange(sigma_schedule.shape[0], device=sigma_schedule.device, dtype=torch.long),
         )
 
