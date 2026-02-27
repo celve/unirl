@@ -13,21 +13,16 @@ import logging
 from typing import Any, Callable, Optional
 
 import ray
-from diffusionrl.ray.data_buffer import normalize_rollout_result as _normalize_rollout_payload
 from diffusionrl.runtime.async_runtime import AsyncPipelineRuntime
 
 logger = logging.getLogger(__name__)
-
-
-def _normalize_rollout_result(rollout_result: Any) -> Any:
-    """Normalize rollout output to an ObjectRef-compatible payload."""
-    return _normalize_rollout_payload(rollout_result)
 
 
 def train_async_loop(
     *,
     args,
     rollout_manager,
+    rollout_buffer,
     training_group,
     wandb_logger: Optional[Any],
     should_save_fn: Callable[[int, Any], bool],
@@ -38,7 +33,9 @@ def train_async_loop(
     logger.info("Starting async pipeline loop (separate mode)")
     max_inflight = int(getattr(args, "async_max_inflight", 1))
     update_interval = max(1, int(getattr(args, "update_weights_interval", 1)))
-    use_rollout_buffer = bool(getattr(args, "rollout_buffer_enabled", True))
+    enforce_rollout_alignment = not bool(getattr(args, "rollout_buffer_grouped", False))
+    rollout_on_gpu = True
+    buffer_consumer_spec = training_group.get_buffer_consumer_spec()
     runtime = AsyncPipelineRuntime(
         max_inflight=max_inflight,
         initial_rollout_id=args.start_rollout_id,
@@ -56,13 +53,7 @@ def train_async_loop(
                 f"Cannot launch rollout {rollout_id}: inflight queue is full "
                 f"(inflight={runtime.inflight_count}, max_inflight={runtime.max_inflight})"
             )
-        if use_rollout_buffer:
-            rollout_future = rollout_manager.generate_and_buffer.remote(rollout_id)
-        else:
-            rollout_future = rollout_manager.generate.remote(
-                rollout_id,
-                world_size=training_group.num_actors,
-            )
+        rollout_future = rollout_buffer.request_rollout.remote(rollout_id=rollout_id)
         runtime.launch_rollout(
             rollout_id,
             rollout_future,
@@ -78,6 +69,12 @@ def train_async_loop(
             _launch_rollout(next_rollout_to_launch)
             next_rollout_to_launch += 1
 
+    def _ensure_rollout_on_gpu() -> None:
+        nonlocal rollout_on_gpu
+        if bool(getattr(args, "offload_rollout", False)) and not rollout_on_gpu:
+            ray.get(rollout_manager.wake_up.remote())
+            rollout_on_gpu = True
+
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         _fill_inflight_window(rollout_id)
 
@@ -88,15 +85,13 @@ def train_async_loop(
                 f"Async rollout ordering violated: expected rollout_id={rollout_id}, "
                 f"got {resolved.rollout_id}"
             )
-        if use_rollout_buffer:
-            rollout_result = ray.get(
-                rollout_manager.pop_training_data.remote(
-                    world_size=training_group.num_actors
-                )
+        rollout_payload = ray.get(
+            rollout_buffer.pop_training_data.remote(
+                consumer_spec=buffer_consumer_spec,
+                expected_rollout_id=rollout_id if enforce_rollout_alignment else None,
             )
-        else:
-            rollout_result = resolved.payload
-        rollout_data_ref = _normalize_rollout_result(rollout_result)
+        )
+        rollout_data_ref = rollout_payload["training_data"]
 
         should_sync = (rollout_id + 1) % update_interval == 0
 
@@ -121,6 +116,7 @@ def train_async_loop(
         # Bound updates at a generation boundary to avoid update during active generation.
         if should_sync:
             runtime.assert_no_inflight_for_weight_sync()
+            _ensure_rollout_on_gpu()
             sync_weights_fn(
                 rollout_id=rollout_id,
                 training_group=training_group,
@@ -128,6 +124,7 @@ def train_async_loop(
             )
 
         if should_eval_fn(rollout_id, args):
+            _ensure_rollout_on_gpu()
             eval_metrics = ray.get(rollout_manager.eval.remote(rollout_id))
             logger.info(
                 f"[async] Eval at {rollout_id}: "
@@ -136,6 +133,10 @@ def train_async_loop(
             if wandb_logger is not None:
                 wandb_logger.log_eval(rollout_id, eval_metrics)
 
+    try:
+        ray.get(rollout_buffer.dispose.remote())
+    finally:
+        ray.kill(rollout_buffer)
     ray.get(rollout_manager.dispose.remote())
     training_group.dispose()
     if wandb_logger is not None:

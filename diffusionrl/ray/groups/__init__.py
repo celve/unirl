@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from .base import BaseActorGroup
-from .factory import create_inference_actor_group, create_training_actor_group
-from .inference import InferenceActorGroup
+from .factory import (
+    create_rollout_actor_group,
+    create_training_actor_group,
+)
+from .rollout import RolloutActorGroup
 from .training import TrainingActorGroup
 
 __all__ = [
     "BaseActorGroup",
-    "InferenceActorGroup",
+    "RolloutActorGroup",
     "TrainingActorGroup",
-    "create_inference_actor_group",
+    "create_rollout_actor_group",
     "create_training_actor_group",
 ]

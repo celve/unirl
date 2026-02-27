@@ -9,10 +9,10 @@ This package provides shared dataclasses and validation helpers used by:
 
 from .reward import RewardRequest, RewardResponse, RewardType
 from .sampling import (
-    InferenceRequest,
+    RolloutOutput,
+    RolloutRequest,
     LogProbData,
     PromptEmbeddings,
-    SamplerOutput,
     SampleStatus,
 )
 from .training_batch import (
@@ -26,7 +26,8 @@ from .training_batch import (
 
 __all__ = [
     "BackwardTrainingBatch",
-    "InferenceRequest",
+    "RolloutOutput",
+    "RolloutRequest",
     "LogProbData",
     "ForwardTrainingBatch",
     "PromptEmbeddings",
@@ -34,7 +35,6 @@ __all__ = [
     "RewardResponse",
     "RewardType",
     "SampleStatus",
-    "SamplerOutput",
     "TimestepData",
     "TrainingBatch",
     "is_backward_batch",

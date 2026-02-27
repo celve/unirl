@@ -22,15 +22,15 @@ import re
 from typing import Any, Dict, List, Optional, Set
 import torch
 
-from ..engine import BaseInferenceEngine, EngineConfig, EngineCapabilities, register_engine
-from diffusionrl.types import SamplerOutput
+from ..engine import BaseRolloutEngine, EngineConfig, EngineCapabilities, register_engine
+from diffusionrl.types import RolloutOutput
 from diffusionrl.utils import load_function
 
 logger = logging.getLogger(__name__)
 
 
 @register_engine("fastvideo")
-class FastVideoInferenceEngine(BaseInferenceEngine):
+class FastVideoRolloutEngine(BaseRolloutEngine):
     """
     FastVideo Inference Engine.
 
@@ -231,7 +231,7 @@ class FastVideoInferenceEngine(BaseInferenceEngine):
         sde_indices: Optional[Set[int]] = None,
         return_trajectory: bool = True,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> RolloutOutput:
         """
         Generate videos with log probabilities using FastVideo.
 
@@ -255,7 +255,7 @@ class FastVideoInferenceEngine(BaseInferenceEngine):
             **kwargs: Additional FastVideo arguments
 
         Returns:
-            SamplerOutput with video trajectories and log_probs
+            RolloutOutput with video trajectories and log_probs
         """
         if not self._is_initialized:
             raise RuntimeError("Engine not initialized")
@@ -263,12 +263,13 @@ class FastVideoInferenceEngine(BaseInferenceEngine):
         if self.generator is None:
             raise RuntimeError("Generator not loaded")
 
-        self.ensure_ready_for_generate()
+        self.wake_up()
         self._last_decoded_videos = None
 
         # Use defaults if not specified
         num_inference_steps = num_inference_steps or self.config.num_inference_steps
-        guidance_scale = guidance_scale or self.config.guidance_scale
+        if guidance_scale is None:
+            guidance_scale = self.config.guidance_scale
         height = height or self.config.height
         width = width or self.config.width
         num_frames = num_frames or self.config.num_frames
@@ -326,7 +327,7 @@ class FastVideoInferenceEngine(BaseInferenceEngine):
             per_prompt_results.append(result)
         result = self._merge_fastvideo_results(per_prompt_results)
 
-        # Convert FastVideo output to SamplerOutput
+        # Convert FastVideo output to RolloutOutput
         return self._convert_to_sampler_output(
             result,
             prompts=prompt_list,
@@ -395,8 +396,8 @@ class FastVideoInferenceEngine(BaseInferenceEngine):
         num_inference_steps: int,
         sde_indices: Optional[Set[int]],
         include_decoded_images: bool = False,
-    ) -> SamplerOutput:
-        """Convert FastVideo result dict to SamplerOutput."""
+    ) -> RolloutOutput:
+        """Convert FastVideo result dict to RolloutOutput."""
         from diffusionrl.types import LogProbData, PromptEmbeddings
 
         # Extract from FastVideo output
@@ -471,7 +472,7 @@ class FastVideoInferenceEngine(BaseInferenceEngine):
                 else None,
             )
 
-        return SamplerOutput(
+        return RolloutOutput(
             latents=final_latents,
             timesteps=timesteps,
             trajectories=trajectories,
@@ -618,7 +619,7 @@ class FastVideoInferenceEngine(BaseInferenceEngine):
             raise RuntimeError("FastVideo update_weights_from_path patch not applied")
         self.generator.update_weights_from_path(checkpoint_path, strict=strict)
 
-    def offload(self) -> None:
+    def sleep(self) -> None:
         """
         Offload FastVideo engine.
 
@@ -630,9 +631,9 @@ class FastVideoInferenceEngine(BaseInferenceEngine):
             raise RuntimeError("FastVideo offload patch not applied")
         self.generator.offload_model()
         self._is_offloaded = True
-        logger.info("FastVideo engine offloaded (workers retained)")
+        logger.info("FastVideo engine entered sleep state (workers retained)")
 
-    def onload(self) -> None:
+    def wake_up(self) -> None:
         """
         Mark FastVideo engine as active again.
         """
@@ -644,14 +645,7 @@ class FastVideoInferenceEngine(BaseInferenceEngine):
             raise RuntimeError("FastVideo onload patch not applied")
         self.generator.onload_model()
         self._is_offloaded = False
-        logger.info("FastVideo engine onloaded")
-
-    def onload_weights(self) -> None:
-        self.onload()
-
-    def onload_post_update(self) -> None:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        logger.info("FastVideo engine exited sleep state")
 
     def decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
         """
@@ -709,6 +703,5 @@ class FastVideoInferenceEngine(BaseInferenceEngine):
             supports_trajectory=True,
             supports_prompt_embeddings=False,
             supports_guidance_scale=True,
-            supports_staged_onload=True,
             weight_sync_mode="checkpoint_path",
         )

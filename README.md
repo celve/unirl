@@ -23,7 +23,7 @@ DiffusionRL supports the following diffusion models:
 **Module Descriptions**:
 
 - **Training Actors (Ray + FSDP)**: Responsible for the main training process, reads `TrainingBatch` from the rollout pipeline, and synchronizes parameters to the inference actors after training.
-- **Inference Actors (FSDP / FastVideo / SGLang)**: Generates denoising trajectories and latent samples using pluggable sampling engines, producing `SamplerOutput` with a unified v1 contract.
+- **Inference Actors (FSDP / FastVideo / SGLang)**: Generates denoising trajectories and latent samples using pluggable sampling engines, producing `RolloutOutput` with a unified v1 contract.
 - **Reward Service**: Evaluates generated samples using configurable reward models (HPS, CLIP, PickScore, OCR, etc.) and feeds reward signals back to the training loop.
 - **RolloutManager**: The central orchestrator that coordinates sampling, reward computation, advantage calculation, and batch assembly.
 
@@ -34,7 +34,7 @@ DiffusionRL supports the following diffusion models:
  │  │  Prompts  │───>│  Inference   │───>│  Reward Service  │  │
  │  │  (Data)   │    │  ActorGroup  │    │  (Local / HTTP)  │  │
  │  └──────────┘    └──────┬───────┘    └────────┬─────────┘  │
- │                         │ SamplerOutput (v1)   │ rewards    │
+ │                         │ RolloutOutput (v1)   │ rewards    │
  │                         v                      v            │
  │               ┌─────────────────────────────────┐           │
  │               │  Advantage Calc + Batch Assembly │           │
@@ -115,14 +115,14 @@ Default local paths are resolved against the repository root:
 - `data_path`: `data/samples/prompts_toy.json`
 - `output_dir`: `outputs/`
 - `weight_sync_dir`: `outputs/weight_sync/`
-- local model mount: `models/local/`
+- local model mount (optional symlink): `models/local/`
 
-For external data / model directories, use the linking script:
+For external data / model directories, pass absolute paths directly (or create symlinks manually):
 
 ```bash
-bash scripts/link_external_resources.sh \
-    --data-source /path/to/external/data \
-    --models-source /path/to/external/shared_models
+DATA_PATH=/path/to/external/data/train.json \
+PRETRAINED_MODEL=/path/to/external/shared_models/flux \
+bash scripts/train_dancegrpo_flux_separate.sh
 ```
 
 ### Training
@@ -139,12 +139,9 @@ bash scripts/train_mixgrpo_sd3_separate.sh
 # NFT with SD3 (separate mode)
 bash scripts/train_nft_sd3_separate.sh
 
-# Override default parameters
-bash scripts/train_dancegrpo_flux_separate.sh \
-    --num-rollout 100 \
-    --batch-size 2 \
-    --inference-gpus 4 \
-    --training-gpus 4
+# Override default parameters via environment variables
+NUM_ROLLOUT=100 BATCH_SIZE=2 ROLLOUT_GPUS=4 TRAINING_GPUS=4 \
+    bash scripts/train_dancegrpo_flux_separate.sh
 ```
 
 Or use the CLI directly:
@@ -167,6 +164,15 @@ python -m diffusionrl.train \
     --num-rollout 300 \
     --output-dir outputs/my_experiment
 ```
+
+You can also start from YAML configs:
+
+```bash
+python -m diffusionrl.train --config scripts/minimal_flux.yaml
+python -m diffusionrl.train --config scripts/minimal_hunyuan.yaml --num-rollout 100
+```
+
+`--config` expects a flat key/value YAML mapping; CLI options always override YAML.
 
 ### Available Training Scripts
 
@@ -202,7 +208,7 @@ Arguments in DiffusionRL are organized into the following categories:
 3.  **Algorithm arguments**: `--algorithm-path`, `--clip-range`, `--use-kl-penalty`, `--advantage-type`, etc.
 4.  **Reward arguments**: `--reward-path`, `--reward-model-name`, `--reward-batch-size`, etc.
 5.  **Training arguments**: `--learning-rate`, `--gradient-accumulation-steps`, `--max-grad-norm`, `--num-inner-epochs`, etc.
-6.  **Runtime arguments**: `--colocate-inference-training`, `--inference-num-gpus-per-node`, `--training-num-gpus-per-node`, `--placement-strategy`, etc.
+6.  **Runtime arguments**: `--colocate-rollout-training`, `--rollout-num-gpus-per-node`, `--training-num-gpus-per-node`, `--placement-strategy`, etc.
 
 For the full argument reference, please refer to: [diffusionrl/config/arguments.py](diffusionrl/config/arguments.py)
 
@@ -210,24 +216,23 @@ For the full argument reference, please refer to: [diffusionrl/config/arguments.
 
 ### Ray Layering
 
-The Ray control plane is split into worker implementations, worker-group orchestration, and train-loop strategy:
+The Ray control plane is split into worker implementations and worker-group orchestration:
 
-- `diffusionrl/ray/actors/`: single worker implementations (`InferenceActor`, `TrainingActor`)
-- `diffusionrl/ray/groups/`: group orchestration (`BaseActorGroup`, `InferenceActorGroup`, `TrainingActorGroup`, factories)
-- `diffusionrl/ray/sampling_mode/`: train-loop strategy plugins (`inference` / `training` backend transitions)
+- `diffusionrl/ray/actors/`: single worker implementations (`RolloutActor`, `TrainingActor`)
+- `diffusionrl/ray/groups/`: group orchestration (`BaseActorGroup`, `RolloutActorGroup`, `TrainingActorGroup`, factories)
+- `diffusionrl/ray/utils/`: Ray distributed utilities + training-actor helper/service modules
 - `diffusionrl/ray/rollout_manager.py`: control-plane actor
 - `diffusionrl/runtime/**`: Ray-agnostic runtime logic
 
-Detailed layer diagram and migration notes:
+Detailed layer diagram:
 - [docs/Ray_Layering.md](docs/Ray_Layering.md)
-- Legacy `actor_group_*` import paths are kept as compatibility shims for one release cycle.
 
 ### Project Structure
 
 ```
 diffusionrl/
 ├── train.py / train_async.py      # Training entry points
-├── types/                          # Canonical shared data types (SamplerOutput, TrainingBatch, Reward, WeightSync)
+├── types/                          # Canonical shared data types (RolloutOutput, TrainingBatch, Reward, WeightSync)
 ├── config/                         # Configuration system (TrainingArguments)
 ├── algorithms/                     # RL algorithms (GRPO, MixGRPO, NFT)
 ├── samplers/                       # Inference engines (FSDP, FastVideo, SGLang)
@@ -243,7 +248,7 @@ diffusionrl/
 │   ├── rollout_manager.py          #   Central orchestrator
 │   ├── actors/                     #   Worker implementations
 │   ├── groups/                     #   Worker-group orchestration
-│   └── sampling_mode/              #   Mode strategies in train loop
+│   ├── utils/                      #   Distributed + actor helper/service utilities
 ├── runtime/                        # Async runtime + ray-agnostic execution logic
 ├── patches/                        # Non-invasive patches for FastVideo
 └── utils/                          # Checkpointing, logging, EMA, weight sync
@@ -251,14 +256,19 @@ diffusionrl/
 
 ### Adding a Custom Algorithm
 
-Subclass `BaseAlgorithm` and define your `SamplingRequirements`.
+Subclass `BaseAlgorithm` and focus on rollout/advantage hooks:
+`from_args()`, `get_sampling_requirements()`, `compute_advantages()`, and optional timestep filters.
 For new code, always import shared data types from `diffusionrl.types` (single entry).
 
 ```python
 from diffusionrl.algorithms.base import BaseAlgorithm, SamplingRequirements
-from diffusionrl.types import BackwardTrainingBatch
 
 class MyAlgorithm(BaseAlgorithm):
+    @classmethod
+    def from_args(cls, args):
+        kwargs = cls._base_kwargs_from_args(args)
+        return cls(**kwargs)
+
     def get_sampling_requirements(self) -> SamplingRequirements:
         return SamplingRequirements(
             requires_trajectory=True,
@@ -266,14 +276,14 @@ class MyAlgorithm(BaseAlgorithm):
             sde_ratio=1.0,
         )
 
-    def compute_loss(self, model, batch, timestep_idx, advantages, **kwargs):
-        # Optional typed path if your algorithm uses typed batch data
-        if isinstance(batch, BackwardTrainingBatch):
-            ...
-        ...
+    def compute_advantages(self, rewards):
+        # Replace with your advantage shaping/normalization.
+        return super().compute_advantages(rewards)
 ```
 
 Then pass it via `--algorithm-path your_module.MyAlgorithm`.
+If you need a custom training objective, implement a loss plugin and pass
+`--loss-type custom --loss-path your_module.MyLoss`.
 See the full minimal template: [docs/Algorithm_Minimal_Template.md](docs/Algorithm_Minimal_Template.md)
 
 ### Adding a Custom Reward Worker

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
-from diffusionrl.types.sampling import SamplerOutput
+from diffusionrl.types.sampling import RolloutOutput
 
 
 def expand_batch_for_sampling(
@@ -59,7 +59,7 @@ def expand_batch_for_sampling(
 def distributed_sample(
     *,
     actor_group: Any,
-    batch: Union[List[str], Dict[str, Any]],
+    batch: Dict[str, Any],
     num_inference_steps: int,
     guidance_scale: float,
     height: int,
@@ -68,25 +68,21 @@ def distributed_sample(
     init_same_noise: bool,
     num_samples_per_prompt: int,
     sde_indices: Optional[Set[int]] = None,
-) -> List[SamplerOutput]:
+    extra_generate_kwargs: Optional[Dict[str, Any]] = None,
+) -> List[RolloutOutput]:
     """
-    Sample across distributed inference actors.
+    Sample across distributed rollout actors.
 
     Args:
-        batch: Either:
-            - List[str]: List of text prompts (legacy)
-            - Dict: Batch containing text prompts (prompt-only input contract)
+        batch: Batch containing text prompts (prompt-only input contract)
         sde_indices: Set of timestep indices for SDE sampling (MixGRPO).
             If None, all timesteps use SDE (standard GRPO).
 
     Returns:
-        List of SamplerOutput.
+        List of RolloutOutput.
     """
     if actor_group is None:
         raise RuntimeError("No sampling actors available")
-
-    if isinstance(batch, list):
-        batch = {"prompts": batch}
 
     prompts = batch.get("prompts", [])
     if not isinstance(prompts, list) or len(prompts) == 0:
@@ -107,30 +103,31 @@ def distributed_sample(
         init_same_noise=init_same_noise,
         num_samples_per_prompt=num_samples_per_prompt,
     )
+    if "latents" in batch:
+        gen_kwargs["latents"] = batch.get("latents")
+    if isinstance(extra_generate_kwargs, dict) and extra_generate_kwargs:
+        gen_kwargs.update(extra_generate_kwargs)
 
-    if hasattr(actor_group, "sample_batch"):
-        outputs = actor_group.sample_batch(**gen_kwargs)
-    else:
-        outputs = actor_group.generate(**gen_kwargs)
+    outputs = actor_group.generate(**gen_kwargs)
 
-    merged_outputs: List[SamplerOutput] = []
+    merged_outputs: List[RolloutOutput] = []
     for output in outputs:
-        if isinstance(output, SamplerOutput):
+        if isinstance(output, RolloutOutput):
             merged_outputs.append(output)
             continue
 
         if isinstance(output, (list, tuple)):
             for item in output:
-                if not isinstance(item, SamplerOutput):
+                if not isinstance(item, RolloutOutput):
                     raise TypeError(
-                        "Sampling stage expects SamplerOutput from actors, "
+                        "Sampling stage expects RolloutOutput from actors, "
                         f"got {type(item).__name__} inside {type(output).__name__}."
                     )
                 merged_outputs.append(item)
             continue
 
         raise TypeError(
-            "Sampling stage expects SamplerOutput from actors, "
+            "Sampling stage expects RolloutOutput from actors, "
             f"got {type(output).__name__}."
         )
 

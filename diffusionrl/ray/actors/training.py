@@ -1,53 +1,41 @@
 """
-diffusionrl Training Actor - Manages model training with FSDP.
+diffusionrl Training Actor - Manages model training via pluggable train backends.
 """
 import logging
 import os
-from functools import partial
 from typing import Any, Dict, List, Optional, Set, Union
 
 import ray
 import torch
-from torch.distributed.fsdp import (
-    BackwardPrefetch,
-    CPUOffload,
-    MixedPrecision,
-    ShardingStrategy,
-)
-from torch.distributed.fsdp import (
-    FullyShardedDataParallel as FSDP,
-)
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 
-from diffusionrl.types.sampling import InferenceRequest, SamplerOutput
+from diffusionrl.types.sampling import RolloutRequest, RolloutOutput
 from diffusionrl.types.training_batch import (
     BackwardTrainingBatch,
     TrainingBatch,
 )
-from diffusionrl.ray.actors.internal import ReplayLogProbPatch
+from diffusionrl.patches.replay_logprob import ReplayLogProbPatch
+from diffusionrl.ray.utils.actor_sampling import TrainingActorSamplingService
+from diffusionrl.ray.utils.memory import TrainingActorMemoryService
+from diffusionrl.ray.utils.state_io import TrainingActorStateIOService
 from diffusionrl.runtime.training import (
     TrainExecutor,
     TrainExecutorConfig,
+    create_train_backend,
     resolve_grad_accum,
 )
 from diffusionrl.utils import load_function
 
 from .base import BaseTrainRayActor, log_gpu_state, log_resource_ids
-from .services import (
-    TrainingActorMemoryService,
-    TrainingActorSamplingService,
-    TrainingActorStateIOService,
-)
 
 logger = logging.getLogger(__name__)
 
 @ray.remote(num_gpus=1)
 class TrainingActor(BaseTrainRayActor):
     """
-    Training Actor - Manages model training with FSDP support.
+    Training Actor - Manages model training with backend-driven runtime.
 
     This actor handles:
-    - Model loading and FSDP wrapping
+    - Model loading and backend wrapping
     - Optimizer and scheduler management
     - Training step execution
     - Checkpoint saving and loading
@@ -79,14 +67,19 @@ class TrainingActor(BaseTrainRayActor):
         self._is_initialized = False
         self._is_offloaded = False
         self._device = None
-        self._use_fsdp = True
+        self._use_fsdp = True  # legacy alias; derived from selected backend
         self._use_lora = False
+        self._fsdp_cpu_offload = False
+        self._train_backend = None
+        self._train_backend_name = "fsdp"
+        self._train_backend_capabilities: Dict[str, Any] = {}
 
         # NFT-specific: EMA updater for dual adapter mechanism
         self._ema_updater = None
         self._use_ema = False
         self._ema_decay = 0.001
         self._loss_type = "grpo"
+        self._loss_path = None
         self._guidance_scale = 3.5  # Default CFG scale for training
         # NFT timestep handling
         self._nft_timestep_mode = "random"  # random or all
@@ -129,8 +122,8 @@ class TrainingActor(BaseTrainRayActor):
                 - scheduler_config: dict with scheduler type and params
                 - loss_config: dict with loss_type, clip_range, kl_coef, etc.
                 - training_config: dict with max_grad_norm, gradient_accumulation_steps
-                - use_fsdp: Whether to use FSDP
-                - fsdp_config: FSDP configuration
+                - train_backend/train_backend_path/train_backend_kwargs
+                - legacy use_fsdp/fsdp_config (backward compatibility)
 
         Note:
             Algorithm instantiation for advantage computation happens in
@@ -138,23 +131,50 @@ class TrainingActor(BaseTrainRayActor):
         """
         logger.info(f"Rank {self.rank}: Initializing training actor...")
 
+        backend_config = config.get("train_backend_config", {}) or {}
+        if not isinstance(backend_config, dict):
+            backend_config = {}
+
+        backend_name = str(
+            config.get("train_backend", backend_config.get("name", "fsdp")) or "fsdp"
+        ).strip().lower()
+        backend_path = config.get("train_backend_path", backend_config.get("backend_path"))
+        backend_kwargs = config.get("train_backend_kwargs", backend_config.get("kwargs", {})) or {}
+        if not isinstance(backend_kwargs, dict):
+            logger.warning("train_backend_kwargs is not a dict; resetting to empty dict.")
+            backend_kwargs = {}
+
+        # Transitional compatibility: map legacy keys into backend kwargs.
+        if backend_name == "fsdp":
+            legacy_fsdp_config = config.get("fsdp_config", {}) or {}
+            if isinstance(legacy_fsdp_config, dict):
+                for key, value in legacy_fsdp_config.items():
+                    backend_kwargs.setdefault(key, value)
+            backend_kwargs.setdefault("use_fsdp", bool(config.get("use_fsdp", True)))
+
+        self._train_backend = create_train_backend(
+            backend_name,
+            backend_path=backend_path,
+            backend_kwargs=backend_kwargs,
+        )
+        self._train_backend_name = self._train_backend.name
+        self._train_backend_capabilities = self._train_backend.capabilities.as_dict()
+
         # Initialize distributed
-        self._init_distributed(backend="nccl")
+        self._init_distributed(backend=self._train_backend.capabilities.distributed_backend)
 
         self._device = torch.device(f"cuda:{os.environ.get('LOCAL_RANK', 0)}")
         torch.cuda.set_device(self._device)
 
-        # Check if FSDP CPU offload is enabled (affects model loading)
-        fsdp_config = config.get("fsdp_config", {})
-        self._fsdp_cpu_offload = fsdp_config.get("cpu_offload", False)
+        # Backend-specific pre-load hook (e.g. CPU-offload behavior).
+        self._train_backend.before_model_load(self)
 
         # Load model (don't move to GPU if CPU offload is enabled)
         self._load_model(config.get("model_config", {}))
 
-        # FSDP wrap
-        self._use_fsdp = config.get("use_fsdp", True)
-        if self._use_fsdp:
-            self._wrap_fsdp(fsdp_config)
+        # Backend model wrapping (FSDP/Megatron/others).
+        self._train_backend.wrap_model(self)
+        self._use_fsdp = bool(self._train_backend.uses_sharded_model())
 
         # Create optimizer
         self._create_optimizer(config.get("optimizer_config", {}))
@@ -170,10 +190,7 @@ class TrainingActor(BaseTrainRayActor):
         self._max_grad_norm = training_config.get("max_grad_norm", 1.0)
         self._gradient_accumulation_steps = resolve_grad_accum(training_config)
         self._num_inner_epochs = max(1, int(training_config.get("num_inner_epochs", 1)))
-        self._replay_log_probs = bool(
-            training_config.get("replay_log_probs", False)
-            or training_config.get("fastvideo_replay_log_probs", False)
-        )
+        self._replay_log_probs = bool(training_config.get("replay_log_probs", False))
 
         # Sampling config (used when training actors perform sampling)
         sampling_config = config.get("sampling_config", {}) or {}
@@ -190,7 +207,8 @@ class TrainingActor(BaseTrainRayActor):
         self._is_initialized = True
         logger.info(
             f"Rank {self.rank}: Training actor initialized "
-            f"(max_grad_norm={self._max_grad_norm}, "
+            f"(backend={self._train_backend_name}, "
+            f"max_grad_norm={self._max_grad_norm}, "
             f"gradient_accumulation_steps={self._gradient_accumulation_steps}, "
             f"num_inner_epochs={self._num_inner_epochs})"
         )
@@ -264,69 +282,6 @@ class TrainingActor(BaseTrainRayActor):
 
         logger.info(f"Rank {self.rank}: Model loaded (lora_rank={model_config.get('lora_rank', 'N/A')}, training_only=True)")
 
-    def _wrap_fsdp(self, fsdp_config: dict) -> None:
-        """Wrap model with FSDP."""
-        # Get sharding strategy
-        strategy_map = {
-            "FULL_SHARD": ShardingStrategy.FULL_SHARD,
-            "SHARD_GRAD_OP": ShardingStrategy.SHARD_GRAD_OP,
-            "NO_SHARD": ShardingStrategy.NO_SHARD,
-            "HYBRID_SHARD": ShardingStrategy.HYBRID_SHARD,
-        }
-        sharding_strategy = strategy_map.get(
-            fsdp_config.get("sharding_strategy", "FULL_SHARD"),
-            ShardingStrategy.FULL_SHARD,
-        )
-
-        # Get backward prefetch
-        prefetch_map = {
-            "BACKWARD_PRE": BackwardPrefetch.BACKWARD_PRE,
-            "BACKWARD_POST": BackwardPrefetch.BACKWARD_POST,
-        }
-        backward_prefetch = prefetch_map.get(
-            fsdp_config.get("backward_prefetch", "BACKWARD_PRE"),
-            BackwardPrefetch.BACKWARD_PRE,
-        )
-
-        # CPU offload
-        cpu_offload = None
-        if fsdp_config.get("cpu_offload", False):
-            cpu_offload = CPUOffload(offload_params=True)
-
-        # Mixed precision
-        mixed_precision = None
-        if fsdp_config.get("mixed_precision", True):
-            mixed_precision = MixedPrecision(
-                param_dtype=torch.bfloat16,
-                reduce_dtype=torch.float32,
-                buffer_dtype=torch.float32,
-            )
-
-        # Auto wrap policy
-        # Note: transformer_auto_wrap_policy requires functools.partial in newer PyTorch
-        auto_wrap_policy = None
-        if hasattr(self.model_bundle, "get_no_split_modules"):
-            no_split_modules = self.model_bundle.get_no_split_modules()
-            if no_split_modules:
-                auto_wrap_policy = partial(
-                    transformer_auto_wrap_policy,
-                    transformer_layer_cls=no_split_modules,
-                )
-
-        # Wrap with FSDP
-        self.model = FSDP(
-            self.model,
-            sharding_strategy=sharding_strategy,
-            cpu_offload=cpu_offload,
-            backward_prefetch=backward_prefetch,
-            mixed_precision=mixed_precision,
-            auto_wrap_policy=auto_wrap_policy,
-            device_id=self._device,
-            use_orig_params=True,
-        )
-
-        logger.info(f"Rank {self.rank}: Model wrapped with FSDP")
-
     def _create_optimizer(self, optimizer_config: dict) -> None:
         """Create optimizer."""
         lr = optimizer_config.get("learning_rate", 1e-6)
@@ -377,16 +332,47 @@ class TrainingActor(BaseTrainRayActor):
         else:
             self.lr_scheduler = None
 
+    @staticmethod
+    def _collect_custom_loss_kwargs(loss_config: dict) -> dict:
+        """Collect custom loss kwargs from config while removing actor-runtime keys."""
+        reserved_keys = {
+            "loss_type",
+            "loss_path",
+            "loss_kwargs",
+            "use_ema",
+            "ema_decay",
+            "guidance_scale",
+            "nft_timestep_mode",
+            "nft_shuffle_timesteps",
+            "nft_apply_shift",
+            "decay_type",
+            "ema_flat_steps",
+            "ema_uprate",
+            "ema_uphold",
+            "old_adapter_name",
+            "new_adapter_name",
+        }
+        kwargs = {
+            key: value
+            for key, value in loss_config.items()
+            if key not in reserved_keys and value is not None
+        }
+        extra = loss_config.get("loss_kwargs")
+        if isinstance(extra, dict):
+            kwargs.update(extra)
+        return kwargs
+
     def _load_loss(self, loss_config: dict) -> None:
         """Load loss function based on loss_type."""
         from diffusionrl.losses import get_loss
 
         self._loss_type = loss_config.get("loss_type", "grpo")
+        self._loss_path = loss_config.get("loss_path")
         self._use_ema = loss_config.get("use_ema", False)
         self._ema_decay = loss_config.get("ema_decay", 0.001)
         self._guidance_scale = loss_config.get("guidance_scale", 3.5)
 
-        if self._loss_type == "nft":
+        if self._loss_type == "nft" and not self._loss_path:
             # NFT loss with forward process optimization
             self.loss_fn = get_loss(
                 loss_type="nft",
@@ -423,8 +409,8 @@ class TrainingActor(BaseTrainRayActor):
                 self.loss_fn.model_type = getattr(self.model_bundle, "model_type", "default")
             if hasattr(self.loss_fn, "_forward_plugin"):
                 self.loss_fn._forward_plugin = None
-        else:
-            # GRPO loss (default)
+        elif self._loss_type == "grpo" and not self._loss_path:
+            # Built-in GRPO loss.
             self.loss_fn = get_loss(
                 loss_type="grpo",
                 clip_range=loss_config.get("clip_range", 1e-4),
@@ -436,8 +422,33 @@ class TrainingActor(BaseTrainRayActor):
                 ignore_last=loss_config.get("ignore_last", False),
                 frozen_init_timesteps=loss_config.get("frozen_init_timesteps", 0),
             )
+        else:
+            # Custom/registered loss. Use explicit loss_path when provided.
+            custom_kwargs = self._collect_custom_loss_kwargs(loss_config)
+            self.loss_fn = get_loss(
+                loss_type=self._loss_type,
+                loss_path=self._loss_path,
+                **custom_kwargs,
+            )
+            # Keep NFT defaults if user selects nft loss_type via custom path.
+            if self._loss_type == "nft":
+                self._nft_timestep_mode = loss_config.get("nft_timestep_mode", "random")
+                self._nft_shuffle_timesteps = loss_config.get("nft_shuffle_timesteps", True)
+                self._nft_apply_shift = loss_config.get("nft_apply_shift", False)
+                self._use_ema = loss_config.get("use_ema", True)
 
-        logger.info(f"Rank {self.rank}: Loss function loaded ({self._loss_type})")
+        # Bind model metadata for losses that implement model-aware forward plugins.
+        if hasattr(self.loss_fn, "model_type"):
+            self.loss_fn.model_type = getattr(self.model_bundle, "model_type", "default")
+        if hasattr(self.loss_fn, "_forward_plugin"):
+            self.loss_fn._forward_plugin = None
+
+        logger.info(
+            "Rank %s: Loss function loaded (loss_type=%s, loss_path=%s)",
+            self.rank,
+            self._loss_type,
+            self._loss_path,
+        )
 
     def _maybe_replay_old_log_probs(self, batch: BackwardTrainingBatch) -> BackwardTrainingBatch:
         return self._replay_logprob_patch.maybe_replay_old_log_probs(
@@ -469,7 +480,7 @@ class TrainingActor(BaseTrainRayActor):
         decode_for_reward: bool = False,
         sde_indices: Optional[Set[int]] = None,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> RolloutOutput:
         return self._sampling_service.generate(
             self,
             prompts=prompts,
@@ -488,23 +499,34 @@ class TrainingActor(BaseTrainRayActor):
             **kwargs,
         )
 
-    def generate_batch(self, requests: List[InferenceRequest]) -> List[SamplerOutput]:
+    def generate_batch(self, requests: List[RolloutRequest]) -> List[RolloutOutput]:
         return self._sampling_service.generate_batch(self, requests)
 
-    def sample_batch(
-        self,
-        prompts: Optional[List[str]] = None,
-        **kwargs,
-    ) -> SamplerOutput:
-        """Control-plane sampling RPC boundary."""
-        return self._sampling_service.sample_batch(self, prompts=prompts, **kwargs)
+    def get_train_backend_info(self) -> Dict[str, Any]:
+        return {
+            "name": self._train_backend_name,
+            "capabilities": dict(self._train_backend_capabilities),
+        }
+
+    def get_buffer_consumer_spec(self) -> Dict[str, Any]:
+        if self._train_backend is None:
+            dp_size = int(getattr(self, "world_size", 1))
+            return {
+                "dp_size": dp_size,
+                "partition_train_data": True,
+                "partition_mode": "data_parallel",
+            }
+        return dict(self._train_backend.buffer_consumer_spec(self))
 
     def _build_train_executor(self) -> TrainExecutor:
+        dp_size = int(getattr(self, "world_size", 1))
+        if self._train_backend is not None:
+            dp_size = int(self._train_backend.data_parallel_size(self))
         config = TrainExecutorConfig(
             rank=self.rank,
-            world_size=getattr(self, "world_size", 1),
+            dp_size=dp_size,
             device=self._device,
-            use_fsdp=self._use_fsdp,
+            use_fsdp=bool(self._train_backend and self._train_backend.uses_sharded_model()),
             loss_type=self._loss_type,
             guidance_scale=self._guidance_scale,
             max_grad_norm=self._max_grad_norm,
@@ -566,7 +588,7 @@ class TrainingActor(BaseTrainRayActor):
         return metrics
 
     def get_weights(self) -> Dict[str, torch.Tensor]:
-        """Get current model weights for syncing to inference actors."""
+        """Get current model weights for syncing to rollout actors."""
         return self._state_io_service.get_weights(self)
 
     def export_weights_to_path(

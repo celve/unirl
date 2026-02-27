@@ -7,8 +7,6 @@ Provides data sources and datasets for both text prompts and pre-computed embedd
 from .data_source import ImageRLDataSource, DefaultDataSource
 from .datasets import (
     EmbeddingRLDataset,
-    DATASET_REGISTRY,
-    register_dataset,
     TextPromptDataset,
     create_rl_dataset,
 )
@@ -20,8 +18,6 @@ __all__ = [
     "DefaultDataSource",
     # Datasets
     "EmbeddingRLDataset",
-    "DATASET_REGISTRY",
-    "register_dataset",
     "TextPromptDataset",
     "create_rl_dataset",
     # Samplers

@@ -358,6 +358,7 @@ class HunyuanForwardPlugin(BaseForwardPlugin):
     Hunyuan models have similar interface to SD3 with some variations
     in how embeddings are handled.
     """
+    GUIDANCE_VALUE = 6018.0
 
     def prepare_model_kwargs(
         self,
@@ -375,11 +376,15 @@ class HunyuanForwardPlugin(BaseForwardPlugin):
         device = latents.device
         dtype = prompt_embeds.dtype
         timestep_1000 = self._prepare_timestep(sigma, batch_size, device, dtype) * 1000
+        guidance = torch.tensor(
+            [self.GUIDANCE_VALUE], device=device, dtype=dtype
+        )
 
         model_kwargs: Dict[str, Any] = {
             "hidden_states": latents.to(dtype),
             "encoder_hidden_states": prompt_embeds,
             "timestep": timestep_1000,
+            "guidance": guidance,
             "return_dict": False,
         }
         if pooled_prompt_embeds is not None:

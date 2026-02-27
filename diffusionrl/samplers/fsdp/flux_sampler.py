@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Set, Tuple, Any
 import torch
 import torch.nn as nn
 
-from ..base import BaseSampler, SamplerOutput
+from ..base import BaseSampler, RolloutOutput
 from ..log_prob import get_sigma_schedule, sd3_time_shift, flux_sde_step
 from diffusionrl.types import LogProbData, PromptEmbeddings
 
@@ -263,7 +263,7 @@ class FluxSampler(BaseSampler):
         init_same_noise: bool = False,
         num_samples_per_prompt: int = 1,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> RolloutOutput:
         """
         Execute SDE sampling aligned with DanceGRPO run_sample_step.
 
@@ -283,7 +283,7 @@ class FluxSampler(BaseSampler):
             num_samples_per_prompt: Number of samples per prompt (for init_same_noise)
 
         Returns:
-            SamplerOutput with trajectories, log_probs, etc.
+            RolloutOutput with trajectories, log_probs, etc.
         """
         # Use provided guidance_scale or fall back to instance default
         actual_guidance = guidance_scale if guidance_scale is not None else self.guidance_scale
@@ -436,7 +436,7 @@ class FluxSampler(BaseSampler):
             image_ids=image_ids,
         )
 
-        return SamplerOutput(
+        return RolloutOutput(
             latents=final_latents,
             timesteps=sigma_schedule,
             trajectories=trajectories,

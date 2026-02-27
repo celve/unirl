@@ -29,12 +29,6 @@ class WeightSyncStrategy(ABC):
     ) -> None:
         """Synchronize latest policy weights to rollout side."""
 
-    @staticmethod
-    def _run_post_update_hooks(rollout_manager: Any) -> None:
-        ray.get(rollout_manager.after_weight_update.remote())
-        ray.get(rollout_manager.reload_runtime_cache.remote())
-
-
 class CheckpointPathWeightSync(WeightSyncStrategy):
     """Sync strategy using shared checkpoint paths."""
 
@@ -73,9 +67,8 @@ class CheckpointPathWeightSync(WeightSyncStrategy):
             export_format=export_format,
         )
 
-        ray.get(rollout_manager.load_weights.remote())
+        ray.get(rollout_manager.wake_up.remote())
         ray.get(rollout_manager.update_weights_from_path.remote(checkpoint_path))
-        self._run_post_update_hooks(rollout_manager)
         cleanup_published_checkpoint(checkpoint_path)
 
 
@@ -94,9 +87,8 @@ class ObjectRefWeightSync(WeightSyncStrategy):
         weights_ref = training_group.get_weights()
         ray.wait([weights_ref], num_returns=1)
 
-        ray.get(rollout_manager.load_weights.remote())
+        ray.get(rollout_manager.wake_up.remote())
         ray.get(rollout_manager.update_weights.remote(weights_ref))
-        self._run_post_update_hooks(rollout_manager)
 
 
 _BUILTIN_WEIGHT_SYNC_STRATEGIES: Dict[str, Type[WeightSyncStrategy]] = {

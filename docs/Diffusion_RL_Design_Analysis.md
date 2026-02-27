@@ -29,8 +29,8 @@ class GRPOPlacementConfig:
     """Resource allocation configuration for GRPO training."""
 
     # Inference resources
-    inference_num_nodes: int = 1
-    inference_num_gpus_per_node: int = 4
+    rollout_num_nodes: int = 1
+    rollout_num_gpus_per_node: int = 4
 
     # Training resources
     training_num_nodes: int = 1
@@ -40,7 +40,7 @@ class GRPOPlacementConfig:
     reward_dedicated_num_gpus: int = 0  # 0 means use CPU
 
     # Deployment strategy
-    colocate_inference_training: bool = False
+    colocate_rollout_training: bool = False
     strategy: str = "PACK"  # "PACK" or "SPREAD"
 ```
 
@@ -48,11 +48,11 @@ class GRPOPlacementConfig:
 
 | 参数 | 说明 |
 |------|------|
-| `inference_num_nodes` | 推理使用的节点数 |
-| `inference_num_gpus_per_node` | 每个节点用于推理的 GPU 数 |
+| `rollout_num_nodes` | 推理使用的节点数 |
+| `rollout_num_gpus_per_node` | 每个节点用于推理的 GPU 数 |
 | `training_num_nodes` | 训练使用的节点数 |
 | `training_num_gpus_per_node` | 每个节点用于训练的 GPU 数 |
-| `colocate_inference_training` | 是否让推理和训练共享 GPU |
+| `colocate_rollout_training` | 是否让推理和训练共享 GPU |
 | `strategy` | `PACK`=尽量放同一节点，`SPREAD`=分散到不同节点 |
 
 > **资源调度**：统一使用单 PG + `{"GPU": 1}` uniform bundle 模式（slime 风格）。
@@ -133,7 +133,7 @@ graph TB
 
 ```python
 def create_placement_groups(config: GRPOPlacementConfig):
-    if config.colocate_inference_training:
+    if config.colocate_rollout_training:
         # 共享 Placement Group - 取最大值
         total_gpus = max(inference_total_gpus, training_total_gpus)
         pg = _create_placement_group(total_gpus, strategy, name="grpo_colocated")
@@ -195,9 +195,9 @@ flowchart TB
         IA2["InferenceActor 1<br/>sampler.sample()"]
         IA3["InferenceActor N<br/>sampler.sample()"]
 
-        IA1 --> SO1["SamplerOutput"]
-        IA2 --> SO2["SamplerOutput"]
-        IA3 --> SO3["SamplerOutput"]
+        IA1 --> SO1["RolloutOutput"]
+        IA2 --> SO2["RolloutOutput"]
+        IA3 --> SO3["RolloutOutput"]
     end
 
     subgraph RewardLayer["4. Reward Layer"]
@@ -246,11 +246,11 @@ def _sync_weights_to_rollout(args, rollout_id, training_group, rollout_manager,
     if args.weight_sync_mode == "checkpoint_path":
         checkpoint_path = _build_weight_checkpoint_path(args, rollout_id)
         training_group.export_weights_to_path(checkpoint_path)
-        ray.get(rollout_manager.onload_weights.remote())
+        ray.get(rollout_manager.load_weights.remote())
         ray.get(rollout_manager.update_weights_from_path.remote(
             checkpoint_path, int(target_weight_version)))
-        ray.get(rollout_manager.onload_post_update.remote())
-        ray.get(rollout_manager.onload_runtime_cache.remote())
+        ray.get(rollout_manager.after_weight_update.remote())
+        ray.get(rollout_manager.reload_runtime_cache.remote())
         ray.get(rollout_manager.assert_inference_weight_version.remote(
             int(target_weight_version)))
         cleanup_published_checkpoint(checkpoint_path)
@@ -259,7 +259,7 @@ def _sync_weights_to_rollout(args, rollout_id, training_group, rollout_manager,
     # Legacy ObjectRef path
     weights_ref = training_group.get_weights()
     ray.wait([weights_ref], num_returns=1)
-    ray.get(rollout_manager.onload_weights.remote())
+    ray.get(rollout_manager.load_weights.remote())
     ray.get(rollout_manager.update_weights.remote(
         weights_ref, int(target_weight_version)))
     # ... onload_post_update, onload_runtime_cache, assert_inference_weight_version
@@ -411,7 +411,7 @@ class RolloutManager:
 
         # 3. 分布式采样（分发到所有 InferenceActor）
         sampler_outputs = self.inference_group.generate(batch, sde_indices)
-        # sampler_outputs: List[SamplerOutput]
+        # sampler_outputs: List[RolloutOutput]
         #   每个包含: trajectories, log_probs, latents, decoded_images
 
         # 4. 计算奖励
@@ -541,7 +541,7 @@ diffusionRL/                          # 总计 ~28,217 行 (含测试 ~1,449行)
 ├── samplers/                       # 采样器 (~4,937行)
 │   ├── __init__.py                 # 模块导出 (~88行)
 │   ├── base.py                     # BaseSampler, TrajectoryReplaySampler (~243行)
-│   ├── engine.py                   # 引擎注册表 + BaseInferenceEngine (~287行)
+│   ├── engine.py                   # 引擎注册表 + BaseRolloutEngine (~287行)
 │   ├── log_prob.py                 # SDE 对数概率计算 (~369行)
 │   ├── noise_utils.py              # 共享噪声生成 init_same_noise (~172行)
 │   ├── fsdp/                       # 原生 PyTorch 采样器 (~2,056行)
@@ -549,14 +549,14 @@ diffusionRL/                          # 总计 ~28,217 行 (含测试 ~1,449行)
 │   │   ├── flux_sampler.py         # FluxSampler (~508行)
 │   │   ├── sd3_sampler.py          # SD3Sampler (~570行)
 │   │   ├── hunyuan_sampler.py      # FSDPHunyuanSampler (~343行)
-│   │   └── engine.py               # FSDPInferenceEngine (~606行)
+│   │   └── engine.py               # FSDPRolloutEngine (~606行)
 │   ├── fastvideo/                   # FastVideo 引擎 (~1,058行)
 │   │   ├── __init__.py             # 模块导出 (~25行)
 │   │   ├── fastvideo_sampler.py    # FastVideoSampler (~494行)
-│   │   └── engine.py               # FastVideoInferenceEngine (~539行)
+│   │   └── engine.py               # FastVideoRolloutEngine (~539行)
 │   ├── sglang/                     # SGLang 引擎
 │   │   ├── __init__.py             # 模块导出 (~33行)
-│   │   ├── engine.py               # SGLangInferenceEngine (~178行)
+│   │   ├── engine.py               # SGLangRolloutEngine (~178行)
 │   │   └── client.py               # SGLang 客户端 (~225行) [v4.0 NEW]
 │   └── schedulers/
 │       ├── __init__.py             # 模块导出 (~27行)
@@ -564,7 +564,6 @@ diffusionRL/                          # 总计 ~28,217 行 (含测试 ~1,449行)
 │
 ├── advantages/                     # 优势函数计算 (~1,176行)
 │   ├── __init__.py                 # 统一 API + 多奖励字典支持 (~296行)
-│   ├── calculator.py               # AdvantageCalculator (deprecated) (~124行)
 │   ├── strategies.py               # Global/Group/PerPrompt 策略 (~185行)
 │   ├── normalizers.py              # 归一化工具 (~134行)
 │   ├── per_prompt_tracker.py       # 跨批次 per-prompt 追踪 (~225行)
@@ -678,7 +677,7 @@ class InferenceActor:
 
 | Actor 类型 | 职责 | 持有的资源 | 核心方法 |
 |-----------|------|-----------|---------|
-| **InferenceActor** | 采样生成轨迹 | ModelBundle（transformer + text_encoder + VAE）、Sampler | `generate()` → `SamplerOutput` |
+| **InferenceActor** | 采样生成轨迹 | ModelBundle（transformer + text_encoder + VAE）、Sampler | `generate()` → `RolloutOutput` |
 | **TrainingActor** | 执行梯度更新 | FSDP 包装的模型、Optimizer、LR Scheduler、Loss 函数 | `train()` → metrics dict |
 
 **为什么要分两个 Actor？**
@@ -689,7 +688,7 @@ class InferenceActor:
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │  模型状态: eval() 模式，torch.no_grad()                    │  │
 │  │  作用: 根据 prompt 生成图像/视频的采样轨迹                  │  │
-│  │  输出: SamplerOutput (latents, trajectories, log_probs)   │  │
+│  │  输出: RolloutOutput (latents, trajectories, log_probs)   │  │
 │  └───────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
                                 ↓
@@ -782,7 +781,7 @@ stateDiagram-v2
 
 ### 3.3 核心数据结构 (types/*)
 
-**v4.0 新增**：`SampleStatus` 枚举（管道中样本状态）、`InferenceRequest` 数据类、`is_backward_batch()` / `is_forward_batch()` 类型判断函数。
+**v4.0 新增**：`SampleStatus` 枚举（管道中样本状态）、`RolloutRequest` 数据类、`is_backward_batch()` / `is_forward_batch()` 类型判断函数。
 
 ```python
 class SampleStatus(Enum):                  # [v4.0 NEW]
@@ -922,13 +921,13 @@ class ForwardTrainingBatch:
     rewards: Optional[Tensor]       # [B] 原始奖励
 ```
 
-#### 3.3.6 SamplerOutput - 采样器输出
+#### 3.3.6 RolloutOutput - 采样器输出
 
-**用途**：InferenceActor 中 Sampler 的统一输出格式。封装采样生成的所有结果，包括最终 latent、完整轨迹、log_prob 等。RolloutManager 收集多个 Actor 的 SamplerOutput 后，计算 reward 并转换为 TrainingBatch。
+**用途**：InferenceActor 中 Sampler 的统一输出格式。封装采样生成的所有结果，包括最终 latent、完整轨迹、log_prob 等。RolloutManager 收集多个 Actor 的 RolloutOutput 后，计算 reward 并转换为 TrainingBatch。
 
 ```python
 @dataclass
-class SamplerOutput:
+class RolloutOutput:
     """
     采样器的统一输出格式
     """
@@ -997,7 +996,7 @@ classDiagram
         +validate()
     }
 
-    class SamplerOutput {
+    class RolloutOutput {
         +Tensor latents
         +Tensor timesteps
         +Tensor trajectories
@@ -1014,8 +1013,8 @@ classDiagram
 
     ForwardTrainingBatch *-- PromptEmbeddings : contains
 
-    SamplerOutput *-- LogProbData : contains
-    SamplerOutput *-- PromptEmbeddings : contains
+    RolloutOutput *-- LogProbData : contains
+    RolloutOutput *-- PromptEmbeddings : contains
 ```
 
 ---
@@ -1378,21 +1377,21 @@ class NFTLoss(BaseLoss):
 
 ```mermaid
 classDiagram
-    class BaseInferenceEngine {
+    class BaseRolloutEngine {
         <<abstract>>
         +is_initialized: bool
         +is_offloaded: bool
         +supports_distributed: bool
         +requires_external_service: bool
         +initialize(config)
-        +generate(batch) SamplerOutput
+        +generate(batch) RolloutOutput
         +encode_prompt(prompts)
         +update_weights(weights_ref)
         +offload() / onload()
         +decode_latents(latents) Optional
     }
 
-    class FSDPInferenceEngine {
+    class FSDPRolloutEngine {
         说明: 原生 PyTorch 引擎
         支持 FSDP 分布式
         DanceGRPO 对齐
@@ -1400,21 +1399,21 @@ classDiagram
         +BaseSampler sampler
     }
 
-    class FastVideoInferenceEngine {
+    class FastVideoRolloutEngine {
         说明: FastVideo 框架引擎
         支持 Sequence Parallel
         视频模型优化
         +sp_size: int
     }
 
-    class SGLangInferenceEngine {
+    class SGLangRolloutEngine {
         说明: SGLang 引擎 (占位)
         支持 Tensor Parallel
     }
 
-    BaseInferenceEngine <|-- FSDPInferenceEngine
-    BaseInferenceEngine <|-- FastVideoInferenceEngine
-    BaseInferenceEngine <|-- SGLangInferenceEngine
+    BaseRolloutEngine <|-- FSDPRolloutEngine
+    BaseRolloutEngine <|-- FastVideoRolloutEngine
+    BaseRolloutEngine <|-- SGLangRolloutEngine
 ```
 
 #### 采样器继承结构
@@ -1426,7 +1425,7 @@ classDiagram
         +eta: float
         +sde_type: str
         +shift: float
-        +sample(batch)* SamplerOutput
+        +sample(batch)* RolloutOutput
         +requires_extra_forward: bool
         +supports_video: bool
     }
@@ -1575,12 +1574,12 @@ classDiagram
 
     class InferenceActor {
         <<@ray.remote num_gpus=1>>
-        -BaseInferenceEngine engine
+        -BaseRolloutEngine engine
         -bool _is_initialized
         -bool _is_offloaded
         -Optional reward_worker
         +init(config: Dict)
-        +generate(batch) SamplerOutput
+        +generate(batch) RolloutOutput
         +encode_prompts(prompts)
         +update_weights(weights_ref: ObjectRef)
         +compute_rewards() (colocate模式)
@@ -1598,7 +1597,7 @@ classDiagram
         -EMAUpdater ema_updater
         -int rank
         -int world_size
-        -Optional sampler (sampling_backend=training)
+        -Optional sampler (training_actor_direct_sampling=true)
         -Optional _sampling_config
         -bool _sampling_ready
         +init(config: Dict)
@@ -1610,7 +1609,7 @@ classDiagram
         +offload()
         +onload()
         +clear_memory()
-        +generate() (sampling_backend=training)
+        +generate() (training_actor_direct_sampling=true)
     }
 
     RayActor <|-- BaseTrainRayActor
@@ -1620,7 +1619,7 @@ classDiagram
 
 #### InferenceActor 引擎支持
 
-InferenceActor 通过 `BaseInferenceEngine` 抽象支持多种推理后端。v3.0 新增 `num_gpus_allocated` 参数：
+InferenceActor 通过 `BaseRolloutEngine` 抽象支持多种推理后端。v3.0 新增 `num_gpus_allocated` 参数：
 
 | 引擎类型 | 配置参数 | GPU 分配 | 特点 |
 |---------|---------|---------|------|
@@ -1662,7 +1661,7 @@ classDiagram
 
     class InferenceActorGroup {
         +List~InferenceActor~ inference_actors
-        +generate(prompts, embeddings) List~SamplerOutput~
+        +generate(prompts, embeddings) List~RolloutOutput~
         +async_generate() List~ObjectRef~
         +update_weights(weights_ref: ObjectRef)
         +offload()
@@ -1929,7 +1928,7 @@ flowchart LR
     Embeds --> DS
     DS -->|"get_samples()"| RM
     RM -->|"_distributed_sample()"| IA
-    IA -->|"SamplerOutput"| RM
+    IA -->|"RolloutOutput"| RM
     RM -->|"images + prompts"| RW
     RW -->|"rewards"| Algo
     Algo -->|"compute_advantages()"| Adv
@@ -2106,7 +2105,7 @@ class TrainingActor:
 `train_async.py`（~145 行）配合 `runtime/async_runtime.py`（~127 行）实现异步 rollout/train 重叠。通过 `--async-pipeline=true` 启用。
 
 当前约束：
-- 仅支持 separate（`colocate_inference_training=false`）
+- 仅支持 separate（`colocate_rollout_training=false`）
 - 默认关闭 offload（避免 rollout/train overlap 期间的状态抖动）
 - 通过 `update_weights_interval` 在 generation 边界执行权重同步
 
@@ -2324,7 +2323,7 @@ flowchart TB
 
         subgraph Phase1["Phase 1: Rollout 生成"]
             A1["1. DataSource.get_batch()"] --> A2["2. InferenceActors.generate()"]
-            A2 --> A3["3. 收集 SamplerOutputs"]
+            A2 --> A3["3. 收集 RolloutOutputs"]
             A3 --> A4["4. 解码 latents → images/videos"]
             A4 --> A5[["5. RewardService.compute_rewards()"]]
             A5 --> A6["6. Algorithm.compute_advantages()"]
@@ -2365,7 +2364,7 @@ sequenceDiagram
     participant Algo as Algorithm
 
     RM->>IA: generate(batch, sde_indices)
-    IA-->>RM: List[SamplerOutput]
+    IA-->>RM: List[RolloutOutput]
 
     Note over RM: 收集所有 Actor 的输出
     Note over RM: 解码 latents → images (VAE)
@@ -2662,7 +2661,7 @@ graph TB
 | **CPU Local** | 默认 | 无 | 开发测试、小模型 |
 | **HTTP Remote** | `use_http_reward=True`<br/>`reward_service_url="..."` | 无（远程） | 生产环境、微服务 |
 | **Independent GPU** | `reward_dedicated_num_gpus=N`<br/>(N > 0) | N 个独立 GPU | 大型奖励模型 |
-| **Colocate GPU** | `colocate_inference_training=True`<br/>`colocate_reward=True` | 与 Inference 共享 | 资源受限 |
+| **Colocate GPU** | `colocate_rollout_training=True`<br/>`colocate_reward=True` | 与 Inference 共享 | 资源受限 |
 
 ### 8.9 核心数据结构
 
@@ -2702,7 +2701,6 @@ reward_dedicated_num_gpus: int = 0           # 独立奖励 GPU 总数 (0 = CPU)
 reward_dedicated_gpus_per_actor: int = 1     # 每个 actor 的 GPU 数 (大模型需要多卡)
 reward_dedicated_num_nodes: int = 0          # 独立奖励节点数 (多节点)
 reward_dedicated_num_gpus_per_node: int = 0  # 每节点 GPU 数
-reward_placement_strategy: str = "PACK"  # PlacementGroup 策略
 ```
 
 说明：`reward_dedicated_num_gpus` 与 `reward_dedicated_num_nodes` 二选一，不要同时设置。
@@ -2737,13 +2735,13 @@ reward_placement_strategy: str = "PACK"  # PlacementGroup 策略
 | **采样配置** | `num_inference_steps`, `eta`, `shift`, `sde_ratio`, `init_same_noise` | SDE 采样控制 |
 | **NFT 配置** | `nft_beta`, `nft_adv_mode`, `use_ema`, `ema_decay`, `nft_timestep_mode`, `nft_shuffle_timesteps`, `nft_apply_shift` | DiffusionNFT 特定 |
 | **DanceGRPO 配置** | `use_running_stats`, `running_stats_warmup`, `use_global_std` | 跨批次统计 |
-| **Ray 资源** | `inference_num_nodes/gpus`, `training_num_nodes/gpus`, `reward_num_gpus` | 分布式配置 |
+| **Ray 资源** | `rollout_num_nodes/gpus`, `training_num_nodes/gpus`, `reward_num_gpus` | 分布式配置 |
 | **引擎配置** | `sampler_engine_type`, `sp_size`, `tp_size`, `fsdp_num_gpus` | 推理后端 |
-| **Offload** | `offload`, `offload_train`, `offload_rollout`, `colocate_inference_training` | 内存优化 |
-| **采样后端** | `sampling_backend` | "inference" (默认) 或 "training" |
+| **Offload** | `offload`, `offload_train`, `offload_rollout`, `colocate_rollout_training` | 内存优化 |
+| **采样模式** | `training_actor_direct_sampling` | `false`=独立 rollout actor, `true`=training actor 直采样 |
 | **训练优化** | `use_gradient_checkpointing`, `gradient_steps_per_epoch`, `cross_rank_shuffle` | 内存/性能优化 |
 | **数据分区** | `partition_train_data`, `prompts_per_batch` | 大批次数据分区 |
-| **Colocate 精细控制** | `colocate_training_gpu_fraction`, `colocate_inference_gpu_fraction` | GPU 分配比例 |
+| **Colocate 精细控制** | `colocate_training_gpu_fraction`, `colocate_rollout_gpu_fraction` | GPU 分配比例 |
 | **异步管道** | `async_pipeline`, `async_max_inflight`, `update_weights_interval` | 异步 rollout/train 重叠 [v4.0] |
 | **权重同步** | `weight_sync_mode`, `weight_sync_dir` | ObjectRef / checkpoint_path 双模式 [v4.0] |
 
@@ -2751,7 +2749,7 @@ reward_placement_strategy: str = "PACK"  # PlacementGroup 策略
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `sampling_backend` | str | "inference" | 采样后端："inference" 使用独立推理 Actor，"training" 训练 Actor 兼做采样 |
+| `training_actor_direct_sampling` | bool | False | `false` 使用独立 rollout actor，`true` 训练 actor 兼做采样（FSDP 直采样） |
 | `init_same_noise` | bool | False | DanceGRPO/MixGRPO：同一 prompt 的多个采样共享初始噪声 |
 | `use_running_stats` | bool | False | 启用跨批次 RunningMeanStd (DanceGRPO) |
 | `running_stats_warmup` | int | 0 | Running stats 预热步数 |
@@ -2867,7 +2865,7 @@ mindmap
             BaseAlgorithm
             BaseSampler
             BaseLoss
-            BaseInferenceEngine
+            BaseRolloutEngine
         状态机模式
             AsyncPipelineRuntime
             InflightRollout 生命周期
@@ -2889,7 +2887,7 @@ mindmap
 | **新损失函数** | 1. 继承 `BaseLoss`<br/>2. 实现 `compute()`<br/>3. 使用 `register_loss()` 注册 | 参考 `grpo_loss.py` |
 | **新奖励模型** | 1. 继承 `BaseRewardWorker`<br/>2. 实现 `compute_rewards()` | 参考 `local.py` |
 | **新模型架构** | 1. 实现 `ModelBundle` 接口<br/>2. 在 `models/` 下添加文件<br/>3. 更新 `MODEL_TYPE_TO_PATH` | 参考 `flux.py` |
-| **新推理引擎** | 1. 继承 `BaseInferenceEngine`<br/>2. 实现所有抽象方法<br/>3. 使用 `@register_engine` | 参考 `fsdp/engine.py` |
+| **新推理引擎** | 1. 继承 `BaseRolloutEngine`<br/>2. 实现所有抽象方法<br/>3. 使用 `@register_engine` | 参考 `fsdp/engine.py` |
 
 ### 10.4 性能考量
 

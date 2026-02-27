@@ -12,9 +12,9 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 import torch
 
 from diffusionrl.samplers.log_prob import get_sigma_schedule
-from diffusionrl.types import LogProbData, PromptEmbeddings, SamplerOutput
+from diffusionrl.types import LogProbData, PromptEmbeddings, RolloutOutput
 
-from ..engine import BaseInferenceEngine, EngineCapabilities, EngineConfig, register_engine
+from ..engine import BaseRolloutEngine, EngineCapabilities, EngineConfig, register_engine
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ def _to_bool(value: Any, default: bool) -> bool:
 
 
 @register_engine("sglang")
-class SGLangInferenceEngine(BaseInferenceEngine):
+class SGLangRolloutEngine(BaseRolloutEngine):
     """Inference engine backed by `sglang.multimodal_gen` DiffGenerator."""
 
     def __init__(self, config: EngineConfig):
@@ -46,14 +46,24 @@ class SGLangInferenceEngine(BaseInferenceEngine):
         self._last_weight_checksum: Dict[str, str] = {}
         self._supports_prompt_encoding: bool = False
         self._prompt_encoder: Any = None
+        self._supports_memory_api: bool = False
+        self._require_memory_api: bool = False
         self._warned_sequential_requests: bool = False
         self._warned_missing_initial_noise: bool = False
         self._warned_missing_decoded: bool = False
         self._warned_ignored_external_embeddings: bool = False
         self._warned_logprob_shape: bool = False
-        self._warned_noop_memory_api: bool = False
         self._warned_unsupported_rollout_sde: bool = False
         self._warned_trimmed_logprob_prefix: bool = False
+        self._warned_disabled_native_rollout: bool = False
+
+    @classmethod
+    def declared_capabilities(cls) -> Dict[str, bool]:
+        return {
+            "requires_trajectory": True,
+            "requires_log_prob": False,
+            "requires_embeddings": False,
+        }
 
     # ---------------------------------------------------------------------
     # Import/runtime helpers
@@ -134,12 +144,65 @@ class SGLangInferenceEngine(BaseInferenceEngine):
             "sync_scheduler_client": sync_scheduler_client,
         }
 
+    def _has_memory_handler(self, method_name: str) -> bool:
+        method = getattr(self._generator, method_name, None)
+        return callable(method)
+
+    def _validate_memory_api_contract(self) -> None:
+        has_release = self._has_memory_handler("release_memory_occupation")
+        has_resume = self._has_memory_handler("resume_memory_occupation")
+        self._supports_memory_api = bool(has_release and has_resume)
+
+        logger.info(
+            "SGLang memory API contract: supports=%s require=%s release=%s resume=%s",
+            self._supports_memory_api,
+            self._require_memory_api,
+            has_release,
+            has_resume,
+        )
+
+        if self._require_memory_api and not self._supports_memory_api:
+            raise RuntimeError(
+                "SGLang offload is required but generator does not expose "
+                "release_memory_occupation/resume_memory_occupation."
+            )
+
+    def _call_memory_api(self, method_name: str, *, tags: Sequence[str]) -> Any:
+        if self._generator is None:
+            raise RuntimeError("SGLang generator is not initialized.")
+
+        method = getattr(self._generator, method_name, None)
+        if not callable(method):
+            raise RuntimeError(
+                f"SGLang generator missing required memory API: {method_name}."
+            )
+
+        response = method(tags=list(tags))
+        if isinstance(response, dict) and not bool(response.get("success", True)):
+            raise RuntimeError(
+                str(response.get("message", f"{method_name} failed"))
+            )
+        return response
+
+    def _sglang_logprob_mode(self) -> str:
+        mode = str((self.config.engine_kwargs or {}).get("sglang_logprob_mode", "replay")).strip().lower()
+        if mode not in {"replay", "native"}:
+            return "replay"
+        return mode
+
+    def _native_rollout_logprob_enabled(self) -> bool:
+        return self._sglang_logprob_mode() == "native"
+
     def _build_server_kwargs(self, server_args_cls: Any) -> Dict[str, Any]:
         raw = dict(self.config.engine_kwargs or {})
         self._local_mode = _to_bool(raw.get("local_mode", True), default=True)
         self._verify_weight_checksum = _to_bool(
             raw.get("verify_weight_checksum", True),
             default=True,
+        )
+        self._require_memory_api = _to_bool(
+            raw.get("require_memory_api", False),
+            default=False,
         )
 
         target_modules = raw.get("target_modules")
@@ -153,6 +216,7 @@ class SGLangInferenceEngine(BaseInferenceEngine):
             "local_mode",
             "target_modules",
             "verify_weight_checksum",
+            "require_memory_api",
             "prompt_encoder_device",
             "prompt_encoder_dtype",
             "server_kwargs",
@@ -212,6 +276,7 @@ class SGLangInferenceEngine(BaseInferenceEngine):
 
         self._server_args = server_args
         self._generator = generator
+        self._validate_memory_api_contract()
         self._is_initialized = True
 
     def _infer_model_type(self) -> str:
@@ -656,7 +721,7 @@ class SGLangInferenceEngine(BaseInferenceEngine):
         seed: Optional[int] = None,
         sde_indices: Optional[Set[int]] = None,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> RolloutOutput:
         if not self._is_initialized or self._generator is None:
             raise RuntimeError("SGLang engine is not initialized")
 
@@ -713,7 +778,19 @@ class SGLangInferenceEngine(BaseInferenceEngine):
         negative_prompt = kwargs.pop("negative_prompt", None)
         fps = kwargs.pop("fps", None)
         num_outputs_per_prompt = kwargs.pop("num_outputs_per_prompt", None)
-        rollout_enabled = bool(kwargs.pop("enable_rollout_logprob", sde_indices is not None))
+        default_rollout_enabled = bool(
+            sde_indices is not None and self._native_rollout_logprob_enabled()
+        )
+        rollout_enabled = bool(kwargs.pop("enable_rollout_logprob", default_rollout_enabled))
+        if rollout_enabled and not self._native_rollout_logprob_enabled():
+            if not self._warned_disabled_native_rollout:
+                logger.warning(
+                    "enable_rollout_logprob requested but sglang_logprob_mode=%r. "
+                    "Disabling native rollout logprob and using replay path.",
+                    self._sglang_logprob_mode(),
+                )
+                self._warned_disabled_native_rollout = True
+            rollout_enabled = False
         requested_rollout_sde = str(
             kwargs.pop("rollout_sde_type", getattr(self.config, "sde_type", "sde"))
         ).strip().lower()
@@ -739,7 +816,6 @@ class SGLangInferenceEngine(BaseInferenceEngine):
         )
 
         sampling_params_kwargs: Dict[str, Any] = {
-            "prompt": list(prompts),
             "num_inference_steps": steps,
             "guidance_scale": scale,
             "height": out_h,
@@ -748,7 +824,9 @@ class SGLangInferenceEngine(BaseInferenceEngine):
             "save_output": False,
             "return_file_paths_only": False,
             "return_trajectory_latents": True,
-            "return_trajectory_decoded": return_decoded_for_reward,
+            # Keep rollout path latent-only; reward-side image decoding is handled
+            # by diffusionrl fallback in RolloutActor.generate().
+            "return_trajectory_decoded": False,
         }
         if seed is not None:
             sampling_params_kwargs["seed"] = int(seed)
@@ -763,15 +841,26 @@ class SGLangInferenceEngine(BaseInferenceEngine):
             sampling_params_kwargs["rollout_sde_type"] = rollout_sde_type
             sampling_params_kwargs["rollout_noise_level"] = rollout_noise_level
 
-        raw_results = self._generator.generate(sampling_params_kwargs=sampling_params_kwargs)
-        if raw_results is None:
-            raise RuntimeError("SGLang generator returned no results")
+        # Upstream sglang-diffusion expects "prompt" as a single string.
+        # Run one request per prompt and merge outputs to keep DiffusionRL's
+        # prompt-batch contract stable.
+        results: List[Any] = []
+        base_seed = int(seed) if seed is not None else None
+        for prompt_idx, prompt in enumerate(prompts):
+            request_kwargs = dict(sampling_params_kwargs)
+            request_kwargs["prompt"] = str(prompt)
+            if base_seed is not None:
+                request_kwargs["seed"] = base_seed + int(prompt_idx)
 
-        results: List[Any]
-        if isinstance(raw_results, list):
-            results = raw_results
-        else:
-            results = [raw_results]
+            raw_results = self._generator.generate(sampling_params_kwargs=request_kwargs)
+            if raw_results is None:
+                raise RuntimeError(
+                    f"SGLang generator returned no results for prompt index {prompt_idx}"
+                )
+            if isinstance(raw_results, list):
+                results.extend(raw_results)
+            else:
+                results.append(raw_results)
 
         trajectories = [self._extract_trajectory_from_result(result) for result in results]
         if not trajectories:
@@ -887,6 +976,7 @@ class SGLangInferenceEngine(BaseInferenceEngine):
         metadata: Dict[str, Any] = {
             "generator_type": "sglang",
             "engine_capabilities": self.get_capabilities_dict(),
+            "sglang_logprob_mode": self._sglang_logprob_mode(),
             "trajectory_format": (
                 "packed_seq_c4"
                 if model_type == "flux" and trajectories_tensor.dim() == 4
@@ -902,7 +992,7 @@ class SGLangInferenceEngine(BaseInferenceEngine):
         if self._last_weight_checksum:
             metadata["weight_checksum"] = dict(self._last_weight_checksum)
 
-        return SamplerOutput(
+        return RolloutOutput(
             latents=final_latents,
             timesteps=timesteps,
             trajectories=trajectories_tensor,
@@ -1022,41 +1112,16 @@ class SGLangInferenceEngine(BaseInferenceEngine):
         """Return checksum snapshot from the latest successful path sync."""
         return dict(self._last_weight_checksum)
 
-    def offload(self) -> None:
-        if self._generator is not None and hasattr(self._generator, "release_memory_occupation"):
-            try:
-                response = self._generator.release_memory_occupation(tags=["weights"])
-                if isinstance(response, dict) and not bool(response.get("success", True)):
-                    raise RuntimeError(str(response.get("message", "unknown error")))
-                self._is_offloaded = True
-                logger.info("SGLang engine offloaded via release_memory_occupation().")
-                return
-            except Exception as exc:
-                logger.warning(
-                    "SGLang release_memory_occupation() failed; falling back to local no-op: %s",
-                    exc,
-                )
-
-        # Fallback no-op when upstream memory handlers are unavailable.
-        if not self._warned_noop_memory_api:
-            logger.warning(
-                "SGLang offload() is currently a local no-op: scheduler release/resume-memory handlers "
-                "are not available in upstream sglang-diffusion."
-            )
-            self._warned_noop_memory_api = True
+    def sleep(self) -> None:
+        self._call_memory_api("release_memory_occupation", tags=["weights"])
         self._is_offloaded = True
+        logger.info("SGLang engine entered sleep state via release_memory_occupation().")
 
-    def onload(self) -> None:
-        if self._generator is not None and hasattr(self._generator, "resume_memory_occupation"):
-            try:
-                response = self._generator.resume_memory_occupation(tags=["weights"])
-                if isinstance(response, dict) and not bool(response.get("success", True)):
-                    raise RuntimeError(str(response.get("message", "unknown error")))
-            except Exception as exc:
-                logger.warning(
-                    "SGLang resume_memory_occupation() failed; falling back to local mark-onload: %s",
-                    exc,
-                )
+    def wake_up(self) -> None:
+        if not self._is_offloaded:
+            return
+
+        self._call_memory_api("resume_memory_occupation", tags=["weights"])
         self._is_offloaded = False
 
     # ---------------------------------------------------------------------
@@ -1075,14 +1140,12 @@ class SGLangInferenceEngine(BaseInferenceEngine):
             self._supports_prompt_encoding
             or self._infer_model_type() in _SUPPORTED_PROMPT_ENCODER_MODEL_TYPES
         )
-        default_sde_type = str(getattr(self.config, "sde_type", "sde")).strip().lower()
-        supports_native_logprob = default_sde_type in {"sde", "cps", "flow", "flux_flow"}
+        supports_native_logprob = self._native_rollout_logprob_enabled()
         return EngineCapabilities(
             supports_logprob=supports_native_logprob,
             supports_trajectory=True,
             supports_prompt_embeddings=supports_prompt_encoding,
             supports_guidance_scale=True,
-            supports_staged_onload=False,
             weight_sync_mode="checkpoint_path",
         )
 

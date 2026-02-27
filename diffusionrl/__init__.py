@@ -10,14 +10,14 @@ __version__ = "0.1.0"
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     # shared types
     "SampleStatus": ("diffusionrl.types", "SampleStatus"),
-    "SamplerOutputType": ("diffusionrl.types", "SamplerOutput"),
-    "InferenceRequest": ("diffusionrl.types", "InferenceRequest"),
+    "RolloutOutputType": ("diffusionrl.types", "RolloutOutput"),
+    "RolloutRequest": ("diffusionrl.types", "RolloutRequest"),
     "RewardRequestType": ("diffusionrl.types", "RewardRequest"),
     "RewardResponseType": ("diffusionrl.types", "RewardResponse"),
     "TrainingBatch": ("diffusionrl.types", "TrainingBatch"),
     # samplers
     "BaseSampler": ("diffusionrl.samplers", "BaseSampler"),
-    "SamplerOutput": ("diffusionrl.samplers", "SamplerOutput"),
+    "RolloutOutput": ("diffusionrl.samplers", "RolloutOutput"),
     "TrajectoryReplaySampler": ("diffusionrl.samplers", "TrajectoryReplaySampler"),
     "FastVideoSampler": ("diffusionrl.samplers", "FastVideoSampler"),
     "FastVideoSamplerV2": ("diffusionrl.samplers", "FastVideoSamplerV2"),
@@ -38,8 +38,6 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "SamplingRequirements": ("diffusionrl.algorithms", "SamplingRequirements"),
     "GRPOAlgorithm": ("diffusionrl.algorithms", "GRPOAlgorithm"),
     "compute_advantage": ("diffusionrl.advantages", "compute_advantage"),
-    "AdvantageCalculator": ("diffusionrl.advantages", "AdvantageCalculator"),
-    "build_advantage_calculator": ("diffusionrl.advantages", "build_advantage_calculator"),
     # config / utils / models
     "TrainingArguments": ("diffusionrl.config", "TrainingArguments"),
     "parse_args": ("diffusionrl.config", "parse_args"),

@@ -18,7 +18,7 @@
 # per_rank_batch = total_samples / num_train_gpus (must be divisible)
 #
 # This script runs DanceGRPO with SD3 using training-actor sampling.
-# Inference actors are disabled; sampling happens on training actors directly.
+# Rollout actors are disabled; sampling happens on training actors directly.
 #
 # Key parameters (adapted from DanceGRPO FLUX for SD3):
 # - sde_type=sde (standard SDE formulation for SD3)
@@ -83,10 +83,10 @@ python -m diffusionrl.train \
     --advantage-type group \
     --advantage-clip-max 5.0 \
     \
-    --sampling-backend training \
-    --colocate-inference-training false \
-    --inference-num-nodes 0 \
-    --inference-num-gpus-per-node 0 \
+    --training-actor-direct-sampling true \
+    --colocate-rollout-training false \
+    --rollout-num-nodes 0 \
+    --rollout-num-gpus-per-node 0 \
     --training-num-gpus-per-node ${NUM_GPUS} \
     --offload false \
     \

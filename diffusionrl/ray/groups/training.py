@@ -55,6 +55,8 @@ class TrainingActorGroup(BaseActorGroup):
 
         self.master_addr = master_addr
         self.master_port = master_port
+        self._buffer_consumer_spec_cache: Optional[Dict[str, Any]] = None
+        self._train_backend_info_cache: Optional[Dict[str, Any]] = None
 
     def async_train(
         self,
@@ -112,9 +114,41 @@ class TrainingActorGroup(BaseActorGroup):
         refs = [actor.update_weights.remote() for actor in self._actor_handles]
         ray.get(refs)
 
+    def get_train_backend_info(self, *, force_refresh: bool = False) -> Dict[str, Any]:
+        """Return training backend metadata declared by actor rank 0."""
+        if self._train_backend_info_cache is not None and not force_refresh:
+            return dict(self._train_backend_info_cache)
+        if not self._actor_handles:
+            return {}
+        info = ray.get(self._actor_handles[0].get_train_backend_info.remote())
+        if isinstance(info, dict):
+            self._train_backend_info_cache = dict(info)
+            return dict(info)
+        return {}
+
+    def get_buffer_consumer_spec(self, *, force_refresh: bool = False) -> Dict[str, Any]:
+        """Describe how rollout buffer should partition payloads for this group."""
+        if self._buffer_consumer_spec_cache is not None and not force_refresh:
+            return dict(self._buffer_consumer_spec_cache)
+        if not self._actor_handles:
+            return {
+                "dp_size": self.num_actors,
+                "partition_train_data": True,
+                "partition_mode": "data_parallel",
+            }
+        spec = ray.get(self._actor_handles[0].get_buffer_consumer_spec.remote())
+        if not isinstance(spec, dict):
+            spec = {}
+        spec = dict(spec)
+        spec.setdefault("dp_size", int(self.num_actors))
+        spec.setdefault("partition_train_data", True)
+        spec.setdefault("partition_mode", "data_parallel")
+        self._buffer_consumer_spec_cache = spec
+        return dict(spec)
+
     def get_weights(self) -> ray.ObjectRef:
         """
-        Get weights from rank 0 for syncing to inference actors.
+        Get weights from rank 0 for syncing to rollout actors.
 
         IMPORTANT: For FSDP, we must call get_weights on ALL actors simultaneously
         because FSDP.state_dict() triggers an ALLGATHER collective that requires
@@ -241,11 +275,11 @@ class TrainingActorGroup(BaseActorGroup):
         return val
 
     def _slice_sampler_output(self, output: Any, start: int, end: int) -> Any:
-        from diffusionrl.types.sampling import SamplerOutput
+        from diffusionrl.types.sampling import RolloutOutput
 
-        if not isinstance(output, SamplerOutput):
+        if not isinstance(output, RolloutOutput):
             return output
-        return SamplerOutput(
+        return RolloutOutput(
             latents=output.latents[start:end],
             timesteps=output.timesteps,
             trajectories=output.trajectories[start:end] if output.trajectories is not None else None,
@@ -351,15 +385,5 @@ class TrainingActorGroup(BaseActorGroup):
             remaining -= keep
 
         return trimmed
-
-    def sample_batch(
-        self,
-        prompts: Optional[List[str]] = None,
-        **kwargs,
-    ) -> List[Any]:
-        """Control-plane sampling API used by RolloutManager."""
-        return self.generate(prompts=prompts, **kwargs)
-
-
 
 __all__ = ["TrainingActorGroup"]

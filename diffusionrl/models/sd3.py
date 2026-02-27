@@ -269,6 +269,10 @@ class SD3ModelBundle(ModelBundle):
     def model_type(self) -> str:
         return "sd3"
 
+    @property
+    def media_type(self) -> str:
+        return "image"
+
     @classmethod
     def default_sampler_path(cls) -> Optional[str]:
         return "diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler"

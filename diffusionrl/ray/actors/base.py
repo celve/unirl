@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# Shared utility functions for all actors (Training & Inference)
+# Shared utility functions for all actors (Training & Rollout)
 # ============================================================
 
 def log_resource_ids(tag: str, rank: int) -> None:

@@ -1,0 +1,62 @@
+"""Ray utility modules: distributed helpers plus training-actor support helpers."""
+
+from diffusionrl.ray.utils.actor_sampling import ActorSamplingExecutor, TrainingActorSamplingService
+from diffusionrl.ray.utils.distributed import (
+    NOSET_VISIBLE_DEVICES_ENV_VARS_LIST,
+    DistributedLock,
+    LockContext,
+    create_distributed_lock,
+    get_distributed_lock,
+    GPUInfo,
+    NodeInfo,
+    get_node_info,
+    get_node_ip,
+    get_free_port,
+    get_consecutive_free_ports,
+    ray_get_with_retry,
+    ray_wait_with_progress,
+    ray_get_async,
+    batch_ray_get,
+    wait_for_placement_group,
+    Timer,
+    timed,
+    clear_gpu_memory,
+    get_gpu_memory_usage,
+    log_gpu_memory_usage,
+    check_actor_health,
+    wait_for_actors_ready,
+)
+from diffusionrl.ray.utils.memory import TrainingActorMemoryService
+from diffusionrl.ray.utils.state_io import TrainingActorStateIOService
+
+__all__ = [
+    # distributed
+    "NOSET_VISIBLE_DEVICES_ENV_VARS_LIST",
+    "DistributedLock",
+    "LockContext",
+    "create_distributed_lock",
+    "get_distributed_lock",
+    "GPUInfo",
+    "NodeInfo",
+    "get_node_info",
+    "get_node_ip",
+    "get_free_port",
+    "get_consecutive_free_ports",
+    "ray_get_with_retry",
+    "ray_wait_with_progress",
+    "ray_get_async",
+    "batch_ray_get",
+    "wait_for_placement_group",
+    "Timer",
+    "timed",
+    "clear_gpu_memory",
+    "get_gpu_memory_usage",
+    "log_gpu_memory_usage",
+    "check_actor_health",
+    "wait_for_actors_ready",
+    # actor helpers/services
+    "ActorSamplingExecutor",
+    "TrainingActorSamplingService",
+    "TrainingActorMemoryService",
+    "TrainingActorStateIOService",
+]

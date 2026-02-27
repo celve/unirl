@@ -147,7 +147,7 @@ class PromptEmbeddings:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary format for backward compatibility."""
+        """Convert to dictionary format for downstream consumers."""
         result = {"prompt_embeds": self.prompt_embeds}
         if self.pooled_prompt_embeds is not None:
             result["pooled_prompt_embeds"] = self.pooled_prompt_embeds
@@ -203,7 +203,7 @@ class PromptEmbeddings:
 
 
 @dataclass
-class SamplerOutput:
+class RolloutOutput:
     """
     Output from a sampler.
 
@@ -270,9 +270,9 @@ class SamplerOutput:
         """Whether this output includes decoded images for reward computation."""
         return self.decoded_images is not None and len(self.decoded_images) > 0
 
-    def to_device(self, device: Union[str, "TorchDevice"]) -> "SamplerOutput":
+    def to_device(self, device: Union[str, "TorchDevice"]) -> "RolloutOutput":
         """Move all tensors to specified device."""
-        return SamplerOutput(
+        return RolloutOutput(
             latents=self.latents.to(device),
             timesteps=self.timesteps.to(device),
             trajectories=self.trajectories.to(device)
@@ -299,12 +299,12 @@ class SamplerOutput:
         """Validate SamplingContractV1 consistency."""
         if self.latents is None or self.timesteps is None:
             raise ValueError(
-                "SamplerOutput contract violation: latents and timesteps must be present."
+                "RolloutOutput contract violation: latents and timesteps must be present."
             )
 
         if self.timesteps.ndim != 1:
             raise ValueError(
-                f"SamplerOutput timesteps must be 1D, got shape={tuple(self.timesteps.shape)}"
+                f"RolloutOutput timesteps must be 1D, got shape={tuple(self.timesteps.shape)}"
             )
 
         batch_size = int(self.latents.shape[0])
@@ -313,33 +313,33 @@ class SamplerOutput:
         step_indices = self.resolved_step_indices
         if step_indices.shape[0] != t_plus_1:
             raise ValueError(
-                f"SamplerOutput step_indices length {step_indices.shape[0]} != timesteps length {t_plus_1}"
+                f"RolloutOutput step_indices length {step_indices.shape[0]} != timesteps length {t_plus_1}"
             )
         if step_indices.numel() > 1 and not bool(
             torch.all(step_indices[1:] > step_indices[:-1])
         ):
             raise ValueError(
-                f"SamplerOutput step_indices must be strictly increasing, got {step_indices.tolist()}"
+                f"RolloutOutput step_indices must be strictly increasing, got {step_indices.tolist()}"
             )
 
         if requires_trajectory and self.trajectories is None:
             raise ValueError(
-                "SamplerOutput contract violation: trajectories required but missing."
+                "RolloutOutput contract violation: trajectories required but missing."
             )
 
         if self.trajectories is not None:
             if int(self.trajectories.shape[0]) != batch_size:
                 raise ValueError(
-                    f"SamplerOutput trajectories batch {self.trajectories.shape[0]} != latents batch {batch_size}"
+                    f"RolloutOutput trajectories batch {self.trajectories.shape[0]} != latents batch {batch_size}"
                 )
             if int(self.trajectories.shape[1]) != t_plus_1:
                 raise ValueError(
-                    f"SamplerOutput trajectories T+1 {self.trajectories.shape[1]} != timesteps length {t_plus_1}"
+                    f"RolloutOutput trajectories T+1 {self.trajectories.shape[1]} != timesteps length {t_plus_1}"
                 )
 
         if requires_log_probs and not self.has_log_probs:
             raise ValueError(
-                "SamplerOutput contract violation: log_probs required but missing."
+                "RolloutOutput contract violation: log_probs required but missing."
             )
 
         if self.log_probs is not None:
@@ -347,22 +347,22 @@ class SamplerOutput:
             for idx, lp in self.log_probs.data.items():
                 if idx not in allowed_steps:
                     raise ValueError(
-                        f"SamplerOutput contract violation: log_prob index {idx} not in step_indices[:-1]={sorted(allowed_steps)}"
+                        f"RolloutOutput contract violation: log_prob index {idx} not in step_indices[:-1]={sorted(allowed_steps)}"
                     )
                 if int(lp.shape[0]) != batch_size:
                     raise ValueError(
-                        f"SamplerOutput contract violation: log_prob[{idx}] batch {lp.shape[0]} != {batch_size}"
+                        f"RolloutOutput contract violation: log_prob[{idx}] batch {lp.shape[0]} != {batch_size}"
                     )
             if self.sde_indices and set(int(i) for i in self.sde_indices) != set(
                 self.log_probs.data.keys()
             ):
                 raise ValueError(
-                    "SamplerOutput contract violation: sde_indices must exactly match log_probs keys"
+                    "RolloutOutput contract violation: sde_indices must exactly match log_probs keys"
                 )
 
         if requires_embeddings and self.embeddings is None:
             raise ValueError(
-                "SamplerOutput contract violation: embeddings required but missing."
+                "RolloutOutput contract violation: embeddings required but missing."
             )
 
         if (
@@ -370,7 +370,7 @@ class SamplerOutput:
             and int(self.embeddings.prompt_embeds.shape[0]) != batch_size
         ):
             raise ValueError(
-                f"SamplerOutput contract violation: embeddings batch {self.embeddings.prompt_embeds.shape[0]} != {batch_size}"
+                f"RolloutOutput contract violation: embeddings batch {self.embeddings.prompt_embeds.shape[0]} != {batch_size}"
             )
 
         if self.metadata is not None:
@@ -378,29 +378,28 @@ class SamplerOutput:
             timestep_type = self.metadata.get("timestep_type")
             if trajectory_format is None:
                 raise ValueError(
-                    "SamplerOutput contract violation: metadata.trajectory_format is required."
+                    "RolloutOutput contract violation: metadata.trajectory_format is required."
                 )
             if timestep_type is None:
                 raise ValueError(
-                    "SamplerOutput contract violation: metadata.timestep_type is required."
+                    "RolloutOutput contract violation: metadata.timestep_type is required."
                 )
             valid_formats = {"dense_latent", "video_dense_latent", "packed_seq_c4"}
             if trajectory_format not in valid_formats:
                 raise ValueError(
-                    f"SamplerOutput contract violation: unknown trajectory_format={trajectory_format}"
+                    f"RolloutOutput contract violation: unknown trajectory_format={trajectory_format}"
                 )
             if timestep_type not in {"sigma", "timestep"}:
                 raise ValueError(
-                    f"SamplerOutput contract violation: unknown timestep_type={timestep_type}"
+                    f"RolloutOutput contract violation: unknown timestep_type={timestep_type}"
                 )
 
 
 @dataclass
-class InferenceRequest:
-    """Request for inference/sampling."""
+class RolloutRequest:
+    """Request for rollout generation."""
 
     prompts: List[str]
-    # Deprecated input path: inference rollout now uses prompt-only requests.
     prompt_embeds: Optional[torch.Tensor] = None
     pooled_prompt_embeds: Optional[torch.Tensor] = None
     num_inference_steps: int = 28
@@ -413,10 +412,11 @@ class InferenceRequest:
     latents: Optional[torch.Tensor] = None
     kwargs: Dict[str, Any] = field(default_factory=dict)
 
+
 __all__ = [
-    "InferenceRequest",
+    "RolloutOutput",
+    "RolloutRequest",
     "LogProbData",
     "PromptEmbeddings",
     "SampleStatus",
-    "SamplerOutput",
 ]

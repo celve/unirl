@@ -58,6 +58,8 @@ NUM_GPUS=${NUM_GPUS:-8}
 BATCH_SIZE=${BATCH_SIZE:-4}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-8}
 REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward_aggr}
+WINDOW_MAX_ITERS_PER_GROUP=${WINDOW_MAX_ITERS_PER_GROUP:-10}
+WINDOW_MIN_ITERS_PER_GROUP=${WINDOW_MIN_ITERS_PER_GROUP:-1}
 LORA_RANK=${LORA_RANK:-32}
 LORA_ALPHA=${LORA_ALPHA:-64}
 if [ "${NUM_SAMPLES_PER_PROMPT}" -lt 2 ]; then
@@ -93,6 +95,8 @@ python -m diffusionrl.train \
     --window-strategy progressive \
     --window-group-size 4 \
     --window-iters-per-group 25 \
+    --window-max-iters-per-group ${WINDOW_MAX_ITERS_PER_GROUP} \
+    --window-min-iters-per-group ${WINDOW_MIN_ITERS_PER_GROUP} \
     --window-overlap true \
     --window-roll-back true \
     \
@@ -105,10 +109,10 @@ python -m diffusionrl.train \
     --advantage-clip-max 5.0 \
     --reward-mix-mode ${REWARD_MIX_MODE} \
     \
-    --sampling-backend training \
-    --colocate-inference-training false \
-    --inference-num-nodes 0 \
-    --inference-num-gpus-per-node 0 \
+    --training-actor-direct-sampling true \
+    --colocate-rollout-training false \
+    --rollout-num-nodes 0 \
+    --rollout-num-gpus-per-node 0 \
     --training-num-gpus-per-node ${NUM_GPUS} \
     --offload false \
     \

@@ -46,7 +46,7 @@ class GlobalStrategy:
 
         Args:
             rewards: Reward values [N]
-            **kwargs: Ignored (for interface compatibility)
+            **kwargs: Reserved for strategy-specific options.
 
         Returns:
             Advantages tensor [N]

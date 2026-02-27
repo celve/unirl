@@ -10,16 +10,16 @@ Available samplers:
 - FastVideoSamplerV2: (Future) Native FastVideo log_prob support
 
 Engine:
-- FastVideoInferenceEngine: Unified engine interface for Ray actors
+- FastVideoRolloutEngine: Unified engine interface for Ray actors
 """
 
 from .fastvideo_sampler import FastVideoSampler, FastVideoSamplerV2
-from .engine import FastVideoInferenceEngine
+from .engine import FastVideoRolloutEngine
 
 __all__ = [
     # Samplers
     "FastVideoSampler",
     "FastVideoSamplerV2",
     # Engine
-    "FastVideoInferenceEngine",
+    "FastVideoRolloutEngine",
 ]

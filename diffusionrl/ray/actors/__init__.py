@@ -8,7 +8,7 @@ from typing import Dict, Tuple
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "RayActor": ("diffusionrl.ray.actors.base", "RayActor"),
     "BaseTrainRayActor": ("diffusionrl.ray.actors.base", "BaseTrainRayActor"),
-    "InferenceActor": ("diffusionrl.ray.actors.inference", "InferenceActor"),
+    "RolloutActor": ("diffusionrl.ray.actors.rollout", "RolloutActor"),
     "TrainingActor": ("diffusionrl.ray.actors.training", "TrainingActor"),
 }
 

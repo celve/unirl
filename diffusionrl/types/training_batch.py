@@ -264,7 +264,7 @@ class BackwardTrainingBatch:
 
     def to_loss_dict(self) -> Dict[str, Any]:
         """
-        Convert to dictionary format for legacy loss interfaces.
+        Convert to dictionary format for loss interfaces.
 
         Returns:
             Dictionary compatible with GRPOLoss.compute()
@@ -366,7 +366,7 @@ class ForwardTrainingBatch:
 
     def to_loss_dict(self) -> Dict[str, Any]:
         """
-        Convert to dictionary format for legacy loss interfaces.
+        Convert to dictionary format for loss interfaces.
 
         Returns:
             Dictionary compatible with NFTLoss.compute()

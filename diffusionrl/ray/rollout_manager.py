@@ -8,42 +8,96 @@ Supports:
 
 Reference: slime/ray/rollout.py
 """
+import asyncio
 import inspect
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import ray
 import torch
 
-from diffusionrl.ray.data_buffer import RolloutDataBuffer
-from diffusionrl.ray.rollout_buffer import create_rollout_buffer_actor
+from diffusionrl.config.arguments import is_training_actor_direct_sampling_mode
 from diffusionrl.runtime.rollout import RolloutPipelineExecutor
-from diffusionrl.types.sampling import PromptEmbeddings, SamplerOutput
+from diffusionrl.types.sampling import PromptEmbeddings, RolloutOutput
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils import load_function
 
 logger = logging.getLogger(__name__)
 
+class _PipelineRolloutEngine:
+    """Function-style rollout engine facade injected into custom pipelines."""
 
-def _build_legacy_algorithm_kwargs(algorithm_cls: Any, args: Any) -> Dict[str, Any]:
-    """Best-effort kwargs mapping for legacy plugins without from_args()."""
-    kwargs: Dict[str, Any] = {}
+    def __init__(
+        self,
+        *,
+        manager: Any,
+        actor_group: Any,
+        batch_template: Dict[str, Any],
+        requirements: Any,
+        default_sde_indices: Optional[Set[int]],
+    ) -> None:
+        self._manager = manager
+        self._actor_group = actor_group
+        self._batch_template = dict(batch_template)
+        self._requirements = requirements
+        self._default_sde_indices = set(default_sde_indices) if default_sde_indices is not None else None
+        self.last_train_prompts: Optional[List[str]] = None
+        self.last_base_prompts: Optional[List[str]] = None
+        self.last_sde_indices: Optional[Set[int]] = set(default_sde_indices) if default_sde_indices is not None else None
+
+    def generate(
+        self,
+        prompts: List[str],
+        *,
+        sde_indices: Optional[Set[int]] = None,
+        sampling_overrides: Optional[Dict[str, Any]] = None,
+        batch_overrides: Optional[Dict[str, Any]] = None,
+    ) -> List[RolloutOutput]:
+        if not isinstance(prompts, list) or len(prompts) == 0:
+            raise ValueError("engine.generate() requires non-empty prompts list.")
+
+        working_batch = dict(self._batch_template)
+        working_batch["prompts"] = list(prompts)
+        if isinstance(batch_overrides, dict) and batch_overrides:
+            working_batch.update(batch_overrides)
+
+        resolved_sde_indices: Optional[Set[int]]
+        if self._requirements.is_forward_process:
+            resolved_sde_indices = None
+        elif sde_indices is not None:
+            resolved_sde_indices = set(int(i) for i in sde_indices)
+        elif self._default_sde_indices is not None:
+            resolved_sde_indices = set(self._default_sde_indices)
+        else:
+            resolved_sde_indices = None
+
+        outputs, train_prompts, base_prompts = self._manager.rollout_executor.sample(
+            actor_group=self._actor_group,
+            batch=working_batch,
+            sde_indices=resolved_sde_indices,
+            sampling_overrides=sampling_overrides,
+        )
+        self._manager._attach_missing_embeddings_from_batch(
+            sampler_outputs=outputs,
+            batch=working_batch,
+        )
+        self.last_train_prompts = train_prompts if train_prompts else list(prompts)
+        self.last_base_prompts = base_prompts if base_prompts else list(prompts)
+        self.last_sde_indices = resolved_sde_indices
+        return outputs
+
+
+def _resolve_custom_pipeline_result(value: Any) -> Any:
+    if not inspect.isawaitable(value):
+        return value
     try:
-        params = inspect.signature(algorithm_cls.__init__).parameters
-    except (TypeError, ValueError):
-        return kwargs
-
-    for name, param in params.items():
-        if name == "self":
-            continue
-        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-            continue
-        if name == "clip_max" and hasattr(args, "advantage_clip_max"):
-            kwargs[name] = getattr(args, "advantage_clip_max")
-            continue
-        if hasattr(args, name):
-            kwargs[name] = getattr(args, name)
-    return kwargs
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(value)
+    raise RuntimeError(
+        "Custom rollout pipeline returned an awaitable while an event loop is already running. "
+        "Please provide a synchronous pipeline or execute async work inside your function."
+    )
 
 
 def _invoke_custom_rollout_pipeline(
@@ -55,46 +109,137 @@ def _invoke_custom_rollout_pipeline(
     requirements: Any,
     actor_group: Any,
 ) -> Any:
-    """Invoke custom rollout pipeline with flexible signature matching."""
+    """Invoke custom rollout pipeline using function-style injected interfaces."""
+    prompts = batch.get("prompts", []) or []
+    if not isinstance(prompts, list) or len(prompts) == 0:
+        raise ValueError(
+            "Custom rollout pipeline requires non-empty text prompts in batch['prompts']."
+        )
+
+    default_sde_indices: Optional[Set[int]] = None
+    if not requirements.is_forward_process:
+        default_sde_indices = set(
+            manager.timestep_scheduler.get_sde_indices(manager._current_step)
+        )
+        if hasattr(manager.algorithm, "set_sde_indices"):
+            manager.algorithm.set_sde_indices(default_sde_indices)
+
+    engine = _PipelineRolloutEngine(
+        manager=manager,
+        actor_group=actor_group,
+        batch_template=batch,
+        requirements=requirements,
+        default_sde_indices=default_sde_indices,
+    )
+
+    def reward_fn(
+        outputs: List[RolloutOutput],
+        *,
+        prompts_override: Optional[List[str]] = None,
+        prompt_metadata: Optional[List[Optional[Dict[str, Any]]]] = None,
+        reward_path: Optional[str] = None,
+        num_samples_per_prompt: Optional[int] = None,
+    ):
+        base_prompts = (
+            prompts_override
+            if prompts_override is not None
+            else (engine.last_base_prompts if engine.last_base_prompts is not None else prompts)
+        )
+        metadata = prompt_metadata if prompt_metadata is not None else batch.get("metadata")
+        return manager.rollout_executor.compute_rewards_only(
+            reward_service=manager.reward_service,
+            sampler_outputs=outputs,
+            prompts=base_prompts,
+            prompt_metadata=metadata,
+            reward_path_override=(
+                str(reward_path)
+                if reward_path is not None
+                else None
+            ),
+            num_samples_per_prompt_override=num_samples_per_prompt,
+        )
+
+    def compute_advantages(
+        rewards: torch.Tensor,
+        *,
+        prompts_override: Optional[List[str]] = None,
+        num_samples_per_prompt: Optional[int] = None,
+    ) -> torch.Tensor:
+        adv_prompts = (
+            prompts_override
+            if prompts_override is not None
+            else (engine.last_base_prompts if engine.last_base_prompts is not None else prompts)
+        )
+        return manager.algorithm.compute_advantages(
+            rewards=rewards,
+            num_samples_per_prompt=int(
+                num_samples_per_prompt
+                if num_samples_per_prompt is not None
+                else getattr(manager.args, "num_samples_per_prompt", 1)
+            ),
+            prompts=adv_prompts,
+        )
+
+    def reward_and_advantage_fn(
+        outputs: List[RolloutOutput],
+        *,
+        prompts_override: Optional[List[str]] = None,
+        prompt_metadata: Optional[List[Optional[Dict[str, Any]]]] = None,
+    ):
+        base_prompts = (
+            prompts_override
+            if prompts_override is not None
+            else (engine.last_base_prompts if engine.last_base_prompts is not None else prompts)
+        )
+        return manager.rollout_executor.compute_reward_and_advantage(
+            algorithm=manager.algorithm,
+            reward_service=manager.reward_service,
+            sampler_outputs=outputs,
+            prompts=base_prompts,
+            prompt_metadata=prompt_metadata if prompt_metadata is not None else batch.get("metadata"),
+        )
+
+    def assemble_batch(
+        outputs: List[RolloutOutput],
+        *,
+        rewards: torch.Tensor,
+        advantages: torch.Tensor,
+        prompts_override: Optional[List[str]] = None,
+        sde_indices: Optional[Set[int]] = None,
+    ) -> TrainingBatch:
+        train_prompts = (
+            prompts_override
+            if prompts_override is not None
+            else (engine.last_train_prompts if engine.last_train_prompts is not None else prompts)
+        )
+        resolved_sde = (
+            set(int(i) for i in sde_indices)
+            if sde_indices is not None
+            else engine.last_sde_indices
+        )
+        return manager.rollout_executor.assemble_training_batch(
+            algorithm=manager.algorithm,
+            requirements=requirements,
+            sampler_outputs=outputs,
+            rewards=rewards,
+            advantages=advantages,
+            prompts=train_prompts,
+            sde_indices=resolved_sde,
+        )
+
     call_kwargs: Dict[str, Any] = {
-        "manager": manager,
+        "prompts": prompts,
+        "engine": engine,
+        "reward_fn": reward_fn,
+        "compute_advantages": compute_advantages,
+        "reward_and_advantage_fn": reward_and_advantage_fn,
+        "assemble_batch": assemble_batch,
+        "sampling_requirements": requirements,
         "batch": batch,
         "rollout_id": rollout_id,
-        "requirements": requirements,
-        "actor_group": actor_group,
-        "algorithm": manager.algorithm,
-        "reward_service": manager.reward_service,
-        "rollout_executor": manager.rollout_executor,
-        "timestep_scheduler": manager.timestep_scheduler,
     }
 
-    signature: Optional[inspect.Signature]
-    try:
-        signature = inspect.signature(pipeline_fn)
-    except (TypeError, ValueError):
-        signature = None
-
-    if signature is not None:
-        accepts_kwargs = any(
-            param.kind == inspect.Parameter.VAR_KEYWORD
-            for param in signature.parameters.values()
-        )
-        try:
-            if accepts_kwargs:
-                return pipeline_fn(**call_kwargs)
-
-            accepted_kwargs = {
-                key: value
-                for key, value in call_kwargs.items()
-                if key in signature.parameters
-            }
-            if accepted_kwargs:
-                return pipeline_fn(**accepted_kwargs)
-        except TypeError:
-            # Fall back to positional invocation below.
-            pass
-
-    return pipeline_fn(manager, batch, rollout_id, requirements, actor_group)
+    return _resolve_custom_pipeline_result(pipeline_fn(**call_kwargs))
 
 
 @ray.remote
@@ -124,7 +269,7 @@ class RolloutManager:
 
         Args:
             args: TrainingArguments instance
-            pg_result: Optional placement group result for inference (pg, bundle_indices, gpu_ids)
+            pg_result: Optional placement group result for rollout (pg, bundle_indices, gpu_ids)
             reward_pg_result: Optional placement group result for reward (pg, bundle_indices, gpu_ids)
         """
         self.args = args
@@ -140,17 +285,12 @@ class RolloutManager:
         # Timestep scheduler for MixGRPO
         self.timestep_scheduler = None
         self.rollout_executor = RolloutPipelineExecutor(args)
-        self.data_buffer = RolloutDataBuffer(
-            partition_train_data=bool(getattr(args, "partition_train_data", True))
-        )
-        self.rollout_buffer = None
-        self.rollout_buffer_enabled = bool(getattr(args, "rollout_buffer_enabled", True))
         self.rollout_pipeline_fn = None
 
-        # Inference actor group
-        self.inference_actors = None
+        # Rollout actor group
+        self.rollout_actors = None
         self.external_sampling_actors = None
-        self._owns_inference_actors = False
+        self._owns_rollout_actors = False
 
         # Stats
         self._total_samples_generated = 0
@@ -167,15 +307,11 @@ class RolloutManager:
 
         # 1. Load algorithm
         algorithm_cls = load_function(self.args.algorithm_path)
-        if hasattr(algorithm_cls, "from_args"):
-            self.algorithm = algorithm_cls.from_args(self.args)
-        else:
-            legacy_kwargs = _build_legacy_algorithm_kwargs(algorithm_cls, self.args)
-            logger.warning(
-                "Algorithm %s does not implement from_args(); falling back to legacy kwargs matching.",
-                self.args.algorithm_path,
+        if not hasattr(algorithm_cls, "from_args"):
+            raise TypeError(
+                f"Algorithm {self.args.algorithm_path} must implement classmethod from_args(args)."
             )
-            self.algorithm = algorithm_cls(**legacy_kwargs)
+        self.algorithm = algorithm_cls.from_args(self.args)
         logger.info(f"Algorithm loaded: {self.args.algorithm_path} (clip_max={self.args.advantage_clip_max}, sde_ratio={getattr(self.args, 'sde_ratio', 'N/A')})")
         use_per_prompt_tracker = getattr(self.args, 'use_per_prompt_stat_tracker', False)
         if getattr(self.args, "advantage_type", "group") == "per_prompt" and not use_per_prompt_tracker:
@@ -204,15 +340,9 @@ class RolloutManager:
         except Exception as e:
             raise RuntimeError(f"Failed to load data source: {e}") from e
 
-        # 5. Create inference actors if placement group provided
-        if self.pg_result is not None and getattr(self.args, "sampling_backend", "inference") != "training":
-            self._create_inference_actors()
-
-        if self.rollout_buffer_enabled:
-            self.rollout_buffer = create_rollout_buffer_actor(self.args)
-            logger.info("Rollout buffer actor created")
-        else:
-            logger.warning("Rollout buffer actor disabled; using legacy data_buffer.put handoff path.")
+        # 5. Create rollout actors if placement group provided
+        if self.pg_result is not None and not is_training_actor_direct_sampling_mode(self.args):
+            self._create_rollout_actors()
 
         self._is_initialized = True
         logger.info("RolloutManager initialized")
@@ -263,6 +393,8 @@ class RolloutManager:
                 strategy=getattr(self.args, 'window_strategy', 'progressive'),
                 group_size=group_size,
                 iters_per_group=getattr(self.args, 'window_iters_per_group', 25),
+                max_iters_per_group=getattr(self.args, 'window_max_iters_per_group', None),
+                min_iters_per_group=getattr(self.args, 'window_min_iters_per_group', None),
                 overlap=getattr(self.args, 'window_overlap', False),
                 overlap_step=getattr(self.args, 'window_overlap_step', 1),
                 roll_back=getattr(self.args, 'window_roll_back', False),
@@ -285,13 +417,13 @@ class RolloutManager:
             else:
                 logger.info("All SDE scheduler initialized (standard GRPO)")
 
-    def _create_inference_actors(self) -> None:
-        """Create inference actor group from placement group."""
-        from .groups.factory import create_inference_actor_group
+    def _create_rollout_actors(self) -> None:
+        """Create rollout actor group from placement group."""
+        from .groups.factory import create_rollout_actor_group
 
-        self.inference_actors = create_inference_actor_group(self.args, self.pg_result)
-        self._owns_inference_actors = True
-        logger.info("Inference actors created via create_inference_actor_group")
+        self.rollout_actors = create_rollout_actor_group(self.args, self.pg_result)
+        self._owns_rollout_actors = True
+        logger.info("Rollout actors created via create_rollout_actor_group")
 
     def attach_sampling_actors(self, actor_group) -> None:
         """Attach external sampling actors (e.g., TrainingActorGroup)."""
@@ -311,7 +443,7 @@ class RolloutManager:
 
         # 2. Get algorithm requirements to determine pipeline
         requirements = self.algorithm.get_sampling_requirements()
-        actor_group = self.external_sampling_actors or self.inference_actors
+        actor_group = self.external_sampling_actors or self.rollout_actors
 
         train_data: Any
         if self.rollout_pipeline_fn is not None:
@@ -369,73 +501,9 @@ class RolloutManager:
 
         return train_data
 
-    def generate(self, rollout_id: int, world_size: Optional[int] = None) -> Any:
-        """
-        Compatibility path: rollout + immediate handoff for training.
-
-        Pipeline depends on algorithm type:
-        - GRPO/MixGRPO: sampling -> reward -> advantages -> BackwardTrainingBatch
-        - NFT: inference -> reward -> advantages -> ForwardTrainingBatch
-
-        Args:
-            rollout_id: Current rollout iteration number
-
-        Returns:
-            - ObjectRef containing typed TrainingBatch (BackwardTrainingBatch or ForwardTrainingBatch), or
-            - List[ObjectRef] when partitioning is enabled and world_size is provided.
-            Ray can serialize dataclasses directly via pickle.
-        """
-        train_data = self._build_training_batch(rollout_id)
-
-        # Serialize and partition via rollout buffer actor (default),
-        # with legacy data_buffer.put() fallback for compatibility.
-        if self.rollout_buffer is not None:
-            return ray.get(
-                self.rollout_buffer.push_and_pop.remote(
-                    rollout_id=rollout_id,
-                    train_data=train_data,
-                    world_size=world_size,
-                    metadata={"step": int(self._current_step)},
-                )
-            )
-
-        return self.data_buffer.put(train_data=train_data, world_size=world_size)
-
-    def generate_and_buffer(self, rollout_id: int) -> Dict[str, Any]:
-        """
-        Generate one rollout and enqueue it into RolloutBufferActor.
-
-        This is the data-centric path used by sync/async train loops to decouple
-        rollout production from training consumption.
-        """
-        if self.rollout_buffer is None:
-            raise RuntimeError(
-                "generate_and_buffer requires rollout_buffer_enabled=true."
-            )
-
-        train_data = self._build_training_batch(rollout_id)
-        push_result = ray.get(
-            self.rollout_buffer.push.remote(
-                rollout_id=rollout_id,
-                train_data=train_data,
-                metadata={"step": int(self._current_step)},
-            )
-        )
-        if not push_result.get("accepted", False):
-            raise RuntimeError(
-                f"Rollout buffer rejected rollout_id={rollout_id}: {push_result.get('error')}"
-            )
-        return push_result
-
-    def pop_training_data(self, world_size: Optional[int] = None) -> Any:
-        """Pop next ready training batch from RolloutBufferActor."""
-        if self.rollout_buffer is None:
-            raise RuntimeError("pop_training_data requires rollout_buffer_enabled=true.")
-
-        payload = ray.get(self.rollout_buffer.pop.remote(world_size=world_size))
-        if payload is None:
-            raise RuntimeError("Rollout buffer is empty; no training data available.")
-        return payload
+    def build_training_batch(self, rollout_id: int) -> TrainingBatch:
+        """Public rollout entrypoint used by RolloutBufferActor.request_rollout()."""
+        return self._build_training_batch(rollout_id)
 
     def _validate_batch_shape(self) -> None:
         """Validate prompts_per_batch * k against training batch/world_size."""
@@ -494,10 +562,7 @@ class RolloutManager:
         )
 
         allow_replay = (
-            bool(
-                getattr(self.args, "replay_log_probs", False)
-                or getattr(self.args, "fastvideo_replay_log_probs", False)
-            )
+            bool(getattr(self.args, "replay_log_probs", False))
             and getattr(self.args, "loss_type", "grpo") == "grpo"
         )
         self.rollout_executor.validate_sampler_outputs(
@@ -604,7 +669,7 @@ class RolloutManager:
     def _attach_missing_embeddings_from_batch(
         self,
         *,
-        sampler_outputs: List[SamplerOutput],
+        sampler_outputs: List[RolloutOutput],
         batch: Dict[str, Any],
     ) -> None:
         fallback_embeddings = self._build_prompt_embeddings_from_batch(batch)
@@ -613,7 +678,7 @@ class RolloutManager:
 
         offset = 0
         for idx, output in enumerate(sampler_outputs):
-            if not isinstance(output, SamplerOutput):
+            if not isinstance(output, RolloutOutput):
                 continue
             sample_count = int(output.batch_size)
             end = offset + sample_count
@@ -695,7 +760,7 @@ class RolloutManager:
         """
         logger.info(f"Running evaluation for rollout {rollout_id}")
 
-        actor_group = self.external_sampling_actors or self.inference_actors
+        actor_group = self.external_sampling_actors or self.rollout_actors
         return self.rollout_executor.eval_batch(
             rollout_id=rollout_id,
             data_source=self.data_source,
@@ -708,21 +773,21 @@ class RolloutManager:
         state_dict_ref: ray.ObjectRef,
     ) -> None:
         """
-        Update inference actor weights from training.
+        Update rollout actor weights from training.
 
         Args:
             state_dict_ref: ObjectRef containing new state dict
         """
-        if self.inference_actors is not None:
-            self.inference_actors.update_weights(state_dict_ref)
+        if self.rollout_actors is not None:
+            self.rollout_actors.update_weights(state_dict_ref)
 
     def update_weights_from_path(
         self,
         checkpoint_path: str,
     ) -> None:
-        """Update inference actor weights from a shared checkpoint path."""
-        if self.inference_actors is not None and hasattr(self.inference_actors, "update_weights_from_path"):
-            self.inference_actors.update_weights_from_path(checkpoint_path)
+        """Update rollout actor weights from a shared checkpoint path."""
+        if self.rollout_actors is not None and hasattr(self.rollout_actors, "update_weights_from_path"):
+            self.rollout_actors.update_weights_from_path(checkpoint_path)
 
     def get_num_rollout_per_epoch(self) -> int:
         """Get number of rollouts per epoch."""
@@ -742,68 +807,24 @@ class RolloutManager:
 
     def get_stats(self) -> Dict[str, Any]:
         """Get rollout statistics."""
-        stats = {
+        return {
             "total_samples_generated": self._total_samples_generated,
         }
-        if self.rollout_buffer is not None:
-            try:
-                stats["rollout_buffer"] = ray.get(self.rollout_buffer.get_stats.remote())
-            except Exception as e:
-                logger.warning("Failed to fetch rollout buffer stats: %s", e)
-        return stats
 
-    def offload(self) -> None:
-        """Offload inference actors to CPU."""
-        if self.inference_actors is not None:
-            self.inference_actors.offload()
+    def sleep(self) -> None:
+        """Put rollout actors into sleep mode."""
+        if self.rollout_actors is not None:
+            self.rollout_actors.sleep()
 
-    def onload(self) -> None:
-        """Load inference actors back to GPU."""
-        if self.inference_actors is not None:
-            self.inference_actors.onload()
-
-    def load_weights(self) -> None:
-        """Stage 1: load modules needed for weight update."""
-        if self.inference_actors is not None and hasattr(self.inference_actors, "onload_weights"):
-            self.inference_actors.onload_weights()
-        else:
-            self.onload()
-
-    def after_weight_update(self) -> None:
-        """Stage 2: run post-update restore hooks."""
-        if self.inference_actors is not None and hasattr(self.inference_actors, "onload_post_update"):
-            self.inference_actors.onload_post_update()
-
-    def reload_runtime_cache(self) -> None:
-        """Stage 3: restore runtime cache (KV/CUDA graph)."""
-        if self.inference_actors is not None and hasattr(self.inference_actors, "onload_runtime_cache"):
-            self.inference_actors.onload_runtime_cache()
-
-    # Backward-compatible aliases (pre-cleanup naming).
-    def onload_weights(self) -> None:
-        self.load_weights()
-
-    def onload_post_update(self) -> None:
-        self.after_weight_update()
-
-    def onload_runtime_cache(self) -> None:
-        self.reload_runtime_cache()
+    def wake_up(self) -> None:
+        """Wake rollout actors up for generation/weight update."""
+        if self.rollout_actors is not None:
+            self.rollout_actors.wake_up()
 
     def dispose(self) -> None:
         """Clean up resources."""
-        if self.rollout_buffer is not None:
-            try:
-                ray.get(self.rollout_buffer.clear.remote())
-            except Exception:
-                pass
-            try:
-                ray.kill(self.rollout_buffer)
-            except Exception:
-                pass
-            self.rollout_buffer = None
-
-        if self._owns_inference_actors and self.inference_actors is not None:
-            self.inference_actors.dispose()
+        if self._owns_rollout_actors and self.rollout_actors is not None:
+            self.rollout_actors.dispose()
         logger.info("RolloutManager disposed")
 
 
@@ -817,7 +838,7 @@ def create_rollout_manager(
 
     Args:
         args: TrainingArguments instance
-        pg_result: Placement group result for inference actors
+        pg_result: Placement group result for rollout actors
         reward_pg_result: Placement group result for reward actors
 
     Returns:

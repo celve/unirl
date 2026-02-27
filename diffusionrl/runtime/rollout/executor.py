@@ -30,13 +30,16 @@ class RolloutPipelineExecutor:
         self._warned_ignored_prompt_embeddings = False
 
     def prepare_batch(self, *, data_source: Any) -> Dict[str, Any]:
-        """Fetch one batch from data source with legacy prompt fallback."""
+        """Fetch one prompt batch from data source."""
         if data_source is not None:
             batch_size = getattr(self.args, "prompts_per_batch", None) or self.args.batch_size
             samples = data_source.get_samples(batch_size)
             if isinstance(samples, dict):
                 return samples
-            return {"prompts": samples}
+            raise TypeError(
+                "DataSource.get_samples() must return Dict[str, Any] with at least 'prompts'. "
+                f"Got {type(samples).__name__}."
+            )
 
         default_prompts = [
             "A beautiful sunset over the ocean",
@@ -53,6 +56,7 @@ class RolloutPipelineExecutor:
         actor_group: Any,
         batch: Dict[str, Any],
         sde_indices: Optional[Set[int]],
+        sampling_overrides: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[Any], List[str], List[str]]:
         """Run distributed sampling with prompt-major K expansion."""
         prompts = batch.get("prompts", []) or []
@@ -80,21 +84,56 @@ class RolloutPipelineExecutor:
             )
             self._warned_ignored_prompt_embeddings = True
 
+        overrides = dict(sampling_overrides or {})
+        num_samples_per_prompt = int(
+            overrides.pop(
+                "num_samples_per_prompt",
+                getattr(self.args, "num_samples_per_prompt", 1),
+            )
+        )
+        init_same_noise = bool(
+            overrides.pop(
+                "init_same_noise",
+                getattr(self.args, "init_same_noise", False),
+            )
+        )
+        num_inference_steps = int(
+            overrides.pop(
+                "num_inference_steps",
+                getattr(self.args, "num_inference_steps", 50),
+            )
+        )
+        guidance_scale = float(
+            overrides.pop(
+                "guidance_scale",
+                getattr(self.args, "guidance_scale", 7.5),
+            )
+        )
+        height = int(overrides.pop("height", getattr(self.args, "height", 256)))
+        width = int(overrides.pop("width", getattr(self.args, "width", 256)))
+        num_frames = int(
+            overrides.pop(
+                "num_frames",
+                getattr(self.args, "num_frames", 16),
+            )
+        )
+
         sampling_batch, train_prompts = expand_batch_for_sampling(
             {"prompts": prompts, "metadata": batch.get("metadata"), "latents": batch.get("latents")},
-            num_samples_per_prompt=int(getattr(self.args, "num_samples_per_prompt", 1)),
+            num_samples_per_prompt=num_samples_per_prompt,
         )
         sampler_outputs = distributed_sample(
             actor_group=actor_group,
             batch=sampling_batch,
-            num_inference_steps=int(self.args.num_inference_steps),
-            guidance_scale=float(self.args.guidance_scale),
-            height=int(self.args.height),
-            width=int(self.args.width),
-            num_frames=int(self.args.num_frames),
-            init_same_noise=bool(getattr(self.args, "init_same_noise", False)),
-            num_samples_per_prompt=int(getattr(self.args, "num_samples_per_prompt", 1)),
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            init_same_noise=init_same_noise,
+            num_samples_per_prompt=num_samples_per_prompt,
             sde_indices=sde_indices,
+            extra_generate_kwargs=overrides,
         )
         return sampler_outputs, (train_prompts if train_prompts is not None else prompts), prompts
 
@@ -163,10 +202,8 @@ class RolloutPipelineExecutor:
         prompt_metadata: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, List[float]]]:
         """Compute rewards and advantages from sampler outputs."""
-        rewards, reward_components = compute_rewards(
+        rewards, reward_components = self.compute_rewards_only(
             reward_service=reward_service,
-            reward_path=str(getattr(self.args, "reward_path", "")),
-            num_samples_per_prompt=int(getattr(self.args, "num_samples_per_prompt", 1)),
             sampler_outputs=sampler_outputs,
             prompts=prompts,
             prompt_metadata=prompt_metadata,
@@ -179,9 +216,42 @@ class RolloutPipelineExecutor:
             rewards=rewards,
             prompts=prompts,
             reward_components=reward_components,
-            reward_workers=getattr(reward_service, "workers", None),
+            reward_workers=getattr(reward_service, "workers", None) if reward_service is not None else None,
         )
         return rewards, advantages, reward_components
+
+    def compute_rewards_only(
+        self,
+        *,
+        reward_service: Any,
+        sampler_outputs: List[Any],
+        prompts: List[str],
+        prompt_metadata: Optional[List[Optional[Dict[str, Any]]]] = None,
+        reward_path_override: Optional[str] = None,
+        num_samples_per_prompt_override: Optional[int] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
+        """Compute rewards only (shared by default path and custom pipelines)."""
+        num_samples_per_prompt = int(
+            num_samples_per_prompt_override
+            if num_samples_per_prompt_override is not None
+            else getattr(self.args, "num_samples_per_prompt", 1)
+        )
+        reward_path = str(
+            reward_path_override
+            if reward_path_override is not None
+            else getattr(self.args, "reward_path", "")
+        )
+
+        if reward_service is None:
+            raise RuntimeError("RewardService is not initialized.")
+        return compute_rewards(
+            reward_service=reward_service,
+            reward_path=reward_path,
+            num_samples_per_prompt=num_samples_per_prompt,
+            sampler_outputs=sampler_outputs,
+            prompts=prompts,
+            prompt_metadata=prompt_metadata,
+        )
 
     def assemble_training_batch(
         self,
@@ -229,7 +299,7 @@ class RolloutPipelineExecutor:
 
         outputs = distributed_sample(
             actor_group=actor_group,
-            batch=prompts,
+            batch={"prompts": prompts},
             num_inference_steps=int(self.args.num_inference_steps),
             guidance_scale=float(self.args.guidance_scale),
             height=int(self.args.height),
@@ -239,10 +309,8 @@ class RolloutPipelineExecutor:
             num_samples_per_prompt=int(getattr(self.args, "num_samples_per_prompt", 1)),
             sde_indices=None,
         )
-        rewards, _ = compute_rewards(
+        rewards, _ = self.compute_rewards_only(
             reward_service=reward_service,
-            reward_path=str(getattr(self.args, "reward_path", "")),
-            num_samples_per_prompt=int(getattr(self.args, "num_samples_per_prompt", 1)),
             sampler_outputs=outputs,
             prompts=prompts,
         )

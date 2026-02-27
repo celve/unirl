@@ -58,6 +58,10 @@ class HunyuanModelBundle(ModelBundle):
     def model_type(self) -> str:
         return "hunyuan"
 
+    @property
+    def media_type(self) -> str:
+        return "video"
+
     @classmethod
     def default_sampler_path(cls) -> Optional[str]:
         return "diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler"
@@ -65,6 +69,19 @@ class HunyuanModelBundle(ModelBundle):
     @classmethod
     def default_sampler_engine(cls) -> Optional[str]:
         return "fsdp"
+
+    @classmethod
+    def validate_config(cls, args: Any) -> None:
+        if getattr(args, "sampler_engine_type", None) != "fsdp":
+            return
+        fixed_guidance = 6018.0
+        if abs(float(args.guidance_scale) - 7.5) <= 1e-6:
+            args.guidance_scale = fixed_guidance
+        if abs(float(args.guidance_scale) - fixed_guidance) > 1e-6:
+            raise ValueError(
+                f"FSDP Hunyuan sampler uses fixed guidance_scale={fixed_guidance}. "
+                f"Got guidance_scale={args.guidance_scale}."
+            )
 
     def load(self) -> None:
         """Load all model components."""

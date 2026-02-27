@@ -48,7 +48,7 @@ class ImageRLDataSource:
         Args:
             args: TrainingArguments instance with:
                 - data_path: Path to data file (JSON or TXT)
-                - model_type: Model type for embedding format
+                - model_path: Model bundle class dotpath for embedding dataset builder
                 - batch_size: Batch size
                 - seed: Random seed
                 - num_samples_per_prompt: K-repeat factor (optional)
@@ -56,6 +56,7 @@ class ImageRLDataSource:
         self.args = args
         self.data_path = getattr(args, 'data_path', None)
         self.model_type = getattr(args, 'model_type', 'flux')
+        self.model_path = getattr(args, "model_path", "")
         self.batch_size = getattr(args, 'batch_size', 4)
         self.seed = getattr(args, 'seed', 42)
         self.k_repeat = getattr(args, 'num_samples_per_prompt', 1)
@@ -78,7 +79,7 @@ class ImageRLDataSource:
             # Pre-computed embeddings format
             self.dataset = create_rl_dataset(
                 json_path=self.data_path,
-                model_type=self.model_type,
+                model_path=self.model_path,
                 seed=self.seed,
             )
             self.data_mode = "embedding"

@@ -3,7 +3,7 @@ NFT (Noise-Free Training) Algorithm Implementation.
 
 DiffusionNFT forward process diffusion RL.
 """
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -183,60 +183,6 @@ class NFTAlgorithm(BaseAlgorithm):
             return self._normalize_global(rewards)
         groups = build_fixed_size_groups(batch_size, num_samples_per_prompt)
         return normalize_grouped(rewards, groups, epsilon=self.epsilon, clip_max=self.clip_max)
-
-    def compute_loss(
-        self,
-        model: nn.Module,
-        batch: Dict[str, Any],
-        timestep_idx: int,
-        advantages: torch.Tensor,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """
-        Compute NFT loss.
-
-        Args:
-            model: Model being trained
-            batch: Training batch (should contain 'clean_latents')
-            timestep_idx: Not used by NFT (random timestep in loss)
-            advantages: Pre-computed advantages
-            **kwargs: Additional arguments
-
-        Returns:
-            Tuple of (loss tensor, metrics dictionary)
-        """
-        return self.loss_fn.compute(
-            model=model,
-            samples=batch,
-            timestep_idx=timestep_idx,
-            advantages=advantages,
-            prompt_embeds=batch.get("prompt_embeds"),
-            pooled_prompt_embeds=batch.get("pooled_prompt_embeds"),
-            text_ids=batch.get("text_ids"),
-            image_ids=batch.get("image_ids"),
-            **kwargs,
-        )
-
-    def compute_aggregated_loss(
-        self,
-        model: nn.Module,
-        batch: Dict[str, Any],
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """
-        Compute NFT loss (single computation, forward process samples random timestep).
-        """
-        advantages = batch.get("advantages")
-        if advantages is None:
-            raise ValueError("batch must contain 'advantages'")
-
-        return self.compute_loss(
-            model=model,
-            batch=batch,
-            timestep_idx=0,
-            advantages=advantages,
-            **kwargs,
-        )
 
     def update_old_adapter(self, model: nn.Module) -> bool:
         """

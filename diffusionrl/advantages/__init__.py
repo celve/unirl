@@ -61,10 +61,7 @@ from .running_stats import (
 def compute_advantage(
     rewards: Union[torch.Tensor, Dict[str, torch.Tensor]],
     *,
-    # Strategy selection (preferred parameter name)
-    strategy: Optional[str] = None,
-    # Backward compatible parameter name
-    advantage_type: Optional[str] = None,
+    strategy: str = "group",
     # Group strategy parameters
     num_samples_per_prompt: int = 1,
     # Per-prompt strategy parameters
@@ -85,7 +82,6 @@ def compute_advantage(
     Args:
         rewards: Reward values [N], or dict of {model_name: rewards} for multi-model
         strategy: Normalization strategy - one of "group", "global", "per_prompt"
-        advantage_type: Deprecated alias for strategy (for backward compatibility)
         num_samples_per_prompt: Number of samples per prompt (for "group" strategy)
         prompts: List of prompts (required for "per_prompt" strategy)
         epsilon: Small value for numerical stability
@@ -101,13 +97,6 @@ def compute_advantage(
     Returns:
         Advantages tensor [N]
     """
-    # Handle strategy parameter (prefer 'strategy' over deprecated 'advantage_type')
-    if strategy is None and advantage_type is None:
-        strategy = "group"
-    elif strategy is None:
-        strategy = advantage_type
-    # If both are provided, 'strategy' takes precedence
-
     # Handle multi-reward dict input
     if isinstance(rewards, dict):
         if reward_weights is None:

@@ -3,10 +3,9 @@ GRPO Algorithm Implementation.
 
 Standard GRPO with group normalization for advantages.
 """
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import torch
-import torch.nn as nn
 
 from .base import BaseAlgorithm, SamplingRequirements
 from diffusionrl.advantages.normalizers import normalize_global, normalize_grouped, build_fixed_size_groups
@@ -99,9 +98,6 @@ class GRPOAlgorithm(BaseAlgorithm):
                 warmup_steps=running_stats_warmup,
             )
 
-        # Loss function (lazy load to avoid circular imports)
-        self._loss_fn = None
-
     @classmethod
     def _grpo_kwargs_from_args(cls, args: Any) -> Dict[str, Any]:
         kwargs = cls._base_kwargs_from_args(args)
@@ -126,20 +122,6 @@ class GRPOAlgorithm(BaseAlgorithm):
     def from_args(cls, args: Any) -> "GRPOAlgorithm":
         """Construct GRPO algorithm from runtime args."""
         return cls(**cls._grpo_kwargs_from_args(args))
-
-    @property
-    def loss_fn(self):
-        """Lazy load loss function."""
-        if self._loss_fn is None:
-            from diffusionrl.losses import GRPOLoss
-            self._loss_fn = GRPOLoss(
-                clip_range=self.clip_range,
-                use_kl_penalty=self.kl_coef > 0,
-                kl_coef=self.kl_coef,
-                eta=self.eta,
-                sde_type=self.sde_type,
-            )
-        return self._loss_fn
 
     def get_sampling_requirements(self) -> SamplingRequirements:
         """Return GRPO sampling requirements."""
@@ -281,65 +263,3 @@ class GRPOAlgorithm(BaseAlgorithm):
 
         std = self.running_reward_normalizer.running_stats.std
         return torch.tensor(std, device=rewards.device, dtype=rewards.dtype)
-
-    def compute_loss(
-        self,
-        model: nn.Module,
-        batch: Dict[str, Any],
-        timestep_idx: int,
-        advantages: torch.Tensor,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """
-        Compute GRPO loss for a single timestep.
-
-        Args:
-            model: Model being trained
-            batch: Training batch dictionary
-            timestep_idx: Current timestep index
-            advantages: Pre-computed advantages
-            **kwargs: Additional arguments
-
-        Returns:
-            Tuple of (loss tensor, metrics dictionary)
-        """
-        # Extract timestep-specific data
-        samples = self._get_timestep_samples(batch, timestep_idx)
-
-        # Call loss function
-        return self.loss_fn.compute(
-            model=model,
-            samples=samples,
-            timestep_idx=timestep_idx,
-            advantages=advantages,
-            prompt_embeds=batch.get("prompt_embeds"),
-            pooled_prompt_embeds=batch.get("pooled_prompt_embeds"),
-            **kwargs,
-        )
-
-    def _get_timestep_samples(
-        self,
-        batch: Dict[str, Any],
-        timestep_idx: int,
-    ) -> Dict[str, Any]:
-        """Extract samples for a specific timestep."""
-        trajectories = batch.get("trajectories")
-        log_probs_dict = batch.get("log_probs_dict", {})
-        timesteps = batch.get("timesteps")
-
-        samples = {}
-
-        if trajectories is not None:
-            samples["latents"] = trajectories[:, timestep_idx]
-            if timestep_idx + 1 < trajectories.shape[1]:
-                samples["next_latents"] = trajectories[:, timestep_idx + 1]
-
-        if timestep_idx in log_probs_dict:
-            samples["log_probs"] = log_probs_dict[timestep_idx]
-
-        if timesteps is not None:
-            samples["sigma"] = timesteps[timestep_idx]
-            if timestep_idx + 1 < len(timesteps):
-                samples["sigma_next"] = timesteps[timestep_idx + 1]
-
-        return samples

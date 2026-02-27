@@ -64,6 +64,14 @@ class GRPOLoss:
         )
     """
 
+    @classmethod
+    def declared_requirements(cls) -> Dict[str, bool]:
+        return {
+            "requires_trajectory": True,
+            "requires_log_prob": True,
+            "requires_embeddings": True,
+        }
+
     def __init__(
         self,
         clip_range: float = 1e-4,

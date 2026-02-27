@@ -206,7 +206,7 @@ class DualAdapterEMA:
         old_adapter_name: str = "old",
         new_adapter_name: str = "default",
         decay_fn: Optional[Callable[[int], float]] = None,
-        # Legacy params for backward compat (ignored if decay_fn provided)
+        # Optional schedule parameters (ignored if decay_fn is provided)
         decay_type: str = "constant",
         **kwargs,  # Absorb any unused params
     ):
@@ -219,13 +219,13 @@ class DualAdapterEMA:
         if decay_fn is not None:
             self._get_decay = decay_fn
         elif decay_type != "constant":
-            # Build decay function from legacy params
+            # Build decay function from schedule params.
             self._get_decay = self._build_decay_fn(decay_type, kwargs)
         else:
             self._get_decay = None  # Use fixed decay
 
     def _build_decay_fn(self, decay_type: str, kwargs: dict) -> Callable[[int], float]:
-        """Build decay function from legacy parameters (for backward compat)."""
+        """Build decay function from schedule parameters."""
         flat_steps = kwargs.get("flat_steps", 0)
         uprate = kwargs.get("uprate", kwargs.get("ema_uprate", 0.001))
         uphold = kwargs.get("uphold", kwargs.get("ema_uphold", 0.5))
@@ -292,4 +292,3 @@ class DualAdapterEMA:
 
         except Exception:
             return False
-

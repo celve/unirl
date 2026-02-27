@@ -25,6 +25,56 @@ from diffusionrl.utils import load_function
 logger = logging.getLogger(__name__)
 
 
+def _put_training_data(
+    *,
+    train_data: Any,
+    dp_size: Optional[int],
+    partition_train_data: bool = True,
+    partition_mode: str = "data_parallel",
+) -> Any:
+    mode = str(partition_mode or "data_parallel").strip().lower()
+    if mode in ("backend_managed", "replicated", "none"):
+        return ray.put(train_data)
+    if mode != "data_parallel":
+        raise ValueError(
+            f"Unsupported rollout buffer partition_mode={partition_mode!r}. "
+            "Expected one of: data_parallel, backend_managed, replicated, none."
+        )
+
+    partitioned_batches = maybe_partition_training_batch(
+        train_data=train_data,
+        dp_size=dp_size,
+        partition_train_data=bool(partition_train_data),
+    )
+    if partitioned_batches is not None:
+        return [ray.put(part) for part in partitioned_batches]
+    return ray.put(train_data)
+
+
+def _resolve_consumer_spec(
+    *,
+    default_partition_train_data: bool,
+    dp_size: Optional[int],
+    consumer_spec: Optional[Dict[str, Any]],
+) -> Tuple[Optional[int], bool, str]:
+    resolved_dp_size = dp_size
+    partition_train_data = bool(default_partition_train_data)
+    partition_mode = "data_parallel"
+
+    if isinstance(consumer_spec, dict):
+        if consumer_spec.get("dp_size") is not None:
+            try:
+                resolved_dp_size = int(consumer_spec.get("dp_size"))
+            except (TypeError, ValueError):
+                resolved_dp_size = dp_size
+        if consumer_spec.get("partition_train_data") is not None:
+            partition_train_data = bool(consumer_spec.get("partition_train_data"))
+        if consumer_spec.get("partition_mode") is not None:
+            partition_mode = str(consumer_spec.get("partition_mode")).strip().lower()
+
+    return resolved_dp_size, partition_train_data, partition_mode
+
+
 @dataclass
 class BufferItem:
     """Single buffered training-batch entry in dispatch queue."""
@@ -592,6 +642,52 @@ class RolloutBufferActor:
         self._assembled_batches = 0
         self._assembled_partial_batches = 0
 
+        # Runtime handles are attached by train loop.
+        self._rollout_manager = None
+        self._training_group = None
+
+    def bind_runtime(self, *, rollout_manager: Any, training_group: Optional[Any] = None) -> Dict[str, bool]:
+        """Attach rollout/training handles used by request_rollout()."""
+        self._rollout_manager = rollout_manager
+        if training_group is not None:
+            self._training_group = training_group
+        return {
+            "has_rollout_manager": self._rollout_manager is not None,
+            "has_training_group": self._training_group is not None,
+        }
+
+    def bind_training_group(self, training_group: Any) -> Dict[str, bool]:
+        """Attach or update training-group handle."""
+        self._training_group = training_group
+        return {
+            "has_rollout_manager": self._rollout_manager is not None,
+            "has_training_group": self._training_group is not None,
+        }
+
+    def request_rollout(
+        self,
+        *,
+        rollout_id: int,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Trigger rollout generation via RolloutManager and enqueue into buffer."""
+        if self._rollout_manager is None:
+            raise RuntimeError(
+                "RolloutBufferActor.request_rollout() requires bind_runtime(rollout_manager=...)."
+            )
+
+        train_data = ray.get(self._rollout_manager.build_training_batch.remote(int(rollout_id)))
+        push_result = self.push(
+            rollout_id=int(rollout_id),
+            train_data=train_data,
+            metadata=metadata,
+        )
+        if not push_result.get("accepted", False):
+            raise RuntimeError(
+                f"Rollout buffer rejected rollout_id={rollout_id}: {push_result.get('error')}"
+            )
+        return push_result
+
     def _new_item_id(self) -> str:
         self._counter += 1
         return f"buffer_item_{self._counter}"
@@ -942,8 +1038,13 @@ class RolloutBufferActor:
                 "queue_size": len(self._dispatch_queue),
             }
 
-    def pop(self, *, world_size: Optional[int] = None) -> Any:
-        """Pop one training batch (optionally partitioned per training rank)."""
+    def pop(
+        self,
+        *,
+        dp_size: Optional[int] = None,
+        consumer_spec: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Pop one training batch, optionally partitioned using consumer spec."""
         if self.grouped and not self._dispatch_queue:
             self._promote_ready_groups(allow_partial=self.allow_partial_group)
 
@@ -954,28 +1055,77 @@ class RolloutBufferActor:
         self._popped_batches += 1
         self._popped_samples += int(item.sample_count)
 
-        if not self.partition_train_data or not world_size:
-            return item.batch_ref
+        resolved_dp_size, partition_train_data, partition_mode = _resolve_consumer_spec(
+            default_partition_train_data=self.partition_train_data,
+            dp_size=dp_size,
+            consumer_spec=consumer_spec,
+        )
+
+        if not partition_train_data or not resolved_dp_size:
+            return {
+                "item_id": item.item_id,
+                "rollout_id": int(item.rollout_id),
+                "sample_count": int(item.sample_count),
+                "metadata": dict(item.metadata),
+                "training_data": item.batch_ref,
+                "consumer_spec": {
+                    "dp_size": resolved_dp_size,
+                    "partition_train_data": partition_train_data,
+                    "partition_mode": partition_mode,
+                },
+            }
 
         train_data = ray.get(item.batch_ref)
-        partitioned = maybe_partition_training_batch(
+        training_data_ref = _put_training_data(
             train_data=train_data,
-            world_size=world_size,
-            partition_train_data=True,
+            dp_size=resolved_dp_size,
+            partition_train_data=partition_train_data,
+            partition_mode=partition_mode,
         )
-        if partitioned is None:
-            return item.batch_ref
-        return [ray.put(part) for part in partitioned]
+        return {
+            "item_id": item.item_id,
+            "rollout_id": int(item.rollout_id),
+            "sample_count": int(item.sample_count),
+            "metadata": dict(item.metadata),
+            "training_data": training_data_ref,
+            "consumer_spec": {
+                "dp_size": resolved_dp_size,
+                "partition_train_data": partition_train_data,
+                "partition_mode": partition_mode,
+            },
+        }
+
+    def pop_training_data(
+        self,
+        *,
+        dp_size: Optional[int] = None,
+        consumer_spec: Optional[Dict[str, Any]] = None,
+        expected_rollout_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Pop next ready training payload with optional rollout-id guard."""
+        payload = self.pop(dp_size=dp_size, consumer_spec=consumer_spec)
+        if payload is None:
+            raise RuntimeError("Rollout buffer is empty; no training data available.")
+        if expected_rollout_id is not None:
+            got = int(payload.get("rollout_id", -1))
+            if got != int(expected_rollout_id):
+                raise RuntimeError(
+                    "Rollout/training payload mismatch: "
+                    f"expected rollout_id={expected_rollout_id}, got {got}. "
+                    "Disable strict alignment when using grouped rollout buffer dispatch."
+                )
+        return payload
 
     def push_and_pop(
         self,
         *,
         rollout_id: int,
         train_data: TrainingBatch,
-        world_size: Optional[int] = None,
+        dp_size: Optional[int] = None,
+        consumer_spec: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        """Convenience API used by compatibility pipeline: push current rollout and pop next ready batch."""
+        """Convenience API: push current rollout and pop next ready batch."""
         push_result = self.push(
             rollout_id=rollout_id,
             train_data=train_data,
@@ -985,7 +1135,7 @@ class RolloutBufferActor:
             raise RuntimeError(
                 f"Rollout buffer rejected rollout_id={rollout_id}: {push_result.get('error')}"
             )
-        return self.pop(world_size=world_size)
+        return self.pop(dp_size=dp_size, consumer_spec=consumer_spec)
 
     def get_stats(self) -> Dict[str, Any]:
         plugin_stats = {plugin.name: plugin.stats() for plugin in self.plugins}
@@ -1004,6 +1154,8 @@ class RolloutBufferActor:
 
         return {
             "grouped_mode": self.grouped,
+            "has_rollout_manager": self._rollout_manager is not None,
+            "has_training_group": self._training_group is not None,
             "queue_size": len(self._dispatch_queue),
             "pushed_batches": self._pushed_batches,
             "popped_batches": self._popped_batches,
@@ -1030,6 +1182,12 @@ class RolloutBufferActor:
             "pending_modality_counts": pending_modalities,
             "avg_pending_reward": avg_pending_reward,
         }
+
+    def dispose(self) -> None:
+        """Release buffered data and runtime handles."""
+        self.clear()
+        self._rollout_manager = None
+        self._training_group = None
 
 
 def create_rollout_buffer_actor(args: Any):

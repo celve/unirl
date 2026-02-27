@@ -132,7 +132,7 @@ def wait_for_published_checkpoint(
         # New protocol: checkpoint + ready marker.
         if os.path.exists(checkpoint_path) and os.path.exists(ready_marker):
             return
-        # Backward compatibility: checkpoint-only publication.
+        # Accept checkpoint-only publication when marker propagation is delayed.
         if os.path.exists(checkpoint_path) and not os.path.exists(ready_marker):
             return
         time.sleep(poll_interval_s)

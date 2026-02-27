@@ -2,7 +2,7 @@
 Ray-based reward worker for GPU-isolated reward computation.
 
 Uses Ray actors and placement groups to isolate GPU memory
-from inference and training actors.
+from rollout and training actors.
 """
 
 import logging
@@ -125,10 +125,10 @@ class RayRewardWorker(BaseRewardWorker):
     Ray-based reward worker for GPU-isolated reward computation.
 
     Uses Ray actors and placement groups to isolate GPU memory
-    from inference and training actors.
+    from rollout and training actors.
 
     **Only used for independent GPU mode** (reward_dedicated_num_gpus > 0).
-    Colocate mode uses InferenceActor built-in reward instead.
+    Colocate mode uses RolloutActor built-in reward instead.
 
     Supports two modes:
     1. parallel_mode=False: Single actor (or multi-GPU actor) handles all requests

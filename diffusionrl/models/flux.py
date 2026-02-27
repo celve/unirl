@@ -9,7 +9,7 @@ FLUX is an image generation model from Black Forest Labs with:
 Reference: https://github.com/black-forest-labs/flux
 """
 import logging
-from typing import List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -95,6 +95,10 @@ class FluxModelBundle(ModelBundle):
     def model_type(self) -> str:
         return "flux"
 
+    @property
+    def media_type(self) -> str:
+        return "image"
+
     @classmethod
     def default_sampler_path(cls) -> Optional[str]:
         return "diffusionrl.samplers.fsdp.flux_sampler.FluxSampler"
@@ -102,6 +106,24 @@ class FluxModelBundle(ModelBundle):
     @classmethod
     def default_sampler_engine(cls) -> Optional[str]:
         return "fsdp"
+
+    @classmethod
+    def validate_config(cls, args: Any) -> None:
+        sde_type = str(getattr(args, "sde_type", "") or "")
+        if sde_type in ("dance", "sde"):
+            args.sde_type = "flux_dance"
+            return
+        if sde_type == "flow":
+            args.sde_type = "flux_flow"
+            return
+        if sde_type in ("flux_dance", "flux_flow", ""):
+            return
+        if sde_type.startswith("flux_"):
+            raise ValueError(f"Unknown FLUX sde_type: {sde_type}")
+
+    @classmethod
+    def embedding_dataset_kwargs(cls) -> Dict[str, Any]:
+        return {"load_text_ids": True}
 
     def load(self) -> None:
         """Load all model components."""
@@ -521,5 +543,4 @@ class FluxTextEncoderWrapper:
         if self.t5_encoder is not None:
             self.t5_encoder.to(device)
         return self
-
 

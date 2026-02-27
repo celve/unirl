@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import torch
 
-from diffusionrl.types.sampling import LogProbData, PromptEmbeddings, SamplerOutput
+from diffusionrl.types.sampling import LogProbData, PromptEmbeddings, RolloutOutput
 from diffusionrl.types.training_batch import BackwardTrainingBatch, ForwardTrainingBatch
 
 logger = logging.getLogger(__name__)
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 def assemble_forward_training_batch(
     *,
-    sampler_outputs: List[SamplerOutput],
+    sampler_outputs: List[RolloutOutput],
     rewards: torch.Tensor,
     advantages: torch.Tensor,
     prompts: List[str],
@@ -32,13 +32,13 @@ def assemble_forward_training_batch(
     timesteps: Optional[torch.Tensor] = None
 
     for idx, output in enumerate(sampler_outputs):
-        if not isinstance(output, SamplerOutput):
+        if not isinstance(output, RolloutOutput):
             raise TypeError(
-                "Assemble stage expects SamplerOutput, "
+                "Assemble stage expects RolloutOutput, "
                 f"got {type(output).__name__} at index={idx}."
             )
         if output.embeddings is None:
-            raise ValueError(f"SamplerOutput at index={idx} missing embeddings in NFT path.")
+            raise ValueError(f"RolloutOutput at index={idx} missing embeddings in NFT path.")
 
         clean_latents.append(output.latents)
 
@@ -108,7 +108,7 @@ def assemble_backward_training_batch(
     *,
     algorithm: Any,
     num_inference_steps: int,
-    sampler_outputs: List[SamplerOutput],
+    sampler_outputs: List[RolloutOutput],
     rewards: torch.Tensor,
     advantages: torch.Tensor,
     prompts: List[str],
@@ -134,15 +134,15 @@ def assemble_backward_training_batch(
     all_image_ids = []
 
     for idx, output in enumerate(sampler_outputs):
-        if not isinstance(output, SamplerOutput):
+        if not isinstance(output, RolloutOutput):
             raise TypeError(
-                "Assemble stage expects SamplerOutput, "
+                "Assemble stage expects RolloutOutput, "
                 f"got {type(output).__name__} at index={idx}."
             )
         if output.trajectories is None:
-            raise ValueError(f"SamplerOutput at index={idx} missing trajectories in GRPO path.")
+            raise ValueError(f"RolloutOutput at index={idx} missing trajectories in GRPO path.")
         if output.embeddings is None:
-            raise ValueError(f"SamplerOutput at index={idx} missing embeddings in GRPO path.")
+            raise ValueError(f"RolloutOutput at index={idx} missing embeddings in GRPO path.")
 
         traj = output.trajectories
         log_probs = output.log_probs.to_dict() if output.log_probs is not None else {}

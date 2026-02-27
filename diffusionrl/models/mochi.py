@@ -70,13 +70,19 @@ class MochiModelBundle(ModelBundle):
     def model_type(self) -> str:
         return "mochi"
 
+    @property
+    def media_type(self) -> str:
+        return "video"
+
     @classmethod
     def default_sampler_path(cls) -> Optional[str]:
-        return "diffusionrl.samplers.fastvideo.fastvideo_sampler.FastVideoSampler"
+        # SGLang engine handles Mochi rollout directly; no FastVideo sampler fallback.
+        return "diffusionrl.samplers.sglang.engine.SGLangRolloutEngine"
 
     @classmethod
     def default_sampler_engine(cls) -> Optional[str]:
-        return "fastvideo"
+        # Default rollout engine is SGLang.
+        return "sglang"
 
     def load(self) -> None:
         """Load all model components."""
@@ -372,5 +378,3 @@ class MochiTextEncoderWrapper:
         if self.encoder is not None:
             self.encoder.to(device)
         return self
-
-

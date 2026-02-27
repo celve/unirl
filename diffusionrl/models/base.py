@@ -75,15 +75,53 @@ class ModelBundle(ABC):
         """Return the model type identifier (e.g., 'hunyuan', 'mochi', 'flux')."""
         ...
 
+    @property
+    @abstractmethod
+    def media_type(self) -> str:
+        """Return the media type identifier ('image' or 'video')."""
+        ...
+
     @classmethod
     def default_sampler_path(cls) -> Optional[str]:
         """Default sampler implementation for this model bundle."""
         return None
 
     @classmethod
+    def declared_model_type(cls) -> Optional[str]:
+        """Class-level model type declaration used by model discovery."""
+        attr = getattr(cls, "model_type", None)
+        if isinstance(attr, property) and callable(attr.fget):
+            try:
+                value = attr.fget(cls)
+            except Exception:
+                return None
+            if isinstance(value, str) and value.strip():
+                return value.strip().lower()
+        return None
+
+    @classmethod
     def default_sampler_engine(cls) -> Optional[str]:
         """Default sampler engine type for this model bundle."""
         return None
+
+    @classmethod
+    def validate_config(cls, args: Any) -> None:
+        """Model-specific argument normalization/validation hook."""
+        return None
+
+    @classmethod
+    def embedding_dataset_kwargs(cls) -> Dict[str, Any]:
+        """Default kwargs when loading embedding manifests for this model."""
+        return {"load_text_ids": False}
+
+    @classmethod
+    def create_embedding_dataset(cls, *, json_path: str, **kwargs: Any):
+        """Build embedding dataset instance for this model."""
+        from diffusionrl.data.datasets import EmbeddingRLDataset
+
+        merged_kwargs = dict(cls.embedding_dataset_kwargs())
+        merged_kwargs.update(kwargs)
+        return EmbeddingRLDataset(json_path=json_path, **merged_kwargs)
 
     @abstractmethod
     def load(self) -> None:
@@ -171,7 +209,6 @@ class ModelBundle(ABC):
         """
         ...
 
-    @abstractmethod
     def get_no_split_modules(self) -> Tuple[Type[nn.Module], ...]:
         """
         Get module types that should not be split in FSDP.
@@ -179,7 +216,7 @@ class ModelBundle(ABC):
         Returns:
             Tuple of module types
         """
-        ...
+        return tuple()
 
     def get_sigma_schedule(
         self,
@@ -264,12 +301,12 @@ class ModelBundle(ABC):
     @property
     def is_video_model(self) -> bool:
         """Whether this is a video generation model."""
-        return self.model_type in ("hunyuan", "mochi", "wan")
+        return self.media_type == "video"
 
     @property
     def is_image_model(self) -> bool:
         """Whether this is an image generation model."""
-        return self.model_type in ("flux", "sd", "sdxl", "sd3")
+        return self.media_type == "image"
 
     def get_config(self) -> Dict[str, Any]:
         """Get model bundle configuration."""

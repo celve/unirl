@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Set, Tuple, Any
 import torch
 import torch.nn as nn
 
-from ..base import BaseSampler, SamplerOutput
+from ..base import BaseSampler, RolloutOutput
 from ..log_prob import get_sigma_schedule, sd3_time_shift, flux_sde_step
 from diffusionrl.types import LogProbData, PromptEmbeddings
 
@@ -117,7 +117,7 @@ class FSDPHunyuanSampler(BaseSampler):
         generator: Optional[torch.Generator] = None,
         sde_indices: Optional[Set[int]] = None,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> RolloutOutput:
         """
         Execute SDE sampling and return trajectories with log probabilities.
 
@@ -142,7 +142,7 @@ class FSDPHunyuanSampler(BaseSampler):
             sde_indices: Set of timestep indices for SDE (all by default)
 
         Returns:
-            SamplerOutput with trajectories, log_probs, etc.
+            RolloutOutput with trajectories, log_probs, etc.
         """
         if self.model is None:
             raise RuntimeError("Model not set. Initialize sampler with model parameter.")
@@ -249,7 +249,7 @@ class FSDPHunyuanSampler(BaseSampler):
             encoder_attention_mask=encoder_attention_mask,
         )
 
-        return SamplerOutput(
+        return RolloutOutput(
             latents=final_latents,
             timesteps=sigma_schedule,
             trajectories=trajectories,

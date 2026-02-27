@@ -10,7 +10,7 @@ Future implementations may include:
 - SGLangHunyuanSampler: HunyuanVideo sampler using SGLang backend
 
 Engine:
-- SGLangInferenceEngine: Placeholder engine interface for Ray actors
+- SGLangRolloutEngine: Placeholder engine interface for Ray actors
 
 See README.md for implementation plans.
 """
@@ -21,7 +21,7 @@ from .client import (
     SGLangProtocolError,
     SGLangTimeoutError,
 )
-from .engine import SGLangInferenceEngine
+from .engine import SGLangRolloutEngine
 
 __all__ = [
     "SGLangClient",
@@ -29,5 +29,5 @@ __all__ = [
     "SGLangProtocolError",
     "SGLangTimeoutError",
     # Engine (placeholder)
-    "SGLangInferenceEngine",
+    "SGLangRolloutEngine",
 ]

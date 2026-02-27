@@ -7,12 +7,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from diffusionrl.types.reward import RewardRequest
-from diffusionrl.types.sampling import SamplerOutput
+from diffusionrl.types.sampling import RolloutOutput
 
 logger = logging.getLogger(__name__)
 
 
-def extract_images_from_output(output: SamplerOutput) -> List[Any]:
+def extract_images_from_output(output: RolloutOutput) -> List[Any]:
     """
     Extract images from a sampler output.
 
@@ -22,9 +22,9 @@ def extract_images_from_output(output: SamplerOutput) -> List[Any]:
     Returns:
         List of images (PIL.Image or tensors)
     """
-    if not isinstance(output, SamplerOutput):
+    if not isinstance(output, RolloutOutput):
         raise TypeError(
-            "Reward stage expects SamplerOutput, "
+            "Reward stage expects RolloutOutput, "
             f"got {type(output).__name__}."
         )
 
@@ -39,11 +39,11 @@ def extract_images_from_output(output: SamplerOutput) -> List[Any]:
     return []
 
 
-def extract_videos_from_output(output: SamplerOutput) -> List[torch.Tensor]:
+def extract_videos_from_output(output: RolloutOutput) -> List[torch.Tensor]:
     """Extract decoded videos (preferred) or 5D tensors as video payload."""
-    if not isinstance(output, SamplerOutput):
+    if not isinstance(output, RolloutOutput):
         raise TypeError(
-            "Reward stage expects SamplerOutput, "
+            "Reward stage expects RolloutOutput, "
             f"got {type(output).__name__}."
         )
 
@@ -79,7 +79,7 @@ def compute_rewards(
     reward_service: Any,
     reward_path: str,
     num_samples_per_prompt: int,
-    sampler_outputs: List[SamplerOutput],
+    sampler_outputs: List[RolloutOutput],
     prompts: List[str],
     prompt_metadata: Optional[List[Optional[Dict[str, Any]]]] = None,
 ) -> Tuple[torch.Tensor, Dict[str, List[float]]]:

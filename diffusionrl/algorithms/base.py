@@ -1,11 +1,11 @@
 """
 diffusionrl Algorithm Base Class.
 
-Defines the interface for all GRPO algorithm variants.
+Defines algorithm responsibilities in rollout/advantage pipeline.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 import torch
 import torch.nn as nn
@@ -59,17 +59,17 @@ class SamplingRequirements:
 
 class BaseAlgorithm(ABC):
     """
-    Base class for GRPO algorithm variants.
+    Base class for algorithm plugins.
 
     Each algorithm variant implements:
     - get_sampling_requirements(): What the sampler needs to provide
     - compute_advantages(): How to compute advantages from rewards
-    - compute_loss(): How to compute the training loss
+    - optional timestep filtering helpers for backward training assembly
 
-    Subclasses:
-    - GRPOAlgorithm: Standard GRPO with group normalization
-    - MixGRPOAlgorithm: Mixed SDE/ODE sampling
-    - NFTAlgorithm: Noise-Free Training
+    Notes:
+    - The main training path in this repository computes gradients through
+      `loss_fn` objects (see diffusionrl.losses), not through
+      algorithm-side loss methods.
     """
 
     def __init__(
@@ -186,30 +186,6 @@ class BaseAlgorithm(ABC):
 
         return advantages
 
-    @abstractmethod
-    def compute_loss(
-        self,
-        model: nn.Module,
-        batch: Dict[str, Any],
-        timestep_idx: int,
-        advantages: torch.Tensor,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """
-        Compute the training loss for a single timestep.
-
-        Args:
-            model: The model being trained
-            batch: Dictionary containing training data
-            timestep_idx: Current timestep index
-            advantages: Pre-computed advantages
-            **kwargs: Additional arguments (prompt_embeds, etc.)
-
-        Returns:
-            Tuple of (loss tensor, metrics dictionary)
-        """
-        ...
-
     # ========== Algorithm Hooks ==========
     # These hooks allow algorithms to customize behavior without requiring
     # special-case handling in TrainingActor or RolloutManager.
@@ -296,63 +272,6 @@ class BaseAlgorithm(ABC):
             result = {i for i in result if i >= frozen_init}
 
         return result
-
-    def compute_aggregated_loss(
-        self,
-        model: nn.Module,
-        batch: Dict[str, Any],
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """
-        Compute aggregated loss across all timesteps.
-
-        Args:
-            model: The model being trained
-            batch: Dictionary containing training data
-            **kwargs: Additional arguments
-
-        Returns:
-            Tuple of (average loss tensor, aggregated metrics dictionary)
-        """
-        sde_indices = batch.get("sde_indices", set())
-        if not sde_indices:
-            num_steps = batch.get("num_steps", 50)
-            sde_indices = set(range(num_steps))
-
-        advantages = batch.get("advantages")
-        if advantages is None:
-            raise ValueError("batch must contain 'advantages'")
-
-        total_loss = torch.tensor(0.0, device=advantages.device)
-        all_metrics: Dict[str, Any] = {}
-        num_timesteps = 0
-
-        for t_idx in sde_indices:
-            loss_t, metrics_t = self.compute_loss(
-                model=model,
-                batch=batch,
-                timestep_idx=t_idx,
-                advantages=advantages,
-                **kwargs,
-            )
-            total_loss += loss_t
-            num_timesteps += 1
-
-            # Store per-timestep metrics
-            for key, value in metrics_t.items():
-                all_metrics[f"t{t_idx}_{key}"] = value
-
-        # Compute averages
-        if num_timesteps > 0:
-            avg_loss = total_loss / num_timesteps
-        else:
-            avg_loss = total_loss
-
-        all_metrics["num_timesteps"] = num_timesteps
-        all_metrics["total_loss"] = total_loss.item()
-        all_metrics["avg_loss"] = avg_loss.item()
-
-        return avg_loss, all_metrics
 
     def get_config(self) -> Dict[str, Any]:
         """Get algorithm configuration as dictionary."""

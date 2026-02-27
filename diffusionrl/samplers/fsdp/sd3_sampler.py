@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Set, Any, Tuple
 import torch
 import torch.nn as nn
 
-from ..base import BaseSampler, SamplerOutput
+from ..base import BaseSampler, RolloutOutput
 from ..log_prob import compute_sde_log_prob, sde_step_with_log_prob, get_sigma_schedule
 from diffusionrl.types import LogProbData, PromptEmbeddings
 
@@ -233,6 +233,65 @@ class SD3Sampler(BaseSampler):
     def supports_video(self) -> bool:
         return False
 
+    def _predict_noise_with_cfg(
+        self,
+        *,
+        latents: torch.Tensor,
+        timestep: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        pooled_prompt_embeds: Optional[torch.Tensor],
+        guidance_scale: float,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Predict noise with SD3 CFG using a single batched forward.
+
+        Matches flow_grpo/DiffusionNFT SD3 behavior:
+        - concat [uncond, cond] embeddings
+        - concat [latents, latents]
+        - single model forward
+        - chunk(2) and apply CFG formula
+        """
+        if guidance_scale > 1.0:
+            uncond_prompt_embeds = (
+                negative_prompt_embeds
+                if negative_prompt_embeds is not None
+                else torch.zeros_like(prompt_embeds)
+            )
+            if pooled_prompt_embeds is not None:
+                uncond_pooled_embeds = (
+                    negative_pooled_prompt_embeds
+                    if negative_pooled_prompt_embeds is not None
+                    else torch.zeros_like(pooled_prompt_embeds)
+                )
+                pooled_batched = torch.cat(
+                    [uncond_pooled_embeds, pooled_prompt_embeds], dim=0
+                )
+            else:
+                pooled_batched = None
+
+            noise_pred = self.model(
+                hidden_states=torch.cat([latents, latents], dim=0),
+                encoder_hidden_states=torch.cat(
+                    [uncond_prompt_embeds, prompt_embeds], dim=0
+                ),
+                timestep=torch.cat([timestep, timestep], dim=0),
+                pooled_projections=pooled_batched,
+                return_dict=False,
+            )[0]
+            noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
+            return noise_pred_uncond + guidance_scale * (
+                noise_pred_cond - noise_pred_uncond
+            )
+
+        return self.model(
+            hidden_states=latents,
+            encoder_hidden_states=prompt_embeds,
+            timestep=timestep,
+            pooled_projections=pooled_prompt_embeds,
+            return_dict=False,
+        )[0]
+
     def sample(
         self,
         prompts: Optional[List[str]] = None,
@@ -252,7 +311,7 @@ class SD3Sampler(BaseSampler):
         init_same_noise: bool = False,
         num_samples_per_prompt: int = 1,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> RolloutOutput:
         """
         Execute SDE sampling and return trajectories with log probabilities.
 
@@ -274,7 +333,7 @@ class SD3Sampler(BaseSampler):
             num_samples_per_prompt: Number of samples per prompt (for init_same_noise)
 
         Returns:
-            SamplerOutput with trajectories, log_probs, etc.
+            RolloutOutput with trajectories, log_probs, etc.
         """
         if self.model is None:
             raise RuntimeError("Model not set. Initialize sampler with model parameter.")
@@ -359,48 +418,15 @@ class SD3Sampler(BaseSampler):
 
             # Forward pass with CFG
             with torch.no_grad():
-                # Unconditional prediction
-                if guidance_scale > 1.0:
-                    # For CFG, we need to run both conditional and unconditional
-                    # Note: In practice, you'd want to batch these together
-                    noise_pred_uncond = self.model(
-                        hidden_states=latents,
-                        encoder_hidden_states=(
-                            negative_prompt_embeds
-                            if negative_prompt_embeds is not None
-                            else torch.zeros_like(prompt_embeds)
-                        ),
-                        timestep=timestep,
-                        pooled_projections=(
-                            negative_pooled_prompt_embeds
-                            if negative_pooled_prompt_embeds is not None
-                            else (
-                                torch.zeros_like(pooled_prompt_embeds)
-                                if pooled_prompt_embeds is not None
-                                else None
-                            )
-                        ),
-                        return_dict=False,
-                    )[0]
-
-                    noise_pred_cond = self.model(
-                        hidden_states=latents,
-                        encoder_hidden_states=prompt_embeds,
-                        timestep=timestep,
-                        pooled_projections=pooled_prompt_embeds,
-                        return_dict=False,
-                    )[0]
-
-                    # CFG
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-                else:
-                    noise_pred = self.model(
-                        hidden_states=latents,
-                        encoder_hidden_states=prompt_embeds,
-                        timestep=timestep,
-                        pooled_projections=pooled_prompt_embeds,
-                        return_dict=False,
-                    )[0]
+                noise_pred = self._predict_noise_with_cfg(
+                    latents=latents,
+                    timestep=timestep,
+                    prompt_embeds=prompt_embeds,
+                    pooled_prompt_embeds=pooled_prompt_embeds,
+                    guidance_scale=guidance_scale,
+                    negative_prompt_embeds=negative_prompt_embeds,
+                    negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                )
 
             # Check if this step uses SDE
             if self.sde_type == "dpm2":
@@ -447,7 +473,7 @@ class SD3Sampler(BaseSampler):
             negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
         )
 
-        return SamplerOutput(
+        return RolloutOutput(
             latents=latents,
             timesteps=sigmas,
             trajectories=trajectories,
@@ -522,44 +548,15 @@ class SD3Sampler(BaseSampler):
         )
         self.model.train()
         with autocast_ctx:
-            if actual_guidance > 1.0:
-                noise_pred_uncond = self.model(
-                    hidden_states=latents,
-                    encoder_hidden_states=(
-                        negative_prompt_embeds
-                        if negative_prompt_embeds is not None
-                        else torch.zeros_like(prompt_embeds)
-                    ),
-                    timestep=timestep,
-                    pooled_projections=(
-                        negative_pooled_prompt_embeds
-                        if negative_pooled_prompt_embeds is not None
-                        else (
-                            torch.zeros_like(pooled_prompt_embeds)
-                            if pooled_prompt_embeds is not None
-                            else None
-                        )
-                    ),
-                    return_dict=False,
-                )[0]
-                noise_pred_cond = self.model(
-                    hidden_states=latents,
-                    encoder_hidden_states=prompt_embeds,
-                    timestep=timestep,
-                    pooled_projections=pooled_prompt_embeds,
-                    return_dict=False,
-                )[0]
-                noise_pred = noise_pred_uncond + actual_guidance * (
-                    noise_pred_cond - noise_pred_uncond
-                )
-            else:
-                noise_pred = self.model(
-                    hidden_states=latents,
-                    encoder_hidden_states=prompt_embeds,
-                    timestep=timestep,
-                    pooled_projections=pooled_prompt_embeds,
-                    return_dict=False,
-                )[0]
+            noise_pred = self._predict_noise_with_cfg(
+                latents=latents,
+                timestep=timestep,
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                guidance_scale=actual_guidance,
+                negative_prompt_embeds=negative_prompt_embeds,
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+            )
 
         log_prob, _ = compute_sde_log_prob(
             noise_pred=noise_pred,

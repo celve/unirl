@@ -11,13 +11,13 @@ Available samplers:
 - FSDPHunyuanSampler: HunyuanVideo video model sampler (aligned with DanceGRPO)
 
 Engine:
-- FSDPInferenceEngine: Unified engine interface for Ray actors
+- FSDPRolloutEngine: Unified engine interface for Ray actors
 """
 
 from .flux_sampler import FluxSampler
 from .sd3_sampler import SD3Sampler
 from .hunyuan_sampler import FSDPHunyuanSampler
-from .engine import FSDPInferenceEngine
+from .engine import FSDPRolloutEngine
 
 __all__ = [
     # Samplers
@@ -25,5 +25,5 @@ __all__ = [
     "SD3Sampler",
     "FSDPHunyuanSampler",
     # Engine
-    "FSDPInferenceEngine",
+    "FSDPRolloutEngine",
 ]

@@ -14,10 +14,12 @@ import json
 import logging
 import os
 import random
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from torch.utils.data import Dataset
+
+from diffusionrl.utils import load_function
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +250,7 @@ class EmbeddingRLDataset(BaseRLDataset):
 
         pooled_key = "pooled_embed_path"
         if pooled_key not in item:
-            # DanceGRPO/MixGRPO field name compatibility
+            # Accept alternate pooled embedding field from existing datasets.
             pooled_key = "pooled_prompt_embeds_path" if "pooled_prompt_embeds_path" in item else pooled_key
 
         prompt_embed_path = os.path.join(self.embedding_dir, item[prompt_embed_key])
@@ -296,48 +298,35 @@ class EmbeddingRLDataset(BaseRLDataset):
         return result
 
 
-# Registry for model_type -> (dataset class, default kwargs)
-DATASET_REGISTRY: Dict[str, Tuple[Type[BaseRLDataset], Dict[str, Any]]] = {}
-
-
-def register_dataset(
-    model_type: str,
-    dataset_cls: Type[BaseRLDataset],
-    default_kwargs: Optional[Dict[str, Any]] = None,
-    overwrite: bool = False,
-) -> None:
-    """Register a dataset class for a model type."""
-    key = model_type.lower()
-    if not overwrite and key in DATASET_REGISTRY:
-        raise ValueError(f"Dataset already registered for model_type={key}")
-    DATASET_REGISTRY[key] = (dataset_cls, dict(default_kwargs or {}))
-
-
 def create_rl_dataset(
     json_path: str,
-    model_type: str = "flux",
+    model_path: str,
     **kwargs,
 ) -> BaseRLDataset:
     """
-    Factory function to create appropriate RL dataset.
+    Build embedding dataset using model class self-description.
 
     Args:
         json_path: Path to JSON metadata file
-        model_type: Registered model type
+        model_path: Model bundle class dotpath
         **kwargs: Additional arguments passed to dataset
 
     Returns:
-        Appropriate dataset instance
+        Dataset instance returned by model_cls.create_embedding_dataset()
     """
-    model_type = model_type.lower()
-    if model_type not in DATASET_REGISTRY:
-        available = ", ".join(sorted(DATASET_REGISTRY.keys()))
-        raise ValueError(f"Unknown model_type: {model_type}. Available: {available}")
-
-    dataset_cls, default_kwargs = DATASET_REGISTRY[model_type]
-    merged_kwargs = dict(default_kwargs)
-    merged_kwargs.update(kwargs)
-    return dataset_cls(json_path, **merged_kwargs)
+    model_cls = load_function(model_path)
+    build_dataset = getattr(model_cls, "create_embedding_dataset", None)
+    if not callable(build_dataset):
+        raise ValueError(
+            f"Model class {model_path} must provide classmethod create_embedding_dataset()."
+        )
+    dataset = build_dataset(json_path=json_path, **kwargs)
+    if not isinstance(dataset, Dataset):
+        raise TypeError(
+            f"{model_path}.create_embedding_dataset() must return torch.utils.data.Dataset, "
+            f"got {type(dataset)!r}."
+        )
+    return dataset
 
 
 def collate_embeddings(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -369,14 +358,3 @@ def collate_embeddings(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         result["text_ids"] = torch.stack([item["text_ids"] for item in batch])
 
     return result
-
-
-def _register_default_datasets() -> None:
-    register_dataset("flux", EmbeddingRLDataset, {"load_text_ids": True}, overwrite=True)
-    register_dataset("sd3", EmbeddingRLDataset, {"load_text_ids": False}, overwrite=True)
-    register_dataset("sd3.5", EmbeddingRLDataset, {"load_text_ids": False}, overwrite=True)
-    register_dataset("hunyuan", EmbeddingRLDataset, {"load_text_ids": False}, overwrite=True)
-    register_dataset("mochi", EmbeddingRLDataset, {"load_text_ids": False}, overwrite=True)
-
-
-_register_default_datasets()

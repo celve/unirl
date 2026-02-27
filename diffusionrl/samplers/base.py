@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Set, Any
 import torch
 
 # Import shared data types from canonical types package
-from diffusionrl.types import LogProbData, PromptEmbeddings, SamplerOutput
+from diffusionrl.types import LogProbData, PromptEmbeddings, RolloutOutput
 
 
 class BaseSampler(ABC):
@@ -55,7 +55,7 @@ class BaseSampler(ABC):
         generator: Optional[torch.Generator] = None,
         sde_indices: Optional[Set[int]] = None,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> RolloutOutput:
         """
         Execute sampling and return trajectories with log probabilities.
 
@@ -74,7 +74,7 @@ class BaseSampler(ABC):
             **kwargs: Additional model-specific arguments
 
         Returns:
-            SamplerOutput with trajectories, log_probs, etc.
+            RolloutOutput with trajectories, log_probs, etc.
             - log_probs will only contain entries for sde_indices
             - sde_indices in output reflects which steps used SDE
         """

@@ -3,13 +3,38 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 
 from diffusionrl.types.training_batch import ForwardTrainingBatch
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_forward_batch_loss(
+    *,
+    loss_fn: Any,
+    model: torch.nn.Module,
+    batch: ForwardTrainingBatch,
+    timestep_values: Optional[torch.Tensor] = None,
+    apply_shift: Optional[bool] = None,
+) -> tuple[torch.Tensor, Dict[str, Any]]:
+    compute_batch = getattr(loss_fn, "compute_batch", None)
+    if not callable(compute_batch):
+        raise TypeError(
+            f"Loss {type(loss_fn).__name__} must implement compute_batch(). "
+            "Legacy compute() is no longer supported."
+        )
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "batch": batch,
+    }
+    if timestep_values is not None:
+        kwargs["timestep_values"] = timestep_values
+    if apply_shift is not None:
+        kwargs["apply_shift"] = apply_shift
+    return compute_batch(**kwargs)
 
 
 def train_forward_batch(
@@ -50,26 +75,13 @@ def train_forward_batch(
             metrics_sum: Dict[str, float] = {}
 
             for t in timesteps:
-                if hasattr(loss_fn, "compute_batch"):
-                    loss, metrics = loss_fn.compute_batch(
-                        model=model,
-                        batch=batch,
-                        timestep_values=t,
-                        apply_shift=apply_shift,
-                    )
-                else:
-                    loss, metrics = loss_fn.compute(
-                        model=model,
-                        samples=batch.to_loss_dict(),
-                        timestep_idx=0,
-                        advantages=batch.advantages,
-                        prompt_embeds=batch.embeddings.prompt_embeds,
-                        pooled_prompt_embeds=batch.embeddings.pooled_prompt_embeds,
-                        text_ids=batch.embeddings.text_ids,
-                        image_ids=batch.embeddings.image_ids,
-                        timestep_values=t,
-                        apply_shift=apply_shift,
-                    )
+                loss, metrics = _compute_forward_batch_loss(
+                    loss_fn=loss_fn,
+                    model=model,
+                    batch=batch,
+                    timestep_values=t,
+                    apply_shift=apply_shift,
+                )
 
                 (loss / effective_grad_accum).backward()
                 total_loss = total_loss + loss.detach()
@@ -90,22 +102,11 @@ def train_forward_batch(
                 True,
             )
 
-    if hasattr(loss_fn, "compute_batch"):
-        loss, metrics = loss_fn.compute_batch(
-            model=model,
-            batch=batch,
-        )
-    else:
-        loss, metrics = loss_fn.compute(
-            model=model,
-            samples=batch.to_loss_dict(),
-            timestep_idx=0,
-            advantages=batch.advantages,
-            prompt_embeds=batch.embeddings.prompt_embeds,
-            pooled_prompt_embeds=batch.embeddings.pooled_prompt_embeds,
-            text_ids=batch.embeddings.text_ids,
-            image_ids=batch.embeddings.image_ids,
-        )
+    loss, metrics = _compute_forward_batch_loss(
+        loss_fn=loss_fn,
+        model=model,
+        batch=batch,
+    )
 
     all_metrics: Dict[str, Any] = {}
     for key, value in metrics.items():

@@ -19,39 +19,28 @@ def resolve_loss_type_requirements(
     if requirements is None:
         raise ValueError(
             f"Unsupported loss_type={loss_type}. "
-            f"Expected one of: {sorted(loss_type_requirements.keys())}."
+            f"Expected one of: {sorted(loss_type_requirements.keys())}. "
+            "Use --loss-type grpo for standard GRPO training or --loss-type nft for Noise-Free Training."
         )
     return dict(requirements)
 
 
-def validate_engine_loss_compatibility(
+def validate_engine_loss_contract(
     *,
     args,
-    sampling_backend: str,
-    model_type_to_sampler_engine: Dict[str, str],
-    engine_capability_requirements: Dict[str, Dict[str, bool]],
+    training_actor_direct_sampling: bool,
+    engine_capabilities: Dict[str, bool],
     loss_type_requirements: Dict[str, Dict[str, bool]],
 ) -> None:
-    """Fail-fast guard for incompatible sampler engine and loss capability pairs."""
-    sampler_engine_type = args.sampler_engine_type or model_type_to_sampler_engine.get(
-        args.model_type, "fsdp"
-    )
-    capabilities = engine_capability_requirements.get(sampler_engine_type)
-    if capabilities is None:
-        raise ValueError(
-            f"Unknown sampler_engine_type={sampler_engine_type}. "
-            f"Supported: {sorted(engine_capability_requirements.keys())}."
-        )
-    capabilities = dict(capabilities)
+    """Fail-fast guard for engine/loss capability contract violations."""
+    sampler_engine_type = str(getattr(args, "sampler_engine_type", "") or "")
+    capabilities = dict(engine_capabilities)
 
-    if sampling_backend == "training":
+    if training_actor_direct_sampling:
         return
 
     allow_replay = (
-        bool(
-            getattr(args, "replay_log_probs", False)
-            or getattr(args, "fastvideo_replay_log_probs", False)
-        )
+        bool(getattr(args, "replay_log_probs", False))
         and getattr(args, "loss_type", "grpo") == "grpo"
     )
     if allow_replay:
@@ -223,7 +212,7 @@ def validate_reward_config(args) -> None:
     if args.colocate_reward:
         raise ValueError(
             "colocate_reward=True is no longer supported. "
-            "InferenceActor is restricted to prompts->SamplerOutput. "
+            "RolloutActor is restricted to prompts->RolloutOutput. "
             "Use RewardService (CPU/HTTP/independent-GPU reward pools)."
         )
 
@@ -244,23 +233,22 @@ def validate_reward_config(args) -> None:
 
 def validate_colocate_fractions(args) -> None:
     """Validate colocate GPU fraction bounds."""
-    if args.colocate_training_gpu_fraction <= 0 or args.colocate_inference_gpu_fraction <= 0:
+    if args.colocate_training_gpu_fraction <= 0 or args.colocate_rollout_gpu_fraction <= 0:
         raise ValueError(
-            "colocate_training_gpu_fraction and colocate_inference_gpu_fraction must be > 0"
+            "colocate_training_gpu_fraction and colocate_rollout_gpu_fraction must be > 0"
         )
-    if args.colocate_training_gpu_fraction + args.colocate_inference_gpu_fraction > 1.0:
+    if args.colocate_training_gpu_fraction + args.colocate_rollout_gpu_fraction > 1.0:
         raise ValueError(
-            "colocate_training_gpu_fraction + colocate_inference_gpu_fraction must be <= 1.0"
+            "colocate_training_gpu_fraction + colocate_rollout_gpu_fraction must be <= 1.0"
         )
 
 
-def get_inference_gpus_per_actor(args, *, model_type_to_sampler_engine: Dict[str, str]) -> int:
-    """Resolve GPUs per inference actor based on sampler engine and engine config."""
-    sampler_engine_type = args.sampler_engine_type or model_type_to_sampler_engine.get(
-        args.model_type, "fsdp"
-    )
-    if sampler_engine_type == "fastvideo":
-        return args.fastvideo_num_gpus if args.fastvideo_num_gpus else args.sp_size
+def get_rollout_gpus_per_actor(args) -> int:
+    """Resolve GPUs per rollout actor based on sampler engine and engine config."""
+    sampler_engine_type = str(getattr(args, "sampler_engine_type", "") or "fsdp").lower()
+    # [FastVideo-suspended]
+    # if sampler_engine_type == "fastvideo":
+    #     return args.fastvideo_num_gpus if args.fastvideo_num_gpus else args.sp_size
     if sampler_engine_type == "fsdp":
         return args.fsdp_num_gpus
     if sampler_engine_type == "sglang":
@@ -268,6 +256,11 @@ def get_inference_gpus_per_actor(args, *, model_type_to_sampler_engine: Dict[str
         if not isinstance(engine_kwargs, dict):
             engine_kwargs = {}
         num_gpus = engine_kwargs.get("num_gpus")
+        if num_gpus is None:
+            # Keep this consistent with RolloutActorGroup factory:
+            # tp_size is treated as the per-engine GPU count when num_gpus
+            # is not explicitly provided.
+            num_gpus = engine_kwargs.get("tp_size", getattr(args, "tp_size", 1))
         if num_gpus is None:
             # Keep behavior explicit: default single-GPU engine unless user opts in.
             return 1
@@ -278,7 +271,6 @@ def get_inference_gpus_per_actor(args, *, model_type_to_sampler_engine: Dict[str
         return max(1, resolved)
     return 1
 
-
 __all__ = [
     "repo_root",
     "normalize_repo_relative_paths",
@@ -286,8 +278,8 @@ __all__ = [
     "looks_like_local_path",
     "is_probably_local_weight_sync_dir",
     "validate_colocate_fractions",
-    "get_inference_gpus_per_actor",
+    "get_rollout_gpus_per_actor",
     "resolve_loss_type_requirements",
-    "validate_engine_loss_compatibility",
+    "validate_engine_loss_contract",
     "validate_reward_config",
 ]

@@ -22,23 +22,18 @@ def compute_backward_timestep_loss(
 ) -> Tuple[torch.Tensor, Dict[str, Any]]:
     """Compute backward-path loss/metrics for one logical diffusion step."""
     timestep_data = batch.get_timestep_data_by_step(timestep_idx)
-
-    if hasattr(loss_fn, "compute_timestep"):
-        return loss_fn.compute_timestep(
-            model=model,
-            timestep_data=timestep_data,
-            advantages=batch.advantages,
-            embeddings=batch.embeddings,
-            guidance_scale=guidance_scale,
+    compute_timestep = getattr(loss_fn, "compute_timestep", None)
+    if not callable(compute_timestep):
+        raise TypeError(
+            f"Loss {type(loss_fn).__name__} must implement compute_timestep(). "
+            "Legacy compute() is no longer supported."
         )
-
-    return loss_fn.compute(
+    return compute_timestep(
         model=model,
-        samples=batch.to_loss_dict(),
-        timestep_idx=batch.get_position_for_step(timestep_idx),
+        timestep_data=timestep_data,
         advantages=batch.advantages,
-        prompt_embeds=batch.embeddings.prompt_embeds,
-        pooled_prompt_embeds=batch.embeddings.pooled_prompt_embeds,
+        embeddings=batch.embeddings,
+        guidance_scale=guidance_scale,
     )
 
 

@@ -9,7 +9,7 @@ Multi-GPU Support:
 - Multi-GPU per actor: Uses FSDP wrapper for model sharding
 
 Architecture (multi-GPU mode):
-    FSDPInferenceEngine (num_gpus=4)
+    FSDPRolloutEngine (num_gpus=4)
     ├── _init_distributed()
     │   └── torch.distributed.init_process_group(backend="nccl")
     ├── Model with FSDP (inference mode, NO_SHARD)
@@ -22,8 +22,8 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 import torch
 import torch.nn as nn
 
-from ..engine import BaseInferenceEngine, EngineConfig, EngineCapabilities, register_engine
-from diffusionrl.types import SamplerOutput
+from ..engine import BaseRolloutEngine, EngineConfig, EngineCapabilities, register_engine
+from diffusionrl.types import RolloutOutput
 from diffusionrl.utils import load_function
 from diffusionrl.utils.adapter_utils import switch_adapter
 
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 @register_engine("fsdp")
-class FSDPInferenceEngine(BaseInferenceEngine):
+class FSDPRolloutEngine(BaseRolloutEngine):
     """
     FSDP Inference Engine.
 
@@ -75,6 +75,14 @@ class FSDPInferenceEngine(BaseInferenceEngine):
             "fsdp_sharding_strategy", "NO_SHARD"
         )
         self._distributed_initialized = False
+
+    @classmethod
+    def declared_capabilities(cls) -> Dict[str, bool]:
+        return {
+            "requires_trajectory": True,
+            "requires_log_prob": True,
+            "requires_embeddings": True,
+        }
 
     def _init_distributed(self) -> None:
         """
@@ -254,7 +262,7 @@ class FSDPInferenceEngine(BaseInferenceEngine):
         sde_indices: Optional[Set[int]] = None,
         sampling_adapter: Optional[str] = None,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> RolloutOutput:
         """
         Generate samples with log probabilities.
 
@@ -277,7 +285,7 @@ class FSDPInferenceEngine(BaseInferenceEngine):
             **kwargs: Additional arguments
 
         Returns:
-            SamplerOutput with trajectories and log_probs
+            RolloutOutput with trajectories and log_probs
         """
         if not self._is_initialized:
             raise RuntimeError("Engine not initialized")
@@ -285,7 +293,7 @@ class FSDPInferenceEngine(BaseInferenceEngine):
         if self.sampler is None:
             raise RuntimeError("Sampler not loaded")
 
-        self.ensure_ready_for_generate()
+        self.wake_up()
 
         # Set seed
         generator = None
@@ -295,7 +303,8 @@ class FSDPInferenceEngine(BaseInferenceEngine):
 
         # Use defaults if not specified
         num_inference_steps = num_inference_steps or self.config.num_inference_steps
-        guidance_scale = guidance_scale or self.config.guidance_scale
+        if guidance_scale is None:
+            guidance_scale = self.config.guidance_scale
         height = height or self.config.height
         width = width or self.config.width
         num_frames = num_frames or self.config.num_frames
@@ -463,7 +472,7 @@ class FSDPInferenceEngine(BaseInferenceEngine):
                     continue
                 self._safe_to_device(component, device, f"sampler.{attr_name}")
 
-    def offload(self) -> None:
+    def sleep(self) -> None:
         """Offload models to CPU.
 
         Offloads all model components including:
@@ -473,6 +482,10 @@ class FSDPInferenceEngine(BaseInferenceEngine):
         - Any components in model_bundle
         - Any components in sampler
         """
+        if self._is_offloaded:
+            logger.debug("FSDP engine already sleeping; skipping repeated sleep()")
+            return
+
         if self._use_fsdp:
             # For FSDP models, avoid moving the FSDP-wrapped transformer.
             # Offload auxiliary components (text encoders/vae) only.
@@ -480,7 +493,7 @@ class FSDPInferenceEngine(BaseInferenceEngine):
             torch.cuda.empty_cache()
             self._is_offloaded = True
             logger.info(
-                "FSDP multi-GPU mode: offload complete (cpu_offload=%s, aux components moved to CPU)",
+                "FSDP multi-GPU mode: sleep complete (cpu_offload=%s, aux components moved to CPU)",
                 self._fsdp_cpu_offload,
             )
             return
@@ -489,9 +502,9 @@ class FSDPInferenceEngine(BaseInferenceEngine):
         self._move_aux_components("cpu", include_transformer=True)
         torch.cuda.empty_cache()
         self._is_offloaded = True
-        logger.info("FSDP engine offloaded to CPU")
+        logger.info("FSDP engine entered sleep state")
 
-    def onload(self) -> None:
+    def wake_up(self) -> None:
         """Load models back to GPU.
 
         Loads all model components including:
@@ -501,27 +514,24 @@ class FSDPInferenceEngine(BaseInferenceEngine):
         - Any components in model_bundle
         - Any components in sampler
         """
+        if not self._is_offloaded:
+            logger.debug("FSDP engine already awake; skipping repeated wake_up()")
+            return
+
         if self._use_fsdp:
             # For FSDP models, device placement is managed by FSDP.
             if self._device is not None:
                 self._move_aux_components(self._device, include_transformer=False)
             self._is_offloaded = False
             logger.info(
-                "FSDP engine: onload complete (cpu_offload=%s, aux components moved to GPU)",
+                "FSDP engine: wake_up complete (cpu_offload=%s, aux components moved to GPU)",
                 self._fsdp_cpu_offload,
             )
             return
 
         self._move_aux_components(self._device, include_transformer=True)
         self._is_offloaded = False
-        logger.info("FSDP engine loaded to GPU")
-
-    def onload_weights(self) -> None:
-        self.onload()
-
-    def onload_post_update(self) -> None:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        logger.info("FSDP engine exited sleep state")
 
     def get_capabilities(self) -> EngineCapabilities:
         model_type = getattr(self.model_bundle, "model_type", None)
@@ -530,7 +540,6 @@ class FSDPInferenceEngine(BaseInferenceEngine):
             supports_trajectory=True,
             supports_prompt_embeddings=True,
             supports_guidance_scale=(model_type != "hunyuan"),
-            supports_staged_onload=True,
             weight_sync_mode="state_dict",
         )
 

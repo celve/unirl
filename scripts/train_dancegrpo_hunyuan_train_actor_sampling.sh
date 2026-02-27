@@ -9,7 +9,7 @@
 #   Paper:   arXiv:2505.07818 "DanceGRPO: Unleashing GRPO on Visual Generation"
 #
 # MODE: Training-actor sampling (colocate pattern)
-#   - NO dedicated inference actors
+#   - NO dedicated rollout actors
 #   - Training actors handle BOTH sampling and gradient updates
 #   - This is the CLOSEST match to DanceGRPO's original approach where each
 #     GPU runs sampling → reward → training sequentially
@@ -17,7 +17,7 @@
 #   - Disadvantage: no async overlap between sampling and training
 #
 # ENGINE: FSDP (via training actors)
-#   When sampling_backend=training, the TrainingActor lazy-loads VAE and
+#   When training_actor_direct_sampling=true, the TrainingActor lazy-loads VAE and
 #   text encoder, then uses the FSDP-wrapped transformer to sample.
 #   Log_prob is computed during sampling (needed for GRPO).
 #
@@ -27,17 +27,22 @@
 #               → compute advantage → GRPO train → sync weights
 #
 #   This script: Ray actors, each training actor does the same loop.
-#               sampling_backend=training → training actors call generate()
+#               training_actor_direct_sampling=true → training actors call generate()
 #               with the same FSDP model they use for training.
 #
 # ALIGNMENT with DanceGRPO:
 #   All DanceGRPO-specific hyperparameters are preserved:
 #   - eta=0.25, shift=5.0, timestep_fraction=0.6
-#   - guidance=0.0, init_same_noise=true
+#   - guidance tensor=6018.0, init_same_noise=true
 #   - group advantage, clip_range=1e-4, adv_clip_max=5.0
 #   - lr=1e-5, max_grad_norm=1.0, weight_decay=0.0001
 #   - 480×480×53 frames
 #   See the separate script header for full parameter mapping table.
+#
+# NOTE on guidance vs cfg:
+#   In DanceGRPO Hunyuan GRPO training, model forward uses guidance tensor 6018.0.
+#   The CLI flag --cfg=0.0 in the original script controls dataset text-dropout rate,
+#   not this guidance tensor value.
 #
 # GPU LAYOUT (default: 8 GPUs, all training):
 #   DanceGRPO uses 16-32 H800 GPUs. This script defaults to 8 GPUs for
@@ -167,7 +172,7 @@ python -m diffusionrl.train \
     --eta 0.25 \
     --shift 5.0 \
     --num-inference-steps 16 \
-    --guidance-scale 0.0 \
+    --guidance-scale 6018.0 \
     --timestep-fraction 0.6 \
     --init-same-noise true \
     \
@@ -180,11 +185,11 @@ python -m diffusionrl.train \
     --advantage-type group \
     --advantage-clip-max 5.0 \
     \
-    `# ===== Training-Actor Sampling (no dedicated inference actors) =====` \
-    --sampling-backend training \
-    --colocate-inference-training false \
-    --inference-num-nodes 0 \
-    --inference-num-gpus-per-node 0 \
+    `# ===== Training-Actor Sampling (no dedicated rollout actors) =====` \
+    --training-actor-direct-sampling true \
+    --colocate-rollout-training false \
+    --rollout-num-nodes 0 \
+    --rollout-num-gpus-per-node 0 \
     --training-num-nodes ${TRAINING_NUM_NODES} \
     --training-num-gpus-per-node ${TRAINING_GPUS_PER_NODE} \
     --offload false \

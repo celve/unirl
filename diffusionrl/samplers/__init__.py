@@ -14,17 +14,17 @@ Engine selection:
 - Use SGLang engine (future) for distributed inference
 
 Engine Interface:
-All engines implement BaseInferenceEngine for unified Ray actor integration:
+All engines implement BaseRolloutEngine for unified Ray actor integration:
 - initialize(): Load models and setup
 - generate(): Generate samples with log_probs
 - encode_prompt(): Text encoding
 - update_weights(): Sync weights from training
-- offload()/onload(): Memory management
+- sleep()/wake_up(): Memory/runtime lifecycle
 """
 
 # Base classes and utilities
 from .log_prob import compute_sde_log_prob, get_sigma_schedule, sde_step_with_log_prob
-from .base import BaseSampler, SamplerOutput, TrajectoryReplaySampler
+from .base import BaseSampler, RolloutOutput, TrajectoryReplaySampler
 from .schedulers import (
     TimestepScheduler,
     AllSDEScheduler,
@@ -35,7 +35,7 @@ from .schedulers import (
 
 # Engine interface
 from .engine import (
-    BaseInferenceEngine,
+    BaseRolloutEngine,
     EngineConfig,
     ENGINE_REGISTRY,
     register_engine,
@@ -44,13 +44,13 @@ from .engine import (
 )
 
 # FSDP Engine (native PyTorch, DanceGRPO-aligned)
-from .fsdp import FluxSampler, SD3Sampler, FSDPHunyuanSampler, FSDPInferenceEngine
+from .fsdp import FluxSampler, SD3Sampler, FSDPHunyuanSampler, FSDPRolloutEngine
 
 # FastVideo Engine
-from .fastvideo import FastVideoSampler, FastVideoSamplerV2, FastVideoInferenceEngine
+from .fastvideo import FastVideoSampler, FastVideoSamplerV2, FastVideoRolloutEngine
 
 # SGLang Engine (placeholder)
-from .sglang import SGLangInferenceEngine
+from .sglang import SGLangRolloutEngine
 
 __all__ = [
     # Log probability computation
@@ -59,10 +59,10 @@ __all__ = [
     "sde_step_with_log_prob",
     # Base classes
     "BaseSampler",
-    "SamplerOutput",
+    "RolloutOutput",
     "TrajectoryReplaySampler",
     # Engine interface
-    "BaseInferenceEngine",
+    "BaseRolloutEngine",
     "EngineConfig",
     "ENGINE_REGISTRY",
     "register_engine",
@@ -72,13 +72,13 @@ __all__ = [
     "FluxSampler",
     "SD3Sampler",
     "FSDPHunyuanSampler",
-    "FSDPInferenceEngine",
+    "FSDPRolloutEngine",
     # FastVideo Engine
     "FastVideoSampler",
     "FastVideoSamplerV2",
-    "FastVideoInferenceEngine",
+    "FastVideoRolloutEngine",
     # SGLang Engine
-    "SGLangInferenceEngine",
+    "SGLangRolloutEngine",
     # Timestep schedulers (MixGRPO)
     "TimestepScheduler",
     "AllSDEScheduler",

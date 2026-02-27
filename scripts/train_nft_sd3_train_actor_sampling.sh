@@ -107,10 +107,10 @@ python -m diffusionrl.train \
     --advantage-type per_prompt \
     --per-prompt-buffer-size 10000 \
     \
-    --sampling-backend training \
-    --colocate-inference-training false \
-    --inference-num-nodes 0 \
-    --inference-num-gpus-per-node 0 \
+    --training-actor-direct-sampling true \
+    --colocate-rollout-training false \
+    --rollout-num-nodes 0 \
+    --rollout-num-gpus-per-node 0 \
     --training-num-gpus-per-node ${NUM_GPUS} \
     --offload false \
     \

@@ -26,7 +26,7 @@ class TrainExecutorConfig:
     """Runtime knobs for training execution."""
 
     rank: int
-    world_size: int
+    dp_size: int
     device: torch.device
     use_fsdp: bool
     loss_type: str
@@ -49,21 +49,21 @@ def resolve_grad_accum(training_config: dict) -> int:
     if isinstance(raw, str) and raw.lower() == "auto":
         prompts_per_batch = training_config.get("prompts_per_batch", 1)
         k = training_config.get("num_samples_per_prompt", 1)
-        world_size = training_config.get("world_size", 1)
+        dp_size = training_config.get("dp_size", 1)
         batch_size = training_config.get("batch_size", 1)
         grad_steps_per_epoch = training_config.get("gradient_steps_per_epoch", 1)
         try:
             total_gen = prompts_per_batch * k
             target_per_update = total_gen / max(1, grad_steps_per_epoch)
-            denom = batch_size * max(1, world_size)
+            denom = batch_size * max(1, dp_size)
             accum = int((target_per_update + denom - 1) // denom)
             accum = max(1, accum)
             logger.info(
-                "Auto gradient_accumulation_steps=%d (prompts_per_batch=%d, k=%d, world_size=%d, batch_size=%d, grad_steps_per_epoch=%d)",
+                "Auto gradient_accumulation_steps=%d (prompts_per_batch=%d, k=%d, dp_size=%d, batch_size=%d, grad_steps_per_epoch=%d)",
                 accum,
                 prompts_per_batch,
                 k,
-                world_size,
+                dp_size,
                 batch_size,
                 grad_steps_per_epoch,
             )
@@ -125,28 +125,28 @@ class TrainExecutor:
         self.config = config
 
     def _shard_batch_by_rank(self, batch: TrainingBatch) -> Optional[TrainingBatch]:
-        world_size = max(1, int(self.config.world_size))
-        if world_size <= 1 or getattr(batch, "is_partitioned", False):
+        dp_size = max(1, int(self.config.dp_size))
+        if dp_size <= 1 or getattr(batch, "is_partitioned", False):
             return batch
 
         batch_size = batch.batch_size
-        per_rank = batch_size // world_size
-        remainder = batch_size % world_size
+        per_rank = batch_size // dp_size
+        remainder = batch_size % dp_size
 
         if per_rank == 0:
             logger.error(
-                "Rank %s: batch_size=%s too small for world_size=%s; skipping train step",
+                "Rank %s: batch_size=%s too small for dp_size=%s; skipping train step",
                 self.config.rank,
                 batch_size,
-                world_size,
+                dp_size,
             )
             return None
 
         if remainder != 0 and self.config.rank == 0:
             logger.warning(
-                "Batch size %d not divisible by world_size %d; dropping %d samples for even sharding",
+                "Batch size %d not divisible by dp_size %d; dropping %d samples for even sharding",
                 batch_size,
-                world_size,
+                dp_size,
                 remainder,
             )
 

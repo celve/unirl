@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from diffusionrl.config.schema import RewardSchema
+from diffusionrl.config.build_domain_args import RewardSchema
 from .base import BaseRewardWorker, RewardRequest, RewardResponse
 from diffusionrl.utils import load_function
 

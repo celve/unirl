@@ -32,7 +32,7 @@
 # - eta=0.7 (noise coefficient)
 # - shift=3.0 (FLUX time shift)
 # - num_inference_steps=25
-# - guidance_scale=0.0 (no CFG during training)
+# - guidance_scale=3.5 (MixGRPO FLUX guidance)
 # - mixed_sampling=true with sde_ratio=0.5 (50% SDE, 50% ODE)
 # - Window scheduler: progressive with group_size=4, iters_per_group=25
 # - NO KL penalty (kl_coeff=0.0 in original)
@@ -66,6 +66,8 @@ NUM_GPUS=${NUM_GPUS:-8}
 BATCH_SIZE=${BATCH_SIZE:-12}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-12}
 REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward_aggr}
+WINDOW_MAX_ITERS_PER_GROUP=${WINDOW_MAX_ITERS_PER_GROUP:-10}
+WINDOW_MIN_ITERS_PER_GROUP=${WINDOW_MIN_ITERS_PER_GROUP:-1}
 if [ $(( NUM_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: NUM_GPUS*BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
     exit 1
@@ -87,7 +89,7 @@ python -m diffusionrl.train \
     --eta 0.7 \
     --shift 3.0 \
     --num-inference-steps 25 \
-    --guidance-scale 0.0 \
+    --guidance-scale 3.5 \
     \
     --mixed-sampling true \
     --sde-ratio 0.5 \
@@ -95,6 +97,8 @@ python -m diffusionrl.train \
     --window-strategy progressive \
     --window-group-size 4 \
     --window-iters-per-group 25 \
+    --window-max-iters-per-group ${WINDOW_MAX_ITERS_PER_GROUP} \
+    --window-min-iters-per-group ${WINDOW_MIN_ITERS_PER_GROUP} \
     --window-overlap true \
     --window-roll-back true \
     \
@@ -107,10 +111,10 @@ python -m diffusionrl.train \
     --advantage-clip-max 5.0 \
     --reward-mix-mode ${REWARD_MIX_MODE} \
     \
-    --sampling-backend training \
-    --colocate-inference-training false \
-    --inference-num-nodes 0 \
-    --inference-num-gpus-per-node 0 \
+    --training-actor-direct-sampling true \
+    --colocate-rollout-training false \
+    --rollout-num-nodes 0 \
+    --rollout-num-gpus-per-node 0 \
     --training-num-gpus-per-node ${NUM_GPUS} \
     --offload false \
     \

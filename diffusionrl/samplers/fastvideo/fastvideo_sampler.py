@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Any, Callable, Set
 import torch
 import torch.nn as nn
 
-from ..base import BaseSampler, SamplerOutput, TrajectoryReplaySampler
+from ..base import BaseSampler, RolloutOutput, TrajectoryReplaySampler
 from ..log_prob import compute_sde_log_prob, get_sigma_schedule
 from diffusionrl.types import LogProbData, PromptEmbeddings
 
@@ -98,7 +98,7 @@ class FastVideoSampler(TrajectoryReplaySampler):
         generator: Optional[torch.Generator] = None,
         sde_indices: Optional[Set[int]] = None,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> RolloutOutput:
         """
         Sample videos using FastVideo and compute log probabilities.
 
@@ -116,7 +116,7 @@ class FastVideoSampler(TrajectoryReplaySampler):
             **kwargs: Additional FastVideo arguments (height, width, num_frames, etc.)
 
         Returns:
-            SamplerOutput with video trajectories and log_probs
+            RolloutOutput with video trajectories and log_probs
         """
         # Step 1: Run FastVideo sampling with trajectory tracking
         # Pass sde_indices for mixed ODE/SDE if supported
@@ -165,7 +165,7 @@ class FastVideoSampler(TrajectoryReplaySampler):
             pooled_prompt_embeds=pooled_prompt_embeds,
         )
 
-        return SamplerOutput(
+        return RolloutOutput(
             latents=final_latents,
             trajectories=trajectories,
             log_probs=LogProbData.from_dict(log_probs_dict),
@@ -527,7 +527,7 @@ class FastVideoSamplerV2(BaseSampler):
         generator: Optional[torch.Generator] = None,
         sde_indices: Optional[Set[int]] = None,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> RolloutOutput:
         """
         Sample using FastVideo with built-in log_prob computation.
 

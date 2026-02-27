@@ -70,6 +70,14 @@ class NFTLoss:
         )
     """
 
+    @classmethod
+    def declared_requirements(cls) -> Dict[str, bool]:
+        return {
+            "requires_trajectory": False,
+            "requires_log_prob": False,
+            "requires_embeddings": True,
+        }
+
     def __init__(
         self,
         beta: float = 0.1,

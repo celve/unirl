@@ -5,9 +5,19 @@ from diffusionrl.runtime.training.train_executor import (
     TrainExecutorConfig,
     resolve_grad_accum,
 )
+from diffusionrl.runtime.training.backends import (
+    TrainBackend,
+    TrainBackendCapabilities,
+    create_train_backend,
+    supported_train_backends,
+)
 
 __all__ = [
     "TrainExecutor",
     "TrainExecutorConfig",
     "resolve_grad_accum",
+    "TrainBackend",
+    "TrainBackendCapabilities",
+    "create_train_backend",
+    "supported_train_backends",
 ]

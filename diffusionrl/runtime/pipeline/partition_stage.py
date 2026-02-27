@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 def maybe_partition_training_batch(
     *,
     train_data: Any,
-    world_size: Optional[int],
+    dp_size: Optional[int],
     partition_train_data: bool = True,
 ) -> Optional[List[Any]]:
     """
@@ -20,7 +20,7 @@ def maybe_partition_training_batch(
     Returns:
         List of per-rank typed batch partitions when partition is applied; otherwise None.
     """
-    if not partition_train_data or not world_size:
+    if not partition_train_data or not dp_size:
         return None
 
     batch_size = getattr(train_data, "batch_size", None)
@@ -28,27 +28,27 @@ def maybe_partition_training_batch(
         logger.warning("Training batch does not expose batch_size; skipping partition.")
         return None
 
-    per_rank = batch_size // world_size
-    remainder = batch_size % world_size
+    per_rank = batch_size // dp_size
+    remainder = batch_size % dp_size
 
     if per_rank == 0:
         logger.warning(
-            "Batch size %d too small for world_size %d; skipping partition.",
+            "Batch size %d too small for dp_size %d; skipping partition.",
             batch_size,
-            world_size,
+            dp_size,
         )
         return None
 
     if remainder != 0:
         logger.warning(
-            "Batch size %d not divisible by world_size %d; dropping %d samples for even partition.",
+            "Batch size %d not divisible by dp_size %d; dropping %d samples for even partition.",
             batch_size,
-            world_size,
+            dp_size,
             remainder,
         )
 
     partitions: List[Any] = []
-    for rank in range(world_size):
+    for rank in range(dp_size):
         start = rank * per_rank
         end = start + per_rank
         part = train_data.slice(start, end)

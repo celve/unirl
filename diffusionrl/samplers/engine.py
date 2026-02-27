@@ -2,21 +2,22 @@
 Inference Engine Interface for GRPO Training.
 
 This module defines the unified interface for inference engines (FSDP, FastVideo, SGLang).
-All engines must implement the BaseInferenceEngine interface to work with Ray actors.
+All engines must implement the BaseRolloutEngine interface to work with Ray actors.
 
 Engine Responsibilities:
 1. Model loading and initialization
 2. Sample generation with log probabilities
 3. Weight synchronization from training
-4. Memory management (offload/onload)
+4. Memory management (sleep/wake_up)
 """
 
+import importlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Set
 import torch
 
-from diffusionrl.types import SamplerOutput
+from diffusionrl.types import RolloutOutput
 
 
 @dataclass
@@ -55,22 +56,21 @@ class EngineCapabilities:
     supports_trajectory: bool = True
     supports_prompt_embeddings: bool = True
     supports_guidance_scale: bool = True
-    supports_staged_onload: bool = False
     weight_sync_mode: str = "state_dict"  # state_dict | checkpoint_path | external
 
 
-class BaseInferenceEngine(ABC):
+class BaseRolloutEngine(ABC):
     """
     Abstract base class for inference engines.
 
     All inference engines (FSDP, FastVideo, SGLang) must implement this interface
-    to be compatible with InferenceActor and Ray scheduling.
+    to be compatible with RolloutActor and Ray scheduling.
 
     Key Design Principles:
     1. Unified interface for all engines
     2. Support for model weight synchronization
-    3. Memory management for GPU offloading
-    4. Consistent SamplerOutput format
+    3. Memory management via sleep/wake_up
+    4. Consistent RolloutOutput format
     """
 
     def __init__(self, config: EngineConfig):
@@ -110,7 +110,7 @@ class BaseInferenceEngine(ABC):
         seed: Optional[int] = None,
         sde_indices: Optional[Set[int]] = None,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> RolloutOutput:
         """
         Generate samples with log probabilities.
 
@@ -130,11 +130,10 @@ class BaseInferenceEngine(ABC):
             **kwargs: Additional engine-specific arguments
 
         Returns:
-            SamplerOutput with trajectories, log_probs, etc.
+            RolloutOutput with trajectories, log_probs, etc.
         """
         pass
 
-    @abstractmethod
     def encode_prompt(
         self,
         prompts: List[str],
@@ -153,7 +152,10 @@ class BaseInferenceEngine(ABC):
                 - pooled_prompt_embeds: [B, hidden] (optional)
                 - encoder_attention_mask: [B, seq] (optional)
         """
-        pass
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support prompt encoding. "
+            "Use engines that implement encode_prompt() or provide prompt embeddings upstream."
+        )
 
     @abstractmethod
     def update_weights(self, state_dict: Dict[str, torch.Tensor]) -> None:
@@ -165,41 +167,13 @@ class BaseInferenceEngine(ABC):
         """
         pass
 
-    @abstractmethod
-    def offload(self) -> None:
-        """Offload model to CPU to free GPU memory."""
-        pass
+    def sleep(self) -> None:
+        """Release runtime resources when rollout side is inactive."""
+        self._is_offloaded = True
 
-    @abstractmethod
-    def onload(self) -> None:
-        """Load model back to GPU from CPU."""
-        pass
-
-    def onload_weights(self) -> None:
-        """Stage 1 onload: bring weights/modules required for weight update."""
-        self.onload()
-
-    def onload_post_update(self) -> None:
-        """Stage 2 onload: prepare post-weight-update state (default no-op)."""
-        return None
-
-    def onload_runtime_cache(self) -> None:
-        """Stage 3 onload: prepare runtime caches (KV/CUDA graph)."""
-        return None
-
-    def prepare_for_weight_update(self) -> None:
-        """Unified stage protocol entrypoint before update_weights/update_weights_from_path."""
-        self.onload_weights()
-
-    def finalize_weight_update(self) -> None:
-        """Unified stage protocol tail after weight update."""
-        self.onload_post_update()
-        self.onload_runtime_cache()
-
-    def ensure_ready_for_generate(self) -> None:
-        """Ensure generation can safely run from any residency state."""
-        if self._is_offloaded:
-            self.onload()
+    def wake_up(self) -> None:
+        """Restore runtime resources required for generation/update."""
+        self._is_offloaded = False
 
     def decode_latents(
         self,
@@ -227,16 +201,23 @@ class BaseInferenceEngine(ABC):
         return self._is_offloaded
 
     @property
-    @abstractmethod
     def supports_distributed(self) -> bool:
-        """Whether engine supports multi-GPU distribution."""
-        pass
+        """Whether engine supports multi-GPU distribution (default: False)."""
+        return False
 
     @property
-    @abstractmethod
     def requires_external_service(self) -> bool:
         """Whether engine requires external service (e.g., SGLang server)."""
-        pass
+        return False
+
+    @classmethod
+    def declared_capabilities(cls) -> Dict[str, bool]:
+        """Config-time capability declaration used by argument validation."""
+        return {
+            "requires_trajectory": True,
+            "requires_log_prob": True,
+            "requires_embeddings": True,
+        }
 
     def get_memory_info(self) -> Dict[str, float]:
         """Get GPU memory information."""
@@ -265,23 +246,56 @@ class BaseInferenceEngine(ABC):
 # Engine registry for dynamic loading
 ENGINE_REGISTRY: Dict[str, type] = {}
 
+# Built-in engine modules for lazy self-registration.
+# Engines register themselves via @register_engine at module import time.
+ENGINE_MODULE_PATHS: Dict[str, str] = {
+    "fsdp": "diffusionrl.samplers.fsdp.engine",
+    # [FastVideo-suspended] "fastvideo": "diffusionrl.samplers.fastvideo.engine",
+    "sglang": "diffusionrl.samplers.sglang.engine",
+}
+
 
 def register_engine(name: str):
     """Decorator to register an engine class."""
     def decorator(cls):
-        ENGINE_REGISTRY[name] = cls
+        ENGINE_REGISTRY[str(name).strip().lower()] = cls
         return cls
     return decorator
 
 
+def ensure_engine_registered(name: str) -> str:
+    """Ensure the target engine is present in ENGINE_REGISTRY."""
+    normalized = str(name or "").strip().lower()
+    if not normalized:
+        raise ValueError("Engine name must be a non-empty string.")
+
+    if normalized in ENGINE_REGISTRY:
+        return normalized
+
+    module_path = ENGINE_MODULE_PATHS.get(normalized)
+    if module_path is not None:
+        importlib.import_module(module_path)
+
+    if normalized not in ENGINE_REGISTRY:
+        raise ValueError(
+            f"Unknown engine: {name}. Available: {sorted(set(ENGINE_MODULE_PATHS.keys()) | set(ENGINE_REGISTRY.keys()))}"
+        )
+    return normalized
+
+
 def get_engine(name: str) -> type:
     """Get engine class by name."""
-    if name not in ENGINE_REGISTRY:
-        raise ValueError(f"Unknown engine: {name}. Available: {list(ENGINE_REGISTRY.keys())}")
-    return ENGINE_REGISTRY[name]
+    normalized = ensure_engine_registered(name)
+    return ENGINE_REGISTRY[normalized]
 
 
-def create_engine(name: str, config: EngineConfig) -> BaseInferenceEngine:
+def get_engine_class_path(name: str) -> str:
+    """Resolve engine type to fully-qualified class dotpath."""
+    engine_cls = get_engine(name)
+    return f"{engine_cls.__module__}.{engine_cls.__name__}"
+
+
+def create_engine(name: str, config: EngineConfig) -> BaseRolloutEngine:
     """Create engine instance by name."""
     engine_cls = get_engine(name)
     return engine_cls(config)

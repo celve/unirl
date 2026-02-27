@@ -16,10 +16,10 @@
 # per_rank_batch = total_samples / num_train_gpus (must be divisible)
 #
 # This script runs DanceGRPO with FLUX using training-actor sampling.
-# Inference actors are disabled; sampling happens on training actors directly.
+# Rollout actors are disabled; sampling happens on training actors directly.
 #
 # Resource scheduling:
-# - inference actors disabled (training-only sampling)
+# - rollout actors disabled (training-only sampling)
 #
 # LoRA NOTE:
 # - This script uses LoRA (default rank=16, alpha=32) for memory efficiency.
@@ -33,7 +33,7 @@
 # - eta=0.3 (noise coefficient)
 # - shift=3.0 (FLUX time shift)
 # - timestep_fraction=0.6 (only train on 60% of timesteps)
-# - guidance_scale=0.0 (no CFG during training)
+# - guidance_scale=3.5 (DanceGRPO FLUX guidance)
 # - NO KL penalty (kl_coeff=0 in original)
 # - max_grad_norm=1.0 (not 2.0)
 #
@@ -84,7 +84,7 @@ python -m diffusionrl.train \
     --eta 0.3 \
     --shift 3.0 \
     --num-inference-steps 25 \
-    --guidance-scale 0.0 \
+    --guidance-scale 3.5 \
     --timestep-fraction 0.6 \
     \
     --prompts-per-batch ${PROMPTS_PER_BATCH} \
@@ -95,10 +95,10 @@ python -m diffusionrl.train \
     --advantage-type group \
     --advantage-clip-max 5.0 \
     \
-    --sampling-backend training \
-    --colocate-inference-training false \
-    --inference-num-nodes 0 \
-    --inference-num-gpus-per-node 0 \
+    --training-actor-direct-sampling true \
+    --colocate-rollout-training false \
+    --rollout-num-nodes 0 \
+    --rollout-num-gpus-per-node 0 \
     --training-num-gpus-per-node ${NUM_GPUS} \
     --offload false \
     \

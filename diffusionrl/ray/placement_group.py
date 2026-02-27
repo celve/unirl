@@ -20,9 +20,9 @@ PlacementGroupResult = Tuple[PlacementGroup, List[int], List[int]]
 class GRPOPlacementConfig:
     """Resource allocation configuration for GRPO training."""
 
-    # Inference resources
-    inference_num_nodes: int = 1
-    inference_num_gpus_per_node: int = 4
+    # Rollout resources
+    rollout_num_nodes: int = 1
+    rollout_num_gpus_per_node: int = 4
 
     # Training resources
     training_num_nodes: int = 1
@@ -32,14 +32,13 @@ class GRPOPlacementConfig:
     reward_dedicated_num_gpus: int = 0  # 0 means no dedicated reward GPU pool
 
     # Deployment strategy
-    colocate_inference_training: bool = False
+    colocate_rollout_training: bool = False
     strategy: str = "PACK"  # "PACK" or "SPREAD"
 
     # Node-level dedicated reward configuration
     reward_dedicated_num_nodes: int = 0  # Dedicated reward nodes (0 = use reward_dedicated_num_gpus directly)
     reward_dedicated_num_gpus_per_node: int = 0  # GPUs per dedicated reward node
     reward_dedicated_gpus_per_actor: int = 1  # GPUs per dedicated reward actor
-    reward_placement_strategy: str = "PACK"  # Reward PG strategy
 
 
 @ray.remote(num_cpus=1)
@@ -195,14 +194,14 @@ def create_placement_groups(
     Create placement groups for GRPO training (unified single_pg mode).
 
     Creates one placement group with uniform {"GPU": 1} bundles, then
-    slices bundles by linear offsets for inference / training / reward roles.
+    slices bundles by linear offsets for rollout / training / reward roles.
 
     Args:
         config: Placement configuration
 
     Returns:
         Dictionary with keys:
-            - "inference": (pg, bundle_indices, gpu_ids) or None
+            - "rollout": (pg, bundle_indices, gpu_ids) or None
             - "training": (pg, bundle_indices, gpu_ids) or None
             - "reward": (pg, bundle_indices, gpu_ids) or None
     """
@@ -216,13 +215,13 @@ def _create_single_pg(
     Create a single placement group and slice bundles by linear offsets.
     """
     result: Dict[str, Optional[PlacementGroupResult]] = {
-        "inference": None,
+        "rollout": None,
         "training": None,
         "reward": None,
     }
 
     # Calculate total GPUs needed
-    inference_total_gpus = config.inference_num_nodes * config.inference_num_gpus_per_node
+    rollout_total_gpus = config.rollout_num_nodes * config.rollout_num_gpus_per_node
     training_total_gpus = config.training_num_nodes * config.training_num_gpus_per_node
 
     # Calculate total reward GPUs
@@ -231,9 +230,9 @@ def _create_single_pg(
     else:
         reward_total_gpus = config.reward_dedicated_num_gpus
 
-    if config.colocate_inference_training:
-        # Colocate: inference and training share same GPU bundles
-        shared_gpus = max(inference_total_gpus, training_total_gpus)
+    if config.colocate_rollout_training:
+        # Colocate: rollout and training share same GPU bundles
+        shared_gpus = max(rollout_total_gpus, training_total_gpus)
         total_gpus = shared_gpus + reward_total_gpus
 
         if total_gpus <= 0:
@@ -245,8 +244,8 @@ def _create_single_pg(
             name="grpo_colocated",
         )
 
-        # Shared bundles for inference/training
-        result["inference"] = (pg, bundle_indices[:shared_gpus], gpu_ids[:shared_gpus])
+        # Shared bundles for rollout/training
+        result["rollout"] = (pg, bundle_indices[:shared_gpus], gpu_ids[:shared_gpus])
         result["training"] = (pg, bundle_indices[:shared_gpus], gpu_ids[:shared_gpus])
 
         # Reward bundles (if any) are allocated after shared bundles
@@ -257,8 +256,8 @@ def _create_single_pg(
 
         return result
 
-    # Non-colocate: single PG sliced by linear offsets for inference/training/reward.
-    total_gpus = inference_total_gpus + training_total_gpus + reward_total_gpus
+    # Non-colocate: single PG sliced by linear offsets for rollout/training/reward.
+    total_gpus = rollout_total_gpus + training_total_gpus + reward_total_gpus
     if total_gpus <= 0:
         return result
 
@@ -272,10 +271,10 @@ def _create_single_pg(
     bundle_indices, gpu_ids = _reorder_bundles_by_node(gpu_info)
 
     cursor = 0
-    if inference_total_gpus > 0:
-        inf_end = cursor + inference_total_gpus
-        result["inference"] = (pg, bundle_indices[cursor:inf_end], gpu_ids[cursor:inf_end])
-        cursor = inf_end
+    if rollout_total_gpus > 0:
+        rollout_end = cursor + rollout_total_gpus
+        result["rollout"] = (pg, bundle_indices[cursor:rollout_end], gpu_ids[cursor:rollout_end])
+        cursor = rollout_end
 
     if training_total_gpus > 0:
         train_end = cursor + training_total_gpus
@@ -308,18 +307,17 @@ def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroup
         Dictionary of placement group results
     """
     config = GRPOPlacementConfig(
-        inference_num_nodes=args.inference_num_nodes,
-        inference_num_gpus_per_node=args.inference_num_gpus_per_node,
+        rollout_num_nodes=args.rollout_num_nodes,
+        rollout_num_gpus_per_node=args.rollout_num_gpus_per_node,
         training_num_nodes=args.training_num_nodes,
         training_num_gpus_per_node=args.training_num_gpus_per_node,
         reward_dedicated_num_gpus=args.reward_dedicated_num_gpus,
-        colocate_inference_training=args.colocate_inference_training,
+        colocate_rollout_training=args.colocate_rollout_training,
         strategy=args.placement_strategy,
         # Node-level reward configuration
         reward_dedicated_num_nodes=getattr(args, "reward_dedicated_num_nodes", 0),
         reward_dedicated_num_gpus_per_node=getattr(args, "reward_dedicated_num_gpus_per_node", 0),
         reward_dedicated_gpus_per_actor=getattr(args, "reward_dedicated_gpus_per_actor", 1),
-        reward_placement_strategy=getattr(args, "reward_placement_strategy", "PACK"),
     )
     return create_placement_groups(config)
 
@@ -331,5 +329,3 @@ def remove_placement_group(pg: PlacementGroup) -> None:
         logger.info("Placement group removed")
     except Exception as e:
         logger.warning(f"Failed to remove placement group: {e}")
-
-
