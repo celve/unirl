@@ -9,6 +9,8 @@ import ray
 import torch
 from ray.util.placement_group import PlacementGroup
 
+from diffusionrl.utils import load_function
+
 from .base import BaseActorGroup
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,9 @@ class TrainingActorGroup(BaseActorGroup):
         num_actors: int,
         pg: PlacementGroup,
         bundle_indices: List[int],
+        actor_class_path: Optional[str] = None,
+        actor_init_kwargs: Optional[Dict[str, Any]] = None,
+        runtime_env: Optional[dict] = None,
         master_addr: Optional[str] = None,
         master_port: Optional[int] = None,
         **kwargs,
@@ -34,23 +39,42 @@ class TrainingActorGroup(BaseActorGroup):
             bundle_indices: Bundle indices for scheduling
             master_addr: Master node address for distributed training
             master_port: Master node port
+            actor_class_path: Optional dotted path to custom Ray actor class
+            actor_init_kwargs: Extra kwargs passed into actor constructor
+            runtime_env: Optional runtime_env passed to Ray actor options
             **kwargs: Additional actor kwargs
         """
-        from ..actors import TrainingActor
         from ..actors.base import RayActor
+
+        if actor_class_path:
+            actor_class = load_function(actor_class_path)
+            if not hasattr(actor_class, "remote"):
+                raise TypeError(
+                    f"actor_class_path must resolve to a Ray actor class, got: {actor_class}"
+                )
+        else:
+            from ..actors import TrainingActor
+
+            actor_class = TrainingActor
 
         # Get master addr/port if not provided
         if master_addr is None or master_port is None:
             master_addr, master_port = RayActor._get_current_node_ip_and_free_port()
 
+        merged_actor_kwargs: Dict[str, Any] = {}
+        if isinstance(actor_init_kwargs, dict):
+            merged_actor_kwargs.update(actor_init_kwargs)
+        merged_actor_kwargs.update(kwargs)
+
         super().__init__(
-            actor_class=TrainingActor,
+            actor_class=actor_class,
             num_actors=num_actors,
             pg=pg,
             bundle_indices=bundle_indices,
             master_addr=master_addr,
             master_port=master_port,
-            **kwargs,
+            runtime_env=runtime_env,
+            **merged_actor_kwargs,
         )
 
         self.master_addr = master_addr

@@ -4,12 +4,6 @@ Per-Prompt Statistics Tracker for cross-batch advantage computation.
 This module provides a stateful tracker that accumulates reward statistics
 across multiple batches for each unique prompt. This enables per-prompt
 normalization even when samples for the same prompt appear in different batches.
-
-Used by flow_grpo for per_prompt advantage computation.
-
-Reference:
-- flow_grpo: diffusers_patch/ddpo_stat_tracker.py
-- unified_grpo: advantages/per_prompt_tracker.py
 """
 
 import logging

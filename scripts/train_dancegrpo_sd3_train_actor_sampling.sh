@@ -98,7 +98,6 @@ python -m diffusionrl.train \
     --lora-rank ${LORA_RANK} \
     --lora-alpha ${LORA_ALPHA} \
     --use-lora true \
-    --use-fsdp true \
     \
     --height 512 \
     --width 512 \

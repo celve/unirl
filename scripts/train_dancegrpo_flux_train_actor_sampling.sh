@@ -110,7 +110,6 @@ python -m diffusionrl.train \
     --lora-rank ${LORA_RANK} \
     --lora-alpha ${LORA_ALPHA} \
     --use-lora true \
-    --use-fsdp true \
     --fsdp-cpu-offload true \
     \
     --height 256 \

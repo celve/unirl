@@ -218,8 +218,36 @@ class RewardService:
         """Initialize local workers (CPU or same-process GPU)."""
         from .local import LocalRewardWorker
 
-        # Determine device
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Determine device for local same-process rewards.
+        local_device_pref = str(
+            getattr(self.reward_config, "local_reward_device", "cpu") or "cpu"
+        ).strip().lower()
+        if local_device_pref == "cpu":
+            device = "cpu"
+        elif local_device_pref == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        elif local_device_pref == "cuda":
+            if torch.cuda.is_available():
+                device = "cuda"
+            else:
+                logger.warning(
+                    "local_reward_device=cuda requested but CUDA is not available. "
+                    "Falling back to CPU."
+                )
+                device = "cpu"
+        else:
+            logger.warning(
+                "Unknown local_reward_device=%s. Falling back to CPU.",
+                local_device_pref,
+            )
+            device = "cpu"
+
+        if device == "cuda":
+            logger.warning(
+                "Local reward worker is running on CUDA in RolloutManager process. "
+                "This can contend with rollout/training GPUs. Prefer dedicated reward "
+                "actors (reward_dedicated_*) or HTTP reward service for isolation."
+            )
 
         reward_path = getattr(
             self.reward_config,
@@ -567,4 +595,3 @@ class RewardService:
             worker.dispose()
         self.workers = []
         logger.info("RewardService disposed")
-

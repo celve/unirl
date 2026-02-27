@@ -2,8 +2,6 @@
 Utility functions for advantage computation.
 
 Includes distributed operations and special-purpose transformations.
-
-Copied from unified_grpo/advantages/utils.py
 """
 
 import torch

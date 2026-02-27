@@ -53,6 +53,15 @@ class TrainingActorStateIOService:
         export_format: str = "state_dict",
     ) -> Optional[str]:
         """Export synchronized weights to a shared path."""
+        backend = self._get_backend(actor)
+        exported_path = backend.export_weights_to_path(
+            actor,
+            checkpoint_path,
+            export_format=export_format,
+        )
+        if exported_path is not None:
+            return exported_path
+
         state_dict = self.get_weights(actor)
         if actor.rank != 0:
             return None

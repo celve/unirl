@@ -8,13 +8,16 @@ Usage:
     # Option A: explicit dotpath (always works)
     --model-path diffusionrl_plugins.models.wan21.Wan21ModelBundle
 
-    # Option B: short name (requires PLUGIN_SPEC defaults, see bottom)
+    # Option B: short name (requires model runtime defaults declared below)
     --model-type wan21
 
 Steps to create your own model plugin:
     1. Subclass ``diffusionrl.models.base.ModelBundle``
     2. Implement the required abstract methods
-    3. Add ``PLUGIN_SPEC`` at the bottom of the file
+    3. Declare class-level defaults for short-name resolution:
+       - declared_model_type()
+       - default_sampler_path()
+       - default_sampler_engine()
     4. Point to it via ``--model-path`` or ``--model-type``
 """
 import logging
@@ -30,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 class Wan21ModelBundle(ModelBundle):
     """Wan2.1 Text-to-Video model bundle (example skeleton)."""
+
+    _DEFAULT_SAMPLER_PATH = "diffusionrl_plugins.samplers.minimal_sampler.MinimalSampler"
 
     def __init__(
         self,
@@ -79,6 +84,20 @@ class Wan21ModelBundle(ModelBundle):
 
     def get_no_split_modules(self) -> Tuple[type, ...]:
         return ()
+
+    @classmethod
+    def declared_model_type(cls) -> str:
+        return "wan21"
+
+    @classmethod
+    def default_sampler_path(cls) -> Optional[str]:
+        # Template default: points to plugin-local sampler skeleton.
+        # Replace this path when you implement a real Wan2.1 sampler.
+        return cls._DEFAULT_SAMPLER_PATH
+
+    @classmethod
+    def default_sampler_engine(cls) -> Optional[str]:
+        return "fsdp"
 
     @property
     def model_type(self) -> str:

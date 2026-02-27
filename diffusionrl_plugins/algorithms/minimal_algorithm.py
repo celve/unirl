@@ -30,11 +30,15 @@ class MinimalAlgorithm(BaseAlgorithm):
         *,
         sde_ratio: float = 1.0,
         train_only_sde_steps: bool = False,
+        ignore_last: bool = False,
+        frozen_init_timesteps: int = 0,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.sde_ratio = float(sde_ratio)
         self.train_only_sde_steps = bool(train_only_sde_steps)
+        self.ignore_last = bool(ignore_last)
+        self.frozen_init_timesteps = int(frozen_init_timesteps)
         self._current_sde_indices: Optional[Set[int]] = None
 
     @classmethod
@@ -44,6 +48,8 @@ class MinimalAlgorithm(BaseAlgorithm):
             {
                 "sde_ratio": getattr(args, "sde_ratio", 1.0),
                 "train_only_sde_steps": getattr(args, "window_training", False),
+                "ignore_last": getattr(args, "ignore_last", False),
+                "frozen_init_timesteps": getattr(args, "frozen_init_timesteps", 0),
             }
         )
         return cls(**kwargs)

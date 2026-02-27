@@ -21,6 +21,20 @@ class ReplayLogProbPatch:
         self._replay_sampler = None
         self._replay_sampler_path: str | None = None
 
+    @staticmethod
+    def _resolve_model_default_replay_sampler_path(model_bundle: Any) -> str | None:
+        for attr in ("default_replay_sampler_path", "default_sampler_path"):
+            fn = getattr(model_bundle, attr, None)
+            if callable(fn):
+                try:
+                    resolved = fn()
+                except Exception as exc:
+                    logger.debug("Model bundle %s() failed: %s", attr, exc)
+                    continue
+                if isinstance(resolved, str) and resolved.strip():
+                    return resolved.strip()
+        return None
+
     def _resolve_replay_sampler_path(self, *, sampling_config: Dict[str, Any], model_bundle: Any) -> str:
         replay_path = sampling_config.get("replay_sampler_path")
         if replay_path:
@@ -30,19 +44,16 @@ class ReplayLogProbPatch:
         if sampler_path and "sglang" not in sampler_path.lower():
             return sampler_path
 
-        model_type = getattr(model_bundle, "model_type", None)
-        fallback = {
-            "flux": "diffusionrl.samplers.fsdp.flux_sampler.FluxSampler",
-            "hunyuan": "diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler",
-            "sd3": "diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler",
-        }
-        resolved = fallback.get(model_type)
-        if not resolved:
-            raise RuntimeError(
-                "replay_log_probs requires replay_sampler_path or a known model_type fallback. "
-                f"model_type={model_type!r}"
-            )
-        return resolved
+        model_default_path = self._resolve_model_default_replay_sampler_path(model_bundle)
+        if model_default_path and "sglang" not in model_default_path.lower():
+            return model_default_path
+
+        model_type = str(getattr(model_bundle, "model_type", "") or "").lower()
+        raise RuntimeError(
+            "replay_log_probs requires a non-sglang replay sampler path. Provide "
+            "--replay-sampler-path explicitly, or implement default_replay_sampler_path() "
+            f"in model bundle '{type(model_bundle).__name__}' (model_type={model_type!r})."
+        )
 
     def _build_replay_sampler(
         self,
@@ -134,6 +145,11 @@ class ReplayLogProbPatch:
         replayed: Dict[int, torch.Tensor] = {}
         for step_idx in target_steps:
             pos = batch.get_position_for_step(step_idx)
+            # Replay samplers index into the provided sigma_schedule by position.
+            # When rollout trajectories miss initial x_T (for example some sglang paths),
+            # resolved step ids can be shifted (1..T) while sigma_schedule remains local (0..T-1).
+            # Use local trajectory position to keep replay indexing in-bounds.
+            local_step_index = int(pos)
             arg_map: Dict[str, Any] = {
                 "latents": batch.trajectories[:, pos],
                 "prev_latents": batch.trajectories[:, pos + 1],
@@ -144,7 +160,7 @@ class ReplayLogProbPatch:
                 "negative_pooled_prompt_embeds": batch.embeddings.negative_pooled_prompt_embeds,
                 "text_ids": batch.embeddings.text_ids,
                 "image_ids": batch.embeddings.image_ids,
-                "timestep_index": int(step_idx),
+                "timestep_index": local_step_index,
                 "sigma_schedule": batch.timesteps,
                 "guidance_scale": guidance_scale,
             }

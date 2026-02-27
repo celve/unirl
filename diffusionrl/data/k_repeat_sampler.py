@@ -3,14 +3,10 @@ K-Repeat Sampler for GRPO training.
 
 Samples each prompt K times to generate multiple samples per prompt,
 which is required for computing group-based advantages.
-
-Reference:
-- unified_grpo/data/k_repeat_sampler.py
-- flow_grpo data sampling
 """
 
 import logging
-from typing import Iterator, List, Sized
+from typing import Iterator, Sized
 
 import torch
 from torch.utils.data import Sampler
@@ -92,8 +88,3 @@ class KRepeatSampler(Sampler[int]):
             epoch: Current epoch number
         """
         self._generator.manual_seed(self.seed + epoch)
-
-    def set_epoch(self, epoch: int) -> None:
-        self._generator.manual_seed(self.seed + epoch)
-
-

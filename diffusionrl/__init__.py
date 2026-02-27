@@ -19,8 +19,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "BaseSampler": ("diffusionrl.samplers", "BaseSampler"),
     "RolloutOutput": ("diffusionrl.samplers", "RolloutOutput"),
     "TrajectoryReplaySampler": ("diffusionrl.samplers", "TrajectoryReplaySampler"),
-    "FastVideoSampler": ("diffusionrl.samplers", "FastVideoSampler"),
-    "FastVideoSamplerV2": ("diffusionrl.samplers", "FastVideoSamplerV2"),
+    # "FastVideoSampler": ("diffusionrl.samplers", "FastVideoSampler"),  # deprecated: fastvideo being phased out
     "compute_sde_log_prob": ("diffusionrl.samplers", "compute_sde_log_prob"),
     "get_sigma_schedule": ("diffusionrl.samplers", "get_sigma_schedule"),
     "sde_step_with_log_prob": ("diffusionrl.samplers", "sde_step_with_log_prob"),

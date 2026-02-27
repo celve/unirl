@@ -52,7 +52,12 @@ version = { attr = "diffusionrl.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["diffusionrl*"]
+include = [
+  "diffusionrl",
+  "diffusionrl.*",
+  "diffusionrl_plugins",
+  "diffusionrl_plugins.*",
+]
 
 [tool.ruff]
 line-length = 120

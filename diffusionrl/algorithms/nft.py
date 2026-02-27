@@ -1,5 +1,5 @@
 """
-NFT (Noise-Free Training) Algorithm Implementation.
+NFT (Negative Fine-Tuning) Algorithm Implementation.
 
 DiffusionNFT forward process diffusion RL.
 """
@@ -14,7 +14,7 @@ from diffusionrl.advantages.normalizers import normalize_global, normalize_group
 
 class NFTAlgorithm(BaseAlgorithm):
     """
-    NFT (Noise-Free Training) Algorithm - DiffusionNFT.
+    NFT (Negative Fine-Tuning) Algorithm - DiffusionNFT.
 
     Forward process diffusion RL that optimizes directly on the forward
     diffusion process instead of reverse sampling trajectories.
@@ -91,18 +91,19 @@ class NFTAlgorithm(BaseAlgorithm):
         kwargs = cls._base_kwargs_from_args(args)
         kwargs.update(
             {
-                "beta": getattr(args, "nft_beta", 0.1),
-                "adv_clip_max": getattr(args, "nft_adv_clip_max", 5.0),
-                "adv_mode": getattr(args, "nft_adv_mode", "raw"),
-                "use_adaptive_weight": getattr(args, "nft_use_adaptive_weight", True),
+                "beta": 0.1,
+                "adv_clip_max": 5.0,
+                "adv_mode": "raw",
+                "use_adaptive_weight": True,
                 "shift": getattr(args, "shift", 3.0),
-                "ema_decay": getattr(args, "ema_decay", 0.001),
+                "ema_decay": 0.001,
                 "use_per_prompt_tracker": getattr(args, "use_per_prompt_stat_tracker", False),
                 "per_prompt_buffer_size": getattr(args, "per_prompt_buffer_size", 16),
                 "per_prompt_min_count": getattr(args, "per_prompt_min_count", 2),
                 "use_global_std": getattr(args, "use_global_std", False),
             }
         )
+        kwargs.update(cls._algorithm_kwargs_from_args(args))
         return cls(**kwargs)
 
     @property
@@ -154,12 +155,8 @@ class NFTAlgorithm(BaseAlgorithm):
         elif self.advantage_type == "per_prompt":
             # Use per-prompt tracker if available and prompts provided
             if self.per_prompt_tracker is not None and prompts is not None:
-                # Expand prompts to match rewards (each prompt repeated num_samples_per_prompt times)
                 if len(prompts) * num_samples_per_prompt == len(rewards):
-                    expanded_prompts = []
-                    for p in prompts:
-                        expanded_prompts.extend([p] * num_samples_per_prompt)
-                    prompts = expanded_prompts
+                    prompts = [p for p in prompts for _ in range(num_samples_per_prompt)]
                 return self.per_prompt_tracker.compute_advantages(
                     prompts, rewards, update_stats=True
                 )

@@ -10,8 +10,6 @@ Usage:
     # Unified function API (recommended)
     from diffusionrl.advantages import compute_advantage
     advantages = compute_advantage(rewards, strategy='group', num_samples_per_prompt=4)
-
-Copied from unified_grpo/advantages with minimal modifications.
 """
 
 from typing import Dict, List, Optional, Union

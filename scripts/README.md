@@ -37,6 +37,13 @@ bash scripts/train_dancegrpo_hunyuan_train_actor_sampling.sh
 bash scripts/train_dancegrpo_hunyuan_sglang_separate.sh
 ```
 
+## Plugin demo
+
+```bash
+# End-to-end plugin wiring example (algorithm/loss/reward/rollout pipeline)
+bash scripts/train_plugin_demo.sh --num-rollout 1
+```
+
 ## Engine note
 
 `training_actor_direct_sampling=true` currently only supports `--sampler-engine-type fsdp`.

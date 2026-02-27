@@ -22,7 +22,7 @@ DiffusionRL supports the following diffusion models:
 
 **Module Descriptions**:
 
-- **Training Actors (Ray + FSDP)**: Responsible for the main training process, reads `TrainingBatch` from the rollout pipeline, and synchronizes parameters to the inference actors after training.
+- **Training Actors (Ray + TrainBackend)**: Responsible for the main training process through pluggable training backends (FSDP2 / VeOmni native; Megatron scaffold), reads `TrainingBatch` from the rollout pipeline, and synchronizes parameters to the inference actors after training.
 - **Inference Actors (FSDP / FastVideo / SGLang)**: Generates denoising trajectories and latent samples using pluggable sampling engines, producing `RolloutOutput` with a unified v1 contract.
 - **Reward Service**: Evaluates generated samples using configurable reward models (HPS, CLIP, PickScore, OCR, etc.) and feeds reward signals back to the training loop.
 - **RolloutManager**: The central orchestrator that coordinates sampling, reward computation, advantage calculation, and batch assembly.
@@ -174,6 +174,35 @@ python -m diffusionrl.train --config scripts/minimal_hunyuan.yaml --num-rollout 
 
 `--config` expects a flat key/value YAML mapping; CLI options always override YAML.
 
+### Training Backend Selection
+
+`diffusionRL` now exposes three train backend entries:
+
+- `fsdp`: default backend, implemented as **FSDP2** (`fully_shard` path).
+- `veomni`: VeOmni native backend with FSDP2-focused data parallel mode (`data_parallel_mode=fsdp2`).
+- `megatron`: interface scaffold for future integration (launcher/topology hooks are present, runtime path is not complete yet; requires a Megatron-specific actor class via `train_backend_kwargs_json.actor_class_path`).
+
+Example: default FSDP2 training
+
+```bash
+python -m diffusionrl.train \
+  --train-backend fsdp
+```
+
+Example: VeOmni-compatible FSDP2 mode
+
+```bash
+python -m diffusionrl.train \
+  --train-backend veomni \
+  --train-backend-kwargs-json '{"data_parallel_mode":"fsdp2"}'
+```
+
+Notes:
+
+- FSDP2 runtime requires a torch build that provides composable FSDP2 APIs (`fully_shard`) and distributed checkpoint state-dict helpers.
+- diffusionRL intentionally keeps VeOmni backend on `fsdp2` only for RL training.
+- Built-in `veomni` backend calls VeOmni native APIs for model parallelization / optimizer / scheduler / grad clipping.
+
 ### Available Training Scripts
 
 | Script | Algorithm | Model | Mode |
@@ -197,7 +226,7 @@ Each script also has a `*_train_actor_sampling.sh` variant that uses training ac
 | **DanceGRPO** | GRPO with dance-specific SDE formulation | `dance`, `flux_dance` | Optimized for FLUX/SD3 |
 | **FlowGRPO** | Flow matching formulation | `flux_flow` | Flow-based objective |
 | **MixGRPO** | Mixed ODE/SDE sampling | Configurable | Flexible SDE ratio (0~1) with window scheduler |
-| **NFT** | Noise-Free Training | N/A | Forward diffusion, no trajectory needed |
+| **NFT** | Negative Fine-Tuning | N/A | Forward diffusion, no trajectory needed |
 
 ## Arguments Walkthrough
 
@@ -285,6 +314,24 @@ Then pass it via `--algorithm-path your_module.MyAlgorithm`.
 If you need a custom training objective, implement a loss plugin and pass
 `--loss-type custom --loss-path your_module.MyLoss`.
 See the full minimal template: [docs/Algorithm_Minimal_Template.md](docs/Algorithm_Minimal_Template.md)
+
+### Plugin Templates (diffusionrl_plugins)
+
+This repo ships minimal templates under `diffusionrl_plugins/` for common extension
+points:
+
+- Model: `diffusionrl_plugins.models.wan21.Wan21ModelBundle`
+- Sampler: `diffusionrl_plugins.samplers.minimal_sampler.MinimalSampler`
+- Algorithm: `diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm`
+- Loss: `diffusionrl_plugins.losses.minimal_loss.MinimalBackwardLoss`
+- Reward: `diffusionrl_plugins.rewards.minimal_reward.MinimalRewardWorker`
+- Rollout pipeline function: `diffusionrl_plugins.rollout_fns.minimal_pipeline.minimal_pipeline`
+
+Notes:
+- There is no plugin auto-registration; pass full dotpaths via CLI args.
+- `--model-type <name>` short-name resolution works only when the model class
+  declares `declared_model_type()`, `default_sampler_path()`, and
+  `default_sampler_engine()`.
 
 ### Adding a Custom Reward Worker
 

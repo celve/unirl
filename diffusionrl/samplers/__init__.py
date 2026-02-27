@@ -46,8 +46,8 @@ from .engine import (
 # FSDP Engine (native PyTorch, DanceGRPO-aligned)
 from .fsdp import FluxSampler, SD3Sampler, FSDPHunyuanSampler, FSDPRolloutEngine
 
-# FastVideo Engine
-from .fastvideo import FastVideoSampler, FastVideoSamplerV2, FastVideoRolloutEngine
+# FastVideo Engine (being phased out)
+# from .fastvideo import FastVideoSampler, FastVideoRolloutEngine
 
 # SGLang Engine (placeholder)
 from .sglang import SGLangRolloutEngine
@@ -73,10 +73,9 @@ __all__ = [
     "SD3Sampler",
     "FSDPHunyuanSampler",
     "FSDPRolloutEngine",
-    # FastVideo Engine
-    "FastVideoSampler",
-    "FastVideoSamplerV2",
-    "FastVideoRolloutEngine",
+    # FastVideo Engine (being phased out)
+    # "FastVideoSampler",
+    # "FastVideoRolloutEngine",
     # SGLang Engine
     "SGLangRolloutEngine",
     # Timestep schedulers (MixGRPO)

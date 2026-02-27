@@ -80,7 +80,6 @@ python -m diffusionrl.train \
     --lora-rank 16 \
     --lora-alpha 32 \
     --use-lora true \
-    --use-fsdp true \
     \
     --height 512 \
     --width 512 \

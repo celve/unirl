@@ -5,6 +5,7 @@ Defines algorithm responsibilities in rollout/advantage pipeline.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import json
 from typing import Any, Dict, List, Optional, Set
 
 import torch
@@ -109,6 +110,23 @@ class BaseAlgorithm(ABC):
             "clip_max": getattr(args, "advantage_clip_max", None),
         }
 
+    @staticmethod
+    def _algorithm_kwargs_from_args(args: Any) -> Dict[str, Any]:
+        """Parse algorithm_kwargs_json into a dictionary."""
+        raw = getattr(args, "algorithm_kwargs_json", "")
+        if not isinstance(raw, str):
+            return {}
+        text = raw.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+        return {}
+
     @classmethod
     def from_args(cls, args: Any) -> "BaseAlgorithm":
         """
@@ -116,7 +134,9 @@ class BaseAlgorithm(ABC):
 
         Subclasses can override to parse algorithm-specific parameters.
         """
-        return cls(**cls._base_kwargs_from_args(args))
+        kwargs = cls._base_kwargs_from_args(args)
+        kwargs.update(cls._algorithm_kwargs_from_args(args))
+        return cls(**kwargs)
 
     @abstractmethod
     def get_sampling_requirements(self) -> SamplingRequirements:
@@ -128,6 +148,7 @@ class BaseAlgorithm(ABC):
         """
         ...
 
+    @abstractmethod
     def compute_advantages(
         self,
         rewards: torch.Tensor,
@@ -137,9 +158,6 @@ class BaseAlgorithm(ABC):
         """
         Compute advantages from rewards.
 
-        Default implementation provides global and group normalization.
-        Subclasses can override for specialized behavior (e.g., per-prompt tracking).
-
         Args:
             rewards: Reward tensor [batch_size]
             num_samples_per_prompt: Number of samples generated per prompt
@@ -148,43 +166,7 @@ class BaseAlgorithm(ABC):
         Returns:
             Advantage tensor [batch_size]
         """
-        from diffusionrl.advantages.normalizers import (
-            normalize_global,
-            normalize_grouped,
-            build_fixed_size_groups,
-            build_prompt_groups,
-        )
-
-        batch_size = rewards.shape[0]
-
-        if self.advantage_type == "global":
-            advantages = normalize_global(rewards, epsilon=self.epsilon)
-        elif self.advantage_type == "group":
-            # Build fixed-size groups based on num_samples_per_prompt
-            group_indices = build_fixed_size_groups(batch_size, num_samples_per_prompt)
-            advantages = normalize_grouped(
-                rewards,
-                group_indices=group_indices,
-                epsilon=self.epsilon,
-            )
-        elif self.advantage_type == "per_prompt":
-            # Build groups by prompt if available, else fall back to fixed groups
-            if prompts is not None and len(prompts) == batch_size:
-                group_indices = build_prompt_groups(prompts)
-            else:
-                group_indices = build_fixed_size_groups(batch_size, num_samples_per_prompt)
-            advantages = normalize_grouped(
-                rewards,
-                group_indices=group_indices,
-                epsilon=self.epsilon,
-            )
-        else:
-            raise ValueError(f"Unknown advantage_type: {self.advantage_type}")
-
-        if self.clip_max is not None:
-            advantages = advantages.clamp(-self.clip_max, self.clip_max)
-
-        return advantages
+        ...
 
     # ========== Algorithm Hooks ==========
     # These hooks allow algorithms to customize behavior without requiring

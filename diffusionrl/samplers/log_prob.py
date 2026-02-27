@@ -2,13 +2,7 @@
 Log probability computation for SDE steps.
 
 This module contains the core formulas for computing log probabilities
-during SDE sampling. These formulas are copied from unified_grpo to
-ensure consistency.
-
-References:
-- unified_grpo/samplers/steps.py: sde_step_with_logprob()
-- unified_grpo/losses/grpo_loss.py: compute_log_prob()
-- flow_grpo/diffusers_patch/sd3_sde_with_logprob.py
+during SDE sampling.
 """
 
 import math
@@ -110,7 +104,6 @@ def compute_sde_log_prob(
 
     if sde_type in ("sde", "flux_flow", "flow"):
         # Standard SDE formulation from flow-GRPO
-        # Formula from unified_grpo/samplers/steps.py: sde_step_with_logprob()
         std_dev_t = torch.sqrt(sigma / (1 - torch.where(sigma == 1, sigma_max, sigma))) * eta
 
         # SDE mean update
@@ -131,7 +124,6 @@ def compute_sde_log_prob(
 
     elif sde_type == "cps":
         # Coefficient-Preserving Sampling
-        # Formula from unified_grpo/samplers/steps.py
         std_dev_t = sigma_next * math.sin(eta * math.pi / 2)
         pred_original = sample - sigma * noise_pred
         noise_estimate = sample + noise_pred * (1 - sigma)
@@ -145,7 +137,6 @@ def compute_sde_log_prob(
 
     elif sde_type in ("dance", "flux_dance"):
         # DanceGRPO SDE formulation (for Flux)
-        # Formula from unified_grpo/losses/grpo_loss.py
         dsigma = sigma_next - sigma
         delta_t = (sigma - sigma_next).clamp(min=1e-12)
         std_dev_t = eta * torch.sqrt(delta_t)

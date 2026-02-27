@@ -1,6 +1,7 @@
 """
 diffusionrl Training Actor - Manages model training via pluggable train backends.
 """
+import inspect
 import logging
 import os
 from typing import Any, Dict, List, Optional, Set, Union
@@ -67,7 +68,6 @@ class TrainingActor(BaseTrainRayActor):
         self._is_initialized = False
         self._is_offloaded = False
         self._device = None
-        self._use_fsdp = True  # legacy alias; derived from selected backend
         self._use_lora = False
         self._fsdp_cpu_offload = False
         self._train_backend = None
@@ -123,7 +123,6 @@ class TrainingActor(BaseTrainRayActor):
                 - loss_config: dict with loss_type, clip_range, kl_coef, etc.
                 - training_config: dict with max_grad_norm, gradient_accumulation_steps
                 - train_backend/train_backend_path/train_backend_kwargs
-                - legacy use_fsdp/fsdp_config (backward compatibility)
 
         Note:
             Algorithm instantiation for advantage computation happens in
@@ -143,14 +142,6 @@ class TrainingActor(BaseTrainRayActor):
         if not isinstance(backend_kwargs, dict):
             logger.warning("train_backend_kwargs is not a dict; resetting to empty dict.")
             backend_kwargs = {}
-
-        # Transitional compatibility: map legacy keys into backend kwargs.
-        if backend_name == "fsdp":
-            legacy_fsdp_config = config.get("fsdp_config", {}) or {}
-            if isinstance(legacy_fsdp_config, dict):
-                for key, value in legacy_fsdp_config.items():
-                    backend_kwargs.setdefault(key, value)
-            backend_kwargs.setdefault("use_fsdp", bool(config.get("use_fsdp", True)))
 
         self._train_backend = create_train_backend(
             backend_name,
@@ -174,7 +165,6 @@ class TrainingActor(BaseTrainRayActor):
 
         # Backend model wrapping (FSDP/Megatron/others).
         self._train_backend.wrap_model(self)
-        self._use_fsdp = bool(self._train_backend.uses_sharded_model())
 
         # Create optimizer
         self._create_optimizer(config.get("optimizer_config", {}))
@@ -284,6 +274,17 @@ class TrainingActor(BaseTrainRayActor):
 
     def _create_optimizer(self, optimizer_config: dict) -> None:
         """Create optimizer."""
+        if self._train_backend is not None:
+            backend_optimizer = self._train_backend.build_optimizer(self, optimizer_config)
+            if backend_optimizer is not None:
+                self.optimizer = backend_optimizer
+                logger.info(
+                    "Rank %s: Optimizer created by backend=%s",
+                    self.rank,
+                    self._train_backend_name,
+                )
+                return
+
         lr = optimizer_config.get("learning_rate", 1e-6)
         betas = (
             optimizer_config.get("adam_beta1", 0.9),
@@ -304,6 +305,17 @@ class TrainingActor(BaseTrainRayActor):
 
     def _create_scheduler(self, scheduler_config: dict) -> None:
         """Create learning rate scheduler."""
+        if self._train_backend is not None:
+            backend_scheduler = self._train_backend.build_scheduler(self, scheduler_config)
+            if backend_scheduler is not None:
+                self.lr_scheduler = backend_scheduler
+                logger.info(
+                    "Rank %s: Scheduler created by backend=%s",
+                    self.rank,
+                    self._train_backend_name,
+                )
+                return
+
         scheduler_type = scheduler_config.get("type", "constant")
         warmup_steps = scheduler_config.get("warmup_steps", 0)
         total_steps = scheduler_config.get("total_steps", 1000)
@@ -332,6 +344,56 @@ class TrainingActor(BaseTrainRayActor):
         else:
             self.lr_scheduler = None
 
+    _LOSS_RUNTIME_KEYS = {
+        "use_ema",
+        "ema_decay",
+        "nft_timestep_mode",
+        "nft_shuffle_timesteps",
+        "nft_apply_shift",
+        "decay_type",
+        "ema_flat_steps",
+        "ema_uprate",
+        "ema_uphold",
+        "old_adapter_name",
+        "new_adapter_name",
+    }
+
+    @classmethod
+    def _split_loss_kwargs(cls, loss_config: dict) -> tuple[dict, dict]:
+        """Split loss kwargs into constructor kwargs and actor runtime kwargs."""
+        extra = loss_config.get("loss_kwargs")
+        if not isinstance(extra, dict):
+            return {}, {}
+
+        ctor_kwargs: Dict[str, Any] = {}
+        runtime_kwargs: Dict[str, Any] = {}
+        for key, value in extra.items():
+            if key in cls._LOSS_RUNTIME_KEYS:
+                runtime_kwargs[key] = value
+            else:
+                ctor_kwargs[key] = value
+        return ctor_kwargs, runtime_kwargs
+
+    @staticmethod
+    def _filter_constructor_kwargs(loss_cls: type, kwargs: dict) -> dict:
+        """Drop kwargs that are not accepted by the target loss constructor."""
+        try:
+            sig = inspect.signature(loss_cls.__init__)
+        except (TypeError, ValueError):
+            return dict(kwargs)
+
+        params = sig.parameters
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return dict(kwargs)
+
+        allowed = {
+            name
+            for name, param in params.items()
+            if name != "self"
+            and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        return {key: value for key, value in kwargs.items() if key in allowed}
+
     @staticmethod
     def _collect_custom_loss_kwargs(loss_config: dict) -> dict:
         """Collect custom loss kwargs from config while removing actor-runtime keys."""
@@ -339,18 +401,7 @@ class TrainingActor(BaseTrainRayActor):
             "loss_type",
             "loss_path",
             "loss_kwargs",
-            "use_ema",
-            "ema_decay",
             "guidance_scale",
-            "nft_timestep_mode",
-            "nft_shuffle_timesteps",
-            "nft_apply_shift",
-            "decay_type",
-            "ema_flat_steps",
-            "ema_uprate",
-            "ema_uphold",
-            "old_adapter_name",
-            "new_adapter_name",
         }
         kwargs = {
             key: value
@@ -359,85 +410,92 @@ class TrainingActor(BaseTrainRayActor):
         }
         extra = loss_config.get("loss_kwargs")
         if isinstance(extra, dict):
-            kwargs.update(extra)
+            kwargs.update(
+                {
+                    key: value
+                    for key, value in extra.items()
+                    if key not in TrainingActor._LOSS_RUNTIME_KEYS
+                }
+            )
         return kwargs
 
     def _load_loss(self, loss_config: dict) -> None:
         """Load loss function based on loss_type."""
-        from diffusionrl.losses import get_loss
+        from diffusionrl.losses import LOSS_REGISTRY, get_loss
 
-        self._loss_type = loss_config.get("loss_type", "grpo")
+        self._loss_type = str(loss_config.get("loss_type", "grpo"))
         self._loss_path = loss_config.get("loss_path")
-        self._use_ema = loss_config.get("use_ema", False)
-        self._ema_decay = loss_config.get("ema_decay", 0.001)
-        self._guidance_scale = loss_config.get("guidance_scale", 3.5)
+        self._guidance_scale = float(loss_config.get("guidance_scale", 3.5))
+        self._ema_updater = None
+
+        ctor_loss_kwargs, runtime_loss_kwargs = self._split_loss_kwargs(loss_config)
+        self._nft_timestep_mode = str(runtime_loss_kwargs.get("nft_timestep_mode", "random"))
+        self._nft_shuffle_timesteps = bool(runtime_loss_kwargs.get("nft_shuffle_timesteps", True))
+        self._nft_apply_shift = bool(runtime_loss_kwargs.get("nft_apply_shift", False))
+        self._ema_decay = float(runtime_loss_kwargs.get("ema_decay", 0.001))
+        self._use_ema = bool(runtime_loss_kwargs.get("use_ema", self._loss_type == "nft"))
+        ema_decay_type = str(runtime_loss_kwargs.get("decay_type", "constant"))
+        ema_flat_steps = int(runtime_loss_kwargs.get("ema_flat_steps", 0))
+        ema_uprate = float(runtime_loss_kwargs.get("ema_uprate", 0.001))
+        ema_uphold = float(runtime_loss_kwargs.get("ema_uphold", 0.5))
+        old_adapter_name = str(runtime_loss_kwargs.get("old_adapter_name", "old"))
+        new_adapter_name = str(runtime_loss_kwargs.get("new_adapter_name", "default"))
 
         if self._loss_type == "nft" and not self._loss_path:
-            # NFT loss with forward process optimization
+            nft_kwargs = {
+                "beta": 0.1,
+                "adv_clip_max": 5.0,
+                "adv_mode": "raw",
+                "use_adaptive_weight": True,
+                "shift": loss_config.get("shift", 3.0),
+                "kl_coef": loss_config.get("kl_coef", 0.0),
+            }
+            nft_kwargs.update(ctor_loss_kwargs)
+            loss_cls = LOSS_REGISTRY.get("nft")
+            if loss_cls is not None:
+                nft_kwargs = self._filter_constructor_kwargs(loss_cls, nft_kwargs)
             self.loss_fn = get_loss(
                 loss_type="nft",
-                beta=loss_config.get("beta", 0.1),
-                adv_clip_max=loss_config.get("adv_clip_max", 5.0),
-                adv_mode=loss_config.get("adv_mode", "raw"),
-                use_adaptive_weight=loss_config.get("use_adaptive_weight", True),
-                shift=loss_config.get("shift", 3.0),
-                kl_coef=loss_config.get("kl_coef", 0.0),
+                **nft_kwargs,
             )
-            # NFT timestep handling
-            self._nft_timestep_mode = loss_config.get("nft_timestep_mode", "random")
-            self._nft_shuffle_timesteps = loss_config.get("nft_shuffle_timesteps", True)
-            self._nft_apply_shift = loss_config.get("nft_apply_shift", False)
-            # Enable EMA by default for NFT
-            self._use_ema = loss_config.get("use_ema", True)
-
-            # Initialize EMA updater for dual adapter mechanism
             if self._use_ema:
                 from diffusionrl.utils import DualAdapterEMA
-                decay_type = loss_config.get("decay_type", "constant")
                 self._ema_updater = DualAdapterEMA(
                     decay=self._ema_decay,
-                    decay_type=decay_type,
-                    # DiffusionNFT decay_type=1 defaults
-                    flat_steps=loss_config.get("ema_flat_steps", 0),
-                    uprate=loss_config.get("ema_uprate", 0.001),
-                    uphold=loss_config.get("ema_uphold", 0.5),
-                    old_adapter_name=loss_config.get("old_adapter_name", "old"),
-                    new_adapter_name=loss_config.get("new_adapter_name", "default"),
+                    decay_type=ema_decay_type,
+                    flat_steps=ema_flat_steps,
+                    uprate=ema_uprate,
+                    uphold=ema_uphold,
+                    old_adapter_name=old_adapter_name,
+                    new_adapter_name=new_adapter_name,
                 )
-            # Bind model_type for adapter selection in NFT loss.
-            if hasattr(self.loss_fn, "model_type"):
-                self.loss_fn.model_type = getattr(self.model_bundle, "model_type", "default")
-            if hasattr(self.loss_fn, "_forward_plugin"):
-                self.loss_fn._forward_plugin = None
         elif self._loss_type == "grpo" and not self._loss_path:
-            # Built-in GRPO loss.
+            grpo_kwargs = {
+                "clip_range": loss_config.get("clip_range", 1e-4),
+                "clip_range_mode": loss_config.get("clip_range_mode", "constant"),
+                "use_kl_penalty": loss_config.get("use_kl_penalty", True),
+                "kl_coef": loss_config.get("kl_coef", 0.01),
+                "eta": loss_config.get("eta", 1.0),
+                "sde_type": loss_config.get("sde_type", "sde"),
+                "ignore_last": loss_config.get("ignore_last", False),
+                "frozen_init_timesteps": loss_config.get("frozen_init_timesteps", 0),
+            }
+            grpo_kwargs.update(ctor_loss_kwargs)
+            loss_cls = LOSS_REGISTRY.get("grpo")
+            if loss_cls is not None:
+                grpo_kwargs = self._filter_constructor_kwargs(loss_cls, grpo_kwargs)
             self.loss_fn = get_loss(
                 loss_type="grpo",
-                clip_range=loss_config.get("clip_range", 1e-4),
-                clip_range_mode=loss_config.get("clip_range_mode", "constant"),
-                use_kl_penalty=loss_config.get("use_kl_penalty", True),
-                kl_coef=loss_config.get("kl_coef", 0.01),
-                eta=loss_config.get("eta", 1.0),
-                sde_type=loss_config.get("sde_type", "sde"),
-                ignore_last=loss_config.get("ignore_last", False),
-                frozen_init_timesteps=loss_config.get("frozen_init_timesteps", 0),
+                **grpo_kwargs,
             )
         else:
-            # Custom/registered loss. Use explicit loss_path when provided.
             custom_kwargs = self._collect_custom_loss_kwargs(loss_config)
             self.loss_fn = get_loss(
                 loss_type=self._loss_type,
                 loss_path=self._loss_path,
                 **custom_kwargs,
             )
-            # Keep NFT defaults if user selects nft loss_type via custom path.
-            if self._loss_type == "nft":
-                self._nft_timestep_mode = loss_config.get("nft_timestep_mode", "random")
-                self._nft_shuffle_timesteps = loss_config.get("nft_shuffle_timesteps", True)
-                self._nft_apply_shift = loss_config.get("nft_apply_shift", False)
-                self._use_ema = loss_config.get("use_ema", True)
 
-        # Bind model metadata for losses that implement model-aware forward plugins.
         if hasattr(self.loss_fn, "model_type"):
             self.loss_fn.model_type = getattr(self.model_bundle, "model_type", "default")
         if hasattr(self.loss_fn, "_forward_plugin"):
@@ -503,10 +561,12 @@ class TrainingActor(BaseTrainRayActor):
         return self._sampling_service.generate_batch(self, requests)
 
     def get_train_backend_info(self) -> Dict[str, Any]:
-        return {
-            "name": self._train_backend_name,
-            "capabilities": dict(self._train_backend_capabilities),
-        }
+        if self._train_backend is None:
+            return {
+                "name": self._train_backend_name,
+                "capabilities": dict(self._train_backend_capabilities),
+            }
+        return dict(self._train_backend.backend_info(self))
 
     def get_buffer_consumer_spec(self) -> Dict[str, Any]:
         if self._train_backend is None:
@@ -537,6 +597,15 @@ class TrainingActor(BaseTrainRayActor):
             nft_timestep_mode=self._nft_timestep_mode,
             nft_shuffle_timesteps=self._nft_shuffle_timesteps,
             nft_apply_shift=self._nft_apply_shift,
+            clip_grad_norm_fn=(
+                (lambda *, model, max_grad_norm: self._train_backend.clip_grad_norm(
+                    self,
+                    model=model,
+                    max_grad_norm=max_grad_norm,
+                ))
+                if self._train_backend is not None
+                else None
+            ),
         )
         return TrainExecutor(
             model=self.model,
@@ -582,6 +651,17 @@ class TrainingActor(BaseTrainRayActor):
         self._log_gpu_state("training_after_batch_to_device")
         if isinstance(batch, BackwardTrainingBatch):
             batch = self._maybe_replay_old_log_probs(batch)
+
+        if self._train_backend is not None:
+            backend_metrics = self._train_backend.run_train_step(
+                self,
+                rollout_id=rollout_id,
+                batch=batch,
+                executor=executor,
+            )
+            if backend_metrics is not None:
+                self._log_gpu_state("training_train_end")
+                return backend_metrics
 
         metrics = executor.execute_prepared_batch(rollout_id=rollout_id, batch=batch)
         self._log_gpu_state("training_train_end")

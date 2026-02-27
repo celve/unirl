@@ -4,10 +4,6 @@ Dataset implementations for GRPO training.
 Supports:
 - Pre-computed embeddings (EmbeddingRLDataset)
 - Plain text prompts (TextPromptDataset)
-
-Reference:
-- unified_grpo/data/datasets.py
-- flow_grpo data loading
 """
 
 import json

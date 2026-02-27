@@ -16,6 +16,15 @@ class TrainBackendCapabilities:
     supports_training_actor_sampling: bool = False
     buffer_partition_mode: str = "data_parallel"
     supports_state_dict_export: bool = True
+    supports_custom_actor_class: bool = False
+    requires_custom_actor_class: bool = False
+    supports_custom_optimizer: bool = False
+    supports_custom_scheduler: bool = False
+    supports_custom_train_step: bool = False
+    supports_backend_managed_offload: bool = False
+    preferred_weight_sync_mode: Optional[str] = None
+    preferred_weight_export_format: Optional[str] = None
+    supported_weight_export_formats: tuple[str, ...] = ("state_dict",)
     notes: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
@@ -25,6 +34,65 @@ class TrainBackendCapabilities:
             "supports_training_actor_sampling": self.supports_training_actor_sampling,
             "buffer_partition_mode": self.buffer_partition_mode,
             "supports_state_dict_export": self.supports_state_dict_export,
+            "supports_custom_actor_class": self.supports_custom_actor_class,
+            "requires_custom_actor_class": self.requires_custom_actor_class,
+            "supports_custom_optimizer": self.supports_custom_optimizer,
+            "supports_custom_scheduler": self.supports_custom_scheduler,
+            "supports_custom_train_step": self.supports_custom_train_step,
+            "supports_backend_managed_offload": self.supports_backend_managed_offload,
+            "preferred_weight_sync_mode": self.preferred_weight_sync_mode,
+            "preferred_weight_export_format": self.preferred_weight_export_format,
+            "supported_weight_export_formats": list(self.supported_weight_export_formats),
+            "notes": self.notes,
+        }
+
+
+@dataclass(frozen=True)
+class TrainTopology:
+    """Runtime topology view declared by train backend."""
+
+    world_size: int
+    dp_size: int
+    dp_replicate_size: int = 1
+    dp_shard_size: int = 1
+    tp_size: int = 1
+    pp_size: int = 1
+    sp_size: int = 1
+    ep_size: int = 1
+    data_partition_axis: str = "dp"
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "world_size": int(self.world_size),
+            "dp_size": int(self.dp_size),
+            "dp_replicate_size": int(self.dp_replicate_size),
+            "dp_shard_size": int(self.dp_shard_size),
+            "tp_size": int(self.tp_size),
+            "pp_size": int(self.pp_size),
+            "sp_size": int(self.sp_size),
+            "ep_size": int(self.ep_size),
+            "data_partition_axis": str(self.data_partition_axis),
+        }
+
+
+@dataclass(frozen=True)
+class TrainBackendLaunchSpec:
+    """Backend-declared actor/group launch hints used by group factory."""
+
+    actor_class_path: Optional[str] = None
+    actor_kwargs: Mapping[str, Any] = None
+    num_actors: Optional[int] = None
+    num_gpus_per_actor: Optional[float] = None
+    runtime_env: Mapping[str, Any] = None
+    notes: str = ""
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "actor_class_path": self.actor_class_path,
+            "actor_kwargs": dict(self.actor_kwargs or {}),
+            "num_actors": self.num_actors,
+            "num_gpus_per_actor": self.num_gpus_per_actor,
+            "runtime_env": dict(self.runtime_env or {}),
             "notes": self.notes,
         }
 
@@ -49,6 +117,11 @@ class TrainBackend(abc.ABC):
     def capabilities(self) -> TrainBackendCapabilities:
         return self.declared_capabilities()
 
+    def launch_spec(self, *, args: Any, default_num_actors: int) -> TrainBackendLaunchSpec:
+        """Optional launch-time actor/group hints consumed by group factory."""
+        del args, default_num_actors
+        return TrainBackendLaunchSpec()
+
     def before_model_load(self, actor: Any) -> None:
         """Hook called after device setup but before model construction."""
         del actor
@@ -56,6 +129,68 @@ class TrainBackend(abc.ABC):
     def wrap_model(self, actor: Any) -> None:
         """Hook called after actor.model is created."""
         del actor
+
+    def build_optimizer(self, actor: Any, optimizer_config: Mapping[str, Any]) -> Any:
+        """Optional optimizer construction hook; return None to use actor default."""
+        del actor, optimizer_config
+        return None
+
+    def build_scheduler(self, actor: Any, scheduler_config: Mapping[str, Any]) -> Any:
+        """Optional scheduler construction hook; return None to use actor default."""
+        del actor, scheduler_config
+        return None
+
+    def run_train_step(
+        self,
+        actor: Any,
+        *,
+        rollout_id: int,
+        batch: Any,
+        executor: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Optional train-step override; return metrics dict to bypass default executor."""
+        del actor, rollout_id, batch, executor
+        return None
+
+    def clip_grad_norm(
+        self,
+        actor: Any,
+        *,
+        model: Any,
+        max_grad_norm: float,
+    ) -> Any:
+        """Optional grad-norm clip override used by TrainExecutor."""
+        import torch
+
+        del actor
+        return torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            max_norm=max_grad_norm,
+        )
+
+    def topology(self, actor: Any) -> TrainTopology:
+        """Report backend runtime topology."""
+        dp_size = self.data_parallel_size(actor)
+        return TrainTopology(
+            world_size=int(getattr(actor, "world_size", dp_size)),
+            dp_size=int(dp_size),
+            dp_replicate_size=1,
+            dp_shard_size=int(dp_size),
+        )
+
+    def backend_info(self, actor: Any) -> Dict[str, Any]:
+        """Return backend metadata bundle used by orchestration/logging."""
+        caps = self.capabilities
+        return {
+            "name": self.name,
+            "capabilities": caps.as_dict(),
+            "topology": self.topology(actor).as_dict(),
+            "weight_sync": {
+                "preferred_mode": caps.preferred_weight_sync_mode,
+                "preferred_export_format": caps.preferred_weight_export_format,
+                "supported_export_formats": list(caps.supported_weight_export_formats),
+            },
+        }
 
     @abc.abstractmethod
     def uses_sharded_model(self) -> bool:
@@ -79,6 +214,27 @@ class TrainBackend(abc.ABC):
         """Optional broadcast step after updates."""
         del actor
 
+    def export_weights_to_path(
+        self,
+        actor: Any,
+        checkpoint_path: str,
+        *,
+        export_format: str,
+    ) -> Optional[str]:
+        """Optional export hook for non-state-dict weight artifacts."""
+        del actor, checkpoint_path, export_format
+        return None
+
+    def offload(self, actor: Any) -> bool:
+        """Optional backend-managed offload; return True when fully handled."""
+        del actor
+        return False
+
+    def onload(self, actor: Any) -> bool:
+        """Optional backend-managed onload; return True when fully handled."""
+        del actor
+        return False
+
     def data_parallel_size(self, actor: Any) -> int:
         """Return effective data-parallel size consumed by train batches."""
         return int(getattr(actor, "world_size", 1))
@@ -95,5 +251,7 @@ class TrainBackend(abc.ABC):
 
 __all__ = [
     "TrainBackendCapabilities",
+    "TrainTopology",
+    "TrainBackendLaunchSpec",
     "TrainBackend",
 ]

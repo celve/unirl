@@ -5,8 +5,6 @@ Each strategy encapsulates a specific normalization approach:
 - GlobalStrategy: Normalize across all samples
 - GroupStrategy: Normalize within fixed-size groups (MixGRPO/DanceGRPO)
 - PerPromptStrategy: Normalize within prompt-based groups
-
-Copied from unified_grpo/advantages/strategies.py
 """
 
 from dataclasses import dataclass

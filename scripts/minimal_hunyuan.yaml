@@ -54,7 +54,6 @@ gradient_accumulation_steps: "4"
 num_inner_epochs: 1
 max_grad_norm: 1.0
 weight_decay: 0.0001
-use_fsdp: true
 use_gradient_checkpointing: true
 
 # --- Video Resolution (DanceGRPO: 480x480, 53 frames) ---

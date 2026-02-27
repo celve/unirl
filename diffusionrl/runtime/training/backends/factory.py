@@ -2,24 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Mapping, Optional
 
 from diffusionrl.utils import load_function
 
 from .base import TrainBackend
 from .fsdp import FSDPTrainBackend
+from .megatron import MegatronTrainBackend
+from .veomni import VeOmniTrainBackend
 
 _SUPPORTED_BUILTIN_BACKENDS = ("fsdp", "megatron", "veomni")
-_UNIMPLEMENTED_BACKEND_HINTS: Dict[str, str] = {
-    "megatron": (
-        "train_backend='megatron' is reserved but not implemented in diffusionRL yet. "
-        "Current runtime supports 'fsdp' only."
-    ),
-    "veomni": (
-        "train_backend='veomni' is reserved but not implemented in diffusionRL yet. "
-        "Current runtime supports 'fsdp' only."
-    ),
-}
 
 
 def supported_train_backends() -> tuple[str, ...]:
@@ -47,8 +39,11 @@ def create_train_backend(
     if backend_name == "fsdp":
         return FSDPTrainBackend(backend_kwargs=dict(backend_kwargs or {}))
 
-    if backend_name in _UNIMPLEMENTED_BACKEND_HINTS:
-        raise NotImplementedError(_UNIMPLEMENTED_BACKEND_HINTS[backend_name])
+    if backend_name == "veomni":
+        return VeOmniTrainBackend(backend_kwargs=dict(backend_kwargs or {}))
+
+    if backend_name == "megatron":
+        return MegatronTrainBackend(backend_kwargs=dict(backend_kwargs or {}))
 
     raise ValueError(
         f"Unsupported train_backend={name!r}. "

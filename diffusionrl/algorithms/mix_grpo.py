@@ -54,6 +54,7 @@ class MixGRPOAlgorithm(GRPOAlgorithm):
                 "window_training": getattr(args, "window_training", False),
             }
         )
+        kwargs.update(cls._algorithm_kwargs_from_args(args))
         return cls(**kwargs)
 
     def get_sampling_requirements(self) -> SamplingRequirements:

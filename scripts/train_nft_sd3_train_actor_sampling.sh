@@ -15,7 +15,7 @@
 # batch_geometry: total_samples = prompts_per_batch * num_samples_per_prompt
 # per_rank_batch = total_samples / num_train_gpus (must be divisible)
 #
-# This script runs DiffusionNFT (Noise-Free Training) with SD3 for OCR task (default).
+# This script runs DiffusionNFT (Negative Fine-Tuning) with SD3 for OCR task (default).
 # NFT uses forward diffusion in the loss function, so it doesn't require
 # trajectories or log probabilities during sampling.
 #
@@ -23,18 +23,18 @@
 #
 # Key alignment with original DiffusionNFT (OCR task):
 # - loss_type=nft (forward process diffusion RL)
-# - nft_beta=1.0 (interpolation weight: positive_prediction = beta*new + (1-beta)*old)
-# - kl_coef=0.0001 (KL regularization coefficient, separate from nft_beta!)
+# - beta=1.0 (interpolation weight: positive_prediction = beta*new + (1-beta)*old)
+# - kl_coef=0.0001 (KL regularization coefficient, separate from beta)
 # - num_inference_steps=10 (training steps, NOT 40)
 # - guidance_scale=1.0 (no CFG during training)
 # - advantage_type=per_prompt (per-prompt statistic tracking)
-# - nft_timestep_mode=all (DiffusionNFT uses full timestep schedule)
-# - nft_adv_mode=raw
+# - loss_kwargs.nft_timestep_mode=all (DiffusionNFT uses full timestep schedule)
+# - adv_mode=raw
 # - EMA decay: warmup curve (decay_type=2 in original)
 #   - ema_flat_steps=75, ema_uprate=0.0075, ema_uphold=0.999
 #
 # Two beta parameters in DiffusionNFT (IMPORTANT!):
-# 1. config.beta (--nft-beta): Controls positive_prediction interpolation
+# 1. config.beta (algorithm/loss kwargs JSON): Controls positive_prediction interpolation
 #    - OCR: 0.1 (mostly use old adapter prediction)
 # 2. config.train.beta (--kl-coef): KL regularization weight
 #    - Fixed: 0.0001
@@ -67,6 +67,8 @@ if [ $(( NUM_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
 fi
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( NUM_GPUS * BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
 NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
+NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"ema_decay":0.001}'}
+NFT_LOSS_KWARGS=${NFT_LOSS_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"nft_timestep_mode":"all","nft_shuffle_timesteps":true,"nft_apply_shift":false,"use_ema":true,"ema_decay":0.001,"decay_type":"warmup","ema_flat_steps":75,"ema_uprate":0.0075,"ema_uphold":0.999}'}
 
 python -m diffusionrl.train \
     --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
@@ -84,20 +86,8 @@ python -m diffusionrl.train \
     --num-inference-steps 10 \
     --guidance-scale 1.0 \
     --sampling-adapter old \
-    \
-    --nft-beta 0.1 \
-    --nft-adv-mode raw \
-    --nft-adv-clip-max 5.0 \
-    --nft-use-adaptive-weight true \
-    --nft-timestep-mode all \
-    --nft-shuffle-timesteps true \
-    --nft-apply-shift false \
-    \
-    --use-ema true \
-    --ema-decay-type warmup \
-    --ema-flat-steps 75 \
-    --ema-uprate 0.0075 \
-    --ema-uphold 0.999 \
+    --algorithm-kwargs-json "${NFT_ALGO_KWARGS}" \
+    --loss-kwargs-json "${NFT_LOSS_KWARGS}" \
     \
     --prompts-per-batch ${PROMPTS_PER_BATCH} \
     --batch-size ${BATCH_SIZE} \
@@ -122,7 +112,6 @@ python -m diffusionrl.train \
     --lora-rank 32 \
     --lora-alpha 64 \
     --use-lora true \
-    --use-fsdp true \
     --use-gradient-checkpointing false \
     \
     --height 512 \

@@ -7,7 +7,7 @@ This decouples actors from the TrainingArguments structure.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 import json
 from typing import Any, Dict, List, Optional
 
@@ -46,11 +46,12 @@ class RewardSchema:
     TrainingArguments — it delegates to the ``args.reward`` group internally.
     """
 
-    reward_path: str
+    reward_path: Optional[str]
     reward_model_saved_path: Optional[str]
     reward_model_name: str
     reward_batch_size: int
     reward_timeout: float
+    local_reward_device: str
     use_http_reward: bool
     reward_service_url: Optional[str]
     reward_service_urls: Optional[List[str]]
@@ -73,6 +74,7 @@ class RewardSchema:
             reward_model_name=rc.reward_model_name,
             reward_batch_size=int(rc.reward_batch_size),
             reward_timeout=float(rc.reward_timeout),
+            local_reward_device=str(getattr(rc, "local_reward_device", "cpu")),
             use_http_reward=bool(rc.use_http_reward),
             reward_service_url=rc.reward_service_url,
             reward_service_urls=getattr(rc, "reward_service_urls", None),
@@ -141,6 +143,11 @@ def build_rollout_engine_config(
     merged_engine_kwargs.setdefault("lora_rank", model_config["lora_rank"])
     merged_engine_kwargs.setdefault("lora_alpha", model_config["lora_alpha"])
     merged_engine_kwargs.setdefault("lora_target_modules", model_config["lora_target_modules"])
+    # Wire top-level fps into engine_kwargs so SGLang engine can consume it
+    # without requiring users to pass it through --engine-kwargs JSON.
+    fps = getattr(args, "fps", None)
+    if fps is not None:
+        merged_engine_kwargs.setdefault("fps", int(fps))
 
     return {
         "sampler_engine_type": sampler_engine_type,
@@ -188,16 +195,7 @@ def _build_scheduler_config(args, *, total_steps: int) -> Dict[str, Any]:
 def _build_loss_config(args) -> Dict[str, Any]:
     ac = args.algorithm  # AlgorithmConfig
     sc = args.sampling   # SamplingConfig
-    loss_kwargs: Dict[str, Any] = {}
-    raw_loss_kwargs = getattr(ac, "loss_kwargs_json", "")
-    if isinstance(raw_loss_kwargs, str) and raw_loss_kwargs.strip():
-        try:
-            parsed = json.loads(raw_loss_kwargs)
-            if isinstance(parsed, dict):
-                loss_kwargs = parsed
-        except Exception:
-            # Validation should already catch malformed JSON.
-            loss_kwargs = {}
+    loss_kwargs = _parse_json_dict(getattr(ac, "loss_kwargs_json", ""))
     return {
         "loss_type": str(ac.loss_type),
         "loss_path": str(ac.loss_path) if ac.loss_path else None,
@@ -211,20 +209,7 @@ def _build_loss_config(args) -> Dict[str, Any]:
         "guidance_scale": float(sc.guidance_scale),
         "ignore_last": bool(ac.ignore_last),
         "frozen_init_timesteps": int(ac.frozen_init_timesteps),
-        "beta": float(ac.nft.nft_beta),
-        "adv_clip_max": float(ac.nft.nft_adv_clip_max),
-        "adv_mode": str(ac.nft.nft_adv_mode),
-        "use_adaptive_weight": bool(ac.nft.nft_use_adaptive_weight),
         "shift": float(sc.shift),
-        "nft_timestep_mode": str(ac.nft.nft_timestep_mode),
-        "nft_shuffle_timesteps": bool(ac.nft.nft_shuffle_timesteps),
-        "nft_apply_shift": bool(ac.nft.nft_apply_shift),
-        "use_ema": bool(ac.ema.use_ema),
-        "ema_decay": float(ac.ema.ema_decay),
-        "decay_type": str(ac.ema.ema_decay_type),
-        "ema_flat_steps": int(ac.ema.ema_flat_steps),
-        "ema_uprate": float(ac.ema.ema_uprate),
-        "ema_uphold": float(ac.ema.ema_uphold),
     }
 
 
@@ -254,6 +239,32 @@ def _build_fsdp_config(args) -> Dict[str, Any]:
     }
 
 
+def _build_veomni_config(args, *, dp_size: Optional[int] = None) -> Dict[str, Any]:
+    tc = args.training  # TrainingConfig
+    # Keep VeOmni dp topology aligned with the actual training actor group size.
+    world_size = int(dp_size) if dp_size is not None else int(args.training_num_nodes) * int(args.training_num_gpus_per_node)
+    enable_mixed_precision = bool(world_size > 1)
+    return {
+        # VeOmni path is FSDP2-focused. Keep defaults explicit and let users
+        # override with train_backend_kwargs_json.
+        "data_parallel_mode": "fsdp2",
+        "dp_size": int(world_size),
+        "dp_replicate_size": 1,
+        "dp_shard_size": int(world_size),
+        "tp_size": int(getattr(args, "tp_size", 1)),
+        "pp_size": 1,
+        "sp_size": int(getattr(args, "sp_size", 1)),
+        "ep_size": 1,
+        "enable_full_shard": True,
+        "enable_reshard_after_forward": True,
+        "enable_mixed_precision": enable_mixed_precision,
+        "enable_gradient_checkpointing": bool(tc.use_gradient_checkpointing),
+        "init_device": "meta",
+        "broadcast_model_weights_from_rank0": True,
+        "weights_path_mode": "transformer_subdir",
+    }
+
+
 def _parse_json_dict(raw: Any) -> Dict[str, Any]:
     if raw is None:
         return {}
@@ -271,14 +282,17 @@ def _parse_json_dict(raw: Any) -> Dict[str, Any]:
     return {}
 
 
-def _build_train_backend_config(args) -> Dict[str, Any]:
+def _build_train_backend_config(args, *, dp_size: Optional[int] = None) -> Dict[str, Any]:
     tc = args.training  # TrainingConfig
     backend_name = str(getattr(tc, "train_backend", "fsdp") or "fsdp").strip().lower()
     backend_kwargs = _parse_json_dict(getattr(tc, "train_backend_kwargs_json", ""))
 
     if backend_name == "fsdp":
         merged = _build_fsdp_config(args)
-        merged["use_fsdp"] = bool(tc.use_fsdp)
+        merged.update(backend_kwargs)
+        backend_kwargs = merged
+    elif backend_name == "veomni":
+        merged = _build_veomni_config(args, dp_size=dp_size)
         merged.update(backend_kwargs)
         backend_kwargs = merged
 
@@ -294,7 +308,7 @@ def build_training_actor_init_config(*, args, dp_size: int) -> Dict[str, Any]:
 
     Pulls from: ModelConfig + TrainingConfig + AlgorithmConfig + SamplingConfig.
     """
-    backend_config = _build_train_backend_config(args)
+    backend_config = _build_train_backend_config(args, dp_size=dp_size)
     return {
         "model_config": build_model_config(args),
         "optimizer_config": _build_optimizer_config(args),
@@ -306,7 +320,4 @@ def build_training_actor_init_config(*, args, dp_size: int) -> Dict[str, Any]:
         "train_backend_path": backend_config["backend_path"],
         "train_backend_kwargs": backend_config["kwargs"],
         "train_backend_config": backend_config,
-        # Legacy compatibility keys for old actor code paths.
-        "use_fsdp": bool(args.training.use_fsdp),
-        "fsdp_config": _build_fsdp_config(args),
     }

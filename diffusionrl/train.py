@@ -8,6 +8,8 @@ Usage:
     python -m diffusionrl.train --pretrained-model-saved-path /path/to/model --num-rollout 100
 """
 import logging
+import os
+import re
 
 from diffusionrl.config import parse_args
 from diffusionrl.config.arguments import is_training_actor_direct_sampling_mode
@@ -94,6 +96,18 @@ def train(args):
     if training_pg_result is None:
         raise ValueError("Missing training placement-group allocation.")
     training_group = create_training_actor_group(args, training_pg_result)
+    resume_from_checkpoint = getattr(args, "resume_from_checkpoint", None)
+    if resume_from_checkpoint:
+        training_group.load_checkpoint(resume_from_checkpoint)
+        logger.info("Checkpoint loaded: %s", resume_from_checkpoint)
+        if int(getattr(args, "start_rollout_id", 0)) == 0:
+            match = re.search(r"checkpoint-(\d+)$", os.path.basename(os.path.normpath(resume_from_checkpoint)))
+            if match:
+                args.start_rollout_id = int(match.group(1)) + 1
+                logger.info(
+                    "Auto-set start_rollout_id=%s from checkpoint path.",
+                    args.start_rollout_id,
+                )
     train_backend_info = training_group.get_train_backend_info()
     buffer_consumer_spec = training_group.get_buffer_consumer_spec()
     logger.info("Training actor group created")

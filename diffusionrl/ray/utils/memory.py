@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 class TrainingActorMemoryService:
     """Owns offload/onload transitions for training actors."""
 
+    @staticmethod
+    def _backend(actor: Any) -> Any:
+        return getattr(actor, "_train_backend", None)
+
     def _safe_to_device(self, component: nn.Module, device: Union[str, torch.device], name: str) -> None:
         if component is None or not hasattr(component, "to"):
             return
@@ -54,6 +58,18 @@ class TrainingActorMemoryService:
 
     def offload(self, actor: Any) -> None:
         """Offload model and optimizer to CPU."""
+        backend = self._backend(actor)
+        if backend is not None:
+            try:
+                if backend.offload(actor):
+                    actor._is_offloaded = True
+                    clear_memory()
+                    logger.info("Rank %s: Offload handled by backend=%s", actor.rank, backend.name)
+                    actor._log_gpu_state("training_offload")
+                    return
+            except Exception as exc:
+                logger.warning("Rank %s: backend offload failed (%s), falling back to default flow", actor.rank, exc)
+
         if getattr(actor, "_fsdp_cpu_offload", False):
             self.move_aux_components(actor, "cpu", include_transformer=False)
             actor._is_offloaded = True
@@ -79,6 +95,17 @@ class TrainingActorMemoryService:
 
     def onload(self, actor: Any) -> None:
         """Load model and optimizer back to GPU."""
+        backend = self._backend(actor)
+        if backend is not None:
+            try:
+                if backend.onload(actor):
+                    actor._is_offloaded = False
+                    logger.info("Rank %s: Onload handled by backend=%s", actor.rank, backend.name)
+                    actor._log_gpu_state("training_onload")
+                    return
+            except Exception as exc:
+                logger.warning("Rank %s: backend onload failed (%s), falling back to default flow", actor.rank, exc)
+
         if getattr(actor, "_fsdp_cpu_offload", False):
             if actor._device is not None:
                 self.move_aux_components(actor, actor._device, include_transformer=False)

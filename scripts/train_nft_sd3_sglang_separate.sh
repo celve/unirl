@@ -37,6 +37,8 @@ if [ $(( TRAINING_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
 fi
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
 NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
+NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"ema_decay":0.001}'}
+NFT_LOSS_KWARGS=${NFT_LOSS_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"nft_timestep_mode":"all","nft_shuffle_timesteps":true,"nft_apply_shift":false,"use_ema":true,"ema_decay":0.001,"decay_type":"warmup","ema_flat_steps":75,"ema_uprate":0.0075,"ema_uphold":0.999}'}
 
 python -m diffusionrl.train \
     --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
@@ -56,20 +58,8 @@ python -m diffusionrl.train \
     --num-inference-steps 10 \
     --guidance-scale 1.0 \
     --sampling-adapter old \
-    \
-    --nft-beta 0.1 \
-    --nft-adv-mode raw \
-    --nft-adv-clip-max 5.0 \
-    --nft-use-adaptive-weight true \
-    --nft-timestep-mode all \
-    --nft-shuffle-timesteps true \
-    --nft-apply-shift false \
-    \
-    --use-ema true \
-    --ema-decay-type warmup \
-    --ema-flat-steps 75 \
-    --ema-uprate 0.0075 \
-    --ema-uphold 0.999 \
+    --algorithm-kwargs-json "${NFT_ALGO_KWARGS}" \
+    --loss-kwargs-json "${NFT_LOSS_KWARGS}" \
     \
     --prompts-per-batch ${PROMPTS_PER_BATCH} \
     --batch-size ${BATCH_SIZE} \
@@ -92,7 +82,6 @@ python -m diffusionrl.train \
     --lora-rank 32 \
     --lora-alpha 64 \
     --use-lora true \
-    --use-fsdp true \
     \
     --height 512 \
     --width 512 \

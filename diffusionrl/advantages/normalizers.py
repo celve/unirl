@@ -3,8 +3,6 @@ Core normalization functions for advantage computation.
 
 This module provides the low-level mathematical operations for normalizing rewards.
 All functions are stateless and operate on pure tensors.
-
-Copied from unified_grpo/advantages/normalizers.py
 """
 
 from collections import defaultdict

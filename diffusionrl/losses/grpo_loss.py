@@ -15,7 +15,6 @@ Formula:
     ratio = exp(new_log_prob - old_log_prob)
     L = -E[min(ratio * A, clip(ratio, 1-eps, 1+eps) * A)]
 
-Based on: unified_grpo, flow_grpo, DanceGRPO, MixGRPO
 """
 
 import math

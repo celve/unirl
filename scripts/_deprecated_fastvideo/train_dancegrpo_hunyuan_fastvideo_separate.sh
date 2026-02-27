@@ -213,7 +213,6 @@ python -m diffusionrl.train \
     --num-inner-epochs ${NUM_INNER_EPOCHS} \
     --max-grad-norm 1.0 \
     --weight-decay 0.0001 \
-    --use-fsdp true \
     --use-gradient-checkpointing true \
     \
     `# ===== Video Resolution =====` \

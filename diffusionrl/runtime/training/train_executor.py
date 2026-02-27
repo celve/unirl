@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 
@@ -39,6 +39,7 @@ class TrainExecutorConfig:
     nft_timestep_mode: str
     nft_shuffle_timesteps: bool
     nft_apply_shift: bool
+    clip_grad_norm_fn: Optional[Callable[..., Any]] = None
 
 
 def resolve_grad_accum(training_config: dict) -> int:
@@ -182,11 +183,28 @@ class TrainExecutor:
 
         return prepared
 
+    def _current_lr(self) -> float:
+        """Best-effort LR lookup compatible with custom optimizer wrappers."""
+        param_groups = getattr(self.optimizer, "param_groups", None)
+        if isinstance(param_groups, list) and param_groups:
+            try:
+                return float(param_groups[0]["lr"])
+            except Exception:
+                pass
+        if self.lr_scheduler is not None and hasattr(self.lr_scheduler, "get_last_lr"):
+            try:
+                last = self.lr_scheduler.get_last_lr()
+                if isinstance(last, list) and last:
+                    return float(last[0])
+            except Exception:
+                pass
+        return 0.0
+
     def skipped_metrics(self, rollout_id: int) -> Dict[str, Any]:
         return {
             "loss": 0.0,
             "grad_norm": 0.0,
-            "lr": self.optimizer.param_groups[0]["lr"],
+            "lr": self._current_lr(),
             "rollout_id": rollout_id,
             "skipped": True,
         }
@@ -225,7 +243,12 @@ class TrainExecutor:
                 )
 
             if has_backward:
-                if self.config.use_fsdp:
+                if callable(self.config.clip_grad_norm_fn):
+                    grad_norm = self.config.clip_grad_norm_fn(
+                        model=self.model,
+                        max_grad_norm=self.config.max_grad_norm,
+                    )
+                elif self.config.use_fsdp:
                     grad_norm = self.model.clip_grad_norm_(self.config.max_grad_norm)
                 else:
                     grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -250,7 +273,7 @@ class TrainExecutor:
             step_metrics = {
                 "loss": total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss,
                 "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                "lr": self.optimizer.param_groups[0]["lr"],
+                "lr": self._current_lr(),
                 "num_timesteps_trained": num_timesteps,
                 "gradient_accumulation_steps": actual_grad_accum,
                 **all_metrics,

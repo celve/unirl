@@ -87,6 +87,15 @@ class ModelBundle(ABC):
         return None
 
     @classmethod
+    def default_replay_sampler_path(cls) -> Optional[str]:
+        """Default sampler path used to replay old log-probs on training actors.
+
+        By default this matches ``default_sampler_path``. Models can override when
+        rollout sampler and replay sampler should differ.
+        """
+        return cls.default_sampler_path()
+
+    @classmethod
     def declared_model_type(cls) -> Optional[str]:
         """Class-level model type declaration used by model discovery."""
         attr = getattr(cls, "model_type", None)

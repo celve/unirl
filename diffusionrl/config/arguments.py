@@ -13,17 +13,25 @@ from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from typing import Any, Dict, List, Optional, get_args, get_origin
 
 from diffusionrl.models import list_model_types, resolve_model_bundle_path
-from diffusionrl.samplers.engine import get_engine_class_path
 from diffusionrl.utils.misc import load_function
 from diffusionrl.config.validation import (
-    get_rollout_gpus_per_actor,
+    DEFAULT_LOSS_TYPE_REQUIREMENTS,
     is_probably_local_weight_sync_dir,
     normalize_repo_relative_paths,
     repo_root,
     resolve_repo_relative_path,
+    validate_algorithm_loss_consistency,
+    validate_algorithm_kwargs_json,
     validate_colocate_fractions,
-    validate_engine_loss_contract,
-    validate_reward_config,
+    validate_dotpath,
+    validate_dynamic_dotpaths,
+    validate_grouped_configs,
+    validate_loss_kwargs_json,
+    validate_model_specific_logic,
+    validate_resolved_engine_loss_contract,
+    validate_reward_and_rollout_buffer_config,
+    validate_rollout_layout,
+    validate_runtime_mode_constraints,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,19 +60,6 @@ _LOCAL_TO_HF_FALLBACK: dict[str, str] = {
 
 DEFAULT_MODEL_PATH = "diffusionrl.models.hunyuan.HunyuanModelBundle"
 DEFAULT_SAMPLER_PATH = "diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler"
-
-DEFAULT_LOSS_TYPE_REQUIREMENTS: Dict[str, Dict[str, bool]] = {
-    "grpo": {
-        "requires_trajectory": True,
-        "requires_log_prob": True,
-        "requires_embeddings": True,
-    },
-    "nft": {
-        "requires_trajectory": False,
-        "requires_log_prob": False,
-        "requires_embeddings": True,
-    },
-}
 
 
 @dataclass
@@ -134,8 +129,6 @@ class SamplingConfig:
         metadata={"help": "Sequence parallelism size for inference"})
     tp_size: int = field(default=1,
         metadata={"help": "Tensor parallelism size for SGLang inference engine"})
-    fastvideo_num_gpus: Optional[int] = field(default=None,
-        metadata={"help": "[Suspended] FastVideo engine GPU count"})
     engine_kwargs: Dict[str, Any] = field(default_factory=dict,
         metadata={"help": "Additional kwargs passed to the rollout engine"})
 
@@ -156,7 +149,7 @@ class SamplingConfig:
 class RewardConfig:
     """Reward path, reward model, and reward pool controls."""
 
-    reward_path: str = field(default="diffusionrl.reward.local.LocalRewardWorker",
+    reward_path: Optional[str] = field(default="diffusionrl.reward.local.LocalRewardWorker",
         metadata={"help": "Python dotpath to RewardWorker class"})
     reward_model_saved_path: Optional[str] = field(default=None,
         metadata={"help": "Path to reward model weights (local path or HuggingFace ID)"})
@@ -188,18 +181,31 @@ class RewardConfig:
         metadata={"help": "GPUs per individual reward actor"})
     reward_service_urls: Optional[List[str]] = field(default=None,
         metadata={"help": "List of HTTP reward service URLs for load balancing"})
-    reward_remote_concurrency: int = field(default=8,
-        metadata={"help": "Max concurrent requests to remote reward service"})
+    local_reward_device: str = field(default="cpu",
+        metadata={"help": "Device for local (non-HTTP, non-dedicated) reward workers: cpu, auto, or cuda"})
+    allow_local_reward_cuda_contention: bool = field(default=False,
+        metadata={"help": "Allow local_reward_device=cuda without dedicated reward GPUs (may contend with rollout/training GPUs)"})
 
     def validate(self) -> None:
         if self.reward_mix_mode not in ("reward_aggr", "advantage_aggr"):
             raise ValueError(
                 f"reward_mix_mode must be one of reward_aggr/advantage_aggr, got: {self.reward_mix_mode}"
             )
-        if not self.reward_path:
+        local_reward_device = str(self.local_reward_device or "cpu").strip().lower()
+        if local_reward_device not in ("cpu", "auto", "cuda"):
             raise ValueError(
-                "reward_path must be set. "
-                "Available: diffusionrl.reward.local.LocalRewardWorker (CPU), "
+                "local_reward_device must be one of cpu/auto/cuda, "
+                f"got: {self.local_reward_device}"
+            )
+        has_http_reward = bool(
+            self.use_http_reward
+            or self.reward_service_url
+            or self.reward_service_urls
+        )
+        if not has_http_reward and not self.reward_path:
+            raise ValueError(
+                "reward_path must be set for local/ray reward workers. "
+                "Available: diffusionrl.reward.local.LocalRewardWorker, "
                 "or provide a custom RewardWorker dotpath."
             )
 
@@ -220,8 +226,6 @@ class RayConfig:
         metadata={"help": "GPUs per node for training actors"})
     colocate_rollout_training: bool = field(default=False,
         metadata={"help": "Run rollout and training on same GPUs (requires offload)"})
-    colocate_reward: bool = field(default=False,
-        metadata={"help": "[Deprecated] Colocate reward with rollout (no longer supported)"})
     placement_strategy: str = field(default="PACK",
         metadata={"help": "Ray placement group strategy: PACK or SPREAD"})
     colocate_training_gpu_fraction: float = field(default=0.4,
@@ -251,44 +255,6 @@ class RayConfig:
                 "Use 'auto' (recommended) to let diffusionrl choose the best mode, "
                 "'checkpoint_path' for SGLang/multi-node, or 'object_ref' for single-node FSDP."
             )
-
-
-@dataclass
-class NFTConfig:
-    """NFT (Noise-Free Training) specific parameters."""
-
-    nft_beta: float = field(default=0.1,
-        metadata={"help": "NFT loss weight (beta). Higher = stronger NFT signal"})
-    nft_adv_clip_max: float = field(default=5.0,
-        metadata={"help": "Max absolute value for NFT advantage clipping"})
-    nft_adv_mode: str = field(default="raw",
-        metadata={"help": "NFT advantage mode: raw, sign, binary, one_only, all, per_timestep"})
-    nft_use_adaptive_weight: bool = field(default=True,
-        metadata={"help": "Use adaptive loss weighting in NFT"})
-    nft_timestep_mode: str = field(default="random",
-        metadata={"help": "NFT timestep sampling: random (sample one) or all (use all timesteps)"})
-    nft_shuffle_timesteps: bool = field(default=True,
-        metadata={"help": "Shuffle timestep order during NFT training"})
-    nft_apply_shift: bool = field(default=False,
-        metadata={"help": "Apply timestep shift schedule to NFT sampling"})
-
-
-@dataclass
-class EMAConfig:
-    """Exponential moving average parameters."""
-
-    use_ema: bool = field(default=False,
-        metadata={"help": "Use EMA (exponential moving average) reference model for NFT"})
-    ema_decay: float = field(default=0.001,
-        metadata={"help": "EMA decay rate (lower = faster update to new weights)"})
-    ema_decay_type: str = field(default="constant",
-        metadata={"help": "EMA decay schedule: constant, linear, warmup"})
-    ema_flat_steps: int = field(default=0,
-        metadata={"help": "Number of initial steps with zero EMA decay (warmup type only)"})
-    ema_uprate: float = field(default=0.001,
-        metadata={"help": "Rate of EMA decay increase during warmup"})
-    ema_uphold: float = field(default=0.5,
-        metadata={"help": "Max EMA decay value during warmup"})
 
 
 @dataclass
@@ -354,8 +320,6 @@ class AlgorithmConfig:
         metadata={"help": "Minimum samples before per-prompt stats are used"})
     use_global_std: bool = field(default=False,
         metadata={"help": "Use global (cross-prompt) std for advantage normalization"})
-    cross_rank_shuffle: bool = field(default=False,
-        metadata={"help": "Shuffle samples across ranks before advantage computation"})
     use_running_stats: bool = field(default=False,
         metadata={"help": "Use running mean/std for advantage normalization"})
     running_stats_warmup: int = field(default=0,
@@ -366,6 +330,8 @@ class AlgorithmConfig:
         metadata={"help": "Loss function type: grpo or nft"})
     loss_path: Optional[str] = field(default=None,
         metadata={"help": "Python dotpath to custom loss class (overrides loss_type)"})
+    algorithm_kwargs_json: str = field(default="",
+        metadata={"help": "JSON string of extra kwargs passed to algorithm.from_args()"})
     loss_kwargs_json: str = field(default="",
         metadata={"help": "JSON string of extra kwargs passed to the loss function"})
     ignore_last: bool = field(default=False,
@@ -373,9 +339,7 @@ class AlgorithmConfig:
     frozen_init_timesteps: int = field(default=0,
         metadata={"help": "Skip first N timesteps in loss computation (frozen warmup)"})
 
-    # Sub-configurations
-    nft: NFTConfig = field(default_factory=NFTConfig)
-    ema: EMAConfig = field(default_factory=EMAConfig)
+    # Sub-configuration
     window: WindowSchedulerConfig = field(default_factory=WindowSchedulerConfig)
 
     def validate(self) -> None:
@@ -390,6 +354,11 @@ class AlgorithmConfig:
             raise ValueError("num_samples_per_prompt must be >= 1.")
         if self.prompts_per_batch < 1:
             raise ValueError("prompts_per_batch must be >= 1.")
+        if str(self.advantage_type).lower() == "group" and self.num_samples_per_prompt < 2:
+            raise ValueError(
+                "advantage_type='group' requires num_samples_per_prompt >= 2. "
+                "With 1 sample per prompt, group normalization is ill-defined and can produce NaN advantages."
+            )
         window_cfg = self.window
         if (
             window_cfg.window_max_iters_per_group is not None
@@ -433,7 +402,7 @@ class TrainingConfig:
 
     # Train backend
     train_backend: str = field(default="fsdp",
-        metadata={"help": "Training backend name (fsdp runnable; megatron/veomni reserved); or custom via train_backend_path"})
+        metadata={"help": "Training backend name (fsdp/veomni built-in; megatron scaffold requires actor_class_path in train_backend_kwargs_json); or custom via train_backend_path"})
     train_backend_path: Optional[str] = field(default=None,
         metadata={"help": "Python dotpath to custom TrainBackend class (overrides built-in backend selection)"})
     train_backend_kwargs_json: str = field(default="",
@@ -450,8 +419,6 @@ class TrainingConfig:
         metadata={"help": "Comma-separated LoRA target modules (e.g. 'to_q,to_k,to_v')"})
 
     # FSDP
-    use_fsdp: bool = field(default=True,
-        metadata={"help": "Enable FSDP (Fully Sharded Data Parallel) for training"})
     fsdp_sharding_strategy: str = field(default="FULL_SHARD",
         metadata={"help": "FSDP sharding: FULL_SHARD, SHARD_GRAD_OP, NO_SHARD, HYBRID_SHARD"})
     fsdp_cpu_offload: bool = field(default=False,
@@ -546,8 +513,6 @@ class RolloutLoggingConfig:
         metadata={"help": "Output directory for checkpoints, logs, and generated samples"})
     save_steps: int = field(default=100,
         metadata={"help": "Save a checkpoint every N training steps"})
-    save_total_limit: Optional[int] = field(default=None,
-        metadata={"help": "Max number of checkpoints to keep (None = keep all)"})
     resume_from_checkpoint: Optional[str] = field(default=None,
         metadata={"help": "Path to checkpoint directory to resume training from"})
 
@@ -556,8 +521,6 @@ class RolloutLoggingConfig:
         metadata={"help": "Run evaluation every N training steps"})
     eval_batch_size: int = field(default=4,
         metadata={"help": "Batch size for evaluation"})
-    num_eval_samples: int = field(default=16,
-        metadata={"help": "Number of samples to generate during evaluation"})
 
     # Logging
     logging_steps: int = field(default=10,
@@ -590,17 +553,16 @@ _GROUP_CONFIG_TYPES = {
 _GROUP_CONFIG_NAMES = set(_GROUP_CONFIG_TYPES.keys())
 
 
-# Names of sub-dataclass fields within group configs (e.g. "nft", "ema", "window")
+# Names of sub-dataclass fields within group configs (currently only "window")
 _SUB_CONFIG_NAMES: set[str] = set()
 
 
-def _build_group_field_to_owner() -> tuple[Dict[str, str], Dict[str, tuple[str, Optional[str]]]]:
-    """Build field-name -> owner mappings, supporting one level of nesting.
+def _build_flat_field_path_index() -> tuple[Dict[str, str], Dict[str, tuple[str, Optional[str]]]]:
+    """Build flat-field owner/path mappings for grouped dataclasses.
 
     Returns:
-        owners: field_name -> group_name (e.g. "nft_beta" -> "algorithm")
+        owners: field_name -> group_name
         nested_path: field_name -> (group_name, sub_field_name or None)
-            e.g. "nft_beta" -> ("algorithm", "nft")
             e.g. "clip_range" -> ("algorithm", None)
     """
     owners: Dict[str, str] = {}
@@ -631,71 +593,7 @@ def _build_group_field_to_owner() -> tuple[Dict[str, str], Dict[str, tuple[str, 
     return owners, nested_path
 
 
-_GROUP_FIELD_TO_OWNER, _NESTED_FIELD_PATH = _build_group_field_to_owner()
-
-
-def _resolve_model_runtime_defaults(model_cls: Any) -> Dict[str, Optional[str]]:
-    """Read model-declared runtime defaults from model class."""
-    defaults: Dict[str, Optional[str]] = {"sampler_path": None, "sampler_engine_type": None}
-    sampler_path_fn = getattr(model_cls, "default_sampler_path", None)
-    if callable(sampler_path_fn):
-        defaults["sampler_path"] = sampler_path_fn()
-
-    engine_type_fn = getattr(model_cls, "default_sampler_engine", None)
-    if callable(engine_type_fn):
-        defaults["sampler_engine_type"] = engine_type_fn()
-
-    return defaults
-
-
-def _validate_dotpath(path: str, *, label: str) -> None:
-    """Fail fast when a configured dotpath is not importable."""
-    try:
-        load_function(path)
-    except Exception as exc:
-        raise ValueError(
-            f"Invalid {label} path: {path!r}. Import failed: {exc}. "
-            f"Check that the module is installed and the dotpath is correct "
-            f"(e.g. 'diffusionrl.algorithms.grpo.GRPOAlgorithm')."
-        ) from exc
-
-
-def _resolve_loss_type_requirements(args: Any) -> Dict[str, Dict[str, bool]]:
-    """Resolve loss requirements with classmethod declaration taking precedence."""
-    requirements = dict(DEFAULT_LOSS_TYPE_REQUIREMENTS)
-    loss_type = str(getattr(args, "loss_type", "grpo"))
-    loss_cls = None
-
-    try:
-        from diffusionrl.losses import LOSS_REGISTRY
-
-        loss_cls = LOSS_REGISTRY.get(loss_type)
-    except Exception:
-        loss_cls = None
-
-    if loss_cls is None and getattr(args, "loss_path", None):
-        loss_cls = load_function(args.loss_path)
-
-    declared = getattr(loss_cls, "declared_requirements", None) if loss_cls is not None else None
-    if callable(declared):
-        requirements[loss_type] = dict(declared())
-    elif loss_cls is not None:
-        # Fallback for custom loss classes that do not declare requirements.
-        # Use conservative GRPO-like contract to avoid under-validating engines.
-        requirements[loss_type] = dict(DEFAULT_LOSS_TYPE_REQUIREMENTS["grpo"])
-    return requirements
-
-
-def _resolve_engine_capabilities(*, engine_type: str) -> Dict[str, bool]:
-    """Resolve engine capabilities from engine class declaration."""
-    engine_path = get_engine_class_path(engine_type)
-    engine_cls = load_function(engine_path)
-    declared = getattr(engine_cls, "declared_capabilities", None)
-    if not callable(declared):
-        raise ValueError(
-            f"Engine class {engine_path} must define classmethod declared_capabilities()."
-        )
-    return dict(declared())
+_, _FLAT_FIELD_PATH_INDEX = _build_flat_field_path_index()
 
 
 def is_training_actor_direct_sampling_mode(args: Any) -> bool:
@@ -722,11 +620,6 @@ class TrainingArguments:
     # ========== Data Configuration ==========
     data_path: Optional[str] = field(default="data/samples/prompts_toy.json",
         metadata={"help": "Path to training prompt data file (JSON, JSONL, or TXT)"})
-    prompt_column: str = field(default="prompt",
-        metadata={"help": "Column name for prompt text in JSON/JSONL data files"})
-    max_prompt_length: int = field(default=256,
-        metadata={"help": "Maximum prompt length in tokens"})
-
     # ========== Video/Image Configuration ==========
     height: int = field(default=256,
         metadata={"help": "Generated image/video height in pixels"})
@@ -744,11 +637,9 @@ class TrainingArguments:
     # ========== Misc ==========
     debug: bool = field(default=False,
         metadata={"help": "Enable debug mode (extra logging and assertions)"})
-    profile: bool = field(default=False,
-        metadata={"help": "Enable profiling (PyTorch profiler)"})
 
     def __getattr__(self, name: str) -> Any:
-        path = _NESTED_FIELD_PATH.get(name)
+        path = _FLAT_FIELD_PATH_INDEX.get(name)
         if path is not None:
             group_name, sub_name = path
             group = object.__getattribute__(self, group_name)
@@ -758,7 +649,7 @@ class TrainingArguments:
         raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
 
     def __setattr__(self, name: str, value: Any) -> None:
-        path = _NESTED_FIELD_PATH.get(name)
+        path = _FLAT_FIELD_PATH_INDEX.get(name)
         if path is not None and name not in _GROUP_CONFIG_NAMES and name not in _SUB_CONFIG_NAMES:
             group_name, sub_name = path
             if group_name in self.__dict__:
@@ -791,7 +682,7 @@ class TrainingArguments:
         return flat
 
 
-def _field_default_value(field_info: Any) -> Any:
+def _resolve_field_default(field_info: Any) -> Any:
     if field_info.default is not MISSING:
         return field_info.default
     if field_info.default_factory is not MISSING:
@@ -799,7 +690,7 @@ def _field_default_value(field_info: Any) -> Any:
     return None
 
 
-def _normalize_parser_type(field_type: Any) -> Any:
+def _resolve_cli_field_type(field_type: Any) -> Any:
     origin = get_origin(field_type)
     if origin is None:
         return field_type
@@ -809,7 +700,7 @@ def _normalize_parser_type(field_type: Any) -> Any:
     return field_type
 
 
-def _parse_bool(value: Any) -> bool:
+def _parse_cli_bool(value: Any) -> bool:
     """Parse boolean CLI values with strict validation."""
     if isinstance(value, bool):
         return value
@@ -823,7 +714,7 @@ def _parse_bool(value: Any) -> bool:
     )
 
 
-def _parse_json_object(value: Any) -> Dict[str, Any]:
+def _parse_cli_json_object(value: Any) -> Dict[str, Any]:
     """Parse a CLI value into a JSON object."""
     if isinstance(value, dict):
         return value
@@ -843,21 +734,16 @@ def _parse_json_object(value: Any) -> Dict[str, Any]:
     return parsed
 
 
-def _is_dict_type(field_type: Any) -> bool:
-    origin = get_origin(field_type)
-    return field_type is dict or origin is dict
-
-
-def _get_field_help(field_info) -> str:
+def _resolve_field_help_text(field_info) -> str:
     """Extract help text from field metadata, with fallback to auto-generated."""
     help_text = (field_info.metadata or {}).get("help")
     if help_text:
         return help_text
-    default = _field_default_value(field_info)
+    default = _resolve_field_default(field_info)
     return f"{field_info.name} (default: {default})"
 
 
-def _iter_field_specs_from_dataclass(
+def _collect_field_specs_from_dataclass(
     config_type, group_key: str, seen_names: set, specs: list,
 ) -> None:
     """Recursively collect (name, type, default, help, group_key) from a dataclass."""
@@ -871,7 +757,7 @@ def _iter_field_specs_from_dataclass(
         if resolved_type is not None:
             # Recurse into sub-dataclass fields with dotted group key
             sub_key = f"{group_key}.{field_info.name}"
-            _iter_field_specs_from_dataclass(resolved_type, sub_key, seen_names, specs)
+            _collect_field_specs_from_dataclass(resolved_type, sub_key, seen_names, specs)
         else:
             if field_info.name in seen_names:
                 raise ValueError(
@@ -881,22 +767,22 @@ def _iter_field_specs_from_dataclass(
             specs.append(
                 (
                     field_info.name,
-                    _normalize_parser_type(field_info.type),
-                    _field_default_value(field_info),
-                    _get_field_help(field_info),
+                    _resolve_cli_field_type(field_info.type),
+                    _resolve_field_default(field_info),
+                    _resolve_field_help_text(field_info),
                     group_key,
                 )
             )
             seen_names.add(field_info.name)
 
 
-def _iter_parser_field_specs() -> List[tuple[str, Any, Any, str, str]]:
+def _collect_cli_field_specs() -> List[tuple[str, Any, Any, str, str]]:
     """Return (name, type, default, help, group_key) for every CLI-exposed field.
 
     group_key is used for argparse grouping:
       - "" for TrainingArguments top-level
       - "model", "sampling", etc. for group configs
-      - "algorithm.nft", "algorithm.ema", etc. for nested sub-configs
+      - "algorithm.window" for nested sub-configs
     """
     specs: List[tuple[str, Any, Any, str, str]] = []
     seen_names: set[str] = set()
@@ -907,16 +793,16 @@ def _iter_parser_field_specs() -> List[tuple[str, Any, Any, str, str]]:
         specs.append(
             (
                 field_info.name,
-                _normalize_parser_type(field_info.type),
-                _field_default_value(field_info),
-                _get_field_help(field_info),
+                _resolve_cli_field_type(field_info.type),
+                _resolve_field_default(field_info),
+                _resolve_field_help_text(field_info),
                 "",  # top-level
             )
         )
         seen_names.add(field_info.name)
 
     for group_name, config_type in _GROUP_CONFIG_TYPES.items():
-        _iter_field_specs_from_dataclass(config_type, group_name, seen_names, specs)
+        _collect_field_specs_from_dataclass(config_type, group_name, seen_names, specs)
 
     return specs
 
@@ -929,15 +815,13 @@ _GROUP_DISPLAY_NAMES: Dict[str, str] = {
     "reward": "Reward Configuration",
     "ray": "Ray & Resource Layout",
     "algorithm": "Algorithm & Advantage",
-    "algorithm.nft": "NFT (Noise-Free Training)",
-    "algorithm.ema": "EMA (Exponential Moving Average)",
     "algorithm.window": "Window/Timestep Scheduler",
     "training": "Training & Optimization",
     "rollout": "Rollout, Checkpointing & Logging",
 }
 
 
-def _load_yaml_config(path: str) -> Dict[str, Any]:
+def _load_yaml_mapping(path: str) -> Dict[str, Any]:
     """Load a YAML config file and return a flat dict of key-value pairs."""
     try:
         import yaml
@@ -954,7 +838,7 @@ def _load_yaml_config(path: str) -> Dict[str, Any]:
     return data
 
 
-def _apply_yaml_overrides(
+def _merge_yaml_overrides(
     raw_args: Dict[str, Any],
     yaml_data: Dict[str, Any],
     defaults: Dict[str, Any],
@@ -977,7 +861,7 @@ def _apply_yaml_overrides(
             raw_args[cli_key] = value
 
 
-def _collect_explicit_cli_keys(argv: List[str], parser: argparse.ArgumentParser) -> set[str]:
+def _collect_explicit_cli_destinations(argv: List[str], parser: argparse.ArgumentParser) -> set[str]:
     """Collect parser destination names explicitly provided via CLI options."""
     explicit: set[str] = set()
     option_to_action = getattr(parser, "_option_string_actions", {})
@@ -1010,7 +894,7 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
 
     # Build argument groups for organized --help output
     _arg_groups: Dict[str, argparse._ArgumentGroup] = {}
-    for field_name, field_type, default, help_text, group_key in _iter_parser_field_specs():
+    for field_name, field_type, default, help_text, group_key in _collect_cli_field_specs():
         # Get or create the argument group
         if group_key not in _arg_groups:
             display_name = _GROUP_DISPLAY_NAMES.get(group_key, group_key)
@@ -1023,7 +907,7 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
         if field_type == bool:
             group.add_argument(
                 arg_name,
-                type=_parse_bool,
+                type=_parse_cli_bool,
                 default=default,
                 help=help_text,
             )
@@ -1031,8 +915,8 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
             group.add_argument(arg_name, type=int, default=default, help=help_text)
         elif field_type == float:
             group.add_argument(arg_name, type=float, default=default, help=help_text)
-        elif _is_dict_type(field_type):
-            group.add_argument(arg_name, type=_parse_json_object, default=default, help=help_text)
+        elif field_type is dict or get_origin(field_type) is dict:
+            group.add_argument(arg_name, type=_parse_cli_json_object, default=default, help=help_text)
         else:
             group.add_argument(arg_name, type=str, default=default, help=help_text)
 
@@ -1044,9 +928,9 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
     # YAML config merging: CLI values take precedence over YAML
     if raw_args.get("config"):
         defaults = {a.dest: a.default for a in parser._actions if a.dest != "help"}
-        yaml_data = _load_yaml_config(raw_args["config"])
-        explicit_cli_keys = _collect_explicit_cli_keys(cli_argv, parser)
-        _apply_yaml_overrides(raw_args, yaml_data, defaults, explicit_cli_keys)
+        yaml_data = _load_yaml_mapping(raw_args["config"])
+        explicit_cli_keys = _collect_explicit_cli_destinations(cli_argv, parser)
+        _merge_yaml_overrides(raw_args, yaml_data, defaults, explicit_cli_keys)
 
     # Remove --config from raw_args (not a TrainingArguments field)
     raw_args.pop("config", None)
@@ -1056,7 +940,7 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
     sub_kwargs: Dict[str, Dict[str, Dict[str, Any]]] = {}
     top_level_kwargs: Dict[str, Any] = {}
     for key, value in raw_args.items():
-        path = _NESTED_FIELD_PATH.get(key)
+        path = _FLAT_FIELD_PATH_INDEX.get(key)
         if path is not None:
             group_name, sub_name = path
             if sub_name is not None:
@@ -1083,17 +967,6 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
 
     return args
 
-
-def _validate_grouped_configs(args: TrainingArguments) -> None:
-    args.model.validate()
-    args.sampling.validate()
-    args.reward.validate()
-    args.ray.validate()
-    args.algorithm.validate()
-    args.training.validate()
-    args.rollout.validate()
-
-
 def _resolve_model_runtime_contract(
     args: TrainingArguments,
     *,
@@ -1116,7 +989,7 @@ def _resolve_model_runtime_contract(
             args.model_path,
         )
 
-    _validate_dotpath(args.model_path, label="model")
+    validate_dotpath(args.model_path, label="model")
     model_cls = load_function(args.model_path)
 
     declared_model_type_fn = getattr(model_cls, "declared_model_type", None)
@@ -1133,9 +1006,19 @@ def _resolve_model_runtime_contract(
                 )
             args.model_type = normalized_declared
 
-    model_defaults = _resolve_model_runtime_defaults(model_cls)
+    model_defaults: Dict[str, Optional[str]] = {"sampler_path": None, "sampler_engine_type": None}
+    sampler_path_fn = getattr(model_cls, "default_sampler_path", None)
+    if callable(sampler_path_fn):
+        model_defaults["sampler_path"] = sampler_path_fn()
+    engine_type_fn = getattr(model_cls, "default_sampler_engine", None)
+    if callable(engine_type_fn):
+        model_defaults["sampler_engine_type"] = engine_type_fn()
 
-    if args.sampler_path == DEFAULT_SAMPLER_PATH and not explicit_sampler_path:
+    if (
+        args.sampler_path == DEFAULT_SAMPLER_PATH
+        and not explicit_sampler_path
+        and not explicit_sampler_engine_type
+    ):
         model_sampler_path = model_defaults.get("sampler_path")
         if model_sampler_path:
             args.sampler_path = model_sampler_path
@@ -1186,25 +1069,6 @@ def _normalize_sampling_basics(args: TrainingArguments) -> tuple[bool, bool, str
     return direct_sampling, is_sglang_engine, sglang_logprob_mode
 
 
-def _validate_dynamic_dotpaths(args: TrainingArguments) -> None:
-    """Validate configured runtime extension dotpaths."""
-    _validate_dotpath(args.sampler_path, label="sampler")
-    _validate_dotpath(args.algorithm_path, label="algorithm")
-    _validate_dotpath(args.data_source_path, label="data_source")
-    if getattr(args, "train_backend_path", None):
-        _validate_dotpath(args.train_backend_path, label="train_backend")
-    if getattr(args, "replay_sampler_path", None):
-        _validate_dotpath(args.replay_sampler_path, label="replay_sampler")
-    if getattr(args, "rollout_pipeline_path", None):
-        _validate_dotpath(args.rollout_pipeline_path, label="rollout_pipeline")
-    if getattr(args, "loss_path", None):
-        _validate_dotpath(args.loss_path, label="loss")
-    rollout_buffer_plugin_paths = getattr(args, "rollout_buffer_plugin_paths", "") or ""
-    if isinstance(rollout_buffer_plugin_paths, str):
-        for plugin_path in [part.strip() for part in rollout_buffer_plugin_paths.split(",") if part.strip()]:
-            _validate_dotpath(plugin_path, label="rollout_buffer_plugin")
-
-
 def _apply_training_actor_direct_sampling_overrides(
     args: TrainingArguments,
     *,
@@ -1223,10 +1087,15 @@ def _apply_training_actor_direct_sampling_overrides(
             "training_actor_direct_sampling=true requires sampler_engine_type='fsdp'. "
             f"Got sampler_engine_type={args.sampler_engine_type}."
         )
-    if str(getattr(args, "train_backend", "fsdp")).lower() != "fsdp":
+    backend_name = str(getattr(args, "train_backend", "fsdp") or "fsdp").strip().lower()
+    backend_path = str(getattr(args, "train_backend_path", "") or "").strip().lower()
+    veomni_like_backend = backend_name == "veomni" or ("veomni" in backend_path)
+    if backend_name != "fsdp" and not veomni_like_backend:
         raise ValueError(
-            "training_actor_direct_sampling=true currently requires train_backend='fsdp'. "
-            f"Got train_backend={getattr(args, 'train_backend', None)!r}."
+            "training_actor_direct_sampling=true currently supports train_backend='fsdp' "
+            "or VeOmni-native backends. "
+            f"Got train_backend={getattr(args, 'train_backend', None)!r}, "
+            f"train_backend_path={getattr(args, 'train_backend_path', None)!r}."
         )
 
     if args.rollout_num_nodes != 0 or args.rollout_num_gpus_per_node != 0:
@@ -1344,86 +1213,6 @@ def _apply_colocate_and_offload_rules(
         args.offload_rollout = False
 
 
-def _validate_reward_and_rollout_buffer_config(args: TrainingArguments) -> None:
-    """Validate reward pool config and rollout-buffer controls."""
-    validate_reward_config(args)
-
-    if int(getattr(args, "rollout_buffer_max_queue_size", 0)) < 0:
-        raise ValueError(
-            f"rollout_buffer_max_queue_size must be >= 0, got: {args.rollout_buffer_max_queue_size}"
-        )
-    if int(getattr(args, "rollout_buffer_min_samples", 1)) < 1:
-        raise ValueError(
-            f"rollout_buffer_min_samples must be >= 1, got: {args.rollout_buffer_min_samples}"
-        )
-    reward_min = getattr(args, "rollout_buffer_reward_min", None)
-    reward_max = getattr(args, "rollout_buffer_reward_max", None)
-    if reward_min is not None and reward_max is not None and float(reward_min) > float(reward_max):
-        raise ValueError(
-            "rollout_buffer_reward_min must be <= rollout_buffer_reward_max, "
-            f"got min={reward_min}, max={reward_max}"
-        )
-    group_size = getattr(args, "rollout_buffer_group_size", None)
-    if group_size is not None and int(group_size) < 1:
-        raise ValueError(
-            f"rollout_buffer_group_size must be >= 1 when provided, got: {group_size}"
-        )
-    if int(getattr(args, "rollout_buffer_dispatch_groups", 0)) < 0:
-        raise ValueError(
-            "rollout_buffer_dispatch_groups must be >= 0 "
-            f"(0 means prompts_per_batch), got: {args.rollout_buffer_dispatch_groups}"
-        )
-    if float(getattr(args, "rollout_buffer_group_ttl_seconds", 0.0)) < 0:
-        raise ValueError(
-            "rollout_buffer_group_ttl_seconds must be >= 0, "
-            f"got: {args.rollout_buffer_group_ttl_seconds}"
-        )
-    if int(getattr(args, "rollout_buffer_max_pending_samples", 0)) < 0:
-        raise ValueError(
-            "rollout_buffer_max_pending_samples must be >= 0, "
-            f"got: {args.rollout_buffer_max_pending_samples}"
-        )
-
-
-def _validate_rollout_layout(
-    args: TrainingArguments,
-    *,
-    training_actor_direct_sampling: bool,
-) -> None:
-    """Validate rollout actor GPU layout and colocate constraints."""
-    if training_actor_direct_sampling:
-        return
-
-    rollout_gpus = get_rollout_gpus_per_actor(args)
-    is_sglang_engine = str(getattr(args, "sampler_engine_type", "")).lower() == "sglang"
-    if rollout_gpus > 1 and args.colocate_rollout_training and not is_sglang_engine:
-        raise ValueError(
-            "colocate_rollout_training=True with multi-GPU rollout actors is only supported "
-            "for sampler_engine_type='sglang'."
-        )
-    if (
-        rollout_gpus > 1
-        and args.colocate_rollout_training
-        and is_sglang_engine
-        and not bool(getattr(args, "allow_noset_multi_gpu_inference", False))
-    ):
-        logger.warning(
-            "sglang colocate with multi-GPU rollout requires NOSET actor layout. "
-            "Auto-enabling allow_noset_multi_gpu_inference=true."
-        )
-        args.allow_noset_multi_gpu_inference = True
-    if rollout_gpus > 1 and not bool(getattr(args, "allow_noset_multi_gpu_inference", False)):
-        raise ValueError(
-            "multi-GPU rollout actor layout requires --allow-noset-multi-gpu-inference=true. "
-            "Default layout keeps integer single-GPU actors."
-        )
-    if rollout_gpus > 1 and bool(getattr(args, "allow_noset_multi_gpu_inference", False)):
-        logger.warning(
-            "allow_noset_multi_gpu_inference=true enabled. "
-            "This is an experimental actor layout and is not part of the default path."
-        )
-
-
 def _normalize_training_misc(args: TrainingArguments) -> None:
     """Normalize misc training knobs that affect downstream components."""
     if args.advantage_type == "per_prompt":
@@ -1450,69 +1239,6 @@ def _normalize_training_misc(args: TrainingArguments) -> None:
         raise ValueError(f"num_inner_epochs must be >= 1, got: {args.num_inner_epochs}")
 
 
-def _validate_model_specific_logic(args: TrainingArguments, *, model_cls: Any) -> None:
-    """Run model-specific runtime validation and loss defaults."""
-    if args.model_type != "flux" and args.sde_type.startswith("flux_"):
-        raise ValueError(
-            f"sde_type '{args.sde_type}' is only valid for model_type='flux'"
-        )
-
-    model_validate_fn = getattr(model_cls, "validate_config", None)
-    if callable(model_validate_fn):
-        model_validate_fn(args)
-
-    if args.loss_type == "nft" and not args.sampling_adapter:
-        args.sampling_adapter = "old"
-        logger.info("NFT: default sampling_adapter set to 'old'")
-
-    if args.loss_type == "nft" and args.sde_type == "sde":
-        args.sde_type = "dpm2"
-        logger.info("NFT: default sde_type set to 'dpm2' for deterministic sampling")
-
-
-def _validate_algorithm_loss_consistency(args: TrainingArguments) -> None:
-    if getattr(args, "loss_path", None):
-        logger.info("Custom loss_path is set; skipping built-in algorithm/loss consistency mapping.")
-        return
-
-    mapping = {
-        "diffusionrl.algorithms.grpo.GRPOAlgorithm": "grpo",
-        "diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm": "grpo",
-        "diffusionrl.algorithms.nft.NFTAlgorithm": "nft",
-    }
-    expected_loss_type = mapping.get(args.algorithm_path)
-    if expected_loss_type and args.loss_type != expected_loss_type:
-        raise ValueError(
-            f"algorithm_path={args.algorithm_path} requires loss_type={expected_loss_type}, "
-            f"but got loss_type={args.loss_type}. "
-            f"Please either change --loss-type to {expected_loss_type} or use a compatible algorithm."
-        )
-
-
-def _validate_loss_kwargs_json(args: TrainingArguments) -> None:
-    raw = getattr(args, "loss_kwargs_json", "")
-    if raw is None:
-        args.loss_kwargs_json = ""
-        return
-    if not isinstance(raw, str):
-        raise ValueError(f"loss_kwargs_json must be a JSON object string, got: {type(raw).__name__}")
-
-    text = raw.strip()
-    if not text:
-        args.loss_kwargs_json = ""
-        return
-
-    try:
-        parsed = json.loads(text)
-    except Exception as exc:
-        raise ValueError(f"Invalid loss_kwargs_json: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("loss_kwargs_json must decode to a JSON object.")
-
-    # Keep canonical JSON text so downstream builders can parse deterministically.
-    args.loss_kwargs_json = json.dumps(parsed)
-
-
 def _normalize_train_backend_config(args: TrainingArguments) -> None:
     """Normalize train-backend selection and backend kwargs JSON payload."""
     backend = str(getattr(args, "train_backend", "fsdp") or "fsdp").strip().lower()
@@ -1525,10 +1251,11 @@ def _normalize_train_backend_config(args: TrainingArguments) -> None:
             f"Unsupported train_backend={backend!r}. "
             f"Expected one of {sorted(supported)} or provide --train-backend-path."
         )
-    if backend in {"megatron", "veomni"} and not backend_path:
+    if backend in {"megatron"} and not backend_path:
         logger.warning(
-            "train_backend=%s is currently interface-reserved and not runtime-implemented; "
-            "current runnable built-in backend is 'fsdp'.",
+            "train_backend=%s is currently a scaffold backend: launch/topology interfaces are wired, "
+            "but runtime training flow is not fully implemented yet. "
+            "Use train_backend_kwargs_json.actor_class_path to provide a Megatron-dedicated actor.",
             backend,
         )
 
@@ -1543,6 +1270,12 @@ def _normalize_train_backend_config(args: TrainingArguments) -> None:
         text = raw.strip()
         if not text:
             args.train_backend_kwargs_json = ""
+            if backend == "megatron" and not backend_path:
+                logger.warning(
+                    "train_backend=%s without actor_class_path will fail at runtime. "
+                    "Set train_backend_kwargs_json with actor_class_path.",
+                    backend,
+                )
         else:
             try:
                 parsed = json.loads(text)
@@ -1550,44 +1283,39 @@ def _normalize_train_backend_config(args: TrainingArguments) -> None:
                 raise ValueError(f"Invalid train_backend_kwargs_json: {exc}") from exc
             if not isinstance(parsed, dict):
                 raise ValueError("train_backend_kwargs_json must decode to a JSON object.")
+            if backend == "veomni":
+                mode = str(parsed.get("data_parallel_mode", "fsdp2") or "fsdp2").strip().lower()
+                if mode == "ddp":
+                    raise ValueError(
+                        "train_backend=veomni in diffusionRL does not support data_parallel_mode='ddp'. "
+                        "Use data_parallel_mode='fsdp2'."
+                    )
+                if mode != "fsdp2":
+                    raise ValueError(
+                        "train_backend=veomni in diffusionRL now targets FSDP2 only. "
+                        "Set data_parallel_mode='fsdp2' or omit this field."
+                    )
+            if backend == "megatron" and not backend_path and not str(parsed.get("actor_class_path", "")).strip():
+                logger.warning(
+                    "train_backend=%s requires actor_class_path in train_backend_kwargs_json "
+                    "to launch a Megatron-specific training actor.",
+                    backend,
+                )
             args.train_backend_kwargs_json = json.dumps(parsed)
-
-    if backend != "fsdp" and bool(getattr(args, "use_fsdp", True)):
-        logger.warning(
-            "train_backend=%s selected: forcing use_fsdp=false (legacy FSDP-only flag).",
-            backend,
-        )
-        args.use_fsdp = False
-
-
-def _validate_engine_loss_contract(
-    args: TrainingArguments,
-    *,
-    training_actor_direct_sampling: bool,
-    is_sglang_engine: bool,
-    replay_guard: bool,
-    sglang_logprob_mode: str,
-) -> None:
-    effective_loss_requirements = _resolve_loss_type_requirements(args)
-    effective_engine_caps = _resolve_engine_capabilities(engine_type=args.sampler_engine_type)
-    if is_sglang_engine and replay_guard and sglang_logprob_mode == "native":
-        effective_engine_caps = dict(
-            effective_engine_caps,
-            requires_log_prob=True,
-            requires_embeddings=True,
-        )
-    validate_engine_loss_contract(
-        args=args,
-        training_actor_direct_sampling=training_actor_direct_sampling,
-        engine_capabilities=effective_engine_caps,
-        loss_type_requirements=effective_loss_requirements,
-    )
-
 
 def _normalize_weight_sync(args: TrainingArguments, *, training_actor_direct_sampling: bool) -> None:
     weight_sync_mode = getattr(args, "weight_sync_mode", "auto")
+    train_backend = str(getattr(args, "train_backend", "fsdp") or "fsdp").strip().lower()
+    backend_path = str(getattr(args, "train_backend_path", "") or "").strip().lower()
+    veomni_like_backend = train_backend == "veomni" or ("veomni" in backend_path)
     if weight_sync_mode == "auto":
-        if args.sampler_engine_type in ("fsdp", "sglang") and not training_actor_direct_sampling:
+        if (
+            not training_actor_direct_sampling
+            and (
+                args.sampler_engine_type in ("fsdp", "sglang")
+                or veomni_like_backend
+            )
+        ):
             args.weight_sync_mode = "checkpoint_path"
         else:
             args.weight_sync_mode = "object_ref"
@@ -1634,40 +1362,6 @@ def _normalize_weight_sync(args: TrainingArguments, *, training_actor_direct_sam
             "Use a shared mount (e.g. /mnt/shared/... or NFS path)."
         )
 
-
-def _validate_runtime_mode_constraints(
-    args: TrainingArguments,
-    *,
-    training_actor_direct_sampling: bool,
-) -> None:
-    if (
-        not training_actor_direct_sampling
-        and str(getattr(args, "sampler_engine_type", "")).lower() == "sglang"
-    ):
-        supported_sglang_prompt_models = {"hunyuan", "flux", "mochi", "sd3"}
-        model_type = str(getattr(args, "model_type", "")).lower()
-        if model_type not in supported_sglang_prompt_models:
-            raise ValueError(
-                "sampler_engine_type='sglang' now uses prompt-only rollout input mode "
-                "(no prompt-embedding input path). "
-                f"Unsupported model_type={args.model_type!r}. "
-                f"Supported model types: {sorted(supported_sglang_prompt_models)}."
-            )
-
-    if getattr(args, "async_pipeline", False):
-        if args.colocate_rollout_training:
-            raise ValueError("async_pipeline requires separate mode (colocate_rollout_training=False).")
-        if training_actor_direct_sampling:
-            raise ValueError("async_pipeline currently requires training_actor_direct_sampling=false.")
-        if int(getattr(args, "async_max_inflight", 1)) < 1:
-            raise ValueError("async_max_inflight must be >= 1.")
-        if args.update_weights_interval <= 0:
-            raise ValueError("update_weights_interval must be > 0.")
-        if args.offload_train or args.offload_rollout:
-            logger.warning("async_pipeline: disabling offload_train/offload_rollout for stable overlap.")
-            args.offload_train = False
-            args.offload_rollout = False
-
 def validate_args(args: TrainingArguments) -> TrainingArguments:
     """
     Validate and normalize arguments for colocate/offload logic.
@@ -1681,7 +1375,7 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
     explicit_sampler_path = args.sampler_path != DEFAULT_SAMPLER_PATH
     explicit_sampler_engine_type = getattr(args, "sampler_engine_type", None) is not None
 
-    _validate_grouped_configs(args)
+    validate_grouped_configs(args)
 
     normalize_repo_relative_paths(
         args,
@@ -1697,9 +1391,10 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
         explicit_sampler_engine_type=explicit_sampler_engine_type,
     )
     training_actor_direct_sampling, is_sglang_engine, sglang_logprob_mode = _normalize_sampling_basics(args)
-    _validate_loss_kwargs_json(args)
+    validate_algorithm_kwargs_json(args)
+    validate_loss_kwargs_json(args)
     _normalize_train_backend_config(args)
-    _validate_dynamic_dotpaths(args)
+    validate_dynamic_dotpaths(args)
     _apply_training_actor_direct_sampling_overrides(
         args,
         training_actor_direct_sampling=training_actor_direct_sampling,
@@ -1725,15 +1420,15 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
             f"Consider using --fsdp-sharding-strategy HYBRID_SHARD for better performance."
         )
 
-    _validate_reward_and_rollout_buffer_config(args)
-    _validate_rollout_layout(
+    validate_reward_and_rollout_buffer_config(args)
+    validate_rollout_layout(
         args,
         training_actor_direct_sampling=training_actor_direct_sampling,
     )
     _normalize_training_misc(args)
-    _validate_model_specific_logic(args, model_cls=model_cls)
-    _validate_algorithm_loss_consistency(args)
-    _validate_engine_loss_contract(
+    validate_model_specific_logic(args, model_cls=model_cls)
+    validate_algorithm_loss_consistency(args)
+    validate_resolved_engine_loss_contract(
         args,
         training_actor_direct_sampling=training_actor_direct_sampling,
         is_sglang_engine=is_sglang_engine,
@@ -1747,7 +1442,7 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
         args,
         training_actor_direct_sampling=training_actor_direct_sampling,
     )
-    _validate_runtime_mode_constraints(
+    validate_runtime_mode_constraints(
         args,
         training_actor_direct_sampling=training_actor_direct_sampling,
     )

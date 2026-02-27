@@ -20,7 +20,7 @@ class GRPOAlgorithm(BaseAlgorithm):
     - PPO-style clipped objective
     - Optional KL penalty
 
-    Reference: DanceGRPO, unified_grpo
+    Reference: DanceGRPO
     """
 
     def __init__(
@@ -121,7 +121,9 @@ class GRPOAlgorithm(BaseAlgorithm):
     @classmethod
     def from_args(cls, args: Any) -> "GRPOAlgorithm":
         """Construct GRPO algorithm from runtime args."""
-        return cls(**cls._grpo_kwargs_from_args(args))
+        kwargs = cls._grpo_kwargs_from_args(args)
+        kwargs.update(cls._algorithm_kwargs_from_args(args))
+        return cls(**kwargs)
 
     def get_sampling_requirements(self) -> SamplingRequirements:
         """Return GRPO sampling requirements."""
@@ -162,12 +164,8 @@ class GRPOAlgorithm(BaseAlgorithm):
                 )
             # Use per-prompt tracker if available and prompts provided
             if self.per_prompt_tracker is not None and prompts is not None:
-                # Expand prompts to match rewards (each prompt repeated num_samples_per_prompt times)
                 if len(prompts) * num_samples_per_prompt == len(rewards):
-                    expanded_prompts = []
-                    for p in prompts:
-                        expanded_prompts.extend([p] * num_samples_per_prompt)
-                    prompts = expanded_prompts
+                    prompts = [p for p in prompts for _ in range(num_samples_per_prompt)]
                 return self.per_prompt_tracker.compute_advantages(
                     prompts, rewards, update_stats=True
                 )
@@ -216,10 +214,7 @@ class GRPOAlgorithm(BaseAlgorithm):
 
         # Expand prompts to per-sample list if needed
         if len(prompts) * num_samples_per_prompt == len(rewards):
-            expanded_prompts = []
-            for p in prompts:
-                expanded_prompts.extend([p] * num_samples_per_prompt)
-            prompts = expanded_prompts
+            prompts = [p for p in prompts for _ in range(num_samples_per_prompt)]
         elif len(prompts) != len(rewards):
             return self._normalize_group(rewards, num_samples_per_prompt)
 

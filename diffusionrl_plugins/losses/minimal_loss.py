@@ -40,19 +40,6 @@ class MinimalBackwardLoss:
         loss = timestep_data.latents.float().sum() * 0.0
         return loss, {"loss_scale": self.scale}
 
-    def compute(
-        self,
-        model: nn.Module,
-        samples: Dict[str, Any],
-        timestep_idx: int,
-        advantages: torch.Tensor,
-        **kwargs: Any,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        # Legacy dict-compatible fallback.
-        trajectories = samples["trajectories"] if "trajectories" in samples else samples["latents"]
-        loss = trajectories[:, timestep_idx].float().sum() * 0.0
-        return loss, {"loss_scale": self.scale}
-
 
 class MinimalForwardLoss:
     """Template for clean-latent forward losses (NFT-like)."""
@@ -79,16 +66,3 @@ class MinimalForwardLoss:
         # Replace with your real objective.
         loss = batch.clean_latents.float().sum() * 0.0
         return loss, {"loss_scale": self.scale}
-
-    def compute(
-        self,
-        model: nn.Module,
-        samples: Dict[str, Any],
-        timestep_idx: int,
-        advantages: torch.Tensor,
-        **kwargs: Any,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        # Legacy dict-compatible fallback.
-        loss = samples["clean_latents"].float().sum() * 0.0
-        return loss, {"loss_scale": self.scale}
-

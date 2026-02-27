@@ -1,30 +1,29 @@
-"""
-Loss functions for GRPO training.
+"""Loss functions for diffusionrl training."""
 
-Provides:
-- GRPOLoss: Standard GRPO with PPO-style clipping
-- NFTLoss: Forward process loss (DiffusionNFT)
-- LOSS_REGISTRY: Registry for dynamic loss selection
-- get_loss(): Factory function for creating loss instances
-"""
-
-from typing import Any, Dict, Optional, Type, Union
+from typing import Any, Dict, Optional
 
 from .grpo_loss import GRPOLoss
-from .nft_loss import NFTLoss
+
+try:
+    from .nft_loss import NFTLoss
+except ImportError as _nft_import_exc:
+    NFTLoss = None  # type: ignore[assignment]
+else:
+    _nft_import_exc = None
 
 # Loss registry for parameter-driven selection
 LOSS_REGISTRY: Dict[str, type] = {
     "grpo": GRPOLoss,
-    "nft": NFTLoss,
 }
+if NFTLoss is not None:
+    LOSS_REGISTRY["nft"] = NFTLoss
 
 
 def get_loss(
     loss_type: str,
     loss_path: Optional[str] = None,
     **kwargs: Any,
-) -> Union[GRPOLoss, NFTLoss]:
+) -> Any:
     """
     Factory function for creating loss instances.
 
@@ -56,6 +55,12 @@ def get_loss(
     # Parameter-driven selection
     if loss_type in LOSS_REGISTRY:
         return LOSS_REGISTRY[loss_type](**kwargs)
+
+    if loss_type == "nft" and NFTLoss is None:
+        raise ImportError(
+            "NFTLoss is unavailable because optional dependencies failed to import. "
+            f"Original error: {_nft_import_exc}"
+        )
 
     raise ValueError(
         f"Unknown loss_type: {loss_type}. "

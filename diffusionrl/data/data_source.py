@@ -4,17 +4,13 @@ Data source implementations for GRPO training.
 Provides a unified interface for loading both:
 - Pre-computed embeddings (for image models)
 - Plain text prompts (for all models)
-
-Reference:
-- unified_grpo/data/data_source.py
 """
 
 import json
 import logging
 import os
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional
 
-import torch
 from torch.utils.data import DataLoader
 
 from .datasets import (
@@ -22,7 +18,6 @@ from .datasets import (
     create_rl_dataset,
     collate_embeddings,
 )
-from .k_repeat_sampler import KRepeatSampler
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +46,6 @@ class ImageRLDataSource:
                 - model_path: Model bundle class dotpath for embedding dataset builder
                 - batch_size: Batch size
                 - seed: Random seed
-                - num_samples_per_prompt: K-repeat factor (optional)
         """
         self.args = args
         self.data_path = getattr(args, 'data_path', None)
@@ -59,7 +53,6 @@ class ImageRLDataSource:
         self.model_path = getattr(args, "model_path", "")
         self.batch_size = getattr(args, 'batch_size', 4)
         self.seed = getattr(args, 'seed', 42)
-        self.k_repeat = getattr(args, 'num_samples_per_prompt', 1)
         self.prompts_per_batch = getattr(args, 'prompts_per_batch', 1)
 
         # Detect data format and create dataset
@@ -114,7 +107,7 @@ class ImageRLDataSource:
         return False
 
     def _create_dataloader(self) -> None:
-        """Create dataloader with optional k-repeat sampling."""
+        """Create dataloader for prompt-batch sampling."""
         if self.dataset is None:
             return
 

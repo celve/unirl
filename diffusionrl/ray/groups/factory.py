@@ -8,6 +8,7 @@ from diffusionrl.config.build_domain_args import (
     build_rollout_engine_config,
     build_training_actor_init_config,
 )
+from diffusionrl.runtime.training import create_train_backend
 
 from .rollout import RolloutActorGroup
 from .training import TrainingActorGroup
@@ -224,12 +225,42 @@ def create_training_actor_group(
     """
     pg, bundle_indices, gpu_ids = pg_result
 
-    num_actors = args.training_num_nodes * args.training_num_gpus_per_node
+    default_num_actors = args.training_num_nodes * args.training_num_gpus_per_node
+
+    config = build_training_actor_init_config(args=args, dp_size=default_num_actors)
+    backend = create_train_backend(
+        config["train_backend"],
+        backend_path=config.get("train_backend_path"),
+        backend_kwargs=config.get("train_backend_kwargs"),
+    )
+    launch_spec = backend.launch_spec(args=args, default_num_actors=default_num_actors)
+    caps = backend.capabilities
+    if bool(caps.requires_custom_actor_class) and not launch_spec.actor_class_path:
+        raise ValueError(
+            f"train_backend={backend.name!r} requires a backend-specific actor class. "
+            "Provide train_backend_kwargs_json with `actor_class_path`, "
+            "or override via --train-backend-path to a backend that does not require a custom actor."
+        )
+
+    num_actors = int(launch_spec.num_actors) if launch_spec.num_actors else int(default_num_actors)
+    if num_actors != default_num_actors:
+        logger.info(
+            "Training backend=%s overrides num_actors: %s -> %s",
+            backend.name,
+            default_num_actors,
+            num_actors,
+        )
+        config = build_training_actor_init_config(args=args, dp_size=num_actors)
+    else:
+        logger.info("Training backend=%s launch spec: %s", backend.name, launch_spec.as_dict())
 
     # In colocate mode, use fractional GPU allocation to allow sharing
     # Both rollout and training actors will claim fractional GPU each
     colocate = getattr(args, "colocate_rollout_training", False)
-    num_gpus_per_actor = float(getattr(args, "colocate_training_gpu_fraction", 0.4)) if colocate else 1.0
+    if launch_spec.num_gpus_per_actor is not None:
+        num_gpus_per_actor = float(launch_spec.num_gpus_per_actor)
+    else:
+        num_gpus_per_actor = float(getattr(args, "colocate_training_gpu_fraction", 0.4)) if colocate else 1.0
 
     if colocate:
         logger.info(
@@ -241,9 +272,11 @@ def create_training_actor_group(
         pg=pg,
         bundle_indices=bundle_indices,
         num_gpus_per_actor=num_gpus_per_actor,
+        actor_class_path=launch_spec.actor_class_path,
+        actor_init_kwargs=dict(launch_spec.actor_kwargs or {}),
+        runtime_env=dict(launch_spec.runtime_env or {}) or None,
     )
 
-    config = build_training_actor_init_config(args=args, dp_size=num_actors)
     group.init(config)
 
     return group
