@@ -484,15 +484,26 @@ class NFTLoss:
         return total_loss, loss_terms
 
     def _get_forward_plugin(self, model: nn.Module):
-        """Get or create forward plugin for current NFT model type."""
-        if self._forward_plugin is None:
-            from diffusionrl.models.forward_plugins import detect_model_type, get_forward_plugin
+        """Get the forward plugin for this model.
 
-            if self.model_type == "default":
-                detected_type = detect_model_type(model)
-                self._forward_plugin = get_forward_plugin(detected_type)
-            else:
-                self._forward_plugin = get_forward_plugin(self.model_type)
+        The plugin should be set by the training actor from model_bundle.forward_plugin().
+        Falls back to DefaultForwardPlugin if not set.
+        """
+        if self._forward_plugin is None:
+            if self.model_type != "default":
+                raise RuntimeError(
+                    "No forward_plugin set on NFTLoss for model_type="
+                    f"{self.model_type!r}. TrainingActor must inject plugin via "
+                    "model_bundle.forward_plugin()."
+                )
+            from diffusionrl.models.forward_plugins import DefaultForwardPlugin
+            self._forward_plugin = DefaultForwardPlugin()
+            logger.warning(
+                "No forward_plugin set on NFTLoss (model_type=%s). "
+                "Using DefaultForwardPlugin. Set loss._forward_plugin from "
+                "model_bundle.forward_plugin() for model-specific behavior.",
+                self.model_type,
+            )
         return self._forward_plugin
 
     def compute_batch(

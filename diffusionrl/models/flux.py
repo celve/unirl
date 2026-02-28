@@ -108,18 +108,34 @@ class FluxModelBundle(ModelBundle):
         return "fsdp"
 
     @classmethod
+    def forward_plugin(cls):
+        from diffusionrl.models.forward_plugins import FluxForwardPlugin
+        return FluxForwardPlugin()
+
+    @classmethod
+    def supports_sglang_prompt_mode(cls) -> bool:
+        return True
+
+    @classmethod
     def validate_config(cls, args: Any) -> None:
         sde_type = str(getattr(args, "sde_type", "") or "")
+        valid_sde_types = ("flux_dance", "flux_flow", "")
+        if sde_type in valid_sde_types:
+            return
         if sde_type in ("dance", "sde"):
-            args.sde_type = "flux_dance"
-            return
+            raise ValueError(
+                f"model_type='flux' requires flux-specific sde_type. "
+                f"Got sde_type='{sde_type}'. Use --sde-type flux_dance instead."
+            )
         if sde_type == "flow":
-            args.sde_type = "flux_flow"
-            return
-        if sde_type in ("flux_dance", "flux_flow", ""):
-            return
-        if sde_type.startswith("flux_"):
-            raise ValueError(f"Unknown FLUX sde_type: {sde_type}")
+            raise ValueError(
+                f"model_type='flux' requires flux-specific sde_type. "
+                f"Got sde_type='flow'. Use --sde-type flux_flow instead."
+            )
+        raise ValueError(
+            f"Unknown sde_type='{sde_type}' for model_type='flux'. "
+            f"Valid options: {', '.join(t for t in valid_sde_types if t)}."
+        )
 
     @classmethod
     def embedding_dataset_kwargs(cls) -> Dict[str, Any]:

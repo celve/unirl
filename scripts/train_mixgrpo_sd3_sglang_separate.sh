@@ -35,6 +35,7 @@ LORA_RANK=${LORA_RANK:-32}
 LORA_ALPHA=${LORA_ALPHA:-64}
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
+REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
 
 if [ "${NUM_SAMPLES_PER_PROMPT}" -lt 2 ]; then
     echo "ERROR: MixGRPO uses group advantages; set NUM_SAMPLES_PER_PROMPT >= 2 to avoid NaN."
@@ -52,6 +53,7 @@ python -m diffusionrl.train \
     --model-type sd3 \
     --sampler-engine-type sglang \
     --sglang-logprob-mode "${SGLANG_LOGPROB_MODE}" \
+    --replay-log-probs "${REPLAY_LOG_PROBS}" \
     --tp-size ${TP_SIZE} \
     --algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
     --reward-path diffusionrl.reward.local.LocalRewardWorker \

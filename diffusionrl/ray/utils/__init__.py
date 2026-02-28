@@ -26,9 +26,6 @@ from diffusionrl.ray.utils.distributed import (
     check_actor_health,
     wait_for_actors_ready,
 )
-from diffusionrl.ray.utils.memory import TrainingActorMemoryService
-from diffusionrl.ray.utils.state_io import TrainingActorStateIOService
-
 __all__ = [
     # distributed
     "NOSET_VISIBLE_DEVICES_ENV_VARS_LIST",
@@ -57,6 +54,4 @@ __all__ = [
     # actor helpers/services
     "ActorSamplingExecutor",
     "TrainingActorSamplingService",
-    "TrainingActorMemoryService",
-    "TrainingActorStateIOService",
 ]

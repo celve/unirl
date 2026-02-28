@@ -502,35 +502,6 @@ class MinSamplesGuardPlugin(BufferPlugin):
         }
 
 
-class CallableBufferPluginAdapter(BufferPlugin):
-    """Adapter for user-supplied plugin callables loaded from dotpath."""
-
-    def __init__(self, fn: Any, *, name: Optional[str] = None) -> None:
-        super().__init__(name=name or getattr(fn, "__name__", None))
-        self.fn = fn
-
-    def process(self, batch: TrainingBatch, *, context: BufferPluginContext) -> TrainingBatch:
-        try:
-            sig = inspect.signature(self.fn)
-        except (TypeError, ValueError):
-            sig = None
-
-        if sig is not None:
-            params = list(sig.parameters.keys())
-            if len(params) >= 2:
-                out = self.fn(batch, context)
-            else:
-                out = self.fn(batch)
-        else:
-            out = self.fn(batch)
-
-        if not isinstance(out, (BackwardTrainingBatch, ForwardTrainingBatch)):
-            raise TypeError(
-                f"Custom buffer plugin {self.name} must return TrainingBatch, got {type(out).__name__}"
-            )
-        return out
-
-
 def _parse_plugin_paths(raw: Any) -> List[str]:
     if raw is None:
         return []
@@ -586,16 +557,16 @@ def build_buffer_plugins(args: Any) -> List[BufferPlugin]:
 
         if isinstance(plugin_obj, BufferPlugin):
             plugins.append(plugin_obj)
-            continue
-
-        if callable(plugin_obj):
-            plugins.append(CallableBufferPluginAdapter(plugin_obj, name=path))
-            continue
-
-        raise TypeError(
-            f"Invalid rollout buffer plugin {path}: expected BufferPlugin instance/class or callable, "
-            f"got {type(plugin_obj).__name__}"
-        )
+        elif callable(plugin_obj):
+            raise TypeError(
+                f"Rollout buffer plugin {path} is a plain callable. "
+                "Wrap it in a BufferPlugin subclass with process() and stats() methods."
+            )
+        else:
+            raise TypeError(
+                f"Invalid rollout buffer plugin {path}: expected BufferPlugin instance/class, "
+                f"got {type(plugin_obj).__name__}"
+            )
 
     return plugins
 
@@ -663,30 +634,6 @@ class RolloutBufferActor:
             "has_rollout_manager": self._rollout_manager is not None,
             "has_training_group": self._training_group is not None,
         }
-
-    def request_rollout(
-        self,
-        *,
-        rollout_id: int,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Trigger rollout generation via RolloutManager and enqueue into buffer."""
-        if self._rollout_manager is None:
-            raise RuntimeError(
-                "RolloutBufferActor.request_rollout() requires bind_runtime(rollout_manager=...)."
-            )
-
-        train_data = ray.get(self._rollout_manager.build_training_batch.remote(int(rollout_id)))
-        push_result = self.push(
-            rollout_id=int(rollout_id),
-            train_data=train_data,
-            metadata=metadata,
-        )
-        if not push_result.get("accepted", False):
-            raise RuntimeError(
-                f"Rollout buffer rejected rollout_id={rollout_id}: {push_result.get('error')}"
-            )
-        return push_result
 
     def _new_item_id(self) -> str:
         self._counter += 1

@@ -281,6 +281,15 @@ class SD3ModelBundle(ModelBundle):
     def default_sampler_engine(cls) -> Optional[str]:
         return "fsdp"
 
+    @classmethod
+    def forward_plugin(cls):
+        from diffusionrl.models.forward_plugins import SD3ForwardPlugin
+        return SD3ForwardPlugin()
+
+    @classmethod
+    def supports_sglang_prompt_mode(cls) -> bool:
+        return True
+
     @property
     def transformer(self) -> nn.Module:
         """Get the transformer (DiT) model."""

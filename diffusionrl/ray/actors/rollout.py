@@ -1,11 +1,12 @@
 """diffusionrl Rollout actor implementation (generation side)."""
+import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import ray
 import torch
 
-from diffusionrl.types.sampling import RolloutRequest, RolloutOutput
+from diffusionrl.types.sampling import PromptEmbeddings, RolloutRequest, RolloutOutput
 from diffusionrl.samplers.engine import (
     BaseRolloutEngine,
     EngineConfig,
@@ -93,6 +94,11 @@ class RolloutActor:
         self.engine: Optional[BaseRolloutEngine] = None
         self._device = None
         self._warned_ignored_prompt_embedding_input = False
+        self._transport_dtype: Optional[torch.dtype] = None
+        self._transport_drop_decoded_videos: bool = False
+        self._transport_log_payload_bytes: bool = False
+        self._scheduler_endpoint: Optional[str] = None
+        self._weight_update_target: str = f"actor_rank:{self.rank}"
 
     def _log_resource_ids(self, tag: str) -> None:
         log_resource_ids(tag, self.rank)
@@ -171,6 +177,350 @@ class RolloutActor:
             return
         self.engine.wake_up()
 
+    @staticmethod
+    def _parse_transport_dtype(value: Any) -> Optional[torch.dtype]:
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        if text in {"", "none", "off", "disable", "disabled", "fp32", "float32"}:
+            return None
+        if text in {"fp16", "float16", "half"}:
+            return torch.float16
+        if text in {"bf16", "bfloat16"}:
+            return torch.bfloat16
+        raise ValueError(
+            f"Unsupported rollout transport dtype: {value!r}. "
+            "Expected one of: fp32, fp16, bf16."
+        )
+
+    @staticmethod
+    def _to_bool(value: Any, *, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on", "y"}:
+            return True
+        if text in {"0", "false", "no", "off", "n"}:
+            return False
+        return default
+
+    @staticmethod
+    def _normalize_scheduler_host(value: Any) -> str:
+        host = str(value or "").strip()
+        if not host:
+            return "127.0.0.1"
+        if host.startswith("tcp://"):
+            host = host[len("tcp://") :]
+        elif host.startswith("http://"):
+            host = host[len("http://") :]
+        elif host.startswith("https://"):
+            host = host[len("https://") :]
+        host = host.split("/", 1)[0].strip()
+        if host == "localhost":
+            return "127.0.0.1"
+        return host
+
+    @staticmethod
+    def _format_scheduler_endpoint(host: str, port: int) -> str:
+        host_text = str(host).strip()
+        if ":" in host_text and not host_text.startswith("["):
+            host_text = f"[{host_text}]"
+        return f"tcp://{host_text}:{int(port)}"
+
+    @classmethod
+    def _parse_scheduler_endpoint(
+        cls,
+        value: Any,
+    ) -> Optional[Tuple[str, int]]:
+        if value is None:
+            return None
+
+        if isinstance(value, dict):
+            endpoint_value = (
+                value.get("scheduler_endpoint")
+                or value.get("endpoint")
+                or value.get("scheduler")
+            )
+            if endpoint_value is not None:
+                return cls._parse_scheduler_endpoint(endpoint_value)
+
+            host = value.get("host", value.get("scheduler_host"))
+            port = value.get("scheduler_port", value.get("port"))
+            if host is None or port is None:
+                return None
+            return cls._normalize_scheduler_host(host), int(port)
+
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.startswith("tcp://"):
+            text = text[len("tcp://") :]
+        elif text.startswith("http://"):
+            text = text[len("http://") :]
+        elif text.startswith("https://"):
+            text = text[len("https://") :]
+        text = text.split("/", 1)[0].strip()
+
+        if text.startswith("["):
+            end = text.find("]")
+            if end <= 0 or end + 1 >= len(text) or text[end + 1] != ":":
+                raise ValueError(
+                    f"Invalid scheduler endpoint {value!r}; expected tcp://[host]:port."
+                )
+            host = text[1:end]
+            port_text = text[end + 2 :]
+        else:
+            if ":" not in text:
+                raise ValueError(
+                    f"Invalid scheduler endpoint {value!r}; expected host:port."
+                )
+            host, port_text = text.rsplit(":", 1)
+
+        return cls._normalize_scheduler_host(host), int(port_text)
+
+    @classmethod
+    def _parse_scheduler_endpoint_pool(
+        cls,
+        value: Any,
+    ) -> List[Tuple[str, int]]:
+        if value is None:
+            return []
+
+        raw_items: Any = value
+        if isinstance(raw_items, str):
+            text = raw_items.strip()
+            if not text:
+                return []
+            if text.startswith("["):
+                raw_items = json.loads(text)
+            else:
+                raw_items = [part.strip() for part in text.split(",") if part.strip()]
+
+        if isinstance(raw_items, dict):
+            raw_items = [raw_items]
+        if not isinstance(raw_items, (list, tuple)):
+            raise TypeError(
+                "Scheduler endpoint pool must be list/tuple/string/dict, "
+                f"got: {type(raw_items).__name__}"
+            )
+
+        parsed: List[Tuple[str, int]] = []
+        for item in raw_items:
+            endpoint = cls._parse_scheduler_endpoint(item)
+            if endpoint is None:
+                continue
+            parsed.append(endpoint)
+        return parsed
+
+    def _extract_scheduler_endpoint_from_engine_kwargs(
+        self,
+        engine_kwargs: Dict[str, Any],
+    ) -> Optional[str]:
+        server_kwargs = engine_kwargs.get("server_kwargs")
+        if not isinstance(server_kwargs, dict):
+            return None
+        host = server_kwargs.get("host")
+        port = server_kwargs.get("scheduler_port")
+        if host is None or port is None:
+            return None
+        try:
+            host_text = self._normalize_scheduler_host(host)
+            return self._format_scheduler_endpoint(host_text, int(port))
+        except Exception:
+            return None
+
+    def _record_weight_update_target(
+        self,
+        *,
+        sampler_engine_type: str,
+        engine_kwargs: Dict[str, Any],
+    ) -> None:
+        if str(sampler_engine_type).lower() != "sglang":
+            self._scheduler_endpoint = None
+            self._weight_update_target = f"actor_rank:{self.rank}"
+            return
+
+        endpoint = self._extract_scheduler_endpoint_from_engine_kwargs(engine_kwargs)
+        if self.engine is not None:
+            server_args = getattr(self.engine, "_server_args", None)
+            resolved = getattr(server_args, "scheduler_endpoint", None)
+            if isinstance(resolved, str) and resolved.strip():
+                endpoint = resolved.strip()
+
+        self._scheduler_endpoint = endpoint
+        if endpoint:
+            self._weight_update_target = f"sglang_scheduler:{endpoint}"
+        else:
+            self._weight_update_target = f"sglang_rank:{self.rank}"
+
+        logger.info(
+            "Rank %s: resolved rollout weight-update target=%s",
+            self.rank,
+            self._weight_update_target,
+        )
+
+    def _configure_transport_options(self, engine_kwargs: Dict[str, Any]) -> None:
+        raw_dtype = engine_kwargs.get(
+            "rollout_transport_dtype",
+            engine_kwargs.get("transport_dtype"),
+        )
+        self._transport_dtype = self._parse_transport_dtype(raw_dtype)
+        self._transport_drop_decoded_videos = self._to_bool(
+            engine_kwargs.get(
+                "rollout_transport_drop_decoded_videos",
+                engine_kwargs.get("transport_drop_decoded_videos"),
+            ),
+            default=False,
+        )
+        self._transport_log_payload_bytes = self._to_bool(
+            engine_kwargs.get(
+                "rollout_transport_log_payload_bytes",
+                engine_kwargs.get("transport_log_payload_bytes"),
+            ),
+            default=False,
+        )
+        if (
+            self._transport_dtype is not None
+            or self._transport_drop_decoded_videos
+            or self._transport_log_payload_bytes
+        ):
+            logger.info(
+                "Rank %s: rollout transport optimization enabled "
+                "(dtype=%s, drop_decoded_videos=%s, log_payload_bytes=%s)",
+                self.rank,
+                self._transport_dtype,
+                self._transport_drop_decoded_videos,
+                self._transport_log_payload_bytes,
+            )
+
+    @staticmethod
+    def _estimate_tree_tensor_bytes(value: Any) -> int:
+        if torch.is_tensor(value):
+            return int(value.numel() * value.element_size())
+        if isinstance(value, dict):
+            return sum(RolloutActor._estimate_tree_tensor_bytes(v) for v in value.values())
+        if isinstance(value, (list, tuple)):
+            return sum(RolloutActor._estimate_tree_tensor_bytes(v) for v in value)
+        return 0
+
+    def _estimate_rollout_output_bytes(self, output: RolloutOutput) -> int:
+        total = 0
+        for tensor in (output.latents, output.timesteps, output.trajectories, output.step_indices):
+            if torch.is_tensor(tensor):
+                total += int(tensor.numel() * tensor.element_size())
+        if output.log_probs is not None:
+            for value in output.log_probs.data.values():
+                if torch.is_tensor(value):
+                    total += int(value.numel() * value.element_size())
+        if output.embeddings is not None:
+            for value in output.embeddings.to_dict().values():
+                if torch.is_tensor(value):
+                    total += int(value.numel() * value.element_size())
+        total += self._estimate_tree_tensor_bytes(output.metadata)
+        return total
+
+    def _maybe_cast_tensor_for_transport(self, value: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if value is None:
+            return None
+        target_dtype = self._transport_dtype
+        if target_dtype is None:
+            return value
+        if not torch.is_tensor(value):
+            return value
+        if value.is_floating_point() and value.dtype != target_dtype:
+            return value.to(dtype=target_dtype)
+        return value
+
+    def _cast_metadata_tensors_for_transport(self, value: Any) -> Any:
+        if torch.is_tensor(value):
+            return self._maybe_cast_tensor_for_transport(value)
+        if isinstance(value, dict):
+            return {k: self._cast_metadata_tensors_for_transport(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._cast_metadata_tensors_for_transport(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(self._cast_metadata_tensors_for_transport(v) for v in value)
+        return value
+
+    def _optimize_output_for_transport(self, output: RolloutOutput) -> RolloutOutput:
+        if (
+            self._transport_dtype is None
+            and not self._transport_drop_decoded_videos
+            and not self._transport_log_payload_bytes
+        ):
+            return output
+
+        bytes_before = self._estimate_rollout_output_bytes(output) if self._transport_log_payload_bytes else 0
+
+        metadata = dict(output.metadata or {})
+        if self._transport_drop_decoded_videos and isinstance(metadata.get("decoded_videos"), torch.Tensor):
+            decoded = metadata.pop("decoded_videos")
+            metadata["decoded_videos_dropped"] = True
+            metadata["decoded_videos_shape"] = tuple(int(v) for v in decoded.shape)
+            metadata["decoded_videos_dtype"] = str(decoded.dtype)
+
+        log_probs = output.log_probs
+        if log_probs is not None and self._transport_dtype is not None:
+            log_probs = type(log_probs).from_dict(
+                {
+                    int(step): self._maybe_cast_tensor_for_transport(value)
+                    for step, value in log_probs.data.items()
+                }
+            )
+
+        embeddings = output.embeddings
+        if embeddings is not None and self._transport_dtype is not None:
+            embeddings = PromptEmbeddings(
+                prompt_embeds=self._maybe_cast_tensor_for_transport(embeddings.prompt_embeds),
+                pooled_prompt_embeds=self._maybe_cast_tensor_for_transport(
+                    embeddings.pooled_prompt_embeds
+                ),
+                encoder_attention_mask=self._maybe_cast_tensor_for_transport(
+                    embeddings.encoder_attention_mask
+                ),
+                negative_prompt_embeds=self._maybe_cast_tensor_for_transport(
+                    embeddings.negative_prompt_embeds
+                ),
+                negative_pooled_prompt_embeds=self._maybe_cast_tensor_for_transport(
+                    embeddings.negative_pooled_prompt_embeds
+                ),
+                text_ids=embeddings.text_ids,
+                image_ids=embeddings.image_ids,
+            )
+
+        if self._transport_dtype is not None:
+            metadata = self._cast_metadata_tensors_for_transport(metadata)
+
+        optimized = RolloutOutput(
+            latents=self._maybe_cast_tensor_for_transport(output.latents),
+            timesteps=output.timesteps,
+            trajectories=self._maybe_cast_tensor_for_transport(output.trajectories),
+            log_probs=log_probs,
+            embeddings=embeddings,
+            decoded_images=output.decoded_images,
+            metadata=metadata,
+            step_indices=output.step_indices,
+        )
+
+        if self._transport_log_payload_bytes:
+            bytes_after = self._estimate_rollout_output_bytes(optimized)
+            delta = bytes_before - bytes_after
+            ratio = (float(bytes_after) / float(bytes_before)) if bytes_before > 0 else 1.0
+            logger.info(
+                "Rank %s: rollout transport bytes before=%d after=%d saved=%d ratio=%.4f",
+                self.rank,
+                bytes_before,
+                bytes_after,
+                delta,
+                ratio,
+            )
+
+        return optimized
+
     def _configure_sglang_ports(self, engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """
         Ensure each SGLang rollout actor gets a distinct port tuple.
@@ -190,12 +540,15 @@ class RolloutActor:
         )
 
         # Respect explicit top-level overrides if provided.
-        for key in ("port", "scheduler_port", "master_port"):
+        for key in ("host", "port", "scheduler_port", "master_port"):
             raw_value = resolved.get(key)
             if raw_value is None:
                 continue
             try:
-                server_kwargs.setdefault(key, int(raw_value))
+                if key == "host":
+                    server_kwargs.setdefault(key, str(raw_value))
+                else:
+                    server_kwargs.setdefault(key, int(raw_value))
             except (TypeError, ValueError):
                 logger.warning(
                     "Rank %s: invalid sglang %s=%r, ignoring explicit value.",
@@ -203,6 +556,61 @@ class RolloutActor:
                     key,
                     raw_value,
                 )
+
+        local_mode = self._to_bool(resolved.get("local_mode", True), default=True)
+
+        raw_endpoint_pool = resolved.get(
+            "remote_scheduler_endpoints",
+            resolved.get(
+                "scheduler_endpoints",
+                resolved.get("sglang_scheduler_endpoints"),
+            ),
+        )
+        endpoint_pool = self._parse_scheduler_endpoint_pool(raw_endpoint_pool)
+        if endpoint_pool and local_mode:
+            logger.warning(
+                "Rank %s: remote scheduler endpoints were provided while local_mode=True; "
+                "forcing local_mode=False.",
+                self.rank,
+            )
+            local_mode = False
+            resolved["local_mode"] = False
+
+        if not local_mode:
+            selected_endpoint: Optional[Tuple[str, int]] = None
+            if endpoint_pool:
+                selected_endpoint = endpoint_pool[int(self.rank) % len(endpoint_pool)]
+            else:
+                for key in (
+                    "remote_scheduler_endpoint",
+                    "scheduler_endpoint",
+                    "sglang_scheduler_endpoint",
+                ):
+                    if resolved.get(key) is None:
+                        continue
+                    selected_endpoint = self._parse_scheduler_endpoint(resolved.get(key))
+                    break
+                if selected_endpoint is None:
+                    selected_endpoint = self._parse_scheduler_endpoint(server_kwargs)
+
+            if selected_endpoint is None:
+                raise ValueError(
+                    "SGLang remote scheduler mode (local_mode=false) requires explicit "
+                    "scheduler host/port. Provide one of: "
+                    "remote_scheduler_endpoints / scheduler_endpoints / "
+                    "remote_scheduler_endpoint / server_kwargs{host,scheduler_port}."
+                )
+
+            host, scheduler_port = selected_endpoint
+            server_kwargs["host"] = str(host)
+            server_kwargs["scheduler_port"] = int(scheduler_port)
+            resolved["server_kwargs"] = server_kwargs
+            logger.info(
+                "Rank %s: SGLang remote scheduler configured as %s",
+                self.rank,
+                self._format_scheduler_endpoint(host, scheduler_port),
+            )
+            return resolved
 
         # Fill missing port fields deterministically from actor rank.
         try:
@@ -293,6 +701,7 @@ class RolloutActor:
 
         # Build EngineConfig
         engine_kwargs = dict(engine_config.get("engine_kwargs", {}))
+        self._configure_transport_options(engine_kwargs)
 
         # Add sampler_path to engine_kwargs
         engine_kwargs["sampler_path"] = sampler_path
@@ -332,6 +741,10 @@ class RolloutActor:
 
         # Initialize engine
         self.engine.initialize(self._device)
+        self._record_weight_update_target(
+            sampler_engine_type=str(sampler_engine_type),
+            engine_kwargs=engine_kwargs,
+        )
 
         logger.info(f"Rank {self.rank}: Rollout actor initialized with {sampler_engine_type} engine")
         self._log_resource_ids("rollout_init")
@@ -463,6 +876,8 @@ class RolloutActor:
                 except Exception as e:
                     logger.warning(f"Failed to decode latents: {e}")
 
+        output = self._optimize_output_for_transport(output)
+
         # Move tensors to CPU for Ray serialization (RolloutManager has no GPU)
         output = output.to_device("cpu")
         self._log_gpu_state("inference_generate_end")
@@ -494,6 +909,36 @@ class RolloutActor:
             )
             outputs.append(output)
         return outputs
+
+    def encode_prompt(
+        self,
+        prompts: List[str],
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        """Encode prompts via engine-side prompt encoder for rollout fallback wiring."""
+        if self.engine is None:
+            raise RuntimeError("Engine not initialized. Call init() first.")
+        if not isinstance(prompts, list) or len(prompts) == 0:
+            raise ValueError("encode_prompt requires non-empty prompts list.")
+
+        fn = getattr(self.engine, "encode_prompt", None)
+        if not callable(fn):
+            raise NotImplementedError(
+                f"Engine {type(self.engine).__name__} does not support encode_prompt()."
+            )
+
+        self._ensure_engine_ready_for_generate()
+        encoded = fn(list(prompts), **kwargs)
+        if not isinstance(encoded, dict):
+            raise TypeError(
+                f"Engine encode_prompt() must return dict, got {type(encoded).__name__}."
+            )
+
+        result: Dict[str, torch.Tensor] = {}
+        for key, value in encoded.items():
+            if torch.is_tensor(value):
+                result[str(key)] = value.detach().cpu()
+        return result
 
     def update_weights(self, state_dict_or_ref) -> None:
         """
@@ -554,6 +999,109 @@ class RolloutActor:
                 )
         return {"rank": int(self.rank), "checksum": checksum}
 
+    def update_weights_from_tensor(
+        self,
+        *,
+        serialized_named_tensors: List[str],
+        target_modules: Optional[List[str]] = None,
+        load_format: Optional[str] = None,
+        flush_cache: bool = True,
+    ) -> None:
+        """Update weights using serialized tensor payload."""
+        if self.engine is None:
+            logger.warning("No engine to update weights")
+            return
+        fn = getattr(self.engine, "update_weights_from_tensor", None)
+        if not callable(fn):
+            raise NotImplementedError(
+                f"Engine {type(self.engine).__name__} does not support update_weights_from_tensor."
+            )
+        self._prepare_engine_for_weight_update()
+        fn(
+            serialized_named_tensors=serialized_named_tensors,
+            target_modules=target_modules,
+            load_format=load_format,
+            flush_cache=flush_cache,
+        )
+
+    def init_weights_update_group(
+        self,
+        *,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str,
+        backend: str = "nccl",
+    ) -> None:
+        """Initialize custom distributed weight-update group in engine workers."""
+        if self.engine is None:
+            logger.warning("No engine to initialize weight update group")
+            return
+        fn = getattr(self.engine, "init_weights_update_group", None)
+        if not callable(fn):
+            raise NotImplementedError(
+                f"Engine {type(self.engine).__name__} does not support init_weights_update_group."
+            )
+        self._prepare_engine_for_weight_update()
+        fn(
+            master_address=master_address,
+            master_port=master_port,
+            rank_offset=rank_offset,
+            world_size=world_size,
+            group_name=group_name,
+            backend=backend,
+        )
+
+    def destroy_weights_update_group(
+        self,
+        *,
+        group_name: str,
+    ) -> None:
+        """Destroy custom distributed weight-update group in engine workers."""
+        if self.engine is None:
+            logger.warning("No engine to destroy weight update group")
+            return
+        fn = getattr(self.engine, "destroy_weights_update_group", None)
+        if not callable(fn):
+            raise NotImplementedError(
+                f"Engine {type(self.engine).__name__} does not support destroy_weights_update_group."
+            )
+        fn(group_name=group_name)
+
+    def update_weights_from_distributed(
+        self,
+        *,
+        names: List[str],
+        dtypes: List[str],
+        shapes: List[List[int]],
+        group_name: str,
+        target_modules: Optional[List[str]] = None,
+        flush_cache: bool = True,
+    ) -> None:
+        """Receive weights from custom distributed broadcast group."""
+        if self.engine is None:
+            logger.warning("No engine to update weights")
+            return
+        fn = getattr(self.engine, "update_weights_from_distributed", None)
+        if not callable(fn):
+            raise NotImplementedError(
+                f"Engine {type(self.engine).__name__} does not support update_weights_from_distributed."
+            )
+        self._prepare_engine_for_weight_update()
+        fn(
+            names=names,
+            dtypes=dtypes,
+            shapes=shapes,
+            group_name=group_name,
+            target_modules=target_modules,
+            flush_cache=flush_cache,
+        )
+
+    def get_num_gpus_allocated(self) -> int:
+        """Return physical GPU count allocated to this rollout actor."""
+        return int(self.num_gpus_allocated)
+
     def sleep(self) -> None:
         """Put engine into sleep mode to release runtime resources."""
         if self.engine is not None:
@@ -573,6 +1121,14 @@ class RolloutActor:
         if self.engine is None:
             return False
         return self.engine.health_check()
+
+    def get_weight_update_target(self) -> Dict[str, Any]:
+        """Return logical rollout weight-update target for dedup routing."""
+        return {
+            "rank": int(self.rank),
+            "target": str(self._weight_update_target),
+            "scheduler_endpoint": self._scheduler_endpoint,
+        }
 
     def is_offloaded(self) -> bool:
         """Check if actor is currently offloaded to CPU."""

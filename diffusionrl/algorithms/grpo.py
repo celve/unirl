@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from .base import BaseAlgorithm, SamplingRequirements
-from diffusionrl.advantages.normalizers import normalize_global, normalize_grouped, build_fixed_size_groups
+from .advantages.normalizers import normalize_global, normalize_grouped, build_fixed_size_groups
 
 
 class GRPOAlgorithm(BaseAlgorithm):
@@ -79,7 +79,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         # Per-prompt statistics tracker (for flow_grpo per_prompt advantage type)
         self.per_prompt_tracker = None
         if (use_per_prompt_tracker or advantage_type == "per_prompt") and per_prompt_mode == "running":
-            from diffusionrl.advantages.per_prompt_tracker import PerPromptStatTracker
+            from .advantages.per_prompt_tracker import PerPromptStatTracker
             self.per_prompt_tracker = PerPromptStatTracker(
                 buffer_size=per_prompt_buffer_size,
                 min_count=per_prompt_min_count,
@@ -91,7 +91,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         # Running statistics for cross-batch global normalization (DanceGRPO)
         self.running_reward_normalizer = None
         if use_running_stats or use_global_std:
-            from diffusionrl.advantages.running_stats import RunningRewardNormalizer
+            from .advantages.running_stats import RunningRewardNormalizer
             self.running_reward_normalizer = RunningRewardNormalizer(
                 epsilon=epsilon,
                 clip_max=clip_max,

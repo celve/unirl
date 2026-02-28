@@ -187,7 +187,7 @@ python -m diffusionrl.train \
     \
     `# ===== Training-Actor Sampling (no dedicated rollout actors) =====` \
     --training-actor-direct-sampling true \
-    --colocate-rollout-training false \
+    --colocate-rollout-training true \
     --rollout-num-nodes 0 \
     --rollout-num-gpus-per-node 0 \
     --training-num-nodes ${TRAINING_NUM_NODES} \

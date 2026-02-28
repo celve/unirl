@@ -111,7 +111,7 @@ python -m diffusionrl.train \
     --per-prompt-buffer-size 10000 \
     \
     --training-actor-direct-sampling true \
-    --colocate-rollout-training false \
+    --colocate-rollout-training true \
     --rollout-num-nodes 0 \
     --rollout-num-gpus-per-node 0 \
     --training-num-gpus-per-node ${NUM_GPUS} \

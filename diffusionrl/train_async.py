@@ -53,7 +53,10 @@ def train_async_loop(
                 f"Cannot launch rollout {rollout_id}: inflight queue is full "
                 f"(inflight={runtime.inflight_count}, max_inflight={runtime.max_inflight})"
             )
-        rollout_future = rollout_buffer.request_rollout.remote(rollout_id=rollout_id)
+        rollout_future = rollout_manager.generate_and_push.remote(
+            rollout_id=rollout_id,
+            buffer=rollout_buffer,
+        )
         runtime.launch_rollout(
             rollout_id,
             rollout_future,

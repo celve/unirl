@@ -39,8 +39,7 @@
 # 2. config.train.beta (--kl-coef): KL regularization weight
 #    - Fixed: 0.0001
 #
-# NOTE: diffusionrl lacks dpm2 solver and deterministic sampling from DiffusionNFT.
-#       This is a known difference that may affect exact reproduction.
+# NOTE: diffusionrl now supports dpm2 deterministic sampling for SD3 NFT path.
 #
 # Usage:
 #   bash train_nft_sd3_train_actor_sampling.sh
@@ -98,7 +97,7 @@ python -m diffusionrl.train \
     --per-prompt-buffer-size 10000 \
     \
     --training-actor-direct-sampling true \
-    --colocate-rollout-training false \
+    --colocate-rollout-training true \
     --rollout-num-nodes 0 \
     --rollout-num-gpus-per-node 0 \
     --training-num-gpus-per-node ${NUM_GPUS} \

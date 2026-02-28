@@ -114,6 +114,21 @@ class ModelBundle(ABC):
         return None
 
     @classmethod
+    def forward_plugin(cls):
+        """Return the forward plugin for this model's loss computation.
+
+        Subclasses should override to provide model-specific forward logic.
+        Returns a BaseForwardPlugin instance.
+        """
+        from diffusionrl.models.forward_plugins import DefaultForwardPlugin
+        return DefaultForwardPlugin()
+
+    @classmethod
+    def supports_sglang_prompt_mode(cls) -> bool:
+        """Whether this model supports SGLang prompt-only rollout mode."""
+        return False
+
+    @classmethod
     def validate_config(cls, args: Any) -> None:
         """Model-specific argument normalization/validation hook."""
         return None

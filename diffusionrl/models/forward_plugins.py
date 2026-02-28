@@ -17,7 +17,7 @@ Benefits:
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional, Protocol, Type, Dict, Any
+from typing import Optional, Protocol, Dict, Any
 
 import torch
 import torch.nn as nn
@@ -425,6 +425,107 @@ class HunyuanForwardPlugin(BaseForwardPlugin):
         return pred
 
 
+class MochiForwardPlugin(BaseForwardPlugin):
+    """Forward plugin for Mochi video models.
+
+    Mochi transformer interface differs from Hunyuan:
+    - requires encoder_attention_mask
+    - does not use pooled_projections/guidance inputs
+    - timestep follows SD3-style 0-1000 scaling
+    """
+
+    def prepare_model_kwargs(
+        self,
+        latents: torch.Tensor,
+        sigma: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        guidance_scale: float = 3.5,
+        text_ids: Optional[torch.Tensor] = None,
+        image_ids: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Prepare Mochi kwargs."""
+        del pooled_prompt_embeds, guidance_scale, text_ids, image_ids
+        batch_size = latents.shape[0]
+        device = latents.device
+        dtype = prompt_embeds.dtype
+        timestep_1000 = self._prepare_timestep(sigma, batch_size, device, dtype) * 1000
+        model_kwargs: Dict[str, Any] = {
+            "hidden_states": latents.to(dtype),
+            "encoder_hidden_states": prompt_embeds,
+            "timestep": timestep_1000,
+            "return_dict": False,
+        }
+        encoder_attention_mask = kwargs.get("encoder_attention_mask")
+        if encoder_attention_mask is not None:
+            model_kwargs["encoder_attention_mask"] = encoder_attention_mask
+        attention_kwargs = kwargs.get("attention_kwargs")
+        if attention_kwargs is not None:
+            model_kwargs["attention_kwargs"] = attention_kwargs
+        return model_kwargs
+
+    def forward(
+        self,
+        model: nn.Module,
+        latents: torch.Tensor,
+        sigma: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        guidance_scale: float = 3.5,
+        text_ids: Optional[torch.Tensor] = None,
+        image_ids: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Execute Mochi forward pass with optional CFG."""
+        del pooled_prompt_embeds, text_ids, image_ids, negative_pooled_prompt_embeds
+        batch_size = latents.shape[0]
+        device = latents.device
+        dtype = prompt_embeds.dtype
+        timestep_1000 = self._prepare_timestep(sigma, batch_size, device, dtype) * 1000
+
+        if guidance_scale > 1.0:
+            uncond_embeds = (
+                negative_prompt_embeds
+                if negative_prompt_embeds is not None
+                else torch.zeros_like(prompt_embeds)
+            )
+            latents_batched = torch.cat([latents, latents], dim=0)
+            embeds_batched = torch.cat([uncond_embeds, prompt_embeds], dim=0)
+            timestep_batched = torch.cat([timestep_1000, timestep_1000], dim=0)
+
+            model_kwargs: Dict[str, Any] = {
+                "hidden_states": latents_batched.to(dtype),
+                "encoder_hidden_states": embeds_batched,
+                "timestep": timestep_batched,
+                "return_dict": False,
+            }
+            if encoder_attention_mask is not None:
+                model_kwargs["encoder_attention_mask"] = torch.cat(
+                    [encoder_attention_mask, encoder_attention_mask], dim=0
+                )
+            attention_kwargs = kwargs.get("attention_kwargs")
+            if attention_kwargs is not None:
+                model_kwargs["attention_kwargs"] = attention_kwargs
+
+            noise_pred = model(**model_kwargs)[0]
+            noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
+            return noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+
+        return model(
+            **self.prepare_model_kwargs(
+                latents=latents,
+                sigma=sigma,
+                prompt_embeds=prompt_embeds,
+                encoder_attention_mask=encoder_attention_mask,
+                **kwargs,
+            )
+        )[0]
+
+
 class DefaultForwardPlugin(BaseForwardPlugin):
     """Default forward plugin with fallback logic.
 
@@ -546,69 +647,3 @@ class DefaultForwardPlugin(BaseForwardPlugin):
             )[0]
 
         return pred
-
-
-# Registry mapping model types to their plugins
-PLUGIN_REGISTRY: Dict[str, Type[BaseForwardPlugin]] = {
-    "flux": FluxForwardPlugin,
-    "sd3": SD3ForwardPlugin,
-    "hunyuan": HunyuanForwardPlugin,
-    "mochi": HunyuanForwardPlugin,  # Mochi uses similar interface to Hunyuan
-    "default": DefaultForwardPlugin,
-}
-
-# Cached plugin instances
-_plugin_cache: Dict[str, BaseForwardPlugin] = {}
-
-
-def get_forward_plugin(model_type: str) -> BaseForwardPlugin:
-    """
-    Get the forward plugin for a given model type.
-
-    Args:
-        model_type: Model type identifier (e.g., "flux", "sd3", "hunyuan")
-
-    Returns:
-        Configured forward plugin instance
-    """
-    if model_type not in _plugin_cache:
-        plugin_cls = PLUGIN_REGISTRY.get(model_type.lower(), DefaultForwardPlugin)
-        _plugin_cache[model_type] = plugin_cls()
-        logger.debug(f"Created forward plugin for model_type={model_type}: {plugin_cls.__name__}")
-
-    return _plugin_cache[model_type]
-
-
-def detect_model_type(model: nn.Module) -> str:
-    """
-    Detect model type from the model's class name.
-
-    Args:
-        model: The model to detect type for
-
-    Returns:
-        Detected model type string
-    """
-    model_name = model.__class__.__name__.lower()
-    base_model = model
-
-    # Unwrap common wrappers
-    if hasattr(model, 'module'):
-        base_model = model.module
-    if hasattr(base_model, 'get_base_model'):
-        base_model = base_model.get_base_model()
-
-    base_model_name = base_model.__class__.__name__.lower()
-
-    # Check both wrapped and unwrapped names
-    for name in [model_name, base_model_name]:
-        if 'flux' in name:
-            return 'flux'
-        elif 'sd3' in name or 'stablevideo' in name:
-            return 'sd3'
-        elif 'hunyuan' in name:
-            return 'hunyuan'
-        elif 'mochi' in name:
-            return 'mochi'
-
-    return 'default'

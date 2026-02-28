@@ -52,6 +52,7 @@ python -m diffusionrl.train \
     --num-samples-per-prompt 2 \
     \
     --training-actor-direct-sampling true \
+    --colocate-rollout-training true \
     --rollout-num-nodes 0 \
     --rollout-num-gpus-per-node 0 \
     --training-num-gpus-per-node "${NUM_GPUS}" \
@@ -72,4 +73,3 @@ python -m diffusionrl.train \
     --logging-steps 1 \
     --output-dir "${OUTPUT_DIR}" \
     "$@"
-

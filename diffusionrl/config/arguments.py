@@ -15,12 +15,10 @@ from typing import Any, Dict, List, Optional, get_args, get_origin
 from diffusionrl.models import list_model_types, resolve_model_bundle_path
 from diffusionrl.utils.misc import load_function
 from diffusionrl.config.validation import (
-    DEFAULT_LOSS_TYPE_REQUIREMENTS,
     is_probably_local_weight_sync_dir,
     normalize_repo_relative_paths,
     repo_root,
     resolve_repo_relative_path,
-    validate_algorithm_loss_consistency,
     validate_algorithm_kwargs_json,
     validate_colocate_fractions,
     validate_dotpath,
@@ -39,24 +37,6 @@ logger = logging.getLogger(__name__)
 ENV_REPO_ROOT = "DIFFUSIONRL_REPO_ROOT"
 ENV_DATA_ROOT = "DIFFUSIONRL_DATA_ROOT"
 ENV_MODEL_ROOT = "DIFFUSIONRL_MODEL_ROOT"
-
-# Local model path -> HuggingFace ID fallback mapping.
-# When a script specifies a repo-relative local path (e.g., "models/local/sd3.5-medium")
-# and the path does not exist on disk, we fall back to the corresponding HF repo ID.
-# This allows GitHub users to run scripts without local models — diffusers will
-# download from HuggingFace automatically.
-_LOCAL_TO_HF_FALLBACK: dict[str, str] = {
-    "models/local/sd3.5-medium":    "stabilityai/stable-diffusion-3.5-medium",
-    "models/local/flux":            "black-forest-labs/FLUX.1-dev",
-    "models/local/hunyuan-video":   "hunyuanvideo-community/HunyuanVideo",
-    "models/local/wan2.1":          "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
-    "models/local/qwen-image":      "Qwen/Qwen-Image",
-    "models/local/qwen-image-edit": "Qwen/Qwen-Image-Edit",
-    "models/local/sd-v1-4":         "CompVis/stable-diffusion-v1-4",
-    "models/local/skyreels-i2v":    "xzyhku/SkyReels-V1-I2V",
-    "models/local/bagel":           "ByteDance-Seed/BAGEL-7B-MoT",
-    "models/local/qwen2-vl":        "Qwen/Qwen2-VL-2B-Instruct",
-}
 
 DEFAULT_MODEL_PATH = "diffusionrl.models.hunyuan.HunyuanModelBundle"
 DEFAULT_SAMPLER_PATH = "diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler"
@@ -243,17 +223,20 @@ class RayConfig:
     offload_rollout: Optional[bool] = field(default=None,
         metadata={"help": "Enable model offload for rollout actors (None = auto)"})
     weight_sync_mode: str = field(default="auto",
-        metadata={"help": "Weight sync mode: auto, object_ref, or checkpoint_path"})
+        metadata={"help": "Weight sync mode: auto, object_ref, checkpoint_path, ipc, or nccl"})
     weight_sync_dir: str = field(default="outputs/weight_sync",
         metadata={"help": "Directory for checkpoint-based weight sync (use shared FS for multi-node)"})
+    weight_sync_bucket_mb: int = field(default=256,
+        metadata={"help": "Weight sync tensor bucket size (MB) for ipc/nccl strategies"})
+    weight_sync_flush_cache: bool = field(default=True,
+        metadata={"help": "Whether rollout side flushes runtime cache after each weight sync bucket"})
 
     def validate(self) -> None:
-        if self.weight_sync_mode not in ("auto", "object_ref", "checkpoint_path"):
+        if self.weight_sync_mode not in ("auto", "object_ref", "checkpoint_path", "ipc", "nccl"):
             raise ValueError(
-                f"weight_sync_mode must be one of auto/object_ref/checkpoint_path, "
+                f"weight_sync_mode must be one of auto/object_ref/checkpoint_path/ipc/nccl, "
                 f"got: {self.weight_sync_mode!r}. "
-                "Use 'auto' (recommended) to let diffusionrl choose the best mode, "
-                "'checkpoint_path' for SGLang/multi-node, or 'object_ref' for single-node FSDP."
+                "Use 'auto' (recommended) to let diffusionrl choose the best mode."
             )
 
 
@@ -541,6 +524,46 @@ class RolloutLoggingConfig:
             raise ValueError("update_weights_interval must be >= 1.")
 
 
+@dataclass
+class DebugConfig:
+    """Debug runtime mode and intermediate artifact controls."""
+
+    debug_mode: str = field(default="none",
+        metadata={"help": "Debug mode: none, rollout_only, train_only (debug_full aliases to none + debug_save_intermediates=true)"})
+    debug_save_dir: str = field(default="outputs/debug",
+        metadata={"help": "Directory for debug artifacts and saved rollout payloads"})
+    debug_save_intermediates: bool = field(default=False,
+        metadata={"help": "Save rollout intermediates during normal training loop"})
+    debug_load_path: Optional[str] = field(default=None,
+        metadata={"help": "Path to debug payload/training batch for train_only mode"})
+    debug_num_rollouts: int = field(default=1,
+        metadata={"help": "Number of rollout iterations to run in rollout_only mode"})
+    debug_max_media: int = field(default=8,
+        metadata={"help": "Maximum number of images/videos to save per rollout"})
+    debug_save_trajectories: bool = field(default=False,
+        metadata={"help": "Persist sampler trajectories/log-probs in debug payloads (can be very large)"})
+    debug_subsample: int = field(default=0,
+        metadata={"help": "If >0, keep only first N samples when loading debug payload in train_only mode"})
+    debug_print_tensor_stats: bool = field(default=True,
+        metadata={"help": "Print per-stage tensor statistics in rollout debug tracing"})
+
+    def validate(self) -> None:
+        mode = str(self.debug_mode or "none").strip().lower()
+        if mode not in ("none", "rollout_only", "train_only", "debug_full"):
+            raise ValueError(
+                "debug_mode must be one of: none, rollout_only, train_only, debug_full. "
+                f"Got: {self.debug_mode!r}"
+            )
+        if int(self.debug_num_rollouts) < 1:
+            raise ValueError("debug_num_rollouts must be >= 1.")
+        if int(self.debug_max_media) < 1:
+            raise ValueError("debug_max_media must be >= 1.")
+        if int(self.debug_subsample) < 0:
+            raise ValueError("debug_subsample must be >= 0.")
+        if mode == "train_only" and not self.debug_load_path:
+            raise ValueError("debug_mode=train_only requires --debug-load-path.")
+
+
 _GROUP_CONFIG_TYPES = {
     "model": ModelConfig,
     "sampling": SamplingConfig,
@@ -549,6 +572,7 @@ _GROUP_CONFIG_TYPES = {
     "algorithm": AlgorithmConfig,
     "training": TrainingConfig,
     "rollout": RolloutLoggingConfig,
+    "debug_cfg": DebugConfig,
 }
 _GROUP_CONFIG_NAMES = set(_GROUP_CONFIG_TYPES.keys())
 
@@ -616,6 +640,7 @@ class TrainingArguments:
     algorithm: AlgorithmConfig = field(default_factory=AlgorithmConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     rollout: RolloutLoggingConfig = field(default_factory=RolloutLoggingConfig)
+    debug_cfg: DebugConfig = field(default_factory=DebugConfig)
 
     # ========== Data Configuration ==========
     data_path: Optional[str] = field(default="data/samples/prompts_toy.json",
@@ -818,6 +843,7 @@ _GROUP_DISPLAY_NAMES: Dict[str, str] = {
     "algorithm.window": "Window/Timestep Scheduler",
     "training": "Training & Optimization",
     "rollout": "Rollout, Checkpointing & Logging",
+    "debug_cfg": "Debug Mode & Artifact Saving",
 }
 
 
@@ -1099,30 +1125,24 @@ def _apply_training_actor_direct_sampling_overrides(
         )
 
     if args.rollout_num_nodes != 0 or args.rollout_num_gpus_per_node != 0:
-        logger.warning(
-            "training_actor_direct_sampling=true: disabling rollout placement groups "
-            f"(rollout_num_nodes={args.rollout_num_nodes}, "
-            f"rollout_num_gpus_per_node={args.rollout_num_gpus_per_node})."
+        raise ValueError(
+            "training_actor_direct_sampling=true requires rollout_num_nodes=0 and "
+            "rollout_num_gpus_per_node=0 (no separate rollout actors). "
+            f"Got rollout_num_nodes={args.rollout_num_nodes}, "
+            f"rollout_num_gpus_per_node={args.rollout_num_gpus_per_node}."
         )
-        args.rollout_num_nodes = 0
-        args.rollout_num_gpus_per_node = 0
 
-    # Training-actor sampling is an implicit colocate mode:
-    # rollout actors are disabled and training actors serve generation.
     if not args.colocate_rollout_training:
-        logger.info(
-            "training_actor_direct_sampling=true: forcing colocate_rollout_training=true "
-            "(training actors directly handle sampling)."
+        raise ValueError(
+            "training_actor_direct_sampling=true requires colocate_rollout_training=true. "
+            "Set --colocate-rollout-training."
         )
-    args.colocate_rollout_training = True
 
     if args.offload or args.offload_train or args.offload_rollout:
-        logger.warning(
-            "training_actor_direct_sampling=true: disabling offload_train/offload_rollout."
+        raise ValueError(
+            "training_actor_direct_sampling=true is incompatible with offload. "
+            "Set --offload=false --offload-train=false --offload-rollout=false."
         )
-    args.offload = False
-    args.offload_train = False
-    args.offload_rollout = False
 
 
 def _normalize_replay_mode(
@@ -1132,53 +1152,28 @@ def _normalize_replay_mode(
     is_sglang_engine: bool,
     sglang_logprob_mode: str,
 ) -> tuple[bool, bool, str]:
-    """Normalize replay flags for sglang/non-sglang engines."""
+    """Validate replay flags for sglang/non-sglang engines."""
     replay_enabled = bool(getattr(args, "replay_log_probs", False))
     replay_guard = (not training_actor_direct_sampling) and getattr(args, "loss_type", "grpo") == "grpo"
 
-    if (
-        args.model_type == "mochi"
-        and is_sglang_engine
-        and sglang_logprob_mode == "replay"
-        and not getattr(args, "replay_sampler_path", None)
-    ):
-        logger.warning(
-            "Mochi + SGLang no longer uses FastVideo replay fallback. "
-            "Auto-switching sglang_logprob_mode to 'native'."
-        )
-        sglang_logprob_mode = "native"
-        args.sglang_logprob_mode = sglang_logprob_mode
-        args.engine_kwargs["sglang_logprob_mode"] = sglang_logprob_mode
-
     if is_sglang_engine and replay_guard:
-        if sglang_logprob_mode == "replay":
-            if not replay_enabled:
-                logger.info(
-                    "SGLang log_prob mode='replay': auto-enabled replay_log_probs "
-                    "for sampler_engine_type='sglang' + loss_type='grpo'."
-                )
-            replay_enabled = True
-            args.replay_log_probs = True
-        else:
-            if replay_enabled:
-                logger.warning(
-                    "SGLang log_prob mode='native' overrides replay_log_probs flags; disabling replay path."
-                )
-            replay_enabled = False
-            args.replay_log_probs = False
-            logger.info(
-                "SGLang log_prob mode='native': expecting rollout/native log_probs from inference engine."
+        if sglang_logprob_mode == "replay" and not replay_enabled:
+            raise ValueError(
+                "sampler_engine_type='sglang' with sglang_logprob_mode='replay' requires "
+                "--replay-log-probs=true. Set it explicitly."
+            )
+        if sglang_logprob_mode == "native" and replay_enabled:
+            raise ValueError(
+                "sglang_logprob_mode='native' is incompatible with replay_log_probs=true. "
+                "Set --replay-log-probs=false when using native log_prob mode."
             )
 
     if replay_enabled and not replay_guard:
-        logger.warning(
+        raise ValueError(
             "replay_log_probs=true is only valid for "
             "training_actor_direct_sampling=false + loss_type='grpo'. "
-            "Disabling replay_log_probs."
+            "Either disable replay_log_probs or adjust your config."
         )
-        args.replay_log_probs = False
-    else:
-        args.replay_log_probs = replay_enabled
 
     return replay_guard, replay_enabled, sglang_logprob_mode
 
@@ -1214,16 +1209,21 @@ def _apply_colocate_and_offload_rules(
 
 
 def _normalize_training_misc(args: TrainingArguments) -> None:
-    """Normalize misc training knobs that affect downstream components."""
-    if args.advantage_type == "per_prompt":
-        if args.per_prompt_mode == "running" and not args.use_per_prompt_stat_tracker:
-            args.use_per_prompt_stat_tracker = True
-            logger.info("Auto-enabled use_per_prompt_stat_tracker for advantage_type='per_prompt'")
-        elif args.per_prompt_mode != "running" and args.use_per_prompt_stat_tracker:
-            logger.info("per_prompt_mode != 'running' will ignore per_prompt_stat_tracker")
+    """Validate misc training knobs that affect downstream components."""
+    if (
+        args.advantage_type == "per_prompt"
+        and args.per_prompt_mode == "running"
+        and not args.use_per_prompt_stat_tracker
+    ):
+        raise ValueError(
+            "advantage_type='per_prompt' with per_prompt_mode='running' requires "
+            "--use-per-prompt-stat-tracker=true."
+        )
 
-    if args.use_global_std:
-        args.use_running_stats = True
+    if args.use_global_std and not args.use_running_stats:
+        raise ValueError(
+            "--use-global-std=true requires --use-running-stats=true."
+        )
 
     if isinstance(args.lora_target_modules, str):
         stripped = args.lora_target_modules.strip()
@@ -1308,32 +1308,36 @@ def _normalize_weight_sync(args: TrainingArguments, *, training_actor_direct_sam
     train_backend = str(getattr(args, "train_backend", "fsdp") or "fsdp").strip().lower()
     backend_path = str(getattr(args, "train_backend_path", "") or "").strip().lower()
     veomni_like_backend = train_backend == "veomni" or ("veomni" in backend_path)
+    sampler_engine_type = str(getattr(args, "sampler_engine_type", "") or "").lower()
+    is_multi_node = (
+        int(getattr(args, "rollout_num_nodes", 1)) > 1
+        or int(getattr(args, "training_num_nodes", 1)) > 1
+        or int(getattr(args, "reward_dedicated_num_nodes", 0)) > 1
+    )
+
     if weight_sync_mode == "auto":
-        if (
+        if not training_actor_direct_sampling and sampler_engine_type == "sglang":
+            args.weight_sync_mode = "nccl" if is_multi_node else "ipc"
+        elif (
             not training_actor_direct_sampling
-            and (
-                args.sampler_engine_type in ("fsdp", "sglang")
-                or veomni_like_backend
-            )
+            and (sampler_engine_type == "fsdp" or veomni_like_backend)
         ):
             args.weight_sync_mode = "checkpoint_path"
         else:
             args.weight_sync_mode = "object_ref"
 
     if (
-        not training_actor_direct_sampling
-        and str(getattr(args, "sampler_engine_type", "")).lower() == "sglang"
-        and args.weight_sync_mode != "checkpoint_path"
+        args.weight_sync_mode in {"ipc", "nccl"}
+        and sampler_engine_type != "sglang"
     ):
-        logger.warning(
-            "sampler_engine_type='sglang' does not support object_ref tensor push; "
-            "forcing weight_sync_mode=checkpoint_path."
+        raise ValueError(
+            "weight_sync_mode in {ipc,nccl} currently requires sampler_engine_type='sglang'. "
+            f"Got sampler_engine_type={sampler_engine_type!r}."
         )
-        args.weight_sync_mode = "checkpoint_path"
 
     if (
         args.weight_sync_mode == "checkpoint_path"
-        and str(getattr(args, "sampler_engine_type", "")).lower() == "sglang"
+        and sampler_engine_type == "sglang"
     ):
         root = repo_root(env_repo_root=ENV_REPO_ROOT)
         default_sync_dir = resolve_repo_relative_path("outputs/weight_sync", root)
@@ -1346,11 +1350,7 @@ def _normalize_weight_sync(args: TrainingArguments, *, training_actor_direct_sam
 
     if (
         args.weight_sync_mode == "checkpoint_path"
-        and (
-            int(getattr(args, "rollout_num_nodes", 1)) > 1
-            or int(getattr(args, "training_num_nodes", 1)) > 1
-            or int(getattr(args, "reward_dedicated_num_nodes", 0)) > 1
-        )
+        and is_multi_node
         and is_probably_local_weight_sync_dir(
             args.weight_sync_dir,
             root=repo_root(env_repo_root=ENV_REPO_ROOT),
@@ -1361,6 +1361,41 @@ def _normalize_weight_sync(args: TrainingArguments, *, training_actor_direct_sam
             f"Got local-only weight_sync_dir={args.weight_sync_dir}. "
             "Use a shared mount (e.g. /mnt/shared/... or NFS path)."
         )
+
+
+def _normalize_debug_config(args: TrainingArguments) -> str:
+    """Normalize debug mode and enforce mode-specific constraints."""
+    debug_mode = str(getattr(args, "debug_mode", "none") or "none").strip().lower()
+    if debug_mode == "debug_full":
+        logger.info(
+            "debug_mode=debug_full is currently mapped to normal training with "
+            "debug_save_intermediates=true."
+        )
+        args.debug_mode = "none"
+        args.debug_save_intermediates = True
+        debug_mode = "none"
+    else:
+        args.debug_mode = debug_mode
+
+    if debug_mode in ("rollout_only", "train_only"):
+        if bool(getattr(args, "async_pipeline", False)):
+            raise ValueError(
+                f"debug_mode={debug_mode} does not support async_pipeline yet. "
+                "Set --async-pipeline=false."
+            )
+        if debug_mode == "rollout_only" and bool(getattr(args, "training_actor_direct_sampling", False)):
+            raise ValueError(
+                "debug_mode=rollout_only is incompatible with training_actor_direct_sampling=true "
+                "(there are no training actors in rollout-only mode)."
+            )
+
+    if bool(getattr(args, "debug_save_intermediates", False)) and bool(getattr(args, "async_pipeline", False)):
+        raise ValueError(
+            "debug_save_intermediates=true is not supported with async_pipeline yet. "
+            "Set --async-pipeline=false."
+        )
+
+    return debug_mode
 
 def validate_args(args: TrainingArguments) -> TrainingArguments:
     """
@@ -1376,13 +1411,13 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
     explicit_sampler_engine_type = getattr(args, "sampler_engine_type", None) is not None
 
     validate_grouped_configs(args)
+    debug_mode = _normalize_debug_config(args)
 
     normalize_repo_relative_paths(
         args,
         env_repo_root=ENV_REPO_ROOT,
         env_data_root=ENV_DATA_ROOT,
         env_model_root=ENV_MODEL_ROOT,
-        local_to_hf_fallback=_LOCAL_TO_HF_FALLBACK,
     )
 
     model_cls = _resolve_model_runtime_contract(
@@ -1421,20 +1456,21 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
         )
 
     validate_reward_and_rollout_buffer_config(args)
-    validate_rollout_layout(
-        args,
-        training_actor_direct_sampling=training_actor_direct_sampling,
-    )
+    if debug_mode != "train_only":
+        validate_rollout_layout(
+            args,
+            training_actor_direct_sampling=training_actor_direct_sampling,
+        )
     _normalize_training_misc(args)
     validate_model_specific_logic(args, model_cls=model_cls)
-    validate_algorithm_loss_consistency(args)
-    validate_resolved_engine_loss_contract(
-        args,
-        training_actor_direct_sampling=training_actor_direct_sampling,
-        is_sglang_engine=is_sglang_engine,
-        replay_guard=replay_guard,
-        sglang_logprob_mode=sglang_logprob_mode,
-    )
+    if debug_mode != "train_only":
+        validate_resolved_engine_loss_contract(
+            args,
+            training_actor_direct_sampling=training_actor_direct_sampling,
+            is_sglang_engine=is_sglang_engine,
+            replay_guard=replay_guard,
+            sglang_logprob_mode=sglang_logprob_mode,
+        )
 
     if args.sampling_adapter:
         args.engine_kwargs.setdefault("sampling_adapter", args.sampling_adapter)
@@ -1442,10 +1478,12 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
         args,
         training_actor_direct_sampling=training_actor_direct_sampling,
     )
-    validate_runtime_mode_constraints(
-        args,
-        training_actor_direct_sampling=training_actor_direct_sampling,
-    )
+    if debug_mode != "train_only":
+        validate_runtime_mode_constraints(
+            args,
+            training_actor_direct_sampling=training_actor_direct_sampling,
+            model_cls=model_cls,
+        )
 
     return args
 

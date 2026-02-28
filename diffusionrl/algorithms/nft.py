@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from .base import BaseAlgorithm, SamplingRequirements
-from diffusionrl.advantages.normalizers import normalize_global, normalize_grouped, build_fixed_size_groups
+from .advantages.normalizers import normalize_global, normalize_grouped, build_fixed_size_groups
 
 
 class NFTAlgorithm(BaseAlgorithm):
@@ -74,7 +74,7 @@ class NFTAlgorithm(BaseAlgorithm):
         # Per-prompt statistics tracker (for per_prompt advantage type)
         self.per_prompt_tracker = None
         if use_per_prompt_tracker or advantage_type == "per_prompt":
-            from diffusionrl.advantages.per_prompt_tracker import PerPromptStatTracker
+            from .advantages.per_prompt_tracker import PerPromptStatTracker
             self.per_prompt_tracker = PerPromptStatTracker(
                 buffer_size=per_prompt_buffer_size,
                 min_count=per_prompt_min_count,

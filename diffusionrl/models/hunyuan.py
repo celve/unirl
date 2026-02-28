@@ -71,6 +71,15 @@ class HunyuanModelBundle(ModelBundle):
         return "fsdp"
 
     @classmethod
+    def forward_plugin(cls):
+        from diffusionrl.models.forward_plugins import HunyuanForwardPlugin
+        return HunyuanForwardPlugin()
+
+    @classmethod
+    def supports_sglang_prompt_mode(cls) -> bool:
+        return True
+
+    @classmethod
     def validate_config(cls, args: Any) -> None:
         if getattr(args, "sampler_engine_type", None) != "fsdp":
             return

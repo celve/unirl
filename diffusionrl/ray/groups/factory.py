@@ -205,6 +205,18 @@ def create_rollout_actor_group(
         engine_kwargs=engine_kwargs,
     )
     group.init(engine_config)
+    if hasattr(group, "refresh_weight_update_targets"):
+        try:
+            dedupe_payload = group.refresh_weight_update_targets()
+            logger.info(
+                "Rollout weight-update target topology: %s",
+                dedupe_payload,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to refresh rollout weight-update targets; fallback to per-actor updates. %s",
+                exc,
+            )
 
     return group
 

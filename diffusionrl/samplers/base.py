@@ -23,6 +23,20 @@ class BaseSampler(ABC):
     1. Log probabilities MUST be computed at sampling time
     2. Trajectories are stored as [B, num_steps+1, C, ...] tensors
     3. Each sampler specifies whether it requires extra forward for log_prob
+
+    Model-Specific Parameter Contracts:
+        Different model architectures handle certain parameters differently.
+        Subclasses should document which optional kwargs they actually use.
+
+        - ``guidance_scale``: Semantics vary per model. Flux treats it as
+          optional (defaults to instance attr), SD3 defaults to 7.0,
+          HunyuanVideo uses a fixed internal value and ignores this arg.
+        - ``text_ids``: Only used by Flux-family models for positional
+          encoding; other models should accept and ignore via **kwargs.
+        - Prompt encoding: Some samplers use ``prompt_embeds`` /
+          ``pooled_prompt_embeds`` directly, others re-encode from
+          ``prompts`` text internally. Check ``requires_pre_encoded``
+          on the concrete sampler if available.
     """
 
     def __init__(

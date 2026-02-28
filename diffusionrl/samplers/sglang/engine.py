@@ -46,6 +46,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         self._last_weight_checksum: Dict[str, str] = {}
         self._supports_prompt_encoding: bool = False
         self._prompt_encoder: Any = None
+        self._encode_prompt_in_generate: bool = False
         self._supports_memory_api: bool = False
         self._require_memory_api: bool = False
         self._warned_sequential_requests: bool = False
@@ -62,7 +63,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         return {
             "requires_trajectory": True,
             "requires_log_prob": False,
-            "requires_embeddings": False,
+            "requires_embeddings": True,
         }
 
     # ---------------------------------------------------------------------
@@ -130,8 +131,12 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             DiffGenerator,
         )
         from sglang.multimodal_gen.runtime.entrypoints.post_training.io_struct import (
+            DestroyWeightsUpdateGroupReqInput,
             GetWeightsChecksumReqInput,
+            InitWeightsUpdateGroupReqInput,
             UpdateWeightFromDiskReqInput,
+            UpdateWeightsFromDistributedReqInput,
+            UpdateWeightsFromTensorReqInput,
         )
         from sglang.multimodal_gen.runtime.scheduler_client import sync_scheduler_client
         from sglang.multimodal_gen.runtime.server_args import ServerArgs
@@ -141,6 +146,10 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             "ServerArgs": ServerArgs,
             "UpdateWeightFromDiskReqInput": UpdateWeightFromDiskReqInput,
             "GetWeightsChecksumReqInput": GetWeightsChecksumReqInput,
+            "InitWeightsUpdateGroupReqInput": InitWeightsUpdateGroupReqInput,
+            "DestroyWeightsUpdateGroupReqInput": DestroyWeightsUpdateGroupReqInput,
+            "UpdateWeightsFromDistributedReqInput": UpdateWeightsFromDistributedReqInput,
+            "UpdateWeightsFromTensorReqInput": UpdateWeightsFromTensorReqInput,
             "sync_scheduler_client": sync_scheduler_client,
         }
 
@@ -204,6 +213,13 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             raw.get("require_memory_api", False),
             default=False,
         )
+        self._encode_prompt_in_generate = _to_bool(
+            raw.get(
+                "encode_prompt_in_generate",
+                raw.get("sglang_encode_prompt_in_generate", False),
+            ),
+            default=False,
+        )
 
         target_modules = raw.get("target_modules")
         if isinstance(target_modules, (list, tuple)) and target_modules:
@@ -219,6 +235,8 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             "require_memory_api",
             "prompt_encoder_device",
             "prompt_encoder_dtype",
+            "encode_prompt_in_generate",
+            "sglang_encode_prompt_in_generate",
             "server_kwargs",
         }
 
@@ -736,7 +754,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             )
             self._warned_sequential_requests = True
 
-        if (
+        has_external_embeddings = bool(
             prompt_embeds is not None
             or pooled_prompt_embeds is not None
             or encoder_attention_mask is not None
@@ -744,11 +762,18 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             or kwargs.get("negative_pooled_prompt_embeds") is not None
             or kwargs.get("text_ids") is not None
             or kwargs.get("image_ids") is not None
-        ) and not self._warned_ignored_external_embeddings:
-            logger.warning(
-                "SGLang engine ignores external prompt embedding tensors and recomputes prompt embeddings "
-                "from text prompts on every generate() call."
-            )
+        )
+        if has_external_embeddings and not self._warned_ignored_external_embeddings:
+            if self._encode_prompt_in_generate:
+                logger.warning(
+                    "SGLang engine ignores external prompt embedding tensors and recomputes prompt embeddings "
+                    "from text prompts on every generate() call."
+                )
+            else:
+                logger.warning(
+                    "SGLang engine ignores external prompt embedding tensors in generate(); "
+                    "expect rollout-level fallback embedding attachment."
+                )
             self._warned_ignored_external_embeddings = True
 
         steps = int(num_inference_steps or self.config.num_inference_steps)
@@ -757,21 +782,30 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         out_w = int(width or self.config.width)
         out_f = int(num_frames or self.config.num_frames)
 
-        encoded = self.encode_prompt(
-            list(prompts),
-            height=out_h,
-            width=out_w,
-            num_frames=out_f,
-        )
-        prompt_embeds = encoded.get("prompt_embeds")
-        if prompt_embeds is None:
-            raise RuntimeError("SGLang encode_prompt() returned no prompt_embeds")
-        pooled_prompt_embeds = encoded.get("pooled_prompt_embeds")
-        encoder_attention_mask = encoded.get("encoder_attention_mask")
-        negative_prompt_embeds = encoded.get("negative_prompt_embeds")
-        negative_pooled_prompt_embeds = encoded.get("negative_pooled_prompt_embeds")
-        text_ids = encoded.get("text_ids")
-        image_ids = encoded.get("image_ids")
+        if self._encode_prompt_in_generate:
+            encoded = self.encode_prompt(
+                list(prompts),
+                height=out_h,
+                width=out_w,
+                num_frames=out_f,
+            )
+            prompt_embeds = encoded.get("prompt_embeds")
+            if prompt_embeds is None:
+                raise RuntimeError("SGLang encode_prompt() returned no prompt_embeds")
+            pooled_prompt_embeds = encoded.get("pooled_prompt_embeds")
+            encoder_attention_mask = encoded.get("encoder_attention_mask")
+            negative_prompt_embeds = encoded.get("negative_prompt_embeds")
+            negative_pooled_prompt_embeds = encoded.get("negative_pooled_prompt_embeds")
+            text_ids = encoded.get("text_ids")
+            image_ids = encoded.get("image_ids")
+        else:
+            prompt_embeds = None
+            pooled_prompt_embeds = None
+            encoder_attention_mask = None
+            negative_prompt_embeds = None
+            negative_pooled_prompt_embeds = None
+            text_ids = None
+            image_ids = None
         model_type = self._infer_model_type()
 
         return_decoded_for_reward = bool(kwargs.pop("return_decoded_for_reward", False))
@@ -977,6 +1011,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             "generator_type": "sglang",
             "engine_capabilities": self.get_capabilities_dict(),
             "sglang_logprob_mode": self._sglang_logprob_mode(),
+            "encode_prompt_in_generate": bool(self._encode_prompt_in_generate),
             "trajectory_format": (
                 "packed_seq_c4"
                 if model_type == "flux" and trajectories_tensor.dim() == 4
@@ -1044,11 +1079,54 @@ class SGLangRolloutEngine(BaseRolloutEngine):
     # ---------------------------------------------------------------------
     # Weight sync / memory management
     # ---------------------------------------------------------------------
+    @staticmethod
+    def _extract_update_status(response: Any, *, operation: str) -> tuple[bool, str]:
+        output = getattr(response, "output", None)
+        if not isinstance(output, dict):
+            raise RuntimeError(f"Invalid SGLang response for {operation}: {response}")
+        success = bool(output.get("success", False))
+        message = str(output.get("message", "Unknown status"))
+        return success, message
+
     def update_weights(self, state_dict: Dict[str, torch.Tensor]) -> None:
-        del state_dict
-        raise RuntimeError(
-            "SGLang engine does not support direct state_dict push. "
-            "Use checkpoint_path mode with update_weights_from_path()."
+        if not self._is_initialized:
+            raise RuntimeError("SGLang engine is not initialized")
+        if not state_dict:
+            raise ValueError("state_dict must be non-empty")
+
+        runtime = self._import_sglang_runtime()
+        from sglang.srt.utils import MultiprocessingSerializer
+        from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
+
+        monkey_patch_torch_reductions()
+        named_tensors = [
+            (str(name), tensor.detach().contiguous())
+            for name, tensor in state_dict.items()
+            if isinstance(tensor, torch.Tensor)
+        ]
+        if not named_tensors:
+            raise ValueError("state_dict contains no tensor entries")
+
+        serialized = MultiprocessingSerializer.serialize(named_tensors, output_str=True)
+        tp_size = max(1, int(getattr(self._server_args, "tp_size", 1) or 1))
+        request = runtime["UpdateWeightsFromTensorReqInput"](
+            serialized_named_tensors=[serialized] * tp_size,
+            target_modules=list(self._target_modules),
+            load_format="direct",
+            flush_cache=True,
+        )
+        response = runtime["sync_scheduler_client"].forward(request)
+        success, message = self._extract_update_status(
+            response,
+            operation="update_weights_from_tensor",
+        )
+        if not success:
+            raise RuntimeError(f"SGLang tensor weight update failed: {message}")
+
+        logger.info(
+            "SGLang weights updated from in-memory tensors (target_modules=%s, tensors=%d)",
+            self._target_modules,
+            len(named_tensors),
         )
 
     def update_weights_from_path(self, checkpoint_path: str) -> None:
@@ -1067,12 +1145,10 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         )
         response = runtime["sync_scheduler_client"].forward(request)
 
-        output = getattr(response, "output", None)
-        if not isinstance(output, dict):
-            raise RuntimeError(f"Invalid SGLang weight update response: {response}")
-
-        success = bool(output.get("success", False))
-        message = str(output.get("message", ""))
+        success, message = self._extract_update_status(
+            response,
+            operation="update_weights_from_disk",
+        )
         if not success:
             raise RuntimeError(f"SGLang weight update failed: {message}")
 
@@ -1107,6 +1183,107 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             checkpoint_path,
             self._target_modules,
         )
+
+    def update_weights_from_tensor(
+        self,
+        *,
+        serialized_named_tensors: list[str | bytes],
+        target_modules: Optional[List[str]] = None,
+        load_format: Optional[str] = None,
+        flush_cache: bool = True,
+    ) -> None:
+        if not self._is_initialized:
+            raise RuntimeError("SGLang engine is not initialized")
+        if not serialized_named_tensors:
+            raise ValueError("serialized_named_tensors must be non-empty")
+
+        runtime = self._import_sglang_runtime()
+        request = runtime["UpdateWeightsFromTensorReqInput"](
+            serialized_named_tensors=serialized_named_tensors,
+            target_modules=list(target_modules or self._target_modules),
+            load_format=load_format,
+            flush_cache=flush_cache,
+        )
+        response = runtime["sync_scheduler_client"].forward(request)
+        success, message = self._extract_update_status(
+            response,
+            operation="update_weights_from_tensor",
+        )
+        if not success:
+            raise RuntimeError(f"SGLang tensor weight update failed: {message}")
+
+    def init_weights_update_group(
+        self,
+        *,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str,
+        backend: str = "nccl",
+    ) -> None:
+        runtime = self._import_sglang_runtime()
+        request = runtime["InitWeightsUpdateGroupReqInput"](
+            master_address=master_address,
+            master_port=int(master_port),
+            rank_offset=int(rank_offset),
+            world_size=int(world_size),
+            group_name=str(group_name),
+            backend=str(backend),
+        )
+        response = runtime["sync_scheduler_client"].forward(request)
+        success, message = self._extract_update_status(
+            response,
+            operation="init_weights_update_group",
+        )
+        if not success:
+            raise RuntimeError(f"init_weights_update_group failed: {message}")
+
+    def destroy_weights_update_group(
+        self,
+        *,
+        group_name: str,
+    ) -> None:
+        runtime = self._import_sglang_runtime()
+        request = runtime["DestroyWeightsUpdateGroupReqInput"](
+            group_name=str(group_name),
+        )
+        response = runtime["sync_scheduler_client"].forward(request)
+        success, message = self._extract_update_status(
+            response,
+            operation="destroy_weights_update_group",
+        )
+        if not success:
+            raise RuntimeError(f"destroy_weights_update_group failed: {message}")
+
+    def update_weights_from_distributed(
+        self,
+        *,
+        names: List[str],
+        dtypes: List[str],
+        shapes: List[List[int]],
+        group_name: str,
+        target_modules: Optional[List[str]] = None,
+        flush_cache: bool = True,
+    ) -> None:
+        if not names:
+            raise ValueError("names must be non-empty for distributed update")
+        runtime = self._import_sglang_runtime()
+        request = runtime["UpdateWeightsFromDistributedReqInput"](
+            names=list(names),
+            dtypes=list(dtypes),
+            shapes=[list(shape) for shape in shapes],
+            group_name=str(group_name),
+            target_modules=list(target_modules or self._target_modules),
+            flush_cache=flush_cache,
+        )
+        response = runtime["sync_scheduler_client"].forward(request)
+        success, message = self._extract_update_status(
+            response,
+            operation="update_weights_from_distributed",
+        )
+        if not success:
+            raise RuntimeError(f"SGLang distributed weight update failed: {message}")
 
     def get_last_weight_checksum(self) -> Dict[str, str]:
         """Return checksum snapshot from the latest successful path sync."""
@@ -1146,7 +1323,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             supports_trajectory=True,
             supports_prompt_embeddings=supports_prompt_encoding,
             supports_guidance_scale=True,
-            weight_sync_mode="checkpoint_path",
+            weight_sync_mode="state_dict",
         )
 
     def health_check(self) -> bool:

@@ -1,6 +1,7 @@
 """diffusionrl Configuration Module."""
 from .arguments import (
     AlgorithmConfig,
+    DebugConfig,
     ModelConfig,
     RolloutLoggingConfig,
     SamplingConfig,
@@ -28,6 +29,7 @@ __all__ = [
     "get_default_args",
     "validate_args",
     "AlgorithmConfig",
+    "DebugConfig",
     "WindowSchedulerConfig",
     "ModelConfig",
     "TrainingConfig",

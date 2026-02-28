@@ -40,6 +40,7 @@ REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardWorker"}
 
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
+REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
 
 if [ ! -f "${DATA_PATH}" ]; then
     echo "ERROR: DATA_PATH not found: ${DATA_PATH}"
@@ -58,6 +59,7 @@ python -m diffusionrl.train \
     --model-type hunyuan \
     --sampler-engine-type sglang \
     --sglang-logprob-mode "${SGLANG_LOGPROB_MODE}" \
+    --replay-log-probs "${REPLAY_LOG_PROBS}" \
     --tp-size ${TP_SIZE} \
     --algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward-path "${REWARD_PATH}" \

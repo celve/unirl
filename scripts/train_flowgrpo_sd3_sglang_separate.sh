@@ -30,6 +30,7 @@ BATCH_SIZE=${BATCH_SIZE:-4}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-8}
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
+REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
 
 if [ $(( TRAINING_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: TRAINING_GPUS*BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
@@ -43,6 +44,7 @@ python -m diffusionrl.train \
     --model-type sd3 \
     --sampler-engine-type sglang \
     --sglang-logprob-mode "${SGLANG_LOGPROB_MODE}" \
+    --replay-log-probs "${REPLAY_LOG_PROBS}" \
     --tp-size ${TP_SIZE} \
     --algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward-path diffusionrl.reward.local.LocalRewardWorker \

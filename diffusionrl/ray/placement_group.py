@@ -306,17 +306,42 @@ def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroup
     Returns:
         Dictionary of placement group results
     """
+    debug_mode = str(getattr(args, "debug_mode", "none") or "none").strip().lower()
+    rollout_num_nodes = int(args.rollout_num_nodes)
+    rollout_num_gpus_per_node = int(args.rollout_num_gpus_per_node)
+    training_num_nodes = int(args.training_num_nodes)
+    training_num_gpus_per_node = int(args.training_num_gpus_per_node)
+    reward_dedicated_num_gpus = int(args.reward_dedicated_num_gpus)
+    reward_dedicated_num_nodes = int(getattr(args, "reward_dedicated_num_nodes", 0))
+    reward_dedicated_num_gpus_per_node = int(getattr(args, "reward_dedicated_num_gpus_per_node", 0))
+
+    if debug_mode == "rollout_only":
+        training_num_nodes = 0
+        training_num_gpus_per_node = 0
+        logger.info(
+            "Debug mode rollout_only: training placement is disabled."
+        )
+    elif debug_mode == "train_only":
+        rollout_num_nodes = 0
+        rollout_num_gpus_per_node = 0
+        reward_dedicated_num_gpus = 0
+        reward_dedicated_num_nodes = 0
+        reward_dedicated_num_gpus_per_node = 0
+        logger.info(
+            "Debug mode train_only: rollout/reward placement is disabled."
+        )
+
     config = GRPOPlacementConfig(
-        rollout_num_nodes=args.rollout_num_nodes,
-        rollout_num_gpus_per_node=args.rollout_num_gpus_per_node,
-        training_num_nodes=args.training_num_nodes,
-        training_num_gpus_per_node=args.training_num_gpus_per_node,
-        reward_dedicated_num_gpus=args.reward_dedicated_num_gpus,
+        rollout_num_nodes=rollout_num_nodes,
+        rollout_num_gpus_per_node=rollout_num_gpus_per_node,
+        training_num_nodes=training_num_nodes,
+        training_num_gpus_per_node=training_num_gpus_per_node,
+        reward_dedicated_num_gpus=reward_dedicated_num_gpus,
         colocate_rollout_training=args.colocate_rollout_training,
         strategy=args.placement_strategy,
         # Node-level reward configuration
-        reward_dedicated_num_nodes=getattr(args, "reward_dedicated_num_nodes", 0),
-        reward_dedicated_num_gpus_per_node=getattr(args, "reward_dedicated_num_gpus_per_node", 0),
+        reward_dedicated_num_nodes=reward_dedicated_num_nodes,
+        reward_dedicated_num_gpus_per_node=reward_dedicated_num_gpus_per_node,
         reward_dedicated_gpus_per_actor=getattr(args, "reward_dedicated_gpus_per_actor", 1),
     )
     return create_placement_groups(config)

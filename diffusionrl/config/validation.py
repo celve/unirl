@@ -12,94 +12,14 @@ from diffusionrl.utils.misc import load_function
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LOSS_TYPE_REQUIREMENTS: Dict[str, Dict[str, bool]] = {
-    "grpo": {
-        "requires_trajectory": True,
-        "requires_log_prob": True,
-        "requires_embeddings": True,
-    },
-    "nft": {
-        "requires_trajectory": False,
-        "requires_log_prob": False,
-        "requires_embeddings": True,
-    },
-}
 
-
-def resolve_loss_type_requirements(
-    *,
-    loss_type: str,
-    loss_type_requirements: Dict[str, Dict[str, bool]],
-) -> Dict[str, bool]:
-    """Resolve required sampling capabilities for the selected loss type."""
-    requirements = loss_type_requirements.get(loss_type)
-    if requirements is None:
-        raise ValueError(
-            f"Unsupported loss_type={loss_type}. "
-            f"Expected one of: {sorted(loss_type_requirements.keys())}. "
-            "Use --loss-type grpo for standard GRPO training or --loss-type nft for Negative Fine-Tuning."
-        )
-    return dict(requirements)
-
-
-def validate_engine_loss_contract(
-    *,
-    args,
-    training_actor_direct_sampling: bool,
-    engine_capabilities: Dict[str, bool],
-    loss_type_requirements: Dict[str, Dict[str, bool]],
-) -> None:
-    """Fail-fast guard for engine/loss capability contract violations."""
-    sampler_engine_type = str(getattr(args, "sampler_engine_type", "") or "")
-    capabilities = dict(engine_capabilities)
-
-    if training_actor_direct_sampling:
-        return
-
-    allow_replay = (
-        bool(getattr(args, "replay_log_probs", False))
-        and getattr(args, "loss_type", "grpo") == "grpo"
-    )
-    if allow_replay:
-        capabilities["requires_log_prob"] = True
-        capabilities["requires_embeddings"] = True
-        logger.warning(
-            "replay_log_probs=true enabled: allowing %s+GRPO with "
-            "training-side old-log-prob replay (experimental path).",
-            sampler_engine_type,
-        )
-
-    required = resolve_loss_type_requirements(
-        loss_type=getattr(args, "loss_type", "grpo"),
-        loss_type_requirements=loss_type_requirements,
-    )
-    missing = [
-        key
-        for key, needed in required.items()
-        if bool(needed) and not bool(capabilities.get(key, False))
-    ]
-    if missing:
-        raise ValueError(
-            f"Engine capability mismatch for loss_type={args.loss_type}: "
-            f"sampler_engine_type={sampler_engine_type} lacks {missing}. "
-            f"engine_capabilities={capabilities}, required={required}. "
-            "Use a compatible engine/loss pair (for example: fsdp+grpo or fsdp+nft)."
-        )
-
-
-def resolve_runtime_loss_type_requirements(
-    args: Any,
-    *,
-    default_loss_type_requirements: Dict[str, Dict[str, bool]] = DEFAULT_LOSS_TYPE_REQUIREMENTS,
-) -> Dict[str, Dict[str, bool]]:
-    """Resolve loss requirements with classmethod declaration taking precedence."""
-    requirements = dict(default_loss_type_requirements)
+def _resolve_loss_class(args: Any):
+    """Load loss class from registry or loss_path."""
     loss_type = str(getattr(args, "loss_type", "grpo"))
     loss_cls = None
 
     try:
         from diffusionrl.losses import LOSS_REGISTRY
-
         loss_cls = LOSS_REGISTRY.get(loss_type)
     except Exception:
         loss_cls = None
@@ -107,14 +27,28 @@ def resolve_runtime_loss_type_requirements(
     if loss_cls is None and getattr(args, "loss_path", None):
         loss_cls = load_function(args.loss_path)
 
-    declared = getattr(loss_cls, "declared_requirements", None) if loss_cls is not None else None
-    if callable(declared):
-        requirements[loss_type] = dict(declared())
-    elif loss_cls is not None:
-        # Fallback for custom loss classes that do not declare requirements.
-        # Use conservative GRPO-like contract to avoid under-validating engines.
-        requirements[loss_type] = dict(default_loss_type_requirements["grpo"])
-    return requirements
+    return loss_cls
+
+
+def _get_loss_requirements(args: Any) -> Dict[str, bool]:
+    """Get loss requirements from loss class's declared_requirements().
+
+    Loss classes MUST implement declared_requirements() classmethod.
+    """
+    loss_cls = _resolve_loss_class(args)
+    if loss_cls is None:
+        raise ValueError(
+            f"Cannot resolve loss class for loss_type={getattr(args, 'loss_type', None)!r}, "
+            f"loss_path={getattr(args, 'loss_path', None)!r}. "
+            "Ensure loss_type is registered or loss_path is importable."
+        )
+    declared = getattr(loss_cls, "declared_requirements", None)
+    if not callable(declared):
+        raise ValueError(
+            f"Loss class {loss_cls.__name__} must define classmethod declared_requirements() "
+            "returning a dict like {'requires_trajectory': True, 'requires_log_prob': True, ...}."
+        )
+    return dict(declared())
 
 
 def resolve_engine_capabilities(*, engine_type: str) -> Dict[str, bool]:
@@ -186,14 +120,20 @@ def normalize_repo_relative_paths(
     env_repo_root: str,
     env_data_root: str,
     env_model_root: str,
-    local_to_hf_fallback: Dict[str, str],
 ) -> None:
-    """Normalize configured paths and apply local-model fallback to HF ids."""
+    """Normalize configured paths relative to repository root."""
     root = repo_root(env_repo_root=env_repo_root)
     data_root_env = os.getenv(env_data_root)
     model_root_env = os.getenv(env_model_root)
 
-    for field_name in ("output_dir", "logging_dir", "weight_sync_dir", "resume_from_checkpoint"):
+    for field_name in (
+        "output_dir",
+        "logging_dir",
+        "weight_sync_dir",
+        "resume_from_checkpoint",
+        "debug_save_dir",
+        "debug_load_path",
+    ):
         value = getattr(args, field_name, None)
         if isinstance(value, str) and value:
             setattr(args, field_name, resolve_repo_relative_path(value, root))
@@ -223,19 +163,6 @@ def normalize_repo_relative_paths(
             )
         else:
             setattr(args, field_name, resolve_repo_relative_path(value, root))
-
-    resolved = getattr(args, "pretrained_model_saved_path", "")
-    if resolved and not os.path.exists(resolved):
-        for local_prefix, hf_id in local_to_hf_fallback.items():
-            abs_local = os.path.join(root, local_prefix)
-            if resolved == abs_local or resolved.endswith("/" + local_prefix):
-                logger.info(
-                    "Local model not found at %s, falling back to HF: %s",
-                    resolved,
-                    hf_id,
-                )
-                args.pretrained_model_saved_path = hf_id
-                break
 
 
 def is_probably_local_weight_sync_dir(path: str, *, root: str) -> bool:
@@ -338,6 +265,7 @@ def validate_grouped_configs(args: Any) -> None:
     args.algorithm.validate()
     args.training.validate()
     args.rollout.validate()
+    args.debug_cfg.validate()
 
 
 def validate_dynamic_dotpaths(args: Any) -> None:
@@ -461,11 +389,10 @@ def validate_rollout_layout(
         and is_sglang_engine
         and not bool(getattr(args, "allow_noset_multi_gpu_inference", False))
     ):
-        logger.warning(
+        raise ValueError(
             "sglang colocate with multi-GPU rollout requires NOSET actor layout. "
-            "Auto-enabling allow_noset_multi_gpu_inference=true."
+            "Set --allow-noset-multi-gpu-inference=true."
         )
-        args.allow_noset_multi_gpu_inference = True
     if rollout_gpus > 1 and not bool(getattr(args, "allow_noset_multi_gpu_inference", False)):
         raise ValueError(
             "multi-GPU rollout actor layout requires --allow-noset-multi-gpu-inference=true. "
@@ -479,7 +406,7 @@ def validate_rollout_layout(
 
 
 def validate_model_specific_logic(args: Any, *, model_cls: Any) -> None:
-    """Run model-specific runtime validation and loss defaults."""
+    """Run model-specific runtime validation."""
     if args.model_type != "flux" and args.sde_type.startswith("flux_"):
         raise ValueError(
             f"sde_type '{args.sde_type}' is only valid for model_type='flux'"
@@ -489,33 +416,36 @@ def validate_model_specific_logic(args: Any, *, model_cls: Any) -> None:
     if callable(model_validate_fn):
         model_validate_fn(args)
 
-    if args.loss_type == "nft" and not args.sampling_adapter:
-        args.sampling_adapter = "old"
-        logger.info("NFT: default sampling_adapter set to 'old'")
+    if args.loss_type == "nft":
+        # DiffusionNFT reproduction contract:
+        # - rollout samples from old adapter
+        # - deterministic solver (dpm2)
+        old_adapter_name = "old"
+        loss_kwargs_json = getattr(args, "loss_kwargs_json", "")
+        if isinstance(loss_kwargs_json, str) and loss_kwargs_json.strip():
+            try:
+                parsed = json.loads(loss_kwargs_json)
+                if isinstance(parsed, dict):
+                    old_adapter_name = str(parsed.get("old_adapter_name", old_adapter_name) or old_adapter_name)
+            except Exception:
+                # validate_loss_kwargs_json() should already have rejected malformed JSON.
+                pass
 
-    if args.loss_type == "nft" and args.sde_type == "sde":
-        args.sde_type = "dpm2"
-        logger.info("NFT: default sde_type set to 'dpm2' for deterministic sampling")
-
-
-def validate_algorithm_loss_consistency(args: Any) -> None:
-    """Validate built-in algorithm/loss consistency."""
-    if getattr(args, "loss_path", None):
-        logger.info("Custom loss_path is set; skipping built-in algorithm/loss consistency mapping.")
-        return
-
-    mapping = {
-        "diffusionrl.algorithms.grpo.GRPOAlgorithm": "grpo",
-        "diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm": "grpo",
-        "diffusionrl.algorithms.nft.NFTAlgorithm": "nft",
-    }
-    expected_loss_type = mapping.get(args.algorithm_path)
-    if expected_loss_type and args.loss_type != expected_loss_type:
-        raise ValueError(
-            f"algorithm_path={args.algorithm_path} requires loss_type={expected_loss_type}, "
-            f"but got loss_type={args.loss_type}. "
-            f"Please either change --loss-type to {expected_loss_type} or use a compatible algorithm."
-        )
+        if not args.sampling_adapter:
+            raise ValueError(
+                "loss_type='nft' requires --sampling-adapter to be set "
+                f"(must match old_adapter_name={old_adapter_name!r})."
+            )
+        if str(args.sampling_adapter) != old_adapter_name:
+            raise ValueError(
+                "loss_type='nft' requires rollout sampling from the old adapter. "
+                f"Set --sampling-adapter {old_adapter_name!r}, got {args.sampling_adapter!r}."
+            )
+        if str(args.sde_type) != "dpm2":
+            raise ValueError(
+                "loss_type='nft' targets DiffusionNFT deterministic sampling. "
+                f"Set --sde-type dpm2, got sde_type={args.sde_type!r}."
+            )
 
 
 def validate_loss_kwargs_json(args: Any) -> None:
@@ -575,40 +505,63 @@ def validate_resolved_engine_loss_contract(
     sglang_logprob_mode: str,
 ) -> None:
     """Validate engine/loss compatibility using resolved capabilities."""
-    effective_loss_requirements = resolve_runtime_loss_type_requirements(args)
-    effective_engine_caps = resolve_engine_capabilities(engine_type=args.sampler_engine_type)
-    if is_sglang_engine and replay_guard and sglang_logprob_mode == "native":
-        effective_engine_caps = dict(
-            effective_engine_caps,
-            requires_log_prob=True,
-            requires_embeddings=True,
-        )
-    validate_engine_loss_contract(
-        args=args,
-        training_actor_direct_sampling=training_actor_direct_sampling,
-        engine_capabilities=effective_engine_caps,
-        loss_type_requirements=effective_loss_requirements,
+    if training_actor_direct_sampling:
+        return
+
+    sampler_engine_type = str(getattr(args, "sampler_engine_type", "") or "")
+    engine_caps = resolve_engine_capabilities(engine_type=args.sampler_engine_type)
+
+    allow_replay = (
+        bool(getattr(args, "replay_log_probs", False))
+        and getattr(args, "loss_type", "grpo") == "grpo"
     )
+    if allow_replay:
+        engine_caps = dict(engine_caps, requires_log_prob=True, requires_embeddings=True)
+        logger.warning(
+            "replay_log_probs=true enabled: allowing %s+GRPO with "
+            "training-side old-log-prob replay (experimental path).",
+            sampler_engine_type,
+        )
+
+    if is_sglang_engine and replay_guard and sglang_logprob_mode == "native":
+        engine_caps = dict(engine_caps, requires_log_prob=True, requires_embeddings=True)
+
+    required = _get_loss_requirements(args)
+    missing = [
+        key
+        for key, needed in required.items()
+        if bool(needed) and not bool(engine_caps.get(key, False))
+    ]
+    if missing:
+        raise ValueError(
+            f"Engine capability mismatch for loss_type={args.loss_type}: "
+            f"sampler_engine_type={sampler_engine_type} lacks {missing}. "
+            f"engine_capabilities={engine_caps}, required={required}. "
+            "Use a compatible engine/loss pair (for example: fsdp+grpo or fsdp+nft)."
+        )
 
 
 def validate_runtime_mode_constraints(
     args: Any,
     *,
     training_actor_direct_sampling: bool,
+    model_cls: Any,
 ) -> None:
     """Validate runtime mode constraints and mutually-exclusive switches."""
     if (
         not training_actor_direct_sampling
         and str(getattr(args, "sampler_engine_type", "")).lower() == "sglang"
     ):
-        supported_sglang_prompt_models = {"hunyuan", "flux", "mochi", "sd3"}
-        model_type = str(getattr(args, "model_type", "")).lower()
-        if model_type not in supported_sglang_prompt_models:
+        supports_sglang = getattr(model_cls, "supports_sglang_prompt_mode", None)
+        if not callable(supports_sglang):
             raise ValueError(
-                "sampler_engine_type='sglang' now uses prompt-only rollout input mode "
-                "(no prompt-embedding input path). "
-                f"Unsupported model_type={args.model_type!r}. "
-                f"Supported model types: {sorted(supported_sglang_prompt_models)}."
+                f"sampler_engine_type='sglang' requires model {args.model_path!r} "
+                "to define classmethod supports_sglang_prompt_mode()."
+            )
+        if not supports_sglang():
+            raise ValueError(
+                f"sampler_engine_type='sglang' is not supported by model {args.model_path!r}. "
+                "The model must implement classmethod supports_sglang_prompt_mode() returning True."
             )
 
     if getattr(args, "async_pipeline", False):
@@ -621,12 +574,12 @@ def validate_runtime_mode_constraints(
         if args.update_weights_interval <= 0:
             raise ValueError("update_weights_interval must be > 0.")
         if args.offload_train or args.offload_rollout:
-            logger.warning("async_pipeline: disabling offload_train/offload_rollout for stable overlap.")
-            args.offload_train = False
-            args.offload_rollout = False
+            raise ValueError(
+                "async_pipeline is incompatible with offload_train/offload_rollout. "
+                "Set --offload-train=false --offload-rollout=false when using --async-pipeline."
+            )
 
 __all__ = [
-    "DEFAULT_LOSS_TYPE_REQUIREMENTS",
     "repo_root",
     "normalize_repo_relative_paths",
     "resolve_repo_relative_path",
@@ -634,18 +587,14 @@ __all__ = [
     "is_probably_local_weight_sync_dir",
     "validate_colocate_fractions",
     "get_rollout_gpus_per_actor",
-    "resolve_loss_type_requirements",
-    "resolve_runtime_loss_type_requirements",
     "resolve_engine_capabilities",
     "validate_dotpath",
     "validate_grouped_configs",
     "validate_dynamic_dotpaths",
-    "validate_engine_loss_contract",
     "validate_reward_config",
     "validate_reward_and_rollout_buffer_config",
     "validate_rollout_layout",
     "validate_model_specific_logic",
-    "validate_algorithm_loss_consistency",
     "validate_algorithm_kwargs_json",
     "validate_loss_kwargs_json",
     "validate_resolved_engine_loss_contract",

@@ -29,6 +29,16 @@ def should_eval(rollout_id: int, args) -> bool:
 
 def train(args):
     """Main training loop."""
+    debug_mode = str(getattr(args, "debug_mode", "none") or "none").strip().lower()
+    if debug_mode == "rollout_only":
+        from diffusionrl.debug import run_debug_rollout_only
+
+        return run_debug_rollout_only(args)
+    if debug_mode == "train_only":
+        from diffusionrl.debug import run_debug_train_only
+
+        return run_debug_train_only(args)
+
     import ray
 
     from diffusionrl.ray import (
@@ -50,6 +60,12 @@ def train(args):
     logger.info(f"Mode: {'colocate' if args.colocate_rollout_training else 'separate'}")
     logger.info(f"Offload train: {args.offload_train}, Offload rollout: {args.offload_rollout}")
     logger.info(f"Weight sync mode: {args.weight_sync_mode}, async_pipeline={args.async_pipeline}")
+    logger.info(
+        "Debug flags: mode=%s save_intermediates=%s save_dir=%s",
+        debug_mode,
+        bool(getattr(args, "debug_save_intermediates", False)),
+        getattr(args, "debug_save_dir", ""),
+    )
 
     # Initialize Ray
     if not ray.is_initialized():
@@ -161,6 +177,12 @@ def train(args):
 
     # 10. Core synchronous training loop
     enforce_rollout_alignment = not bool(getattr(args, "rollout_buffer_grouped", False))
+    debug_save_intermediates = bool(getattr(args, "debug_save_intermediates", False))
+    save_rollout_debug_payload = None
+    if debug_save_intermediates:
+        from diffusionrl.debug.runner import save_rollout_debug_payload as _save_rollout_debug_payload
+
+        save_rollout_debug_payload = _save_rollout_debug_payload
 
     def offload_train_phase() -> None:
         if args.offload_train:
@@ -177,8 +199,33 @@ def train(args):
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         # === PHASE 1: Rollout ===
         ensure_rollout_on_gpu()
-
-        ray.get(rollout_buffer.request_rollout.remote(rollout_id=rollout_id))
+        if debug_save_intermediates:
+            debug_payload = ray.get(rollout_manager.build_training_debug_payload.remote(rollout_id))
+            push_result = ray.get(
+                rollout_buffer.push.remote(
+                    rollout_id=rollout_id,
+                    train_data=debug_payload["training_batch"],
+                )
+            )
+            if not push_result.get("accepted", False):
+                raise RuntimeError(
+                    f"Rollout buffer rejected rollout_id={rollout_id}: {push_result.get('error')}"
+                )
+            if save_rollout_debug_payload is not None:
+                save_rollout_debug_payload(
+                    args=args,
+                    payload=debug_payload,
+                    rollout_id=rollout_id,
+                    source="train_loop",
+                )
+            del debug_payload
+        else:
+            ray.get(
+                rollout_manager.generate_and_push.remote(
+                    rollout_id=rollout_id,
+                    buffer=rollout_buffer,
+                )
+            )
         rollout_payload = ray.get(
             rollout_buffer.pop_training_data.remote(
                 consumer_spec=buffer_consumer_spec,

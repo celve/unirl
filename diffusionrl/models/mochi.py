@@ -84,6 +84,15 @@ class MochiModelBundle(ModelBundle):
         # Default rollout engine is SGLang.
         return "sglang"
 
+    @classmethod
+    def forward_plugin(cls):
+        from diffusionrl.models.forward_plugins import MochiForwardPlugin
+        return MochiForwardPlugin()
+
+    @classmethod
+    def supports_sglang_prompt_mode(cls) -> bool:
+        return True
+
     def load(self) -> None:
         """Load all model components."""
         logger.info("Loading Mochi model bundle...")

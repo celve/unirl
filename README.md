@@ -264,12 +264,12 @@ diffusionrl/
 ├── types/                          # Canonical shared data types (RolloutOutput, TrainingBatch, Reward, WeightSync)
 ├── config/                         # Configuration system (TrainingArguments)
 ├── algorithms/                     # RL algorithms (GRPO, MixGRPO, NFT)
+│   └── advantages/                 #   Advantage computation (global, group, per-prompt)
 ├── samplers/                       # Inference engines (FSDP, FastVideo, SGLang)
 │   ├── fsdp/                       #   FSDP-based: FluxSampler, SD3Sampler, HunyuanSampler
 │   ├── fastvideo/                  #   FastVideo-based: FastVideoSampler
 │   └── sglang/                     #   SGLang external service engine
 ├── losses/                         # Loss functions (GRPOLoss, NFTLoss)
-├── advantages/                     # Advantage computation (global, group, per-prompt)
 ├── reward/                 # Reward workers (Local, HTTP, Ray service)
 ├── models/                         # Model implementations (FLUX, SD3, Hunyuan, Mochi)
 ├── data/                           # Data loading and datasets

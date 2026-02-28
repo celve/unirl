@@ -8,7 +8,7 @@ Provides unified advantage computation with clean separation of concerns:
 
 Usage:
     # Unified function API (recommended)
-    from diffusionrl.advantages import compute_advantage
+    from diffusionrl.algorithms.advantages import compute_advantage
     advantages = compute_advantage(rewards, strategy='group', num_samples_per_prompt=4)
 """
 

@@ -2,12 +2,15 @@
 Log probability computation for SDE steps.
 
 This module contains the core formulas for computing log probabilities
-during SDE sampling.
+during SDE sampling. SDE-type-specific math is delegated to the strategy
+registry in ``sde_strategies.py``.
 """
 
 import math
 from typing import Tuple, Optional
 import torch
+
+from diffusionrl.samplers.sde_strategies import get_sde_strategy
 
 
 def sd3_time_shift(shift: float, t: torch.Tensor) -> torch.Tensor:
@@ -97,65 +100,16 @@ def compute_sde_log_prob(
         sigma = sigma.unsqueeze(-1)
         sigma_next = sigma_next.unsqueeze(-1)
 
-    dt = sigma_next - sigma  # negative
-
-    if sigma_max is None:
-        sigma_max = 1.0
-
-    if sde_type in ("sde", "flux_flow", "flow"):
-        # Standard SDE formulation from flow-GRPO
-        std_dev_t = torch.sqrt(sigma / (1 - torch.where(sigma == 1, sigma_max, sigma))) * eta
-
-        # SDE mean update
-        prev_sample_mean = (
-            sample * (1 + std_dev_t**2 / (2 * sigma) * dt) +
-            noise_pred * (1 + std_dev_t**2 * (1 - sigma) / (2 * sigma)) * dt
-        )
-
-        # Variance
-        variance = (std_dev_t * torch.sqrt(-dt)) ** 2
-
-        # Log probability
-        log_prob = (
-            -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * variance)
-            - torch.log(std_dev_t * torch.sqrt(-dt))
-            - 0.5 * math.log(2 * math.pi)
-        )
-
-    elif sde_type == "cps":
-        # Coefficient-Preserving Sampling
-        std_dev_t = sigma_next * math.sin(eta * math.pi / 2)
-        pred_original = sample - sigma * noise_pred
-        noise_estimate = sample + noise_pred * (1 - sigma)
-        prev_sample_mean = (
-            pred_original * (1 - sigma_next) +
-            noise_estimate * torch.sqrt(sigma_next**2 - std_dev_t**2)
-        )
-
-        # Simplified log prob (constants removed for this formulation)
-        log_prob = -((prev_sample.detach() - prev_sample_mean) ** 2)
-
-    elif sde_type in ("dance", "flux_dance"):
-        # DanceGRPO SDE formulation (for Flux)
-        dsigma = sigma_next - sigma
-        delta_t = (sigma - sigma_next).clamp(min=1e-12)
-        std_dev_t = eta * torch.sqrt(delta_t)
-
-        pred_original = sample - sigma * noise_pred
-        prev_sample_mean = sample + dsigma * noise_pred
-
-        score_estimate = -(sample - pred_original * (1 - sigma)) / (sigma**2 + 1e-12)
-        log_term = -0.5 * (eta**2) * score_estimate
-        prev_sample_mean = prev_sample_mean + log_term * dsigma
-
-        log_prob = (
-            -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * std_dev_t**2 + 1e-12)
-            - torch.log(std_dev_t + 1e-12)
-            - 0.5 * math.log(2 * math.pi)
-        )
-
-    else:
-        raise ValueError(f"Unknown sde_type: {sde_type}")
+    strategy = get_sde_strategy(sde_type)
+    log_prob, prev_sample_mean = strategy.compute_log_prob(
+        noise_pred=noise_pred,
+        sample=sample,
+        prev_sample=prev_sample,
+        sigma=sigma,
+        sigma_next=sigma_next,
+        eta=eta,
+        sigma_max=sigma_max,
+    )
 
     # Mean along all but batch dimension to get per-sample log prob
     log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
@@ -195,8 +149,6 @@ def sde_step_with_log_prob(
         log_prob: Log probability [B]
         prev_sample_mean: SDE mean [B, C, ...]
     """
-    from diffusers.utils.torch_utils import randn_tensor
-
     # Convert to float32
     noise_pred = noise_pred.float()
     sample = sample.float()
@@ -209,86 +161,18 @@ def sde_step_with_log_prob(
     sigma_max = sigmas[1].item()
     dt = sigma_next - sigma
 
-    if sde_type in ("sde", "flux_flow", "flow"):
-        # Add epsilon protection for numerical stability
-        sigma_safe = sigma.clamp(min=1e-8)
-        std_dev_t = torch.sqrt(
-            sigma_safe / (1 - torch.where(sigma == 1, sigma_max, sigma_safe))
-        ) * eta
-
-        prev_sample_mean = (
-            sample * (1 + std_dev_t**2 / (2 * sigma_safe) * dt) +
-            noise_pred * (1 + std_dev_t**2 * (1 - sigma) / (2 * sigma_safe)) * dt
-        )
-
-        if prev_sample is None:
-            noise = randn_tensor(
-                noise_pred.shape,
-                generator=generator,
-                device=device,
-                dtype=noise_pred.dtype,
-            )
-            prev_sample = prev_sample_mean + std_dev_t * torch.sqrt(-dt) * noise
-
-        variance = (std_dev_t * torch.sqrt(-dt)) ** 2 + 1e-12
-        std_term = std_dev_t * torch.sqrt(-dt) + 1e-12
-        log_prob = (
-            -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * variance)
-            - torch.log(std_term)
-            - 0.5 * math.log(2 * math.pi)
-        )
-
-    elif sde_type == "cps":
-        std_dev_t = sigma_next * math.sin(eta * math.pi / 2)
-        pred_original = sample - sigma * noise_pred
-        noise_estimate = sample + noise_pred * (1 - sigma)
-        prev_sample_mean = (
-            pred_original * (1 - sigma_next) +
-            noise_estimate * torch.sqrt(sigma_next**2 - std_dev_t**2)
-        )
-
-        if prev_sample is None:
-            noise = randn_tensor(
-                noise_pred.shape,
-                generator=generator,
-                device=device,
-                dtype=noise_pred.dtype,
-            )
-            prev_sample = prev_sample_mean + std_dev_t * noise
-
-        log_prob = -((prev_sample.detach() - prev_sample_mean) ** 2)
-
-    elif sde_type in ("dance", "flux_dance"):
-        # DanceGRPO SDE formulation (for Flux)
-        dsigma = sigma_next - sigma
-        delta_t = (sigma - sigma_next).clamp(min=1e-12)
-        std_dev_t = eta * torch.sqrt(delta_t)
-
-        pred_original = sample - sigma * noise_pred
-        prev_sample_mean = sample + dsigma * noise_pred
-
-        # Add score-based correction term
-        score_estimate = -(sample - pred_original * (1 - sigma)) / (sigma**2 + 1e-12)
-        log_term = -0.5 * (eta**2) * score_estimate
-        prev_sample_mean = prev_sample_mean + log_term * dsigma
-
-        if prev_sample is None:
-            noise = randn_tensor(
-                noise_pred.shape,
-                generator=generator,
-                device=device,
-                dtype=noise_pred.dtype,
-            )
-            prev_sample = prev_sample_mean + std_dev_t * noise
-
-        log_prob = (
-            -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * std_dev_t**2 + 1e-12)
-            - torch.log(std_dev_t + 1e-12)
-            - 0.5 * math.log(2 * math.pi)
-        )
-
-    else:
-        raise ValueError(f"Unknown sde_type: {sde_type}")
+    strategy = get_sde_strategy(sde_type)
+    prev_sample, log_prob, prev_sample_mean = strategy.step_with_log_prob(
+        noise_pred=noise_pred,
+        sample=sample,
+        sigma=sigma,
+        sigma_next=sigma_next,
+        dt=dt,
+        eta=eta,
+        prev_sample=prev_sample,
+        generator=generator,
+        sigma_max=sigma_max,
+    )
 
     # Mean along all but batch dimension
     log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim)))

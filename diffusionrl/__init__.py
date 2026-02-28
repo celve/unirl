@@ -36,7 +36,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "BaseAlgorithm": ("diffusionrl.algorithms", "BaseAlgorithm"),
     "SamplingRequirements": ("diffusionrl.algorithms", "SamplingRequirements"),
     "GRPOAlgorithm": ("diffusionrl.algorithms", "GRPOAlgorithm"),
-    "compute_advantage": ("diffusionrl.advantages", "compute_advantage"),
+    "compute_advantage": ("diffusionrl.algorithms.advantages", "compute_advantage"),
     # config / utils / models
     "TrainingArguments": ("diffusionrl.config", "TrainingArguments"),
     "parse_args": ("diffusionrl.config", "parse_args"),

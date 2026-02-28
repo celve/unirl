@@ -11,12 +11,16 @@ from .fsdp import FSDPTrainBackend
 from .megatron import MegatronTrainBackend
 from .veomni import VeOmniTrainBackend
 
-_SUPPORTED_BUILTIN_BACKENDS = ("fsdp", "megatron", "veomni")
+_BUILTIN_BACKENDS: dict[str, type[TrainBackend]] = {
+    "fsdp": FSDPTrainBackend,
+    "veomni": VeOmniTrainBackend,
+    "megatron": MegatronTrainBackend,
+}
 
 
 def supported_train_backends() -> tuple[str, ...]:
     """Return built-in train backend names recognized by configuration."""
-    return _SUPPORTED_BUILTIN_BACKENDS
+    return tuple(_BUILTIN_BACKENDS.keys())
 
 
 def create_train_backend(
@@ -35,20 +39,13 @@ def create_train_backend(
         return backend_cls(backend_kwargs=backend_kwargs)
 
     backend_name = str(name or "fsdp").strip().lower()
-
-    if backend_name == "fsdp":
-        return FSDPTrainBackend(backend_kwargs=dict(backend_kwargs or {}))
-
-    if backend_name == "veomni":
-        return VeOmniTrainBackend(backend_kwargs=dict(backend_kwargs or {}))
-
-    if backend_name == "megatron":
-        return MegatronTrainBackend(backend_kwargs=dict(backend_kwargs or {}))
-
-    raise ValueError(
-        f"Unsupported train_backend={name!r}. "
-        f"Expected one of {list(_SUPPORTED_BUILTIN_BACKENDS)} or provide train_backend_path."
-    )
+    backend_cls = _BUILTIN_BACKENDS.get(backend_name)
+    if backend_cls is None:
+        raise ValueError(
+            f"Unsupported train_backend={name!r}. "
+            f"Expected one of {list(_BUILTIN_BACKENDS)} or provide train_backend_path."
+        )
+    return backend_cls(backend_kwargs=dict(backend_kwargs or {}))
 
 
 __all__ = [

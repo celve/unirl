@@ -575,22 +575,26 @@ class GRPOLoss:
         return total_loss, loss_terms
 
     def _get_forward_plugin(self, model: nn.Module):
-        """Get or create the forward plugin for this model.
+        """Get the forward plugin for this model.
 
-        Lazy loads the plugin on first use, using model_type from config
-        or auto-detecting from the model class name.
+        The plugin should be set by the training actor from model_bundle.forward_plugin().
+        Falls back to DefaultForwardPlugin if not set.
         """
         if self._forward_plugin is None:
-            from diffusionrl.models.forward_plugins import get_forward_plugin, detect_model_type
-
-            if self.model_type == "default":
-                # Auto-detect model type from model class
-                detected_type = detect_model_type(model)
-                self._forward_plugin = get_forward_plugin(detected_type)
-                logger.debug(f"Auto-detected model_type={detected_type} for forward plugin")
-            else:
-                self._forward_plugin = get_forward_plugin(self.model_type)
-
+            if self.model_type != "default":
+                raise RuntimeError(
+                    "No forward_plugin set on loss for model_type="
+                    f"{self.model_type!r}. TrainingActor must inject plugin via "
+                    "model_bundle.forward_plugin()."
+                )
+            from diffusionrl.models.forward_plugins import DefaultForwardPlugin
+            self._forward_plugin = DefaultForwardPlugin()
+            logger.warning(
+                "No forward_plugin set on loss (model_type=%s). "
+                "Using DefaultForwardPlugin. Set loss._forward_plugin from "
+                "model_bundle.forward_plugin() for model-specific behavior.",
+                self.model_type,
+            )
         return self._forward_plugin
 
     def _default_forward(

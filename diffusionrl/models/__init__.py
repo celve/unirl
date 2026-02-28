@@ -11,10 +11,8 @@ from .forward_plugins import (
     FluxForwardPlugin,
     SD3ForwardPlugin,
     HunyuanForwardPlugin,
+    MochiForwardPlugin,
     DefaultForwardPlugin,
-    get_forward_plugin,
-    detect_model_type,
-    PLUGIN_REGISTRY,
 )
 
 __all__ = [
@@ -28,10 +26,8 @@ __all__ = [
     "FluxForwardPlugin",
     "SD3ForwardPlugin",
     "HunyuanForwardPlugin",
+    "MochiForwardPlugin",
     "DefaultForwardPlugin",
-    "get_forward_plugin",
-    "detect_model_type",
-    "PLUGIN_REGISTRY",
     # Lazy import getters
     "get_hunyuan_model_bundle",
     "get_mochi_model_bundle",

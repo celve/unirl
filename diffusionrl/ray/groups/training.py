@@ -138,6 +138,112 @@ class TrainingActorGroup(BaseActorGroup):
         refs = [actor.update_weights.remote() for actor in self._actor_handles]
         ray.get(refs)
 
+    def get_rank0_ip_and_free_port(self, *, start_port: int = 26000) -> Dict[str, Any]:
+        """Get node IP and free port from training rank 0."""
+        if not self._actor_handles:
+            raise RuntimeError("Training actor group is empty.")
+        payload = ray.get(
+            self._actor_handles[0].get_node_ip_and_free_port.remote(start_port=start_port)
+        )
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Invalid rank0 network payload: {payload!r}")
+        return {
+            "master_address": str(payload["master_address"]),
+            "master_port": int(payload["master_port"]),
+        }
+
+    def async_init_weights_update_group(
+        self,
+        *,
+        master_address: str,
+        master_port: int,
+        world_size: int,
+        group_name: str,
+        backend: str = "nccl",
+    ) -> ray.ObjectRef:
+        """Initialize rank-0 custom process group for NCCL rollout sync."""
+        if not self._actor_handles:
+            raise RuntimeError("Training actor group is empty.")
+        return self._actor_handles[0].init_weights_update_group.remote(
+            master_address=master_address,
+            master_port=int(master_port),
+            world_size=int(world_size),
+            group_name=str(group_name),
+            backend=str(backend),
+        )
+
+    def destroy_weights_update_group(
+        self,
+        *,
+        group_name: str,
+    ) -> None:
+        """Destroy rank-0 custom process group for NCCL rollout sync."""
+        if not self._actor_handles:
+            return
+        ray.get(
+            self._actor_handles[0].destroy_weights_update_group.remote(
+                group_name=str(group_name),
+            )
+        )
+
+    def sync_weights_to_rollout_ipc(
+        self,
+        *,
+        rollout_manager: Any,
+        target_modules: Optional[List[str]] = None,
+        bucket_size_mb: int = 256,
+        flush_cache: bool = True,
+        tp_payload_count: int = 1,
+    ) -> Dict[str, int]:
+        """Run collective state export then push weights to rollout via IPC payloads."""
+        refs = [
+            actor.sync_weights_to_rollout_ipc.remote(
+                rollout_manager=rollout_manager,
+                target_modules=target_modules,
+                bucket_size_mb=int(bucket_size_mb),
+                flush_cache=bool(flush_cache),
+                tp_payload_count=max(1, int(tp_payload_count)),
+            )
+            for actor in self._actor_handles
+        ]
+        results = ray.get(refs)
+        rank0 = results[0] if results else {}
+        if not isinstance(rank0, dict):
+            return {"buckets": 0, "payloads": 0}
+        return {
+            "buckets": int(rank0.get("buckets", 0)),
+            "payloads": int(rank0.get("payloads", 0)),
+        }
+
+    def sync_weights_to_rollout_nccl(
+        self,
+        *,
+        rollout_manager: Any,
+        group_name: str,
+        target_modules: Optional[List[str]] = None,
+        bucket_size_mb: int = 256,
+        flush_cache: bool = True,
+    ) -> Dict[str, int]:
+        """Run collective state export then push weights via NCCL broadcast."""
+        refs = [
+            actor.sync_weights_to_rollout_nccl.remote(
+                rollout_manager=rollout_manager,
+                group_name=str(group_name),
+                target_modules=target_modules,
+                bucket_size_mb=int(bucket_size_mb),
+                flush_cache=bool(flush_cache),
+            )
+            for actor in self._actor_handles
+        ]
+        results = ray.get(refs)
+        rank0 = results[0] if results else {}
+        if not isinstance(rank0, dict):
+            return {"buckets": 0, "broadcast_tensors": 0}
+        return {
+            "buckets": int(rank0.get("buckets", 0)),
+            "broadcast_tensors": int(rank0.get("broadcast_tensors", 0)),
+        }
+
     def get_train_backend_info(self, *, force_refresh: bool = False) -> Dict[str, Any]:
         """Return training backend metadata declared by actor rank 0."""
         if self._train_backend_info_cache is not None and not force_refresh:

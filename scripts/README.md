@@ -50,6 +50,30 @@ bash scripts/train_plugin_demo.sh --num-rollout 1
 For SGLang, use dedicated rollout actors (`--colocate-rollout-training true/false`)
 with scripts named `*_sglang_colocate.sh` or `*_sglang_separate.sh`.
 
+### SGLang remote scheduler mode (TCP, non-HTTP data plane)
+
+Use `local_mode=false` and pass explicit scheduler endpoint(s) in `engine_kwargs`:
+
+```bash
+--engine-kwargs-json '{
+  "local_mode": false,
+  "remote_scheduler_endpoints": [
+    "tcp://10.0.0.11:35555",
+    "tcp://10.0.0.12:35555"
+  ],
+  "num_gpus": 4,
+  "tp_size": 4,
+  "rollout_transport_dtype": "bf16",
+  "rollout_transport_drop_decoded_videos": true,
+  "rollout_transport_log_payload_bytes": true
+}'
+```
+
+Notes:
+- When `remote_scheduler_endpoints` is set, rollout actors map by rank (`rank % len(endpoints)`).
+- Rollout weight updates are deduplicated per logical scheduler endpoint (avoids repeated updates to the same scheduler).
+- For SGLang rollout, `encode_prompt_in_generate` now defaults to `false` (can be re-enabled in `engine_kwargs`).
+
 ## Local model setup
 
 Models are loaded from `models/local/` (symlinks to `shared_models/`).

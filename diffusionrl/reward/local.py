@@ -12,6 +12,22 @@ from PIL import Image
 from .base import BaseRewardWorker, RewardRequest, RewardResponse, RewardType
 
 
+_REWARD_LOADERS = {
+    "pickscore": "_load_pickscore",
+    "clip": "_load_clip",
+    "aesthetic": "_load_aesthetic",
+    "hpsv2": "_load_hpsv2",
+    "ocr": "_load_ocr",
+}
+
+_REWARD_COMPUTERS = {
+    "pickscore": "_compute_pickscore",
+    "clip": "_compute_clip",
+    "hpsv2": "_compute_hpsv2",
+    "ocr": "_compute_ocr",
+}
+
+
 class LocalRewardWorker(BaseRewardWorker):
     """
     Local reward computation using pre-loaded models.
@@ -87,19 +103,13 @@ class LocalRewardWorker(BaseRewardWorker):
 
     def _load_model(self):
         """Load the reward model based on model_name."""
-        if self.model_name == "pickscore":
-            self._load_pickscore()
-        elif self.model_name == "clip":
-            self._load_clip()
-        elif self.model_name == "aesthetic":
-            self._load_aesthetic()
-        elif self.model_name == "hpsv2":
-            self._load_hpsv2()
-        elif self.model_name == "ocr":
-            self._load_ocr()
-        else:
-            raise ValueError(f"Unknown model_name: {self.model_name}")
-
+        loader_name = _REWARD_LOADERS.get(self.model_name)
+        if loader_name is None:
+            raise ValueError(
+                f"Unknown model_name: {self.model_name}. "
+                f"Available: {sorted(_REWARD_LOADERS.keys())}"
+            )
+        getattr(self, loader_name)()
         self._is_loaded = True
 
     def _load_pickscore(self):
@@ -172,16 +182,14 @@ class LocalRewardWorker(BaseRewardWorker):
         try:
             if self.reward_fn is not None:
                 rewards = self._compute_custom(request)
-            elif self.model_name == "pickscore":
-                rewards = self._compute_pickscore(request)
-            elif self.model_name == "clip":
-                rewards = self._compute_clip(request)
-            elif self.model_name == "hpsv2":
-                rewards = self._compute_hpsv2(request)
-            elif self.model_name == "ocr":
-                rewards = self._compute_ocr(request)
             else:
-                raise ValueError(f"Unknown model: {self.model_name}")
+                computer_name = _REWARD_COMPUTERS.get(self.model_name)
+                if computer_name is None:
+                    raise ValueError(
+                        f"Unknown model: {self.model_name}. "
+                        f"Available: {sorted(_REWARD_COMPUTERS.keys())}"
+                    )
+                rewards = getattr(self, computer_name)(request)
 
             return RewardResponse(
                 rewards=rewards,
