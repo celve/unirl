@@ -68,6 +68,7 @@ class FSDPHunyuanSampler(BaseSampler):
     def __init__(
         self,
         model: Optional[nn.Module] = None,
+        text_encoder: Optional[Any] = None,
         vae: Optional[nn.Module] = None,
         eta: float = 1.0,
         sde_type: str = "dance",  # Use DanceGRPO formulation
@@ -79,6 +80,8 @@ class FSDPHunyuanSampler(BaseSampler):
 
         Args:
             model: HunyuanVideo transformer model
+            text_encoder: Reserved for constructor compatibility with the
+                shared sampler factory (unused in this sampler).
             vae: VAE for decoding latents to video
             eta: Noise level for SDE (controls stochasticity)
             sde_type: SDE formulation (use "dance" for DanceGRPO alignment)
@@ -87,6 +90,7 @@ class FSDPHunyuanSampler(BaseSampler):
         """
         super().__init__(eta=eta, sde_type=sde_type, shift=shift)
         self.model = model
+        self.text_encoder = text_encoder
         self.vae = vae
         self.use_sde_solver = use_sde_solver
 
@@ -155,8 +159,27 @@ class FSDPHunyuanSampler(BaseSampler):
 
         # Move embeddings to device
         prompt_embeds = prompt_embeds.to(device=device)
+        if pooled_prompt_embeds is not None:
+            pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=torch.bfloat16)
+        else:
+            # Newer diffusers Hunyuan forward requires pooled_projections.
+            proj_dim = getattr(getattr(self.model, "config", None), "pooled_projection_dim", 768)
+            pooled_prompt_embeds = torch.zeros(
+                batch_size,
+                int(proj_dim),
+                device=device,
+                dtype=torch.bfloat16,
+            )
         if encoder_attention_mask is not None:
             encoder_attention_mask = encoder_attention_mask.to(device=device)
+        else:
+            # Recent diffusers Hunyuan forward expects a valid attention mask.
+            encoder_attention_mask = torch.ones(
+                batch_size,
+                prompt_embeds.shape[1],
+                device=device,
+                dtype=torch.long,
+            )
 
         # Calculate latent dimensions (DanceGRPO line 199-203)
         latent_t = ((num_frames - 1) // self.TEMPORAL_DOWNSAMPLE) + 1
@@ -207,6 +230,7 @@ class FSDPHunyuanSampler(BaseSampler):
                     model_pred = self.model(
                         hidden_states=latents,
                         encoder_hidden_states=prompt_embeds,
+                        pooled_projections=pooled_prompt_embeds,
                         timestep=timesteps,
                         guidance=torch.tensor(
                             [self.GUIDANCE_VALUE],

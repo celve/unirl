@@ -62,6 +62,8 @@ python -m diffusionrl.train \
     --prompts-per-batch ${PROMPTS_PER_BATCH} \
     --batch-size ${BATCH_SIZE} \
     --num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --use-per-prompt-stat-tracker true \
+    --use-running-stats true \
     --use-global-std true \
     --clip-range 1e-4 \
     --use-kl-penalty true \

@@ -375,6 +375,21 @@ class HunyuanForwardPlugin(BaseForwardPlugin):
         batch_size = latents.shape[0]
         device = latents.device
         dtype = prompt_embeds.dtype
+        if pooled_prompt_embeds is None:
+            pooled_prompt_embeds = torch.zeros(
+                batch_size,
+                768,
+                device=device,
+                dtype=dtype,
+            )
+        encoder_attention_mask = kwargs.get("encoder_attention_mask")
+        if encoder_attention_mask is None:
+            encoder_attention_mask = torch.ones(
+                batch_size,
+                prompt_embeds.shape[1],
+                device=device,
+                dtype=torch.long,
+            )
         timestep_1000 = self._prepare_timestep(sigma, batch_size, device, dtype) * 1000
         guidance = torch.tensor(
             [self.GUIDANCE_VALUE], device=device, dtype=dtype
@@ -383,15 +398,12 @@ class HunyuanForwardPlugin(BaseForwardPlugin):
         model_kwargs: Dict[str, Any] = {
             "hidden_states": latents.to(dtype),
             "encoder_hidden_states": prompt_embeds,
+            "pooled_projections": pooled_prompt_embeds,
+            "encoder_attention_mask": encoder_attention_mask,
             "timestep": timestep_1000,
             "guidance": guidance,
             "return_dict": False,
         }
-        if pooled_prompt_embeds is not None:
-            model_kwargs["pooled_projections"] = pooled_prompt_embeds
-        encoder_attention_mask = kwargs.get("encoder_attention_mask")
-        if encoder_attention_mask is not None:
-            model_kwargs["encoder_attention_mask"] = encoder_attention_mask
         return model_kwargs
 
     def forward(

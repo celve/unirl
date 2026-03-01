@@ -67,6 +67,7 @@ python -m diffusionrl.train \
     --clip-range 1e-4 \
     --kl-coef 0.0001 \
     --advantage-type per_prompt \
+    --use-per-prompt-stat-tracker true \
     --per-prompt-buffer-size 10000 \
     \
     --colocate-rollout-training false \
