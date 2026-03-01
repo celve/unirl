@@ -47,7 +47,10 @@ class _DPMState:
 
 
 def _convert_model_output(model_output: torch.Tensor, sample: torch.Tensor, sigmas: torch.Tensor, step_index: int) -> torch.Tensor:
-    sigma_t = sigmas[step_index]
+    compute_device = model_output.device
+    if sample.device != compute_device:
+        sample = sample.to(compute_device)
+    sigma_t = sigmas[step_index].to(device=compute_device, dtype=model_output.dtype)
     x0_pred = sample - sigma_t * model_output
     return x0_pred
 
@@ -124,21 +127,27 @@ def _dpm_step(
     model_output = _convert_model_output(model_output, sample, sigmas, step_index=step_index)
     dpm_state.update(model_output)
 
-    sample = sample.to(torch.float32)
+    sample = sample.to(device=model_output.device, dtype=torch.float32)
+    local_sigmas = sigmas.to(device=sample.device, dtype=sigmas.dtype)
 
     if order == 1 or dpm_state.lower_order_nums < 1 or lower_order_final:
         if step_index == 0 or lower_order_final:
             # DDIM update with eta=0
-            t, s = sigmas[step_index + 1], sigmas[step_index]
+            t, s = local_sigmas[step_index + 1], local_sigmas[step_index]
             noise_pred = (sample - (1 - s) * model_output) / s
             prev_mean = (1 - t) * model_output + torch.sqrt(t**2) * noise_pred
             prev_sample = prev_mean
         else:
-            prev_sample = _dpm_solver_first_order_update(model_output, sigmas.to(torch.float64), step_index, sample)
+            prev_sample = _dpm_solver_first_order_update(
+                model_output,
+                local_sigmas.to(dtype=torch.float64),
+                step_index,
+                sample,
+            )
     elif order == 2 or dpm_state.lower_order_nums < 2 or lower_order_second:
         prev_sample = _multistep_dpm_solver_second_order_update(
             dpm_state.model_outputs,
-            sigmas.to(torch.float64),
+            local_sigmas.to(dtype=torch.float64),
             step_index,
             sample,
         )
@@ -292,6 +301,32 @@ class SD3Sampler(BaseSampler):
             return_dict=False,
         )[0]
 
+    def _resolve_runtime_device(
+        self,
+        prompt_embeds: Optional[torch.Tensor],
+        latents: Optional[torch.Tensor],
+    ) -> torch.device:
+        """
+        Resolve sampling compute device robustly under FSDP CPU offload.
+
+        With FSDP cpu_offload, parameter.device can be CPU outside forward, so
+        use runtime tensors first and fallback to current CUDA device.
+        """
+        if latents is not None and torch.is_tensor(latents) and latents.is_cuda:
+            return latents.device
+        if prompt_embeds is not None and torch.is_tensor(prompt_embeds) and prompt_embeds.is_cuda:
+            return prompt_embeds.device
+        if torch.cuda.is_available():
+            try:
+                return torch.device(f"cuda:{torch.cuda.current_device()}")
+            except Exception:
+                return torch.device("cuda")
+        if latents is not None and torch.is_tensor(latents):
+            return latents.device
+        if prompt_embeds is not None and torch.is_tensor(prompt_embeds):
+            return prompt_embeds.device
+        return next(self.model.parameters()).device
+
     def sample(
         self,
         prompts: Optional[List[str]] = None,
@@ -338,7 +373,7 @@ class SD3Sampler(BaseSampler):
         if self.model is None:
             raise RuntimeError("Model not set. Initialize sampler with model parameter.")
 
-        device = next(self.model.parameters()).device
+        device = self._resolve_runtime_device(prompt_embeds, latents)
         # For SD3 with PEFT, always use bfloat16 for inference to match base model
         # LoRA adapters are float32 but base model is bfloat16
         dtype = torch.bfloat16

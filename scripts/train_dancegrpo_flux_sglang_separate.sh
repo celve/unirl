@@ -3,7 +3,7 @@
 # DanceGRPO training with FLUX model — SGLang backend (Separate mode)
 # =============================================================================
 #
-# This script mirrors train_dancegrpo_flux_separate.sh but uses the SGLang
+# This script mirrors the legacy FSDP-separate layout but uses the SGLang
 # diffusion engine instead of the FSDP sampler.
 #
 # Key differences from the FSDP version:
@@ -33,7 +33,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 export SGLANG_PYTHON_PATH="${SGLANG_PYTHON_PATH:-/home/aiops/wanghn/mmgrpo/sglang/python}"
 
 # ========== Default values (can be overridden via environment) ==========
-PRETRAINED_MODEL=${PRETRAINED_MODEL:-"models/local/flux"}
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/flux"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/dancegrpo_flux_sglang_separate"}
 DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/prompts_toy.json"}
 

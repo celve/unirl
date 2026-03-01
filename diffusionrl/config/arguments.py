@@ -297,6 +297,8 @@ class AlgorithmConfig:
         metadata={"help": "Epsilon for numerical stability in advantage normalization"})
     advantage_clip_max: Optional[float] = field(default=None,
         metadata={"help": "Max absolute advantage value (None = no clipping)"})
+    trimmed_ratio: float = field(default=0.0,
+        metadata={"help": "Trim ratio for grouped advantage stats (MixGRPO-style outlier trimming)"})
     use_per_prompt_stat_tracker: bool = field(default=False,
         metadata={"help": "Track per-prompt running statistics for advantage normalization"})
     per_prompt_mode: str = field(default="running",
@@ -341,6 +343,8 @@ class AlgorithmConfig:
             raise ValueError("num_samples_per_prompt must be >= 1.")
         if self.prompts_per_batch < 1:
             raise ValueError("prompts_per_batch must be >= 1.")
+        if not (0.0 <= self.trimmed_ratio < 0.5):
+            raise ValueError("trimmed_ratio must be in [0.0, 0.5).")
         if str(self.advantage_type).lower() == "group" and self.num_samples_per_prompt < 2:
             raise ValueError(
                 "advantage_type='group' requires num_samples_per_prompt >= 2. "
@@ -407,11 +411,9 @@ class TrainingConfig:
 
     # FSDP
     fsdp_sharding_strategy: str = field(default="FULL_SHARD",
-        metadata={"help": "FSDP sharding: FULL_SHARD, SHARD_GRAD_OP, NO_SHARD, HYBRID_SHARD"})
+        metadata={"help": "Legacy compatibility knob. diffusionrl train_backend=fsdp is fully_shard-only; keep FULL_SHARD"})
     fsdp_cpu_offload: bool = field(default=False,
         metadata={"help": "Offload FSDP parameters and gradients to CPU"})
-    fsdp_backward_prefetch: str = field(default="BACKWARD_PRE",
-        metadata={"help": "FSDP backward prefetch strategy: BACKWARD_PRE, BACKWARD_POST"})
 
     # Memory optimization
     use_gradient_checkpointing: bool = field(default=False,
@@ -428,6 +430,13 @@ class TrainingConfig:
             raise ValueError(
                 f"Unsupported train_backend={self.train_backend!r}. "
                 f"Expected one of {sorted(supported)} or provide --train-backend-path."
+            )
+        sharding = str(self.fsdp_sharding_strategy or "FULL_SHARD").strip().upper()
+        if sharding != "FULL_SHARD":
+            raise ValueError(
+                "fsdp_sharding_strategy is a legacy compatibility argument and "
+                "must be FULL_SHARD in the current FSDP2 backend. "
+                f"Got: {self.fsdp_sharding_strategy!r}"
             )
         raw_backend_kwargs = self.train_backend_kwargs_json
         if raw_backend_kwargs is None:
@@ -764,6 +773,53 @@ def _parse_cli_json_object(value: Any) -> Dict[str, Any]:
     return parsed
 
 
+def _parse_cli_list(value: Any, *, item_type: Any = str) -> List[Any]:
+    """Parse comma-separated or JSON list CLI values into typed Python lists."""
+    if isinstance(value, list):
+        raw_items = list(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except Exception as exc:
+                raise argparse.ArgumentTypeError(
+                    f"Expected a list value, got: {value!r}. Error: {exc}"
+                ) from exc
+            if not isinstance(parsed, list):
+                raise argparse.ArgumentTypeError(
+                    f"Expected a list value, got {type(parsed).__name__}."
+                )
+            raw_items = list(parsed)
+        else:
+            raw_items = [part.strip() for part in text.split(",") if part.strip()]
+
+    normalized_item_type = _resolve_cli_field_type(item_type)
+    parsed_items: List[Any] = []
+    for raw in raw_items:
+        if normalized_item_type == bool:
+            parsed_items.append(_parse_cli_bool(raw))
+        elif normalized_item_type == int:
+            try:
+                parsed_items.append(int(raw))
+            except Exception as exc:
+                raise argparse.ArgumentTypeError(
+                    f"Expected integer list item, got: {raw!r}"
+                ) from exc
+        elif normalized_item_type == float:
+            try:
+                parsed_items.append(float(raw))
+            except Exception as exc:
+                raise argparse.ArgumentTypeError(
+                    f"Expected float list item, got: {raw!r}"
+                ) from exc
+        else:
+            parsed_items.append(str(raw))
+    return parsed_items
+
+
 def _resolve_field_help_text(field_info) -> str:
     """Extract help text from field metadata, with fallback to auto-generated."""
     help_text = (field_info.metadata or {}).get("help")
@@ -948,6 +1004,14 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
             group.add_argument(arg_name, type=float, default=default, help=help_text)
         elif field_type is dict or get_origin(field_type) is dict:
             group.add_argument(arg_name, type=_parse_cli_json_object, default=default, help=help_text)
+        elif get_origin(field_type) is list:
+            item_type = get_args(field_type)[0] if get_args(field_type) else str
+            group.add_argument(
+                arg_name,
+                type=(lambda value, item_type=item_type: _parse_cli_list(value, item_type=item_type)),
+                default=default,
+                help=help_text,
+            )
         else:
             group.add_argument(arg_name, type=str, default=default, help=help_text)
 
@@ -1459,16 +1523,6 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
         args,
         training_actor_direct_sampling=training_actor_direct_sampling,
     )
-
-    if (
-        str(getattr(args, "train_backend", "fsdp")).lower() == "fsdp"
-        and args.training_num_nodes > 1
-        and args.fsdp_sharding_strategy == "FULL_SHARD"
-    ):
-        logger.warning(
-            f"Multi-node training detected ({args.training_num_nodes} nodes). "
-            f"Consider using --fsdp-sharding-strategy HYBRID_SHARD for better performance."
-        )
 
     validate_reward_and_rollout_buffer_config(args)
     if debug_mode != "train_only":

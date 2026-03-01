@@ -55,7 +55,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Default values (can be overridden via command line)
 # Memory-optimized for 8x40GB GPUs (FLUX is ~12B params)
-PRETRAINED_MODEL=${PRETRAINED_MODEL:-"models/local/flux"}
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/flux"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/dancegrpo_flux_train_sampling"}
 DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/prompts_toy.json"}
 NUM_GPUS=${NUM_GPUS:-8}
@@ -110,7 +110,7 @@ python -m diffusionrl.train \
     --lora-rank ${LORA_RANK} \
     --lora-alpha ${LORA_ALPHA} \
     --use-lora true \
-    --fsdp-cpu-offload true \
+    --fsdp-cpu-offload false \
     \
     --height 256 \
     --width 256 \

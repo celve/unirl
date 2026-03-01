@@ -17,9 +17,9 @@ import ray
 import torch
 
 from diffusionrl.config.arguments import is_training_actor_direct_sampling_mode
-from diffusionrl.runtime.pipeline.advantage_stage import compute_advantages as _compute_advantages_stage
-from diffusionrl.runtime.pipeline.reward_stage import compute_rewards as _compute_rewards_stage
-from diffusionrl.runtime.pipeline.sampling_stage import (
+from diffusionrl.runtime.pipeline.rollout_pipeline import compute_advantages as _compute_advantages_stage
+from diffusionrl.runtime.pipeline.rollout_pipeline import compute_rewards as _compute_rewards_stage
+from diffusionrl.runtime.pipeline.rollout_pipeline import (
     distributed_sample,
     expand_batch_for_sampling,
 )
@@ -427,7 +427,7 @@ class RolloutManager:
 
     def _create_rollout_actors(self) -> None:
         """Create rollout actor group from placement group."""
-        from .groups.factory import create_rollout_actor_group
+        from .group_factory import create_rollout_actor_group
 
         self.rollout_actors = create_rollout_actor_group(self.args, self.pg_result)
         self._owns_rollout_actors = True

@@ -102,9 +102,10 @@ class BaseAlgorithm(ABC):
     - optional timestep filtering helpers for backward training assembly
 
     Notes:
-    - The main training path in this repository computes gradients through
-      `loss_fn` objects (see diffusionrl.losses), not through
-      algorithm-side loss methods.
+    - Loss objects (see diffusionrl.losses) are created independently via
+      ``load_function(loss_path) + cls.from_config()``.  Algorithm does
+      NOT own loss creation — it only handles advantage computation and
+      sampling requirements.
     """
 
     def __init__(
@@ -121,6 +122,7 @@ class BaseAlgorithm(ABC):
         use_running_stats: bool = False,
         running_stats_warmup: int = 0,
         use_global_std: bool = False,
+        trimmed_ratio: float = 0.0,
         **kwargs,
     ):
         """
@@ -139,6 +141,7 @@ class BaseAlgorithm(ABC):
             use_running_stats: Use RunningMeanStd for cross-batch global normalization
             running_stats_warmup: Warmup batches before using running stats
             use_global_std: Use global std instead of per-group std
+            trimmed_ratio: Ratio of outliers trimmed from each side for grouped stats
             **kwargs: Additional algorithm-specific arguments
         """
         self.clip_range = clip_range
@@ -148,6 +151,7 @@ class BaseAlgorithm(ABC):
         self.clip_max = clip_max
         self.per_prompt_mode = per_prompt_mode
         self.use_global_std = use_global_std
+        self.trimmed_ratio = max(0.0, min(float(trimmed_ratio), 0.49))
         self._extra_kwargs = kwargs
 
         # Per-prompt statistics tracker
@@ -273,7 +277,14 @@ class BaseAlgorithm(ABC):
         if num_samples_per_prompt <= 0 or batch_size % num_samples_per_prompt != 0:
             return self._normalize_global(rewards)
         groups = build_fixed_size_groups(batch_size, num_samples_per_prompt)
-        return normalize_grouped(rewards, groups, epsilon=self.epsilon, clip_max=self.clip_max)
+        return normalize_grouped(
+            rewards,
+            groups,
+            epsilon=self.epsilon,
+            clip_max=self.clip_max,
+            trimmed_ratio=self.trimmed_ratio,
+            use_global_std=self.use_global_std,
+        )
 
     def _normalize_per_prompt(
         self,
@@ -393,7 +404,7 @@ class BaseAlgorithm(ABC):
         sde_indices: Optional[Set[int]] = None,
     ) -> Any:
         """Assemble typed training batch. Subclasses can override strategy."""
-        from diffusionrl.runtime.pipeline.assemble_stage import (
+        from diffusionrl.runtime.pipeline.rollout_pipeline import (
             assemble_backward_training_batch,
             assemble_forward_training_batch,
         )

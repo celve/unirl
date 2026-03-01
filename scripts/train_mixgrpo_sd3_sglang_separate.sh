@@ -20,7 +20,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 export SGLANG_PYTHON_PATH="${SGLANG_PYTHON_PATH:-/home/aiops/wanghn/mmgrpo/sglang/python}"
 
-PRETRAINED_MODEL=${PRETRAINED_MODEL:-"models/local/sd3.5-medium"}
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/sd3.5-medium"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/mixgrpo_sd3_sglang_separate"}
 DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/prompts_toy.json"}
 
@@ -67,7 +67,6 @@ python -m diffusionrl.train \
     --num-inference-steps 25 \
     --guidance-scale 4.5 \
     \
-    --mixed-sampling true \
     --sde-ratio 0.5 \
     --timestep-strategy window \
     --window-strategy progressive \

@@ -14,20 +14,21 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_loss_class(args: Any):
-    """Load loss class from registry or loss_path."""
+    """Load loss class from loss_path or default dotpath."""
+    loss_path = getattr(args, "loss_path", None)
+    if loss_path:
+        return load_function(loss_path)
+
+    from diffusionrl.losses import DEFAULT_LOSS_PATHS
+
     loss_type = str(getattr(args, "loss_type", "grpo"))
-    loss_cls = None
-
+    path = DEFAULT_LOSS_PATHS.get(loss_type)
+    if path is None:
+        return None
     try:
-        from diffusionrl.losses import LOSS_REGISTRY
-        loss_cls = LOSS_REGISTRY.get(loss_type)
+        return load_function(path)
     except Exception:
-        loss_cls = None
-
-    if loss_cls is None and getattr(args, "loss_path", None):
-        loss_cls = load_function(args.loss_path)
-
-    return loss_cls
+        return None
 
 
 def _get_loss_requirements(args: Any) -> Dict[str, bool]:

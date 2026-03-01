@@ -53,7 +53,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 
 # Default values (can be overridden via command line)
-PRETRAINED_MODEL=${PRETRAINED_MODEL:-"models/local/sd3.5-medium"}
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/sd3.5-medium"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/flowgrpo_sd3_train_sampling"}
 DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/prompts_toy.json"}
 # Memory-optimized settings for 8x40GB GPUs with offload
@@ -103,6 +103,8 @@ python -m diffusionrl.train \
     --prompts-per-batch ${PROMPTS_PER_BATCH} \
     --batch-size ${BATCH_SIZE} \
     --num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --use-per-prompt-stat-tracker true \
+    --use-running-stats true \
     --use-global-std true \
     --clip-range 1e-4 \
     --use-kl-penalty true \

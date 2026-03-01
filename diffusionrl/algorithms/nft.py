@@ -3,7 +3,7 @@ NFT (Negative Fine-Tuning) Algorithm Implementation.
 
 DiffusionNFT forward process diffusion RL.
 """
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 import torch
 import torch.nn as nn
@@ -74,9 +74,6 @@ class NFTAlgorithm(BaseAlgorithm):
         self.shift = shift
         self.ema_decay = ema_decay
 
-        # Loss function (lazy load)
-        self._loss_fn = None
-
     @classmethod
     def from_args(cls, args: Any) -> "NFTAlgorithm":
         """Construct NFT algorithm from runtime args."""
@@ -97,21 +94,6 @@ class NFTAlgorithm(BaseAlgorithm):
         )
         kwargs.update(cls._algorithm_kwargs_from_args(args))
         return cls(**kwargs)
-
-    @property
-    def loss_fn(self):
-        """Lazy load NFT loss function."""
-        if self._loss_fn is None:
-            from diffusionrl.losses import NFTLoss
-            self._loss_fn = NFTLoss(
-                beta=self.beta,
-                adv_clip_max=self.adv_clip_max,
-                adv_mode=self.adv_mode,
-                use_adaptive_weight=self.use_adaptive_weight,
-                shift=self.shift,
-                kl_coef=self.kl_coef,
-            )
-        return self._loss_fn
 
     def get_sampling_requirements(self) -> SamplingRequirements:
         """Return NFT sampling requirements."""
@@ -137,7 +119,9 @@ class NFTAlgorithm(BaseAlgorithm):
         Returns:
             True if update was successful
         """
-        return self.loss_fn.update_old_adapter(model, self.ema_decay)
+        from diffusionrl.losses.nft_loss import NFTLoss
+        temp = NFTLoss(kl_coef=self.kl_coef)
+        return temp.update_old_adapter(model, self.ema_decay)
 
     # ========== NFT-specific hooks ==========
 

@@ -19,7 +19,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-PRETRAINED_MODEL=${PRETRAINED_MODEL:-"models/local/sd3.5-medium"}
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/sd3.5-medium"}
 DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/prompts_toy.json"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/plugin_demo_sd3"}
 

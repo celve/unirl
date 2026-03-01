@@ -107,7 +107,8 @@ Toy data is included in `data/samples/` for smoke tests.
 For real datasets, symlink into `data/datasets/` and override `DATA_PATH`:
 
 ```bash
-DATA_PATH=data/datasets/hpdv2/train.json bash scripts/train_dancegrpo_sd3_separate.sh
+DATA_PATH=data/datasets/hpdv2/train.json \
+  bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh --num-rollout 1
 ```
 
 Default local paths are resolved against the repository root:
@@ -122,7 +123,7 @@ For external data / model directories, pass absolute paths directly (or create s
 ```bash
 DATA_PATH=/path/to/external/data/train.json \
 PRETRAINED_MODEL=/path/to/external/shared_models/flux \
-bash scripts/train_dancegrpo_flux_separate.sh
+bash scripts/train_dancegrpo_flux_train_actor_sampling.sh --num-rollout 1
 ```
 
 ### Training
@@ -130,18 +131,18 @@ bash scripts/train_dancegrpo_flux_separate.sh
 We provide pre-configured training scripts for various algorithm + model combinations:
 
 ```bash
-# DanceGRPO with FLUX (separate mode, 4+4 GPUs)
-bash scripts/train_dancegrpo_flux_separate.sh
+# DanceGRPO with FLUX (SGLang separate mode, rollout/training split)
+bash scripts/train_dancegrpo_flux_sglang_separate.sh
 
-# MixGRPO with SD3 (separate mode)
-bash scripts/train_mixgrpo_sd3_separate.sh
+# MixGRPO with SD3 (SGLang separate mode)
+bash scripts/train_mixgrpo_sd3_sglang_separate.sh
 
-# NFT with SD3 (separate mode)
-bash scripts/train_nft_sd3_separate.sh
+# NFT with SD3 (training-actor sampling mode)
+bash scripts/train_nft_sd3_train_actor_sampling.sh
 
 # Override default parameters via environment variables
 NUM_ROLLOUT=100 BATCH_SIZE=2 ROLLOUT_GPUS=4 TRAINING_GPUS=4 \
-    bash scripts/train_dancegrpo_flux_separate.sh
+    bash scripts/train_dancegrpo_flux_sglang_separate.sh
 ```
 
 Or use the CLI directly:
@@ -207,16 +208,12 @@ Notes:
 
 | Script | Algorithm | Model | Mode |
 |--------|-----------|-------|------|
-| `train_dancegrpo_flux_separate.sh` | DanceGRPO | FLUX | Separate |
-| `train_dancegrpo_sd3_separate.sh` | DanceGRPO | SD3 | Separate |
-| `train_dancegrpo_hunyuan_separate.sh` | DanceGRPO | Hunyuan | Separate |
-| `train_dancegrpo_hunyuan_fastvideo_*.sh` | DanceGRPO | Hunyuan | Separate / Colocate |
-| `train_mixgrpo_flux_separate.sh` | MixGRPO | FLUX | Separate |
-| `train_mixgrpo_sd3_separate.sh` | MixGRPO | SD3 | Separate |
-| `train_flowgrpo_sd3_separate.sh` | FlowGRPO | SD3 | Separate |
-| `train_nft_sd3_separate.sh` | NFT | SD3 | Separate |
+| `train_*_sglang_separate.sh` | DanceGRPO / MixGRPO / FlowGRPO / NFT | FLUX / SD3 / Hunyuan | Separate (dedicated rollout actors, SGLang engine) |
+| `train_dancegrpo_flux_sglang_colocate.sh` | DanceGRPO | FLUX | Colocate (SGLang engine) |
+| `train_*_train_actor_sampling.sh` | DanceGRPO / MixGRPO / FlowGRPO / NFT | FLUX / SD3 / Hunyuan | Training-actor direct sampling (FSDP engine) |
+| `train_plugin_demo.sh` | Plugin demo | FLUX | Training-actor sampling |
 
-Each script also has a `*_train_actor_sampling.sh` variant that uses training actors for sampling.
+See [scripts/README.md](scripts/README.md) for exact per-script defaults.
 
 ## Supported Algorithms
 
@@ -247,9 +244,9 @@ For the full argument reference, please refer to: [diffusionrl/config/arguments.
 
 The Ray control plane is split into worker implementations and worker-group orchestration:
 
-- `diffusionrl/ray/actors/`: single worker implementations (`RolloutActor`, `TrainingActor`)
-- `diffusionrl/ray/groups/`: group orchestration (`BaseActorGroup`, `RolloutActorGroup`, `TrainingActorGroup`, factories)
-- `diffusionrl/ray/utils/`: Ray distributed utilities + training-actor helper/service modules
+- `diffusionrl/ray/{rollout_actor.py,training_actor.py}`: single worker implementations
+- `diffusionrl/ray/{rollout_group.py,training_group.py,group_factory.py}`: group orchestration and factories
+- `diffusionrl/ray/ray_utils.py`: Ray distributed utilities + training-actor helper/service modules
 - `diffusionrl/ray/rollout_manager.py`: control-plane actor
 - `diffusionrl/runtime/**`: Ray-agnostic runtime logic
 
@@ -263,8 +260,7 @@ diffusionrl/
 ├── train.py / train_async.py      # Training entry points
 ├── types/                          # Canonical shared data types (RolloutOutput, TrainingBatch, Reward, WeightSync)
 ├── config/                         # Configuration system (TrainingArguments)
-├── algorithms/                     # RL algorithms (GRPO, MixGRPO, NFT)
-│   └── advantages/                 #   Advantage computation (global, group, per-prompt)
+├── algorithms/                     # RL algorithms + advantage normalization helpers
 ├── samplers/                       # Inference engines (FSDP, FastVideo, SGLang)
 │   ├── fsdp/                       #   FSDP-based: FluxSampler, SD3Sampler, HunyuanSampler
 │   ├── fastvideo/                  #   FastVideo-based: FastVideoSampler
@@ -275,9 +271,9 @@ diffusionrl/
 ├── data/                           # Data loading and datasets
 ├── ray/                            # Ray distributed orchestration
 │   ├── rollout_manager.py          #   Central orchestrator
-│   ├── actors/                     #   Worker implementations
-│   ├── groups/                     #   Worker-group orchestration
-│   ├── utils/                      #   Distributed + actor helper/service utilities
+│   ├── rollout_actor.py / training_actor.py
+│   ├── rollout_group.py / training_group.py / group_factory.py
+│   ├── rollout_buffer.py / placement_group.py / ray_utils.py
 ├── runtime/                        # Async runtime + ray-agnostic execution logic
 ├── patches/                        # Non-invasive patches for FastVideo
 └── utils/                          # Checkpointing, logging, EMA, weight sync
@@ -351,14 +347,14 @@ Then pass it via `--reward-path your_module.MyRewardWorker`.
 ### Running Tests
 
 ```bash
-# Run all tests
-pytest tests/ -v
+# CLI parse smoke check
+python -m diffusionrl.train --help
 
-# Run specific test
-pytest tests/unit/test_model_bundle_inference_hooks.py -v
+# Python syntax check
+python -m compileall -q diffusionrl
 
-# With coverage
-pytest tests/ --cov=diffusionrl --cov-report=term-missing
+# Script syntax check
+for f in scripts/*.sh; do bash -n "$f"; done
 ```
 
 ### Code Style

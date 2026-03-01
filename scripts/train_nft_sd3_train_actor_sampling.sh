@@ -54,7 +54,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 
 # Default values (can be overridden via command line)
-PRETRAINED_MODEL=${PRETRAINED_MODEL:-"models/local/sd3.5-medium"}
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/sd3.5-medium"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/nft_sd3_ocr_train_sampling"}
 DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/prompts_toy.json"}
 NUM_GPUS=${NUM_GPUS:-8}
@@ -68,6 +68,19 @@ PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( NUM_GPUS * BATCH_SIZE / NUM_SAMPLES_P
 NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
 NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"ema_decay":0.001}'}
 NFT_LOSS_KWARGS=${NFT_LOSS_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"nft_timestep_mode":"all","nft_shuffle_timesteps":true,"nft_apply_shift":false,"use_ema":true,"ema_decay":0.001,"decay_type":"warmup","ema_flat_steps":75,"ema_uprate":0.0075,"ema_uphold":0.999}'}
+
+if [ ! -d "${PRETRAINED_MODEL}" ] && [ -d "${REPO_ROOT}/${PRETRAINED_MODEL}" ]; then
+    PRETRAINED_MODEL="${REPO_ROOT}/${PRETRAINED_MODEL}"
+fi
+if [ ! -d "${PRETRAINED_MODEL}" ]; then
+    echo "ERROR: PRETRAINED_MODEL path not found: ${PRETRAINED_MODEL}"
+    echo "Hint: set PRETRAINED_MODEL to a local SD3 model directory."
+    exit 1
+fi
+if [ ! -f "${DATA_PATH}" ]; then
+    echo "ERROR: DATA_PATH file not found: ${DATA_PATH}"
+    exit 1
+fi
 
 python -m diffusionrl.train \
     --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
@@ -94,6 +107,7 @@ python -m diffusionrl.train \
     --clip-range 1e-4 \
     --kl-coef 0.0001 \
     --advantage-type per_prompt \
+    --use-per-prompt-stat-tracker true \
     --per-prompt-buffer-size 10000 \
     \
     --training-actor-direct-sampling true \

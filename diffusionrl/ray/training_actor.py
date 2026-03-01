@@ -7,7 +7,7 @@ import os
 import socket
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Union
 
 import ray
 import torch
@@ -21,7 +21,7 @@ from diffusionrl.types.training_batch import (
 import torch.nn as nn
 
 from diffusionrl.patches.replay_logprob import ReplayLogProbPatch
-from diffusionrl.ray.utils.actor_sampling import TrainingActorSamplingService
+from diffusionrl.ray.ray_utils import TrainingActorSamplingService
 from diffusionrl.utils import clear_memory as _clear_gpu_memory
 from diffusionrl.utils.weight_sync_checkpoint import (
     publish_checkpoint_atomic,
@@ -35,7 +35,7 @@ from diffusionrl.runtime.training import (
 )
 from diffusionrl.utils import load_function
 
-from .base import BaseTrainRayActor, log_gpu_state, log_resource_ids
+from .actor_base import BaseTrainRayActor, log_gpu_state, log_resource_ids
 
 logger = logging.getLogger(__name__)
 
@@ -477,9 +477,12 @@ class TrainingActor(BaseTrainRayActor):
         return kwargs
 
     def _load_loss(self, loss_config: dict) -> None:
-        """Load loss function based on loss_type."""
-        from diffusionrl.losses import LOSS_REGISTRY, get_loss
+        """Load loss function via load_function(loss_path) + cls.from_config().
 
+        Each loss class knows how to construct itself from a loss_config dict.
+        No Algorithm instance is created here — Algorithm lives only in
+        RolloutManager for advantage computation.
+        """
         self._loss_type = str(loss_config.get("loss_type", "grpo"))
         self._loss_path = loss_config.get("loss_path")
         self._guidance_scale = float(loss_config.get("guidance_scale", 3.5))
@@ -498,59 +501,42 @@ class TrainingActor(BaseTrainRayActor):
         old_adapter_name = str(runtime_loss_kwargs.get("old_adapter_name", "old"))
         new_adapter_name = str(runtime_loss_kwargs.get("new_adapter_name", "default"))
 
-        if self._loss_type == "nft" and not self._loss_path:
-            nft_kwargs = {
-                "beta": 0.1,
-                "adv_clip_max": 5.0,
-                "adv_mode": "raw",
-                "use_adaptive_weight": True,
-                "shift": loss_config.get("shift", 3.0),
-                "kl_coef": loss_config.get("kl_coef", 0.0),
-            }
-            nft_kwargs.update(ctor_loss_kwargs)
-            loss_cls = LOSS_REGISTRY.get("nft")
-            if loss_cls is not None:
-                nft_kwargs = self._filter_constructor_kwargs(loss_cls, nft_kwargs)
-            self.loss_fn = get_loss(
-                loss_type="nft",
-                **nft_kwargs,
+        # Resolve loss_path from loss_type if not explicitly set
+        if not self._loss_path:
+            from diffusionrl.losses import DEFAULT_LOSS_PATHS
+            self._loss_path = DEFAULT_LOSS_PATHS.get(self._loss_type)
+        if not self._loss_path:
+            raise ValueError(
+                f"Cannot resolve loss_path for loss_type={self._loss_type!r}. "
+                "Provide --loss-path or use a known loss_type ('grpo', 'nft')."
             )
-            if self._use_ema:
-                from diffusionrl.utils import DualAdapterEMA
-                self._ema_updater = DualAdapterEMA(
-                    decay=self._ema_decay,
-                    decay_type=ema_decay_type,
-                    flat_steps=ema_flat_steps,
-                    uprate=ema_uprate,
-                    uphold=ema_uphold,
-                    old_adapter_name=old_adapter_name,
-                    new_adapter_name=new_adapter_name,
-                )
-        elif self._loss_type == "grpo" and not self._loss_path:
-            grpo_kwargs = {
-                "clip_range": loss_config.get("clip_range", 1e-4),
-                "clip_range_mode": loss_config.get("clip_range_mode", "constant"),
-                "use_kl_penalty": loss_config.get("use_kl_penalty", True),
-                "kl_coef": loss_config.get("kl_coef", 0.01),
-                "eta": loss_config.get("eta", 1.0),
-                "sde_type": loss_config.get("sde_type", "sde"),
-                "ignore_last": loss_config.get("ignore_last", False),
-                "frozen_init_timesteps": loss_config.get("frozen_init_timesteps", 0),
-            }
-            grpo_kwargs.update(ctor_loss_kwargs)
-            loss_cls = LOSS_REGISTRY.get("grpo")
-            if loss_cls is not None:
-                grpo_kwargs = self._filter_constructor_kwargs(loss_cls, grpo_kwargs)
-            self.loss_fn = get_loss(
-                loss_type="grpo",
-                **grpo_kwargs,
-            )
+
+        loss_cls = load_function(self._loss_path)
+
+        if hasattr(loss_cls, "from_config"):
+            self.loss_fn = loss_cls.from_config(loss_config)
         else:
+            # Fallback for custom losses without from_config
             custom_kwargs = self._collect_custom_loss_kwargs(loss_config)
-            self.loss_fn = get_loss(
-                loss_type=self._loss_type,
-                loss_path=self._loss_path,
-                **custom_kwargs,
+            filtered_kwargs = self._filter_constructor_kwargs(loss_cls, custom_kwargs)
+            self.loss_fn = loss_cls(**filtered_kwargs)
+
+        logger.info(
+            "Rank %s: Loss loaded from %s (type=%s)",
+            self.rank, self._loss_path, type(self.loss_fn).__name__,
+        )
+
+        # --- EMA updater for NFT ---
+        if self._use_ema and self._ema_updater is None:
+            from diffusionrl.utils import DualAdapterEMA
+            self._ema_updater = DualAdapterEMA(
+                decay=self._ema_decay,
+                decay_type=ema_decay_type,
+                flat_steps=ema_flat_steps,
+                uprate=ema_uprate,
+                uphold=ema_uphold,
+                old_adapter_name=old_adapter_name,
+                new_adapter_name=new_adapter_name,
             )
 
         if hasattr(self.loss_fn, "model_type"):

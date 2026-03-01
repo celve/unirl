@@ -267,7 +267,7 @@ class BackwardTrainingBatch:
         Convert to dictionary format for loss interfaces.
 
         Returns:
-            Dictionary compatible with GRPOLoss.compute()
+            Dictionary compatible with GRPOLoss.compute_timestep()
         """
         return {
             "trajectories": self.trajectories,
@@ -369,7 +369,7 @@ class ForwardTrainingBatch:
         Convert to dictionary format for loss interfaces.
 
         Returns:
-            Dictionary compatible with NFTLoss.compute()
+            Dictionary compatible with NFTLoss.compute_batch()
         """
         return {
             "clean_latents": self.clean_latents,

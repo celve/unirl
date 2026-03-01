@@ -9,7 +9,7 @@ import ray
 from ray.util.placement_group import PlacementGroup
 
 from diffusionrl.types import RolloutRequest
-from .base import BaseActorGroup
+from .group_base import BaseActorGroup
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class RolloutActorGroup(BaseActorGroup):
             runtime_env: Runtime environment variables
             **kwargs: Additional actor kwargs including num_gpus_allocated
         """
-        from ..actors import RolloutActor
+        from .rollout_actor import RolloutActor
 
         # Pass num_gpus_allocated to actor constructor
         if "num_gpus_allocated" not in kwargs:

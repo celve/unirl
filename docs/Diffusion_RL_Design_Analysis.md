@@ -2,6 +2,10 @@
 
 ---
 
+> 文档状态（2026-03-01）：
+> 这份分析报告是阶段性设计快照，包含部分历史脚本名与旧结构示例。
+> 当前代码行为请以 `README.md`、`scripts/README.md` 以及 `diffusionrl/` 实际实现为准。
+
 ## 目录
 
 1. [Stage Placement (阶段资源分配)](#1-stage-placement-阶段资源分配)

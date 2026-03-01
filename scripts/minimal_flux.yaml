@@ -1,7 +1,7 @@
 # =============================================================================
-# DanceGRPO FLUX — Separate Mode (Minimal Config)
+# DanceGRPO FLUX — Minimal Config
 # =============================================================================
-# Equivalent to: scripts/train_dancegrpo_flux_separate.sh
+# Standalone minimal YAML example (direct `python -m diffusionrl.train --config ...` path).
 # Usage: python -m diffusionrl.train --config scripts/minimal_flux.yaml
 #
 # Override any value via CLI:

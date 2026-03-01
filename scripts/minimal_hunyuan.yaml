@@ -1,7 +1,7 @@
 # =============================================================================
-# DanceGRPO HunyuanVideo — Separate Mode (Minimal Config)
+# DanceGRPO HunyuanVideo — Minimal Config
 # =============================================================================
-# Equivalent to: scripts/train_dancegrpo_hunyuan_separate.sh
+# Standalone minimal YAML example (direct `python -m diffusionrl.train --config ...` path).
 # Usage: python -m diffusionrl.train --config scripts/minimal_hunyuan.yaml
 #
 # Override any value via CLI:

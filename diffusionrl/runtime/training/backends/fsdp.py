@@ -181,22 +181,6 @@ class FSDPTrainBackend(TrainBackend):
 
         fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy, *_ = self._fsdp2_runtime_apis()
 
-        sharding_strategy = str(self._fsdp_config.get("sharding_strategy", "FULL_SHARD") or "FULL_SHARD").upper()
-        if sharding_strategy != "FULL_SHARD":
-            logger.warning(
-                "Rank %s: FSDP2 backend ignores sharding_strategy=%s. "
-                "Current implementation is fully_shard-only.",
-                actor.rank,
-                sharding_strategy,
-            )
-        backward_prefetch = str(self._fsdp_config.get("backward_prefetch", "BACKWARD_PRE") or "BACKWARD_PRE").upper()
-        if backward_prefetch != "BACKWARD_PRE":
-            logger.warning(
-                "Rank %s: FSDP2 backend ignores backward_prefetch=%s.",
-                actor.rank,
-                backward_prefetch,
-            )
-
         fsdp_kwargs: Dict[str, Any] = {}
 
         if self._fsdp_config.get("mixed_precision", True):
@@ -306,12 +290,77 @@ class FSDPTrainBackend(TrainBackend):
         model: Any,
         max_grad_norm: float,
     ) -> Any:
+        def _global_clip_for_sharded_grads() -> torch.Tensor:
+            import torch.distributed as dist
+
+            grads = []
+            local_sq_sum = 0.0
+            for param in model.parameters():
+                grad = getattr(param, "grad", None)
+                if grad is None:
+                    continue
+
+                local_grad = grad
+                if hasattr(local_grad, "to_local") and callable(getattr(local_grad, "to_local")):
+                    try:
+                        local_grad = local_grad.to_local()
+                    except Exception:
+                        pass
+
+                if not isinstance(local_grad, torch.Tensor):
+                    continue
+
+                local_sq_sum += float(torch.sum(local_grad.detach().float() ** 2).item())
+                grads.append(grad)
+
+            if not grads:
+                return torch.tensor(0.0)
+
+            reduce_device = torch.device("cpu")
+            if torch.cuda.is_available():
+                try:
+                    reduce_device = torch.device(f"cuda:{torch.cuda.current_device()}")
+                except Exception:
+                    reduce_device = torch.device("cuda")
+
+            total_sq = torch.tensor(local_sq_sum, device=reduce_device, dtype=torch.float32)
+            if dist.is_available() and dist.is_initialized():
+                dist.all_reduce(total_sq, op=dist.ReduceOp.SUM)
+
+            global_norm = float(torch.sqrt(total_sq).item())
+            clip_coef = float(max_grad_norm) / (global_norm + 1e-6)
+            if clip_coef < 1.0:
+                for grad in grads:
+                    grad.mul_(clip_coef)
+
+            return torch.tensor(global_norm, device=reduce_device, dtype=torch.float32)
+
         if self._use_fsdp:
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                model.parameters(),
-                max_norm=max_grad_norm,
-            )
-            return self._maybe_dtensor_to_tensor(grad_norm)
+            cpu_offload = bool(self._fsdp_config.get("cpu_offload", False))
+            if cpu_offload:
+                # Use explicit global-norm clipping path for FSDP2+CPU offload.
+                # This avoids DTensor CPU collective limitations in clip_grad_norm_.
+                return _global_clip_for_sharded_grads()
+            try:
+                clip_fn = getattr(model, "clip_grad_norm_", None)
+                if callable(clip_fn):
+                    grad_norm = clip_fn(max_grad_norm)
+                else:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        max_norm=max_grad_norm,
+                    )
+                return self._maybe_dtensor_to_tensor(grad_norm)
+            except RuntimeError as exc:
+                # FSDP2 + CPU offload can surface DTensor CPU collective errors here.
+                if "No backend type associated with device type cpu" not in str(exc):
+                    raise
+                logger.warning(
+                    "Rank %s: FSDP grad clipping hit CPU DTensor backend error; "
+                    "falling back to explicit global-norm clipping path.",
+                    getattr(actor, "rank", "unknown"),
+                )
+                return _global_clip_for_sharded_grads()
         return torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
 
     def topology(self, actor: Any) -> TrainTopology:

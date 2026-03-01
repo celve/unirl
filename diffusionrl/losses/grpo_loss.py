@@ -19,7 +19,7 @@ Formula:
 
 import math
 import logging
-from typing import Dict, Any, Tuple, Optional, List, Set, Union
+from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
@@ -54,12 +54,11 @@ class GRPOLoss:
             sde_type="sde",
         )
 
-        loss, metrics = loss_fn.compute(
+        loss, metrics = loss_fn.compute_timestep(
             model=model,
-            samples=sampling_output,
-            timestep_idx=t,
+            timestep_data=timestep_data,
             advantages=advantages,
-            prompt_embeds=prompt_embeds,
+            embeddings=embeddings,
         )
     """
 
@@ -70,6 +69,31 @@ class GRPOLoss:
             "requires_log_prob": True,
             "requires_embeddings": True,
         }
+
+    @classmethod
+    def from_config(cls, config: dict) -> "GRPOLoss":
+        """Create GRPOLoss from a loss_config dictionary.
+
+        Reads constructor parameters from config top-level keys,
+        with ``loss_kwargs`` sub-dict taking precedence for overrides.
+        """
+        extra = config.get("loss_kwargs") or {}
+
+        def _get(key, default):
+            return extra.get(key, config.get(key, default))
+
+        return cls(
+            clip_range=float(_get("clip_range", 1e-4)),
+            clip_range_mode=str(_get("clip_range_mode", "constant")),
+            use_kl_penalty=bool(_get("use_kl_penalty", True)),
+            kl_coef=float(_get("kl_coef", 0.01)),
+            ratio_reg_coef=float(_get("ratio_reg_coef", 0.0)),
+            eta=float(_get("eta", 0.7)),
+            sde_type=str(_get("sde_type", "sde")),
+            ignore_last=bool(_get("ignore_last", False)),
+            frozen_init_timesteps=int(_get("frozen_init_timesteps", 0)),
+            model_type=str(_get("model_type", "default")),
+        )
 
     def __init__(
         self,
@@ -177,215 +201,6 @@ class GRPOLoss:
             sigma_max=sigma_max,
         )
 
-    def compute(
-        self,
-        model: nn.Module,
-        samples: Dict[str, Any],
-        timestep_idx: int,
-        advantages: torch.Tensor,
-        prompt_embeds: torch.Tensor,
-        pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        sigmas: Optional[torch.Tensor] = None,
-        ref_model: Optional[nn.Module] = None,
-        training_progress: float = 0.0,
-        model_forward_fn: Optional[callable] = None,
-        guidance_scale: float = 3.5,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """
-        Compute GRPO loss for a single timestep.
-
-        Args:
-            model: The diffusion model being trained
-            samples: Dictionary containing:
-                - 'latents' or 'trajectories': [B, num_steps+1, C, H, W]
-                - 'log_probs' or 'log_probs_dict': old log probabilities
-                - 'timesteps' or 'sigmas': sigma schedule
-            timestep_idx: Which timestep to compute loss for
-            advantages: Per-sample advantages [B]
-            prompt_embeds: Text encoder hidden states [B, seq, hidden]
-            pooled_prompt_embeds: Pooled text embeddings [B, hidden]
-            sigmas: Sigma schedule (if not in samples)
-            ref_model: Reference model for KL penalty
-            training_progress: Training progress in [0, 1]
-            model_forward_fn: Custom forward function
-            guidance_scale: CFG scale
-            **kwargs: Additional model-specific arguments
-
-        Returns:
-            Tuple of (loss, metrics_dict)
-        """
-        device = advantages.device
-        batch_size = advantages.shape[0]
-
-        # Get latents (support both key names)
-        latents_key = "trajectories" if "trajectories" in samples else "latents"
-        all_latents = samples[latents_key]
-
-        # Check if this is a mixed sampler with sparse log_probs
-        log_probs_dict = samples.get("log_probs_dict")
-        sde_indices = samples.get("sde_indices")
-
-        # Validate log_probs_dict is not empty when using mixed sampling
-        if log_probs_dict is not None and len(log_probs_dict) == 0:
-            logger.warning(
-                "log_probs_dict is empty - all timesteps appear to be ODE steps. "
-                "Check that sde_ratio > 0 and sde_indices is properly computed. "
-                "Falling back to full tensor log_probs if available."
-            )
-            # Try fallback to tensor log_probs
-            log_probs_tensor = samples.get("log_probs")
-            if log_probs_tensor is not None and isinstance(log_probs_tensor, torch.Tensor):
-                log_probs_dict = None  # Will use tensor path below
-
-        if log_probs_dict is not None:
-            # Mixed sampler mode - check if this timestep has log_prob
-            if timestep_idx not in log_probs_dict:
-                # ODE step - no loss for this timestep
-                logger.warning(
-                    f"Timestep {timestep_idx} missing from log_probs_dict (available: {list(log_probs_dict.keys())}). "
-                    f"This may indicate ODE steps not computing log_prob. Consider enabling log_prob for all steps."
-                )
-                return torch.tensor(0.0, device=device, requires_grad=True), {
-                    "skip_reason": "ode_step",
-                    "timestep_idx": timestep_idx,
-                }
-            old_log_probs = log_probs_dict[timestep_idx]
-        else:
-            # Full SDE mode
-            log_probs = samples.get("log_probs", samples.get("old_log_probs"))
-            if isinstance(log_probs, torch.Tensor):
-                old_log_probs = log_probs[:, timestep_idx]
-            else:
-                old_log_probs = log_probs[timestep_idx]
-
-        # Get current and next latents from trajectory
-        latents = all_latents[:, timestep_idx]
-        next_latents = all_latents[:, timestep_idx + 1]
-
-        # Get sigma schedule
-        if sigmas is None:
-            sigmas = samples.get("sigmas", samples.get("timesteps"))
-        sigma = sigmas[timestep_idx]
-        sigma_next = sigmas[timestep_idx + 1]
-        sigma_max = sigmas[1].item() if sigmas[1].dim() == 0 else sigmas[1][0].item()
-
-        # Convert sigma to tensor if needed
-        if not isinstance(sigma, torch.Tensor):
-            sigma = torch.tensor(sigma, device=device)
-        if not isinstance(sigma_next, torch.Tensor):
-            sigma_next = torch.tensor(sigma_next, device=device)
-
-        # Forward pass through model
-        if model_forward_fn is not None:
-            pred = model_forward_fn(
-                model=model,
-                latents=latents,
-                sigma=sigma,
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                guidance_scale=guidance_scale,
-                **kwargs,
-            )
-        else:
-            pred = self._default_forward(
-                model=model,
-                latents=latents,
-                sigma=sigma,
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                guidance_scale=guidance_scale,
-                text_ids=kwargs.get('text_ids'),
-                image_ids=kwargs.get('image_ids'),
-                negative_prompt_embeds=samples.get("negative_prompt_embeds"),
-                negative_pooled_prompt_embeds=samples.get("negative_pooled_prompt_embeds"),
-            )
-
-        # Compute new log probability
-        pred_f = pred.float()
-        latents_f = latents.float()
-        next_latents_f = next_latents.float()
-
-        new_log_prob, prev_sample_mean = self.compute_log_prob(
-            pred=pred_f,
-            sample=latents_f,
-            next_sample=next_latents_f,
-            sigma=sigma,
-            sigma_next=sigma_next,
-            sigma_max=sigma_max,
-        )
-
-        # Compute importance sampling ratio with clamping for numerical stability
-        log_prob_diff = torch.clamp(new_log_prob - old_log_probs, -20.0, 20.0)
-        ratio = torch.exp(log_prob_diff)
-
-        # Get clip range
-        clip_range = self.get_clip_range(training_progress)
-
-        # PPO-style clipped loss
-        adv = advantages.detach()
-        unclipped_loss = -adv * ratio
-        clipped_loss = -adv * torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
-        policy_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
-
-        # Compute metrics
-        clip_fraction = ((ratio - 1.0).abs() > clip_range).float().mean()
-        clipfrac_gt_one = (ratio - 1.0 > clip_range).float().mean()
-        clipfrac_lt_one = (1.0 - ratio > clip_range).float().mean()
-        approx_kl = 0.5 * torch.mean(log_prob_diff ** 2)
-
-        loss_terms = {
-            "policy_loss": policy_loss.detach(),
-            "ratio_mean": ratio.mean().detach(),
-            "ratio_std": ratio.std().detach(),
-            "ratio_max": ratio.max().detach(),
-            "ratio_min": ratio.min().detach(),
-            "clip_fraction": clip_fraction.detach(),
-            "clipfrac_gt_one": clipfrac_gt_one.detach(),
-            "clipfrac_lt_one": clipfrac_lt_one.detach(),
-            "approx_kl": approx_kl.detach(),
-            "new_log_prob_mean": new_log_prob.mean().detach(),
-            "old_log_prob_mean": old_log_probs.mean().detach(),
-        }
-
-        total_loss = policy_loss
-
-        # KL penalty (optional)
-        if self.use_kl_penalty and self.kl_coef > 0:
-            kl_loss = self._compute_kl_penalty(
-                model=model,
-                latents=latents,
-                latents_f=latents_f,
-                next_latents_f=next_latents_f,
-                sigma=sigma,
-                sigma_next=sigma_next,
-                sigma_max=sigma_max,
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                negative_prompt_embeds=samples.get("negative_prompt_embeds"),
-                negative_pooled_prompt_embeds=samples.get("negative_pooled_prompt_embeds"),
-                prev_sample_mean=prev_sample_mean,
-                ref_model=ref_model,
-                guidance_scale=guidance_scale,
-                model_forward_fn=model_forward_fn,
-                **kwargs,
-            )
-
-            if kl_loss is not None:
-                total_loss = total_loss + self.kl_coef * kl_loss
-                loss_terms["kl_loss"] = kl_loss.detach()
-
-        # Ratio regularization (prevents ratio from exploding)
-        if self.ratio_reg_coef > 0:
-            ratio_reg = torch.mean((new_log_prob - old_log_probs) ** 2)
-            total_loss = total_loss + self.ratio_reg_coef * ratio_reg
-            loss_terms["ratio_reg"] = ratio_reg.detach()
-
-        loss_terms["total_loss"] = total_loss.detach()
-        loss_terms["timestep_idx"] = timestep_idx
-
-        return total_loss, loss_terms
-
     def compute_timestep(
         self,
         model: nn.Module,
@@ -421,7 +236,6 @@ class GRPOLoss:
             Tuple of (loss, metrics_dict)
         """
         device = advantages.device
-        batch_size = advantages.shape[0]
 
         # Extract data from typed structures
         latents = timestep_data.latents
@@ -749,7 +563,6 @@ class GRPOLoss:
 
         if ref_prev_sample_mean is not None:
             # KL loss calculation matching flow_grpo
-            dt = sigma_next - sigma
             std_dev_t = torch.sqrt(
                 sigma / (1 - torch.where(sigma == 1, sigma_max, sigma))
             ) * self.eta
@@ -762,107 +575,3 @@ class GRPOLoss:
             return kl_loss
 
         return None
-
-    def compute_aggregated(
-        self,
-        model: nn.Module,
-        samples: Dict[str, Any],
-        advantages: torch.Tensor,
-        prompt_embeds: torch.Tensor,
-        pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        ignore_last: Optional[bool] = None,
-        frozen_init_timesteps: Optional[int] = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """
-        Compute GRPO loss aggregated over all timesteps.
-
-        This is a convenience method that computes loss for all timesteps
-        and aggregates them.
-
-        Args:
-            model: The diffusion model being trained
-            samples: Sampling trajectory and log_probs
-            advantages: Per-sample advantages [B]
-            prompt_embeds: Text encoder hidden states
-            pooled_prompt_embeds: Pooled text embeddings
-            ignore_last: Override instance ignore_last setting (MixGRPO).
-                Skip the last timestep (t->0) which has unstable log_prob.
-            frozen_init_timesteps: Override instance setting.
-                Skip the first N timesteps in loss computation.
-            **kwargs: Additional arguments
-
-        Returns:
-            Tuple of (total_loss, aggregated_metrics)
-        """
-        # Use instance settings if not overridden
-        if ignore_last is None:
-            ignore_last = self.ignore_last
-        if frozen_init_timesteps is None:
-            frozen_init_timesteps = self.frozen_init_timesteps
-
-        # Determine which timesteps to compute loss for
-        sde_indices = samples.get("sde_indices")
-        latents_key = "trajectories" if "trajectories" in samples else "latents"
-
-        if sde_indices is not None:
-            # Mixed sampler - only compute for SDE steps
-            timestep_indices = list(sde_indices)
-        else:
-            # Full SDE sampler - compute for all steps
-            num_steps = samples[latents_key].shape[1] - 1
-            timestep_indices = list(range(num_steps))
-
-        # Apply ignore_last: skip the last timestep (MixGRPO)
-        # The last step (t->0) has very low noise level, causing unstable log_prob
-        if ignore_last and len(timestep_indices) > 0:
-            max_idx = max(timestep_indices)
-            timestep_indices = [t for t in timestep_indices if t != max_idx]
-            logger.debug(f"ignore_last: skipping timestep {max_idx}")
-
-        # Apply frozen_init_timesteps: skip the first N timesteps (MixGRPO)
-        if frozen_init_timesteps > 0:
-            timestep_indices = [t for t in timestep_indices if t >= frozen_init_timesteps]
-            logger.debug(f"frozen_init_timesteps: skipping timesteps 0-{frozen_init_timesteps-1}")
-
-        device = advantages.device
-        total_loss = torch.tensor(0.0, device=device, requires_grad=True)
-        aggregated_terms = {
-            "policy_loss": 0.0,
-            "ratio_mean": 0.0,
-            "clip_fraction": 0.0,
-            "approx_kl": 0.0,
-            "num_steps": len(timestep_indices),
-        }
-        num_computed = 0
-
-        for t in timestep_indices:
-            loss, terms = self.compute(
-                model=model,
-                samples=samples,
-                timestep_idx=t,
-                advantages=advantages,
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                **kwargs,
-            )
-
-            if "skip_reason" not in terms:
-                total_loss = total_loss + loss
-                num_computed += 1
-                for key in ["policy_loss", "ratio_mean", "clip_fraction", "approx_kl"]:
-                    if key in terms:
-                        val = terms[key]
-                        if isinstance(val, torch.Tensor):
-                            val = val.item()
-                        aggregated_terms[key] += val
-
-        # Average over timesteps
-        if num_computed > 0:
-            total_loss = total_loss / num_computed
-            for key in ["policy_loss", "ratio_mean", "clip_fraction", "approx_kl"]:
-                aggregated_terms[key] /= num_computed
-
-        aggregated_terms["total_loss"] = total_loss.detach()
-
-        return total_loss, aggregated_terms

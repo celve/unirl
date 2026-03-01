@@ -10,8 +10,8 @@ from diffusionrl.config.build_domain_args import (
 )
 from diffusionrl.runtime.training import create_train_backend
 
-from .rollout import RolloutActorGroup
-from .training import TrainingActorGroup
+from .rollout_group import RolloutActorGroup
+from .training_group import TrainingActorGroup
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +139,7 @@ def create_rollout_actor_group(
                 "Multi-GPU rollout actor layout requires --allow-noset-multi-gpu-inference=true. "
                 "Default layout only supports integer single-GPU actors."
             )
-        from diffusionrl.ray.utils.distributed import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
+        from diffusionrl.ray.ray_utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
 
         actual_gpus_per_engine = int(num_gpus_per_actor)
         ray_num_gpus = 0.5  # Fractional claim to satisfy Ray scheduler

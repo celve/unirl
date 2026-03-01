@@ -12,7 +12,7 @@ from ray.util.placement_group import PlacementGroup
 from diffusionrl.types import RolloutRequest
 from diffusionrl.utils import load_function
 
-from .base import BaseActorGroup
+from .group_base import BaseActorGroup
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class TrainingActorGroup(BaseActorGroup):
             runtime_env: Optional runtime_env passed to Ray actor options
             **kwargs: Additional actor kwargs
         """
-        from ..actors.base import RayActor
+        from .actor_base import RayActor
 
         if actor_class_path:
             actor_class = load_function(actor_class_path)
@@ -54,7 +54,7 @@ class TrainingActorGroup(BaseActorGroup):
                     f"actor_class_path must resolve to a Ray actor class, got: {actor_class}"
                 )
         else:
-            from ..actors import TrainingActor
+            from .training_actor import TrainingActor
 
             actor_class = TrainingActor
 
@@ -369,30 +369,6 @@ class TrainingActorGroup(BaseActorGroup):
         """Clear GPU cache without full offload."""
         refs = [actor.clear_memory.remote() for actor in self._actor_handles]
         ray.get(refs)
-
-    def _get_batch_size(
-        self,
-        prompts: Optional[List[str]],
-        **kwargs,
-    ) -> int:
-        if prompts is not None:
-            return len(prompts)
-        for key in (
-            "prompt_embeds",
-            "pooled_prompt_embeds",
-            "encoder_attention_mask",
-            "text_ids",
-            "latents",
-            "image_ids",
-        ):
-            val = kwargs.get(key)
-            if val is None:
-                continue
-            if hasattr(val, "shape") and len(getattr(val, "shape", ())) > 0:
-                return val.shape[0]
-            if isinstance(val, list):
-                return len(val)
-        raise ValueError("TrainingActorGroup.generate requires prompts or batched tensors")
 
     def _pad_batched_value(self, val: Any, batch_size: int, target_size: int) -> Any:
         if val is None or target_size <= batch_size:

@@ -88,7 +88,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ===== Configurable defaults (override via env vars or CLI "$@") =====
 # Keep local checkpoints under models/local by default.
-PRETRAINED_MODEL=${PRETRAINED_MODEL:-"models/local/hunyuan-video"}
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/hunyuan-video"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/dancegrpo_hunyuan_colocate"}
 # Hunyuan path in diffusionrl currently expects plain prompts (text mode).
 DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/video_prompts_toy.txt"}
@@ -122,7 +122,6 @@ REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-"hpsv2"}
 REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardWorker"}
 
 # FSDP configuration
-FSDP_SHARDING=${FSDP_SHARDING:-"FULL_SHARD"}
 FSDP_CPU_OFFLOAD=${FSDP_CPU_OFFLOAD:-"false"}
 
 # Note: shell-level path existence check removed. The Python-level fallback in
@@ -152,7 +151,6 @@ echo " Total samples/rollout:  ${TOTAL_SAMPLES}"
 echo " Per-rank training:      $((TOTAL_SAMPLES / TOTAL_GPUS))"
 echo " Resolution:             ${HEIGHT}×${WIDTH}×${NUM_FRAMES}f"
 echo " Reward:                 ${REWARD_MODEL_NAME}"
-echo " FSDP sharding:          ${FSDP_SHARDING}"
 echo " FSDP CPU offload:       ${FSDP_CPU_OFFLOAD}"
 echo "======================================================"
 
@@ -200,7 +198,6 @@ python -m diffusionrl.train \
     --num-inner-epochs ${NUM_INNER_EPOCHS} \
     --max-grad-norm 1.0 \
     --weight-decay 0.0001 \
-    --fsdp-sharding-strategy ${FSDP_SHARDING} \
     --fsdp-cpu-offload ${FSDP_CPU_OFFLOAD} \
     --use-gradient-checkpointing true \
     \

@@ -13,7 +13,7 @@ from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Tuple
 import ray
 import torch
 
-from diffusionrl.runtime.pipeline.partition_stage import maybe_partition_training_batch
+from diffusionrl.runtime.pipeline.rollout_pipeline import maybe_partition_training_batch
 from diffusionrl.types.sampling import LogProbData, PromptEmbeddings
 from diffusionrl.types.training_batch import (
     BackwardTrainingBatch,

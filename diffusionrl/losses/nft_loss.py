@@ -16,15 +16,18 @@ Key Features:
 Based on: DiffusionNFT
 """
 
-from typing import Dict, Any, Tuple, Optional
+import logging
+from typing import Any, Dict, Optional, Tuple
 from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
 from diffusers.utils.torch_utils import randn_tensor
 
-from diffusionrl.types import ForwardTrainingBatch, PromptEmbeddings
+from diffusionrl.types import ForwardTrainingBatch
 from diffusionrl.utils.adapter_utils import switch_adapter
+
+logger = logging.getLogger(__name__)
 
 
 class NFTLoss:
@@ -62,11 +65,9 @@ class NFTLoss:
 
     Example:
         loss_fn = NFTLoss(beta=0.1, adv_clip_max=5.0)
-        loss, metrics = loss_fn.compute(
+        loss, metrics = loss_fn.compute_batch(
             model=model,
-            samples={"clean_latents": x0, "prompt_embeds": embeds},
-            timestep_idx=0,
-            advantages=advantages,
+            batch=forward_training_batch,
         )
     """
 
@@ -77,6 +78,29 @@ class NFTLoss:
             "requires_log_prob": False,
             "requires_embeddings": True,
         }
+
+    @classmethod
+    def from_config(cls, config: dict) -> "NFTLoss":
+        """Create NFTLoss from a loss_config dictionary.
+
+        Reads constructor parameters from config top-level keys,
+        with ``loss_kwargs`` sub-dict taking precedence for overrides.
+        """
+        extra = config.get("loss_kwargs") or {}
+
+        def _get(key, default):
+            return extra.get(key, config.get(key, default))
+
+        return cls(
+            beta=float(_get("beta", 0.1)),
+            adv_clip_max=float(_get("adv_clip_max", 5.0)),
+            adv_mode=str(_get("adv_mode", "raw")),
+            use_adaptive_weight=bool(_get("use_adaptive_weight", True)),
+            shift=float(_get("shift", 3.0)),
+            old_adapter_name=str(_get("old_adapter_name", "old")),
+            new_adapter_name=str(_get("new_adapter_name", "default")),
+            kl_coef=float(_get("kl_coef", 0.0)),
+        )
 
     def __init__(
         self,
@@ -272,7 +296,7 @@ class NFTLoss:
                 return old_model(**model_kwargs)[0]
             return model(**model_kwargs)[0]
 
-    def compute(
+    def _compute_core(
         self,
         model: nn.Module,
         samples: Dict[str, Any],
@@ -291,7 +315,9 @@ class NFTLoss:
         **kwargs,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
-        Compute NFT forward process loss.
+        Internal: compute NFT forward process loss.
+
+        Called by ``compute_batch()`` which is the public interface.
 
         Args:
             model: The diffusion model being trained (current policy)
@@ -379,20 +405,31 @@ class NFTLoss:
             encoder_attention_mask=encoder_attention_mask,
         )
 
+        # Ensure training forward uses the new policy adapter and has autograd enabled.
+        adapter_model = model.module if hasattr(model, "module") else model
+        if hasattr(adapter_model, "set_adapter"):
+            try:
+                adapter_model.set_adapter(self.new_adapter_name)
+            except Exception:
+                pass
+
+        grad_context = torch.enable_grad() if not torch.is_grad_enabled() else nullcontext()
         # Get predictions from current model
         try:
             from fastvideo.forward_context import set_forward_context
 
-            if attn_metadata is not None:
-                with set_forward_context(current_timestep=timestep_idx, attn_metadata=attn_metadata):
+            with grad_context:
+                if attn_metadata is not None:
+                    with set_forward_context(current_timestep=timestep_idx, attn_metadata=attn_metadata):
+                        with torch.autocast("cuda", model_dtype) if autocast_enabled else nullcontext():
+                            forward_prediction = model(**model_kwargs)[0]
+                else:
                     with torch.autocast("cuda", model_dtype) if autocast_enabled else nullcontext():
                         forward_prediction = model(**model_kwargs)[0]
-            else:
+        except ImportError:
+            with grad_context:
                 with torch.autocast("cuda", model_dtype) if autocast_enabled else nullcontext():
                     forward_prediction = model(**model_kwargs)[0]
-        except ImportError:
-            with torch.autocast("cuda", model_dtype) if autocast_enabled else nullcontext():
-                forward_prediction = model(**model_kwargs)[0]
 
         # Get predictions from old model/adapter
         old_prediction = self.get_old_prediction(model, model_kwargs, old_model)
@@ -540,7 +577,7 @@ class NFTLoss:
             "clean_latents": batch.clean_latents,
         }
 
-        return self.compute(
+        return self._compute_core(
             model=model,
             samples=samples,
             timestep_idx=0,  # Not used for NFT
@@ -555,30 +592,6 @@ class NFTLoss:
             generator=generator,
             attn_metadata=attn_metadata,
             config=config,
-            **kwargs,
-        )
-
-    def compute_aggregated(
-        self,
-        model: nn.Module,
-        samples: Dict[str, Any],
-        advantages: torch.Tensor,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """
-        Compute NFT loss.
-
-        For NFT, we only compute once (forward process samples random timestep).
-        """
-        return self.compute(
-            model=model,
-            samples=samples,
-            timestep_idx=0,  # Not used for NFT
-            advantages=advantages,
-            prompt_embeds=prompt_embeds,
-            pooled_prompt_embeds=pooled_prompt_embeds,
             **kwargs,
         )
 

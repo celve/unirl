@@ -37,14 +37,11 @@
 # - Window scheduler: progressive with group_size=4, iters_per_group=25
 # - NO KL penalty (kl_coeff=0.0 in original)
 #
-# NOTE: The following MixGRPO features are NOT implemented in diffusionrl:
-# - --trimmed_ratio (outlier removal from advantage calculation)
-# - --init_same_noise (same initial noise for same prompt)
-# - --ignore_last (ignore last timestep)
-# - --frozen_init_timesteps (freeze initial timesteps)
-# - Multi-reward weighting (hps/clip/image_reward/pick_score)
-#
-# This is an APPROXIMATE reproduction. See plan for details.
+# NOTE:
+# - Core MixGRPO knobs used here are implemented in diffusionrl
+#   (window scheduler / sde_ratio / trimmed_ratio / ignore_last / frozen_init_timesteps).
+# - This script remains an approximate reproduction because reward stack,
+#   dataset, and model initialization may differ from the upstream project.
 #
 # Usage:
 #   bash train_mixgrpo_flux_train_actor_sampling.sh
@@ -59,7 +56,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 
 # Default values (can be overridden via command line)
-PRETRAINED_MODEL=${PRETRAINED_MODEL:-"models/local/flux"}
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/flux"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/mixgrpo_flux_train_sampling"}
 DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/prompts_toy.json"}
 NUM_GPUS=${NUM_GPUS:-8}
@@ -91,7 +88,6 @@ python -m diffusionrl.train \
     --num-inference-steps 25 \
     --guidance-scale 3.5 \
     \
-    --mixed-sampling true \
     --sde-ratio 0.5 \
     --timestep-strategy window \
     --window-strategy progressive \

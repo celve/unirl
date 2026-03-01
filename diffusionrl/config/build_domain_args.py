@@ -202,9 +202,19 @@ def _build_loss_config(args) -> Dict[str, Any]:
     ac = args.algorithm  # AlgorithmConfig
     sc = args.sampling   # SamplingConfig
     loss_kwargs = _parse_json_dict(getattr(ac, "loss_kwargs_json", ""))
+    algorithm_kwargs = _parse_json_dict(getattr(ac, "algorithm_kwargs_json", ""))
+
+    # Auto-resolve loss_path from loss_type if not explicitly set
+    loss_path = str(ac.loss_path) if ac.loss_path else None
+    if not loss_path:
+        from diffusionrl.losses import DEFAULT_LOSS_PATHS
+        loss_path = DEFAULT_LOSS_PATHS.get(str(ac.loss_type))
+
     return {
+        "algorithm_path": str(ac.algorithm_path),
+        "algorithm_kwargs": algorithm_kwargs,
         "loss_type": str(ac.loss_type),
-        "loss_path": str(ac.loss_path) if ac.loss_path else None,
+        "loss_path": loss_path,
         "loss_kwargs": loss_kwargs,
         "clip_range": float(ac.clip_range),
         "clip_range_mode": str(ac.clip_range_mode),
@@ -239,9 +249,7 @@ def _build_training_runtime_config(args, *, dp_size: int) -> Dict[str, Any]:
 def _build_fsdp_config(args) -> Dict[str, Any]:
     tc = args.training  # TrainingConfig
     return {
-        "sharding_strategy": str(tc.fsdp_sharding_strategy),
         "cpu_offload": bool(tc.fsdp_cpu_offload),
-        "backward_prefetch": str(tc.fsdp_backward_prefetch),
     }
 
 

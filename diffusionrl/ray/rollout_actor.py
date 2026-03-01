@@ -15,7 +15,7 @@ from diffusionrl.samplers.engine import (
 )
 from diffusionrl.utils.weight_sync_checkpoint import wait_for_published_checkpoint
 
-from .base import log_gpu_state, log_resource_ids, tensor_to_pil
+from .actor_base import log_gpu_state, log_resource_ids, tensor_to_pil
 
 logger = logging.getLogger(__name__)
 

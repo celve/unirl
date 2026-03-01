@@ -189,6 +189,7 @@ class GRPOAlgorithm(BaseAlgorithm):
                 "use_running_stats": getattr(args, "use_running_stats", False),
                 "running_stats_warmup": getattr(args, "running_stats_warmup", 0),
                 "use_global_std": getattr(args, "use_global_std", False),
+                "trimmed_ratio": getattr(args, "trimmed_ratio", 0.0),
                 "ignore_last": getattr(args, "ignore_last", False),
                 "frozen_init_timesteps": getattr(args, "frozen_init_timesteps", 0),
             }
