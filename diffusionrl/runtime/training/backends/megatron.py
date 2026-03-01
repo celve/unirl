@@ -63,7 +63,7 @@ class MegatronTrainBackend(TrainBackend):
             supports_custom_scheduler=True,
             supports_custom_train_step=True,
             supports_backend_managed_offload=True,
-            preferred_weight_sync_mode="checkpoint_path",
+            preferred_weight_transport="checkpoint_path",
             preferred_weight_export_format="state_dict",
             supported_weight_export_formats=("state_dict",),
             notes=(

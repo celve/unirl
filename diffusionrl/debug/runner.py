@@ -83,6 +83,8 @@ def _save_media_from_sampler_outputs(
     sampler_outputs: Sequence[Any],
     output_dir: Path,
     max_media: int,
+    prompts: Optional[Sequence[str]] = None,
+    rewards: Optional[torch.Tensor] = None,
 ) -> Dict[str, Any]:
     media_dir = output_dir / "media"
     _ensure_dir(media_dir)
@@ -91,7 +93,17 @@ def _save_media_from_sampler_outputs(
     saved_videos = 0
     summaries: List[Dict[str, Any]] = []
 
+    # Flatten rewards to a 1-D list for per-sample lookup.
+    rewards_flat: List[Optional[float]] = []
+    if rewards is not None and torch.is_tensor(rewards):
+        rewards_flat = [float(v) for v in rewards.detach().cpu().reshape(-1).tolist()]
+
+    # manifest rows: (image_file, global_sample_idx, prompt, reward)
+    manifest_rows: List[Tuple[str, int, str, str]] = []
+    global_sample_idx = 0
+
     for out_idx, output in enumerate(sampler_outputs):
+        batch_size = int(getattr(output, "batch_size", 1))
         item_summary: Dict[str, Any] = {
             "index": int(out_idx),
             "latents_shape": _shape(getattr(output, "latents", None)),
@@ -109,15 +121,17 @@ def _save_media_from_sampler_outputs(
         for image_idx, image in enumerate(decoded_images):
             if saved_images >= max_media:
                 break
-            output_path = media_dir / f"image_{out_idx:03d}_{image_idx:03d}.png"
+            sample_idx = global_sample_idx + image_idx
+            image_file = f"sample_{sample_idx:06d}.png"
+            output_path = media_dir / image_file
+            saved_ok = False
             try:
                 if hasattr(image, "save"):
                     image.save(output_path)
-                    saved_images += 1
-                    continue
-                if torch.is_tensor(image):
+                    saved_ok = True
+                elif torch.is_tensor(image):
                     _save_tensor_as_image(image, output_path)
-                    saved_images += 1
+                    saved_ok = True
             except Exception as exc:
                 logger.warning(
                     "Failed to save decoded image (output=%s idx=%s): %s",
@@ -125,6 +139,15 @@ def _save_media_from_sampler_outputs(
                     image_idx,
                     exc,
                 )
+            if saved_ok:
+                saved_images += 1
+                prompt_str = ""
+                if prompts and sample_idx < len(prompts):
+                    prompt_str = str(prompts[sample_idx])
+                reward_str = ""
+                if sample_idx < len(rewards_flat):
+                    reward_str = f"{rewards_flat[sample_idx]:.6f}"
+                manifest_rows.append((image_file, sample_idx, prompt_str, reward_str))
 
         decoded_videos = None
         metadata = getattr(output, "metadata", {}) or {}
@@ -152,6 +175,17 @@ def _save_media_from_sampler_outputs(
                         video_idx,
                         exc,
                     )
+
+        global_sample_idx += batch_size
+
+    # Write manifest.csv so developers can correlate images with prompts/rewards.
+    if manifest_rows:
+        manifest_path = media_dir / "manifest.csv"
+        with manifest_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["image_file", "global_sample_idx", "prompt", "reward"])
+            for row in manifest_rows:
+                writer.writerow(row)
 
     return {
         "saved_images": int(saved_images),
@@ -244,6 +278,8 @@ def save_rollout_debug_payload(
         sampler_outputs=sampler_outputs,
         output_dir=rollout_dir,
         max_media=max(1, int(getattr(args, "debug_max_media", 8))),
+        prompts=payload.get("reward_prompts") or payload.get("prompts"),
+        rewards=payload.get("rewards"),
     )
 
     _save_reward_csv(
@@ -559,3 +595,138 @@ def run_debug_train_only(args: Any) -> None:
             )
     finally:
         training_group.dispose()
+
+
+def _save_current(args: Any, rollout_manager: Any, rollout_id: int) -> Path:
+    """Fetch full payload from actor cache and persist to disk."""
+    payload = ray.get(rollout_manager.debug_fetch_payload.remote())
+    return save_rollout_debug_payload(
+        args=args,
+        payload=payload,
+        rollout_id=rollout_id,
+        source="interactive",
+    )
+
+
+def _print_summary(label: str, summary: Dict[str, Any]) -> None:
+    """Pretty-print a stage summary dict."""
+    parts = []
+    for key in ("rewards_mean", "rewards_std", "rewards_min", "rewards_max",
+                "advantages_mean", "advantages_std", "advantages_min", "advantages_max",
+                "num_samples", "total_samples", "batch_type", "batch_size",
+                "component_names"):
+        if key in summary:
+            val = summary[key]
+            if isinstance(val, float):
+                parts.append(f"{key}={val:.6f}")
+            else:
+                parts.append(f"{key}={val}")
+    logger.info("[interactive] %s: %s", label, "  ".join(parts))
+    print(f"  {label}: {', '.join(parts)}")
+
+
+_INTERACTIVE_MENU = """
+--- Interactive Debug Menu ---
+[1] Full pipeline    (new sampling + reward + advantage)
+[2] From reward      (reuse last sampling, recompute reward + advantage)
+[3] From advantage   (reuse last sampling + reward, only recompute advantage)
+[4] Save             (save current results to disk)
+[5] Assemble batch   (assemble training_batch and save)
+[q] Quit
+
+Note: reward workers are separate Ray actors; code changes to them require
+      a process restart.  algorithm.compute_advantages() runs inside the
+      RolloutManager and *may* respond to importlib.reload in some cases.
+"""
+
+
+def run_debug_interactive(args: Any) -> None:
+    """Interactive debug mode: load model once, loop over a stage-based menu."""
+    from diffusionrl.ray import create_placement_groups_from_args, create_rollout_manager
+    from diffusionrl.utils import configure_logger, set_seed
+
+    configure_logger()
+    set_seed(args.seed)
+    _maybe_init_ray(args)
+
+    pgs = create_placement_groups_from_args(args)
+    rollout_pg_result = pgs.get("rollout")
+    if rollout_pg_result is None and not bool(getattr(args, "training_actor_direct_sampling", False)):
+        raise ValueError(
+            "debug_mode=interactive requires rollout placement resources."
+        )
+
+    rollout_manager, _ = create_rollout_manager(
+        args,
+        pg_result=rollout_pg_result,
+        reward_pg_result=pgs.get("reward"),
+    )
+    logger.info("Interactive debug mode: model loaded. Running initial full pipeline...")
+
+    # --- First automatic full run ---
+    summary = ray.get(rollout_manager.debug_sample.remote(rollout_id=0))
+    print(f"Sampled {summary['total_samples']} samples from {len(summary['prompts'])} prompts")
+
+    reward_summary = ray.get(rollout_manager.debug_rewards.remote())
+    _print_summary("Rewards", reward_summary)
+
+    adv_summary = ray.get(rollout_manager.debug_advantages.remote())
+    _print_summary("Advantages", adv_summary)
+
+    out_dir = _save_current(args, rollout_manager, rollout_id=0)
+    print(f"Saved to {out_dir}")
+
+    # --- Interactive loop ---
+    iteration = 1
+    try:
+        while True:
+            print(_INTERACTIVE_MENU)
+            try:
+                choice = input("Choice: ").strip().lower()
+            except EOFError:
+                break
+
+            if choice == "1":
+                summary = ray.get(rollout_manager.debug_sample.remote(iteration))
+                print(f"Sampled {summary['total_samples']} samples")
+                reward_summary = ray.get(rollout_manager.debug_rewards.remote())
+                _print_summary("Rewards", reward_summary)
+                adv_summary = ray.get(rollout_manager.debug_advantages.remote())
+                _print_summary("Advantages", adv_summary)
+                out_dir = _save_current(args, rollout_manager, iteration)
+                print(f"Saved to {out_dir}")
+                iteration += 1
+
+            elif choice == "2":
+                reward_summary = ray.get(rollout_manager.debug_rewards.remote())
+                _print_summary("Rewards", reward_summary)
+                adv_summary = ray.get(rollout_manager.debug_advantages.remote())
+                _print_summary("Advantages", adv_summary)
+                out_dir = _save_current(args, rollout_manager, iteration)
+                print(f"Saved to {out_dir}")
+
+            elif choice == "3":
+                adv_summary = ray.get(rollout_manager.debug_advantages.remote())
+                _print_summary("Advantages", adv_summary)
+                out_dir = _save_current(args, rollout_manager, iteration)
+                print(f"Saved to {out_dir}")
+
+            elif choice == "4":
+                out_dir = _save_current(args, rollout_manager, iteration)
+                print(f"Saved to {out_dir}")
+
+            elif choice == "5":
+                batch_summary = ray.get(rollout_manager.debug_assemble.remote())
+                _print_summary("Training batch", batch_summary)
+                out_dir = _save_current(args, rollout_manager, iteration)
+                print(f"Saved to {out_dir}")
+
+            elif choice in ("q", "quit"):
+                break
+
+            else:
+                print(f"Unknown choice: {choice!r}")
+    finally:
+        ray.get(rollout_manager.dispose.remote())
+
+    logger.info("Interactive debug session ended.")

@@ -12,9 +12,15 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 import torch
 
 from diffusionrl.samplers.log_prob import get_sigma_schedule
-from diffusionrl.types import LogProbData, PromptEmbeddings, RolloutOutput
+from diffusionrl.types import LogProbData, PromptEmbeddings, RolloutOutput, RolloutRequest
 
-from ..engine import BaseRolloutEngine, EngineCapabilities, EngineConfig, register_engine
+from ..engine import (
+    BaseRolloutEngine,
+    DistributedWeightSyncCapable,
+    EngineCapabilities,
+    EngineConfig,
+    register_engine,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +38,7 @@ def _to_bool(value: Any, default: bool) -> bool:
 
 
 @register_engine("sglang")
-class SGLangRolloutEngine(BaseRolloutEngine):
+class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
     """Inference engine backed by `sglang.multimodal_gen` DiffGenerator."""
 
     def __init__(self, config: EngineConfig):
@@ -724,26 +730,25 @@ class SGLangRolloutEngine(BaseRolloutEngine):
     # ---------------------------------------------------------------------
     # Core inference API
     # ---------------------------------------------------------------------
-    def generate(
-        self,
-        prompts: Optional[List[str]] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        num_inference_steps: Optional[int] = None,
-        guidance_scale: Optional[float] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
-        num_frames: Optional[int] = None,
-        latents: Optional[torch.Tensor] = None,
-        seed: Optional[int] = None,
-        sde_indices: Optional[Set[int]] = None,
-        **kwargs,
-    ) -> RolloutOutput:
+    def generate(self, request: RolloutRequest) -> RolloutOutput:
         if not self._is_initialized or self._generator is None:
             raise RuntimeError("SGLang engine is not initialized")
 
-        del latents  # SGLang runtime samples noise internally.
+        # Extract fields from request
+        prompts = request.prompts
+        prompt_embeds = request.prompt_embeds
+        pooled_prompt_embeds = request.pooled_prompt_embeds
+        encoder_attention_mask = request.encoder_attention_mask
+        num_inference_steps = request.num_inference_steps
+        guidance_scale = request.guidance_scale
+        height = request.height
+        width = request.width
+        num_frames = request.num_frames
+        seed = request.seed
+        sde_indices = request.sde_indices
+        kwargs = dict(request.kwargs)
+
+        # SGLang runtime samples noise internally.
 
         if prompts is None or len(prompts) == 0:
             raise ValueError("SGLang engine requires non-empty prompts")
@@ -1323,7 +1328,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             supports_trajectory=True,
             supports_prompt_embeddings=supports_prompt_encoding,
             supports_guidance_scale=True,
-            weight_sync_mode="state_dict",
+            weight_load_mode="state_dict",
         )
 
     def health_check(self) -> bool:

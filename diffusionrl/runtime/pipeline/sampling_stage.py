@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
-from diffusionrl.types.sampling import RolloutOutput
+from diffusionrl.types.sampling import RolloutOutput, RolloutRequest
 
 
 def expand_batch_for_sampling(
@@ -73,6 +73,9 @@ def distributed_sample(
     """
     Sample across distributed rollout actors.
 
+    This is the natural construction point where scattered parameters are
+    bundled into a :class:`RolloutRequest` before being dispatched.
+
     Args:
         batch: Batch containing text prompts (prompt-only input contract)
         sde_indices: Set of timestep indices for SDE sampling (MixGRPO).
@@ -91,7 +94,13 @@ def distributed_sample(
             "Prompt-embedding-only input is no longer supported in rollout sampling."
         )
 
-    gen_kwargs = dict(
+    extra_kwargs: Dict[str, Any] = {}
+    extra_kwargs["init_same_noise"] = init_same_noise
+    extra_kwargs["num_samples_per_prompt"] = num_samples_per_prompt
+    if isinstance(extra_generate_kwargs, dict) and extra_generate_kwargs:
+        extra_kwargs.update(extra_generate_kwargs)
+
+    request = RolloutRequest(
         prompts=prompts,
         num_inference_steps=num_inference_steps,
         guidance_scale=guidance_scale,
@@ -100,15 +109,11 @@ def distributed_sample(
         num_frames=num_frames,
         sde_indices=sde_indices,
         decode_for_reward=True,
-        init_same_noise=init_same_noise,
-        num_samples_per_prompt=num_samples_per_prompt,
+        latents=batch.get("latents"),
+        kwargs=extra_kwargs,
     )
-    if "latents" in batch:
-        gen_kwargs["latents"] = batch.get("latents")
-    if isinstance(extra_generate_kwargs, dict) and extra_generate_kwargs:
-        gen_kwargs.update(extra_generate_kwargs)
 
-    outputs = actor_group.generate(**gen_kwargs)
+    outputs = actor_group.generate(request)
 
     merged_outputs: List[RolloutOutput] = []
     for output in outputs:

@@ -13,7 +13,6 @@ from .sampling import (
     RolloutRequest,
     LogProbData,
     PromptEmbeddings,
-    SampleStatus,
 )
 from .training_batch import (
     BackwardTrainingBatch,
@@ -34,7 +33,6 @@ __all__ = [
     "RewardRequest",
     "RewardResponse",
     "RewardType",
-    "SampleStatus",
     "TimestepData",
     "TrainingBatch",
     "is_backward_batch",

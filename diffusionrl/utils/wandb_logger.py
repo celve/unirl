@@ -24,6 +24,7 @@ Usage:
 import os
 import tempfile
 from typing import Any, Dict, List, Optional, Union
+
 from PIL import Image
 import torch
 
@@ -53,6 +54,7 @@ class GRPOCoreWandBLogger:
         project: Optional[str] = None,
         run_name: Optional[str] = None,
         config: Optional[Any] = None,
+        log_dir: Optional[str] = None,
         rank: int = 0,
         image_log_interval: int = 10,
         enabled: bool = True,
@@ -63,12 +65,14 @@ class GRPOCoreWandBLogger:
             project: WandB project name
             run_name: WandB run name
             config: Training configuration (dict or object with __dict__)
+            log_dir: WandB run directory (if provided)
             rank: Process rank (only rank 0 logs)
             image_log_interval: How often to log images (in rollouts)
             enabled: Whether to enable logging
         """
         self.project = project
         self.run_name = run_name
+        self.log_dir = str(log_dir) if log_dir else None
         self.image_log_interval = image_log_interval
         self.rank = rank
         self._initialized = False
@@ -93,15 +97,86 @@ class GRPOCoreWandBLogger:
                 elif hasattr(config, "__dict__"):
                     config_dict = vars(config)
 
+            if self.log_dir:
+                os.makedirs(self.log_dir, exist_ok=True)
+
             wandb.init(
                 project=self.project,
                 name=self.run_name,
                 config=config_dict,
+                dir=self.log_dir,
             )
+            self._init_metric_axes()
             self._initialized = True
         except Exception as e:
             print(f"Warning: Failed to initialize wandb: {e}")
             self.enabled = False
+
+    def _init_metric_axes(self) -> None:
+        """Define metric namespaces and their step axes."""
+        if not WANDB_AVAILABLE:
+            return
+        try:
+            wandb.define_metric("train/step")
+            wandb.define_metric("train/*", step_metric="train/step")
+            wandb.define_metric("rollout/step")
+            wandb.define_metric("rollout/*", step_metric="rollout/step")
+            wandb.define_metric("perf/*", step_metric="rollout/step")
+            wandb.define_metric("sync/*", step_metric="rollout/step")
+            wandb.define_metric("buffer/*", step_metric="rollout/step")
+            wandb.define_metric("eval/step")
+            wandb.define_metric("eval/*", step_metric="eval/step")
+        except Exception as e:
+            print(f"Warning: Failed to define wandb metrics: {e}")
+
+    @staticmethod
+    def _coerce_metric_value(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return float(value)
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, torch.Tensor):
+            tensor = value.detach()
+            if tensor.numel() == 0:
+                return None
+            if tensor.numel() == 1:
+                return float(tensor.item())
+            return float(tensor.to(dtype=torch.float32).mean().item())
+        return None
+
+    @staticmethod
+    def _apply_prefix(key: str, prefix: str) -> str:
+        if not prefix:
+            return key
+        return key if key.startswith(prefix) else f"{prefix}{key}"
+
+    def log_with_step(
+        self,
+        *,
+        step_key: str,
+        step: int,
+        metrics: Dict[str, Any],
+        prefix: str = "",
+    ) -> None:
+        """Log metrics with an explicit namespace step key."""
+        if not self.enabled or not self._initialized:
+            return
+
+        try:
+            log_dict: Dict[str, Any] = {step_key: int(step)}
+            for key, value in metrics.items():
+                metric_key = self._apply_prefix(str(key), prefix)
+                if metric_key == step_key:
+                    continue
+                scalar = self._coerce_metric_value(value)
+                if scalar is None:
+                    continue
+                log_dict[metric_key] = scalar
+            wandb.log(log_dict)
+        except Exception as e:
+            print(f"Warning: Failed to log metrics ({step_key}): {e}")
 
     def log_step(
         self,
@@ -126,23 +201,12 @@ class GRPOCoreWandBLogger:
             metrics: Dictionary of metrics to log
             prefix: Prefix for metric names (default: "train/")
         """
-        if not self.enabled or not self._initialized:
-            return
-
-        try:
-            log_dict = {}
-            for key, value in metrics.items():
-                # Handle tensors
-                if isinstance(value, torch.Tensor):
-                    value = value.item() if value.numel() == 1 else value.mean().item()
-
-                # Add prefix
-                log_key = f"{prefix}{key}" if prefix else key
-                log_dict[log_key] = value
-
-            wandb.log(log_dict, step=step)
-        except Exception as e:
-            print(f"Warning: Failed to log step metrics: {e}")
+        self.log_with_step(
+            step_key="train/step",
+            step=step,
+            metrics=metrics,
+            prefix=prefix,
+        )
 
     def log_rollout(
         self,
@@ -163,20 +227,25 @@ class GRPOCoreWandBLogger:
             rollout_id: Rollout identifier
             metrics: Dictionary of metrics to log
         """
-        if not self.enabled or not self._initialized:
-            return
+        self.log_with_step(
+            step_key="rollout/step",
+            step=rollout_id,
+            metrics=metrics,
+            prefix="rollout/",
+        )
 
-        try:
-            log_dict = {"rollout_id": rollout_id}
-
-            for key, value in metrics.items():
-                if isinstance(value, torch.Tensor):
-                    value = value.item() if value.numel() == 1 else value.mean().item()
-                log_dict[f"rollout/{key}"] = value
-
-            wandb.log(log_dict, step=rollout_id)
-        except Exception as e:
-            print(f"Warning: Failed to log rollout metrics: {e}")
+    def log_perf(
+        self,
+        rollout_id: int,
+        metrics: Dict[str, Any],
+    ) -> None:
+        """Log performance metrics keyed by rollout step."""
+        self.log_with_step(
+            step_key="rollout/step",
+            step=rollout_id,
+            metrics=metrics,
+            prefix="perf/",
+        )
 
     def log_images(
         self,
@@ -234,7 +303,12 @@ class GRPOCoreWandBLogger:
 
                     wandb_images.append(wandb.Image(img_path, caption=caption))
 
-            wandb.log({key: wandb_images}, step=step)
+            wandb.log(
+                {
+                    "rollout/step": int(step),
+                    key: wandb_images,
+                }
+            )
         except Exception as e:
             print(f"Warning: Failed to log images: {e}")
 
@@ -249,19 +323,12 @@ class GRPOCoreWandBLogger:
             step: Global step number
             eval_metrics: Dictionary of evaluation metrics
         """
-        if not self.enabled or not self._initialized:
-            return
-
-        try:
-            log_dict = {}
-            for key, value in eval_metrics.items():
-                if isinstance(value, torch.Tensor):
-                    value = value.item() if value.numel() == 1 else value.mean().item()
-                log_dict[f"eval/{key}"] = value
-
-            wandb.log(log_dict, step=step)
-        except Exception as e:
-            print(f"Warning: Failed to log eval metrics: {e}")
+        self.log_with_step(
+            step_key="eval/step",
+            step=step,
+            metrics=eval_metrics,
+            prefix="eval/",
+        )
 
     def finish(self):
         """Finish wandb run."""
@@ -291,6 +358,7 @@ def init_logger(
     project: Optional[str] = None,
     run_name: Optional[str] = None,
     config: Optional[Any] = None,
+    log_dir: Optional[str] = None,
     rank: int = 0,
     **kwargs,
 ) -> GRPOCoreWandBLogger:
@@ -311,6 +379,7 @@ def init_logger(
         project=project,
         run_name=run_name,
         config=config,
+        log_dir=log_dir,
         rank=rank,
         **kwargs,
     )

@@ -22,7 +22,7 @@ class TrainBackendCapabilities:
     supports_custom_scheduler: bool = False
     supports_custom_train_step: bool = False
     supports_backend_managed_offload: bool = False
-    preferred_weight_sync_mode: Optional[str] = None
+    preferred_weight_transport: Optional[str] = None
     preferred_weight_export_format: Optional[str] = None
     supported_weight_export_formats: tuple[str, ...] = ("state_dict",)
     notes: str = ""
@@ -40,7 +40,7 @@ class TrainBackendCapabilities:
             "supports_custom_scheduler": self.supports_custom_scheduler,
             "supports_custom_train_step": self.supports_custom_train_step,
             "supports_backend_managed_offload": self.supports_backend_managed_offload,
-            "preferred_weight_sync_mode": self.preferred_weight_sync_mode,
+            "preferred_weight_transport": self.preferred_weight_transport,
             "preferred_weight_export_format": self.preferred_weight_export_format,
             "supported_weight_export_formats": list(self.supported_weight_export_formats),
             "notes": self.notes,
@@ -263,7 +263,7 @@ class TrainBackend(abc.ABC):
             "capabilities": caps.as_dict(),
             "topology": self.topology(actor).as_dict(),
             "weight_sync": {
-                "preferred_mode": caps.preferred_weight_sync_mode,
+                "preferred_mode": caps.preferred_weight_transport,
                 "preferred_export_format": caps.preferred_weight_export_format,
                 "supported_export_formats": list(caps.supported_weight_export_formats),
             },

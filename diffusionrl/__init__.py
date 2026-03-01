@@ -9,7 +9,6 @@ __version__ = "0.1.0"
 
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     # shared types
-    "SampleStatus": ("diffusionrl.types", "SampleStatus"),
     "RolloutOutputType": ("diffusionrl.types", "RolloutOutput"),
     "RolloutRequest": ("diffusionrl.types", "RolloutRequest"),
     "RewardRequestType": ("diffusionrl.types", "RewardRequest"),
@@ -36,7 +35,6 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "BaseAlgorithm": ("diffusionrl.algorithms", "BaseAlgorithm"),
     "SamplingRequirements": ("diffusionrl.algorithms", "SamplingRequirements"),
     "GRPOAlgorithm": ("diffusionrl.algorithms", "GRPOAlgorithm"),
-    "compute_advantage": ("diffusionrl.algorithms.advantages", "compute_advantage"),
     # config / utils / models
     "TrainingArguments": ("diffusionrl.config", "TrainingArguments"),
     "parse_args": ("diffusionrl.config", "parse_args"),

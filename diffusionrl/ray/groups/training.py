@@ -9,6 +9,7 @@ import ray
 import torch
 from ray.util.placement_group import PlacementGroup
 
+from diffusionrl.types import RolloutRequest
 from diffusionrl.utils import load_function
 
 from .base import BaseActorGroup
@@ -420,29 +421,36 @@ class TrainingActorGroup(BaseActorGroup):
             step_indices=output.step_indices,
         )
 
-    def async_generate(
-        self,
-        prompts: Optional[List[str]] = None,
-        **kwargs,
-    ) -> List[ray.ObjectRef]:
-        batch_size = self._get_batch_size(prompts, **kwargs)
+    def async_generate(self, request: RolloutRequest) -> List[ray.ObjectRef]:
+        batch_size = len(request.prompts) if request.prompts else 0
         if batch_size <= 0:
             raise ValueError("batch_size must be > 0 for generate")
 
         target_size = max(batch_size, self.num_actors)
         if target_size > batch_size:
-            if prompts is not None:
-                prompts = self._pad_batched_value(prompts, batch_size, target_size)
-            for key in (
-                "prompt_embeds",
-                "pooled_prompt_embeds",
-                "encoder_attention_mask",
-                "text_ids",
-                "latents",
-                "image_ids",
-            ):
-                if key in kwargs:
-                    kwargs[key] = self._pad_batched_value(kwargs.get(key), batch_size, target_size)
+            # Pad prompts so each actor gets at least one
+            request = RolloutRequest(
+                prompts=self._pad_batched_value(request.prompts, batch_size, target_size),
+                prompt_embeds=self._pad_batched_value(request.prompt_embeds, batch_size, target_size),
+                pooled_prompt_embeds=self._pad_batched_value(request.pooled_prompt_embeds, batch_size, target_size),
+                encoder_attention_mask=self._pad_batched_value(request.encoder_attention_mask, batch_size, target_size),
+                text_ids=self._pad_batched_value(request.text_ids, batch_size, target_size),
+                num_inference_steps=request.num_inference_steps,
+                guidance_scale=request.guidance_scale,
+                eta=request.eta,
+                sde_type=request.sde_type,
+                height=request.height,
+                width=request.width,
+                num_frames=request.num_frames,
+                seed=request.seed,
+                latents=self._pad_batched_value(request.latents, batch_size, target_size),
+                sde_indices=request.sde_indices,
+                decode_for_reward=request.decode_for_reward,
+                sampling_adapter=request.sampling_adapter,
+                return_trajectories=request.return_trajectories,
+                return_log_probs=request.return_log_probs,
+                kwargs=dict(request.kwargs),
+            )
 
         # Distribute batch across actors
         prompts_per_actor = target_size // self.num_actors
@@ -450,46 +458,23 @@ class TrainingActorGroup(BaseActorGroup):
 
         refs = []
         start = 0
-        batched_keys = (
-            "prompt_embeds",
-            "pooled_prompt_embeds",
-            "encoder_attention_mask",
-            "text_ids",
-            "latents",
-            "image_ids",
-        )
         for i, actor in enumerate(self._actor_handles):
             count = prompts_per_actor + (1 if i < remainder else 0)
             end = start + count
 
             if count > 0:
-                actor_prompts = prompts[start:end] if prompts is not None else None
-                actor_kwargs = dict(kwargs)
-                for key in batched_keys:
-                    if key not in actor_kwargs:
-                        continue
-                    val = actor_kwargs[key]
-                    if val is None:
-                        continue
-                    if hasattr(val, "shape") and len(getattr(val, "shape", ())) > 0 and val.shape[0] == target_size:
-                        actor_kwargs[key] = val[start:end]
-                    elif isinstance(val, list) and len(val) == target_size:
-                        actor_kwargs[key] = val[start:end]
-                refs.append(actor.generate.remote(prompts=actor_prompts, **actor_kwargs))
+                actor_request = request.slice_prompts(start, end)
+                refs.append(actor.generate.remote(actor_request))
 
             start = end
 
         return refs
 
-    def generate(
-        self,
-        prompts: Optional[List[str]] = None,
-        **kwargs,
-    ) -> List[Any]:
-        original_batch_size = self._get_batch_size(prompts, **kwargs)
+    def generate(self, request: RolloutRequest) -> List[Any]:
+        original_batch_size = len(request.prompts) if request.prompts else 0
         target_size = max(original_batch_size, self.num_actors)
 
-        refs = self.async_generate(prompts=prompts, **kwargs)
+        refs = self.async_generate(request)
         outputs = ray.get(refs)
 
         if target_size == original_batch_size:

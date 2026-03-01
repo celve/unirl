@@ -9,6 +9,7 @@ import torch
 from diffusionrl.types.sampling import PromptEmbeddings, RolloutRequest, RolloutOutput
 from diffusionrl.samplers.engine import (
     BaseRolloutEngine,
+    DistributedWeightSyncCapable,
     EngineConfig,
     get_engine,
 )
@@ -750,58 +751,31 @@ class RolloutActor:
         self._log_resource_ids("rollout_init")
         self._log_gpu_state("rollout_init")
 
-    def generate(
-        self,
-        prompts: Optional[List[str]] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        text_ids: Optional[torch.Tensor] = None,
-        num_inference_steps: Optional[int] = None,
-        guidance_scale: Optional[float] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
-        num_frames: Optional[int] = None,
-        seed: Optional[int] = None,
-        decode_for_reward: bool = False,
-        **kwargs,
-    ) -> RolloutOutput:
+    def generate(self, request: RolloutRequest) -> RolloutOutput:
         """
         Generate samples with log probabilities.
 
         Args:
-            prompts: List of text prompts
-            prompt_embeds: Deprecated (ignored)
-            pooled_prompt_embeds: Deprecated (ignored)
-            encoder_attention_mask: Attention mask
-            text_ids: Text position IDs (for FLUX)
-            num_inference_steps: Number of denoising steps
-            guidance_scale: Classifier-free guidance scale
-            height: Output height
-            width: Output width
-            num_frames: Number of frames (for video)
-            seed: Random seed for reproducibility
-            decode_for_reward: If True, decode latents for reward computation
-            **kwargs: Additional engine arguments
+            request: RolloutRequest with prompts and generation parameters.
 
         Returns:
             RolloutOutput containing trajectories, log_probs, etc.
         """
         if self.engine is None:
             raise RuntimeError("Engine not initialized. Call init() first.")
-        if not isinstance(prompts, list) or len(prompts) == 0:
+        if not isinstance(request.prompts, list) or len(request.prompts) == 0:
             raise ValueError(
                 "RolloutActor.generate requires non-empty text prompts. "
                 "Prompt-embedding-only input is no longer supported."
             )
 
         ignored_embedding_input = (
-            prompt_embeds is not None
-            or pooled_prompt_embeds is not None
-            or encoder_attention_mask is not None
-            or text_ids is not None
-            or kwargs.get("negative_prompt_embeds") is not None
-            or kwargs.get("negative_pooled_prompt_embeds") is not None
+            request.prompt_embeds is not None
+            or request.pooled_prompt_embeds is not None
+            or request.encoder_attention_mask is not None
+            or request.text_ids is not None
+            or request.kwargs.get("negative_prompt_embeds") is not None
+            or request.kwargs.get("negative_pooled_prompt_embeds") is not None
         )
         if ignored_embedding_input:
             if not self._warned_ignored_prompt_embedding_input:
@@ -810,47 +784,42 @@ class RolloutActor:
                     "Engines are responsible for per-request prompt encoding."
                 )
                 self._warned_ignored_prompt_embedding_input = True
-            prompt_embeds = None
-            pooled_prompt_embeds = None
-            encoder_attention_mask = None
-            text_ids = None
-            kwargs.pop("negative_prompt_embeds", None)
-            kwargs.pop("negative_pooled_prompt_embeds", None)
+            # Clear embedding fields before passing to engine
+            request = RolloutRequest(
+                prompts=request.prompts,
+                num_inference_steps=request.num_inference_steps,
+                guidance_scale=request.guidance_scale,
+                eta=request.eta,
+                sde_type=request.sde_type,
+                height=request.height,
+                width=request.width,
+                num_frames=request.num_frames,
+                seed=request.seed,
+                latents=request.latents,
+                sde_indices=request.sde_indices,
+                decode_for_reward=request.decode_for_reward,
+                sampling_adapter=request.sampling_adapter,
+                return_trajectories=request.return_trajectories,
+                return_log_probs=request.return_log_probs,
+                kwargs={k: v for k, v in request.kwargs.items()
+                        if k not in ("negative_prompt_embeds", "negative_pooled_prompt_embeds")},
+            )
 
         self._ensure_engine_ready_for_generate()
         engine_caps = self.engine.get_capabilities_dict()
         if (
-            guidance_scale is not None
+            request.guidance_scale is not None
             and not engine_caps.get("supports_guidance_scale", True)
-            and float(guidance_scale) != float(getattr(self.engine.config, "guidance_scale", guidance_scale))
+            and float(request.guidance_scale) != float(getattr(self.engine.config, "guidance_scale", request.guidance_scale))
         ):
             raise ValueError(
                 f"Engine {type(self.engine).__name__} does not support custom guidance_scale, "
-                f"but guidance_scale={guidance_scale} was provided."
+                f"but guidance_scale={request.guidance_scale} was provided."
             )
-
-        negative_prompt_embeds = None
-        negative_pooled_prompt_embeds = None
 
         self._log_gpu_state("inference_generate_start")
         # Generate
-        output = self.engine.generate(
-            prompts=prompts,
-            prompt_embeds=prompt_embeds,
-            pooled_prompt_embeds=pooled_prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-            encoder_attention_mask=encoder_attention_mask,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            height=height,
-            width=width,
-            num_frames=num_frames,
-            seed=seed,
-            text_ids=text_ids,
-            return_decoded_for_reward=decode_for_reward,
-            **kwargs,
-        )
+        output = self.engine.generate(request)
 
         # Attach capability snapshot for control-plane decisions/debugging.
         meta = dict(output.metadata or {})
@@ -858,7 +827,7 @@ class RolloutActor:
         output.metadata = meta
 
         # Decode latents for reward if requested
-        if decode_for_reward:
+        if request.decode_for_reward:
             if not output.has_decoded_images:
                 try:
                     decoded = self.engine.decode_latents(output.latents)
@@ -899,16 +868,7 @@ class RolloutActor:
         Returns:
             List of RolloutOutput for each request
         """
-        outputs = []
-        for request in requests:
-            output = self.generate(
-                prompts=request.prompts,
-                num_inference_steps=request.num_inference_steps,
-                guidance_scale=request.guidance_scale,
-                seed=request.seed,
-            )
-            outputs.append(output)
-        return outputs
+        return [self.generate(req) for req in requests]
 
     def encode_prompt(
         self,
@@ -1011,13 +971,13 @@ class RolloutActor:
         if self.engine is None:
             logger.warning("No engine to update weights")
             return
-        fn = getattr(self.engine, "update_weights_from_tensor", None)
-        if not callable(fn):
+        if not isinstance(self.engine, DistributedWeightSyncCapable):
             raise NotImplementedError(
-                f"Engine {type(self.engine).__name__} does not support update_weights_from_tensor."
+                f"{type(self.engine).__name__} does not support update_weights_from_tensor. "
+                "Only engines implementing DistributedWeightSyncCapable support tensor/distributed weight sync."
             )
         self._prepare_engine_for_weight_update()
-        fn(
+        self.engine.update_weights_from_tensor(
             serialized_named_tensors=serialized_named_tensors,
             target_modules=target_modules,
             load_format=load_format,
@@ -1038,13 +998,13 @@ class RolloutActor:
         if self.engine is None:
             logger.warning("No engine to initialize weight update group")
             return
-        fn = getattr(self.engine, "init_weights_update_group", None)
-        if not callable(fn):
+        if not isinstance(self.engine, DistributedWeightSyncCapable):
             raise NotImplementedError(
-                f"Engine {type(self.engine).__name__} does not support init_weights_update_group."
+                f"{type(self.engine).__name__} does not support init_weights_update_group. "
+                "Only engines implementing DistributedWeightSyncCapable support tensor/distributed weight sync."
             )
         self._prepare_engine_for_weight_update()
-        fn(
+        self.engine.init_weights_update_group(
             master_address=master_address,
             master_port=master_port,
             rank_offset=rank_offset,
@@ -1062,12 +1022,12 @@ class RolloutActor:
         if self.engine is None:
             logger.warning("No engine to destroy weight update group")
             return
-        fn = getattr(self.engine, "destroy_weights_update_group", None)
-        if not callable(fn):
+        if not isinstance(self.engine, DistributedWeightSyncCapable):
             raise NotImplementedError(
-                f"Engine {type(self.engine).__name__} does not support destroy_weights_update_group."
+                f"{type(self.engine).__name__} does not support destroy_weights_update_group. "
+                "Only engines implementing DistributedWeightSyncCapable support tensor/distributed weight sync."
             )
-        fn(group_name=group_name)
+        self.engine.destroy_weights_update_group(group_name=group_name)
 
     def update_weights_from_distributed(
         self,
@@ -1083,13 +1043,13 @@ class RolloutActor:
         if self.engine is None:
             logger.warning("No engine to update weights")
             return
-        fn = getattr(self.engine, "update_weights_from_distributed", None)
-        if not callable(fn):
+        if not isinstance(self.engine, DistributedWeightSyncCapable):
             raise NotImplementedError(
-                f"Engine {type(self.engine).__name__} does not support update_weights_from_distributed."
+                f"{type(self.engine).__name__} does not support update_weights_from_distributed. "
+                "Only engines implementing DistributedWeightSyncCapable support tensor/distributed weight sync."
             )
         self._prepare_engine_for_weight_update()
-        fn(
+        self.engine.update_weights_from_distributed(
             names=names,
             dtypes=dtypes,
             shapes=shapes,

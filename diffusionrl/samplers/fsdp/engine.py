@@ -18,14 +18,14 @@ Architecture (multi-GPU mode):
 
 import logging
 import os
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Union
 import torch
 import torch.nn as nn
 
 from ..engine import BaseRolloutEngine, EngineConfig, EngineCapabilities, register_engine
-from diffusionrl.types import RolloutOutput
+from diffusionrl.types import RolloutOutput, RolloutRequest
 from diffusionrl.utils import load_function
-from diffusionrl.utils.adapter_utils import switch_adapter
+from . import sampler_runner
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +190,8 @@ class FSDPRolloutEngine(BaseRolloutEngine):
             use_lora = bool(self.config.engine_kwargs.get("use_lora", False))
             model_kwargs = {
                 "pretrained_path": self.config.pretrained_model_saved_path,
+                "vae_saved_path": self.config.engine_kwargs.get("vae_saved_path"),
+                "text_encoder_path": self.config.engine_kwargs.get("text_encoder_path"),
                 "device": device,
                 "use_lora": use_lora,
             }
@@ -223,66 +225,31 @@ class FSDPRolloutEngine(BaseRolloutEngine):
                 if hasattr(self.model_bundle, 'transformer'):
                     self.model_bundle.transformer = self.model
 
-        # Determine sampler based on model type
+        # Create sampler via shared runner
         sampler_path = self.config.engine_kwargs.get("sampler_path")
         if sampler_path:
-            sampler_cls = load_function(sampler_path)
             sampler_kwargs = dict(self.config.engine_kwargs.get("sampler_kwargs", {}))
-            extra_kwargs = {}
-            if self.model_bundle is not None and hasattr(self.model_bundle, "get_sampler_extra_kwargs"):
-                extra_kwargs = self.model_bundle.get_sampler_extra_kwargs() or {}
-            for key, value in extra_kwargs.items():
-                sampler_kwargs.setdefault(key, value)
-            self.sampler = sampler_cls(
+            self.sampler = sampler_runner.create_sampler(
+                sampler_path=sampler_path,
                 model=self.model,
                 text_encoder=self.text_encoder,
                 vae=self.vae,
                 eta=self.config.eta,
                 sde_type=self.config.sde_type,
                 shift=self.config.shift,
+                model_bundle=self.model_bundle,
                 **sampler_kwargs,
             )
 
         self._is_initialized = True
         logger.info("FSDP engine initialized")
 
-    def generate(
-        self,
-        prompts: Optional[List[str]] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        num_inference_steps: Optional[int] = None,
-        guidance_scale: Optional[float] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
-        num_frames: Optional[int] = None,
-        latents: Optional[torch.Tensor] = None,
-        seed: Optional[int] = None,
-        sde_indices: Optional[Set[int]] = None,
-        sampling_adapter: Optional[str] = None,
-        **kwargs,
-    ) -> RolloutOutput:
+    def generate(self, request: RolloutRequest) -> RolloutOutput:
         """
         Generate samples with log probabilities.
 
         Args:
-            prompts: List of text prompts
-            prompt_embeds: Pre-computed prompt embeddings
-            pooled_prompt_embeds: Pooled prompt embeddings
-            encoder_attention_mask: Attention mask
-            num_inference_steps: Override default steps
-            guidance_scale: Override default guidance
-            height: Override default height
-            width: Override default width
-            num_frames: Override default frames
-            latents: Initial latents
-            seed: Random seed
-            sde_indices: SDE step indices
-            sampling_adapter: Optional adapter name to use during sampling.
-                For NFT training, set to "old" to use frozen reference adapter.
-                If None, uses current adapter (no switch).
-            **kwargs: Additional arguments
+            request: RolloutRequest with prompts and generation parameters.
 
         Returns:
             RolloutOutput with trajectories and log_probs
@@ -297,79 +264,48 @@ class FSDPRolloutEngine(BaseRolloutEngine):
 
         # Set seed
         generator = None
-        if seed is not None:
+        if request.seed is not None:
             generator = torch.Generator(device=self._device)
-            generator.manual_seed(seed)
+            generator.manual_seed(request.seed)
 
         # Use defaults if not specified
-        num_inference_steps = num_inference_steps or self.config.num_inference_steps
-        if guidance_scale is None:
-            guidance_scale = self.config.guidance_scale
-        height = height or self.config.height
-        width = width or self.config.width
-        num_frames = num_frames or self.config.num_frames
+        num_inference_steps = request.num_inference_steps or self.config.num_inference_steps
+        guidance_scale = request.guidance_scale if request.guidance_scale is not None else self.config.guidance_scale
+        height = request.height or self.config.height
+        width = request.width or self.config.width
+        num_frames = request.num_frames or self.config.num_frames
 
         # Also check config for sampling_adapter
+        sampling_adapter = request.sampling_adapter
         if sampling_adapter is None:
             sampling_adapter = self.config.engine_kwargs.get("sampling_adapter")
 
-        # Call sampler with optional adapter switch
-        if sampling_adapter and self.model is not None:
-            with switch_adapter(self.model, sampling_adapter):
-                return self.sampler.sample(
-                    prompts=prompts,
-                    prompt_embeds=prompt_embeds,
-                    pooled_prompt_embeds=pooled_prompt_embeds,
-                    encoder_attention_mask=encoder_attention_mask,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    height=height,
-                    width=width,
-                    num_frames=num_frames,
-                    latents=latents,
-                    generator=generator,
-                    sde_indices=sde_indices,
-                    **kwargs,
-                )
-        else:
-            return self.sampler.sample(
-                prompts=prompts,
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                encoder_attention_mask=encoder_attention_mask,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                height=height,
-                width=width,
-                num_frames=num_frames,
-                latents=latents,
-                generator=generator,
-                sde_indices=sde_indices,
-                **kwargs,
-            )
+        return sampler_runner.run_sample(
+            model=self.model,
+            sampler=self.sampler,
+            sampling_adapter=sampling_adapter,
+            prompts=request.prompts,
+            prompt_embeds=request.prompt_embeds,
+            pooled_prompt_embeds=request.pooled_prompt_embeds,
+            encoder_attention_mask=request.encoder_attention_mask,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            latents=request.latents,
+            generator=generator,
+            sde_indices=request.sde_indices,
+            **request.kwargs,
+        )
 
     def encode_prompt(
         self,
         prompts: List[str],
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Encode text prompts to embeddings.
-
-        Args:
-            prompts: List of text prompts
-            **kwargs: Additional encoding arguments
-
-        Returns:
-            Dict with prompt_embeds, pooled_prompt_embeds, etc.
-        """
-        if self.model_bundle is None:
-            raise RuntimeError("Model bundle not loaded")
-
-        if not hasattr(self.model_bundle, "encode_prompt_for_inference"):
-            raise RuntimeError("Model bundle does not support inference prompt encoding")
-
-        return self.model_bundle.encode_prompt_for_inference(prompts, **kwargs)
+        """Encode text prompts to embeddings."""
+        return sampler_runner.encode_prompt(self.model_bundle, prompts, **kwargs)
 
     def update_weights(self, state_dict: Dict[str, torch.Tensor]) -> None:
         """
@@ -419,32 +355,6 @@ class FSDPRolloutEngine(BaseRolloutEngine):
         except Exception as e:
             logger.warning("Could not move %s to %s: %s", name, device, e)
 
-    def _iter_reflection_modules(
-        self,
-        obj: Any,
-        include_transformer: bool,
-    ) -> Iterable[Tuple[str, nn.Module]]:
-        if obj is None:
-            return []
-        known_names = {
-            "transformer",
-            "text_encoder",
-            "text_encoder_2",
-            "text_encoder_3",
-            "vae",
-            "image_encoder",
-        }
-        results: List[Tuple[str, nn.Module]] = []
-        for name, value in obj.__dict__.items():
-            if not isinstance(value, nn.Module):
-                continue
-            base_name = name.lstrip("_").lower()
-            if not include_transformer and "transformer" in base_name:
-                continue
-            if base_name in known_names or any(token in base_name for token in ("encoder", "vae", "transformer")):
-                results.append((name, value))
-        return results
-
     def _move_aux_components(self, device: Union[str, torch.device], include_transformer: bool) -> None:
         # Engine-level components
         if include_transformer and self.model is not None:
@@ -465,7 +375,7 @@ class FSDPRolloutEngine(BaseRolloutEngine):
 
         # Sampler components (may hold references to text encoders)
         if self.sampler is not None:
-            for attr_name, component in self._iter_reflection_modules(
+            for attr_name, component in sampler_runner.iter_offloadable_modules(
                 self.sampler, include_transformer=include_transformer
             ):
                 if not include_transformer and component is self.model:
@@ -540,26 +450,12 @@ class FSDPRolloutEngine(BaseRolloutEngine):
             supports_trajectory=True,
             supports_prompt_embeddings=True,
             supports_guidance_scale=(model_type != "hunyuan"),
-            weight_sync_mode="state_dict",
+            weight_load_mode="state_dict",
         )
 
     def decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
         """Decode latents using VAE."""
-        if self.vae is None:
-            raise RuntimeError("VAE not available for decoding")
-
-        with torch.no_grad():
-            # Determine scaling factor
-            if hasattr(self.vae, 'config') and hasattr(self.vae.config, 'scaling_factor'):
-                scaling_factor = self.vae.config.scaling_factor
-            else:
-                scaling_factor = 0.18215
-
-            # VAE decode doesn't support bfloat16 ("Got unsupported ScalarType BFloat16")
-            # Always use float32 for VAE decoding
-            latents_float = latents.to(dtype=torch.float32)
-            decoded = self.vae.to(torch.float32).decode(latents_float / scaling_factor).sample
-            return (decoded + 1) / 2  # [-1, 1] -> [0, 1]
+        return sampler_runner.decode_latents(self.vae, latents)
 
     @property
     def supports_distributed(self) -> bool:

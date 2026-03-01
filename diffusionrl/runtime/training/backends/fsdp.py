@@ -59,7 +59,7 @@ class FSDPTrainBackend(TrainBackend):
             supports_custom_scheduler=False,
             supports_custom_train_step=False,
             supports_backend_managed_offload=False,
-            preferred_weight_sync_mode="object_ref",
+            preferred_weight_transport="checkpoint_path",
             preferred_weight_export_format="state_dict",
             supported_weight_export_formats=("state_dict", "sglang_transformer_safetensors"),
             notes=(

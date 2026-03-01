@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from .base import BaseAlgorithm, SamplingRequirements
-from .advantages.normalizers import normalize_global, normalize_grouped, build_fixed_size_groups
 
 
 class GRPOAlgorithm(BaseAlgorithm):
@@ -66,72 +65,27 @@ class GRPOAlgorithm(BaseAlgorithm):
                 Early timesteps may have high variance.
             **kwargs: Additional arguments
         """
-        super().__init__(clip_range, kl_coef, advantage_type, epsilon=epsilon, clip_max=clip_max, **kwargs)
+        super().__init__(
+            clip_range=clip_range,
+            kl_coef=kl_coef,
+            advantage_type=advantage_type,
+            epsilon=epsilon,
+            clip_max=clip_max,
+            use_per_prompt_tracker=use_per_prompt_tracker,
+            per_prompt_mode=per_prompt_mode,
+            per_prompt_buffer_size=per_prompt_buffer_size,
+            per_prompt_min_count=per_prompt_min_count,
+            use_running_stats=use_running_stats,
+            running_stats_warmup=running_stats_warmup,
+            use_global_std=use_global_std,
+            **kwargs,
+        )
         self.eta = eta
         self.sde_type = sde_type
-        self.per_prompt_mode = per_prompt_mode
-        self.use_global_std = use_global_std
 
         # MixGRPO stability controls
         self.ignore_last = ignore_last
         self.frozen_init_timesteps = frozen_init_timesteps
-
-        # Per-prompt statistics tracker (for flow_grpo per_prompt advantage type)
-        self.per_prompt_tracker = None
-        if (use_per_prompt_tracker or advantage_type == "per_prompt") and per_prompt_mode == "running":
-            from .advantages.per_prompt_tracker import PerPromptStatTracker
-            self.per_prompt_tracker = PerPromptStatTracker(
-                buffer_size=per_prompt_buffer_size,
-                min_count=per_prompt_min_count,
-                epsilon=epsilon,
-                clip_max=clip_max,
-                use_global_std=use_global_std,
-            )
-
-        # Running statistics for cross-batch global normalization (DanceGRPO)
-        self.running_reward_normalizer = None
-        if use_running_stats or use_global_std:
-            from .advantages.running_stats import RunningRewardNormalizer
-            self.running_reward_normalizer = RunningRewardNormalizer(
-                epsilon=epsilon,
-                clip_max=clip_max,
-                warmup_steps=running_stats_warmup,
-            )
-
-    @classmethod
-    def _grpo_kwargs_from_args(cls, args: Any) -> Dict[str, Any]:
-        kwargs = cls._base_kwargs_from_args(args)
-        kwargs.update(
-            {
-                "eta": getattr(args, "eta", 1.0),
-                "sde_type": getattr(args, "sde_type", "sde"),
-                "use_per_prompt_tracker": getattr(args, "use_per_prompt_stat_tracker", False),
-                "per_prompt_mode": getattr(args, "per_prompt_mode", "running"),
-                "per_prompt_buffer_size": getattr(args, "per_prompt_buffer_size", 16),
-                "per_prompt_min_count": getattr(args, "per_prompt_min_count", 2),
-                "use_running_stats": getattr(args, "use_running_stats", False),
-                "running_stats_warmup": getattr(args, "running_stats_warmup", 0),
-                "use_global_std": getattr(args, "use_global_std", False),
-                "ignore_last": getattr(args, "ignore_last", False),
-                "frozen_init_timesteps": getattr(args, "frozen_init_timesteps", 0),
-            }
-        )
-        return kwargs
-
-    @classmethod
-    def from_args(cls, args: Any) -> "GRPOAlgorithm":
-        """Construct GRPO algorithm from runtime args."""
-        kwargs = cls._grpo_kwargs_from_args(args)
-        kwargs.update(cls._algorithm_kwargs_from_args(args))
-        return cls(**kwargs)
-
-    def get_sampling_requirements(self) -> SamplingRequirements:
-        """Return GRPO sampling requirements."""
-        return SamplingRequirements(
-            requires_trajectory=True,
-            requires_log_prob=True,
-            sde_ratio=1.0,  # All SDE steps
-        )
 
     def compute_advantages(
         self,
@@ -142,8 +96,8 @@ class GRPOAlgorithm(BaseAlgorithm):
         """
         Compute advantages using group normalization.
 
-        For GRPO, we normalize within groups where each group consists of
-        num_samples_per_prompt samples from the same prompt.
+        Extends the base implementation to support GRPO-specific
+        per_prompt_mode="batch" normalization.
 
         Args:
             rewards: Reward tensor [batch_size]
@@ -153,49 +107,11 @@ class GRPOAlgorithm(BaseAlgorithm):
         Returns:
             Normalized advantage tensor [batch_size]
         """
-        if self.advantage_type == "global":
-            return self._normalize_global(rewards)
-        elif self.advantage_type == "group":
-            return self._normalize_group(rewards, num_samples_per_prompt)
-        elif self.advantage_type == "per_prompt":
-            if self.per_prompt_mode == "batch":
-                return self._normalize_per_prompt_batch(
-                    rewards, num_samples_per_prompt, prompts
-                )
-            # Use per-prompt tracker if available and prompts provided
-            if self.per_prompt_tracker is not None and prompts is not None:
-                if len(prompts) * num_samples_per_prompt == len(rewards):
-                    prompts = [p for p in prompts for _ in range(num_samples_per_prompt)]
-                return self.per_prompt_tracker.compute_advantages(
-                    prompts, rewards, update_stats=True
-                )
-            # Fall back to batch-level group normalization
-            return self._normalize_group(rewards, num_samples_per_prompt)
-        else:
-            raise ValueError(f"Unknown advantage_type: {self.advantage_type}")
-
-    def _normalize_global(self, rewards: torch.Tensor) -> torch.Tensor:
-        """Global normalization across all samples.
-
-        If running_reward_normalizer is enabled (DanceGRPO mode), uses
-        cross-batch accumulated statistics for stable normalization.
-        Otherwise uses batch-only statistics.
-        """
-        if self.running_reward_normalizer is not None:
-            return self.running_reward_normalizer.normalize(rewards, update_stats=True)
-        return normalize_global(rewards, epsilon=self.epsilon, clip_max=self.clip_max)
-
-    def _normalize_group(
-        self,
-        rewards: torch.Tensor,
-        num_samples_per_prompt: int,
-    ) -> torch.Tensor:
-        """Group normalization within prompt groups."""
-        batch_size = rewards.shape[0]
-        if num_samples_per_prompt <= 0 or batch_size % num_samples_per_prompt != 0:
-            return self._normalize_global(rewards)
-        groups = build_fixed_size_groups(batch_size, num_samples_per_prompt)
-        return normalize_grouped(rewards, groups, epsilon=self.epsilon, clip_max=self.clip_max)
+        if self.advantage_type == "per_prompt" and self.per_prompt_mode == "batch":
+            return self._normalize_per_prompt_batch(
+                rewards, num_samples_per_prompt, prompts
+            )
+        return super().compute_advantages(rewards, num_samples_per_prompt, prompts)
 
     def _normalize_per_prompt_batch(
         self,
@@ -258,3 +174,37 @@ class GRPOAlgorithm(BaseAlgorithm):
 
         std = self.running_reward_normalizer.running_stats.std
         return torch.tensor(std, device=rewards.device, dtype=rewards.dtype)
+
+    @classmethod
+    def _grpo_kwargs_from_args(cls, args: Any) -> Dict[str, Any]:
+        kwargs = cls._base_kwargs_from_args(args)
+        kwargs.update(
+            {
+                "eta": getattr(args, "eta", 1.0),
+                "sde_type": getattr(args, "sde_type", "sde"),
+                "use_per_prompt_tracker": getattr(args, "use_per_prompt_stat_tracker", False),
+                "per_prompt_mode": getattr(args, "per_prompt_mode", "running"),
+                "per_prompt_buffer_size": getattr(args, "per_prompt_buffer_size", 16),
+                "per_prompt_min_count": getattr(args, "per_prompt_min_count", 2),
+                "use_running_stats": getattr(args, "use_running_stats", False),
+                "running_stats_warmup": getattr(args, "running_stats_warmup", 0),
+                "use_global_std": getattr(args, "use_global_std", False),
+                "ignore_last": getattr(args, "ignore_last", False),
+                "frozen_init_timesteps": getattr(args, "frozen_init_timesteps", 0),
+            }
+        )
+        return kwargs
+
+    @classmethod
+    def from_args(cls, args: Any) -> "GRPOAlgorithm":
+        """Construct GRPO algorithm from runtime args."""
+        kwargs = cls._grpo_kwargs_from_args(args)
+        kwargs.update(cls._algorithm_kwargs_from_args(args))
+        return cls(**kwargs)
+
+    def get_sampling_requirements(self) -> SamplingRequirements:
+        """Return GRPO sampling requirements."""
+        return SamplingRequirements(
+            requires_trajectory=True,
+            requires_log_prob=True,
+        )

@@ -3,23 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
 import torch
 
 if TYPE_CHECKING:
     from torch import device as TorchDevice
-
-
-class SampleStatus(Enum):
-    """Status of a sample in the pipeline."""
-
-    PENDING = "pending"
-    COMPLETED = "completed"
-    TRUNCATED = "truncated"
-    FAILED = "failed"
-
 
 @dataclass
 class LogProbData:
@@ -397,20 +386,59 @@ class RolloutOutput:
 
 @dataclass
 class RolloutRequest:
-    """Request for rollout generation."""
+    """Request for rollout generation.
+
+    This is the single interface contract for all ``generate()`` calls
+    throughout the rollout pipeline (engines, actors, actor-groups,
+    distributed helpers).
+    """
 
     prompts: List[str]
     prompt_embeds: Optional[torch.Tensor] = None
     pooled_prompt_embeds: Optional[torch.Tensor] = None
+    encoder_attention_mask: Optional[torch.Tensor] = None
+    text_ids: Optional[torch.Tensor] = None
     num_inference_steps: int = 28
     guidance_scale: float = 3.5
     eta: float = 1.0
     sde_type: str = "sde"
-    return_trajectories: bool = True
-    return_log_probs: bool = True
+    height: Optional[int] = None
+    width: Optional[int] = None
+    num_frames: Optional[int] = None
     seed: Optional[int] = None
     latents: Optional[torch.Tensor] = None
+    sde_indices: Optional[Set[int]] = None
+    decode_for_reward: bool = False
+    sampling_adapter: Optional[str] = None
+    return_trajectories: bool = True
+    return_log_probs: bool = True
     kwargs: Dict[str, Any] = field(default_factory=dict)
+
+    def slice_prompts(self, start: int, end: int) -> "RolloutRequest":
+        """Create a sub-request with sliced prompts for distributed actors.
+
+        Tensor fields that have a batch dimension matching len(prompts)
+        are sliced accordingly.  Scalar / None fields are copied as-is.
+        """
+        import copy
+        req = copy.copy(self)
+        req.prompts = self.prompts[start:end]
+
+        # Slice tensor fields that may be batched along dim-0
+        for attr in (
+            "prompt_embeds",
+            "pooled_prompt_embeds",
+            "encoder_attention_mask",
+            "text_ids",
+            "latents",
+        ):
+            val = getattr(self, attr, None)
+            if val is not None and isinstance(val, torch.Tensor) and val.shape[0] == len(self.prompts):
+                setattr(req, attr, val[start:end])
+
+        # kwargs is shallow-copied to avoid mutation
+        req.kwargs = dict(self.kwargs)
+        return req
 
 
 __all__ = [
@@ -418,5 +446,4 @@ __all__ = [
     "RolloutRequest",
     "LogProbData",
     "PromptEmbeddings",
-    "SampleStatus",
 ]

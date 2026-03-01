@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import ray
 from ray.util.placement_group import PlacementGroup
 
+from diffusionrl.types import RolloutRequest
 from .base import BaseActorGroup
 
 logger = logging.getLogger(__name__)
@@ -148,27 +149,22 @@ class RolloutActorGroup(BaseActorGroup):
         self._ensure_weight_update_targets()
         return [self._actor_handles[idx] for idx in self._weight_update_actor_indices]
 
-    def async_generate(
-        self,
-        prompts: Optional[List[str]] = None,
-        **kwargs,
-    ) -> List[ray.ObjectRef]:
+    def async_generate(self, request: RolloutRequest) -> List[ray.ObjectRef]:
         """
         Asynchronously generate samples across all actors.
 
         Args:
-            prompts: Optional list of text prompts to generate from
-            **kwargs: Additional generation arguments
+            request: RolloutRequest with prompts and generation parameters.
 
         Returns:
             List of ObjectRefs for generation results
         """
-        if not isinstance(prompts, list) or len(prompts) == 0:
+        if not isinstance(request.prompts, list) or len(request.prompts) == 0:
             raise ValueError(
                 "RolloutActorGroup.generate requires non-empty text prompts. "
                 "Prompt-embedding-only input is no longer supported."
             )
-        batch_size = len(prompts)
+        batch_size = len(request.prompts)
 
         # Distribute batch across actors
         prompts_per_actor = batch_size // self.num_actors
@@ -176,69 +172,30 @@ class RolloutActorGroup(BaseActorGroup):
 
         refs = []
         start = 0
-        embedding_keys = (
-            "prompt_embeds",
-            "pooled_prompt_embeds",
-            "negative_prompt_embeds",
-            "negative_pooled_prompt_embeds",
-            "encoder_attention_mask",
-            "text_ids",
-            "image_ids",
-        )
-        if (
-            not self._warned_ignored_embedding_kwargs
-            and any(key in kwargs for key in embedding_keys)
-        ):
-            logger.warning(
-                "RolloutActorGroup(%s) now uses prompt-only generation input; "
-                "embedding kwargs are ignored.",
-                self._sampler_engine_type,
-            )
-            self._warned_ignored_embedding_kwargs = True
-
-        batched_keys = ("latents",)
         for i, actor in enumerate(self._actor_handles):
             # Give extra prompts to first few actors
             count = prompts_per_actor + (1 if i < remainder else 0)
             end = start + count
 
             if count > 0:
-                actor_prompts = prompts[start:end] if prompts is not None else None
-                actor_kwargs = dict(kwargs)
-                for key in embedding_keys:
-                    actor_kwargs.pop(key, None)
-                for key in batched_keys:
-                    if key not in actor_kwargs:
-                        continue
-                    val = actor_kwargs[key]
-                    if val is None:
-                        continue
-                    if hasattr(val, "shape") and len(getattr(val, "shape", ())) > 0 and val.shape[0] == batch_size:
-                        actor_kwargs[key] = val[start:end]
-                    elif isinstance(val, list) and len(val) == batch_size:
-                        actor_kwargs[key] = val[start:end]
-                refs.append(actor.generate.remote(prompts=actor_prompts, **actor_kwargs))
+                actor_request = request.slice_prompts(start, end)
+                refs.append(actor.generate.remote(actor_request))
 
             start = end
 
         return refs
 
-    def generate(
-        self,
-        prompts: Optional[List[str]] = None,
-        **kwargs,
-    ) -> List[Any]:
+    def generate(self, request: RolloutRequest) -> List[Any]:
         """
         Synchronously generate samples.
 
         Args:
-            prompts: Optional list of text prompts
-            **kwargs: Additional generation arguments
+            request: RolloutRequest with prompts and generation parameters.
 
         Returns:
             List of generation outputs
         """
-        refs = self.async_generate(prompts, **kwargs)
+        refs = self.async_generate(request)
         return ray.get(refs)
 
     def async_encode_prompt(

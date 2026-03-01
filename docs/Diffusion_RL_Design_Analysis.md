@@ -276,7 +276,7 @@ def train(args):
         ray.init(address=args.ray_address, ...) if args.ray_address else ray.init()
 
     # 2. 初始化 WandB (仅 rank 0)
-    wandb_logger = init_logger(...) if args.report_to == "wandb" else None
+    wandb_logger = init_logger(...) if args.report_to_wandb else None
 
     # 3. 创建 Placement Groups (资源分配)
     pgs = create_placement_groups_from_args(args)

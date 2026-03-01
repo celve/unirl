@@ -17,7 +17,7 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Set
 import torch
 
-from diffusionrl.types import RolloutOutput
+from diffusionrl.types import RolloutOutput, RolloutRequest
 
 
 @dataclass
@@ -56,7 +56,7 @@ class EngineCapabilities:
     supports_trajectory: bool = True
     supports_prompt_embeddings: bool = True
     supports_guidance_scale: bool = True
-    weight_sync_mode: str = "state_dict"  # state_dict | checkpoint_path | external
+    weight_load_mode: str = "state_dict"  # state_dict | checkpoint_path | external
 
 
 class BaseRolloutEngine(ABC):
@@ -95,39 +95,13 @@ class BaseRolloutEngine(ABC):
         pass
 
     @abstractmethod
-    def generate(
-        self,
-        prompts: Optional[List[str]] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        num_inference_steps: Optional[int] = None,
-        guidance_scale: Optional[float] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
-        num_frames: Optional[int] = None,
-        latents: Optional[torch.Tensor] = None,
-        seed: Optional[int] = None,
-        sde_indices: Optional[Set[int]] = None,
-        **kwargs,
-    ) -> RolloutOutput:
+    def generate(self, request: RolloutRequest) -> RolloutOutput:
         """
         Generate samples with log probabilities.
 
         Args:
-            prompts: List of text prompts
-            prompt_embeds: Pre-computed prompt embeddings [B, seq, hidden]
-            pooled_prompt_embeds: Pooled prompt embeddings [B, hidden]
-            encoder_attention_mask: Attention mask [B, seq]
-            num_inference_steps: Number of denoising steps
-            guidance_scale: CFG scale
-            height: Output height
-            width: Output width
-            num_frames: Number of frames (for video)
-            latents: Initial latents (if None, sample from noise)
-            seed: Random seed for reproducibility
-            sde_indices: Set of timestep indices for SDE sampling
-            **kwargs: Additional engine-specific arguments
+            request: A RolloutRequest containing prompts, generation
+                parameters, and optional pre-computed embeddings.
 
         Returns:
             RolloutOutput with trajectories, log_probs, etc.
@@ -241,6 +215,54 @@ class BaseRolloutEngine(ABC):
     def get_capabilities_dict(self) -> Dict[str, Any]:
         """Serialize capabilities to plain dict for metadata/RPC usage."""
         return asdict(self.get_capabilities())
+
+
+class DistributedWeightSyncCapable:
+    """Mixin protocol for engines that support advanced weight sync.
+
+    SGLangRolloutEngine implements this; FSDPRolloutEngine does not.
+    RolloutActor checks isinstance() instead of hasattr().
+    """
+
+    def update_weights_from_path(self, checkpoint_path: str) -> None:
+        raise NotImplementedError
+
+    def update_weights_from_tensor(
+        self,
+        *,
+        serialized_named_tensors: list,
+        target_modules: Optional[List[str]] = None,
+        load_format: Optional[str] = None,
+        flush_cache: bool = True,
+    ) -> None:
+        raise NotImplementedError
+
+    def init_weights_update_group(
+        self,
+        *,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str,
+        backend: str = "nccl",
+    ) -> None:
+        raise NotImplementedError
+
+    def destroy_weights_update_group(self, *, group_name: str) -> None:
+        raise NotImplementedError
+
+    def update_weights_from_distributed(
+        self,
+        *,
+        names: List[str],
+        dtypes: List[str],
+        shapes: List[List[int]],
+        group_name: str,
+        target_modules: Optional[List[str]] = None,
+        flush_cache: bool = True,
+    ) -> None:
+        raise NotImplementedError
 
 
 # Engine registry for dynamic loading

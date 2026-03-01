@@ -23,6 +23,7 @@ from diffusionrl.config.validation import (
     validate_colocate_fractions,
     validate_dotpath,
     validate_dynamic_dotpaths,
+    validate_algorithm_loss_contract,
     validate_grouped_configs,
     validate_loss_kwargs_json,
     validate_model_specific_logic,
@@ -91,10 +92,8 @@ class SamplingConfig:
         metadata={"help": "Timestep schedule shift parameter (model-specific)"})
     guidance_scale: float = field(default=7.5,
         metadata={"help": "Classifier-free guidance scale (0.0 = no guidance)"})
-    mixed_sampling: bool = field(default=False,
-        metadata={"help": "Mix SDE and ODE steps during sampling"})
     sde_ratio: float = field(default=1.0,
-        metadata={"help": "Fraction of steps that use SDE when mixed_sampling=true"})
+        metadata={"help": "Fraction of steps that use SDE (0.0 = all ODE, 1.0 = all SDE)"})
     timestep_fraction: float = field(default=1.0,
         metadata={"help": "Fraction of total timesteps to train on (e.g. 0.6 = last 60%%)"})
     sampling_adapter: Optional[str] = field(default=None,
@@ -223,7 +222,8 @@ class RayConfig:
     offload_rollout: Optional[bool] = field(default=None,
         metadata={"help": "Enable model offload for rollout actors (None = auto)"})
     weight_sync_mode: str = field(default="auto",
-        metadata={"help": "Weight sync mode: auto, object_ref, checkpoint_path, ipc, or nccl"})
+        metadata={"help": "Weight sync mode: auto, tensor_payload, nccl_broadcast, checkpoint_path "
+                          "(legacy: ipc, nccl, object_ref)"})
     weight_sync_dir: str = field(default="outputs/weight_sync",
         metadata={"help": "Directory for checkpoint-based weight sync (use shared FS for multi-node)"})
     weight_sync_bucket_mb: int = field(default=256,
@@ -232,9 +232,13 @@ class RayConfig:
         metadata={"help": "Whether rollout side flushes runtime cache after each weight sync bucket"})
 
     def validate(self) -> None:
-        if self.weight_sync_mode not in ("auto", "object_ref", "checkpoint_path", "ipc", "nccl"):
+        _valid_modes = (
+            "auto", "tensor_payload", "nccl_broadcast", "checkpoint_path",
+            "ipc", "nccl", "object_ref",
+        )
+        if self.weight_sync_mode not in _valid_modes:
             raise ValueError(
-                f"weight_sync_mode must be one of auto/object_ref/checkpoint_path/ipc/nccl, "
+                f"weight_sync_mode must be one of {'/'.join(_valid_modes)}, "
                 f"got: {self.weight_sync_mode!r}. "
                 "Use 'auto' (recommended) to let diffusionrl choose the best mode."
             )
@@ -509,19 +513,24 @@ class RolloutLoggingConfig:
     logging_steps: int = field(default=10,
         metadata={"help": "Log metrics every N training steps"})
     logging_dir: Optional[str] = field(default=None,
-        metadata={"help": "Directory for TensorBoard/WandB logs (defaults to output_dir/logs)"})
-    report_to: str = field(default="tensorboard",
-        metadata={"help": "Logging backend: tensorboard, wandb, or none"})
+        metadata={"help": "Directory for WandB logs/artifacts (defaults to output_dir/logs)"})
+    report_to_wandb: bool = field(default=False,
+        metadata={"help": "Enable WandB reporting (true/false)"})
     project_name: str = field(default="diffusionrl",
-        metadata={"help": "Project name for WandB/TensorBoard"})
+        metadata={"help": "Project name for WandB"})
     run_name: Optional[str] = field(default=None,
-        metadata={"help": "Run name for WandB/TensorBoard (auto-generated if None)"})
+        metadata={"help": "Run name for WandB (auto-generated if None)"})
 
     def validate(self) -> None:
         if self.num_rollout < 1:
             raise ValueError("num_rollout must be >= 1.")
         if self.update_weights_interval < 1:
             raise ValueError("update_weights_interval must be >= 1.")
+        if not isinstance(self.report_to_wandb, bool):
+            raise ValueError(
+                "report_to_wandb must be a boolean (true/false). "
+                f"Got: {self.report_to_wandb!r}"
+            )
 
 
 @dataclass
@@ -529,7 +538,7 @@ class DebugConfig:
     """Debug runtime mode and intermediate artifact controls."""
 
     debug_mode: str = field(default="none",
-        metadata={"help": "Debug mode: none, rollout_only, train_only (debug_full aliases to none + debug_save_intermediates=true)"})
+        metadata={"help": "Debug mode: none, rollout_only, train_only, interactive (debug_full aliases to none + debug_save_intermediates=true)"})
     debug_save_dir: str = field(default="outputs/debug",
         metadata={"help": "Directory for debug artifacts and saved rollout payloads"})
     debug_save_intermediates: bool = field(default=False,
@@ -549,9 +558,9 @@ class DebugConfig:
 
     def validate(self) -> None:
         mode = str(self.debug_mode or "none").strip().lower()
-        if mode not in ("none", "rollout_only", "train_only", "debug_full"):
+        if mode not in ("none", "rollout_only", "train_only", "interactive", "debug_full"):
             raise ValueError(
-                "debug_mode must be one of: none, rollout_only, train_only, debug_full. "
+                "debug_mode must be one of: none, rollout_only, train_only, interactive, debug_full. "
                 f"Got: {self.debug_mode!r}"
             )
         if int(self.debug_num_rollouts) < 1:
@@ -658,10 +667,6 @@ class TrainingArguments:
     # ========== Seed ==========
     seed: int = field(default=42,
         metadata={"help": "Random seed for reproducibility"})
-
-    # ========== Misc ==========
-    debug: bool = field(default=False,
-        metadata={"help": "Enable debug mode (extra logging and assertions)"})
 
     def __getattr__(self, name: str) -> Any:
         path = _FLAT_FIELD_PATH_INDEX.get(name)
@@ -948,6 +953,7 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
 
     cli_argv = list(argv) if argv is not None else sys.argv[1:]
     parsed_args = parser.parse_args(cli_argv)
+    explicit_cli_keys = _collect_explicit_cli_destinations(cli_argv, parser)
 
     raw_args = vars(parsed_args)
 
@@ -955,7 +961,6 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
     if raw_args.get("config"):
         defaults = {a.dest: a.default for a in parser._actions if a.dest != "help"}
         yaml_data = _load_yaml_mapping(raw_args["config"])
-        explicit_cli_keys = _collect_explicit_cli_destinations(cli_argv, parser)
         _merge_yaml_overrides(raw_args, yaml_data, defaults, explicit_cli_keys)
 
     # Remove --config from raw_args (not a TrainingArguments field)
@@ -1317,22 +1322,30 @@ def _normalize_weight_sync(args: TrainingArguments, *, training_actor_direct_sam
 
     if weight_sync_mode == "auto":
         if not training_actor_direct_sampling and sampler_engine_type == "sglang":
-            args.weight_sync_mode = "nccl" if is_multi_node else "ipc"
+            args.weight_sync_mode = "nccl_broadcast" if is_multi_node else "tensor_payload"
         elif (
             not training_actor_direct_sampling
             and (sampler_engine_type == "fsdp" or veomni_like_backend)
         ):
             args.weight_sync_mode = "checkpoint_path"
         else:
-            args.weight_sync_mode = "object_ref"
+            args.weight_sync_mode = "checkpoint_path"
+
+    # Legacy alias normalization.
+    _alias_map = {"ipc": "tensor_payload", "nccl": "nccl_broadcast"}
+    if args.weight_sync_mode in _alias_map:
+        args.weight_sync_mode = _alias_map[args.weight_sync_mode]
+    if args.weight_sync_mode == "object_ref":
+        logger.warning("weight_sync_mode='object_ref' is deprecated, using 'checkpoint_path'")
+        args.weight_sync_mode = "checkpoint_path"
 
     if (
-        args.weight_sync_mode in {"ipc", "nccl"}
+        args.weight_sync_mode in {"tensor_payload", "nccl_broadcast"}
         and sampler_engine_type != "sglang"
     ):
         raise ValueError(
-            "weight_sync_mode in {ipc,nccl} currently requires sampler_engine_type='sglang'. "
-            f"Got sampler_engine_type={sampler_engine_type!r}."
+            "weight_sync_mode in {tensor_payload,nccl_broadcast} currently requires "
+            f"sampler_engine_type='sglang'. Got sampler_engine_type={sampler_engine_type!r}."
         )
 
     if (
@@ -1365,7 +1378,8 @@ def _normalize_weight_sync(args: TrainingArguments, *, training_actor_direct_sam
 
 def _normalize_debug_config(args: TrainingArguments) -> str:
     """Normalize debug mode and enforce mode-specific constraints."""
-    debug_mode = str(getattr(args, "debug_mode", "none") or "none").strip().lower()
+    requested_debug_mode = str(getattr(args, "debug_mode", "none") or "none").strip().lower()
+    debug_mode = requested_debug_mode
     if debug_mode == "debug_full":
         logger.info(
             "debug_mode=debug_full is currently mapped to normal training with "
@@ -1377,16 +1391,16 @@ def _normalize_debug_config(args: TrainingArguments) -> str:
     else:
         args.debug_mode = debug_mode
 
-    if debug_mode in ("rollout_only", "train_only"):
+    if debug_mode in ("rollout_only", "train_only", "interactive"):
         if bool(getattr(args, "async_pipeline", False)):
             raise ValueError(
                 f"debug_mode={debug_mode} does not support async_pipeline yet. "
                 "Set --async-pipeline=false."
             )
-        if debug_mode == "rollout_only" and bool(getattr(args, "training_actor_direct_sampling", False)):
+        if debug_mode in ("rollout_only", "interactive") and bool(getattr(args, "training_actor_direct_sampling", False)):
             raise ValueError(
-                "debug_mode=rollout_only is incompatible with training_actor_direct_sampling=true "
-                "(there are no training actors in rollout-only mode)."
+                f"debug_mode={debug_mode} is incompatible with training_actor_direct_sampling=true "
+                "(there are no training actors in this debug mode)."
             )
 
     if bool(getattr(args, "debug_save_intermediates", False)) and bool(getattr(args, "async_pipeline", False)):
@@ -1430,6 +1444,7 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
     validate_loss_kwargs_json(args)
     _normalize_train_backend_config(args)
     validate_dynamic_dotpaths(args)
+    validate_algorithm_loss_contract(args)
     _apply_training_actor_direct_sampling_overrides(
         args,
         training_actor_direct_sampling=training_actor_direct_sampling,

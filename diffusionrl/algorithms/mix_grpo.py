@@ -62,7 +62,7 @@ class MixGRPOAlgorithm(GRPOAlgorithm):
         return SamplingRequirements(
             requires_trajectory=True,
             requires_log_prob=True,
-            sde_ratio=self.sde_ratio,
+            extras={"sde_ratio": self.sde_ratio},
         )
 
     def get_sde_indices(self, num_steps: int) -> Set[int]:

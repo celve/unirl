@@ -315,11 +315,11 @@ def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroup
     reward_dedicated_num_nodes = int(getattr(args, "reward_dedicated_num_nodes", 0))
     reward_dedicated_num_gpus_per_node = int(getattr(args, "reward_dedicated_num_gpus_per_node", 0))
 
-    if debug_mode == "rollout_only":
+    if debug_mode in ("rollout_only", "interactive"):
         training_num_nodes = 0
         training_num_gpus_per_node = 0
         logger.info(
-            "Debug mode rollout_only: training placement is disabled."
+            "Debug mode %s: training placement is disabled.", debug_mode
         )
     elif debug_mode == "train_only":
         rollout_num_nodes = 0

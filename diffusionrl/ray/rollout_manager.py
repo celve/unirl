@@ -18,10 +18,6 @@ import torch
 
 from diffusionrl.config.arguments import is_training_actor_direct_sampling_mode
 from diffusionrl.runtime.pipeline.advantage_stage import compute_advantages as _compute_advantages_stage
-from diffusionrl.runtime.pipeline.assemble_stage import (
-    assemble_backward_training_batch,
-    assemble_forward_training_batch,
-)
 from diffusionrl.runtime.pipeline.reward_stage import compute_rewards as _compute_rewards_stage
 from diffusionrl.runtime.pipeline.sampling_stage import (
     distributed_sample,
@@ -71,9 +67,7 @@ class _PipelineRolloutEngine:
             working_batch.update(batch_overrides)
 
         resolved_sde_indices: Optional[Set[int]]
-        if self._requirements.is_forward_process:
-            resolved_sde_indices = None
-        elif sde_indices is not None:
+        if sde_indices is not None:
             resolved_sde_indices = set(int(i) for i in sde_indices)
         elif self._default_sde_indices is not None:
             resolved_sde_indices = set(self._default_sde_indices)
@@ -132,13 +126,10 @@ def _invoke_custom_rollout_pipeline(
             "Custom rollout pipeline requires non-empty text prompts in batch['prompts']."
         )
 
-    default_sde_indices: Optional[Set[int]] = None
-    if not requirements.is_forward_process:
-        default_sde_indices = set(
-            manager.timestep_scheduler.get_sde_indices(manager._current_step)
-        )
-        if hasattr(manager.algorithm, "set_sde_indices"):
-            manager.algorithm.set_sde_indices(default_sde_indices)
+    default_sde_indices = manager.algorithm.resolve_rollout_sde_indices(
+        timestep_scheduler=manager.timestep_scheduler,
+        current_step=manager._current_step,
+    )
 
     engine = _PipelineRolloutEngine(
         manager=manager,
@@ -235,7 +226,6 @@ def _invoke_custom_rollout_pipeline(
         )
         return manager._assemble_training_batch(
             algorithm=manager.algorithm,
-            requirements=requirements,
             sampler_outputs=outputs,
             rewards=rewards,
             advantages=advantages,
@@ -551,6 +541,35 @@ class RolloutManager:
             expanded.extend(candidate)
         return expanded[:sample_count]
 
+    def _resolve_rollout_sde_indices(
+        self,
+        *,
+        rollout_id: Optional[int] = None,
+        log_debug: bool = False,
+    ) -> Optional[Set[int]]:
+        sde_indices = self.algorithm.resolve_rollout_sde_indices(
+            timestep_scheduler=self.timestep_scheduler,
+            current_step=self._current_step,
+        )
+        if log_debug and rollout_id is not None and sde_indices is not None:
+            logger.info(
+                "[debug] rollout=%s step=%s sampled_sde_count=%s",
+                rollout_id,
+                self._current_step,
+                len(sde_indices),
+            )
+        return sde_indices
+
+    def _get_sampler_validation_config(self) -> Dict[str, Any]:
+        config = self.algorithm.get_sampler_validation_config(args=self.args)
+        if not isinstance(config, dict):
+            config = {}
+        return {
+            "allow_replay": bool(config.get("allow_replay", False)),
+            "assert_step_alignment": bool(config.get("assert_step_alignment", True)),
+            "mode_label": str(config.get("mode_label", "trajectory")),
+        }
+
     def _generate_training_data_debug(
         self,
         *,
@@ -561,19 +580,10 @@ class RolloutManager:
     ) -> Tuple[TrainingBatch, Dict[str, Any]]:
         """Generate one rollout batch with detailed intermediate payload."""
         prompts = batch.get("prompts", []) or []
-        is_forward = bool(requirements.is_forward_process)
-
-        sde_indices: Optional[Set[int]] = None
-        if not is_forward:
-            sde_indices = self.timestep_scheduler.get_sde_indices(self._current_step)
-            logger.info(
-                "[debug] rollout=%s step=%s sampled_sde_count=%s",
-                rollout_id,
-                self._current_step,
-                len(sde_indices),
-            )
-            if hasattr(self.algorithm, "set_sde_indices"):
-                self.algorithm.set_sde_indices(sde_indices)
+        sde_indices = self._resolve_rollout_sde_indices(
+            rollout_id=rollout_id,
+            log_debug=True,
+        )
 
         logger.info(
             "[debug] rollout=%s stage=sampling prompts=%s num_samples_per_prompt=%s",
@@ -602,17 +612,13 @@ class RolloutManager:
             len(sampler_outputs),
         )
 
-        allow_replay = (
-            not is_forward
-            and bool(getattr(self.args, "replay_log_probs", False))
-            and getattr(self.args, "loss_type", "grpo") == "grpo"
-        )
+        validation_config = self._get_sampler_validation_config()
         self._validate_sampler_outputs(
             sampler_outputs=sampler_outputs,
             requirements=requirements,
-            allow_replay=allow_replay,
-            assert_step_alignment=not is_forward,
-            mode_label="forward" if is_forward else "trajectory",
+            allow_replay=validation_config["allow_replay"],
+            assert_step_alignment=validation_config["assert_step_alignment"],
+            mode_label=validation_config["mode_label"],
         )
 
         logger.info("[debug] rollout=%s stage=reward_advantage", rollout_id)
@@ -629,7 +635,6 @@ class RolloutManager:
         logger.info("[debug] rollout=%s stage=assemble", rollout_id)
         training_batch = self._assemble_training_batch(
             algorithm=self.algorithm,
-            requirements=requirements,
             sampler_outputs=sampler_outputs,
             rewards=rewards,
             advantages=advantages,
@@ -724,6 +729,177 @@ class RolloutManager:
         """Public debug rollout entrypoint with full intermediate payload."""
         return self._build_training_debug_payload(rollout_id)
 
+    # ------------------------------------------------------------------
+    # Interactive debug stage methods (debug_mode=interactive)
+    #
+    # These methods execute individual pipeline stages and cache intermediate
+    # results inside the actor to avoid serializing large tensors back to the
+    # driver between stages.  The driver only receives lightweight summaries.
+    # ------------------------------------------------------------------
+
+    def _debug_cache_clear(self) -> None:
+        """Reset the interactive-debug intermediate cache."""
+        self._debug_cache: Dict[str, Any] = {}
+
+    def debug_sample(self, rollout_id: int) -> Dict[str, Any]:
+        """Stage 1: execute sampling, cache results in actor. Returns lightweight summary."""
+        if not self._is_initialized:
+            raise RuntimeError("RolloutManager not initialized. Call init() first.")
+
+        batch = self._prepare_batch(data_source=self.data_source)
+        prompts = batch.get("prompts", [])
+        requirements = self.algorithm.get_sampling_requirements()
+        actor_group = self.external_sampling_actors or self.rollout_actors
+
+        sde_indices = self._resolve_rollout_sde_indices()
+
+        sampler_outputs, train_prompts, base_prompts = self._sample(
+            actor_group=actor_group,
+            batch=batch,
+            sde_indices=sde_indices,
+        )
+        self._attach_missing_embeddings_from_batch(
+            sampler_outputs=sampler_outputs, batch=batch,
+        )
+        if bool(getattr(requirements, "requires_embeddings", True)):
+            self._attach_missing_embeddings_from_rollout_encoder(
+                actor_group=actor_group,
+                sampler_outputs=sampler_outputs,
+                prompts=(train_prompts if train_prompts else prompts),
+            )
+
+        validation_config = self._get_sampler_validation_config()
+        self._validate_sampler_outputs(
+            sampler_outputs=sampler_outputs,
+            requirements=requirements,
+            allow_replay=validation_config["allow_replay"],
+            assert_step_alignment=validation_config["assert_step_alignment"],
+            mode_label=validation_config["mode_label"],
+        )
+
+        self._debug_cache = {
+            "rollout_id": rollout_id,
+            "batch": batch,
+            "prompts": prompts,
+            "train_prompts": train_prompts if train_prompts else prompts,
+            "base_prompts": base_prompts if base_prompts else prompts,
+            "sampler_outputs": sampler_outputs,
+            "sde_indices": sde_indices,
+            "requirements": requirements,
+        }
+
+        return {
+            "rollout_id": rollout_id,
+            "num_outputs": len(sampler_outputs),
+            "total_samples": sum(int(getattr(o, "batch_size", 1)) for o in sampler_outputs),
+            "prompts": prompts,
+            "sde_indices": sorted(int(v) for v in (sde_indices or [])),
+        }
+
+    def debug_rewards(self) -> Dict[str, Any]:
+        """Stage 2: compute rewards from cached sampler_outputs. Returns summary."""
+        cache = getattr(self, "_debug_cache", None)
+        if not cache or "sampler_outputs" not in cache:
+            raise RuntimeError("No cached sampler_outputs. Run debug_sample first.")
+
+        rewards, comps = self._compute_rewards_only(
+            reward_service=self.reward_service,
+            sampler_outputs=cache["sampler_outputs"],
+            prompts=cache["base_prompts"],
+            prompt_metadata=cache["batch"].get("metadata"),
+        )
+        cache["rewards"] = rewards
+        cache["reward_components"] = comps
+        self._debug_log_tensor_stats("rewards", rewards)
+
+        flat = rewards.detach().to(dtype=torch.float32).reshape(-1)
+        return {
+            "rewards_mean": float(flat.mean().item()),
+            "rewards_std": float(flat.std(unbiased=False).item()),
+            "rewards_min": float(flat.min().item()),
+            "rewards_max": float(flat.max().item()),
+            "num_samples": int(flat.numel()),
+            "component_names": sorted(comps.keys()),
+        }
+
+    def debug_advantages(self) -> Dict[str, Any]:
+        """Stage 3: compute advantages from cached rewards. Returns summary."""
+        cache = getattr(self, "_debug_cache", None)
+        if not cache or "rewards" not in cache:
+            raise RuntimeError("No cached rewards. Run debug_rewards first.")
+
+        advantages = _compute_advantages_stage(
+            algorithm=self.algorithm,
+            num_samples_per_prompt=int(getattr(self.args, "num_samples_per_prompt", 1)),
+            reward_mix_mode=str(getattr(self.args, "reward_mix_mode", "reward_aggr")),
+            rewards=cache["rewards"],
+            prompts=cache["base_prompts"],
+            reward_components=cache.get("reward_components", {}),
+            reward_workers=getattr(self.reward_service, "workers", None) if self.reward_service is not None else None,
+        )
+        cache["advantages"] = advantages
+        self._debug_log_tensor_stats("advantages", advantages)
+
+        flat = advantages.detach().to(dtype=torch.float32).reshape(-1)
+        return {
+            "advantages_mean": float(flat.mean().item()),
+            "advantages_std": float(flat.std(unbiased=False).item()),
+            "advantages_min": float(flat.min().item()),
+            "advantages_max": float(flat.max().item()),
+            "num_samples": int(flat.numel()),
+        }
+
+    def debug_assemble(self) -> Dict[str, Any]:
+        """Stage 4: assemble training batch from cached intermediates. Returns summary."""
+        cache = getattr(self, "_debug_cache", None)
+        if not cache or "advantages" not in cache:
+            raise RuntimeError("No cached advantages. Run debug_advantages first.")
+
+        training_batch = self._assemble_training_batch(
+            algorithm=self.algorithm,
+            sampler_outputs=cache["sampler_outputs"],
+            rewards=cache["rewards"],
+            advantages=cache["advantages"],
+            prompts=cache["train_prompts"],
+            sde_indices=cache["sde_indices"],
+        )
+        cache["training_batch"] = training_batch
+
+        return {
+            "batch_type": type(training_batch).__name__,
+            "batch_size": int(getattr(training_batch, "batch_size", 0)),
+        }
+
+    def debug_fetch_payload(self) -> Dict[str, Any]:
+        """Transfer cached intermediates back to driver (large; call only when saving)."""
+        cache = getattr(self, "_debug_cache", None)
+        if not cache:
+            raise RuntimeError("No debug cache available. Run debug_sample first.")
+
+        sample_count = 0
+        if cache.get("rewards") is not None and torch.is_tensor(cache["rewards"]):
+            sample_count = int(cache["rewards"].shape[0])
+        reward_prompts = self._build_reward_prompts(
+            train_prompts=cache.get("train_prompts"),
+            base_prompts=cache.get("base_prompts"),
+            fallback_prompts=cache.get("prompts", []),
+            sample_count=sample_count,
+        )
+        return {
+            "rollout_id": cache.get("rollout_id", 0),
+            "prompts": cache.get("prompts", []),
+            "train_prompts": cache.get("train_prompts", []),
+            "base_prompts": cache.get("base_prompts", []),
+            "reward_prompts": reward_prompts,
+            "sde_indices": sorted(int(v) for v in (cache.get("sde_indices") or [])),
+            "sampler_outputs": cache.get("sampler_outputs", []),
+            "rewards": cache.get("rewards"),
+            "advantages": cache.get("advantages"),
+            "reward_components": cache.get("reward_components", {}),
+            "training_batch": cache.get("training_batch"),
+            "debug_mode": "interactive",
+        }
+
     def _validate_batch_shape(self) -> None:
         """Validate prompts_per_batch * k against training batch/world_size."""
         try:
@@ -754,9 +930,8 @@ class RolloutManager:
     ) -> TrainingBatch:
         """Unified training data generation for all algorithm types.
 
-        Differences driven by requirements.is_forward_process:
-        - Forward (NFT): sde_indices=None, allow_replay=False, assert_step_alignment=False
-        - Trajectory (GRPO/MixGRPO): sde_indices from scheduler, replay/alignment enabled
+        Algorithm-specific behavior (forward vs trajectory, replay/alignment policy)
+        is delegated to algorithm strategy hooks.
 
         Args:
             batch: Dict containing prompts (and optionally embeddings/metadata)
@@ -765,15 +940,9 @@ class RolloutManager:
             actor_group: Actor group for distributed sampling
         """
         prompts = batch.get("prompts", []) or []
-        is_forward = bool(requirements.is_forward_process)
-
-        # Determine SDE indices
-        sde_indices: Optional[Set[int]] = None
-        if not is_forward:
-            sde_indices = self.timestep_scheduler.get_sde_indices(self._current_step)
+        sde_indices = self._resolve_rollout_sde_indices()
+        if sde_indices is not None:
             logger.debug(f"SDE indices for step {self._current_step}: {sorted(sde_indices)[:5]}...")
-            if hasattr(self.algorithm, 'set_sde_indices'):
-                self.algorithm.set_sde_indices(sde_indices)
 
         # Sample
         sampler_outputs, train_prompts, base_prompts = self._sample(
@@ -793,17 +962,13 @@ class RolloutManager:
             )
 
         # Validate
-        allow_replay = (
-            not is_forward
-            and bool(getattr(self.args, "replay_log_probs", False))
-            and getattr(self.args, "loss_type", "grpo") == "grpo"
-        )
+        validation_config = self._get_sampler_validation_config()
         self._validate_sampler_outputs(
             sampler_outputs=sampler_outputs,
             requirements=requirements,
-            allow_replay=allow_replay,
-            assert_step_alignment=not is_forward,
-            mode_label="forward" if is_forward else "trajectory",
+            allow_replay=validation_config["allow_replay"],
+            assert_step_alignment=validation_config["assert_step_alignment"],
+            mode_label=validation_config["mode_label"],
         )
 
         # Reward + advantage
@@ -818,7 +983,6 @@ class RolloutManager:
         # Assemble
         return self._assemble_training_batch(
             algorithm=self.algorithm,
-            requirements=requirements,
             sampler_outputs=sampler_outputs,
             rewards=rewards,
             advantages=advantages,
@@ -1270,24 +1434,14 @@ class RolloutManager:
         self,
         *,
         algorithm: Any,
-        requirements: Any,
         sampler_outputs: List[Any],
         rewards: torch.Tensor,
         advantages: torch.Tensor,
         prompts: List[str],
         sde_indices: Optional[Set[int]],
     ) -> TrainingBatch:
-        """Assemble typed training batch for backward (GRPO) or forward (NFT) paths."""
-        if bool(requirements.is_forward_process):
-            return assemble_forward_training_batch(
-                sampler_outputs=sampler_outputs,
-                rewards=rewards,
-                advantages=advantages,
-                prompts=prompts,
-            )
-
-        return assemble_backward_training_batch(
-            algorithm=algorithm,
+        """Delegate training-batch assembly to algorithm strategy."""
+        return algorithm.assemble_training_batch(
             num_inference_steps=int(self.args.num_inference_steps),
             sampler_outputs=sampler_outputs,
             rewards=rewards,
@@ -1382,8 +1536,11 @@ class RolloutManager:
         self,
         state_dict_ref: ray.ObjectRef,
     ) -> None:
-        """
-        Update rollout actor weights from training.
+        """Update rollout actor weights from training.
+
+        .. deprecated::
+            Kept for backward compatibility. New code should use
+            WeightSyncProtocol which delegates to rollout_actor_group directly.
 
         Args:
             state_dict_ref: ObjectRef containing new state dict
@@ -1395,7 +1552,10 @@ class RolloutManager:
         self,
         checkpoint_path: str,
     ) -> None:
-        """Update rollout actor weights from a shared checkpoint path."""
+        """Update rollout actor weights from a shared checkpoint path.
+
+        .. deprecated:: Proxy retained for TrainingActor remote calls.
+        """
         if self.rollout_actors is not None and hasattr(self.rollout_actors, "update_weights_from_path"):
             self.rollout_actors.update_weights_from_path(checkpoint_path)
 
@@ -1407,7 +1567,10 @@ class RolloutManager:
         load_format: Optional[str] = None,
         flush_cache: bool = True,
     ) -> None:
-        """Update rollout actor weights from serialized tensor payload."""
+        """Update rollout actor weights from serialized tensor payload.
+
+        .. deprecated:: Proxy retained for TrainingActor remote calls.
+        """
         if self.rollout_actors is not None and hasattr(self.rollout_actors, "update_weights_from_tensor"):
             self.rollout_actors.update_weights_from_tensor(
                 serialized_named_tensors=serialized_named_tensors,
@@ -1425,7 +1588,10 @@ class RolloutManager:
         group_name: str,
         backend: str = "nccl",
     ) -> None:
-        """Initialize rollout-side distributed group for weight updates."""
+        """Initialize rollout-side distributed group for weight updates.
+
+        .. deprecated:: Proxy retained for WeightSyncProtocol remote calls.
+        """
         if self.rollout_actors is not None and hasattr(self.rollout_actors, "init_weights_update_group"):
             self.rollout_actors.init_weights_update_group(
                 master_address=master_address,
@@ -1440,7 +1606,10 @@ class RolloutManager:
         *,
         group_name: str,
     ) -> None:
-        """Destroy rollout-side distributed group for weight updates."""
+        """Destroy rollout-side distributed group for weight updates.
+
+        .. deprecated:: Proxy retained for WeightSyncProtocol remote calls.
+        """
         if self.rollout_actors is not None and hasattr(self.rollout_actors, "destroy_weights_update_group"):
             self.rollout_actors.destroy_weights_update_group(group_name=group_name)
 
@@ -1454,7 +1623,10 @@ class RolloutManager:
         target_modules: Optional[List[str]] = None,
         flush_cache: bool = True,
     ) -> None:
-        """Update rollout actor weights from distributed broadcast metadata."""
+        """Update rollout actor weights from distributed broadcast metadata.
+
+        .. deprecated:: Proxy retained for TrainingActor remote calls.
+        """
         if self.rollout_actors is not None and hasattr(self.rollout_actors, "update_weights_from_distributed"):
             self.rollout_actors.update_weights_from_distributed(
                 names=names,

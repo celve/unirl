@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Set
 import torch
 
 from ..engine import BaseRolloutEngine, EngineConfig, EngineCapabilities, register_engine
-from diffusionrl.types import RolloutOutput
+from diffusionrl.types import RolloutOutput, RolloutRequest
 from diffusionrl.utils import load_function
 
 logger = logging.getLogger(__name__)
@@ -215,44 +215,12 @@ class FastVideoRolloutEngine(BaseRolloutEngine):
             shift=self.config.shift,
         )
 
-    def generate(
-        self,
-        prompts: Optional[List[str]] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        num_inference_steps: Optional[int] = None,
-        guidance_scale: Optional[float] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
-        num_frames: Optional[int] = None,
-        latents: Optional[torch.Tensor] = None,
-        seed: Optional[int] = None,
-        sde_indices: Optional[Set[int]] = None,
-        return_trajectory: bool = True,
-        **kwargs,
-    ) -> RolloutOutput:
+    def generate(self, request: RolloutRequest) -> RolloutOutput:
         """
         Generate videos with log probabilities using FastVideo.
 
-        Uses VideoGenerator.generate_video() internally, which dispatches
-        to MultiprocExecutor workers for parallel execution.
-
         Args:
-            prompts: List of text prompts
-            prompt_embeds: Pre-computed prompt embeddings (not used, FastVideo encodes internally)
-            pooled_prompt_embeds: Pooled prompt embeddings (not used)
-            encoder_attention_mask: Attention mask (not used)
-            num_inference_steps: Override default steps
-            guidance_scale: Override default guidance
-            height: Override default height
-            width: Override default width
-            num_frames: Override default frames
-            latents: Initial latents (not used, FastVideo samples internally)
-            seed: Random seed
-            sde_indices: SDE step indices for MixGRPO
-            return_trajectory: Whether to return trajectory (default True for GRPO)
-            **kwargs: Additional FastVideo arguments
+            request: RolloutRequest with prompts and generation parameters.
 
         Returns:
             RolloutOutput with video trajectories and log_probs
@@ -266,14 +234,20 @@ class FastVideoRolloutEngine(BaseRolloutEngine):
         self.wake_up()
         self._last_decoded_videos = None
 
+        # Extract fields from request
+        prompts = request.prompts
+        seed = request.seed
+        sde_indices = request.sde_indices
+        kwargs = dict(request.kwargs)
+        return_trajectory = request.return_trajectories
+
         # Use defaults if not specified
-        num_inference_steps = num_inference_steps or self.config.num_inference_steps
-        if guidance_scale is None:
-            guidance_scale = self.config.guidance_scale
-        height = height or self.config.height
-        width = width or self.config.width
-        num_frames = num_frames or self.config.num_frames
-        return_decoded_for_reward = bool(kwargs.pop("return_decoded_for_reward", False))
+        num_inference_steps = request.num_inference_steps or self.config.num_inference_steps
+        guidance_scale = request.guidance_scale if request.guidance_scale is not None else self.config.guidance_scale
+        height = request.height or self.config.height
+        width = request.width or self.config.width
+        num_frames = request.num_frames or self.config.num_frames
+        return_decoded_for_reward = request.decode_for_reward
 
         # Build SamplingParam for FastVideo
         try:
@@ -703,5 +677,5 @@ class FastVideoRolloutEngine(BaseRolloutEngine):
             supports_trajectory=True,
             supports_prompt_embeddings=False,
             supports_guidance_scale=True,
-            weight_sync_mode="checkpoint_path",
+            weight_load_mode="checkpoint_path",
         )

@@ -26,6 +26,8 @@ def build_model_config(args) -> Dict[str, Any]:
     return {
         "model_path": mc.model_path,
         "pretrained_model_saved_path": mc.pretrained_model_saved_path,
+        "vae_saved_path": mc.vae_saved_path,
+        "text_encoder_path": mc.text_encoder_path,
         "use_lora": bool(tc.use_lora),
         "lora_rank": int(tc.lora_rank),
         "lora_alpha": int(tc.lora_alpha),
@@ -143,6 +145,10 @@ def build_rollout_engine_config(
     merged_engine_kwargs.setdefault("lora_rank", model_config["lora_rank"])
     merged_engine_kwargs.setdefault("lora_alpha", model_config["lora_alpha"])
     merged_engine_kwargs.setdefault("lora_target_modules", model_config["lora_target_modules"])
+    if model_config.get("vae_saved_path"):
+        merged_engine_kwargs.setdefault("vae_saved_path", model_config["vae_saved_path"])
+    if model_config.get("text_encoder_path"):
+        merged_engine_kwargs.setdefault("text_encoder_path", model_config["text_encoder_path"])
     # Wire top-level fps into engine_kwargs so SGLang engine can consume it
     # without requiring users to pass it through --engine-kwargs JSON.
     fps = getattr(args, "fps", None)

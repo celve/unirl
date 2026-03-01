@@ -10,8 +10,7 @@ import torch
 import torch.nn as nn
 
 from diffusionrl.types.sampling import RolloutRequest, RolloutOutput
-from diffusionrl.utils import load_function
-from diffusionrl.utils.adapter_utils import switch_adapter
+from diffusionrl.samplers.fsdp import sampler_runner
 
 logger = logging.getLogger(__name__)
 
@@ -76,28 +75,9 @@ class ActorSamplingExecutor:
         include_transformer: bool,
     ) -> List[Tuple[str, nn.Module]]:
         """Collect likely offloadable submodules from arbitrary objects via reflection."""
-        if obj is None:
-            return []
-        known_names = {
-            "transformer",
-            "text_encoder",
-            "text_encoder_2",
-            "text_encoder_3",
-            "vae",
-            "image_encoder",
-        }
-        results: List[Tuple[str, nn.Module]] = []
-        for name, value in obj.__dict__.items():
-            if not isinstance(value, nn.Module):
-                continue
-            base_name = name.lstrip("_").lower()
-            if not include_transformer and "transformer" in base_name:
-                continue
-            if base_name in known_names or any(
-                token in base_name for token in ("encoder", "vae", "transformer")
-            ):
-                results.append((name, value))
-        return results
+        return sampler_runner.iter_offloadable_modules(
+            obj, include_transformer=include_transformer
+        )
 
     def ensure_sampling_components(self, actor: Any) -> None:
         if actor._sampling_ready:
@@ -119,46 +99,26 @@ class ActorSamplingExecutor:
         if not sampler_path:
             raise ValueError("sampling_config must provide sampler_path for training-actor sampling")
 
-        sampler_cls = load_function(sampler_path)
         sampler_kwargs = dict(actor._sampling_config.get("sampler_kwargs", {}))
-        extra_kwargs = {}
-        if hasattr(actor.model_bundle, "get_sampler_extra_kwargs"):
-            extra_kwargs = actor.model_bundle.get_sampler_extra_kwargs() or {}
-        for key, value in extra_kwargs.items():
-            sampler_kwargs.setdefault(key, value)
-
-        actor._sampler = sampler_cls(
+        actor._sampler = sampler_runner.create_sampler(
+            sampler_path=sampler_path,
             model=actor.model,
             text_encoder=actor.text_encoder,
             vae=actor.vae,
             eta=actor._sampling_config.get("eta", 1.0),
             sde_type=actor._sampling_config.get("sde_type", "sde"),
             shift=actor._sampling_config.get("shift", 3.0),
+            model_bundle=actor.model_bundle,
             **sampler_kwargs,
         )
 
         actor._sampling_ready = True
 
     def _encode_prompt(self, actor: Any, prompts: List[str], **kwargs) -> Dict[str, torch.Tensor]:
-        if actor.model_bundle is None:
-            raise RuntimeError("Model bundle not loaded")
-        if not hasattr(actor.model_bundle, "encode_prompt_for_inference"):
-            raise RuntimeError("Model bundle does not support inference prompt encoding")
-        return actor.model_bundle.encode_prompt_for_inference(prompts, **kwargs)
+        return sampler_runner.encode_prompt(actor.model_bundle, prompts, **kwargs)
 
     def _decode_latents(self, actor: Any, latents: torch.Tensor) -> torch.Tensor:
-        if actor.vae is None:
-            raise RuntimeError("VAE not available for decoding")
-
-        with torch.no_grad():
-            if hasattr(actor.vae, "config") and hasattr(actor.vae.config, "scaling_factor"):
-                scaling_factor = actor.vae.config.scaling_factor
-            else:
-                scaling_factor = 0.18215
-
-            latents_float = latents.to(dtype=torch.float32)
-            decoded = actor.vae.to(torch.float32).decode(latents_float / scaling_factor).sample
-            return (decoded + 1) / 2
+        return sampler_runner.decode_latents(actor.vae, latents)
 
     def _iter_sampling_mode_modules(self, actor: Any) -> List[nn.Module]:
         modules: List[nn.Module] = []
@@ -185,25 +145,7 @@ class ActorSamplingExecutor:
         with sampling_eval_context(modules):
             yield
 
-    def generate(
-        self,
-        actor: Any,
-        *,
-        prompts: Optional[List[str]] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        text_ids: Optional[torch.Tensor] = None,
-        num_inference_steps: Optional[int] = None,
-        guidance_scale: Optional[float] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
-        num_frames: Optional[int] = None,
-        seed: Optional[int] = None,
-        decode_for_reward: bool = False,
-        sde_indices: Optional[Set[int]] = None,
-        **kwargs,
-    ) -> RolloutOutput:
+    def generate(self, actor: Any, request: RolloutRequest) -> RolloutOutput:
         if not actor._is_initialized:
             raise RuntimeError("Actor not initialized. Call init() first.")
 
@@ -212,14 +154,21 @@ class ActorSamplingExecutor:
 
         self.ensure_sampling_components(actor)
 
-        num_inference_steps = num_inference_steps or actor._sampling_config.get("num_inference_steps", 50)
-        if guidance_scale is None:
-            guidance_scale = actor._sampling_config.get("guidance_scale", 7.5)
-        height = height or actor._sampling_config.get("height", 256)
-        width = width or actor._sampling_config.get("width", 256)
-        num_frames = num_frames or actor._sampling_config.get("num_frames", 16)
+        # Extract fields and apply config defaults
+        prompts = request.prompts
+        prompt_embeds = request.prompt_embeds
+        pooled_prompt_embeds = request.pooled_prompt_embeds
+        encoder_attention_mask = request.encoder_attention_mask
+        text_ids = request.text_ids
+        kwargs = dict(request.kwargs)
 
-        sampling_adapter = kwargs.pop("sampling_adapter", None)
+        num_inference_steps = request.num_inference_steps or actor._sampling_config.get("num_inference_steps", 50)
+        guidance_scale = request.guidance_scale if request.guidance_scale is not None else actor._sampling_config.get("guidance_scale", 7.5)
+        height = request.height or actor._sampling_config.get("height", 256)
+        width = request.width or actor._sampling_config.get("width", 256)
+        num_frames = request.num_frames or actor._sampling_config.get("num_frames", 16)
+
+        sampling_adapter = request.sampling_adapter
         if sampling_adapter is None:
             sampling_adapter = actor._sampling_config.get("sampling_adapter")
 
@@ -230,9 +179,9 @@ class ActorSamplingExecutor:
         )
 
         generator = None
-        if seed is not None:
+        if request.seed is not None:
             generator = torch.Generator(device=actor._device)
-            generator.manual_seed(seed)
+            generator.manual_seed(request.seed)
 
         with self._sampling_eval_context(actor):
             if prompts is not None and prompt_embeds is None:
@@ -247,49 +196,30 @@ class ActorSamplingExecutor:
                 negative_prompt_embeds = kwargs.pop("negative_prompt_embeds", None)
                 negative_pooled_prompt_embeds = kwargs.pop("negative_pooled_prompt_embeds", None)
 
-            if sampling_adapter and actor.model is not None:
-                with switch_adapter(actor.model, sampling_adapter):
-                    output = actor._sampler.sample(
-                        prompts=prompts,
-                        prompt_embeds=prompt_embeds,
-                        pooled_prompt_embeds=pooled_prompt_embeds,
-                        negative_prompt_embeds=negative_prompt_embeds,
-                        negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-                        encoder_attention_mask=encoder_attention_mask,
-                        num_inference_steps=num_inference_steps,
-                        guidance_scale=guidance_scale,
-                        height=height,
-                        width=width,
-                        num_frames=num_frames,
-                        generator=generator,
-                        sde_indices=sde_indices,
-                        text_ids=text_ids,
-                        init_same_noise=init_same_noise,
-                        num_samples_per_prompt=num_samples_per_prompt,
-                        **kwargs,
-                    )
-            else:
-                output = actor._sampler.sample(
-                    prompts=prompts,
-                    prompt_embeds=prompt_embeds,
-                    pooled_prompt_embeds=pooled_prompt_embeds,
-                    negative_prompt_embeds=negative_prompt_embeds,
-                    negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-                    encoder_attention_mask=encoder_attention_mask,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    height=height,
-                    width=width,
-                    num_frames=num_frames,
-                    generator=generator,
-                    sde_indices=sde_indices,
-                    text_ids=text_ids,
-                    init_same_noise=init_same_noise,
-                    num_samples_per_prompt=num_samples_per_prompt,
-                    **kwargs,
-                )
+            output = sampler_runner.run_sample(
+                model=actor.model,
+                sampler=actor._sampler,
+                sampling_adapter=sampling_adapter,
+                prompts=prompts,
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                negative_prompt_embeds=negative_prompt_embeds,
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                encoder_attention_mask=encoder_attention_mask,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                generator=generator,
+                sde_indices=request.sde_indices,
+                text_ids=text_ids,
+                init_same_noise=init_same_noise,
+                num_samples_per_prompt=num_samples_per_prompt,
+                **kwargs,
+            )
 
-        if decode_for_reward:
+        if request.decode_for_reward:
             try:
                 decoded = self._decode_latents(actor, output.latents)
                 decoded_images = _tensor_to_pil(decoded)
@@ -309,19 +239,7 @@ class ActorSamplingExecutor:
         return output.to_device("cpu")
 
     def generate_batch(self, actor: Any, requests: List[RolloutRequest]) -> List[RolloutOutput]:
-        outputs = []
-        for request in requests:
-            output = self.generate(
-                actor,
-                prompts=request.prompts,
-                prompt_embeds=request.prompt_embeds,
-                pooled_prompt_embeds=request.pooled_prompt_embeds,
-                num_inference_steps=request.num_inference_steps,
-                guidance_scale=request.guidance_scale,
-                seed=request.seed,
-            )
-            outputs.append(output)
-        return outputs
+        return [self.generate(actor, req) for req in requests]
 
 class TrainingActorSamplingService:
     """Delegates training-actor sampling RPCs to ActorSamplingExecutor."""
@@ -333,42 +251,8 @@ class TrainingActorSamplingService:
     def executor(self) -> ActorSamplingExecutor:
         return self._executor
 
-    def generate(
-        self,
-        actor,
-        *,
-        prompts: Optional[List[str]] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        text_ids: Optional[torch.Tensor] = None,
-        num_inference_steps: Optional[int] = None,
-        guidance_scale: Optional[float] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
-        num_frames: Optional[int] = None,
-        seed: Optional[int] = None,
-        decode_for_reward: bool = False,
-        sde_indices: Optional[Set[int]] = None,
-        **kwargs,
-    ) -> RolloutOutput:
-        return self._executor.generate(
-            actor,
-            prompts=prompts,
-            prompt_embeds=prompt_embeds,
-            pooled_prompt_embeds=pooled_prompt_embeds,
-            encoder_attention_mask=encoder_attention_mask,
-            text_ids=text_ids,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            height=height,
-            width=width,
-            num_frames=num_frames,
-            seed=seed,
-            decode_for_reward=decode_for_reward,
-            sde_indices=sde_indices,
-            **kwargs,
-        )
+    def generate(self, actor, request: RolloutRequest) -> RolloutOutput:
+        return self._executor.generate(actor, request)
 
     def generate_batch(self, actor, requests: List[RolloutRequest]) -> List[RolloutOutput]:
         return self._executor.generate_batch(actor, requests)

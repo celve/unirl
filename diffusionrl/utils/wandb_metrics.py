@@ -1,0 +1,221 @@
+"""Helpers for building structured WandB metrics in train loops."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Iterable, List, Optional
+
+import torch
+
+from diffusionrl.types.training_batch import (
+    BackwardTrainingBatch,
+    ForwardTrainingBatch,
+    TrainingBatch,
+)
+
+
+def _coerce_scalar(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if torch.is_tensor(value):
+        tensor = value.detach()
+        if tensor.numel() == 0:
+            return None
+        if tensor.numel() == 1:
+            return float(tensor.item())
+        return float(tensor.to(dtype=torch.float32).mean().item())
+    return None
+
+
+def flatten_numeric_metrics(
+    payload: Dict[str, Any],
+    *,
+    prefix: str = "",
+) -> Dict[str, float]:
+    """Flatten nested dict payload into numeric metrics only."""
+    output: Dict[str, float] = {}
+
+    def _walk(node: Dict[str, Any], node_prefix: str) -> None:
+        for key, value in node.items():
+            metric_key = f"{node_prefix}{key}" if node_prefix else str(key)
+            if isinstance(value, dict):
+                _walk(value, f"{metric_key}/")
+                continue
+            scalar = _coerce_scalar(value)
+            if scalar is not None:
+                output[metric_key] = scalar
+
+    _walk(payload, prefix)
+    return output
+
+
+def _iter_batches(training_data: Any) -> Iterable[TrainingBatch]:
+    if isinstance(training_data, list):
+        for item in training_data:
+            if isinstance(item, (BackwardTrainingBatch, ForwardTrainingBatch)):
+                yield item
+        return
+    if isinstance(training_data, (BackwardTrainingBatch, ForwardTrainingBatch)):
+        yield training_data
+
+
+def _tensor_stats(prefix: str, tensor: Optional[torch.Tensor]) -> Dict[str, float]:
+    if tensor is None or (not torch.is_tensor(tensor)) or tensor.numel() == 0:
+        return {}
+    flat = tensor.detach().to(dtype=torch.float32).reshape(-1).cpu()
+    return {
+        f"{prefix}_mean": float(flat.mean().item()),
+        f"{prefix}_std": float(flat.std(unbiased=False).item()),
+        f"{prefix}_min": float(flat.min().item()),
+        f"{prefix}_max": float(flat.max().item()),
+    }
+
+
+def _zero_std_group_counts(rewards: torch.Tensor, num_samples_per_prompt: int) -> tuple[int, int]:
+    k = max(1, int(num_samples_per_prompt))
+    total = int(rewards.shape[0])
+    if total == 0:
+        return 0, 0
+    if k <= 1:
+        return 0, total
+    groups = total // k
+    if groups <= 0:
+        return 0, 0
+    usable = rewards[: groups * k].reshape(groups, k)
+    std = usable.std(dim=1, unbiased=False)
+    zero_std = int((std <= 1e-8).sum().item())
+    return zero_std, groups
+
+
+def compute_rollout_batch_metrics(
+    *,
+    training_data: Any,
+    num_samples_per_prompt: int,
+) -> Dict[str, float]:
+    """Build rollout metrics from typed training batch (or partition list)."""
+    metrics: Dict[str, float] = {}
+
+    reward_tensors: List[torch.Tensor] = []
+    advantage_tensors: List[torch.Tensor] = []
+    total_samples = 0
+    zero_std_groups = 0
+    total_groups = 0
+    sde_selected = 0
+    sde_total = 0
+
+    for batch in _iter_batches(training_data):
+        total_samples += int(getattr(batch, "batch_size", 0))
+
+        rewards = getattr(batch, "rewards", None)
+        if torch.is_tensor(rewards) and rewards.numel() > 0:
+            rewards_f = rewards.detach().to(dtype=torch.float32).reshape(-1).cpu()
+            reward_tensors.append(rewards_f)
+            zero_cnt, group_cnt = _zero_std_group_counts(rewards_f, num_samples_per_prompt)
+            zero_std_groups += zero_cnt
+            total_groups += group_cnt
+
+        advantages = getattr(batch, "advantages", None)
+        if torch.is_tensor(advantages) and advantages.numel() > 0:
+            advantage_tensors.append(
+                advantages.detach().to(dtype=torch.float32).reshape(-1).cpu()
+            )
+
+        if isinstance(batch, BackwardTrainingBatch):
+            sde_selected += len(batch.sde_indices)
+            steps_total = max(int(batch.trajectories.shape[1]) - 1, 0)
+            sde_total += steps_total
+
+    metrics["num_samples"] = float(total_samples)
+
+    if reward_tensors:
+        rewards_cat = torch.cat(reward_tensors, dim=0)
+        metrics.update(_tensor_stats("reward", rewards_cat))
+
+    if advantage_tensors:
+        advantages_cat = torch.cat(advantage_tensors, dim=0)
+        metrics.update(_tensor_stats("advantage", advantages_cat))
+
+    if total_groups > 0:
+        metrics["zero_std_group_ratio"] = float(zero_std_groups) / float(total_groups)
+        metrics["zero_std_group_count"] = float(zero_std_groups)
+        metrics["group_count"] = float(total_groups)
+
+    if sde_total > 0:
+        metrics["sde_selected_steps"] = float(sde_selected)
+        metrics["sde_total_steps"] = float(sde_total)
+        metrics["sde_selected_ratio"] = float(sde_selected) / float(sde_total)
+
+    return metrics
+
+
+_BUFFER_CORE_KEYS = (
+    "queue_size",
+    "pushed_batches",
+    "popped_batches",
+    "pushed_samples",
+    "popped_samples",
+    "assembled_batches",
+    "assembled_partial_batches",
+    "dropped_queue_items",
+    "dropped_batches",
+    "dropped_samples",
+    "expired_samples",
+    "pending_overflow_drops",
+    "pending_group_count",
+    "ready_group_count",
+    "pending_sample_count",
+    "avg_pending_reward",
+)
+
+
+def build_buffer_metrics(
+    stats: Optional[Dict[str, Any]],
+    *,
+    prefix: str = "buffer/",
+) -> Dict[str, float]:
+    """Extract numeric rollout-buffer health metrics."""
+    if not isinstance(stats, dict):
+        return {}
+
+    metrics: Dict[str, float] = {}
+    for key in _BUFFER_CORE_KEYS:
+        scalar = _coerce_scalar(stats.get(key))
+        if scalar is not None:
+            metrics[f"{prefix}{key}"] = scalar
+
+    pending_modalities = stats.get("pending_modality_counts")
+    if isinstance(pending_modalities, dict):
+        for modality, count in pending_modalities.items():
+            scalar = _coerce_scalar(count)
+            if scalar is not None:
+                metrics[f"{prefix}pending_modality/{modality}"] = scalar
+
+    plugins = stats.get("plugins")
+    if isinstance(plugins, dict):
+        metrics.update(flatten_numeric_metrics(plugins, prefix=f"{prefix}plugin/"))
+
+    return metrics
+
+
+def build_sync_metrics(
+    sync_result: Any,
+    *,
+    prefix: str = "sync/",
+) -> Dict[str, float]:
+    """Flatten weight-sync result into numeric metrics."""
+    if sync_result is None:
+        return {}
+
+    metrics: Dict[str, float] = {}
+    for key in ("elapsed_ms", "version", "rollout_id"):
+        scalar = _coerce_scalar(getattr(sync_result, key, None))
+        if scalar is not None:
+            metrics[f"{prefix}{key}"] = scalar
+
+    extra = getattr(sync_result, "extra", None)
+    if isinstance(extra, dict):
+        metrics.update(flatten_numeric_metrics(extra, prefix=f"{prefix}extra/"))
+    return metrics

@@ -271,6 +271,8 @@ class TrainingActor(BaseTrainRayActor):
         # Pass through LoRA configuration for models that support it
         model_kwargs = {
             "pretrained_path": model_config.get("pretrained_model_saved_path", ""),
+            "vae_saved_path": model_config.get("vae_saved_path"),
+            "text_encoder_path": model_config.get("text_encoder_path"),
             "device": self._device,
             # Training only needs transformer, skip VAE/text_encoders to save memory
             "training_only": True,
@@ -589,40 +591,8 @@ class TrainingActor(BaseTrainRayActor):
             guidance_scale=self._guidance_scale,
         )
 
-    def generate(
-        self,
-        prompts: Optional[List[str]] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        text_ids: Optional[torch.Tensor] = None,
-        num_inference_steps: Optional[int] = None,
-        guidance_scale: Optional[float] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
-        num_frames: Optional[int] = None,
-        seed: Optional[int] = None,
-        decode_for_reward: bool = False,
-        sde_indices: Optional[Set[int]] = None,
-        **kwargs,
-    ) -> RolloutOutput:
-        return self._sampling_service.generate(
-            self,
-            prompts=prompts,
-            prompt_embeds=prompt_embeds,
-            pooled_prompt_embeds=pooled_prompt_embeds,
-            encoder_attention_mask=encoder_attention_mask,
-            text_ids=text_ids,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            height=height,
-            width=width,
-            num_frames=num_frames,
-            seed=seed,
-            decode_for_reward=decode_for_reward,
-            sde_indices=sde_indices,
-            **kwargs,
-        )
+    def generate(self, request: RolloutRequest) -> RolloutOutput:
+        return self._sampling_service.generate(self, request)
 
     def generate_batch(self, requests: List[RolloutRequest]) -> List[RolloutOutput]:
         return self._sampling_service.generate_batch(self, requests)

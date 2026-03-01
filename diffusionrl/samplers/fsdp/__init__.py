@@ -18,6 +18,7 @@ from .flux_sampler import FluxSampler
 from .sd3_sampler import SD3Sampler
 from .hunyuan_sampler import FSDPHunyuanSampler
 from .engine import FSDPRolloutEngine
+from . import sampler_runner
 
 __all__ = [
     # Samplers
@@ -26,4 +27,6 @@ __all__ = [
     "FSDPHunyuanSampler",
     # Engine
     "FSDPRolloutEngine",
+    # Shared sampling core
+    "sampler_runner",
 ]

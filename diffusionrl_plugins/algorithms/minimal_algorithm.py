@@ -59,7 +59,7 @@ class MinimalAlgorithm(BaseAlgorithm):
             requires_trajectory=True,
             requires_log_prob=True,
             requires_embeddings=True,
-            sde_ratio=self.sde_ratio,
+            extras={"sde_ratio": self.sde_ratio},
         )
 
     def set_sde_indices(self, sde_indices: Set[int]) -> None:
