@@ -1,0 +1,229 @@
+# GitHub Issues Workflow Guide / GitHub Issues 工作流指南
+
+## 1. Issue Title Convention / Issue 标题规范
+
+Use prefix tags to categorize issues clearly.
+使用前缀标签对 issue 进行分类。
+
+| Prefix / 前缀 | Usage / 用途 | Example / 示例 |
+|---|---|---|
+| `[Feature]` | New feature / 新功能 | `[Feature] Add mixed precision training support` |
+| `[Bug]` | Bug fix / 问题修复 | `[Bug] Gradient accumulation NaN in step 500+` |
+| `[Task]` | Concrete work item / 具体任务 | `[Task] Refactor backward_train_step` |
+| `[RFC]` | Discussion before implementation / 方案讨论 | `[RFC] Async rollout pipeline design` |
+| `[Tracking]` | Parent issue that tracks sub-tasks / 总体跟踪 | `[Tracking] Training Pipeline Optimization` |
+
+---
+
+## 2. Issue Template / Issue 模板
+
+Every issue should follow this structure to ensure clarity and actionability.
+每个 issue 应遵循以下结构，确保清晰可执行。
+
+```markdown
+## Background / 背景
+Why this needs to be done. 1-2 sentences.
+为什么要做这件事，1-2 句话说清楚。
+
+## Objective / 目标
+What specific outcome is expected.
+具体要达成什么效果。
+
+## Tasks / 具体任务
+- [ ] Sub-task 1 (may reference other issues: #12)
+- [ ] Sub-task 2
+- [ ] Sub-task 3
+
+## References / 参考资料
+- Related code path: `diffusionrl/xxx/yyy.py`
+- Related paper / link
+
+## Acceptance Criteria / 验收标准
+How do we know this is done? e.g., pass a specific test, reach a performance target.
+怎样算做完了？比如：跑通某个测试、性能达到某个指标。
+```
+
+---
+
+## 3. Label System / 标签体系
+
+Create these labels in your repository to enable filtering and prioritization.
+在仓库中创建以下标签，便于筛选和排优先级。
+
+### Priority / 优先级
+
+| Label | Description / 说明 |
+|---|---|
+| `priority: high` | Must be done ASAP / 需要尽快完成 |
+| `priority: medium` | Should be done this sprint / 本轮迭代内完成 |
+| `priority: low` | Nice to have / 有空再做 |
+
+### Module / 模块
+
+| Label | Description / 说明 |
+|---|---|
+| `module: training` | Training pipeline related / 训练流程相关 |
+| `module: inference` | Inference & rollout related / 推理与采样相关 |
+| `module: sampling` | Sampling strategy related / 采样策略相关 |
+| `module: algorithm` | Algorithm (GRPO, etc.) related / 算法相关 |
+| `module: infra` | Infrastructure & distributed related / 基础设施与分布式相关 |
+
+### Status / 状态
+
+| Label | Description / 说明 |
+|---|---|
+| `good first issue` | Good for newcomers / 适合新组员上手 |
+| `needs-discussion` | Requires design discussion before coding / 需要先讨论方案再动手 |
+| `in-progress` | Currently being worked on / 正在进行中 |
+| `blocked` | Blocked by dependency / 被其他任务阻塞 |
+
+---
+
+## 4. Workflow: From Issue to Merge / 工作流：从 Issue 到合并
+
+```
+Step 1: Create a Tracking Issue (break down large tasks)
+第一步：创建 Tracking Issue（大任务拆分）
+        │
+        ▼
+Step 2: Create sub-issues for each task, listed in the Tracking Issue
+第二步：每个子任务单独开 issue，在 Tracking Issue 中列出
+        │
+        ▼
+Step 3: Assign sub-issues to team members via Assignees
+第三步：通过 Assignees 把子 issue 指派给具体组员
+        │
+        ▼
+Step 4: Assignee comments progress & problems under the issue
+第四步：组员在 issue 下评论进度和遇到的问题
+        │
+        ▼
+Step 5: Submit PR and link the issue (write "Closes #xx" in PR description)
+第五步：完成后提交 PR，PR 描述里写 "Closes #xx" 关联 issue
+        │
+        ▼
+Step 6: Code Review → Merge → Issue auto-closed
+第六步：Code Review → 合并 → Issue 自动关闭
+```
+
+---
+
+## 5. Example: A Real Tracking Issue / 示例：一个实际的 Tracking Issue
+
+```markdown
+Title: [Tracking] DiffusionRL Training Pipeline Optimization
+标题：[Tracking] DiffusionRL 训练流程优化
+
+## Background / 背景
+The current training pipeline has performance bottlenecks in gradient
+accumulation and lacks mixed precision support.
+当前训练流程在梯度累积环节存在性能瓶颈，且缺少混合精度支持。
+
+## Sub-tasks / 子任务
+- [ ] #101 Refactor gradient accumulation in backward_train_step → @MemberA
+      重构 backward_train_step 中的梯度累积逻辑
+- [ ] #102 Add mixed precision (bf16/fp16) support → @MemberB
+      添加混合精度训练支持
+- [ ] #103 Write training performance benchmark → @MemberC
+      编写训练性能 benchmark
+- [ ] #104 Add unit tests for training step → @MemberD
+      补充训练步骤的单元测试
+
+## Milestones / 里程碑
+- Mar 15: Complete #101, #102 / 3月15日前完成 #101 #102
+- Mar 31: Complete #103, #104 / 3月底前完成 #103 #104
+
+## Acceptance Criteria / 验收标准
+- All sub-issues closed with merged PRs / 所有子 issue 已关闭并合并 PR
+- Benchmark shows ≥20% training speedup / Benchmark 显示训练速度提升 ≥20%
+- Unit test coverage ≥80% for training module / 训练模块单测覆盖率 ≥80%
+```
+
+---
+
+## 6. CLI Quick Reference / 命令行快速参考
+
+Use the `gh` CLI to manage issues efficiently from terminal.
+使用 `gh` 命令行工具在终端高效管理 issue。
+
+```bash
+# Create an issue with assignee and labels
+# 创建 issue 并指派和打标签
+gh issue create \
+  --title "[Task] Refactor backward_train_step gradient accumulation" \
+  --body "## Objective
+Optimize gradient accumulation logic.
+
+## Tasks
+- [ ] Analyze current implementation
+- [ ] Refactor code
+- [ ] Add tests" \
+  --assignee teammate-username \
+  --label "module: training,priority: high"
+
+# List open issues assigned to someone
+# 查看某人被分配的 issue
+gh issue list --assignee teammate-username --state open
+
+# View a specific issue
+# 查看某个 issue 的详情
+gh issue view 101
+
+# Close an issue (usually done automatically via PR)
+# 关闭 issue（通常通过 PR 自动关闭）
+gh issue close 101
+
+# Add a comment to an issue
+# 给 issue 添加评论
+gh issue comment 101 --body "Progress update: completed step 1 and 2."
+
+# Create labels (run once to set up the repo)
+# 创建标签（初始化仓库时运行一次）
+gh label create "priority: high" --color "d93f0b" --description "Must be done ASAP"
+gh label create "priority: medium" --color "fbca04" --description "Should be done this sprint"
+gh label create "priority: low" --color "0e8a16" --description "Nice to have"
+gh label create "module: training" --color "1d76db" --description "Training pipeline"
+gh label create "module: inference" --color "5319e7" --description "Inference & rollout"
+gh label create "module: algorithm" --color "006b75" --description "Algorithm related"
+gh label create "needs-discussion" --color "d4c5f9" --description "Needs design discussion"
+```
+
+---
+
+## 7. GitHub Projects Board (Optional) / GitHub Projects 看板（可选）
+
+For visual progress tracking, create a **GitHub Project** with board view.
+如果想可视化进度，可以创建 GitHub Project 看板。
+
+| Column / 列 | Description / 说明 |
+|---|---|
+| `Backlog` | Planned but not started / 已规划但未开始 |
+| `Todo` | Ready to start / 准备开始 |
+| `In Progress` | Currently being worked on / 正在进行中 |
+| `In Review` | PR submitted, waiting for review / 已提交 PR，等待 Review |
+| `Done` | Merged and closed / 已合并关闭 |
+
+---
+
+## 8. Best Practices / 最佳实践
+
+1. **One issue, one owner** — Every issue should have a clear assignee.
+   **一个 issue 一个负责人** — 每个 issue 都应有明确的 assignee。
+
+2. **Small and specific** — Break large tasks into issues that can be completed in 1-3 days.
+   **小而具体** — 把大任务拆成 1-3 天能完成的 issue。
+
+3. **Link everything** — Use `#issue_number` to cross-reference related issues and PRs.
+   **互相关联** — 用 `#issue编号` 交叉引用相关的 issue 和 PR。
+
+4. **Update regularly** — Comment on your issues at least twice a week with progress.
+   **定期更新** — 每周至少在 issue 下评论两次进度。
+
+5. **Close with PRs** — Always use `Closes #xx` in PR descriptions for automatic tracking.
+   **用 PR 关闭** — PR 描述中始终使用 `Closes #xx` 实现自动跟踪。
+
+6. **Discuss before coding** — For non-trivial tasks, use `[RFC]` issues to align on approach first.
+   **先讨论再写码** — 对于复杂任务，先用 `[RFC]` issue 讨论方案。
+
+7. **Use milestones** — Group issues into milestones for release/sprint planning.
+   **使用里程碑** — 把 issue 分组到 milestone 中做版本/迭代规划。
