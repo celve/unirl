@@ -19,11 +19,9 @@ from diffusionrl.config.validation import (
     normalize_repo_relative_paths,
     repo_root,
     resolve_repo_relative_path,
-    validate_algorithm_kwargs_json,
     validate_colocate_fractions,
     validate_dotpath,
     validate_dynamic_dotpaths,
-    validate_algorithm_loss_contract,
     validate_grouped_configs,
     validate_loss_kwargs_json,
     validate_model_specific_logic,
@@ -1505,11 +1503,9 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
         explicit_sampler_engine_type=explicit_sampler_engine_type,
     )
     training_actor_direct_sampling, is_sglang_engine, sglang_logprob_mode = _normalize_sampling_basics(args)
-    validate_algorithm_kwargs_json(args)
     validate_loss_kwargs_json(args)
     _normalize_train_backend_config(args)
     validate_dynamic_dotpaths(args)
-    validate_algorithm_loss_contract(args)
     _apply_training_actor_direct_sampling_overrides(
         args,
         training_actor_direct_sampling=training_actor_direct_sampling,

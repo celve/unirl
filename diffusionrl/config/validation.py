@@ -472,69 +472,6 @@ def validate_loss_kwargs_json(args: Any) -> None:
     args.loss_kwargs_json = json.dumps(parsed)
 
 
-def validate_algorithm_kwargs_json(args: Any) -> None:
-    """Validate and normalize algorithm_kwargs_json into canonical JSON text."""
-    raw = getattr(args, "algorithm_kwargs_json", "")
-    if raw is None:
-        args.algorithm_kwargs_json = ""
-        return
-    if not isinstance(raw, str):
-        raise ValueError(
-            f"algorithm_kwargs_json must be a JSON object string, got: {type(raw).__name__}"
-        )
-
-    text = raw.strip()
-    if not text:
-        args.algorithm_kwargs_json = ""
-        return
-
-    try:
-        parsed = json.loads(text)
-    except Exception as exc:
-        raise ValueError(f"Invalid algorithm_kwargs_json: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("algorithm_kwargs_json must decode to a JSON object.")
-    args.algorithm_kwargs_json = json.dumps(parsed)
-
-
-def validate_algorithm_loss_contract(args: Any) -> None:
-    """Validate algorithm sampling requirements against selected loss contract."""
-    algorithm_cls = load_function(args.algorithm_path)
-    from_args_fn = getattr(algorithm_cls, "from_args", None)
-    if not callable(from_args_fn):
-        raise ValueError(
-            f"Algorithm class {args.algorithm_path!r} must implement classmethod from_args(args)."
-        )
-
-    algorithm = from_args_fn(args)
-    get_requirements_fn = getattr(algorithm, "get_sampling_requirements", None)
-    if not callable(get_requirements_fn):
-        raise ValueError(
-            f"Algorithm class {args.algorithm_path!r} must implement get_sampling_requirements()."
-        )
-
-    requirements = get_requirements_fn()
-    algorithm_caps = {
-        "requires_trajectory": bool(getattr(requirements, "requires_trajectory", False)),
-        "requires_log_prob": bool(getattr(requirements, "requires_log_prob", False)),
-        "requires_embeddings": bool(getattr(requirements, "requires_embeddings", False)),
-    }
-    loss_requirements = _get_loss_requirements(args)
-
-    missing = [
-        key
-        for key, needed in loss_requirements.items()
-        if bool(needed) and not bool(algorithm_caps.get(key, False))
-    ]
-    if missing:
-        raise ValueError(
-            "Algorithm/loss contract mismatch: "
-            f"algorithm_path={args.algorithm_path} cannot satisfy loss_type={args.loss_type}. "
-            f"Missing requirements={missing}. "
-            f"algorithm_caps={algorithm_caps}, loss_requirements={loss_requirements}."
-        )
-
-
 def validate_resolved_engine_loss_contract(
     args: Any,
     *,
@@ -646,9 +583,7 @@ __all__ = [
     "validate_reward_and_rollout_buffer_config",
     "validate_rollout_layout",
     "validate_model_specific_logic",
-    "validate_algorithm_kwargs_json",
     "validate_loss_kwargs_json",
-    "validate_algorithm_loss_contract",
     "validate_resolved_engine_loss_contract",
     "validate_runtime_mode_constraints",
 ]

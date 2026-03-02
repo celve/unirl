@@ -14,8 +14,17 @@ import time
 
 from diffusionrl.config import parse_args
 from diffusionrl.config.arguments import is_training_actor_direct_sampling_mode
+from diffusionrl.ray.group_factory import create_training_actor_group
+from diffusionrl.ray.placement_group import create_placement_groups_from_args
+from diffusionrl.ray.rollout_buffer import create_rollout_buffer_actor
+from diffusionrl.ray.rollout_manager import create_rollout_manager
 
 logger = logging.getLogger(__name__)
+
+# Main control-plane path (sync mode):
+# parse_args -> create_placement_groups_from_args -> create_rollout_manager
+# -> create_training_actor_group -> rollout_manager.generate_and_push
+# -> training_group.train -> weight_sync.sync
 
 
 def should_save(rollout_id: int, args) -> bool:
@@ -46,12 +55,6 @@ def train(args):
 
     import ray
 
-    from diffusionrl.ray import (
-        create_placement_groups_from_args,
-        create_rollout_buffer_actor,
-        create_rollout_manager,
-        create_training_actor_group,
-    )
     from diffusionrl.utils import configure_logger, set_seed
     from diffusionrl.utils.wandb_metrics import (
         build_buffer_metrics,
