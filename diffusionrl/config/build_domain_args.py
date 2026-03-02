@@ -104,6 +104,7 @@ def build_sampling_config(args) -> Dict[str, Any]:
     engine_kwargs = _resolve_engine_kwargs(sc)
     return {
         "sampler_path": sc.sampler_path,
+        "sampler_engine_type": sc.sampler_engine_type,
         "replay_sampler_path": sc.replay_sampler_path,
         "num_inference_steps": int(sc.num_inference_steps),
         "eta": float(sc.eta),

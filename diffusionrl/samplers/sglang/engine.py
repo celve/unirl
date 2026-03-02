@@ -7,7 +7,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
@@ -63,6 +63,10 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         self._warned_unsupported_rollout_sde: bool = False
         self._warned_trimmed_logprob_prefix: bool = False
         self._warned_disabled_native_rollout: bool = False
+        self._warned_missing_trajectory_with_optional_mode: bool = False
+        self._warned_latent_encode_fallback: bool = False
+        self._fallback_vae: Any = None
+        self._fallback_vae_model_type: Optional[str] = None
 
     @classmethod
     def declared_capabilities(cls) -> Dict[str, bool]:
@@ -530,9 +534,19 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             return value
         try:
             import numpy as np
+            from PIL import Image
 
             if isinstance(value, np.ndarray):
                 return torch.from_numpy(value)
+            if isinstance(value, Image.Image):
+                return torch.from_numpy(np.array(value))
+            if isinstance(value, (list, tuple)) and value:
+                if all(torch.is_tensor(v) for v in value):
+                    return torch.stack([v.detach() for v in value], dim=0)
+                if all(isinstance(v, np.ndarray) for v in value):
+                    return torch.from_numpy(np.stack(value, axis=0))
+                if all(isinstance(v, Image.Image) for v in value):
+                    return torch.from_numpy(np.stack([np.array(v) for v in value], axis=0))
         except Exception:
             pass
         return None
@@ -549,10 +563,62 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             return value
         return value
 
-    def _extract_trajectory_from_result(self, result: Any) -> torch.Tensor:
+    @staticmethod
+    def _describe_result_fields(result: Any) -> str:
+        keys = (
+            "trajectory_latents",
+            "trajectory",
+            "trajectory_timesteps",
+            "trajectory_log_probs",
+            "latents",
+            "sample_latents",
+            "samples",
+            "frames",
+            "output_file_path",
+        )
+        parts: List[str] = []
+        for key in keys:
+            if not hasattr(result, key):
+                continue
+            value = getattr(result, key)
+            if value is None:
+                parts.append(f"{key}=None")
+                continue
+            if torch.is_tensor(value):
+                parts.append(f"{key}=Tensor{tuple(value.shape)}")
+                continue
+            shape = getattr(value, "shape", None)
+            if shape is not None:
+                try:
+                    parts.append(f"{key}={type(value).__name__}{tuple(shape)}")
+                except Exception:
+                    parts.append(f"{key}={type(value).__name__}")
+            else:
+                parts.append(f"{key}={type(value).__name__}")
+        return ", ".join(parts) if parts else "no-known-fields"
+
+    def _extract_trajectory_from_result(
+        self,
+        result: Any,
+        *,
+        required: bool = True,
+    ) -> Optional[torch.Tensor]:
         traj = self._to_tensor(getattr(result, "trajectory_latents", None))
         if traj is None:
-            raise RuntimeError("SGLang result missing trajectory_latents")
+            traj = self._to_tensor(getattr(result, "trajectory", None))
+        if traj is None:
+            if required:
+                raise RuntimeError(
+                    "SGLang result missing trajectory_latents/trajectory. "
+                    f"Available fields: {self._describe_result_fields(result)}"
+                )
+            if not self._warned_missing_trajectory_with_optional_mode:
+                logger.warning(
+                    "SGLang result is missing trajectory_latents in optional-trajectory mode. "
+                    "Will try latent fallback from sample outputs."
+                )
+                self._warned_missing_trajectory_with_optional_mode = True
+            return None
 
         model_type = self._infer_model_type()
         if model_type == "flux":
@@ -587,6 +653,187 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             )
 
         return traj.detach().cpu()
+
+    @staticmethod
+    def _extract_sample_payload(result: Any) -> Any:
+        sample = getattr(result, "samples", None)
+        if isinstance(sample, (tuple, list)) and len(sample) == 2:
+            sample = sample[0]
+        return sample
+
+    @staticmethod
+    def _to_nchw_image_tensor(sample_tensor: torch.Tensor) -> Optional[torch.Tensor]:
+        tensor = sample_tensor.detach().cpu()
+        if tensor.dim() == 4 and tensor.shape[0] == 1:
+            tensor = tensor[0]
+        elif tensor.dim() == 4 and tensor.shape[0] > 1 and tensor.shape[-1] in (1, 3, 4):
+            # [N,H,W,C] -> pick first output for this prompt
+            tensor = tensor[0]
+
+        if tensor.dim() != 3:
+            return None
+
+        if tensor.shape[0] in (1, 3, 4):
+            chw = tensor[:3]
+        elif tensor.shape[-1] in (1, 3, 4):
+            chw = tensor.permute(2, 0, 1)[:3]
+        else:
+            return None
+
+        chw = chw.float()
+        if chw.numel() == 0:
+            return None
+        max_val = float(chw.max().item())
+        min_val = float(chw.min().item())
+        if max_val > 1.5:
+            chw = chw / 255.0
+        if min_val >= 0.0:
+            chw = chw * 2.0 - 1.0
+        chw = chw.clamp(-1.0, 1.0)
+        return chw.unsqueeze(0)
+
+    def _extract_pixel_batch_for_latent_fallback(
+        self,
+        results: Sequence[Any],
+    ) -> torch.Tensor:
+        pixel_batches: List[torch.Tensor] = []
+        for idx, result in enumerate(results):
+            sample = self._extract_sample_payload(result)
+            sample_tensor = self._to_tensor(sample)
+            if sample_tensor is None:
+                raise RuntimeError(
+                    "SGLang trajectory fallback failed: cannot convert result.samples to tensor "
+                    f"(idx={idx}). Fields: {self._describe_result_fields(result)}"
+                )
+            image = self._to_nchw_image_tensor(sample_tensor)
+            if image is None:
+                raise RuntimeError(
+                    "SGLang trajectory fallback failed: result.samples is not an image tensor "
+                    f"(idx={idx}, shape={tuple(sample_tensor.shape)})."
+                )
+            pixel_batches.append(image)
+        return torch.cat(pixel_batches, dim=0)
+
+    def _ensure_fallback_vae(self, *, model_type: str) -> None:
+        if self._fallback_vae is not None and self._fallback_vae_model_type == model_type:
+            return
+        if model_type not in {"sd3", "flux"}:
+            raise RuntimeError(
+                f"SGLang latent fallback currently supports sd3/flux, got model_type={model_type}."
+            )
+
+        model_path = self.config.pretrained_model_saved_path or self.config.model_path
+        if not model_path:
+            raise RuntimeError("Missing model_path while initializing latent fallback VAE.")
+
+        from diffusers import AutoencoderKL
+
+        device = self._device or torch.device("cpu")
+        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        vae = AutoencoderKL.from_pretrained(
+            model_path,
+            subfolder="vae",
+            torch_dtype=dtype,
+        )
+        vae = vae.to(device=device, dtype=dtype)
+        vae.eval()
+        for param in vae.parameters():
+            param.requires_grad_(False)
+
+        self._fallback_vae = vae
+        self._fallback_vae_model_type = model_type
+
+    def _encode_pixels_to_latents(
+        self,
+        pixels: torch.Tensor,
+        *,
+        model_type: str,
+    ) -> torch.Tensor:
+        self._ensure_fallback_vae(model_type=model_type)
+        if self._fallback_vae is None:
+            raise RuntimeError("Fallback VAE was not initialized.")
+
+        vae = self._fallback_vae
+        device = next(vae.parameters()).device
+        dtype = next(vae.parameters()).dtype
+        pixel_values = pixels.to(device=device, dtype=dtype)
+
+        with torch.no_grad():
+            posterior = vae.encode(pixel_values).latent_dist
+            latents = posterior.mode()
+        scale = float(getattr(getattr(vae, "config", None), "scaling_factor", 1.0))
+        latents = latents * scale
+        return latents.detach().cpu()
+
+    def _extract_final_latents_without_trajectory(
+        self,
+        *,
+        results: Sequence[Any],
+        model_type: str,
+    ) -> torch.Tensor:
+        # 1) Try direct latent-like fields first.
+        direct_latents: List[torch.Tensor] = []
+        for idx, result in enumerate(results):
+            latent = None
+            for key in ("latents", "sample_latents", "output_latents", "final_latents"):
+                latent = self._to_tensor(getattr(result, key, None))
+                if latent is not None:
+                    break
+            if latent is None:
+                direct_latents = []
+                break
+
+            if latent.dim() == 3:
+                latent = latent.unsqueeze(0)
+            elif latent.dim() >= 4 and latent.shape[0] > 1:
+                prompt_idx = int(getattr(result, "prompt_index", 0))
+                prompt_idx = max(0, min(prompt_idx, latent.shape[0] - 1))
+                latent = latent[prompt_idx : prompt_idx + 1]
+            direct_latents.append(latent.detach().cpu())
+
+            if idx == len(results) - 1 and direct_latents:
+                return torch.cat(direct_latents, dim=0)
+
+        # 2) Fallback: encode generated pixel samples back to latent space.
+        pixels = self._extract_pixel_batch_for_latent_fallback(results)
+        if not self._warned_latent_encode_fallback:
+            logger.warning(
+                "SGLang result has no trajectory latents; encoding generated images with VAE "
+                "to recover clean latents for forward-process training."
+            )
+            self._warned_latent_encode_fallback = True
+        return self._encode_pixels_to_latents(pixels, model_type=model_type)
+
+    def _derive_timestep_alignment(
+        self,
+        *,
+        trajectories_tensor: torch.Tensor,
+        num_inference_steps: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, bool]:
+        traj_len = int(trajectories_tensor.shape[1])
+        has_initial_noise = traj_len == int(num_inference_steps) + 1
+        if has_initial_noise:
+            timesteps = get_sigma_schedule(
+                int(num_inference_steps),
+                shift=float(self.config.shift),
+            ).cpu()
+            step_indices = torch.arange(timesteps.shape[0], dtype=torch.long)
+        else:
+            full_sigmas = get_sigma_schedule(traj_len, shift=float(self.config.shift)).cpu()
+            timesteps = full_sigmas[1:]
+            step_indices = torch.arange(1, full_sigmas.shape[0], dtype=torch.long)
+            if not self._warned_missing_initial_noise:
+                logger.warning(
+                    "SGLang trajectory is missing initial x_T noise (len=T instead of T+1). "
+                    "DiffusionRL applies step-index offset compatibility mode."
+                )
+                self._warned_missing_initial_noise = True
+        if int(timesteps.shape[0]) != traj_len:
+            raise RuntimeError(
+                "SGLang timestep/trajectory length mismatch after conversion: "
+                f"timesteps={timesteps.shape[0]}, trajectory_len={traj_len}"
+            )
+        return timesteps, step_indices, has_initial_noise
 
     @staticmethod
     def _tensor_to_pil(frame: torch.Tensor) -> Any:
@@ -813,12 +1060,16 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             image_ids = None
         model_type = self._infer_model_type()
 
-        return_decoded_for_reward = bool(kwargs.pop("return_decoded_for_reward", False))
+        require_trajectory = bool(request.return_trajectories)
+        require_log_probs = bool(request.return_log_probs)
+        return_decoded_for_reward = bool(
+            request.decode_for_reward or kwargs.pop("return_decoded_for_reward", False)
+        )
         negative_prompt = kwargs.pop("negative_prompt", None)
         fps = kwargs.pop("fps", None)
         num_outputs_per_prompt = kwargs.pop("num_outputs_per_prompt", None)
         default_rollout_enabled = bool(
-            sde_indices is not None and self._native_rollout_logprob_enabled()
+            require_log_probs and sde_indices is not None and self._native_rollout_logprob_enabled()
         )
         rollout_enabled = bool(kwargs.pop("enable_rollout_logprob", default_rollout_enabled))
         if rollout_enabled and not self._native_rollout_logprob_enabled():
@@ -862,7 +1113,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             "num_frames": out_f,
             "save_output": False,
             "return_file_paths_only": False,
-            "return_trajectory_latents": True,
+            "return_trajectory_latents": bool(require_trajectory or require_log_probs),
             # Keep rollout path latent-only; reward-side image decoding is handled
             # by diffusionrl fallback in RolloutActor.generate().
             "return_trajectory_decoded": False,
@@ -901,43 +1152,52 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             else:
                 results.append(raw_results)
 
-        trajectories = [self._extract_trajectory_from_result(result) for result in results]
-        if not trajectories:
-            raise RuntimeError("SGLang result conversion produced no trajectories")
-        trajectories_tensor = torch.cat(trajectories, dim=0)
-        per_result_log_probs = [self._extract_log_probs_from_result(result) for result in results]
+        trajectory_items: List[Optional[torch.Tensor]] = [
+            self._extract_trajectory_from_result(result, required=require_trajectory)
+            for result in results
+        ]
+        missing_trajectory = sum(item is None for item in trajectory_items)
+        use_trajectory = missing_trajectory == 0 and len(trajectory_items) > 0
+        if missing_trajectory and not require_trajectory and missing_trajectory != len(trajectory_items):
+            logger.warning(
+                "SGLang returned mixed trajectory availability (%s/%s missing); "
+                "falling back to trajectory-free adapter path for batch consistency.",
+                missing_trajectory,
+                len(trajectory_items),
+            )
+            use_trajectory = False
 
-        traj_len = int(trajectories_tensor.shape[1])
-        has_initial_noise = traj_len == steps + 1
-
-        if has_initial_noise:
+        trajectories_tensor: Optional[torch.Tensor] = None
+        has_initial_noise: Optional[bool] = None
+        if use_trajectory:
+            trajectories_tensor = torch.cat(
+                [item for item in trajectory_items if item is not None],
+                dim=0,
+            )
+            timesteps, step_indices, has_initial_noise = self._derive_timestep_alignment(
+                trajectories_tensor=trajectories_tensor,
+                num_inference_steps=steps,
+            )
+            final_latents = trajectories_tensor[:, -1]
+        else:
+            final_latents = self._extract_final_latents_without_trajectory(
+                results=results,
+                model_type=model_type,
+            )
             timesteps = get_sigma_schedule(steps, shift=float(self.config.shift)).cpu()
             step_indices = torch.arange(timesteps.shape[0], dtype=torch.long)
-        else:
-            # Upstream currently returns [x_{T-1}, ..., x_0] without initial x_T.
-            # Shift sigma labels by one step to keep timestep->trajectory alignment.
-            full_sigmas = get_sigma_schedule(traj_len, shift=float(self.config.shift)).cpu()
-            timesteps = full_sigmas[1:]
-            step_indices = torch.arange(1, full_sigmas.shape[0], dtype=torch.long)
-            if not self._warned_missing_initial_noise:
-                logger.warning(
-                    "SGLang trajectory is missing initial x_T noise (len=T instead of T+1). "
-                    "DiffusionRL applies step-index offset compatibility mode."
-                )
-                self._warned_missing_initial_noise = True
 
-        if int(timesteps.shape[0]) != traj_len:
-            raise RuntimeError(
-                f"SGLang timestep/trajectory length mismatch after conversion: "
-                f"timesteps={timesteps.shape[0]}, trajectory_len={traj_len}"
-            )
+        per_result_log_probs: List[Optional[torch.Tensor]] = []
+        if require_log_probs:
+            per_result_log_probs = [self._extract_log_probs_from_result(result) for result in results]
 
         merged_log_probs: Optional[LogProbData] = None
-        if per_result_log_probs and all(lp is not None for lp in per_result_log_probs):
+        if require_log_probs and per_result_log_probs and all(lp is not None for lp in per_result_log_probs):
             log_prob_tensor = torch.cat([lp for lp in per_result_log_probs if lp is not None], dim=0)
             expected_steps = int(step_indices.shape[0]) - 1
             if (
-                not has_initial_noise
+                trajectories_tensor is not None
+                and has_initial_noise is False
                 and int(log_prob_tensor.shape[1]) == expected_steps + 1
             ):
                 # Upstream rollout log_probs may include the first transition
@@ -965,8 +1225,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                     expected_steps,
                 )
                 self._warned_logprob_shape = True
-
-        final_latents = trajectories_tensor[:, -1]
 
         embeddings = None
         if prompt_embeds is not None:
@@ -1012,20 +1270,34 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 )
                 self._warned_missing_decoded = True
 
+        if model_type == "flux":
+            if trajectories_tensor is not None and trajectories_tensor.dim() == 4:
+                trajectory_format = "packed_seq_c4"
+            elif final_latents.dim() == 3:
+                trajectory_format = "packed_seq_c4"
+            else:
+                trajectory_format = "dense_latent"
+        else:
+            if trajectories_tensor is not None:
+                trajectory_format = (
+                    "video_dense_latent" if trajectories_tensor.dim() == 6 else "dense_latent"
+                )
+            else:
+                trajectory_format = (
+                    "video_dense_latent" if final_latents.dim() == 5 else "dense_latent"
+                )
+
         metadata: Dict[str, Any] = {
             "generator_type": "sglang",
             "engine_capabilities": self.get_capabilities_dict(),
             "sglang_logprob_mode": self._sglang_logprob_mode(),
             "encode_prompt_in_generate": bool(self._encode_prompt_in_generate),
-            "trajectory_format": (
-                "packed_seq_c4"
-                if model_type == "flux" and trajectories_tensor.dim() == 4
-                else ("video_dense_latent" if trajectories_tensor.dim() == 6 else "dense_latent")
-            ),
+            "trajectory_format": trajectory_format,
             "timestep_type": "sigma",
             "timestep_scale": 1.0,
             "sde_indices": sorted(int(i) for i in sde_indices) if sde_indices is not None else None,
             "has_initial_noise": has_initial_noise,
+            "trajectory_available": bool(trajectories_tensor is not None),
         }
         if decoded_video_tensors:
             metadata["decoded_videos"] = torch.stack(decoded_video_tensors, dim=0)
@@ -1035,7 +1307,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         return RolloutOutput(
             latents=final_latents,
             timesteps=timesteps,
-            trajectories=trajectories_tensor,
+            trajectories=trajectories_tensor if require_trajectory else None,
             log_probs=merged_log_probs,
             embeddings=embeddings,
             decoded_images=decoded_images,

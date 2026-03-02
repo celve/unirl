@@ -815,15 +815,18 @@ class TrainingActor(BaseTrainRayActor):
         state_dict: Dict[str, torch.Tensor],
         *,
         bucket_size_mb: int,
+        staging_device: Optional[torch.device] = None,
     ):
         bucket_size_bytes = max(1, int(bucket_size_mb) * 1024 * 1024)
         current_bucket: List[tuple[str, torch.Tensor]] = []
         current_bytes = 0
+        if staging_device is None:
+            staging_device = self._device
 
         for name, tensor in state_dict.items():
             if not isinstance(tensor, torch.Tensor):
                 continue
-            staged = tensor.detach().to(device=self._device, non_blocking=False).contiguous()
+            staged = tensor.detach().to(device=staging_device, non_blocking=False).contiguous()
             tensor_bytes = staged.numel() * staged.element_size()
             if current_bucket and current_bytes + tensor_bytes > bucket_size_bytes:
                 yield current_bucket
@@ -840,9 +843,14 @@ class TrainingActor(BaseTrainRayActor):
         state_dict: Dict[str, torch.Tensor],
         *,
         bucket_size_mb: int,
+        staging_device: Optional[torch.device] = None,
     ):
         bucket_iter = iter(
-            self._iter_weight_sync_buckets(state_dict, bucket_size_mb=bucket_size_mb)
+            self._iter_weight_sync_buckets(
+                state_dict,
+                bucket_size_mb=bucket_size_mb,
+                staging_device=staging_device,
+            )
         )
         try:
             current_bucket = next(bucket_iter)
@@ -872,7 +880,10 @@ class TrainingActor(BaseTrainRayActor):
         from sglang.srt.utils import MultiprocessingSerializer
         from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
 
-        monkey_patch_torch_reductions()
+        # SGLang's torch reduction monkey-patch is needed for CUDA tensor IPC
+        # payloads. Applying it to CPU-only payloads can break pickle reduce args.
+        if any(tensor.is_cuda for _, tensor in named_tensors):
+            monkey_patch_torch_reductions()
 
         if getattr(FlattenedTensorBucket, "supports_multi_dtypes", False):
             grouped = {"_all": named_tensors}
@@ -923,6 +934,7 @@ class TrainingActor(BaseTrainRayActor):
             for named_tensors, is_last_bucket in self._iter_weight_sync_buckets_with_last(
                 state_dict,
                 bucket_size_mb=bucket_size_mb,
+                staging_device=torch.device("cpu"),
             ):
                 total_buckets += 1
                 serialized_payloads, long_lived_payloads = self._flatten_tensor_bucket_payload(named_tensors)

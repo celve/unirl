@@ -78,6 +78,7 @@ class _PipelineRolloutEngine:
             actor_group=self._actor_group,
             batch=working_batch,
             sde_indices=resolved_sde_indices,
+            requirements=self._requirements,
             sampling_overrides=sampling_overrides,
         )
         self._manager._attach_missing_embeddings_from_batch(
@@ -595,6 +596,7 @@ class RolloutManager:
             actor_group=actor_group,
             batch=batch,
             sde_indices=sde_indices,
+            requirements=requirements,
         )
         self._attach_missing_embeddings_from_batch(
             sampler_outputs=sampler_outputs,
@@ -757,6 +759,7 @@ class RolloutManager:
             actor_group=actor_group,
             batch=batch,
             sde_indices=sde_indices,
+            requirements=requirements,
         )
         self._attach_missing_embeddings_from_batch(
             sampler_outputs=sampler_outputs, batch=batch,
@@ -949,6 +952,7 @@ class RolloutManager:
             actor_group=actor_group,
             batch=batch,
             sde_indices=sde_indices,
+            requirements=requirements,
         )
         self._attach_missing_embeddings_from_batch(
             sampler_outputs=sampler_outputs,
@@ -1233,6 +1237,7 @@ class RolloutManager:
         actor_group: Any,
         batch: Dict[str, Any],
         sde_indices: Optional[Set[int]],
+        requirements: Optional[Any] = None,
         sampling_overrides: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[Any], List[str], List[str]]:
         """Run distributed sampling with prompt-major K expansion."""
@@ -1294,6 +1299,11 @@ class RolloutManager:
                 getattr(self.args, "num_frames", 16),
             )
         )
+        requires_trajectory = True
+        requires_log_prob = True
+        if requirements is not None:
+            requires_trajectory = bool(getattr(requirements, "requires_trajectory", True))
+            requires_log_prob = bool(getattr(requirements, "requires_log_prob", True))
 
         sampling_batch, train_prompts = expand_batch_for_sampling(
             {"prompts": prompts, "metadata": batch.get("metadata"), "latents": batch.get("latents")},
@@ -1310,6 +1320,8 @@ class RolloutManager:
             init_same_noise=init_same_noise,
             num_samples_per_prompt=num_samples_per_prompt,
             sde_indices=sde_indices,
+            return_trajectories=requires_trajectory,
+            return_log_probs=requires_log_prob,
             extra_generate_kwargs=overrides,
         )
         return sampler_outputs, (train_prompts if train_prompts is not None else prompts), prompts

@@ -90,6 +90,8 @@ def distributed_sample(
     init_same_noise: bool,
     num_samples_per_prompt: int,
     sde_indices: Optional[Set[int]] = None,
+    return_trajectories: bool = True,
+    return_log_probs: bool = True,
     extra_generate_kwargs: Optional[Dict[str, Any]] = None,
 ) -> List[RolloutOutput]:
     """
@@ -131,6 +133,8 @@ def distributed_sample(
         num_frames=num_frames,
         sde_indices=sde_indices,
         decode_for_reward=True,
+        return_trajectories=bool(return_trajectories),
+        return_log_probs=bool(return_log_probs),
         latents=batch.get("latents"),
         kwargs=extra_kwargs,
     )

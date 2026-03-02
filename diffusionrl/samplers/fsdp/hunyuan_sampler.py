@@ -265,6 +265,11 @@ class FSDPHunyuanSampler(BaseSampler):
         final_latents = pred_original.to(torch.float32) / self.LATENT_SCALE
 
         # Stack trajectory (DanceGRPO line 141)
+        # Under FSDP CPU offload, some intermediates can temporarily reside on CPU.
+        # Normalize trajectory tensors to the final latent device before stacking.
+        target_device = latents.device
+        if any(t.device != target_device for t in all_latents):
+            all_latents = [t.to(device=target_device) for t in all_latents]
         trajectories = torch.stack(all_latents, dim=1)  # [B, T+1, C, t, H, W]
 
         # Create embeddings bundle
@@ -327,12 +332,29 @@ class FSDPHunyuanSampler(BaseSampler):
         """
         device = latents.device
         batch_size = latents.shape[0]
+        prompt_embeds = prompt_embeds.to(device=device)
+        if encoder_attention_mask is None:
+            encoder_attention_mask = torch.ones(
+                batch_size,
+                prompt_embeds.shape[1],
+                device=device,
+                dtype=torch.long,
+            )
+        else:
+            encoder_attention_mask = encoder_attention_mask.to(device=device)
 
         sigma = sigma_schedule[timestep_index]
         timestep_value = int(sigma.item() * 1000)
         timesteps = torch.full(
             [batch_size], timestep_value,
             device=device, dtype=torch.long
+        )
+        proj_dim = getattr(getattr(self.model, "config", None), "pooled_projection_dim", 768)
+        pooled_prompt_embeds = torch.zeros(
+            batch_size,
+            int(proj_dim),
+            device=device,
+            dtype=torch.bfloat16,
         )
 
         # Forward pass with gradients (DanceGRPO line 158-171)
@@ -341,6 +363,7 @@ class FSDPHunyuanSampler(BaseSampler):
             model_pred = self.model(
                 hidden_states=latents,
                 encoder_hidden_states=prompt_embeds,
+                pooled_projections=pooled_prompt_embeds,
                 timestep=timesteps,
                 guidance=torch.tensor(
                     [self.GUIDANCE_VALUE],

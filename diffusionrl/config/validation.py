@@ -566,6 +566,18 @@ def validate_resolved_engine_loss_contract(
         engine_caps = dict(engine_caps, requires_log_prob=True, requires_embeddings=True)
 
     required = _get_loss_requirements(args)
+    if is_sglang_engine and str(getattr(args, "model_type", "") or "").strip().lower() == "sd3":
+        # Current sglang-diffusion SD3 path may return only final samples without
+        # trajectory latents. Fail fast for trajectory-dependent losses.
+        if bool(required.get("requires_trajectory", False)):
+            raise ValueError(
+                "sampler_engine_type='sglang' with model_type='sd3' currently does not "
+                "provide trajectory_latents required by trajectory-based losses "
+                "(e.g. GRPO/MixGRPO). Use sampler_engine_type='fsdp', or use loss_type='nft' "
+                "when running SD3 with sglang."
+            )
+        engine_caps = dict(engine_caps, requires_trajectory=False)
+
     missing = [
         key
         for key, needed in required.items()

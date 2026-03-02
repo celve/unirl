@@ -40,19 +40,29 @@ class ReplayLogProbPatch:
         if replay_path:
             return replay_path
 
+        sampler_engine_type = str(
+            sampling_config.get("sampler_engine_type", "") or ""
+        ).strip().lower()
         sampler_path = sampling_config.get("sampler_path")
-        if sampler_path and "sglang" not in sampler_path.lower():
-            return sampler_path
-
         model_default_path = self._resolve_model_default_replay_sampler_path(model_bundle)
-        if model_default_path and "sglang" not in model_default_path.lower():
-            return model_default_path
+
+        # For sglang rollout engines, sampler_path may still point to a legacy/default
+        # FSDP sampler. Prefer model-declared replay sampler in this case.
+        if sampler_engine_type == "sglang":
+            if model_default_path and "sglang" not in model_default_path.lower():
+                return model_default_path
+        else:
+            if sampler_path and "sglang" not in sampler_path.lower():
+                return sampler_path
+            if model_default_path and "sglang" not in model_default_path.lower():
+                return model_default_path
 
         model_type = str(getattr(model_bundle, "model_type", "") or "").lower()
         raise RuntimeError(
             "replay_log_probs requires a non-sglang replay sampler path. Provide "
             "--replay-sampler-path explicitly, or implement default_replay_sampler_path() "
-            f"in model bundle '{type(model_bundle).__name__}' (model_type={model_type!r})."
+            f"in model bundle '{type(model_bundle).__name__}' (model_type={model_type!r}, "
+            f"sampler_engine_type={sampler_engine_type!r})."
         )
 
     def _build_replay_sampler(

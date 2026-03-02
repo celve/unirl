@@ -1109,11 +1109,7 @@ def _resolve_model_runtime_contract(
     if callable(engine_type_fn):
         model_defaults["sampler_engine_type"] = engine_type_fn()
 
-    if (
-        args.sampler_path == DEFAULT_SAMPLER_PATH
-        and not explicit_sampler_path
-        and not explicit_sampler_engine_type
-    ):
+    if args.sampler_path == DEFAULT_SAMPLER_PATH and not explicit_sampler_path:
         model_sampler_path = model_defaults.get("sampler_path")
         if model_sampler_path:
             args.sampler_path = model_sampler_path
@@ -1386,7 +1382,12 @@ def _normalize_weight_sync(args: TrainingArguments, *, training_actor_direct_sam
 
     if weight_sync_mode == "auto":
         if not training_actor_direct_sampling and sampler_engine_type == "sglang":
-            args.weight_sync_mode = "nccl_broadcast" if is_multi_node else "tensor_payload"
+            if is_multi_node:
+                args.weight_sync_mode = "nccl_broadcast"
+            else:
+                # Single-node sglang runs are more robust with checkpoint-based
+                # sync under Ray actor-local CUDA_VISIBLE_DEVICES mapping.
+                args.weight_sync_mode = "checkpoint_path"
         elif (
             not training_actor_direct_sampling
             and (sampler_engine_type == "fsdp" or veomni_like_backend)
