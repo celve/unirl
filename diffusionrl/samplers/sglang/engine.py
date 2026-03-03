@@ -835,6 +835,8 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         ).strip().lower()
         if requested_rollout_sde in {"sde", "flow", "flux_flow"}:
             rollout_sde_type = "sde"
+        elif requested_rollout_sde in {"dance", "flux_dance"}:
+            rollout_sde_type = "dance"
         elif requested_rollout_sde == "cps":
             rollout_sde_type = "cps"
         else:
