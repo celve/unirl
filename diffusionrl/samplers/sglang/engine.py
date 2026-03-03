@@ -329,7 +329,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
 
         model_type = self._infer_model_type()
         engine_kwargs = dict(self.config.engine_kwargs or {})
-        encoder_device = str(engine_kwargs.get("prompt_encoder_device", "cpu"))
+        encoder_device = str(engine_kwargs.get("prompt_encoder_device", "cuda"))
         dtype_name = str(engine_kwargs.get("prompt_encoder_dtype", "auto")).lower()
         if dtype_name == "fp16" or dtype_name == "float16":
             encoder_dtype = torch.float16
@@ -1086,6 +1086,8 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         ).strip().lower()
         if requested_rollout_sde in {"sde", "flow", "flux_flow"}:
             rollout_sde_type = "sde"
+        elif requested_rollout_sde in {"dance", "flux_dance"}:
+            rollout_sde_type = "dance"
         elif requested_rollout_sde == "cps":
             rollout_sde_type = "cps"
         else:
