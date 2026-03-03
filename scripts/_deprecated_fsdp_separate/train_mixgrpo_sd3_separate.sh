@@ -40,7 +40,7 @@
 #
 # Usage:
 #   bash train_mixgrpo_sd3_separate.sh
-#   bash train_mixgrpo_sd3_separate.sh --num-rollout 100 --batch-size 2
+#   bash train_mixgrpo_sd3_separate.sh --rollout.num-rollout 100 --training.batch-size 2
 #
 # =============================================================================
 
@@ -69,58 +69,58 @@ PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMP
 NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
 
 python -m diffusionrl.train \
-    --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
-    --model-type sd3 \
-    --sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
-    --algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
-    --reward-path diffusionrl.reward.local.LocalRewardWorker \
-    --reward-model-name ocr \
+    --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
+    --model.model-type sd3 \
+    --sampling.sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
+    --algorithm.algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-model-name ocr \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
-    --sde-type sde \
-    --eta 0.7 \
-    --shift 3.0 \
-    --num-inference-steps 25 \
-    --guidance-scale 4.5 \
+    --sampling.sde-type sde \
+    --sampling.eta 0.7 \
+    --sampling.shift 3.0 \
+    --sampling.num-inference-steps 25 \
+    --sampling.guidance-scale 4.5 \
     \
-    --mixed-sampling true \
-    --sde-ratio 0.5 \
-    --timestep-strategy window \
-    --window-strategy progressive \
-    --window-group-size 4 \
-    --window-iters-per-group 25 \
-    --window-overlap true \
-    --window-roll-back true \
+    --algorithm.mixed-sampling true \
+    --sampling.sde-ratio 0.5 \
+    --algorithm.window.timestep-strategy window \
+    --algorithm.window.window-strategy progressive \
+    --algorithm.window.window-group-size 4 \
+    --algorithm.window.window-iters-per-group 25 \
+    --algorithm.window.window-overlap true \
+    --algorithm.window.window-roll-back true \
     \
-    --prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --batch-size ${BATCH_SIZE} \
-    --num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --clip-range 1e-4 \
-    --use-kl-penalty false \
-    --advantage-type group \
-    --advantage-clip-max 5.0 \
-    --reward-mix-mode ${REWARD_MIX_MODE} \
+    --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
+    --training.batch-size ${BATCH_SIZE} \
+    --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.clip-range 1e-4 \
+    --algorithm.use-kl-penalty false \
+    --algorithm.advantage-type group \
+    --algorithm.advantage-clip-max 5.0 \
+    --reward.reward-mix-mode ${REWARD_MIX_MODE} \
     \
-    --colocate-rollout-training false \
-    --rollout-num-gpus-per-node ${ROLLOUT_GPUS} \
-    --training-num-gpus-per-node ${TRAINING_GPUS} \
-    --placement-strategy SPREAD \
+    --ray.colocate-rollout-training false \
+    --ray.rollout-num-gpus-per-node ${ROLLOUT_GPUS} \
+    --ray.training-num-gpus-per-node ${TRAINING_GPUS} \
+    --ray.placement-strategy SPREAD \
     \
-    --learning-rate 1e-5 \
-    --gradient-accumulation-steps 2 \
-    --num-inner-epochs ${NUM_INNER_EPOCHS} \
-    --max-grad-norm 1.0 \
-    --weight-decay 0.0001 \
-    --lora-rank ${LORA_RANK} \
-    --lora-alpha ${LORA_ALPHA} \
-    --use-lora true \
+    --training.learning-rate 1e-5 \
+    --training.gradient-accumulation-steps 2 \
+    --training.num-inner-epochs ${NUM_INNER_EPOCHS} \
+    --training.max-grad-norm 1.0 \
+    --training.weight-decay 0.0001 \
+    --training.lora-rank ${LORA_RANK} \
+    --training.lora-alpha ${LORA_ALPHA} \
+    --training.use-lora true \
     \
     --height 512 \
     --width 512 \
     \
-    --num-rollout 300 \
-    --save-steps 50 \
-    --logging-steps 10 \
-    --output-dir "${OUTPUT_DIR}" \
+    --rollout.num-rollout 300 \
+    --rollout.save-steps 50 \
+    --rollout.logging-steps 10 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
     "$@"

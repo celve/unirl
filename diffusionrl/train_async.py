@@ -41,21 +41,21 @@ def train_async_loop(
 ) -> None:
     """Asynchronous train loop with rollout/train overlap."""
     logger.info("Starting async pipeline loop (separate mode)")
-    max_inflight = int(getattr(args, "async_max_inflight", 1))
-    update_interval = max(1, int(getattr(args, "update_weights_interval", 1)))
-    enforce_rollout_alignment = not bool(getattr(args, "rollout_buffer_grouped", False))
+    max_inflight = int(getattr(args.rollout, "async_max_inflight", 1))
+    update_interval = max(1, int(getattr(args.rollout, "update_weights_interval", 1)))
+    enforce_rollout_alignment = not bool(getattr(args.rollout, "rollout_buffer_grouped", False))
     rollout_on_gpu = True
     buffer_consumer_spec = training_group.get_buffer_consumer_spec()
     runtime = AsyncPipelineRuntime(
         max_inflight=max_inflight,
-        initial_rollout_id=args.start_rollout_id,
+        initial_rollout_id=args.rollout.start_rollout_id,
     )
-    next_rollout_to_launch = int(args.start_rollout_id)
+    next_rollout_to_launch = int(args.rollout.start_rollout_id)
 
     def _sync_boundary_for(rollout_id: int) -> int:
         """Largest rollout id allowed before next weight sync boundary."""
         boundary = ((int(rollout_id) // update_interval) + 1) * update_interval - 1
-        return min(boundary, int(args.num_rollout) - 1)
+        return min(boundary, int(args.rollout.num_rollout) - 1)
 
     def _launch_rollout(rollout_id: int) -> None:
         if not runtime.can_launch():
@@ -74,7 +74,7 @@ def train_async_loop(
 
     def _fill_inflight_window(current_rollout: int) -> None:
         nonlocal next_rollout_to_launch
-        if next_rollout_to_launch >= int(args.num_rollout):
+        if next_rollout_to_launch >= int(args.rollout.num_rollout):
             return
 
         launch_limit = _sync_boundary_for(current_rollout)
@@ -84,11 +84,11 @@ def train_async_loop(
 
     def _ensure_rollout_on_gpu() -> None:
         nonlocal rollout_on_gpu
-        if bool(getattr(args, "offload_rollout", False)) and not rollout_on_gpu:
+        if bool(getattr(args.ray, "offload_rollout", False)) and not rollout_on_gpu:
             ray.get(rollout_manager.wake_up.remote())
             rollout_on_gpu = True
 
-    num_samples_per_prompt = max(1, int(getattr(args, "num_samples_per_prompt", 1)))
+    num_samples_per_prompt = max(1, int(getattr(args.algorithm, "num_samples_per_prompt", 1)))
 
     def _collect_rollout_batch_metrics(batch_ref) -> dict:
         try:
@@ -101,7 +101,7 @@ def train_async_loop(
             num_samples_per_prompt=num_samples_per_prompt,
         )
 
-    for rollout_id in range(args.start_rollout_id, args.num_rollout):
+    for rollout_id in range(args.rollout.start_rollout_id, args.rollout.num_rollout):
         step_start_t = time.perf_counter()
         sync_result = None
         sync_phase_s = 0.0
@@ -135,7 +135,7 @@ def train_async_loop(
         train_phase_s = time.perf_counter() - train_phase_start_t
 
         if should_save_fn(rollout_id, args):
-            save_path = f"{args.output_dir}/checkpoint-{rollout_id}"
+            save_path = f"{args.rollout.output_dir}/checkpoint-{rollout_id}"
             training_group.save_model(save_path)
             logger.info(f"[async] Checkpoint saved: {save_path}")
 
@@ -159,7 +159,7 @@ def train_async_loop(
             if wandb_logger is not None:
                 wandb_logger.log_eval(rollout_id, eval_metrics)
 
-        should_log = (rollout_id % args.logging_steps == 0)
+        should_log = (rollout_id % args.rollout.logging_steps == 0)
         if should_log:
             avg_loss = sum(m.get("loss", 0) for m in metrics) / max(len(metrics), 1)
             step_time_s = time.perf_counter() - step_start_t

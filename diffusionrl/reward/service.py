@@ -44,8 +44,8 @@ class RewardService:
         response = service.compute_rewards(request)
 
         # Multi-reward with weights
-        args.reward_models = ["pickscore", "hpsv2"]
-        args.reward_weights = [0.3, 0.7]
+        args.reward.reward_models = ["pickscore", "hpsv2"]
+        args.reward.reward_weights = [0.3, 0.7]
         service = RewardService(args, reward_pg_result=pgs.get("reward"))
         response = service.compute_rewards(request)  # Returns weighted average
     """

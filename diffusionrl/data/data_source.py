@@ -49,11 +49,11 @@ class ImageRLDataSource:
         """
         self.args = args
         self.data_path = getattr(args, 'data_path', None)
-        self.model_type = getattr(args, 'model_type', 'flux')
-        self.model_path = getattr(args, "model_path", "")
-        self.batch_size = getattr(args, 'batch_size', 4)
+        self.model_type = getattr(args.model, "model_type", "flux")
+        self.model_path = getattr(args.model, "model_path", "")
+        self.batch_size = getattr(args.training, "batch_size", 4)
         self.seed = getattr(args, 'seed', 42)
-        self.prompts_per_batch = getattr(args, 'prompts_per_batch', 1)
+        self.prompts_per_batch = getattr(args.algorithm, "prompts_per_batch", 1)
 
         # Detect data format and create dataset
         self.dataset = None
@@ -209,7 +209,7 @@ class DefaultDataSource:
             args: TrainingArguments instance
         """
         self.args = args
-        self.batch_size = getattr(args, 'batch_size', 4)
+        self.batch_size = getattr(args.training, "batch_size", 4)
 
         # Default prompts for different scenarios
         self.prompts = [

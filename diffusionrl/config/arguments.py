@@ -1,9 +1,17 @@
 """
 diffusionrl Arguments - Configuration parameters for training.
 
-Reference: slime/utils/arguments.py
+Default resolution order:
+1) Explicit CLI flags
+2) YAML values from --config
+3) Dataclass field defaults
+4) validate_args() normalize/derive rewrites
+
+New contributors: start from parse_args() -> validate_args().
 """
 import argparse
+import copy
+import inspect
 import json
 import logging
 import os
@@ -23,7 +31,7 @@ from diffusionrl.config.validation import (
     validate_dotpath,
     validate_dynamic_dotpaths,
     validate_grouped_configs,
-    validate_loss_kwargs_json,
+    validate_loss_kwargs,
     validate_model_specific_logic,
     validate_resolved_engine_loss_contract,
     validate_reward_and_rollout_buffer_config,
@@ -317,10 +325,10 @@ class AlgorithmConfig:
         metadata={"help": "Loss function type: grpo or nft"})
     loss_path: Optional[str] = field(default=None,
         metadata={"help": "Python dotpath to custom loss class (overrides loss_type)"})
-    algorithm_kwargs_json: str = field(default="",
-        metadata={"help": "JSON string of extra kwargs passed to algorithm.from_args()"})
-    loss_kwargs_json: str = field(default="",
-        metadata={"help": "JSON string of extra kwargs passed to the loss function"})
+    algorithm_kwargs: Dict[str, Any] = field(default_factory=dict,
+        metadata={"help": "Extra kwargs passed to algorithm.from_args(); accepts JSON string (CLI) or mapping (YAML)"})
+    loss_kwargs: Dict[str, Any] = field(default_factory=dict,
+        metadata={"help": "Extra kwargs passed to loss; accepts JSON string (CLI) or mapping (YAML)"})
     ignore_last: bool = field(default=False,
         metadata={"help": "Skip last timestep (t->0) in loss (can be numerically unstable)"})
     frozen_init_timesteps: int = field(default=0,
@@ -391,11 +399,11 @@ class TrainingConfig:
 
     # Train backend
     train_backend: str = field(default="fsdp",
-        metadata={"help": "Training backend name (fsdp/veomni built-in; megatron scaffold requires actor_class_path in train_backend_kwargs_json); or custom via train_backend_path"})
+        metadata={"help": "Training backend name (fsdp/veomni built-in; megatron scaffold requires actor_class_path in train_backend_kwargs); or custom via train_backend_path"})
     train_backend_path: Optional[str] = field(default=None,
         metadata={"help": "Python dotpath to custom TrainBackend class (overrides built-in backend selection)"})
-    train_backend_kwargs_json: str = field(default="",
-        metadata={"help": "JSON object string forwarded to the selected train backend"})
+    train_backend_kwargs: Dict[str, Any] = field(default_factory=dict,
+        metadata={"help": "Extra kwargs for selected train backend; accepts JSON string (CLI) or mapping (YAML)"})
 
     # LoRA
     use_lora: bool = field(default=False,
@@ -436,22 +444,6 @@ class TrainingConfig:
                 "must be FULL_SHARD in the current FSDP2 backend. "
                 f"Got: {self.fsdp_sharding_strategy!r}"
             )
-        raw_backend_kwargs = self.train_backend_kwargs_json
-        if raw_backend_kwargs is None:
-            return
-        if not isinstance(raw_backend_kwargs, str):
-            raise ValueError(
-                f"train_backend_kwargs_json must be a JSON object string, got: {type(raw_backend_kwargs).__name__}"
-            )
-        text = raw_backend_kwargs.strip()
-        if not text:
-            return
-        try:
-            parsed = json.loads(text)
-        except Exception as exc:
-            raise ValueError(f"Invalid train_backend_kwargs_json: {exc}") from exc
-        if not isinstance(parsed, dict):
-            raise ValueError("train_backend_kwargs_json must decode to a JSON object.")
 
 
 @dataclass
@@ -593,10 +585,6 @@ _GROUP_CONFIG_TYPES = {
 _GROUP_CONFIG_NAMES = set(_GROUP_CONFIG_TYPES.keys())
 
 
-# Names of sub-dataclass fields within group configs (currently only "window")
-_SUB_CONFIG_NAMES: set[str] = set()
-
-
 def _build_flat_field_path_index() -> tuple[Dict[str, str], Dict[str, tuple[str, Optional[str]]]]:
     """Build flat-field owner/path mappings for grouped dataclasses.
 
@@ -612,7 +600,6 @@ def _build_flat_field_path_index() -> tuple[Dict[str, str], Dict[str, tuple[str,
             ft = config_field.type
             # Check if this field is itself a dataclass (sub-config)
             if isinstance(ft, type) and is_dataclass(ft):
-                _SUB_CONFIG_NAMES.add(config_field.name)
                 # Register all leaf fields of the sub-dataclass
                 for sub_field in fields(ft):
                     if sub_field.name in owners:
@@ -634,11 +621,13 @@ def _build_flat_field_path_index() -> tuple[Dict[str, str], Dict[str, tuple[str,
 
 
 _, _FLAT_FIELD_PATH_INDEX = _build_flat_field_path_index()
+_TOP_LEVEL_FIELD_NAMES: set[str] = set()
+_GROUP_SUBCONFIG_NAMES: Dict[str, set[str]] = {}
 
 
 def is_training_actor_direct_sampling_mode(args: Any) -> bool:
     """Return whether training actors should directly handle sampling."""
-    return bool(getattr(args, "training_actor_direct_sampling", False))
+    return bool(getattr(args.sampling, "training_actor_direct_sampling", False))
 
 @dataclass
 class TrainingArguments:
@@ -675,29 +664,6 @@ class TrainingArguments:
     seed: int = field(default=42,
         metadata={"help": "Random seed for reproducibility"})
 
-    def __getattr__(self, name: str) -> Any:
-        path = _FLAT_FIELD_PATH_INDEX.get(name)
-        if path is not None:
-            group_name, sub_name = path
-            group = object.__getattribute__(self, group_name)
-            if sub_name is not None:
-                return getattr(getattr(group, sub_name), name)
-            return getattr(group, name)
-        raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        path = _FLAT_FIELD_PATH_INDEX.get(name)
-        if path is not None and name not in _GROUP_CONFIG_NAMES and name not in _SUB_CONFIG_NAMES:
-            group_name, sub_name = path
-            if group_name in self.__dict__:
-                group = self.__dict__[group_name]
-                if sub_name is not None:
-                    setattr(getattr(group, sub_name), name, value)
-                else:
-                    setattr(group, name, value)
-                return
-        super().__setattr__(name, value)
-
     def to_flat_dict(self) -> Dict[str, Any]:
         """Flatten grouped + top-level args to a single dictionary."""
         flat: Dict[str, Any] = {}
@@ -717,6 +683,17 @@ class TrainingArguments:
                 else:
                     flat[info.name] = getattr(config_obj, info.name)
         return flat
+
+
+_TOP_LEVEL_FIELD_NAMES = {
+    info.name for info in fields(TrainingArguments) if info.name not in _GROUP_CONFIG_NAMES
+}
+for _group_name, _group_type in _GROUP_CONFIG_TYPES.items():
+    _GROUP_SUBCONFIG_NAMES[_group_name] = {
+        info.name
+        for info in fields(_group_type)
+        if isinstance(info.type, type) and is_dataclass(info.type)
+    }
 
 
 def _resolve_field_default(field_info: Any) -> Any:
@@ -907,7 +884,7 @@ _GROUP_DISPLAY_NAMES: Dict[str, str] = {
 
 
 def _load_yaml_mapping(path: str) -> Dict[str, Any]:
-    """Load a YAML config file and return a flat dict of key-value pairs."""
+    """Load a YAML config file and return a mapping."""
     try:
         import yaml
     except ImportError:
@@ -928,22 +905,212 @@ def _merge_yaml_overrides(
     yaml_data: Dict[str, Any],
     defaults: Dict[str, Any],
     explicit_cli_keys: set[str],
+    action_by_dest: Dict[str, argparse.Action],
+    allow_unknown_config_keys: bool,
 ) -> None:
     """Apply YAML values to raw_args for keys the user did NOT explicitly set on CLI."""
+    flattened_yaml = _flatten_yaml_mapping(yaml_data)
     all_known_keys = set(defaults.keys())
-    for key, value in yaml_data.items():
+    reported_cli_overrides: set[str] = set()
+    for key, value in flattened_yaml.items():
         cli_key = key.replace("-", "_")
         if cli_key not in all_known_keys:
+            message = f"Unknown key '{key}' in YAML config (no matching CLI argument)."
+            if not allow_unknown_config_keys:
+                raise ValueError(
+                    message
+                    + " Remove/fix the key, or pass --allow-unknown-config-keys "
+                    "to ignore unknown YAML keys."
+                )
             warnings.warn(
-                f"Unknown key '{key}' in YAML config (no matching CLI argument). Ignoring.",
+                message + " Ignoring because --allow-unknown-config-keys is set.",
                 stacklevel=3,
             )
             continue
         # Only apply YAML value if user did not explicitly set via CLI
         if cli_key in explicit_cli_keys:
+            if cli_key not in reported_cli_overrides:
+                warnings.warn(
+                    f"YAML key '{key}' ignored because CLI explicitly set '{cli_key}' (CLI takes precedence).",
+                    stacklevel=3,
+                )
+                reported_cli_overrides.add(cli_key)
             continue
         if raw_args.get(cli_key) == defaults.get(cli_key):
-            raw_args[cli_key] = value
+            raw_args[cli_key] = _coerce_yaml_value(
+                key=key,
+                cli_key=cli_key,
+                value=value,
+                action_by_dest=action_by_dest,
+            )
+
+
+def _is_yaml_container_path(parts: List[str]) -> bool:
+    if len(parts) == 1 and parts[0] in _GROUP_CONFIG_NAMES:
+        return True
+    if len(parts) == 2 and parts[0] in _GROUP_SUBCONFIG_NAMES:
+        return parts[1] in _GROUP_SUBCONFIG_NAMES[parts[0]]
+    return False
+
+
+def _resolve_yaml_leaf_dest(parts: List[str]) -> Optional[str]:
+    if not parts:
+        return None
+    if len(parts) == 1:
+        key = parts[0]
+        if key in _TOP_LEVEL_FIELD_NAMES:
+            return key
+        return None
+
+    group = parts[0]
+    leaf = parts[-1]
+    path = _FLAT_FIELD_PATH_INDEX.get(leaf)
+    if path is None:
+        return None
+    owner, sub_name = path
+    if owner != group:
+        return None
+    if len(parts) == 2:
+        # Accept both group.leaf and group.sub_leaf for contributor convenience.
+        return leaf
+    if len(parts) == 3 and sub_name is not None and parts[1] == sub_name:
+        return leaf
+    return None
+
+
+def _flatten_yaml_mapping(
+    yaml_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Flatten nested YAML mapping into parser destination keys."""
+    flattened: Dict[str, Any] = {}
+    origins: Dict[str, str] = {}
+
+    def _value_repr(value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return repr(value)
+
+    def _assign(dest_key: str, value: Any, *, source_path: str) -> None:
+        if dest_key in flattened:
+            previous_source = origins[dest_key]
+            if previous_source != source_path:
+                raise ValueError(
+                    "Conflicting YAML keys map to the same argument destination "
+                    f"'{dest_key}': '{previous_source}'={_value_repr(flattened[dest_key])} "
+                    f"and '{source_path}'={_value_repr(value)}. "
+                    "Keep only one style (prefer grouped keys)."
+                )
+        flattened[dest_key] = value
+        origins[dest_key] = source_path
+
+    def _walk(node: Dict[str, Any], prefix: List[str]) -> None:
+        for raw_key, value in node.items():
+            key = str(raw_key).replace("-", "_")
+            key_parts = [part for part in key.split(".") if part]
+            if not key_parts:
+                continue
+            parts = prefix + key_parts
+            # Only grouped style is supported for grouped fields in YAML.
+            # Example: use `training: {train_backend: fsdp}` (or `training.train_backend`)
+            # instead of legacy flat key `train_backend`.
+            if len(parts) == 1:
+                flat_key = parts[0]
+                if flat_key not in _TOP_LEVEL_FIELD_NAMES and flat_key in _FLAT_FIELD_PATH_INDEX:
+                    owner, sub_name = _FLAT_FIELD_PATH_INDEX[flat_key]
+                    expected = (
+                        f"{owner}.{sub_name}.{flat_key}"
+                        if sub_name is not None
+                        else f"{owner}.{flat_key}"
+                    )
+                    raise ValueError(
+                        f"Unsupported flat YAML key '{flat_key}'. "
+                        f"Use grouped YAML key '{expected}' instead."
+                    )
+
+            if isinstance(value, dict):
+                leaf_dest = _resolve_yaml_leaf_dest(parts)
+                if leaf_dest is not None and not _is_yaml_container_path(parts):
+                    _assign(leaf_dest, value, source_path=".".join(parts))
+                    continue
+                if _is_yaml_container_path(parts):
+                    _walk(value, parts)
+                    continue
+                _assign(".".join(parts), value, source_path=".".join(parts))
+                continue
+
+            leaf_dest = _resolve_yaml_leaf_dest(parts)
+            if leaf_dest is not None:
+                _assign(leaf_dest, value, source_path=".".join(parts))
+            else:
+                _assign(".".join(parts), value, source_path=".".join(parts))
+
+    _walk(yaml_data, [])
+    return flattened
+
+
+def _coerce_yaml_value(
+    *,
+    key: str,
+    cli_key: str,
+    value: Any,
+    action_by_dest: Dict[str, argparse.Action],
+) -> Any:
+    """Coerce YAML value using argparse converter for the destination key."""
+    if cli_key in {"algorithm_kwargs", "loss_kwargs", "train_backend_kwargs"}:
+        return _parse_cli_json_object(value)
+
+    action = action_by_dest.get(cli_key)
+    converter = getattr(action, "type", None) if action is not None else None
+    if converter is None or value is None:
+        return value
+    if converter is str and not isinstance(value, str):
+        return value
+    try:
+        return converter(value)
+    except argparse.ArgumentTypeError as exc:
+        raise ValueError(f"Invalid value for YAML key '{key}': {exc}") from exc
+    except Exception as exc:
+        raise ValueError(f"Invalid value for YAML key '{key}': {exc}") from exc
+
+
+def _build_cli_option_strings(field_name: str, group_key: str) -> List[str]:
+    """Build CLI option strings.
+
+    Grouped fields use dotted CLI style only (e.g. --training.train-backend).
+    """
+    field_opt = field_name.replace("_", "-")
+    flat_option = f"--{field_opt}"
+
+    if not group_key:
+        return [flat_option]
+
+    dotted_group = ".".join(part.replace("_", "-") for part in group_key.split("."))
+    dotted_option = f"--{dotted_group}.{field_opt}"
+    return [dotted_option]
+
+
+def _build_add_argument_kwargs(field_type: Any, default: Any, help_text: str) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {
+        "default": default,
+        "help": help_text,
+    }
+    if field_type == bool:
+        kwargs["type"] = _parse_cli_bool
+    elif field_type == int:
+        kwargs["type"] = int
+    elif field_type == float:
+        kwargs["type"] = float
+    elif field_type is dict or get_origin(field_type) is dict:
+        kwargs["type"] = _parse_cli_json_object
+    elif get_origin(field_type) is list:
+        item_type = get_args(field_type)[0] if get_args(field_type) else str
+        kwargs["type"] = (
+            lambda value, item_type=item_type: _parse_cli_list(value, item_type=item_type)
+        )
+    else:
+        kwargs["type"] = str
+    return kwargs
 
 
 def _collect_explicit_cli_destinations(argv: List[str], parser: argparse.ArgumentParser) -> set[str]:
@@ -960,11 +1127,157 @@ def _collect_explicit_cli_destinations(argv: List[str], parser: argparse.Argumen
     return explicit
 
 
+_ANSI_COLORS = {
+    "reset": "\033[0m",
+    "bold": "\033[1m",
+    "cyan": "\033[36m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "orange": "\033[38;5;208m",
+    "red": "\033[31m",
+}
+
+
+def _supports_color_output() -> bool:
+    if os.getenv("NO_COLOR"):
+        return False
+    if os.getenv("FORCE_COLOR"):
+        return True
+    return bool(getattr(sys.stdout, "isatty", lambda: False)())
+
+
+def _color(text: str, name: str, *, enabled: bool) -> str:
+    if not enabled:
+        return text
+    prefix = _ANSI_COLORS.get(name, "")
+    if not prefix:
+        return text
+    return f"{prefix}{text}{_ANSI_COLORS['reset']}"
+
+
+def _format_config_value(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return repr(value)
+
+
+def _infer_normalize_source() -> str:
+    """Best-effort infer of normalize rewrite source function name."""
+    frame = inspect.currentframe()
+    try:
+        frame = frame.f_back if frame is not None else None
+        skip = {
+            "_infer_normalize_source",
+            "_set_normalized_attr",
+            "_set_normalized_dict_item",
+            "_trace_normalize_change",
+        }
+        while frame is not None:
+            name = frame.f_code.co_name
+            if name not in skip:
+                return name
+            frame = frame.f_back
+    finally:
+        # Avoid reference cycles in frame objects.
+        del frame
+    return "<unknown>"
+
+
+def _normalize_trace_enabled(args: Any) -> bool:
+    return bool(getattr(args, "_print_normalize_changes", False))
+
+
+def _print_normalize_header_once(args: Any) -> None:
+    if not _normalize_trace_enabled(args):
+        return
+    if bool(getattr(args, "_normalize_change_header_printed", False)):
+        return
+    use_color = _supports_color_output()
+    print(_color("[Normalize Changes] rewritten fields during validation", "bold", enabled=use_color))
+    setattr(args, "_normalize_change_header_printed", True)
+
+
+def _trace_normalize_change(
+    args: Any,
+    key: str,
+    before: Any,
+    after: Any,
+    *,
+    source: Optional[str] = None,
+) -> None:
+    if before == after or not _normalize_trace_enabled(args):
+        return
+    _print_normalize_header_once(args)
+    use_color = _supports_color_output()
+    before_text = _format_config_value(before)
+    after_text = _format_config_value(after)
+    source_text = str(source or _infer_normalize_source())
+    print(
+        f"  {_color(key, 'orange', enabled=use_color)}: "
+        f"{_color(before_text, 'red', enabled=use_color)} "
+        f"{_color('->', 'orange', enabled=use_color)} "
+        f"{_color(after_text, 'green', enabled=use_color)} "
+        f"{_color(f'(source={source_text})', 'cyan', enabled=use_color)}"
+    )
+
+
+def _set_normalized_attr(
+    args: Any,
+    owner: Any,
+    attr: str,
+    value: Any,
+    *,
+    key: str,
+    source: Optional[str] = None,
+) -> None:
+    before = getattr(owner, attr)
+    if before == value:
+        return
+    setattr(owner, attr, value)
+    _trace_normalize_change(args, key, before, value, source=source or _infer_normalize_source())
+
+
+def _set_normalized_dict_item(
+    args: Any,
+    mapping: Dict[str, Any],
+    item: str,
+    value: Any,
+    *,
+    key: str,
+    source: Optional[str] = None,
+) -> None:
+    before = mapping.get(item, "<missing>")
+    if before == value:
+        return
+    mapping[item] = value
+    _trace_normalize_change(args, key, before, value, source=source or _infer_normalize_source())
+
+
+def _print_config_views(
+    *,
+    after_flat: Dict[str, Any],
+    print_resolved_config: bool,
+) -> None:
+    if not print_resolved_config:
+        return
+
+    use_color = _supports_color_output()
+
+    if print_resolved_config:
+        print(_color("[Resolved Config] final runtime values", "bold", enabled=use_color))
+        for key in sorted(after_flat.keys()):
+            value_text = _format_config_value(after_flat.get(key))
+            print(f"  {_color(key, 'cyan', enabled=use_color)}: {value_text}")
+
+
 def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
     """Parse command line arguments and return TrainingArguments.
 
     Supports ``--config path/to/config.yaml`` for YAML-based configuration.
     CLI arguments override YAML values when both are provided.
+    Grouped fields in YAML must use grouped keys (for example ``training.train_backend``
+    or nested ``training: {train_backend: ...}``).
     """
     parser = argparse.ArgumentParser(
         description="diffusionrl training",
@@ -976,6 +1289,16 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
         "--config", type=str, default=None,
         help="Path to YAML config file. CLI args override YAML values.",
     )
+    parser.add_argument(
+        "--print-resolved-config",
+        action="store_true",
+        help="Print resolved runtime config after normalization/validation.",
+    )
+    parser.add_argument(
+        "--allow-unknown-config-keys",
+        action="store_true",
+        help="Allow unknown keys in --config YAML (default is fail-fast).",
+    )
 
     # Build argument groups for organized --help output
     _arg_groups: Dict[str, argparse._ArgumentGroup] = {}
@@ -986,47 +1309,45 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
             _arg_groups[group_key] = parser.add_argument_group(display_name)
         group = _arg_groups[group_key]
 
-        # Convert field name to argument name
-        arg_name = f"--{field_name.replace('_', '-')}"
-
-        if field_type == bool:
-            group.add_argument(
-                arg_name,
-                type=_parse_cli_bool,
-                default=default,
-                help=help_text,
-            )
-        elif field_type == int:
-            group.add_argument(arg_name, type=int, default=default, help=help_text)
-        elif field_type == float:
-            group.add_argument(arg_name, type=float, default=default, help=help_text)
-        elif field_type is dict or get_origin(field_type) is dict:
-            group.add_argument(arg_name, type=_parse_cli_json_object, default=default, help=help_text)
-        elif get_origin(field_type) is list:
-            item_type = get_args(field_type)[0] if get_args(field_type) else str
-            group.add_argument(
-                arg_name,
-                type=(lambda value, item_type=item_type: _parse_cli_list(value, item_type=item_type)),
-                default=default,
-                help=help_text,
-            )
-        else:
-            group.add_argument(arg_name, type=str, default=default, help=help_text)
+        # Build CLI option names (dotted style for grouped args).
+        option_strings = _build_cli_option_strings(field_name, group_key)
+        add_kwargs = _build_add_argument_kwargs(field_type, default, help_text)
+        add_kwargs["dest"] = field_name
+        group.add_argument(*option_strings, **add_kwargs)
 
     cli_argv = list(argv) if argv is not None else sys.argv[1:]
     parsed_args = parser.parse_args(cli_argv)
     explicit_cli_keys = _collect_explicit_cli_destinations(cli_argv, parser)
+    action_by_dest = {
+        action.dest: action for action in parser._actions if getattr(action, "dest", None)
+    }
 
     raw_args = vars(parsed_args)
+    print_resolved_config = bool(raw_args.get("print_resolved_config", False))
+    allow_unknown_config_keys = bool(raw_args.get("allow_unknown_config_keys", False))
 
     # YAML config merging: CLI values take precedence over YAML
     if raw_args.get("config"):
-        defaults = {a.dest: a.default for a in parser._actions if a.dest != "help"}
+        defaults: Dict[str, Any] = {}
+        for action in parser._actions:
+            dest = getattr(action, "dest", None)
+            if not dest or dest == "help" or dest in defaults:
+                continue
+            defaults[dest] = action.default
         yaml_data = _load_yaml_mapping(raw_args["config"])
-        _merge_yaml_overrides(raw_args, yaml_data, defaults, explicit_cli_keys)
+        _merge_yaml_overrides(
+            raw_args,
+            yaml_data,
+            defaults,
+            explicit_cli_keys,
+            action_by_dest=action_by_dest,
+            allow_unknown_config_keys=allow_unknown_config_keys,
+        )
 
     # Remove --config from raw_args (not a TrainingArguments field)
     raw_args.pop("config", None)
+    raw_args.pop("print_resolved_config", None)
+    raw_args.pop("allow_unknown_config_keys", None)
 
     grouped_kwargs: Dict[str, Dict[str, Any]] = {name: {} for name in _GROUP_CONFIG_TYPES}
     # sub_kwargs: group_name -> sub_field_name -> {leaf_field: value}
@@ -1056,7 +1377,12 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
     args = TrainingArguments(**top_level_kwargs)
 
     # Validate and normalize arguments
-    args = validate_args(args)
+    args = validate_args(args, print_normalize_changes=True)
+    post_validate_flat = args.to_flat_dict()
+    _print_config_views(
+        after_flat=post_validate_flat,
+        print_resolved_config=print_resolved_config,
+    )
 
     return args
 
@@ -1067,37 +1393,49 @@ def _resolve_model_runtime_contract(
     explicit_sampler_engine_type: bool,
 ) -> Any:
     """Resolve model path/type and model-declared runtime defaults."""
-    if args.model_path == DEFAULT_MODEL_PATH:
-        resolved_model_path = resolve_model_bundle_path(args.model_type)
+    if args.model.model_path == DEFAULT_MODEL_PATH:
+        resolved_model_path = resolve_model_bundle_path(args.model.model_type)
         if not resolved_model_path:
             raise ValueError(
-                f"Unknown model_type={args.model_type!r}. "
+                f"Unknown model_type={args.model.model_type!r}. "
                 f"Discovered model types: {list_model_types()}. "
                 "Provide --model-path explicitly for custom models."
             )
-        args.model_path = resolved_model_path
+        _set_normalized_attr(
+            args,
+            args.model,
+            "model_path",
+            resolved_model_path,
+            key="model.model_path",
+        )
         logger.info(
             "Auto-resolved model_type=%s to model_path=%s",
-            args.model_type,
-            args.model_path,
+            args.model.model_type,
+            args.model.model_path,
         )
 
-    validate_dotpath(args.model_path, label="model")
-    model_cls = load_function(args.model_path)
+    validate_dotpath(args.model.model_path, label="model")
+    model_cls = load_function(args.model.model_path)
 
     declared_model_type_fn = getattr(model_cls, "declared_model_type", None)
     if callable(declared_model_type_fn):
         declared_model_type = declared_model_type_fn()
         if isinstance(declared_model_type, str) and declared_model_type.strip():
             normalized_declared = declared_model_type.strip().lower()
-            if str(args.model_type).strip().lower() != normalized_declared:
+            if str(args.model.model_type).strip().lower() != normalized_declared:
                 logger.info(
                     "Aligning model_type=%s to declared model_type=%s from model_path=%s",
-                    args.model_type,
+                    args.model.model_type,
                     normalized_declared,
-                    args.model_path,
+                    args.model.model_path,
                 )
-            args.model_type = normalized_declared
+            _set_normalized_attr(
+                args,
+                args.model,
+                "model_type",
+                normalized_declared,
+                key="model.model_type",
+            )
 
     model_defaults: Dict[str, Optional[str]] = {"sampler_path": None, "sampler_engine_type": None}
     sampler_path_fn = getattr(model_cls, "default_sampler_path", None)
@@ -1107,34 +1445,46 @@ def _resolve_model_runtime_contract(
     if callable(engine_type_fn):
         model_defaults["sampler_engine_type"] = engine_type_fn()
 
-    if args.sampler_path == DEFAULT_SAMPLER_PATH and not explicit_sampler_path:
+    if args.sampling.sampler_path == DEFAULT_SAMPLER_PATH and not explicit_sampler_path:
         model_sampler_path = model_defaults.get("sampler_path")
         if model_sampler_path:
-            args.sampler_path = model_sampler_path
+            _set_normalized_attr(
+                args,
+                args.sampling,
+                "sampler_path",
+                model_sampler_path,
+                key="sampling.sampler_path",
+            )
             logger.info(
                 "Auto-mapped model_path=%s to sampler_path=%s",
-                args.model_path,
-                args.sampler_path,
+                args.model.model_path,
+                args.sampling.sampler_path,
             )
         else:
             logger.warning(
                 "Model %s does not declare default_sampler_path(); keeping sampler_path=%s.",
-                args.model_path,
-                args.sampler_path,
+                args.model.model_path,
+                args.sampling.sampler_path,
             )
 
-    if args.sampler_engine_type is None:
+    if args.sampling.sampler_engine_type is None:
         model_engine_type = model_defaults.get("sampler_engine_type")
         if model_engine_type:
-            args.sampler_engine_type = model_engine_type
+            _set_normalized_attr(
+                args,
+                args.sampling,
+                "sampler_engine_type",
+                model_engine_type,
+                key="sampling.sampler_engine_type",
+            )
             logger.info(
                 "Auto-selected sampler_engine_type=%s from model_path=%s",
-                args.sampler_engine_type,
-                args.model_path,
+                args.sampling.sampler_engine_type,
+                args.model.model_path,
             )
         else:
             raise ValueError(
-                f"Model {args.model_path} does not declare default_sampler_engine(). "
+                f"Model {args.model.model_path} does not declare default_sampler_engine(). "
                 "Provide --sampler-engine-type explicitly."
             )
 
@@ -1143,18 +1493,42 @@ def _resolve_model_runtime_contract(
 
 def _normalize_sampling_basics(args: TrainingArguments) -> tuple[bool, bool, str]:
     """Normalize direct-sampling mode, engine kwargs, and sglang mode."""
-    if not isinstance(args.engine_kwargs, dict):
+    if not isinstance(args.sampling.engine_kwargs, dict):
         logger.warning("engine_kwargs is not a dict. Resetting to empty dict.")
-        args.engine_kwargs = {}
+        _set_normalized_attr(
+            args,
+            args.sampling,
+            "engine_kwargs",
+            {},
+            key="sampling.engine_kwargs",
+        )
 
-    direct_sampling = bool(getattr(args, "training_actor_direct_sampling", False))
-    args.training_actor_direct_sampling = direct_sampling
+    direct_sampling = bool(args.sampling.training_actor_direct_sampling)
+    _set_normalized_attr(
+        args,
+        args.sampling,
+        "training_actor_direct_sampling",
+        direct_sampling,
+        key="sampling.training_actor_direct_sampling",
+    )
 
-    is_sglang_engine = str(getattr(args, "sampler_engine_type", "")).lower() == "sglang"
-    sglang_logprob_mode = str(getattr(args, "sglang_logprob_mode", "replay") or "replay").strip().lower()
-    args.sglang_logprob_mode = sglang_logprob_mode
+    is_sglang_engine = str(args.sampling.sampler_engine_type).lower() == "sglang"
+    sglang_logprob_mode = str(args.sampling.sglang_logprob_mode or "replay").strip().lower()
+    _set_normalized_attr(
+        args,
+        args.sampling,
+        "sglang_logprob_mode",
+        sglang_logprob_mode,
+        key="sampling.sglang_logprob_mode",
+    )
     if is_sglang_engine:
-        args.engine_kwargs["sglang_logprob_mode"] = sglang_logprob_mode
+        _set_normalized_dict_item(
+            args,
+            args.sampling.engine_kwargs,
+            "sglang_logprob_mode",
+            sglang_logprob_mode,
+            key="sampling.engine_kwargs.sglang_logprob_mode",
+        )
     return direct_sampling, is_sglang_engine, sglang_logprob_mode
 
 
@@ -1171,37 +1545,37 @@ def _apply_training_actor_direct_sampling_overrides(
         "training_actor_direct_sampling=true is an experimental path. "
         "Default production path remains dedicated rollout actors."
     )
-    if args.sampler_engine_type != "fsdp":
+    if args.sampling.sampler_engine_type != "fsdp":
         raise ValueError(
             "training_actor_direct_sampling=true requires sampler_engine_type='fsdp'. "
-            f"Got sampler_engine_type={args.sampler_engine_type}."
+            f"Got sampler_engine_type={args.sampling.sampler_engine_type}."
         )
-    backend_name = str(getattr(args, "train_backend", "fsdp") or "fsdp").strip().lower()
-    backend_path = str(getattr(args, "train_backend_path", "") or "").strip().lower()
+    backend_name = str(getattr(args.training, "train_backend", "fsdp") or "fsdp").strip().lower()
+    backend_path = str(getattr(args.training, "train_backend_path", "") or "").strip().lower()
     veomni_like_backend = backend_name == "veomni" or ("veomni" in backend_path)
     if backend_name != "fsdp" and not veomni_like_backend:
         raise ValueError(
             "training_actor_direct_sampling=true currently supports train_backend='fsdp' "
             "or VeOmni-native backends. "
-            f"Got train_backend={getattr(args, 'train_backend', None)!r}, "
-            f"train_backend_path={getattr(args, 'train_backend_path', None)!r}."
+            f"Got train_backend={getattr(args.training, 'train_backend', None)!r}, "
+            f"train_backend_path={getattr(args.training, 'train_backend_path', None)!r}."
         )
 
-    if args.rollout_num_nodes != 0 or args.rollout_num_gpus_per_node != 0:
+    if args.ray.rollout_num_nodes != 0 or args.ray.rollout_num_gpus_per_node != 0:
         raise ValueError(
             "training_actor_direct_sampling=true requires rollout_num_nodes=0 and "
             "rollout_num_gpus_per_node=0 (no separate rollout actors). "
-            f"Got rollout_num_nodes={args.rollout_num_nodes}, "
-            f"rollout_num_gpus_per_node={args.rollout_num_gpus_per_node}."
+            f"Got rollout_num_nodes={args.ray.rollout_num_nodes}, "
+            f"rollout_num_gpus_per_node={args.ray.rollout_num_gpus_per_node}."
         )
 
-    if not args.colocate_rollout_training:
+    if not args.ray.colocate_rollout_training:
         raise ValueError(
             "training_actor_direct_sampling=true requires colocate_rollout_training=true. "
             "Set --colocate-rollout-training."
         )
 
-    if args.offload or args.offload_train or args.offload_rollout:
+    if args.ray.offload or args.ray.offload_train or args.ray.offload_rollout:
         raise ValueError(
             "training_actor_direct_sampling=true is incompatible with offload. "
             "Set --offload=false --offload-train=false --offload-rollout=false."
@@ -1216,8 +1590,8 @@ def _normalize_replay_mode(
     sglang_logprob_mode: str,
 ) -> tuple[bool, bool, str]:
     """Validate replay flags for sglang/non-sglang engines."""
-    replay_enabled = bool(getattr(args, "replay_log_probs", False))
-    replay_guard = (not training_actor_direct_sampling) and getattr(args, "loss_type", "grpo") == "grpo"
+    replay_enabled = bool(getattr(args.sampling, "replay_log_probs", False))
+    replay_guard = (not training_actor_direct_sampling) and getattr(args.algorithm, "loss_type", "grpo") == "grpo"
 
     if is_sglang_engine and replay_guard:
         if sglang_logprob_mode == "replay" and not replay_enabled:
@@ -1249,65 +1623,176 @@ def _apply_colocate_and_offload_rules(
     """Normalize offload and colocate flags."""
     if training_actor_direct_sampling:
         # Training-actor sampling has no separate rollout actors; keep offload disabled.
-        args.offload = False
-        args.offload_train = False
-        args.offload_rollout = False
+        _set_normalized_attr(args, args.ray, "offload", False, key="ray.offload")
+        _set_normalized_attr(args, args.ray, "offload_train", False, key="ray.offload_train")
+        _set_normalized_attr(args, args.ray, "offload_rollout", False, key="ray.offload_rollout")
         return
 
-    if args.offload:
-        args.offload_train = True
-        args.offload_rollout = True
+    if args.ray.offload:
+        _set_normalized_attr(args, args.ray, "offload_train", True, key="ray.offload_train")
+        _set_normalized_attr(args, args.ray, "offload_rollout", True, key="ray.offload_rollout")
 
-    if args.colocate_rollout_training:
-        if args.offload_train is None:
-            args.offload_train = True
-        if args.offload_rollout is None:
-            args.offload_rollout = True
+    if args.ray.colocate_rollout_training:
+        if args.ray.offload_train is None:
+            _set_normalized_attr(args, args.ray, "offload_train", True, key="ray.offload_train")
+        if args.ray.offload_rollout is None:
+            _set_normalized_attr(args, args.ray, "offload_rollout", True, key="ray.offload_rollout")
         validate_colocate_fractions(args)
 
-    if args.offload_train is None:
-        args.offload_train = False
-    if args.offload_rollout is None:
-        args.offload_rollout = False
+    if args.ray.offload_train is None:
+        _set_normalized_attr(args, args.ray, "offload_train", False, key="ray.offload_train")
+    if args.ray.offload_rollout is None:
+        _set_normalized_attr(args, args.ray, "offload_rollout", False, key="ray.offload_rollout")
 
 
 def _normalize_training_misc(args: TrainingArguments) -> None:
     """Validate misc training knobs that affect downstream components."""
     if (
-        args.advantage_type == "per_prompt"
-        and args.per_prompt_mode == "running"
-        and not args.use_per_prompt_stat_tracker
+        args.algorithm.advantage_type == "per_prompt"
+        and args.algorithm.per_prompt_mode == "running"
+        and not args.algorithm.use_per_prompt_stat_tracker
     ):
         raise ValueError(
             "advantage_type='per_prompt' with per_prompt_mode='running' requires "
             "--use-per-prompt-stat-tracker=true."
         )
 
-    if args.use_global_std and not args.use_running_stats:
+    if args.algorithm.use_global_std and not args.algorithm.use_running_stats:
         raise ValueError(
             "--use-global-std=true requires --use-running-stats=true."
         )
 
-    if isinstance(args.lora_target_modules, str):
-        stripped = args.lora_target_modules.strip()
+    if isinstance(args.training.lora_target_modules, str):
+        stripped = args.training.lora_target_modules.strip()
         if stripped:
-            args.lora_target_modules = [s.strip() for s in stripped.split(",") if s.strip()]
+            _set_normalized_attr(
+                args,
+                args.training,
+                "lora_target_modules",
+                [s.strip() for s in stripped.split(",") if s.strip()],
+                key="training.lora_target_modules",
+            )
         else:
-            args.lora_target_modules = None
+            _set_normalized_attr(
+                args,
+                args.training,
+                "lora_target_modules",
+                None,
+                key="training.lora_target_modules",
+            )
 
-    if isinstance(args.gradient_accumulation_steps, int):
-        args.gradient_accumulation_steps = str(args.gradient_accumulation_steps)
+    if isinstance(args.training.gradient_accumulation_steps, int):
+        _set_normalized_attr(
+            args,
+            args.training,
+            "gradient_accumulation_steps",
+            str(args.training.gradient_accumulation_steps),
+            key="training.gradient_accumulation_steps",
+        )
 
-    if args.num_inner_epochs < 1:
-        raise ValueError(f"num_inner_epochs must be >= 1, got: {args.num_inner_epochs}")
+    if args.training.num_inner_epochs < 1:
+        raise ValueError(f"num_inner_epochs must be >= 1, got: {args.training.num_inner_epochs}")
+
+
+def _normalize_algorithm_kwargs_payload(args: TrainingArguments) -> None:
+    """Normalize algorithm_kwargs into a dictionary payload."""
+    raw = getattr(args.algorithm, "algorithm_kwargs", {})
+    if raw is None:
+        _set_normalized_attr(
+            args,
+            args.algorithm,
+            "algorithm_kwargs",
+            {},
+            key="algorithm.algorithm_kwargs",
+        )
+        return
+    if isinstance(raw, dict):
+        _set_normalized_attr(
+            args,
+            args.algorithm,
+            "algorithm_kwargs",
+            dict(raw),
+            key="algorithm.algorithm_kwargs",
+        )
+        return
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            _set_normalized_attr(
+                args,
+                args.algorithm,
+                "algorithm_kwargs",
+                {},
+                key="algorithm.algorithm_kwargs",
+            )
+            return
+        try:
+            parsed = json.loads(text)
+        except Exception as exc:
+            raise ValueError(f"Invalid algorithm_kwargs: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                "algorithm_kwargs must decode to a JSON object, "
+                f"got: {type(parsed).__name__}"
+            )
+        _set_normalized_attr(
+            args,
+            args.algorithm,
+            "algorithm_kwargs",
+            dict(parsed),
+            key="algorithm.algorithm_kwargs",
+        )
+        return
+    raise ValueError(
+        "algorithm_kwargs must be a JSON object (YAML mapping) "
+        f"or JSON object string, got: {type(raw).__name__}"
+    )
+
+
+def _normalize_loss_path(args: TrainingArguments) -> None:
+    """Resolve algorithm.loss_path from loss_type exactly once in validate stage."""
+    raw_loss_path = getattr(args.algorithm, "loss_path", None)
+    if isinstance(raw_loss_path, str) and raw_loss_path.strip():
+        normalized = raw_loss_path.strip()
+        _set_normalized_attr(
+            args,
+            args.algorithm,
+            "loss_path",
+            normalized,
+            key="algorithm.loss_path",
+        )
+        return
+
+    from diffusionrl.losses import DEFAULT_LOSS_PATHS
+
+    loss_type = str(getattr(args.algorithm, "loss_type", "") or "").strip()
+    resolved = DEFAULT_LOSS_PATHS.get(loss_type)
+    if not resolved:
+        raise ValueError(
+            f"Cannot resolve algorithm.loss_path for loss_type={loss_type!r}. "
+            "Provide --algorithm.loss-path explicitly or register this loss_type."
+        )
+    _set_normalized_attr(
+        args,
+        args.algorithm,
+        "loss_path",
+        resolved,
+        key="algorithm.loss_path",
+    )
 
 
 def _normalize_train_backend_config(args: TrainingArguments) -> None:
     """Normalize train-backend selection and backend kwargs JSON payload."""
-    backend = str(getattr(args, "train_backend", "fsdp") or "fsdp").strip().lower()
-    args.train_backend = backend
+    backend = str(getattr(args.training, "train_backend", "fsdp") or "fsdp").strip().lower()
+    _set_normalized_attr(
+        args,
+        args.training,
+        "train_backend",
+        backend,
+        key="training.train_backend",
+    )
 
-    backend_path = getattr(args, "train_backend_path", None)
+    backend_path = getattr(args.training, "train_backend_path", None)
     supported = {"fsdp", "megatron", "veomni"}
     if backend not in supported and not backend_path:
         raise ValueError(
@@ -1318,92 +1803,140 @@ def _normalize_train_backend_config(args: TrainingArguments) -> None:
         logger.warning(
             "train_backend=%s is currently a scaffold backend: launch/topology interfaces are wired, "
             "but runtime training flow is not fully implemented yet. "
-            "Use train_backend_kwargs_json.actor_class_path to provide a Megatron-dedicated actor.",
+            "Use train_backend_kwargs.actor_class_path to provide a Megatron-dedicated actor.",
             backend,
         )
 
-    raw = getattr(args, "train_backend_kwargs_json", "")
+    raw = getattr(args.training, "train_backend_kwargs", {})
     if raw is None:
-        args.train_backend_kwargs_json = ""
-    elif not isinstance(raw, str):
-        raise ValueError(
-            f"train_backend_kwargs_json must be a JSON object string, got: {type(raw).__name__}"
-        )
-    else:
+        parsed: Dict[str, Any] = {}
+    elif isinstance(raw, dict):
+        parsed = dict(raw)
+    elif isinstance(raw, str):
         text = raw.strip()
         if not text:
-            args.train_backend_kwargs_json = ""
+            parsed = {}
             if backend == "megatron" and not backend_path:
                 logger.warning(
                     "train_backend=%s without actor_class_path will fail at runtime. "
-                    "Set train_backend_kwargs_json with actor_class_path.",
+                    "Set train_backend_kwargs with actor_class_path.",
                     backend,
                 )
         else:
             try:
-                parsed = json.loads(text)
+                parsed_obj = json.loads(text)
             except Exception as exc:
-                raise ValueError(f"Invalid train_backend_kwargs_json: {exc}") from exc
-            if not isinstance(parsed, dict):
-                raise ValueError("train_backend_kwargs_json must decode to a JSON object.")
-            if backend == "veomni":
-                mode = str(parsed.get("data_parallel_mode", "fsdp2") or "fsdp2").strip().lower()
-                if mode == "ddp":
-                    raise ValueError(
-                        "train_backend=veomni in diffusionRL does not support data_parallel_mode='ddp'. "
-                        "Use data_parallel_mode='fsdp2'."
-                    )
-                if mode != "fsdp2":
-                    raise ValueError(
-                        "train_backend=veomni in diffusionRL now targets FSDP2 only. "
-                        "Set data_parallel_mode='fsdp2' or omit this field."
-                    )
-            if backend == "megatron" and not backend_path and not str(parsed.get("actor_class_path", "")).strip():
-                logger.warning(
-                    "train_backend=%s requires actor_class_path in train_backend_kwargs_json "
-                    "to launch a Megatron-specific training actor.",
-                    backend,
-                )
-            args.train_backend_kwargs_json = json.dumps(parsed)
+                raise ValueError(f"Invalid train_backend_kwargs: {exc}") from exc
+            if not isinstance(parsed_obj, dict):
+                raise ValueError("train_backend_kwargs must decode to a JSON object.")
+            parsed = dict(parsed_obj)
+    else:
+        raise ValueError(
+            "train_backend_kwargs must be a JSON object (YAML mapping) "
+            f"or JSON object string, got: {type(raw).__name__}"
+        )
+
+    if backend == "veomni":
+        mode = str(parsed.get("data_parallel_mode", "fsdp2") or "fsdp2").strip().lower()
+        if mode == "ddp":
+            raise ValueError(
+                "train_backend=veomni in diffusionRL does not support data_parallel_mode='ddp'. "
+                "Use data_parallel_mode='fsdp2'."
+            )
+        if mode != "fsdp2":
+            raise ValueError(
+                "train_backend=veomni in diffusionRL now targets FSDP2 only. "
+                "Set data_parallel_mode='fsdp2' or omit this field."
+            )
+    if backend == "megatron" and not backend_path and not str(parsed.get("actor_class_path", "")).strip():
+        logger.warning(
+            "train_backend=%s requires actor_class_path in train_backend_kwargs "
+            "to launch a Megatron-specific training actor.",
+            backend,
+        )
+
+    _set_normalized_attr(
+        args,
+        args.training,
+        "train_backend_kwargs",
+        parsed,
+        key="training.train_backend_kwargs",
+    )
 
 def _normalize_weight_sync(args: TrainingArguments, *, training_actor_direct_sampling: bool) -> None:
-    weight_sync_mode = getattr(args, "weight_sync_mode", "auto")
-    train_backend = str(getattr(args, "train_backend", "fsdp") or "fsdp").strip().lower()
-    backend_path = str(getattr(args, "train_backend_path", "") or "").strip().lower()
+    weight_sync_mode = getattr(args.ray, "weight_sync_mode", "auto")
+    train_backend = str(getattr(args.training, "train_backend", "fsdp") or "fsdp").strip().lower()
+    backend_path = str(getattr(args.training, "train_backend_path", "") or "").strip().lower()
     veomni_like_backend = train_backend == "veomni" or ("veomni" in backend_path)
-    sampler_engine_type = str(getattr(args, "sampler_engine_type", "") or "").lower()
+    sampler_engine_type = str(getattr(args.sampling, "sampler_engine_type", "") or "").lower()
     is_multi_node = (
-        int(getattr(args, "rollout_num_nodes", 1)) > 1
-        or int(getattr(args, "training_num_nodes", 1)) > 1
-        or int(getattr(args, "reward_dedicated_num_nodes", 0)) > 1
+        int(getattr(args.ray, "rollout_num_nodes", 1)) > 1
+        or int(getattr(args.ray, "training_num_nodes", 1)) > 1
+        or int(getattr(args.reward, "reward_dedicated_num_nodes", 0)) > 1
     )
 
     if weight_sync_mode == "auto":
         if not training_actor_direct_sampling and sampler_engine_type == "sglang":
             if is_multi_node:
-                args.weight_sync_mode = "nccl_broadcast"
+                _set_normalized_attr(
+                    args,
+                    args.ray,
+                    "weight_sync_mode",
+                    "nccl_broadcast",
+                    key="ray.weight_sync_mode",
+                )
             else:
                 # Single-node sglang runs are more robust with checkpoint-based
                 # sync under Ray actor-local CUDA_VISIBLE_DEVICES mapping.
-                args.weight_sync_mode = "checkpoint_path"
+                _set_normalized_attr(
+                    args,
+                    args.ray,
+                    "weight_sync_mode",
+                    "checkpoint_path",
+                    key="ray.weight_sync_mode",
+                )
         elif (
             not training_actor_direct_sampling
             and (sampler_engine_type == "fsdp" or veomni_like_backend)
         ):
-            args.weight_sync_mode = "checkpoint_path"
+            _set_normalized_attr(
+                args,
+                args.ray,
+                "weight_sync_mode",
+                "checkpoint_path",
+                key="ray.weight_sync_mode",
+            )
         else:
-            args.weight_sync_mode = "checkpoint_path"
+            _set_normalized_attr(
+                args,
+                args.ray,
+                "weight_sync_mode",
+                "checkpoint_path",
+                key="ray.weight_sync_mode",
+            )
 
     # Legacy alias normalization.
     _alias_map = {"ipc": "tensor_payload", "nccl": "nccl_broadcast"}
-    if args.weight_sync_mode in _alias_map:
-        args.weight_sync_mode = _alias_map[args.weight_sync_mode]
-    if args.weight_sync_mode == "object_ref":
+    if args.ray.weight_sync_mode in _alias_map:
+        _set_normalized_attr(
+            args,
+            args.ray,
+            "weight_sync_mode",
+            _alias_map[args.ray.weight_sync_mode],
+            key="ray.weight_sync_mode",
+        )
+    if args.ray.weight_sync_mode == "object_ref":
         logger.warning("weight_sync_mode='object_ref' is deprecated, using 'checkpoint_path'")
-        args.weight_sync_mode = "checkpoint_path"
+        _set_normalized_attr(
+            args,
+            args.ray,
+            "weight_sync_mode",
+            "checkpoint_path",
+            key="ray.weight_sync_mode",
+        )
 
     if (
-        args.weight_sync_mode in {"tensor_payload", "nccl_broadcast"}
+        args.ray.weight_sync_mode in {"tensor_payload", "nccl_broadcast"}
         and sampler_engine_type != "sglang"
     ):
         raise ValueError(
@@ -1412,61 +1945,79 @@ def _normalize_weight_sync(args: TrainingArguments, *, training_actor_direct_sam
         )
 
     if (
-        args.weight_sync_mode == "checkpoint_path"
+        args.ray.weight_sync_mode == "checkpoint_path"
         and sampler_engine_type == "sglang"
     ):
         root = repo_root(env_repo_root=ENV_REPO_ROOT)
         default_sync_dir = resolve_repo_relative_path("outputs/weight_sync", root)
-        if os.path.realpath(args.weight_sync_dir) == os.path.realpath(default_sync_dir):
-            args.weight_sync_dir = "/dev/shm/diffusionrl_weight_sync"
+        if os.path.realpath(args.ray.weight_sync_dir) == os.path.realpath(default_sync_dir):
+            _set_normalized_attr(
+                args,
+                args.ray,
+                "weight_sync_dir",
+                "/dev/shm/diffusionrl_weight_sync",
+                key="ray.weight_sync_dir",
+            )
             logger.info(
                 "Auto-switched weight_sync_dir to %s for sglang checkpoint sync performance.",
-                args.weight_sync_dir,
+                args.ray.weight_sync_dir,
             )
 
     if (
-        args.weight_sync_mode == "checkpoint_path"
+        args.ray.weight_sync_mode == "checkpoint_path"
         and is_multi_node
         and is_probably_local_weight_sync_dir(
-            args.weight_sync_dir,
+            args.ray.weight_sync_dir,
             root=repo_root(env_repo_root=ENV_REPO_ROOT),
         )
     ):
         raise ValueError(
             "weight_sync_mode=checkpoint_path in multi-node mode requires a shared filesystem path. "
-            f"Got local-only weight_sync_dir={args.weight_sync_dir}. "
+            f"Got local-only weight_sync_dir={args.ray.weight_sync_dir}. "
             "Use a shared mount (e.g. /mnt/shared/... or NFS path)."
         )
 
 
 def _normalize_debug_config(args: TrainingArguments) -> str:
     """Normalize debug mode and enforce mode-specific constraints."""
-    requested_debug_mode = str(getattr(args, "debug_mode", "none") or "none").strip().lower()
+    requested_debug_mode = str(getattr(args.debug_cfg, "debug_mode", "none") or "none").strip().lower()
     debug_mode = requested_debug_mode
     if debug_mode == "debug_full":
         logger.info(
             "debug_mode=debug_full is currently mapped to normal training with "
             "debug_save_intermediates=true."
         )
-        args.debug_mode = "none"
-        args.debug_save_intermediates = True
+        _set_normalized_attr(args, args.debug_cfg, "debug_mode", "none", key="debug_cfg.debug_mode")
+        _set_normalized_attr(
+            args,
+            args.debug_cfg,
+            "debug_save_intermediates",
+            True,
+            key="debug_cfg.debug_save_intermediates",
+        )
         debug_mode = "none"
     else:
-        args.debug_mode = debug_mode
+        _set_normalized_attr(
+            args,
+            args.debug_cfg,
+            "debug_mode",
+            debug_mode,
+            key="debug_cfg.debug_mode",
+        )
 
     if debug_mode in ("rollout_only", "train_only", "interactive"):
-        if bool(getattr(args, "async_pipeline", False)):
+        if bool(getattr(args.rollout, "async_pipeline", False)):
             raise ValueError(
                 f"debug_mode={debug_mode} does not support async_pipeline yet. "
                 "Set --async-pipeline=false."
             )
-        if debug_mode in ("rollout_only", "interactive") and bool(getattr(args, "training_actor_direct_sampling", False)):
+        if debug_mode in ("rollout_only", "interactive") and bool(getattr(args.sampling, "training_actor_direct_sampling", False)):
             raise ValueError(
                 f"debug_mode={debug_mode} is incompatible with training_actor_direct_sampling=true "
                 "(there are no training actors in this debug mode)."
             )
 
-    if bool(getattr(args, "debug_save_intermediates", False)) and bool(getattr(args, "async_pipeline", False)):
+    if bool(getattr(args.debug_cfg, "debug_save_intermediates", False)) and bool(getattr(args.rollout, "async_pipeline", False)):
         raise ValueError(
             "debug_save_intermediates=true is not supported with async_pipeline yet. "
             "Set --async-pipeline=false."
@@ -1474,7 +2025,11 @@ def _normalize_debug_config(args: TrainingArguments) -> str:
 
     return debug_mode
 
-def validate_args(args: TrainingArguments) -> TrainingArguments:
+def validate_args(
+    args: TrainingArguments,
+    *,
+    print_normalize_changes: bool = False,
+) -> TrainingArguments:
     """
     Validate and normalize arguments for colocate/offload logic.
 
@@ -1484,8 +2039,22 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
     Returns:
         Validated and normalized TrainingArguments
     """
-    explicit_sampler_path = args.sampler_path != DEFAULT_SAMPLER_PATH
-    explicit_sampler_engine_type = getattr(args, "sampler_engine_type", None) is not None
+    setattr(args, "_print_normalize_changes", bool(print_normalize_changes))
+    setattr(args, "_normalize_change_header_printed", False)
+    setattr(
+        args,
+        "_normalize_trace_callback",
+        lambda key, before, after, source=None: _trace_normalize_change(
+            args,
+            key,
+            before,
+            after,
+            source=source,
+        ),
+    )
+
+    explicit_sampler_path = args.sampling.sampler_path != DEFAULT_SAMPLER_PATH
+    explicit_sampler_engine_type = getattr(args.sampling, "sampler_engine_type", None) is not None
 
     validate_grouped_configs(args)
     debug_mode = _normalize_debug_config(args)
@@ -1503,7 +2072,17 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
         explicit_sampler_engine_type=explicit_sampler_engine_type,
     )
     training_actor_direct_sampling, is_sglang_engine, sglang_logprob_mode = _normalize_sampling_basics(args)
-    validate_loss_kwargs_json(args)
+    _normalize_algorithm_kwargs_payload(args)
+    before_loss_kwargs = copy.deepcopy(args.algorithm.loss_kwargs)
+    validate_loss_kwargs(args)
+    _trace_normalize_change(
+        args,
+        "algorithm.loss_kwargs",
+        before_loss_kwargs,
+        args.algorithm.loss_kwargs,
+        source="validate_loss_kwargs",
+    )
+    _normalize_loss_path(args)
     _normalize_train_backend_config(args)
     validate_dynamic_dotpaths(args)
     _apply_training_actor_direct_sampling_overrides(
@@ -1538,8 +2117,14 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
             sglang_logprob_mode=sglang_logprob_mode,
         )
 
-    if args.sampling_adapter:
-        args.engine_kwargs.setdefault("sampling_adapter", args.sampling_adapter)
+    if args.sampling.sampling_adapter:
+        _set_normalized_dict_item(
+            args,
+            args.sampling.engine_kwargs,
+            "sampling_adapter",
+            args.sampling.sampling_adapter,
+            key="sampling.engine_kwargs.sampling_adapter",
+        )
     _normalize_weight_sync(
         args,
         training_actor_direct_sampling=training_actor_direct_sampling,
@@ -1550,6 +2135,14 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
             training_actor_direct_sampling=training_actor_direct_sampling,
             model_cls=model_cls,
         )
+
+    for transient in (
+        "_print_normalize_changes",
+        "_normalize_change_header_printed",
+        "_normalize_trace_callback",
+    ):
+        if hasattr(args, transient):
+            delattr(args, transient)
 
     return args
 

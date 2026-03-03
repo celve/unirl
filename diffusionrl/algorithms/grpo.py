@@ -180,18 +180,18 @@ class GRPOAlgorithm(BaseAlgorithm):
         kwargs = cls._base_kwargs_from_args(args)
         kwargs.update(
             {
-                "eta": getattr(args, "eta", 1.0),
-                "sde_type": getattr(args, "sde_type", "sde"),
-                "use_per_prompt_tracker": getattr(args, "use_per_prompt_stat_tracker", False),
-                "per_prompt_mode": getattr(args, "per_prompt_mode", "running"),
-                "per_prompt_buffer_size": getattr(args, "per_prompt_buffer_size", 16),
-                "per_prompt_min_count": getattr(args, "per_prompt_min_count", 2),
-                "use_running_stats": getattr(args, "use_running_stats", False),
-                "running_stats_warmup": getattr(args, "running_stats_warmup", 0),
-                "use_global_std": getattr(args, "use_global_std", False),
-                "trimmed_ratio": getattr(args, "trimmed_ratio", 0.0),
-                "ignore_last": getattr(args, "ignore_last", False),
-                "frozen_init_timesteps": getattr(args, "frozen_init_timesteps", 0),
+                "eta": getattr(args.sampling, "eta", 1.0),
+                "sde_type": getattr(args.sampling, "sde_type", "sde"),
+                "use_per_prompt_tracker": getattr(args.algorithm, "use_per_prompt_stat_tracker", False),
+                "per_prompt_mode": getattr(args.algorithm, "per_prompt_mode", "running"),
+                "per_prompt_buffer_size": getattr(args.algorithm, "per_prompt_buffer_size", 16),
+                "per_prompt_min_count": getattr(args.algorithm, "per_prompt_min_count", 2),
+                "use_running_stats": getattr(args.algorithm, "use_running_stats", False),
+                "running_stats_warmup": getattr(args.algorithm, "running_stats_warmup", 0),
+                "use_global_std": getattr(args.algorithm, "use_global_std", False),
+                "trimmed_ratio": getattr(args.algorithm, "trimmed_ratio", 0.0),
+                "ignore_last": getattr(args.algorithm, "ignore_last", False),
+                "frozen_init_timesteps": getattr(args.algorithm, "frozen_init_timesteps", 0),
             }
         )
         return kwargs

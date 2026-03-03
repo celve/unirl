@@ -38,11 +38,11 @@
 # - batch_size=3, num_samples_per_prompt=24 (original _get_config defaults)
 # - For 4 GPU: batch_size=8, num_samples_per_prompt=16
 #
-# NOTE: Use --sde-type cps for CPS variant (e.g., geneval_sd3_fast_nocfg)
+# NOTE: Use --sampling.sde-type cps for CPS variant (e.g., geneval_sd3_fast_nocfg)
 #
 # Usage:
 #   bash train_flowgrpo_sd3_train_actor_sampling.sh
-#   bash train_flowgrpo_sd3_train_actor_sampling.sh --sde-type cps  # For CPS variant
+#   bash train_flowgrpo_sd3_train_actor_sampling.sh --sampling.sde-type cps  # For CPS variant
 #
 # =============================================================================
 
@@ -71,7 +71,7 @@ NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
 NUM_INFERENCE_STEPS_OVERRIDE=""
 prev=""
 for arg in "$@"; do
-    if [ "$prev" = "--num-inference-steps" ]; then
+    if [ "$prev" = "--sampling.num-inference-steps" ]; then
         NUM_INFERENCE_STEPS_OVERRIDE="$arg"
     fi
     prev="$arg"
@@ -84,56 +84,56 @@ if [ "${NUM_INFERENCE_STEPS}" -lt 2 ]; then
 fi
 
 python -m diffusionrl.train \
-    --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
-    --model-type sd3 \
-    --sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
-    --algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward-path diffusionrl.reward.local.LocalRewardWorker \
-    --reward-model-name ocr \
+    --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
+    --model.model-type sd3 \
+    --sampling.sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
+    --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-model-name ocr \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
-    --sde-type sde \
-    --eta 0.7 \
-    --shift 3.0 \
-    --num-inference-steps ${NUM_INFERENCE_STEPS} \
-    --guidance-scale 4.5 \
-    --timestep-fraction 0.99 \
+    --sampling.sde-type sde \
+    --sampling.eta 0.7 \
+    --sampling.shift 3.0 \
+    --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
+    --sampling.guidance-scale 4.5 \
+    --sampling.timestep-fraction 0.99 \
     \
-    --prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --batch-size ${BATCH_SIZE} \
-    --num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --use-per-prompt-stat-tracker true \
-    --use-running-stats true \
-    --use-global-std true \
-    --clip-range 1e-4 \
-    --use-kl-penalty true \
-    --kl-coef 0.04 \
-    --advantage-type per_prompt \
-    --per-prompt-buffer-size 10000 \
+    --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
+    --training.batch-size ${BATCH_SIZE} \
+    --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.use-per-prompt-stat-tracker true \
+    --algorithm.use-running-stats true \
+    --algorithm.use-global-std true \
+    --algorithm.clip-range 1e-4 \
+    --algorithm.use-kl-penalty true \
+    --algorithm.kl-coef 0.04 \
+    --algorithm.advantage-type per_prompt \
+    --algorithm.per-prompt-buffer-size 10000 \
     \
-    --training-actor-direct-sampling true \
-    --colocate-rollout-training true \
-    --rollout-num-nodes 0 \
-    --rollout-num-gpus-per-node 0 \
-    --training-num-gpus-per-node ${NUM_GPUS} \
-    --offload false \
+    --sampling.training-actor-direct-sampling true \
+    --ray.colocate-rollout-training true \
+    --ray.rollout-num-nodes 0 \
+    --ray.rollout-num-gpus-per-node 0 \
+    --ray.training-num-gpus-per-node ${NUM_GPUS} \
+    --ray.offload false \
     \
-    --learning-rate 3e-4 \
-    --gradient-accumulation-steps auto \
-    --num-inner-epochs ${NUM_INNER_EPOCHS} \
-    --gradient-steps-per-epoch 2 \
-    --max-grad-norm 1.0 \
-    --lora-rank 16 \
-    --lora-alpha 32 \
-    --use-lora true \
+    --training.learning-rate 3e-4 \
+    --training.gradient-accumulation-steps auto \
+    --training.num-inner-epochs ${NUM_INNER_EPOCHS} \
+    --training.gradient-steps-per-epoch 2 \
+    --training.max-grad-norm 1.0 \
+    --training.lora-rank 32 \
+    --training.lora-alpha 64 \
+    --training.use-lora true \
     \
     --height 512 \
     --width 512 \
     \
-    --num-rollout 1000 \
-    --save-steps 60 \
-    --eval-steps 60 \
-    --logging-steps 10 \
-    --output-dir "${OUTPUT_DIR}" \
+    --rollout.num-rollout 1000 \
+    --rollout.save-steps 60 \
+    --rollout.eval-steps 60 \
+    --rollout.logging-steps 10 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
     "$@"

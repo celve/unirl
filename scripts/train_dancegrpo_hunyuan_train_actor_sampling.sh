@@ -61,7 +61,7 @@
 #   With 8 GPUs FULL_SHARD: ~40-50GB per GPU (tight on 40GB, OK on 80GB)
 #   With 16+ GPUs: more comfortable, can increase resolution
 #
-#   For 40GB GPUs: enable --fsdp-cpu-offload true (slower but fits)
+#   For 40GB GPUs: enable --training.fsdp-cpu-offload true (slower but fits)
 #
 # NOTE on bestofn:
 #   DanceGRPO bestofn=8 (keep top-8 of 24 samples). Not implemented in
@@ -155,51 +155,51 @@ echo " FSDP CPU offload:       ${FSDP_CPU_OFFLOAD}"
 echo "======================================================"
 
 python -m diffusionrl.train \
-    --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
-    --model-type hunyuan \
-    --sampler-engine-type fsdp \
-    --sampler-path diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler \
-    --algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward-path "${REWARD_PATH}" \
-    --reward-model-name "${REWARD_MODEL_NAME}" \
+    --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
+    --model.model-type hunyuan \
+    --sampling.sampler-engine-type fsdp \
+    --sampling.sampler-path diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler \
+    --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
+    --reward.reward-path "${REWARD_PATH}" \
+    --reward.reward-model-name "${REWARD_MODEL_NAME}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
     `# ===== SDE Sampling (aligned with DanceGRPO) =====` \
-    --sde-type dance \
-    --eta 0.25 \
-    --shift 5.0 \
-    --num-inference-steps 16 \
-    --guidance-scale 6018.0 \
-    --timestep-fraction 0.6 \
-    --init-same-noise true \
+    --sampling.sde-type dance \
+    --sampling.eta 0.25 \
+    --sampling.shift 5.0 \
+    --sampling.num-inference-steps 16 \
+    --sampling.guidance-scale 6018.0 \
+    --sampling.timestep-fraction 0.6 \
+    --sampling.init-same-noise true \
     \
     `# ===== GRPO Algorithm =====` \
-    --prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --batch-size ${BATCH_SIZE} \
-    --num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --clip-range 1e-4 \
-    --use-kl-penalty false \
-    --advantage-type group \
-    --advantage-clip-max 5.0 \
+    --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
+    --training.batch-size ${BATCH_SIZE} \
+    --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.clip-range 1e-4 \
+    --algorithm.use-kl-penalty false \
+    --algorithm.advantage-type group \
+    --algorithm.advantage-clip-max 5.0 \
     \
     `# ===== Training-Actor Sampling (no dedicated rollout actors) =====` \
-    --training-actor-direct-sampling true \
-    --colocate-rollout-training true \
-    --rollout-num-nodes 0 \
-    --rollout-num-gpus-per-node 0 \
-    --training-num-nodes ${TRAINING_NUM_NODES} \
-    --training-num-gpus-per-node ${TRAINING_GPUS_PER_NODE} \
-    --offload false \
+    --sampling.training-actor-direct-sampling true \
+    --ray.colocate-rollout-training true \
+    --ray.rollout-num-nodes 0 \
+    --ray.rollout-num-gpus-per-node 0 \
+    --ray.training-num-nodes ${TRAINING_NUM_NODES} \
+    --ray.training-num-gpus-per-node ${TRAINING_GPUS_PER_NODE} \
+    --ray.offload false \
     \
     `# ===== Training Hyperparams (aligned with DanceGRPO) =====` \
-    --learning-rate 1e-5 \
-    --gradient-accumulation-steps ${GRADIENT_ACCUMULATION_STEPS} \
-    --num-inner-epochs ${NUM_INNER_EPOCHS} \
-    --max-grad-norm 1.0 \
-    --weight-decay 0.0001 \
-    --fsdp-cpu-offload ${FSDP_CPU_OFFLOAD} \
-    --use-gradient-checkpointing true \
+    --training.learning-rate 1e-5 \
+    --training.gradient-accumulation-steps ${GRADIENT_ACCUMULATION_STEPS} \
+    --training.num-inner-epochs ${NUM_INNER_EPOCHS} \
+    --training.max-grad-norm 1.0 \
+    --training.weight-decay 0.0001 \
+    --training.fsdp-cpu-offload ${FSDP_CPU_OFFLOAD} \
+    --training.use-gradient-checkpointing true \
     \
     `# ===== Video Resolution =====` \
     --height ${HEIGHT} \
@@ -208,8 +208,8 @@ python -m diffusionrl.train \
     --fps ${FPS} \
     \
     `# ===== Rollout / Checkpoint =====` \
-    --num-rollout 202 \
-    --save-steps 50 \
-    --logging-steps 1 \
-    --output-dir "${OUTPUT_DIR}" \
+    --rollout.num-rollout 202 \
+    --rollout.save-steps 50 \
+    --rollout.logging-steps 1 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
     "$@"

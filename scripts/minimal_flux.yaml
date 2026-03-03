@@ -1,66 +1,62 @@
 # =============================================================================
-# DanceGRPO FLUX — Minimal Config
+# DanceGRPO FLUX - Minimal Config (grouped YAML style)
 # =============================================================================
-# Standalone minimal YAML example (direct `python -m diffusionrl.train --config ...` path).
 # Usage: python -m diffusionrl.train --config scripts/minimal_flux.yaml
 #
-# Override any value via CLI:
-#   python -m diffusionrl.train --config scripts/minimal_flux.yaml --num-rollout 100
+# Override via dotted CLI:
+#   python -m diffusionrl.train --config scripts/minimal_flux.yaml --rollout.num-rollout 100
 # =============================================================================
 
-# --- Model ---
-model_type: flux
-pretrained_model_saved_path: models/local/flux
-sampler_path: diffusionrl.samplers.fsdp.flux_sampler.FluxSampler
-algorithm_path: diffusionrl.algorithms.grpo.GRPOAlgorithm
+model:
+  model_type: flux
+  pretrained_model_saved_path: models/local/flux
 
-# --- Reward ---
-reward_path: diffusionrl.reward.local.LocalRewardWorker
-reward_model_name: ocr
+sampling:
+  sampler_path: diffusionrl.samplers.fsdp.flux_sampler.FluxSampler
+  sde_type: flux_dance
+  eta: 0.3
+  shift: 3.0
+  num_inference_steps: 25
+  guidance_scale: 3.5
+  timestep_fraction: 0.6
 
-# --- Data ---
+reward:
+  reward_path: diffusionrl.reward.local.LocalRewardWorker
+  reward_model_name: ocr
+
+algorithm:
+  algorithm_path: diffusionrl.algorithms.grpo.GRPOAlgorithm
+  prompts_per_batch: 1
+  num_samples_per_prompt: 4
+  clip_range: 0.0001
+  use_kl_penalty: false
+  advantage_type: group
+  advantage_clip_max: 5.0
+
+training:
+  batch_size: 1
+  learning_rate: 0.00001
+  gradient_accumulation_steps: "1"
+  num_inner_epochs: 1
+  max_grad_norm: 1.0
+  weight_decay: 0.0001
+  use_lora: true
+  lora_rank: 16
+  lora_alpha: 32
+
+ray:
+  colocate_rollout_training: false
+  rollout_num_gpus_per_node: 4
+  training_num_gpus_per_node: 4
+  placement_strategy: SPREAD
+
+rollout:
+  num_rollout: 300
+  save_steps: 40
+  logging_steps: 10
+  output_dir: outputs/dancegrpo_flux_separate
+
 data_source_path: diffusionrl.data.data_source.ImageRLDataSource
 data_path: data/samples/prompts_toy.json
-
-# --- Sampling (DanceGRPO FLUX formulation) ---
-sde_type: flux_dance
-eta: 0.3
-shift: 3.0
-num_inference_steps: 25
-guidance_scale: 3.5
-timestep_fraction: 0.6
-
-# --- GRPO Algorithm ---
-prompts_per_batch: 1
-batch_size: 1
-num_samples_per_prompt: 4
-clip_range: 0.0001
-use_kl_penalty: false
-advantage_type: group
-advantage_clip_max: 5.0
-
-# --- GPU Layout (Separate Mode) ---
-colocate_rollout_training: false
-rollout_num_gpus_per_node: 4
-training_num_gpus_per_node: 4
-placement_strategy: SPREAD
-
-# --- Training ---
-learning_rate: 0.00001
-gradient_accumulation_steps: "1"
-num_inner_epochs: 1
-max_grad_norm: 1.0
-weight_decay: 0.0001
-use_lora: true
-lora_rank: 16
-lora_alpha: 32
-
-# --- Resolution ---
 height: 256
 width: 256
-
-# --- Rollout / Logging ---
-num_rollout: 300
-save_steps: 40
-logging_steps: 10
-output_dir: outputs/dancegrpo_flux_separate

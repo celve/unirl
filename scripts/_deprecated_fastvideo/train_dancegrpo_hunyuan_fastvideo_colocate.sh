@@ -156,54 +156,54 @@ echo " FSDP sharding:          ${FSDP_SHARDING}"
 echo "======================================================"
 
 python -m diffusionrl.train \
-    --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
-    --model-type hunyuan \
-    --sampler-engine-type fastvideo \
-    --sampler-path diffusionrl.samplers.fastvideo.fastvideo_sampler.FastVideoSampler \
-    --algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward-path "${REWARD_PATH}" \
-    --reward-model-name "${REWARD_MODEL_NAME}" \
+    --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
+    --model.model-type hunyuan \
+    --sampling.sampler-engine-type fastvideo \
+    --sampling.sampler-path diffusionrl.samplers.fastvideo.fastvideo_sampler.FastVideoSampler \
+    --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
+    --reward.reward-path "${REWARD_PATH}" \
+    --reward.reward-model-name "${REWARD_MODEL_NAME}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
     `# ===== SDE Sampling (aligned with DanceGRPO) =====` \
-    --sde-type dance \
-    --eta 0.25 \
-    --shift 5.0 \
-    --num-inference-steps 16 \
-    --guidance-scale 0.0 \
-    --timestep-fraction 0.6 \
-    --init-same-noise true \
+    --sampling.sde-type dance \
+    --sampling.eta 0.25 \
+    --sampling.shift 5.0 \
+    --sampling.num-inference-steps 16 \
+    --sampling.guidance-scale 0.0 \
+    --sampling.timestep-fraction 0.6 \
+    --sampling.init-same-noise true \
     \
     `# ===== GRPO Algorithm =====` \
-    --prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --batch-size ${BATCH_SIZE} \
-    --num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --clip-range 1e-4 \
-    --use-kl-penalty false \
-    --advantage-type group \
-    --advantage-clip-max 5.0 \
-    --replay-log-probs ${REPLAY_LOG_PROBS} \
+    --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
+    --training.batch-size ${BATCH_SIZE} \
+    --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.clip-range 1e-4 \
+    --algorithm.use-kl-penalty false \
+    --algorithm.advantage-type group \
+    --algorithm.advantage-clip-max 5.0 \
+    --sampling.replay-log-probs ${REPLAY_LOG_PROBS} \
     \
     `# ===== Colocate Mode Layout =====` \
-    --colocate-rollout-training true \
-    --rollout-num-gpus-per-node ${GPUS_PER_NODE} \
-    --training-num-nodes ${NUM_NODES} \
-    --training-num-gpus-per-node ${GPUS_PER_NODE} \
-    --fastvideo-num-gpus ${FASTVIDEO_NUM_GPUS} \
-    --sp-size ${FASTVIDEO_SP_SIZE} \
-    --offload ${OFFLOAD} \
-    --offload-train ${OFFLOAD_TRAIN} \
+    --ray.colocate-rollout-training true \
+    --ray.rollout-num-gpus-per-node ${GPUS_PER_NODE} \
+    --ray.training-num-nodes ${NUM_NODES} \
+    --ray.training-num-gpus-per-node ${GPUS_PER_NODE} \
+    --sampling.fastvideo-num-gpus ${FASTVIDEO_NUM_GPUS} \
+    --sampling.sp-size ${FASTVIDEO_SP_SIZE} \
+    --ray.offload ${OFFLOAD} \
+    --ray.offload-train ${OFFLOAD_TRAIN} \
     \
     `# ===== Training Hyperparams (aligned with DanceGRPO) =====` \
-    --learning-rate 1e-5 \
-    --gradient-accumulation-steps ${GRADIENT_ACCUMULATION_STEPS} \
-    --num-inner-epochs ${NUM_INNER_EPOCHS} \
-    --max-grad-norm 1.0 \
-    --weight-decay 0.0001 \
-    --fsdp-sharding-strategy ${FSDP_SHARDING} \
-    --fsdp-cpu-offload ${FSDP_CPU_OFFLOAD} \
-    --use-gradient-checkpointing true \
+    --training.learning-rate 1e-5 \
+    --training.gradient-accumulation-steps ${GRADIENT_ACCUMULATION_STEPS} \
+    --training.num-inner-epochs ${NUM_INNER_EPOCHS} \
+    --training.max-grad-norm 1.0 \
+    --training.weight-decay 0.0001 \
+    --training.fsdp-sharding-strategy ${FSDP_SHARDING} \
+    --training.fsdp-cpu-offload ${FSDP_CPU_OFFLOAD} \
+    --training.use-gradient-checkpointing true \
     \
     `# ===== Video Resolution =====` \
     --height ${HEIGHT} \
@@ -212,11 +212,11 @@ python -m diffusionrl.train \
     --fps ${FPS} \
     \
     `# ===== Weight Sync (checkpoint path for FastVideo) =====` \
-    --weight-sync-mode checkpoint_path \
+    --ray.weight-sync-mode checkpoint_path \
     \
     `# ===== Rollout / Checkpoint =====` \
-    --num-rollout 202 \
-    --save-steps 50 \
-    --logging-steps 1 \
-    --output-dir "${OUTPUT_DIR}" \
+    --rollout.num-rollout 202 \
+    --rollout.save-steps 50 \
+    --rollout.logging-steps 1 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
     "$@"

@@ -1,69 +1,64 @@
 # =============================================================================
-# DanceGRPO HunyuanVideo — Minimal Config
+# DanceGRPO HunyuanVideo - Minimal Config (grouped YAML style)
 # =============================================================================
-# Standalone minimal YAML example (direct `python -m diffusionrl.train --config ...` path).
 # Usage: python -m diffusionrl.train --config scripts/minimal_hunyuan.yaml
 #
-# Override any value via CLI:
-#   python -m diffusionrl.train --config scripts/minimal_hunyuan.yaml --learning-rate 5e-6
+# Override via dotted CLI:
+#   python -m diffusionrl.train --config scripts/minimal_hunyuan.yaml --training.learning-rate 5e-6
 # =============================================================================
 
-# --- Model ---
-model_type: hunyuan
-pretrained_model_saved_path: models/local/hunyuan-video
-sampler_engine_type: fsdp
-sampler_path: diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler
-algorithm_path: diffusionrl.algorithms.grpo.GRPOAlgorithm
+model:
+  model_type: hunyuan
+  pretrained_model_saved_path: models/local/hunyuan-video
 
-# --- Reward ---
-reward_path: diffusionrl.reward.local.LocalRewardWorker
-reward_model_name: hpsv2
+sampling:
+  sampler_engine_type: fsdp
+  sampler_path: diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler
+  sde_type: dance
+  eta: 0.25
+  shift: 5.0
+  num_inference_steps: 16
+  guidance_scale: 6018.0
+  timestep_fraction: 0.6
+  init_same_noise: true
 
-# --- Data ---
+reward:
+  reward_path: diffusionrl.reward.local.LocalRewardWorker
+  reward_model_name: hpsv2
+
+algorithm:
+  algorithm_path: diffusionrl.algorithms.grpo.GRPOAlgorithm
+  prompts_per_batch: 8
+  num_samples_per_prompt: 8
+  clip_range: 0.0001
+  use_kl_penalty: false
+  advantage_type: group
+  advantage_clip_max: 5.0
+
+training:
+  batch_size: 1
+  learning_rate: 0.00001
+  gradient_accumulation_steps: "4"
+  num_inner_epochs: 1
+  max_grad_norm: 1.0
+  weight_decay: 0.0001
+  use_gradient_checkpointing: true
+
+ray:
+  colocate_rollout_training: false
+  rollout_num_gpus_per_node: 8
+  training_num_gpus_per_node: 8
+  placement_strategy: PACK
+
+rollout:
+  num_rollout: 202
+  save_steps: 50
+  logging_steps: 1
+  output_dir: outputs/dancegrpo_hunyuan_separate
+
 data_source_path: diffusionrl.data.data_source.ImageRLDataSource
 data_path: data/samples/video_prompts_toy.txt
-
-# --- Sampling (DanceGRPO HunyuanVideo formulation) ---
-sde_type: dance
-eta: 0.25
-shift: 5.0
-num_inference_steps: 16
-# DanceGRPO Hunyuan GRPO path uses cfg-distill guidance embedding (fixed value).
-guidance_scale: 6018.0
-timestep_fraction: 0.6
-init_same_noise: true
-
-# --- GRPO Algorithm ---
-prompts_per_batch: 8
-batch_size: 1
-num_samples_per_prompt: 8
-clip_range: 0.0001
-use_kl_penalty: false
-advantage_type: group
-advantage_clip_max: 5.0
-
-# --- GPU Layout (Separate Mode) ---
-colocate_rollout_training: false
-rollout_num_gpus_per_node: 8
-training_num_gpus_per_node: 8
-placement_strategy: PACK
-
-# --- Training ---
-learning_rate: 0.00001
-gradient_accumulation_steps: "4"
-num_inner_epochs: 1
-max_grad_norm: 1.0
-weight_decay: 0.0001
-use_gradient_checkpointing: true
-
-# --- Video Resolution (DanceGRPO: 480x480, 53 frames) ---
 height: 480
 width: 480
 num_frames: 53
 fps: 8
-
-# --- Rollout / Logging ---
-num_rollout: 202
-save_steps: 50
-logging_steps: 1
-output_dir: outputs/dancegrpo_hunyuan_separate

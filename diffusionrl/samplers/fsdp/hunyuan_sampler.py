@@ -13,7 +13,7 @@ Key alignment points with DanceGRPO:
 - flux_step(): SDE step with log_prob computation (line 57-96)
 - run_sample_step(): sampling loop (line 104-143)
 - SDE solver correction term (line 76-79)
-- Guidance value: 6018.0 (line 129)
+- Guidance default: 6018.0 (line 129; configurable via runtime args)
 - Latent normalization: /0.476986 (line 140)
 - Precision: bfloat16 for forward, float32 for SDE step
 """
@@ -62,7 +62,7 @@ class FSDPHunyuanSampler(BaseSampler):
     SPATIAL_DOWNSAMPLE = 8
     TEMPORAL_DOWNSAMPLE = 4
     IN_CHANNELS = 16
-    GUIDANCE_VALUE = 6018.0  # DanceGRPO line 129
+    DEFAULT_GUIDANCE_VALUE = 6018.0  # DanceGRPO line 129
     LATENT_SCALE = 0.476986  # DanceGRPO line 140
 
     def __init__(
@@ -74,6 +74,7 @@ class FSDPHunyuanSampler(BaseSampler):
         sde_type: str = "dance",  # Use DanceGRPO formulation
         shift: float = 1.0,  # DanceGRPO default
         use_sde_solver: bool = True,  # Enable SDE solver correction
+        guidance_scale: float = DEFAULT_GUIDANCE_VALUE,
     ):
         """
         Initialize HunyuanVideo FSDP sampler.
@@ -87,12 +88,14 @@ class FSDPHunyuanSampler(BaseSampler):
             sde_type: SDE formulation (use "dance" for DanceGRPO alignment)
             shift: Time shift parameter for sigma schedule
             use_sde_solver: Enable SDE solver correction (DanceGRPO line 76-79)
+            guidance_scale: Default guidance scale when request does not override.
         """
         super().__init__(eta=eta, sde_type=sde_type, shift=shift)
         self.model = model
         self.text_encoder = text_encoder
         self.vae = vae
         self.use_sde_solver = use_sde_solver
+        self.default_guidance_scale = float(guidance_scale)
 
     @property
     def requires_extra_forward_for_log_prob(self) -> bool:
@@ -113,7 +116,7 @@ class FSDPHunyuanSampler(BaseSampler):
         pooled_prompt_embeds: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         num_inference_steps: int = 50,
-        guidance_scale: float = None,  # Ignored, uses GUIDANCE_VALUE
+        guidance_scale: float = None,
         height: int = 480,
         width: int = 848,
         num_frames: int = 129,
@@ -127,7 +130,7 @@ class FSDPHunyuanSampler(BaseSampler):
 
         Aligned with DanceGRPO run_sample_step (line 104-143):
         - Sigma schedule with time shift
-        - Forward pass with fixed guidance (6018.0)
+        - Forward pass with configurable guidance (DanceGRPO default: 6018.0)
         - SDE step with log probability
         - Trajectory stacking
 
@@ -137,7 +140,7 @@ class FSDPHunyuanSampler(BaseSampler):
             pooled_prompt_embeds: Not used for HunyuanVideo
             encoder_attention_mask: Attention mask [B, seq]
             num_inference_steps: Number of denoising steps
-            guidance_scale: Ignored (uses fixed GUIDANCE_VALUE=6018.0)
+            guidance_scale: Optional per-request guidance override.
             height: Video height
             width: Video width
             num_frames: Number of video frames
@@ -209,6 +212,11 @@ class FSDPHunyuanSampler(BaseSampler):
         # Default: all timesteps use SDE
         if sde_indices is None:
             sde_indices = set(range(num_inference_steps))
+        actual_guidance = (
+            float(guidance_scale)
+            if guidance_scale is not None
+            else float(self.default_guidance_scale)
+        )
 
         # Storage for trajectory and log probs (DanceGRPO line 115-116)
         all_latents = [latents.clone()]
@@ -233,7 +241,7 @@ class FSDPHunyuanSampler(BaseSampler):
                         pooled_projections=pooled_prompt_embeds,
                         timestep=timesteps,
                         guidance=torch.tensor(
-                            [self.GUIDANCE_VALUE],
+                            [actual_guidance],
                             device=device,
                             dtype=torch.bfloat16
                         ),
@@ -290,7 +298,7 @@ class FSDPHunyuanSampler(BaseSampler):
                     "supports_logprob": True,
                     "supports_trajectory": True,
                     "supports_prompt_embeddings": True,
-                    "supports_guidance_scale": False,
+                    "supports_guidance_scale": True,
                 },
                 "trajectory_format": "video_dense_latent",
                 "timestep_type": "sigma",
@@ -298,7 +306,7 @@ class FSDPHunyuanSampler(BaseSampler):
                 "height": height,
                 "width": width,
                 "num_frames": num_frames,
-                "guidance_scale": self.GUIDANCE_VALUE,
+                "guidance_scale": float(actual_guidance),
                 "use_sde_solver": self.use_sde_solver,
                 "latent_scale": self.LATENT_SCALE,
             },
@@ -313,6 +321,7 @@ class FSDPHunyuanSampler(BaseSampler):
         encoder_attention_mask: Optional[torch.Tensor],
         timestep_index: int,
         sigma_schedule: torch.Tensor,
+        guidance_scale: Optional[float] = None,
     ) -> torch.Tensor:
         """
         Compute log probability for a single training step.
@@ -332,6 +341,11 @@ class FSDPHunyuanSampler(BaseSampler):
         """
         device = latents.device
         batch_size = latents.shape[0]
+        actual_guidance = (
+            float(guidance_scale)
+            if guidance_scale is not None
+            else float(self.default_guidance_scale)
+        )
         prompt_embeds = prompt_embeds.to(device=device)
         if encoder_attention_mask is None:
             encoder_attention_mask = torch.ones(
@@ -366,7 +380,7 @@ class FSDPHunyuanSampler(BaseSampler):
                 pooled_projections=pooled_prompt_embeds,
                 timestep=timesteps,
                 guidance=torch.tensor(
-                    [self.GUIDANCE_VALUE],
+                    [actual_guidance],
                     device=device,
                     dtype=torch.bfloat16
                 ),

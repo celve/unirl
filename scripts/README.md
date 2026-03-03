@@ -12,7 +12,7 @@ All scripts now resolve paths relative to repository root:
 ## Quick sanity run
 
 ```bash
-bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh --num-rollout 1 --save-steps 1000
+bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh --rollout.num-rollout 1 --rollout.save-steps 1000
 ```
 
 ## Typical usage
@@ -41,13 +41,13 @@ bash scripts/train_dancegrpo_hunyuan_sglang_separate.sh
 
 ```bash
 # End-to-end plugin wiring example (algorithm/loss/reward/rollout pipeline)
-bash scripts/train_plugin_demo.sh --num-rollout 1
+bash scripts/train_plugin_demo.sh --rollout.num-rollout 1
 ```
 
 ## Engine note
 
-`training_actor_direct_sampling=true` currently only supports `--sampler-engine-type fsdp`.
-For SGLang, use dedicated rollout actors (`--colocate-rollout-training true/false`)
+`sampling.training_actor_direct_sampling=true` currently only supports `--sampling.sampler-engine-type fsdp`.
+For SGLang, use dedicated rollout actors (`--ray.colocate-rollout-training true/false`)
 with scripts named `*_sglang_colocate.sh` or `*_sglang_separate.sh`.
 
 ### SGLang remote scheduler mode (TCP, non-HTTP data plane)
@@ -55,7 +55,7 @@ with scripts named `*_sglang_colocate.sh` or `*_sglang_separate.sh`.
 Use `local_mode=false` and pass explicit scheduler endpoint(s) in `engine_kwargs`:
 
 ```bash
---engine-kwargs-json '{
+--sampling.engine-kwargs '{
   "local_mode": false,
   "remote_scheduler_endpoints": [
     "tcp://10.0.0.11:35555",

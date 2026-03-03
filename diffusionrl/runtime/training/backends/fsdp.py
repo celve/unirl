@@ -46,6 +46,14 @@ class FSDPTrainBackend(TrainBackend):
 
         self._use_fsdp = bool(merged.pop("use_fsdp", True))
         self._fsdp_config = merged
+        known_keys = {"cpu_offload", "param_dtype", "mixed_precision"}
+        unknown = sorted(key for key in self._fsdp_config.keys() if key not in known_keys)
+        if unknown:
+            logger.warning(
+                "FSDPTrainBackend received unknown train_backend_kwargs keys: %s. "
+                "These keys are currently ignored by the built-in fsdp backend.",
+                unknown,
+            )
 
     @classmethod
     def declared_capabilities(cls) -> TrainBackendCapabilities:

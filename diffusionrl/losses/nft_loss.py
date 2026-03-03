@@ -19,6 +19,7 @@ Based on: DiffusionNFT
 import logging
 from typing import Any, Dict, Optional, Tuple
 from contextlib import nullcontext
+import warnings
 
 import torch
 import torch.nn as nn
@@ -87,6 +88,34 @@ class NFTLoss:
         with ``loss_kwargs`` sub-dict taking precedence for overrides.
         """
         extra = config.get("loss_kwargs") or {}
+        known_keys = {
+            "beta",
+            "adv_clip_max",
+            "adv_mode",
+            "use_adaptive_weight",
+            "shift",
+            "old_adapter_name",
+            "new_adapter_name",
+            "kl_coef",
+        }
+        runtime_only_keys = {
+            "use_ema",
+            "ema_decay",
+            "nft_timestep_mode",
+            "nft_shuffle_timesteps",
+            "nft_apply_shift",
+            "decay_type",
+            "ema_flat_steps",
+            "ema_uprate",
+            "ema_uphold",
+        }
+        unknown = sorted(key for key in extra.keys() if key not in known_keys and key not in runtime_only_keys)
+        if unknown:
+            warnings.warn(
+                f"NFTLoss.from_config received unknown loss_kwargs keys: {unknown}. "
+                "These keys are ignored by NFT loss constructor.",
+                stacklevel=3,
+            )
 
         def _get(key, default):
             return extra.get(key, config.get(key, default))

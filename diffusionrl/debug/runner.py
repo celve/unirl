@@ -269,7 +269,7 @@ def save_rollout_debug_payload(
     source: str,
 ) -> Path:
     """Persist rollout debug payload, media, and summary artifacts."""
-    root = Path(str(getattr(args, "debug_save_dir", "outputs/debug")))
+    root = Path(str(getattr(args.debug_cfg, "debug_save_dir", "outputs/debug")))
     rollout_dir = root / f"rollout_{int(rollout_id):06d}"
     _ensure_dir(rollout_dir)
 
@@ -277,7 +277,7 @@ def save_rollout_debug_payload(
     media_result = _save_media_from_sampler_outputs(
         sampler_outputs=sampler_outputs,
         output_dir=rollout_dir,
-        max_media=max(1, int(getattr(args, "debug_max_media", 8))),
+        max_media=max(1, int(getattr(args.debug_cfg, "debug_max_media", 8))),
         prompts=payload.get("reward_prompts") or payload.get("prompts"),
         rewards=payload.get("rewards"),
     )
@@ -297,7 +297,7 @@ def save_rollout_debug_payload(
     disk_payload = _build_payload_for_disk(
         rollout_id=rollout_id,
         payload=payload,
-        save_trajectories=bool(getattr(args, "debug_save_trajectories", False)),
+        save_trajectories=bool(getattr(args.debug_cfg, "debug_save_trajectories", False)),
         sampler_summaries=media_result.get("sampler_summaries", []),
     )
     payload_path = rollout_dir / "payload.pt"
@@ -460,7 +460,7 @@ def put_training_data_for_consumer(
 def _maybe_init_ray(args: Any) -> None:
     if ray.is_initialized():
         return
-    ray_address = getattr(args, "ray_address", None)
+    ray_address = getattr(args.ray, "ray_address", None)
     if ray_address:
         ray.init(address=ray_address, ignore_reinit_error=True)
     else:
@@ -502,7 +502,7 @@ def run_debug_rollout_only(args: Any) -> None:
 
     pgs = create_placement_groups_from_args(args)
     rollout_pg_result = pgs.get("rollout")
-    if rollout_pg_result is None and not bool(getattr(args, "training_actor_direct_sampling", False)):
+    if rollout_pg_result is None and not bool(getattr(args.sampling, "training_actor_direct_sampling", False)):
         raise ValueError(
             "debug_mode=rollout_only requires rollout placement resources."
         )
@@ -514,13 +514,13 @@ def run_debug_rollout_only(args: Any) -> None:
     )
     logger.info(
         "Starting rollout_only debug run: num_rollouts=%s save_dir=%s",
-        args.debug_num_rollouts,
-        args.debug_save_dir,
+        args.debug_cfg.debug_num_rollouts,
+        args.debug_cfg.debug_save_dir,
     )
 
-    start_rollout_id = int(getattr(args, "start_rollout_id", 0))
+    start_rollout_id = int(getattr(args.rollout, "start_rollout_id", 0))
     try:
-        for offset in range(int(args.debug_num_rollouts)):
+        for offset in range(int(args.debug_cfg.debug_num_rollouts)):
             rollout_id = start_rollout_id + offset
             payload = ray.get(rollout_manager.build_training_debug_payload.remote(rollout_id))
             save_rollout_debug_payload(
@@ -544,7 +544,7 @@ def run_debug_train_only(args: Any) -> None:
     set_seed(args.seed)
     _maybe_init_ray(args)
 
-    if not getattr(args, "debug_load_path", None):
+    if not getattr(args.debug_cfg, "debug_load_path", None):
         raise ValueError("debug_mode=train_only requires --debug-load-path.")
 
     pgs = create_placement_groups_from_args(args)
@@ -555,8 +555,8 @@ def run_debug_train_only(args: Any) -> None:
     training_group = create_training_actor_group(args, training_pg_result)
     try:
         batch, payload_meta = load_debug_training_batch(
-            load_path=str(args.debug_load_path),
-            subsample=int(getattr(args, "debug_subsample", 0)),
+            load_path=str(args.debug_cfg.debug_load_path),
+            subsample=int(getattr(args.debug_cfg, "debug_subsample", 0)),
         )
         consumer_spec = training_group.get_buffer_consumer_spec()
         train_data_ref = put_training_data_for_consumer(
@@ -564,26 +564,26 @@ def run_debug_train_only(args: Any) -> None:
             consumer_spec=consumer_spec,
             default_dp_size=int(getattr(training_group, "num_actors", 1)),
         )
-        rollout_id = int(payload_meta.get("rollout_id", getattr(args, "start_rollout_id", 0)))
+        rollout_id = int(payload_meta.get("rollout_id", getattr(args.rollout, "start_rollout_id", 0)))
         metrics = training_group.train(rollout_id, train_data_ref)
         avg_loss = 0.0
         if metrics:
             avg_loss = sum(float(m.get("loss", 0.0)) for m in metrics) / float(len(metrics))
         logger.info(
             "train_only debug replay complete: source=%s rollout_id=%s batch_size=%s avg_loss=%.6f",
-            payload_meta.get("source_path", args.debug_load_path),
+            payload_meta.get("source_path", args.debug_cfg.debug_load_path),
             rollout_id,
             int(batch.batch_size),
             avg_loss,
         )
 
-        out_dir = Path(str(getattr(args, "debug_save_dir", "outputs/debug"))) / "train_only"
+        out_dir = Path(str(getattr(args.debug_cfg, "debug_save_dir", "outputs/debug"))) / "train_only"
         _ensure_dir(out_dir)
         with (out_dir / "metrics.json").open("w", encoding="utf-8") as f:
             json.dump(
                 {
                     "created_at_utc": _now_utc_iso(),
-                    "source_path": payload_meta.get("source_path", str(args.debug_load_path)),
+                    "source_path": payload_meta.get("source_path", str(args.debug_cfg.debug_load_path)),
                     "rollout_id": rollout_id,
                     "batch_size": int(batch.batch_size),
                     "avg_loss": float(avg_loss),
@@ -651,7 +651,7 @@ def run_debug_interactive(args: Any) -> None:
 
     pgs = create_placement_groups_from_args(args)
     rollout_pg_result = pgs.get("rollout")
-    if rollout_pg_result is None and not bool(getattr(args, "training_actor_direct_sampling", False)):
+    if rollout_pg_result is None and not bool(getattr(args.sampling, "training_actor_direct_sampling", False)):
         raise ValueError(
             "debug_mode=interactive requires rollout placement resources."
         )

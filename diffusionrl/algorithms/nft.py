@@ -84,12 +84,12 @@ class NFTAlgorithm(BaseAlgorithm):
                 "adv_clip_max": 5.0,
                 "adv_mode": "raw",
                 "use_adaptive_weight": True,
-                "shift": getattr(args, "shift", 3.0),
+                "shift": getattr(args.sampling, "shift", 3.0),
                 "ema_decay": 0.001,
-                "use_per_prompt_tracker": getattr(args, "use_per_prompt_stat_tracker", False),
-                "per_prompt_buffer_size": getattr(args, "per_prompt_buffer_size", 16),
-                "per_prompt_min_count": getattr(args, "per_prompt_min_count", 2),
-                "use_global_std": getattr(args, "use_global_std", False),
+                "use_per_prompt_tracker": getattr(args.algorithm, "use_per_prompt_stat_tracker", False),
+                "per_prompt_buffer_size": getattr(args.algorithm, "per_prompt_buffer_size", 16),
+                "per_prompt_min_count": getattr(args.algorithm, "per_prompt_min_count", 2),
+                "use_global_std": getattr(args.algorithm, "use_global_std", False),
             }
         )
         kwargs.update(cls._algorithm_kwargs_from_args(args))

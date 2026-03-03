@@ -8,7 +8,6 @@ This decouples actors from the TrainingArguments structure.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 from typing import Any, Dict, List, Optional
 
 
@@ -122,9 +121,12 @@ def build_sampling_config(args) -> Dict[str, Any]:
 
 
 def _resolve_engine_kwargs(sc) -> Dict[str, Any]:
-    engine_kwargs = getattr(sc, "engine_kwargs", {})
+    engine_kwargs = sc.engine_kwargs
     if not isinstance(engine_kwargs, dict):
-        return {}
+        raise ValueError(
+            "sampling.engine_kwargs must be a dict after normalization, "
+            f"got: {type(engine_kwargs).__name__}"
+        )
     return dict(engine_kwargs)
 
 
@@ -152,9 +154,7 @@ def build_rollout_engine_config(
         merged_engine_kwargs.setdefault("text_encoder_path", model_config["text_encoder_path"])
     # Wire top-level fps into engine_kwargs so SGLang engine can consume it
     # without requiring users to pass it through --engine-kwargs JSON.
-    fps = getattr(args, "fps", None)
-    if fps is not None:
-        merged_engine_kwargs.setdefault("fps", int(fps))
+    merged_engine_kwargs.setdefault("fps", int(args.fps))
 
     return {
         "sampler_engine_type": sampler_engine_type,
@@ -202,14 +202,21 @@ def _build_scheduler_config(args, *, total_steps: int) -> Dict[str, Any]:
 def _build_loss_config(args) -> Dict[str, Any]:
     ac = args.algorithm  # AlgorithmConfig
     sc = args.sampling   # SamplingConfig
-    loss_kwargs = _parse_json_dict(getattr(ac, "loss_kwargs_json", ""))
-    algorithm_kwargs = _parse_json_dict(getattr(ac, "algorithm_kwargs_json", ""))
+    loss_kwargs = _require_normalized_kwargs_dict(
+        ac.loss_kwargs,
+        field_name="algorithm.loss_kwargs",
+    )
+    algorithm_kwargs = _require_normalized_kwargs_dict(
+        ac.algorithm_kwargs,
+        field_name="algorithm.algorithm_kwargs",
+    )
 
-    # Auto-resolve loss_path from loss_type if not explicitly set
-    loss_path = str(ac.loss_path) if ac.loss_path else None
+    loss_path = str(ac.loss_path or "").strip()
     if not loss_path:
-        from diffusionrl.losses import DEFAULT_LOSS_PATHS
-        loss_path = DEFAULT_LOSS_PATHS.get(str(ac.loss_type))
+        raise ValueError(
+            "algorithm.loss_path must be resolved before build_domain_args(). "
+            "validate_args() should set this from loss_type or explicit config."
+        )
 
     return {
         "algorithm_path": str(ac.algorithm_path),
@@ -257,18 +264,18 @@ def _build_fsdp_config(args) -> Dict[str, Any]:
 def _build_veomni_config(args, *, dp_size: Optional[int] = None) -> Dict[str, Any]:
     tc = args.training  # TrainingConfig
     # Keep VeOmni dp topology aligned with the actual training actor group size.
-    world_size = int(dp_size) if dp_size is not None else int(args.training_num_nodes) * int(args.training_num_gpus_per_node)
+    world_size = int(dp_size) if dp_size is not None else int(args.ray.training_num_nodes) * int(args.ray.training_num_gpus_per_node)
     enable_mixed_precision = bool(world_size > 1)
     return {
         # VeOmni path is FSDP2-focused. Keep defaults explicit and let users
-        # override with train_backend_kwargs_json.
+        # override with train_backend_kwargs.
         "data_parallel_mode": "fsdp2",
         "dp_size": int(world_size),
         "dp_replicate_size": 1,
         "dp_shard_size": int(world_size),
-        "tp_size": int(getattr(args, "tp_size", 1)),
+        "tp_size": int(args.sampling.tp_size),
         "pp_size": 1,
-        "sp_size": int(getattr(args, "sp_size", 1)),
+        "sp_size": int(args.sampling.sp_size),
         "ep_size": 1,
         "enable_full_shard": True,
         "enable_reshard_after_forward": True,
@@ -280,27 +287,28 @@ def _build_veomni_config(args, *, dp_size: Optional[int] = None) -> Dict[str, An
     }
 
 
-def _parse_json_dict(raw: Any) -> Dict[str, Any]:
-    if raw is None:
-        return {}
+def _require_normalized_kwargs_dict(raw: Any, *, field_name: str) -> Dict[str, Any]:
     if isinstance(raw, dict):
         return dict(raw)
-    text = str(raw).strip()
-    if not text:
-        return {}
-    try:
-        parsed = json.loads(text)
-    except Exception:
-        return {}
-    if isinstance(parsed, dict):
-        return parsed
-    return {}
+    raise ValueError(
+        f"{field_name} must be a dict after normalize/validate, "
+        f"got: {type(raw).__name__}"
+    )
 
 
 def _build_train_backend_config(args, *, dp_size: Optional[int] = None) -> Dict[str, Any]:
     tc = args.training  # TrainingConfig
-    backend_name = str(getattr(tc, "train_backend", "fsdp") or "fsdp").strip().lower()
-    backend_kwargs = _parse_json_dict(getattr(tc, "train_backend_kwargs_json", ""))
+    backend_name = str(tc.train_backend or "").strip().lower()
+    if not backend_name:
+        raise ValueError(
+            "training.train_backend is empty after normalization; "
+            "expected a non-empty backend name."
+        )
+
+    backend_kwargs = _require_normalized_kwargs_dict(
+        tc.train_backend_kwargs,
+        field_name="training.train_backend_kwargs",
+    )
 
     if backend_name == "fsdp":
         merged = _build_fsdp_config(args)
@@ -331,8 +339,68 @@ def build_training_actor_init_config(*, args, dp_size: int) -> Dict[str, Any]:
         "loss_config": _build_loss_config(args),
         "training_config": _build_training_runtime_config(args, dp_size=dp_size),
         "sampling_config": build_sampling_config(args),
-        "train_backend": backend_config["name"],
-        "train_backend_path": backend_config["backend_path"],
-        "train_backend_kwargs": backend_config["kwargs"],
         "train_backend_config": backend_config,
     }
+
+
+def _require_dict_section(config: Dict[str, Any], *, name: str) -> Dict[str, Any]:
+    value = config.get(name)
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be a dict, got: {type(value).__name__}")
+    return value
+
+
+def validate_rollout_engine_config(config: Dict[str, Any]) -> None:
+    """Minimal pre-dispatch validation for rollout actor config."""
+    if not isinstance(config, dict):
+        raise ValueError(f"rollout_engine_config must be a dict, got: {type(config).__name__}")
+    if not isinstance(config.get("engine_kwargs"), dict):
+        raise ValueError(
+            "rollout_engine_config.engine_kwargs must be a dict, "
+            f"got: {type(config.get('engine_kwargs')).__name__}"
+        )
+
+
+def validate_training_actor_init_config(config: Dict[str, Any]) -> None:
+    """Minimal pre-dispatch validation for training actor config."""
+    if not isinstance(config, dict):
+        raise ValueError(f"training_actor_init_config must be a dict, got: {type(config).__name__}")
+
+    for section in (
+        "model_config",
+        "optimizer_config",
+        "scheduler_config",
+        "loss_config",
+        "training_config",
+        "sampling_config",
+        "train_backend_config",
+    ):
+        _require_dict_section(config, name=section)
+
+    loss_config = config["loss_config"]
+    if not isinstance(loss_config.get("loss_kwargs"), dict):
+        raise ValueError(
+            "loss_config.loss_kwargs must be a dict, "
+            f"got: {type(loss_config.get('loss_kwargs')).__name__}"
+        )
+
+    backend_config = config["train_backend_config"]
+    if not isinstance(backend_config.get("kwargs"), dict):
+        raise ValueError(
+            "train_backend_config.kwargs must be a dict, "
+            f"got: {type(backend_config.get('kwargs')).__name__}"
+        )
+    backend_name = str(backend_config.get("name", "") or "").strip().lower()
+    if not backend_name:
+        raise ValueError("train_backend_config.name is required.")
+
+
+__all__ = [
+    "RewardSchema",
+    "build_model_config",
+    "build_sampling_config",
+    "build_rollout_engine_config",
+    "build_training_actor_init_config",
+    "validate_rollout_engine_config",
+    "validate_training_actor_init_config",
+]

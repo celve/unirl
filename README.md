@@ -108,7 +108,7 @@ For real datasets, symlink into `data/datasets/` and override `DATA_PATH`:
 
 ```bash
 DATA_PATH=data/datasets/hpdv2/train.json \
-  bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh --num-rollout 1
+  bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh --rollout.num-rollout 1
 ```
 
 Default local paths are resolved against the repository root:
@@ -123,7 +123,7 @@ For external data / model directories, pass absolute paths directly (or create s
 ```bash
 DATA_PATH=/path/to/external/data/train.json \
 PRETRAINED_MODEL=/path/to/external/shared_models/flux \
-bash scripts/train_dancegrpo_flux_train_actor_sampling.sh --num-rollout 1
+bash scripts/train_dancegrpo_flux_train_actor_sampling.sh --rollout.num-rollout 1
 ```
 
 ### Training
@@ -149,31 +149,35 @@ Or use the CLI directly:
 
 ```bash
 python -m diffusionrl.train \
-    --pretrained-model-saved-path black-forest-labs/FLUX.1-dev \
-    --model-type flux \
-    --sampler-path diffusionrl.samplers.fsdp.flux_sampler.FluxSampler \
-    --algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward-path diffusionrl.reward.local.LocalRewardWorker \
-    --reward-model-name hpsv2 \
+    --model.pretrained-model-saved-path black-forest-labs/FLUX.1-dev \
+    --model.model-type flux \
+    --sampling.sampler-path diffusionrl.samplers.fsdp.flux_sampler.FluxSampler \
+    --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-model-name hpsv2 \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path data/samples/prompts_toy.json \
-    --sde-type flux_dance \
-    --eta 0.3 \
-    --num-inference-steps 25 \
-    --use-lora true \
-    --lora-rank 16 \
-    --num-rollout 300 \
-    --output-dir outputs/my_experiment
+    --sampling.sde-type flux_dance \
+    --sampling.eta 0.3 \
+    --sampling.num-inference-steps 25 \
+    --training.use-lora true \
+    --training.lora-rank 16 \
+    --rollout.num-rollout 300 \
+    --rollout.output-dir outputs/my_experiment
 ```
 
 You can also start from YAML configs:
 
 ```bash
 python -m diffusionrl.train --config scripts/minimal_flux.yaml
-python -m diffusionrl.train --config scripts/minimal_hunyuan.yaml --num-rollout 100
+python -m diffusionrl.train --config scripts/minimal_hunyuan.yaml --rollout.num-rollout 100
 ```
 
-`--config` expects a flat key/value YAML mapping; CLI options always override YAML.
+`--config` supports grouped YAML mappings (for example `algorithm: { ... }`, `training: { ... }`).
+Grouped YAML is now the only supported style for grouped fields.
+Grouped CLI options also use dotted names (for example `--training.train-backend`).
+CLI options always override YAML. Unknown YAML keys fail fast by default; use
+`--allow-unknown-config-keys` only when you intentionally want to ignore unknown keys.
 
 ### Training Backend Selection
 
@@ -181,21 +185,21 @@ python -m diffusionrl.train --config scripts/minimal_hunyuan.yaml --num-rollout 
 
 - `fsdp`: default backend, implemented as **FSDP2** (`fully_shard` path).
 - `veomni`: VeOmni native backend with FSDP2-focused data parallel mode (`data_parallel_mode=fsdp2`).
-- `megatron`: interface scaffold for future integration (launcher/topology hooks are present, runtime path is not complete yet; requires a Megatron-specific actor class via `train_backend_kwargs_json.actor_class_path`).
+- `megatron`: interface scaffold for future integration (launcher/topology hooks are present, runtime path is not complete yet; requires a Megatron-specific actor class via `train_backend_kwargs.actor_class_path`).
 
 Example: default FSDP2 training
 
 ```bash
 python -m diffusionrl.train \
-  --train-backend fsdp
+  --training.train-backend fsdp
 ```
 
 Example: VeOmni-compatible FSDP2 mode
 
 ```bash
 python -m diffusionrl.train \
-  --train-backend veomni \
-  --train-backend-kwargs-json '{"data_parallel_mode":"fsdp2"}'
+  --training.train-backend veomni \
+  --training.train-backend-kwargs '{"data_parallel_mode":"fsdp2"}'
 ```
 
 Notes:
@@ -229,12 +233,12 @@ See [scripts/README.md](scripts/README.md) for exact per-script defaults.
 
 Arguments in DiffusionRL are organized into the following categories:
 
-1.  **Model arguments**: `--model-type`, `--pretrained-model-saved-path`, `--use-lora`, `--lora-rank`, `--lora-alpha`, etc.
-2.  **Sampling arguments**: `--sde-type`, `--eta`, `--num-inference-steps`, `--guidance-scale`, `--shift`, `--timestep-fraction`, etc.
-3.  **Algorithm arguments**: `--algorithm-path`, `--clip-range`, `--use-kl-penalty`, `--advantage-type`, etc.
-4.  **Reward arguments**: `--reward-path`, `--reward-model-name`, `--reward-batch-size`, etc.
-5.  **Training arguments**: `--learning-rate`, `--gradient-accumulation-steps`, `--max-grad-norm`, `--num-inner-epochs`, etc.
-6.  **Runtime arguments**: `--colocate-rollout-training`, `--rollout-num-gpus-per-node`, `--training-num-gpus-per-node`, `--placement-strategy`, etc.
+1.  **Model arguments**: `--model.model-type`, `--model.pretrained-model-saved-path`, `--training.use-lora`, `--training.lora-rank`, `--training.lora-alpha`, etc.
+2.  **Sampling arguments**: `--sampling.sde-type`, `--sampling.eta`, `--sampling.num-inference-steps`, `--sampling.guidance-scale`, `--sampling.shift`, `--sampling.timestep-fraction`, etc.
+3.  **Algorithm arguments**: `--algorithm.algorithm-path`, `--algorithm.clip-range`, `--algorithm.use-kl-penalty`, `--algorithm.advantage-type`, etc.
+4.  **Reward arguments**: `--reward.reward-path`, `--reward.reward-model-name`, `--reward.reward-batch-size`, etc.
+5.  **Training arguments**: `--training.learning-rate`, `--training.gradient-accumulation-steps`, `--training.max-grad-norm`, `--training.num-inner-epochs`, etc.
+6.  **Runtime arguments**: `--ray.colocate-rollout-training`, `--ray.rollout-num-gpus-per-node`, `--ray.training-num-gpus-per-node`, `--ray.placement-strategy`, etc.
 
 For the full argument reference, please refer to: [diffusionrl/config/arguments.py](diffusionrl/config/arguments.py)
 
@@ -298,7 +302,7 @@ class MyAlgorithm(BaseAlgorithm):
         return SamplingRequirements(
             requires_trajectory=True,
             requires_log_prob=True,
-            sde_ratio=1.0,
+            extras={"sde_ratio": 1.0},
         )
 
     def compute_advantages(self, rewards):
@@ -306,9 +310,9 @@ class MyAlgorithm(BaseAlgorithm):
         return super().compute_advantages(rewards)
 ```
 
-Then pass it via `--algorithm-path your_module.MyAlgorithm`.
+Then pass it via `--algorithm.algorithm-path your_module.MyAlgorithm`.
 If you need a custom training objective, implement a loss plugin and pass
-`--loss-type custom --loss-path your_module.MyLoss`.
+`--algorithm.loss-type custom --algorithm.loss-path your_module.MyLoss`.
 See the full minimal template: [docs/Algorithm_Minimal_Template.md](docs/Algorithm_Minimal_Template.md)
 
 ### Plugin Templates (diffusionrl_plugins)
@@ -325,7 +329,7 @@ points:
 
 Notes:
 - There is no plugin auto-registration; pass full dotpaths via CLI args.
-- `--model-type <name>` short-name resolution works only when the model class
+- `--model.model-type <name>` short-name resolution works only when the model class
   declares `declared_model_type()`, `default_sampler_path()`, and
   `default_sampler_engine()`.
 
@@ -342,7 +346,7 @@ class MyRewardWorker(BaseRewardWorker):
         return rewards
 ```
 
-Then pass it via `--reward-path your_module.MyRewardWorker`.
+Then pass it via `--reward.reward-path your_module.MyRewardWorker`.
 
 ### Running Tests
 

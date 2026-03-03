@@ -17,6 +17,7 @@ import ray
 import torch
 
 from diffusionrl.config.arguments import is_training_actor_direct_sampling_mode
+from diffusionrl.config.validation import resolve_sampling_requirements
 from diffusionrl.runtime.pipeline.rollout_pipeline import compute_advantages as _compute_advantages_stage
 from diffusionrl.runtime.pipeline.rollout_pipeline import compute_rewards as _compute_rewards_stage
 from diffusionrl.runtime.pipeline.rollout_pipeline import (
@@ -304,6 +305,7 @@ class RolloutManager:
         # Stats
         self._total_samples_generated = 0
         self._current_step = 0
+        self._sampling_requirements = None
 
     def init(self) -> None:
         """
@@ -315,22 +317,34 @@ class RolloutManager:
         self._validate_batch_shape()
 
         # 1. Load algorithm
-        algorithm_cls = load_function(self.args.algorithm_path)
+        algorithm_cls = load_function(self.args.algorithm.algorithm_path)
         if not hasattr(algorithm_cls, "from_args"):
             raise TypeError(
-                f"Algorithm {self.args.algorithm_path} must implement classmethod from_args(args)."
+                f"Algorithm {self.args.algorithm.algorithm_path} must implement classmethod from_args(args)."
             )
         self.algorithm = algorithm_cls.from_args(self.args)
-        logger.info(f"Algorithm loaded: {self.args.algorithm_path} (clip_max={self.args.advantage_clip_max}, sde_ratio={getattr(self.args, 'sde_ratio', 'N/A')})")
-        use_per_prompt_tracker = getattr(self.args, 'use_per_prompt_stat_tracker', False)
-        if getattr(self.args, "advantage_type", "group") == "per_prompt" and not use_per_prompt_tracker:
+        self._sampling_requirements = self._resolve_sampling_requirements()
+        logger.info(
+            f"Algorithm loaded: {self.args.algorithm.algorithm_path} "
+            f"(clip_max={self.args.algorithm.advantage_clip_max}, sde_ratio={getattr(self.args.sampling, 'sde_ratio', 'N/A')})"
+        )
+        logger.info(
+            "Resolved sampling contract: requires_trajectory=%s requires_log_prob=%s "
+            "requires_embeddings=%s extras=%s",
+            bool(self._sampling_requirements.requires_trajectory),
+            bool(self._sampling_requirements.requires_log_prob),
+            bool(self._sampling_requirements.requires_embeddings),
+            dict(getattr(self._sampling_requirements, "extras", {}) or {}),
+        )
+        use_per_prompt_tracker = getattr(self.args.algorithm, "use_per_prompt_stat_tracker", False)
+        if getattr(self.args.algorithm, "advantage_type", "group") == "per_prompt" and not use_per_prompt_tracker:
             logger.warning("advantage_type=per_prompt but use_per_prompt_stat_tracker=False; advantages will fall back to group normalization.")
 
         # 2. Load timestep scheduler based on algorithm requirements
         self._init_timestep_scheduler()
 
         # Optional custom rollout pipeline (slime-style pluggable generate function)
-        rollout_pipeline_path = getattr(self.args, "rollout_pipeline_path", None)
+        rollout_pipeline_path = getattr(self.args.rollout, "rollout_pipeline_path", None)
         if rollout_pipeline_path:
             self.rollout_pipeline_fn = load_function(rollout_pipeline_path)
             logger.info("Custom rollout pipeline loaded: %s", rollout_pipeline_path)
@@ -368,13 +382,15 @@ class RolloutManager:
         """Initialize timestep scheduler based on algorithm requirements and config."""
         from diffusionrl.samplers.schedulers import get_scheduler
 
-        # Get algorithm's sampling requirements
-        requirements = self.algorithm.get_sampling_requirements()
+        requirements = self._sampling_requirements
+        if requirements is None:
+            requirements = self._resolve_sampling_requirements()
+            self._sampling_requirements = requirements
 
         # Get scheduler config from args
-        scheduler_type = getattr(self.args, 'timestep_strategy', 'all')
-        num_timesteps = self.args.num_inference_steps
-        timestep_fraction = getattr(self.args, 'timestep_fraction', 1.0)
+        scheduler_type = getattr(self.args.algorithm.window, "timestep_strategy", "all")
+        num_timesteps = self.args.sampling.num_inference_steps
+        timestep_fraction = getattr(self.args.sampling, "timestep_fraction", 1.0)
 
         # Check if we should use sde_ratio to determine scheduler
         # If sde_ratio < 1.0 and no explicit strategy, infer window scheduler
@@ -389,7 +405,7 @@ class RolloutManager:
         if scheduler_type == 'window':
             # MixGRPO window scheduler
             # Use explicit group_size from args if provided, otherwise from sde_ratio
-            explicit_group_size = getattr(self.args, 'window_group_size', None)
+            explicit_group_size = getattr(self.args.algorithm.window, "window_group_size", None)
             if explicit_group_size is None and requirements.sde_ratio < 1.0:
                 group_size = max(1, int(num_timesteps * requirements.sde_ratio))
             else:
@@ -399,14 +415,14 @@ class RolloutManager:
                 scheduler_type='window',
                 num_timesteps=num_timesteps,
                 timestep_fraction=timestep_fraction,
-                strategy=getattr(self.args, 'window_strategy', 'progressive'),
+                strategy=getattr(self.args.algorithm.window, "window_strategy", "progressive"),
                 group_size=group_size,
-                iters_per_group=getattr(self.args, 'window_iters_per_group', 25),
-                max_iters_per_group=getattr(self.args, 'window_max_iters_per_group', None),
-                min_iters_per_group=getattr(self.args, 'window_min_iters_per_group', None),
-                overlap=getattr(self.args, 'window_overlap', False),
-                overlap_step=getattr(self.args, 'window_overlap_step', 1),
-                roll_back=getattr(self.args, 'window_roll_back', False),
+                iters_per_group=getattr(self.args.algorithm.window, "window_iters_per_group", 25),
+                max_iters_per_group=getattr(self.args.algorithm.window, "window_max_iters_per_group", None),
+                min_iters_per_group=getattr(self.args.algorithm.window, "window_min_iters_per_group", None),
+                overlap=getattr(self.args.algorithm.window, "window_overlap", False),
+                overlap_step=getattr(self.args.algorithm.window, "window_overlap_step", 1),
+                roll_back=getattr(self.args.algorithm.window, "window_roll_back", False),
             )
             logger.info(f"Window scheduler initialized: group_size={group_size}")
         else:
@@ -434,6 +450,14 @@ class RolloutManager:
         self._owns_rollout_actors = True
         logger.info("Rollout actors created via create_rollout_actor_group")
 
+    def _resolve_sampling_requirements(self):
+        """Resolve final sampling contract (loss requires_* + algorithm extras)."""
+        algorithm_requirements = self.algorithm.get_sampling_requirements()
+        return resolve_sampling_requirements(
+            self.args,
+            algorithm_requirements=algorithm_requirements,
+        )
+
     def attach_sampling_actors(self, actor_group) -> None:
         """Attach external sampling actors (e.g., TrainingActorGroup)."""
         self.external_sampling_actors = actor_group
@@ -451,7 +475,10 @@ class RolloutManager:
         prompts = batch.get("prompts", [])
 
         # 2. Get algorithm requirements to determine pipeline
-        requirements = self.algorithm.get_sampling_requirements()
+        requirements = self._sampling_requirements
+        if requirements is None:
+            requirements = self._resolve_sampling_requirements()
+            self._sampling_requirements = requirements
         actor_group = self.external_sampling_actors or self.rollout_actors
 
         train_data: Any
@@ -506,7 +533,7 @@ class RolloutManager:
             self.timestep_scheduler.update(self._current_step)
 
     def _debug_log_tensor_stats(self, label: str, value: Optional[torch.Tensor]) -> None:
-        if not bool(getattr(self.args, "debug_print_tensor_stats", True)):
+        if not bool(getattr(self.args.debug_cfg, "debug_print_tensor_stats", True)):
             return
         if not torch.is_tensor(value):
             return
@@ -590,7 +617,7 @@ class RolloutManager:
             "[debug] rollout=%s stage=sampling prompts=%s num_samples_per_prompt=%s",
             rollout_id,
             len(prompts),
-            int(getattr(self.args, "num_samples_per_prompt", 1)),
+            int(getattr(self.args.algorithm, "num_samples_per_prompt", 1)),
         )
         sampler_outputs, train_prompts, base_prompts = self._sample(
             actor_group=actor_group,
@@ -659,7 +686,7 @@ class RolloutManager:
 
         trace_payload = {
             "rollout_id": int(rollout_id),
-            "debug_mode": str(getattr(self.args, "debug_mode", "none")),
+            "debug_mode": str(getattr(self.args.debug_cfg, "debug_mode", "none")),
             "prompts": list(prompts),
             "train_prompts": list(train_prompts if train_prompts else prompts),
             "base_prompts": list(base_prompts if base_prompts else prompts),
@@ -680,7 +707,10 @@ class RolloutManager:
 
         batch = self._prepare_batch(data_source=self.data_source)
         prompts = batch.get("prompts", [])
-        requirements = self.algorithm.get_sampling_requirements()
+        requirements = self._sampling_requirements
+        if requirements is None:
+            requirements = self._resolve_sampling_requirements()
+            self._sampling_requirements = requirements
         actor_group = self.external_sampling_actors or self.rollout_actors
 
         if self.rollout_pipeline_fn is not None:
@@ -703,7 +733,7 @@ class RolloutManager:
                 )
             payload = {
                 "rollout_id": int(rollout_id),
-                "debug_mode": str(getattr(self.args, "debug_mode", "none")),
+                "debug_mode": str(getattr(self.args.debug_cfg, "debug_mode", "none")),
                 "prompts": list(prompts),
                 "train_prompts": list(prompts),
                 "base_prompts": list(prompts),
@@ -714,7 +744,7 @@ class RolloutManager:
                 "advantages": getattr(train_data, "advantages", None),
                 "reward_components": {},
                 "training_batch": train_data,
-                "custom_rollout_pipeline": str(getattr(self.args, "rollout_pipeline_path", "")),
+                "custom_rollout_pipeline": str(getattr(self.args.rollout, "rollout_pipeline_path", "")),
             }
         else:
             train_data, payload = self._generate_training_data_debug(
@@ -750,7 +780,10 @@ class RolloutManager:
 
         batch = self._prepare_batch(data_source=self.data_source)
         prompts = batch.get("prompts", [])
-        requirements = self.algorithm.get_sampling_requirements()
+        requirements = self._sampling_requirements
+        if requirements is None:
+            requirements = self._resolve_sampling_requirements()
+            self._sampling_requirements = requirements
         actor_group = self.external_sampling_actors or self.rollout_actors
 
         sde_indices = self._resolve_rollout_sde_indices()
@@ -833,8 +866,8 @@ class RolloutManager:
 
         advantages = _compute_advantages_stage(
             algorithm=self.algorithm,
-            num_samples_per_prompt=int(getattr(self.args, "num_samples_per_prompt", 1)),
-            reward_mix_mode=str(getattr(self.args, "reward_mix_mode", "reward_aggr")),
+            num_samples_per_prompt=int(getattr(self.args.algorithm, "num_samples_per_prompt", 1)),
+            reward_mix_mode=str(getattr(self.args.reward, "reward_mix_mode", "reward_aggr")),
             rewards=cache["rewards"],
             prompts=cache["base_prompts"],
             reward_components=cache.get("reward_components", {}),
@@ -906,12 +939,12 @@ class RolloutManager:
     def _validate_batch_shape(self) -> None:
         """Validate prompts_per_batch * k against training batch/world_size."""
         try:
-            prompts_per_batch = getattr(self.args, "prompts_per_batch", 1)
-            k = getattr(self.args, "num_samples_per_prompt", 1)
+            prompts_per_batch = getattr(self.args.algorithm, "prompts_per_batch", 1)
+            k = getattr(self.args.algorithm, "num_samples_per_prompt", 1)
             gen_batch = prompts_per_batch * k
 
-            train_world_size = self.args.training_num_nodes * self.args.training_num_gpus_per_node
-            train_bsz = self.args.batch_size
+            train_world_size = self.args.ray.training_num_nodes * self.args.ray.training_num_gpus_per_node
+            train_bsz = self.args.training.batch_size
             denom = train_world_size * train_bsz if train_world_size > 0 else train_bsz
 
             if denom > 0 and gen_batch % denom != 0:
@@ -1213,7 +1246,7 @@ class RolloutManager:
     def _prepare_batch(self, *, data_source: Any) -> Dict[str, Any]:
         """Fetch one prompt batch from data source."""
         if data_source is not None:
-            batch_size = getattr(self.args, "prompts_per_batch", None) or self.args.batch_size
+            batch_size = getattr(self.args.algorithm, "prompts_per_batch", None) or self.args.training.batch_size
             samples = data_source.get_samples(batch_size)
             if isinstance(samples, dict):
                 return samples
@@ -1228,7 +1261,7 @@ class RolloutManager:
             "A mountain landscape with snow",
             "A futuristic city at night",
         ]
-        batch_size = getattr(self.args, "prompts_per_batch", None) or self.args.batch_size
+        batch_size = getattr(self.args.algorithm, "prompts_per_batch", None) or self.args.training.batch_size
         return {"prompts": default_prompts[:batch_size]}
 
     def _sample(
@@ -1270,25 +1303,25 @@ class RolloutManager:
         num_samples_per_prompt = int(
             overrides.pop(
                 "num_samples_per_prompt",
-                getattr(self.args, "num_samples_per_prompt", 1),
+                getattr(self.args.algorithm, "num_samples_per_prompt", 1),
             )
         )
         init_same_noise = bool(
             overrides.pop(
                 "init_same_noise",
-                getattr(self.args, "init_same_noise", False),
+                getattr(self.args.sampling, "init_same_noise", False),
             )
         )
         num_inference_steps = int(
             overrides.pop(
                 "num_inference_steps",
-                getattr(self.args, "num_inference_steps", 50),
+                getattr(self.args.sampling, "num_inference_steps", 50),
             )
         )
         guidance_scale = float(
             overrides.pop(
                 "guidance_scale",
-                getattr(self.args, "guidance_scale", 7.5),
+                getattr(self.args.sampling, "guidance_scale", 7.5),
             )
         )
         height = int(overrides.pop("height", getattr(self.args, "height", 256)))
@@ -1400,8 +1433,8 @@ class RolloutManager:
 
         advantages = _compute_advantages_stage(
             algorithm=algorithm,
-            num_samples_per_prompt=int(getattr(self.args, "num_samples_per_prompt", 1)),
-            reward_mix_mode=str(getattr(self.args, "reward_mix_mode", "reward_aggr")),
+            num_samples_per_prompt=int(getattr(self.args.algorithm, "num_samples_per_prompt", 1)),
+            reward_mix_mode=str(getattr(self.args.reward, "reward_mix_mode", "reward_aggr")),
             rewards=rewards,
             prompts=prompts,
             reward_components=reward_components,
@@ -1423,12 +1456,12 @@ class RolloutManager:
         num_samples_per_prompt = int(
             num_samples_per_prompt_override
             if num_samples_per_prompt_override is not None
-            else getattr(self.args, "num_samples_per_prompt", 1)
+            else getattr(self.args.algorithm, "num_samples_per_prompt", 1)
         )
         reward_path = str(
             reward_path_override
             if reward_path_override is not None
-            else getattr(self.args, "reward_path", "")
+            else getattr(self.args.reward, "reward_path", "")
         )
 
         if reward_service is None:
@@ -1454,7 +1487,7 @@ class RolloutManager:
     ) -> TrainingBatch:
         """Delegate training-batch assembly to algorithm strategy."""
         return algorithm.assemble_training_batch(
-            num_inference_steps=int(self.args.num_inference_steps),
+            num_inference_steps=int(self.args.sampling.num_inference_steps),
             sampler_outputs=sampler_outputs,
             rewards=rewards,
             advantages=advantages,
@@ -1472,20 +1505,20 @@ class RolloutManager:
     ) -> Dict[str, Any]:
         """Run evaluation sampling and reward aggregation."""
         if data_source is not None and hasattr(data_source, "get_eval_samples"):
-            prompts = data_source.get_eval_samples(self.args.eval_batch_size)
+            prompts = data_source.get_eval_samples(self.args.rollout.eval_batch_size)
         else:
-            prompts = self._prepare_batch(data_source=data_source).get("prompts", [])[: self.args.eval_batch_size]
+            prompts = self._prepare_batch(data_source=data_source).get("prompts", [])[: self.args.rollout.eval_batch_size]
 
         outputs = distributed_sample(
             actor_group=actor_group,
             batch={"prompts": prompts},
-            num_inference_steps=int(self.args.num_inference_steps),
-            guidance_scale=float(self.args.guidance_scale),
+            num_inference_steps=int(self.args.sampling.num_inference_steps),
+            guidance_scale=float(self.args.sampling.guidance_scale),
             height=int(self.args.height),
             width=int(self.args.width),
             num_frames=int(self.args.num_frames),
-            init_same_noise=bool(getattr(self.args, "init_same_noise", False)),
-            num_samples_per_prompt=int(getattr(self.args, "num_samples_per_prompt", 1)),
+            init_same_noise=bool(getattr(self.args.sampling, "init_same_noise", False)),
+            num_samples_per_prompt=int(getattr(self.args.algorithm, "num_samples_per_prompt", 1)),
             sde_indices=None,
         )
         rewards, _ = self._compute_rewards_only(
@@ -1664,14 +1697,14 @@ class RolloutManager:
 
     def get_num_rollout_per_epoch(self) -> int:
         """Get number of rollouts per epoch."""
-        if self.args.rollouts_per_epoch is not None:
-            return self.args.rollouts_per_epoch
+        if self.args.rollout.rollouts_per_epoch is not None:
+            return self.args.rollout.rollouts_per_epoch
 
         if self.data_source is not None and hasattr(self.data_source, "num_samples"):
             num_samples = int(self.data_source.num_samples)
             if num_samples > 0:
                 prompts_per_batch = int(
-                    getattr(self.args, "prompts_per_batch", 0) or self.args.batch_size
+                    getattr(self.args.algorithm, "prompts_per_batch", 0) or self.args.training.batch_size
                 )
                 prompts_per_batch = max(1, prompts_per_batch)
                 return max(1, num_samples // prompts_per_batch)
