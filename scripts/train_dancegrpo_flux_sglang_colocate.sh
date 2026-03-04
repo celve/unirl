@@ -28,7 +28,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ========== SGLang Configuration ==========
-export SGLANG_PYTHON_PATH="${SGLANG_PYTHON_PATH:-/home/aiops/wanghn/mmgrpo/sglang/python}"
+SGLANG_PYTHON_PATH="${SGLANG_PYTHON_PATH:-${REPO_ROOT}/../sglang/python}"
+if [ ! -d "${SGLANG_PYTHON_PATH}" ]; then
+    echo "ERROR: SGLANG_PYTHON_PATH not found: ${SGLANG_PYTHON_PATH}"
+    echo "Set it explicitly, e.g. export SGLANG_PYTHON_PATH=/path/to/sglang/python"
+    exit 1
+fi
+export SGLANG_PYTHON_PATH
 
 # ========== Default values ==========
 PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/flux.1-dev"}
