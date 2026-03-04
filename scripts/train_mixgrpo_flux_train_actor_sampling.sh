@@ -23,7 +23,7 @@
 # - This script uses LoRA (rank=64, alpha=128) for memory efficiency.
 # - Original MixGRPO does NOT use LoRA - it uses FSDP full fine-tuning.
 # - For fair comparison with original MixGRPO, you may need to:
-#   1. Disable LoRA (--use-lora false) and use more GPUs
+#   1. Disable LoRA (--training.use-lora false) and use more GPUs
 #   2. Or modify MixGRPO to use LoRA for comparison
 # - Using LoRA here enables running on fewer GPUs (8x A100-40GB).
 #
@@ -45,7 +45,7 @@
 #
 # Usage:
 #   bash train_mixgrpo_flux_train_actor_sampling.sh
-#   bash train_mixgrpo_flux_train_actor_sampling.sh --num-rollout 100 --batch-size 2
+#   bash train_mixgrpo_flux_train_actor_sampling.sh --rollout.num-rollout 100 --training.batch-size 2
 #
 # =============================================================================
 
@@ -56,7 +56,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 
 # Default values (can be overridden via command line)
-PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/flux"}
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/flux.1-dev"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/mixgrpo_flux_train_sampling"}
 DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/prompts_toy.json"}
 NUM_GPUS=${NUM_GPUS:-8}
@@ -73,61 +73,61 @@ PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( NUM_GPUS * BATCH_SIZE / NUM_SAMPLES_P
 NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
 
 python -m diffusionrl.train \
-    --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
-    --model-type flux \
-    --sampler-path diffusionrl.samplers.fsdp.flux_sampler.FluxSampler \
-    --algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
-    --reward-path diffusionrl.reward.local.LocalRewardWorker \
-    --reward-model-name ocr \
+    --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
+    --model.model-type flux \
+    --sampling.sampler-path diffusionrl.samplers.fsdp.flux_sampler.FluxSampler \
+    --algorithm.algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-model-name ocr \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
-    --sde-type flux_flow \
-    --eta 0.7 \
-    --shift 3.0 \
-    --num-inference-steps 25 \
-    --guidance-scale 3.5 \
+    --sampling.sde-type flux_flow \
+    --sampling.eta 0.7 \
+    --sampling.shift 3.0 \
+    --sampling.num-inference-steps 25 \
+    --sampling.guidance-scale 3.5 \
     \
-    --sde-ratio 0.5 \
-    --timestep-strategy window \
-    --window-strategy progressive \
-    --window-group-size 4 \
-    --window-iters-per-group 25 \
-    --window-max-iters-per-group ${WINDOW_MAX_ITERS_PER_GROUP} \
-    --window-min-iters-per-group ${WINDOW_MIN_ITERS_PER_GROUP} \
-    --window-overlap true \
-    --window-roll-back true \
+    --sampling.sde-ratio 0.5 \
+    --algorithm.window.timestep-strategy window \
+    --algorithm.window.window-strategy progressive \
+    --algorithm.window.window-group-size 4 \
+    --algorithm.window.window-iters-per-group 25 \
+    --algorithm.window.window-max-iters-per-group ${WINDOW_MAX_ITERS_PER_GROUP} \
+    --algorithm.window.window-min-iters-per-group ${WINDOW_MIN_ITERS_PER_GROUP} \
+    --algorithm.window.window-overlap true \
+    --algorithm.window.window-roll-back true \
     \
-    --prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --batch-size ${BATCH_SIZE} \
-    --num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --clip-range 1e-4 \
-    --use-kl-penalty false \
-    --advantage-type group \
-    --advantage-clip-max 5.0 \
-    --reward-mix-mode ${REWARD_MIX_MODE} \
+    --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
+    --training.batch-size ${BATCH_SIZE} \
+    --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.clip-range 1e-4 \
+    --algorithm.use-kl-penalty false \
+    --algorithm.advantage-type group \
+    --algorithm.advantage-clip-max 5.0 \
+    --reward.reward-mix-mode ${REWARD_MIX_MODE} \
     \
-    --training-actor-direct-sampling true \
-    --colocate-rollout-training true \
-    --rollout-num-nodes 0 \
-    --rollout-num-gpus-per-node 0 \
-    --training-num-gpus-per-node ${NUM_GPUS} \
-    --offload false \
+    --sampling.training-actor-direct-sampling true \
+    --ray.colocate-rollout-training true \
+    --ray.rollout-num-nodes 0 \
+    --ray.rollout-num-gpus-per-node 0 \
+    --ray.training-num-gpus-per-node ${NUM_GPUS} \
+    --ray.offload false \
     \
-    --learning-rate 1e-5 \
-    --gradient-accumulation-steps 3 \
-    --num-inner-epochs ${NUM_INNER_EPOCHS} \
-    --max-grad-norm 1.0 \
-    --weight-decay 0.0001 \
-    --lora-rank 64 \
-    --lora-alpha 128 \
-    --use-lora true \
+    --training.learning-rate 1e-5 \
+    --training.gradient-accumulation-steps 3 \
+    --training.num-inner-epochs ${NUM_INNER_EPOCHS} \
+    --training.max-grad-norm 1.0 \
+    --training.weight-decay 0.0001 \
+    --training.lora-rank 64 \
+    --training.lora-alpha 128 \
+    --training.use-lora true \
     \
     --height 720 \
     --width 720 \
     \
-    --num-rollout 300 \
-    --save-steps 50 \
-    --logging-steps 10 \
-    --output-dir "${OUTPUT_DIR}" \
+    --rollout.num-rollout 300 \
+    --rollout.save-steps 50 \
+    --rollout.logging-steps 10 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
     "$@"

@@ -50,8 +50,8 @@ class MixGRPOAlgorithm(GRPOAlgorithm):
         kwargs: Dict[str, Any] = cls._grpo_kwargs_from_args(args)
         kwargs.update(
             {
-                "sde_ratio": getattr(args, "sde_ratio", 1.0),
-                "window_training": getattr(args, "window_training", False),
+                "sde_ratio": getattr(args.sampling, "sde_ratio", 1.0),
+                "window_training": getattr(args.algorithm.window, "window_training", False),
             }
         )
         kwargs.update(cls._algorithm_kwargs_from_args(args))

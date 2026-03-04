@@ -5,8 +5,9 @@ Defines algorithm responsibilities in rollout/advantage pipeline.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-import json
+import inspect
 from typing import Any, Dict, List, Optional, Set
+import warnings
 
 import torch
 import torch.nn as nn
@@ -17,16 +18,15 @@ from .normalizers import normalize_global, normalize_grouped, build_fixed_size_g
 @dataclass
 class SamplingRequirements:
     """
-    Requirements for the sampling process specified by the algorithm.
+    Sampling extras specified by algorithm implementations.
 
-    Three universal fields describe the sampler-facing contract that every
-    algorithm must answer:
+    Runtime note:
+    - In diffusionRL, ``requires_*`` is resolved from loss
+      ``declared_requirements()`` as the single source of truth.
+    - The ``requires_*`` fields here are kept for backward compatibility,
+      but runtime control-plane logic may ignore them.
 
-    - ``requires_trajectory`` — store full denoising trajectories?
-    - ``requires_log_prob`` — compute per-step log probabilities?
-    - ``requires_embeddings`` — attach prompt embeddings to output?
-
-    Algorithm-specific hints (e.g. ``sde_ratio`` for MixGRPO,
+    Algorithm-specific extras (e.g. ``sde_ratio`` for MixGRPO,
     ``requires_clean_latents`` for NFT) go into the open ``extras``
     dict.  This lets new algorithms declare their own requirements
     without modifying this shared dataclass.
@@ -45,7 +45,7 @@ class SamplingRequirements:
     """Whether the algorithm needs prompt embeddings in the sampled batch."""
 
     extras: Dict[str, Any] = field(default_factory=dict)
-    """Open dict for algorithm-specific sampler hints.
+    """Open dict for algorithm-specific sampler extras.
 
     Known keys (non-exhaustive):
     - ``"sde_ratio"`` (float): fraction of SDE steps, default 1.0 (MixGRPO)
@@ -180,29 +180,50 @@ class BaseAlgorithm(ABC):
     def _base_kwargs_from_args(cls, args: Any) -> Dict[str, Any]:
         """Build shared constructor kwargs from runtime args."""
         return {
-            "clip_range": args.clip_range,
-            "kl_coef": getattr(args, "kl_coef", 0.01),
-            "advantage_type": getattr(args, "advantage_type", "group"),
-            "epsilon": getattr(args, "advantage_epsilon", 1e-8),
-            "clip_max": getattr(args, "advantage_clip_max", None),
+            "clip_range": args.algorithm.clip_range,
+            "kl_coef": getattr(args.algorithm, "kl_coef", 0.01),
+            "advantage_type": getattr(args.algorithm, "advantage_type", "group"),
+            "epsilon": getattr(args.algorithm, "advantage_epsilon", 1e-8),
+            "clip_max": getattr(args.algorithm, "advantage_clip_max", None),
         }
 
-    @staticmethod
-    def _algorithm_kwargs_from_args(args: Any) -> Dict[str, Any]:
-        """Parse algorithm_kwargs_json into a dictionary."""
-        raw = getattr(args, "algorithm_kwargs_json", "")
-        if not isinstance(raw, str):
+    @classmethod
+    def _algorithm_kwargs_from_args(cls, args: Any) -> Dict[str, Any]:
+        """Read normalized algorithm_kwargs dictionary from args."""
+        raw = getattr(args.algorithm, "algorithm_kwargs", {})
+        if raw is None:
             return {}
-        text = raw.strip()
-        if not text:
-            return {}
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            return {}
-        if isinstance(parsed, dict):
-            return parsed
-        return {}
+        if isinstance(raw, dict):
+            payload = dict(raw)
+            allowed: Set[str] = set()
+            for owner in cls.mro():
+                init_fn = owner.__dict__.get("__init__")
+                if not callable(init_fn):
+                    continue
+                try:
+                    sig = inspect.signature(init_fn)
+                except (TypeError, ValueError):
+                    continue
+                for name, param in sig.parameters.items():
+                    if name == "self":
+                        continue
+                    if param.kind in (
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    ):
+                        allowed.add(name)
+            unknown = sorted(key for key in payload.keys() if key not in allowed)
+            if unknown:
+                warnings.warn(
+                    f"{cls.__name__} received unknown algorithm_kwargs keys: {unknown}. "
+                    "These keys are currently not declared in constructor signatures and may be ignored.",
+                    stacklevel=3,
+                )
+            return payload
+        raise ValueError(
+            "algorithm.algorithm_kwargs must be a dict after parse/validate, "
+            f"got: {type(raw).__name__}"
+        )
 
     @classmethod
     def from_args(cls, args: Any) -> "BaseAlgorithm":
@@ -384,8 +405,8 @@ class BaseAlgorithm(ABC):
         is_forward = self.is_forward_process()
         allow_replay = (
             not is_forward
-            and bool(getattr(args, "replay_log_probs", False))
-            and getattr(args, "loss_type", "grpo") == "grpo"
+            and bool(getattr(args.sampling, "replay_log_probs", False))
+            and getattr(args.algorithm, "loss_type", "grpo") == "grpo"
         )
         return {
             "allow_replay": allow_replay,

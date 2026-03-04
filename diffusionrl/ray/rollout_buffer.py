@@ -522,12 +522,12 @@ def build_buffer_plugins(args: Any) -> List[BufferPlugin]:
     """Build built-in and custom rollout-buffer plugins from runtime args."""
     plugins: List[BufferPlugin] = [
         FiniteTensorFilterPlugin(
-            drop_invalid=bool(getattr(args, "rollout_buffer_drop_invalid", True))
+            drop_invalid=bool(getattr(args.rollout, "rollout_buffer_drop_invalid", True))
         )
     ]
 
-    min_reward = getattr(args, "rollout_buffer_reward_min", None)
-    max_reward = getattr(args, "rollout_buffer_reward_max", None)
+    min_reward = getattr(args.rollout, "rollout_buffer_reward_min", None)
+    max_reward = getattr(args.rollout, "rollout_buffer_reward_max", None)
     if min_reward is not None or max_reward is not None:
         plugins.append(
             RewardRangeFilterPlugin(
@@ -538,11 +538,11 @@ def build_buffer_plugins(args: Any) -> List[BufferPlugin]:
 
     plugins.append(
         MinSamplesGuardPlugin(
-            min_samples=max(1, int(getattr(args, "rollout_buffer_min_samples", 1)))
+            min_samples=max(1, int(getattr(args.rollout, "rollout_buffer_min_samples", 1)))
         )
     )
 
-    for path in _parse_plugin_paths(getattr(args, "rollout_buffer_plugin_paths", "")):
+    for path in _parse_plugin_paths(getattr(args.rollout, "rollout_buffer_plugin_paths", "")):
         target = load_function(path)
         if inspect.isclass(target):
             if hasattr(target, "from_args") and callable(getattr(target, "from_args")):
@@ -577,25 +577,25 @@ class RolloutBufferActor:
 
     def __init__(self, args: Any):
         self.args = args
-        self.partition_train_data = bool(getattr(args, "partition_train_data", True))
-        self.max_queue_size = max(0, int(getattr(args, "rollout_buffer_max_queue_size", 0)))
+        self.partition_train_data = bool(getattr(args.ray, "partition_train_data", True))
+        self.max_queue_size = max(0, int(getattr(args.rollout, "rollout_buffer_max_queue_size", 0)))
         self.plugins = build_buffer_plugins(args)
 
-        self.grouped = bool(getattr(args, "rollout_buffer_grouped", False))
-        default_group_size = max(1, int(getattr(args, "num_samples_per_prompt", 1)))
-        raw_group_size = getattr(args, "rollout_buffer_group_size", None)
+        self.grouped = bool(getattr(args.rollout, "rollout_buffer_grouped", False))
+        default_group_size = max(1, int(getattr(args.algorithm, "num_samples_per_prompt", 1)))
+        raw_group_size = getattr(args.rollout, "rollout_buffer_group_size", None)
         if raw_group_size is None:
             self.group_size = default_group_size
         else:
             self.group_size = max(1, int(raw_group_size))
 
-        raw_dispatch_groups = int(getattr(args, "rollout_buffer_dispatch_groups", 0) or 0)
-        default_dispatch_groups = max(1, int(getattr(args, "prompts_per_batch", 1)))
+        raw_dispatch_groups = int(getattr(args.rollout, "rollout_buffer_dispatch_groups", 0) or 0)
+        default_dispatch_groups = max(1, int(getattr(args.algorithm, "prompts_per_batch", 1)))
         self.dispatch_groups = raw_dispatch_groups if raw_dispatch_groups > 0 else default_dispatch_groups
-        self.allow_partial_group = bool(getattr(args, "rollout_buffer_allow_partial_group", True))
-        self.group_ttl_seconds = max(0.0, float(getattr(args, "rollout_buffer_group_ttl_seconds", 0.0)))
-        self.max_pending_samples = max(0, int(getattr(args, "rollout_buffer_max_pending_samples", 0)))
-        self.min_samples = max(1, int(getattr(args, "rollout_buffer_min_samples", 1)))
+        self.allow_partial_group = bool(getattr(args.rollout, "rollout_buffer_allow_partial_group", True))
+        self.group_ttl_seconds = max(0.0, float(getattr(args.rollout, "rollout_buffer_group_ttl_seconds", 0.0)))
+        self.max_pending_samples = max(0, int(getattr(args.rollout, "rollout_buffer_max_pending_samples", 0)))
+        self.min_samples = max(1, int(getattr(args.rollout, "rollout_buffer_min_samples", 1)))
 
         self._dispatch_queue: Deque[BufferItem] = deque()
         self._groups: Dict[str, Deque[GroupSampleLocator]] = {}

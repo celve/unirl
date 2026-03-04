@@ -29,17 +29,17 @@ logger = logging.getLogger(__name__)
 
 def should_save(rollout_id: int, args) -> bool:
     """Check if we should save a checkpoint at this rollout."""
-    return (rollout_id + 1) % args.save_steps == 0
+    return (rollout_id + 1) % args.rollout.save_steps == 0
 
 
 def should_eval(rollout_id: int, args) -> bool:
     """Check if we should run evaluation at this rollout."""
-    return (rollout_id + 1) % args.eval_steps == 0
+    return (rollout_id + 1) % args.rollout.eval_steps == 0
 
 
 def train(args):
     """Main training loop."""
-    debug_mode = str(getattr(args, "debug_mode", "none") or "none").strip().lower()
+    debug_mode = str(getattr(args.debug, "debug_mode", "none") or "none").strip().lower()
     if debug_mode == "rollout_only":
         from diffusionrl.debug import run_debug_rollout_only
 
@@ -68,36 +68,36 @@ def train(args):
     set_seed(args.seed)
 
     logger.info("Starting GRPO training...")
-    logger.info(f"Model: {args.pretrained_model_saved_path}")
-    logger.info(f"Algorithm: {args.algorithm_path}")
-    logger.info(f"Mode: {'colocate' if args.colocate_rollout_training else 'separate'}")
-    logger.info(f"Offload train: {args.offload_train}, Offload rollout: {args.offload_rollout}")
-    logger.info(f"Weight sync mode: {args.weight_sync_mode}, async_pipeline={args.async_pipeline}")
+    logger.info(f"Model: {args.model.pretrained_model_saved_path}")
+    logger.info(f"Algorithm: {args.algorithm.algorithm_path}")
+    logger.info(f"Mode: {'colocate' if args.ray.colocate_rollout_training else 'separate'}")
+    logger.info(f"Offload train: {args.ray.offload_train}, Offload rollout: {args.ray.offload_rollout}")
+    logger.info(f"Weight sync mode: {args.ray.weight_sync_mode}, async_pipeline={args.rollout.async_pipeline}")
     logger.info(
         "Debug flags: mode=%s save_intermediates=%s save_dir=%s",
         debug_mode,
-        bool(getattr(args, "debug_save_intermediates", False)),
-        getattr(args, "debug_save_dir", ""),
+        bool(getattr(args.debug, "debug_save_intermediates", False)),
+        getattr(args.debug, "debug_save_dir", ""),
     )
 
     # Initialize Ray
     if not ray.is_initialized():
-        if args.ray_address:
-            ray.init(address=args.ray_address, ignore_reinit_error=True)
+        if args.ray.ray_address:
+            ray.init(address=args.ray.ray_address, ignore_reinit_error=True)
         else:
             ray.init()
 
     # Initialize WandB logger (only on rank 0)
     wandb_logger = None
-    if args.report_to_wandb and args.project_name:
+    if args.rollout.report_to_wandb and args.rollout.project_name:
         wandb_logger = init_logger(
-            project=args.project_name,
-            run_name=args.run_name,
+            project=args.rollout.project_name,
+            run_name=args.rollout.run_name,
             config=args.to_flat_dict() if hasattr(args, "to_flat_dict") else vars(args),
-            log_dir=getattr(args, "logging_dir", None),
+            log_dir=getattr(args.rollout, "logging_dir", None),
             rank=0,
         )
-        logger.info(f"WandB initialized: project={args.project_name}, run={args.run_name}")
+        logger.info(f"WandB initialized: project={args.rollout.project_name}, run={args.rollout.run_name}")
 
     # 1. Resource allocation
     pgs = create_placement_groups_from_args(args)
@@ -117,7 +117,7 @@ def train(args):
     logger.info(f"Rollout manager created, {num_rollout_per_epoch} rollouts per epoch")
 
     # 3. Optional pre-offload for colocate memory pressure relief before training actor init.
-    if args.offload_rollout:
+    if args.ray.offload_rollout:
         ray.get(rollout_manager.sleep.remote())
         rollout_on_gpu = False
 
@@ -126,17 +126,17 @@ def train(args):
     if training_pg_result is None:
         raise ValueError("Missing training placement-group allocation.")
     training_group = create_training_actor_group(args, training_pg_result)
-    resume_from_checkpoint = getattr(args, "resume_from_checkpoint", None)
+    resume_from_checkpoint = getattr(args.rollout, "resume_from_checkpoint", None)
     if resume_from_checkpoint:
         training_group.load_checkpoint(resume_from_checkpoint)
         logger.info("Checkpoint loaded: %s", resume_from_checkpoint)
-        if int(getattr(args, "start_rollout_id", 0)) == 0:
+        if int(getattr(args.rollout, "start_rollout_id", 0)) == 0:
             match = re.search(r"checkpoint-(\d+)$", os.path.basename(os.path.normpath(resume_from_checkpoint)))
             if match:
-                args.start_rollout_id = int(match.group(1)) + 1
+                args.rollout.start_rollout_id = int(match.group(1)) + 1
                 logger.info(
                     "Auto-set start_rollout_id=%s from checkpoint path.",
-                    args.start_rollout_id,
+                    args.rollout.start_rollout_id,
                 )
     train_backend_info = training_group.get_train_backend_info()
     buffer_consumer_spec = training_group.get_buffer_consumer_spec()
@@ -154,11 +154,11 @@ def train(args):
     logger.info("Initial weights synchronized")
 
     # 7. Restore rollout side and offload train side as needed after initial sync.
-    if args.offload_rollout and args.offload_train:
+    if args.ray.offload_rollout and args.ray.offload_train:
         training_group.offload()
         ray.get(rollout_manager.wake_up.remote())
         rollout_on_gpu = True
-    elif args.offload_rollout:
+    elif args.ray.offload_rollout:
         ray.get(rollout_manager.wake_up.remote())
         rollout_on_gpu = True
 
@@ -176,7 +176,7 @@ def train(args):
     weight_sync.setup(training_group=training_group, rollout_manager=rollout_manager)
 
     # 10. Core async training loop
-    if args.async_pipeline:
+    if args.rollout.async_pipeline:
         from diffusionrl.train_async import train_async_loop
 
         try:
@@ -196,8 +196,8 @@ def train(args):
         return
 
     # 11. Core synchronous training loop
-    enforce_rollout_alignment = not bool(getattr(args, "rollout_buffer_grouped", False))
-    debug_save_intermediates = bool(getattr(args, "debug_save_intermediates", False))
+    enforce_rollout_alignment = not bool(getattr(args.rollout, "rollout_buffer_grouped", False))
+    debug_save_intermediates = bool(getattr(args.debug, "debug_save_intermediates", False))
     save_rollout_debug_payload = None
     if debug_save_intermediates:
         from diffusionrl.debug.runner import save_rollout_debug_payload as _save_rollout_debug_payload
@@ -205,18 +205,18 @@ def train(args):
         save_rollout_debug_payload = _save_rollout_debug_payload
 
     def offload_train_phase() -> None:
-        if args.offload_train:
+        if args.ray.offload_train:
             training_group.offload()
         else:
             training_group.clear_memory()
 
     def ensure_rollout_on_gpu() -> None:
         nonlocal rollout_on_gpu
-        if args.offload_rollout and not rollout_on_gpu:
+        if args.ray.offload_rollout and not rollout_on_gpu:
             ray.get(rollout_manager.wake_up.remote())
             rollout_on_gpu = True
 
-    num_samples_per_prompt = max(1, int(getattr(args, "num_samples_per_prompt", 1)))
+    num_samples_per_prompt = max(1, int(getattr(args.algorithm, "num_samples_per_prompt", 1)))
 
     def _collect_rollout_batch_metrics(batch_ref) -> dict:
         try:
@@ -229,7 +229,7 @@ def train(args):
             num_samples_per_prompt=num_samples_per_prompt,
         )
 
-    for rollout_id in range(args.start_rollout_id, args.num_rollout):
+    for rollout_id in range(args.rollout.start_rollout_id, args.rollout.num_rollout):
         step_start_t = time.perf_counter()
         sync_result = None
         sync_phase_s = 0.0
@@ -275,13 +275,13 @@ def train(args):
         sample_count = int(rollout_payload.get("sample_count", 0) or 0)
         rollout_phase_s = time.perf_counter() - rollout_phase_start_t
 
-        if args.offload_rollout:
+        if args.ray.offload_rollout:
             ray.get(rollout_manager.sleep.remote())
             rollout_on_gpu = False
 
         # === PHASE 2: Training ===
         train_phase_start_t = time.perf_counter()
-        if args.offload_train:
+        if args.ray.offload_train:
             training_group.onload()
 
         metrics = training_group.train(rollout_id, rollout_data_ref)
@@ -289,7 +289,7 @@ def train(args):
 
         # Periodic: save (before offload to ensure model is on GPU)
         if should_save(rollout_id, args):
-            save_path = f"{args.output_dir}/checkpoint-{rollout_id}"
+            save_path = f"{args.rollout.output_dir}/checkpoint-{rollout_id}"
             training_group.save_model(save_path)
             logger.info(f"Checkpoint saved: {save_path}")
 
@@ -298,7 +298,7 @@ def train(args):
 
         if (
             not training_actor_direct_sampling
-            and (rollout_id + 1) % args.update_weights_interval == 0
+            and (rollout_id + 1) % args.rollout.update_weights_interval == 0
         ):
             sync_phase_start_t = time.perf_counter()
             sync_result = weight_sync.sync(rollout_id=rollout_id)
@@ -317,7 +317,7 @@ def train(args):
             if wandb_logger:
                 wandb_logger.log_eval(rollout_id, eval_metrics)
 
-        should_log = (rollout_id % args.logging_steps == 0)
+        should_log = (rollout_id % args.rollout.logging_steps == 0)
         if should_log:
             avg_loss = sum(m.get("loss", 0) for m in metrics) / max(len(metrics), 1)
             step_time_s = time.perf_counter() - step_start_t

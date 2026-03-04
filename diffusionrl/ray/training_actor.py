@@ -89,7 +89,7 @@ class TrainingActor(BaseTrainRayActor):
         self._ema_decay = 0.001
         self._loss_type = "grpo"
         self._loss_path = None
-        self._guidance_scale = 3.5  # Default CFG scale for training
+        self._guidance_scale: Optional[float] = None
         # NFT timestep handling
         self._nft_timestep_mode = "random"  # random or all
         self._nft_shuffle_timesteps = True
@@ -118,6 +118,15 @@ class TrainingActor(BaseTrainRayActor):
 
     def _log_gpu_state(self, tag: str) -> None:
         log_gpu_state(tag, self.rank, device=self._device, offloaded=self._is_offloaded)
+
+    @staticmethod
+    def _require_dict_config(config: dict, key: str) -> Dict[str, Any]:
+        value = config.get(key)
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"TrainingActor.init requires config['{key}'] dict, got: {type(value).__name__}"
+            )
+        return value
 
     @staticmethod
     def _candidate_sglang_python_paths() -> List[Path]:
@@ -177,7 +186,7 @@ class TrainingActor(BaseTrainRayActor):
                 - scheduler_config: dict with scheduler type and params
                 - loss_config: dict with loss_type, clip_range, kl_coef, etc.
                 - training_config: dict with max_grad_norm, gradient_accumulation_steps
-                - train_backend/train_backend_path/train_backend_kwargs
+                - train_backend_config: dict(name/backend_path/kwargs)
 
         Note:
             Algorithm instantiation for advantage computation happens in
@@ -185,18 +194,22 @@ class TrainingActor(BaseTrainRayActor):
         """
         logger.info(f"Rank {self.rank}: Initializing training actor...")
 
-        backend_config = config.get("train_backend_config", {}) or {}
+        backend_config = config.get("train_backend_config")
         if not isinstance(backend_config, dict):
-            backend_config = {}
+            raise ValueError(
+                "TrainingActor.init requires config['train_backend_config'] dict."
+            )
 
-        backend_name = str(
-            config.get("train_backend", backend_config.get("name", "fsdp")) or "fsdp"
-        ).strip().lower()
-        backend_path = config.get("train_backend_path", backend_config.get("backend_path"))
-        backend_kwargs = config.get("train_backend_kwargs", backend_config.get("kwargs", {})) or {}
+        backend_name = str(backend_config.get("name", "") or "").strip().lower()
+        if not backend_name:
+            raise ValueError("train_backend_config.name is required.")
+        backend_path = backend_config.get("backend_path")
+        backend_kwargs = backend_config.get("kwargs")
         if not isinstance(backend_kwargs, dict):
-            logger.warning("train_backend_kwargs is not a dict; resetting to empty dict.")
-            backend_kwargs = {}
+            raise ValueError(
+                "train_backend_config.kwargs must be a dict, "
+                f"got: {type(backend_kwargs).__name__}"
+            )
 
         self._train_backend = create_train_backend(
             backend_name,
@@ -215,33 +228,30 @@ class TrainingActor(BaseTrainRayActor):
         # Backend-specific pre-load hook (e.g. CPU-offload behavior).
         self._train_backend.before_model_load(self)
 
-        # Load model (don't move to GPU if CPU offload is enabled)
-        self._load_model(config.get("model_config", {}))
+        model_config = self._require_dict_config(config, "model_config")
+        self._load_model(model_config)
 
         # Backend model wrapping (FSDP/Megatron/others).
         self._train_backend.wrap_model(self)
 
-        # Create optimizer
-        self._create_optimizer(config.get("optimizer_config", {}))
+        optimizer_config = self._require_dict_config(config, "optimizer_config")
+        self._create_optimizer(optimizer_config)
 
-        # Create scheduler
-        self._create_scheduler(config.get("scheduler_config", {}))
+        scheduler_config = self._require_dict_config(config, "scheduler_config")
+        self._create_scheduler(scheduler_config)
 
-        # Load loss function
-        self._load_loss(config.get("loss_config", {}))
+        loss_config = self._require_dict_config(config, "loss_config")
+        self._load_loss(loss_config)
 
         # Load training config
-        training_config = config.get("training_config", {})
-        self._max_grad_norm = training_config.get("max_grad_norm", 1.0)
+        training_config = self._require_dict_config(config, "training_config")
+        self._max_grad_norm = float(training_config["max_grad_norm"])
         self._gradient_accumulation_steps = resolve_grad_accum(training_config)
-        self._num_inner_epochs = max(1, int(training_config.get("num_inner_epochs", 1)))
-        self._replay_log_probs = bool(training_config.get("replay_log_probs", False))
+        self._num_inner_epochs = max(1, int(training_config["num_inner_epochs"]))
+        self._replay_log_probs = bool(training_config["replay_log_probs"])
 
         # Sampling config (used when training actors perform sampling)
-        sampling_config = config.get("sampling_config", {}) or {}
-        if not isinstance(sampling_config, dict):
-            logger.warning("sampling_config is not a dict; resetting to empty dict.")
-            sampling_config = {}
+        sampling_config = self._require_dict_config(config, "sampling_config")
         self._sampling_config = sampling_config
 
         # Note: Algorithm is not instantiated here because:
@@ -270,9 +280,9 @@ class TrainingActor(BaseTrainRayActor):
         # Build kwargs for model constructor
         # Pass through LoRA configuration for models that support it
         model_kwargs = {
-            "pretrained_path": model_config.get("pretrained_model_saved_path", ""),
-            "vae_saved_path": model_config.get("vae_saved_path"),
-            "text_encoder_path": model_config.get("text_encoder_path"),
+            "pretrained_path": model_config["pretrained_model_saved_path"],
+            "vae_saved_path": model_config["vae_saved_path"],
+            "text_encoder_path": model_config["text_encoder_path"],
             "device": self._device,
             # Training only needs transformer, skip VAE/text_encoders to save memory
             "training_only": True,
@@ -281,7 +291,7 @@ class TrainingActor(BaseTrainRayActor):
         }
 
         # Pass LoRA parameters only when explicitly enabled
-        use_lora = bool(model_config.get("use_lora", False))
+        use_lora = bool(model_config["use_lora"])
         self._use_lora = use_lora
         model_kwargs["use_lora"] = use_lora
         if use_lora:
@@ -301,7 +311,7 @@ class TrainingActor(BaseTrainRayActor):
 
         # Enable gradient checkpointing (activation checkpointing) only when explicitly requested
         # Note: For LoRA models, this should be done in the model bundle before PEFT wrapping
-        use_gradient_checkpointing = bool(model_config.get("use_gradient_checkpointing", False))
+        use_gradient_checkpointing = bool(model_config["use_gradient_checkpointing"])
         logger.info(
             "Rank %s: Gradient checkpointing %s (scope=transformer)",
             self.rank,
@@ -342,13 +352,13 @@ class TrainingActor(BaseTrainRayActor):
                 )
                 return
 
-        lr = optimizer_config.get("learning_rate", 1e-6)
+        lr = float(optimizer_config["learning_rate"])
         betas = (
-            optimizer_config.get("adam_beta1", 0.9),
-            optimizer_config.get("adam_beta2", 0.999),
+            float(optimizer_config["adam_beta1"]),
+            float(optimizer_config["adam_beta2"]),
         )
-        eps = optimizer_config.get("adam_epsilon", 1e-8)
-        weight_decay = optimizer_config.get("weight_decay", 0.0)
+        eps = float(optimizer_config["adam_epsilon"])
+        weight_decay = float(optimizer_config["weight_decay"])
 
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -373,9 +383,9 @@ class TrainingActor(BaseTrainRayActor):
                 )
                 return
 
-        scheduler_type = scheduler_config.get("type", "constant")
-        warmup_steps = scheduler_config.get("warmup_steps", 0)
-        total_steps = scheduler_config.get("total_steps", 1000)
+        scheduler_type = str(scheduler_config["type"])
+        warmup_steps = int(scheduler_config["warmup_steps"])
+        total_steps = int(scheduler_config["total_steps"])
 
         if scheduler_type == "constant":
             self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -483,9 +493,9 @@ class TrainingActor(BaseTrainRayActor):
         No Algorithm instance is created here — Algorithm lives only in
         RolloutManager for advantage computation.
         """
-        self._loss_type = str(loss_config.get("loss_type", "grpo"))
+        self._loss_type = str(loss_config["loss_type"])
         self._loss_path = loss_config.get("loss_path")
-        self._guidance_scale = float(loss_config.get("guidance_scale", 3.5))
+        self._guidance_scale = float(loss_config["guidance_scale"])
         self._ema_updater = None
 
         ctor_loss_kwargs, runtime_loss_kwargs = self._split_loss_kwargs(loss_config)
@@ -501,14 +511,13 @@ class TrainingActor(BaseTrainRayActor):
         old_adapter_name = str(runtime_loss_kwargs.get("old_adapter_name", "old"))
         new_adapter_name = str(runtime_loss_kwargs.get("new_adapter_name", "default"))
 
-        # Resolve loss_path from loss_type if not explicitly set
-        if not self._loss_path:
-            from diffusionrl.losses import DEFAULT_LOSS_PATHS
-            self._loss_path = DEFAULT_LOSS_PATHS.get(self._loss_type)
+        # loss_path should be fully resolved by config builder.
         if not self._loss_path:
             raise ValueError(
-                f"Cannot resolve loss_path for loss_type={self._loss_type!r}. "
-                "Provide --loss-path or use a known loss_type ('grpo', 'nft')."
+                "loss_config.loss_path is required before TrainingActor.init. "
+                f"Got empty loss_path for loss_type={self._loss_type!r}. "
+                "Ensure build_domain_args resolves loss_path from loss_type, "
+                "or pass --algorithm.loss-path explicitly."
             )
 
         loss_cls = load_function(self._loss_path)
@@ -564,6 +573,11 @@ class TrainingActor(BaseTrainRayActor):
         )
 
     def _maybe_replay_old_log_probs(self, batch: BackwardTrainingBatch) -> BackwardTrainingBatch:
+        if self._guidance_scale is None:
+            raise RuntimeError(
+                "TrainingActor guidance_scale is not initialized. "
+                "Ensure loss_config.guidance_scale is provided before replay."
+            )
         return self._replay_logprob_patch.maybe_replay_old_log_probs(
             batch=batch,
             enabled=self._replay_log_probs,

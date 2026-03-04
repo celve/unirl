@@ -90,6 +90,8 @@ models/**/*.safetensors
 tests/
 docs/*
 !docs/entry_map.md
+# !docs/Parameter_System_Guide.md
+!docs/GitHub_Issues_Workflow_Guide.md
 
 # IDE / editor metadata
 .vscode/

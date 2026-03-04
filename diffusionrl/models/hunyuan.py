@@ -81,16 +81,9 @@ class HunyuanModelBundle(ModelBundle):
 
     @classmethod
     def validate_config(cls, args: Any) -> None:
-        if getattr(args, "sampler_engine_type", None) != "fsdp":
-            return
-        fixed_guidance = 6018.0
-        if abs(float(args.guidance_scale) - 7.5) <= 1e-6:
-            args.guidance_scale = fixed_guidance
-        if abs(float(args.guidance_scale) - fixed_guidance) > 1e-6:
-            raise ValueError(
-                f"FSDP Hunyuan sampler uses fixed guidance_scale={fixed_guidance}. "
-                f"Got guidance_scale={args.guidance_scale}."
-            )
+        # Hunyuan guidance scale is controlled by runtime config/scripts.
+        # Keep this hook as a no-op for now.
+        _ = args
 
     def load(self) -> None:
         """Load all model components."""

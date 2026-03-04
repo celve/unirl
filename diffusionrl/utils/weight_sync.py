@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _resolve_target_modules(args: Any) -> list[str]:
-    engine_kwargs = getattr(args, "engine_kwargs", {}) or {}
+    engine_kwargs = getattr(args.sampling, "engine_kwargs", {}) or {}
     if not isinstance(engine_kwargs, dict):
         return ["transformer"]
     raw = engine_kwargs.get("target_modules")
@@ -35,20 +35,20 @@ def _resolve_target_modules(args: Any) -> list[str]:
 
 
 def _resolve_bucket_size_mb(args: Any) -> int:
-    explicit = getattr(args, "weight_sync_bucket_mb", None)
+    explicit = getattr(args.ray, "weight_sync_bucket_mb", None)
     if explicit is not None:
         return max(1, int(explicit))
-    engine_kwargs = getattr(args, "engine_kwargs", {}) or {}
+    engine_kwargs = getattr(args.sampling, "engine_kwargs", {}) or {}
     if isinstance(engine_kwargs, dict) and engine_kwargs.get("weight_sync_bucket_mb") is not None:
         return max(1, int(engine_kwargs["weight_sync_bucket_mb"]))
     return 256
 
 
 def _resolve_flush_cache(args: Any) -> bool:
-    explicit = getattr(args, "weight_sync_flush_cache", None)
+    explicit = getattr(args.ray, "weight_sync_flush_cache", None)
     if explicit is not None:
         return bool(explicit)
-    engine_kwargs = getattr(args, "engine_kwargs", {}) or {}
+    engine_kwargs = getattr(args.sampling, "engine_kwargs", {}) or {}
     if isinstance(engine_kwargs, dict) and engine_kwargs.get("weight_sync_flush_cache") is not None:
         return bool(engine_kwargs["weight_sync_flush_cache"])
     return True
@@ -56,12 +56,12 @@ def _resolve_flush_cache(args: Any) -> bool:
 
 def _validate_tensor_sync_topology(args: Any) -> None:
     """Guard invalid topology values for tensor/distributed sync paths."""
-    engine_kwargs = getattr(args, "engine_kwargs", {}) or {}
+    engine_kwargs = getattr(args.sampling, "engine_kwargs", {}) or {}
     tp_size = None
     if isinstance(engine_kwargs, dict):
         tp_size = engine_kwargs.get("tp_size")
     if tp_size is None:
-        tp_size = getattr(args, "tp_size", 1)
+        tp_size = getattr(args.sampling, "tp_size", 1)
     try:
         tp_size_int = int(tp_size)
     except Exception:
@@ -337,20 +337,20 @@ class CheckpointWeightSync(WeightSyncProtocol):
         self._export_format = self._select_export_format()
 
     def _select_export_format(self) -> str:
-        engine_type = str(getattr(self.args, "sampler_engine_type", "") or "").lower()
+        engine_type = str(getattr(self.args.sampling, "sampler_engine_type", "") or "").lower()
         if engine_type == "sglang":
             return "sglang_transformer_safetensors"
         return "state_dict"
 
     def _build_weight_checkpoint_path(self, rollout_id: int, *, export_format: str) -> str:
-        os.makedirs(self.args.weight_sync_dir, exist_ok=True)
+        os.makedirs(self.args.ray.weight_sync_dir, exist_ok=True)
         if export_format == "sglang_transformer_safetensors":
             return os.path.join(
-                self.args.weight_sync_dir,
+                self.args.ray.weight_sync_dir,
                 f"weights_rollout_{rollout_id}_{int(time.time_ns())}",
             )
         return os.path.join(
-            self.args.weight_sync_dir,
+            self.args.ray.weight_sync_dir,
             f"weights_rollout_{rollout_id}_{int(time.time_ns())}.pt",
         )
 
@@ -410,14 +410,14 @@ def create_weight_sync_protocol(args: Any) -> WeightSyncProtocol:
 
     Extension point:
     - If args.weight_sync_strategy_path exists, dynamically load custom strategy.
-    - Otherwise resolve built-in protocols from args.weight_sync_mode.
+    - Otherwise resolve built-in protocols from args.ray.weight_sync_mode.
     """
     strategy_path = getattr(args, "weight_sync_strategy_path", None)
     if strategy_path:
         strategy_cls = load_function(strategy_path)
         return strategy_cls(args)
 
-    mode = getattr(args, "weight_sync_mode", "checkpoint_path")
+    mode = getattr(args.ray, "weight_sync_mode", "checkpoint_path")
     cls = _BUILTIN_PROTOCOLS.get(mode)
     if cls is None:
         raise ValueError(

@@ -37,17 +37,27 @@ class MegatronTrainBackend(TrainBackend):
         super().__init__(backend_kwargs=backend_kwargs)
         kwargs = dict(self.backend_kwargs)
 
-        self._actor_class_path = kwargs.get("actor_class_path")
-        self._dp_size_hint = _as_optional_int(kwargs.get("dp_size"))
-        self._tp_size = _as_optional_int(kwargs.get("tp_size")) or 1
-        self._pp_size = _as_optional_int(kwargs.get("pp_size")) or 1
-        self._sp_size = _as_optional_int(kwargs.get("sp_size")) or 1
-        self._ep_size = _as_optional_int(kwargs.get("ep_size")) or 1
+        self._actor_class_path = kwargs.pop("actor_class_path", None)
+        self._dp_size_hint = _as_optional_int(kwargs.pop("dp_size", None))
+        self._tp_size = _as_optional_int(kwargs.pop("tp_size", None)) or 1
+        self._pp_size = _as_optional_int(kwargs.pop("pp_size", None)) or 1
+        self._sp_size = _as_optional_int(kwargs.pop("sp_size", None)) or 1
+        self._ep_size = _as_optional_int(kwargs.pop("ep_size", None)) or 1
 
-        self._launch_num_actors = _as_optional_int(kwargs.get("num_actors"))
-        self._launch_num_gpus_per_actor = kwargs.get("num_gpus_per_actor")
-        self._launch_runtime_env = kwargs.get("runtime_env") if isinstance(kwargs.get("runtime_env"), dict) else {}
-        self._launch_actor_kwargs = kwargs.get("actor_kwargs") if isinstance(kwargs.get("actor_kwargs"), dict) else {}
+        self._launch_num_actors = _as_optional_int(kwargs.pop("num_actors", None))
+        self._launch_num_gpus_per_actor = kwargs.pop("num_gpus_per_actor", None)
+        runtime_env = kwargs.pop("runtime_env", None)
+        actor_kwargs = kwargs.pop("actor_kwargs", None)
+        self._launch_runtime_env = runtime_env if isinstance(runtime_env, dict) else {}
+        self._launch_actor_kwargs = actor_kwargs if isinstance(actor_kwargs, dict) else {}
+        if kwargs:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "MegatronTrainBackend received unknown train_backend_kwargs keys: %s. "
+                "These keys are currently ignored by the megatron scaffold backend.",
+                sorted(kwargs.keys()),
+            )
 
     @classmethod
     def declared_capabilities(cls) -> TrainBackendCapabilities:

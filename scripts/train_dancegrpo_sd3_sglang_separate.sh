@@ -18,7 +18,13 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-export SGLANG_PYTHON_PATH="${SGLANG_PYTHON_PATH:-/home/aiops/wanghn/mmgrpo/sglang/python}"
+SGLANG_PYTHON_PATH="${SGLANG_PYTHON_PATH:-${REPO_ROOT}/../sglang/python}"
+if [ ! -d "${SGLANG_PYTHON_PATH}" ]; then
+    echo "ERROR: SGLANG_PYTHON_PATH not found: ${SGLANG_PYTHON_PATH}"
+    echo "Set it explicitly, e.g. export SGLANG_PYTHON_PATH=/path/to/sglang/python"
+    exit 1
+fi
+export SGLANG_PYTHON_PATH
 
 PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/sd3.5-medium"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/dancegrpo_sd3_sglang_separate"}
@@ -42,52 +48,52 @@ PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMP
 NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
 
 python -m diffusionrl.train \
-    --pretrained-model-saved-path "${PRETRAINED_MODEL}" \
-    --model-type sd3 \
-    --sampler-engine-type sglang \
-    --sglang-logprob-mode "${SGLANG_LOGPROB_MODE}" \
-    --replay-log-probs "${REPLAY_LOG_PROBS}" \
-    --tp-size ${TP_SIZE} \
-    --algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward-path diffusionrl.reward.local.LocalRewardWorker \
-    --reward-model-name ocr \
+    --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
+    --model.model-type sd3 \
+    --sampling.sampler-engine-type sglang \
+    --sampling.sglang-logprob-mode "${SGLANG_LOGPROB_MODE}" \
+    --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
+    --sampling.tp-size ${TP_SIZE} \
+    --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-model-name ocr \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
-    --sde-type sde \
-    --eta 0.3 \
-    --shift 3.0 \
-    --num-inference-steps 25 \
-    --guidance-scale 4.5 \
-    --timestep-fraction 0.6 \
+    --sampling.sde-type sde \
+    --sampling.eta 0.3 \
+    --sampling.shift 3.0 \
+    --sampling.num-inference-steps 25 \
+    --sampling.guidance-scale 4.5 \
+    --sampling.timestep-fraction 0.6 \
     \
-    --prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --batch-size ${BATCH_SIZE} \
-    --num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --clip-range 1e-4 \
-    --use-kl-penalty false \
-    --advantage-type group \
-    --advantage-clip-max 5.0 \
+    --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
+    --training.batch-size ${BATCH_SIZE} \
+    --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.clip-range 1e-4 \
+    --algorithm.use-kl-penalty false \
+    --algorithm.advantage-type group \
+    --algorithm.advantage-clip-max 5.0 \
     \
-    --colocate-rollout-training false \
-    --rollout-num-gpus-per-node ${ROLLOUT_GPUS} \
-    --training-num-gpus-per-node ${TRAINING_GPUS} \
-    --placement-strategy SPREAD \
+    --ray.colocate-rollout-training false \
+    --ray.rollout-num-gpus-per-node ${ROLLOUT_GPUS} \
+    --ray.training-num-gpus-per-node ${TRAINING_GPUS} \
+    --ray.placement-strategy SPREAD \
     \
-    --learning-rate 1e-5 \
-    --gradient-accumulation-steps 1 \
-    --num-inner-epochs ${NUM_INNER_EPOCHS} \
-    --max-grad-norm 1.0 \
-    --weight-decay 0.0001 \
-    --lora-rank ${LORA_RANK} \
-    --lora-alpha ${LORA_ALPHA} \
-    --use-lora true \
+    --training.learning-rate 1e-5 \
+    --training.gradient-accumulation-steps 1 \
+    --training.num-inner-epochs ${NUM_INNER_EPOCHS} \
+    --training.max-grad-norm 1.0 \
+    --training.weight-decay 0.0001 \
+    --training.lora-rank ${LORA_RANK} \
+    --training.lora-alpha ${LORA_ALPHA} \
+    --training.use-lora true \
     \
     --height 512 \
     --width 512 \
     \
-    --num-rollout 300 \
-    --save-steps 40 \
-    --logging-steps 10 \
-    --output-dir "${OUTPUT_DIR}" \
+    --rollout.num-rollout 300 \
+    --rollout.save-steps 40 \
+    --rollout.logging-steps 10 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
     "$@"
