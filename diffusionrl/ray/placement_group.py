@@ -306,7 +306,7 @@ def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroup
     Returns:
         Dictionary of placement group results
     """
-    debug_mode = str(getattr(args.debug_cfg, "debug_mode", "none") or "none").strip().lower()
+    debug_mode = str(getattr(args.debug, "debug_mode", "none") or "none").strip().lower()
     rollout_num_nodes = int(args.ray.rollout_num_nodes)
     rollout_num_gpus_per_node = int(args.ray.rollout_num_gpus_per_node)
     training_num_nodes = int(args.ray.training_num_nodes)

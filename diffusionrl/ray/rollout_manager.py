@@ -533,7 +533,7 @@ class RolloutManager:
             self.timestep_scheduler.update(self._current_step)
 
     def _debug_log_tensor_stats(self, label: str, value: Optional[torch.Tensor]) -> None:
-        if not bool(getattr(self.args.debug_cfg, "debug_print_tensor_stats", True)):
+        if not bool(getattr(self.args.debug, "debug_print_tensor_stats", True)):
             return
         if not torch.is_tensor(value):
             return
@@ -686,7 +686,7 @@ class RolloutManager:
 
         trace_payload = {
             "rollout_id": int(rollout_id),
-            "debug_mode": str(getattr(self.args.debug_cfg, "debug_mode", "none")),
+            "debug_mode": str(getattr(self.args.debug, "debug_mode", "none")),
             "prompts": list(prompts),
             "train_prompts": list(train_prompts if train_prompts else prompts),
             "base_prompts": list(base_prompts if base_prompts else prompts),
@@ -733,7 +733,7 @@ class RolloutManager:
                 )
             payload = {
                 "rollout_id": int(rollout_id),
-                "debug_mode": str(getattr(self.args.debug_cfg, "debug_mode", "none")),
+                "debug_mode": str(getattr(self.args.debug, "debug_mode", "none")),
                 "prompts": list(prompts),
                 "train_prompts": list(prompts),
                 "base_prompts": list(prompts),

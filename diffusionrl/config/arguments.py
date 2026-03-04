@@ -580,7 +580,7 @@ _GROUP_CONFIG_TYPES = {
     "algorithm": AlgorithmConfig,
     "training": TrainingConfig,
     "rollout": RolloutLoggingConfig,
-    "debug_cfg": DebugConfig,
+    "debug": DebugConfig,
 }
 _GROUP_CONFIG_NAMES = set(_GROUP_CONFIG_TYPES.keys())
 
@@ -645,7 +645,7 @@ class TrainingArguments:
     algorithm: AlgorithmConfig = field(default_factory=AlgorithmConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     rollout: RolloutLoggingConfig = field(default_factory=RolloutLoggingConfig)
-    debug_cfg: DebugConfig = field(default_factory=DebugConfig)
+    debug: DebugConfig = field(default_factory=DebugConfig)
 
     # ========== Data Configuration ==========
     data_path: Optional[str] = field(default="data/samples/prompts_toy.json",
@@ -879,7 +879,7 @@ _GROUP_DISPLAY_NAMES: Dict[str, str] = {
     "algorithm.window": "Window/Timestep Scheduler",
     "training": "Training & Optimization",
     "rollout": "Rollout, Checkpointing & Logging",
-    "debug_cfg": "Debug Mode & Artifact Saving",
+    "debug": "Debug Mode & Artifact Saving",
 }
 
 
@@ -1980,29 +1980,29 @@ def _normalize_weight_sync(args: TrainingArguments, *, training_actor_direct_sam
 
 def _normalize_debug_config(args: TrainingArguments) -> str:
     """Normalize debug mode and enforce mode-specific constraints."""
-    requested_debug_mode = str(getattr(args.debug_cfg, "debug_mode", "none") or "none").strip().lower()
+    requested_debug_mode = str(getattr(args.debug, "debug_mode", "none") or "none").strip().lower()
     debug_mode = requested_debug_mode
     if debug_mode == "debug_full":
         logger.info(
             "debug_mode=debug_full is currently mapped to normal training with "
             "debug_save_intermediates=true."
         )
-        _set_normalized_attr(args, args.debug_cfg, "debug_mode", "none", key="debug_cfg.debug_mode")
+        _set_normalized_attr(args, args.debug, "debug_mode", "none", key="debug.debug_mode")
         _set_normalized_attr(
             args,
-            args.debug_cfg,
+            args.debug,
             "debug_save_intermediates",
             True,
-            key="debug_cfg.debug_save_intermediates",
+            key="debug.debug_save_intermediates",
         )
         debug_mode = "none"
     else:
         _set_normalized_attr(
             args,
-            args.debug_cfg,
+            args.debug,
             "debug_mode",
             debug_mode,
-            key="debug_cfg.debug_mode",
+            key="debug.debug_mode",
         )
 
     if debug_mode in ("rollout_only", "train_only", "interactive"):
@@ -2017,7 +2017,7 @@ def _normalize_debug_config(args: TrainingArguments) -> str:
                 "(there are no training actors in this debug mode)."
             )
 
-    if bool(getattr(args.debug_cfg, "debug_save_intermediates", False)) and bool(getattr(args.rollout, "async_pipeline", False)):
+    if bool(getattr(args.debug, "debug_save_intermediates", False)) and bool(getattr(args.rollout, "async_pipeline", False)):
         raise ValueError(
             "debug_save_intermediates=true is not supported with async_pipeline yet. "
             "Set --async-pipeline=false."

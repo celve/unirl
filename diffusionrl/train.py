@@ -39,7 +39,7 @@ def should_eval(rollout_id: int, args) -> bool:
 
 def train(args):
     """Main training loop."""
-    debug_mode = str(getattr(args.debug_cfg, "debug_mode", "none") or "none").strip().lower()
+    debug_mode = str(getattr(args.debug, "debug_mode", "none") or "none").strip().lower()
     if debug_mode == "rollout_only":
         from diffusionrl.debug import run_debug_rollout_only
 
@@ -76,8 +76,8 @@ def train(args):
     logger.info(
         "Debug flags: mode=%s save_intermediates=%s save_dir=%s",
         debug_mode,
-        bool(getattr(args.debug_cfg, "debug_save_intermediates", False)),
-        getattr(args.debug_cfg, "debug_save_dir", ""),
+        bool(getattr(args.debug, "debug_save_intermediates", False)),
+        getattr(args.debug, "debug_save_dir", ""),
     )
 
     # Initialize Ray
@@ -197,7 +197,7 @@ def train(args):
 
     # 11. Core synchronous training loop
     enforce_rollout_alignment = not bool(getattr(args.rollout, "rollout_buffer_grouped", False))
-    debug_save_intermediates = bool(getattr(args.debug_cfg, "debug_save_intermediates", False))
+    debug_save_intermediates = bool(getattr(args.debug, "debug_save_intermediates", False))
     save_rollout_debug_payload = None
     if debug_save_intermediates:
         from diffusionrl.debug.runner import save_rollout_debug_payload as _save_rollout_debug_payload

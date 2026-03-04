@@ -204,8 +204,8 @@ def normalize_repo_relative_paths(
         ("rollout", "logging_dir"),
         ("ray", "weight_sync_dir"),
         ("rollout", "resume_from_checkpoint"),
-        ("debug_cfg", "debug_save_dir"),
-        ("debug_cfg", "debug_load_path"),
+        ("debug", "debug_save_dir"),
+        ("debug", "debug_load_path"),
     )
     for group_name, field_name in grouped_path_fields:
         group_obj = getattr(args, group_name)
@@ -373,7 +373,7 @@ def validate_grouped_configs(args: Any) -> None:
     args.algorithm.validate()
     args.training.validate()
     args.rollout.validate()
-    args.debug_cfg.validate()
+    args.debug.validate()
 
 
 def validate_dynamic_dotpaths(args: Any) -> None:
