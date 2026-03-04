@@ -877,12 +877,12 @@ class TrainingActor(BaseTrainRayActor):
             from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
         except Exception:
             from sglang.srt.model_executor.model_runner import FlattenedTensorBucket
-        from sglang.srt.utils import MultiprocessingSerializer
-        from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
 
-        # SGLang's torch reduction monkey-patch is needed for CUDA tensor IPC
-        # payloads. Applying it to CPU-only payloads can break pickle reduce args.
-        if any(tensor.is_cuda for _, tensor in named_tensors):
+        has_cuda = any(tensor.is_cuda for _, tensor in named_tensors)
+        if has_cuda:
+            from sglang.srt.utils import MultiprocessingSerializer
+            from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
+
             monkey_patch_torch_reductions()
 
         if getattr(FlattenedTensorBucket, "supports_multi_dtypes", False):
@@ -901,10 +901,35 @@ class TrainingActor(BaseTrainRayActor):
                 "metadata": bucket.get_metadata(),
             }
             long_lived_payloads.append(payload)
-            serialized_payloads.append(
-                MultiprocessingSerializer.serialize(payload, output_str=True)
-            )
+            if has_cuda:
+                serialized_payloads.append(
+                    MultiprocessingSerializer.serialize(payload, output_str=True)
+                )
+            else:
+                serialized_payloads.append(
+                    self._serialize_cpu_payload(payload)
+                )
         return serialized_payloads, long_lived_payloads
+
+    @staticmethod
+    def _serialize_cpu_payload(obj: dict) -> str:
+        """Serialize payload using regular pickle to avoid fd-sharing.
+
+        ForkingPickler (used by MultiprocessingSerializer) reduces CPU tensor
+        storages via Unix fd-sharing (DupFd/resource_sharer), which requires
+        the receiver to connect back to the sender with a matching authkey.
+        This breaks when sender (Ray training actor) and receiver (SGLang GPU
+        worker) are in different process trees.  Regular pickle serializes CPU
+        storage bytes inline, avoiding the fd-sharing path entirely.
+        """
+        import io
+        import pickle
+
+        import pybase64
+
+        buf = io.BytesIO()
+        pickle.Pickler(buf).dump(obj)
+        return pybase64.b64encode(buf.getvalue()).decode("utf-8")
 
     def sync_weights_to_rollout_ipc(
         self,
