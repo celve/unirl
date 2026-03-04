@@ -9,7 +9,7 @@
 
 model:
   model_type: flux
-  pretrained_model_saved_path: models/local/flux
+  pretrained_model_saved_path: models/local/flux.1-dev
 
 sampling:
   sampler_path: diffusionrl.samplers.fsdp.flux_sampler.FluxSampler
