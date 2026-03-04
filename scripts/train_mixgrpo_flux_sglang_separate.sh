@@ -30,6 +30,7 @@ WINDOW_MIN_ITERS_PER_GROUP=${WINDOW_MIN_ITERS_PER_GROUP:-1}
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
 REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
+REPLAY_SAMPLER_PATH=${REPLAY_SAMPLER_PATH:-diffusionrl.samplers.fsdp.flux_sampler.FluxSampler}
 
 if [ "${NUM_SAMPLES_PER_PROMPT}" -lt 2 ]; then
     echo "ERROR: MixGRPO uses group advantages; set NUM_SAMPLES_PER_PROMPT >= 2 to avoid NaN."
@@ -48,6 +49,7 @@ python -m diffusionrl.train \
     --sampling.sampler-engine-type sglang \
     --sampling.sglang-logprob-mode "${SGLANG_LOGPROB_MODE}" \
     --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
+    --sampling.replay-sampler-path "${REPLAY_SAMPLER_PATH}" \
     --sampling.tp-size ${TP_SIZE} \
     --algorithm.algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
     --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
