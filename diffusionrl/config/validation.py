@@ -499,11 +499,12 @@ def validate_rollout_layout(
     ):
         raise ValueError(
             "sglang colocate with multi-GPU rollout requires NOSET actor layout. "
-            "Set --allow-noset-multi-gpu-inference=true."
+            "Set --ray.allow-noset-multi-gpu-inference=true."
         )
     if rollout_gpus > 1 and not bool(getattr(args.ray, "allow_noset_multi_gpu_inference", False)):
         raise ValueError(
-            "multi-GPU rollout actor layout requires --allow-noset-multi-gpu-inference=true. "
+            "multi-GPU rollout actor layout requires "
+            "--ray.allow-noset-multi-gpu-inference=true. "
             "Default layout keeps integer single-GPU actors."
         )
     if rollout_gpus > 1 and bool(getattr(args.ray, "allow_noset_multi_gpu_inference", False)):
@@ -557,18 +558,19 @@ def validate_model_specific_logic(args: Any, *, model_cls: Any) -> None:
 
         if not args.sampling.sampling_adapter:
             raise ValueError(
-                "loss_type='nft' requires --sampling-adapter to be set "
+                "loss_type='nft' requires --sampling.sampling-adapter to be set "
                 f"(must match old_adapter_name={old_adapter_name!r})."
             )
         if str(args.sampling.sampling_adapter) != old_adapter_name:
             raise ValueError(
                 "loss_type='nft' requires rollout sampling from the old adapter. "
-                f"Set --sampling-adapter {old_adapter_name!r}, got {args.sampling.sampling_adapter!r}."
+                f"Set --sampling.sampling-adapter {old_adapter_name!r}, "
+                f"got {args.sampling.sampling_adapter!r}."
             )
         if str(args.sampling.sde_type) != "dpm2":
             raise ValueError(
                 "loss_type='nft' targets DiffusionNFT deterministic sampling. "
-                f"Set --sde-type dpm2, got sde_type={args.sampling.sde_type!r}."
+                f"Set --sampling.sde-type dpm2, got sde_type={args.sampling.sde_type!r}."
             )
 
 
@@ -694,7 +696,8 @@ def validate_runtime_mode_constraints(
         if args.ray.offload_train or args.ray.offload_rollout:
             raise ValueError(
                 "async_pipeline is incompatible with offload_train/offload_rollout. "
-                "Set --offload-train=false --offload-rollout=false when using --async-pipeline."
+                "Set --ray.offload-train=false --ray.offload-rollout=false "
+                "when using --rollout.async-pipeline."
             )
 
 __all__ = [

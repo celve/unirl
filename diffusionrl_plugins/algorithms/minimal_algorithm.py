@@ -46,10 +46,10 @@ class MinimalAlgorithm(BaseAlgorithm):
         kwargs = cls._base_kwargs_from_args(args)
         kwargs.update(
             {
-                "sde_ratio": getattr(args, "sde_ratio", 1.0),
-                "train_only_sde_steps": getattr(args, "window_training", False),
-                "ignore_last": getattr(args, "ignore_last", False),
-                "frozen_init_timesteps": getattr(args, "frozen_init_timesteps", 0),
+                "sde_ratio": getattr(args.sampling, "sde_ratio", 1.0),
+                "train_only_sde_steps": getattr(args.algorithm.window, "window_training", False),
+                "ignore_last": getattr(args.algorithm, "ignore_last", False),
+                "frozen_init_timesteps": getattr(args.algorithm, "frozen_init_timesteps", 0),
             }
         )
         return cls(**kwargs)

@@ -125,12 +125,12 @@ class FluxModelBundle(ModelBundle):
         if sde_type in ("dance", "sde"):
             raise ValueError(
                 f"model_type='flux' requires flux-specific sde_type. "
-                f"Got sde_type='{sde_type}'. Use --sde-type flux_dance instead."
+                f"Got sde_type='{sde_type}'. Use --sampling.sde-type flux_dance instead."
             )
         if sde_type == "flow":
             raise ValueError(
                 f"model_type='flux' requires flux-specific sde_type. "
-                f"Got sde_type='flow'. Use --sde-type flux_flow instead."
+                f"Got sde_type='flow'. Use --sampling.sde-type flux_flow instead."
             )
         raise ValueError(
             f"Unknown sde_type='{sde_type}' for model_type='flux'. "
@@ -559,4 +559,3 @@ class FluxTextEncoderWrapper:
         if self.t5_encoder is not None:
             self.t5_encoder.to(device)
         return self
-

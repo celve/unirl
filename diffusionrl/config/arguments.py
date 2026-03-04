@@ -68,7 +68,8 @@ class ModelConfig:
         if not self.model_path:
             raise ValueError(
                 "model_path must be set. It is usually auto-resolved from model_type. "
-                "Set --model-type (hunyuan, flux, sd3, mochi) or provide --model-path explicitly."
+                "Set --model.model-type (hunyuan, flux, sd3, mochi) or provide "
+                "--model.model-path explicitly."
             )
 
 
@@ -126,7 +127,7 @@ class SamplingConfig:
         if not self.sampler_path:
             raise ValueError(
                 "sampler_path must be set. It is usually auto-resolved from model_type. "
-                "Set --model-type or provide --sampler-path explicitly."
+                "Set --model.model-type or provide --sampling.sampler-path explicitly."
             )
 
 
@@ -435,7 +436,7 @@ class TrainingConfig:
         if backend not in supported and not self.train_backend_path:
             raise ValueError(
                 f"Unsupported train_backend={self.train_backend!r}. "
-                f"Expected one of {sorted(supported)} or provide --train-backend-path."
+                f"Expected one of {sorted(supported)} or provide --training.train-backend-path."
             )
         sharding = str(self.fsdp_sharding_strategy or "FULL_SHARD").strip().upper()
         if sharding != "FULL_SHARD":
@@ -569,7 +570,7 @@ class DebugConfig:
         if int(self.debug_subsample) < 0:
             raise ValueError("debug_subsample must be >= 0.")
         if mode == "train_only" and not self.debug_load_path:
-            raise ValueError("debug_mode=train_only requires --debug-load-path.")
+            raise ValueError("debug_mode=train_only requires --debug.debug-load-path.")
 
 
 _GROUP_CONFIG_TYPES = {
@@ -1399,7 +1400,7 @@ def _resolve_model_runtime_contract(
             raise ValueError(
                 f"Unknown model_type={args.model.model_type!r}. "
                 f"Discovered model types: {list_model_types()}. "
-                "Provide --model-path explicitly for custom models."
+                "Provide --model.model-path explicitly for custom models."
             )
         _set_normalized_attr(
             args,
@@ -1485,7 +1486,7 @@ def _resolve_model_runtime_contract(
         else:
             raise ValueError(
                 f"Model {args.model.model_path} does not declare default_sampler_engine(). "
-                "Provide --sampler-engine-type explicitly."
+                "Provide --sampling.sampler-engine-type explicitly."
             )
 
     return model_cls
@@ -1572,13 +1573,13 @@ def _apply_training_actor_direct_sampling_overrides(
     if not args.ray.colocate_rollout_training:
         raise ValueError(
             "training_actor_direct_sampling=true requires colocate_rollout_training=true. "
-            "Set --colocate-rollout-training."
+            "Set --ray.colocate-rollout-training."
         )
 
     if args.ray.offload or args.ray.offload_train or args.ray.offload_rollout:
         raise ValueError(
             "training_actor_direct_sampling=true is incompatible with offload. "
-            "Set --offload=false --offload-train=false --offload-rollout=false."
+            "Set --ray.offload=false --ray.offload-train=false --ray.offload-rollout=false."
         )
 
 
@@ -1597,12 +1598,12 @@ def _normalize_replay_mode(
         if sglang_logprob_mode == "replay" and not replay_enabled:
             raise ValueError(
                 "sampler_engine_type='sglang' with sglang_logprob_mode='replay' requires "
-                "--replay-log-probs=true. Set it explicitly."
+                "--sampling.replay-log-probs=true. Set it explicitly."
             )
         if sglang_logprob_mode == "native" and replay_enabled:
             raise ValueError(
                 "sglang_logprob_mode='native' is incompatible with replay_log_probs=true. "
-                "Set --replay-log-probs=false when using native log_prob mode."
+                "Set --sampling.replay-log-probs=false when using native log_prob mode."
             )
 
     if replay_enabled and not replay_guard:
@@ -1654,12 +1655,12 @@ def _normalize_training_misc(args: TrainingArguments) -> None:
     ):
         raise ValueError(
             "advantage_type='per_prompt' with per_prompt_mode='running' requires "
-            "--use-per-prompt-stat-tracker=true."
+            "--algorithm.use-per-prompt-stat-tracker=true."
         )
 
     if args.algorithm.use_global_std and not args.algorithm.use_running_stats:
         raise ValueError(
-            "--use-global-std=true requires --use-running-stats=true."
+            "--algorithm.use-global-std=true requires --algorithm.use-running-stats=true."
         )
 
     if isinstance(args.training.lora_target_modules, str):
@@ -1797,7 +1798,7 @@ def _normalize_train_backend_config(args: TrainingArguments) -> None:
     if backend not in supported and not backend_path:
         raise ValueError(
             f"Unsupported train_backend={backend!r}. "
-            f"Expected one of {sorted(supported)} or provide --train-backend-path."
+            f"Expected one of {sorted(supported)} or provide --training.train-backend-path."
         )
     if backend in {"megatron"} and not backend_path:
         logger.warning(
@@ -2009,7 +2010,7 @@ def _normalize_debug_config(args: TrainingArguments) -> str:
         if bool(getattr(args.rollout, "async_pipeline", False)):
             raise ValueError(
                 f"debug_mode={debug_mode} does not support async_pipeline yet. "
-                "Set --async-pipeline=false."
+                "Set --rollout.async-pipeline=false."
             )
         if debug_mode in ("rollout_only", "interactive") and bool(getattr(args.sampling, "training_actor_direct_sampling", False)):
             raise ValueError(
@@ -2020,7 +2021,7 @@ def _normalize_debug_config(args: TrainingArguments) -> str:
     if bool(getattr(args.debug, "debug_save_intermediates", False)) and bool(getattr(args.rollout, "async_pipeline", False)):
         raise ValueError(
             "debug_save_intermediates=true is not supported with async_pipeline yet. "
-            "Set --async-pipeline=false."
+            "Set --rollout.async-pipeline=false."
         )
 
     return debug_mode

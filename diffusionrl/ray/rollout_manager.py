@@ -184,7 +184,7 @@ def _invoke_custom_rollout_pipeline(
             num_samples_per_prompt=int(
                 num_samples_per_prompt
                 if num_samples_per_prompt is not None
-                else getattr(manager.args, "num_samples_per_prompt", 1)
+                else getattr(manager.args.algorithm, "num_samples_per_prompt", 1)
             ),
             prompts=adv_prompts,
         )
