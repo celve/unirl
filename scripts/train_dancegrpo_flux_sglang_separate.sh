@@ -8,13 +8,12 @@
 #
 # Key differences from the FSDP version:
 #   - --sampling.sampler-engine-type sglang   (instead of --sampling.sampler-path)
-#   - SGLANG_PYTHON_PATH must point to your local sglang/python directory
+#   - Optional local debug override via SGLANG_PYTHON_PATH/PYTHONPATH
 #   - --sampling.tp-size controls tensor-parallelism inside the SGLang engine
 #   - Weight sync uses checkpoint_path (automatic for sglang engine)
 #
 # Prerequisites:
-#   - SGLang with diffusion patches (branch local/diffusion-rl)
-#     export SGLANG_PYTHON_PATH=/path/to/sglang/python
+#   - Install sglang[diffusion] (default runtime path)
 #   - FLUX model weights at PRETRAINED_MODEL path
 #
 # Usage:
@@ -29,14 +28,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ========== SGLang Configuration ==========
-# Point to local sglang/python with diffusion-rl patches
+# Prefer local sibling sglang checkout when available; otherwise use installed package.
 SGLANG_PYTHON_PATH="${SGLANG_PYTHON_PATH:-${REPO_ROOT}/../sglang/python}"
-if [ ! -d "${SGLANG_PYTHON_PATH}" ]; then
-    echo "ERROR: SGLANG_PYTHON_PATH not found: ${SGLANG_PYTHON_PATH}"
-    echo "Set it explicitly, e.g. export SGLANG_PYTHON_PATH=/path/to/sglang/python"
-    exit 1
+if [ -d "${SGLANG_PYTHON_PATH}" ]; then
+    export SGLANG_PYTHON_PATH
+    export PYTHONPATH="${SGLANG_PYTHON_PATH}:${PYTHONPATH:-}"
+    echo "[SGLang] Using local source: ${SGLANG_PYTHON_PATH}"
+else
+    echo "[SGLang] Local source not found at ${SGLANG_PYTHON_PATH}; using installed sglang."
 fi
-export SGLANG_PYTHON_PATH
 
 # ========== Default values (can be overridden via environment) ==========
 PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/flux.1-dev"}

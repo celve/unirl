@@ -64,14 +64,15 @@ DiffusionRL supports the following diffusion models:
 ### Installation
 
 We support two equivalent core installation paths.
+Python `>=3.10` is required (the SGLang diffusion fork depends on it).
 
 ```bash
 # Option A (recommended): editable install with core extras
-pip install -e ".[train,infer,eval]"
+pip install -e ".[train,infer,eval]" --no-build-isolation
 
 # Option B: requirements-based install (same dependency set as Option A)
-pip install -r requirements.txt
-pip install -e . --no-deps
+pip install -r requirements.txt --no-build-isolation
+pip install -e . --no-deps --no-build-isolation
 ```
 
 To match our validated GPU environment, install FlashAttention explicitly:
@@ -86,13 +87,13 @@ For development tools:
 pip install -e ".[train,infer,eval,dev]"
 ```
 
-If your package mirror blocks build-time `setuptools/wheel` resolution, use:
+If your environment has complete build tooling/mirrors, you can omit `--no-build-isolation`:
 
 ```bash
-pip install -e ".[train,infer,eval]" --no-build-isolation
+pip install -e ".[train,infer,eval]"
 # or
-pip install -r requirements.txt --no-build-isolation
-pip install -e . --no-deps --no-build-isolation
+pip install -r requirements.txt
+pip install -e . --no-deps
 pip install flash-attn==2.7.4.post1 --no-build-isolation
 ```
 

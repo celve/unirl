@@ -1,9 +1,10 @@
 # Core dependency set aligned with:
 #   pip install -e ".[train,infer,eval]"
+# Includes the SGLang diffusion fork dependency.
 #
 # Usage:
-#   pip install -r requirements.txt
-#   pip install -e . --no-deps
+#   pip install -r requirements.txt --no-build-isolation
+#   pip install -e . --no-deps --no-build-isolation
 #   pip install flash-attn==2.7.4.post1 --no-build-isolation
 #
 # Optional Geneval/OpenMMLab stack (mmcv/mmdet) is intentionally excluded.
@@ -12,6 +13,7 @@
 numpy>=1.24,<3
 torch>=2.1
 ray[default]>=2.9,<3
+sglang[diffusion] @ git+https://github.com/celve/sglang.git@diffusionrl#subdirectory=python
 diffusers>=0.30
 transformers>=4.41
 peft>=0.11

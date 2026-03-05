@@ -14,13 +14,15 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Prefer local sibling sglang checkout when available; otherwise use installed package.
 SGLANG_PYTHON_PATH="${SGLANG_PYTHON_PATH:-${REPO_ROOT}/../sglang/python}"
-if [ ! -d "${SGLANG_PYTHON_PATH}" ]; then
-    echo "ERROR: SGLANG_PYTHON_PATH not found: ${SGLANG_PYTHON_PATH}"
-    echo "Set it explicitly, e.g. export SGLANG_PYTHON_PATH=/path/to/sglang/python"
-    exit 1
+if [ -d "${SGLANG_PYTHON_PATH}" ]; then
+    export SGLANG_PYTHON_PATH
+    export PYTHONPATH="${SGLANG_PYTHON_PATH}:${PYTHONPATH:-}"
+    echo "[SGLang] Using local source: ${SGLANG_PYTHON_PATH}"
+else
+    echo "[SGLang] Local source not found at ${SGLANG_PYTHON_PATH}; using installed sglang."
 fi
-export SGLANG_PYTHON_PATH
 
 PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/hunyuan-video"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/dancegrpo_hunyuan_sglang_separate"}
