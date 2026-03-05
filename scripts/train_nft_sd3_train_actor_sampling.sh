@@ -60,6 +60,9 @@ DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/prompts_toy.json"}
 NUM_GPUS=${NUM_GPUS:-8}
 BATCH_SIZE=${BATCH_SIZE:-3}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-24}
+REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
+WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-nft_sd3_train_actor_sampling}
 if [ $(( NUM_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: NUM_GPUS*BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
     exit 1
@@ -135,4 +138,7 @@ python -m diffusionrl.train \
     --rollout.eval-steps 60 \
     --rollout.logging-steps 10 \
     --rollout.output-dir "${OUTPUT_DIR}" \
+    --rollout.report-to-wandb ${REPORT_TO_WANDB} \
+    --rollout.project-name "${WANDB_PROJECT_NAME}" \
+    --rollout.run-name "${WANDB_RUN_NAME}" \
     "$@"

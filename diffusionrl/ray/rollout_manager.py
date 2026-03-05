@@ -306,6 +306,7 @@ class RolloutManager:
         self._total_samples_generated = 0
         self._current_step = 0
         self._sampling_requirements = None
+        self._last_rollout_metadata: Dict[str, Any] = {}
 
     def init(self) -> None:
         """
@@ -463,11 +464,18 @@ class RolloutManager:
         self.external_sampling_actors = actor_group
         logger.info("External sampling actors attached")
 
-    def _build_training_batch(self, rollout_id: int) -> TrainingBatch:
+    def _build_training_batch(
+        self,
+        rollout_id: int,
+        *,
+        collect_media_preview: bool = False,
+        media_max_items: int = 8,
+    ) -> TrainingBatch:
         """Run rollout pipeline and return one typed TrainingBatch."""
         if not self._is_initialized:
             raise RuntimeError("RolloutManager not initialized. Call init() first.")
 
+        self._last_rollout_metadata = {}
         logger.info(f"Starting generation for rollout {rollout_id}")
 
         # 1. Get batch from data source (supports both prompts and embeddings)
@@ -497,6 +505,8 @@ class RolloutManager:
                 rollout_id=rollout_id,
                 requirements=requirements,
                 actor_group=actor_group,
+                collect_media_preview=collect_media_preview,
+                media_max_items=media_max_items,
             )
 
         if not hasattr(train_data, "slice"):
@@ -568,6 +578,51 @@ class RolloutManager:
         while len(expanded) < sample_count:
             expanded.extend(candidate)
         return expanded[:sample_count]
+
+    def _build_wandb_media_preview(
+        self,
+        *,
+        sampler_outputs: List[Any],
+        reward_prompts: List[str],
+        rewards: torch.Tensor,
+        max_items: int,
+    ) -> Optional[Dict[str, Any]]:
+        limit = max(1, int(max_items))
+        rewards_flat: List[float] = []
+        if torch.is_tensor(rewards) and rewards.numel() > 0:
+            rewards_flat = [float(v) for v in rewards.detach().cpu().reshape(-1).tolist()]
+
+        images: List[Any] = []
+        prompts: List[str] = []
+        reward_values: List[float] = []
+        global_sample_idx = 0
+
+        for output in sampler_outputs:
+            batch_size = int(getattr(output, "batch_size", 0) or 0)
+            decoded_images = list(getattr(output, "decoded_images", None) or [])
+            for image_idx, image in enumerate(decoded_images):
+                if len(images) >= limit:
+                    break
+                if not hasattr(image, "save"):
+                    continue
+                sample_idx = global_sample_idx + image_idx
+                images.append(image)
+                prompt = reward_prompts[sample_idx] if sample_idx < len(reward_prompts) else ""
+                prompts.append(str(prompt))
+                reward_val = rewards_flat[sample_idx] if sample_idx < len(rewards_flat) else 0.0
+                reward_values.append(float(reward_val))
+            if len(images) >= limit:
+                break
+            global_sample_idx += batch_size
+
+        if not images:
+            return None
+
+        return {
+            "images": images,
+            "prompts": prompts,
+            "rewards": reward_values,
+        }
 
     def _resolve_rollout_sde_indices(
         self,
@@ -963,6 +1018,9 @@ class RolloutManager:
         rollout_id: int,
         requirements: Any,
         actor_group: Any,
+        *,
+        collect_media_preview: bool = False,
+        media_max_items: int = 8,
     ) -> TrainingBatch:
         """Unified training data generation for all algorithm types.
 
@@ -1016,6 +1074,22 @@ class RolloutManager:
             prompts=base_prompts if base_prompts else prompts,
             prompt_metadata=batch.get("metadata"),
         )
+
+        if collect_media_preview:
+            reward_prompts = self._build_reward_prompts(
+                train_prompts=train_prompts,
+                base_prompts=base_prompts,
+                fallback_prompts=prompts,
+                sample_count=int(rewards.shape[0]),
+            )
+            media_preview = self._build_wandb_media_preview(
+                sampler_outputs=sampler_outputs,
+                reward_prompts=reward_prompts,
+                rewards=rewards,
+                max_items=media_max_items,
+            )
+            if media_preview is not None:
+                self._last_rollout_metadata["wandb_media_preview"] = media_preview
 
         # Assemble
         return self._assemble_training_batch(
@@ -1535,7 +1609,14 @@ class RolloutManager:
             "prompts": prompts,
         }
 
-    def generate_and_push(self, rollout_id: int, buffer: Any) -> Dict[str, Any]:
+    def generate_and_push(
+        self,
+        rollout_id: int,
+        buffer: Any,
+        *,
+        collect_media_preview: bool = False,
+        media_max_items: int = 8,
+    ) -> Dict[str, Any]:
         """Generate training data and push directly to buffer.
 
         This is the preferred flow: Manager generates, then pushes result.
@@ -1549,8 +1630,19 @@ class RolloutManager:
         Returns:
             Push result dict from buffer.push()
         """
-        train_data = self._build_training_batch(rollout_id)
-        push_result = ray.get(buffer.push.remote(rollout_id=rollout_id, train_data=train_data))
+        train_data = self._build_training_batch(
+            rollout_id,
+            collect_media_preview=collect_media_preview,
+            media_max_items=media_max_items,
+        )
+        metadata = dict(self._last_rollout_metadata) if self._last_rollout_metadata else None
+        push_result = ray.get(
+            buffer.push.remote(
+                rollout_id=rollout_id,
+                train_data=train_data,
+                metadata=metadata,
+            )
+        )
         if not push_result.get("accepted", False):
             raise RuntimeError(
                 f"Rollout buffer rejected rollout_id={rollout_id}: {push_result.get('error')}"

@@ -65,6 +65,9 @@ NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-12}
 REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward_aggr}
 WINDOW_MAX_ITERS_PER_GROUP=${WINDOW_MAX_ITERS_PER_GROUP:-10}
 WINDOW_MIN_ITERS_PER_GROUP=${WINDOW_MIN_ITERS_PER_GROUP:-1}
+REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
+WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-mixgrpo_flux_train_actor_sampling}
 if [ $(( NUM_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: NUM_GPUS*BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
     exit 1
@@ -130,4 +133,7 @@ python -m diffusionrl.train \
     --rollout.save-steps 50 \
     --rollout.logging-steps 10 \
     --rollout.output-dir "${OUTPUT_DIR}" \
+    --rollout.report-to-wandb ${REPORT_TO_WANDB} \
+    --rollout.project-name "${WANDB_PROJECT_NAME}" \
+    --rollout.run-name "${WANDB_RUN_NAME}" \
     "$@"

@@ -63,6 +63,9 @@ BATCH_SIZE=${BATCH_SIZE:-1}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-4}
 LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-32}
+REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
+WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-dancegrpo_flux_train_actor_sampling}
 if [ $(( NUM_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: NUM_GPUS*BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
     exit 1
@@ -119,4 +122,7 @@ python -m diffusionrl.train \
     --rollout.save-steps 40 \
     --rollout.logging-steps 10 \
     --rollout.output-dir "${OUTPUT_DIR}" \
+    --rollout.report-to-wandb ${REPORT_TO_WANDB} \
+    --rollout.project-name "${WANDB_PROJECT_NAME}" \
+    --rollout.run-name "${WANDB_RUN_NAME}" \
     "$@"

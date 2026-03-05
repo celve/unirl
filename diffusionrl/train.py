@@ -217,6 +217,10 @@ def train(args):
             rollout_on_gpu = True
 
     num_samples_per_prompt = max(1, int(getattr(args.algorithm, "num_samples_per_prompt", 1)))
+    wandb_media_enabled = bool(
+        wandb_logger is not None and bool(getattr(args.rollout, "wandb_log_media", False))
+    )
+    wandb_media_max_items = max(1, int(getattr(args.rollout, "wandb_media_max_items", 8)))
 
     def _collect_rollout_batch_metrics(batch_ref) -> dict:
         try:
@@ -234,6 +238,8 @@ def train(args):
         sync_result = None
         sync_phase_s = 0.0
         eval_phase_s = 0.0
+        should_log = (rollout_id % args.rollout.logging_steps == 0)
+        collect_media_preview = bool(should_log and wandb_media_enabled)
 
         # === PHASE 1: Rollout ===
         rollout_phase_start_t = time.perf_counter()
@@ -263,6 +269,8 @@ def train(args):
                 rollout_manager.generate_and_push.remote(
                     rollout_id=rollout_id,
                     buffer=rollout_buffer,
+                    collect_media_preview=collect_media_preview,
+                    media_max_items=wandb_media_max_items,
                 )
             )
         rollout_payload = ray.get(
@@ -272,6 +280,7 @@ def train(args):
             )
         )
         rollout_data_ref = rollout_payload["training_data"]
+        rollout_metadata = dict(rollout_payload.get("metadata") or {})
         sample_count = int(rollout_payload.get("sample_count", 0) or 0)
         rollout_phase_s = time.perf_counter() - rollout_phase_start_t
 
@@ -317,7 +326,6 @@ def train(args):
             if wandb_logger:
                 wandb_logger.log_eval(rollout_id, eval_metrics)
 
-        should_log = (rollout_id % args.rollout.logging_steps == 0)
         if should_log:
             avg_loss = sum(m.get("loss", 0) for m in metrics) / max(len(metrics), 1)
             step_time_s = time.perf_counter() - step_start_t
@@ -340,6 +348,9 @@ def train(args):
                 rollout_metrics = _collect_rollout_batch_metrics(rollout_data_ref)
                 if rollout_metrics:
                     wandb_logger.log_rollout(rollout_id, rollout_metrics)
+                media_preview = rollout_metadata.get("wandb_media_preview")
+                if media_preview:
+                    wandb_logger.log_generated_media(rollout_id, media_preview)
 
                 perf_metrics = {
                     "rollout_phase_s": rollout_phase_s,

@@ -312,6 +312,35 @@ class GRPOCoreWandBLogger:
         except Exception as e:
             print(f"Warning: Failed to log images: {e}")
 
+    def log_generated_media(
+        self,
+        rollout_id: int,
+        media_preview: Dict[str, Any],
+        *,
+        key: str = "rollout/generated_media",
+    ) -> None:
+        """Log rollout media preview payload produced by rollout manager."""
+        if not isinstance(media_preview, dict):
+            return
+
+        images = media_preview.get("images")
+        if not isinstance(images, list) or not images:
+            return
+
+        prompts = media_preview.get("prompts")
+        if not isinstance(prompts, list):
+            prompts = []
+
+        rewards = media_preview.get("rewards")
+        self.log_images(
+            images=images,
+            prompts=prompts,
+            rewards=rewards if isinstance(rewards, (list, torch.Tensor, dict)) else None,
+            step=int(rollout_id),
+            max_images=max(1, len(images)),
+            key=key,
+        )
+
     def log_eval(
         self,
         step: int,

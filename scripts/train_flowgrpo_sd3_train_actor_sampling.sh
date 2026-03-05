@@ -62,6 +62,11 @@ NUM_GPUS=${NUM_GPUS:-8}
 BATCH_SIZE=${BATCH_SIZE:-1}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-8}
 NUM_INFERENCE_STEPS=${NUM_INFERENCE_STEPS:-10}
+REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
+WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-flowgrpo_sd3_train_actor_sampling}
+WANDB_LOG_MEDIA=${WANDB_LOG_MEDIA:-true}
+WANDB_MEDIA_MAX_ITEMS=${WANDB_MEDIA_MAX_ITEMS:-8}
 if [ $(( NUM_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: NUM_GPUS*BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
     exit 1
@@ -136,4 +141,9 @@ python -m diffusionrl.train \
     --rollout.eval-steps 60 \
     --rollout.logging-steps 10 \
     --rollout.output-dir "${OUTPUT_DIR}" \
+    --rollout.report-to-wandb ${REPORT_TO_WANDB} \
+    --rollout.project-name "${WANDB_PROJECT_NAME}" \
+    --rollout.run-name "${WANDB_RUN_NAME}" \
+    --rollout.wandb-log-media ${WANDB_LOG_MEDIA} \
+    --rollout.wandb-media-max-items ${WANDB_MEDIA_MAX_ITEMS} \
     "$@"

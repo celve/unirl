@@ -120,6 +120,9 @@ FPS=${FPS:-8}
 # Reward model
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-"hpsv2"}
 REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardWorker"}
+REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
+WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-dancegrpo_hunyuan_train_actor_sampling}
 
 # FSDP configuration
 FSDP_CPU_OFFLOAD=${FSDP_CPU_OFFLOAD:-"false"}
@@ -212,4 +215,7 @@ python -m diffusionrl.train \
     --rollout.save-steps 50 \
     --rollout.logging-steps 1 \
     --rollout.output-dir "${OUTPUT_DIR}" \
+    --rollout.report-to-wandb ${REPORT_TO_WANDB} \
+    --rollout.project-name "${WANDB_PROJECT_NAME}" \
+    --rollout.run-name "${WANDB_RUN_NAME}" \
     "$@"

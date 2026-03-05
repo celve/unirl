@@ -61,6 +61,9 @@ WINDOW_MAX_ITERS_PER_GROUP=${WINDOW_MAX_ITERS_PER_GROUP:-10}
 WINDOW_MIN_ITERS_PER_GROUP=${WINDOW_MIN_ITERS_PER_GROUP:-1}
 LORA_RANK=${LORA_RANK:-32}
 LORA_ALPHA=${LORA_ALPHA:-64}
+REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
+WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-mixgrpo_sd3_train_actor_sampling}
 if [ "${NUM_SAMPLES_PER_PROMPT}" -lt 2 ]; then
     echo "ERROR: MixGRPO uses group advantages; set NUM_SAMPLES_PER_PROMPT >= 2 to avoid NaN."
     exit 1
@@ -130,4 +133,7 @@ python -m diffusionrl.train \
     --rollout.save-steps 50 \
     --rollout.logging-steps 10 \
     --rollout.output-dir "${OUTPUT_DIR}" \
+    --rollout.report-to-wandb ${REPORT_TO_WANDB} \
+    --rollout.project-name "${WANDB_PROJECT_NAME}" \
+    --rollout.run-name "${WANDB_RUN_NAME}" \
     "$@"

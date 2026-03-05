@@ -520,6 +520,10 @@ class RolloutLoggingConfig:
         metadata={"help": "Project name for WandB"})
     run_name: Optional[str] = field(default=None,
         metadata={"help": "Run name for WandB (auto-generated if None)"})
+    wandb_log_media: bool = field(default=False,
+        metadata={"help": "Log generated media previews to WandB (true/false)"})
+    wandb_media_max_items: int = field(default=8,
+        metadata={"help": "Maximum generated media items to log per rollout when wandb_log_media=true"})
 
     def validate(self) -> None:
         if self.num_rollout < 1:
@@ -531,6 +535,8 @@ class RolloutLoggingConfig:
                 "report_to_wandb must be a boolean (true/false). "
                 f"Got: {self.report_to_wandb!r}"
             )
+        if int(self.wandb_media_max_items) < 1:
+            raise ValueError("wandb_media_max_items must be >= 1.")
 
 
 @dataclass

@@ -63,9 +63,12 @@ def train_async_loop(
                 f"Cannot launch rollout {rollout_id}: inflight queue is full "
                 f"(inflight={runtime.inflight_count}, max_inflight={runtime.max_inflight})"
             )
+        should_log_rollout = (rollout_id % args.rollout.logging_steps == 0)
         rollout_future = rollout_manager.generate_and_push.remote(
             rollout_id=rollout_id,
             buffer=rollout_buffer,
+            collect_media_preview=bool(should_log_rollout and wandb_media_enabled),
+            media_max_items=wandb_media_max_items,
         )
         runtime.launch_rollout(
             rollout_id,
@@ -89,6 +92,10 @@ def train_async_loop(
             rollout_on_gpu = True
 
     num_samples_per_prompt = max(1, int(getattr(args.algorithm, "num_samples_per_prompt", 1)))
+    wandb_media_enabled = bool(
+        wandb_logger is not None and bool(getattr(args.rollout, "wandb_log_media", False))
+    )
+    wandb_media_max_items = max(1, int(getattr(args.rollout, "wandb_media_max_items", 8)))
 
     def _collect_rollout_batch_metrics(batch_ref) -> dict:
         try:
@@ -124,6 +131,7 @@ def train_async_loop(
             )
         )
         rollout_data_ref = rollout_payload["training_data"]
+        rollout_metadata = dict(rollout_payload.get("metadata") or {})
         sample_count = int(rollout_payload.get("sample_count", 0) or 0)
         rollout_phase_s = time.perf_counter() - rollout_phase_start_t
 
@@ -182,6 +190,9 @@ def train_async_loop(
                 rollout_metrics = _collect_rollout_batch_metrics(rollout_data_ref)
                 if rollout_metrics:
                     wandb_logger.log_rollout(rollout_id, rollout_metrics)
+                media_preview = rollout_metadata.get("wandb_media_preview")
+                if media_preview:
+                    wandb_logger.log_generated_media(rollout_id, media_preview)
 
                 perf_metrics = {
                     "rollout_phase_s": rollout_phase_s,
