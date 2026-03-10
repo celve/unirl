@@ -24,36 +24,52 @@ else
     echo "[SGLang] Local source not found at ${SGLANG_PYTHON_PATH}; using installed sglang."
 fi
 
+
+## ---- Default values (can be overridden via command line) ----
+# Model & data & output configurations
 PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/flux.1-dev"}
-OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/mixgrpo_flux_sglang_separate"}
+OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/mixgrpo_flux_sglang_sampling"}
 DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/ocr_prompts_toy.json"}
 
+REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
+WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-mixgrpo_flux_sglang_sampling}
+
+# GPU allocation
 ROLLOUT_GPUS=${ROLLOUT_GPUS:-4}
 TRAINING_GPUS=${TRAINING_GPUS:-4}
-LOCAL_BATCH_SIZE=${LOCAL_BATCH_SIZE:-${BATCH_SIZE:-12}}
-GRADIENT_ACCUMULATION_BATCH_SIZE=${GRADIENT_ACCUMULATION_BATCH_SIZE-4}
+
+# Rollout
+PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-32}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-12}
-REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward_aggr}
-WINDOW_MAX_ITERS_PER_GROUP=${WINDOW_MAX_ITERS_PER_GROUP:-10}
-WINDOW_MIN_ITERS_PER_GROUP=${WINDOW_MIN_ITERS_PER_GROUP:-1}
-TP_SIZE=${TP_SIZE:-1}
-SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
-REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
-REPLAY_SAMPLER_PATH=${REPLAY_SAMPLER_PATH:-diffusionrl.samplers.fsdp.flux_sampler.FluxSampler}
+NUM_UPDATE_STEPS_PER_ROLLOUT=${NUM_UPDATE_STEPS_PER_ROLLOUT:-4}
+ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 
 if [ "${NUM_SAMPLES_PER_PROMPT}" -lt 2 ]; then
     echo "ERROR: MixGRPO uses group advantages; set NUM_SAMPLES_PER_PROMPT >= 2 to avoid NaN."
     exit 1
 fi
-if [ $(( TRAINING_GPUS * LOCAL_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
-    echo "ERROR: TRAINING_GPUS*LOCAL_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
+
+# Rollout (sglang engine)
+TP_SIZE=${TP_SIZE:-1}
+SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
+REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
+REPLAY_SAMPLER_PATH=${REPLAY_SAMPLER_PATH:-diffusionrl.samplers.fsdp.flux_sampler.FluxSampler}
+
+# Reward
+REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward_aggr}
+REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-hpsv2}
+
+# Training
+UPDATE_MODE=${UPDATE_MODE:-multi_update}
+if [ $(( ROLLOUT_TOTAL_SAMPLES % TRAINING_GPUS )) -ne 0 ]; then
+    echo "ERROR: PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT must be divisible by TRAINING_GPUS"
     exit 1
 fi
-PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * LOCAL_BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
-GRADIENT_ACCUMULATION_ARGS=()
-if [ -n "${GRADIENT_ACCUMULATION_BATCH_SIZE}" ]; then
-    GRADIENT_ACCUMULATION_ARGS+=(--training.gradient-accumulation-batch-size "${GRADIENT_ACCUMULATION_BATCH_SIZE}")
-fi
+GRADIENT_ACCUMULATION_BATCH_SIZE=${GRADIENT_ACCUMULATION_BATCH_SIZE-4}
+LOCAL_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / TRAINING_GPUS ))
+MULTI_UPDATE_BATCH_SIZE=$(( LOCAL_BATCH_SIZE / NUM_UPDATE_STEPS_PER_ROLLOUT ))
+
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
@@ -65,7 +81,7 @@ python -m diffusionrl.train \
     --sampling.tp-size ${TP_SIZE} \
     --algorithm.algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
     --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
-    --reward.reward-model-name ocr \
+    --reward.reward-model-name "${REWARD_MODEL_NAME}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
@@ -75,18 +91,17 @@ python -m diffusionrl.train \
     --sampling.num-inference-steps 25 \
     --sampling.guidance-scale 3.5 \
     \
-    --sampling.sde-ratio 0.5 \
+    --sampling.sde-ratio 0.16 \
     --algorithm.window.timestep-strategy window \
     --algorithm.window.window-strategy progressive \
     --algorithm.window.window-group-size 4 \
     --algorithm.window.window-iters-per-group 25 \
-    --algorithm.window.window-max-iters-per-group ${WINDOW_MAX_ITERS_PER_GROUP} \
-    --algorithm.window.window-min-iters-per-group ${WINDOW_MIN_ITERS_PER_GROUP} \
+    --algorithm.window.window-max-iters-per-group ${WINDOW_MAX_ITERS_PER_GROUP:-10} \
+    --algorithm.window.window-min-iters-per-group ${WINDOW_MIN_ITERS_PER_GROUP:-1} \
     --algorithm.window.window-overlap true \
     --algorithm.window.window-roll-back true \
     \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
-    "${GRADIENT_ACCUMULATION_ARGS[@]}" \
     --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
@@ -100,7 +115,9 @@ python -m diffusionrl.train \
     --ray.placement-strategy SPREAD \
     \
     --training.learning-rate 1e-5 \
-    --training.update-mode single_update \
+    --training.update-mode ${UPDATE_MODE} \
+    --training.gradient-accumulation-batch-size ${GRADIENT_ACCUMULATION_BATCH_SIZE} \
+    --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.lora-rank 64 \
@@ -112,6 +129,6 @@ python -m diffusionrl.train \
     \
     --rollout.num-rollout 300 \
     --rollout.save-steps 50 \
-    --rollout.logging-steps 10 \
+    --rollout.logging-steps 1 \
     --rollout.output-dir "${OUTPUT_DIR}" \
     "$@"

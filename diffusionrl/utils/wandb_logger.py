@@ -108,7 +108,6 @@ class GRPOCoreWandBLogger:
                 name=self.run_name,
                 config=config_dict,
                 dir=self.log_dir,
-                entity="diffusionrl-reproduce",
                 tags=self.tags,
             )
             self._init_metric_axes()

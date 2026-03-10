@@ -376,7 +376,7 @@ def train(args):
             avg_loss = sum(m.get("loss", 0) for m in metrics) / max(len(metrics), 1)
             step_time_s = time.perf_counter() - step_start_t
             logger.info(
-                "Rollout %s: loss=%.4f rollout=%.3fs train=%.3fs sync=%.3fs eval=%.3fs step=%.3fs",
+                "Rollout %s: loss=%.4E rollout=%.3fs train=%.3fs sync=%.3fs eval=%.3fs step=%.3fs",
                 rollout_id,
                 avg_loss,
                 rollout_phase_s,

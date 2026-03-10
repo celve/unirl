@@ -7,8 +7,9 @@
 #   Project: MixGRPO (https://github.com/Tencent-Hunyuan/MixGRPO)
 #   Algorithm: MixGRPO with SD3 model (adapted from FLUX version)
 #
-# NOTE: MixGRPO paper mentions SD3.5-M LoRA experiments for comparison.
-#       This script adapts MixGRPO's algorithm to SD3 for testing purposes.
+# NOTE: MixGRPO paper mentions SD3.5-M LoRA experiments for comparison but doesn't
+#       elaborate on the hyper-parameters or open-source the code for SD training.
+#       This script uses MixGRPO's configurations for FLUX.
 #       SD3 is much smaller than FLUX (~2B vs ~12B), making it ideal for testing.
 #
 # LoRA: Use LoRA (rank=32, alpha=64) to reduce memory usage
@@ -28,7 +29,7 @@
 # - shift=3.0 (SD3 time shift)
 # - num_inference_steps=25
 # - guidance_scale=4.5 (SD3 benefits from CFG, unlike FLUX)
-# - mixed_sampling=true with sde_ratio=0.5 (50% SDE, 50% ODE)
+# - mixed_sampling=true with sde_ratio=0.16 (16% SDE, 84% ODE)
 # - Window scheduler: progressive with group_size=4, iters_per_group=25
 # - NO KL penalty (same as MixGRPO)
 #
@@ -52,33 +53,31 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 
-# Default values (can be overridden via command line)
+## ---- Default configurations (can be overridden via command line) ----
+# Model & data & output
 PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/sd3.5-medium"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/mixgrpo_sd3_train_sampling"}
-DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/ocr_prompts_toy_16.json"}
-NUM_GPUS=${NUM_GPUS:-8}
-GRADIENT_ACCUMULATION_BATCH_SIZE=${GRADIENT_ACCUMULATION_BATCH_SIZE-2}
-MULTI_UPDATE_BATCH_SIZE=${MULTI_UPDATE_BATCH_SIZE:-2}
-NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-8}
-REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward_aggr}
-WINDOW_MAX_ITERS_PER_GROUP=${WINDOW_MAX_ITERS_PER_GROUP:-10}
-WINDOW_MIN_ITERS_PER_GROUP=${WINDOW_MIN_ITERS_PER_GROUP:-1}
-LORA_RANK=${LORA_RANK:-32}
-LORA_ALPHA=${LORA_ALPHA:-64}
+DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/ocr_prompts_toy.json"}
+
 REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
 WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-mixgrpo_sd3_train_actor_sampling}
-REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-ocr}
-REWARD_EXECUTION_MODE=${REWARD_EXECUTION_MODE:-rollout}
-LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cpu}
+
+# GPU allocation
+NUM_GPUS=${NUM_GPUS:-8}
+
+# Rollout
+PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-32}
+NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-12}
+ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
+
 if [ "${NUM_SAMPLES_PER_PROMPT}" -lt 2 ]; then
     echo "ERROR: MixGRPO uses group advantages; set NUM_SAMPLES_PER_PROMPT >= 2 to avoid NaN."
     exit 1
 fi
-PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-8}
-ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
+
+# Rollout (direct sampling)
 DIRECT_SAMPLING_BATCH_SIZE=${DIRECT_SAMPLING_BATCH_SIZE:-${ROLLOUT_TOTAL_SAMPLES}}
-UPDATE_MODE=${UPDATE_MODE:-multi_update}
 if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
     exit 1
@@ -87,10 +86,25 @@ if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${ROLLOUT_TOTAL_SAMPLES}" ] && [ $(( R
     echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must evenly divide rollout_total_samples (${ROLLOUT_TOTAL_SAMPLES})"
     exit 1
 fi
-GRADIENT_ACCUMULATION_ARGS=()
-if [ -n "${GRADIENT_ACCUMULATION_BATCH_SIZE}" ]; then
-    GRADIENT_ACCUMULATION_ARGS+=(--training.gradient-accumulation-batch-size "${GRADIENT_ACCUMULATION_BATCH_SIZE}")
+
+# Reward
+REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward_aggr}
+REWARD_EXECUTION_MODE=${REWARD_EXECUTION_MODE:-rollout}
+REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-hpsv2}
+LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cuda}
+
+# Training
+if [ $(( ROLLOUT_TOTAL_SAMPLES % NUM_GPUS )) -ne 0 ]; then
+    echo "ERROR: PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT must be divisible by NUM_GPUS"
+    exit 1
 fi
+
+UPDATE_MODE=${UPDATE_MODE:-multi_update}
+NUM_UPDATE_STEPS_PER_ROLLOUT=${NUM_UPDATE_STEPS_PER_ROLLOUT:-4}
+GRADIENT_ACCUMULATION_BATCH_SIZE=${GRADIENT_ACCUMULATION_BATCH_SIZE:-4}
+LOCAL_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / NUM_GPUS ))
+MULTI_UPDATE_BATCH_SIZE=$(( LOCAL_BATCH_SIZE / NUM_UPDATE_STEPS_PER_ROLLOUT ))
+
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
@@ -110,19 +124,17 @@ python -m diffusionrl.train \
     --sampling.num-inference-steps 25 \
     --sampling.guidance-scale 4.5 \
     \
-    --sampling.sde-ratio 0.5 \
+    --sampling.sde-ratio 0.16 \
     --algorithm.window.timestep-strategy window \
     --algorithm.window.window-strategy progressive \
     --algorithm.window.window-group-size 4 \
     --algorithm.window.window-iters-per-group 25 \
-    --algorithm.window.window-max-iters-per-group ${WINDOW_MAX_ITERS_PER_GROUP} \
-    --algorithm.window.window-min-iters-per-group ${WINDOW_MIN_ITERS_PER_GROUP} \
+    --algorithm.window.window-max-iters-per-group ${WINDOW_MAX_ITERS_PER_GROUP:-10} \
+    --algorithm.window.window-min-iters-per-group ${WINDOW_MIN_ITERS_PER_GROUP:-1} \
     --algorithm.window.window-overlap true \
     --algorithm.window.window-roll-back true \
     \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
-    "${GRADIENT_ACCUMULATION_ARGS[@]}" \
-    --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \
     --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
@@ -140,10 +152,12 @@ python -m diffusionrl.train \
     \
     --training.learning-rate 1e-5 \
     --training.update-mode ${UPDATE_MODE} \
+    --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \
+    --training.gradient-accumulation-batch-size ${GRADIENT_ACCUMULATION_BATCH_SIZE} \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
-    --training.lora-rank ${LORA_RANK} \
-    --training.lora-alpha ${LORA_ALPHA} \
+    --training.lora-rank 32 \
+    --training.lora-alpha 64 \
     --training.use-lora true \
     \
     --height 512 \
@@ -151,7 +165,7 @@ python -m diffusionrl.train \
     \
     --rollout.num-rollout 300 \
     --rollout.save-steps 50 \
-    --rollout.logging-steps 10 \
+    --rollout.logging-steps 1 \
     --rollout.output-dir "${OUTPUT_DIR}" \
     --rollout.report-to-wandb ${REPORT_TO_WANDB} \
     --rollout.project-name "${WANDB_PROJECT_NAME}" \
