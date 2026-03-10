@@ -34,10 +34,9 @@ algorithm:
   advantage_clip_max: 5.0
 
 training:
-  batch_size: 1
+  gradient_accumulation_batch_size: 1
   learning_rate: 0.00001
-  gradient_accumulation_steps: "1"
-  num_inner_epochs: 1
+  update_mode: single_update
   max_grad_norm: 1.0
   weight_decay: 0.0001
   use_lora: true

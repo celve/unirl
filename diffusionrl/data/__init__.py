@@ -1,14 +1,14 @@
 """
 Data loading utilities for GRPO training.
 
-Provides data sources and datasets for both text prompts and pre-computed embeddings.
+Provides prompt-only data sources and prompt datasets for GRPO training.
 """
 
 from .data_source import ImageRLDataSource, DefaultDataSource
 from .datasets import (
-    EmbeddingRLDataset,
+    PromptExampleDataset,
     TextPromptDataset,
-    create_rl_dataset,
+    normalize_prompt_example,
 )
 from .k_repeat_sampler import KRepeatSampler
 
@@ -17,9 +17,9 @@ __all__ = [
     "ImageRLDataSource",
     "DefaultDataSource",
     # Datasets
-    "EmbeddingRLDataset",
+    "PromptExampleDataset",
     "TextPromptDataset",
-    "create_rl_dataset",
+    "normalize_prompt_example",
     # Samplers
     "KRepeatSampler",
 ]

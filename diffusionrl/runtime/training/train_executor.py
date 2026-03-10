@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+from functools import partial
+import tqdm as tqdm_
+tqdm = partial(tqdm_.tqdm, dynamic_ncols=True)
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
@@ -17,8 +21,18 @@ from diffusionrl.runtime.training.backward_train_step import (
     train_backward_with_accumulation,
 )
 from diffusionrl.runtime.training.forward_train_step import train_forward_batch
+from diffusionrl.runtime.training.update_schedule import (
+    TrainingUpdateSchedule,
+    create_training_update_schedule,
+)
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.StreamHandler()],
+)
 
 
 @dataclass
@@ -32,8 +46,9 @@ class TrainExecutorConfig:
     loss_type: str
     guidance_scale: float
     max_grad_norm: float
-    gradient_accumulation_steps: int
-    num_inner_epochs: int
+    gradient_accumulation_batch_size: int
+    multi_update_batch_size: Optional[int]
+    update_mode: str
     use_ema: bool
     ema_updater: Optional[Any]
     nft_timestep_mode: str
@@ -42,45 +57,8 @@ class TrainExecutorConfig:
     clip_grad_norm_fn: Optional[Callable[..., Any]] = None
 
 
-def resolve_grad_accum(training_config: dict) -> int:
-    """Compute gradient accumulation steps with optional auto mode."""
-    raw = training_config.get("gradient_accumulation_steps", 1)
-    if isinstance(raw, int):
-        return max(1, raw)
-    if isinstance(raw, str) and raw.lower() == "auto":
-        prompts_per_batch = training_config.get("prompts_per_batch", 1)
-        k = training_config.get("num_samples_per_prompt", 1)
-        dp_size = training_config.get("dp_size", 1)
-        batch_size = training_config.get("batch_size", 1)
-        grad_steps_per_epoch = training_config.get("gradient_steps_per_epoch", 1)
-        try:
-            total_gen = prompts_per_batch * k
-            target_per_update = total_gen / max(1, grad_steps_per_epoch)
-            denom = batch_size * max(1, dp_size)
-            accum = int((target_per_update + denom - 1) // denom)
-            accum = max(1, accum)
-            logger.info(
-                "Auto gradient_accumulation_steps=%d (prompts_per_batch=%d, k=%d, dp_size=%d, batch_size=%d, grad_steps_per_epoch=%d)",
-                accum,
-                prompts_per_batch,
-                k,
-                dp_size,
-                batch_size,
-                grad_steps_per_epoch,
-            )
-            return accum
-        except Exception as e:
-            logger.warning("Auto gradient accumulation failed (%s), fallback to 1", e)
-            return 1
-    try:
-        return max(1, int(raw))
-    except Exception:
-        logger.warning("Invalid gradient_accumulation_steps=%s, fallback to 1", raw)
-        return 1
-
-
 def aggregate_numeric_metrics(metrics_list: List[Dict[str, Any]]) -> Dict[str, float]:
-    """Aggregate numeric metrics from repeated inner-epoch updates."""
+    """Aggregate numeric metrics from repeated update chunks."""
     aggregated: Dict[str, float] = {}
     if not metrics_list:
         return aggregated
@@ -124,6 +102,9 @@ class TrainExecutor:
         self.lr_scheduler = lr_scheduler
         self.loss_fn = loss_fn
         self.config = config
+        self.update_schedule: TrainingUpdateSchedule = create_training_update_schedule(
+            config.update_mode
+        )
 
     def _shard_batch_by_rank(self, batch: TrainingBatch) -> Optional[TrainingBatch]:
         dp_size = max(1, int(self.config.dp_size))
@@ -135,20 +116,21 @@ class TrainExecutor:
         remainder = batch_size % dp_size
 
         if per_rank == 0:
-            logger.error(
-                "Rank %s: batch_size=%s too small for dp_size=%s; skipping train step",
-                self.config.rank,
-                batch_size,
-                dp_size,
+            raise ValueError(
+                "Training batch size is smaller than dp_size; each rank needs at least one sample. "
+                f"Got batch_size={batch_size}, dp_size={dp_size}."
             )
-            return None
 
         if remainder != 0 and self.config.rank == 0:
-            logger.warning(
-                "Batch size %d not divisible by dp_size %d; dropping %d samples for even sharding",
-                batch_size,
-                dp_size,
-                remainder,
+            raise ValueError(
+                "Training batch size must be divisible by dp_size. "
+                "DiffusionRL no longer drops remainder samples implicitly. "
+                f"Got batch_size={batch_size}, dp_size={dp_size}, remainder={remainder}."
+            )
+        if remainder != 0:
+            raise ValueError(
+                "Training batch size must be divisible by dp_size. "
+                f"Got batch_size={batch_size}, dp_size={dp_size}, remainder={remainder}."
             )
 
         start = self.config.rank * per_rank
@@ -171,16 +153,6 @@ class TrainExecutor:
         prepared = sharded.to_device(self.config.device)
         prepared.validate()
 
-        if (
-            isinstance(prepared, ForwardTrainingBatch)
-            and self.config.gradient_accumulation_steps > 1
-            and self.config.nft_timestep_mode != "all"
-        ):
-            logger.warning(
-                "gradient_accumulation_steps=%s is ignored for NFT loss (single forward pass)",
-                self.config.gradient_accumulation_steps,
-            )
-
         return prepared
 
     def _current_lr(self) -> float:
@@ -200,6 +172,51 @@ class TrainExecutor:
                 pass
         return 0.0
 
+    def _train_update_chunk(
+        self,
+        *,
+        batch: TrainingBatch,
+        gradient_accumulation_batch_size: int,
+    ) -> tuple[float, Dict[str, Any], int, int, bool]:
+        if isinstance(batch, ForwardTrainingBatch):
+            return train_forward_batch(
+                batch=batch,
+                loss_fn=self.loss_fn,
+                model=self.model,
+                gradient_accumulation_batch_size=gradient_accumulation_batch_size,
+                timestep_mode=self.config.nft_timestep_mode,
+                shuffle_timesteps=self.config.nft_shuffle_timesteps,
+                apply_shift=self.config.nft_apply_shift,
+            )
+        return train_backward_with_accumulation(
+            batch=batch,
+            loss_fn=self.loss_fn,
+            model=self.model,
+            guidance_scale=self.config.guidance_scale,
+            gradient_accumulation_batch_size=gradient_accumulation_batch_size,
+        )
+
+    def _clip_grad_norm(self) -> float:
+        """Clip gradients using backend-aware semantics and return the norm."""
+        if callable(self.config.clip_grad_norm_fn):
+            grad_norm = self.config.clip_grad_norm_fn(
+                model=self.model,
+                max_grad_norm=self.config.max_grad_norm,
+            )
+        elif self.config.use_fsdp:
+            grad_norm = self.model.clip_grad_norm_(self.config.max_grad_norm)
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(),
+                max_norm=self.config.max_grad_norm,
+            )
+        return grad_norm.item() if isinstance(grad_norm, torch.Tensor) else float(grad_norm)
+
+    def _apply_optimizer_step(self) -> None:
+        self.optimizer.step()
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.step()
+
     def skipped_metrics(self, rollout_id: int) -> Dict[str, Any]:
         return {
             "loss": 0.0,
@@ -213,61 +230,53 @@ class TrainExecutor:
         """Run optimization on a pre-validated, on-device typed batch."""
         inner_metrics: List[Dict[str, Any]] = []
         total_timesteps = 0
-        last_grad_accum = 1
+        last_mini_batches_per_update = 1
+        total_mini_batches_consumed = 0
+        optimizer_steps = 0
+        last_effective_update_batch_size = int(batch.batch_size)
+        last_effective_gradient_accumulation_batch_size = int(
+            self.config.gradient_accumulation_batch_size
+        )
+        update_mode = self.update_schedule.name
 
-        for _inner_epoch_id in range(max(1, int(self.config.num_inner_epochs))):
-            has_backward = False
-
-            if isinstance(batch, ForwardTrainingBatch):
-                self.optimizer.zero_grad()
-                total_loss, all_metrics, num_timesteps, actual_grad_accum, has_backward = train_forward_batch(
-                    batch=batch,
-                    loss_fn=self.loss_fn,
-                    model=self.model,
-                    gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-                    timestep_mode=self.config.nft_timestep_mode,
-                    shuffle_timesteps=self.config.nft_shuffle_timesteps,
-                    apply_shift=self.config.nft_apply_shift,
-                )
-                if not has_backward:
-                    total_loss.backward()
-                    has_backward = True
-            else:
-                total_loss, all_metrics, num_timesteps, actual_grad_accum, has_backward = train_backward_with_accumulation(
-                    batch=batch,
-                    optimizer=self.optimizer,
-                    loss_fn=self.loss_fn,
-                    model=self.model,
-                    guidance_scale=self.config.guidance_scale,
-                    gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-                )
+        rank = self.config.rank
+        for update_chunk in tqdm(
+            self.update_schedule.iter_update_chunks(
+                batch=batch,
+                gradient_accumulation_batch_size=self.config.gradient_accumulation_batch_size,
+                multi_update_batch_size=self.config.multi_update_batch_size,
+            ),
+            desc=f"Training {rollout_id}:",
+            unit="update",
+            disable=(rank != 0),
+        ):
+            self.optimizer.zero_grad()
+            total_loss, all_metrics, num_timesteps, actual_mini_batches, has_backward = self._train_update_chunk(
+                batch=update_chunk.batch,
+                gradient_accumulation_batch_size=update_chunk.gradient_accumulation_batch_size,
+            )
 
             if has_backward:
-                if callable(self.config.clip_grad_norm_fn):
-                    grad_norm = self.config.clip_grad_norm_fn(
-                        model=self.model,
-                        max_grad_norm=self.config.max_grad_norm,
-                    )
-                elif self.config.use_fsdp:
-                    grad_norm = self.model.clip_grad_norm_(self.config.max_grad_norm)
-                else:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(),
-                        max_norm=self.config.max_grad_norm,
-                    )
-
-                self.optimizer.step()
-                if self.lr_scheduler is not None:
-                    self.lr_scheduler.step()
+                grad_norm = self._clip_grad_norm()
+                self._apply_optimizer_step()
+                optimizer_steps += 1
             else:
                 grad_norm = 0.0
-                logger.warning("No valid timesteps to train, skipping optimizer step")
+                logger.warning(
+                    "No valid timesteps to train in %s update, skipping optimizer step",
+                    update_mode,
+                )
 
             if self.config.use_ema and self.config.ema_updater is not None:
                 ema_success = self.config.ema_updater.update(self.model)
                 all_metrics["ema_updated"] = ema_success
 
-            last_grad_accum = actual_grad_accum
+            last_mini_batches_per_update = actual_mini_batches
+            last_effective_update_batch_size = int(update_chunk.update_batch_size)
+            last_effective_gradient_accumulation_batch_size = int(
+                update_chunk.gradient_accumulation_batch_size
+            )
+            total_mini_batches_consumed += actual_mini_batches
             total_timesteps += num_timesteps
 
             step_metrics = {
@@ -275,7 +284,7 @@ class TrainExecutor:
                 "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                 "lr": self._current_lr(),
                 "num_timesteps_trained": num_timesteps,
-                "gradient_accumulation_steps": actual_grad_accum,
+                "mini_batches_per_update": actual_mini_batches,
                 **all_metrics,
             }
             inner_metrics.append(step_metrics)
@@ -285,10 +294,15 @@ class TrainExecutor:
             {
                 "rollout_id": rollout_id,
                 "loss_type": self.config.loss_type,
-                "num_inner_epochs": self.config.num_inner_epochs,
+                "training_update_mode": update_mode,
+                "configured_gradient_accumulation_batch_size": self.config.gradient_accumulation_batch_size,
+                "configured_multi_update_batch_size": self.config.multi_update_batch_size,
+                "effective_gradient_accumulation_batch_size": last_effective_gradient_accumulation_batch_size,
+                "effective_update_batch_size": last_effective_update_batch_size,
                 "num_timesteps_trained": total_timesteps,
-                "gradient_accumulation_steps": last_grad_accum,
-                "effective_gradient_accumulation_steps": last_grad_accum * self.config.num_inner_epochs,
+                "mini_batches_per_update": last_mini_batches_per_update,
+                "mini_batches_consumed": total_mini_batches_consumed,
+                "optimizer_steps": optimizer_steps,
             }
         )
         return metrics

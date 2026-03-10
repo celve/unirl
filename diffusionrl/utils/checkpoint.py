@@ -480,7 +480,7 @@ class CheckpointManager:
 
     def should_save(self, step: int) -> bool:
         """Check if we should save at this step."""
-        return (step + 1) % self.save_steps == 0
+        return int(self.save_steps) > 0 and (step + 1) % int(self.save_steps) == 0
 
     def save(
         self,
@@ -541,4 +541,3 @@ class CheckpointManager:
             metric_name=self.metric_name,
             metric_mode=self.metric_mode,
         )
-

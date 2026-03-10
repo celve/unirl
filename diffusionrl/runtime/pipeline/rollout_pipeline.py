@@ -231,6 +231,63 @@ def reward_prefers_video_inputs(reward_path: str) -> bool:
     return "VideoRewardWorker" in reward_path
 
 
+def _read_precomputed_reward_payload(output: RolloutOutput) -> Optional[Tuple[List[float], Dict[str, List[float]]]]:
+    metadata = output.metadata if isinstance(output.metadata, dict) else {}
+    raw_rewards = metadata.get("precomputed_rewards")
+    if raw_rewards is None:
+        return None
+    rewards = [float(v) for v in list(raw_rewards)]
+    reward_components = dict(metadata.get("precomputed_reward_components") or {})
+    normalized_components: Dict[str, List[float]] = {}
+    for name, values in reward_components.items():
+        normalized_components[str(name)] = [float(v) for v in list(values or [])]
+    return rewards, normalized_components
+
+
+def collect_precomputed_rewards(
+    *,
+    sampler_outputs: List[RolloutOutput],
+) -> Optional[Tuple[torch.Tensor, Dict[str, List[float]]]]:
+    """Collect precomputed rewards from rollout outputs when available."""
+    if not sampler_outputs:
+        return None
+
+    saw_precomputed = False
+    saw_missing = False
+    all_rewards: List[float] = []
+    reward_components: Dict[str, List[float]] = {}
+
+    for output in sampler_outputs:
+        payload = _read_precomputed_reward_payload(output)
+        if payload is None:
+            saw_missing = True
+            continue
+        saw_precomputed = True
+        rewards, components = payload
+        if len(rewards) != int(output.batch_size):
+            raise ValueError(
+                "Precomputed rewards length must match rollout output batch_size. "
+                f"Got rewards={len(rewards)} batch_size={int(output.batch_size)}."
+            )
+        all_rewards.extend(rewards)
+        for name, values in components.items():
+            if len(values) != len(rewards):
+                raise ValueError(
+                    "Precomputed reward component length must match reward length. "
+                    f"Got component={name} len={len(values)} rewards={len(rewards)}."
+                )
+            reward_components.setdefault(name, []).extend(values)
+
+    if saw_precomputed and saw_missing:
+        raise ValueError(
+            "Mixed rollout reward execution is not supported: some sampler outputs contain "
+            "precomputed rewards while others do not."
+        )
+    if not saw_precomputed:
+        return None
+    return torch.tensor(all_rewards, dtype=torch.float32), reward_components
+
+
 def compute_rewards(
     *,
     reward_service: Any,
@@ -253,6 +310,14 @@ def compute_rewards(
             - Tensor of rewards [batch_size]
             - Reward components by worker/model name
     """
+    precomputed = collect_precomputed_rewards(sampler_outputs=sampler_outputs)
+    if precomputed is not None:
+        return precomputed
+    if reward_service is None:
+        raise RuntimeError(
+            "RewardService is not initialized and sampler outputs do not include precomputed rewards."
+        )
+
     all_images: List[Any] = []
     all_videos: List[torch.Tensor] = []
     all_prompts: List[str] = []
@@ -323,9 +388,14 @@ def compute_rewards(
 def get_reward_component_weights(
     reward_components: Dict[str, List[float]],
     reward_workers: Optional[Iterable[Any]] = None,
+    reward_component_weights: Optional[Dict[str, float]] = None,
 ) -> Dict[str, float]:
     """Map reward component name to configured worker weight."""
     default_weights = {name: 1.0 for name in reward_components.keys()}
+    if reward_component_weights:
+        for name, value in reward_component_weights.items():
+            if name in default_weights:
+                default_weights[name] = float(value)
     if reward_workers is None:
         return default_weights
 
@@ -345,6 +415,7 @@ def compute_advantages(
     prompts: List[str],
     reward_components: Optional[Dict[str, List[float]]] = None,
     reward_workers: Optional[Iterable[Any]] = None,
+    reward_component_weights: Optional[Dict[str, float]] = None,
 ) -> torch.Tensor:
     """
     Compute advantages from reward tensor.
@@ -360,7 +431,11 @@ def compute_advantages(
             prompts=prompts,
         )
 
-    weights = get_reward_component_weights(reward_components, reward_workers)
+    weights = get_reward_component_weights(
+        reward_components,
+        reward_workers,
+        reward_component_weights=reward_component_weights,
+    )
     weighted_advantages = torch.zeros_like(rewards)
     total_weight = 0.0
 

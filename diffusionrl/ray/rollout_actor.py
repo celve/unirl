@@ -6,6 +6,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import ray
 import torch
 
+from diffusionrl.config.build_domain_args import RewardSchema
+from diffusionrl.reward.service import LocalRewardExecutor
+from diffusionrl.runtime.pipeline.rollout_pipeline import compute_rewards as compute_rollout_rewards
 from diffusionrl.types.sampling import PromptEmbeddings, RolloutRequest, RolloutOutput
 from diffusionrl.samplers.engine import (
     BaseRolloutEngine,
@@ -100,6 +103,8 @@ class RolloutActor:
         self._transport_log_payload_bytes: bool = False
         self._scheduler_endpoint: Optional[str] = None
         self._weight_update_target: str = f"actor_rank:{self.rank}"
+        self._reward_schema: Optional[RewardSchema] = None
+        self._local_reward_executor: Optional[LocalRewardExecutor] = None
 
     def _log_resource_ids(self, tag: str) -> None:
         log_resource_ids(tag, self.rank)
@@ -177,6 +182,16 @@ class RolloutActor:
             logger.warning("No engine to update weights")
             return
         self.engine.wake_up()
+
+    def _uses_rollout_local_reward(self) -> bool:
+        return bool(self._reward_schema is not None and self._reward_schema.uses_rollout_execution)
+
+    def _ensure_local_reward_executor(self) -> LocalRewardExecutor:
+        if not self._uses_rollout_local_reward():
+            raise RuntimeError("Local reward executor requested but reward_execution_mode!='rollout'.")
+        if self._local_reward_executor is None:
+            self._local_reward_executor = LocalRewardExecutor(self._reward_schema)
+        return self._local_reward_executor
 
     @staticmethod
     def _parse_transport_dtype(value: Any) -> Optional[torch.dtype]:
@@ -700,6 +715,14 @@ class RolloutActor:
                 "This should be set automatically via --model-type or explicitly via --sampler-path"
             )
 
+        reward_config = engine_config.get("reward_config", {})
+        if not isinstance(reward_config, dict):
+            raise ValueError(
+                "reward_config must be provided in engine_config as dict. "
+                f"Got: {type(reward_config).__name__}"
+            )
+        self._reward_schema = RewardSchema(**reward_config)
+
         # Build EngineConfig
         engine_kwargs = dict(engine_config.get("engine_kwargs", {}))
         self._configure_transport_options(engine_kwargs)
@@ -844,6 +867,34 @@ class RolloutActor:
                     )
                 except Exception as e:
                     logger.warning(f"Failed to decode latents: {e}")
+
+        if request.decode_for_reward and self._uses_rollout_local_reward():
+            base_prompts = list(request.kwargs.get("_base_prompts") or request.prompts or [])
+            prompt_metadata = request.kwargs.get("_prompt_metadata")
+            if not (
+                isinstance(prompt_metadata, list)
+                and len(prompt_metadata) == len(base_prompts)
+            ):
+                prompt_metadata = None
+            num_samples_per_prompt = int(request.kwargs.get("num_samples_per_prompt", 1) or 1)
+            rewards, reward_components = compute_rollout_rewards(
+                reward_service=self._ensure_local_reward_executor(),
+                reward_path=str(self._reward_schema.reward_path if self._reward_schema is not None else ""),
+                num_samples_per_prompt=num_samples_per_prompt,
+                sampler_outputs=[output],
+                prompts=base_prompts if base_prompts else list(request.prompts),
+                prompt_metadata=prompt_metadata,
+            )
+            meta = dict(output.metadata or {})
+            meta["precomputed_rewards"] = [float(v) for v in rewards.tolist()]
+            meta["precomputed_reward_components"] = {
+                str(name): [float(v) for v in list(values or [])]
+                for name, values in dict(reward_components or {}).items()
+            }
+            output.metadata = meta
+            if not bool(request.kwargs.get("_keep_reward_media_for_manager", False)):
+                output.decoded_images = None
+                output.metadata.pop("decoded_videos", None)
 
         output = self._optimize_output_for_transport(output)
 

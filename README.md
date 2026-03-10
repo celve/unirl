@@ -112,12 +112,22 @@ DATA_PATH=data/datasets/hpdv2/train.json \
   bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh --rollout.num-rollout 1
 ```
 
+The user-facing dataset contract is prompt-only:
+
+- preferred format: JSON / JSONL / TXT containing prompt strings
+- JSON objects may use either `prompt` or `caption`
+- extra per-sample fields are preserved as metadata for reward/eval
+- precomputed embedding files are not a supported input path; if legacy manifests still contain embedding fields, they are ignored
+
 Default local paths are resolved against the repository root:
 
 - `data_path`: `data/samples/prompts_toy.json`
+- `eval_data_path`: unset by default; periodic eval then uses `data_path` with deterministic ordering
 - `output_dir`: `outputs/`
 - `weight_sync_dir`: `outputs/weight_sync/`
 - local model mount (optional symlink): `models/local/`
+
+For a real validation split, pass `eval_data_path` explicitly. This keeps eval prompts independent from the training iterator and avoids train/eval data-stream coupling.
 
 For external data / model directories, pass absolute paths directly (or create symlinks manually):
 
@@ -158,6 +168,7 @@ python -m diffusionrl.train \
     --reward.reward-model-name hpsv2 \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path data/samples/prompts_toy.json \
+    --eval-data-path data/samples/prompts_toy.json \
     --sampling.sde-type flux_dance \
     --sampling.eta 0.3 \
     --sampling.num-inference-steps 25 \
@@ -173,6 +184,12 @@ You can also start from YAML configs:
 python -m diffusionrl.train --config scripts/minimal_flux.yaml
 python -m diffusionrl.train --config scripts/minimal_hunyuan.yaml --rollout.num-rollout 100
 ```
+
+Terminology:
+
+- `rollout_id` / `rollout.step` is the outer rollout-train loop step.
+- In practice it behaves similarly to a framework-level global step.
+- It is not strictly the same as optimizer update count when gradient accumulation or inner epochs are enabled.
 
 `--config` supports grouped YAML mappings (for example `algorithm: { ... }`, `training: { ... }`).
 Grouped YAML is now the only supported style for grouped fields.
@@ -238,7 +255,7 @@ Arguments in DiffusionRL are organized into the following categories:
 2.  **Sampling arguments**: `--sampling.sde-type`, `--sampling.eta`, `--sampling.num-inference-steps`, `--sampling.guidance-scale`, `--sampling.shift`, `--sampling.timestep-fraction`, etc.
 3.  **Algorithm arguments**: `--algorithm.algorithm-path`, `--algorithm.clip-range`, `--algorithm.use-kl-penalty`, `--algorithm.advantage-type`, etc.
 4.  **Reward arguments**: `--reward.reward-path`, `--reward.reward-model-name`, `--reward.reward-batch-size`, etc.
-5.  **Training arguments**: `--training.learning-rate`, `--training.gradient-accumulation-steps`, `--training.max-grad-norm`, `--training.num-inner-epochs`, etc.
+5.  **Training arguments**: `--training.learning-rate`, `--training.gradient-accumulation-batch-size`, `--training.multi-update-batch-size`, `--training.update-mode`, `--training.max-grad-norm`, etc.
 6.  **Runtime arguments**: `--ray.colocate-rollout-training`, `--ray.rollout-num-gpus-per-node`, `--ray.training-num-gpus-per-node`, `--ray.placement-strategy`, etc.
 
 For the full argument reference, please refer to: [diffusionrl/config/arguments.py](diffusionrl/config/arguments.py)

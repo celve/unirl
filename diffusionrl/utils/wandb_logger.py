@@ -58,6 +58,7 @@ class GRPOCoreWandBLogger:
         rank: int = 0,
         image_log_interval: int = 10,
         enabled: bool = True,
+        tags: Optional[List[str]] = None,
     ):
         """Initialize WandB logger.
 
@@ -69,12 +70,14 @@ class GRPOCoreWandBLogger:
             rank: Process rank (only rank 0 logs)
             image_log_interval: How often to log images (in rollouts)
             enabled: Whether to enable logging
+            tags: List of tags for the WandB run. Defaults to ['diffusionrl-reproduce'] if not provided.
         """
         self.project = project
         self.run_name = run_name
         self.log_dir = str(log_dir) if log_dir else None
         self.image_log_interval = image_log_interval
         self.rank = rank
+        self.tags = tags if tags is not None else ["diffusionrl"]
         self._initialized = False
 
         # Only enable on rank 0
@@ -105,6 +108,8 @@ class GRPOCoreWandBLogger:
                 name=self.run_name,
                 config=config_dict,
                 dir=self.log_dir,
+                entity="diffusionrl-reproduce",
+                tags=self.tags,
             )
             self._init_metric_axes()
             self._initialized = True
@@ -119,6 +124,9 @@ class GRPOCoreWandBLogger:
         try:
             wandb.define_metric("train/step")
             wandb.define_metric("train/*", step_metric="train/step")
+            # rollout/step tracks the outer rollout-train loop step.
+            # It behaves like a framework-level global step, but is not the same
+            # thing as optimizer update count when one rollout yields multiple updates.
             wandb.define_metric("rollout/step")
             wandb.define_metric("rollout/*", step_metric="rollout/step")
             wandb.define_metric("perf/*", step_metric="rollout/step")
@@ -224,7 +232,8 @@ class GRPOCoreWandBLogger:
         - zero_std_ratio: Ratio of prompts with zero reward std
 
         Args:
-            rollout_id: Rollout identifier
+            rollout_id: Outer rollout-train loop step. Similar to a global step for
+                this framework, but not guaranteed to equal optimizer update count.
             metrics: Dictionary of metrics to log
         """
         self.log_with_step(
@@ -301,7 +310,8 @@ class GRPOCoreWandBLogger:
                     else:
                         caption = f"{prompt[:100]}"
 
-                    wandb_images.append(wandb.Image(img_path, caption=caption))
+                    # wandb_images.append(wandb.Image(img_path, caption=caption)) # Bug with temp file here
+                    wandb_images.append(wandb.Image(images[idx], caption=caption)) # Bug with temp file here
 
             wandb.log(
                 {
@@ -389,6 +399,7 @@ def init_logger(
     config: Optional[Any] = None,
     log_dir: Optional[str] = None,
     rank: int = 0,
+    tags: Optional[List[str]] = None,
     **kwargs,
 ) -> GRPOCoreWandBLogger:
     """Initialize and set the global wandb logger.
@@ -398,6 +409,7 @@ def init_logger(
         run_name: WandB run name
         config: Training configuration
         rank: Process rank
+        tags: List of tags for the WandB run. Defaults to ['diffusionrl-reproduce'] if not provided.
         **kwargs: Additional arguments for GRPOCoreWandBLogger
 
     Returns:
@@ -410,6 +422,7 @@ def init_logger(
         config=config,
         log_dir=log_dir,
         rank=rank,
+        tags=tags,
         **kwargs,
     )
     return _global_logger

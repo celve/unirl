@@ -22,23 +22,24 @@
 #
 # Reference: flow_grpo/config/grpo.py
 #
-# Current defaults in this script:
-# - sde_type=sde (use cps via CLI for CPS variants)
-# - eta=0.7
-# - shift=3.0
-# - num_inference_steps=10
-# - guidance_scale=1.0
-# - kl_coef=0.04
-# - advantage_type=per_prompt with running stats enabled
-# - learning_rate=3e-4
-# - LoRA: rank=32, alpha=64
-# - timestep_fraction=0.99
-# - training.update_mode=multi_update
-# - reward_execution_mode=rollout
-# - reward_model_name defaults to pickscore
-# - prompts_per_batch=16, num_samples_per_prompt=8 on 8 GPUs
+# Key alignment with original flow_grpo:
+# - sde_type=sde (default; use cps for fast variants like geneval_sd3_fast_nocfg)
+# - eta=0.7 (noise coefficient)
+# - shift=3.0 (SD3 time shift)
+# - num_inference_steps=10 (training steps)
+# - guidance_scale=4.5
+# - kl_coef=0.04 (KL penalty)
+# - advantage_type=per_prompt (per-prompt statistic tracking)
+# - learning_rate=3e-4 (higher than DanceGRPO's 1e-5)
+# - LoRA: rank=32, alpha=64 (SD3 default uses LoRA)
+# - timestep_fraction=0.99 (nearly all timesteps)
+# - training.update_mode=multi_update for Flow-style multi-update inner loops
 # - sampling.direct_sampling_batch_size only controls OOM-safe request splitting;
 #   rollout_total_samples still equals prompts_per_batch * num_samples_per_prompt
+#
+# Batch/group configuration (8 GPU):
+# - batch_size=3, num_samples_per_prompt=24 (original _get_config defaults)
+# - For 4 GPU: batch_size=8, num_samples_per_prompt=16
 #
 # NOTE: Use --sampling.sde-type cps for CPS variant (e.g., geneval_sd3_fast_nocfg)
 #
@@ -53,23 +54,23 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Default values (can be overridden via env or command line)
-PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/sd3.5-medium"}
+# Default values (can be overridden via command line)
+PRETRAINED_MODEL="stabilityai/stable-diffusion-3.5-medium"
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/flowgrpo_sd3_train_sampling"}
-DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/ocr_prompts_toy_16.json"}
-NUM_GPUS=${NUM_GPUS:-8}
+DATA_PATH="${REPO_ROOT}/dataset/pickscore/train.txt"
+NUM_GPUS=8
 
 # Rollout setttings
-NUM_INFERENCE_STEPS=10
-NUM_SAMPLES_PER_PROMPT=8 # group size
-PROMPTS_PER_BATCH=16 # number of prompts per epoch
-DIRECT_SAMPLING_BATCH_SIZE=8 # Lower peak sampling batch size to reduce OOM risk.
+NUM_INFERENCE_STEPS=10 # denoising steps during rollout (sampling) stage.
+NUM_SAMPLES_PER_PROMPT=16 # group size
+PROMPTS_PER_BATCH=48 # number of (unique) prompts per epoch
+DIRECT_SAMPLING_BATCH_SIZE=16 # Actual peak forward batch size during sampling stage.
 
 # Training settings
-GRADIENT_ACCUMULATION_BATCH_SIZE=2 # Lower peak forward/backward batch size during optimization.
-MULTI_UPDATE_BATCH_SIZE=16 # Smaller effective update chunk to keep training memory usage conservative.
+GRADIENT_ACCUMULATION_BATCH_SIZE=4 # Actually peak forward/backward batch size during optimization
+MULTI_UPDATE_BATCH_SIZE=48 # Effective batch size for multi-update. Set `prompts_per_batch * num_samples_per_prompt` // NUM_GPUS // n for n updates per epoch
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
-UPDATE_MODE=${UPDATE_MODE:-multi_update}
+UPDATE_MODE=${UPDATE_MODE:-multi_update} # multi_update or single_update. single_update for NFT, multi_update for GRPO.
 
 if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
@@ -98,15 +99,20 @@ if [ "${NUM_INFERENCE_STEPS}" -lt 2 ]; then
     echo "WARNING: num_inference_steps < 2 can lead to empty training timesteps and no optimizer step."
 fi
 
-REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
-WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
-WANDB_RUN_NAME=${WANDB_RUN_NAME:-flowgrpo_sd3_train_actor_sampling}
-WANDB_LOG_MEDIA=${WANDB_LOG_MEDIA:-true}
-WANDB_MEDIA_MAX_ITEMS=${WANDB_MEDIA_MAX_ITEMS:-16}
-REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-pickscore}
-REWARD_EXECUTION_MODE=${REWARD_EXECUTION_MODE:-rollout}
-LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cuda}
+REPORT_TO_WANDB=true
+WANDB_PROJECT_NAME="diffusionrl"
+WANDB_RUN_NAME="SD3.5-Flow-GRPO" # change to your own name
+WANDB_LOG_MEDIA=true
+WANDB_MEDIA_MAX_ITEMS=16 # Max number of image reports per logging step
+WANDB_TAGS="reproduce,sd3.5" # Add more tags as needed, split by comma
+export WANDB_API_KEY="YOUR_KEY_HERE" # Change to your own API key
 LOGGING_STEPS=1
+
+REWARD_NAME="pickscore" # pickscore, ocr, clip, hpsv2
+REWARD_DEVICE="cuda"
+REWARD_EXECUTION_MODE="rollout" # compute reward during rollout stage
+
+conda activate drl #  Change to your own conda environment
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
@@ -114,9 +120,9 @@ python -m diffusionrl.train \
     --sampling.sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
-    --reward.reward-model-name "${REWARD_MODEL_NAME}" \
+    --reward.reward-model-name ${REWARD_NAME} \
     --reward.reward-execution-mode "${REWARD_EXECUTION_MODE}" \
-    --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
+    --reward.local-reward-device ${REWARD_DEVICE} \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
@@ -125,7 +131,7 @@ python -m diffusionrl.train \
     --sampling.shift 3.0 \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
     --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
-    --sampling.guidance-scale 1.0 \
+    --sampling.guidance-scale 4.5 \
     --sampling.timestep-fraction 0.99 \
     \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
@@ -168,4 +174,5 @@ python -m diffusionrl.train \
     --rollout.run-name "${WANDB_RUN_NAME}" \
     --rollout.wandb-log-media ${WANDB_LOG_MEDIA} \
     --rollout.wandb-media-max-items ${WANDB_MEDIA_MAX_ITEMS} \
+    --rollout.wandb-tags "${WANDB_TAGS}" \
     "$@"

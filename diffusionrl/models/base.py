@@ -133,20 +133,6 @@ class ModelBundle(ABC):
         """Model-specific argument normalization/validation hook."""
         return None
 
-    @classmethod
-    def embedding_dataset_kwargs(cls) -> Dict[str, Any]:
-        """Default kwargs when loading embedding manifests for this model."""
-        return {"load_text_ids": False}
-
-    @classmethod
-    def create_embedding_dataset(cls, *, json_path: str, **kwargs: Any):
-        """Build embedding dataset instance for this model."""
-        from diffusionrl.data.datasets import EmbeddingRLDataset
-
-        merged_kwargs = dict(cls.embedding_dataset_kwargs())
-        merged_kwargs.update(kwargs)
-        return EmbeddingRLDataset(json_path=json_path, **merged_kwargs)
-
     @abstractmethod
     def load(self) -> None:
         """Load all model components."""

@@ -30,7 +30,7 @@ fi
 
 PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/sd3.5-medium"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/nft_sd3_sglang_separate"}
-DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/prompts_toy.json"}
+DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/ocr_prompts_toy.json"}
 
 ROLLOUT_GPUS=${ROLLOUT_GPUS:-4}
 TRAINING_GPUS=${TRAINING_GPUS:-4}
@@ -44,7 +44,6 @@ if [ $(( TRAINING_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     exit 1
 fi
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
-NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
 NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"ema_decay":0.001}'}
 NFT_LOSS_KWARGS=${NFT_LOSS_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"nft_timestep_mode":"all","nft_shuffle_timesteps":true,"nft_apply_shift":false,"use_ema":true,"ema_decay":0.001,"decay_type":"warmup","ema_flat_steps":75,"ema_uprate":0.0075,"ema_uphold":0.999}'}
 
@@ -70,7 +69,7 @@ python -m diffusionrl.train \
     --algorithm.loss-kwargs "${NFT_LOSS_KWARGS}" \
     \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --training.batch-size ${BATCH_SIZE} \
+    --training.gradient-accumulation-batch-size ${BATCH_SIZE} \
     --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.kl-coef 0.0001 \
@@ -84,9 +83,7 @@ python -m diffusionrl.train \
     --ray.placement-strategy SPREAD \
     \
     --training.learning-rate 3e-4 \
-    --training.gradient-accumulation-steps auto \
-    --training.num-inner-epochs ${NUM_INNER_EPOCHS} \
-    --training.gradient-steps-per-epoch 1 \
+    --training.update-mode single_update \
     --training.max-grad-norm 1.0 \
     --training.lora-rank 32 \
     --training.lora-alpha 64 \

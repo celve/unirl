@@ -590,7 +590,10 @@ class RolloutBufferActor:
             self.group_size = max(1, int(raw_group_size))
 
         raw_dispatch_groups = int(getattr(args.rollout, "rollout_buffer_dispatch_groups", 0) or 0)
-        default_dispatch_groups = max(1, int(getattr(args.algorithm, "prompts_per_batch", 1)))
+        prompts_per_batch = getattr(args.algorithm, "prompts_per_batch", None)
+        if prompts_per_batch is None:
+            raise ValueError("algorithm.prompts_per_batch must be set explicitly.")
+        default_dispatch_groups = max(1, int(prompts_per_batch))
         self.dispatch_groups = raw_dispatch_groups if raw_dispatch_groups > 0 else default_dispatch_groups
         self.allow_partial_group = bool(getattr(args.rollout, "rollout_buffer_allow_partial_group", True))
         self.group_ttl_seconds = max(0.0, float(getattr(args.rollout, "rollout_buffer_group_ttl_seconds", 0.0)))

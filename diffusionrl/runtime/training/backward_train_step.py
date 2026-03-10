@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import logging
 from typing import Any, Dict, Tuple
 
+from tqdm import tqdm
 import torch
 
+from diffusionrl.runtime.training.update_schedule import resolve_gradient_accumulation_plan
 from diffusionrl.types.training_batch import BackwardTrainingBatch
 
 logger = logging.getLogger(__name__)
@@ -40,28 +43,19 @@ def compute_backward_timestep_loss(
 def train_backward_with_accumulation(
     *,
     batch: BackwardTrainingBatch,
-    optimizer: torch.optim.Optimizer,
     loss_fn: Any,
     model: torch.nn.Module,
     guidance_scale: float,
-    gradient_accumulation_steps: int,
+    gradient_accumulation_batch_size: int,
 ) -> tuple[float, Dict[str, Any], int, int, bool]:
     """Run backward-path micro-batch gradient accumulation over selected SDE steps."""
     batch_size = batch.batch_size
-    grad_accum = max(1, int(gradient_accumulation_steps))
+    mini_batches, actual_mini_batches = resolve_gradient_accumulation_plan(
+        batch_size=batch_size,
+        gradient_accumulation_batch_size=gradient_accumulation_batch_size,
+    )
+    num_mini_batches = len(mini_batches)
 
-    if batch_size % grad_accum != 0:
-        logger.warning(
-            "batch_size %s not divisible by gradient_accumulation_steps %s; fallback to grad_accum=1",
-            batch_size,
-            grad_accum,
-        )
-        grad_accum = 1
-
-    micro_batch_size = batch_size // grad_accum
-    num_micro_batches = grad_accum
-
-    optimizer.zero_grad()
     total_loss_accum = 0.0
     has_backward = False
 
@@ -70,17 +64,19 @@ def train_backward_with_accumulation(
     num_timesteps_per_sample = len(valid_step_indices)
     if num_timesteps_per_sample == 0:
         logger.warning("No valid SDE timesteps in batch, skipping GRPO backward")
-        return 0.0, {}, 0, grad_accum, False
+        return 0.0, {}, 0, actual_mini_batches, False
 
-    micro_batch_metrics_list: list[Dict[str, Any]] = []
+    mini_batch_metrics_list: list[Dict[str, Any]] = []
+    rank = int(os.environ.get("RANK", 0))
+    for start, end in tqdm(
+        mini_batches,
+        desc="GRPO backward",
+        disable=(rank != 0),
+    ):
+        mini_batch = batch.slice(start, end)
 
-    for mbs_id in range(num_micro_batches):
-        start = mbs_id * micro_batch_size
-        end = start + micro_batch_size
-        micro_batch = batch.slice(start, end)
-
-        micro_loss_sum = 0.0
-        micro_metrics: Dict[str, Any] = {}
+        mini_loss_sum = 0.0
+        mini_metrics: Dict[str, Any] = {}
         metric_sums: Dict[str, float] = {}
         metric_counts: Dict[str, int] = {}
 
@@ -88,20 +84,20 @@ def train_backward_with_accumulation(
             loss_t, metrics_t = compute_backward_timestep_loss(
                 loss_fn=loss_fn,
                 model=model,
-                batch=micro_batch,
+                batch=mini_batch,
                 timestep_idx=t_idx,
                 guidance_scale=guidance_scale,
             )
-            scaled_loss = loss_t / (num_micro_batches * num_timesteps_per_sample)
+            scaled_loss = loss_t / (num_mini_batches * num_timesteps_per_sample)
             scaled_loss.backward()
             has_backward = True
-            micro_loss_sum += loss_t.detach().item()
+            mini_loss_sum += scaled_loss.detach().item()
 
             for key, value in metrics_t.items():
                 val = value.item() if isinstance(value, torch.Tensor) else value
                 metric_key = f"t{t_idx}_{key}"
-                if metric_key not in micro_metrics:
-                    micro_metrics[metric_key] = val
+                if metric_key not in mini_metrics:
+                    mini_metrics[metric_key] = val
                 if isinstance(val, (int, float)):
                     metric_sums[key] = metric_sums.get(key, 0.0) + float(val)
                     metric_counts[key] = metric_counts.get(key, 0) + 1
@@ -109,21 +105,27 @@ def train_backward_with_accumulation(
         for key, total in metric_sums.items():
             count = metric_counts.get(key, 0)
             if count > 0:
-                micro_metrics[key] = total / count
+                mini_metrics[key] = total / count
 
-        micro_loss = micro_loss_sum / num_timesteps_per_sample
-        micro_batch_metrics_list.append(micro_metrics)
-        total_loss_accum += micro_loss
+        mini_loss = mini_loss_sum
+        mini_batch_metrics_list.append(mini_metrics)
+        total_loss_accum += mini_loss
 
     all_metrics: Dict[str, Any] = {}
-    if micro_batch_metrics_list:
-        keys = micro_batch_metrics_list[0].keys()
+    if mini_batch_metrics_list:
+        keys = mini_batch_metrics_list[0].keys()
         for key in keys:
-            values = [m.get(key) for m in micro_batch_metrics_list if m.get(key) is not None]
+            values = [m.get(key) for m in mini_batch_metrics_list if m.get(key) is not None]
             if values and isinstance(values[0], (int, float)):
                 all_metrics[key] = sum(values) / len(values)
             else:
-                all_metrics[key] = micro_batch_metrics_list[-1].get(key)
+                all_metrics[key] = mini_batch_metrics_list[-1].get(key)
 
-    avg_loss = total_loss_accum / num_micro_batches if num_micro_batches > 0 else 0.0
-    return avg_loss, all_metrics, num_timesteps_per_sample, grad_accum, has_backward
+    avg_loss = total_loss_accum
+    return avg_loss, all_metrics, num_timesteps_per_sample, actual_mini_batches, has_backward
+
+
+__all__ = [
+    "compute_backward_timestep_loss",
+    "train_backward_with_accumulation",
+]

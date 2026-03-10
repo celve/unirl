@@ -100,8 +100,9 @@ class BaseRolloutEngine(ABC):
         Generate samples with log probabilities.
 
         Args:
-            request: A RolloutRequest containing prompts, generation
-                parameters, and optional pre-computed embeddings.
+            request: A RolloutRequest containing text prompts and generation
+                parameters. Optional embedding tensors remain available only
+                for internal compatibility paths.
 
         Returns:
             RolloutOutput with trajectories, log_probs, etc.
@@ -128,7 +129,7 @@ class BaseRolloutEngine(ABC):
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not support prompt encoding. "
-            "Use engines that implement encode_prompt() or provide prompt embeddings upstream."
+            "Use engines that implement encode_prompt()."
         )
 
     @abstractmethod

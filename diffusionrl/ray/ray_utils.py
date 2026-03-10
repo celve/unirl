@@ -605,7 +605,7 @@ def wait_for_actors_ready(
 # Training-actor sampling helpers (merged from actor_sampling.py)
 # ============================================================
 
-from diffusionrl.types.sampling import RolloutRequest, RolloutOutput
+from diffusionrl.types.sampling import PromptEmbeddings, RolloutRequest, RolloutOutput
 from diffusionrl.samplers.fsdp import sampler_runner
 
 logger = logging.getLogger(__name__)
@@ -733,7 +733,46 @@ class ActorSamplingExecutor:
         with sampling_eval_context(modules):
             yield
 
-    def generate(self, actor: Any, request: RolloutRequest) -> RolloutOutput:
+    def _maybe_attach_prompt_embeddings(
+        self,
+        *,
+        output: RolloutOutput,
+        prompt_embeds: Optional[torch.Tensor],
+        pooled_prompt_embeds: Optional[torch.Tensor],
+        encoder_attention_mask: Optional[torch.Tensor],
+        negative_prompt_embeds: Optional[torch.Tensor],
+        negative_pooled_prompt_embeds: Optional[torch.Tensor],
+        text_ids: Optional[torch.Tensor],
+        image_ids: Optional[torch.Tensor],
+    ) -> RolloutOutput:
+        if output.embeddings is not None or prompt_embeds is None:
+            return output
+        return RolloutOutput(
+            latents=output.latents,
+            timesteps=output.timesteps,
+            trajectories=output.trajectories,
+            log_probs=output.log_probs,
+            embeddings=PromptEmbeddings(
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                encoder_attention_mask=encoder_attention_mask,
+                negative_prompt_embeds=negative_prompt_embeds,
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                text_ids=text_ids,
+                image_ids=image_ids,
+            ),
+            decoded_images=output.decoded_images,
+            metadata=output.metadata,
+            step_indices=output.step_indices,
+        )
+
+    def generate(
+        self,
+        actor: Any,
+        request: RolloutRequest,
+        *,
+        move_output_to_cpu: bool = True,
+    ) -> RolloutOutput:
         if not actor._is_initialized:
             raise RuntimeError("Actor not initialized. Call init() first.")
 
@@ -749,6 +788,26 @@ class ActorSamplingExecutor:
         encoder_attention_mask = request.encoder_attention_mask
         text_ids = request.text_ids
         kwargs = dict(request.kwargs)
+        image_ids = kwargs.get("image_ids")
+
+        has_internal_embedding_request = bool(
+            prompt_embeds is not None
+            or pooled_prompt_embeds is not None
+            or encoder_attention_mask is not None
+            or text_ids is not None
+            or kwargs.get("negative_prompt_embeds") is not None
+            or kwargs.get("negative_pooled_prompt_embeds") is not None
+            or kwargs.get("image_ids") is not None
+        )
+        if has_internal_embedding_request and not getattr(
+            actor, "_warned_internal_only_prompt_embedding_request", False
+        ):
+            logger.warning(
+                "Training-actor sampling received prompt embedding tensors. "
+                "This path is kept only for internal compatibility; external callers "
+                "should pass text prompts and let the actor encode them."
+            )
+            actor._warned_internal_only_prompt_embedding_request = True
 
         num_inference_steps = request.num_inference_steps or actor._sampling_config.get("num_inference_steps", 50)
         guidance_scale = request.guidance_scale if request.guidance_scale is not None else actor._sampling_config.get("guidance_scale", 7.5)
@@ -806,6 +865,16 @@ class ActorSamplingExecutor:
                 num_samples_per_prompt=num_samples_per_prompt,
                 **kwargs,
             )
+            output = self._maybe_attach_prompt_embeddings(
+                output=output,
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                encoder_attention_mask=encoder_attention_mask,
+                negative_prompt_embeds=negative_prompt_embeds,
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                text_ids=text_ids,
+                image_ids=image_ids,
+            )
 
         if request.decode_for_reward:
             try:
@@ -824,10 +893,18 @@ class ActorSamplingExecutor:
             except Exception as e:
                 logger.warning("Failed to decode latents: %s", e)
 
-        return output.to_device("cpu")
+        if move_output_to_cpu:
+            return output.to_device("cpu")
+        return output
 
     def generate_batch(self, actor: Any, requests: List[RolloutRequest]) -> List[RolloutOutput]:
         return [self.generate(actor, req) for req in requests]
+
+    def generate_local(self, actor: Any, request: RolloutRequest) -> RolloutOutput:
+        return self.generate(actor, request, move_output_to_cpu=False)
+
+    def generate_local_batch(self, actor: Any, requests: List[RolloutRequest]) -> List[RolloutOutput]:
+        return [self.generate_local(actor, req) for req in requests]
 
 class TrainingActorSamplingService:
     """Delegates training-actor sampling RPCs to ActorSamplingExecutor."""
@@ -844,3 +921,9 @@ class TrainingActorSamplingService:
 
     def generate_batch(self, actor, requests: List[RolloutRequest]) -> List[RolloutOutput]:
         return self._executor.generate_batch(actor, requests)
+
+    def generate_local(self, actor, request: RolloutRequest) -> RolloutOutput:
+        return self._executor.generate_local(actor, request)
+
+    def generate_local_batch(self, actor, requests: List[RolloutRequest]) -> List[RolloutOutput]:
+        return self._executor.generate_local_batch(actor, requests)

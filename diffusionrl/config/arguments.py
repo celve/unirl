@@ -20,13 +20,13 @@ import warnings
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from typing import Any, Dict, List, Optional, get_args, get_origin
 
-from diffusionrl.models import list_model_types, resolve_model_bundle_path
-from diffusionrl.utils.misc import load_function
-from diffusionrl.config.validation import (
+from diffusionrl.config.paths import (
     is_probably_local_weight_sync_dir,
     normalize_repo_relative_paths,
     repo_root,
     resolve_repo_relative_path,
+)
+from diffusionrl.config.validation import (
     validate_colocate_fractions,
     validate_dotpath,
     validate_dynamic_dotpaths,
@@ -38,6 +38,8 @@ from diffusionrl.config.validation import (
     validate_rollout_layout,
     validate_runtime_mode_constraints,
 )
+from diffusionrl.models import list_model_types, resolve_model_bundle_path
+from diffusionrl.utils.misc import load_function
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +49,6 @@ ENV_MODEL_ROOT = "DIFFUSIONRL_MODEL_ROOT"
 
 DEFAULT_MODEL_PATH = "diffusionrl.models.hunyuan.HunyuanModelBundle"
 DEFAULT_SAMPLER_PATH = "diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler"
-
-
 @dataclass
 class ModelConfig:
     """Model/runtime identity and checkpoint paths."""
@@ -83,6 +83,8 @@ class SamplingConfig:
         metadata={"help": "Rollout engine type: fsdp or sglang (auto-resolved from model)"})
     training_actor_direct_sampling: bool = field(default=False,
         metadata={"help": "Training actors handle sampling directly (FSDP-only, no rollout actors)"})
+    direct_sampling_batch_size: Optional[int] = field(default=None,
+        metadata={"help": "Generated-sample cap per training-actor direct-sampling request; rollout_total_samples stays prompts_per_batch*num_samples_per_prompt"})
     sglang_logprob_mode: str = field(default="replay",
         metadata={"help": "SGLang log-prob mode: replay (training-side) or native (engine-side)"})
     replay_log_probs: bool = field(default=False,
@@ -124,6 +126,8 @@ class SamplingConfig:
             raise ValueError(
                 f"sglang_logprob_mode must be one of replay/native, got: {self.sglang_logprob_mode}"
             )
+        if self.direct_sampling_batch_size is not None and int(self.direct_sampling_batch_size) < 1:
+            raise ValueError("direct_sampling_batch_size must be >= 1 when set.")
         if not self.sampler_path:
             raise ValueError(
                 "sampler_path must be set. It is usually auto-resolved from model_type. "
@@ -167,6 +171,8 @@ class RewardConfig:
         metadata={"help": "GPUs per individual reward actor"})
     reward_service_urls: Optional[List[str]] = field(default=None,
         metadata={"help": "List of HTTP reward service URLs for load balancing"})
+    reward_execution_mode: str = field(default="manager",
+        metadata={"help": "Where reward-model inference runs: manager or rollout"})
     local_reward_device: str = field(default="cpu",
         metadata={"help": "Device for local (non-HTTP, non-dedicated) reward workers: cpu, auto, or cuda"})
     allow_local_reward_cuda_contention: bool = field(default=False,
@@ -176,6 +182,12 @@ class RewardConfig:
         if self.reward_mix_mode not in ("reward_aggr", "advantage_aggr"):
             raise ValueError(
                 f"reward_mix_mode must be one of reward_aggr/advantage_aggr, got: {self.reward_mix_mode}"
+            )
+        reward_execution_mode = str(self.reward_execution_mode or "manager").strip().lower()
+        if reward_execution_mode not in ("manager", "rollout"):
+            raise ValueError(
+                "reward_execution_mode must be one of manager/rollout, "
+                f"got: {self.reward_execution_mode}"
             )
         local_reward_device = str(self.local_reward_device or "cpu").strip().lower()
         if local_reward_device not in ("cpu", "auto", "cuda"):
@@ -298,8 +310,8 @@ class AlgorithmConfig:
         metadata={"help": "Advantage normalization: global, group (per-prompt), or per_prompt (tracked)"})
     num_samples_per_prompt: int = field(default=4,
         metadata={"help": "Number of generated samples per prompt for GRPO"})
-    prompts_per_batch: int = field(default=1,
-        metadata={"help": "Number of unique prompts per rollout step"})
+    prompts_per_batch: Optional[int] = field(default=None,
+        metadata={"help": "Number of unique prompts per rollout step. Required."})
     advantage_epsilon: float = field(default=1e-8,
         metadata={"help": "Epsilon for numerical stability in advantage normalization"})
     advantage_clip_max: Optional[float] = field(default=None,
@@ -348,6 +360,8 @@ class AlgorithmConfig:
             )
         if self.num_samples_per_prompt < 1:
             raise ValueError("num_samples_per_prompt must be >= 1.")
+        if self.prompts_per_batch is None:
+            raise ValueError("prompts_per_batch must be set explicitly.")
         if self.prompts_per_batch < 1:
             raise ValueError("prompts_per_batch must be >= 1.")
         if not (0.0 <= self.trimmed_ratio < 0.5):
@@ -373,14 +387,12 @@ class TrainingConfig:
     """Optimizer, LoRA/FSDP, and core training runtime controls."""
 
     # Optimizer and update schedule
-    batch_size: int = field(default=4,
-        metadata={"help": "Per-GPU training batch size"})
-    gradient_accumulation_steps: str = field(default="1",
-        metadata={"help": "Gradient accumulation steps (integer or 'auto')"})
-    gradient_steps_per_epoch: int = field(default=1,
-        metadata={"help": "Gradient steps per epoch when gradient_accumulation_steps='auto'"})
-    num_inner_epochs: int = field(default=1,
-        metadata={"help": "Number of repeated update passes per rollout batch"})
+    gradient_accumulation_batch_size: Optional[int] = field(default=None,
+        metadata={"help": "Per-GPU micro-batch size used inside one optimizer update. Set to null/None to disable extra gradient accumulation and use the effective update batch size directly"})
+    multi_update_batch_size: Optional[int] = field(default=None,
+        metadata={"help": "Per-GPU update-chunk size for multi_update. If >= the local rollout batch size, validation normalizes update_mode back to single_update"})
+    update_mode: str = field(default="single_update",
+        metadata={"help": "Training update schedule: single_update does one optimizer step per rollout pass; multi_update does one optimizer step per update chunk"})
     learning_rate: float = field(default=1e-6,
         metadata={"help": "Peak learning rate for the optimizer"})
     adam_beta1: float = field(default=0.9,
@@ -427,10 +439,19 @@ class TrainingConfig:
         metadata={"help": "Enable gradient checkpointing to save memory at the cost of compute"})
 
     def validate(self) -> None:
-        if self.batch_size < 1:
-            raise ValueError("batch_size must be >= 1.")
-        if self.num_inner_epochs < 1:
-            raise ValueError("num_inner_epochs must be >= 1.")
+        if (
+            self.gradient_accumulation_batch_size is not None
+            and int(self.gradient_accumulation_batch_size) < 1
+        ):
+            raise ValueError("gradient_accumulation_batch_size must be >= 1 when set.")
+        if self.multi_update_batch_size is not None and int(self.multi_update_batch_size) < 1:
+            raise ValueError("multi_update_batch_size must be >= 1 when set.")
+        mode = str(self.update_mode).strip().lower()
+        if mode not in {"single_update", "multi_update"}:
+            raise ValueError(
+                "update_mode must be one of single_update/multi_update, "
+                f"got: {self.update_mode!r}"
+            )
         backend = str(self.train_backend or "fsdp").strip().lower()
         supported = {"fsdp", "megatron", "veomni"}
         if backend not in supported and not self.train_backend_path:
@@ -483,11 +504,9 @@ class RolloutLoggingConfig:
 
     # Rollout loop
     num_rollout: int = field(default=1000,
-        metadata={"help": "Total number of rollout iterations (training steps)"})
+        metadata={"help": "Total number of rollout iterations (outer-loop steps; analogous to global step)"})
     start_rollout_id: int = field(default=0,
-        metadata={"help": "Starting rollout ID (for resuming training)"})
-    rollouts_per_epoch: Optional[int] = field(default=None,
-        metadata={"help": "Number of rollouts per data epoch (None = single pass)"})
+        metadata={"help": "Starting rollout step/ID for resuming training (acts like an outer-loop global step)"})
     async_pipeline: bool = field(default=False,
         metadata={"help": "Enable async rollout/training overlap (separate mode only)"})
     async_max_inflight: int = field(default=1,
@@ -499,19 +518,19 @@ class RolloutLoggingConfig:
     output_dir: str = field(default="outputs",
         metadata={"help": "Output directory for checkpoints, logs, and generated samples"})
     save_steps: int = field(default=100,
-        metadata={"help": "Save a checkpoint every N training steps"})
+        metadata={"help": "Save a checkpoint every N training steps (0 disables periodic saves)"})
     resume_from_checkpoint: Optional[str] = field(default=None,
         metadata={"help": "Path to checkpoint directory to resume training from"})
 
     # Evaluation
     eval_steps: int = field(default=100,
-        metadata={"help": "Run evaluation every N training steps"})
+        metadata={"help": "Run evaluation every N training steps (0 disables periodic eval)"})
     eval_batch_size: int = field(default=4,
         metadata={"help": "Batch size for evaluation"})
 
     # Logging
     logging_steps: int = field(default=10,
-        metadata={"help": "Log metrics every N training steps"})
+        metadata={"help": "Log metrics every N training steps (0 disables periodic step logging)"})
     logging_dir: Optional[str] = field(default=None,
         metadata={"help": "Directory for WandB logs/artifacts (defaults to output_dir/logs)"})
     report_to_wandb: bool = field(default=False,
@@ -524,10 +543,18 @@ class RolloutLoggingConfig:
         metadata={"help": "Log generated media previews to WandB (true/false)"})
     wandb_media_max_items: int = field(default=8,
         metadata={"help": "Maximum generated media items to log per rollout when wandb_log_media=true"})
+    wandb_tags: Optional[str] = field(default=None,
+        metadata={"help": "Comma-separated tags for WandB run (e.g. 'exp1,baseline'). Defaults to 'diffusionrl-reproduce' if not set."})
 
     def validate(self) -> None:
         if self.num_rollout < 1:
             raise ValueError("num_rollout must be >= 1.")
+        if self.save_steps < 0:
+            raise ValueError("save_steps must be >= 0 (0 disables periodic saves).")
+        if self.eval_steps < 0:
+            raise ValueError("eval_steps must be >= 0 (0 disables periodic eval).")
+        if self.logging_steps < 0:
+            raise ValueError("logging_steps must be >= 0 (0 disables periodic step logging).")
         if self.update_weights_interval < 1:
             raise ValueError("update_weights_interval must be >= 1.")
         if not isinstance(self.report_to_wandb, bool):
@@ -642,7 +669,7 @@ class TrainingArguments:
 
     # ========== Paths (Dynamic Loading) ==========
     data_source_path: str = field(default="diffusionrl.data.DefaultDataSource",
-        metadata={"help": "Python dotpath to DataSource class for loading training prompts"})
+        metadata={"help": "Python dotpath to DataSource class for loading training/eval prompt streams"})
 
     # ========== Grouped Configuration ==========
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -656,7 +683,9 @@ class TrainingArguments:
 
     # ========== Data Configuration ==========
     data_path: Optional[str] = field(default="data/samples/prompts_toy.json",
-        metadata={"help": "Path to training prompt data file (JSON, JSONL, or TXT)"})
+        metadata={"help": "Path to training prompt data file (JSON, JSONL, or TXT). JSON items should provide text via 'prompt' or 'caption'."})
+    eval_data_path: Optional[str] = field(default=None,
+        metadata={"help": "Optional path to evaluation prompt data file. If unset, eval uses data_path with deterministic ordering."})
     # ========== Video/Image Configuration ==========
     height: int = field(default=256,
         metadata={"help": "Generated image/video height in pixels"})
@@ -1688,17 +1717,212 @@ def _normalize_training_misc(args: TrainingArguments) -> None:
                 key="training.lora_target_modules",
             )
 
-    if isinstance(args.training.gradient_accumulation_steps, int):
-        _set_normalized_attr(
-            args,
-            args.training,
-            "gradient_accumulation_steps",
-            str(args.training.gradient_accumulation_steps),
-            key="training.gradient_accumulation_steps",
+    _normalize_training_batch_geometry(args)
+
+
+def _maybe_positive_int(value: Any) -> Optional[int]:
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError):
+        return None
+    if resolved < 1:
+        return None
+    return resolved
+
+
+def _resolve_training_dp_size(args: TrainingArguments) -> int:
+    default_dp_size = max(
+        1,
+        int(args.ray.training_num_nodes) * int(args.ray.training_num_gpus_per_node),
+    )
+    backend = str(getattr(args.training, "train_backend", "fsdp") or "fsdp").strip().lower()
+    backend_kwargs = getattr(args.training, "train_backend_kwargs", {})
+    if not isinstance(backend_kwargs, dict):
+        backend_kwargs = {}
+
+    if backend == "veomni":
+        return _maybe_positive_int(backend_kwargs.get("dp_size")) or default_dp_size
+
+    if backend == "megatron":
+        hinted_dp_size = _maybe_positive_int(backend_kwargs.get("dp_size"))
+        if hinted_dp_size is not None:
+            return hinted_dp_size
+        tp_size = _maybe_positive_int(backend_kwargs.get("tp_size")) or 1
+        pp_size = _maybe_positive_int(backend_kwargs.get("pp_size")) or 1
+        sp_size = _maybe_positive_int(backend_kwargs.get("sp_size")) or 1
+        denom = max(1, tp_size * pp_size * sp_size)
+        return max(1, default_dp_size // denom)
+
+    return default_dp_size
+
+
+def _resolve_nominal_local_training_batch_size(args: TrainingArguments) -> int:
+    total_samples = max(
+        1,
+        int(args.algorithm.prompts_per_batch) * int(args.algorithm.num_samples_per_prompt),
+    )
+    dp_size = _resolve_training_dp_size(args)
+    if total_samples % dp_size != 0:
+        raise ValueError(
+            "Nominal rollout batch size must be divisible by the effective training dp_size. "
+            f"Got total_samples={total_samples}, dp_size={dp_size}. "
+            "Adjust algorithm.prompts_per_batch, algorithm.num_samples_per_prompt, "
+            "or the training backend topology."
+        )
+    return max(1, total_samples // dp_size)
+
+
+def _normalize_training_batch_geometry(args: TrainingArguments) -> None:
+    """Normalize training batch-geometry knobs onto explicit runtime semantics."""
+    local_batch_size = _resolve_nominal_local_training_batch_size(args)
+    update_mode = str(args.training.update_mode or "single_update").strip().lower()
+    gradient_accumulation_batch_size = (
+        max(1, int(args.training.gradient_accumulation_batch_size))
+        if args.training.gradient_accumulation_batch_size is not None
+        else None
+    )
+    multi_update_batch_size = (
+        max(1, int(args.training.multi_update_batch_size))
+        if args.training.multi_update_batch_size is not None
+        else None
+    )
+
+    if update_mode == "multi_update":
+        if multi_update_batch_size is None:
+            raise ValueError(
+                "update_mode='multi_update' requires training.multi_update_batch_size."
+            )
+
+        if multi_update_batch_size >= local_batch_size:
+            _set_normalized_attr(
+                args,
+                args.training,
+                "update_mode",
+                "single_update",
+                key="training.update_mode",
+            )
+            _set_normalized_attr(
+                args,
+                args.training,
+                "multi_update_batch_size",
+                None,
+                key="training.multi_update_batch_size",
+            )
+            update_mode = "single_update"
+            multi_update_batch_size = None
+        elif local_batch_size % multi_update_batch_size != 0:
+            raise ValueError(
+                "multi_update requires the nominal local training batch size to be divisible by "
+                "multi_update_batch_size. "
+                f"Got local_batch_size={local_batch_size}, "
+                f"multi_update_batch_size={multi_update_batch_size}."
+            )
+
+    if update_mode == "single_update":
+        normalized_grad_accum_batch_size = (
+            local_batch_size
+            if gradient_accumulation_batch_size is None
+            else min(gradient_accumulation_batch_size, local_batch_size)
+        )
+        if args.training.gradient_accumulation_batch_size != normalized_grad_accum_batch_size:
+            _set_normalized_attr(
+                args,
+                args.training,
+                "gradient_accumulation_batch_size",
+                normalized_grad_accum_batch_size,
+                key="training.gradient_accumulation_batch_size",
+            )
+        gradient_accumulation_batch_size = normalized_grad_accum_batch_size
+        if args.training.multi_update_batch_size is not None:
+            _set_normalized_attr(
+                args,
+                args.training,
+                "multi_update_batch_size",
+                None,
+                key="training.multi_update_batch_size",
+            )
+
+        if local_batch_size % gradient_accumulation_batch_size != 0:
+            raise ValueError(
+                "single_update requires the nominal local training batch size to be divisible by "
+                "gradient_accumulation_batch_size. "
+                f"Got local_batch_size={local_batch_size}, "
+                f"gradient_accumulation_batch_size={gradient_accumulation_batch_size}."
+            )
+    else:
+        normalized_grad_accum_batch_size = (
+            multi_update_batch_size
+            if gradient_accumulation_batch_size is None
+            else min(
+                gradient_accumulation_batch_size,
+                multi_update_batch_size,
+            )
+        )
+        if args.training.gradient_accumulation_batch_size != normalized_grad_accum_batch_size:
+            _set_normalized_attr(
+                args,
+                args.training,
+                "gradient_accumulation_batch_size",
+                normalized_grad_accum_batch_size,
+                key="training.gradient_accumulation_batch_size",
+            )
+        gradient_accumulation_batch_size = normalized_grad_accum_batch_size
+
+        if multi_update_batch_size % gradient_accumulation_batch_size != 0:
+            raise ValueError(
+                "multi_update requires multi_update_batch_size to be divisible by "
+                "gradient_accumulation_batch_size. "
+                f"Got multi_update_batch_size={multi_update_batch_size}, "
+                f"gradient_accumulation_batch_size={gradient_accumulation_batch_size}."
+            )
+
+
+def _validate_direct_sampling_batch_geometry(
+    args: TrainingArguments,
+    *,
+    training_actor_direct_sampling: bool,
+) -> None:
+    """Validate prompt-batch splitting for training-actor direct sampling."""
+    direct_sampling_batch_size = getattr(args.sampling, "direct_sampling_batch_size", None)
+    if direct_sampling_batch_size is None:
+        return
+
+    if not training_actor_direct_sampling:
+        raise ValueError(
+            "sampling.direct_sampling_batch_size is only valid when "
+            "sampling.training_actor_direct_sampling=true."
         )
 
-    if args.training.num_inner_epochs < 1:
-        raise ValueError(f"num_inner_epochs must be >= 1, got: {args.training.num_inner_epochs}")
+    direct_sampling_batch_size = int(direct_sampling_batch_size)
+    num_samples_per_prompt = max(1, int(getattr(args.algorithm, "num_samples_per_prompt", 1)))
+    prompts_per_batch = getattr(args.algorithm, "prompts_per_batch", None)
+    if prompts_per_batch is None:
+        raise ValueError(
+            "sampling.direct_sampling_batch_size requires algorithm.prompts_per_batch to be set explicitly."
+        )
+    prompts_per_batch = int(prompts_per_batch)
+    rollout_total_samples = max(1, prompts_per_batch * num_samples_per_prompt)
+
+    if direct_sampling_batch_size % num_samples_per_prompt != 0:
+        raise ValueError(
+            "sampling.direct_sampling_batch_size must be divisible by "
+            "algorithm.num_samples_per_prompt so each sampling request contains "
+            "whole prompts. "
+            f"Got direct_sampling_batch_size={direct_sampling_batch_size}, "
+            f"num_samples_per_prompt={num_samples_per_prompt}."
+        )
+
+    if (
+        direct_sampling_batch_size < rollout_total_samples
+        and rollout_total_samples % direct_sampling_batch_size != 0
+    ):
+        raise ValueError(
+            "When sampling.direct_sampling_batch_size is smaller than one rollout, "
+            "it must evenly divide rollout_total_samples = "
+            "algorithm.prompts_per_batch * algorithm.num_samples_per_prompt. "
+            f"Got rollout_total_samples={rollout_total_samples}, "
+            f"direct_sampling_batch_size={direct_sampling_batch_size}."
+        )
 
 
 def _normalize_algorithm_kwargs_payload(args: TrainingArguments) -> None:
@@ -2114,6 +2338,10 @@ def validate_args(
             training_actor_direct_sampling=training_actor_direct_sampling,
         )
     _normalize_training_misc(args)
+    _validate_direct_sampling_batch_geometry(
+        args,
+        training_actor_direct_sampling=training_actor_direct_sampling,
+    )
     validate_model_specific_logic(args, model_cls=model_cls)
     if debug_mode != "train_only":
         validate_resolved_engine_loss_contract(

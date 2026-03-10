@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 
+from diffusionrl.runtime.training.update_schedule import resolve_gradient_accumulation_plan
 from diffusionrl.types.training_batch import ForwardTrainingBatch
 
 logger = logging.getLogger(__name__)
@@ -42,12 +43,18 @@ def train_forward_batch(
     batch: ForwardTrainingBatch,
     loss_fn: Any,
     model: torch.nn.Module,
-    gradient_accumulation_steps: int,
+    gradient_accumulation_batch_size: int,
     timestep_mode: str,
     shuffle_timesteps: bool,
     apply_shift: bool,
-) -> tuple[torch.Tensor, Dict[str, Any], int, int, bool]:
+) -> tuple[float, Dict[str, Any], int, int, bool]:
     """Run one forward-path update (random timestep or all-timestep mode)."""
+    mini_batches, actual_mini_batches = resolve_gradient_accumulation_plan(
+        batch_size=batch.batch_size,
+        gradient_accumulation_batch_size=gradient_accumulation_batch_size,
+    )
+    num_mini_batches = len(mini_batches)
+
     if timestep_mode == "all" and batch.timesteps is not None:
         timesteps = batch.timesteps
         if isinstance(timesteps, torch.Tensor):
@@ -70,49 +77,101 @@ def train_forward_batch(
                 perm = torch.randperm(timesteps.numel(), device=timesteps.device)
                 timesteps = timesteps[perm]
 
-            effective_grad_accum = max(1, int(gradient_accumulation_steps)) * timesteps.numel()
-            total_loss = torch.zeros((), device=batch.advantages.device)
-            metrics_sum: Dict[str, float] = {}
+            effective_mini_batches = actual_mini_batches * timesteps.numel()
+            total_loss_accum = 0.0
+            mini_batch_metrics_list: List[Dict[str, Any]] = []
+            has_backward = False
 
-            for t in timesteps:
-                loss, metrics = _compute_forward_batch_loss(
-                    loss_fn=loss_fn,
-                    model=model,
-                    batch=batch,
-                    timestep_values=t,
-                    apply_shift=apply_shift,
-                )
+            for start, end in mini_batches:
+                mini_batch = batch.slice(start, end)
+                mini_loss_sum = 0.0
+                mini_metrics: Dict[str, Any] = {}
+                metric_sums: Dict[str, float] = {}
+                metric_counts: Dict[str, int] = {}
 
-                (loss / effective_grad_accum).backward()
-                total_loss = total_loss + loss.detach()
+                for t in timesteps:
+                    loss, metrics = _compute_forward_batch_loss(
+                        loss_fn=loss_fn,
+                        model=model,
+                        batch=mini_batch,
+                        timestep_values=t,
+                        apply_shift=apply_shift,
+                    )
 
-                for key, value in metrics.items():
-                    metric_val = value.item() if isinstance(value, torch.Tensor) else float(value)
-                    metrics_sum[key] = metrics_sum.get(key, 0.0) + metric_val
+                    (loss / effective_mini_batches).backward()
+                    has_backward = True
+                    mini_loss_sum += loss.detach().item()
+
+                    for key, value in metrics.items():
+                        metric_val = value.item() if isinstance(value, torch.Tensor) else float(value)
+                        metric_sums[key] = metric_sums.get(key, 0.0) + metric_val
+                        metric_counts[key] = metric_counts.get(key, 0) + 1
+                        if key not in mini_metrics:
+                            mini_metrics[key] = metric_val
+
+                for key, total in metric_sums.items():
+                    count = metric_counts.get(key, 0)
+                    if count > 0:
+                        mini_metrics[key] = total / count
+
+                mini_batch_metrics_list.append(mini_metrics)
+                total_loss_accum += mini_loss_sum / timesteps.numel()
 
             all_metrics: Dict[str, Any] = {}
-            for key, value in metrics_sum.items():
-                all_metrics[key] = value / timesteps.numel()
+            if mini_batch_metrics_list:
+                keys = mini_batch_metrics_list[0].keys()
+                for key in keys:
+                    values = [m.get(key) for m in mini_batch_metrics_list if m.get(key) is not None]
+                    if values and isinstance(values[0], (int, float)):
+                        all_metrics[key] = sum(values) / len(values)
+                    else:
+                        all_metrics[key] = mini_batch_metrics_list[-1].get(key)
 
             return (
-                total_loss / timesteps.numel(),
+                total_loss_accum / max(1, num_mini_batches),
                 all_metrics,
                 timesteps.numel(),
-                effective_grad_accum,
-                True,
+                effective_mini_batches,
+                has_backward,
             )
 
-    loss, metrics = _compute_forward_batch_loss(
-        loss_fn=loss_fn,
-        model=model,
-        batch=batch,
-    )
+    total_loss_accum = 0.0
+    mini_batch_metrics_list: List[Dict[str, Any]] = []
+    has_backward = False
+
+    for start, end in mini_batches:
+        mini_batch = batch.slice(start, end)
+        loss, metrics = _compute_forward_batch_loss(
+            loss_fn=loss_fn,
+            model=model,
+            batch=mini_batch,
+        )
+        (loss / num_mini_batches).backward()
+        has_backward = True
+        total_loss_accum += loss.detach().item()
+
+        mini_metrics: Dict[str, Any] = {}
+        for key, value in metrics.items():
+            if isinstance(value, torch.Tensor):
+                mini_metrics[key] = value.item()
+            else:
+                mini_metrics[key] = value
+        mini_batch_metrics_list.append(mini_metrics)
 
     all_metrics: Dict[str, Any] = {}
-    for key, value in metrics.items():
-        if isinstance(value, torch.Tensor):
-            all_metrics[key] = value.item()
-        else:
-            all_metrics[key] = value
+    if mini_batch_metrics_list:
+        keys = mini_batch_metrics_list[0].keys()
+        for key in keys:
+            values = [m.get(key) for m in mini_batch_metrics_list if m.get(key) is not None]
+            if values and isinstance(values[0], (int, float)):
+                all_metrics[key] = sum(values) / len(values)
+            else:
+                all_metrics[key] = mini_batch_metrics_list[-1].get(key)
 
-    return loss, all_metrics, 1, 1, False
+    return (
+        total_loss_accum / max(1, num_mini_batches),
+        all_metrics,
+        1,
+        actual_mini_batches,
+        has_backward,
+    )

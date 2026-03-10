@@ -48,7 +48,7 @@ python -m diffusionrl.train \
     --sampling.guidance-scale 4.5 \
     \
     --algorithm.prompts-per-batch 1 \
-    --training.batch-size 1 \
+    --training.gradient-accumulation-batch-size 1 \
     --algorithm.num-samples-per-prompt 2 \
     \
     --sampling.training-actor-direct-sampling true \
@@ -58,8 +58,7 @@ python -m diffusionrl.train \
     --ray.training-num-gpus-per-node "${NUM_GPUS}" \
     \
     --training.learning-rate 1e-5 \
-    --training.gradient-accumulation-steps 1 \
-    --training.num-inner-epochs 1 \
+    --training.update-mode single_update \
     --training.max-grad-norm 1.0 \
     --training.use-lora true \
     --training.lora-rank 8 \

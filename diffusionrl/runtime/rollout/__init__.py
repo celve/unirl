@@ -1,1 +1,1 @@
-"""Ray-agnostic rollout pipeline execution helpers."""
+"""Ray-agnostic rollout runtime helpers."""

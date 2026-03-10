@@ -69,6 +69,7 @@ local/
 **/buffer_stats/
 *.out
 *.pkl
+*.log
 
 # Symlinked models and datasets (local only, not committed)
 models/local/*

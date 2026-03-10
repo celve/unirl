@@ -6,20 +6,26 @@ import logging
 import os
 import socket
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import ray
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 
+from diffusionrl.config.build_domain_args import RewardSchema
+from diffusionrl.runtime.pipeline.rollout_pipeline import (
+    compute_rewards as compute_rollout_rewards,
+)
+from diffusionrl.reward.service import LocalRewardExecutor
 from diffusionrl.types.sampling import RolloutRequest, RolloutOutput
 from diffusionrl.types.training_batch import (
     BackwardTrainingBatch,
+    ForwardTrainingBatch,
     TrainingBatch,
 )
-import torch.nn as nn
-
 from diffusionrl.patches.replay_logprob import ReplayLogProbPatch
 from diffusionrl.ray.ray_utils import TrainingActorSamplingService
 from diffusionrl.utils import clear_memory as _clear_gpu_memory
@@ -31,7 +37,6 @@ from diffusionrl.runtime.training import (
     TrainExecutor,
     TrainExecutorConfig,
     create_train_backend,
-    resolve_grad_accum,
 )
 from diffusionrl.utils import load_function
 
@@ -83,7 +88,7 @@ class TrainingActor(BaseTrainRayActor):
         self._train_backend_name = "fsdp"
         self._train_backend_capabilities: Dict[str, Any] = {}
 
-        # NFT-specific: EMA updater for dual adapter mechanism
+        # Optional EMA updater for reference-policy synchronization.
         self._ema_updater = None
         self._use_ema = False
         self._ema_decay = 0.001
@@ -97,8 +102,9 @@ class TrainingActor(BaseTrainRayActor):
 
         # Training config (read from config in init)
         self._max_grad_norm = 1.0
-        self._gradient_accumulation_steps = 1
-        self._num_inner_epochs = 1
+        self._gradient_accumulation_batch_size = 1
+        self._multi_update_batch_size: Optional[int] = None
+        self._update_mode = "single_update"
         self._replay_log_probs = False
 
         # Sampling support (training-actor sampling mode)
@@ -112,6 +118,9 @@ class TrainingActor(BaseTrainRayActor):
         self.vae = None
         self.scheduler = None
         self._weights_update_groups: Dict[str, Any] = {}
+        self._reward_config: Dict[str, Any] = {}
+        self._reward_schema: Optional[RewardSchema] = None
+        self._local_reward_executor: Optional[LocalRewardExecutor] = None
 
     def _log_resource_ids(self, tag: str) -> None:
         log_resource_ids(tag, self.rank)
@@ -185,7 +194,8 @@ class TrainingActor(BaseTrainRayActor):
                 - optimizer_config: dict with lr, betas, weight_decay
                 - scheduler_config: dict with scheduler type and params
                 - loss_config: dict with loss_type, clip_range, kl_coef, etc.
-                - training_config: dict with max_grad_norm, gradient_accumulation_steps
+                - training_config: dict with max_grad_norm, gradient_accumulation_batch_size,
+                  multi_update_batch_size, update_mode
                 - train_backend_config: dict(name/backend_path/kwargs)
 
         Note:
@@ -246,13 +256,22 @@ class TrainingActor(BaseTrainRayActor):
         # Load training config
         training_config = self._require_dict_config(config, "training_config")
         self._max_grad_norm = float(training_config["max_grad_norm"])
-        self._gradient_accumulation_steps = resolve_grad_accum(training_config)
-        self._num_inner_epochs = max(1, int(training_config["num_inner_epochs"]))
+        self._gradient_accumulation_batch_size = int(training_config["gradient_accumulation_batch_size"])
+        raw_multi_update_batch_size = training_config.get("multi_update_batch_size")
+        self._multi_update_batch_size = (
+            int(raw_multi_update_batch_size)
+            if raw_multi_update_batch_size is not None
+            else None
+        )
+        self._update_mode = str(training_config["update_mode"]).strip().lower()
         self._replay_log_probs = bool(training_config["replay_log_probs"])
 
         # Sampling config (used when training actors perform sampling)
         sampling_config = self._require_dict_config(config, "sampling_config")
         self._sampling_config = sampling_config
+        reward_config = self._require_dict_config(config, "reward_config")
+        self._reward_config = reward_config
+        self._reward_schema = RewardSchema(**reward_config)
 
         # Note: Algorithm is not instantiated here because:
         # - Advantage computation happens in RolloutManager (sampling phase)
@@ -264,11 +283,60 @@ class TrainingActor(BaseTrainRayActor):
             f"Rank {self.rank}: Training actor initialized "
             f"(backend={self._train_backend_name}, "
             f"max_grad_norm={self._max_grad_norm}, "
-            f"gradient_accumulation_steps={self._gradient_accumulation_steps}, "
-            f"num_inner_epochs={self._num_inner_epochs})"
+            f"update_mode={self._update_mode}, "
+            f"gradient_accumulation_batch_size={self._gradient_accumulation_batch_size}, "
+            f"multi_update_batch_size={self._multi_update_batch_size})"
         )
         self._log_resource_ids("training_init")
         self._log_gpu_state("training_init")
+
+    def _uses_rollout_local_reward(self) -> bool:
+        return bool(self._reward_schema is not None and self._reward_schema.uses_rollout_execution)
+
+    def _ensure_local_reward_executor(self) -> LocalRewardExecutor:
+        if not self._uses_rollout_local_reward():
+            raise RuntimeError("Local reward executor requested but reward_execution_mode!='rollout'.")
+        if self._local_reward_executor is None:
+            self._local_reward_executor = LocalRewardExecutor(self._reward_schema)
+        return self._local_reward_executor
+
+    def _attach_local_reward_to_output(
+        self,
+        *,
+        output: RolloutOutput,
+        base_prompts: List[str],
+        prompt_metadata: Optional[List[Optional[Dict[str, Any]]]],
+        num_samples_per_prompt: int,
+        keep_reward_media_for_manager: bool,
+    ) -> RolloutOutput:
+        if not self._uses_rollout_local_reward():
+            return output
+        normalized_metadata = prompt_metadata
+        if not (
+            isinstance(normalized_metadata, list)
+            and len(normalized_metadata) == len(base_prompts)
+        ):
+            normalized_metadata = None
+        rewards, reward_components = compute_rollout_rewards(
+            reward_service=self._ensure_local_reward_executor(),
+            reward_path=str(self._reward_schema.reward_path if self._reward_schema is not None else ""),
+            num_samples_per_prompt=int(num_samples_per_prompt),
+            sampler_outputs=[output],
+            prompts=list(base_prompts),
+            prompt_metadata=normalized_metadata,
+        )
+        meta = dict(output.metadata or {})
+        meta["precomputed_rewards"] = [float(v) for v in rewards.tolist()]
+        meta["precomputed_reward_components"] = {
+            str(name): [float(v) for v in list(values or [])]
+            for name, values in dict(reward_components or {}).items()
+        }
+        output.metadata = meta
+        if not keep_reward_media_for_manager:
+            output.decoded_images = None
+            if isinstance(output.metadata, dict):
+                output.metadata.pop("decoded_videos", None)
+        return output
 
     def _load_model(self, model_config: dict) -> None:
         """Load the model for training."""
@@ -547,6 +615,13 @@ class TrainingActor(BaseTrainRayActor):
                 old_adapter_name=old_adapter_name,
                 new_adapter_name=new_adapter_name,
             )
+            if self._ema_updater is not None:
+                logger.info(
+                    "Rank %s: EMA updater enabled (%s, decay=%s)",
+                    self.rank,
+                    type(self._ema_updater).__name__,
+                    self._ema_decay,
+                )
 
         if hasattr(self.loss_fn, "model_type"):
             self.loss_fn.model_type = getattr(self.model_bundle, "model_type", "default")
@@ -592,7 +667,19 @@ class TrainingActor(BaseTrainRayActor):
         )
 
     def generate(self, request: RolloutRequest) -> RolloutOutput:
-        return self._sampling_service.generate(self, request)
+        output = self._sampling_service.generate_local(self, request)
+        base_prompts = list(request.kwargs.get("_base_prompts") or request.prompts or [])
+        prompt_metadata = request.kwargs.get("_prompt_metadata")
+        output = self._attach_local_reward_to_output(
+            output=output,
+            base_prompts=base_prompts if base_prompts else list(request.prompts or []),
+            prompt_metadata=prompt_metadata,
+            num_samples_per_prompt=int(request.kwargs.get("num_samples_per_prompt", 1) or 1),
+            keep_reward_media_for_manager=bool(
+                request.kwargs.get("_keep_reward_media_for_manager", False)
+            ),
+        )
+        return output.to_device("cpu")
 
     def generate_batch(self, requests: List[RolloutRequest]) -> List[RolloutOutput]:
         return self._sampling_service.generate_batch(self, requests)
@@ -627,8 +714,9 @@ class TrainingActor(BaseTrainRayActor):
             loss_type=self._loss_type,
             guidance_scale=self._guidance_scale,
             max_grad_norm=self._max_grad_norm,
-            gradient_accumulation_steps=self._gradient_accumulation_steps,
-            num_inner_epochs=self._num_inner_epochs,
+            gradient_accumulation_batch_size=self._gradient_accumulation_batch_size,
+            multi_update_batch_size=self._multi_update_batch_size,
+            update_mode=self._update_mode,
             use_ema=self._use_ema,
             ema_updater=self._ema_updater,
             nft_timestep_mode=self._nft_timestep_mode,

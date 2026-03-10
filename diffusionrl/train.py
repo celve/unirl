@@ -29,12 +29,20 @@ logger = logging.getLogger(__name__)
 
 def should_save(rollout_id: int, args) -> bool:
     """Check if we should save a checkpoint at this rollout."""
-    return (rollout_id + 1) % args.rollout.save_steps == 0
+    interval = int(getattr(args.rollout, "save_steps", 0))
+    return interval > 0 and (rollout_id + 1) % interval == 0
 
 
 def should_eval(rollout_id: int, args) -> bool:
     """Check if we should run evaluation at this rollout."""
-    return (rollout_id + 1) % args.rollout.eval_steps == 0
+    interval = int(getattr(args.rollout, "eval_steps", 0))
+    return interval > 0 and (rollout_id + 1) % interval == 0
+
+
+def should_log(rollout_id: int, args) -> bool:
+    """Check if we should emit periodic rollout logs at this rollout."""
+    interval = int(getattr(args.rollout, "logging_steps", 0))
+    return interval > 0 and rollout_id % interval == 0
 
 
 def train(args):
@@ -74,6 +82,12 @@ def train(args):
     logger.info(f"Offload train: {args.ray.offload_train}, Offload rollout: {args.ray.offload_rollout}")
     logger.info(f"Weight sync mode: {args.ray.weight_sync_mode}, async_pipeline={args.rollout.async_pipeline}")
     logger.info(
+        "Periodic controls: save_steps=%s eval_steps=%s logging_steps=%s",
+        args.rollout.save_steps,
+        args.rollout.eval_steps,
+        args.rollout.logging_steps,
+    )
+    logger.info(
         "Debug flags: mode=%s save_intermediates=%s save_dir=%s",
         debug_mode,
         bool(getattr(args.debug, "debug_save_intermediates", False)),
@@ -90,12 +104,20 @@ def train(args):
     # Initialize WandB logger (only on rank 0)
     wandb_logger = None
     if args.rollout.report_to_wandb and args.rollout.project_name:
+        # Parse wandb tags from config
+        wandb_tags_str = getattr(args.rollout, "wandb_tags", None)
+        wandb_tags = (
+            [t.strip() for t in wandb_tags_str.split(",") if t.strip()]
+            if wandb_tags_str
+            else None
+        )
         wandb_logger = init_logger(
             project=args.rollout.project_name,
             run_name=args.rollout.run_name,
             config=args.to_flat_dict() if hasattr(args, "to_flat_dict") else vars(args),
             log_dir=getattr(args.rollout, "logging_dir", None),
             rank=0,
+            tags=wandb_tags,
         )
         logger.info(f"WandB initialized: project={args.rollout.project_name}, run={args.rollout.run_name}")
 
@@ -109,12 +131,29 @@ def train(args):
 
     # 2. Create rollout manager; direct-sampling mode does not allocate rollout actors.
     rollout_pg_result = None if training_actor_direct_sampling else pgs.get("rollout")
-    rollout_manager, num_rollout_per_epoch = create_rollout_manager(
+    rollout_manager, dataset_step_info = create_rollout_manager(
         args,
         pg_result=rollout_pg_result,
         reward_pg_result=pgs.get("reward"),
     )
-    logger.info(f"Rollout manager created, {num_rollout_per_epoch} rollouts per epoch")
+    logger.info("Rollout manager created")
+    if dataset_step_info.get("num_samples", 0) > 0:
+        logger.info(
+            "Dataset step info: num_samples=%s prompts_per_batch=%s "
+            "estimated_steps_per_dataset_pass=%s steps_before_reset=%s",
+            dataset_step_info.get("num_samples"),
+            dataset_step_info.get("prompts_per_batch"),
+            dataset_step_info.get("estimated_steps_per_dataset_pass"),
+            dataset_step_info.get("steps_before_reset"),
+        )
+        if not dataset_step_info.get("exact_dataset_pass_per_cycle", False):
+            logger.warning(
+                "Dataset pass is not exact under current data-source batching: "
+                "drop_last=%s remainder_samples=%s. "
+                "One reset cycle will not cover the full dataset exactly once.",
+                dataset_step_info.get("drop_last"),
+                dataset_step_info.get("remainder_samples"),
+            )
 
     # 3. Optional pre-offload for colocate memory pressure relief before training actor init.
     if args.ray.offload_rollout:
@@ -162,7 +201,7 @@ def train(args):
         ray.get(rollout_manager.wake_up.remote())
         rollout_on_gpu = True
 
-    # 8. Build rollout buffer and bind runtime handles.
+    # 8. Build rollout buffer.
     rollout_buffer = create_rollout_buffer_actor(args)
     ray.get(
         rollout_buffer.bind_runtime.remote(
@@ -174,6 +213,8 @@ def train(args):
 
     # 9. Setup weight sync protocol (binds training_group + rollout_manager).
     weight_sync.setup(training_group=training_group, rollout_manager=rollout_manager)
+
+    debug_save_intermediates = bool(getattr(args.debug, "debug_save_intermediates", False))
 
     # 10. Core async training loop
     if args.rollout.async_pipeline:
@@ -197,7 +238,6 @@ def train(args):
 
     # 11. Core synchronous training loop
     enforce_rollout_alignment = not bool(getattr(args.rollout, "rollout_buffer_grouped", False))
-    debug_save_intermediates = bool(getattr(args.debug, "debug_save_intermediates", False))
     save_rollout_debug_payload = None
     if debug_save_intermediates:
         from diffusionrl.debug.runner import save_rollout_debug_payload as _save_rollout_debug_payload
@@ -223,6 +263,8 @@ def train(args):
     wandb_media_max_items = max(1, int(getattr(args.rollout, "wandb_media_max_items", 8)))
 
     def _collect_rollout_batch_metrics(batch_ref) -> dict:
+        if batch_ref is None:
+            return {}
         try:
             training_data = ray.get(batch_ref)
         except Exception as exc:
@@ -233,14 +275,18 @@ def train(args):
             num_samples_per_prompt=num_samples_per_prompt,
         )
 
+    # rollout_id is the outer rollout-train loop step; it behaves similarly to
+    # a framework-level global step, but may differ from optimizer step count.
     for rollout_id in range(args.rollout.start_rollout_id, args.rollout.num_rollout):
         step_start_t = time.perf_counter()
         sync_result = None
         sync_phase_s = 0.0
         eval_phase_s = 0.0
-        should_log = (rollout_id % args.rollout.logging_steps == 0)
-        collect_media_preview = bool(should_log and wandb_media_enabled)
-
+        should_log_step = should_log(rollout_id, args)
+        collect_media_preview = bool(should_log_step and wandb_media_enabled)
+        rollout_data_ref = None
+        rollout_metadata = {}
+        sample_count = 0
         # === PHASE 1: Rollout ===
         rollout_phase_start_t = time.perf_counter()
         ensure_rollout_on_gpu()
@@ -326,7 +372,7 @@ def train(args):
             if wandb_logger:
                 wandb_logger.log_eval(rollout_id, eval_metrics)
 
-        if should_log:
+        if should_log_step:
             avg_loss = sum(m.get("loss", 0) for m in metrics) / max(len(metrics), 1)
             step_time_s = time.perf_counter() - step_start_t
             logger.info(
@@ -367,14 +413,15 @@ def train(args):
                 }
                 wandb_logger.log_perf(rollout_id, perf_metrics)
 
+                sync_metrics = {}
                 if sync_result is not None:
                     sync_metrics = build_sync_metrics(sync_result)
-                    if sync_metrics:
-                        wandb_logger.log_with_step(
-                            step_key="rollout/step",
-                            step=rollout_id,
-                            metrics=sync_metrics,
-                        )
+                if sync_metrics:
+                    wandb_logger.log_with_step(
+                        step_key="rollout/step",
+                        step=rollout_id,
+                        metrics=sync_metrics,
+                    )
 
                 try:
                     buffer_stats = ray.get(rollout_buffer.get_stats.remote())

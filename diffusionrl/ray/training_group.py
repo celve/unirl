@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
+from tqdm import tqdm
 
 import ray
 import torch
@@ -82,6 +83,7 @@ class TrainingActorGroup(BaseActorGroup):
         self.master_port = master_port
         self._buffer_consumer_spec_cache: Optional[Dict[str, Any]] = None
         self._train_backend_info_cache: Optional[Dict[str, Any]] = None
+        self._warned_internal_only_embedding_request = False
 
     def async_train(
         self,
@@ -402,9 +404,27 @@ class TrainingActorGroup(BaseActorGroup):
         if batch_size <= 0:
             raise ValueError("batch_size must be > 0 for generate")
 
+        has_internal_embedding_request = bool(
+            request.prompt_embeds is not None
+            or request.pooled_prompt_embeds is not None
+            or request.encoder_attention_mask is not None
+            or request.text_ids is not None
+            or request.kwargs.get("negative_prompt_embeds") is not None
+            or request.kwargs.get("negative_pooled_prompt_embeds") is not None
+            or request.kwargs.get("image_ids") is not None
+        )
+        if has_internal_embedding_request and not self._warned_internal_only_embedding_request:
+            logger.warning(
+                "TrainingActorGroup received prompt embedding tensors in RolloutRequest. "
+                "This path is kept only for internal compatibility; user-facing rollout input "
+                "should remain prompt-only."
+            )
+            self._warned_internal_only_embedding_request = True
+
         target_size = max(batch_size, self.num_actors)
         if target_size > batch_size:
-            # Pad prompts so each actor gets at least one
+            # Pad prompts so each actor gets at least one. Keep tensor padding for
+            # internal compatibility paths that still carry embeddings.
             request = RolloutRequest(
                 prompts=self._pad_batched_value(request.prompts, batch_size, target_size),
                 prompt_embeds=self._pad_batched_value(request.prompt_embeds, batch_size, target_size),

@@ -55,7 +55,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         self._encode_prompt_in_generate: bool = False
         self._supports_memory_api: bool = False
         self._require_memory_api: bool = False
-        self._warned_sequential_requests: bool = False
         self._warned_missing_initial_noise: bool = False
         self._warned_missing_decoded: bool = False
         self._warned_ignored_external_embeddings: bool = False
@@ -999,12 +998,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
 
         if prompts is None or len(prompts) == 0:
             raise ValueError("SGLang engine requires non-empty prompts")
-        if len(prompts) > 1 and not self._warned_sequential_requests:
-            logger.warning(
-                "SGLang DiffGenerator currently processes prompt batches sequentially. "
-                "Large prompts_per_batch may reduce rollout throughput."
-            )
-            self._warned_sequential_requests = True
 
         has_external_embeddings = bool(
             prompt_embeds is not None
@@ -1133,24 +1126,22 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             sampling_params_kwargs["rollout_sde_type"] = rollout_sde_type
             sampling_params_kwargs["rollout_noise_level"] = rollout_noise_level
 
-        # Upstream sglang-diffusion expects "prompt" as a single string.
-        # Run one request per prompt and merge outputs to keep DiffusionRL's
-        # prompt-batch contract stable.
+        # The local DiffGenerator API currently validates `prompt` as a single
+        # string before it expands batched inputs internally. Dispatch one
+        # request per prompt here to keep diffusionrl compatible with both the
+        # local checkout and installed sglang variants.
         results: List[Any] = []
-        base_seed = int(seed) if seed is not None else None
-        for prompt_idx, prompt in enumerate(prompts):
+        for prompt in prompts:
             request_kwargs = dict(sampling_params_kwargs)
             request_kwargs["prompt"] = str(prompt)
-            if base_seed is not None:
-                request_kwargs["seed"] = base_seed + int(prompt_idx)
+            if seed is not None:
+                request_kwargs["seed"] = int(seed)
 
             raw_results = self._generator.generate(sampling_params_kwargs=request_kwargs)
             if raw_results is None:
-                raise RuntimeError(
-                    f"SGLang generator returned no results for prompt index {prompt_idx}"
-                )
+                raise RuntimeError("SGLang generator returned no results for prompt batch")
             if isinstance(raw_results, list):
-                results.extend(raw_results)
+                results.extend(list(raw_results))
             else:
                 results.append(raw_results)
 

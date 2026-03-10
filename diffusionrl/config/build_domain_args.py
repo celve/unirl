@@ -7,7 +7,7 @@ This decouples actors from the TrainingArguments structure.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
 
 
@@ -64,6 +64,7 @@ class RewardSchema:
     reward_dedicated_num_gpus: int
     reward_dedicated_num_nodes: int
     reward_dedicated_num_gpus_per_node: int
+    reward_execution_mode: str
 
     @classmethod
     def from_args(cls, args) -> "RewardSchema":
@@ -87,7 +88,26 @@ class RewardSchema:
             reward_dedicated_num_gpus=int(rc.reward_dedicated_num_gpus),
             reward_dedicated_num_nodes=int(rc.reward_dedicated_num_nodes),
             reward_dedicated_num_gpus_per_node=int(rc.reward_dedicated_num_gpus_per_node),
+            reward_execution_mode=str(getattr(rc, "reward_execution_mode", "manager")),
         )
+
+    @property
+    def uses_rollout_execution(self) -> bool:
+        return str(self.reward_execution_mode or "manager").strip().lower() == "rollout"
+
+    def component_weights(self) -> Dict[str, float]:
+        if self.reward_models:
+            weights = self.reward_weights or []
+            return {
+                str(model): float(weights[idx]) if idx < len(weights) else 1.0
+                for idx, model in enumerate(self.reward_models)
+            }
+        return {str(self.reward_model_name): 1.0}
+
+
+def build_reward_config(args) -> Dict[str, Any]:
+    """Build reward config consumed by actors and services."""
+    return asdict(RewardSchema.from_args(args))
 
 
 # ---------------------------------------------------------------------------
@@ -98,9 +118,17 @@ def build_sampling_config(args) -> Dict[str, Any]:
     """Build sampling config consumed by TrainingActor sampling path.
 
     Pulls from: SamplingConfig + TrainingArguments top-level (height/width/num_frames).
+    Rollout collection geometry stays in rollout/training runtime config rather than
+    sampler config so engines only receive knobs they actually consume.
     """
     sc = args.sampling  # SamplingConfig
-    engine_kwargs = _resolve_engine_kwargs(sc)
+    engine_kwargs = sc.engine_kwargs
+    if not isinstance(engine_kwargs, dict):
+        raise ValueError(
+            "sampling.engine_kwargs must be a dict after normalization, "
+            f"got: {type(engine_kwargs).__name__}"
+        )
+    engine_kwargs = dict(engine_kwargs)
     return {
         "sampler_path": sc.sampler_path,
         "sampler_engine_type": sc.sampler_engine_type,
@@ -118,16 +146,6 @@ def build_sampling_config(args) -> Dict[str, Any]:
         "num_samples_per_prompt": int(args.algorithm.num_samples_per_prompt),
         "sampler_kwargs": engine_kwargs.get("sampler_kwargs", {}),
     }
-
-
-def _resolve_engine_kwargs(sc) -> Dict[str, Any]:
-    engine_kwargs = sc.engine_kwargs
-    if not isinstance(engine_kwargs, dict):
-        raise ValueError(
-            "sampling.engine_kwargs must be a dict after normalization, "
-            f"got: {type(engine_kwargs).__name__}"
-        )
-    return dict(engine_kwargs)
 
 
 def build_rollout_engine_config(
@@ -173,6 +191,7 @@ def build_rollout_engine_config(
         "width": sampling_config["width"],
         "num_frames": sampling_config["num_frames"],
         "engine_kwargs": merged_engine_kwargs,
+        "reward_config": build_reward_config(args),
     }
 
 # ---------------------------------------------------------------------------
@@ -236,21 +255,24 @@ def _build_loss_config(args) -> Dict[str, Any]:
         "shift": float(sc.shift),
     }
 
-
 def _build_training_runtime_config(args, *, dp_size: int) -> Dict[str, Any]:
     tc = args.training    # TrainingConfig
-    ac = args.algorithm   # AlgorithmConfig
-    sc = args.sampling    # SamplingConfig
+    if tc.gradient_accumulation_batch_size is None:
+        raise ValueError(
+            "training.gradient_accumulation_batch_size must be normalized before "
+            "build_domain_args()."
+        )
     return {
         "max_grad_norm": float(tc.max_grad_norm),
-        "gradient_accumulation_steps": tc.gradient_accumulation_steps,
-        "prompts_per_batch": int(ac.prompts_per_batch),
-        "num_samples_per_prompt": int(ac.num_samples_per_prompt),
-        "batch_size": int(tc.batch_size),
-        "gradient_steps_per_epoch": int(tc.gradient_steps_per_epoch),
-        "num_inner_epochs": int(tc.num_inner_epochs),
+        "gradient_accumulation_batch_size": int(tc.gradient_accumulation_batch_size),
+        "multi_update_batch_size": (
+            int(tc.multi_update_batch_size)
+            if tc.multi_update_batch_size is not None
+            else None
+        ),
+        "update_mode": str(tc.update_mode),
         "dp_size": int(dp_size),
-        "replay_log_probs": bool(sc.replay_log_probs),
+        "replay_log_probs": bool(args.sampling.replay_log_probs),
     }
 
 
@@ -334,6 +356,7 @@ def build_training_actor_init_config(*, args, dp_size: int) -> Dict[str, Any]:
     backend_config = _build_train_backend_config(args, dp_size=dp_size)
     return {
         "model_config": build_model_config(args),
+        "reward_config": build_reward_config(args),
         "optimizer_config": _build_optimizer_config(args),
         "scheduler_config": _build_scheduler_config(args, total_steps=args.rollout.num_rollout),
         "loss_config": _build_loss_config(args),
@@ -359,6 +382,11 @@ def validate_rollout_engine_config(config: Dict[str, Any]) -> None:
             "rollout_engine_config.engine_kwargs must be a dict, "
             f"got: {type(config.get('engine_kwargs')).__name__}"
         )
+    if not isinstance(config.get("reward_config"), dict):
+        raise ValueError(
+            "rollout_engine_config.reward_config must be a dict, "
+            f"got: {type(config.get('reward_config')).__name__}"
+        )
 
 
 def validate_training_actor_init_config(config: Dict[str, Any]) -> None:
@@ -368,6 +396,7 @@ def validate_training_actor_init_config(config: Dict[str, Any]) -> None:
 
     for section in (
         "model_config",
+        "reward_config",
         "optimizer_config",
         "scheduler_config",
         "loss_config",
@@ -398,6 +427,7 @@ def validate_training_actor_init_config(config: Dict[str, Any]) -> None:
 __all__ = [
     "RewardSchema",
     "build_model_config",
+    "build_reward_config",
     "build_sampling_config",
     "build_rollout_engine_config",
     "build_training_actor_init_config",

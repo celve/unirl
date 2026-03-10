@@ -9,7 +9,7 @@
 #   Config:  config/nft.py -> geneval_sd3() or general_ocr_sd3()
 #   Command: accelerate launch scripts/train_nft_sd3.py --config config/nft.py:general_ocr_sd3
 #
-# LoRA: ✅ 原版默认使用 LoRA (rank=32, alpha=64)，与本脚本一致
+# LoRA: The original setup uses LoRA by default (rank=32, alpha=64), matching this script
 #
 # =============================================================================
 # batch_geometry: total_samples = prompts_per_batch * num_samples_per_prompt
@@ -41,9 +41,12 @@
 #
 # NOTE: diffusionrl now supports dpm2 deterministic sampling for SD3 NFT path.
 #
+# Training-actor sampling now reuses the main manager -> rollout_buffer -> train path.
+# The main speed knob left in this branch is rollout-side reward execution.
+#
 # Usage:
 #   bash train_nft_sd3_train_actor_sampling.sh
-#   bash train_nft_sd3_train_actor_sampling.sh --rollout.num-rollout 100 --training.batch-size 2
+#   bash train_nft_sd3_train_actor_sampling.sh --rollout.num-rollout 100 --training.gradient-accumulation-batch-size 2
 #
 # =============================================================================
 
@@ -56,21 +59,33 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Default values (can be overridden via command line)
 PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/sd3.5-medium"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/nft_sd3_ocr_train_sampling"}
-DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/prompts_toy.json"}
+DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/ocr_prompts_toy_16.json"}
 NUM_GPUS=${NUM_GPUS:-8}
-BATCH_SIZE=${BATCH_SIZE:-3}
+GRADIENT_ACCUMULATION_BATCH_SIZE=${GRADIENT_ACCUMULATION_BATCH_SIZE-3}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-24}
 REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
 WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-nft_sd3_train_actor_sampling}
-if [ $(( NUM_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
-    echo "ERROR: NUM_GPUS*BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
-    exit 1
-fi
-PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( NUM_GPUS * BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
-NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
+REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-ocr}
+REWARD_EXECUTION_MODE=${REWARD_EXECUTION_MODE:-rollout}
+LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cpu}
+PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-8}
+ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
+DIRECT_SAMPLING_BATCH_SIZE=${DIRECT_SAMPLING_BATCH_SIZE:-${ROLLOUT_TOTAL_SAMPLES}}
 NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"ema_decay":0.001}'}
 NFT_LOSS_KWARGS=${NFT_LOSS_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"nft_timestep_mode":"all","nft_shuffle_timesteps":true,"nft_apply_shift":false,"use_ema":true,"ema_decay":0.001,"decay_type":"warmup","ema_flat_steps":75,"ema_uprate":0.0075,"ema_uphold":0.999}'}
+if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
+    echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
+    exit 1
+fi
+if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${ROLLOUT_TOTAL_SAMPLES}" ] && [ $(( ROLLOUT_TOTAL_SAMPLES % DIRECT_SAMPLING_BATCH_SIZE )) -ne 0 ]; then
+    echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must evenly divide rollout_total_samples (${ROLLOUT_TOTAL_SAMPLES})"
+    exit 1
+fi
+GRADIENT_ACCUMULATION_ARGS=()
+if [ -n "${GRADIENT_ACCUMULATION_BATCH_SIZE}" ]; then
+    GRADIENT_ACCUMULATION_ARGS+=(--training.gradient-accumulation-batch-size "${GRADIENT_ACCUMULATION_BATCH_SIZE}")
+fi
 
 if [ ! -d "${PRETRAINED_MODEL}" ] && [ -d "${REPO_ROOT}/${PRETRAINED_MODEL}" ]; then
     PRETRAINED_MODEL="${REPO_ROOT}/${PRETRAINED_MODEL}"
@@ -91,7 +106,9 @@ python -m diffusionrl.train \
     --sampling.sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
     --algorithm.algorithm-path diffusionrl.algorithms.nft.NFTAlgorithm \
     --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
-    --reward.reward-model-name ocr \
+    --reward.reward-model-name "${REWARD_MODEL_NAME}" \
+    --reward.reward-execution-mode "${REWARD_EXECUTION_MODE}" \
+    --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
@@ -105,7 +122,7 @@ python -m diffusionrl.train \
     --algorithm.loss-kwargs "${NFT_LOSS_KWARGS}" \
     \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --training.batch-size ${BATCH_SIZE} \
+    "${GRADIENT_ACCUMULATION_ARGS[@]}" \
     --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.kl-coef 0.0001 \
@@ -114,6 +131,7 @@ python -m diffusionrl.train \
     --algorithm.per-prompt-buffer-size 10000 \
     \
     --sampling.training-actor-direct-sampling true \
+    --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
     --ray.colocate-rollout-training true \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
@@ -121,9 +139,7 @@ python -m diffusionrl.train \
     --ray.offload false \
     \
     --training.learning-rate 3e-4 \
-    --training.gradient-accumulation-steps auto \
-    --training.num-inner-epochs ${NUM_INNER_EPOCHS} \
-    --training.gradient-steps-per-epoch 1 \
+    --training.update-mode single_update \
     --training.max-grad-norm 1.0 \
     --training.lora-rank 32 \
     --training.lora-alpha 64 \

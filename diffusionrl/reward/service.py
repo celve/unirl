@@ -12,6 +12,7 @@ Provides a single interface for:
 import inspect
 import logging
 import time
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -244,9 +245,10 @@ class RewardService:
 
         if device == "cuda":
             logger.warning(
-                "Local reward worker is running on CUDA in RolloutManager process. "
+                "Local reward worker is running on CUDA in-process. "
                 "This can contend with rollout/training GPUs. Prefer dedicated reward "
-                "actors (reward_dedicated_*) or HTTP reward service for isolation."
+                "actors (reward_dedicated_*) or HTTP reward service for isolation when "
+                "you need strict resource isolation."
             )
 
         reward_path = getattr(
@@ -452,7 +454,6 @@ class RewardService:
 
         final_rewards = (total / len(responses)).tolist()
 
-        # Merge successes
         all_successes = [True] * batch_size
         all_errors = [None] * batch_size
         for resp, _ in responses:
@@ -486,7 +487,6 @@ class RewardService:
             for resp, worker in responses
         }
 
-        # Merge successes
         all_successes = [True] * batch_size
         all_errors = [None] * batch_size
         for resp, _ in responses:
@@ -520,7 +520,6 @@ class RewardService:
             for resp, worker in responses
         }
 
-        # Merge successes
         all_successes = [True] * batch_size
         all_errors = [None] * batch_size
         for resp, _ in responses:
@@ -543,20 +542,13 @@ class RewardService:
         batch_size: int,
         total_time: float,
     ) -> RewardResponse:
-        """
-        Return all rewards without aggregation.
-
-        Uses first worker's rewards as the primary, stores all in components.
-        """
+        """Return all rewards without aggregation."""
         reward_components = {
             worker.get_model_name(): resp.rewards
             for resp, worker in responses
         }
-
-        # Use first worker's rewards as primary
         final_rewards = responses[0][0].rewards
 
-        # Merge successes
         all_successes = [True] * batch_size
         all_errors = [None] * batch_size
         for resp, _ in responses:
@@ -576,6 +568,46 @@ class RewardService:
     def is_available(self) -> bool:
         """Check if at least one worker is available."""
         return any(worker.is_available() for worker in self.workers)
+
+
+class LocalRewardExecutor(RewardService):
+    """Lightweight same-process reward executor for rollout/training actors.
+
+    This reuses RewardService's local-worker creation and aggregation logic
+    without enabling HTTP or dedicated Ray reward modes.
+    """
+
+    def __init__(
+        self,
+        reward_config: RewardSchema,
+        *,
+        device_override: Optional[str] = None,
+    ) -> None:
+        if not isinstance(reward_config, RewardSchema):
+            raise TypeError(
+                "LocalRewardExecutor requires RewardSchema, "
+                f"got: {type(reward_config).__name__}"
+            )
+        if device_override is not None:
+            reward_config = replace(
+                reward_config,
+                local_reward_device=str(device_override),
+            )
+        self.args = None
+        self.reward_config = reward_config
+        self.reward_pg = None
+        self.workers = []
+        self.aggregation = self.reward_config.reward_aggregation
+        self._init_local_workers(
+            self.reward_config.reward_models,
+            self.reward_config.reward_weights,
+        )
+        logger.info(
+            "LocalRewardExecutor initialized with %d worker(s), aggregation=%s, device=%s",
+            len(self.workers),
+            self.aggregation,
+            self.reward_config.local_reward_device,
+        )
 
     def offload(self) -> None:
         """Offload all workers."""

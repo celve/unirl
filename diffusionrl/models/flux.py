@@ -137,10 +137,6 @@ class FluxModelBundle(ModelBundle):
             f"Valid options: {', '.join(t for t in valid_sde_types if t)}."
         )
 
-    @classmethod
-    def embedding_dataset_kwargs(cls) -> Dict[str, Any]:
-        return {"load_text_ids": True}
-
     def load(self) -> None:
         """Load all model components."""
         if self.training_only:

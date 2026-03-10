@@ -12,17 +12,23 @@ import asyncio
 import inspect
 import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
+import os
+from tqdm import tqdm
 
 import ray
 import torch
 
 from diffusionrl.config.arguments import is_training_actor_direct_sampling_mode
-from diffusionrl.config.validation import resolve_sampling_requirements
+from diffusionrl.config.build_domain_args import RewardSchema
+from diffusionrl.runtime.contracts import resolve_sampling_requirements
 from diffusionrl.runtime.pipeline.rollout_pipeline import compute_advantages as _compute_advantages_stage
 from diffusionrl.runtime.pipeline.rollout_pipeline import compute_rewards as _compute_rewards_stage
 from diffusionrl.runtime.pipeline.rollout_pipeline import (
     distributed_sample,
     expand_batch_for_sampling,
+)
+from diffusionrl.runtime.rollout.training_actor_direct_sampling_policy import (
+    TrainingActorDirectSamplingPolicy,
 )
 from diffusionrl.types.sampling import PromptEmbeddings, RolloutOutput
 from diffusionrl.types.training_batch import TrainingBatch
@@ -81,10 +87,6 @@ class _PipelineRolloutEngine:
             sde_indices=resolved_sde_indices,
             requirements=self._requirements,
             sampling_overrides=sampling_overrides,
-        )
-        self._manager._attach_missing_embeddings_from_batch(
-            sampler_outputs=outputs,
-            batch=working_batch,
         )
         if bool(getattr(self._requirements, "requires_embeddings", True)):
             self._manager._attach_missing_embeddings_from_rollout_encoder(
@@ -296,6 +298,7 @@ class RolloutManager:
         self._warned_ignored_prompt_embeddings = False
         self._warned_missing_prompt_encoder_rpc = False
         self._warned_prompt_encode_fallback_failed = False
+        self._reward_schema = RewardSchema.from_args(args)
 
         # Rollout actor group
         self.rollout_actors = None
@@ -307,6 +310,7 @@ class RolloutManager:
         self._current_step = 0
         self._sampling_requirements = None
         self._last_rollout_metadata: Dict[str, Any] = {}
+        self._direct_sampling_request_planner = TrainingActorDirectSamplingPolicy.from_args(args)
 
     def init(self) -> None:
         """
@@ -329,6 +333,19 @@ class RolloutManager:
             f"Algorithm loaded: {self.args.algorithm.algorithm_path} "
             f"(clip_max={self.args.algorithm.advantage_clip_max}, sde_ratio={getattr(self.args.sampling, 'sde_ratio', 'N/A')})"
         )
+        requests_per_rollout = self._direct_sampling_request_planner.requests_per_rollout(
+            rollout_total_samples=self._generated_samples_per_rollout()
+        )
+        if requests_per_rollout > 1:
+            logger.info(
+                "Training-actor direct sampling sub-batching enabled: "
+                "direct_sampling_batch_size=%s sampling_requests_per_rollout=%s "
+                "(prompts_per_rollout=%s generated_samples_per_rollout=%s)",
+                getattr(self._direct_sampling_request_planner, "direct_sampling_batch_size", None),
+                requests_per_rollout,
+                self._prompts_per_batch(),
+                self._generated_samples_per_rollout(),
+            )
         logger.info(
             "Resolved sampling contract: requires_trajectory=%s requires_log_prob=%s "
             "requires_embeddings=%s extras=%s",
@@ -349,12 +366,22 @@ class RolloutManager:
         if rollout_pipeline_path:
             self.rollout_pipeline_fn = load_function(rollout_pipeline_path)
             logger.info("Custom rollout pipeline loaded: %s", rollout_pipeline_path)
+            if requests_per_rollout > 1:
+                logger.warning(
+                    "sampling.direct_sampling_batch_size=%s is not automatically applied inside custom rollout pipelines. "
+                    "Custom pipeline code must opt in explicitly if it wants direct-sampling sub-batching.",
+                    getattr(self._direct_sampling_request_planner, "direct_sampling_batch_size", None),
+                )
 
         # 3. Initialize reward service
         self._init_reward_service()
         if self.reward_service is None:
-            raise RuntimeError("RewardService initialization failed.")
-        logger.info(f"Reward service loaded with {len(self.reward_service.workers)} worker(s)")
+            if self._reward_schema.uses_rollout_execution:
+                logger.info("Reward service skipped: rollout-local reward execution is active.")
+            else:
+                raise RuntimeError("RewardService initialization failed.")
+        else:
+            logger.info(f"Reward service loaded with {len(self.reward_service.workers)} worker(s)")
 
         # 4. Load data source if available
         try:
@@ -373,6 +400,9 @@ class RolloutManager:
 
     def _init_reward_service(self) -> None:
         """Initialize reward service (single reward boundary)."""
+        if self._reward_schema.uses_rollout_execution:
+            self.reward_service = None
+            return
         from diffusionrl.reward.service import RewardService
         self.reward_service = RewardService(
             args=self.args,
@@ -478,7 +508,7 @@ class RolloutManager:
         self._last_rollout_metadata = {}
         logger.info(f"Starting generation for rollout {rollout_id}")
 
-        # 1. Get batch from data source (supports both prompts and embeddings)
+        # 1. Get batch from data source (prompt-only external input contract)
         batch = self._prepare_batch(data_source=self.data_source)
         prompts = batch.get("prompts", [])
 
@@ -523,6 +553,25 @@ class RolloutManager:
         """Public rollout entrypoint used by RolloutBufferActor.request_rollout()."""
         return self._build_training_batch(rollout_id)
 
+    def _advance_rollout_state(
+        self,
+        *,
+        sample_count: int,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Shared rollout-state update used by manager-owned and external workflows."""
+        if metadata is not None:
+            self._last_rollout_metadata = dict(metadata)
+        self._total_samples_generated += max(0, int(sample_count))
+        self._current_step += 1
+        if self.timestep_scheduler is not None:
+            self.timestep_scheduler.update(self._current_step)
+        return {
+            "current_step": int(self._current_step),
+            "total_samples_generated": int(self._total_samples_generated),
+            "metadata": dict(self._last_rollout_metadata),
+        }
+
     def _finalize_rollout_state(self, *, train_data: TrainingBatch, prompts: List[str]) -> None:
         """Update counters/scheduler after one rollout payload is produced."""
         try:
@@ -533,14 +582,10 @@ class RolloutManager:
                 sample_count = int(train_data.batch_size)
             else:
                 sample_count = len(prompts)
-            self._total_samples_generated += sample_count
+            self._advance_rollout_state(sample_count=sample_count)
         except Exception as e:
             logger.warning(f"Failed to compute sample count ({e}), falling back to prompt count")
-            self._total_samples_generated += len(prompts)
-
-        self._current_step += 1
-        if self.timestep_scheduler is not None:
-            self.timestep_scheduler.update(self._current_step)
+            self._advance_rollout_state(sample_count=len(prompts))
 
     def _debug_log_tensor_stats(self, label: str, value: Optional[torch.Tensor]) -> None:
         if not bool(getattr(self.args.debug, "debug_print_tensor_stats", True)):
@@ -674,35 +719,17 @@ class RolloutManager:
             len(prompts),
             int(getattr(self.args.algorithm, "num_samples_per_prompt", 1)),
         )
-        sampler_outputs, train_prompts, base_prompts = self._sample(
+        sampler_outputs, train_prompts, base_prompts, prompt_metadata = self._sample_rollout_batches(
             actor_group=actor_group,
             batch=batch,
             sde_indices=sde_indices,
             requirements=requirements,
+            rollout_id=rollout_id,
         )
-        self._attach_missing_embeddings_from_batch(
-            sampler_outputs=sampler_outputs,
-            batch=batch,
-        )
-        if bool(getattr(requirements, "requires_embeddings", True)):
-            self._attach_missing_embeddings_from_rollout_encoder(
-                actor_group=actor_group,
-                sampler_outputs=sampler_outputs,
-                prompts=(train_prompts if train_prompts else prompts),
-            )
         logger.info(
             "[debug] rollout=%s stage=sampling done outputs=%s",
             rollout_id,
             len(sampler_outputs),
-        )
-
-        validation_config = self._get_sampler_validation_config()
-        self._validate_sampler_outputs(
-            sampler_outputs=sampler_outputs,
-            requirements=requirements,
-            allow_replay=validation_config["allow_replay"],
-            assert_step_alignment=validation_config["assert_step_alignment"],
-            mode_label=validation_config["mode_label"],
         )
 
         logger.info("[debug] rollout=%s stage=reward_advantage", rollout_id)
@@ -711,7 +738,7 @@ class RolloutManager:
             reward_service=self.reward_service,
             sampler_outputs=sampler_outputs,
             prompts=base_prompts if base_prompts else prompts,
-            prompt_metadata=batch.get("metadata"),
+            prompt_metadata=prompt_metadata,
         )
         self._debug_log_tensor_stats("rewards", rewards)
         self._debug_log_tensor_stats("advantages", advantages)
@@ -742,7 +769,7 @@ class RolloutManager:
         trace_payload = {
             "rollout_id": int(rollout_id),
             "debug_mode": str(getattr(self.args.debug, "debug_mode", "none")),
-            "prompts": list(prompts),
+            "prompts": list(base_prompts if base_prompts else prompts),
             "train_prompts": list(train_prompts if train_prompts else prompts),
             "base_prompts": list(base_prompts if base_prompts else prompts),
             "reward_prompts": reward_prompts,
@@ -843,37 +870,21 @@ class RolloutManager:
 
         sde_indices = self._resolve_rollout_sde_indices()
 
-        sampler_outputs, train_prompts, base_prompts = self._sample(
+        sampler_outputs, train_prompts, base_prompts, prompt_metadata = self._sample_rollout_batches(
             actor_group=actor_group,
             batch=batch,
             sde_indices=sde_indices,
             requirements=requirements,
-        )
-        self._attach_missing_embeddings_from_batch(
-            sampler_outputs=sampler_outputs, batch=batch,
-        )
-        if bool(getattr(requirements, "requires_embeddings", True)):
-            self._attach_missing_embeddings_from_rollout_encoder(
-                actor_group=actor_group,
-                sampler_outputs=sampler_outputs,
-                prompts=(train_prompts if train_prompts else prompts),
-            )
-
-        validation_config = self._get_sampler_validation_config()
-        self._validate_sampler_outputs(
-            sampler_outputs=sampler_outputs,
-            requirements=requirements,
-            allow_replay=validation_config["allow_replay"],
-            assert_step_alignment=validation_config["assert_step_alignment"],
-            mode_label=validation_config["mode_label"],
+            rollout_id=rollout_id,
         )
 
         self._debug_cache = {
             "rollout_id": rollout_id,
             "batch": batch,
-            "prompts": prompts,
+            "prompts": base_prompts if base_prompts else prompts,
             "train_prompts": train_prompts if train_prompts else prompts,
             "base_prompts": base_prompts if base_prompts else prompts,
+            "prompt_metadata": prompt_metadata,
             "sampler_outputs": sampler_outputs,
             "sde_indices": sde_indices,
             "requirements": requirements,
@@ -883,7 +894,7 @@ class RolloutManager:
             "rollout_id": rollout_id,
             "num_outputs": len(sampler_outputs),
             "total_samples": sum(int(getattr(o, "batch_size", 1)) for o in sampler_outputs),
-            "prompts": prompts,
+            "prompts": base_prompts if base_prompts else prompts,
             "sde_indices": sorted(int(v) for v in (sde_indices or [])),
         }
 
@@ -897,7 +908,7 @@ class RolloutManager:
             reward_service=self.reward_service,
             sampler_outputs=cache["sampler_outputs"],
             prompts=cache["base_prompts"],
-            prompt_metadata=cache["batch"].get("metadata"),
+            prompt_metadata=cache.get("prompt_metadata"),
         )
         cache["rewards"] = rewards
         cache["reward_components"] = comps
@@ -927,6 +938,7 @@ class RolloutManager:
             prompts=cache["base_prompts"],
             reward_components=cache.get("reward_components", {}),
             reward_workers=getattr(self.reward_service, "workers", None) if self.reward_service is not None else None,
+            reward_component_weights=self._reward_schema.component_weights(),
         )
         cache["advantages"] = advantages
         self._debug_log_tensor_stats("advantages", advantages)
@@ -992,25 +1004,64 @@ class RolloutManager:
         }
 
     def _validate_batch_shape(self) -> None:
-        """Validate prompts_per_batch * k against training batch/world_size."""
+        """Validate rollout-generated sample count against training batch/world size."""
         try:
-            prompts_per_batch = getattr(self.args.algorithm, "prompts_per_batch", 1)
-            k = getattr(self.args.algorithm, "num_samples_per_prompt", 1)
-            gen_batch = prompts_per_batch * k
+            gen_batch = self._generated_samples_per_rollout()
 
             train_world_size = self.args.ray.training_num_nodes * self.args.ray.training_num_gpus_per_node
-            train_bsz = self.args.training.batch_size
-            denom = train_world_size * train_bsz if train_world_size > 0 else train_bsz
+            if train_world_size <= 0:
+                return
 
-            if denom > 0 and gen_batch % denom != 0:
+            if gen_batch % train_world_size != 0:
                 logger.warning(
-                    "Generation batch (%d) is not divisible by train_world_size*batch_size (%d). "
-                    "This may lead to uneven gradient accumulation. Consider adjusting prompts_per_batch or batch_size.",
+                    "Rollout-generated sample count (%d) is not divisible by train_world_size (%d). "
+                    "This will produce uneven local training batches. Consider adjusting prompts_per_batch, "
+                    "num_samples_per_prompt, or the training actor topology.",
                     gen_batch,
-                    denom,
+                    train_world_size,
+                )
+                return
+
+            local_batch_size = gen_batch // train_world_size
+            gradient_accumulation_batch_size = int(self.args.training.gradient_accumulation_batch_size)
+            update_mode = str(self.args.training.update_mode or "single_update").strip().lower()
+
+            if update_mode == "multi_update":
+                multi_update_batch_size = int(self.args.training.multi_update_batch_size)
+                if local_batch_size % multi_update_batch_size != 0:
+                    logger.warning(
+                        "Local rollout batch size (%d) is not divisible by multi_update_batch_size (%d). "
+                        "Consider adjusting training.multi_update_batch_size or rollout batch geometry.",
+                        local_batch_size,
+                        multi_update_batch_size,
+                    )
+                if multi_update_batch_size % gradient_accumulation_batch_size != 0:
+                    logger.warning(
+                        "multi_update_batch_size (%d) is not divisible by gradient_accumulation_batch_size (%d). "
+                        "Consider adjusting training.gradient_accumulation_batch_size or "
+                        "training.multi_update_batch_size.",
+                        multi_update_batch_size,
+                        gradient_accumulation_batch_size,
+                    )
+            elif local_batch_size % gradient_accumulation_batch_size != 0:
+                logger.warning(
+                    "Local rollout batch size (%d) is not divisible by gradient_accumulation_batch_size (%d). "
+                    "Consider adjusting training.gradient_accumulation_batch_size or rollout batch geometry.",
+                    local_batch_size,
+                    gradient_accumulation_batch_size,
                 )
         except Exception as e:
             logger.warning(f"Batch shape validation skipped: {e}")
+
+    def _prompts_per_batch(self) -> int:
+        prompts_per_batch = getattr(self.args.algorithm, "prompts_per_batch", None)
+        if prompts_per_batch is None:
+            raise ValueError("algorithm.prompts_per_batch must be set explicitly.")
+        return max(1, int(prompts_per_batch))
+
+    def _generated_samples_per_rollout(self) -> int:
+        num_samples_per_prompt = int(getattr(self.args.algorithm, "num_samples_per_prompt", 1))
+        return max(1, self._prompts_per_batch() * max(1, num_samples_per_prompt))
 
     def _generate_training_data(
         self,
@@ -1038,32 +1089,17 @@ class RolloutManager:
         if sde_indices is not None:
             logger.debug(f"SDE indices for step {self._current_step}: {sorted(sde_indices)[:5]}...")
 
-        # Sample
-        sampler_outputs, train_prompts, base_prompts = self._sample(
+        sampling_overrides: Dict[str, Any] = {
+            "_keep_reward_media_for_manager": bool(collect_media_preview),
+        }
+
+        sampler_outputs, train_prompts, base_prompts, prompt_metadata = self._sample_rollout_batches(
             actor_group=actor_group,
             batch=batch,
             sde_indices=sde_indices,
             requirements=requirements,
-        )
-        self._attach_missing_embeddings_from_batch(
-            sampler_outputs=sampler_outputs,
-            batch=batch,
-        )
-        if bool(getattr(requirements, "requires_embeddings", True)):
-            self._attach_missing_embeddings_from_rollout_encoder(
-                actor_group=actor_group,
-                sampler_outputs=sampler_outputs,
-                prompts=(train_prompts if train_prompts else prompts),
-            )
-
-        # Validate
-        validation_config = self._get_sampler_validation_config()
-        self._validate_sampler_outputs(
-            sampler_outputs=sampler_outputs,
-            requirements=requirements,
-            allow_replay=validation_config["allow_replay"],
-            assert_step_alignment=validation_config["assert_step_alignment"],
-            mode_label=validation_config["mode_label"],
+            rollout_id=rollout_id,
+            sampling_overrides=sampling_overrides,
         )
 
         # Reward + advantage
@@ -1072,7 +1108,7 @@ class RolloutManager:
             reward_service=self.reward_service,
             sampler_outputs=sampler_outputs,
             prompts=base_prompts if base_prompts else prompts,
-            prompt_metadata=batch.get("metadata"),
+            prompt_metadata=prompt_metadata,
         )
 
         if collect_media_preview:
@@ -1101,13 +1137,30 @@ class RolloutManager:
             sde_indices=sde_indices,
         )
 
+    # TODO(refactor): Move this post-sampling embedding-fallback cluster into
+    # runtime/rollout/sampler_output_contract.py.
+    # Planned move as one group:
+    # - _build_prompt_embeddings_from_payload
+    # - _attach_missing_embeddings_from_payload
+    # - _sampler_outputs_need_prompt_encode_fallback
+    # - _sampler_outputs_batch_size
+    # - _resolve_prompt_encode_kwargs
+    # - _attach_missing_embeddings_from_rollout_encoder
+    # RolloutManager should keep only the panel-level wiring and call a thin
+    # postprocess/attach entrypoint after _sample().
     @staticmethod
-    def _build_prompt_embeddings_from_batch(batch: Dict[str, Any]) -> Optional[PromptEmbeddings]:
+    def _build_prompt_embeddings_from_payload(payload: Dict[str, Any]) -> Optional[PromptEmbeddings]:
+        """Build PromptEmbeddings from an internal runtime payload.
+
+        This helper is intentionally limited to internal payloads such as
+        ``encode_prompt()`` results. User-facing data batches are prompt-only
+        and should never be treated as an embedding fallback source.
+        """
         def _optional_tensor(name: str) -> Optional[torch.Tensor]:
-            value = batch.get(name)
+            value = payload.get(name)
             return value if torch.is_tensor(value) else None
 
-        prompt_embeds = batch.get("prompt_embeds")
+        prompt_embeds = payload.get("prompt_embeds")
         if not torch.is_tensor(prompt_embeds):
             return None
         return PromptEmbeddings(
@@ -1120,13 +1173,14 @@ class RolloutManager:
             image_ids=_optional_tensor("image_ids"),
         )
 
-    def _attach_missing_embeddings_from_batch(
+    def _attach_missing_embeddings_from_payload(
         self,
         *,
         sampler_outputs: List[RolloutOutput],
-        batch: Dict[str, Any],
+        payload: Dict[str, Any],
+        source_label: str,
     ) -> None:
-        fallback_embeddings = self._build_prompt_embeddings_from_batch(batch)
+        fallback_embeddings = self._build_prompt_embeddings_from_payload(payload)
         if fallback_embeddings is None:
             return
 
@@ -1157,14 +1211,15 @@ class RolloutManager:
             if needs_fallback_slice:
                 if end > fallback_embeddings.prompt_embeds.shape[0]:
                     raise ValueError(
-                        "Cannot attach fallback embeddings: insufficient batch embeddings "
+                        f"Cannot attach fallback embeddings from {source_label}: insufficient embeddings "
                         f"(need end={end}, have={fallback_embeddings.prompt_embeds.shape[0]})."
                     )
                 sliced = fallback_embeddings.slice(offset, end)
                 if output.embeddings is None:
                     output.embeddings = sliced
                     logger.debug(
-                        "Attached fallback prompt embeddings to sampler output idx=%s (range=%s:%s)",
+                        "Attached fallback prompt embeddings from %s to sampler output idx=%s (range=%s:%s)",
+                        source_label,
                         idx,
                         offset,
                         end,
@@ -1195,7 +1250,8 @@ class RolloutManager:
                         patched_fields.append("image_ids")
                     if patched_fields:
                         logger.debug(
-                            "Patched missing embedding fields from batch fallback at idx=%s: %s",
+                            "Patched missing embedding fields from %s at idx=%s: %s",
+                            source_label,
                             idx,
                             patched_fields,
                         )
@@ -1211,6 +1267,18 @@ class RolloutManager:
                 continue
             emb = output.embeddings
             if emb is None or emb.prompt_embeds is None:
+                return True
+            if any(
+                value is None
+                for value in (
+                    emb.pooled_prompt_embeds,
+                    emb.encoder_attention_mask,
+                    emb.negative_prompt_embeds,
+                    emb.negative_pooled_prompt_embeds,
+                    emb.text_ids,
+                    emb.image_ids,
+                )
+            ):
                 return True
         return False
 
@@ -1303,9 +1371,10 @@ class RolloutManager:
                     "encode_prompt fallback payload must be dict, "
                     f"got {type(encoded_payload).__name__}"
                 )
-            self._attach_missing_embeddings_from_batch(
+            self._attach_missing_embeddings_from_payload(
                 sampler_outputs=sampler_outputs,
-                batch=encoded_payload,
+                payload=encoded_payload,
+                source_label="rollout encode_prompt fallback",
             )
         except Exception as exc:
             if not self._warned_prompt_encode_fallback_failed:
@@ -1320,7 +1389,7 @@ class RolloutManager:
     def _prepare_batch(self, *, data_source: Any) -> Dict[str, Any]:
         """Fetch one prompt batch from data source."""
         if data_source is not None:
-            batch_size = getattr(self.args.algorithm, "prompts_per_batch", None) or self.args.training.batch_size
+            batch_size = self._prompts_per_batch()
             samples = data_source.get_samples(batch_size)
             if isinstance(samples, dict):
                 return samples
@@ -1335,7 +1404,7 @@ class RolloutManager:
             "A mountain landscape with snow",
             "A futuristic city at night",
         ]
-        batch_size = getattr(self.args.algorithm, "prompts_per_batch", None) or self.args.training.batch_size
+        batch_size = self._prompts_per_batch()
         return {"prompts": default_prompts[:batch_size]}
 
     def _sample(
@@ -1369,11 +1438,16 @@ class RolloutManager:
             and any(key in batch for key in embedding_keys)
         ):
             logger.warning(
-                "Rollout sampling now uses prompt-only input; batch embedding fields are ignored."
+                "Rollout sampling now uses prompt-only input; batch embedding fields are ignored "
+                "and are no longer used as fallback training embeddings."
             )
             self._warned_ignored_prompt_embeddings = True
 
         overrides = dict(sampling_overrides or {})
+        overrides.setdefault("_base_prompts", list(prompts))
+        batch_metadata = batch.get("metadata")
+        if isinstance(batch_metadata, list):
+            overrides.setdefault("_prompt_metadata", list(batch_metadata))
         num_samples_per_prompt = int(
             overrides.pop(
                 "num_samples_per_prompt",
@@ -1433,6 +1507,69 @@ class RolloutManager:
         )
         return sampler_outputs, (train_prompts if train_prompts is not None else prompts), prompts
 
+    def _sample_rollout_batches(
+        self,
+        *,
+        actor_group: Any,
+        batch: Dict[str, Any],
+        sde_indices: Optional[Set[int]],
+        requirements: Optional[Any] = None,
+        sampling_overrides: Optional[Dict[str, Any]] = None,
+        rollout_id: Optional[int] = None,
+    ) -> Tuple[
+        List[Any],
+        List[str],
+        List[str],
+        Optional[List[Optional[Dict[str, Any]]]],
+    ]:
+        """Sample one rollout batch through the configured request policy."""
+        validation_config = self._get_sampler_validation_config()
+
+        def sample_request(current_batch: Dict[str, Any]) -> Tuple[List[Any], List[str], List[str]]:
+            return self._sample(
+                actor_group=actor_group,
+                batch=current_batch,
+                sde_indices=sde_indices,
+                requirements=requirements,
+                sampling_overrides=sampling_overrides,
+            )
+
+        def attach_embeddings(sampler_outputs: List[Any], prompts: List[str]) -> None:
+            self._attach_missing_embeddings_from_rollout_encoder(
+                actor_group=actor_group,
+                sampler_outputs=sampler_outputs,
+                prompts=prompts,
+                sampling_overrides=sampling_overrides,
+            )
+
+        def validate_sampler_outputs(sampler_outputs: List[Any]) -> None:
+            self._validate_sampler_outputs(
+                sampler_outputs=sampler_outputs,
+                requirements=requirements,
+                allow_replay=validation_config["allow_replay"],
+                assert_step_alignment=validation_config["assert_step_alignment"],
+                mode_label=validation_config["mode_label"],
+            )
+
+        sampled_rollout = self._direct_sampling_request_planner.sample_rollout(
+            batch=batch,
+            rollout_id=rollout_id,
+            sample_request=sample_request,
+            attach_embeddings=attach_embeddings if bool(getattr(requirements, "requires_embeddings", True)) else None,
+            validate_sampler_outputs=validate_sampler_outputs,
+        )
+        return (
+            sampled_rollout.sampler_outputs,
+            sampled_rollout.train_prompts,
+            sampled_rollout.base_prompts,
+            sampled_rollout.prompt_metadata,
+        )
+
+    # TODO(refactor): Move sampler-output contract validation into
+    # runtime/rollout/sampler_output_contract.py next to the fallback helpers
+    # above. This is post-sampling contract handling, not panel orchestration.
+    # RolloutManager should pass requirements/validation config in and let the
+    # runtime helper raise contract errors or return validated outputs.
     def _validate_sampler_outputs(
         self,
         *,
@@ -1513,6 +1650,7 @@ class RolloutManager:
             prompts=prompts,
             reward_components=reward_components,
             reward_workers=getattr(reward_service, "workers", None) if reward_service is not None else None,
+            reward_component_weights=self._reward_schema.component_weights(),
         )
         return rewards, advantages, reward_components
 
@@ -1538,8 +1676,6 @@ class RolloutManager:
             else getattr(self.args.reward, "reward_path", "")
         )
 
-        if reward_service is None:
-            raise RuntimeError("RewardService is not initialized.")
         return _compute_rewards_stage(
             reward_service=reward_service,
             reward_path=reward_path,
@@ -1578,10 +1714,27 @@ class RolloutManager:
         reward_service: Any,
     ) -> Dict[str, Any]:
         """Run evaluation sampling and reward aggregation."""
+        eval_batch: Dict[str, Any]
         if data_source is not None and hasattr(data_source, "get_eval_samples"):
-            prompts = data_source.get_eval_samples(self.args.rollout.eval_batch_size)
+            eval_samples = data_source.get_eval_samples(self.args.rollout.eval_batch_size)
+            if isinstance(eval_samples, dict):
+                eval_batch = dict(eval_samples)
+            elif isinstance(eval_samples, list):
+                eval_batch = {"prompts": list(eval_samples)}
+            else:
+                raise TypeError(
+                    "DataSource.get_eval_samples() must return List[str] or Dict[str, Any] "
+                    f"with at least 'prompts'. Got {type(eval_samples).__name__}."
+                )
         else:
-            prompts = self._prepare_batch(data_source=data_source).get("prompts", [])[: self.args.rollout.eval_batch_size]
+            eval_batch = self._prepare_batch(data_source=data_source)
+
+        prompts = list(eval_batch.get("prompts", [])[: self.args.rollout.eval_batch_size])
+        prompt_metadata = eval_batch.get("metadata")
+        if isinstance(prompt_metadata, list):
+            prompt_metadata = prompt_metadata[: len(prompts)]
+        else:
+            prompt_metadata = None
 
         outputs = distributed_sample(
             actor_group=actor_group,
@@ -1599,6 +1752,7 @@ class RolloutManager:
             reward_service=reward_service,
             sampler_outputs=outputs,
             prompts=prompts,
+            prompt_metadata=prompt_metadata,
         )
 
         return {
@@ -1787,21 +1941,46 @@ class RolloutManager:
             "total_gpus": int(payload.get("total_gpus", 0)),
         }
 
-    def get_num_rollout_per_epoch(self) -> int:
-        """Get number of rollouts per epoch."""
-        if self.args.rollout.rollouts_per_epoch is not None:
-            return self.args.rollout.rollouts_per_epoch
+    def get_dataset_step_info(self) -> Dict[str, Any]:
+        """Compute rollout-step progress information for the current dataset."""
+        prompts_per_batch = self._prompts_per_batch()
+        drop_last = bool(getattr(self.data_source, "drop_last", False))
+        info: Dict[str, Any] = {
+            "num_samples": 0,
+            "prompts_per_batch": prompts_per_batch,
+            "estimated_steps_per_dataset_pass": 0,
+            "steps_before_reset": 0,
+            "remainder_samples": 0,
+            "drop_last": drop_last,
+            "exact_dataset_pass_per_cycle": False,
+        }
 
-        if self.data_source is not None and hasattr(self.data_source, "num_samples"):
-            num_samples = int(self.data_source.num_samples)
-            if num_samples > 0:
-                prompts_per_batch = int(
-                    getattr(self.args.algorithm, "prompts_per_batch", 0) or self.args.training.batch_size
-                )
-                prompts_per_batch = max(1, prompts_per_batch)
-                return max(1, num_samples // prompts_per_batch)
+        if self.data_source is None or not hasattr(self.data_source, "num_samples"):
+            return info
 
-        return 100
+        num_samples = int(self.data_source.num_samples)
+        info["num_samples"] = num_samples
+        if num_samples <= 0:
+            return info
+
+        estimated_steps = (num_samples + prompts_per_batch - 1) // prompts_per_batch
+        remainder = num_samples % prompts_per_batch
+        if drop_last:
+            steps_before_reset = num_samples // prompts_per_batch
+        else:
+            steps_before_reset = estimated_steps
+
+        info.update(
+            {
+                "estimated_steps_per_dataset_pass": int(estimated_steps),
+                "steps_before_reset": int(steps_before_reset),
+                "remainder_samples": int(remainder),
+                "exact_dataset_pass_per_cycle": bool(
+                    remainder == 0 and steps_before_reset == estimated_steps
+                ),
+            }
+        )
+        return info
 
     def get_stats(self) -> Dict[str, Any]:
         """Get rollout statistics."""
@@ -1830,7 +2009,7 @@ def create_rollout_manager(
     args,
     pg_result: Optional[Tuple] = None,
     reward_pg_result: Optional[Tuple] = None,
-) -> Tuple[ray.ObjectRef, int]:
+) -> Tuple[ray.ObjectRef, Dict[str, Any]]:
     """
     Factory function to create RolloutManager.
 
@@ -1840,7 +2019,7 @@ def create_rollout_manager(
         reward_pg_result: Placement group result for reward actors
 
     Returns:
-        Tuple of (RolloutManager actor handle, num_rollout_per_epoch)
+        Tuple of (RolloutManager actor handle, dataset step info)
     """
     rollout_manager = RolloutManager.options(
         num_cpus=1,
@@ -1850,7 +2029,6 @@ def create_rollout_manager(
     # Initialize
     ray.get(rollout_manager.init.remote())
 
-    # Get rollouts per epoch
-    num_rollout_per_epoch = ray.get(rollout_manager.get_num_rollout_per_epoch.remote())
+    dataset_step_info = ray.get(rollout_manager.get_dataset_step_info.remote())
 
-    return rollout_manager, num_rollout_per_epoch
+    return rollout_manager, dataset_step_info

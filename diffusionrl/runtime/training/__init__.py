@@ -3,7 +3,12 @@
 from diffusionrl.runtime.training.train_executor import (
     TrainExecutor,
     TrainExecutorConfig,
-    resolve_grad_accum,
+)
+from diffusionrl.runtime.training.update_schedule import (
+    TrainingUpdateChunk,
+    TrainingUpdateSchedule,
+    create_training_update_schedule,
+    resolve_gradient_accumulation_plan,
 )
 from diffusionrl.runtime.training.backends import (
     TrainBackend,
@@ -17,7 +22,10 @@ from diffusionrl.runtime.training.backends import (
 __all__ = [
     "TrainExecutor",
     "TrainExecutorConfig",
-    "resolve_grad_accum",
+    "TrainingUpdateChunk",
+    "TrainingUpdateSchedule",
+    "create_training_update_schedule",
+    "resolve_gradient_accumulation_plan",
     "TrainBackend",
     "TrainBackendCapabilities",
     "TrainBackendLaunchSpec",

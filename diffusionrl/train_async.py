@@ -28,6 +28,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _should_log_rollout(rollout_id: int, args) -> bool:
+    interval = int(getattr(args.rollout, "logging_steps", 0))
+    return interval > 0 and rollout_id % interval == 0
+
+
 def train_async_loop(
     *,
     args,
@@ -63,7 +68,7 @@ def train_async_loop(
                 f"Cannot launch rollout {rollout_id}: inflight queue is full "
                 f"(inflight={runtime.inflight_count}, max_inflight={runtime.max_inflight})"
             )
-        should_log_rollout = (rollout_id % args.rollout.logging_steps == 0)
+        should_log_rollout = _should_log_rollout(rollout_id, args)
         rollout_future = rollout_manager.generate_and_push.remote(
             rollout_id=rollout_id,
             buffer=rollout_buffer,
@@ -108,6 +113,8 @@ def train_async_loop(
             num_samples_per_prompt=num_samples_per_prompt,
         )
 
+    # rollout_id is the outer rollout-train loop step; it behaves similarly to
+    # a framework-level global step, but may differ from optimizer step count.
     for rollout_id in range(args.rollout.start_rollout_id, args.rollout.num_rollout):
         step_start_t = time.perf_counter()
         sync_result = None
@@ -167,7 +174,7 @@ def train_async_loop(
             if wandb_logger is not None:
                 wandb_logger.log_eval(rollout_id, eval_metrics)
 
-        should_log = (rollout_id % args.rollout.logging_steps == 0)
+        should_log = _should_log_rollout(rollout_id, args)
         if should_log:
             avg_loss = sum(m.get("loss", 0) for m in metrics) / max(len(metrics), 1)
             step_time_s = time.perf_counter() - step_start_t

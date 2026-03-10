@@ -12,11 +12,12 @@ Reference:
 - flow_grpo: flow_grpo/diffusers_patch/sd3_sde_with_logprob.py
 - DiffusionNFT: DiffusionNFT SD3 implementation
 """
-
+import os
 import logging
 from dataclasses import dataclass
 from contextlib import nullcontext
 from typing import Dict, List, Optional, Set, Any, Tuple
+from tqdm import tqdm
 import torch
 import torch.nn as nn
 
@@ -444,7 +445,12 @@ class SD3Sampler(BaseSampler):
         if self.sde_type == "dpm2":
             dpm_state = _DPMState(order=2)
             timesteps = sigmas[:-1]
-        for i in range(num_inference_steps):
+        rank = int(os.environ.get("RANK", 0))
+        for i in tqdm(
+            range(num_inference_steps),
+            desc="SD3 sampling",
+            disable=True,
+        ):
             sigma = sigmas[i]
             sigma_next = sigmas[i + 1]
 

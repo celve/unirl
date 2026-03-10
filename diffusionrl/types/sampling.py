@@ -391,6 +391,10 @@ class RolloutRequest:
     This is the single interface contract for all ``generate()`` calls
     throughout the rollout pipeline (engines, actors, actor-groups,
     distributed helpers).
+
+    External callers are expected to provide text prompts. Optional embedding
+    tensor fields remain available only for internal compatibility paths and
+    fallback plumbing.
     """
 
     prompts: List[str]

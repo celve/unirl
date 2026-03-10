@@ -3,7 +3,8 @@
 ## Directories
 
 - `samples/` — committed toy data for smoke tests
-  - `prompts_toy.json` — image prompts (SD3/FLUX scripts)
+  - `prompts_toy.json` — generic image prompts (alignment / non-OCR smoke)
+  - `ocr_prompts_toy.json` — quoted text prompts for OCR-reward smoke tests
   - `video_prompts_toy.txt` — video prompts (HunyuanVideo scripts)
 - `datasets/` — symlinks to real training datasets (not committed)
 

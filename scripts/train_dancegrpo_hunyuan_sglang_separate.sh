@@ -34,9 +34,7 @@ TRAINING_GPUS=${TRAINING_GPUS:-4}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-8}
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-${ROLLOUT_GPUS}}
 
-BATCH_SIZE=${BATCH_SIZE:-1}
-GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-4}
-NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
+GRADIENT_ACCUMULATION_BATCH_SIZE=${GRADIENT_ACCUMULATION_BATCH_SIZE-2}
 
 HEIGHT=${HEIGHT:-480}
 WIDTH=${WIDTH:-480}
@@ -61,6 +59,11 @@ if [ $((TOTAL_SAMPLES % TRAINING_GPUS)) -ne 0 ]; then
     echo "ERROR: total_samples (${TOTAL_SAMPLES} = ${PROMPTS_PER_BATCH}x${NUM_SAMPLES_PER_PROMPT}) must be divisible by TRAINING_GPUS (${TRAINING_GPUS})"
     exit 1
 fi
+LOCAL_BATCH_SIZE=$((TOTAL_SAMPLES / TRAINING_GPUS))
+GRADIENT_ACCUMULATION_ARGS=()
+if [ -n "${GRADIENT_ACCUMULATION_BATCH_SIZE}" ]; then
+    GRADIENT_ACCUMULATION_ARGS+=(--training.gradient-accumulation-batch-size "${GRADIENT_ACCUMULATION_BATCH_SIZE}")
+fi
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
@@ -84,7 +87,7 @@ python -m diffusionrl.train \
     --sampling.init-same-noise true \
     \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --training.batch-size ${BATCH_SIZE} \
+    "${GRADIENT_ACCUMULATION_ARGS[@]}" \
     --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
@@ -97,8 +100,7 @@ python -m diffusionrl.train \
     --ray.placement-strategy PACK \
     \
     --training.learning-rate 1e-5 \
-    --training.gradient-accumulation-steps ${GRADIENT_ACCUMULATION_STEPS} \
-    --training.num-inner-epochs ${NUM_INNER_EPOCHS} \
+    --training.update-mode single_update \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.use-gradient-checkpointing true \

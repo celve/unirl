@@ -4,13 +4,23 @@ Local reward worker for GRPO training.
 Computes rewards using locally loaded models (PickScore, CLIP, etc.)
 """
 
+import os
 import time
+from tqdm import tqdm
 from typing import Dict, List, Optional, Any, Union, Callable
 import torch
 from PIL import Image
+import logging
 
 from .base import BaseRewardWorker, RewardRequest, RewardResponse, RewardType
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.StreamHandler()],
+)
 
 _REWARD_LOADERS = {
     "pickscore": "_load_pickscore",
@@ -113,32 +123,62 @@ class LocalRewardWorker(BaseRewardWorker):
         self._is_loaded = True
 
     def _load_pickscore(self):
-        """Load PickScore model."""
+        """Load PickScore model (aligned with flow_grpo PickScoreScorer)."""
         try:
-            from transformers import AutoProcessor, AutoModel
+            from transformers import CLIPProcessor, CLIPModel
         except ImportError:
             raise ImportError("transformers is required for PickScore")
 
-        model_id = self.model_kwargs.get(
+        processor_path = self.model_kwargs.get(
+            "processor_id", "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
+        )
+        model_path = self.model_kwargs.get(
             "model_id", "yuvalkirstain/PickScore_v1"
         )
 
-        self.processor = AutoProcessor.from_pretrained(model_id)
-        self.model = AutoModel.from_pretrained(model_id).eval().to(self.device)
-        if self.dtype == torch.float16:
-            self.model = self.model.half()
+        self.processor = CLIPProcessor.from_pretrained(processor_path)
+        self.model = CLIPModel.from_pretrained(model_path).eval().to(self.device)
+        # flow_grpo uses float32 by default
+        self.model = self.model.to(dtype=torch.float32)
 
         self.reward_types = [RewardType.IMAGE_TEXT_ALIGNMENT]
 
     def _load_clip(self):
-        """Load CLIP model."""
+        """Load CLIP model (aligned with flow_grpo ClipScorer)."""
         try:
-            import clip
+            from transformers import CLIPProcessor, CLIPModel, AutoImageProcessor
+            import torchvision.transforms as T
+            import torch.nn as nn
         except ImportError:
-            raise ImportError("openai-clip is required for CLIP")
+            raise ImportError("transformers and torchvision are required for CLIP")
 
-        model_name = self.model_kwargs.get("model_name", "ViT-B/32")
-        self.model, self.processor = clip.load(model_name, device=self.device)
+        model_name = self.model_kwargs.get(
+            "model_name", "openai/clip-vit-large-patch14"
+        )
+        self.model = CLIPModel.from_pretrained(model_name).to(self.device)
+        self.processor = CLIPProcessor.from_pretrained(model_name)
+
+        # Build image transform consistent with flow_grpo (get_image_transform)
+        def _get_size(size):
+            if isinstance(size, int):
+                return (size, size)
+            elif "height" in size and "width" in size:
+                return (size["height"], size["width"])
+            elif "shortest_edge" in size:
+                return size["shortest_edge"]
+            else:
+                raise ValueError(f"Invalid size: {size}")
+
+        config = self.processor.image_processor.to_dict()
+        resize = T.Resize(_get_size(config.get("size"))) if config.get("do_resize") else nn.Identity()
+        crop = T.CenterCrop(_get_size(config.get("crop_size"))) if config.get("do_center_crop") else nn.Identity()
+        normalise = T.Normalize(
+            mean=self.processor.image_processor.image_mean,
+            std=self.processor.image_processor.image_std
+        ) if config.get("do_normalize") else nn.Identity()
+        self._clip_tform = T.Compose([resize, crop, normalise])
+
+        self.model.eval()
         self.reward_types = [RewardType.IMAGE_TEXT_ALIGNMENT]
 
     def _load_aesthetic(self):
@@ -148,15 +188,46 @@ class LocalRewardWorker(BaseRewardWorker):
         raise NotImplementedError("Aesthetic model loading not yet implemented")
 
     def _load_hpsv2(self):
-        """Load HPSv2 model."""
+        """Load HPSv2 model (aligned with DanceGRPO train_grpo_sd.py)."""
         try:
-            import hpsv2
-            self._hpsv2_module = hpsv2
+            from hpsv2.src.open_clip import create_model_and_transforms, get_tokenizer
         except ImportError:
             raise ImportError("hpsv2 is required for HPSv2 reward")
 
-        # HPSv2 uses module-level score function, not a class
-        self.model = "hpsv2"  # Placeholder to indicate model is loaded
+        # Manually load open_clip model and weights, consistent with DanceGRPO
+        open_clip_path = self.model_kwargs.get(
+            "open_clip_path", "./hps_ckpt/open_clip_pytorch_model.bin"
+        )
+        checkpoint_path = self.model_kwargs.get(
+            "checkpoint_path", "./hps_ckpt/HPS_v2.1_compressed.pt"
+        )
+
+        model, preprocess_train, preprocess_val = create_model_and_transforms(
+            'ViT-H-14',
+            open_clip_path,
+            precision='amp',
+            device=self.device,
+            jit=False,
+            force_quick_gelu=False,
+            force_custom_text=False,
+            force_patch_dropout=False,
+            force_image_size=None,
+            pretrained_image=False,
+            image_mean=None,
+            image_std=None,
+            light_augmentation=True,
+            aug_cfg={},
+            output_dict=True,
+            with_score_predictor=False,
+            with_region_predictor=False
+        )
+
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        model.load_state_dict(checkpoint['state_dict'])
+        self._hpsv2_tokenizer = get_tokenizer('ViT-H-14')
+        self._hpsv2_preprocess_val = preprocess_val
+        self.model = model.to(self.device)
+        self.model.eval()
         self.reward_types = [RewardType.IMAGE_TEXT_ALIGNMENT]
 
     def compute_rewards(self, request: RewardRequest) -> RewardResponse:
@@ -214,54 +285,77 @@ class LocalRewardWorker(BaseRewardWorker):
             return self.reward_fn(request.images, request.prompts)
 
     def _compute_pickscore(self, request: RewardRequest) -> List[float]:
-        """Compute PickScore rewards."""
+        """Compute PickScore rewards (aligned with flow_grpo PickScoreScorer)."""
         images = request.images
         prompts = request.prompts
 
-        # Process in batches
+        # Process all images and texts
         all_rewards = []
 
-        for i in range(0, len(images), self.batch_size):
+        def _extract_tensor(output):
+            """Compatible with both transformers < 5.0 and >= 5.0. This is an ugly temp solution."""
+            if isinstance(output, torch.Tensor):
+                return output  # transformers < 5.0: the model returns tensor
+            if hasattr(output, "pooler_output") and output.pooler_output is not None:
+                return output.pooler_output  # transformers >= 5.0: the model returns a wrapped class, which may has pooler_output attr
+            if hasattr(output, "last_hidden_state") and output.last_hidden_state is not None:
+                return output.last_hidden_state[:, 0]  # fallback: get the first token
+            if isinstance(output, (tuple, list)):
+                return output[0]
+            raise TypeError(f"Unexpected output format: {type(output)}")
+
+        rank = int(os.environ.get("RANK", 0))
+        for i in tqdm(
+            range(0, len(images), self.batch_size),
+            desc="Computing PickScore rewards",
+            disable=True
+        ):
             batch_images = images[i:i + self.batch_size]
             batch_prompts = prompts[i:i + self.batch_size]
 
-            # Process images
+            # Preprocess images
             image_inputs = self.processor(
                 images=batch_images,
                 padding=True,
                 truncation=True,
                 max_length=77,
                 return_tensors="pt",
-            ).to(self.device)
+            )
+            image_inputs = {k: v.to(device=self.device) for k, v in image_inputs.items()}
 
-            # Process text
+            # Preprocess texts
             text_inputs = self.processor(
                 text=batch_prompts,
                 padding=True,
                 truncation=True,
                 max_length=77,
                 return_tensors="pt",
-            ).to(self.device)
+            )
+            text_inputs = {k: v.to(device=self.device) for k, v in text_inputs.items()}
 
             with torch.no_grad():
-                # Get embeddings
-                image_embeds = self.model.get_image_features(**image_inputs)
-                text_embeds = self.model.get_text_features(**text_inputs)
+                # Get feature embeddings
+                image_embs = self.model.get_image_features(**image_inputs)
+                image_embs = _extract_tensor(image_embs)
+                image_embs = image_embs / image_embs.norm(p=2, dim=-1, keepdim=True)
 
-                # Normalize
-                image_embeds = image_embeds / image_embeds.norm(dim=-1, keepdim=True)
-                text_embeds = text_embeds / text_embeds.norm(dim=-1, keepdim=True)
+                text_embs = self.model.get_text_features(**text_inputs)
+                text_embs = _extract_tensor(text_embs)
+                text_embs = text_embs / text_embs.norm(p=2, dim=-1, keepdim=True)
 
-                # Compute similarity
-                scores = (image_embeds * text_embeds).sum(dim=-1)
-
+                # Scale with logit_scale + matrix multiply then take diagonal, consistent with flow_grpo
+                logit_scale = self.model.logit_scale.exp()
+                scores = logit_scale * (text_embs @ image_embs.T)
+                scores = scores.diag()
+                # Normalize to 0-1 range, consistent with flow_grpo
+                scores = scores / 26
                 all_rewards.extend(scores.cpu().tolist())
 
         return all_rewards
 
     def _compute_clip(self, request: RewardRequest) -> List[float]:
-        """Compute CLIP similarity rewards."""
-        import clip
+        """Compute CLIP similarity rewards (aligned with flow_grpo ClipScorer)."""
+        import numpy as np
 
         images = request.images
         prompts = request.prompts
@@ -272,31 +366,36 @@ class LocalRewardWorker(BaseRewardWorker):
             batch_images = images[i:i + self.batch_size]
             batch_prompts = prompts[i:i + self.batch_size]
 
-            # Preprocess images
-            image_inputs = torch.stack([
-                self.processor(img) for img in batch_images
-            ]).to(self.device)
+            # Convert PIL Image to tensor [B, C, H, W], value range [0, 1]
+            # Consistent with clip_score input conversion in flow_grpo rewards.py
+            img_arrays = [np.array(img) for img in batch_images]
+            img_arrays = np.array(img_arrays)
+            pixels = img_arrays.transpose(0, 3, 1, 2)  # NHWC -> NCHW
+            pixels = torch.tensor(pixels, dtype=torch.uint8).float() / 255.0
 
-            # Tokenize text
-            text_inputs = clip.tokenize(batch_prompts).to(self.device)
+            # Apply image transform consistent with flow_grpo
+            pixels = self._clip_tform(pixels).to(self.device, dtype=pixels.dtype)
+
+            # Text preprocessing
+            texts = self.processor(
+                text=batch_prompts,
+                padding='max_length',
+                truncation=True,
+                return_tensors="pt"
+            ).to(self.device)
 
             with torch.no_grad():
-                image_features = self.model.encode_image(image_inputs)
-                text_features = self.model.encode_text(text_inputs)
+                # Use CLIPModel's forward method, which includes logit_scale internally
+                outputs = self.model(pixel_values=pixels, **texts)
+                # Take diagonal and normalize by dividing by 30, consistent with flow_grpo
+                scores = outputs.logits_per_image.diagonal() / 30
 
-                # Normalize
-                image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-
-                # Compute similarity
-                similarity = (image_features * text_features).sum(dim=-1)
-
-                all_rewards.extend(similarity.cpu().tolist())
+                all_rewards.extend(scores.cpu().tolist())
 
         return all_rewards
 
     def _compute_hpsv2(self, request: RewardRequest) -> List[float]:
-        """Compute HPSv2 rewards."""
+        """Compute HPSv2 rewards (aligned with DanceGRPO train_grpo_sd.py)."""
         images = request.images
         prompts = request.prompts
 
@@ -306,15 +405,32 @@ class LocalRewardWorker(BaseRewardWorker):
             batch_images = images[i:i + self.batch_size]
             batch_prompts = prompts[i:i + self.batch_size]
 
-            # HPSv2 uses module-level score function
-            # It accepts (images, prompts) and returns list of scores
             for img, prompt in zip(batch_images, batch_prompts):
                 try:
-                    # hpsv2.score expects single image and prompt
-                    score = self._hpsv2_module.score(img, prompt)
-                    if isinstance(score, (list, tuple)):
-                        score = score[0]
-                    all_rewards.append(float(score))
+                    # Image preprocessing: consistent with DanceGRPO
+                    if isinstance(img, Image.Image):
+                        img_pil = img.convert("RGB")
+                    else:
+                        img_pil = Image.fromarray(img).convert("RGB")
+
+                    image_input = self._hpsv2_preprocess_val(img_pil).unsqueeze(0).to(
+                        device=self.device, non_blocking=True
+                    )
+                    # Text preprocessing
+                    text_input = self._hpsv2_tokenizer([prompt]).to(
+                        device=self.device, non_blocking=True
+                    )
+
+                    with torch.no_grad():
+                        with torch.amp.autocast('cuda'):
+                            outputs = self.model(image_input, text_input)
+                            image_features = outputs["image_features"]
+                            text_features = outputs["text_features"]
+                            # Compute cosine similarity directly without logit_scale (consistent with DanceGRPO)
+                            logits_per_image = image_features @ text_features.T
+                            hps_score = torch.diagonal(logits_per_image)
+
+                    all_rewards.append(float(hps_score.item()))
                 except Exception as e:
                     # Fall back to 0.0 on error
                     all_rewards.append(0.0)
@@ -322,16 +438,22 @@ class LocalRewardWorker(BaseRewardWorker):
         return all_rewards
 
     def _load_ocr(self):
-        """Load OCR model for text detection reward (used for text-in-image tasks)."""
+        """Load OCR model for text detection reward (PP-OCRv5)."""
         try:
-            import easyocr
+            from paddleocr import PaddleOCR
         except ImportError:
-            raise ImportError("easyocr is required for OCR reward. Install with: pip install easyocr")
+            raise ImportError("paddleocr is required for OCR reward. Install with: pip install paddleocr")
 
-        # Initialize EasyOCR reader
-        self._ocr_reader = easyocr.Reader(
-            ['en'],
-            gpu=torch.cuda.is_available() and self.device != "cpu",
+        try:
+            from Levenshtein import distance
+        except ImportError:
+            raise ImportError("python-Levenshtein is required for OCR reward. Install with: pip install python-Levenshtein")
+
+        # Initialize PP-OCRv5 reader with new API
+        self._ocr_reader = PaddleOCR(
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
         )
         self.model = "ocr"  # Placeholder to indicate model is loaded
         self.reward_types = [RewardType.CUSTOM]
@@ -345,54 +467,54 @@ class LocalRewardWorker(BaseRewardWorker):
 
         Scoring:
         - Extract expected text from prompt (e.g., "an image with text 'Hello World'")
-        - Run OCR on the image
+        - Run OCR on the image using PP-OCRv5 predict API
         - Compute word-level overlap between expected and detected text
         """
         import numpy as np
+        from Levenshtein import distance
 
         images = request.images
         prompts = request.prompts
 
-        all_rewards = []
+        prompts = [prompt.split('"')[1] for prompt in prompts]
+        rewards = []
+        assert len(images) == len(prompts), "Images and prompts must have the same length"
+        rank = int(os.environ.get("RANK", 0))
+        for img, prompt in tqdm(
+            zip(images, prompts),
+            desc="Computing OCR rewards",
+            disable=(rank != 0)
+        ):
+            # Convert image format to np.ndarray
+            if isinstance(img, Image.Image):
+                img = np.array(img)
 
-        for img, prompt in zip(images, prompts):
             try:
-                # Convert image to numpy array if needed
-                if isinstance(img, Image.Image):
-                    img_array = np.array(img)
-                elif isinstance(img, torch.Tensor):
-                    # Convert tensor to numpy
-                    if img.dim() == 4:
-                        img = img.squeeze(0)
-                    if img.max() <= 1.0:
-                        img = (img * 255).byte()
-                    img_array = img.permute(1, 2, 0).cpu().numpy()
+                # OCR recognition using PP-OCRv5 predict API
+                result = self._ocr_reader.predict(img)
+                # Extract recognized text from PP-OCRv5 result
+                recognized_text = ''
+                for res in result:
+                    recognized_text += ''.join(res['rec_texts'])
+
+                recognized_text = recognized_text.replace(' ', '').lower()
+                prompt = prompt.replace(' ', '').lower()
+                if prompt in recognized_text:
+                    dist = 0
                 else:
-                    img_array = np.array(img)
-
-                # Run OCR detection
-                ocr_results = self._ocr_reader.readtext(img_array)
-                detected_text = " ".join([r[1] for r in ocr_results]).lower()
-
-                # Extract expected text from prompt
-                expected_words = self._extract_text_keywords(prompt)
-
-                # Compute word-level match score
-                if expected_words:
-                    detected_words = set(detected_text.split())
-                    matched = len(expected_words & detected_words)
-                    score = matched / len(expected_words)
-                else:
-                    # If no specific text expected, reward having any readable text
-                    score = min(len(detected_text) / 50, 1.0)  # Normalize by expected length
-
-                all_rewards.append(score)
+                    dist = distance(recognized_text, prompt)
+                # Recognized many unrelated characters, only add one character penalty
+                if dist > len(prompt):
+                    dist = len(prompt)
 
             except Exception as e:
-                # Fall back to 0.0 on error
-                all_rewards.append(0.0)
+                # Error handling (e.g., OCR parsing failure)
+                print(f"OCR processing failed: {str(e)}")
+                dist = len(prompt)  # Maximum penalty
+            reward = 1 - dist / (len(prompt))
+            rewards.append(reward)
 
-        return all_rewards
+        return rewards
 
     def _extract_text_keywords(self, prompt: str) -> set:
         """
@@ -587,3 +709,110 @@ class VideoRewardWorker(LocalRewardWorker):
         consistency = max(0, 1 - avg_diff)
 
         return consistency
+
+
+if __name__ == '__main__':
+
+    def test_pickscore():
+        """Test PickScore reward model."""
+        print("=" * 60)
+        print("Testing PickScore Reward Model")
+        print("=" * 60)
+
+        # Create a simple test image
+        test_image = Image.new("RGB", (512, 512), color=(135, 206, 235))
+
+        # Initialize PickScore worker
+        worker = LocalRewardWorker(
+            model_name="pickscore",
+            device="cuda",
+        )
+
+        # Build request
+        test_prompts = [
+            "a beautiful blue sky",
+            "a red sports car on the highway",
+        ]
+        test_images = [test_image, test_image]
+
+        request = RewardRequest(
+            images=test_images,
+            prompts=test_prompts,
+        )
+
+        # Compute rewards
+        response = worker.compute_rewards(request)
+
+        print(f"Prompts: {test_prompts}")
+        print(f"Rewards: {response.rewards}")
+        print(f"Successes: {response.successes}")
+        print(f"Errors: {response.errors}")
+        print(f"Compute time: {response.compute_time:.4f}s")
+        print()
+
+    def test_ocr():
+        """Test OCR (PP-OCRv5) reward model."""
+        print("=" * 60)
+        print("Testing OCR (PP-OCRv5) Reward Model")
+        print("=" * 60)
+
+        from PIL import ImageDraw, ImageFont
+
+        # Create a test image with text rendered on it
+        test_image = Image.new("RGB", (512, 256), color=(255, 255, 255))
+        draw = ImageDraw.Draw(test_image)
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
+        except IOError:
+            font = ImageFont.load_default()
+        draw.text((50, 80), "Hello World", fill=(0, 0, 0), font=font)
+        test_image.save("test_ocr_input.png")
+        print("Saved test image to test_ocr_input.png")
+
+        # Initialize OCR worker
+        worker = LocalRewardWorker(
+            model_name="ocr",
+            device="cuda",
+        )
+
+        # Test 1: prompt matches image text
+        request_match = RewardRequest(
+            images=[test_image],
+            prompts=['an image with text "Hello World"'],
+        )
+        response_match = worker.compute_rewards(request_match)
+        print(f"[Match test] Prompt: 'an image with text \"Hello World\"'")
+        print(f"  Reward: {response_match.rewards}")
+        print(f"  Success: {response_match.successes}")
+        print()
+
+        # Test 2: prompt does NOT match image text
+        request_mismatch = RewardRequest(
+            images=[test_image],
+            prompts=['an image with text "Goodbye"'],
+        )
+        response_mismatch = worker.compute_rewards(request_mismatch)
+        print(f"[Mismatch test] Prompt: 'an image with text \"Goodbye\"'")
+        print(f"  Reward: {response_mismatch.rewards}")
+        print(f"  Success: {response_mismatch.successes}")
+        print()
+
+        # Also demonstrate raw PP-OCRv5 predict API
+        print("-" * 40)
+        print("Raw PP-OCRv5 predict output:")
+        from paddleocr import PaddleOCR
+        ocr = PaddleOCR(
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+        )
+        result = ocr.predict("test_ocr_input.png")
+        for res in result:
+            res.print()
+        print()
+
+    # Run tests
+    print("Starting reward model tests...\n")
+    # test_pickscore()
+    test_ocr()
+    print("All tests completed!")

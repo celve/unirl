@@ -71,6 +71,9 @@
 #   DanceGRPO uses VideoAlign (VQ score). Default here is hpsv2 (proxy).
 #   For faithful reproduction, implement VideoAlign reward worker.
 #
+# Training-actor sampling now reuses the main manager -> rollout_buffer -> train path.
+# The main speed knob left in this branch is rollout-side reward execution.
+#
 # Usage:
 #   bash train_dancegrpo_hunyuan_train_actor_sampling.sh
 #   NUM_GPUS=16 bash train_dancegrpo_hunyuan_train_actor_sampling.sh
@@ -91,7 +94,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/hunyuan-video"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/dancegrpo_hunyuan_colocate"}
 # Hunyuan path in diffusionrl currently expects plain prompts (text mode).
-DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/video_prompts_toy.txt"}
+DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/video_prompts_toy_8.txt"}
 
 # GPU layout (single-node default)
 NUM_GPUS=${NUM_GPUS:-8}
@@ -107,9 +110,7 @@ NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-8}
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-${TOTAL_GPUS}}
 
 # Training geometry
-BATCH_SIZE=${BATCH_SIZE:-1}
-GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-4}
-NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
+GRADIENT_ACCUMULATION_BATCH_SIZE=${GRADIENT_ACCUMULATION_BATCH_SIZE-2}
 
 # Resolution (DanceGRPO: 480×480, 53 frames)
 HEIGHT=${HEIGHT:-480}
@@ -120,6 +121,8 @@ FPS=${FPS:-8}
 # Reward model
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-"hpsv2"}
 REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardWorker"}
+REWARD_EXECUTION_MODE=${REWARD_EXECUTION_MODE:-rollout}
+LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cuda}
 REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
 WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-dancegrpo_hunyuan_train_actor_sampling}
@@ -143,6 +146,20 @@ if [ $((TOTAL_SAMPLES % TOTAL_GPUS)) -ne 0 ]; then
     echo "ERROR: total_samples (${TOTAL_SAMPLES} = ${PROMPTS_PER_BATCH}×${NUM_SAMPLES_PER_PROMPT}) must be divisible by TOTAL_GPUS (${TOTAL_GPUS})"
     exit 1
 fi
+LOCAL_BATCH_SIZE=$((TOTAL_SAMPLES / TOTAL_GPUS))
+DIRECT_SAMPLING_BATCH_SIZE=${DIRECT_SAMPLING_BATCH_SIZE:-${TOTAL_SAMPLES}}
+if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
+    echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
+    exit 1
+fi
+if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${TOTAL_SAMPLES}" ] && [ $(( TOTAL_SAMPLES % DIRECT_SAMPLING_BATCH_SIZE )) -ne 0 ]; then
+    echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must evenly divide total_samples (${TOTAL_SAMPLES})"
+    exit 1
+fi
+GRADIENT_ACCUMULATION_ARGS=()
+if [ -n "${GRADIENT_ACCUMULATION_BATCH_SIZE}" ]; then
+    GRADIENT_ACCUMULATION_ARGS+=(--training.gradient-accumulation-batch-size "${GRADIENT_ACCUMULATION_BATCH_SIZE}")
+fi
 
 echo "======================================================"
 echo " DanceGRPO HunyuanVideo — Training-Actor Sampling"
@@ -151,7 +168,8 @@ echo " Total GPUs:             ${TOTAL_GPUS} (${TRAINING_NUM_NODES} nodes × ${T
 echo " Prompts per batch:      ${PROMPTS_PER_BATCH}"
 echo " Samples per prompt (K): ${NUM_SAMPLES_PER_PROMPT}"
 echo " Total samples/rollout:  ${TOTAL_SAMPLES}"
-echo " Per-rank training:      $((TOTAL_SAMPLES / TOTAL_GPUS))"
+echo " Per-rank local batch:   ${LOCAL_BATCH_SIZE}"
+echo " Gradient accum batch:   ${GRADIENT_ACCUMULATION_BATCH_SIZE:-disabled}"
 echo " Resolution:             ${HEIGHT}×${WIDTH}×${NUM_FRAMES}f"
 echo " Reward:                 ${REWARD_MODEL_NAME}"
 echo " FSDP CPU offload:       ${FSDP_CPU_OFFLOAD}"
@@ -165,6 +183,8 @@ python -m diffusionrl.train \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-path "${REWARD_PATH}" \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
+    --reward.reward-execution-mode "${REWARD_EXECUTION_MODE}" \
+    --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
@@ -179,15 +199,15 @@ python -m diffusionrl.train \
     \
     `# ===== GRPO Algorithm =====` \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --training.batch-size ${BATCH_SIZE} \
+    "${GRADIENT_ACCUMULATION_ARGS[@]}" \
     --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
     --algorithm.advantage-type group \
     --algorithm.advantage-clip-max 5.0 \
     \
-    `# ===== Training-Actor Sampling (no dedicated rollout actors) =====` \
     --sampling.training-actor-direct-sampling true \
+    --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
     --ray.colocate-rollout-training true \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
@@ -197,8 +217,7 @@ python -m diffusionrl.train \
     \
     `# ===== Training Hyperparams (aligned with DanceGRPO) =====` \
     --training.learning-rate 1e-5 \
-    --training.gradient-accumulation-steps ${GRADIENT_ACCUMULATION_STEPS} \
-    --training.num-inner-epochs ${NUM_INNER_EPOCHS} \
+    --training.update-mode single_update \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.fsdp-cpu-offload ${FSDP_CPU_OFFLOAD} \

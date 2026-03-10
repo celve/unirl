@@ -11,7 +11,7 @@
 #       This script adapts MixGRPO's algorithm to SD3 for testing purposes.
 #       SD3 is much smaller than FLUX (~2B vs ~12B), making it ideal for testing.
 #
-# LoRA: ✅ 使用 LoRA (rank=32, alpha=64) 以节省显存
+# LoRA: Use LoRA (rank=32, alpha=64) to reduce memory usage
 #
 # =============================================================================
 # batch_geometry: total_samples = prompts_per_batch * num_samples_per_prompt
@@ -37,9 +37,12 @@
 #   (window scheduler / sde_ratio / trimmed_ratio / ignore_last / frozen_init_timesteps).
 # - This script is still an adapted SD3 variant (not a bit-for-bit upstream run).
 #
+# Training-actor sampling now reuses the main manager -> rollout_buffer -> train path.
+# The main speed knob left in this branch is rollout-side reward execution.
+#
 # Usage:
 #   bash train_mixgrpo_sd3_train_actor_sampling.sh
-#   bash train_mixgrpo_sd3_train_actor_sampling.sh --rollout.num-rollout 100 --training.batch-size 2
+#   bash train_mixgrpo_sd3_train_actor_sampling.sh --rollout.num-rollout 100 --training.gradient-accumulation-batch-size 2 --training.multi-update-batch-size 2
 #
 # =============================================================================
 
@@ -52,9 +55,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Default values (can be overridden via command line)
 PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/sd3.5-medium"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/mixgrpo_sd3_train_sampling"}
-DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/prompts_toy.json"}
+DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/ocr_prompts_toy_16.json"}
 NUM_GPUS=${NUM_GPUS:-8}
-BATCH_SIZE=${BATCH_SIZE:-4}
+GRADIENT_ACCUMULATION_BATCH_SIZE=${GRADIENT_ACCUMULATION_BATCH_SIZE-2}
+MULTI_UPDATE_BATCH_SIZE=${MULTI_UPDATE_BATCH_SIZE:-2}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-8}
 REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward_aggr}
 WINDOW_MAX_ITERS_PER_GROUP=${WINDOW_MAX_ITERS_PER_GROUP:-10}
@@ -64,16 +68,29 @@ LORA_ALPHA=${LORA_ALPHA:-64}
 REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
 WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-mixgrpo_sd3_train_actor_sampling}
+REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-ocr}
+REWARD_EXECUTION_MODE=${REWARD_EXECUTION_MODE:-rollout}
+LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cpu}
 if [ "${NUM_SAMPLES_PER_PROMPT}" -lt 2 ]; then
     echo "ERROR: MixGRPO uses group advantages; set NUM_SAMPLES_PER_PROMPT >= 2 to avoid NaN."
     exit 1
 fi
-if [ $(( NUM_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
-    echo "ERROR: NUM_GPUS*BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
+PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-8}
+ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
+DIRECT_SAMPLING_BATCH_SIZE=${DIRECT_SAMPLING_BATCH_SIZE:-${ROLLOUT_TOTAL_SAMPLES}}
+UPDATE_MODE=${UPDATE_MODE:-multi_update}
+if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
+    echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
     exit 1
 fi
-PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( NUM_GPUS * BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
-NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
+if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${ROLLOUT_TOTAL_SAMPLES}" ] && [ $(( ROLLOUT_TOTAL_SAMPLES % DIRECT_SAMPLING_BATCH_SIZE )) -ne 0 ]; then
+    echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must evenly divide rollout_total_samples (${ROLLOUT_TOTAL_SAMPLES})"
+    exit 1
+fi
+GRADIENT_ACCUMULATION_ARGS=()
+if [ -n "${GRADIENT_ACCUMULATION_BATCH_SIZE}" ]; then
+    GRADIENT_ACCUMULATION_ARGS+=(--training.gradient-accumulation-batch-size "${GRADIENT_ACCUMULATION_BATCH_SIZE}")
+fi
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
@@ -81,7 +98,9 @@ python -m diffusionrl.train \
     --sampling.sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
     --algorithm.algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
     --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
-    --reward.reward-model-name ocr \
+    --reward.reward-model-name "${REWARD_MODEL_NAME}" \
+    --reward.reward-execution-mode "${REWARD_EXECUTION_MODE}" \
+    --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
@@ -102,7 +121,8 @@ python -m diffusionrl.train \
     --algorithm.window.window-roll-back true \
     \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --training.batch-size ${BATCH_SIZE} \
+    "${GRADIENT_ACCUMULATION_ARGS[@]}" \
+    --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \
     --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
@@ -111,6 +131,7 @@ python -m diffusionrl.train \
     --reward.reward-mix-mode ${REWARD_MIX_MODE} \
     \
     --sampling.training-actor-direct-sampling true \
+    --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
     --ray.colocate-rollout-training true \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
@@ -118,8 +139,7 @@ python -m diffusionrl.train \
     --ray.offload false \
     \
     --training.learning-rate 1e-5 \
-    --training.gradient-accumulation-steps 2 \
-    --training.num-inner-epochs ${NUM_INNER_EPOCHS} \
+    --training.update-mode ${UPDATE_MODE} \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.lora-rank ${LORA_RANK} \

@@ -8,7 +8,7 @@
 #   Script:  scripts/finetune/finetune_flux_grpo_MixGRPO.sh
 #   Command: bash scripts/finetune/finetune_flux_grpo_MixGRPO.sh
 #
-# LoRA: ⚠️ 原版 MixGRPO 不使用 LoRA，本脚本使用 LoRA (rank=64, alpha=128) 以节省显存
+# LoRA: Original MixGRPO does not use LoRA; this script uses LoRA (rank=64, alpha=128) to reduce memory usage
 #
 # =============================================================================
 # batch_geometry: total_samples = prompts_per_batch * num_samples_per_prompt
@@ -43,9 +43,12 @@
 # - This script remains an approximate reproduction because reward stack,
 #   dataset, and model initialization may differ from the upstream project.
 #
+# Training-actor sampling now reuses the main manager -> rollout_buffer -> train path.
+# The main speed knob left in this branch is rollout-side reward execution.
+#
 # Usage:
 #   bash train_mixgrpo_flux_train_actor_sampling.sh
-#   bash train_mixgrpo_flux_train_actor_sampling.sh --rollout.num-rollout 100 --training.batch-size 2
+#   bash train_mixgrpo_flux_train_actor_sampling.sh --rollout.num-rollout 100 --training.gradient-accumulation-batch-size 2 --training.multi-update-batch-size 2
 #
 # =============================================================================
 
@@ -58,9 +61,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Default values (can be overridden via command line)
 PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/flux.1-dev"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/mixgrpo_flux_train_sampling"}
-DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/prompts_toy.json"}
+DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/ocr_prompts_toy_16.json"}
 NUM_GPUS=${NUM_GPUS:-8}
-BATCH_SIZE=${BATCH_SIZE:-12}
+LOCAL_BATCH_SIZE=${LOCAL_BATCH_SIZE:-12}
+GRADIENT_ACCUMULATION_BATCH_SIZE=${GRADIENT_ACCUMULATION_BATCH_SIZE-4}
+MULTI_UPDATE_BATCH_SIZE=${MULTI_UPDATE_BATCH_SIZE:-4}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-12}
 REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward_aggr}
 WINDOW_MAX_ITERS_PER_GROUP=${WINDOW_MAX_ITERS_PER_GROUP:-10}
@@ -68,12 +73,29 @@ WINDOW_MIN_ITERS_PER_GROUP=${WINDOW_MIN_ITERS_PER_GROUP:-1}
 REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
 WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-mixgrpo_flux_train_actor_sampling}
-if [ $(( NUM_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
-    echo "ERROR: NUM_GPUS*BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
+REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-ocr}
+REWARD_EXECUTION_MODE=${REWARD_EXECUTION_MODE:-rollout}
+LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cpu}
+if [ $(( NUM_GPUS * LOCAL_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
+    echo "ERROR: NUM_GPUS*LOCAL_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
     exit 1
 fi
-PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( NUM_GPUS * BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
-NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
+PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( NUM_GPUS * LOCAL_BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
+ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
+DIRECT_SAMPLING_BATCH_SIZE=${DIRECT_SAMPLING_BATCH_SIZE:-${ROLLOUT_TOTAL_SAMPLES}}
+UPDATE_MODE=${UPDATE_MODE:-multi_update}
+if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
+    echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
+    exit 1
+fi
+if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${ROLLOUT_TOTAL_SAMPLES}" ] && [ $(( ROLLOUT_TOTAL_SAMPLES % DIRECT_SAMPLING_BATCH_SIZE )) -ne 0 ]; then
+    echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must evenly divide rollout_total_samples (${ROLLOUT_TOTAL_SAMPLES})"
+    exit 1
+fi
+GRADIENT_ACCUMULATION_ARGS=()
+if [ -n "${GRADIENT_ACCUMULATION_BATCH_SIZE}" ]; then
+    GRADIENT_ACCUMULATION_ARGS+=(--training.gradient-accumulation-batch-size "${GRADIENT_ACCUMULATION_BATCH_SIZE}")
+fi
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
@@ -81,7 +103,9 @@ python -m diffusionrl.train \
     --sampling.sampler-path diffusionrl.samplers.fsdp.flux_sampler.FluxSampler \
     --algorithm.algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
     --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
-    --reward.reward-model-name ocr \
+    --reward.reward-model-name "${REWARD_MODEL_NAME}" \
+    --reward.reward-execution-mode "${REWARD_EXECUTION_MODE}" \
+    --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
@@ -102,7 +126,8 @@ python -m diffusionrl.train \
     --algorithm.window.window-roll-back true \
     \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --training.batch-size ${BATCH_SIZE} \
+    "${GRADIENT_ACCUMULATION_ARGS[@]}" \
+    --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \
     --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
@@ -111,6 +136,7 @@ python -m diffusionrl.train \
     --reward.reward-mix-mode ${REWARD_MIX_MODE} \
     \
     --sampling.training-actor-direct-sampling true \
+    --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
     --ray.colocate-rollout-training true \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
@@ -118,8 +144,7 @@ python -m diffusionrl.train \
     --ray.offload false \
     \
     --training.learning-rate 1e-5 \
-    --training.gradient-accumulation-steps 3 \
-    --training.num-inner-epochs ${NUM_INNER_EPOCHS} \
+    --training.update-mode ${UPDATE_MODE} \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.lora-rank 64 \

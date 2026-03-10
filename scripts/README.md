@@ -5,6 +5,7 @@ These shell scripts are reproducible experiment templates.
 All scripts now resolve paths relative to repository root:
 
 - toy data: `data/samples/prompts_toy.json`
+- OCR toy data: `data/samples/ocr_prompts_toy.json`
 - toy video prompts: `data/samples/video_prompts_toy.txt`
 - local model mount: `models/local/`
 - outputs: `outputs/`
@@ -12,8 +13,24 @@ All scripts now resolve paths relative to repository root:
 ## Quick sanity run
 
 ```bash
-bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh --rollout.num-rollout 1 --rollout.save-steps 1000
+DATA_PATH=data/samples/ocr_prompts_toy.json \
+  bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh \
+  --rollout.num-rollout 1 \
+  --rollout.save-steps 1000
 ```
+
+Terminology:
+
+- `rollout_id` is the outer rollout-train loop step.
+- For experiment tracking it is close to a framework-level global step.
+- It is not guaranteed to equal raw optimizer step count when gradient accumulation or inner epochs are used.
+
+Eval data:
+
+- `data_path` is the training prompt source.
+- `eval_data_path` is optional; when unset, periodic eval reads a deterministic, unshuffled view of `data_path`.
+- For a real validation split, set `eval_data_path` explicitly.
+- Prompt datasets should provide text via `prompt` or `caption`; legacy embedding fields are ignored.
 
 ## Typical usage
 

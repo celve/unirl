@@ -30,7 +30,7 @@ fi
 
 PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/sd3.5-medium"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/dancegrpo_sd3_sglang_separate"}
-DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/prompts_toy.json"}
+DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/ocr_prompts_toy.json"}
 
 ROLLOUT_GPUS=${ROLLOUT_GPUS:-4}
 TRAINING_GPUS=${TRAINING_GPUS:-4}
@@ -47,7 +47,6 @@ if [ $(( TRAINING_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     exit 1
 fi
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
-NUM_INNER_EPOCHS=${NUM_INNER_EPOCHS:-1}
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
@@ -70,7 +69,7 @@ python -m diffusionrl.train \
     --sampling.timestep-fraction 0.6 \
     \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --training.batch-size ${BATCH_SIZE} \
+    --training.gradient-accumulation-batch-size ${BATCH_SIZE} \
     --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
@@ -83,8 +82,7 @@ python -m diffusionrl.train \
     --ray.placement-strategy SPREAD \
     \
     --training.learning-rate 1e-5 \
-    --training.gradient-accumulation-steps 1 \
-    --training.num-inner-epochs ${NUM_INNER_EPOCHS} \
+    --training.update-mode single_update \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.lora-rank ${LORA_RANK} \

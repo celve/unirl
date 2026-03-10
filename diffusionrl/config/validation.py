@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
 import logging
-import os
 from typing import Any, Dict, Optional
 
-from diffusionrl.samplers.engine import get_engine_class_path
+from diffusionrl.runtime.contracts import (
+    resolve_engine_capabilities,
+    resolve_sampling_requirements,
+)
 from diffusionrl.utils.misc import load_function
 
 logger = logging.getLogger(__name__)
@@ -30,112 +31,6 @@ def _trace_normalize_change(
         callback(key, before, after, source=source)
 
 
-@dataclass(frozen=True)
-class ResolvedSamplingRequirements:
-    """Final sampling contract: loss-required fields + algorithm extras."""
-
-    requires_trajectory: bool = True
-    requires_log_prob: bool = True
-    requires_embeddings: bool = True
-    extras: Dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def sde_ratio(self) -> float:
-        return float(self.extras.get("sde_ratio", 1.0))
-
-    @property
-    def requires_clean_latents(self) -> bool:
-        return bool(self.extras.get("requires_clean_latents", False))
-
-    @property
-    def forward_diffusion_in_loss(self) -> bool:
-        return bool(self.extras.get("forward_diffusion_in_loss", False))
-
-    def to_dict(self) -> Dict[str, bool]:
-        return {
-            "requires_trajectory": bool(self.requires_trajectory),
-            "requires_log_prob": bool(self.requires_log_prob),
-            "requires_embeddings": bool(self.requires_embeddings),
-        }
-
-
-def _resolve_loss_class(args: Any):
-    """Load loss class from normalized algorithm.loss_path."""
-    loss_path = getattr(args.algorithm, "loss_path", None)
-    if not isinstance(loss_path, str) or not loss_path.strip():
-        return None
-    try:
-        return load_function(loss_path.strip())
-    except Exception:
-        return None
-
-
-def get_loss_requirements(args: Any) -> Dict[str, bool]:
-    """Get loss requirements from loss class's declared_requirements().
-
-    Loss classes MUST implement declared_requirements() classmethod.
-    """
-    loss_cls = _resolve_loss_class(args)
-    if loss_cls is None:
-        raise ValueError(
-            f"Cannot resolve loss class for loss_type={getattr(args.algorithm, 'loss_type', None)!r}, "
-            f"loss_path={getattr(args.algorithm, 'loss_path', None)!r}. "
-            "Ensure loss_type is registered or loss_path is importable."
-        )
-    declared = getattr(loss_cls, "declared_requirements", None)
-    if not callable(declared):
-        raise ValueError(
-            f"Loss class {loss_cls.__name__} must define classmethod declared_requirements() "
-            "returning a dict like {'requires_trajectory': True, 'requires_log_prob': True, ...}."
-        )
-    return dict(declared())
-
-
-def resolve_sampling_requirements(
-    args: Any,
-    *,
-    algorithm_requirements: Optional[Any] = None,
-) -> ResolvedSamplingRequirements:
-    """Resolve final sampling contract with loss as single source of requires_*.
-
-    - requires_* fields are sourced from loss.declared_requirements()
-    - algorithm contributes only extras (e.g. sde_ratio)
-    """
-    required = get_loss_requirements(args)
-    extras: Dict[str, Any] = {}
-    if algorithm_requirements is not None:
-        raw_extras = getattr(algorithm_requirements, "extras", None)
-        if isinstance(raw_extras, dict):
-            extras.update(dict(raw_extras))
-        for key in ("sde_ratio", "requires_clean_latents", "forward_diffusion_in_loss"):
-            if key in extras:
-                continue
-            if hasattr(algorithm_requirements, key):
-                try:
-                    extras[key] = getattr(algorithm_requirements, key)
-                except Exception:
-                    continue
-
-    return ResolvedSamplingRequirements(
-        requires_trajectory=bool(required.get("requires_trajectory", True)),
-        requires_log_prob=bool(required.get("requires_log_prob", True)),
-        requires_embeddings=bool(required.get("requires_embeddings", True)),
-        extras=extras,
-    )
-
-
-def resolve_engine_capabilities(*, engine_type: str) -> Dict[str, bool]:
-    """Resolve engine capabilities from engine class declaration."""
-    engine_path = get_engine_class_path(engine_type)
-    engine_cls = load_function(engine_path)
-    declared = getattr(engine_cls, "declared_capabilities", None)
-    if not callable(declared):
-        raise ValueError(
-            f"Engine class {engine_path} must define classmethod declared_capabilities()."
-        )
-    return dict(declared())
-
-
 def validate_dotpath(path: str, *, label: str) -> None:
     """Fail fast when a configured dotpath is not importable."""
     try:
@@ -146,145 +41,6 @@ def validate_dotpath(path: str, *, label: str) -> None:
             f"Check that the module is installed and the dotpath is correct "
             f"(e.g. 'diffusionrl.algorithms.grpo.GRPOAlgorithm')."
         ) from exc
-
-
-def repo_root(*, env_repo_root: str) -> str:
-    """Resolve repository root from environment override or package-relative path."""
-    env_root = os.getenv(env_repo_root)
-    if env_root:
-        return os.path.abspath(os.path.expanduser(env_root))
-    # validation.py lives at diffusionrl/config/validation.py.
-    # Two levels up resolves to diffusionRL repository root.
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-
-
-def resolve_repo_relative_path(path: str, root: str) -> str:
-    """Resolve path relative to repository root unless absolute."""
-    expanded = os.path.expanduser(path)
-    if os.path.isabs(expanded):
-        return os.path.abspath(expanded)
-    return os.path.abspath(os.path.join(root, expanded))
-
-
-def looks_like_local_path(path: str, root: str) -> bool:
-    """Best-effort check whether a value should be interpreted as local path."""
-    expanded = os.path.expanduser(path)
-    if os.path.isabs(expanded):
-        return True
-    if any(
-        path.startswith(prefix)
-        for prefix in ("./", "../", "~", "data/", "models/", "outputs/", "shared_models/")
-    ):
-        return True
-    if os.path.exists(expanded):
-        return True
-    if os.path.exists(os.path.join(root, expanded)):
-        return True
-    if path.count("/") >= 2:
-        return True
-    if path.endswith((".pt", ".pth", ".bin", ".safetensors", ".ckpt", ".json", ".txt")):
-        return True
-    return False
-
-
-def normalize_repo_relative_paths(
-    args,
-    *,
-    env_repo_root: str,
-    env_data_root: str,
-    env_model_root: str,
-) -> None:
-    """Normalize configured paths relative to repository root."""
-    root = repo_root(env_repo_root=env_repo_root)
-    data_root_env = os.getenv(env_data_root)
-    model_root_env = os.getenv(env_model_root)
-
-    grouped_path_fields = (
-        ("rollout", "output_dir"),
-        ("rollout", "logging_dir"),
-        ("ray", "weight_sync_dir"),
-        ("rollout", "resume_from_checkpoint"),
-        ("debug", "debug_save_dir"),
-        ("debug", "debug_load_path"),
-    )
-    for group_name, field_name in grouped_path_fields:
-        group_obj = getattr(args, group_name)
-        value = getattr(group_obj, field_name, None)
-        if isinstance(value, str) and value:
-            resolved = resolve_repo_relative_path(value, root)
-            setattr(group_obj, field_name, resolved)
-            _trace_normalize_change(
-                args,
-                f"{group_name}.{field_name}",
-                value,
-                resolved,
-                source="normalize_repo_relative_paths",
-            )
-
-    data_path = getattr(args, "data_path", None)
-    if isinstance(data_path, str) and data_path:
-        if data_root_env and not os.path.isabs(os.path.expanduser(data_path)):
-            trimmed = data_path[5:] if data_path.startswith("data/") else data_path
-            resolved_data_path = os.path.abspath(
-                os.path.join(os.path.expanduser(data_root_env), trimmed)
-            )
-            args.data_path = resolved_data_path
-        else:
-            resolved_data_path = resolve_repo_relative_path(data_path, root)
-            args.data_path = resolved_data_path
-        _trace_normalize_change(
-            args,
-            "data_path",
-            data_path,
-            resolved_data_path,
-            source="normalize_repo_relative_paths",
-        )
-
-    model_like_fields = (
-        ("model", "pretrained_model_saved_path"),
-        ("model", "vae_saved_path"),
-        ("model", "text_encoder_path"),
-        ("reward", "reward_model_saved_path"),
-    )
-    for group_name, field_name in model_like_fields:
-        group_obj = getattr(args, group_name)
-        value = getattr(group_obj, field_name, None)
-        if not isinstance(value, str) or not value:
-            continue
-        if not looks_like_local_path(value, root):
-            continue
-        if model_root_env and not os.path.isabs(os.path.expanduser(value)):
-            trimmed = value[7:] if value.startswith("models/") else value
-            resolved = os.path.abspath(os.path.join(os.path.expanduser(model_root_env), trimmed))
-            setattr(
-                group_obj,
-                field_name,
-                resolved,
-            )
-        else:
-            resolved = resolve_repo_relative_path(value, root)
-            setattr(group_obj, field_name, resolved)
-        _trace_normalize_change(
-            args,
-            f"{group_name}.{field_name}",
-            value,
-            resolved,
-            source="normalize_repo_relative_paths",
-        )
-
-
-def is_probably_local_weight_sync_dir(path: str, *, root: str) -> bool:
-    """Best-effort guard for local-only paths in multi-node checkpoint sync."""
-    if not path:
-        return True
-    real = os.path.realpath(path)
-    for prefix in ("/tmp", "/var/tmp", "/dev/shm"):
-        if real == prefix or real.startswith(prefix + os.sep):
-            return True
-    if real == root or real.startswith(root + os.sep):
-        return True
-    return False
-
 
 def validate_reward_config(args) -> None:
     """Validate reward pool/source configuration consistency."""
@@ -322,6 +78,9 @@ def validate_reward_config(args) -> None:
     local_reward_device = str(
         getattr(args.reward, "local_reward_device", "cpu") or "cpu"
     ).strip().lower()
+    reward_execution_mode = str(
+        getattr(args.reward, "reward_execution_mode", "manager") or "manager"
+    ).strip().lower()
     allow_local_reward_cuda_contention = bool(
         getattr(args.reward, "allow_local_reward_cuda_contention", False)
     )
@@ -334,7 +93,23 @@ def validate_reward_config(args) -> None:
             "use_http_reward=true requires reward_service_url or reward_service_urls."
         )
 
-    uses_local_same_process_reward = not has_http_reward and not has_dedicated_reward_pool
+    if reward_execution_mode == "rollout":
+        if has_http_reward:
+            raise ValueError(
+                "reward_execution_mode='rollout' cannot be combined with HTTP reward service. "
+                "Use reward_execution_mode='manager' for HTTP reward."
+            )
+        if has_dedicated_reward_pool:
+            raise ValueError(
+                "reward_execution_mode='rollout' cannot be combined with dedicated reward actors. "
+                "Use reward_execution_mode='manager' for reward_dedicated_* modes."
+            )
+
+    uses_local_same_process_reward = (
+        reward_execution_mode == "manager"
+        and not has_http_reward
+        and not has_dedicated_reward_pool
+    )
     if (
         uses_local_same_process_reward
         and local_reward_device == "cuda"
@@ -346,7 +121,12 @@ def validate_reward_config(args) -> None:
             "use_http_reward, or set allow_local_reward_cuda_contention=true to force."
         )
 
-    if has_http_reward:
+    if reward_execution_mode == "rollout":
+        logger.info(
+            "Reward mode: rollout-local worker (local_reward_device=%s)",
+            local_reward_device,
+        )
+    elif has_http_reward:
         logger.info("Reward mode: HTTP (external service)")
     elif has_dedicated_reward_pool:
         total_gpus = args.reward.reward_dedicated_num_gpus
@@ -701,15 +481,8 @@ def validate_runtime_mode_constraints(
             )
 
 __all__ = [
-    "ResolvedSamplingRequirements",
-    "repo_root",
-    "normalize_repo_relative_paths",
-    "resolve_repo_relative_path",
-    "looks_like_local_path",
-    "is_probably_local_weight_sync_dir",
     "validate_colocate_fractions",
     "get_rollout_gpus_per_actor",
-    "resolve_engine_capabilities",
     "validate_dotpath",
     "validate_grouped_configs",
     "validate_dynamic_dotpaths",
@@ -717,8 +490,6 @@ __all__ = [
     "validate_reward_and_rollout_buffer_config",
     "validate_rollout_layout",
     "validate_model_specific_logic",
-    "get_loss_requirements",
-    "resolve_sampling_requirements",
     "validate_loss_kwargs",
     "validate_resolved_engine_loss_contract",
     "validate_runtime_mode_constraints",
