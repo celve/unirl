@@ -355,7 +355,10 @@ def load_debug_training_batch(
     if not resolved.exists():
         raise FileNotFoundError(f"Debug load path not found: {resolved}")
 
-    obj = torch.load(resolved, map_location="cpu")
+    # TODO: torch.serialization.add_safe_globals on all interface objects
+    # types defined in diffusionrl.types
+    obj = torch.load(resolved, weights_only=False, map_location="cpu")
+
     meta: Dict[str, Any] = {"source_path": str(resolved)}
     if isinstance(obj, (BackwardTrainingBatch, ForwardTrainingBatch)):
         batch = obj
@@ -500,9 +503,14 @@ def run_debug_rollout_only(args: Any) -> None:
     set_seed(args.seed)
     _maybe_init_ray(args)
 
+    training_actor_direct_sampling = bool(
+        getattr(args.sampling, "training_actor_direct_sampling", False)
+    )
+
     pgs = create_placement_groups_from_args(args)
     rollout_pg_result = pgs.get("rollout")
-    if rollout_pg_result is None and not bool(getattr(args.sampling, "training_actor_direct_sampling", False)):
+
+    if rollout_pg_result is None and not training_actor_direct_sampling:
         raise ValueError(
             "debug_mode=rollout_only requires rollout placement resources."
         )
@@ -512,6 +520,19 @@ def run_debug_rollout_only(args: Any) -> None:
         pg_result=rollout_pg_result,
         reward_pg_result=pgs.get("reward"),
     )
+
+    if training_actor_direct_sampling:
+        from diffusionrl.ray.group_factory import create_training_actor_group
+
+        training_pg_result = pgs.get("training")
+
+        training_group = create_training_actor_group(args, training_pg_result)
+        resume_from_checkpoint = getattr(args.rollout, "resume_from_checkpoint", None)
+        if resume_from_checkpoint:
+            training_group.load_checkpoint(resume_from_checkpoint)
+        ray.get(rollout_manager.attach_sampling_actors.remote(training_group))
+        logger.info("Attached training actors as rollout sampling source")
+
     logger.info(
         "Starting rollout_only debug run: num_rollouts=%s save_dir=%s",
         args.debug.debug_num_rollouts,

@@ -315,7 +315,12 @@ def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroup
     reward_dedicated_num_nodes = int(getattr(args.reward, "reward_dedicated_num_nodes", 0))
     reward_dedicated_num_gpus_per_node = int(getattr(args.reward, "reward_dedicated_num_gpus_per_node", 0))
 
-    if debug_mode in ("rollout_only", "interactive"):
+    from diffusionrl.config.arguments import is_training_actor_direct_sampling_mode
+
+    if debug_mode in (
+        "rollout_only",
+        "interactive",
+    ) and not is_training_actor_direct_sampling_mode(args):
         training_num_nodes = 0
         training_num_gpus_per_node = 0
         logger.info(

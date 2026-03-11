@@ -2242,11 +2242,11 @@ def _normalize_debug_config(args: TrainingArguments) -> str:
                 f"debug_mode={debug_mode} does not support async_pipeline yet. "
                 "Set --rollout.async-pipeline=false."
             )
-        if debug_mode in ("rollout_only", "interactive") and bool(getattr(args.sampling, "training_actor_direct_sampling", False)):
-            raise ValueError(
-                f"debug_mode={debug_mode} is incompatible with training_actor_direct_sampling=true "
-                "(there are no training actors in this debug mode)."
-            )
+        # if debug_mode in ("rollout_only", "interactive") and bool(getattr(args.sampling, "training_actor_direct_sampling", False)):
+        #     raise ValueError(
+        #         f"debug_mode={debug_mode} is incompatible with training_actor_direct_sampling=true "
+        #         "(there are no training actors in this debug mode)."
+        #     )
 
     if bool(getattr(args.debug, "debug_save_intermediates", False)) and bool(getattr(args.rollout, "async_pipeline", False)):
         raise ValueError(

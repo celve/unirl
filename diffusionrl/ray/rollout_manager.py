@@ -719,12 +719,15 @@ class RolloutManager:
             len(prompts),
             int(getattr(self.args.algorithm, "num_samples_per_prompt", 1)),
         )
-        sampler_outputs, train_prompts, base_prompts, prompt_metadata = self._sample_rollout_batches(
-            actor_group=actor_group,
-            batch=batch,
-            sde_indices=sde_indices,
-            requirements=requirements,
-            rollout_id=rollout_id,
+        sampler_outputs, train_prompts, base_prompts, prompt_metadata = (
+            self._sample_rollout_batches(
+                actor_group=actor_group,
+                batch=batch,
+                sde_indices=sde_indices,
+                requirements=requirements,
+                rollout_id=rollout_id,
+                sampling_overrides={"_keep_reward_media_for_manager": True},
+            )
         )
         logger.info(
             "[debug] rollout=%s stage=sampling done outputs=%s",
