@@ -294,7 +294,8 @@ def compute_rewards(
     reward_path: str,
     num_samples_per_prompt: int,
     sampler_outputs: List[RolloutOutput],
-    prompts: List[str],
+    prompts: Optional[List[str]] = None,
+    base_prompts: Optional[List[str]] = None,
     prompt_metadata: Optional[List[Optional[Dict[str, Any]]]] = None,
 ) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
     """
@@ -310,6 +311,15 @@ def compute_rewards(
             - Tensor of rewards [batch_size]
             - Reward components by worker/model name
     """
+    if prompts is None and base_prompts is None:
+        raise ValueError(
+            f"Either a list of `prompts` (currently {prompts}) or a list of `base_prompts` "
+            f"(currently {base_prompts}) should be provided to "
+            "`diffusionrl.runtime.pipeline.rollout_pipeline.compute_rewards`.\n"
+            "* Each of `prompts` corresponds to one sampler output (each prompt can repeat multiple times). Used in `rollout` reward execution mode.\n"
+            "* Each of `base_prompts` corresponds to `num_samples_per_prompt` sampler outputs. Used in `manager` reward execution mode."
+        )
+
     precomputed = collect_precomputed_rewards(sampler_outputs=sampler_outputs)
     if precomputed is not None:
         return precomputed
@@ -325,11 +335,17 @@ def compute_rewards(
 
     sample_idx = 0
 
+    def _get_prompt(sample_idx):
+        nonlocal base_prompts, prompts
+        if prompts is not None:
+            return prompts[sample_idx]
+        prompt_idx = sample_idx // num_samples_per_prompt
+        return base_prompts[prompt_idx % len(base_prompts)]
+
     def _append_media(items: List[Any], target: List[Any]) -> None:
         nonlocal sample_idx
         for item in items:
-            prompt_idx = sample_idx // num_samples_per_prompt
-            prompt = prompts[prompt_idx % len(prompts)] if prompts else ""
+            prompt = _get_prompt(sample_idx)
             target.append(item)
             all_prompts.append(prompt)
             if prompt_metadata and len(prompt_metadata) > 0:

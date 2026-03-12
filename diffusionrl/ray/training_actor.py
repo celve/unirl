@@ -304,7 +304,7 @@ class TrainingActor(BaseTrainRayActor):
         self,
         *,
         output: RolloutOutput,
-        base_prompts: List[str],
+        prompts: List[str],
         prompt_metadata: Optional[List[Optional[Dict[str, Any]]]],
         num_samples_per_prompt: int,
         keep_reward_media_for_manager: bool,
@@ -322,7 +322,7 @@ class TrainingActor(BaseTrainRayActor):
             reward_path=str(self._reward_schema.reward_path if self._reward_schema is not None else ""),
             num_samples_per_prompt=int(num_samples_per_prompt),
             sampler_outputs=[output],
-            prompts=list(base_prompts),
+            prompts=list(prompts),
             prompt_metadata=normalized_metadata,
         )
         meta = dict(output.metadata or {})
@@ -668,11 +668,11 @@ class TrainingActor(BaseTrainRayActor):
 
     def generate(self, request: RolloutRequest) -> RolloutOutput:
         output = self._sampling_service.generate_local(self, request)
-        base_prompts = list(request.kwargs.get("_base_prompts") or request.prompts or [])
+        prompts = request.prompts
         prompt_metadata = request.kwargs.get("_prompt_metadata")
         output = self._attach_local_reward_to_output(
             output=output,
-            base_prompts=base_prompts if base_prompts else list(request.prompts or []),
+            prompts=prompts,
             prompt_metadata=prompt_metadata,
             num_samples_per_prompt=int(request.kwargs.get("num_samples_per_prompt", 1) or 1),
             keep_reward_media_for_manager=bool(

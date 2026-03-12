@@ -1684,7 +1684,7 @@ class RolloutManager:
             reward_path=reward_path,
             num_samples_per_prompt=num_samples_per_prompt,
             sampler_outputs=sampler_outputs,
-            prompts=prompts,
+            base_prompts=prompts,
             prompt_metadata=prompt_metadata,
         )
 
