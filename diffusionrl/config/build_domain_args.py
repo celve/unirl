@@ -253,6 +253,7 @@ def _build_loss_config(args) -> Dict[str, Any]:
         "ignore_last": bool(ac.ignore_last),
         "frozen_init_timesteps": int(ac.frozen_init_timesteps),
         "shift": float(sc.shift),
+        "debug_output_dir": getattr(args.debug, "debug_output_dir", None),
     }
 
 def _build_training_runtime_config(args, *, dp_size: int) -> Dict[str, Any]:

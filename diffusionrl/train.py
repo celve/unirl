@@ -111,6 +111,7 @@ def train(args):
             if wandb_tags_str
             else None
         )
+        wandb_entity = getattr(args.rollout, "wandb_entity", None) or None
         wandb_logger = init_logger(
             project=args.rollout.project_name,
             run_name=args.rollout.run_name,
@@ -118,6 +119,7 @@ def train(args):
             log_dir=getattr(args.rollout, "logging_dir", None),
             rank=0,
             tags=wandb_tags,
+            entity=wandb_entity,
         )
         logger.info(f"WandB initialized: project={args.rollout.project_name}, run={args.rollout.run_name}")
 
@@ -277,6 +279,8 @@ def train(args):
 
     # rollout_id is the outer rollout-train loop step; it behaves similarly to
     # a framework-level global step, but may differ from optimizer step count.
+    # global_optimizer_step tracks real optimizer step for wandb logging
+    global_optimizer_step = 0
     for rollout_id in range(args.rollout.start_rollout_id, args.rollout.num_rollout):
         step_start_t = time.perf_counter()
         sync_result = None
@@ -372,6 +376,18 @@ def train(args):
             if wandb_logger:
                 wandb_logger.log_eval(rollout_id, eval_metrics)
 
+        # === Per-optimizer-step wandb logging ===
+        if wandb_logger and metrics:
+            per_step_list = metrics[0].get("_per_optimizer_step_metrics", [])
+            for per_step_m in per_step_list:
+                if per_step_m.get("has_backward", False):
+                    global_optimizer_step += 1
+                    wandb_step_m = {
+                        k: v for k, v in per_step_m.items()
+                        if k != "has_backward"
+                    }
+                    wandb_logger.log_step(global_optimizer_step, wandb_step_m)
+
         if should_log_step:
             avg_loss = sum(m.get("loss", 0) for m in metrics) / max(len(metrics), 1)
             step_time_s = time.perf_counter() - step_start_t
@@ -389,7 +405,7 @@ def train(args):
             if wandb_logger:
                 aggregated = aggregate_metrics(metrics)
                 aggregated["loss"] = avg_loss
-                wandb_logger.log_step(rollout_id, aggregated)
+                wandb_logger.log_rollout(rollout_id, aggregated)
 
                 rollout_metrics = _collect_rollout_batch_metrics(rollout_data_ref)
                 if rollout_metrics:

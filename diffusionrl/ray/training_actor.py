@@ -640,6 +640,12 @@ class TrainingActor(BaseTrainRayActor):
                 )
             self.loss_fn._forward_plugin = forward_plugin
 
+        # Inject debug output directory if configured
+        debug_output_dir = loss_config.get("debug_output_dir")
+        if debug_output_dir and hasattr(self.loss_fn, "_debug_output_dir"):
+            self.loss_fn._debug_output_dir = debug_output_dir
+            logger.info("Rank %s: Debug output dir set on loss_fn: %s", self.rank, debug_output_dir)
+
         logger.info(
             "Rank %s: Loss function loaded (loss_type=%s, loss_path=%s)",
             self.rank,

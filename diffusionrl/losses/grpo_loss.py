@@ -19,6 +19,7 @@ Formula:
 
 import math
 import logging
+import os
 from typing import Any, Dict, Optional, Tuple
 import warnings
 import torch
@@ -27,6 +28,16 @@ import torch.nn as nn
 from diffusionrl.types import TimestepData, PromptEmbeddings
 
 logger = logging.getLogger(__name__)
+
+
+def _save_training_debug_tensor(base_dir: str, step_idx: int, name: str, tensor: torch.Tensor, rank: int = 0) -> None:
+    """Save a debug tensor from training path to disk. Only rank 0 saves."""
+    if rank != 0:
+        return
+    step_dir = os.path.join(base_dir, f"step_{step_idx:03d}")
+    os.makedirs(step_dir, exist_ok=True)
+    path = os.path.join(step_dir, f"{name}.pt")
+    torch.save(tensor.detach().cpu().float(), path)
 
 
 class GRPOLoss:
@@ -103,6 +114,8 @@ class GRPOLoss:
             "ema_uphold",
             "old_adapter_name",
             "new_adapter_name",
+            "shuffle_samples",
+            "shuffle_seed",
         }
         unknown = sorted(key for key in extra.keys() if key not in known_keys and key not in runtime_only_keys)
         if unknown:
@@ -170,6 +183,8 @@ class GRPOLoss:
         self.frozen_init_timesteps = frozen_init_timesteps
         self.model_type = model_type
         self._forward_plugin = None  # Lazy loaded
+        self._debug_output_dir = None  # Set externally for train-inference consistency debugging
+        self._debug_dumped_steps: set = set()  # Track which steps already dumped (one-shot guard)
 
     def get_clip_range(self, progress: float = 0.0) -> float:
         """
@@ -286,16 +301,20 @@ class GRPOLoss:
             }
 
         # Get sigma_max for log_prob computation
-        # sigma_max is used to handle the sigma=1.0 boundary case
-        if sigmas is not None:
-            sigma_max = sigmas[1].item() if sigmas[1].dim() == 0 else sigmas[1][0].item()
+        # sigma_max is used to handle the sigma=1.0 boundary case.
+        # Priority: explicit sigmas arg > timestep_data.sigmas > error
+        # sigma_max = sigmas[1], i.e. the second element of the full sigma schedule,
+        # which is the largest sigma that is strictly < 1.0.
+        _sigmas = sigmas if sigmas is not None else timestep_data.sigmas
+        if _sigmas is not None:
+            sigma_max = _sigmas[1].item() if _sigmas[1].dim() == 0 else _sigmas[1][0].item()
         else:
-            # Fallback: use sigma_next if available, otherwise use a safe default
-            # The key is that sigma_max must be < 1.0 to avoid division by zero
-            sigma_val = sigma.item() if sigma.dim() == 0 else sigma[0].item()
-            sigma_next_val = sigma_next.item() if isinstance(sigma_next, torch.Tensor) and sigma_next.dim() == 0 else (sigma_next[0].item() if isinstance(sigma_next, torch.Tensor) else sigma_next)
-            # Use sigma_next if sigma is at the boundary (1.0), otherwise use sigma
-            sigma_max = sigma_next_val if sigma_val >= 0.9999 else sigma_val
+            raise ValueError(
+                "Cannot determine sigma_max: neither `sigmas` argument nor "
+                "`timestep_data.sigmas` is provided. Ensure TimestepData is "
+                "constructed with the full sigma schedule (e.g. via "
+                "BackwardTrainingBatch.get_timestep_data_by_step())."
+            )
 
         # Convert sigma to tensor if needed
         if not isinstance(sigma, torch.Tensor):
@@ -350,9 +369,34 @@ class GRPOLoss:
             sigma_max=sigma_max,
         )
 
-        # Compute importance sampling ratio with clamping for numerical stability
-        log_prob_diff = torch.clamp(new_log_prob - old_log_probs, -20.0, 20.0)
+        # Compute importance sampling ratio
+        log_prob_diff = new_log_prob - old_log_probs
         ratio = torch.exp(log_prob_diff)
+
+        # Debug: dump training-side tensors for consistency analysis.
+        # Only dump the FIRST forward pass per step (on-policy). In multi_update mode,
+        # later update chunks have stale weights; we must not overwrite.
+        _resolved_debug_dir = self._debug_output_dir or os.environ.get("DIFFUSIONRL_DEBUG_OUTPUT_DIR")
+        if _resolved_debug_dir is not None and timestep_idx not in self._debug_dumped_steps:
+            self._debug_dumped_steps.add(timestep_idx)
+            _rank = int(os.environ.get("RANK", 0))
+            _training_debug_dir = os.path.join(_resolved_debug_dir, "training")
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "noise_pred", pred, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "latents_input", latents, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "latents_output", next_latents, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "prev_sample_mean", prev_sample_mean, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "new_log_prob", new_log_prob, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "old_log_prob", old_log_probs, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "ratio", ratio, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma", sigma.unsqueeze(0) if sigma.dim() == 0 else sigma, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma_next", sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma_max", torch.tensor([sigma_max]), _rank)
+            # Also save full sigma schedule once
+            if _sigmas is not None and _rank == 0:
+                _step_dir = os.path.join(_training_debug_dir, f"step_{timestep_idx:03d}")
+                _sched_path = os.path.join(_step_dir, "sigmas_schedule.pt")
+                if not os.path.exists(_sched_path):
+                    torch.save(_sigmas.detach().cpu().float(), _sched_path)
 
         # Get clip range
         clip_range = self.get_clip_range(training_progress)

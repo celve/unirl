@@ -126,6 +126,7 @@ def sde_step_with_log_prob(
     prev_sample: Optional[torch.Tensor] = None,
     generator: Optional[torch.Generator] = None,
     sde_type: str = "sde",
+    output_dtype: Optional[torch.dtype] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     SDE sampling step with log probability computation.
@@ -133,6 +134,12 @@ def sde_step_with_log_prob(
     This is the main function used during sampling to:
     1. Generate the next sample (if prev_sample is None)
     2. Compute the log probability of the transition
+
+    When ``output_dtype`` is set (e.g. ``torch.float16``), ``prev_sample`` is
+    cast to that dtype **before** computing the log probability.  This ensures
+    the log-prob is evaluated on the *exact* tensor that will be stored in the
+    trajectory, eliminating float32→float16 truncation mismatch between
+    sampling (old_log_prob) and training (new_log_prob).
 
     Args:
         noise_pred: Model velocity prediction
@@ -143,9 +150,10 @@ def sde_step_with_log_prob(
         prev_sample: Pre-computed previous sample (for training)
         generator: Random number generator
         sde_type: SDE formulation
-
+        output_dtype: If set, cast prev_sample to this dtype before computing
+            log_prob so that sampling and training see identical precision.
     Returns:
-        prev_sample: Next sample x_{t-1}
+        prev_sample: Next sample x_{t-1} (in output_dtype if specified)
         log_prob: Log probability [B]
         prev_sample_mean: SDE mean [B, C, ...]
     """
@@ -162,6 +170,7 @@ def sde_step_with_log_prob(
     dt = sigma_next - sigma
 
     strategy = get_sde_strategy(sde_type)
+
     prev_sample, log_prob, prev_sample_mean = strategy.step_with_log_prob(
         noise_pred=noise_pred,
         sample=sample,
@@ -172,6 +181,7 @@ def sde_step_with_log_prob(
         prev_sample=prev_sample,
         generator=generator,
         sigma_max=sigma_max,
+        output_dtype=output_dtype,
     )
 
     # Mean along all but batch dimension
@@ -188,12 +198,19 @@ def flux_sde_step(
     eta: float = 1.0,
     use_sde_solver: bool = False,
     prev_sample: Optional[torch.Tensor] = None,
+    output_dtype: Optional[torch.dtype] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     DanceGRPO-style SDE step with log probability for Flux/HunyuanVideo.
 
     This is the shared implementation used by both flux_sampler and hunyuan_sampler.
     Aligned with DanceGRPO flux_step formulation.
+
+    When ``output_dtype`` is set (e.g. ``torch.float16``), ``prev_sample`` is
+    cast to that dtype **before** computing the log probability.  This ensures
+    the log-prob is evaluated on the *exact* tensor that will be stored in the
+    trajectory, eliminating float32→float16 truncation mismatch between
+    sampling (old_log_prob) and training (new_log_prob).
 
     Args:
         model_output: Velocity prediction from transformer
@@ -203,9 +220,11 @@ def flux_sde_step(
         eta: Noise level (controls stochasticity)
         use_sde_solver: Whether to apply SDE solver correction
         prev_sample: Pre-computed previous sample (for training log-prob recomputation)
+        output_dtype: If set, cast prev_sample to this dtype before computing
+            log_prob so that sampling and training see identical precision.
 
     Returns:
-        prev_sample: Next sample x_{t-1}
+        prev_sample: Next sample x_{t-1} (in output_dtype if specified)
         pred_original_sample: Predicted clean sample x_0
         log_prob: Log probability [B]
     """
@@ -232,13 +251,18 @@ def flux_sde_step(
 
     # SDE solver correction
     if use_sde_solver:
-        score_estimate = -(latents - pred_original_sample * (1 - sigma)) / (sigma**2 + 1e-12)
+        score_estimate = -(latents - pred_original_sample * (1 - sigma)) / (sigma**2)
         log_term = -0.5 * eta**2 * score_estimate
         prev_sample_mean = prev_sample_mean + log_term * dsigma
 
     # Sample if not provided
     if prev_sample is None:
         prev_sample = prev_sample_mean + torch.randn_like(prev_sample_mean) * std_dev_t
+
+    # Cast prev_sample to storage dtype before computing log_prob,
+    # so old_log_prob (sampling) matches new_log_prob (training).
+    if output_dtype is not None and output_dtype != prev_sample.dtype:
+        prev_sample = prev_sample.to(dtype=output_dtype)
 
     # Log probability: log N(prev_sample | prev_sample_mean, std_dev_t²)
     log_prob = (

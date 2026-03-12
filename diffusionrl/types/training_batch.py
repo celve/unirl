@@ -31,6 +31,9 @@ class TimestepData:
         sigma: Current sigma value
         sigma_next: Next sigma value
         timestep_idx: Index of this timestep
+        sigmas: Full sigma schedule [T+1] for all timesteps.
+            Used to derive sigma_max (sigmas[1]) for log_prob boundary handling,
+            ensuring training-inference consistency.
     """
 
     latents: torch.Tensor
@@ -39,6 +42,7 @@ class TimestepData:
     sigma: torch.Tensor
     sigma_next: torch.Tensor
     timestep_idx: int = 0
+    sigmas: Optional[torch.Tensor] = None
 
     def to_device(self, device: Union[str, "TorchDevice"]) -> "TimestepData":
         """Move all tensors to specified device."""
@@ -53,6 +57,9 @@ class TimestepData:
             if isinstance(self.sigma_next, torch.Tensor)
             else self.sigma_next,
             timestep_idx=self.timestep_idx,
+            sigmas=self.sigmas.to(device)
+            if self.sigmas is not None
+            else None,
         )
 
 
@@ -221,6 +228,7 @@ class BackwardTrainingBatch:
             sigma=self.timesteps[t_idx],
             sigma_next=self.timesteps[t_idx + 1],
             timestep_idx=t_idx,
+            sigmas=self.timesteps,
         )
 
     def get_timestep_data_by_step(self, step_idx: int) -> TimestepData:
@@ -238,6 +246,7 @@ class BackwardTrainingBatch:
             sigma=self.timesteps[pos],
             sigma_next=self.timesteps[pos + 1],
             timestep_idx=int(step_idx),
+            sigmas=self.timesteps,
         )
 
     def slice(self, start: int, end: int) -> "BackwardTrainingBatch":

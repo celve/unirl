@@ -28,6 +28,16 @@ from diffusionrl.types import LogProbData, PromptEmbeddings
 logger = logging.getLogger(__name__)
 
 
+def _save_debug_tensor(base_dir: str, step_idx: int, name: str, tensor: torch.Tensor, rank: int = 0) -> None:
+    """Save a debug tensor to disk. Only rank 0 saves to avoid conflicts."""
+    if rank != 0:
+        return
+    step_dir = os.path.join(base_dir, f"step_{step_idx:03d}")
+    os.makedirs(step_dir, exist_ok=True)
+    path = os.path.join(step_dir, f"{name}.pt")
+    torch.save(tensor.detach().cpu().float(), path)
+
+
 @dataclass
 class _DPMState:
     order: int
@@ -230,6 +240,8 @@ class SD3Sampler(BaseSampler):
         self.scheduler = scheduler
         self.latent_channels = latent_channels
         self.vae_scale_factor = vae_scale_factor
+        # 防止多个sub-batch覆盖同一step的debug tensor（只保留第一个sub-batch的数据）
+        self._debug_dumped_steps: set = set()
 
     @property
     def requires_extra_forward_for_log_prob(self) -> bool:
@@ -346,6 +358,7 @@ class SD3Sampler(BaseSampler):
         max_sequence_length: int = 256,
         init_same_noise: bool = False,
         num_samples_per_prompt: int = 1,
+        debug_output_dir: Optional[str] = None,
         **kwargs,
     ) -> RolloutOutput:
         """
@@ -367,6 +380,8 @@ class SD3Sampler(BaseSampler):
             max_sequence_length: Maximum T5 sequence length
             init_same_noise: Share initial noise across K samples for same prompt (DanceGRPO/MixGRPO)
             num_samples_per_prompt: Number of samples per prompt (for init_same_noise)
+            debug_output_dir: If set, dump per-step SDE tensors to this directory for
+                train-inference consistency debugging.
 
         Returns:
             RolloutOutput with trajectories, log_probs, etc.
@@ -376,8 +391,8 @@ class SD3Sampler(BaseSampler):
 
         device = self._resolve_runtime_device(prompt_embeds, latents)
         # For SD3 with PEFT, always use bfloat16 for inference to match base model
-        # LoRA adapters are float32 but base model is bfloat16
-        dtype = torch.bfloat16
+        # float16 for trajectory (more mantissa bits than bfloat16)
+        dtype = torch.float16
 
         # Encode prompts if needed
         if prompt_embeds is None:
@@ -455,7 +470,7 @@ class SD3Sampler(BaseSampler):
             sigma_next = sigmas[i + 1]
 
             # Create timestep tensor (SD3 uses 0-1000 range)
-            timestep = (sigma * 1000).expand(batch_size).to(dtype=dtype)
+            timestep = (sigma * 1000).expand(batch_size)
 
             # Forward pass with CFG
             with torch.no_grad():
@@ -468,6 +483,13 @@ class SD3Sampler(BaseSampler):
                     negative_prompt_embeds=negative_prompt_embeds,
                     negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
                 )
+
+            # Debug: resolve sampling dump directory
+            # Check explicit arg first, then env var fallback
+            _resolved_debug_dir = debug_output_dir or os.environ.get("DIFFUSIONRL_DEBUG_OUTPUT_DIR")
+            _sampling_debug_dir = None
+            if _resolved_debug_dir is not None:
+                _sampling_debug_dir = os.path.join(_resolved_debug_dir, "sampling")
 
             # Check if this step uses SDE
             if self.sde_type == "dpm2":
@@ -482,18 +504,56 @@ class SD3Sampler(BaseSampler):
                 )
                 latents = latents.to(dtype=dtype)
             elif i in sde_indices:
-                # SDE step with log probability
-                latents, log_prob, _ = sde_step_with_log_prob(
+                # Save pre-step latents for debug before SDE step mutates them
+                _pre_step_latents = latents.clone()
+
+                # SDE step with log probability.
+                # output_dtype=dtype ensures prev_sample is cast to float16 *before*
+                # log_prob is computed, so old_log_prob matches training's new_log_prob
+                # (which also evaluates on float16 trajectory tensors).
+                latents, log_prob, prev_sample_mean = sde_step_with_log_prob(
                     noise_pred=noise_pred,
-                    sample=latents,
+                    sample=_pre_step_latents,
                     sigmas=sigmas,
                     step_index=i,
                     eta=self.eta,
                     generator=generator,
                     sde_type=self.sde_type,
+                    output_dtype=dtype,
                 )
-                # Cast back to bfloat16 (sde_step_with_log_prob uses float32 internally)
-                latents = latents.to(dtype=dtype)
+
+                # Dump debug tensors for this SDE step
+                # 只保存第一个sub-batch的debug tensor，防止后续sub-batch调用sample()时覆盖
+                if _sampling_debug_dir is not None and i not in self._debug_dumped_steps:
+                    self._debug_dumped_steps.add(i)
+                    _save_debug_tensor(_sampling_debug_dir, i, "noise_pred", noise_pred, rank)
+                    _save_debug_tensor(_sampling_debug_dir, i, "latents_input", _pre_step_latents, rank)
+                    _save_debug_tensor(_sampling_debug_dir, i, "latents_output", latents, rank)
+                    _save_debug_tensor(_sampling_debug_dir, i, "prev_sample_mean", prev_sample_mean, rank)
+                    _save_debug_tensor(_sampling_debug_dir, i, "log_prob", log_prob, rank)
+                    _save_debug_tensor(_sampling_debug_dir, i, "sigma", sigma.unsqueeze(0) if sigma.dim() == 0 else sigma, rank)
+                    _save_debug_tensor(_sampling_debug_dir, i, "sigma_next", sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next, rank)
+                    _save_debug_tensor(_sampling_debug_dir, i, "timestep", timestep, rank)
+                    # Save full sigma schedule once at step 0
+                    if i == min(sde_indices):
+                        _save_debug_tensor(_sampling_debug_dir, i, "sigmas_schedule", sigmas, rank)
+                        # Save sde config
+                        if rank == 0:
+                            import json
+                            cfg_path = os.path.join(_sampling_debug_dir, "config.json")
+                            with open(cfg_path, "w") as f:
+                                json.dump({
+                                    "sde_type": self.sde_type,
+                                    "eta": self.eta,
+                                    "shift": self.shift,
+                                    "num_inference_steps": num_inference_steps,
+                                    "guidance_scale": guidance_scale,
+                                    "sde_indices": sorted(sde_indices),
+                                    "batch_size": batch_size,
+                                    "height": height,
+                                    "width": width,
+                                }, f, indent=2)
+
                 log_probs_dict[i] = log_prob
             else:
                 # Deterministic ODE step (no log_prob)
@@ -567,7 +627,8 @@ class SD3Sampler(BaseSampler):
 
         sigma = sigma_schedule[timestep_index]
         sigma_next = sigma_schedule[timestep_index + 1]
-        timestep = (sigma * 1000).expand(batch_size).to(dtype=dtype)
+        # Keep timestep in float32 to avoid reduced-precision loss
+        timestep = (sigma * 1000).expand(batch_size)
 
         prompt_embeds = prompt_embeds.to(device=device, dtype=dtype)
         pooled_prompt_embeds = (

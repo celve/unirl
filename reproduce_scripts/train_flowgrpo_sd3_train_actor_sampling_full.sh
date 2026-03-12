@@ -57,8 +57,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Default values (can be overridden via command line)
 PRETRAINED_MODEL="stabilityai/stable-diffusion-3.5-medium"
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/flowgrpo_sd3_train_sampling"}
-DATA_PATH="${REPO_ROOT}/data/datasets/ocr/train.txt"
-EVAL_DATA_PATH="${REPO_ROOT}/data/datasets/ocr/test.txt"
+DATA_PATH="${REPO_ROOT}/data/datasets/pickscore/train.txt"
+EVAL_DATA_PATH="${REPO_ROOT}/data/datasets/pickscore/test.txt"
 NUM_GPUS=8
 
 # Rollout setttings
@@ -114,7 +114,7 @@ if [ -n "${WANDB_ENTITY}" ]; then
     WANDB_ENTITY_ARGS+=(--rollout.wandb-entity "${WANDB_ENTITY}")
 fi
 
-REWARD_NAME="ocr" # pickscore, ocr, clip, hpsv2
+REWARD_NAME="pickscore" # pickscore, ocr, clip, hpsv2
 REWARD_DEVICE="cuda"
 REWARD_EXECUTION_MODE="rollout" # compute reward during rollout stage
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
@@ -140,7 +140,7 @@ python -m diffusionrl.train \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
     --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 4.5 \
-    --sampling.timestep-fraction 0.1,0.3 \
+    --sampling.timestep-fraction 0.99 \
     \
     --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \

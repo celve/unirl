@@ -57,19 +57,18 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Default values (can be overridden via command line)
 PRETRAINED_MODEL="stabilityai/stable-diffusion-3.5-medium"
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/flowgrpo_sd3_train_sampling"}
-DATA_PATH="${REPO_ROOT}/data/datasets/ocr/train.txt"
-EVAL_DATA_PATH="${REPO_ROOT}/data/datasets/ocr/test.txt"
+DATA_PATH="${REPO_ROOT}/data/datasets/pickscore/train.txt"
 NUM_GPUS=8
 
 # Rollout setttings
 NUM_INFERENCE_STEPS=10 # denoising steps during rollout (sampling) stage.
-NUM_SAMPLES_PER_PROMPT=24 # group size
+NUM_SAMPLES_PER_PROMPT=16 # group size
 PROMPTS_PER_BATCH=48 # number of (unique) prompts per epoch
-DIRECT_SAMPLING_BATCH_SIZE=192 # Actual peak forward batch size during sampling stage.
+DIRECT_SAMPLING_BATCH_SIZE=16 # Actual peak forward batch size during sampling stage.
 
 # Training settings
-GRADIENT_ACCUMULATION_BATCH_SIZE=12 # Actually peak forward/backward batch size during optimization
-MULTI_UPDATE_BATCH_SIZE=72 # Effective batch size for multi-update. Set `prompts_per_batch * num_samples_per_prompt` // NUM_GPUS // n for n updates per epoch
+GRADIENT_ACCUMULATION_BATCH_SIZE=16 # Actually peak forward/backward batch size during optimization
+MULTI_UPDATE_BATCH_SIZE=48 # Effective batch size for multi-update. Set `prompts_per_batch * num_samples_per_prompt` // NUM_GPUS // n for n updates per epoch
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 UPDATE_MODE="multi_update" # multi_update or single_update. single_update for NFT, multi_update for GRPO.
 
@@ -101,8 +100,8 @@ if [ "${NUM_INFERENCE_STEPS}" -lt 2 ]; then
 fi
 
 REPORT_TO_WANDB=true
-WANDB_PROJECT_NAME="diffusionrl-flowgrpo"
-WANDB_RUN_NAME="SD3.5-Flow-GRPO" # change to your own name
+WANDB_PROJECT_NAME="diffusionrl-dancegrpo"
+WANDB_RUN_NAME="SD3.5-Dance-GRPO" # change to your own name
 WANDB_LOG_MEDIA=true
 WANDB_MEDIA_MAX_ITEMS=48 # Max number of image reports per logging step
 WANDB_TAGS="reproduce,sd3.5,flow" # Add more tags as needed, split by comma
@@ -114,12 +113,11 @@ if [ -n "${WANDB_ENTITY}" ]; then
     WANDB_ENTITY_ARGS+=(--rollout.wandb-entity "${WANDB_ENTITY}")
 fi
 
-REWARD_NAME="ocr" # pickscore, ocr, clip, hpsv2
+REWARD_NAME="pickscore" # pickscore, ocr, clip, hpsv2
 REWARD_DEVICE="cuda"
 REWARD_EXECUTION_MODE="rollout" # compute reward during rollout stage
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
-SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-false}
-
+SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
@@ -132,15 +130,14 @@ python -m diffusionrl.train \
     --reward.local-reward-device ${REWARD_DEVICE} \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
-    --eval-data-path "${EVAL_DATA_PATH}" \
     \
-    --sampling.sde-type sde \
-    --sampling.eta 0.7 \
+    --sampling.sde-type "dance" \
+    --sampling.eta 0.3 \
     --sampling.shift 3.0 \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
     --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 4.5 \
-    --sampling.timestep-fraction 0.1,0.3 \
+    --sampling.timestep-fraction 0.6 \
     \
     --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
@@ -149,9 +146,9 @@ python -m diffusionrl.train \
     --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.use-per-prompt-stat-tracker true \
     --algorithm.use-running-stats true \
-    --algorithm.use-global-std true \
+    --algorithm.use-global-std false \
     --algorithm.clip-range 1e-4 \
-    --algorithm.use-kl-penalty true \
+    --algorithm.use-kl-penalty false \
     --algorithm.kl-coef 0.04 \
     --algorithm.advantage-type per_prompt \
     --algorithm.per-prompt-buffer-size 10000 \

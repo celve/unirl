@@ -59,6 +59,7 @@ class SDEStrategy(ABC):
         prev_sample: Optional[torch.Tensor] = None,
         generator: Optional[torch.Generator] = None,
         sigma_max: float = 1.0,
+        output_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Sampling step with log probability.
 
@@ -72,9 +73,12 @@ class SDEStrategy(ABC):
             prev_sample: Pre-computed previous sample (for training)
             generator: Random number generator
             sigma_max: Maximum sigma
+            output_dtype: If set, cast prev_sample to this dtype before
+                computing log_prob, so the log-prob is evaluated on the
+                exact precision that will be stored in the trajectory.
 
         Returns:
-            prev_sample: Next sample x_{t-1}
+            prev_sample: Next sample x_{t-1} (in output_dtype if specified)
             log_prob: [B, C, ...] element-wise log probability (before spatial mean)
             prev_sample_mean: [B, C, ...] SDE mean
         """
@@ -150,18 +154,18 @@ class FlowSDEStrategy(SDEStrategy):
         prev_sample: Optional[torch.Tensor] = None,
         generator: Optional[torch.Generator] = None,
         sigma_max: float = 1.0,
+        output_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         from diffusers.utils.torch_utils import randn_tensor
 
         device = noise_pred.device
-        sigma_safe = sigma.clamp(min=1e-8)
         std_dev_t = torch.sqrt(
-            sigma_safe / (1 - torch.where(sigma == 1, sigma_max, sigma_safe))
+            sigma / (1 - torch.where(sigma == 1, sigma_max, sigma))
         ) * eta
 
         prev_sample_mean = (
-            sample * (1 + std_dev_t**2 / (2 * sigma_safe) * dt) +
-            noise_pred * (1 + std_dev_t**2 * (1 - sigma) / (2 * sigma_safe)) * dt
+            sample * (1 + std_dev_t**2 / (2 * sigma) * dt) +
+            noise_pred * (1 + std_dev_t**2 * (1 - sigma) / (2 * sigma)) * dt
         )
 
         if prev_sample is None:
@@ -170,10 +174,15 @@ class FlowSDEStrategy(SDEStrategy):
             )
             prev_sample = prev_sample_mean + std_dev_t * torch.sqrt(-dt) * noise
 
-        variance = (std_dev_t * torch.sqrt(-dt)) ** 2 + 1e-12
-        std_term = std_dev_t * torch.sqrt(-dt) + 1e-12
+        # Cast prev_sample to storage dtype before computing log_prob,
+        # so old_log_prob (sampling) matches new_log_prob (training).
+        if output_dtype is not None and output_dtype != prev_sample.dtype:
+            prev_sample = prev_sample.to(dtype=output_dtype)
+
+        variance = (std_dev_t * torch.sqrt(-dt)) ** 2
+        std_term = std_dev_t * torch.sqrt(-dt)
         log_prob = (
-            -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * variance)
+            -((prev_sample.detach().float() - prev_sample_mean) ** 2) / (2 * variance)
             - torch.log(std_term)
             - 0.5 * math.log(2 * math.pi)
         )
@@ -215,6 +224,7 @@ class CPSSDEStrategy(SDEStrategy):
         prev_sample: Optional[torch.Tensor] = None,
         generator: Optional[torch.Generator] = None,
         sigma_max: float = 1.0,
+        output_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         from diffusers.utils.torch_utils import randn_tensor
 
@@ -233,7 +243,11 @@ class CPSSDEStrategy(SDEStrategy):
             )
             prev_sample = prev_sample_mean + std_dev_t * noise
 
-        log_prob = -((prev_sample.detach() - prev_sample_mean) ** 2)
+        # Cast prev_sample to storage dtype before computing log_prob
+        if output_dtype is not None and output_dtype != prev_sample.dtype:
+            prev_sample = prev_sample.to(dtype=output_dtype)
+
+        log_prob = -((prev_sample.detach().float() - prev_sample_mean) ** 2)
         return prev_sample, log_prob, prev_sample_mean
 
 
@@ -252,19 +266,19 @@ class DanceSDEStrategy(SDEStrategy):
         sigma_max: Optional[float] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         dsigma = sigma_next - sigma
-        delta_t = (sigma - sigma_next).clamp(min=1e-12)
+        delta_t = sigma - sigma_next
         std_dev_t = eta * torch.sqrt(delta_t)
 
         pred_original = sample - sigma * noise_pred
         prev_sample_mean = sample + dsigma * noise_pred
 
-        score_estimate = -(sample - pred_original * (1 - sigma)) / (sigma**2 + 1e-12)
+        score_estimate = -(sample - pred_original * (1 - sigma)) / (sigma**2)
         log_term = -0.5 * (eta**2) * score_estimate
         prev_sample_mean = prev_sample_mean + log_term * dsigma
 
         log_prob = (
-            -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * std_dev_t**2 + 1e-12)
-            - torch.log(std_dev_t + 1e-12)
+            -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * std_dev_t**2)
+            - torch.log(std_dev_t)
             - 0.5 * math.log(2 * math.pi)
         )
         return log_prob, prev_sample_mean
@@ -280,18 +294,19 @@ class DanceSDEStrategy(SDEStrategy):
         prev_sample: Optional[torch.Tensor] = None,
         generator: Optional[torch.Generator] = None,
         sigma_max: float = 1.0,
+        output_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         from diffusers.utils.torch_utils import randn_tensor
 
         device = noise_pred.device
         dsigma = sigma_next - sigma
-        delta_t = (sigma - sigma_next).clamp(min=1e-12)
+        delta_t = sigma - sigma_next
         std_dev_t = eta * torch.sqrt(delta_t)
 
         pred_original = sample - sigma * noise_pred
         prev_sample_mean = sample + dsigma * noise_pred
 
-        score_estimate = -(sample - pred_original * (1 - sigma)) / (sigma**2 + 1e-12)
+        score_estimate = -(sample - pred_original * (1 - sigma)) / sigma**2
         log_term = -0.5 * (eta**2) * score_estimate
         prev_sample_mean = prev_sample_mean + log_term * dsigma
 
@@ -301,9 +316,13 @@ class DanceSDEStrategy(SDEStrategy):
             )
             prev_sample = prev_sample_mean + std_dev_t * noise
 
+        # Cast prev_sample to storage dtype before computing log_prob
+        if output_dtype is not None and output_dtype != prev_sample.dtype:
+            prev_sample = prev_sample.to(dtype=output_dtype)
+
         log_prob = (
-            -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * std_dev_t**2 + 1e-12)
-            - torch.log(std_dev_t + 1e-12)
+            -((prev_sample.detach().float() - prev_sample_mean) ** 2) / (2 * std_dev_t**2)
+            - torch.log(std_dev_t)
             - 0.5 * math.log(2 * math.pi)
         )
         return prev_sample, log_prob, prev_sample_mean

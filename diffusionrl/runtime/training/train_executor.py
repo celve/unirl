@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from functools import partial
 import tqdm as tqdm_
 tqdm = partial(tqdm_.tqdm, dynamic_ncols=True)
@@ -285,11 +286,15 @@ class TrainExecutor:
                 "lr": self._current_lr(),
                 "num_timesteps_trained": num_timesteps,
                 "mini_batches_per_update": actual_mini_batches,
+                "has_backward": has_backward,
                 **all_metrics,
             }
             inner_metrics.append(step_metrics)
 
         metrics = aggregate_numeric_metrics(inner_metrics)
+        # Filter out per-timestep metrics (t{N}_...) from aggregated output;
+        # these are exposed only via _per_optimizer_step_metrics for train/ namespace.
+        metrics = {k: v for k, v in metrics.items() if not re.match(r"^t\d+_", k)}
         metrics.update(
             {
                 "rollout_id": rollout_id,
@@ -305,4 +310,5 @@ class TrainExecutor:
                 "optimizer_steps": optimizer_steps,
             }
         )
+        metrics["_per_optimizer_step_metrics"] = inner_metrics
         return metrics
