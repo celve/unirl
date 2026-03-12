@@ -74,6 +74,8 @@ REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-ocr}
 REWARD_EXECUTION_MODE=${REWARD_EXECUTION_MODE:-rollout}
 LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cpu}
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-8}
+SHUFFLE_SEED=${SHUFFLE_SEED:-42}
+SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 DIRECT_SAMPLING_BATCH_SIZE=${DIRECT_SAMPLING_BATCH_SIZE:-${ROLLOUT_TOTAL_SAMPLES}}
 UPDATE_MODE=${UPDATE_MODE:-multi_update}
@@ -110,6 +112,7 @@ python -m diffusionrl.train \
     --sampling.guidance-scale 3.5 \
     --sampling.timestep-fraction 0.6 \
     \
+    --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
     "${GRADIENT_ACCUMULATION_ARGS[@]}" \
     --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \

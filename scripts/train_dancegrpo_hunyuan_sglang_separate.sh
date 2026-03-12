@@ -47,6 +47,8 @@ REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardWorker"}
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
 REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
+SHUFFLE_SEED=${SHUFFLE_SEED:-42}
+SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 
 if [ ! -f "${DATA_PATH}" ]; then
     echo "ERROR: DATA_PATH not found: ${DATA_PATH}"
@@ -86,6 +88,7 @@ python -m diffusionrl.train \
     --sampling.timestep-fraction 0.6 \
     --sampling.init-same-noise true \
     \
+    --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
     "${GRADIENT_ACCUMULATION_ARGS[@]}" \
     --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \

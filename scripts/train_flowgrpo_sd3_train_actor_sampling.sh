@@ -106,6 +106,8 @@ WANDB_MEDIA_MAX_ITEMS=${WANDB_MEDIA_MAX_ITEMS:-16}
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-pickscore}
 REWARD_EXECUTION_MODE=${REWARD_EXECUTION_MODE:-rollout}
 LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cuda}
+SHUFFLE_SEED=${SHUFFLE_SEED:-42}
+SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 LOGGING_STEPS=1
 
 python -m diffusionrl.train \
@@ -128,6 +130,7 @@ python -m diffusionrl.train \
     --sampling.guidance-scale 1.0 \
     --sampling.timestep-fraction 0.99 \
     \
+    --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
     "${GRADIENT_ACCUMULATION_ARGS[@]}" \
     --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \

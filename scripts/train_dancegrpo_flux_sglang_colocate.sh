@@ -51,6 +51,8 @@ LORA_ALPHA=${LORA_ALPHA:-32}
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
 REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
+SHUFFLE_SEED=${SHUFFLE_SEED:-42}
+SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 
 if [ $(( NUM_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: NUM_GPUS*BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
@@ -78,6 +80,7 @@ python -m diffusionrl.train \
     --sampling.guidance-scale 3.5 \
     --sampling.timestep-fraction 0.6 \
     \
+    --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
     --training.gradient-accumulation-batch-size ${BATCH_SIZE} \
     --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \

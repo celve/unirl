@@ -55,6 +55,8 @@ class TrainExecutorConfig:
     nft_timestep_mode: str
     nft_shuffle_timesteps: bool
     nft_apply_shift: bool
+    shuffle_samples: bool = True
+    shuffle_seed: Optional[int] = None
     clip_grad_norm_fn: Optional[Callable[..., Any]] = None
 
 
@@ -227,8 +229,47 @@ class TrainExecutor:
             "skipped": True,
         }
 
+    def _shuffle_batch(self, batch: TrainingBatch, rollout_id: int) -> TrainingBatch:
+        """Shuffle samples in the training batch before optimization.
+
+        Analogous to Flow-Factory's per-inner-epoch shuffle: applies a
+        deterministic permutation (seeded by shuffle_seed + rollout_id) to
+        all sample-level tensors so that mini-batch composition varies
+        across rollouts.  All ranks derive the identical permutation from
+        the same seed, preserving distributed consistency.
+
+        Args:
+            batch: Typed training batch (Backward or Forward).
+            rollout_id: Current rollout iteration, mixed into the RNG seed
+                        for reproducible yet varying permutations.
+
+        Returns:
+            A new TrainingBatch with shuffled sample order.
+        """
+        batch_size = batch.batch_size
+        if batch_size <= 1:
+            return batch
+
+        # Build a deterministic generator from (shuffle_seed, rollout_id)
+        # so that every rank produces the same permutation.
+        g = torch.Generator()
+        seed = self.config.shuffle_seed if self.config.shuffle_seed is not None else 42
+        g.manual_seed(seed + rollout_id)
+        perm = torch.randperm(batch_size, generator=g)
+
+        logger.info(
+            "Shuffling %d samples before training (rollout_id=%d, seed=%d)",
+            batch_size, rollout_id, seed + rollout_id,
+        )
+        return batch.shuffle(perm)
+
     def execute_prepared_batch(self, *, rollout_id: int, batch: TrainingBatch) -> Dict[str, Any]:
         """Run optimization on a pre-validated, on-device typed batch."""
+        # Shuffle samples before training to break ordering bias,
+        # analogous to Flow-Factory's inner-epoch shuffle.
+        if self.config.shuffle_samples:
+            batch = self._shuffle_batch(batch, rollout_id)
+
         inner_metrics: List[Dict[str, Any]] = []
         total_timesteps = 0
         last_mini_batches_per_update = 1

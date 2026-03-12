@@ -271,6 +271,41 @@ class BackwardTrainingBatch:
             target_sde_indices=self.target_sde_indices,
         )
 
+    def shuffle(self, indices: torch.Tensor) -> "BackwardTrainingBatch":
+        """
+        Shuffle (reindex) batch along sample dimension.
+
+        This is analogous to Flow-Factory's per-inner-epoch shuffle before
+        training: it permutes all sample-level tensors (trajectories,
+        log_probs, advantages, embeddings, rewards, prompts) using the
+        given index permutation, while keeping shared fields (timesteps,
+        step_indices, target_sde_indices, num_steps) unchanged.
+
+        Args:
+            indices: 1-D LongTensor permutation of [0, batch_size)
+                     (e.g. from torch.randperm(batch_size))
+
+        Returns:
+            New BackwardTrainingBatch with shuffled sample order
+        """
+        return BackwardTrainingBatch(
+            trajectories=self.trajectories[indices],
+            log_probs=self.log_probs.reindex(indices),
+            timesteps=self.timesteps,
+            advantages=self.advantages[indices],
+            embeddings=self.embeddings.reindex(indices),
+            rewards=self.rewards[indices] if self.rewards is not None else None,
+            prompts=(
+                [self.prompts[i] for i in indices.tolist()]
+                if self.prompts is not None
+                else None
+            ),
+            num_steps=self.num_steps,
+            is_partitioned=self.is_partitioned,
+            step_indices=self.step_indices,
+            target_sde_indices=self.target_sde_indices,
+        )
+
     def to_loss_dict(self) -> Dict[str, Any]:
         """
         Convert to dictionary format for loss interfaces.
@@ -371,6 +406,34 @@ class ForwardTrainingBatch:
             prompts=self.prompts[start:end] if self.prompts is not None else None,
             timesteps=self.timesteps if self.timesteps is not None else None,
             is_partitioned=True,
+        )
+
+    def shuffle(self, indices: torch.Tensor) -> "ForwardTrainingBatch":
+        """
+        Shuffle (reindex) batch along sample dimension.
+
+        Permutes all sample-level tensors using the given index permutation,
+        while keeping shared fields (timesteps) unchanged.
+
+        Args:
+            indices: 1-D LongTensor permutation of [0, batch_size)
+                     (e.g. from torch.randperm(batch_size))
+
+        Returns:
+            New ForwardTrainingBatch with shuffled sample order
+        """
+        return ForwardTrainingBatch(
+            clean_latents=self.clean_latents[indices],
+            advantages=self.advantages[indices],
+            embeddings=self.embeddings.reindex(indices),
+            rewards=self.rewards[indices] if self.rewards is not None else None,
+            prompts=(
+                [self.prompts[i] for i in indices.tolist()]
+                if self.prompts is not None
+                else None
+            ),
+            timesteps=self.timesteps,
+            is_partitioned=self.is_partitioned,
         )
 
     def to_loss_dict(self) -> Dict[str, Any]:

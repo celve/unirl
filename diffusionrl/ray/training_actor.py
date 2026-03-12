@@ -99,6 +99,9 @@ class TrainingActor(BaseTrainRayActor):
         self._nft_timestep_mode = "random"  # random or all
         self._nft_shuffle_timesteps = True
         self._nft_apply_shift = False
+        # Sample-level shuffle before training (analogous to Flow-Factory inner-epoch shuffle)
+        self._shuffle_samples = True
+        self._shuffle_seed: Optional[int] = None
 
         # Training config (read from config in init)
         self._max_grad_norm = 1.0
@@ -491,6 +494,8 @@ class TrainingActor(BaseTrainRayActor):
         "ema_uphold",
         "old_adapter_name",
         "new_adapter_name",
+        "shuffle_samples",
+        "shuffle_seed",
     }
 
     @classmethod
@@ -570,6 +575,9 @@ class TrainingActor(BaseTrainRayActor):
         self._nft_timestep_mode = str(runtime_loss_kwargs.get("nft_timestep_mode", "random"))
         self._nft_shuffle_timesteps = bool(runtime_loss_kwargs.get("nft_shuffle_timesteps", True))
         self._nft_apply_shift = bool(runtime_loss_kwargs.get("nft_apply_shift", False))
+        self._shuffle_samples = bool(runtime_loss_kwargs.get("shuffle_samples", True))
+        raw_shuffle_seed = runtime_loss_kwargs.get("shuffle_seed", None)
+        self._shuffle_seed = int(raw_shuffle_seed) if raw_shuffle_seed is not None else None
         self._ema_decay = float(runtime_loss_kwargs.get("ema_decay", 0.001))
         self._use_ema = bool(runtime_loss_kwargs.get("use_ema", self._loss_type == "nft"))
         ema_decay_type = str(runtime_loss_kwargs.get("decay_type", "constant"))
@@ -728,6 +736,8 @@ class TrainingActor(BaseTrainRayActor):
             nft_timestep_mode=self._nft_timestep_mode,
             nft_shuffle_timesteps=self._nft_shuffle_timesteps,
             nft_apply_shift=self._nft_apply_shift,
+            shuffle_samples=self._shuffle_samples,
+            shuffle_seed=self._shuffle_seed,
             clip_grad_norm_fn=(
                 (lambda *, model, max_grad_norm: self._train_backend.clip_grad_norm(
                     self,

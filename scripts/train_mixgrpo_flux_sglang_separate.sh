@@ -59,6 +59,8 @@ REPLAY_SAMPLER_PATH=${REPLAY_SAMPLER_PATH:-diffusionrl.samplers.fsdp.flux_sample
 # Reward
 REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward_aggr}
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-hpsv2}
+SHUFFLE_SEED=${SHUFFLE_SEED:-42}
+SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 
 # Training
 UPDATE_MODE=${UPDATE_MODE:-multi_update}
@@ -91,6 +93,7 @@ python -m diffusionrl.train \
     --sampling.num-inference-steps 25 \
     --sampling.guidance-scale 3.5 \
     \
+    --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --sampling.sde-ratio 0.16 \
     --algorithm.window.timestep-strategy window \
     --algorithm.window.window-strategy progressive \
