@@ -108,6 +108,8 @@ class NFTLoss:
             "ema_flat_steps",
             "ema_uprate",
             "ema_uphold",
+            "shuffle_samples",
+            "shuffle_seed",
         }
         unknown = sorted(key for key in extra.keys() if key not in known_keys and key not in runtime_only_keys)
         if unknown:

@@ -97,6 +97,8 @@ REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward_aggr}
 REWARD_EXECUTION_MODE=${REWARD_EXECUTION_MODE:-rollout}
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-hpsv2}
 LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cuda}
+SHUFFLE_SEED=${SHUFFLE_SEED:-42}
+SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 
 # Training
 if [ $(( ROLLOUT_TOTAL_SAMPLES % NUM_GPUS )) -ne 0 ]; then
@@ -129,6 +131,7 @@ python -m diffusionrl.train \
     --sampling.num-inference-steps 25 \
     --sampling.guidance-scale 3.5 \
     \
+    --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --sampling.sde-ratio 0.16 \
     --algorithm.window.timestep-strategy window \
     --algorithm.window.window-strategy progressive \

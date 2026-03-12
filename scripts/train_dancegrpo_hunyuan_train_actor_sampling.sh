@@ -129,6 +129,8 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-dancegrpo_hunyuan_train_actor_sampling}
 
 # FSDP configuration
 FSDP_CPU_OFFLOAD=${FSDP_CPU_OFFLOAD:-"false"}
+SHUFFLE_SEED=${SHUFFLE_SEED:-42}
+SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 
 # Note: shell-level path existence check removed. The Python-level fallback in
 # arguments.py handles missing local paths by falling back to HuggingFace IDs.
@@ -197,7 +199,7 @@ python -m diffusionrl.train \
     --sampling.timestep-fraction 0.6 \
     --sampling.init-same-noise true \
     \
-    `# ===== GRPO Algorithm =====` \
+    --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
     "${GRADIENT_ACCUMULATION_ARGS[@]}" \
     --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \

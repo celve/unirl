@@ -76,6 +76,18 @@ class LogProbData:
         """
         return LogProbData(data={k: v[start:end] for k, v in self.data.items()})
 
+    def reindex(self, indices: torch.Tensor) -> "LogProbData":
+        """
+        Reindex log probabilities along batch dimension using a permutation tensor.
+
+        Args:
+            indices: 1-D LongTensor of sample indices (e.g. from torch.randperm)
+
+        Returns:
+            New LogProbData with reindexed tensors
+        """
+        return LogProbData(data={k: v[indices] for k, v in self.data.items()})
+
     def to_device(self, device: Union[str, "TorchDevice"]) -> "LogProbData":
         """Move all tensors to specified device."""
         return LogProbData(data={k: v.to(device) for k, v in self.data.items()})
@@ -188,6 +200,40 @@ class PromptEmbeddings:
             ),
             text_ids=_slice_if_batched(self.text_ids),
             image_ids=_slice_if_batched(self.image_ids),
+        )
+
+    def reindex(self, indices: torch.Tensor) -> "PromptEmbeddings":
+        """
+        Reindex embeddings along batch dimension using a permutation tensor.
+
+        For FLUX models, image_ids are NOT batched (shared across batch)
+        and are kept as-is.
+
+        Args:
+            indices: 1-D LongTensor of sample indices (e.g. from torch.randperm)
+
+        Returns:
+            New PromptEmbeddings with reindexed tensors
+        """
+        batch_size = self.prompt_embeds.shape[0]
+
+        def _reindex_if_batched(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+            if tensor is None:
+                return None
+            if tensor.shape[0] == batch_size:
+                return tensor[indices]
+            return tensor
+
+        return PromptEmbeddings(
+            prompt_embeds=self.prompt_embeds[indices],
+            pooled_prompt_embeds=_reindex_if_batched(self.pooled_prompt_embeds),
+            encoder_attention_mask=_reindex_if_batched(self.encoder_attention_mask),
+            negative_prompt_embeds=_reindex_if_batched(self.negative_prompt_embeds),
+            negative_pooled_prompt_embeds=_reindex_if_batched(
+                self.negative_pooled_prompt_embeds
+            ),
+            text_ids=_reindex_if_batched(self.text_ids),
+            image_ids=_reindex_if_batched(self.image_ids),
         )
 
 
