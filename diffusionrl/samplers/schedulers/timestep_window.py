@@ -14,7 +14,7 @@ Based on: MixGRPO/fastvideo/utils/grpo_states.py
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Literal, Optional, Set, Dict, Any, Type
+from typing import List, Literal, Optional, Set, Dict, Any, Tuple, Type, Union
 
 import numpy as np
 
@@ -112,33 +112,73 @@ class TimestepScheduler(ABC):
         self.num_timesteps = state_dict.get("num_timesteps", self.num_timesteps)
 
 
+def _normalize_timestep_fraction(
+    timestep_fraction: Union[float, Tuple[float, float], List[float]],
+) -> Tuple[float, float]:
+    """Normalize timestep_fraction to a (start, end) tuple.
+
+    Supports:
+    - Single float x  -> (0.0, x)
+    - Tuple/list (x, y) -> (x, y)
+
+    Returns:
+        (start_fraction, end_fraction) both in [0.0, 1.0], start <= end.
+    """
+    if isinstance(timestep_fraction, (list, tuple)):
+        if len(timestep_fraction) != 2:
+            raise ValueError(
+                f"timestep_fraction tuple must have exactly 2 elements, got {len(timestep_fraction)}"
+            )
+        start, end = float(timestep_fraction[0]), float(timestep_fraction[1])
+    else:
+        start, end = 0.0, float(timestep_fraction)
+    if not (0.0 <= start <= 1.0) or not (0.0 <= end <= 1.0):
+        raise ValueError(
+            f"timestep_fraction values must be in [0.0, 1.0], got ({start}, {end})"
+        )
+    if start > end:
+        raise ValueError(
+            f"timestep_fraction start ({start}) must be <= end ({end})"
+        )
+    return (start, end)
+
+
 class AllSDEScheduler(TimestepScheduler):
     """
     All SDE scheduler (standard GRPO) with optional timestep_fraction (DanceGRPO).
 
     When timestep_fraction=1.0 (default): All timesteps use SDE sampling.
-    When timestep_fraction<1.0: Only the first fraction of timesteps use SDE.
+    When timestep_fraction<1.0 (single float): Only the first fraction of timesteps use SDE.
+    When timestep_fraction=(x, y) (tuple): Only timesteps in [x, y) fraction range use SDE.
 
     This implements DanceGRPO's timestep_fraction parameter which restricts
-    training to early timesteps (e.g., timestep_fraction=0.6 trains on first 60%
-    of timesteps only).
+    training to a subset of timesteps (e.g., timestep_fraction=0.6 trains on
+    first 60% of timesteps; timestep_fraction=(0.2, 0.8) trains on 20%-80%).
     """
 
-    def __init__(self, num_timesteps: int, timestep_fraction: float = 1.0):
+    def __init__(
+        self,
+        num_timesteps: int,
+        timestep_fraction: Union[float, Tuple[float, float]] = 1.0,
+    ):
         """
         Initialize AllSDE scheduler.
 
         Args:
             num_timesteps: Total number of denoising timesteps
-            timestep_fraction: Fraction of timesteps to train (1.0 = all, 0.6 = first 60%)
+            timestep_fraction: Fraction of timesteps to train.
+                Single float x means [0, x) range (backward compatible).
+                Tuple (x, y) means [x, y) range.
         """
         super().__init__(num_timesteps)
         self.timestep_fraction = timestep_fraction
-        self._effective_timesteps = int(num_timesteps * timestep_fraction)
+        self._fraction_start, self._fraction_end = _normalize_timestep_fraction(timestep_fraction)
+        self._effective_start = int(num_timesteps * self._fraction_start)
+        self._effective_end = int(num_timesteps * self._fraction_end)
 
     def get_sde_indices(self, step: Optional[int] = None) -> Set[int]:
-        """Return first fraction of timesteps."""
-        return set(range(self._effective_timesteps))
+        """Return timestep indices in [start, end) fraction range."""
+        return set(range(self._effective_start, self._effective_end))
 
     def update(self, step: int) -> None:
         """No-op for all SDE scheduler."""
@@ -154,8 +194,11 @@ class AllSDEScheduler(TimestepScheduler):
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         """Load scheduler state from checkpoint."""
         super().load_state_dict(state_dict)
-        self.timestep_fraction = state_dict.get("timestep_fraction", 1.0)
-        self._effective_timesteps = int(self.num_timesteps * self.timestep_fraction)
+        raw = state_dict.get("timestep_fraction", 1.0)
+        self.timestep_fraction = raw
+        self._fraction_start, self._fraction_end = _normalize_timestep_fraction(raw)
+        self._effective_start = int(self.num_timesteps * self._fraction_start)
+        self._effective_end = int(self.num_timesteps * self._fraction_end)
 
 
 class WindowScheduler(TimestepScheduler):
@@ -360,7 +403,7 @@ SCHEDULER_REGISTRY: Dict[str, Type[TimestepScheduler]] = {
 def get_scheduler(
     scheduler_type: str,
     num_timesteps: int,
-    timestep_fraction: float = 1.0,
+    timestep_fraction: Union[float, Tuple[float, float]] = 1.0,
     **kwargs: Any,
 ) -> TimestepScheduler:
     """
@@ -369,7 +412,9 @@ def get_scheduler(
     Args:
         scheduler_type: Type of scheduler ("all", "window")
         num_timesteps: Total number of denoising timesteps
-        timestep_fraction: Fraction of timesteps to train (DanceGRPO: 0.6)
+        timestep_fraction: Fraction of timesteps to train.
+            Single float x: SDE on [0, x) range (e.g. 0.6 = first 60%).
+            Tuple (x, y): SDE on [x, y) range (e.g. (0.2, 0.8) = 20%-80%).
         **kwargs: Additional arguments for scheduler/config
 
     Returns:
@@ -381,6 +426,9 @@ def get_scheduler(
 
         # All SDE with timestep_fraction (DanceGRPO)
         scheduler = get_scheduler("all", num_timesteps=50, timestep_fraction=0.6)
+
+        # All SDE with interval timestep_fraction
+        scheduler = get_scheduler("all", num_timesteps=50, timestep_fraction=(0.2, 0.8))
 
         # Window scheduler (MixGRPO)
         scheduler = get_scheduler(
