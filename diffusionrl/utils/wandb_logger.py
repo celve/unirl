@@ -59,6 +59,7 @@ class GRPOCoreWandBLogger:
         image_log_interval: int = 10,
         enabled: bool = True,
         tags: Optional[List[str]] = None,
+        entity: Optional[str] = None,
     ):
         """Initialize WandB logger.
 
@@ -71,9 +72,11 @@ class GRPOCoreWandBLogger:
             image_log_interval: How often to log images (in rollouts)
             enabled: Whether to enable logging
             tags: List of tags for the WandB run. Defaults to ['diffusionrl-reproduce'] if not provided.
+            entity: WandB entity (team or username). If None, uses the default entity.
         """
         self.project = project
         self.run_name = run_name
+        self.entity = entity
         self.log_dir = str(log_dir) if log_dir else None
         self.image_log_interval = image_log_interval
         self.rank = rank
@@ -103,13 +106,16 @@ class GRPOCoreWandBLogger:
             if self.log_dir:
                 os.makedirs(self.log_dir, exist_ok=True)
 
-            wandb.init(
+            init_kwargs = dict(
                 project=self.project,
                 name=self.run_name,
                 config=config_dict,
                 dir=self.log_dir,
                 tags=self.tags,
             )
+            if self.entity:
+                init_kwargs["entity"] = self.entity
+            wandb.init(**init_kwargs)
             self._init_metric_axes()
             self._initialized = True
         except Exception as e:
@@ -399,6 +405,7 @@ def init_logger(
     log_dir: Optional[str] = None,
     rank: int = 0,
     tags: Optional[List[str]] = None,
+    entity: Optional[str] = None,
     **kwargs,
 ) -> GRPOCoreWandBLogger:
     """Initialize and set the global wandb logger.
@@ -409,6 +416,7 @@ def init_logger(
         config: Training configuration
         rank: Process rank
         tags: List of tags for the WandB run. Defaults to ['diffusionrl-reproduce'] if not provided.
+        entity: WandB entity (team or username). If None, uses the default entity.
         **kwargs: Additional arguments for GRPOCoreWandBLogger
 
     Returns:
@@ -422,6 +430,7 @@ def init_logger(
         log_dir=log_dir,
         rank=rank,
         tags=tags,
+        entity=entity,
         **kwargs,
     )
     return _global_logger

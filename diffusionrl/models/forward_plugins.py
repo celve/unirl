@@ -123,7 +123,7 @@ class BaseForwardPlugin(ABC):
         sigma: torch.Tensor,
         batch_size: int,
         device: torch.device,
-        dtype: torch.dtype,
+        dtype: torch.dtype = torch.float32,
     ) -> torch.Tensor:
         """Prepare timestep tensor from sigma."""
         if sigma.dim() == 0:
@@ -158,7 +158,7 @@ class FluxForwardPlugin(BaseForwardPlugin):
         device = latents.device
         dtype = prompt_embeds.dtype
 
-        timestep = self._prepare_timestep(sigma, batch_size, device, dtype)
+        timestep = self._prepare_timestep(sigma, batch_size, device)
 
         # FLUX requires guidance tensor
         guidance_tensor = torch.tensor(
@@ -253,7 +253,8 @@ class SD3ForwardPlugin(BaseForwardPlugin):
         batch_size = latents.shape[0]
         device = latents.device
         dtype = prompt_embeds.dtype
-        timestep = self._prepare_timestep(sigma, batch_size, device, dtype) * 1000
+        # Keep timestep in float32 to avoid bfloat16 precision loss
+        timestep = self._prepare_timestep(sigma, batch_size, device) * 1000
         model_kwargs: Dict[str, Any] = {
             "hidden_states": latents.to(dtype),
             "encoder_hidden_states": prompt_embeds,
@@ -290,7 +291,7 @@ class SD3ForwardPlugin(BaseForwardPlugin):
         device = latents.device
         dtype = prompt_embeds.dtype
 
-        timestep = self._prepare_timestep(sigma, batch_size, device, dtype)
+        timestep = self._prepare_timestep(sigma, batch_size, device)
         timestep_1000 = timestep * 1000
 
         if guidance_scale > 1.0:
@@ -390,7 +391,7 @@ class HunyuanForwardPlugin(BaseForwardPlugin):
                 device=device,
                 dtype=torch.long,
             )
-        timestep_1000 = self._prepare_timestep(sigma, batch_size, device, dtype) * 1000
+        timestep_1000 = self._prepare_timestep(sigma, batch_size, device) * 1000
         guidance = torch.tensor(
             [self.GUIDANCE_VALUE], device=device, dtype=dtype
         )
@@ -462,7 +463,7 @@ class MochiForwardPlugin(BaseForwardPlugin):
         batch_size = latents.shape[0]
         device = latents.device
         dtype = prompt_embeds.dtype
-        timestep_1000 = self._prepare_timestep(sigma, batch_size, device, dtype) * 1000
+        timestep_1000 = self._prepare_timestep(sigma, batch_size, device) * 1000
         model_kwargs: Dict[str, Any] = {
             "hidden_states": latents.to(dtype),
             "encoder_hidden_states": prompt_embeds,
@@ -497,7 +498,7 @@ class MochiForwardPlugin(BaseForwardPlugin):
         batch_size = latents.shape[0]
         device = latents.device
         dtype = prompt_embeds.dtype
-        timestep_1000 = self._prepare_timestep(sigma, batch_size, device, dtype) * 1000
+        timestep_1000 = self._prepare_timestep(sigma, batch_size, device) * 1000
 
         if guidance_scale > 1.0:
             uncond_embeds = (
@@ -562,7 +563,8 @@ class DefaultForwardPlugin(BaseForwardPlugin):
         batch_size = latents.shape[0]
         device = latents.device
         dtype = prompt_embeds.dtype
-        timestep = self._prepare_timestep(sigma, batch_size, device, dtype) * 1000
+        # Keep timestep in float32 to avoid bfloat16 precision loss
+        timestep = self._prepare_timestep(sigma, batch_size, device) * 1000
         model_kwargs: Dict[str, Any] = {
             "hidden_states": latents.to(dtype),
             "encoder_hidden_states": prompt_embeds,
@@ -595,7 +597,7 @@ class DefaultForwardPlugin(BaseForwardPlugin):
         device = latents.device
         dtype = prompt_embeds.dtype
 
-        timestep = self._prepare_timestep(sigma, batch_size, device, dtype)
+        timestep = self._prepare_timestep(sigma, batch_size, device) # Keep timestep as float32
 
         # Try SD3-style interface (timestep * 1000)
         try:

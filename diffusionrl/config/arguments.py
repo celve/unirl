@@ -545,6 +545,8 @@ class RolloutLoggingConfig:
         metadata={"help": "Maximum generated media items to log per rollout when wandb_log_media=true"})
     wandb_tags: Optional[str] = field(default=None,
         metadata={"help": "Comma-separated tags for WandB run (e.g. 'exp1,baseline'). Defaults to 'diffusionrl-reproduce' if not set."})
+    wandb_entity: Optional[str] = field(default=None,
+        metadata={"help": "WandB entity (team or username). If not set, uses the default entity of the logged-in user."})
 
     def validate(self) -> None:
         if self.num_rollout < 1:
@@ -588,6 +590,9 @@ class DebugConfig:
         metadata={"help": "If >0, keep only first N samples when loading debug payload in train_only mode"})
     debug_print_tensor_stats: bool = field(default=True,
         metadata={"help": "Print per-stage tensor statistics in rollout debug tracing"})
+    debug_output_dir: Optional[str] = field(default=None,
+        metadata={"help": "Directory to dump per-step SDE tensors for train-inference consistency debugging. "
+                          "Sampling tensors saved to <dir>/sampling/, training tensors to <dir>/training/."})
 
     def validate(self) -> None:
         mode = str(self.debug_mode or "none").strip().lower()

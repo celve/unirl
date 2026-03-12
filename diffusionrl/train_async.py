@@ -115,6 +115,8 @@ def train_async_loop(
 
     # rollout_id is the outer rollout-train loop step; it behaves similarly to
     # a framework-level global step, but may differ from optimizer step count.
+    # global_optimizer_step tracks real optimizer step for wandb logging
+    global_optimizer_step = 0
     for rollout_id in range(args.rollout.start_rollout_id, args.rollout.num_rollout):
         step_start_t = time.perf_counter()
         sync_result = None
@@ -174,6 +176,18 @@ def train_async_loop(
             if wandb_logger is not None:
                 wandb_logger.log_eval(rollout_id, eval_metrics)
 
+        # === Per-optimizer-step wandb logging ===
+        if wandb_logger is not None and metrics:
+            per_step_list = metrics[0].get("_per_optimizer_step_metrics", [])
+            for per_step_m in per_step_list:
+                if per_step_m.get("has_backward", False):
+                    global_optimizer_step += 1
+                    wandb_step_m = {
+                        k: v for k, v in per_step_m.items()
+                        if k != "has_backward"
+                    }
+                    wandb_logger.log_step(global_optimizer_step, wandb_step_m)
+
         should_log = _should_log_rollout(rollout_id, args)
         if should_log:
             avg_loss = sum(m.get("loss", 0) for m in metrics) / max(len(metrics), 1)
@@ -190,9 +204,10 @@ def train_async_loop(
             )
 
             if wandb_logger is not None:
+                # === Rollout 级别聚合上报 ===
                 aggregated = aggregate_metrics(metrics)
                 aggregated["loss"] = avg_loss
-                wandb_logger.log_step(rollout_id, aggregated)
+                wandb_logger.log_rollout(rollout_id, aggregated)
 
                 rollout_metrics = _collect_rollout_batch_metrics(rollout_data_ref)
                 if rollout_metrics:

@@ -15,7 +15,7 @@ Key alignment points with DanceGRPO:
 - SDE solver correction term (line 76-79)
 - Guidance default: 6018.0 (line 129; configurable via runtime args)
 - Latent normalization: /0.476986 (line 140)
-- Precision: bfloat16 for forward, float32 for SDE step
+- Precision: bfloat16 for forward, float32 for SDE step, float16 for trajectory storage
 """
 
 import logging
@@ -42,6 +42,7 @@ class FSDPHunyuanSampler(BaseSampler):
     - SDE sampling with exact DanceGRPO formulation
     - SDE solver correction for improved sampling
     - bfloat16 forward pass with float32 SDE step for numerical stability
+    - float16 trajectory storage for precision (natural images within float16 range)
     - Full trajectory and log probability tracking
 
     Example:
@@ -166,6 +167,7 @@ class FSDPHunyuanSampler(BaseSampler):
             pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=torch.bfloat16)
         else:
             # Newer diffusers Hunyuan forward requires pooled_projections.
+            # pooled_prompt_embeds stays bfloat16 for model forward (not trajectory storage).
             proj_dim = getattr(getattr(self.model, "config", None), "pooled_projection_dim", 768)
             pooled_prompt_embeds = torch.zeros(
                 batch_size,
@@ -190,6 +192,11 @@ class FSDPHunyuanSampler(BaseSampler):
         latent_w = width // self.SPATIAL_DOWNSAMPLE
 
         # Initialize latents (DanceGRPO line 223-229)
+        # Use float16 for trajectory storage (more mantissa bits than bfloat16).
+        # Natural image latents are within float16 range.
+        # Model forward still uses bfloat16 via torch.autocast.
+        trajectory_dtype = torch.float16
+
         if latents is None:
             latents = torch.randn(
                 batch_size,
@@ -198,11 +205,11 @@ class FSDPHunyuanSampler(BaseSampler):
                 latent_h,
                 latent_w,
                 device=device,
-                dtype=torch.bfloat16,
+                dtype=trajectory_dtype,
                 generator=generator,
             )
         else:
-            latents = latents.to(device=device, dtype=torch.bfloat16)
+            latents = latents.to(device=device, dtype=trajectory_dtype)
 
         # Get sigma schedule (DanceGRPO line 188-190)
         sigma_schedule = torch.linspace(1, 0, num_inference_steps + 1)
@@ -225,11 +232,8 @@ class FSDPHunyuanSampler(BaseSampler):
         # Denoising loop (DanceGRPO line 117-139)
         for i in range(num_inference_steps):
             sigma = sigma_schedule[i]
-            timestep_value = int(sigma.item() * 1000)
-            timesteps = torch.full(
-                [batch_size], timestep_value,
-                device=device, dtype=torch.long
-            )
+            # Keep timestep in float32 to avoid precision loss (no int truncation)
+            timestep = (sigma.float() * 1000).expand(batch_size)
 
             # Forward pass (DanceGRPO line 123-135)
             self.model.eval()
@@ -239,7 +243,7 @@ class FSDPHunyuanSampler(BaseSampler):
                         hidden_states=latents,
                         encoder_hidden_states=prompt_embeds,
                         pooled_projections=pooled_prompt_embeds,
-                        timestep=timesteps,
+                        timestep=timestep,
                         guidance=torch.tensor(
                             [actual_guidance],
                             device=device,
@@ -252,6 +256,8 @@ class FSDPHunyuanSampler(BaseSampler):
             # Check if this step uses SDE
             if i in sde_indices:
                 # SDE step with log probability (DanceGRPO line 136)
+                # output_dtype=float16: align log_prob with trajectory storage precision
+                # float16 has more mantissa bits than bfloat16
                 latents, pred_original, log_prob = flux_sde_step(
                     model_pred,
                     latents.to(torch.float32),
@@ -259,9 +265,9 @@ class FSDPHunyuanSampler(BaseSampler):
                     index=i,
                     eta=self.eta,
                     use_sde_solver=self.use_sde_solver,
+                    output_dtype=trajectory_dtype,
                 )
-                latents = latents.to(torch.bfloat16)
-                all_log_probs[i] = log_prob
+                latents = latents.to(trajectory_dtype)
             else:
                 # ODE step (deterministic)
                 dsigma = sigma_schedule[i + 1] - sigma
@@ -358,11 +364,9 @@ class FSDPHunyuanSampler(BaseSampler):
             encoder_attention_mask = encoder_attention_mask.to(device=device)
 
         sigma = sigma_schedule[timestep_index]
-        timestep_value = int(sigma.item() * 1000)
-        timesteps = torch.full(
-            [batch_size], timestep_value,
-            device=device, dtype=torch.long
-        )
+        # Keep timestep in float32 to avoid precision loss (no int truncation)
+        timestep = (sigma.float() * 1000).expand(batch_size)
+
         proj_dim = getattr(getattr(self.model, "config", None), "pooled_projection_dim", 768)
         pooled_prompt_embeds = torch.zeros(
             batch_size,
@@ -378,7 +382,7 @@ class FSDPHunyuanSampler(BaseSampler):
                 hidden_states=latents,
                 encoder_hidden_states=prompt_embeds,
                 pooled_projections=pooled_prompt_embeds,
-                timestep=timesteps,
+                timestep=timestep,
                 guidance=torch.tensor(
                     [actual_guidance],
                     device=device,
@@ -389,6 +393,8 @@ class FSDPHunyuanSampler(BaseSampler):
             )[0]
 
         # Compute log probability (DanceGRPO line 172)
+        # Training side: prev_latents is float16 from trajectory.
+        # Upcast to float32 so that compute is on the same truncated value.
         _, _, log_prob = flux_sde_step(
             model_pred,
             latents.to(torch.float32),
