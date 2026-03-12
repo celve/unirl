@@ -103,8 +103,10 @@ class SamplingConfig:
         metadata={"help": "Classifier-free guidance scale (0.0 = no guidance)"})
     sde_ratio: float = field(default=1.0,
         metadata={"help": "Fraction of steps that use SDE (0.0 = all ODE, 1.0 = all SDE)"})
-    timestep_fraction: float = field(default=1.0,
-        metadata={"help": "Fraction of total timesteps to train on (e.g. 0.6 = last 60%%)"})
+    timestep_fraction: Any = field(default=1.0,
+        metadata={"help": "Fraction of total timesteps to train on. "
+                          "Single float x means [0, x) range; "
+                          "tuple (x, y) means [x, y) range (e.g. (0.2, 0.8) = timesteps 20%%-80%%)"})
     sampling_adapter: Optional[str] = field(default=None,
         metadata={"help": "Sampling adapter type for special modes (e.g. 'old' for NFT)"})
     init_same_noise: bool = field(default=False,
@@ -769,6 +771,61 @@ def _parse_cli_bool(value: Any) -> bool:
     )
 
 
+def _parse_cli_timestep_fraction(value: Any) -> Any:
+    """Parse timestep_fraction CLI value.
+
+    Accepts:
+    - A single float: 0.6  -> returns 0.6
+    - A comma-separated pair: "0.2,0.8" -> returns (0.2, 0.8)
+    - A JSON-style list: "[0.2, 0.8]" -> returns (0.2, 0.8)
+    - Already a list/tuple (from YAML): [0.2, 0.8] -> returns (0.2, 0.8)
+    """
+    if isinstance(value, (list, tuple)):
+        if len(value) == 2:
+            return (float(value[0]), float(value[1]))
+        raise argparse.ArgumentTypeError(
+            f"timestep_fraction tuple must have exactly 2 elements, got {len(value)}"
+        )
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return 1.0
+    # Try JSON list: "[0.2, 0.8]"
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except Exception as exc:
+            raise argparse.ArgumentTypeError(
+                f"Invalid timestep_fraction value: {value!r}. Error: {exc}"
+            ) from exc
+        if isinstance(parsed, list) and len(parsed) == 2:
+            return (float(parsed[0]), float(parsed[1]))
+        raise argparse.ArgumentTypeError(
+            f"timestep_fraction list must have exactly 2 elements, got: {parsed!r}"
+        )
+    # Try comma-separated: "0.2,0.8"
+    if "," in text:
+        parts = [p.strip() for p in text.split(",") if p.strip()]
+        if len(parts) == 2:
+            try:
+                return (float(parts[0]), float(parts[1]))
+            except ValueError as exc:
+                raise argparse.ArgumentTypeError(
+                    f"Invalid timestep_fraction value: {value!r}. Error: {exc}"
+                ) from exc
+        raise argparse.ArgumentTypeError(
+            f"timestep_fraction comma-separated value must have exactly 2 elements, got {len(parts)}"
+        )
+    # Single float
+    try:
+        return float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"Invalid timestep_fraction value: {value!r}. Error: {exc}"
+        ) from exc
+
+
 def _parse_cli_json_object(value: Any) -> Dict[str, Any]:
     """Parse a CLI value into a JSON object."""
     if isinstance(value, dict):
@@ -1131,12 +1188,15 @@ def _build_cli_option_strings(field_name: str, group_key: str) -> List[str]:
     return [dotted_option]
 
 
-def _build_add_argument_kwargs(field_type: Any, default: Any, help_text: str) -> Dict[str, Any]:
+def _build_add_argument_kwargs(field_type: Any, default: Any, help_text: str, *, field_name: str = "") -> Dict[str, Any]:
     kwargs: Dict[str, Any] = {
         "default": default,
         "help": help_text,
     }
-    if field_type == bool:
+    # Field-specific custom parsers
+    if field_name == "timestep_fraction":
+        kwargs["type"] = _parse_cli_timestep_fraction
+    elif field_type == bool:
         kwargs["type"] = _parse_cli_bool
     elif field_type == int:
         kwargs["type"] = int
@@ -1352,7 +1412,7 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
 
         # Build CLI option names (dotted style for grouped args).
         option_strings = _build_cli_option_strings(field_name, group_key)
-        add_kwargs = _build_add_argument_kwargs(field_type, default, help_text)
+        add_kwargs = _build_add_argument_kwargs(field_type, default, help_text, field_name=field_name)
         add_kwargs["dest"] = field_name
         group.add_argument(*option_strings, **add_kwargs)
 

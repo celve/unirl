@@ -464,11 +464,16 @@ class RolloutManager:
                 num_timesteps=num_timesteps,
                 timestep_fraction=timestep_fraction,
             )
-            if timestep_fraction < 1.0:
-                effective_steps = int(num_timesteps * timestep_fraction)
+            # Determine whether timestep_fraction restricts the SDE range
+            from diffusionrl.samplers.schedulers.timestep_window import _normalize_timestep_fraction
+            frac_start, frac_end = _normalize_timestep_fraction(timestep_fraction)
+            if frac_start > 0.0 or frac_end < 1.0:
+                eff_start = int(num_timesteps * frac_start)
+                eff_end = int(num_timesteps * frac_end)
                 logger.info(
                     "All SDE scheduler initialized; "
-                    f"timestep_fraction={timestep_fraction} (SDE on first {effective_steps}/{num_timesteps} timesteps)"
+                    f"timestep_fraction={timestep_fraction} "
+                    f"(SDE on timesteps [{eff_start}, {eff_end})/{num_timesteps})"
                 )
             else:
                 logger.info("All SDE scheduler initialized (standard GRPO)")
