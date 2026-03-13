@@ -167,6 +167,9 @@ def train_async_loop(
         if should_eval_fn(rollout_id, args):
             eval_phase_start_t = time.perf_counter()
             _ensure_rollout_on_gpu()
+            # NOTE: Async mode uses separate rollout actors for eval. EMA-based
+            # eval would require syncing EMA weights to rollout actors which is
+            # not yet implemented. The eval here uses the latest synced weights.
             eval_metrics = ray.get(rollout_manager.eval.remote(rollout_id))
             eval_phase_s = time.perf_counter() - eval_phase_start_t
             logger.info(

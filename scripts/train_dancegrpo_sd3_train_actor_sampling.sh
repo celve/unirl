@@ -61,6 +61,9 @@ LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cpu}
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-8}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
+# Eval EMA settings (smoothed weights for stable evaluation)
+EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
+EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 DIRECT_SAMPLING_BATCH_SIZE=${DIRECT_SAMPLING_BATCH_SIZE:-${ROLLOUT_TOTAL_SAMPLES}}
 UPDATE_MODE=${UPDATE_MODE:-multi_update}
@@ -106,6 +109,8 @@ python -m diffusionrl.train \
     --algorithm.use-kl-penalty false \
     --algorithm.advantage-type group \
     --algorithm.advantage-clip-max 5.0 \
+    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
+    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
     --sampling.training-actor-direct-sampling true \
     --ray.colocate-rollout-training true \

@@ -25,6 +25,10 @@ OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/plugin_demo_sd3"}
 
 NUM_GPUS=${NUM_GPUS:-1}
 
+# Eval EMA settings (smoothed weights for stable evaluation)
+EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
+EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
@@ -50,6 +54,8 @@ python -m diffusionrl.train \
     --algorithm.prompts-per-batch 1 \
     --training.gradient-accumulation-batch-size 1 \
     --algorithm.num-samples-per-prompt 2 \
+    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
+    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
     --sampling.training-actor-direct-sampling true \
     --ray.colocate-rollout-training true \

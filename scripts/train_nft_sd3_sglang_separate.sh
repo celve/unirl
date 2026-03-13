@@ -47,6 +47,10 @@ PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMP
 NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"ema_decay":0.001}'}
 NFT_LOSS_KWARGS=${NFT_LOSS_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"nft_timestep_mode":"all","nft_shuffle_timesteps":true,"nft_apply_shift":false,"use_ema":true,"ema_decay":0.001,"decay_type":"warmup","ema_flat_steps":75,"ema_uprate":0.0075,"ema_uphold":0.999,"shuffle_seed":42,"shuffle_samples":true}'}
 
+# Eval EMA settings (smoothed weights for stable evaluation)
+EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
+EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
@@ -76,6 +80,8 @@ python -m diffusionrl.train \
     --algorithm.advantage-type per_prompt \
     --algorithm.use-per-prompt-stat-tracker true \
     --algorithm.per-prompt-buffer-size 10000 \
+    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
+    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
     --ray.colocate-rollout-training false \
     --ray.rollout-num-gpus-per-node ${ROLLOUT_GPUS} \

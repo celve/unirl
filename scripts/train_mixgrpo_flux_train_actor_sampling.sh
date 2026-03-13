@@ -100,6 +100,10 @@ LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cuda}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 
+# Eval EMA settings (smoothed weights for stable evaluation)
+EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
+EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+
 # Training
 if [ $(( ROLLOUT_TOTAL_SAMPLES % NUM_GPUS )) -ne 0 ]; then
     echo "ERROR: PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT must be divisible by NUM_GPUS"
@@ -148,6 +152,8 @@ python -m diffusionrl.train \
     --algorithm.use-kl-penalty false \
     --algorithm.advantage-type group \
     --algorithm.advantage-clip-max 5.0 \
+    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
+    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     --reward.reward-mix-mode ${REWARD_MIX_MODE} \
     \
     --sampling.training-actor-direct-sampling true \

@@ -349,6 +349,12 @@ class AlgorithmConfig:
     frozen_init_timesteps: int = field(default=0,
         metadata={"help": "Skip first N timesteps in loss computation (frozen warmup)"})
 
+    # Evaluation EMA
+    eval_ema_decay: float = field(default=0.9,
+        metadata={"help": "EMA decay rate for evaluation model (warmup schedule: min((1+step)/(10+step), decay))"})
+    eval_ema_update_interval: int = field(default=1,
+        metadata={"help": "Update evaluation EMA every N optimizer steps"})
+
     # Sub-configuration
     window: WindowSchedulerConfig = field(default_factory=WindowSchedulerConfig)
 

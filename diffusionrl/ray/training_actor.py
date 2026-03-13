@@ -88,7 +88,12 @@ class TrainingActor(BaseTrainRayActor):
         self._train_backend_name = "fsdp"
         self._train_backend_capabilities: Dict[str, Any] = {}
 
-        # Optional EMA updater for reference-policy synchronization.
+        # EMA trackers ---------------------------------------------------------
+        # _eval_ema: universal smoothed copy of trainable params for evaluation
+        # _nft_old_params_ema: NFT full-param old-model EMA (None when LoRA)
+        # _ema_updater: DualAdapterEMA for NFT LoRA mode (legacy path)
+        self._eval_ema = None
+        self._nft_old_params_ema = None
         self._ema_updater = None
         self._use_ema = False
         self._ema_decay = 0.001
@@ -486,6 +491,8 @@ class TrainingActor(BaseTrainRayActor):
     _LOSS_RUNTIME_KEYS = {
         "use_ema",
         "ema_decay",
+        "eval_ema_decay",
+        "eval_ema_update_interval",
         "nft_timestep_mode",
         "nft_shuffle_timesteps",
         "nft_apply_shift",
@@ -580,6 +587,8 @@ class TrainingActor(BaseTrainRayActor):
         raw_shuffle_seed = runtime_loss_kwargs.get("shuffle_seed", None)
         self._shuffle_seed = int(raw_shuffle_seed) if raw_shuffle_seed is not None else None
         self._ema_decay = float(runtime_loss_kwargs.get("ema_decay", 0.001))
+        self._eval_ema_decay = float(runtime_loss_kwargs.get("eval_ema_decay", 0.9))
+        self._eval_ema_update_interval = int(runtime_loss_kwargs.get("eval_ema_update_interval", 1))
         self._use_ema = bool(runtime_loss_kwargs.get("use_ema", self._loss_type == "nft"))
         ema_decay_type = str(runtime_loss_kwargs.get("decay_type", "constant"))
         ema_flat_steps = int(runtime_loss_kwargs.get("ema_flat_steps", 0))
@@ -588,7 +597,6 @@ class TrainingActor(BaseTrainRayActor):
         old_adapter_name = str(runtime_loss_kwargs.get("old_adapter_name", "old"))
         new_adapter_name = str(runtime_loss_kwargs.get("new_adapter_name", "default"))
 
-        # loss_path should be fully resolved by config builder.
         if not self._loss_path:
             raise ValueError(
                 "loss_config.loss_path is required before TrainingActor.init. "
@@ -602,7 +610,6 @@ class TrainingActor(BaseTrainRayActor):
         if hasattr(loss_cls, "from_config"):
             self.loss_fn = loss_cls.from_config(loss_config)
         else:
-            # Fallback for custom losses without from_config
             custom_kwargs = self._collect_custom_loss_kwargs(loss_config)
             filtered_kwargs = self._filter_constructor_kwargs(loss_cls, custom_kwargs)
             self.loss_fn = loss_cls(**filtered_kwargs)
@@ -612,31 +619,18 @@ class TrainingActor(BaseTrainRayActor):
             self.rank, self._loss_path, type(self.loss_fn).__name__,
         )
 
-        # --- EMA updater for NFT ---
-        if self._use_ema and self._ema_updater is None:
-            from diffusionrl.utils import DualAdapterEMA
-            self._ema_updater = DualAdapterEMA(
-                decay=self._ema_decay,
-                decay_type=ema_decay_type,
-                flat_steps=ema_flat_steps,
-                uprate=ema_uprate,
-                uphold=ema_uphold,
-                old_adapter_name=old_adapter_name,
-                new_adapter_name=new_adapter_name,
-            )
-            if self._ema_updater is not None:
-                logger.info(
-                    "Rank %s: EMA updater enabled (%s, decay=%s, decay_type=%s, flat_steps=%s, uprate=%s, uphold=%s, old_adapter_name=%s, new_adapter_name=%s)",
-                    self.rank,
-                    type(self._ema_updater).__name__,
-                    self._ema_decay,
-                    ema_decay_type,
-                    ema_flat_steps,
-                    ema_uprate,
-                    ema_uphold,
-                    old_adapter_name,
-                    new_adapter_name,
-                )
+        # --- EMA setup ---
+        # NFT + LoRA: DualAdapterEMA for old/new adapter synchronisation.
+        # NFT + full-param: EMAModuleWrapper as old-model reference.
+        # All algorithms: EMAModuleWrapper for eval-time smoothed weights.
+        self._init_ema(
+            ema_decay_type=ema_decay_type,
+            ema_flat_steps=ema_flat_steps,
+            ema_uprate=ema_uprate,
+            ema_uphold=ema_uphold,
+            old_adapter_name=old_adapter_name,
+            new_adapter_name=new_adapter_name,
+        )
 
         if hasattr(self.loss_fn, "model_type"):
             self.loss_fn.model_type = getattr(self.model_bundle, "model_type", "default")
@@ -655,7 +649,6 @@ class TrainingActor(BaseTrainRayActor):
                 )
             self.loss_fn._forward_plugin = forward_plugin
 
-        # Inject debug output directory if configured
         debug_output_dir = loss_config.get("debug_output_dir")
         if debug_output_dir and hasattr(self.loss_fn, "_debug_output_dir"):
             self.loss_fn._debug_output_dir = debug_output_dir
@@ -667,6 +660,117 @@ class TrainingActor(BaseTrainRayActor):
             self._loss_type,
             self._loss_path,
         )
+
+    # ------------------------------------------------------------------
+    # EMA initialisation & eval helpers
+    # ------------------------------------------------------------------
+
+    def _init_ema(
+        self,
+        *,
+        ema_decay_type: str,
+        ema_flat_steps: int,
+        ema_uprate: float,
+        ema_uphold: float,
+        old_adapter_name: str,
+        new_adapter_name: str,
+    ) -> None:
+        """Create all EMA trackers after model + loss are ready."""
+        from diffusionrl.utils.ema import EMAModuleWrapper, DualAdapterEMA
+
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        if not trainable_params:
+            logger.warning("Rank %s: No trainable params found, skipping EMA init", self.rank)
+            return
+
+        # 1) Eval EMA — always created for every algorithm.
+        self._eval_ema = EMAModuleWrapper(
+            trainable_params,
+            decay=self._eval_ema_decay,
+            update_step_interval=self._eval_ema_update_interval,
+            device=torch.device("cpu"),
+        )
+        logger.info(
+            "Rank %s: Eval EMA initialised (decay=%s, update_interval=%d, params=%d, device=cpu)",
+            self.rank, self._eval_ema_decay, self._eval_ema_update_interval, len(trainable_params),
+        )
+
+        # 2) NFT-specific reference-model EMA.
+        is_nft = self._loss_type == "nft"
+        if is_nft and self._use_lora:
+            # LoRA mode: keep the dual-adapter mechanism.
+            self._ema_updater = DualAdapterEMA(
+                decay=self._ema_decay,
+                decay_type=ema_decay_type,
+                flat_steps=ema_flat_steps,
+                uprate=ema_uprate,
+                uphold=ema_uphold,
+                old_adapter_name=old_adapter_name,
+                new_adapter_name=new_adapter_name,
+            )
+            self._use_ema = True
+            logger.info(
+                "Rank %s: NFT DualAdapterEMA enabled (decay=%s, decay_type=%s, "
+                "flat_steps=%s, uprate=%s, uphold=%s, old=%s, new=%s)",
+                self.rank, self._ema_decay, ema_decay_type,
+                ema_flat_steps, ema_uprate, ema_uphold,
+                old_adapter_name, new_adapter_name,
+            )
+        elif is_nft and not self._use_lora:
+            # Full-param mode: old model = EMA of trainable params.
+            decay_fn = self._build_nft_decay_fn(
+                ema_decay_type, self._ema_decay,
+                ema_flat_steps, ema_uprate, ema_uphold,
+            )
+            self._nft_old_params_ema = EMAModuleWrapper(
+                trainable_params,
+                decay=self._ema_decay,
+                decay_fn=decay_fn,
+                update_step_interval=1,
+                device=torch.device("cpu"),
+            )
+            # Inject into loss so get_old_prediction can use it.
+            self.loss_fn._old_params_ema = self._nft_old_params_ema
+            self._use_ema = False  # DualAdapterEMA not used
+            logger.info(
+                "Rank %s: NFT full-param old-model EMA initialised "
+                "(decay=%s, decay_type=%s, params=%d)",
+                self.rank, self._ema_decay, ema_decay_type, len(trainable_params),
+            )
+
+    @staticmethod
+    def _build_nft_decay_fn(
+        decay_type: str,
+        base_decay: float,
+        flat_steps: int,
+        uprate: float,
+        uphold: float,
+    ):
+        """Build NFT decay schedule (matches DualAdapterEMA logic)."""
+        if decay_type == "linear":
+            return lambda step: min(step * uprate, uphold)
+        if decay_type == "warmup":
+            return lambda step: 0.0 if step < flat_steps else min((step - flat_steps) * uprate, uphold)
+        # "constant" or unknown
+        return None  # fall back to EMAModuleWrapper default formula
+
+    def apply_ema_for_eval(self) -> bool:
+        """Swap eval-EMA weights into the model for evaluation."""
+        if self._eval_ema is None:
+            return False
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        self._eval_ema.copy_ema_to(trainable_params, store_temp=True, grad=False)
+        logger.debug("Rank %s: EMA weights applied for eval", self.rank)
+        return True
+
+    def restore_from_eval(self) -> bool:
+        """Restore training weights after evaluation."""
+        if self._eval_ema is None or self._eval_ema.temp_stored_parameters is None:
+            return False
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        self._eval_ema.copy_temp_to(trainable_params)
+        logger.debug("Rank %s: Training weights restored after eval", self.rank)
+        return True
 
     def _maybe_replay_old_log_probs(self, batch: BackwardTrainingBatch) -> BackwardTrainingBatch:
         if self._guidance_scale is None:
@@ -740,6 +844,8 @@ class TrainingActor(BaseTrainRayActor):
             update_mode=self._update_mode,
             use_ema=self._use_ema,
             ema_updater=self._ema_updater,
+            eval_ema=self._eval_ema,
+            nft_old_params_ema=self._nft_old_params_ema,
             nft_timestep_mode=self._nft_timestep_mode,
             nft_shuffle_timesteps=self._nft_shuffle_timesteps,
             nft_apply_shift=self._nft_apply_shift,

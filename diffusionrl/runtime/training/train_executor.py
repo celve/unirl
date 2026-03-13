@@ -60,6 +60,8 @@ class TrainExecutorConfig:
     shuffle_samples: bool = True
     shuffle_seed: Optional[int] = None
     clip_grad_norm_fn: Optional[Callable[..., Any]] = None
+    eval_ema: Optional[Any] = None
+    nft_old_params_ema: Optional[Any] = None
 
 
 def aggregate_numeric_metrics(metrics_list: List[Dict[str, Any]]) -> Dict[str, float]:
@@ -223,6 +225,24 @@ class TrainExecutor:
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
 
+    def _update_ema_trackers(self, metrics: dict) -> None:
+        """Step all active EMA trackers after an optimizer step."""
+        has_param_ema = (
+            self.config.eval_ema is not None
+            or self.config.nft_old_params_ema is not None
+        )
+        if has_param_ema:
+            trainable = [p for p in self.model.parameters() if p.requires_grad]
+            if self.config.eval_ema is not None:
+                self.config.eval_ema.step(trainable)
+            if self.config.nft_old_params_ema is not None:
+                self.config.nft_old_params_ema.step(trainable)
+
+        # DualAdapterEMA for NFT LoRA mode (legacy path).
+        if self.config.use_ema and self.config.ema_updater is not None:
+            ema_success = self.config.ema_updater.update(self.model)
+            metrics["ema_updated"] = ema_success
+
     def skipped_metrics(self, rollout_id: int) -> Dict[str, Any]:
         return {
             "loss": 0.0,
@@ -305,16 +325,13 @@ class TrainExecutor:
                 grad_norm = self._clip_grad_norm()
                 self._apply_optimizer_step()
                 optimizer_steps += 1
+                self._update_ema_trackers(all_metrics)
             else:
                 grad_norm = 0.0
                 logger.warning(
                     "No valid timesteps to train in %s update, skipping optimizer step",
                     update_mode,
                 )
-
-            if self.config.use_ema and self.config.ema_updater is not None:
-                ema_success = self.config.ema_updater.update(self.model)
-                all_metrics["ema_updated"] = ema_success
 
             last_mini_batches_per_update = actual_mini_batches
             last_effective_update_batch_size = int(update_chunk.update_batch_size)

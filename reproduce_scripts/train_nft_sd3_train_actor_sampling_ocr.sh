@@ -64,19 +64,20 @@ DATA_PATH="${REPO_ROOT}/data/datasets/ocr/train.txt"
 NUM_GPUS=${NUM_GPUS:-8}
 
 # Rollout setttings
-NUM_INFERENCE_STEPS=10 # denoising steps during rollout (sampling) stage.
-NUM_SAMPLES_PER_PROMPT=24 # group size
-PROMPTS_PER_BATCH=48 # number of (unique) prompts per epoch
-DIRECT_SAMPLING_BATCH_SIZE=192 # Actual peak forward batch size during sampling stage.
+NUM_INFERENCE_STEPS=8 # denoising steps during rollout (sampling) stage.
+NUM_SAMPLES_PER_PROMPT=16 # group size
+PROMPTS_PER_BATCH=8 # number of (unique) prompts per epoch
+DIRECT_SAMPLING_BATCH_SIZE=128 # Actual peak forward batch size during sampling stage.
 
 # Training settings
-GRADIENT_ACCUMULATION_BATCH_SIZE=12 # Actually peak forward/backward batch size during optimization
-MULTI_UPDATE_BATCH_SIZE=72 # Effective batch size for multi-update. Set `prompts_per_batch * num_samples_per_prompt` // NUM_GPUS // n for n updates per epoch
+GRADIENT_ACCUMULATION_BATCH_SIZE=16 # Actually peak forward/backward batch size during optimization
+MULTI_UPDATE_BATCH_SIZE=72 # Effective batch size for multi-update. Set `prompts_per_batch * num_samples_per_prompt` // NUM_GPUS // n for n updates per epoch.
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 UPDATE_MODE="single_update" # multi_update or single_update. single_update for NFT, multi_update for GRPO.
 
 NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"ema_decay":0.001}'}
-NFT_LOSS_KWARGS=${NFT_LOSS_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"nft_timestep_mode":"all","nft_shuffle_timesteps":true,"nft_apply_shift":false,"use_ema":true,"ema_decay":0.001,"decay_type":"warmup","ema_flat_steps":75,"ema_uprate":0.0075,"ema_uphold":0.999,"shuffle_seed":42,"shuffle_samples":true}'}
+# NFT_LOSS_KWARGS=${NFT_LOSS_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"nft_timestep_mode":"all","nft_shuffle_timesteps":true,"nft_apply_shift":false,"use_ema":true,"ema_decay":0.001,"decay_type":"warmup","ema_flat_steps":75,"ema_uprate":0.0075,"ema_uphold":0.999,"shuffle_seed":42,"shuffle_samples":true}'}
+NFT_LOSS_KWARGS=${NFT_LOSS_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"nft_timestep_mode":"all","nft_shuffle_timesteps":true,"nft_apply_shift":false,"use_ema":true,"ema_decay":0.001,"decay_type":"warmup","ema_flat_steps":0,"ema_uprate":0.001,"ema_uphold":0.5,"shuffle_seed":42,"shuffle_samples":true}'}
 if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
     exit 1
@@ -95,11 +96,11 @@ if [ ! -f "${DATA_PATH}" ]; then
     exit 1
 fi
 
-REPORT_TO_WANDB=true
+REPORT_TO_WANDB=false
 WANDB_PROJECT_NAME="diffusionrl-diffusionNFT"
 WANDB_RUN_NAME="SD3.5-DiffusionNFT" # change to your own name
 WANDB_LOG_MEDIA=true
-WANDB_MEDIA_MAX_ITEMS=48 # Max number of image reports per logging step
+WANDB_MEDIA_MAX_ITEMS=4 # Max number of image reports per logging step
 WANDB_TAGS="reproduce,sd3.5,nft,ocr" # reward=ocr, flow
 WANDB_ENTITY=${WANDB_ENTITY:-"diffusionrl-reproduce"} # Set empty to skip: WANDB_ENTITY=""
 LOGGING_STEPS=1
@@ -112,6 +113,10 @@ fi
 REWARD_NAME="ocr" # pickscore, ocr, clip, hpsv2
 REWARD_DEVICE="cuda"
 REWARD_EXECUTION_MODE="rollout" # compute reward during rollout stage
+
+# Eval EMA settings (smoothed weights for stable evaluation)
+EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
+EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-false}
 
@@ -129,7 +134,6 @@ python -m diffusionrl.train \
     \
     --algorithm.loss-type nft \
     --sampling.shift 3.0 \
-    --sampling.timestep-fraction 0.1,0.3 \
     --sampling.sde-type dpm2 \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
     --sampling.guidance-scale 1.0 \
@@ -145,6 +149,8 @@ python -m diffusionrl.train \
     --algorithm.advantage-type per_prompt \
     --algorithm.use-per-prompt-stat-tracker true \
     --algorithm.per-prompt-buffer-size 10000 \
+    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
+    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
     --sampling.training-actor-direct-sampling true \
     --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \

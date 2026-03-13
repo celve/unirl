@@ -53,6 +53,9 @@ SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
 REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
+# Eval EMA settings (smoothed weights for stable evaluation)
+EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
+EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
 
 if [ $(( NUM_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: NUM_GPUS*BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
@@ -88,6 +91,8 @@ python -m diffusionrl.train \
     --algorithm.use-kl-penalty false \
     --algorithm.advantage-type group \
     --algorithm.advantage-clip-max 5.0 \
+    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
+    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
     --ray.colocate-rollout-training true \
     --ray.offload-rollout true \

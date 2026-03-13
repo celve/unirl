@@ -372,6 +372,16 @@ class TrainingActorGroup(BaseActorGroup):
         refs = [actor.clear_memory.remote() for actor in self._actor_handles]
         ray.get(refs)
 
+    def apply_ema_for_eval(self) -> None:
+        """Swap eval-EMA weights into all training actors for evaluation."""
+        refs = [actor.apply_ema_for_eval.remote() for actor in self._actor_handles]
+        ray.get(refs)
+
+    def restore_from_eval(self) -> None:
+        """Restore training weights on all actors after evaluation."""
+        refs = [actor.restore_from_eval.remote() for actor in self._actor_handles]
+        ray.get(refs)
+
     def _pad_batched_value(self, val: Any, batch_size: int, target_size: int) -> Any:
         if val is None or target_size <= batch_size:
             return val

@@ -368,7 +368,13 @@ def train(args):
         if should_eval(rollout_id, args):
             eval_phase_start_t = time.perf_counter()
             ensure_rollout_on_gpu()
+            # Swap in EMA weights for stable evaluation when training actors
+            # serve as sampling source (direct-sampling mode).
+            if training_actor_direct_sampling:
+                training_group.apply_ema_for_eval()
             eval_metrics = ray.get(rollout_manager.eval.remote(rollout_id))
+            if training_actor_direct_sampling:
+                training_group.restore_from_eval()
             eval_phase_s = time.perf_counter() - eval_phase_start_t
             logger.info(f"Eval at {rollout_id}: mean_reward={eval_metrics['mean_reward']:.4f}")
 

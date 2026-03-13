@@ -231,6 +231,11 @@ def _build_loss_config(args) -> Dict[str, Any]:
         field_name="algorithm.algorithm_kwargs",
     )
 
+    # Merge first-class eval-EMA args into loss_kwargs so they reach
+    # TrainingActor._load_loss via the existing runtime-key pipeline.
+    loss_kwargs.setdefault("eval_ema_decay", float(ac.eval_ema_decay))
+    loss_kwargs.setdefault("eval_ema_update_interval", int(ac.eval_ema_update_interval))
+
     loss_path = str(ac.loss_path or "").strip()
     if not loss_path:
         raise ValueError(

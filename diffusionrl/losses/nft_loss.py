@@ -101,6 +101,8 @@ class NFTLoss:
         runtime_only_keys = {
             "use_ema",
             "ema_decay",
+            "eval_ema_decay",
+            "eval_ema_update_interval",
             "nft_timestep_mode",
             "nft_shuffle_timesteps",
             "nft_apply_shift",
@@ -271,9 +273,10 @@ class NFTLoss:
 
         Tries in order:
         1. Separate old_model if provided
-        2. Dual adapter mode (switch to old adapter)
-        3. Disable adapter mode (LoRA base model)
-        4. Detached current prediction (fallback)
+        2. Full-param EMA mode (swap EMA weights, compute, restore)
+        3. Dual adapter mode (switch to old adapter)
+        4. Disable adapter mode (LoRA base model)
+        5. Detached current prediction (fallback)
 
         Args:
             model: Current model
@@ -288,7 +291,17 @@ class NFTLoss:
             if old_model is not None:
                 return old_model(**model_kwargs)[0]
 
-            # Option 2: Dual adapter mode
+            # Option 2: Full-param EMA (injected by TrainingActor for non-LoRA NFT)
+            old_params_ema = getattr(self, "_old_params_ema", None)
+            if old_params_ema is not None:
+                trainable = [p for p in model.parameters() if p.requires_grad]
+                old_params_ema.copy_ema_to(trainable, store_temp=True, grad=True)
+                try:
+                    return model(**model_kwargs)[0]
+                finally:
+                    old_params_ema.copy_temp_to(trainable)
+
+            # Option 3: Dual adapter mode
             adapter_model = model.module if hasattr(model, "module") else model
             if hasattr(adapter_model, "set_adapter"):
                 try:
@@ -297,7 +310,7 @@ class NFTLoss:
                 except Exception:
                     pass
 
-            # Option 3: Disable adapter mode
+            # Option 4: Disable adapter mode
             if hasattr(adapter_model, "disable_adapter"):
                 try:
                     with adapter_model.disable_adapter():
@@ -305,7 +318,7 @@ class NFTLoss:
                 except Exception:
                     pass
 
-            # Option 4: Fallback - use current model prediction (detached)
+            # Option 5: Fallback - use current model prediction (detached)
             return model(**model_kwargs)[0]
 
     def get_ref_prediction(

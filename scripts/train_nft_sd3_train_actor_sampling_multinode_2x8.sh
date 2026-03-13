@@ -42,6 +42,11 @@ fi
 # Cluster defaults (override via env vars)
 NUM_NODES="${NUM_NODES:-2}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
+
+# Eval EMA settings (smoothed weights for stable evaluation)
+EVAL_EMA_DECAY="${EVAL_EMA_DECAY:-0.9}"
+EVAL_EMA_UPDATE_INTERVAL="${EVAL_EMA_UPDATE_INTERVAL:-1}"
+
 HEAD_IP="${HEAD_IP:-}"
 NODE_IP="${NODE_IP:-}"
 HEAD_PORT="${HEAD_PORT:-6379}"
@@ -149,6 +154,8 @@ case "${ROLE}" in
         RAY_ADDRESS="${HEAD_IP}:${HEAD_PORT}" \
         RAY_PLACEMENT_STRATEGY="${RAY_PLACEMENT_STRATEGY}" \
         WEIGHT_SYNC_DIR="${WEIGHT_SYNC_DIR}" \
+        EVAL_EMA_DECAY="${EVAL_EMA_DECAY}" \
+        EVAL_EMA_UPDATE_INTERVAL="${EVAL_EMA_UPDATE_INTERVAL}" \
         bash "${BASE_TRAIN_SCRIPT}" "$@"
         ;;
 

@@ -105,6 +105,8 @@ class GRPOLoss:
         runtime_only_keys = {
             "use_ema",
             "ema_decay",
+            "eval_ema_decay",
+            "eval_ema_update_interval",
             "nft_timestep_mode",
             "nft_shuffle_timesteps",
             "nft_apply_shift",

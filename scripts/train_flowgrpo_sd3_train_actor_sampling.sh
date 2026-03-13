@@ -108,6 +108,11 @@ REWARD_EXECUTION_MODE=${REWARD_EXECUTION_MODE:-rollout}
 LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cuda}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
+
+# Eval EMA settings (smoothed weights for stable evaluation)
+EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
+EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+
 LOGGING_STEPS=1
 
 python -m diffusionrl.train \
@@ -143,6 +148,8 @@ python -m diffusionrl.train \
     --algorithm.kl-coef 0.04 \
     --algorithm.advantage-type per_prompt \
     --algorithm.per-prompt-buffer-size 10000 \
+    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
+    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
     --sampling.training-actor-direct-sampling true \
     --ray.colocate-rollout-training true \

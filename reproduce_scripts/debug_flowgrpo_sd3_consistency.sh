@@ -77,6 +77,10 @@ REWARD_NAME="pickscore"
 REWARD_DEVICE="cuda"
 REWARD_EXECUTION_MODE="rollout"
 
+# Eval EMA settings (smoothed weights for stable evaluation)
+EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
+EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
@@ -110,6 +114,8 @@ python -m diffusionrl.train \
     --algorithm.kl-coef 0.04 \
     --algorithm.advantage-type per_prompt \
     --algorithm.per-prompt-buffer-size 10000 \
+    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
+    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
     --sampling.training-actor-direct-sampling true \
     --ray.colocate-rollout-training true \

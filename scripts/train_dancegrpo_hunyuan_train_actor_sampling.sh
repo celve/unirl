@@ -131,6 +131,9 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-dancegrpo_hunyuan_train_actor_sampling}
 FSDP_CPU_OFFLOAD=${FSDP_CPU_OFFLOAD:-"false"}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
+# Eval EMA settings (smoothed weights for stable evaluation)
+EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
+EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
 
 # Note: shell-level path existence check removed. The Python-level fallback in
 # arguments.py handles missing local paths by falling back to HuggingFace IDs.
@@ -207,6 +210,8 @@ python -m diffusionrl.train \
     --algorithm.use-kl-penalty false \
     --algorithm.advantage-type group \
     --algorithm.advantage-clip-max 5.0 \
+    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
+    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
     --sampling.training-actor-direct-sampling true \
     --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \

@@ -1,48 +1,33 @@
 """
 EMA (Exponential Moving Average) module for model parameters.
 
-Used by NFT algorithm for dual adapter mechanism:
-- new_adapter: Current policy being trained
-- old_adapter: Reference policy (EMA of new_adapter)
+Two use cases:
+1. Eval EMA: all algorithms maintain a smoothed copy of trainable parameters
+   for stable evaluation (decay=0.9, warmup formula).
+2. NFT old-model EMA: NFT full-param training uses a second EMA instance
+   (with its own decay schedule) as the reference / "old" policy.
 
-Based on: DiffusionNFT/flow_grpo/ema.py
+For NFT LoRA training, the existing DualAdapterEMA handles old/new adapter
+synchronization without touching this class.
 """
 
 from collections.abc import Iterable
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Callable, Dict, Any
 
 import torch
 import torch.nn as nn
 
 
 class EMAModuleWrapper:
-    """
-    EMA wrapper for model parameters.
-
-    Maintains an exponential moving average of model parameters,
-    useful for:
-    - Stable policy reference in RL (NFT old adapter)
-    - Model averaging for better generalization
-    - Rollout policy snapshots
+    """Exponential moving average of model parameters.
 
     Args:
-        parameters: Iterable of model parameters to track
-        decay: EMA decay rate (higher = slower update, default 0.9999)
-        update_step_interval: How often to update EMA (default 1)
-        device: Device for EMA parameters
-
-    Example:
-        # Initialize EMA
-        ema = EMAModuleWrapper(model.parameters(), decay=0.9999)
-
-        # Training loop
-        for step in range(num_steps):
-            loss.backward()
-            optimizer.step()
-            ema.step(model.parameters(), step)
-
-        # Use EMA weights for evaluation
-        ema.copy_ema_to(model.parameters())
+        parameters: Iterable of parameters to track.
+        decay: Target EMA decay rate.
+        update_step_interval: Update EMA every N optimizer steps.
+        device: Storage device for EMA tensors (``None`` keeps source device).
+        decay_fn: Optional ``(step) -> float`` that overrides the default
+            warmup-based decay schedule.
     """
 
     def __init__(
@@ -51,44 +36,28 @@ class EMAModuleWrapper:
         decay: float = 0.9999,
         update_step_interval: int = 1,
         device: Optional[torch.device] = None,
+        decay_fn: Optional[Callable[[int], float]] = None,
     ):
         parameters = list(parameters)
         self.ema_parameters = [p.clone().detach().to(device) for p in parameters]
-        self.temp_stored_parameters: Optional[List[torch.Tensor]] = None
+        self.temp_stored_parameters: Optional[list[torch.Tensor]] = None
         self.decay = decay
         self.update_step_interval = update_step_interval
         self.device = device
+        self._decay_fn = decay_fn
+        self._step_counter = 0
 
     def get_current_decay(self, optimization_step: int) -> float:
-        """
-        Get current decay rate with warmup.
-
-        Uses warmup formula: min((1 + step) / (10 + step), decay)
-        This starts with low decay and ramps up to target decay.
-
-        Args:
-            optimization_step: Current optimization step
-
-        Returns:
-            Current decay rate
-        """
+        if self._decay_fn is not None:
+            return self._decay_fn(optimization_step)
         return min((1 + optimization_step) / (10 + optimization_step), self.decay)
 
     @torch.no_grad()
-    def step(
-        self,
-        parameters: Iterable[nn.Parameter],
-        optimization_step: int,
-    ) -> None:
-        """
-        Update EMA parameters.
+    def step(self, parameters: Iterable[nn.Parameter], optimization_step: Optional[int] = None):
+        """Update EMA: ``ema = decay * ema + (1 - decay) * param``."""
+        if optimization_step is None:
+            optimization_step = self._step_counter
 
-        Formula: ema = decay * ema + (1 - decay) * param
-
-        Args:
-            parameters: Current model parameters
-            optimization_step: Current optimization step
-        """
         parameters = list(parameters)
         one_minus_decay = 1 - self.get_current_decay(optimization_step)
 
@@ -96,27 +65,29 @@ class EMAModuleWrapper:
             for ema_parameter, parameter in zip(self.ema_parameters, parameters, strict=True):
                 if parameter.requires_grad:
                     if ema_parameter.device == parameter.device:
-                        # In-place update when on same device
                         ema_parameter.add_(one_minus_decay * (parameter - ema_parameter))
                     else:
-                        # Memory-efficient cross-device update
                         parameter_copy = parameter.detach().to(ema_parameter.device)
                         parameter_copy.sub_(ema_parameter)
                         parameter_copy.mul_(one_minus_decay)
                         ema_parameter.add_(parameter_copy)
                         del parameter_copy
 
-    def to(
-        self,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
-    ) -> None:
-        """Move EMA parameters to device/dtype."""
+        self._step_counter += 1
+
+    def to(self, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None) -> None:
         self.device = device
         self.ema_parameters = [
             p.to(device=device, dtype=dtype) if p.is_floating_point() else p.to(device=device)
             for p in self.ema_parameters
         ]
+
+    @torch.no_grad()
+    def sync_with_model(self, parameters: Iterable[nn.Parameter]) -> None:
+        """Force EMA to be an exact copy of current model parameters."""
+        parameters = list(parameters)
+        for ema_parameter, parameter in zip(self.ema_parameters, parameters, strict=True):
+            ema_parameter.data.copy_(parameter.detach().data)
 
     def copy_ema_to(
         self,
@@ -124,16 +95,16 @@ class EMAModuleWrapper:
         store_temp: bool = True,
         grad: bool = False,
     ) -> None:
-        """
-        Copy EMA parameters to model parameters.
+        """Copy EMA weights into model parameters.
 
         Args:
-            parameters: Model parameters to copy to
-            store_temp: Whether to store original parameters temporarily
-            grad: Whether to keep gradient info in temp storage
+            parameters: Model parameters to overwrite.
+            store_temp: If ``True``, save originals so they can be restored
+                via :meth:`copy_temp_to`.
+            grad: When *store_temp* is ``True``, keep temp tensors on the
+                same device (``grad=True``) or move to CPU (``grad=False``).
         """
         parameters = list(parameters)
-
         if store_temp:
             if grad:
                 self.temp_stored_parameters = [p.data.clone() for p in parameters]
@@ -143,45 +114,29 @@ class EMAModuleWrapper:
         for ema_parameter, parameter in zip(self.ema_parameters, parameters, strict=True):
             parameter.data.copy_(ema_parameter.to(parameter.device).data)
 
-    @torch.no_grad()
-    def update(
-        self,
-        parameters: Optional[Iterable[nn.Parameter]] = None,
-        optimization_step: int = 0,
-    ) -> None:
-        """
-        Convenience method for updating EMA.
-
-        If parameters not provided and model was passed to __init__, uses model.parameters().
-
-        Args:
-            parameters: Model parameters (optional if model was stored)
-            optimization_step: Current optimization step (default 0)
-        """
-        if parameters is None:
-            if hasattr(self, '_model') and self._model is not None:
-                parameters = self._model.parameters()
-            else:
-                raise ValueError("parameters must be provided or model must be stored in __init__")
-        self.step(parameters, optimization_step)
+    def copy_temp_to(self, parameters: Iterable[nn.Parameter]) -> None:
+        """Restore model parameters previously saved by *copy_ema_to*."""
+        parameters = list(parameters)
+        for temp_parameter, parameter in zip(self.temp_stored_parameters, parameters, strict=True):
+            parameter.data.copy_(temp_parameter.to(parameter.device))
+        self.temp_stored_parameters = None
 
     def state_dict(self) -> Dict[str, Any]:
-        """Get state dict for checkpointing."""
         return {
             "decay": self.decay,
             "ema_parameters": self.ema_parameters,
+            "step_counter": self._step_counter,
         }
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        """Load state dict from checkpoint."""
         self.decay = state_dict.get("decay", self.decay)
         self.ema_parameters = state_dict.get("ema_parameters", self.ema_parameters)
+        self._step_counter = int(state_dict.get("step_counter", 0))
         self.to(self.device)
 
 
 class DualAdapterEMA:
-    """
-    EMA updater for dual LoRA adapter setup (NFT algorithm).
+    """EMA updater for dual LoRA adapter setup (NFT algorithm).
 
     NFT uses two LoRA adapters:
     - new_adapter (default): Current policy being trained
@@ -206,26 +161,22 @@ class DualAdapterEMA:
         old_adapter_name: str = "old",
         new_adapter_name: str = "default",
         decay_fn: Optional[Callable[[int], float]] = None,
-        # Optional schedule parameters (ignored if decay_fn is provided)
         decay_type: str = "constant",
-        **kwargs,  # Absorb any unused params
+        **kwargs,
     ):
         self.decay = decay
         self.old_adapter_name = old_adapter_name
         self.new_adapter_name = new_adapter_name
         self._step = 0
 
-        # Set up decay function
         if decay_fn is not None:
             self._get_decay = decay_fn
         elif decay_type != "constant":
-            # Build decay function from schedule params.
             self._get_decay = self._build_decay_fn(decay_type, kwargs)
         else:
-            self._get_decay = None  # Use fixed decay
+            self._get_decay = None
 
     def _build_decay_fn(self, decay_type: str, kwargs: dict) -> Callable[[int], float]:
-        """Build decay function from schedule parameters."""
         flat_steps = kwargs.get("flat_steps", 0)
         uprate = kwargs.get("uprate", kwargs.get("ema_uprate", 0.001))
         uphold = kwargs.get("uphold", kwargs.get("ema_uphold", 0.5))
@@ -238,36 +189,24 @@ class DualAdapterEMA:
             return lambda step: self.decay
 
     def get_decay(self, step: Optional[int] = None) -> float:
-        """Get decay value for given step."""
         if self._get_decay is None:
             return self.decay
         return self._get_decay(step if step is not None else self._step)
 
     @torch.no_grad()
     def update(self, model: nn.Module, step: Optional[int] = None) -> bool:
-        """
-        Update old adapter weights using EMA from new adapter.
+        """Update old adapter weights using EMA from new adapter.
 
         Formula: old = decay * old + (1 - decay) * new
-
-        Args:
-            model: Model with dual LoRA adapters
-            step: Optional step number for dynamic decay (uses internal counter if None)
-
-        Returns:
-            True if update was successful, False otherwise
         """
-        # Handle FSDP-wrapped models
         adapter_model = model.module if hasattr(model, "module") else model
 
         if not hasattr(adapter_model, "set_adapter"):
             return False
 
-        # Get decay for current step (fixed or dynamic)
         current_decay = self.get_decay(step)
 
         try:
-            # Get new adapter parameters
             adapter_model.set_adapter(self.new_adapter_name)
             new_params = {
                 name: param.data.clone()
@@ -275,19 +214,13 @@ class DualAdapterEMA:
                 if "lora" in name.lower()
             }
 
-            # Update old adapter with EMA
             adapter_model.set_adapter(self.old_adapter_name)
             for name, param in adapter_model.named_parameters():
                 if "lora" in name.lower() and name in new_params:
-                    # old = decay * old + (1 - decay) * new
                     param.data = current_decay * param.data + (1 - current_decay) * new_params[name]
 
-            # Switch back to new adapter for training
             adapter_model.set_adapter(self.new_adapter_name)
-
-            # Increment internal step counter
             self._step += 1
-
             return True
 
         except Exception:
