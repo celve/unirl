@@ -272,6 +272,7 @@ class TrainingActor(BaseTrainRayActor):
         # Sampling config (used when training actors perform sampling)
         sampling_config = self._require_dict_config(config, "sampling_config")
         self._sampling_config = sampling_config
+        self._timestep_fraction = sampling_config.get("timestep_fraction", 1.0)
         reward_config = self._require_dict_config(config, "reward_config")
         self._reward_config = reward_config
         self._reward_schema = RewardSchema(**reward_config)
@@ -625,10 +626,16 @@ class TrainingActor(BaseTrainRayActor):
             )
             if self._ema_updater is not None:
                 logger.info(
-                    "Rank %s: EMA updater enabled (%s, decay=%s)",
+                    "Rank %s: EMA updater enabled (%s, decay=%s, decay_type=%s, flat_steps=%s, uprate=%s, uphold=%s, old_adapter_name=%s, new_adapter_name=%s)",
                     self.rank,
                     type(self._ema_updater).__name__,
                     self._ema_decay,
+                    ema_decay_type,
+                    ema_flat_steps,
+                    ema_uprate,
+                    ema_uphold,
+                    old_adapter_name,
+                    new_adapter_name,
                 )
 
         if hasattr(self.loss_fn, "model_type"):
@@ -736,6 +743,7 @@ class TrainingActor(BaseTrainRayActor):
             nft_timestep_mode=self._nft_timestep_mode,
             nft_shuffle_timesteps=self._nft_shuffle_timesteps,
             nft_apply_shift=self._nft_apply_shift,
+            timestep_fraction=getattr(self, "_timestep_fraction", 1.0),
             shuffle_samples=self._shuffle_samples,
             shuffle_seed=self._shuffle_seed,
             clip_grad_norm_fn=(

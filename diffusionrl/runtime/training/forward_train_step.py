@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
 from diffusionrl.runtime.training.update_schedule import resolve_gradient_accumulation_plan
 from diffusionrl.types.training_batch import ForwardTrainingBatch
+from diffusionrl.samplers.schedulers.timestep_window import _normalize_timestep_fraction
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,14 @@ def train_forward_batch(
     timestep_mode: str,
     shuffle_timesteps: bool,
     apply_shift: bool,
+    timestep_fraction: Union[float, Tuple[float, float]] = 1.0,
 ) -> tuple[float, Dict[str, Any], int, int, bool]:
-    """Run one forward-path update (random timestep or all-timestep mode)."""
+    """Run one forward-path update (random timestep or all-timestep mode).
+
+    When timestep_mode is \"all\", timestep_fraction restricts which timesteps
+    are trained: only indices in [frac_start*N, frac_end*N) are used (same
+    semantics as DanceGRPO/rollout timestep_fraction).
+    """
     mini_batches, actual_mini_batches = resolve_gradient_accumulation_plan(
         batch_size=batch.batch_size,
         gradient_accumulation_batch_size=gradient_accumulation_batch_size,
@@ -70,8 +77,20 @@ def train_forward_batch(
         ).item():
             timesteps = timesteps[:-1]
 
+        # Apply timestep_fraction: train only on [frac_start*N, frac_end*N)
+        if timesteps.numel() > 0 and timestep_fraction is not None and timestep_fraction != 1.0:
+            frac_start, frac_end = _normalize_timestep_fraction(timestep_fraction)
+            n = timesteps.numel()
+            effective_start = int(n * frac_start)
+            effective_end = int(n * frac_end)
+            effective_end = min(effective_end, n)
+            if effective_start < effective_end:
+                timesteps = timesteps[effective_start:effective_end]
+            else:
+                timesteps = timesteps[:0]
+
         if timesteps.numel() == 0:
-            logger.warning("NFT all-timestep mode: empty timesteps, falling back to random mode")
+            logger.warning("NFT all-timestep mode: empty timesteps (or empty after timestep_fraction), falling back to random mode")
         else:
             if shuffle_timesteps:
                 perm = torch.randperm(timesteps.numel(), device=timesteps.device)

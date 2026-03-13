@@ -101,3 +101,5 @@ settings.json
 *.iml
 *.code-workspace
 .DS_Store
+.claude/
+.cursor

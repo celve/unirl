@@ -138,6 +138,7 @@ def build_sampling_config(args) -> Dict[str, Any]:
         "sde_type": str(sc.sde_type),
         "shift": float(sc.shift),
         "guidance_scale": float(sc.guidance_scale),
+        "timestep_fraction": getattr(sc, "timestep_fraction", 1.0),
         "height": int(args.height),
         "width": int(args.width),
         "num_frames": int(args.num_frames),

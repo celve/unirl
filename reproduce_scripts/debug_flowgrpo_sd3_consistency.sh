@@ -77,8 +77,6 @@ REWARD_NAME="pickscore"
 REWARD_DEVICE="cuda"
 REWARD_EXECUTION_MODE="rollout"
 
-conda activate drl  # Change to your own conda environment
-
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
@@ -96,7 +94,7 @@ python -m diffusionrl.train \
     --sampling.shift 3.0 \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
     --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
-    --sampling.guidance-scale 1.0 \
+    --sampling.guidance-scale 4.5 \
     --sampling.timestep-fraction 0.1,0.3 \
     \
     --algorithm.loss-kwargs "{\"shuffle_seed\":42,\"shuffle_samples\":false}" \

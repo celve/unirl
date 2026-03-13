@@ -105,7 +105,7 @@ WANDB_PROJECT_NAME="diffusionrl-flowgrpo"
 WANDB_RUN_NAME="SD3.5-Flow-GRPO" # change to your own name
 WANDB_LOG_MEDIA=true
 WANDB_MEDIA_MAX_ITEMS=48 # Max number of image reports per logging step
-WANDB_TAGS="reproduce,sd3.5,flow" # Add more tags as needed, split by comma
+WANDB_TAGS="reproduce,sd3.5,flow,ocr" # reward=ocr, flow
 WANDB_ENTITY=${WANDB_ENTITY:-"diffusionrl-reproduce"} # Set empty to skip: WANDB_ENTITY=""
 LOGGING_STEPS=1
 
@@ -140,7 +140,7 @@ python -m diffusionrl.train \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
     --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 4.5 \
-    --sampling.timestep-fraction 0.1,0.3 \
+    --sampling.timestep-fraction 0.99 \
     \
     --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \

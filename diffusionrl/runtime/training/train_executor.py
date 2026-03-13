@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from math import log
 import os
 import re
 from functools import partial
@@ -55,6 +56,7 @@ class TrainExecutorConfig:
     nft_timestep_mode: str
     nft_shuffle_timesteps: bool
     nft_apply_shift: bool
+    timestep_fraction: Any = 1.0
     shuffle_samples: bool = True
     shuffle_seed: Optional[int] = None
     clip_grad_norm_fn: Optional[Callable[..., Any]] = None
@@ -190,6 +192,7 @@ class TrainExecutor:
                 timestep_mode=self.config.nft_timestep_mode,
                 shuffle_timesteps=self.config.nft_shuffle_timesteps,
                 apply_shift=self.config.nft_apply_shift,
+                timestep_fraction=getattr(self.config, "timestep_fraction", 1.0),
             )
         return train_backward_with_accumulation(
             batch=batch,
