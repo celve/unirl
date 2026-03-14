@@ -3,9 +3,7 @@ GRPO Algorithm Implementation.
 
 Standard GRPO with group normalization for advantages.
 """
-from typing import Any, Dict, List, Optional
-
-import torch
+from typing import Any, Dict
 
 from .base import BaseAlgorithm, SamplingRequirements
 
@@ -32,7 +30,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         epsilon: float = 1e-4,
         clip_max: float = 5.0,
         use_per_prompt_tracker: bool = False,
-        per_prompt_mode: str = "running",
+        per_prompt_mode: str = "batch",
         per_prompt_buffer_size: int = 16,
         per_prompt_min_count: int = 2,
         use_running_stats: bool = False,
@@ -87,94 +85,6 @@ class GRPOAlgorithm(BaseAlgorithm):
         self.ignore_last = ignore_last
         self.frozen_init_timesteps = frozen_init_timesteps
 
-    def compute_advantages(
-        self,
-        rewards: torch.Tensor,
-        num_samples_per_prompt: int,
-        prompts: Optional[List[str]] = None,
-    ) -> torch.Tensor:
-        """
-        Compute advantages using group normalization.
-
-        Extends the base implementation to support GRPO-specific
-        per_prompt_mode="batch" normalization.
-
-        Args:
-            rewards: Reward tensor [batch_size]
-            num_samples_per_prompt: Number of samples per prompt
-            prompts: Optional list of prompt strings (for per_prompt with tracker)
-
-        Returns:
-            Normalized advantage tensor [batch_size]
-        """
-        if self.advantage_type == "per_prompt" and self.per_prompt_mode == "batch":
-            return self._normalize_per_prompt_batch(
-                rewards, num_samples_per_prompt, prompts
-            )
-        return super().compute_advantages(rewards, num_samples_per_prompt, prompts)
-
-    def _normalize_per_prompt_batch(
-        self,
-        rewards: torch.Tensor,
-        num_samples_per_prompt: int,
-        prompts: Optional[List[str]] = None,
-    ) -> torch.Tensor:
-        """
-        Per-prompt normalization using current batch statistics.
-
-        - Mean is computed per prompt group.
-        - Std is computed per prompt group unless use_global_std=True.
-        """
-        if prompts is None:
-            return self._normalize_group(rewards, num_samples_per_prompt)
-
-        # Expand prompts to per-sample list if needed
-        if len(prompts) * num_samples_per_prompt == len(rewards):
-            prompts = [p for p in prompts for _ in range(num_samples_per_prompt)]
-        elif len(prompts) != len(rewards):
-            return self._normalize_group(rewards, num_samples_per_prompt)
-
-        # Build prompt -> indices mapping
-        prompt_to_indices: Dict[str, List[int]] = {}
-        for idx, prompt in enumerate(prompts):
-            prompt_to_indices.setdefault(prompt, []).append(idx)
-
-        # Global std (batch or running stats)
-        global_std = None
-        if self.use_global_std:
-            global_std = self._get_global_std(rewards)
-
-        advantages = torch.empty_like(rewards)
-        for prompt, indices in prompt_to_indices.items():
-            idx_tensor = torch.tensor(indices, device=rewards.device, dtype=torch.long)
-            prompt_rewards = rewards.index_select(0, idx_tensor)
-            mean = prompt_rewards.mean()
-            if global_std is None:
-                std = prompt_rewards.std() + self.epsilon
-            else:
-                std = global_std
-            prompt_adv = (prompt_rewards - mean) / std
-            advantages.index_copy_(0, idx_tensor, prompt_adv)
-
-        if self.clip_max is not None:
-            advantages = advantages.clamp(-self.clip_max, self.clip_max)
-
-        return advantages
-
-    def _get_global_std(self, rewards: torch.Tensor) -> torch.Tensor:
-        """Get global std with optional running stats (DanceGRPO style)."""
-        if self.running_reward_normalizer is None:
-            return rewards.std() + self.epsilon
-
-        # Update running stats and respect warmup
-        self.running_reward_normalizer.running_stats.update(rewards)
-        self.running_reward_normalizer._step_count += 1
-        if self.running_reward_normalizer._step_count <= self.running_reward_normalizer.warmup_steps:
-            return rewards.std() + self.epsilon
-
-        std = self.running_reward_normalizer.running_stats.std
-        return torch.tensor(std, device=rewards.device, dtype=rewards.dtype)
-
     @classmethod
     def _grpo_kwargs_from_args(cls, args: Any) -> Dict[str, Any]:
         kwargs = cls._base_kwargs_from_args(args)
@@ -183,7 +93,7 @@ class GRPOAlgorithm(BaseAlgorithm):
                 "eta": getattr(args.sampling, "eta", 1.0),
                 "sde_type": getattr(args.sampling, "sde_type", "sde"),
                 "use_per_prompt_tracker": getattr(args.algorithm, "use_per_prompt_stat_tracker", False),
-                "per_prompt_mode": getattr(args.algorithm, "per_prompt_mode", "running"),
+                "per_prompt_mode": getattr(args.algorithm, "per_prompt_mode", "batch"),
                 "per_prompt_buffer_size": getattr(args.algorithm, "per_prompt_buffer_size", 16),
                 "per_prompt_min_count": getattr(args.algorithm, "per_prompt_min_count", 2),
                 "use_running_stats": getattr(args.algorithm, "use_running_stats", False),

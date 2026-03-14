@@ -76,14 +76,10 @@ python -m diffusionrl.train \
     --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
     --training.gradient-accumulation-batch-size ${BATCH_SIZE} \
     --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --algorithm.use-per-prompt-stat-tracker true \
-    --algorithm.use-running-stats true \
-    --algorithm.use-global-std true \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty true \
     --algorithm.kl-coef 0.04 \
     --algorithm.advantage-type per_prompt \
-    --algorithm.per-prompt-buffer-size 10000 \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \

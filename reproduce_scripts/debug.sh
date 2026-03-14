@@ -23,7 +23,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Default values (can be overridden via command line)
 PRETRAINED_MODEL="stabilityai/stable-diffusion-3.5-medium"
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/flowgrpo_sd3_train_sampling"}
-DATA_PATH="${REPO_ROOT}/data/datasets/ocr/train.txt"
+DATA_PATH="${REPO_ROOT}/data/datasets/pickscore/train.txt"
 
 NUM_GPUS=${NUM_GPUS:-8}
 
@@ -73,7 +73,7 @@ if [ -n "${WANDB_ENTITY}" ]; then
     WANDB_ENTITY_ARGS+=(--rollout.wandb-entity "${WANDB_ENTITY}")
 fi
 
-REWARD_NAME="ocr" # pickscore, ocr, clip, hpsv2
+REWARD_NAME="pickscore" # pickscore, ocr, clip, hpsv2
 REWARD_DEVICE="cuda"
 REWARD_EXECUTION_MODE="rollout" # compute reward during rollout stage
 
@@ -89,11 +89,13 @@ DEBUG_NUM_ROLLOUTS=${DEBUG_NUM_ROLLOUTS:-1}
 
     # --debug.debug-save-intermediates true \
     # --debug.debug-save-dir "${DEBUG_SAVE_DIR}" \
-    
+
+    # --debug.debug-mode train_only \
+    # --debug.debug-load-path "${DEBUG_SAVE_DIR}/rollout_payload_0.pt" \
+    # --debug.debug-num-rollouts 3 \
 python -m diffusionrl.train \
-    --debug.debug-mode train_only \
-    --debug.debug-load-path "${DEBUG_SAVE_DIR}/rollout_payload_0.pt" \
-    --debug.debug-num-rollouts 3 \
+    --debug.debug-save-intermediates true \
+    --debug.debug-save-dir "${DEBUG_SAVE_DIR}" \
     \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
@@ -124,8 +126,6 @@ python -m diffusionrl.train \
     --algorithm.use-kl-penalty true \
     --algorithm.kl-coef 0.0001 \
     --algorithm.advantage-type per_prompt \
-    --algorithm.use-per-prompt-stat-tracker true \
-    --algorithm.per-prompt-buffer-size 10000 \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \

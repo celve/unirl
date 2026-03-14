@@ -12,7 +12,7 @@ import warnings
 import torch
 import torch.nn as nn
 
-from .normalizers import normalize_global, normalize_grouped, build_fixed_size_groups
+from .normalizers import normalize_global, normalize_grouped, build_fixed_size_groups, build_prompt_groups
 
 
 @dataclass
@@ -116,7 +116,7 @@ class BaseAlgorithm(ABC):
         epsilon: float = 1e-8,
         clip_max: Optional[float] = 5.0,
         use_per_prompt_tracker: bool = False,
-        per_prompt_mode: str = "running",
+        per_prompt_mode: str = "batch",
         per_prompt_buffer_size: int = 16,
         per_prompt_min_count: int = 2,
         use_running_stats: bool = False,
@@ -168,7 +168,7 @@ class BaseAlgorithm(ABC):
 
         # Running statistics for cross-batch global normalization (DanceGRPO)
         self.running_reward_normalizer = None
-        if use_running_stats or use_global_std:
+        if use_running_stats:
             from .running_stats import RunningRewardNormalizer
             self.running_reward_normalizer = RunningRewardNormalizer(
                 epsilon=epsilon,
@@ -313,15 +313,37 @@ class BaseAlgorithm(ABC):
         num_samples_per_prompt: int,
         prompts: Optional[List[str]] = None,
     ) -> torch.Tensor:
-        """Per-prompt normalization with tracker or batch-level fallback."""
-        # Use per-prompt tracker if available and prompts provided
+        """Per-prompt normalization.
+
+        When a PerPromptStatTracker is active (per_prompt_mode='running'),
+        delegates to the tracker for cross-batch statistics.
+
+        Otherwise (per_prompt_mode='batch', the default) normalizes using
+        only the current batch, grouping samples by prompt text.
+        """
+        # Running mode: delegate to cross-batch tracker
         if self.per_prompt_tracker is not None and prompts is not None:
             if len(prompts) * num_samples_per_prompt == len(rewards):
                 prompts = [p for p in prompts for _ in range(num_samples_per_prompt)]
             return self.per_prompt_tracker.compute_advantages(
                 prompts, rewards, update_stats=True
             )
-        # Fall back to batch-level group normalization
+        # Batch mode: normalize within current batch per prompt text
+        if prompts is not None:
+            # Expand prompts to per-sample list if needed
+            if len(prompts) * num_samples_per_prompt == len(rewards):
+                prompts = [p for p in prompts for _ in range(num_samples_per_prompt)]
+            if len(prompts) == len(rewards):
+                groups = build_prompt_groups(prompts)
+                return normalize_grouped(
+                    rewards,
+                    groups,
+                    epsilon=self.epsilon,
+                    clip_max=self.clip_max,
+                    trimmed_ratio=self.trimmed_ratio,
+                    use_global_std=self.use_global_std,
+                )
+        # Fall back to fixed-size group normalization
         return self._normalize_group(rewards, num_samples_per_prompt)
 
     # ========== Algorithm Hooks ==========

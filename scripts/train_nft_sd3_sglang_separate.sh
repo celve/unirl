@@ -78,8 +78,6 @@ python -m diffusionrl.train \
     --algorithm.clip-range 1e-4 \
     --algorithm.kl-coef 0.0001 \
     --algorithm.advantage-type per_prompt \
-    --algorithm.use-per-prompt-stat-tracker true \
-    --algorithm.per-prompt-buffer-size 10000 \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \

@@ -322,8 +322,8 @@ class AlgorithmConfig:
         metadata={"help": "Trim ratio for grouped advantage stats (MixGRPO-style outlier trimming)"})
     use_per_prompt_stat_tracker: bool = field(default=False,
         metadata={"help": "Track per-prompt running statistics for advantage normalization"})
-    per_prompt_mode: str = field(default="running",
-        metadata={"help": "Per-prompt stats mode: running (EMA tracker) or batch (per-batch stats)"})
+    per_prompt_mode: str = field(default="batch",
+        metadata={"help": "Per-prompt stats mode: batch (per-batch stats, default) or running (EMA tracker, requires use-per-prompt-stat-tracker)"})
     per_prompt_buffer_size: int = field(default=16,
         metadata={"help": "Buffer size for per-prompt running statistics"})
     per_prompt_min_count: int = field(default=2,
@@ -1767,10 +1767,9 @@ def _normalize_training_misc(args: TrainingArguments) -> None:
             "--algorithm.use-per-prompt-stat-tracker=true."
         )
 
-    if args.algorithm.use_global_std and not args.algorithm.use_running_stats:
-        raise ValueError(
-            "--algorithm.use-global-std=true requires --algorithm.use-running-stats=true."
-        )
+    # use_global_std is now independent of use_running_stats.
+    # It can be used with batch-level normalization (per_prompt_mode='batch')
+    # to apply per-prompt mean subtraction with global std division.
 
     if isinstance(args.training.lora_target_modules, str):
         stripped = args.training.lora_target_modules.strip()

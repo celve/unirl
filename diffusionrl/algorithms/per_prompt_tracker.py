@@ -104,7 +104,9 @@ class PerPromptStatTracker:
         Compute advantages using per-prompt statistics.
 
         For prompts with sufficient history, uses per-prompt mean/std.
-        For new prompts, falls back to global statistics or configured defaults.
+        For new prompts, falls back to current-batch per-prompt group
+        normalization so that the first rollout still gets meaningful
+        (zero-mean, unit-variance) advantages instead of raw rewards.
 
         Args:
             prompt_ids: List of prompt identifiers [B]
@@ -125,13 +127,19 @@ class PerPromptStatTracker:
             except Exception:
                 global_std = None
 
+        # Pre-compute current-batch per-prompt groups for fallback
+        rewards_list = rewards.tolist()
+        batch_prompt_rewards: Dict[str, List[float]] = defaultdict(list)
+        for pid, r in zip(prompt_ids, rewards_list):
+            batch_prompt_rewards[pid].append(r)
+
         advantages = []
 
-        for pid, r in zip(prompt_ids, rewards.tolist()):
+        for pid, r in zip(prompt_ids, rewards_list):
             buf = self.prompt_stats.get(pid, [])
 
             if len(buf) >= self.min_count:
-                # Use per-prompt statistics
+                # Use per-prompt historical statistics
                 mean = sum(buf) / len(buf)
                 if self.use_global_std and global_std is not None:
                     std = max(global_std, self.epsilon)
@@ -140,9 +148,20 @@ class PerPromptStatTracker:
                     std = max(variance ** 0.5, self.epsilon)
                 adv = (r - mean) / std
             else:
-                # Fall back to global statistics
-                mean, std = self._get_global_stats()
-                adv = (r - mean) / std
+                # Fall back to current-batch per-prompt group normalization
+                group = batch_prompt_rewards[pid]
+                if len(group) >= 2:
+                    mean = sum(group) / len(group)
+                    if self.use_global_std and global_std is not None:
+                        std = max(global_std, self.epsilon)
+                    else:
+                        variance = sum((x - mean) ** 2 for x in group) / len(group)
+                        std = max(variance ** 0.5, self.epsilon)
+                    adv = (r - mean) / std
+                else:
+                    # Single sample for this prompt in the batch – no
+                    # normalization possible; set advantage to zero.
+                    adv = 0.0
 
             advantages.append(adv)
 
