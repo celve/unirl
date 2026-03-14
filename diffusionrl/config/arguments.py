@@ -409,7 +409,7 @@ class TrainingConfig:
         metadata={"help": "Adam optimizer beta2 (second moment decay)"})
     adam_epsilon: float = field(default=1e-8,
         metadata={"help": "Adam optimizer epsilon for numerical stability"})
-    weight_decay: float = field(default=0.0,
+    weight_decay: float = field(default=1e-4,
         metadata={"help": "Weight decay (L2 regularization) coefficient"})
     max_grad_norm: float = field(default=1.0,
         metadata={"help": "Max gradient norm for gradient clipping"})
@@ -616,7 +616,10 @@ class DebugConfig:
         if int(self.debug_subsample) < 0:
             raise ValueError("debug_subsample must be >= 0.")
         if mode == "train_only" and not self.debug_load_path:
-            raise ValueError("debug_mode=train_only requires --debug.debug-load-path.")
+            logger.info(
+                "debug_mode=train_only without --debug.debug-load-path: "
+                "will generate synthetic training data."
+            )
 
 
 _GROUP_CONFIG_TYPES = {

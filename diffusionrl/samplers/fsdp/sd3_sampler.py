@@ -445,8 +445,10 @@ class SD3Sampler(BaseSampler):
         sigmas = self._get_sigma_schedule(num_inference_steps, device)
 
         # Default: all timesteps use SDE; in deterministic (dpm2) mode, use ODE only.
+        # When eta=0 the SDE degenerates to ODE (no noise), so skip SDE steps
+        # to avoid division-by-zero in the log-prob variance term.
         if sde_indices is None:
-            if self.sde_type == "dpm2":
+            if self.sde_type == "dpm2" or self.eta == 0.0:
                 sde_indices = set()
             else:
                 sde_indices = set(range(num_inference_steps))

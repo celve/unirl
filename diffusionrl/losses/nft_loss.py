@@ -402,6 +402,7 @@ class NFTLoss:
 
         # Sample random timesteps unless explicitly provided
         provided_t = kwargs.get("timestep_values")
+        assert provided_t is not None, "timestep_values must be provided"
         if provided_t is None:
             t = torch.rand(batch_size, device=device)
             apply_shift = True
@@ -449,34 +450,28 @@ class NFTLoss:
             encoder_attention_mask=encoder_attention_mask,
         )
 
-        # Ensure training forward uses the new policy adapter and has autograd enabled.
         adapter_model = model.module if hasattr(model, "module") else model
-        if hasattr(adapter_model, "set_adapter"):
-            try:
-                adapter_model.set_adapter(self.new_adapter_name)
-            except Exception:
-                pass
+        assert hasattr(adapter_model, "set_adapter"), "adapter_model must have set_adapter method"
+        adapter_model.set_adapter(self.new_adapter_name)
 
+        autocast_ctx_fn = lambda: torch.autocast("cuda", model_dtype) if autocast_enabled else nullcontext[None]()
         grad_context = torch.enable_grad() if not torch.is_grad_enabled() else nullcontext()
-        # Get predictions from current model
-        try:
-            from fastvideo.forward_context import set_forward_context
 
-            with grad_context:
-                if attn_metadata is not None:
-                    with set_forward_context(current_timestep=timestep_idx, attn_metadata=attn_metadata):
-                        with torch.autocast("cuda", model_dtype) if autocast_enabled else nullcontext():
-                            forward_prediction = model(**model_kwargs)[0]
-                else:
-                    with torch.autocast("cuda", model_dtype) if autocast_enabled else nullcontext():
-                        forward_prediction = model(**model_kwargs)[0]
-        except ImportError:
-            with grad_context:
-                with torch.autocast("cuda", model_dtype) if autocast_enabled else nullcontext():
-                    forward_prediction = model(**model_kwargs)[0]
+        # Get predictions from current model (new adapter)
+        with grad_context, autocast_ctx_fn():
+            forward_prediction = model(**model_kwargs)[0]
 
-        # Get predictions from old model/adapter
-        old_prediction = self.get_old_prediction(model, model_kwargs, old_model)
+        # Get predictions from old model/adapter.
+        # Must use same autocast context as new prediction to ensure identical
+        # CUDA kernel selection (e.g. SDPA attention backend), otherwise
+        # bfloat16 accumulation differences cause non-zero MSE even when
+        # adapter weights are identical.
+        adapter_model.set_adapter(self.old_adapter_name)
+        with torch.no_grad(), autocast_ctx_fn():
+            old_prediction = model(**model_kwargs)[0]
+
+        # Restore new adapter as active
+        adapter_model.set_adapter(self.new_adapter_name)
 
         # Process advantages
         adv_processed = self.process_advantages(advantages)
@@ -552,7 +547,8 @@ class NFTLoss:
 
         # KL regularization (optional) - DiffusionNFT style
         if self.kl_coef > 0:
-            ref_prediction = self.get_ref_prediction(model, model_kwargs, old_model=old_model)
+            with torch.no_grad(), autocast_ctx_fn(), adapter_model.disable_adapter():
+                ref_prediction = model(**model_kwargs)[0]
             kl_div = ((forward_prediction - ref_prediction) ** 2).mean(
                 dim=tuple(range(1, x0.ndim))
             )

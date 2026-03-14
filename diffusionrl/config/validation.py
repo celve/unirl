@@ -347,10 +347,14 @@ def validate_model_specific_logic(args: Any, *, model_cls: Any) -> None:
                 f"Set --sampling.sampling-adapter {old_adapter_name!r}, "
                 f"got {args.sampling.sampling_adapter!r}."
             )
-        if str(args.sampling.sde_type) != "dpm2":
+        sde_type = str(args.sampling.sde_type)
+        eta = float(getattr(args.sampling, "eta", 1.0))
+        if sde_type != "dpm2" and not (sde_type == "sde" and eta == 0.0):
             raise ValueError(
                 "loss_type='nft' targets DiffusionNFT deterministic sampling. "
-                f"Set --sampling.sde-type dpm2, got sde_type={args.sampling.sde_type!r}."
+                "Set --sampling.sde-type dpm2, or use --sampling.sde-type sde "
+                f"with --sampling.eta 0.0 (ODE mode). "
+                f"Got sde_type={sde_type!r}, eta={eta}."
             )
 
 

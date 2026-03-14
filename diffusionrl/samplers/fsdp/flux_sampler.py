@@ -357,9 +357,9 @@ class FluxSampler(BaseSampler):
         sigma_schedule = torch.linspace(1, 0, num_inference_steps + 1, device=device)
         sigma_schedule = sd3_time_shift(self.shift, sigma_schedule).to(device=device, dtype=torch.float32)
 
-        # Default: all timesteps use SDE. For deterministic (dpm2) mode, use ODE only.
+        # Default: all timesteps use SDE. For deterministic (dpm2) or eta=0 mode, use ODE only.
         if sde_indices is None:
-            if self.sde_type == "dpm2":
+            if self.sde_type == "dpm2" or self.eta == 0.0:
                 sde_indices = set()  # pure ODE / deterministic steps
             else:
                 sde_indices = set(range(num_inference_steps))

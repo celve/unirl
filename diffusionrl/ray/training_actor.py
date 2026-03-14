@@ -437,15 +437,16 @@ class TrainingActor(BaseTrainRayActor):
         eps = float(optimizer_config["adam_epsilon"])
         weight_decay = float(optimizer_config["weight_decay"])
 
+        trainable_params = list(filter(lambda p: p.requires_grad, self.model.parameters()))
         self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
+            trainable_params,
             lr=lr,
             betas=betas,
             eps=eps,
             weight_decay=weight_decay,
         )
 
-        logger.info(f"Rank {self.rank}: Optimizer created (lr={lr})")
+        logger.info(f"Rank {self.rank}: Optimizer created (lr={lr}, betas={betas}, eps={eps}, weight_decay={weight_decay})")
 
     def _create_scheduler(self, scheduler_config: dict) -> None:
         """Create learning rate scheduler."""
@@ -683,16 +684,27 @@ class TrainingActor(BaseTrainRayActor):
             logger.warning("Rank %s: No trainable params found, skipping EMA init", self.rank)
             return
 
+        # When FSDP shards the model, parameters become DTensors.  Storing EMA
+        # copies on CPU would strip DTensor metadata and cause type/shape
+        # mismatches on every subsequent copy.  Keep EMA on-device (None) so
+        # all operations remain DTensor↔DTensor.
+        is_sharded = (
+            self._train_backend is not None
+            and self._train_backend.uses_sharded_model()
+        )
+        ema_device = None if is_sharded else torch.device("cpu")
+
         # 1) Eval EMA — always created for every algorithm.
         self._eval_ema = EMAModuleWrapper(
             trainable_params,
             decay=self._eval_ema_decay,
             update_step_interval=self._eval_ema_update_interval,
-            device=torch.device("cpu"),
+            device=ema_device,
         )
         logger.info(
-            "Rank %s: Eval EMA initialised (decay=%s, update_interval=%d, params=%d, device=cpu)",
-            self.rank, self._eval_ema_decay, self._eval_ema_update_interval, len(trainable_params),
+            "Rank %s: Eval EMA initialised (decay=%s, update_interval=%d, params=%d, device=%s)",
+            self.rank, self._eval_ema_decay, self._eval_ema_update_interval,
+            len(trainable_params), ema_device or "same-as-model",
         )
 
         # 2) NFT-specific reference-model EMA.
@@ -727,7 +739,7 @@ class TrainingActor(BaseTrainRayActor):
                 decay=self._ema_decay,
                 decay_fn=decay_fn,
                 update_step_interval=1,
-                device=torch.device("cpu"),
+                device=ema_device,
             )
             # Inject into loss so get_old_prediction can use it.
             self.loss_fn._old_params_ema = self._nft_old_params_ema
@@ -921,6 +933,53 @@ class TrainingActor(BaseTrainRayActor):
         metrics = executor.execute_prepared_batch(rollout_id=rollout_id, batch=batch)
         self._log_gpu_state("training_train_end")
         return metrics
+
+    def create_debug_forward_batch(
+        self,
+        batch_size: int,
+        height: int,
+        width: int,
+        *,
+        latent_channels: int = 16,
+        vae_scale_factor: int = 8,
+        max_sequence_length: int = 256,
+    ) -> "ForwardTrainingBatch":
+        """Create a synthetic ForwardTrainingBatch for debug/testing.
+
+        Infers embedding dimensions from the loaded transformer config so
+        shapes are always correct for the current model.
+        """
+        from diffusionrl.types.training_batch import ForwardTrainingBatch
+        from diffusionrl.types.sampling import PromptEmbeddings
+
+        transformer = self.model
+        config = getattr(transformer, "config", None)
+        if config is not None:
+            joint_dim = int(getattr(config, "joint_attention_dim", 4096))
+            pooled_dim = int(getattr(config, "pooled_projection_dim", 2048))
+        else:
+            joint_dim, pooled_dim = 4096, 2048
+
+        latent_h = height // vae_scale_factor
+        latent_w = width // vae_scale_factor
+        dtype = next(transformer.parameters()).dtype
+
+        clean_latents = torch.randn(batch_size, latent_channels, latent_h, latent_w, dtype=dtype)
+        prompt_embeds = torch.randn(batch_size, max_sequence_length, joint_dim, dtype=dtype)
+        pooled_prompt_embeds = torch.randn(batch_size, pooled_dim, dtype=dtype)
+        advantages = torch.randn(batch_size, dtype=dtype)
+        rewards = torch.randn(batch_size, dtype=dtype)
+
+        return ForwardTrainingBatch(
+            clean_latents=clean_latents,
+            advantages=advantages,
+            embeddings=PromptEmbeddings(
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+            ),
+            rewards=rewards,
+            prompts=[f"debug_prompt_{i}" for i in range(batch_size)],
+        )
 
     # --- State IO methods ---
 
