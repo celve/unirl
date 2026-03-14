@@ -2054,7 +2054,12 @@ def _normalize_algorithm_kwargs_payload(args: TrainingArguments) -> None:
 
 
 def _normalize_loss_path(args: TrainingArguments) -> None:
-    """Resolve algorithm.loss_path from loss_type exactly once in validate stage."""
+    """Resolve algorithm.loss_path from loss_type exactly once in validate stage.
+
+    Now resolves from DEFAULT_ALGORITHM_PATHS (unified algorithms module)
+    instead of the legacy DEFAULT_LOSS_PATHS.  Explicit ``--algorithm.loss-path``
+    still wins for backward compatibility.
+    """
     raw_loss_path = getattr(args.algorithm, "loss_path", None)
     if isinstance(raw_loss_path, str) and raw_loss_path.strip():
         normalized = raw_loss_path.strip()
@@ -2067,10 +2072,10 @@ def _normalize_loss_path(args: TrainingArguments) -> None:
         )
         return
 
-    from diffusionrl.losses import DEFAULT_LOSS_PATHS
+    from diffusionrl.algorithms import DEFAULT_ALGORITHM_PATHS
 
     loss_type = str(getattr(args.algorithm, "loss_type", "") or "").strip()
-    resolved = DEFAULT_LOSS_PATHS.get(loss_type)
+    resolved = DEFAULT_ALGORITHM_PATHS.get(loss_type)
     if not resolved:
         raise ValueError(
             f"Cannot resolve algorithm.loss_path for loss_type={loss_type!r}. "

@@ -38,24 +38,31 @@ class ResolvedSamplingRequirements:
         }
 
 def get_loss_requirements(args: Any) -> Dict[str, bool]:
-    """Get loss requirements from loss class's declared_requirements()."""
+    """Get loss requirements from algorithm/loss class's declared_requirements().
+
+    Prefers ``algorithm_path`` when ``loss_path`` resolves to the same value
+    (unified module).  Falls back to ``loss_path`` for backward compatibility.
+    """
+    # Try algorithm_path first (unified), fall back to loss_path (legacy)
     loss_path = getattr(args.algorithm, "loss_path", None)
     if not isinstance(loss_path, str) or not loss_path.strip():
+        loss_path = getattr(args.algorithm, "algorithm_path", None)
+    if not isinstance(loss_path, str) or not loss_path.strip():
         raise ValueError(
-            f"Cannot resolve loss class for loss_type={getattr(args.algorithm, 'loss_type', None)!r}, "
-            f"loss_path={loss_path!r}. Ensure loss_type is registered or loss_path is importable."
+            f"Cannot resolve algorithm/loss class for loss_type={getattr(args.algorithm, 'loss_type', None)!r}, "
+            f"loss_path={loss_path!r}. Ensure loss_type is registered or loss_path/algorithm_path is importable."
         )
     try:
         loss_cls = load_function(loss_path.strip())
     except Exception as exc:
         raise ValueError(
-            f"Cannot resolve loss class for loss_type={getattr(args.algorithm, 'loss_type', None)!r}, "
-            f"loss_path={loss_path!r}. Ensure loss_type is registered or loss_path is importable."
+            f"Cannot resolve algorithm/loss class for loss_type={getattr(args.algorithm, 'loss_type', None)!r}, "
+            f"loss_path={loss_path!r}. Ensure loss_type is registered or loss_path/algorithm_path is importable."
         ) from exc
     declared = getattr(loss_cls, "declared_requirements", None)
     if not callable(declared):
         raise ValueError(
-            f"Loss class {loss_cls.__name__} must define classmethod declared_requirements() "
+            f"Algorithm/loss class {loss_cls.__name__} must define classmethod declared_requirements() "
             "returning a dict like {'requires_trajectory': True, 'requires_log_prob': True, ...}."
         )
     return dict(declared())

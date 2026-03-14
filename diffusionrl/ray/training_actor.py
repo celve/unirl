@@ -569,14 +569,15 @@ class TrainingActor(BaseTrainRayActor):
         return kwargs
 
     def _load_loss(self, loss_config: dict) -> None:
-        """Load loss function via load_function(loss_path) + cls.from_config().
+        """Load algorithm/loss via load_function(algorithm_path) + cls.from_config().
 
-        Each loss class knows how to construct itself from a loss_config dict.
-        No Algorithm instance is created here — Algorithm lives only in
-        RolloutManager for advantage computation.
+        The algorithm class is the single source of truth for both rollout-side
+        requirements and training-side gradient computation.  Falls back to
+        ``loss_path`` when ``algorithm_path`` is not present for backward compat.
         """
         self._loss_type = str(loss_config["loss_type"])
-        self._loss_path = loss_config.get("loss_path")
+        # Prefer algorithm_path (new unified path), fall back to loss_path (legacy)
+        self._loss_path = loss_config.get("algorithm_path") or loss_config.get("loss_path")
         self._guidance_scale = float(loss_config["guidance_scale"])
         self._ema_updater = None
 
@@ -600,10 +601,10 @@ class TrainingActor(BaseTrainRayActor):
 
         if not self._loss_path:
             raise ValueError(
-                "loss_config.loss_path is required before TrainingActor.init. "
-                f"Got empty loss_path for loss_type={self._loss_type!r}. "
-                "Ensure build_domain_args resolves loss_path from loss_type, "
-                "or pass --algorithm.loss-path explicitly."
+                "loss_config requires algorithm_path (or loss_path) before TrainingActor.init. "
+                f"Got empty path for loss_type={self._loss_type!r}. "
+                "Ensure build_domain_args resolves algorithm_path from loss_type, "
+                "or pass --algorithm.algorithm-path explicitly."
             )
 
         loss_cls = load_function(self._loss_path)

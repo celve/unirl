@@ -31,10 +31,12 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "HTTPRewardWorker": ("diffusionrl.reward", "HTTPRewardWorker"),
     "RewardService": ("diffusionrl.reward", "RewardService"),
     # losses / algorithms / advantages
-    "GRPOLoss": ("diffusionrl.losses", "GRPOLoss"),
+    "GRPOLoss": ("diffusionrl.algorithms.grpo", "GRPOAlgorithm"),
+    "NFTLoss": ("diffusionrl.algorithms.nft", "NFTAlgorithm"),
     "BaseAlgorithm": ("diffusionrl.algorithms", "BaseAlgorithm"),
     "SamplingRequirements": ("diffusionrl.algorithms", "SamplingRequirements"),
     "GRPOAlgorithm": ("diffusionrl.algorithms", "GRPOAlgorithm"),
+    "NFTAlgorithm": ("diffusionrl.algorithms", "NFTAlgorithm"),
     # config / utils / models
     "TrainingArguments": ("diffusionrl.config", "TrainingArguments"),
     "parse_args": ("diffusionrl.config", "parse_args"),

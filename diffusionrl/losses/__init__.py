@@ -1,20 +1,26 @@
-"""Loss functions for diffusionrl training."""
+"""Loss functions for diffusionrl training — backward-compatibility shim.
 
+.. deprecated::
+    The ``diffusionrl.losses`` module is deprecated.  Loss computation has been
+    merged into the algorithm classes in ``diffusionrl.algorithms``.  Import
+    ``GRPOAlgorithm`` / ``NFTAlgorithm`` directly from ``diffusionrl.algorithms``
+    instead.  The old names ``GRPOLoss`` / ``NFTLoss`` are re-exported here for
+    backward compatibility and will be removed in a future release.
+"""
+
+import warnings
 from typing import Any, Optional
 
-from .grpo_loss import GRPOLoss
+from diffusionrl.algorithms.grpo import GRPOAlgorithm as GRPOLoss
+from diffusionrl.algorithms import DEFAULT_ALGORITHM_PATHS
 
 try:
-    from .nft_loss import NFTLoss
+    from diffusionrl.algorithms.nft import NFTAlgorithm as NFTLoss
 except ImportError:
     NFTLoss = None  # type: ignore[assignment]
 
-# Default dotpaths for built-in loss classes.
-# Used by get_loss() when no explicit loss_path is provided.
-DEFAULT_LOSS_PATHS = {
-    "grpo": "diffusionrl.losses.grpo_loss.GRPOLoss",
-    "nft": "diffusionrl.losses.nft_loss.NFTLoss",
-}
+# Legacy mapping — now points to algorithm classes
+DEFAULT_LOSS_PATHS = dict(DEFAULT_ALGORITHM_PATHS)
 
 
 def get_loss(
@@ -25,32 +31,17 @@ def get_loss(
     """
     Create a loss instance by dotpath or built-in type name.
 
-    For normal training, loss is created via
-    ``load_function(loss_path) + cls.from_config(loss_config)``
-    inside TrainingActor. This factory is a convenience for
-    standalone / testing use.
-
-    Args:
-        loss_type: Built-in type name ("grpo", "nft").  Ignored when
-            *loss_path* is provided.
-        loss_path: Explicit Python dotpath to a loss class
-            (e.g. ``"mypackage.MyLoss"``).  Overrides *loss_type*.
-        **kwargs: Forwarded to the loss constructor.
-
-    Returns:
-        Loss instance.
+    .. deprecated::
+        Use ``diffusionrl.algorithms.get_algorithm()`` instead.
     """
-    from diffusionrl.utils import load_function
-
-    path = loss_path or DEFAULT_LOSS_PATHS.get(loss_type)
-    if path is None:
-        raise ValueError(
-            f"Unknown loss_type: {loss_type!r}. "
-            f"Available: {sorted(DEFAULT_LOSS_PATHS)}. "
-            f"Or provide a loss_path for custom losses."
-        )
-    loss_cls = load_function(path)
-    return loss_cls(**kwargs)
+    warnings.warn(
+        "diffusionrl.losses.get_loss() is deprecated. "
+        "Use diffusionrl.algorithms.get_algorithm() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    from diffusionrl.algorithms import get_algorithm
+    return get_algorithm(algorithm_type=loss_type, algorithm_path=loss_path, **kwargs)
 
 
 __all__ = [

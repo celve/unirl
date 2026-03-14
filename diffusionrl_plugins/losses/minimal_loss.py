@@ -1,6 +1,13 @@
 """Minimal custom loss plugin templates.
 
 Copy one of the classes below and replace the dummy objective.
+
+.. note::
+    Loss computation is now unified into the algorithm classes
+    (``diffusionrl.algorithms``).  These templates still work as standalone
+    loss plugins loaded via ``--algorithm.loss-path``, but for new code
+    consider extending ``BaseAlgorithm`` directly (see
+    ``diffusionrl_plugins/algorithms/minimal_algorithm.py``).
 """
 
 from __future__ import annotations

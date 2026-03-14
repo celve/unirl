@@ -247,6 +247,8 @@ def _build_loss_config(args) -> Dict[str, Any]:
         "algorithm_path": str(ac.algorithm_path),
         "algorithm_kwargs": algorithm_kwargs,
         "loss_type": str(ac.loss_type),
+        # loss_path now resolves to algorithm class (via _normalize_loss_path).
+        # Keep both keys so TrainingActor._load_loss can prefer algorithm_path.
         "loss_path": loss_path,
         "loss_kwargs": loss_kwargs,
         "clip_range": float(ac.clip_range),

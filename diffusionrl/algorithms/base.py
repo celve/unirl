@@ -97,15 +97,15 @@ class BaseAlgorithm(ABC):
     Base class for algorithm plugins.
 
     Each algorithm variant implements:
+    - declared_requirements(): Static data requirements (classmethod, no instance needed)
+    - from_config(): Construct from loss_config dict (classmethod)
     - get_sampling_requirements(): What the sampler needs to provide
     - compute_advantages(): How to compute advantages from rewards
+    - compute_timestep() or compute_batch(): Loss / gradient computation
     - optional timestep filtering helpers for backward training assembly
 
-    Notes:
-    - Loss objects (see diffusionrl.losses) are created independently via
-      ``load_function(loss_path) + cls.from_config()``.  Algorithm does
-      NOT own loss creation — it only handles advantage computation and
-      sampling requirements.
+    The Algorithm class is the single source of truth for both rollout-side
+    requirements (sampling, advantages) and training-side gradient computation.
     """
 
     def __init__(
@@ -175,6 +175,41 @@ class BaseAlgorithm(ABC):
                 clip_max=clip_max,
                 warmup_steps=running_stats_warmup,
             )
+
+    # ------------------------------------------------------------------
+    # Class-level contracts (override in subclasses)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def declared_requirements(cls) -> Dict[str, bool]:
+        """Declare data requirements for contracts / validation pipeline.
+
+        Returns a dict with keys like ``requires_trajectory``,
+        ``requires_log_prob``, ``requires_embeddings``.  The contracts
+        module calls this as a *classmethod* (no instance needed) to
+        resolve engine/loss compatibility at validation time.
+
+        Subclasses MUST override this.
+        """
+        raise NotImplementedError(
+            f"{cls.__name__} must implement declared_requirements() classmethod."
+        )
+
+    @classmethod
+    def from_config(cls, config: dict) -> "BaseAlgorithm":
+        """Construct algorithm from a loss_config dictionary.
+
+        TrainingActor calls ``algorithm_cls.from_config(loss_config)`` to
+        create the algorithm / loss instance.  Subclasses should override
+        to read their specific parameters from ``config`` and
+        ``config['loss_kwargs']``.
+
+        Default implementation raises NotImplementedError so custom
+        plugins fail loudly if they forget to implement this.
+        """
+        raise NotImplementedError(
+            f"{cls.__name__} must implement from_config() classmethod."
+        )
 
     @classmethod
     def _base_kwargs_from_args(cls, args: Any) -> Dict[str, Any]:
