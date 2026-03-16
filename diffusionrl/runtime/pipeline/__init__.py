@@ -8,7 +8,6 @@ directly, or use the convenience re-exports below::
 
 from .rollout_pipeline import (  # noqa: F401
     # Sampling stage
-    expand_batch_for_sampling,
     distributed_sample,
     # Reward stage
     extract_images_from_output,

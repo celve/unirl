@@ -1,4 +1,4 @@
-"""Runtime capability and loss-contract resolution helpers."""
+"""Runtime capability and algorithm-contract resolution helpers."""
 
 from __future__ import annotations
 
@@ -37,32 +37,25 @@ class ResolvedSamplingRequirements:
             "requires_embeddings": bool(self.requires_embeddings),
         }
 
-def get_loss_requirements(args: Any) -> Dict[str, bool]:
-    """Get loss requirements from algorithm/loss class's declared_requirements().
-
-    Prefers ``algorithm_path`` when ``loss_path`` resolves to the same value
-    (unified module).  Falls back to ``loss_path`` for backward compatibility.
-    """
-    # Try algorithm_path first (unified), fall back to loss_path (legacy)
-    loss_path = getattr(args.algorithm, "loss_path", None)
-    if not isinstance(loss_path, str) or not loss_path.strip():
-        loss_path = getattr(args.algorithm, "algorithm_path", None)
-    if not isinstance(loss_path, str) or not loss_path.strip():
+def get_algorithm_requirements(args: Any) -> Dict[str, bool]:
+    """Get algorithm requirements from the Algorithm class declaration."""
+    algorithm_path = getattr(args.algorithm, "algorithm_path", None)
+    if not isinstance(algorithm_path, str) or not algorithm_path.strip():
         raise ValueError(
-            f"Cannot resolve algorithm/loss class for loss_type={getattr(args.algorithm, 'loss_type', None)!r}, "
-            f"loss_path={loss_path!r}. Ensure loss_type is registered or loss_path/algorithm_path is importable."
+            "Cannot resolve algorithm class because args.algorithm.algorithm_path is empty. "
+            f"algorithm_type={getattr(args.algorithm, 'algorithm_type', None)!r}."
         )
     try:
-        loss_cls = load_function(loss_path.strip())
+        algorithm_cls = load_function(algorithm_path.strip())
     except Exception as exc:
         raise ValueError(
-            f"Cannot resolve algorithm/loss class for loss_type={getattr(args.algorithm, 'loss_type', None)!r}, "
-            f"loss_path={loss_path!r}. Ensure loss_type is registered or loss_path/algorithm_path is importable."
+            "Cannot resolve algorithm class from args.algorithm.algorithm_path="
+            f"{algorithm_path!r}."
         ) from exc
-    declared = getattr(loss_cls, "declared_requirements", None)
+    declared = getattr(algorithm_cls, "declared_requirements", None)
     if not callable(declared):
         raise ValueError(
-            f"Algorithm/loss class {loss_cls.__name__} must define classmethod declared_requirements() "
+            f"Algorithm class {algorithm_cls.__name__} must define classmethod declared_requirements() "
             "returning a dict like {'requires_trajectory': True, 'requires_log_prob': True, ...}."
         )
     return dict(declared())
@@ -73,8 +66,8 @@ def resolve_sampling_requirements(
     *,
     algorithm_requirements: Optional[Any] = None,
 ) -> ResolvedSamplingRequirements:
-    """Resolve final sampling contract with loss as single source of requires_*."""
-    required = get_loss_requirements(args)
+    """Resolve final sampling contract with Algorithm as the single source of requires_*."""
+    required = get_algorithm_requirements(args)
     extras: Dict[str, Any] = {}
     if algorithm_requirements is not None:
         raw_extras = getattr(algorithm_requirements, "extras", None)
@@ -111,7 +104,7 @@ def resolve_engine_capabilities(*, engine_type: str) -> Dict[str, bool]:
 
 __all__ = [
     "ResolvedSamplingRequirements",
-    "get_loss_requirements",
+    "get_algorithm_requirements",
     "resolve_sampling_requirements",
     "resolve_engine_capabilities",
 ]

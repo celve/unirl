@@ -5,14 +5,15 @@ Defines algorithm responsibilities in rollout/advantage pipeline.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-import inspect
-from typing import Any, Dict, List, Optional, Set
-import warnings
+import logging
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
 
-from .normalizers import normalize_global, normalize_grouped, build_fixed_size_groups, build_prompt_groups
+from .normalizers import normalize_global, normalize_grouped
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -92,35 +93,55 @@ class SamplingRequirements:
         return self.requires_clean_latents and not self.requires_trajectory
 
 
+@dataclass(frozen=True)
+class EMASpec:
+    """Algorithm-declared EMA policy.
+
+    The algorithm declares *what* EMA behavior it needs. Runtime owns
+    the mechanism that materializes and updates the trackers.
+    """
+
+    enable_eval_ema: bool = True
+    eval_decay: float = 0.9
+    eval_update_interval: int = 1
+    reference_mode: str = "none"
+    reference_decay: float = 0.0
+    reference_decay_type: str = "constant"
+    reference_flat_steps: int = 0
+    reference_uprate: float = 0.001
+    reference_uphold: float = 0.5
+    old_adapter_name: str = "old"
+    new_adapter_name: str = "default"
+
+
 class BaseAlgorithm(ABC):
     """
     Base class for algorithm plugins.
 
     Each algorithm variant implements:
-    - declared_requirements(): Static data requirements (classmethod, no instance needed)
-    - from_config(): Construct from loss_config dict (classmethod)
+    - declared_requirements(): Static data requirements (delegated from loss)
+    - from_config(): Construct from algorithm_config dict (classmethod)
     - get_sampling_requirements(): What the sampler needs to provide
     - compute_advantages(): How to compute advantages from rewards
-    - compute_timestep() or compute_batch(): Loss / gradient computation
+    - compute_loss(): Single algorithm-owned loss entrypoint
     - optional timestep filtering helpers for backward training assembly
 
     The Algorithm class is the single source of truth for both rollout-side
     requirements (sampling, advantages) and training-side gradient computation.
     """
 
+    _loss_cls = None
+
     def __init__(
         self,
         clip_range: float = 1e-4,
         kl_coef: float = 0.01,
-        advantage_type: str = "group",
+        adv_normalization: str = "group",
+        samples_per_prompt: int = 1,
+        eval_ema_decay: float = 0.9,
+        eval_ema_update_interval: int = 1,
         epsilon: float = 1e-8,
         clip_max: Optional[float] = 5.0,
-        use_per_prompt_tracker: bool = False,
-        per_prompt_mode: str = "batch",
-        per_prompt_buffer_size: int = 16,
-        per_prompt_min_count: int = 2,
-        use_running_stats: bool = False,
-        running_stats_warmup: int = 0,
         use_global_std: bool = False,
         trimmed_ratio: float = 0.0,
         **kwargs,
@@ -131,50 +152,44 @@ class BaseAlgorithm(ABC):
         Args:
             clip_range: PPO clip range for importance ratio
             kl_coef: KL penalty coefficient
-            advantage_type: Type of advantage normalization ("global", "group", "per_prompt")
+            adv_normalization: Type of advantage normalization ("global" or "group")
+            samples_per_prompt: Number of rollout samples to generate per prompt
+            eval_ema_decay: Eval-time EMA decay
+            eval_ema_update_interval: Eval-time EMA update interval in optimizer steps
             epsilon: Small value for numerical stability in advantage normalization
             clip_max: Maximum advantage value for clipping (None to disable)
-            use_per_prompt_tracker: Use PerPromptStatTracker for cross-batch stats
-            per_prompt_mode: "running" (tracker) or "batch" (per-batch stats)
-            per_prompt_buffer_size: Buffer size for per-prompt tracker
-            per_prompt_min_count: Min samples before using per-prompt stats
-            use_running_stats: Use RunningMeanStd for cross-batch global normalization
-            running_stats_warmup: Warmup batches before using running stats
             use_global_std: Use global std instead of per-group std
             trimmed_ratio: Ratio of outliers trimmed from each side for grouped stats
             **kwargs: Additional algorithm-specific arguments
         """
         self.clip_range = clip_range
         self.kl_coef = kl_coef
-        self.advantage_type = advantage_type
+        self.adv_normalization = adv_normalization
+        self.samples_per_prompt = max(1, int(samples_per_prompt))
+        self.eval_ema_decay = float(eval_ema_decay)
+        self.eval_ema_update_interval = max(1, int(eval_ema_update_interval))
         self.epsilon = epsilon
         self.clip_max = clip_max
-        self.per_prompt_mode = per_prompt_mode
         self.use_global_std = use_global_std
         self.trimmed_ratio = max(0.0, min(float(trimmed_ratio), 0.49))
         self._extra_kwargs = kwargs
 
-        # Per-prompt statistics tracker
-        self.per_prompt_tracker = None
-        if (use_per_prompt_tracker or advantage_type == "per_prompt") and per_prompt_mode == "running":
-            from .per_prompt_tracker import PerPromptStatTracker
-            self.per_prompt_tracker = PerPromptStatTracker(
-                buffer_size=per_prompt_buffer_size,
-                min_count=per_prompt_min_count,
-                epsilon=epsilon,
-                clip_max=clip_max,
-                use_global_std=use_global_std,
-            )
+        self.loss_fn = self._create_loss_fn()
 
-        # Running statistics for cross-batch global normalization (DanceGRPO)
-        self.running_reward_normalizer = None
-        if use_running_stats:
-            from .running_stats import RunningRewardNormalizer
-            self.running_reward_normalizer = RunningRewardNormalizer(
-                epsilon=epsilon,
-                clip_max=clip_max,
-                warmup_steps=running_stats_warmup,
+    @classmethod
+    def _resolve_loss_class(cls):
+        loss_cls = getattr(cls, "_loss_cls", None)
+        if loss_cls is None:
+            raise NotImplementedError(
+                f"{cls.__name__} must define _loss_cls or override declared_requirements()."
             )
+        return loss_cls
+
+    def _create_loss_fn(self):
+        loss_cls = getattr(type(self), "_loss_cls", None)
+        if loss_cls is None:
+            return None
+        return loss_cls(self)
 
     # ------------------------------------------------------------------
     # Class-level contracts (override in subclasses)
@@ -182,27 +197,24 @@ class BaseAlgorithm(ABC):
 
     @classmethod
     def declared_requirements(cls) -> Dict[str, bool]:
-        """Declare data requirements for contracts / validation pipeline.
-
-        Returns a dict with keys like ``requires_trajectory``,
-        ``requires_log_prob``, ``requires_embeddings``.  The contracts
-        module calls this as a *classmethod* (no instance needed) to
-        resolve engine/loss compatibility at validation time.
-
-        Subclasses MUST override this.
-        """
-        raise NotImplementedError(
-            f"{cls.__name__} must implement declared_requirements() classmethod."
-        )
+        """Declare data requirements for contracts / validation pipeline."""
+        loss_cls = cls._resolve_loss_class()
+        declared = getattr(loss_cls, "declared_requirements", None)
+        if not callable(declared):
+            raise NotImplementedError(
+                f"{cls.__name__} loss class {loss_cls.__name__} must define "
+                "declared_requirements()."
+            )
+        return dict(declared())
 
     @classmethod
     def from_config(cls, config: dict) -> "BaseAlgorithm":
-        """Construct algorithm from a loss_config dictionary.
+        """Construct algorithm from an algorithm_config dictionary.
 
-        TrainingActor calls ``algorithm_cls.from_config(loss_config)`` to
-        create the algorithm / loss instance.  Subclasses should override
+        TrainingActor calls ``algorithm_cls.from_config(algorithm_config)`` to
+        create the train-side algorithm instance.  Subclasses should override
         to read their specific parameters from ``config`` and
-        ``config['loss_kwargs']``.
+        ``config['algorithm_kwargs']``.
 
         Default implementation raises NotImplementedError so custom
         plugins fail loudly if they forget to implement this.
@@ -212,64 +224,11 @@ class BaseAlgorithm(ABC):
         )
 
     @classmethod
-    def _base_kwargs_from_args(cls, args: Any) -> Dict[str, Any]:
-        """Build shared constructor kwargs from runtime args."""
-        return {
-            "clip_range": args.algorithm.clip_range,
-            "kl_coef": getattr(args.algorithm, "kl_coef", 0.01),
-            "advantage_type": getattr(args.algorithm, "advantage_type", "group"),
-            "epsilon": getattr(args.algorithm, "advantage_epsilon", 1e-8),
-            "clip_max": getattr(args.algorithm, "advantage_clip_max", None),
-        }
-
-    @classmethod
-    def _algorithm_kwargs_from_args(cls, args: Any) -> Dict[str, Any]:
-        """Read normalized algorithm_kwargs dictionary from args."""
-        raw = getattr(args.algorithm, "algorithm_kwargs", {})
-        if raw is None:
-            return {}
-        if isinstance(raw, dict):
-            payload = dict(raw)
-            allowed: Set[str] = set()
-            for owner in cls.mro():
-                init_fn = owner.__dict__.get("__init__")
-                if not callable(init_fn):
-                    continue
-                try:
-                    sig = inspect.signature(init_fn)
-                except (TypeError, ValueError):
-                    continue
-                for name, param in sig.parameters.items():
-                    if name == "self":
-                        continue
-                    if param.kind in (
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        inspect.Parameter.KEYWORD_ONLY,
-                    ):
-                        allowed.add(name)
-            unknown = sorted(key for key in payload.keys() if key not in allowed)
-            if unknown:
-                warnings.warn(
-                    f"{cls.__name__} received unknown algorithm_kwargs keys: {unknown}. "
-                    "These keys are currently not declared in constructor signatures and may be ignored.",
-                    stacklevel=3,
-                )
-            return payload
-        raise ValueError(
-            "algorithm.algorithm_kwargs must be a dict after parse/validate, "
-            f"got: {type(raw).__name__}"
-        )
-
-    @classmethod
     def from_args(cls, args: Any) -> "BaseAlgorithm":
-        """
-        Construct algorithm instance from TrainingArguments.
+        """Legacy wrapper that normalizes args into algorithm_config first."""
+        from diffusionrl.config.build_domain_args import build_algorithm_config
 
-        Subclasses can override to parse algorithm-specific parameters.
-        """
-        kwargs = cls._base_kwargs_from_args(args)
-        kwargs.update(cls._algorithm_kwargs_from_args(args))
-        return cls(**kwargs)
+        return cls.from_config(build_algorithm_config(args))
 
     @abstractmethod
     def get_sampling_requirements(self) -> SamplingRequirements:
@@ -281,95 +240,78 @@ class BaseAlgorithm(ABC):
         """
         ...
 
+    def _build_sampling_requirements(
+        self,
+        *,
+        extras: Optional[Dict[str, Any]] = None,
+    ) -> SamplingRequirements:
+        """Build SamplingRequirements from the algorithm-owned loss contract."""
+        declared = type(self).declared_requirements()
+        return SamplingRequirements(
+            requires_trajectory=bool(declared.get("requires_trajectory", True)),
+            requires_log_prob=bool(declared.get("requires_log_prob", True)),
+            requires_embeddings=bool(declared.get("requires_embeddings", True)),
+            extras=dict(extras or {}),
+        )
+
     def compute_advantages(
         self,
         rewards: torch.Tensor,
-        num_samples_per_prompt: int,
-        prompts: Optional[List[str]] = None,
+        group_ids: Optional[List[str]] = None,
     ) -> torch.Tensor:
         """
         Compute advantages from rewards.
 
         Dispatches to the appropriate normalization method based on
-        ``self.advantage_type`` ("global", "group", or "per_prompt").
+        ``self.adv_normalization`` ("global" or "group").
 
         Args:
             rewards: Reward tensor [batch_size]
-            num_samples_per_prompt: Number of samples generated per prompt
-            prompts: Optional list of prompt strings (for per_prompt strategies)
+            group_ids: Optional explicit sample-group identifiers for batch grouping
 
         Returns:
             Advantage tensor [batch_size]
         """
-        if self.advantage_type == "global":
+        if self.adv_normalization == "global":
             return self._normalize_global(rewards)
-        elif self.advantage_type == "group":
-            return self._normalize_group(rewards, num_samples_per_prompt)
-        elif self.advantage_type == "per_prompt":
-            return self._normalize_per_prompt(
-                rewards, num_samples_per_prompt, prompts
+        elif self.adv_normalization == "group":
+            return self._normalize_group(
+                rewards,
+                group_ids=group_ids,
             )
         else:
-            raise ValueError(f"Unknown advantage_type: {self.advantage_type}")
+            raise ValueError(f"Unknown adv_normalization: {self.adv_normalization}")
+
+    @staticmethod
+    def _normalize_group_id(group_id: Any) -> Optional[str]:
+        if group_id is None:
+            return None
+        text = str(group_id).strip()
+        return text if text else None
+
+    def _build_groups_from_ids(self, group_ids: List[str]) -> List[List[int]]:
+        ordered_groups: Dict[str, List[int]] = {}
+        for sample_idx, raw_group_id in enumerate(group_ids):
+            group_id = self._normalize_group_id(raw_group_id)
+            if group_id is None:
+                continue
+            ordered_groups.setdefault(group_id, []).append(sample_idx)
+        return list(ordered_groups.values())
 
     def _normalize_global(self, rewards: torch.Tensor) -> torch.Tensor:
-        """Global normalization across all samples.
-
-        If running_reward_normalizer is enabled (DanceGRPO mode), uses
-        cross-batch accumulated statistics for stable normalization.
-        Otherwise uses batch-only statistics.
-        """
-        if self.running_reward_normalizer is not None:
-            return self.running_reward_normalizer.normalize(rewards, update_stats=True)
+        """Global normalization across all samples."""
         return normalize_global(rewards, epsilon=self.epsilon, clip_max=self.clip_max)
 
     def _normalize_group(
         self,
         rewards: torch.Tensor,
-        num_samples_per_prompt: int,
+        group_ids: Optional[List[str]] = None,
     ) -> torch.Tensor:
-        """Group normalization within prompt groups."""
+        """Group normalization using explicit sample-group identities."""
         batch_size = rewards.shape[0]
-        if num_samples_per_prompt <= 0 or batch_size % num_samples_per_prompt != 0:
-            return self._normalize_global(rewards)
-        groups = build_fixed_size_groups(batch_size, num_samples_per_prompt)
-        return normalize_grouped(
-            rewards,
-            groups,
-            epsilon=self.epsilon,
-            clip_max=self.clip_max,
-            trimmed_ratio=self.trimmed_ratio,
-            use_global_std=self.use_global_std,
-        )
-
-    def _normalize_per_prompt(
-        self,
-        rewards: torch.Tensor,
-        num_samples_per_prompt: int,
-        prompts: Optional[List[str]] = None,
-    ) -> torch.Tensor:
-        """Per-prompt normalization.
-
-        When a PerPromptStatTracker is active (per_prompt_mode='running'),
-        delegates to the tracker for cross-batch statistics.
-
-        Otherwise (per_prompt_mode='batch', the default) normalizes using
-        only the current batch, grouping samples by prompt text.
-        """
-        # Running mode: delegate to cross-batch tracker
-        if self.per_prompt_tracker is not None and prompts is not None:
-            if len(prompts) * num_samples_per_prompt == len(rewards):
-                prompts = [p for p in prompts for _ in range(num_samples_per_prompt)]
-            return self.per_prompt_tracker.compute_advantages(
-                prompts, rewards, update_stats=True
-            )
-        # Batch mode: normalize within current batch per prompt text
-        if prompts is not None:
-            # Expand prompts to per-sample list if needed
-            if len(prompts) * num_samples_per_prompt == len(rewards):
-                prompts = [p for p in prompts for _ in range(num_samples_per_prompt)]
-            if len(prompts) == len(rewards):
-                groups = build_prompt_groups(prompts)
+        if group_ids is not None and len(group_ids) == batch_size:
+            groups = self._build_groups_from_ids(group_ids)
+            if groups:
                 return normalize_grouped(
                     rewards,
                     groups,
@@ -378,64 +320,74 @@ class BaseAlgorithm(ABC):
                     trimmed_ratio=self.trimmed_ratio,
                     use_global_std=self.use_global_std,
                 )
-        # Fall back to fixed-size group normalization
-        return self._normalize_group(rewards, num_samples_per_prompt)
 
-    # ========== Algorithm Hooks ==========
-    # These hooks allow algorithms to customize behavior without requiring
-    # special-case handling in TrainingActor or RolloutManager.
+        raise ValueError(
+            "adv_normalization='group' requires explicit group_ids aligned to the reward batch. "
+            f"Got batch_size={batch_size}, "
+            f"group_ids_len={len(group_ids) if group_ids is not None else None}."
+        )
 
-    def post_backward_hook(self, model: nn.Module, batch: Dict[str, Any]) -> None:
-        """Hook called after backward pass.
+    # ------------------------------------------------------------------
+    # Phase 3: Advantage orchestration with reward components
+    # ------------------------------------------------------------------
 
-        Override in subclasses to perform post-backward operations.
-
-        Args:
-            model: The model being trained
-            batch: The training batch
-        """
-        pass
-
-    def post_optimizer_step_hook(
+    @abstractmethod
+    def compute_advantages_with_components(
         self,
-        model: nn.Module,
-        optimizer: torch.optim.Optimizer,
-        batch: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Hook called after optimizer step.
+        *,
+        rewards: torch.Tensor,
+        group_ids: Optional[List[str]] = None,
+        component_mix_stage: str = "reward",
+        reward_components: Optional[Dict[str, List[float]]] = None,
+        reward_component_weights: Optional[Dict[str, float]] = None,
+    ) -> torch.Tensor:
+        """Full advantage computation pipeline including reward component mixing.
 
-        Override in subclasses to perform post-step operations (e.g., EMA updates).
+        This consolidates the logic that was previously scattered in
+        ``rollout_pipeline.compute_advantages`` into the algorithm itself.
 
         Args:
-            model: The model being trained
-            optimizer: The optimizer
-            batch: The training batch
+            rewards: Aggregated reward tensor [batch_size].
+            component_mix_stage: ``"reward"`` (default) uses aggregated rewards.
+                ``"advantage"`` computes per-component advantages and
+                aggregates with weights.
+            reward_components: Per-component reward values, keyed by name.
+            reward_component_weights: Per-component weights for aggregation.
 
         Returns:
-            Dictionary of metrics from the hook
+            Advantage tensor [batch_size].
         """
-        return {}
+        ...
 
-    def requires_ema_update(self) -> bool:
-        """Whether this algorithm requires EMA updates after each step.
+    @abstractmethod
+    def get_ema_spec(self) -> EMASpec:
+        """Declare EMA policy for this algorithm."""
+        ...
 
-        Returns:
-            True if EMA update is needed (e.g., NFT)
-        """
-        return False
+    # ------------------------------------------------------------------
+    # Phase 2: Algorithm-owned training step
+    # ------------------------------------------------------------------
 
-    def get_ema_decay(self) -> float:
-        """Get EMA decay rate for this algorithm.
-
-        Returns:
-            EMA decay rate (0.0 if EMA not used)
-        """
-        return 0.0
+    def compute_loss_and_backward(
+        self,
+        *,
+        model: nn.Module,
+        batch: Any,
+        gradient_accumulation_batch_size: int,
+        guidance_scale: float = 3.5,
+        **kwargs: Any,
+    ) -> tuple:
+        """Compute loss and call backward for a single update chunk."""
+        del model, batch, gradient_accumulation_batch_size, guidance_scale, kwargs
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement compute_loss_and_backward()."
+        )
 
     def is_forward_process(self) -> bool:
         """Whether this algorithm trains via forward process (NFT-style)."""
         return bool(self.get_sampling_requirements().is_forward_process)
 
+    @abstractmethod
     def resolve_rollout_sde_indices(
         self,
         *,
@@ -449,28 +401,14 @@ class BaseAlgorithm(ABC):
         - Trajectory algorithms read indices from scheduler and receive the
           optional `set_sde_indices` callback when implemented.
         """
-        if self.is_forward_process() or timestep_scheduler is None:
-            return None
+        ...
 
-        sde_indices = set(int(i) for i in timestep_scheduler.get_sde_indices(current_step))
-        if hasattr(self, "set_sde_indices"):
-            self.set_sde_indices(sde_indices)
-        return sde_indices
-
+    @abstractmethod
     def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:
         """Get sampler-output validation flags for rollout orchestration."""
-        is_forward = self.is_forward_process()
-        allow_replay = (
-            not is_forward
-            and bool(getattr(args.sampling, "replay_log_probs", False))
-            and getattr(args.algorithm, "loss_type", "grpo") == "grpo"
-        )
-        return {
-            "allow_replay": allow_replay,
-            "assert_step_alignment": (not is_forward),
-            "mode_label": ("forward" if is_forward else "trajectory"),
-        }
+        ...
 
+    @abstractmethod
     def assemble_training_batch(
         self,
         *,
@@ -481,30 +419,10 @@ class BaseAlgorithm(ABC):
         prompts: List[str],
         sde_indices: Optional[Set[int]] = None,
     ) -> Any:
-        """Assemble typed training batch. Subclasses can override strategy."""
-        from diffusionrl.runtime.pipeline.rollout_pipeline import (
-            assemble_backward_training_batch,
-            assemble_forward_training_batch,
-        )
+        """Assemble the typed training batch for this algorithm."""
+        ...
 
-        if self.is_forward_process():
-            return assemble_forward_training_batch(
-                sampler_outputs=sampler_outputs,
-                rewards=rewards,
-                advantages=advantages,
-                prompts=prompts,
-            )
-
-        return assemble_backward_training_batch(
-            algorithm=self,
-            num_inference_steps=num_inference_steps,
-            sampler_outputs=sampler_outputs,
-            rewards=rewards,
-            advantages=advantages,
-            prompts=prompts,
-            sde_indices=sde_indices,
-        )
-
+    @abstractmethod
     def get_filtered_training_indices(
         self,
         sde_indices: Set[int],
@@ -514,8 +432,8 @@ class BaseAlgorithm(ABC):
         Get filtered training timestep indices based on algorithm requirements.
 
         This method handles common filtering operations like:
-        - ignore_last: Skip the last timestep (t->0) which has unstable log_prob
-        - frozen_init_timesteps: Skip early timesteps with high variance
+        - skip_last_timestep: Skip the last timestep (t->0) which has unstable log_prob
+        - skip_initial_timesteps: Skip early timesteps with high variance
 
         Subclasses can override to add algorithm-specific filtering.
 
@@ -526,20 +444,7 @@ class BaseAlgorithm(ABC):
         Returns:
             Filtered set of timestep indices for training
         """
-        result = set(sde_indices)
-
-        # Apply ignore_last if configured
-        ignore_last = getattr(self, 'ignore_last', False)
-        if ignore_last and result:
-            max_idx = max(result)
-            result.discard(max_idx)
-
-        # Apply frozen_init_timesteps if configured
-        frozen_init = getattr(self, 'frozen_init_timesteps', 0)
-        if frozen_init > 0:
-            result = {i for i in result if i >= frozen_init}
-
-        return result
+        ...
 
     def get_config(self) -> Dict[str, Any]:
         """Get algorithm configuration as dictionary."""
@@ -547,7 +452,7 @@ class BaseAlgorithm(ABC):
             "algorithm_type": self.__class__.__name__,
             "clip_range": self.clip_range,
             "kl_coef": self.kl_coef,
-            "advantage_type": self.advantage_type,
+            "adv_normalization": self.adv_normalization,
             **self._extra_kwargs,
         }
 
@@ -556,5 +461,5 @@ class BaseAlgorithm(ABC):
             f"{self.__class__.__name__}("
             f"clip_range={self.clip_range}, "
             f"kl_coef={self.kl_coef}, "
-            f"advantage_type={self.advantage_type})"
+            f"adv_normalization={self.adv_normalization})"
         )

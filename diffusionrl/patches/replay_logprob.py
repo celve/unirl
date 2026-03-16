@@ -115,7 +115,7 @@ class ReplayLogProbPatch:
         *,
         batch: BackwardTrainingBatch,
         enabled: bool,
-        loss_type: str,
+        algorithm_type: str,
         sampling_config: Dict[str, Any],
         model_bundle: Any,
         model: Any,
@@ -124,7 +124,7 @@ class ReplayLogProbPatch:
         scheduler: Any,
         guidance_scale: float,
     ) -> BackwardTrainingBatch:
-        if not enabled or loss_type != "grpo" or len(batch.log_probs) > 0:
+        if not enabled or algorithm_type != "grpo" or len(batch.log_probs) > 0:
             return batch
 
         self._build_replay_sampler(

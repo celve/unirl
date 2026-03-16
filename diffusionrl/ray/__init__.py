@@ -15,8 +15,8 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     # Rollout manager
     "RolloutManager": ("diffusionrl.ray.rollout_manager", "RolloutManager"),
     "create_rollout_manager": ("diffusionrl.ray.rollout_manager", "create_rollout_manager"),
-    "RolloutBufferActor": ("diffusionrl.ray.rollout_buffer", "RolloutBufferActor"),
-    "create_rollout_buffer_actor": ("diffusionrl.ray.rollout_buffer", "create_rollout_buffer_actor"),
+    "BufferActor": ("diffusionrl.ray.buffer_actor", "BufferActor"),
+    "create_buffer_actor": ("diffusionrl.ray.buffer_actor", "create_buffer_actor"),
     # Actor groups
     "BaseActorGroup": ("diffusionrl.ray.group_base", "BaseActorGroup"),
     "RolloutActorGroup": ("diffusionrl.ray.rollout_group", "RolloutActorGroup"),
@@ -63,7 +63,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "wait_for_actors_ready": ("diffusionrl.ray.ray_utils", "wait_for_actors_ready"),
     # Utils - Actor sampling
     "ActorSamplingExecutor": ("diffusionrl.ray.ray_utils", "ActorSamplingExecutor"),
-    "TrainingActorSamplingService": ("diffusionrl.ray.ray_utils", "TrainingActorSamplingService"),
+    "ActorSamplingRuntime": ("diffusionrl.ray.ray_utils", "ActorSamplingRuntime"),
 }
 
 __all__ = list(_LAZY_ATTRS.keys())

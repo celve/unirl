@@ -1,4 +1,4 @@
-"""Rollout buffer actor and plugin chain for rollout->train decoupling."""
+"""Buffer actor and plugin chain for rollout->train decoupling."""
 
 from __future__ import annotations
 
@@ -41,13 +41,34 @@ def _put_training_data(
             "Expected one of: data_parallel, backend_managed, replicated, none."
         )
 
+    partition_t0 = time.perf_counter()
     partitioned_batches = maybe_partition_training_batch(
         train_data=train_data,
         dp_size=dp_size,
         partition_train_data=bool(partition_train_data),
     )
+    partition_t1 = time.perf_counter()
     if partitioned_batches is not None:
-        return [ray.put(part) for part in partitioned_batches]
+        refs = []
+        for shard_idx, part in enumerate(partitioned_batches):
+            shard_t0 = time.perf_counter()
+            refs.append(ray.put(part))
+            shard_t1 = time.perf_counter()
+            if shard_t1 - shard_t0 > 1.0:
+                logger.warning(
+                    "[TIMING] _put_training_data shard %d/%d ray.put=%.2fs",
+                    shard_idx + 1,
+                    len(partitioned_batches),
+                    shard_t1 - shard_t0,
+                )
+        partition_t2 = time.perf_counter()
+        logger.warning(
+            "[TIMING] _put_training_data: partition=%.2fs ray_put_all=%.2fs n_shards=%d",
+            partition_t1 - partition_t0,
+            partition_t2 - partition_t1,
+            len(partitioned_batches),
+        )
+        return refs
     return ray.put(train_data)
 
 
@@ -95,7 +116,7 @@ class GroupSampleLocator:
     sample_idx: int
     rollout_id: int
     created_at: float
-    prompt: Optional[str]
+    group_id: Optional[str]
     reward: Optional[float]
     modality: str
 
@@ -185,6 +206,21 @@ def _index_batch(batch: TrainingBatch, keep_indices: Sequence[int]) -> TrainingB
                 else None
             ),
             prompts=prompts,
+            prompt_ids=(
+                [batch.prompt_ids[i] for i in keep_indices]
+                if batch.prompt_ids is not None
+                else None
+            ),
+            sample_ids=(
+                [batch.sample_ids[i] for i in keep_indices]
+                if batch.sample_ids is not None
+                else None
+            ),
+            group_ids=(
+                [batch.group_ids[i] for i in keep_indices]
+                if batch.group_ids is not None
+                else None
+            ),
             num_steps=batch.num_steps,
             is_partitioned=batch.is_partitioned,
             step_indices=batch.step_indices,
@@ -210,6 +246,21 @@ def _index_batch(batch: TrainingBatch, keep_indices: Sequence[int]) -> TrainingB
                 else None
             ),
             prompts=prompts,
+            prompt_ids=(
+                [batch.prompt_ids[i] for i in keep_indices]
+                if batch.prompt_ids is not None
+                else None
+            ),
+            sample_ids=(
+                [batch.sample_ids[i] for i in keep_indices]
+                if batch.sample_ids is not None
+                else None
+            ),
+            group_ids=(
+                [batch.group_ids[i] for i in keep_indices]
+                if batch.group_ids is not None
+                else None
+            ),
             timesteps=batch.timesteps,
             is_partitioned=batch.is_partitioned,
         )
@@ -306,6 +357,15 @@ def _concat_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
         prompts = None
         if all(b.prompts is not None for b in typed):
             prompts = [p for b in typed for p in (b.prompts or [])]
+        prompt_ids = None
+        if all(b.prompt_ids is not None for b in typed):
+            prompt_ids = [p for b in typed for p in (b.prompt_ids or [])]
+        sample_ids = None
+        if all(b.sample_ids is not None for b in typed):
+            sample_ids = [s for b in typed for s in (b.sample_ids or [])]
+        group_ids = None
+        if all(b.group_ids is not None for b in typed):
+            group_ids = [g for b in typed for g in (b.group_ids or [])]
 
         rewards = None
         if all(b.rewards is not None for b in typed):
@@ -319,6 +379,9 @@ def _concat_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
             embeddings=_concat_prompt_embeddings([b.embeddings for b in typed]),
             rewards=rewards,
             prompts=prompts,
+            prompt_ids=prompt_ids,
+            sample_ids=sample_ids,
+            group_ids=group_ids,
             num_steps=typed[0].num_steps,
             is_partitioned=False,
             step_indices=typed[0].step_indices,
@@ -339,6 +402,15 @@ def _concat_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
         prompts_f = None
         if all(b.prompts is not None for b in typed_f):
             prompts_f = [p for b in typed_f for p in (b.prompts or [])]
+        prompt_ids_f = None
+        if all(b.prompt_ids is not None for b in typed_f):
+            prompt_ids_f = [p for b in typed_f for p in (b.prompt_ids or [])]
+        sample_ids_f = None
+        if all(b.sample_ids is not None for b in typed_f):
+            sample_ids_f = [s for b in typed_f for s in (b.sample_ids or [])]
+        group_ids_f = None
+        if all(b.group_ids is not None for b in typed_f):
+            group_ids_f = [g for b in typed_f for g in (b.group_ids or [])]
 
         rewards_f = None
         if all(b.rewards is not None for b in typed_f):
@@ -350,6 +422,9 @@ def _concat_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
             embeddings=_concat_prompt_embeddings([b.embeddings for b in typed_f]),
             rewards=rewards_f,
             prompts=prompts_f,
+            prompt_ids=prompt_ids_f,
+            sample_ids=sample_ids_f,
+            group_ids=group_ids_f,
             timesteps=base_timesteps,
             is_partitioned=False,
         )
@@ -572,7 +647,7 @@ def build_buffer_plugins(args: Any) -> List[BufferPlugin]:
 
 
 @ray.remote(num_cpus=1, num_gpus=0)
-class RolloutBufferActor:
+class BufferActor:
     """Queue-backed buffer actor for rollout->train decoupling."""
 
     def __init__(self, args: Any):
@@ -582,18 +657,17 @@ class RolloutBufferActor:
         self.plugins = build_buffer_plugins(args)
 
         self.grouped = bool(getattr(args.rollout, "rollout_buffer_grouped", False))
-        default_group_size = max(1, int(getattr(args.algorithm, "num_samples_per_prompt", 1)))
         raw_group_size = getattr(args.rollout, "rollout_buffer_group_size", None)
         if raw_group_size is None:
-            self.group_size = default_group_size
+            self.group_size = None
         else:
             self.group_size = max(1, int(raw_group_size))
 
         raw_dispatch_groups = int(getattr(args.rollout, "rollout_buffer_dispatch_groups", 0) or 0)
-        prompts_per_batch = getattr(args.algorithm, "prompts_per_batch", None)
-        if prompts_per_batch is None:
-            raise ValueError("algorithm.prompts_per_batch must be set explicitly.")
-        default_dispatch_groups = max(1, int(prompts_per_batch))
+        prompts_per_rollout = getattr(args.algorithm, "prompts_per_rollout", None)
+        if prompts_per_rollout is None:
+            raise ValueError("algorithm.prompts_per_rollout must be set explicitly.")
+        default_dispatch_groups = max(1, int(prompts_per_rollout))
         self.dispatch_groups = raw_dispatch_groups if raw_dispatch_groups > 0 else default_dispatch_groups
         self.allow_partial_group = bool(getattr(args.rollout, "rollout_buffer_allow_partial_group", True))
         self.group_ttl_seconds = max(0.0, float(getattr(args.rollout, "rollout_buffer_group_ttl_seconds", 0.0)))
@@ -602,6 +676,7 @@ class RolloutBufferActor:
 
         self._dispatch_queue: Deque[BufferItem] = deque()
         self._groups: Dict[str, Deque[GroupSampleLocator]] = {}
+        self._group_expected_sizes: Dict[str, int] = {}
 
         self._counter = 0
         self._dropped_queue_items = 0
@@ -646,7 +721,11 @@ class RolloutBufferActor:
         return sum(len(items) for items in self._groups.values())
 
     def _ready_groups(self) -> int:
-        return sum(1 for items in self._groups.values() if len(items) >= self.group_size)
+        ready = 0
+        for key, items in self._groups.items():
+            if len(items) >= self._required_group_size(key):
+                ready += 1
+        return ready
 
     def _detect_modality(self, batch: TrainingBatch) -> str:
         if isinstance(batch, BackwardTrainingBatch):
@@ -661,16 +740,19 @@ class RolloutBufferActor:
             return "image"
         return "unknown"
 
-    def _normalize_prompt(self, prompt: Any) -> Optional[str]:
-        if prompt is None:
+    def _normalize_group_id(self, group_id: Any) -> Optional[str]:
+        if group_id is None:
             return None
-        text = str(prompt).strip()
+        text = str(group_id).strip()
         return text if text else None
 
-    def _group_key_for_sample(self, *, prompt: Optional[str], rollout_id: int, sample_idx: int) -> str:
-        if prompt is not None:
-            return f"prompt::{prompt}"
-        return f"fallback::{int(rollout_id)}::{int(sample_idx)}"
+    def _group_key_for_sample(self, *, group_id: Optional[str], rollout_id: int, sample_idx: int) -> str:
+        if group_id is not None:
+            return f"group::{group_id}"
+        raise ValueError(
+            "Grouped rollout buffer requires explicit group_ids; fallback grouping is removed. "
+            f"Got rollout_id={rollout_id}, sample_idx={sample_idx}."
+        )
 
     def _maybe_drop_dispatch_head(self) -> None:
         if self.max_queue_size > 0 and len(self._dispatch_queue) >= self.max_queue_size:
@@ -686,6 +768,12 @@ class RolloutBufferActor:
         group = self._groups.get(group_key)
         if group is not None and len(group) == 0:
             del self._groups[group_key]
+            self._group_expected_sizes.pop(group_key, None)
+
+    def _required_group_size(self, group_key: str) -> int:
+        if self.group_size is not None:
+            return int(self.group_size)
+        return max(1, int(self._group_expected_sizes.get(group_key, 1)))
 
     def _cleanup_expired_groups(self) -> None:
         if self.group_ttl_seconds <= 0:
@@ -747,9 +835,10 @@ class RolloutBufferActor:
         plan: List[Tuple[str, int]] = []
         for key in list(self._groups.keys()):
             group = self._groups.get(key)
-            if group is None or len(group) < self.group_size:
+            required_size = self._required_group_size(key)
+            if group is None or len(group) < required_size:
                 continue
-            plan.append((key, self.group_size))
+            plan.append((key, required_size))
             if len(plan) >= self.dispatch_groups:
                 return plan, False
 
@@ -763,7 +852,7 @@ class RolloutBufferActor:
             group = self._groups.get(key)
             if group is None or len(group) < self.min_samples:
                 continue
-            return [(key, min(len(group), self.group_size))], True
+            return [(key, min(len(group), self._required_group_size(key)))], True
 
         return [], False
 
@@ -839,7 +928,11 @@ class RolloutBufferActor:
                 metadata={
                     "group_keys": selected_group_keys,
                     "partial_group": bool(partial),
-                    "group_size": int(self.group_size),
+                    "group_size": (
+                        self._required_group_size(selected_group_keys[0])
+                        if selected_group_keys
+                        else None
+                    ),
                 },
             )
             if partial:
@@ -864,28 +957,64 @@ class RolloutBufferActor:
             raise ValueError("Processed batch is empty.")
 
         created_at = time.time()
+        push_t0 = time.perf_counter()
         batch_ref = ray.put(current)
+        push_t1 = time.perf_counter()
+        logger.warning(
+            "[TIMING] buffer.push[grouped] ray.put=%.2fs samples=%d",
+            push_t1 - push_t0,
+            sample_count,
+        )
         modality = self._detect_modality(current)
 
-        prompts = current.prompts
-        if prompts is not None and len(prompts) != sample_count:
-            logger.warning(
-                "Training batch prompts length %d != batch_size %d; grouped prompt keying disabled for this push.",
-                len(prompts),
-                sample_count,
+        group_ids = current.group_ids
+        if group_ids is None or len(group_ids) != sample_count:
+            raise ValueError(
+                "Grouped rollout buffer requires explicit sample-aligned group_ids. "
+                f"Got batch_size={sample_count}, group_ids_len={len(group_ids) if group_ids is not None else None}."
             )
-            prompts = None
+
+        normalized_group_ids: List[str] = []
+        group_counts: Dict[str, int] = {}
+        for sample_idx, raw_group_id in enumerate(group_ids):
+            group_id = self._normalize_group_id(raw_group_id)
+            if group_id is None:
+                raise ValueError(
+                    "Grouped rollout buffer requires non-empty group_ids for every sample. "
+                    f"Found invalid group_id at sample_idx={sample_idx}."
+                )
+            group_key = self._group_key_for_sample(
+                group_id=group_id,
+                rollout_id=int(rollout_id),
+                sample_idx=sample_idx,
+            )
+            normalized_group_ids.append(group_id)
+            group_counts[group_key] = group_counts.get(group_key, 0) + 1
+
+        if self.group_size is None:
+            for group_key, count in group_counts.items():
+                expected = self._group_expected_sizes.get(group_key)
+                if expected is None:
+                    self._group_expected_sizes[group_key] = int(count)
+                elif int(expected) != int(count):
+                    logger.warning(
+                        "Grouped rollout buffer saw inconsistent inferred group size for %s: expected=%s new=%s. "
+                        "Keeping the first inferred size.",
+                        group_key,
+                        expected,
+                        count,
+                    )
 
         rewards_tensor = current.rewards
         for sample_idx in range(sample_count):
-            prompt = self._normalize_prompt(prompts[sample_idx]) if prompts is not None else None
+            group_id = normalized_group_ids[sample_idx]
             reward = (
                 float(rewards_tensor[sample_idx].item())
                 if rewards_tensor is not None
                 else None
             )
             group_key = self._group_key_for_sample(
-                prompt=prompt,
+                group_id=group_id,
                 rollout_id=int(rollout_id),
                 sample_idx=sample_idx,
             )
@@ -894,7 +1023,7 @@ class RolloutBufferActor:
                 sample_idx=sample_idx,
                 rollout_id=int(rollout_id),
                 created_at=created_at,
-                prompt=prompt,
+                group_id=group_id,
                 reward=reward,
                 modality=modality,
             )
@@ -925,6 +1054,7 @@ class RolloutBufferActor:
     def clear(self) -> None:
         self._dispatch_queue.clear()
         self._groups.clear()
+        self._group_expected_sizes.clear()
 
     def push(
         self,
@@ -958,10 +1088,18 @@ class RolloutBufferActor:
                 raise ValueError("Processed batch is empty.")
 
             self._maybe_drop_dispatch_head()
+            push_t0 = time.perf_counter()
+            batch_ref = ray.put(current)
+            push_t1 = time.perf_counter()
+            logger.warning(
+                "[TIMING] buffer.push ray.put=%.2fs samples=%d",
+                push_t1 - push_t0,
+                sample_count,
+            )
             item = BufferItem(
                 item_id=self._new_item_id(),
                 rollout_id=int(rollout_id),
-                batch_ref=ray.put(current),
+                batch_ref=batch_ref,
                 sample_count=sample_count,
                 created_at=time.time(),
                 metadata=context.metadata,
@@ -979,7 +1117,7 @@ class RolloutBufferActor:
                 "grouped_mode": False,
             }
         except Exception as exc:
-            logger.warning("RolloutBufferActor drop rollout_id=%s due to: %s", rollout_id, exc)
+            logger.warning("BufferActor drop rollout_id=%s due to: %s", rollout_id, exc)
             self._dropped_batches += 1
             return {
                 "accepted": False,
@@ -1025,12 +1163,22 @@ class RolloutBufferActor:
                 },
             }
 
+        pop_t0 = time.perf_counter()
         train_data = ray.get(item.batch_ref)
+        pop_t1 = time.perf_counter()
         training_data_ref = _put_training_data(
             train_data=train_data,
             dp_size=resolved_dp_size,
             partition_train_data=partition_train_data,
             partition_mode=partition_mode,
+        )
+        pop_t2 = time.perf_counter()
+        logger.warning(
+            "[TIMING] buffer.pop: ray_get=%.2fs partition_put=%.2fs dp=%s mode=%s",
+            pop_t1 - pop_t0,
+            pop_t2 - pop_t1,
+            resolved_dp_size,
+            partition_mode,
         )
         return {
             "item_id": item.item_id,
@@ -1140,9 +1288,9 @@ class RolloutBufferActor:
         self._training_group = None
 
 
-def create_rollout_buffer_actor(args: Any):
-    """Factory for rollout buffer actor."""
-    return RolloutBufferActor.options(num_cpus=1, num_gpus=0).remote(args)
+def create_buffer_actor(args: Any):
+    """Factory for buffer actor."""
+    return BufferActor.options(num_cpus=1, num_gpus=0).remote(args)
 
 
 __all__ = [
@@ -1151,7 +1299,7 @@ __all__ = [
     "FiniteTensorFilterPlugin",
     "RewardRangeFilterPlugin",
     "MinSamplesGuardPlugin",
-    "RolloutBufferActor",
+    "BufferActor",
     "build_buffer_plugins",
-    "create_rollout_buffer_actor",
+    "create_buffer_actor",
 ]

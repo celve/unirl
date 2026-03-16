@@ -19,22 +19,12 @@ from diffusionrl.types.training_batch import (
     ForwardTrainingBatch,
     TrainingBatch,
 )
-from diffusionrl.runtime.training.backward_train_step import (
-    train_backward_with_accumulation,
-)
-from diffusionrl.runtime.training.forward_train_step import train_forward_batch
 from diffusionrl.runtime.training.update_schedule import (
     TrainingUpdateSchedule,
     create_training_update_schedule,
 )
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[logging.StreamHandler()],
-)
 
 
 @dataclass
@@ -45,23 +35,17 @@ class TrainExecutorConfig:
     dp_size: int
     device: torch.device
     use_fsdp: bool
-    loss_type: str
+    algorithm_type: str
     guidance_scale: float
     max_grad_norm: float
     gradient_accumulation_batch_size: int
     multi_update_batch_size: Optional[int]
     update_mode: str
-    use_ema: bool
-    ema_updater: Optional[Any]
-    nft_timestep_mode: str
-    nft_shuffle_timesteps: bool
-    nft_apply_shift: bool
+    ema_manager: Optional[Any]
     timestep_fraction: Any = 1.0
     shuffle_samples: bool = True
     shuffle_seed: Optional[int] = None
     clip_grad_norm_fn: Optional[Callable[..., Any]] = None
-    eval_ema: Optional[Any] = None
-    nft_old_params_ema: Optional[Any] = None
 
 
 def aggregate_numeric_metrics(metrics_list: List[Dict[str, Any]]) -> Dict[str, float]:
@@ -101,13 +85,13 @@ class TrainExecutor:
         model: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
         lr_scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
-        loss_fn: Any,
+        algorithm: Any,
         config: TrainExecutorConfig,
     ):
         self.model = model
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
-        self.loss_fn = loss_fn
+        self.algorithm = algorithm
         self.config = config
         self.update_schedule: TrainingUpdateSchedule = create_training_update_schedule(
             config.update_mode
@@ -185,23 +169,12 @@ class TrainExecutor:
         batch: TrainingBatch,
         gradient_accumulation_batch_size: int,
     ) -> tuple[float, Dict[str, Any], int, int, bool]:
-        if isinstance(batch, ForwardTrainingBatch):
-            return train_forward_batch(
-                batch=batch,
-                loss_fn=self.loss_fn,
-                model=self.model,
-                gradient_accumulation_batch_size=gradient_accumulation_batch_size,
-                timestep_mode=self.config.nft_timestep_mode,
-                shuffle_timesteps=self.config.nft_shuffle_timesteps,
-                apply_shift=self.config.nft_apply_shift,
-                timestep_fraction=getattr(self.config, "timestep_fraction", 1.0),
-            )
-        return train_backward_with_accumulation(
-            batch=batch,
-            loss_fn=self.loss_fn,
+        return self.algorithm.compute_loss_and_backward(
             model=self.model,
-            guidance_scale=self.config.guidance_scale,
+            batch=batch,
             gradient_accumulation_batch_size=gradient_accumulation_batch_size,
+            guidance_scale=self.config.guidance_scale,
+            timestep_fraction=getattr(self.config, "timestep_fraction", 1.0),
         )
 
     def _clip_grad_norm(self) -> float:
@@ -227,21 +200,8 @@ class TrainExecutor:
 
     def _update_ema_trackers(self, metrics: dict) -> None:
         """Step all active EMA trackers after an optimizer step."""
-        has_param_ema = (
-            self.config.eval_ema is not None
-            or self.config.nft_old_params_ema is not None
-        )
-        if has_param_ema:
-            trainable = [p for p in self.model.parameters() if p.requires_grad]
-            if self.config.eval_ema is not None:
-                self.config.eval_ema.step(trainable)
-            if self.config.nft_old_params_ema is not None:
-                self.config.nft_old_params_ema.step(trainable)
-
-        # DualAdapterEMA for NFT LoRA mode (legacy path).
-        if self.config.use_ema and self.config.ema_updater is not None:
-            ema_success = self.config.ema_updater.update(self.model)
-            metrics["ema_updated"] = ema_success
+        if self.config.ema_manager is not None:
+            self.config.ema_manager.post_optimizer_step(self.model, metrics)
 
     def skipped_metrics(self, rollout_id: int) -> Dict[str, Any]:
         return {
@@ -359,7 +319,7 @@ class TrainExecutor:
         metrics.update(
             {
                 "rollout_id": rollout_id,
-                "loss_type": self.config.loss_type,
+                "algorithm_type": self.config.algorithm_type,
                 "training_update_mode": update_mode,
                 "configured_gradient_accumulation_batch_size": self.config.gradient_accumulation_batch_size,
                 "configured_multi_update_batch_size": self.config.multi_update_batch_size,

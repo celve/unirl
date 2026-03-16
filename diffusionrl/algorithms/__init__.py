@@ -11,7 +11,7 @@ from .mix_grpo import MixGRPOAlgorithm
 from .nft import NFTAlgorithm
 
 # Default dotpaths for built-in algorithm classes.
-# Used by get_algorithm() and _normalize_loss_path() for resolution.
+# Used by get_algorithm() and _normalize_algorithm_path() for resolution.
 DEFAULT_ALGORITHM_PATHS = {
     "grpo": "diffusionrl.algorithms.grpo.GRPOAlgorithm",
     "nft": "diffusionrl.algorithms.nft.NFTAlgorithm",
@@ -28,7 +28,7 @@ def get_algorithm(
     Create an algorithm instance by dotpath or built-in type name.
 
     For normal training, the algorithm is created via
-    ``load_function(algorithm_path) + cls.from_config(loss_config)``
+    ``load_function(algorithm_path) + cls.from_config(algorithm_config)``
     inside TrainingActor.  This factory is a convenience for
     standalone / testing use.
 

@@ -46,9 +46,9 @@ class ImageRLDataSource:
         self.data_path = getattr(args, 'data_path', None)
         self.eval_data_path = getattr(args, "eval_data_path", None)
         self.seed = getattr(args, 'seed', 42)
-        self.prompts_per_batch = getattr(args.algorithm, "prompts_per_batch", None)
-        if self.prompts_per_batch is None:
-            raise ValueError("algorithm.prompts_per_batch must be set explicitly.")
+        self.prompts_per_rollout = getattr(args.algorithm, "prompts_per_rollout", None)
+        if self.prompts_per_rollout is None:
+            raise ValueError("algorithm.prompts_per_rollout must be set explicitly.")
         self.drop_last = True
 
         # Training data and eval data are treated as separate prompt sources.
@@ -155,18 +155,18 @@ class ImageRLDataSource:
         if self.train_dataset is None:
             return
 
-        # prompts_per_batch determines the DataLoader batch size; do not repeat each prompt k times here
+        # prompts_per_rollout determines the DataLoader batch size; do not repeat each prompt k times here
         sampler = None
-        if len(self.train_dataset) < self.prompts_per_batch:
+        if len(self.train_dataset) < self.prompts_per_rollout:
             raise ValueError(
-                "Training dataset is smaller than prompts_per_batch, which would produce an "
+                "Training dataset is smaller than prompts_per_rollout, which would produce an "
                 f"empty DataLoader with drop_last=True (num_samples={len(self.train_dataset)}, "
-                f"prompts_per_batch={self.prompts_per_batch})."
+                f"prompts_per_rollout={self.prompts_per_rollout})."
             )
 
         self._dataloader = DataLoader(
             self.train_dataset,
-            batch_size=self.prompts_per_batch,
+            batch_size=self.prompts_per_rollout,
             sampler=sampler,
             shuffle=(sampler is None),  # Only shuffle if not using custom sampler
             num_workers=0,  # Keep simple for Ray
@@ -179,8 +179,9 @@ class ImageRLDataSource:
     def _collate_text(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Collate function for text prompt dataset."""
         prompts = [item["prompt"] for item in batch]
+        prompt_ids = [str(item["prompt_id"]) for item in batch]
         metadata = [item.get("metadata") for item in batch]
-        result: Dict[str, Any] = {"prompts": prompts}
+        result: Dict[str, Any] = {"prompts": prompts, "prompt_ids": prompt_ids}
         if any(m is not None for m in metadata):
             result["metadata"] = metadata
         return result
@@ -196,6 +197,7 @@ class ImageRLDataSource:
         """Convert normalized prompt examples into a batch payload."""
         result: Dict[str, Any] = {
             "prompts": [item["prompt"] for item in prompt_examples],
+            "prompt_ids": [str(item["prompt_id"]) for item in prompt_examples],
         }
         metadata = [item.get("metadata") for item in prompt_examples]
         if any(m is not None for m in metadata):
@@ -237,7 +239,11 @@ class ImageRLDataSource:
             "A cozy cabin in the woods during a snowfall",
             "A bustling marketplace in a medieval town",
         ]
-        return {"prompts": default_prompts[:batch_size]}
+        prompts = default_prompts[:batch_size]
+        return {
+            "prompts": prompts,
+            "prompt_ids": [f"default:{idx}" for idx in range(len(prompts))],
+        }
 
     def get_eval_samples(self, batch_size: int) -> Dict[str, Any]:
         """Get a stable eval batch from the dedicated evaluation prompt source."""

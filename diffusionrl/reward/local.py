@@ -15,12 +15,6 @@ import logging
 from .base import BaseRewardWorker, RewardRequest, RewardResponse, RewardType
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[logging.StreamHandler()],
-)
 
 _REWARD_LOADERS = {
     "pickscore": "_load_pickscore",

@@ -68,7 +68,7 @@ class TrainingUpdateChunk:
 
 
 class TrainingUpdateSchedule:
-    """Policy interface for splitting one rollout batch into optimizer updates."""
+    """Schedule interface for splitting one rollout batch into optimizer updates."""
 
     name = "single_update"
 

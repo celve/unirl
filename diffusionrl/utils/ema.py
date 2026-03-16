@@ -256,6 +256,27 @@ class DualAdapterEMA:
             return self.decay
         return self._get_decay(step if step is not None else self._step)
 
+    @staticmethod
+    def _adapter_param_key(name: str, adapter_name: str) -> Optional[str]:
+        token = f".{adapter_name}."
+        if token not in name:
+            return None
+        return name.replace(token, ".__adapter__.")
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            "decay": float(self.decay),
+            "old_adapter_name": str(self.old_adapter_name),
+            "new_adapter_name": str(self.new_adapter_name),
+            "step": int(self._step),
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        self.decay = float(state_dict.get("decay", self.decay))
+        self.old_adapter_name = str(state_dict.get("old_adapter_name", self.old_adapter_name))
+        self.new_adapter_name = str(state_dict.get("new_adapter_name", self.new_adapter_name))
+        self._step = int(state_dict.get("step", self._step))
+
     @torch.no_grad()
     def update(self, model: nn.Module, step: Optional[int] = None) -> bool:
         """Update old adapter weights using EMA from new adapter.
@@ -272,15 +293,20 @@ class DualAdapterEMA:
         try:
             adapter_model.set_adapter(self.new_adapter_name)
             new_params = {
-                name: param.data.clone()
+                key: param.data.clone()
                 for name, param in adapter_model.named_parameters()
-                if "lora" in name.lower()
+                for key in [self._adapter_param_key(name, self.new_adapter_name)]
+                if key is not None
             }
+            if not new_params:
+                return False
 
             adapter_model.set_adapter(self.old_adapter_name)
             for name, param in adapter_model.named_parameters():
-                if "lora" in name.lower() and name in new_params:
-                    param.data = current_decay * param.data + (1 - current_decay) * new_params[name]
+                key = self._adapter_param_key(name, self.old_adapter_name)
+                if key is None or key not in new_params:
+                    continue
+                param.data.mul_(current_decay).add_(new_params[key], alpha=(1 - current_decay))
 
             adapter_model.set_adapter(self.new_adapter_name)
             self._step += 1
@@ -288,3 +314,155 @@ class DualAdapterEMA:
 
         except Exception:
             return False
+
+
+class EMAManager:
+    """Runtime EMA mechanism materialized from algorithm-declared policy."""
+
+    def __init__(
+        self,
+        *,
+        eval_ema: Optional[EMAModuleWrapper] = None,
+        reference_param_ema: Optional[EMAModuleWrapper] = None,
+        reference_adapter_ema: Optional[DualAdapterEMA] = None,
+    ) -> None:
+        self.eval_ema = eval_ema
+        self.reference_param_ema = reference_param_ema
+        self.reference_adapter_ema = reference_adapter_ema
+
+    @classmethod
+    def from_model_and_spec(
+        cls,
+        *,
+        model: nn.Module,
+        spec: Any,
+        use_lora: bool,
+        uses_sharded_model: bool,
+        algorithm: Optional[Any] = None,
+    ) -> "EMAManager":
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        if not trainable_params:
+            return cls()
+
+        ema_device = None if uses_sharded_model else torch.device("cpu")
+        eval_ema = None
+        if bool(getattr(spec, "enable_eval_ema", True)):
+            eval_ema = EMAModuleWrapper(
+                trainable_params,
+                decay=float(getattr(spec, "eval_decay", 0.9)),
+                update_step_interval=max(1, int(getattr(spec, "eval_update_interval", 1))),
+                device=ema_device,
+            )
+
+        reference_mode = str(getattr(spec, "reference_mode", "none") or "none").strip().lower()
+        reference_param_ema = None
+        reference_adapter_ema = None
+        if reference_mode == "nft_old_policy":
+            if use_lora:
+                reference_adapter_ema = DualAdapterEMA(
+                    decay=float(getattr(spec, "reference_decay", 0.001)),
+                    decay_type=str(getattr(spec, "reference_decay_type", "constant")),
+                    flat_steps=int(getattr(spec, "reference_flat_steps", 0)),
+                    uprate=float(getattr(spec, "reference_uprate", 0.001)),
+                    uphold=float(getattr(spec, "reference_uphold", 0.5)),
+                    old_adapter_name=str(getattr(spec, "old_adapter_name", "old")),
+                    new_adapter_name=str(getattr(spec, "new_adapter_name", "default")),
+                )
+            else:
+                reference_param_ema = EMAModuleWrapper(
+                    trainable_params,
+                    decay=float(getattr(spec, "reference_decay", 0.001)),
+                    decay_fn=cls._build_reference_decay_fn(spec),
+                    update_step_interval=1,
+                    device=ema_device,
+                )
+
+        manager = cls(
+            eval_ema=eval_ema,
+            reference_param_ema=reference_param_ema,
+            reference_adapter_ema=reference_adapter_ema,
+        )
+        manager.bind_algorithm(algorithm)
+        return manager
+
+    @staticmethod
+    def _build_reference_decay_fn(spec: Any) -> Callable[[int], float]:
+        decay_type = str(getattr(spec, "reference_decay_type", "constant"))
+        base_decay = float(getattr(spec, "reference_decay", 0.001))
+        flat_steps = int(getattr(spec, "reference_flat_steps", 0))
+        uprate = float(getattr(spec, "reference_uprate", 0.001))
+        uphold = float(getattr(spec, "reference_uphold", 0.5))
+        if decay_type == "linear":
+            return lambda step: min(step * uprate, uphold)
+        if decay_type == "warmup":
+            return lambda step: 0.0 if step < flat_steps else min((step - flat_steps) * uprate, uphold)
+        return lambda _step: float(base_decay)
+
+    def bind_algorithm(self, algorithm: Optional[Any]) -> None:
+        if algorithm is None or self.reference_param_ema is None:
+            return
+        setattr(algorithm, "_old_params_ema", self.reference_param_ema)
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            "eval_ema": (
+                self.eval_ema.state_dict()
+                if self.eval_ema is not None
+                else None
+            ),
+            "reference_param_ema": (
+                self.reference_param_ema.state_dict()
+                if self.reference_param_ema is not None
+                else None
+            ),
+            "reference_adapter_ema": (
+                self.reference_adapter_ema.state_dict()
+                if self.reference_adapter_ema is not None
+                else None
+            ),
+        }
+
+    def load_state_dict(
+        self,
+        state_dict: Dict[str, Any],
+        *,
+        algorithm: Optional[Any] = None,
+    ) -> None:
+        eval_state = state_dict.get("eval_ema")
+        if self.eval_ema is not None and isinstance(eval_state, dict):
+            self.eval_ema.load_state_dict(eval_state)
+
+        reference_param_state = state_dict.get("reference_param_ema")
+        if self.reference_param_ema is not None and isinstance(reference_param_state, dict):
+            self.reference_param_ema.load_state_dict(reference_param_state)
+
+        reference_adapter_state = state_dict.get("reference_adapter_ema")
+        if self.reference_adapter_ema is not None and isinstance(reference_adapter_state, dict):
+            self.reference_adapter_ema.load_state_dict(reference_adapter_state)
+
+        self.bind_algorithm(algorithm)
+
+    def post_optimizer_step(self, model: nn.Module, metrics: Optional[Dict[str, Any]] = None) -> None:
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        if self.eval_ema is not None:
+            self.eval_ema.step(trainable)
+        if self.reference_param_ema is not None:
+            self.reference_param_ema.step(trainable)
+        if self.reference_adapter_ema is not None:
+            ema_success = self.reference_adapter_ema.update(model)
+            if metrics is not None:
+                metrics["ema_updated"] = ema_success
+
+    def apply_eval_ema(self, model: nn.Module) -> bool:
+        if self.eval_ema is None:
+            return False
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        self.eval_ema.copy_ema_to(trainable, store_temp=True, grad=False)
+        return True
+
+    def restore_from_eval(self, model: nn.Module) -> bool:
+        if self.eval_ema is None or self.eval_ema.temp_stored_parameters is None:
+            return False
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        self.eval_ema.copy_temp_to(trainable)
+        return True

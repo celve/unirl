@@ -74,26 +74,34 @@ def _tensor_stats(prefix: str, tensor: Optional[torch.Tensor]) -> Dict[str, floa
     }
 
 
-def _zero_std_group_counts(rewards: torch.Tensor, num_samples_per_prompt: int) -> tuple[int, int]:
-    k = max(1, int(num_samples_per_prompt))
-    total = int(rewards.shape[0])
-    if total == 0:
+def _zero_std_group_counts_from_ids(
+    rewards: torch.Tensor,
+    group_ids: Optional[List[str]],
+) -> tuple[int, int]:
+    if not isinstance(group_ids, list) or len(group_ids) != int(rewards.shape[0]):
         return 0, 0
-    if k <= 1:
-        return 0, total
-    groups = total // k
-    if groups <= 0:
+    ordered: Dict[str, List[float]] = {}
+    rewards_f = rewards.to(dtype=torch.float32).reshape(-1)
+    for sample_idx, raw_group_id in enumerate(group_ids):
+        group_id = str(raw_group_id).strip()
+        if not group_id:
+            continue
+        ordered.setdefault(group_id, []).append(float(rewards_f[sample_idx].item()))
+    if not ordered:
         return 0, 0
-    usable = rewards[: groups * k].reshape(groups, k)
-    std = usable.std(dim=1, unbiased=False)
-    zero_std = int((std <= 1e-8).sum().item())
-    return zero_std, groups
+    zero_std = 0
+    for values in ordered.values():
+        if len(values) <= 1:
+            continue
+        std = torch.tensor(values, dtype=torch.float32).std(unbiased=False)
+        if float(std.item()) <= 1e-8:
+            zero_std += 1
+    return zero_std, len(ordered)
 
 
 def compute_rollout_batch_metrics(
     *,
     training_data: Any,
-    num_samples_per_prompt: int,
 ) -> Dict[str, float]:
     """Build rollout metrics from typed training batch (or partition list)."""
     metrics: Dict[str, float] = {}
@@ -113,7 +121,10 @@ def compute_rollout_batch_metrics(
         if torch.is_tensor(rewards) and rewards.numel() > 0:
             rewards_f = rewards.detach().to(dtype=torch.float32).reshape(-1).cpu()
             reward_tensors.append(rewards_f)
-            zero_cnt, group_cnt = _zero_std_group_counts(rewards_f, num_samples_per_prompt)
+            zero_cnt, group_cnt = _zero_std_group_counts_from_ids(
+                rewards_f,
+                getattr(batch, "group_ids", None),
+            )
             zero_std_groups += zero_cnt
             total_groups += group_cnt
 

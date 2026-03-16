@@ -45,25 +45,71 @@ class MixGRPOAlgorithm(GRPOAlgorithm):
         self._current_sde_indices: Optional[Set[int]] = None
 
     @classmethod
-    def from_args(cls, args: Any) -> "MixGRPOAlgorithm":
-        """Construct MixGRPO algorithm from runtime args."""
-        kwargs: Dict[str, Any] = cls._grpo_kwargs_from_args(args)
-        kwargs.update(
-            {
-                "sde_ratio": getattr(args.sampling, "sde_ratio", 1.0),
-                "window_training": getattr(args.algorithm.window, "window_training", False),
-            }
+    def from_config(cls, config: dict) -> "MixGRPOAlgorithm":
+        extra = dict(config.get("algorithm_kwargs") or {})
+        known_keys = {
+            "clip_range",
+            "clip_schedule",
+            "use_kl_penalty",
+            "kl_coef",
+            "samples_per_prompt",
+            "eval_ema_decay",
+            "eval_ema_update_interval",
+            "ratio_reg_coef",
+            "eta",
+            "sde_type",
+            "time_shift",
+            "skip_last_timestep",
+            "skip_initial_timesteps",
+            "model_type",
+            "adv_normalization",
+            "adv_norm_eps",
+            "adv_clip_abs",
+            "use_global_std",
+            "trimmed_ratio",
+            "sde_ratio",
+            "window_training",
+        }
+        runtime_only_keys = {
+            "shuffle_samples",
+            "shuffle_seed",
+        }
+        unknown = sorted(key for key in extra.keys() if key not in known_keys and key not in runtime_only_keys)
+        if unknown:
+            import warnings
+
+            warnings.warn(
+                f"MixGRPOAlgorithm.from_config received unknown algorithm_kwargs keys: {unknown}. "
+                "These keys are ignored by MixGRPO algorithm constructor.",
+                stacklevel=3,
+            )
+
+        return cls(
+            clip_range=float(extra.get("clip_range", 1e-4)),
+            clip_schedule=str(extra.get("clip_schedule", "constant")),
+            use_kl_penalty=bool(extra.get("use_kl_penalty", True)),
+            kl_coef=float(extra.get("kl_coef", 0.01)),
+            samples_per_prompt=int(extra.get("samples_per_prompt", 1)),
+            eval_ema_decay=float(extra.get("eval_ema_decay", 0.9)),
+            eval_ema_update_interval=int(extra.get("eval_ema_update_interval", 1)),
+            ratio_reg_coef=float(extra.get("ratio_reg_coef", 0.0)),
+            eta=float(extra.get("eta", 0.7)),
+            sde_type=str(extra.get("sde_type", "sde")),
+            skip_last_timestep=bool(extra.get("skip_last_timestep", False)),
+            skip_initial_timesteps=int(extra.get("skip_initial_timesteps", 0)),
+            model_type=str(extra.get("model_type", "default")),
+            adv_normalization=str(extra.get("adv_normalization", "group")),
+            epsilon=float(extra.get("adv_norm_eps", 1e-8)),
+            clip_max=extra.get("adv_clip_abs", 5.0),
+            use_global_std=bool(extra.get("use_global_std", False)),
+            trimmed_ratio=float(extra.get("trimmed_ratio", 0.0)),
+            sde_ratio=float(extra.get("sde_ratio", 1.0)),
+            window_training=bool(extra.get("window_training", False)),
         )
-        kwargs.update(cls._algorithm_kwargs_from_args(args))
-        return cls(**kwargs)
 
     def get_sampling_requirements(self) -> SamplingRequirements:
         """Return MixGRPO sampling requirements."""
-        return SamplingRequirements(
-            requires_trajectory=True,
-            requires_log_prob=True,
-            extras={"sde_ratio": self.sde_ratio},
-        )
+        return self._build_sampling_requirements(extras={"sde_ratio": self.sde_ratio})
 
     def get_sde_indices(self, num_steps: int) -> Set[int]:
         """

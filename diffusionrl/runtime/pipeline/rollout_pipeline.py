@@ -4,7 +4,7 @@ Rollout pipeline — unified stage helpers for RolloutManager.
 This module merges all five pipeline stages into a single file for reduced
 file-jumping when reading the rollout→train data flow:
 
-- **Sampling stage**: expand_batch_for_sampling, distributed_sample
+- **Sampling stage**: distributed_sample
 - **Reward stage**: extract_images_from_output, extract_videos_from_output,
   reward_prefers_video_inputs, compute_rewards
 - **Advantage stage**: get_reward_component_weights, compute_advantages
@@ -15,6 +15,7 @@ file-jumping when reading the rollout→train data flow:
 from __future__ import annotations
 
 import logging
+import time as _time
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import torch
@@ -30,69 +31,11 @@ logger = logging.getLogger(__name__)
 # Sampling stage
 # =========================================================================
 
-def expand_batch_for_sampling(
-    batch: Dict[str, Any],
-    *,
-    num_samples_per_prompt: int,
-) -> Tuple[Dict[str, Any], Optional[List[str]]]:
-    """
-    Expand batch for K-repeat sampling using prompt-major order.
-
-    This repeats prompts along the batch dimension so that
-    sampling generates num_samples_per_prompt outputs per unique prompt.
-
-    Returns:
-        (expanded_batch, train_prompts)
-    """
-    k = int(num_samples_per_prompt)
-    if k <= 1:
-        return batch, batch.get("prompts")
-
-    prompts = batch.get("prompts")
-    base_size = len(prompts) if prompts is not None else None
-
-    if base_size is None or base_size == 0:
-        return batch, prompts
-
-    train_prompts: Optional[List[str]] = None
-    if prompts is not None:
-        train_prompts = [p for p in prompts for _ in range(k)]
-
-    expanded: Dict[str, Any] = dict(batch)
-    if prompts is not None:
-        expanded["prompts"] = train_prompts
-    if "metadata" in expanded and isinstance(expanded["metadata"], list):
-        metadata = expanded["metadata"]
-        if len(metadata) == base_size:
-            expanded["metadata"] = [m for m in metadata for _ in range(k)]
-
-    def _repeat(value: Any) -> Any:
-        if torch.is_tensor(value) and value.shape[0] == base_size:
-            return value.repeat_interleave(k, dim=0)
-        return value
-
-    for key in ("latents",):
-        if key in expanded:
-            expanded[key] = _repeat(expanded[key])
-
-    return expanded, train_prompts
-
 
 def distributed_sample(
     *,
     actor_group: Any,
-    batch: Dict[str, Any],
-    num_inference_steps: int,
-    guidance_scale: float,
-    height: int,
-    width: int,
-    num_frames: int,
-    init_same_noise: bool,
-    num_samples_per_prompt: int,
-    sde_indices: Optional[Set[int]] = None,
-    return_trajectories: bool = True,
-    return_log_probs: bool = True,
-    extra_generate_kwargs: Optional[Dict[str, Any]] = None,
+    request: RolloutRequest,
 ) -> List[RolloutOutput]:
     """
     Sample across distributed rollout actors.
@@ -111,33 +54,12 @@ def distributed_sample(
     if actor_group is None:
         raise RuntimeError("No sampling actors available")
 
-    prompts = batch.get("prompts", [])
+    prompts = request.prompts
     if not isinstance(prompts, list) or len(prompts) == 0:
         raise ValueError(
             "distributed_sample requires non-empty text prompts. "
             "Prompt-embedding-only input is no longer supported in rollout sampling."
         )
-
-    extra_kwargs: Dict[str, Any] = {}
-    extra_kwargs["init_same_noise"] = init_same_noise
-    extra_kwargs["num_samples_per_prompt"] = num_samples_per_prompt
-    if isinstance(extra_generate_kwargs, dict) and extra_generate_kwargs:
-        extra_kwargs.update(extra_generate_kwargs)
-
-    request = RolloutRequest(
-        prompts=prompts,
-        num_inference_steps=num_inference_steps,
-        guidance_scale=guidance_scale,
-        height=height,
-        width=width,
-        num_frames=num_frames,
-        sde_indices=sde_indices,
-        decode_for_reward=True,
-        return_trajectories=bool(return_trajectories),
-        return_log_probs=bool(return_log_probs),
-        latents=batch.get("latents"),
-        kwargs=extra_kwargs,
-    )
 
     outputs = actor_group.generate(request)
 
@@ -288,14 +210,77 @@ def collect_precomputed_rewards(
     return torch.tensor(all_rewards, dtype=torch.float32), reward_components
 
 
+def normalize_prompt_metadata(
+    *,
+    prompt_metadata: Optional[List[Optional[Dict[str, Any]]]],
+    prompts: List[str],
+    prompt_ids: Optional[List[str]] = None,
+    samples_per_prompt: Optional[int] = None,
+) -> Optional[List[Optional[Dict[str, Any]]]]:
+    """Normalize prompt metadata to sample-aligned layout.
+
+    Preferred path:
+    - prompt metadata is already sample-aligned
+    - or prompt metadata is prompt-aligned and prompt_ids are provided so
+      metadata can be expanded by explicit prompt identity
+
+    Legacy fallback:
+    - expand by fixed ``samples_per_prompt`` when explicit ids are absent
+    """
+    if not isinstance(prompt_metadata, list) or not prompt_metadata:
+        return None
+
+    sample_count = len(prompts)
+    if sample_count <= 0:
+        return None
+
+    if len(prompt_metadata) == sample_count:
+        return list(prompt_metadata)
+
+    if isinstance(prompt_ids, list) and len(prompt_ids) == sample_count:
+        ordered_prompt_ids: List[str] = []
+        seen: set[str] = set()
+        for raw_prompt_id in prompt_ids:
+            prompt_id = str(raw_prompt_id).strip()
+            if not prompt_id or prompt_id in seen:
+                continue
+            seen.add(prompt_id)
+            ordered_prompt_ids.append(prompt_id)
+        if len(prompt_metadata) == len(ordered_prompt_ids):
+            metadata_by_prompt_id = {
+                prompt_id: prompt_metadata[idx]
+                for idx, prompt_id in enumerate(ordered_prompt_ids)
+            }
+            return [metadata_by_prompt_id.get(str(raw_prompt_id).strip()) for raw_prompt_id in prompt_ids]
+
+    k = max(1, int(samples_per_prompt or 1))
+    if len(prompt_metadata) * k == sample_count:
+        return [
+            metadata
+            for metadata in prompt_metadata
+            for _ in range(k)
+        ]
+
+    logger.warning(
+        "Ignoring misaligned prompt metadata: prompts=%s metadata=%s prompt_ids=%s samples_per_prompt=%s",
+        sample_count,
+        len(prompt_metadata),
+        len(prompt_ids) if isinstance(prompt_ids, list) else None,
+        samples_per_prompt,
+    )
+    return None
+
+
 def compute_rewards(
     *,
     reward_service: Any,
     reward_path: str,
-    num_samples_per_prompt: int,
+    samples_per_prompt: int,
     sampler_outputs: List[RolloutOutput],
-    prompts: Optional[List[str]] = None,
-    base_prompts: Optional[List[str]] = None,
+    prompts: List[str],
+    prompt_ids: Optional[List[str]] = None,
+    sample_ids: Optional[List[str]] = None,
+    group_ids: Optional[List[str]] = None,
     prompt_metadata: Optional[List[Optional[Dict[str, Any]]]] = None,
 ) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
     """
@@ -304,24 +289,28 @@ def compute_rewards(
 
     Args:
         sampler_outputs: List of sampler outputs
-        prompts: List of text prompts
+        prompts: Sample-aligned prompt list. The reward stage uses a single
+            prompt representation everywhere; prompt-major base prompts are
+            expanded by the caller before entering this function.
 
     Returns:
         Tuple of:
             - Tensor of rewards [batch_size]
             - Reward components by worker/model name
     """
-    if prompts is None and base_prompts is None:
+    if not isinstance(prompts, list) or len(prompts) == 0:
         raise ValueError(
-            f"Either a list of `prompts` (currently {prompts}) or a list of `base_prompts` "
-            f"(currently {base_prompts}) should be provided to "
-            "`diffusionrl.runtime.pipeline.rollout_pipeline.compute_rewards`.\n"
-            "* Each of `prompts` corresponds to one sampler output (each prompt can repeat multiple times). Used in `rollout` reward execution mode.\n"
-            "* Each of `base_prompts` corresponds to `num_samples_per_prompt` sampler outputs. Used in `manager` reward execution mode."
+            "compute_rewards requires a non-empty sample-aligned prompts list."
         )
 
+    _rw_t0 = _time.perf_counter()
     precomputed = collect_precomputed_rewards(sampler_outputs=sampler_outputs)
     if precomputed is not None:
+        _rw_t1 = _time.perf_counter()
+        logger.warning(
+            "[TIMING] compute_rewards: precomputed_collect=%.2fs",
+            _rw_t1 - _rw_t0,
+        )
         return precomputed
     if reward_service is None:
         raise RuntimeError(
@@ -331,25 +320,39 @@ def compute_rewards(
     all_images: List[Any] = []
     all_videos: List[torch.Tensor] = []
     all_prompts: List[str] = []
+    all_prompt_ids: List[str] = []
+    all_sample_ids: List[str] = []
+    all_group_ids: List[str] = []
     all_metadata: List[Optional[Dict[str, Any]]] = []
 
     sample_idx = 0
 
-    def _get_prompt(sample_idx):
-        nonlocal base_prompts, prompts
-        if prompts is not None:
-            return prompts[sample_idx]
-        prompt_idx = sample_idx // num_samples_per_prompt
-        return base_prompts[prompt_idx % len(base_prompts)]
+    normalized_prompt_metadata = normalize_prompt_metadata(
+        prompt_metadata=prompt_metadata,
+        prompts=prompts,
+        prompt_ids=prompt_ids,
+        samples_per_prompt=samples_per_prompt,
+    )
 
     def _append_media(items: List[Any], target: List[Any]) -> None:
         nonlocal sample_idx
         for item in items:
-            prompt = _get_prompt(sample_idx)
+            if sample_idx >= len(prompts):
+                raise IndexError(
+                    "Reward media count exceeded prompt count while assembling RewardRequest. "
+                    f"sample_idx={sample_idx}, prompts={len(prompts)}"
+                )
+            prompt = prompts[sample_idx]
             target.append(item)
             all_prompts.append(prompt)
-            if prompt_metadata and len(prompt_metadata) > 0:
-                all_metadata.append(prompt_metadata[prompt_idx % len(prompt_metadata)])
+            if prompt_ids is not None and sample_idx < len(prompt_ids):
+                all_prompt_ids.append(str(prompt_ids[sample_idx]))
+            if sample_ids is not None and sample_idx < len(sample_ids):
+                all_sample_ids.append(str(sample_ids[sample_idx]))
+            if group_ids is not None and sample_idx < len(group_ids):
+                all_group_ids.append(str(group_ids[sample_idx]))
+            if normalized_prompt_metadata is not None:
+                all_metadata.append(normalized_prompt_metadata[sample_idx])
             else:
                 all_metadata.append(None)
             sample_idx += 1
@@ -387,6 +390,12 @@ def compute_rewards(
         "prompts": all_prompts,
         "metadata": all_metadata if any(m is not None for m in all_metadata) else None,
     }
+    if len(all_prompt_ids) == len(all_prompts):
+        request_kwargs["prompt_ids"] = all_prompt_ids
+    if len(all_sample_ids) == len(all_prompts):
+        request_kwargs["sample_ids"] = all_sample_ids
+    if len(all_group_ids) == len(all_prompts):
+        request_kwargs["group_ids"] = all_group_ids
     if prefer_video_inputs and all_videos:
         request_kwargs["videos"] = all_videos
     else:
@@ -425,72 +434,29 @@ def get_reward_component_weights(
 def compute_advantages(
     *,
     algorithm: Any,
-    num_samples_per_prompt: int,
-    reward_mix_mode: str,
+    component_mix_stage: str,
     rewards: torch.Tensor,
-    prompts: List[str],
+    group_ids: Optional[List[str]] = None,
     reward_components: Optional[Dict[str, List[float]]] = None,
     reward_workers: Optional[Iterable[Any]] = None,
     reward_component_weights: Optional[Dict[str, float]] = None,
 ) -> torch.Tensor:
-    """
-    Compute advantages from reward tensor.
+    """Compute advantages from reward tensor.
 
-    Default path (`reward_mix_mode=reward_aggr`) uses aggregated rewards directly.
-    Optional path (`reward_mix_mode=advantage_aggr`) computes advantages per reward
-    component and aggregates them with reward worker weights.
+    Delegates reward-mixing and advantage policy to the algorithm.
     """
-    if reward_mix_mode != "advantage_aggr" or not reward_components:
-        return algorithm.compute_advantages(
-            rewards=rewards,
-            num_samples_per_prompt=num_samples_per_prompt,
-            prompts=prompts,
+    resolved_weights = reward_component_weights
+    if reward_workers is not None and reward_components:
+        resolved_weights = get_reward_component_weights(
+            reward_components, reward_workers, reward_component_weights
         )
-
-    weights = get_reward_component_weights(
-        reward_components,
-        reward_workers,
-        reward_component_weights=reward_component_weights,
+    return algorithm.compute_advantages_with_components(
+        rewards=rewards,
+        group_ids=group_ids,
+        component_mix_stage=component_mix_stage,
+        reward_components=reward_components,
+        reward_component_weights=resolved_weights,
     )
-    weighted_advantages = torch.zeros_like(rewards)
-    total_weight = 0.0
-
-    for component_name, component_rewards in reward_components.items():
-        component_tensor = torch.tensor(
-            component_rewards,
-            dtype=rewards.dtype,
-            device=rewards.device,
-        )
-        if component_tensor.shape != rewards.shape:
-            logger.warning(
-                "Skipping reward component %s due to shape mismatch: expected %s, got %s",
-                component_name,
-                tuple(rewards.shape),
-                tuple(component_tensor.shape),
-            )
-            continue
-
-        component_advantages = algorithm.compute_advantages(
-            rewards=component_tensor,
-            num_samples_per_prompt=num_samples_per_prompt,
-            prompts=prompts,
-        )
-        weight = float(weights.get(component_name, 1.0))
-        weighted_advantages += component_advantages * weight
-        total_weight += weight
-
-    if total_weight <= 0:
-        logger.warning(
-            "reward_mix_mode=advantage_aggr but no valid reward components; "
-            "falling back to aggregated reward advantages."
-        )
-        return algorithm.compute_advantages(
-            rewards=rewards,
-            num_samples_per_prompt=num_samples_per_prompt,
-            prompts=prompts,
-        )
-
-    return weighted_advantages / total_weight
 
 
 # =========================================================================
@@ -504,7 +470,13 @@ def assemble_forward_training_batch(
     advantages: torch.Tensor,
     prompts: List[str],
 ) -> ForwardTrainingBatch:
-    """Convert pipeline outputs to NFT training data format."""
+    """Convert pipeline outputs to NFT training data format.
+
+    .. deprecated::
+        Assembly logic has been moved into ``BaseAlgorithm._assemble_forward_batch``.
+        This function is kept for backward compatibility but will be removed in a
+        future version. Prefer ``algorithm.assemble_training_batch()`` instead.
+    """
     clean_latents = []
     all_prompt_embeds = []
     all_pooled_prompt_embeds = []
@@ -598,7 +570,13 @@ def assemble_backward_training_batch(
     prompts: List[str],
     sde_indices: Optional[Set[int]] = None,
 ) -> BackwardTrainingBatch:
-    """Convert pipeline outputs to trajectory-based training batch."""
+    """Convert pipeline outputs to trajectory-based training batch.
+
+    .. deprecated::
+        Assembly logic has been moved into ``BaseAlgorithm._assemble_backward_batch``.
+        This function is kept for backward compatibility but will be removed in a
+        future version. Prefer ``algorithm.assemble_training_batch()`` instead.
+    """
     trajectories = []
     log_probs_dicts = []
     timesteps = None
@@ -667,7 +645,11 @@ def assemble_backward_training_batch(
             all_image_ids.append(emb.image_ids)
 
     if trajectories:
+        _asm_t0 = _time.perf_counter()
+        traj_count = len(trajectories)
+        traj_shapes = [tuple(t.shape) for t in trajectories[:3]]
         trajectories_tensor = torch.cat(trajectories, dim=0)
+        _asm_t1 = _time.perf_counter()
     else:
         raise ValueError("No trajectories found in sampler outputs")
 
@@ -804,6 +786,16 @@ def assemble_backward_training_batch(
         target_sde_indices=set(int(i) for i in final_sde_indices),
     )
     batch.validate()
+    _asm_t2 = _time.perf_counter()
+    traj_gb = trajectories_tensor.nelement() * trajectories_tensor.element_size() / 1e9
+    logger.warning(
+        "[TIMING] assemble_backward: cat_traj=%.2fs total=%.2fs n=%d shapes=%s traj_gb=%.2f",
+        _asm_t1 - _asm_t0,
+        _asm_t2 - _asm_t0,
+        traj_count,
+        traj_shapes,
+        traj_gb,
+    )
     return batch
 
 

@@ -10,6 +10,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
 
+from diffusionrl.reward.spec import (
+    RewardComponentSpec,
+    RewardExecutionPlan,
+    RewardSpec,
+)
 
 # ---------------------------------------------------------------------------
 # Model domain
@@ -58,13 +63,13 @@ class RewardSchema:
     reward_service_urls: Optional[List[str]]
     reward_models: Optional[List[str]]
     reward_weights: Optional[List[float]]
-    reward_aggregation: str
-    reward_mix_mode: str
+    component_aggregation: str
+    component_mix_stage: str
     reward_dedicated_gpus_per_actor: int
     reward_dedicated_num_gpus: int
     reward_dedicated_num_nodes: int
     reward_dedicated_num_gpus_per_node: int
-    reward_execution_mode: str
+    reward_location: str
 
     @classmethod
     def from_args(cls, args) -> "RewardSchema":
@@ -82,27 +87,76 @@ class RewardSchema:
             reward_service_urls=getattr(rc, "reward_service_urls", None),
             reward_models=rc.reward_models,
             reward_weights=rc.reward_weights,
-            reward_aggregation=rc.reward_aggregation,
-            reward_mix_mode=rc.reward_mix_mode,
+            component_aggregation=rc.component_aggregation,
+            component_mix_stage=rc.component_mix_stage,
             reward_dedicated_gpus_per_actor=int(rc.reward_dedicated_gpus_per_actor),
             reward_dedicated_num_gpus=int(rc.reward_dedicated_num_gpus),
             reward_dedicated_num_nodes=int(rc.reward_dedicated_num_nodes),
             reward_dedicated_num_gpus_per_node=int(rc.reward_dedicated_num_gpus_per_node),
-            reward_execution_mode=str(getattr(rc, "reward_execution_mode", "manager")),
+            reward_location=str(getattr(rc, "reward_location", "manager")),
         )
 
     @property
-    def uses_rollout_execution(self) -> bool:
-        return str(self.reward_execution_mode or "manager").strip().lower() == "rollout"
+    def uses_sampling_actor_execution(self) -> bool:
+        return self.to_execution_plan().uses_sampling_actor_execution
 
-    def component_weights(self) -> Dict[str, float]:
+    def to_spec(self) -> RewardSpec:
         if self.reward_models:
             weights = self.reward_weights or []
-            return {
-                str(model): float(weights[idx]) if idx < len(weights) else 1.0
+            components = tuple(
+                RewardComponentSpec(
+                    model_name=str(model),
+                    weight=float(weights[idx]) if idx < len(weights) else 1.0,
+                )
                 for idx, model in enumerate(self.reward_models)
-            }
-        return {str(self.reward_model_name): 1.0}
+            )
+        else:
+            components = (
+                RewardComponentSpec(
+                    model_name=str(self.reward_model_name),
+                    weight=1.0,
+                ),
+            )
+        return RewardSpec(
+            reward_path=self.reward_path,
+            reward_model_saved_path=self.reward_model_saved_path,
+            batch_size=int(self.reward_batch_size),
+            timeout=float(self.reward_timeout),
+            component_aggregation=str(self.component_aggregation),
+            components=components,
+        )
+
+    def to_execution_plan(self) -> RewardExecutionPlan:
+        service_urls = tuple(
+            str(url)
+            for url in (self.reward_service_urls or [])
+            if str(url or "").strip()
+        )
+        service_url = (
+            str(self.reward_service_url)
+            if self.reward_service_url is not None and str(self.reward_service_url).strip()
+            else None
+        )
+        if self.use_http_reward or service_urls or service_url:
+            backend = "http"
+        elif int(self.reward_dedicated_num_gpus) > 0 or int(self.reward_dedicated_num_nodes) > 0:
+            backend = "ray_pool"
+        else:
+            backend = "local"
+        return RewardExecutionPlan(
+            location=str(self.reward_location or "manager"),
+            backend=backend,
+            local_device=str(self.local_reward_device or "cpu"),
+            reward_service_url=service_url,
+            reward_service_urls=service_urls,
+            dedicated_num_gpus=int(self.reward_dedicated_num_gpus),
+            dedicated_num_nodes=int(self.reward_dedicated_num_nodes),
+            dedicated_num_gpus_per_node=int(self.reward_dedicated_num_gpus_per_node),
+            dedicated_gpus_per_actor=int(self.reward_dedicated_gpus_per_actor),
+        )
+
+    def component_weights(self) -> Dict[str, float]:
+        return self.to_spec().component_weights()
 
 
 def build_reward_config(args) -> Dict[str, Any]:
@@ -136,7 +190,7 @@ def build_sampling_config(args) -> Dict[str, Any]:
         "num_inference_steps": int(sc.num_inference_steps),
         "eta": float(sc.eta),
         "sde_type": str(sc.sde_type),
-        "shift": float(sc.shift),
+        "shift": float(sc.time_shift),
         "guidance_scale": float(sc.guidance_scale),
         "timestep_fraction": getattr(sc, "timestep_fraction", 1.0),
         "height": int(args.height),
@@ -144,7 +198,6 @@ def build_sampling_config(args) -> Dict[str, Any]:
         "num_frames": int(args.num_frames),
         "sampling_adapter": sc.sampling_adapter,
         "init_same_noise": bool(sc.init_same_noise),
-        "num_samples_per_prompt": int(args.algorithm.num_samples_per_prompt),
         "sampler_kwargs": engine_kwargs.get("sampler_kwargs", {}),
     }
 
@@ -219,48 +272,55 @@ def _build_scheduler_config(args, *, total_steps: int) -> Dict[str, Any]:
     }
 
 
-def _build_loss_config(args) -> Dict[str, Any]:
+def _build_algorithm_kwargs(args) -> Dict[str, Any]:
     ac = args.algorithm  # AlgorithmConfig
     sc = args.sampling   # SamplingConfig
-    loss_kwargs = _require_normalized_kwargs_dict(
-        ac.loss_kwargs,
-        field_name="algorithm.loss_kwargs",
-    )
     algorithm_kwargs = _require_normalized_kwargs_dict(
         ac.algorithm_kwargs,
         field_name="algorithm.algorithm_kwargs",
     )
 
-    # Merge first-class eval-EMA args into loss_kwargs so they reach
-    # TrainingActor._load_loss via the existing runtime-key pipeline.
-    loss_kwargs.setdefault("eval_ema_decay", float(ac.eval_ema_decay))
-    loss_kwargs.setdefault("eval_ema_update_interval", int(ac.eval_ema_update_interval))
+    # Single source of truth for algorithm construction.
+    # Both rollout-side and train-side algorithms consume this same payload.
+    normalized = dict(algorithm_kwargs)
+    normalized.setdefault("clip_range", float(ac.clip_range))
+    normalized.setdefault("clip_schedule", str(ac.clip_schedule))
+    normalized.setdefault("use_kl_penalty", bool(ac.use_kl_penalty))
+    normalized.setdefault("kl_coef", float(ac.kl_coef))
+    normalized.setdefault("adv_normalization", str(ac.adv_normalization))
+    normalized.setdefault("samples_per_prompt", int(ac.samples_per_prompt))
+    normalized.setdefault("adv_norm_eps", float(ac.adv_norm_eps))
+    normalized.setdefault("adv_clip_abs", ac.adv_clip_abs)
+    normalized.setdefault("trimmed_ratio", float(ac.trimmed_ratio))
+    normalized.setdefault("use_global_std", bool(ac.use_global_std))
+    normalized.setdefault("skip_last_timestep", bool(ac.skip_last_timestep))
+    normalized.setdefault("skip_initial_timesteps", int(ac.skip_initial_timesteps))
+    normalized.setdefault("eval_ema_decay", float(ac.eval_ema_decay))
+    normalized.setdefault("eval_ema_update_interval", int(ac.eval_ema_update_interval))
+    normalized.setdefault("eta", float(sc.eta))
+    normalized.setdefault("sde_type", str(sc.sde_type))
+    normalized.setdefault("sde_ratio", float(sc.sde_ratio))
+    normalized.setdefault("time_shift", float(sc.time_shift))
+    normalized.setdefault("window_training", bool(ac.window.window_training))
+    return normalized
 
-    loss_path = str(ac.loss_path or "").strip()
-    if not loss_path:
+
+def build_algorithm_config(args) -> Dict[str, Any]:
+    ac = args.algorithm  # AlgorithmConfig
+    sc = args.sampling   # SamplingConfig
+
+    algorithm_path = str(ac.algorithm_path or "").strip()
+    if not algorithm_path:
         raise ValueError(
-            "algorithm.loss_path must be resolved before build_domain_args(). "
-            "validate_args() should set this from loss_type or explicit config."
+            "algorithm.algorithm_path must be resolved before build_domain_args(). "
+            "validate_args() should set this from algorithm_type or explicit config."
         )
 
     return {
-        "algorithm_path": str(ac.algorithm_path),
-        "algorithm_kwargs": algorithm_kwargs,
-        "loss_type": str(ac.loss_type),
-        # loss_path now resolves to algorithm class (via _normalize_loss_path).
-        # Keep both keys so TrainingActor._load_loss can prefer algorithm_path.
-        "loss_path": loss_path,
-        "loss_kwargs": loss_kwargs,
-        "clip_range": float(ac.clip_range),
-        "clip_range_mode": str(ac.clip_range_mode),
-        "use_kl_penalty": bool(ac.use_kl_penalty),
-        "kl_coef": float(ac.kl_coef),
-        "eta": float(sc.eta),
-        "sde_type": str(sc.sde_type),
+        "algorithm_type": str(ac.algorithm_type),
+        "algorithm_path": algorithm_path,
+        "algorithm_kwargs": _build_algorithm_kwargs(args),
         "guidance_scale": float(sc.guidance_scale),
-        "ignore_last": bool(ac.ignore_last),
-        "frozen_init_timesteps": int(ac.frozen_init_timesteps),
-        "shift": float(sc.shift),
         "debug_output_dir": getattr(args.debug, "debug_output_dir", None),
     }
 
@@ -368,7 +428,7 @@ def build_training_actor_init_config(*, args, dp_size: int) -> Dict[str, Any]:
         "reward_config": build_reward_config(args),
         "optimizer_config": _build_optimizer_config(args),
         "scheduler_config": _build_scheduler_config(args, total_steps=args.rollout.num_rollout),
-        "loss_config": _build_loss_config(args),
+        "algorithm_config": build_algorithm_config(args),
         "training_config": _build_training_runtime_config(args, dp_size=dp_size),
         "sampling_config": build_sampling_config(args),
         "train_backend_config": backend_config,
@@ -408,18 +468,18 @@ def validate_training_actor_init_config(config: Dict[str, Any]) -> None:
         "reward_config",
         "optimizer_config",
         "scheduler_config",
-        "loss_config",
+        "algorithm_config",
         "training_config",
         "sampling_config",
         "train_backend_config",
     ):
         _require_dict_section(config, name=section)
 
-    loss_config = config["loss_config"]
-    if not isinstance(loss_config.get("loss_kwargs"), dict):
+    algorithm_config = config["algorithm_config"]
+    if not isinstance(algorithm_config.get("algorithm_kwargs"), dict):
         raise ValueError(
-            "loss_config.loss_kwargs must be a dict, "
-            f"got: {type(loss_config.get('loss_kwargs')).__name__}"
+            "algorithm_config.algorithm_kwargs must be a dict, "
+            f"got: {type(algorithm_config.get('algorithm_kwargs')).__name__}"
         )
 
     backend_config = config["train_backend_config"]

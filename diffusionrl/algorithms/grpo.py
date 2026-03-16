@@ -1,33 +1,23 @@
 """
-GRPO Algorithm Implementation — unified algorithm + loss.
+GRPO Algorithm Implementation — algorithm-owned loss and training logic.
 
-Standard GRPO with group normalization for advantages.  This class is the
-single source of truth for both rollout-side requirements (sampling, advantages)
-and training-side gradient computation (the former ``GRPOLoss``).
-
-Key Features:
-- PPO-style clipped policy gradient
-- KL regularization (flow_grpo style with LoRA disable_adapter)
-- Support for both SDE and Mixed sampling modes
-- Per-timestep or aggregated loss
-- Typed interface via compute_timestep() for type-safe training
-
-Formula:
-    ratio = exp(new_log_prob - old_log_prob)
-    L = -E[min(ratio * A, clip(ratio, 1-eps, 1+eps) * A)]
+Standard GRPO with group normalization for advantages. The algorithm file is
+the single source of truth for rollout requirements, loss creation, and the
+backward training step.
 """
 
 import math
 import logging
 import os
+import time as _time
 import warnings
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
 
 from diffusionrl.types import TimestepData, PromptEmbeddings
-from .base import BaseAlgorithm, SamplingRequirements
+from .base import BaseAlgorithm, EMASpec, SamplingRequirements
 
 logger = logging.getLogger(__name__)
 
@@ -42,15 +32,203 @@ def _save_training_debug_tensor(base_dir: str, step_idx: int, name: str, tensor:
     torch.save(tensor.detach().cpu().float(), path)
 
 
+class _GRPOLoss:
+    """Private GRPO objective owned and created by GRPOAlgorithm."""
+
+    def __init__(self, algorithm: "GRPOAlgorithm") -> None:
+        self.algorithm = algorithm
+
+    @classmethod
+    def declared_requirements(cls) -> Dict[str, bool]:
+        return {
+            "requires_trajectory": True,
+            "requires_log_prob": True,
+            "requires_embeddings": True,
+        }
+
+    def compute_loss(
+        self,
+        model: nn.Module,
+        timestep_data: TimestepData,
+        advantages: torch.Tensor,
+        embeddings: PromptEmbeddings,
+        sigmas: Optional[torch.Tensor] = None,
+        ref_model: Optional[nn.Module] = None,
+        training_progress: float = 0.0,
+        model_forward_fn: Optional[callable] = None,
+        guidance_scale: float = 3.5,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        algorithm = self.algorithm
+        device = advantages.device
+
+        latents = timestep_data.latents
+        next_latents = timestep_data.next_latents
+        old_log_probs = timestep_data.log_prob
+        sigma = timestep_data.sigma
+        sigma_next = timestep_data.sigma_next
+        timestep_idx = timestep_data.timestep_idx
+
+        if old_log_probs is None:
+            return torch.tensor(0.0, device=device, requires_grad=True), {
+                "skip_reason": "ode_step",
+                "timestep_idx": timestep_idx,
+            }
+
+        _sigmas = sigmas if sigmas is not None else timestep_data.sigmas
+        if _sigmas is not None:
+            sigma_max = _sigmas[1].item() if _sigmas[1].dim() == 0 else _sigmas[1][0].item()
+        else:
+            raise ValueError(
+                "Cannot determine sigma_max: neither `sigmas` argument nor "
+                "`timestep_data.sigmas` is provided. Ensure TimestepData is "
+                "constructed with the full sigma schedule."
+            )
+
+        if not isinstance(sigma, torch.Tensor):
+            sigma = torch.tensor(sigma, device=device)
+        if not isinstance(sigma_next, torch.Tensor):
+            sigma_next = torch.tensor(sigma_next, device=device)
+
+        prompt_embeds = embeddings.prompt_embeds
+        pooled_prompt_embeds = embeddings.pooled_prompt_embeds
+        negative_prompt_embeds = getattr(embeddings, "negative_prompt_embeds", None)
+        negative_pooled_prompt_embeds = getattr(embeddings, "negative_pooled_prompt_embeds", None)
+
+        if model_forward_fn is not None:
+            pred = model_forward_fn(
+                model=model,
+                latents=latents,
+                sigma=sigma,
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                guidance_scale=guidance_scale,
+                text_ids=embeddings.text_ids,
+                image_ids=embeddings.image_ids,
+                **kwargs,
+            )
+        else:
+            pred = algorithm._default_forward(
+                model=model,
+                latents=latents,
+                sigma=sigma,
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                guidance_scale=guidance_scale,
+                text_ids=embeddings.text_ids,
+                image_ids=embeddings.image_ids,
+                negative_prompt_embeds=negative_prompt_embeds,
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+            )
+
+        pred_f = pred.float()
+        latents_f = latents.float()
+        next_latents_f = next_latents.float()
+
+        new_log_prob, prev_sample_mean = algorithm.compute_log_prob(
+            pred=pred_f,
+            sample=latents_f,
+            next_sample=next_latents_f,
+            sigma=sigma,
+            sigma_next=sigma_next,
+            sigma_max=sigma_max,
+        )
+
+        log_prob_diff = new_log_prob - old_log_probs
+        ratio = torch.exp(log_prob_diff)
+
+        _resolved_debug_dir = algorithm._debug_output_dir or os.environ.get("DIFFUSIONRL_DEBUG_OUTPUT_DIR")
+        if _resolved_debug_dir is not None and timestep_idx not in algorithm._debug_dumped_steps:
+            algorithm._debug_dumped_steps.add(timestep_idx)
+            _rank = int(os.environ.get("RANK", 0))
+            _training_debug_dir = os.path.join(_resolved_debug_dir, "training")
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "noise_pred", pred, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "latents_input", latents, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "latents_output", next_latents, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "prev_sample_mean", prev_sample_mean, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "new_log_prob", new_log_prob, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "old_log_prob", old_log_probs, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "ratio", ratio, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma", sigma.unsqueeze(0) if sigma.dim() == 0 else sigma, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma_next", sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma_max", torch.tensor([sigma_max]), _rank)
+            if _sigmas is not None and _rank == 0:
+                _step_dir = os.path.join(_training_debug_dir, f"step_{timestep_idx:03d}")
+                _sched_path = os.path.join(_step_dir, "sigmas_schedule.pt")
+                if not os.path.exists(_sched_path):
+                    torch.save(_sigmas.detach().cpu().float(), _sched_path)
+
+        clip_range = algorithm.get_clip_range(training_progress)
+
+        adv = advantages.detach()
+        unclipped_loss = -adv * ratio
+        clipped_loss = -adv * torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
+        policy_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
+
+        clip_fraction = ((ratio - 1.0).abs() > clip_range).float().mean()
+        clipfrac_gt_one = (ratio - 1.0 > clip_range).float().mean()
+        clipfrac_lt_one = (1.0 - ratio > clip_range).float().mean()
+        approx_kl = 0.5 * torch.mean(log_prob_diff ** 2)
+
+        loss_terms = {
+            "policy_loss": policy_loss.detach(),
+            "ratio_mean": ratio.mean().detach(),
+            "ratio_std": ratio.std().detach(),
+            "ratio_max": ratio.max().detach(),
+            "ratio_min": ratio.min().detach(),
+            "clip_fraction": clip_fraction.detach(),
+            "clipfrac_gt_one": clipfrac_gt_one.detach(),
+            "clipfrac_lt_one": clipfrac_lt_one.detach(),
+            "approx_kl": approx_kl.detach(),
+            "new_log_prob_mean": new_log_prob.mean().detach(),
+            "old_log_prob_mean": old_log_probs.mean().detach(),
+        }
+
+        total_loss = policy_loss
+
+        if algorithm.use_kl_penalty and algorithm.kl_coef > 0:
+            kl_loss = algorithm._compute_kl_penalty(
+                model=model,
+                latents=latents,
+                latents_f=latents_f,
+                next_latents_f=next_latents_f,
+                sigma=sigma,
+                sigma_next=sigma_next,
+                sigma_max=sigma_max,
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                negative_prompt_embeds=negative_prompt_embeds,
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                prev_sample_mean=prev_sample_mean,
+                ref_model=ref_model,
+                guidance_scale=guidance_scale,
+                model_forward_fn=model_forward_fn,
+                **kwargs,
+            )
+            if kl_loss is not None:
+                total_loss = total_loss + algorithm.kl_coef * kl_loss
+                loss_terms["kl_loss"] = kl_loss.detach()
+
+        if algorithm.ratio_reg_coef > 0:
+            ratio_reg = torch.mean((new_log_prob - old_log_probs) ** 2)
+            total_loss = total_loss + algorithm.ratio_reg_coef * ratio_reg
+            loss_terms["ratio_reg"] = ratio_reg.detach()
+
+        loss_terms["total_loss"] = total_loss.detach()
+        loss_terms["timestep_idx"] = timestep_idx
+
+        return total_loss, loss_terms
+
+
 class GRPOAlgorithm(BaseAlgorithm):
     """
-    Standard GRPO Algorithm — unified algorithm + loss.
+    Standard GRPO Algorithm — algorithm owns loss and training step.
 
     This class handles:
     1. Sampling requirements (get_sampling_requirements)
     2. Advantage computation (compute_advantages, inherited)
-    3. Loss / gradient computation (compute_timestep)
-    4. Static requirements declaration (declared_requirements)
+    3. Loss ownership / debug entry (compute_loss -> self.loss_fn)
+    4. Gradient computation (compute_loss_and_backward)
 
     Features:
     - Group normalization for advantages (within prompt groups)
@@ -60,100 +238,94 @@ class GRPOAlgorithm(BaseAlgorithm):
 
     Reference: DanceGRPO
     """
-
-    @classmethod
-    def declared_requirements(cls) -> Dict[str, bool]:
-        """Declare data requirements for the contracts / validation pipeline."""
-        return {
-            "requires_trajectory": True,
-            "requires_log_prob": True,
-            "requires_embeddings": True,
-        }
+    _loss_cls = _GRPOLoss
 
     @classmethod
     def from_config(cls, config: dict) -> "GRPOAlgorithm":
-        """Create GRPOAlgorithm from a loss_config dictionary.
+        """Create GRPOAlgorithm from an algorithm_config dictionary.
 
-        Reads constructor parameters from config top-level keys,
-        with ``loss_kwargs`` sub-dict taking precedence for overrides.
+        Reads constructor parameters from the normalized ``algorithm_kwargs``
+        payload only. Rollout-side and train-side should instantiate from the
+        same algorithm_config surface.
         """
-        extra = config.get("loss_kwargs") or {}
+        extra = dict(config.get("algorithm_kwargs") or {})
         known_keys = {
             "clip_range",
-            "clip_range_mode",
+            "clip_schedule",
             "use_kl_penalty",
             "kl_coef",
+            "samples_per_prompt",
+            "eval_ema_decay",
+            "eval_ema_update_interval",
             "ratio_reg_coef",
             "eta",
             "sde_type",
-            "ignore_last",
-            "frozen_init_timesteps",
+            "sde_ratio",
+            "time_shift",
+            "skip_last_timestep",
+            "skip_initial_timesteps",
+            "window_training",
             "model_type",
+            "adv_normalization",
+            "adv_norm_eps",
+            "adv_clip_abs",
+            "use_global_std",
+            "trimmed_ratio",
         }
         runtime_only_keys = {
-            "use_ema",
-            "ema_decay",
-            "eval_ema_decay",
-            "eval_ema_update_interval",
-            "nft_timestep_mode",
-            "nft_shuffle_timesteps",
-            "nft_apply_shift",
-            "decay_type",
-            "ema_flat_steps",
-            "ema_uprate",
-            "ema_uphold",
-            "old_adapter_name",
-            "new_adapter_name",
             "shuffle_samples",
             "shuffle_seed",
         }
         unknown = sorted(key for key in extra.keys() if key not in known_keys and key not in runtime_only_keys)
         if unknown:
             warnings.warn(
-                f"GRPOAlgorithm.from_config received unknown loss_kwargs keys: {unknown}. "
+                f"GRPOAlgorithm.from_config received unknown algorithm_kwargs keys: {unknown}. "
                 "These keys are ignored by GRPO algorithm constructor.",
                 stacklevel=3,
             )
 
-        def _get(key, default):
-            return extra.get(key, config.get(key, default))
-
         return cls(
-            clip_range=float(_get("clip_range", 1e-4)),
-            clip_range_mode=str(_get("clip_range_mode", "constant")),
-            use_kl_penalty=bool(_get("use_kl_penalty", True)),
-            kl_coef=float(_get("kl_coef", 0.01)),
-            ratio_reg_coef=float(_get("ratio_reg_coef", 0.0)),
-            eta=float(_get("eta", 0.7)),
-            sde_type=str(_get("sde_type", "sde")),
-            ignore_last=bool(_get("ignore_last", False)),
-            frozen_init_timesteps=int(_get("frozen_init_timesteps", 0)),
-            model_type=str(_get("model_type", "default")),
+            clip_range=float(extra.get("clip_range", 1e-4)),
+            clip_schedule=str(extra.get("clip_schedule", "constant")),
+            use_kl_penalty=bool(extra.get("use_kl_penalty", True)),
+            kl_coef=float(extra.get("kl_coef", 0.01)),
+            samples_per_prompt=int(extra.get("samples_per_prompt", 1)),
+            eval_ema_decay=float(extra.get("eval_ema_decay", 0.9)),
+            eval_ema_update_interval=int(extra.get("eval_ema_update_interval", 1)),
+            ratio_reg_coef=float(extra.get("ratio_reg_coef", 0.0)),
+            eta=float(extra.get("eta", 0.7)),
+            sde_type=str(extra.get("sde_type", "sde")),
+            skip_last_timestep=bool(extra.get("skip_last_timestep", False)),
+            skip_initial_timesteps=int(extra.get("skip_initial_timesteps", 0)),
+            model_type=str(extra.get("model_type", "default")),
+            adv_normalization=str(extra.get("adv_normalization", "group")),
+            epsilon=float(extra.get("adv_norm_eps", 1e-8)),
+            clip_max=extra.get("adv_clip_abs", 5.0),
+            use_global_std=bool(extra.get("use_global_std", False)),
+            trimmed_ratio=float(extra.get("trimmed_ratio", 0.0)),
         )
 
     def __init__(
         self,
         clip_range: float = 1e-4,
-        clip_range_mode: str = "constant",
+        clip_schedule: str = "constant",
         use_kl_penalty: bool = True,
         kl_coef: float = 0.01,
         ratio_reg_coef: float = 0.0,
         eta: float = 1.0,
         sde_type: str = "sde",
-        ignore_last: bool = False,
-        frozen_init_timesteps: int = 0,
+        skip_last_timestep: bool = False,
+        skip_initial_timesteps: int = 0,
         model_type: str = "default",
         # BaseAlgorithm params
-        advantage_type: str = "group",
-        epsilon: float = 1e-4,
+        adv_normalization: str = "group",
+        samples_per_prompt: int = 1,
+        eval_ema_decay: float = 0.9,
+        eval_ema_update_interval: int = 1,
+        epsilon: float = 1e-8,
         clip_max: float = 5.0,
-        use_per_prompt_tracker: bool = False,
-        per_prompt_mode: str = "batch",
-        per_prompt_buffer_size: int = 16,
-        per_prompt_min_count: int = 2,
-        use_running_stats: bool = False,
-        running_stats_warmup: int = 0,
         use_global_std: bool = False,
+        trimmed_ratio: float = 0.0,
         **kwargs,
     ):
         """
@@ -161,46 +333,41 @@ class GRPOAlgorithm(BaseAlgorithm):
 
         Args:
             clip_range: PPO clip range (epsilon)
-            clip_range_mode: Clip range schedule ("constant", "linear_decay", "cosine_decay")
+            clip_schedule: Clip range schedule ("constant", "linear_decay", "cosine_decay")
             use_kl_penalty: Whether to add KL penalty
             kl_coef: KL penalty coefficient
             ratio_reg_coef: Coefficient for ratio regularization
             eta: SDE noise coefficient
             sde_type: Type of SDE ("sde", "cps", "dance")
-            ignore_last: Skip the last timestep (t->0) in loss computation (MixGRPO).
+            skip_last_timestep: Skip the last timestep (t->0) in loss computation (MixGRPO).
                 The last step has very low noise level, causing unstable log_prob.
-            frozen_init_timesteps: Skip the first N timesteps in loss computation (MixGRPO).
+            skip_initial_timesteps: Skip the first N timesteps in loss computation (MixGRPO).
                 Early timesteps may have high variance.
             model_type: Model type for forward plugin selection ("flux", "sd3", "hunyuan", "default").
                 If not specified, model type will be auto-detected from the model class name.
-            advantage_type: Advantage normalization type ("global", "group", "per_prompt")
+            adv_normalization: Advantage normalization type ("global" or "group")
+            samples_per_prompt: Number of rollout samples to generate per prompt
+            eval_ema_decay: Eval-time EMA decay
+            eval_ema_update_interval: Eval-time EMA update interval
             epsilon: Small value for numerical stability
             clip_max: Maximum advantage clip value (optional)
-            use_per_prompt_tracker: Use PerPromptStatTracker for cross-batch stats
-            per_prompt_mode: "running" (tracker) or "batch" (per-batch stats)
-            per_prompt_buffer_size: Buffer size for per-prompt tracker
-            per_prompt_min_count: Min samples before using per-prompt stats
-            use_running_stats: Use RunningMeanStd for cross-batch global normalization (DanceGRPO)
-            running_stats_warmup: Warmup batches before using running stats
             use_global_std: Use global std instead of per-group std
             **kwargs: Additional arguments
         """
         super().__init__(
             clip_range=clip_range,
             kl_coef=kl_coef,
-            advantage_type=advantage_type,
+            adv_normalization=adv_normalization,
+            samples_per_prompt=samples_per_prompt,
+            eval_ema_decay=eval_ema_decay,
+            eval_ema_update_interval=eval_ema_update_interval,
             epsilon=epsilon,
             clip_max=clip_max,
-            use_per_prompt_tracker=use_per_prompt_tracker,
-            per_prompt_mode=per_prompt_mode,
-            per_prompt_buffer_size=per_prompt_buffer_size,
-            per_prompt_min_count=per_prompt_min_count,
-            use_running_stats=use_running_stats,
-            running_stats_warmup=running_stats_warmup,
             use_global_std=use_global_std,
+            trimmed_ratio=trimmed_ratio,
             **kwargs,
         )
-        self.clip_range_mode = clip_range_mode
+        self.clip_schedule = clip_schedule
         self.use_kl_penalty = use_kl_penalty
         self.ratio_reg_coef = ratio_reg_coef
         self.eta = eta
@@ -208,51 +375,310 @@ class GRPOAlgorithm(BaseAlgorithm):
         self.model_type = model_type
 
         # MixGRPO stability controls
-        self.ignore_last = ignore_last
-        self.frozen_init_timesteps = frozen_init_timesteps
+        self.skip_last_timestep = skip_last_timestep
+        self.skip_initial_timesteps = skip_initial_timesteps
 
-        # Loss-side instance vars (formerly on GRPOLoss)
+        # Train-side objective state
         self._forward_plugin = None  # Lazy loaded
         self._debug_output_dir = None  # Set externally for train-inference consistency debugging
         self._debug_dumped_steps: set = set()  # Track which steps already dumped (one-shot guard)
 
-    @classmethod
-    def _grpo_kwargs_from_args(cls, args: Any) -> Dict[str, Any]:
-        kwargs = cls._base_kwargs_from_args(args)
-        kwargs.update(
-            {
-                "eta": getattr(args.sampling, "eta", 1.0),
-                "sde_type": getattr(args.sampling, "sde_type", "sde"),
-                "use_per_prompt_tracker": getattr(args.algorithm, "use_per_prompt_stat_tracker", False),
-                "per_prompt_mode": getattr(args.algorithm, "per_prompt_mode", "batch"),
-                "per_prompt_buffer_size": getattr(args.algorithm, "per_prompt_buffer_size", 16),
-                "per_prompt_min_count": getattr(args.algorithm, "per_prompt_min_count", 2),
-                "use_running_stats": getattr(args.algorithm, "use_running_stats", False),
-                "running_stats_warmup": getattr(args.algorithm, "running_stats_warmup", 0),
-                "use_global_std": getattr(args.algorithm, "use_global_std", False),
-                "trimmed_ratio": getattr(args.algorithm, "trimmed_ratio", 0.0),
-                "ignore_last": getattr(args.algorithm, "ignore_last", False),
-                "frozen_init_timesteps": getattr(args.algorithm, "frozen_init_timesteps", 0),
-            }
-        )
-        return kwargs
-
-    @classmethod
-    def from_args(cls, args: Any) -> "GRPOAlgorithm":
-        """Construct GRPO algorithm from runtime args."""
-        kwargs = cls._grpo_kwargs_from_args(args)
-        kwargs.update(cls._algorithm_kwargs_from_args(args))
-        return cls(**kwargs)
-
     def get_sampling_requirements(self) -> SamplingRequirements:
         """Return GRPO sampling requirements."""
-        return SamplingRequirements(
-            requires_trajectory=True,
-            requires_log_prob=True,
+        return self._build_sampling_requirements()
+
+    def compute_advantages_with_components(
+        self,
+        *,
+        rewards: torch.Tensor,
+        group_ids: Optional[List[str]] = None,
+        component_mix_stage: str = "reward",
+        reward_components: Optional[Dict[str, List[float]]] = None,
+        reward_component_weights: Optional[Dict[str, float]] = None,
+    ) -> torch.Tensor:
+        if component_mix_stage != "advantage" or not reward_components:
+            return self.compute_advantages(rewards=rewards, group_ids=group_ids)
+
+        default_weights = {name: 1.0 for name in reward_components}
+        if reward_component_weights:
+            for name, weight in reward_component_weights.items():
+                if name in default_weights:
+                    default_weights[name] = float(weight)
+
+        weighted_advantages = torch.zeros_like(rewards)
+        total_weight = 0.0
+        for component_name, component_rewards in reward_components.items():
+            component_tensor = torch.tensor(
+                component_rewards,
+                dtype=rewards.dtype,
+                device=rewards.device,
+            )
+            if component_tensor.shape != rewards.shape:
+                logger.warning(
+                    "Skipping reward component %s due to shape mismatch: expected=%s got=%s",
+                    component_name,
+                    tuple(rewards.shape),
+                    tuple(component_tensor.shape),
+                )
+                continue
+            component_advantages = self.compute_advantages(
+                rewards=component_tensor,
+                group_ids=group_ids,
+            )
+            weight = float(default_weights.get(component_name, 1.0))
+            weighted_advantages += component_advantages * weight
+            total_weight += weight
+
+        if total_weight <= 0:
+            return self.compute_advantages(rewards=rewards, group_ids=group_ids)
+        return weighted_advantages / total_weight
+
+    def get_ema_spec(self) -> EMASpec:
+        return EMASpec(enable_eval_ema=False)
+
+    def resolve_rollout_sde_indices(
+        self,
+        *,
+        timestep_scheduler: Optional[Any],
+        current_step: int,
+    ) -> Optional[Set[int]]:
+        if timestep_scheduler is None:
+            return None
+        sde_indices = set(int(i) for i in timestep_scheduler.get_sde_indices(current_step))
+        if hasattr(self, "set_sde_indices"):
+            self.set_sde_indices(sde_indices)
+        return sde_indices
+
+    def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:
+        allow_replay = bool(getattr(args.sampling, "replay_log_probs", False))
+        return {
+            "allow_replay": allow_replay,
+            "assert_step_alignment": True,
+            "mode_label": "trajectory",
+        }
+
+    def get_filtered_training_indices(
+        self,
+        sde_indices: Set[int],
+        num_steps: int,
+    ) -> Set[int]:
+        result = set(sde_indices)
+        if self.skip_last_timestep and result:
+            result.discard(max(result))
+        if self.skip_initial_timesteps > 0:
+            result = {i for i in result if i >= self.skip_initial_timesteps}
+        return result
+
+    def assemble_training_batch(
+        self,
+        *,
+        num_inference_steps: int,
+        sampler_outputs: List[Any],
+        rewards: torch.Tensor,
+        advantages: torch.Tensor,
+        prompts: List[str],
+        sde_indices: Optional[Set[int]] = None,
+    ) -> Any:
+        return self._assemble_backward_batch(
+            num_inference_steps=num_inference_steps,
+            sampler_outputs=sampler_outputs,
+            rewards=rewards,
+            advantages=advantages,
+            prompts=prompts,
+            sde_indices=sde_indices,
         )
 
+    def _assemble_backward_batch(
+        self,
+        *,
+        num_inference_steps: int,
+        sampler_outputs: List[Any],
+        rewards: torch.Tensor,
+        advantages: torch.Tensor,
+        prompts: List[str],
+        sde_indices: Optional[Set[int]] = None,
+    ) -> Any:
+        from diffusionrl.types.sampling import RolloutOutput, LogProbData, PromptEmbeddings
+        from diffusionrl.types.training_batch import BackwardTrainingBatch
+
+        trajectories = []
+        log_probs_dicts = []
+        timesteps = None
+        step_indices = None
+        raw_scheduler_indices = {int(i) for i in sde_indices} if sde_indices is not None else None
+        final_sde_indices: Set[int] = set(raw_scheduler_indices or set())
+        all_prompt_embeds = []
+        all_pooled_prompt_embeds = []
+        all_encoder_attention_mask = []
+        all_negative_prompt_embeds = []
+        all_negative_pooled_prompt_embeds = []
+        all_text_ids = []
+        all_image_ids = []
+
+        for idx, output in enumerate(sampler_outputs):
+            if not isinstance(output, RolloutOutput):
+                raise TypeError(
+                    f"Assemble stage expects RolloutOutput, got {type(output).__name__} at index={idx}."
+                )
+            if output.trajectories is None:
+                raise ValueError(f"RolloutOutput at index={idx} missing trajectories in backward path.")
+            if output.embeddings is None:
+                raise ValueError(f"RolloutOutput at index={idx} missing embeddings in backward path.")
+
+            trajectories.append(output.trajectories)
+            log_probs_dicts.append(output.log_probs.to_dict() if output.log_probs is not None else {})
+            ts = output.timesteps
+            steps = output.step_indices
+            sde_idx = output.sde_indices
+
+            if ts is not None and timesteps is None:
+                timesteps = ts
+            elif ts is not None and timesteps is not None and not torch.equal(timesteps.to(ts.device), ts):
+                raise ValueError("Mismatched timesteps across sampler outputs")
+            if steps is not None:
+                if step_indices is None:
+                    step_indices = steps
+                elif not torch.equal(step_indices.to(steps.device), steps):
+                    raise ValueError(
+                        "Mismatched step_indices across sampler outputs: "
+                        f"expected={step_indices.tolist()} got={steps.tolist()}"
+                    )
+            if sde_indices is None:
+                final_sde_indices.update(int(i) for i in sde_idx)
+
+            emb = output.embeddings
+            all_prompt_embeds.append(emb.prompt_embeds)
+            if emb.pooled_prompt_embeds is not None:
+                all_pooled_prompt_embeds.append(emb.pooled_prompt_embeds)
+            if emb.encoder_attention_mask is not None:
+                all_encoder_attention_mask.append(emb.encoder_attention_mask)
+            if emb.negative_prompt_embeds is not None:
+                all_negative_prompt_embeds.append(emb.negative_prompt_embeds)
+            if emb.negative_pooled_prompt_embeds is not None:
+                all_negative_pooled_prompt_embeds.append(emb.negative_pooled_prompt_embeds)
+            if emb.text_ids is not None:
+                all_text_ids.append(emb.text_ids)
+            if emb.image_ids is not None:
+                all_image_ids.append(emb.image_ids)
+
+        if not trajectories:
+            raise ValueError("No trajectories found in sampler outputs")
+        if timesteps is None:
+            raise ValueError("No timesteps found in sampler outputs")
+        if step_indices is None:
+            step_indices = torch.arange(timesteps.shape[0], device=timesteps.device, dtype=torch.long)
+
+        step_labels = [int(v) for v in step_indices[:-1].tolist()]
+        step_label_set = set(step_labels)
+
+        def _normalize_to_step_labels(indices: Set[int], *, source: str) -> Set[int]:
+            if not indices:
+                return set()
+            if indices.issubset(step_label_set):
+                return set(indices)
+            mapped = {step_labels[i] for i in indices if 0 <= int(i) < len(step_labels)}
+            if mapped:
+                logger.debug(
+                    "%s indices look positional; mapped to step labels raw=%s mapped=%s",
+                    source,
+                    sorted(indices),
+                    sorted(mapped),
+                )
+                return mapped
+            logger.warning(
+                "%s indices do not match sampled step labels and could not be mapped: raw=%s available=%s",
+                source,
+                sorted(indices),
+                sorted(step_labels),
+            )
+            return set()
+
+        if final_sde_indices:
+            final_sde_indices = _normalize_to_step_labels(
+                set(int(i) for i in final_sde_indices), source="Scheduler/Sampler SDE"
+            )
+
+        if hasattr(self, "get_training_indices"):
+            raw_train_indices = set(int(i) for i in self.get_training_indices(len(step_labels)))
+            train_indices = _normalize_to_step_labels(
+                raw_train_indices, source=f"{type(self).__name__}.get_training_indices"
+            )
+            if not train_indices:
+                train_indices = step_label_set
+            if sde_indices is None:
+                final_sde_indices = train_indices
+            else:
+                final_sde_indices = final_sde_indices & train_indices
+            if not final_sde_indices:
+                final_sde_indices = train_indices if train_indices else set(step_labels)
+
+        num_steps = len(step_labels)
+        final_sde_indices = self.get_filtered_training_indices(final_sde_indices, num_steps)
+        if not final_sde_indices:
+            final_sde_indices = set(step_labels)
+
+        merged_log_probs: Dict[int, torch.Tensor] = {}
+        if log_probs_dicts:
+            all_indices: Set[int] = set()
+            for lpd in log_probs_dicts:
+                all_indices.update(lpd.keys())
+            for idx_key in all_indices:
+                values = [lpd[idx_key] for lpd in log_probs_dicts if idx_key in lpd]
+                if values:
+                    merged_log_probs[idx_key] = torch.cat(values, dim=0)
+        if final_sde_indices:
+            merged_log_probs = {
+                int(k): v for k, v in merged_log_probs.items()
+                if int(k) in set(int(i) for i in final_sde_indices)
+            }
+
+        assemble_t0 = _time.perf_counter()
+        traj_count = len(trajectories)
+        traj_shapes = [tuple(t.shape) for t in trajectories[:3]]
+        trajectories_tensor = torch.cat(trajectories, dim=0)
+        assemble_t1 = _time.perf_counter()
+
+        prompt_embeds = torch.cat(all_prompt_embeds, dim=0) if all_prompt_embeds else None
+        if prompt_embeds is None:
+            raise ValueError("No prompt embeddings found in sampler outputs")
+
+        embeddings = PromptEmbeddings(
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=torch.cat(all_pooled_prompt_embeds, dim=0) if all_pooled_prompt_embeds else None,
+            encoder_attention_mask=torch.cat(all_encoder_attention_mask, dim=0) if all_encoder_attention_mask else None,
+            negative_prompt_embeds=torch.cat(all_negative_prompt_embeds, dim=0) if all_negative_prompt_embeds else None,
+            negative_pooled_prompt_embeds=torch.cat(all_negative_pooled_prompt_embeds, dim=0) if all_negative_pooled_prompt_embeds else None,
+            text_ids=torch.cat(all_text_ids, dim=0) if all_text_ids else None,
+            image_ids=all_image_ids[0] if all_image_ids else None,
+        )
+
+        batch = BackwardTrainingBatch(
+            trajectories=trajectories_tensor,
+            log_probs=LogProbData.from_dict(merged_log_probs),
+            timesteps=timesteps,
+            advantages=advantages,
+            embeddings=embeddings,
+            rewards=rewards,
+            prompts=prompts,
+            num_steps=num_inference_steps,
+            step_indices=step_indices,
+            target_sde_indices=set(int(i) for i in final_sde_indices),
+        )
+        batch.validate()
+        assemble_t2 = _time.perf_counter()
+        traj_gb = trajectories_tensor.nelement() * trajectories_tensor.element_size() / 1e9
+        logger.warning(
+            "[TIMING] assemble_backward: cat_traj=%.2fs total=%.2fs n=%d shapes=%s traj_gb=%.2f",
+            assemble_t1 - assemble_t0,
+            assemble_t2 - assemble_t0,
+            traj_count,
+            traj_shapes,
+            traj_gb,
+        )
+        return batch
+
     # ==================================================================
-    # Loss computation (formerly in GRPOLoss)
+    # Objective computation
     # ==================================================================
 
     def get_clip_range(self, progress: float = 0.0) -> float:
@@ -265,11 +691,11 @@ class GRPOAlgorithm(BaseAlgorithm):
         Returns:
             Current clip range
         """
-        if self.clip_range_mode == "constant":
+        if self.clip_schedule == "constant":
             return self.clip_range
-        elif self.clip_range_mode == "linear_decay":
+        elif self.clip_schedule == "linear_decay":
             return self.clip_range * (1 - 0.5 * progress)
-        elif self.clip_range_mode == "cosine_decay":
+        elif self.clip_schedule == "cosine_decay":
             return self.clip_range * (0.5 * (1 + math.cos(math.pi * progress)))
         else:
             return self.clip_range
@@ -313,7 +739,7 @@ class GRPOAlgorithm(BaseAlgorithm):
             sigma_max=sigma_max,
         )
 
-    def compute_timestep(
+    def compute_loss(
         self,
         model: nn.Module,
         timestep_data: TimestepData,
@@ -326,199 +752,120 @@ class GRPOAlgorithm(BaseAlgorithm):
         guidance_scale: float = 3.5,
         **kwargs,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """
-        Compute GRPO loss for a single timestep using typed data structures.
-
-        Args:
-            model: The diffusion model being trained
-            timestep_data: Typed container with latents, log_prob, sigmas for this step
-            advantages: Per-sample advantages [B]
-            embeddings: Typed container with prompt embeddings
-            sigmas: Full sigma schedule (optional, uses timestep_data if not provided)
-            ref_model: Reference model for KL penalty
-            training_progress: Training progress in [0, 1]
-            model_forward_fn: Custom forward function
-            guidance_scale: CFG scale
-            **kwargs: Additional model-specific arguments
-
-        Returns:
-            Tuple of (loss, metrics_dict)
-        """
-        device = advantages.device
-
-        # Extract data from typed structures
-        latents = timestep_data.latents
-        next_latents = timestep_data.next_latents
-        old_log_probs = timestep_data.log_prob
-        sigma = timestep_data.sigma
-        sigma_next = timestep_data.sigma_next
-        timestep_idx = timestep_data.timestep_idx
-
-        # Handle ODE step (no log_prob)
-        if old_log_probs is None:
-            return torch.tensor(0.0, device=device, requires_grad=True), {
-                "skip_reason": "ode_step",
-                "timestep_idx": timestep_idx,
-            }
-
-        # Get sigma_max for log_prob computation
-        _sigmas = sigmas if sigmas is not None else timestep_data.sigmas
-        if _sigmas is not None:
-            sigma_max = _sigmas[1].item() if _sigmas[1].dim() == 0 else _sigmas[1][0].item()
-        else:
-            raise ValueError(
-                "Cannot determine sigma_max: neither `sigmas` argument nor "
-                "`timestep_data.sigmas` is provided. Ensure TimestepData is "
-                "constructed with the full sigma schedule (e.g. via "
-                "BackwardTrainingBatch.get_timestep_data_by_step())."
-            )
-
-        # Convert sigma to tensor if needed
-        if not isinstance(sigma, torch.Tensor):
-            sigma = torch.tensor(sigma, device=device)
-        if not isinstance(sigma_next, torch.Tensor):
-            sigma_next = torch.tensor(sigma_next, device=device)
-
-        # Extract embeddings
-        prompt_embeds = embeddings.prompt_embeds
-        pooled_prompt_embeds = embeddings.pooled_prompt_embeds
-        negative_prompt_embeds = getattr(embeddings, "negative_prompt_embeds", None)
-        negative_pooled_prompt_embeds = getattr(embeddings, "negative_pooled_prompt_embeds", None)
-
-        # Forward pass through model
-        if model_forward_fn is not None:
-            pred = model_forward_fn(
-                model=model,
-                latents=latents,
-                sigma=sigma,
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                guidance_scale=guidance_scale,
-                text_ids=embeddings.text_ids,
-                image_ids=embeddings.image_ids,
-                **kwargs,
-            )
-        else:
-            pred = self._default_forward(
-                model=model,
-                latents=latents,
-                sigma=sigma,
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                guidance_scale=guidance_scale,
-                text_ids=embeddings.text_ids,
-                image_ids=embeddings.image_ids,
-                negative_prompt_embeds=negative_prompt_embeds,
-                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-            )
-
-        # Compute new log probability
-        pred_f = pred.float()
-        latents_f = latents.float()
-        next_latents_f = next_latents.float()
-
-        new_log_prob, prev_sample_mean = self.compute_log_prob(
-            pred=pred_f,
-            sample=latents_f,
-            next_sample=next_latents_f,
-            sigma=sigma,
-            sigma_next=sigma_next,
-            sigma_max=sigma_max,
+        """Single GRPO loss entrypoint for debugging and training."""
+        if self.loss_fn is None:
+            raise RuntimeError(f"{type(self).__name__} loss_fn is not initialized.")
+        return self.loss_fn.compute_loss(
+            model=model,
+            timestep_data=timestep_data,
+            advantages=advantages,
+            embeddings=embeddings,
+            sigmas=sigmas,
+            ref_model=ref_model,
+            training_progress=training_progress,
+            model_forward_fn=model_forward_fn,
+            guidance_scale=guidance_scale,
+            **kwargs,
         )
 
-        # Compute importance sampling ratio
-        log_prob_diff = new_log_prob - old_log_probs
-        ratio = torch.exp(log_prob_diff)
+    # ------------------------------------------------------------------
+    # Algorithm-owned training step (Phase 2)
+    # ------------------------------------------------------------------
 
-        # Debug: dump training-side tensors for consistency analysis.
-        _resolved_debug_dir = self._debug_output_dir or os.environ.get("DIFFUSIONRL_DEBUG_OUTPUT_DIR")
-        if _resolved_debug_dir is not None and timestep_idx not in self._debug_dumped_steps:
-            self._debug_dumped_steps.add(timestep_idx)
-            _rank = int(os.environ.get("RANK", 0))
-            _training_debug_dir = os.path.join(_resolved_debug_dir, "training")
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "noise_pred", pred, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "latents_input", latents, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "latents_output", next_latents, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "prev_sample_mean", prev_sample_mean, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "new_log_prob", new_log_prob, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "old_log_prob", old_log_probs, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "ratio", ratio, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma", sigma.unsqueeze(0) if sigma.dim() == 0 else sigma, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma_next", sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma_max", torch.tensor([sigma_max]), _rank)
-            # Also save full sigma schedule once
-            if _sigmas is not None and _rank == 0:
-                _step_dir = os.path.join(_training_debug_dir, f"step_{timestep_idx:03d}")
-                _sched_path = os.path.join(_step_dir, "sigmas_schedule.pt")
-                if not os.path.exists(_sched_path):
-                    torch.save(_sigmas.detach().cpu().float(), _sched_path)
+    def compute_loss_and_backward(
+        self,
+        *,
+        model: nn.Module,
+        batch: Any,
+        gradient_accumulation_batch_size: int,
+        guidance_scale: float = 3.5,
+        **kwargs: Any,
+    ) -> tuple:
+        """GRPO training step: iterate over SDE timesteps with gradient accumulation.
 
-        # Get clip range
-        clip_range = self.get_clip_range(training_progress)
+        The algorithm itself decides which timesteps to train on and how to accumulate.
 
-        # PPO-style clipped loss
-        adv = advantages.detach()
-        unclipped_loss = -adv * ratio
-        clipped_loss = -adv * torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
-        policy_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
+        Returns:
+            ``(avg_loss, metrics_dict, num_timesteps, actual_mini_batches, has_backward)``
+        """
+        from diffusionrl.types.training_batch import BackwardTrainingBatch
+        from diffusionrl.runtime.training.update_schedule import resolve_gradient_accumulation_plan
 
-        # Compute metrics
-        clip_fraction = ((ratio - 1.0).abs() > clip_range).float().mean()
-        clipfrac_gt_one = (ratio - 1.0 > clip_range).float().mean()
-        clipfrac_lt_one = (1.0 - ratio > clip_range).float().mean()
-        approx_kl = 0.5 * torch.mean(log_prob_diff ** 2)
-
-        loss_terms = {
-            "policy_loss": policy_loss.detach(),
-            "ratio_mean": ratio.mean().detach(),
-            "ratio_std": ratio.std().detach(),
-            "ratio_max": ratio.max().detach(),
-            "ratio_min": ratio.min().detach(),
-            "clip_fraction": clip_fraction.detach(),
-            "clipfrac_gt_one": clipfrac_gt_one.detach(),
-            "clipfrac_lt_one": clipfrac_lt_one.detach(),
-            "approx_kl": approx_kl.detach(),
-            "new_log_prob_mean": new_log_prob.mean().detach(),
-            "old_log_prob_mean": old_log_probs.mean().detach(),
-        }
-
-        total_loss = policy_loss
-
-        # KL penalty (optional)
-        if self.use_kl_penalty and self.kl_coef > 0:
-            kl_loss = self._compute_kl_penalty(
-                model=model,
-                latents=latents,
-                latents_f=latents_f,
-                next_latents_f=next_latents_f,
-                sigma=sigma,
-                sigma_next=sigma_next,
-                sigma_max=sigma_max,
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                negative_prompt_embeds=negative_prompt_embeds,
-                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-                prev_sample_mean=prev_sample_mean,
-                ref_model=ref_model,
-                guidance_scale=guidance_scale,
-                model_forward_fn=model_forward_fn,
-                **kwargs,
+        if not isinstance(batch, BackwardTrainingBatch):
+            raise TypeError(
+                f"{type(self).__name__} expects BackwardTrainingBatch, got {type(batch).__name__}"
             )
 
-            if kl_loss is not None:
-                total_loss = total_loss + self.kl_coef * kl_loss
-                loss_terms["kl_loss"] = kl_loss.detach()
+        batch_size = batch.batch_size
+        mini_batches, actual_mini_batches = resolve_gradient_accumulation_plan(
+            batch_size=batch_size,
+            gradient_accumulation_batch_size=gradient_accumulation_batch_size,
+        )
+        num_mini_batches = len(mini_batches)
 
-        # Ratio regularization
-        if self.ratio_reg_coef > 0:
-            ratio_reg = torch.mean((new_log_prob - old_log_probs) ** 2)
-            total_loss = total_loss + self.ratio_reg_coef * ratio_reg
-            loss_terms["ratio_reg"] = ratio_reg.detach()
+        available_steps = set(int(s) for s in batch.resolved_step_indices[:-1].tolist())
+        valid_step_indices = sorted(int(i) for i in batch.sde_indices if int(i) in available_steps)
+        num_timesteps_per_sample = len(valid_step_indices)
+        if num_timesteps_per_sample == 0:
+            return 0.0, {}, 0, actual_mini_batches, False
 
-        loss_terms["total_loss"] = total_loss.detach()
-        loss_terms["timestep_idx"] = timestep_idx
+        total_loss_accum = 0.0
+        has_backward = False
+        mini_batch_metrics_list = []
 
-        return total_loss, loss_terms
+        for start, end in mini_batches:
+            mini_batch = batch.slice(start, end)
+            mini_loss_sum = 0.0
+            mini_metrics: Dict[str, Any] = {}
+            metric_sums: Dict[str, float] = {}
+            metric_counts: Dict[str, int] = {}
+
+            for t_idx in valid_step_indices:
+                timestep_data = mini_batch.get_timestep_data_by_step(t_idx)
+                loss_t, metrics_t = self.compute_loss(
+                    model=model,
+                    timestep_data=timestep_data,
+                    advantages=mini_batch.advantages,
+                    embeddings=mini_batch.embeddings,
+                    guidance_scale=guidance_scale,
+                )
+                scaled_loss = loss_t / (num_mini_batches * num_timesteps_per_sample)
+                scaled_loss.backward()
+                has_backward = True
+                mini_loss_sum += scaled_loss.detach().item()
+
+                for key, value in metrics_t.items():
+                    val = value.item() if isinstance(value, torch.Tensor) else value
+                    metric_key = f"t{t_idx}_{key}"
+                    if metric_key not in mini_metrics:
+                        mini_metrics[metric_key] = val
+                    if isinstance(val, (int, float)):
+                        metric_sums[key] = metric_sums.get(key, 0.0) + float(val)
+                        metric_counts[key] = metric_counts.get(key, 0) + 1
+
+            for key, total in metric_sums.items():
+                count = metric_counts.get(key, 0)
+                if count > 0:
+                    mini_metrics[key] = total / count
+
+            mini_batch_metrics_list.append(mini_metrics)
+            total_loss_accum += mini_loss_sum
+
+        all_metrics: Dict[str, Any] = {}
+        if mini_batch_metrics_list:
+            keys = mini_batch_metrics_list[0].keys()
+            for key in keys:
+                values = [m.get(key) for m in mini_batch_metrics_list if m.get(key) is not None]
+                if values and isinstance(values[0], (int, float)):
+                    all_metrics[key] = sum(values) / len(values)
+                else:
+                    all_metrics[key] = mini_batch_metrics_list[-1].get(key)
+
+        return total_loss_accum, all_metrics, num_timesteps_per_sample, actual_mini_batches, has_backward
+
+    # ------------------------------------------------------------------
+    # Forward plugin
+    # ------------------------------------------------------------------
 
     def _get_forward_plugin(self, model: nn.Module):
         """Get the forward plugin for this model.

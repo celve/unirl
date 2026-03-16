@@ -74,7 +74,9 @@ class LogProbData:
         Returns:
             New LogProbData with sliced tensors
         """
-        return LogProbData(data={k: v[start:end] for k, v in self.data.items()})
+        return LogProbData(
+            data={k: v[start:end].clone() for k, v in self.data.items()}
+        )
 
     def reindex(self, indices: torch.Tensor) -> "LogProbData":
         """
@@ -187,11 +189,11 @@ class PromptEmbeddings:
             if tensor is None:
                 return None
             if tensor.shape[0] == batch_size:
-                return tensor[start:end]
+                return tensor[start:end].clone()
             return tensor
 
         return PromptEmbeddings(
-            prompt_embeds=self.prompt_embeds[start:end],
+            prompt_embeds=self.prompt_embeds[start:end].clone(),
             pooled_prompt_embeds=_slice_if_batched(self.pooled_prompt_embeds),
             encoder_attention_mask=_slice_if_batched(self.encoder_attention_mask),
             negative_prompt_embeds=_slice_if_batched(self.negative_prompt_embeds),
@@ -444,6 +446,11 @@ class RolloutRequest:
     """
 
     prompts: List[str]
+    prompt_ids: Optional[List[str]] = None
+    sample_ids: Optional[List[str]] = None
+    group_ids: Optional[List[str]] = None
+    noise_group_ids: Optional[List[str]] = None
+    prompt_metadata: Optional[List[Optional[Dict[str, Any]]]] = None
     prompt_embeds: Optional[torch.Tensor] = None
     pooled_prompt_embeds: Optional[torch.Tensor] = None
     encoder_attention_mask: Optional[torch.Tensor] = None
@@ -459,6 +466,9 @@ class RolloutRequest:
     latents: Optional[torch.Tensor] = None
     sde_indices: Optional[Set[int]] = None
     decode_for_reward: bool = False
+    keep_reward_media_for_manager: bool = False
+    init_same_noise: bool = False
+    samples_per_prompt: int = 1
     sampling_adapter: Optional[str] = None
     return_trajectories: bool = True
     return_log_probs: bool = True
@@ -471,8 +481,19 @@ class RolloutRequest:
         are sliced accordingly.  Scalar / None fields are copied as-is.
         """
         import copy
+
         req = copy.copy(self)
         req.prompts = self.prompts[start:end]
+        for attr in (
+            "prompt_ids",
+            "sample_ids",
+            "group_ids",
+            "noise_group_ids",
+            "prompt_metadata",
+        ):
+            value = getattr(self, attr, None)
+            if isinstance(value, list) and len(value) == len(self.prompts):
+                setattr(req, attr, value[start:end])
 
         # Slice tensor fields that may be batched along dim-0
         for attr in (
@@ -483,11 +504,25 @@ class RolloutRequest:
             "latents",
         ):
             val = getattr(self, attr, None)
-            if val is not None and isinstance(val, torch.Tensor) and val.shape[0] == len(self.prompts):
-                setattr(req, attr, val[start:end])
+            if (
+                val is not None
+                and isinstance(val, torch.Tensor)
+                and val.shape[0] == len(self.prompts)
+            ):
+                setattr(req, attr, val[start:end].clone())
 
-        # kwargs is shallow-copied to avoid mutation
-        req.kwargs = dict(self.kwargs)
+        req.kwargs = {}
+        for key, value in dict(self.kwargs).items():
+            if isinstance(value, list) and len(value) == len(self.prompts):
+                req.kwargs[key] = value[start:end]
+                continue
+            if isinstance(value, tuple) and len(value) == len(self.prompts):
+                req.kwargs[key] = value[start:end]
+                continue
+            if isinstance(value, torch.Tensor) and value.shape[0] == len(self.prompts):
+                req.kwargs[key] = value[start:end].clone()
+                continue
+            req.kwargs[key] = value
         return req
 
 

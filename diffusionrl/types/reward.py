@@ -29,7 +29,10 @@ class RewardRequest:
     images: Optional[List[Union[Image.Image, torch.Tensor]]] = None
     videos: Optional[List[torch.Tensor]] = None  # [B, T, C, H, W] or [B, C, T, H, W]
     prompts: List[str] = field(default_factory=list)
-    metadata: Optional[List[Dict[str, Any]]] = None
+    prompt_ids: Optional[List[str]] = None
+    sample_ids: Optional[List[str]] = None
+    group_ids: Optional[List[str]] = None
+    metadata: Optional[List[Optional[Dict[str, Any]]]] = None
     reward_types: List[RewardType] = field(
         default_factory=lambda: [RewardType.IMAGE_TEXT_ALIGNMENT]
     )

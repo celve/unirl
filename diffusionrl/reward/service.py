@@ -1,13 +1,4 @@
-"""
-RewardService - Unified abstraction for all reward computation.
-
-Provides a single interface for:
-- Local (CPU/GPU) rewards
-- Remote (HTTP API) rewards
-- Ray-based (GPU-isolated) rewards
-- Multi-reward combinations with aggregation
-
-"""
+"""Manager-side reward execution runtime."""
 
 import inspect
 import logging
@@ -18,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 
 from diffusionrl.config.build_domain_args import RewardSchema
+from .spec import RewardExecutionPlan, RewardSpec
 from .base import BaseRewardWorker, RewardRequest, RewardResponse
 from diffusionrl.utils import load_function
 
@@ -29,50 +21,41 @@ PlacementGroupResult = Tuple[Any, List[int], List[int]]  # (pg, bundle_indices, 
 
 class RewardService:
     """
-    Unified reward computation service.
+    Manager-side reward runtime.
 
-    Automatically selects and configures appropriate workers based on
-    configuration, and handles multi-reward aggregation.
-
-    Backend selection priority:
-    1. use_http_reward=True or reward_service_urls -> HTTPRewardWorker
-    2. reward_dedicated_num_gpus > 0 -> RayRewardWorker (independent GPU)
-    3. Otherwise -> LocalRewardWorker (CPU)
-
-    Example usage:
-        # Simple usage (auto-configured from args)
-        service = RewardService(args, reward_pg_result=pgs.get("reward"))
-        response = service.compute_rewards(request)
-
-        # Multi-reward with weights
-        args.reward.reward_models = ["pickscore", "hpsv2"]
-        args.reward.reward_weights = [0.3, 0.7]
-        service = RewardService(args, reward_pg_result=pgs.get("reward"))
-        response = service.compute_rewards(request)  # Returns weighted average
+    This class only owns deployment/execution mechanics. Reward semantics are
+    captured by ``RewardSpec`` and resource placement is captured by
+    ``RewardExecutionPlan``.
     """
 
     def __init__(
         self,
-        args,
+        reward_schema: RewardSchema,
         reward_pg_result: Optional[PlacementGroupResult] = None,
     ):
         """
         Initialize RewardService.
 
         Args:
-            args: TrainingArguments instance with reward configuration
+            reward_schema: typed reward schema with semantic and execution info
             reward_pg_result: Optional placement group result for GPU rewards
                              Tuple of (placement_group, bundle_indices, gpu_ids)
         """
-        self.args = args
-        self.reward_config = RewardSchema.from_args(args)
+        if not isinstance(reward_schema, RewardSchema):
+            raise TypeError(
+                "RewardService requires RewardSchema, "
+                f"got: {type(reward_schema).__name__}"
+            )
+        self.reward_schema = reward_schema
+        self.reward_spec: RewardSpec = reward_schema.to_spec()
+        self.execution_plan: RewardExecutionPlan = reward_schema.to_execution_plan()
         self.reward_pg = reward_pg_result
 
         # Workers list (supports multiple for multi-reward)
         self.workers: List[BaseRewardWorker] = []
 
         # Aggregation configuration
-        self.aggregation = self.reward_config.reward_aggregation
+        self.aggregation = self.reward_spec.component_aggregation
 
         # Initialize workers based on configuration
         self._init_workers()
@@ -84,43 +67,34 @@ class RewardService:
 
     def _init_workers(self) -> None:
         """Initialize workers based on args configuration."""
-        # Parse multi-reward configuration
-        reward_models = self.reward_config.reward_models
-        reward_weights = self.reward_config.reward_weights
-        reward_service_urls = self.reward_config.reward_service_urls
-
-        # Priority 1: Remote HTTP rewards
-        if self.reward_config.use_http_reward or reward_service_urls:
-            self._init_http_workers(reward_service_urls)
-
-        # Priority 2: GPU-isolated rewards (Ray workers)
+        if self.execution_plan.uses_http_backend:
+            self._init_http_workers()
         elif self._should_use_ray_workers():
-            self._init_ray_workers(reward_models, reward_weights)
-
-        # Priority 3: Local (CPU or same-process GPU)
+            self._init_ray_workers()
         else:
-            self._init_local_workers(reward_models, reward_weights)
+            self._init_local_workers()
 
     def _should_use_ray_workers(self) -> bool:
         """Check if Ray workers should be used."""
-        # Use Ray workers if dedicated reward GPU pool is configured and we have a placement group
-        reward_dedicated_num_gpus = self.reward_config.reward_dedicated_num_gpus
-        reward_dedicated_num_nodes = self.reward_config.reward_dedicated_num_nodes
-
-        has_gpu_config = reward_dedicated_num_gpus > 0 or reward_dedicated_num_nodes > 0
+        has_gpu_config = (
+            self.execution_plan.uses_ray_backend
+            and (
+                self.execution_plan.dedicated_num_gpus > 0
+                or self.execution_plan.dedicated_num_nodes > 0
+            )
+        )
         has_pg = self.reward_pg is not None
 
         return has_gpu_config and has_pg
 
-    def _init_http_workers(
-        self,
-        urls: Optional[List[str]] = None,
-    ) -> None:
+    def _init_http_workers(self) -> None:
         """Initialize HTTP reward workers."""
         from .http import HTTPRewardWorker
 
-        urls = urls or [self.reward_config.reward_service_url]
-        reward_weights = self.reward_config.reward_weights
+        urls = list(self.execution_plan.reward_service_urls or ())
+        if not urls and self.execution_plan.reward_service_url:
+            urls = [self.execution_plan.reward_service_url]
+        reward_weights = self.reward_spec.reward_weights
 
         for i, url in enumerate(urls):
             if url is None:
@@ -134,22 +108,20 @@ class RewardService:
                 base_url=url,
                 model_name=f"http_{i}",
                 weight=weight,
-                timeout=self.reward_config.reward_timeout,
-                batch_size=self.reward_config.reward_batch_size,
+                timeout=self.reward_spec.timeout,
+                batch_size=self.reward_spec.batch_size,
             )
             self.workers.append(worker)
             logger.info(f"Added HTTPRewardWorker: {url}")
 
-    def _init_ray_workers(
-        self,
-        reward_models: Optional[List[str]] = None,
-        reward_weights: Optional[List[float]] = None,
-    ) -> None:
+    def _init_ray_workers(self) -> None:
         """Initialize Ray-based workers for GPU-isolated rewards."""
         from .ray_worker import RayRewardWorker
 
         pg, bundle_indices, gpu_ids = self.reward_pg
-        gpus_per_actor = self.reward_config.reward_dedicated_gpus_per_actor
+        gpus_per_actor = self.execution_plan.dedicated_gpus_per_actor
+        reward_models = self.reward_spec.reward_models
+        reward_weights = self.reward_spec.reward_weights
 
         if reward_models:
             # Multi-reward: each model gets its own actor(s)
@@ -175,12 +147,12 @@ class RewardService:
                     pg=pg,
                     bundle_indices=bundle_indices[actor_start:actor_end],
                     gpu_ids=gpu_ids[actor_start:actor_end],
-                    reward_path=self.reward_config.reward_path,
-                    model_path=self.reward_config.reward_model_saved_path,
+                    reward_path=self.reward_spec.reward_path,
+                    model_path=self.reward_spec.reward_model_saved_path,
                     num_actors=1,
                     gpus_per_actor=gpus_per_actor,
-                    batch_size=self.reward_config.reward_batch_size,
-                    timeout=self.reward_config.reward_timeout,
+                    batch_size=self.reward_spec.batch_size,
+                    timeout=self.reward_spec.timeout,
                     parallel_mode=False,
                     weight=weight,
                 )
@@ -192,36 +164,32 @@ class RewardService:
             num_actors = len(gpu_ids) // gpus_per_actor
 
             worker = RayRewardWorker(
-                model_name=self.reward_config.reward_model_name,
+                model_name=self.reward_spec.default_model_name,
                 pg=pg,
                 bundle_indices=bundle_indices,
                 gpu_ids=gpu_ids,
-                reward_path=self.reward_config.reward_path,
-                model_path=self.reward_config.reward_model_saved_path,
+                reward_path=self.reward_spec.reward_path,
+                model_path=self.reward_spec.reward_model_saved_path,
                 num_actors=num_actors,
                 gpus_per_actor=gpus_per_actor,
-                batch_size=self.reward_config.reward_batch_size,
-                timeout=self.reward_config.reward_timeout,
+                batch_size=self.reward_spec.batch_size,
+                timeout=self.reward_spec.timeout,
                 parallel_mode=True,  # Distribute batch across actors
                 weight=1.0,
             )
             self.workers.append(worker)
             logger.info(
-                f"Added RayRewardWorker: {self.reward_config.reward_model_name} "
+                f"Added RayRewardWorker: {self.reward_spec.default_model_name} "
                 f"({num_actors} parallel actors)"
             )
 
-    def _init_local_workers(
-        self,
-        reward_models: Optional[List[str]] = None,
-        reward_weights: Optional[List[float]] = None,
-    ) -> None:
+    def _init_local_workers(self) -> None:
         """Initialize local workers (CPU or same-process GPU)."""
         from .local import LocalRewardWorker
 
         # Determine device for local same-process rewards.
         local_device_pref = str(
-            getattr(self.reward_config, "local_reward_device", "cpu") or "cpu"
+            getattr(self.execution_plan, "local_device", "cpu") or "cpu"
         ).strip().lower()
         if local_device_pref == "cpu":
             device = "cpu"
@@ -252,7 +220,7 @@ class RewardService:
             )
 
         reward_path = getattr(
-            self.reward_config,
+            self.reward_spec,
             "reward_path",
             "diffusionrl.reward.local.LocalRewardWorker",
         )
@@ -271,8 +239,8 @@ class RewardService:
         def _create_worker(model_name: str, weight: float) -> BaseRewardWorker:
             init_kwargs: Dict[str, Any] = {
                 "weight": weight,
-                "batch_size": self.reward_config.reward_batch_size,
-                "timeout": self.reward_config.reward_timeout,
+                "batch_size": self.reward_spec.batch_size,
+                "timeout": self.reward_spec.timeout,
                 "device": device,
             }
             if "model_name" in ctor_params:
@@ -280,6 +248,9 @@ class RewardService:
             elif "frame_reward_model" in ctor_params:
                 init_kwargs["frame_reward_model"] = model_name
             return worker_cls(**init_kwargs)
+
+        reward_models = self.reward_spec.reward_models
+        reward_weights = self.reward_spec.reward_weights
 
         if reward_models:
             # Multi-reward: create worker for each model
@@ -299,11 +270,11 @@ class RewardService:
 
         else:
             # Single reward model
-            worker = _create_worker(model_name=self.reward_config.reward_model_name, weight=1.0)
+            worker = _create_worker(model_name=self.reward_spec.default_model_name, weight=1.0)
             self.workers.append(worker)
             logger.info(
                 "Added local reward worker: %s via %s",
-                self.reward_config.reward_model_name,
+                self.reward_spec.default_model_name,
                 worker_cls.__name__,
             )
 
@@ -579,34 +550,32 @@ class LocalRewardExecutor(RewardService):
 
     def __init__(
         self,
-        reward_config: RewardSchema,
+        reward_schema: RewardSchema,
         *,
         device_override: Optional[str] = None,
     ) -> None:
-        if not isinstance(reward_config, RewardSchema):
+        if not isinstance(reward_schema, RewardSchema):
             raise TypeError(
                 "LocalRewardExecutor requires RewardSchema, "
-                f"got: {type(reward_config).__name__}"
+                f"got: {type(reward_schema).__name__}"
             )
         if device_override is not None:
-            reward_config = replace(
-                reward_config,
+            reward_schema = replace(
+                reward_schema,
                 local_reward_device=str(device_override),
             )
-        self.args = None
-        self.reward_config = reward_config
+        self.reward_schema = reward_schema
+        self.reward_spec = reward_schema.to_spec()
+        self.execution_plan = reward_schema.to_execution_plan()
         self.reward_pg = None
         self.workers = []
-        self.aggregation = self.reward_config.reward_aggregation
-        self._init_local_workers(
-            self.reward_config.reward_models,
-            self.reward_config.reward_weights,
-        )
+        self.aggregation = self.reward_spec.component_aggregation
+        self._init_local_workers()
         logger.info(
             "LocalRewardExecutor initialized with %d worker(s), aggregation=%s, device=%s",
             len(self.workers),
             self.aggregation,
-            self.reward_config.local_reward_device,
+            self.execution_plan.local_device,
         )
 
     def offload(self) -> None:

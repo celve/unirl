@@ -13,18 +13,18 @@ import re
 import time
 
 from diffusionrl.config import parse_args
-from diffusionrl.config.arguments import is_training_actor_direct_sampling_mode
+from diffusionrl.config.arguments import is_training_actor_sampling_mode
 from diffusionrl.ray.group_factory import create_training_actor_group
 from diffusionrl.ray.placement_group import create_placement_groups_from_args
-from diffusionrl.ray.rollout_buffer import create_rollout_buffer_actor
+from diffusionrl.ray.buffer_actor import create_buffer_actor
 from diffusionrl.ray.rollout_manager import create_rollout_manager
 
 logger = logging.getLogger(__name__)
 
 # Main control-plane path (sync mode):
 # parse_args -> create_placement_groups_from_args -> create_rollout_manager
-# -> create_training_actor_group -> rollout_manager.generate_and_push
-# -> training_group.train -> weight_sync.sync
+# -> create_training_actor_group -> rollout_manager.produce_training_payload
+# -> rollout_buffer.push/pop -> training_group.train -> weight_sync.sync
 
 
 def should_save(rollout_id: int, args) -> bool:
@@ -48,18 +48,10 @@ def should_log(rollout_id: int, args) -> bool:
 def train(args):
     """Main training loop."""
     debug_mode = str(getattr(args.debug, "debug_mode", "none") or "none").strip().lower()
-    if debug_mode == "rollout_only":
-        from diffusionrl.debug import run_debug_rollout_only
-
-        return run_debug_rollout_only(args)
     if debug_mode == "train_only":
         from diffusionrl.debug import run_debug_train_only
 
         return run_debug_train_only(args)
-    if debug_mode == "interactive":
-        from diffusionrl.debug import run_debug_interactive
-
-        return run_debug_interactive(args)
 
     import ray
 
@@ -133,12 +125,12 @@ def train(args):
     pgs = create_placement_groups_from_args(args)
     logger.info("Placement groups created")
 
-    training_actor_direct_sampling = is_training_actor_direct_sampling_mode(args)
+    training_actor_sampling_mode = is_training_actor_sampling_mode(args)
     rollout_on_gpu = True
     weight_sync = create_weight_sync_protocol(args)
 
     # 2. Create rollout manager; direct-sampling mode does not allocate rollout actors.
-    rollout_pg_result = None if training_actor_direct_sampling else pgs.get("rollout")
+    rollout_pg_result = None if training_actor_sampling_mode else pgs.get("rollout")
     rollout_manager, dataset_step_info = create_rollout_manager(
         args,
         pg_result=rollout_pg_result,
@@ -147,10 +139,10 @@ def train(args):
     logger.info("Rollout manager created")
     if dataset_step_info.get("num_samples", 0) > 0:
         logger.info(
-            "Dataset step info: num_samples=%s prompts_per_batch=%s "
+            "Dataset step info: num_samples=%s prompts_per_rollout=%s "
             "estimated_steps_per_dataset_pass=%s steps_before_reset=%s",
             dataset_step_info.get("num_samples"),
-            dataset_step_info.get("prompts_per_batch"),
+            dataset_step_info.get("prompts_per_rollout"),
             dataset_step_info.get("estimated_steps_per_dataset_pass"),
             dataset_step_info.get("steps_before_reset"),
         )
@@ -192,7 +184,7 @@ def train(args):
         logger.info("Training backend: %s", train_backend_info)
 
     # 5. FSDP direct-sampling path: training actors serve rollout requests.
-    if training_actor_direct_sampling:
+    if training_actor_sampling_mode:
         ray.get(rollout_manager.attach_sampling_actors.remote(training_group))
         logger.info("Attached training actors as rollout sampling source")
 
@@ -210,7 +202,7 @@ def train(args):
         rollout_on_gpu = True
 
     # 8. Build rollout buffer.
-    rollout_buffer = create_rollout_buffer_actor(args)
+    rollout_buffer = create_buffer_actor(args)
     ray.get(
         rollout_buffer.bind_runtime.remote(
             rollout_manager=rollout_manager,
@@ -264,7 +256,6 @@ def train(args):
             ray.get(rollout_manager.wake_up.remote())
             rollout_on_gpu = True
 
-    num_samples_per_prompt = max(1, int(getattr(args.algorithm, "num_samples_per_prompt", 1)))
     wandb_media_enabled = bool(
         wandb_logger is not None and bool(getattr(args.rollout, "wandb_log_media", False))
     )
@@ -278,10 +269,7 @@ def train(args):
         except Exception as exc:
             logger.warning("Failed to materialize training batch for rollout metrics: %s", exc)
             return {}
-        return compute_rollout_batch_metrics(
-            training_data=training_data,
-            num_samples_per_prompt=num_samples_per_prompt,
-        )
+        return compute_rollout_batch_metrics(training_data=training_data)
 
     # rollout_id is the outer rollout-train loop step; it behaves similarly to
     # a framework-level global step, but may differ from optimizer step count.
@@ -321,14 +309,24 @@ def train(args):
                 )
             del debug_payload
         else:
-            ray.get(
-                rollout_manager.generate_and_push.remote(
+            rollout_payload = ray.get(
+                rollout_manager.produce_training_payload.remote(
                     rollout_id=rollout_id,
-                    buffer=rollout_buffer,
                     collect_media_preview=collect_media_preview,
                     media_max_items=wandb_media_max_items,
                 )
             )
+            push_result = ray.get(
+                rollout_buffer.push.remote(
+                    rollout_id=rollout_id,
+                    train_data=rollout_payload["training_batch"],
+                    metadata=rollout_payload.get("metadata"),
+                )
+            )
+            if not push_result.get("accepted", False):
+                raise RuntimeError(
+                    f"Rollout buffer rejected rollout_id={rollout_id}: {push_result.get('error')}"
+                )
         rollout_payload = ray.get(
             rollout_buffer.pop_training_data.remote(
                 consumer_spec=buffer_consumer_spec,
@@ -362,7 +360,7 @@ def train(args):
         offload_train_phase()
 
         if (
-            not training_actor_direct_sampling
+            not training_actor_sampling_mode
             and (rollout_id + 1) % args.rollout.update_weights_interval == 0
         ):
             sync_phase_start_t = time.perf_counter()
@@ -376,10 +374,10 @@ def train(args):
             ensure_rollout_on_gpu()
             # Swap in EMA weights for stable evaluation when training actors
             # serve as sampling source (direct-sampling mode).
-            if training_actor_direct_sampling:
+            if training_actor_sampling_mode:
                 training_group.apply_ema_for_eval()
             eval_metrics = ray.get(rollout_manager.eval.remote(rollout_id))
-            if training_actor_direct_sampling:
+            if training_actor_sampling_mode:
                 training_group.restore_from_eval()
             eval_phase_s = time.perf_counter() - eval_phase_start_t
             logger.info(f"Eval at {rollout_id}: mean_reward={eval_metrics['mean_reward']:.4f}")

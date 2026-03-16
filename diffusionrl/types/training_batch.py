@@ -1,4 +1,4 @@
-"""Training batch data types for algorithms and loss modules.
+"""Training batch data types for algorithms.
 
 `BackwardTrainingBatch` is for trajectory-based GRPO/MixGRPO optimization.
 `ForwardTrainingBatch` is for NFT optimization on clean latents.
@@ -80,6 +80,9 @@ class BackwardTrainingBatch:
     embeddings: PromptEmbeddings
     rewards: Optional[torch.Tensor] = None
     prompts: Optional[List[str]] = None
+    prompt_ids: Optional[List[str]] = None
+    sample_ids: Optional[List[str]] = None
+    group_ids: Optional[List[str]] = None
     num_steps: int = 50
     is_partitioned: bool = False
     step_indices: Optional[torch.Tensor] = None
@@ -181,6 +184,18 @@ class BackwardTrainingBatch:
                 f"Embeddings batch size {self.embeddings.prompt_embeds.shape[0]} != "
                 f"batch size {batch_size}"
             )
+        if self.sample_ids is not None and len(self.sample_ids) != batch_size:
+            raise ValueError(
+                f"sample_ids length {len(self.sample_ids)} != batch size {batch_size}"
+            )
+        if self.prompt_ids is not None and len(self.prompt_ids) != batch_size:
+            raise ValueError(
+                f"prompt_ids length {len(self.prompt_ids)} != batch size {batch_size}"
+            )
+        if self.group_ids is not None and len(self.group_ids) != batch_size:
+            raise ValueError(
+                f"group_ids length {len(self.group_ids)} != batch size {batch_size}"
+            )
 
         for idx, log_prob in self.log_probs.data.items():
             if log_prob.shape[0] != batch_size:
@@ -198,6 +213,9 @@ class BackwardTrainingBatch:
             embeddings=self.embeddings.to_device(device),
             rewards=self.rewards.to(device) if self.rewards is not None else None,
             prompts=self.prompts,
+            prompt_ids=self.prompt_ids,
+            sample_ids=self.sample_ids,
+            group_ids=self.group_ids,
             num_steps=self.num_steps,
             is_partitioned=self.is_partitioned,
             step_indices=self.step_indices.to(device)
@@ -258,13 +276,16 @@ class BackwardTrainingBatch:
         - Video trajectories: [B, T+1, C, T_frames, H, W]
         """
         return BackwardTrainingBatch(
-            trajectories=self.trajectories[start:end],
+            trajectories=self.trajectories[start:end].clone(),
             log_probs=self.log_probs.slice(start, end),
             timesteps=self.timesteps,
-            advantages=self.advantages[start:end],
+            advantages=self.advantages[start:end].clone(),
             embeddings=self.embeddings.slice(start, end),
-            rewards=self.rewards[start:end] if self.rewards is not None else None,
+            rewards=self.rewards[start:end].clone() if self.rewards is not None else None,
             prompts=self.prompts[start:end] if self.prompts is not None else None,
+            prompt_ids=self.prompt_ids[start:end] if self.prompt_ids is not None else None,
+            sample_ids=self.sample_ids[start:end] if self.sample_ids is not None else None,
+            group_ids=self.group_ids[start:end] if self.group_ids is not None else None,
             num_steps=self.num_steps,
             is_partitioned=True,
             step_indices=self.step_indices,
@@ -300,6 +321,21 @@ class BackwardTrainingBatch:
                 if self.prompts is not None
                 else None
             ),
+            prompt_ids=(
+                [self.prompt_ids[i] for i in indices.tolist()]
+                if self.prompt_ids is not None
+                else None
+            ),
+            sample_ids=(
+                [self.sample_ids[i] for i in indices.tolist()]
+                if self.sample_ids is not None
+                else None
+            ),
+            group_ids=(
+                [self.group_ids[i] for i in indices.tolist()]
+                if self.group_ids is not None
+                else None
+            ),
             num_steps=self.num_steps,
             is_partitioned=self.is_partitioned,
             step_indices=self.step_indices,
@@ -311,7 +347,7 @@ class BackwardTrainingBatch:
         Convert to dictionary format for loss interfaces.
 
         Returns:
-            Dictionary compatible with GRPOLoss.compute_timestep()
+            Dictionary compatible with GRPOAlgorithm.compute_loss()
         """
         return {
             "trajectories": self.trajectories,
@@ -341,6 +377,9 @@ class ForwardTrainingBatch:
     embeddings: PromptEmbeddings
     rewards: Optional[torch.Tensor] = None
     prompts: Optional[List[str]] = None
+    prompt_ids: Optional[List[str]] = None
+    sample_ids: Optional[List[str]] = None
+    group_ids: Optional[List[str]] = None
     timesteps: Optional[torch.Tensor] = None
     is_partitioned: bool = False
 
@@ -374,6 +413,18 @@ class ForwardTrainingBatch:
                 f"Embeddings batch size {self.embeddings.prompt_embeds.shape[0]} != "
                 f"batch size {batch_size}"
             )
+        if self.sample_ids is not None and len(self.sample_ids) != batch_size:
+            raise ValueError(
+                f"sample_ids length {len(self.sample_ids)} != batch size {batch_size}"
+            )
+        if self.prompt_ids is not None and len(self.prompt_ids) != batch_size:
+            raise ValueError(
+                f"prompt_ids length {len(self.prompt_ids)} != batch size {batch_size}"
+            )
+        if self.group_ids is not None and len(self.group_ids) != batch_size:
+            raise ValueError(
+                f"group_ids length {len(self.group_ids)} != batch size {batch_size}"
+            )
 
     def to_device(self, device: Union[str, "TorchDevice"]) -> "ForwardTrainingBatch":
         """Move all tensors to specified device."""
@@ -383,6 +434,9 @@ class ForwardTrainingBatch:
             embeddings=self.embeddings.to_device(device),
             rewards=self.rewards.to(device) if self.rewards is not None else None,
             prompts=self.prompts,
+            prompt_ids=self.prompt_ids,
+            sample_ids=self.sample_ids,
+            group_ids=self.group_ids,
             timesteps=self.timesteps.to(device) if self.timesteps is not None else None,
             is_partitioned=self.is_partitioned,
         )
@@ -399,11 +453,14 @@ class ForwardTrainingBatch:
             New ForwardTrainingBatch with sliced data
         """
         return ForwardTrainingBatch(
-            clean_latents=self.clean_latents[start:end],
-            advantages=self.advantages[start:end],
+            clean_latents=self.clean_latents[start:end].clone(),
+            advantages=self.advantages[start:end].clone(),
             embeddings=self.embeddings.slice(start, end),
-            rewards=self.rewards[start:end] if self.rewards is not None else None,
+            rewards=self.rewards[start:end].clone() if self.rewards is not None else None,
             prompts=self.prompts[start:end] if self.prompts is not None else None,
+            prompt_ids=self.prompt_ids[start:end] if self.prompt_ids is not None else None,
+            sample_ids=self.sample_ids[start:end] if self.sample_ids is not None else None,
+            group_ids=self.group_ids[start:end] if self.group_ids is not None else None,
             timesteps=self.timesteps if self.timesteps is not None else None,
             is_partitioned=True,
         )
@@ -432,6 +489,21 @@ class ForwardTrainingBatch:
                 if self.prompts is not None
                 else None
             ),
+            prompt_ids=(
+                [self.prompt_ids[i] for i in indices.tolist()]
+                if self.prompt_ids is not None
+                else None
+            ),
+            sample_ids=(
+                [self.sample_ids[i] for i in indices.tolist()]
+                if self.sample_ids is not None
+                else None
+            ),
+            group_ids=(
+                [self.group_ids[i] for i in indices.tolist()]
+                if self.group_ids is not None
+                else None
+            ),
             timesteps=self.timesteps,
             is_partitioned=self.is_partitioned,
         )
@@ -441,7 +513,7 @@ class ForwardTrainingBatch:
         Convert to dictionary format for loss interfaces.
 
         Returns:
-            Dictionary compatible with NFTLoss.compute_batch()
+            Dictionary compatible with NFTAlgorithm.compute_loss()
         """
         return {
             "clean_latents": self.clean_latents,

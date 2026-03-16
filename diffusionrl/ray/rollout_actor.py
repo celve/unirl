@@ -7,8 +7,7 @@ import ray
 import torch
 
 from diffusionrl.config.build_domain_args import RewardSchema
-from diffusionrl.reward.service import LocalRewardExecutor
-from diffusionrl.runtime.pipeline.rollout_pipeline import compute_rewards as compute_rollout_rewards
+from diffusionrl.reward.runtime import SamplingActorRewardRuntime
 from diffusionrl.types.sampling import PromptEmbeddings, RolloutRequest, RolloutOutput
 from diffusionrl.samplers.engine import (
     BaseRolloutEngine,
@@ -104,7 +103,7 @@ class RolloutActor:
         self._scheduler_endpoint: Optional[str] = None
         self._weight_update_target: str = f"actor_rank:{self.rank}"
         self._reward_schema: Optional[RewardSchema] = None
-        self._local_reward_executor: Optional[LocalRewardExecutor] = None
+        self._local_reward_runtime: Optional[SamplingActorRewardRuntime] = None
 
     def _log_resource_ids(self, tag: str) -> None:
         log_resource_ids(tag, self.rank)
@@ -184,14 +183,14 @@ class RolloutActor:
         self.engine.wake_up()
 
     def _uses_rollout_local_reward(self) -> bool:
-        return bool(self._reward_schema is not None and self._reward_schema.uses_rollout_execution)
+        return bool(self._reward_schema is not None and self._reward_schema.uses_sampling_actor_execution)
 
-    def _ensure_local_reward_executor(self) -> LocalRewardExecutor:
+    def _ensure_local_reward_runtime(self) -> SamplingActorRewardRuntime:
         if not self._uses_rollout_local_reward():
-            raise RuntimeError("Local reward executor requested but reward_execution_mode!='rollout'.")
-        if self._local_reward_executor is None:
-            self._local_reward_executor = LocalRewardExecutor(self._reward_schema)
-        return self._local_reward_executor
+            raise RuntimeError("Local reward runtime requested but reward_location!='sampling_actor'.")
+        if self._local_reward_runtime is None:
+            self._local_reward_runtime = SamplingActorRewardRuntime(self._reward_schema)
+        return self._local_reward_runtime
 
     @staticmethod
     def _parse_transport_dtype(value: Any) -> Optional[torch.dtype]:
@@ -869,32 +868,16 @@ class RolloutActor:
                     logger.warning(f"Failed to decode latents: {e}")
 
         if request.decode_for_reward and self._uses_rollout_local_reward():
-            base_prompts = list(request.kwargs.get("_base_prompts") or request.prompts or [])
-            prompt_metadata = request.kwargs.get("_prompt_metadata")
-            if not (
-                isinstance(prompt_metadata, list)
-                and len(prompt_metadata) == len(base_prompts)
-            ):
-                prompt_metadata = None
-            num_samples_per_prompt = int(request.kwargs.get("num_samples_per_prompt", 1) or 1)
-            rewards, reward_components = compute_rollout_rewards(
-                reward_service=self._ensure_local_reward_executor(),
-                reward_path=str(self._reward_schema.reward_path if self._reward_schema is not None else ""),
-                num_samples_per_prompt=num_samples_per_prompt,
-                sampler_outputs=[output],
-                prompts=base_prompts if base_prompts else list(request.prompts),
-                prompt_metadata=prompt_metadata,
+            output = self._ensure_local_reward_runtime().attach_to_output(
+                output=output,
+                prompts=list(request.prompts),
+                prompt_ids=request.prompt_ids,
+                sample_ids=request.sample_ids,
+                group_ids=request.group_ids,
+                prompt_metadata=request.prompt_metadata,
+                keep_reward_media_for_manager=bool(request.keep_reward_media_for_manager),
+                samples_per_prompt=int(request.samples_per_prompt or 1),
             )
-            meta = dict(output.metadata or {})
-            meta["precomputed_rewards"] = [float(v) for v in rewards.tolist()]
-            meta["precomputed_reward_components"] = {
-                str(name): [float(v) for v in list(values or [])]
-                for name, values in dict(reward_components or {}).items()
-            }
-            output.metadata = meta
-            if not bool(request.kwargs.get("_keep_reward_media_for_manager", False)):
-                output.decoded_images = None
-                output.metadata.pop("decoded_videos", None)
 
         output = self._optimize_output_for_transport(output)
 
@@ -905,21 +888,6 @@ class RolloutActor:
 
     def _tensor_to_pil(self, images: torch.Tensor) -> List[Any]:
         return tensor_to_pil(images)
-
-    def generate_batch(
-        self,
-        requests: List[RolloutRequest],
-    ) -> List[RolloutOutput]:
-        """
-        Generate samples for multiple requests.
-
-        Args:
-            requests: List of inference requests
-
-        Returns:
-            List of RolloutOutput for each request
-        """
-        return [self.generate(req) for req in requests]
 
     def encode_prompt(
         self,
@@ -1117,6 +1085,8 @@ class RolloutActor:
         """Put engine into sleep mode to release runtime resources."""
         if self.engine is not None:
             self.engine.sleep()
+        if self._local_reward_runtime is not None:
+            self._local_reward_runtime.offload()
         logger.info(f"Rank {self.rank}: Engine entered sleep mode")
         self._log_gpu_state("inference_sleep")
 
@@ -1124,6 +1094,8 @@ class RolloutActor:
         """Wake engine up for generation or weight update."""
         if self.engine is not None:
             self.engine.wake_up()
+        if self._local_reward_runtime is not None:
+            self._local_reward_runtime.onload()
         logger.info(f"Rank {self.rank}: Engine wake_up complete")
         self._log_gpu_state("inference_wake_up")
 

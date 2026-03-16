@@ -1,15 +1,8 @@
-"""
-Core normalization functions for advantage computation.
+"""Pure tensor math helpers for advantage normalization."""
 
-This module provides the low-level mathematical operations for normalizing rewards.
-All functions are stateless and operate on pure tensors.
-"""
-
-from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import torch
-import torch.distributed as dist
 
 
 def normalize_grouped(
@@ -89,71 +82,3 @@ def normalize_global(
         advantages = torch.clamp(advantages, -clip_max, clip_max)
 
     return advantages
-
-
-def build_fixed_size_groups(total: int, group_size: int) -> List[List[int]]:
-    """Build group indices with fixed group size.
-
-    Used by the 'group' strategy where samples are arranged in contiguous groups.
-
-    Args:
-        total: Total number of samples
-        group_size: Number of samples per group
-
-    Returns:
-        List of index lists, each of length group_size
-    """
-    if group_size <= 0:
-        return [[i] for i in range(total)]
-
-    n_groups = total // group_size
-    groups = []
-    for i in range(n_groups):
-        start_idx = i * group_size
-        end_idx = (i + 1) * group_size
-        groups.append(list(range(start_idx, end_idx)))
-
-    return groups
-
-
-def build_prompt_groups(prompts: List[str]) -> List[List[int]]:
-    """Build group indices by prompt content.
-
-    Groups samples that share the same prompt text together.
-
-    Args:
-        prompts: List of prompt strings [N]
-
-    Returns:
-        List of index lists, grouped by prompt content
-    """
-    prompt_to_indices: Dict[str, List[int]] = defaultdict(list)
-    for idx, prompt in enumerate(prompts):
-        prompt_to_indices[prompt].append(idx)
-    return list(prompt_to_indices.values())
-
-
-def gather_rewards_across_gpus(rewards: torch.Tensor) -> torch.Tensor:
-    """Gather rewards from all GPUs for advantage computation.
-
-    This is needed for flow_grpo/DiffusionNFT style training where advantages
-    should be computed across all GPUs' samples.
-
-    Args:
-        rewards: Local rewards tensor [local_batch_size]
-
-    Returns:
-        Gathered rewards tensor [total_batch_size]
-    """
-    if not dist.is_initialized():
-        return rewards
-
-    world_size = dist.get_world_size()
-    if world_size == 1:
-        return rewards
-
-    # Gather rewards from all ranks
-    gathered_list = [torch.zeros_like(rewards) for _ in range(world_size)]
-    dist.all_gather(gathered_list, rewards)
-
-    return torch.cat(gathered_list, dim=0)

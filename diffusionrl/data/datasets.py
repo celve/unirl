@@ -7,6 +7,7 @@ The default user-facing data input contract is prompt-first:
 
 import json
 import logging
+import os
 import random
 from typing import Any, Dict, List, Optional
 from torch.utils.data import Dataset
@@ -24,6 +25,7 @@ _PROMPT_EXAMPLE_EXCLUDED_KEYS = {
     "text_ids",
     "prompt_embeds",
     "pooled_prompt_embeds",
+    "prompt_id",
 }
 
 
@@ -50,6 +52,9 @@ def normalize_prompt_example(item: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     result: Dict[str, Any] = {"prompt": prompt}
+    prompt_id = item.get("prompt_id")
+    if prompt_id is not None:
+        result["prompt_id"] = str(prompt_id)
     if metadata:
         result["metadata"] = dict(metadata)
     return result
@@ -106,6 +111,7 @@ class TextPromptDataset(PromptExampleDataset):
         self.samples: List[Dict[str, Any]] = []
 
         # Load prompts
+        self._source_prefix = os.path.basename(self.file_path) or "prompt_source"
         self._load_prompts()
 
         # Shuffle if requested
@@ -121,7 +127,13 @@ class TextPromptDataset(PromptExampleDataset):
         """Load prompts from file."""
         def _append_item(item: Any, *, context: str) -> None:
             if isinstance(item, str):
-                self.samples.append({"prompt": item})
+                sample_idx = len(self.samples)
+                self.samples.append(
+                    {
+                        "prompt": item,
+                        "prompt_id": f"{self._source_prefix}:{sample_idx}",
+                    }
+                )
                 return
             if not isinstance(item, dict):
                 logger.warning("Skipping invalid %s: %r", context, item)
@@ -132,7 +144,12 @@ class TextPromptDataset(PromptExampleDataset):
                 candidate["prompt"] = candidate.pop(self.prompt_key)
 
             try:
-                self.samples.append(normalize_prompt_example(candidate))
+                normalized = normalize_prompt_example(candidate)
+                normalized.setdefault(
+                    "prompt_id",
+                    f"{self._source_prefix}:{len(self.samples)}",
+                )
+                self.samples.append(normalized)
             except (TypeError, ValueError) as exc:
                 logger.warning("Skipping invalid %s: %s", context, exc)
 
@@ -180,7 +197,14 @@ class TextPromptDataset(PromptExampleDataset):
 
         elif self.file_path.endswith('.txt'):
             with open(self.file_path, 'r') as f:
-                self.samples = [{"prompt": line.strip()} for line in f if line.strip()]
+                prompts = [line.strip() for line in f if line.strip()]
+            self.samples = [
+                {
+                    "prompt": prompt,
+                    "prompt_id": f"{self._source_prefix}:{idx}",
+                }
+                for idx, prompt in enumerate(prompts)
+            ]
 
         else:
             raise ValueError(f"Unsupported file format: {self.file_path}. Supported formats: .json, .jsonl, .txt")

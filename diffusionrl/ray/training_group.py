@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time as _time
 from typing import Any, Dict, List, Optional
 from tqdm import tqdm
 
@@ -480,8 +481,18 @@ class TrainingActorGroup(BaseActorGroup):
         original_batch_size = len(request.prompts) if request.prompts else 0
         target_size = max(original_batch_size, self.num_actors)
 
+        _tg_t0 = _time.perf_counter()
         refs = self.async_generate(request)
+        _tg_t1 = _time.perf_counter()
         outputs = ray.get(refs)
+        _tg_t2 = _time.perf_counter()
+        logger.warning(
+            "[TIMING] training_group.generate: dispatch=%.2fs ray_get=%.2fs total=%.2fs prompts=%s",
+            _tg_t1 - _tg_t0,
+            _tg_t2 - _tg_t1,
+            _tg_t2 - _tg_t0,
+            original_batch_size,
+        )
 
         if target_size == original_batch_size:
             return outputs

@@ -69,9 +69,8 @@ def train_async_loop(
                 f"(inflight={runtime.inflight_count}, max_inflight={runtime.max_inflight})"
             )
         should_log_rollout = _should_log_rollout(rollout_id, args)
-        rollout_future = rollout_manager.generate_and_push.remote(
+        rollout_future = rollout_manager.produce_training_payload.remote(
             rollout_id=rollout_id,
-            buffer=rollout_buffer,
             collect_media_preview=bool(should_log_rollout and wandb_media_enabled),
             media_max_items=wandb_media_max_items,
         )
@@ -96,7 +95,6 @@ def train_async_loop(
             ray.get(rollout_manager.wake_up.remote())
             rollout_on_gpu = True
 
-    num_samples_per_prompt = max(1, int(getattr(args.algorithm, "num_samples_per_prompt", 1)))
     wandb_media_enabled = bool(
         wandb_logger is not None and bool(getattr(args.rollout, "wandb_log_media", False))
     )
@@ -108,10 +106,7 @@ def train_async_loop(
         except Exception as exc:
             logger.warning("[async] Failed to materialize training batch for rollout metrics: %s", exc)
             return {}
-        return compute_rollout_batch_metrics(
-            training_data=training_data,
-            num_samples_per_prompt=num_samples_per_prompt,
-        )
+        return compute_rollout_batch_metrics(training_data=training_data)
 
     # rollout_id is the outer rollout-train loop step; it behaves similarly to
     # a framework-level global step, but may differ from optimizer step count.
@@ -132,6 +127,17 @@ def train_async_loop(
             raise RuntimeError(
                 f"Async rollout ordering violated: expected rollout_id={rollout_id}, "
                 f"got {resolved.rollout_id}"
+            )
+        push_result = ray.get(
+            rollout_buffer.push.remote(
+                rollout_id=rollout_id,
+                train_data=resolved.payload["training_batch"],
+                metadata=resolved.payload.get("metadata"),
+            )
+        )
+        if not push_result.get("accepted", False):
+            raise RuntimeError(
+                f"Rollout buffer rejected rollout_id={rollout_id}: {push_result.get('error')}"
             )
         rollout_payload = ray.get(
             rollout_buffer.pop_training_data.remote(

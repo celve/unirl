@@ -819,11 +819,9 @@ class ActorSamplingExecutor:
         if sampling_adapter is None:
             sampling_adapter = actor._sampling_config.get("sampling_adapter")
 
-        init_same_noise = kwargs.pop("init_same_noise", actor._sampling_config.get("init_same_noise", False))
-        num_samples_per_prompt = kwargs.pop(
-            "num_samples_per_prompt",
-            actor._sampling_config.get("num_samples_per_prompt", 1),
-        )
+        init_same_noise = bool(request.init_same_noise)
+        samples_per_prompt = int(request.samples_per_prompt or 1)
+        noise_group_ids = request.noise_group_ids
 
         generator = None
         if request.seed is not None:
@@ -862,7 +860,8 @@ class ActorSamplingExecutor:
                 sde_indices=request.sde_indices,
                 text_ids=text_ids,
                 init_same_noise=init_same_noise,
-                num_samples_per_prompt=num_samples_per_prompt,
+                samples_per_prompt=samples_per_prompt,
+                noise_group_ids=noise_group_ids,
                 **kwargs,
             )
             output = self._maybe_attach_prompt_embeddings(
@@ -897,17 +896,11 @@ class ActorSamplingExecutor:
             return output.to_device("cpu")
         return output
 
-    def generate_batch(self, actor: Any, requests: List[RolloutRequest]) -> List[RolloutOutput]:
-        return [self.generate(actor, req) for req in requests]
-
     def generate_local(self, actor: Any, request: RolloutRequest) -> RolloutOutput:
         return self.generate(actor, request, move_output_to_cpu=False)
 
-    def generate_local_batch(self, actor: Any, requests: List[RolloutRequest]) -> List[RolloutOutput]:
-        return [self.generate_local(actor, req) for req in requests]
-
-class TrainingActorSamplingService:
-    """Delegates training-actor sampling RPCs to ActorSamplingExecutor."""
+class ActorSamplingRuntime:
+    """Thin sampling runtime delegating actor-side sampling calls to ActorSamplingExecutor."""
 
     def __init__(self, executor: Optional[ActorSamplingExecutor] = None) -> None:
         self._executor = executor or ActorSamplingExecutor()
@@ -919,11 +912,5 @@ class TrainingActorSamplingService:
     def generate(self, actor, request: RolloutRequest) -> RolloutOutput:
         return self._executor.generate(actor, request)
 
-    def generate_batch(self, actor, requests: List[RolloutRequest]) -> List[RolloutOutput]:
-        return self._executor.generate_batch(actor, requests)
-
     def generate_local(self, actor, request: RolloutRequest) -> RolloutOutput:
         return self._executor.generate_local(actor, request)
-
-    def generate_local_batch(self, actor, requests: List[RolloutRequest]) -> List[RolloutOutput]:
-        return self._executor.generate_local_batch(actor, requests)

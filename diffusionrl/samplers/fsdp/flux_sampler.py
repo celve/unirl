@@ -266,7 +266,8 @@ class FluxSampler(BaseSampler):
         generator: Optional[torch.Generator] = None,
         sde_indices: Optional[Set[int]] = None,
         init_same_noise: bool = False,
-        num_samples_per_prompt: int = 1,
+        samples_per_prompt: int = 1,
+        noise_group_ids: Optional[List[str]] = None,
         **kwargs,
     ) -> RolloutOutput:
         """
@@ -285,7 +286,7 @@ class FluxSampler(BaseSampler):
             generator: Random number generator
             sde_indices: Set of timestep indices for SDE (all by default)
             init_same_noise: Share initial noise across K samples for same prompt (DanceGRPO/MixGRPO)
-            num_samples_per_prompt: Number of samples per prompt (for init_same_noise)
+            samples_per_prompt: Number of samples per prompt (for init_same_noise)
 
         Returns:
             RolloutOutput with trajectories, log_probs, etc.
@@ -330,7 +331,8 @@ class FluxSampler(BaseSampler):
                 dtype=trajectory_dtype,
                 generator=generator,
                 init_same_noise=init_same_noise,
-                num_samples_per_prompt=num_samples_per_prompt,
+                samples_per_prompt=samples_per_prompt,
+                noise_group_ids=noise_group_ids,
             )
         else:
             latents = latents.to(device=device, dtype=trajectory_dtype)

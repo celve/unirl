@@ -16,18 +16,15 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from diffusionrl.config.build_domain_args import RewardSchema
-from diffusionrl.runtime.pipeline.rollout_pipeline import (
-    compute_rewards as compute_rollout_rewards,
-)
-from diffusionrl.reward.service import LocalRewardExecutor
-from diffusionrl.types.sampling import RolloutRequest, RolloutOutput
+from diffusionrl.reward.runtime import SamplingActorRewardRuntime
+from diffusionrl.types.sampling import LogProbData, PromptEmbeddings, RolloutRequest, RolloutOutput
 from diffusionrl.types.training_batch import (
     BackwardTrainingBatch,
     ForwardTrainingBatch,
     TrainingBatch,
 )
 from diffusionrl.patches.replay_logprob import ReplayLogProbPatch
-from diffusionrl.ray.ray_utils import TrainingActorSamplingService
+from diffusionrl.ray.ray_utils import ActorSamplingRuntime
 from diffusionrl.utils import clear_memory as _clear_gpu_memory
 from diffusionrl.utils.weight_sync_checkpoint import (
     publish_checkpoint_atomic,
@@ -43,6 +40,112 @@ from diffusionrl.utils import load_function
 from .actor_base import BaseTrainRayActor, log_gpu_state, log_resource_ids
 
 logger = logging.getLogger(__name__)
+
+
+def _build_synthetic_debug_training_batch(
+    *,
+    model: nn.Module,
+    algorithm: Any,
+    model_type: str,
+    batch_size: int,
+    height: int,
+    width: int,
+    num_inference_steps: int,
+    latent_channels: int = 16,
+    vae_scale_factor: int = 8,
+    max_sequence_length: int = 256,
+) -> TrainingBatch:
+    """Build a conservative synthetic train_only batch for pre-release debugging.
+
+    This path is intentionally narrow: only image-style SD3 training batches are
+    synthesized. Other model families have materially different latent contracts
+    (for example video layouts or FLUX-specific packed inputs), so train_only
+    should use ``--debug.debug-load-path`` there rather than guessing.
+    """
+    from diffusionrl.types.training_batch import BackwardTrainingBatch, ForwardTrainingBatch
+
+    normalized_model_type = str(model_type or "").strip().lower()
+    if normalized_model_type != "sd3":
+        raise NotImplementedError(
+            "Synthetic train_only batches are only supported for model_type='sd3'. "
+            "Use --debug.debug-load-path with a saved rollout payload for other models."
+        )
+
+    config = getattr(model, "config", None)
+    if config is not None:
+        joint_dim = int(getattr(config, "joint_attention_dim", 4096))
+        pooled_dim = int(getattr(config, "pooled_projection_dim", 2048))
+        latent_channels = int(getattr(config, "in_channels", latent_channels))
+    else:
+        joint_dim, pooled_dim = 4096, 2048
+
+    try:
+        dtype = next(model.parameters()).dtype
+    except StopIteration:
+        dtype = torch.float32
+
+    latent_h = height // vae_scale_factor
+    latent_w = width // vae_scale_factor
+
+    prompt_embeds = torch.randn(batch_size, max_sequence_length, joint_dim, dtype=dtype)
+    pooled_prompt_embeds = torch.randn(batch_size, pooled_dim, dtype=dtype)
+    negative_prompt_embeds = torch.zeros_like(prompt_embeds)
+    negative_pooled_prompt_embeds = torch.zeros_like(pooled_prompt_embeds)
+    embeddings = PromptEmbeddings(
+        prompt_embeds=prompt_embeds,
+        pooled_prompt_embeds=pooled_prompt_embeds,
+        negative_prompt_embeds=negative_prompt_embeds,
+        negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+    )
+    advantages = torch.randn(batch_size, dtype=torch.float32)
+    rewards = torch.randn(batch_size, dtype=torch.float32)
+    prompts = [f"debug_prompt_{i}" for i in range(batch_size)]
+
+    if bool(getattr(algorithm, "is_forward_process", lambda: False)()):
+        batch = ForwardTrainingBatch(
+            clean_latents=torch.randn(
+                batch_size,
+                latent_channels,
+                latent_h,
+                latent_w,
+                dtype=dtype,
+            ),
+            advantages=advantages,
+            embeddings=embeddings,
+            rewards=rewards,
+            prompts=prompts,
+        )
+        batch.validate()
+        return batch
+
+    step_indices = torch.arange(num_inference_steps + 1, dtype=torch.long)
+    timesteps = torch.linspace(1.0, 0.0, steps=num_inference_steps + 1, dtype=torch.float32)
+    batch = BackwardTrainingBatch(
+        trajectories=torch.randn(
+            batch_size,
+            num_inference_steps + 1,
+            latent_channels,
+            latent_h,
+            latent_w,
+            dtype=dtype,
+        ),
+        log_probs=LogProbData.from_dict(
+            {
+                step_idx: torch.randn(batch_size, dtype=torch.float32)
+                for step_idx in range(num_inference_steps)
+            }
+        ),
+        timesteps=timesteps,
+        advantages=advantages,
+        embeddings=embeddings,
+        rewards=rewards,
+        prompts=prompts,
+        num_steps=num_inference_steps,
+        step_indices=step_indices,
+        target_sde_indices=set(range(num_inference_steps)),
+    )
+    batch.validate()
+    return batch
 
 @ray.remote(num_gpus=1)
 class TrainingActor(BaseTrainRayActor):
@@ -78,7 +181,7 @@ class TrainingActor(BaseTrainRayActor):
         self.model_bundle = None
         self.optimizer = None
         self.lr_scheduler = None
-        self.loss_fn = None
+        self.algorithm = None
         self._is_initialized = False
         self._is_offloaded = False
         self._device = None
@@ -88,22 +191,11 @@ class TrainingActor(BaseTrainRayActor):
         self._train_backend_name = "fsdp"
         self._train_backend_capabilities: Dict[str, Any] = {}
 
-        # EMA trackers ---------------------------------------------------------
-        # _eval_ema: universal smoothed copy of trainable params for evaluation
-        # _nft_old_params_ema: NFT full-param old-model EMA (None when LoRA)
-        # _ema_updater: DualAdapterEMA for NFT LoRA mode (legacy path)
-        self._eval_ema = None
-        self._nft_old_params_ema = None
-        self._ema_updater = None
-        self._use_ema = False
-        self._ema_decay = 0.001
-        self._loss_type = "grpo"
-        self._loss_path = None
+        # EMA runtime ----------------------------------------------------------
+        self._ema_manager = None
+        self._algorithm_type = "grpo"
+        self._algorithm_path = None
         self._guidance_scale: Optional[float] = None
-        # NFT timestep handling
-        self._nft_timestep_mode = "random"  # random or all
-        self._nft_shuffle_timesteps = True
-        self._nft_apply_shift = False
         # Sample-level shuffle before training (analogous to Flow-Factory inner-epoch shuffle)
         self._shuffle_samples = True
         self._shuffle_seed: Optional[int] = None
@@ -118,8 +210,8 @@ class TrainingActor(BaseTrainRayActor):
         # Sampling support (training-actor sampling mode)
         self._sampling_config: Dict[str, Any] = {}
         self._sampler = None
-        self._sampling_service = TrainingActorSamplingService()
-        self._actor_sampling_executor = self._sampling_service.executor
+        self._sampling_runtime = ActorSamplingRuntime()
+        self._actor_sampling_executor = self._sampling_runtime.executor
         self._replay_logprob_patch = ReplayLogProbPatch()
         self._sampling_ready = False
         self.text_encoder = None
@@ -128,7 +220,7 @@ class TrainingActor(BaseTrainRayActor):
         self._weights_update_groups: Dict[str, Any] = {}
         self._reward_config: Dict[str, Any] = {}
         self._reward_schema: Optional[RewardSchema] = None
-        self._local_reward_executor: Optional[LocalRewardExecutor] = None
+        self._local_reward_runtime: Optional[SamplingActorRewardRuntime] = None
 
     def _log_resource_ids(self, tag: str) -> None:
         log_resource_ids(tag, self.rank)
@@ -201,14 +293,15 @@ class TrainingActor(BaseTrainRayActor):
                 - model_config: dict with model_path, pretrained_model_saved_path
                 - optimizer_config: dict with lr, betas, weight_decay
                 - scheduler_config: dict with scheduler type and params
-                - loss_config: dict with loss_type, clip_range, kl_coef, etc.
+                - algorithm_config: dict with algorithm_type, algorithm_path, algorithm_kwargs, guidance_scale
                 - training_config: dict with max_grad_norm, gradient_accumulation_batch_size,
                   multi_update_batch_size, update_mode
                 - train_backend_config: dict(name/backend_path/kwargs)
 
         Note:
-            Algorithm instantiation for advantage computation happens in
-            RolloutManager, not here. Training uses loss_fn directly.
+            RolloutManager and TrainingActor each instantiate the same
+            Algorithm class locally for their own role. Training owns the
+            train-side algorithm instance.
         """
         logger.info(f"Rank {self.rank}: Initializing training actor...")
 
@@ -258,8 +351,8 @@ class TrainingActor(BaseTrainRayActor):
         scheduler_config = self._require_dict_config(config, "scheduler_config")
         self._create_scheduler(scheduler_config)
 
-        loss_config = self._require_dict_config(config, "loss_config")
-        self._load_loss(loss_config)
+        algorithm_config = self._require_dict_config(config, "algorithm_config")
+        self._load_algorithm(algorithm_config)
 
         # Load training config
         training_config = self._require_dict_config(config, "training_config")
@@ -282,11 +375,6 @@ class TrainingActor(BaseTrainRayActor):
         self._reward_config = reward_config
         self._reward_schema = RewardSchema(**reward_config)
 
-        # Note: Algorithm is not instantiated here because:
-        # - Advantage computation happens in RolloutManager (sampling phase)
-        # - Training only uses loss_fn for gradient computation
-        # This is consistent with the functional dispatch pattern used in slime.
-
         self._is_initialized = True
         logger.info(
             f"Rank {self.rank}: Training actor initialized "
@@ -300,52 +388,39 @@ class TrainingActor(BaseTrainRayActor):
         self._log_gpu_state("training_init")
 
     def _uses_rollout_local_reward(self) -> bool:
-        return bool(self._reward_schema is not None and self._reward_schema.uses_rollout_execution)
+        return bool(self._reward_schema is not None and self._reward_schema.uses_sampling_actor_execution)
 
-    def _ensure_local_reward_executor(self) -> LocalRewardExecutor:
+    def _ensure_local_reward_runtime(self) -> SamplingActorRewardRuntime:
         if not self._uses_rollout_local_reward():
-            raise RuntimeError("Local reward executor requested but reward_execution_mode!='rollout'.")
-        if self._local_reward_executor is None:
-            self._local_reward_executor = LocalRewardExecutor(self._reward_schema)
-        return self._local_reward_executor
+            raise RuntimeError("Local reward runtime requested but reward_location!='sampling_actor'.")
+        if self._local_reward_runtime is None:
+            self._local_reward_runtime = SamplingActorRewardRuntime(self._reward_schema)
+        return self._local_reward_runtime
 
     def _attach_local_reward_to_output(
         self,
         *,
         output: RolloutOutput,
         prompts: List[str],
+        prompt_ids: Optional[List[str]],
+        sample_ids: Optional[List[str]],
+        group_ids: Optional[List[str]],
         prompt_metadata: Optional[List[Optional[Dict[str, Any]]]],
-        num_samples_per_prompt: int,
         keep_reward_media_for_manager: bool,
+        samples_per_prompt: int,
     ) -> RolloutOutput:
         if not self._uses_rollout_local_reward():
             return output
-        normalized_metadata = prompt_metadata
-        if not (
-            isinstance(normalized_metadata, list)
-            and len(normalized_metadata) == len(base_prompts)
-        ):
-            normalized_metadata = None
-        rewards, reward_components = compute_rollout_rewards(
-            reward_service=self._ensure_local_reward_executor(),
-            reward_path=str(self._reward_schema.reward_path if self._reward_schema is not None else ""),
-            num_samples_per_prompt=int(num_samples_per_prompt),
-            sampler_outputs=[output],
+        return self._ensure_local_reward_runtime().attach_to_output(
+            output=output,
             prompts=list(prompts),
-            prompt_metadata=normalized_metadata,
+            prompt_ids=prompt_ids,
+            sample_ids=sample_ids,
+            group_ids=group_ids,
+            prompt_metadata=prompt_metadata,
+            keep_reward_media_for_manager=keep_reward_media_for_manager,
+            samples_per_prompt=int(samples_per_prompt),
         )
-        meta = dict(output.metadata or {})
-        meta["precomputed_rewards"] = [float(v) for v in rewards.tolist()]
-        meta["precomputed_reward_components"] = {
-            str(name): [float(v) for v in list(values or [])]
-            for name, values in dict(reward_components or {}).items()
-        }
-        output.metadata = meta
-        if not keep_reward_media_for_manager:
-            output.decoded_images = None
-            if isinstance(output.metadata, dict):
-                output.metadata.pop("decoded_videos", None)
-        return output
 
     def _load_model(self, model_config: dict) -> None:
         """Load the model for training."""
@@ -489,45 +564,35 @@ class TrainingActor(BaseTrainRayActor):
         else:
             self.lr_scheduler = None
 
-    _LOSS_RUNTIME_KEYS = {
-        "use_ema",
-        "ema_decay",
-        "eval_ema_decay",
-        "eval_ema_update_interval",
-        "nft_timestep_mode",
-        "nft_shuffle_timesteps",
-        "nft_apply_shift",
-        "decay_type",
-        "ema_flat_steps",
-        "ema_uprate",
-        "ema_uphold",
-        "old_adapter_name",
-        "new_adapter_name",
+    _ALGORITHM_RUNTIME_KEYS = {
         "shuffle_samples",
         "shuffle_seed",
     }
 
     @classmethod
-    def _split_loss_kwargs(cls, loss_config: dict) -> tuple[dict, dict]:
-        """Split loss kwargs into constructor kwargs and actor runtime kwargs."""
-        extra = loss_config.get("loss_kwargs")
-        if not isinstance(extra, dict):
+    def _split_algorithm_kwargs(cls, algorithm_config: dict) -> tuple[dict, dict]:
+        """Split algorithm kwargs into constructor kwargs and actor runtime kwargs."""
+        extra: Dict[str, Any] = {}
+        algorithm_kwargs = algorithm_config.get("algorithm_kwargs")
+        if isinstance(algorithm_kwargs, dict):
+            extra.update(algorithm_kwargs)
+        if not extra:
             return {}, {}
 
         ctor_kwargs: Dict[str, Any] = {}
         runtime_kwargs: Dict[str, Any] = {}
         for key, value in extra.items():
-            if key in cls._LOSS_RUNTIME_KEYS:
+            if key in cls._ALGORITHM_RUNTIME_KEYS:
                 runtime_kwargs[key] = value
             else:
                 ctor_kwargs[key] = value
         return ctor_kwargs, runtime_kwargs
 
     @staticmethod
-    def _filter_constructor_kwargs(loss_cls: type, kwargs: dict) -> dict:
-        """Drop kwargs that are not accepted by the target loss constructor."""
+    def _filter_constructor_kwargs(algorithm_cls: type, kwargs: dict) -> dict:
+        """Drop kwargs that are not accepted by the target algorithm constructor."""
         try:
-            sig = inspect.signature(loss_cls.__init__)
+            sig = inspect.signature(algorithm_cls.__init__)
         except (TypeError, ValueError):
             return dict(kwargs)
 
@@ -544,104 +609,66 @@ class TrainingActor(BaseTrainRayActor):
         return {key: value for key, value in kwargs.items() if key in allowed}
 
     @staticmethod
-    def _collect_custom_loss_kwargs(loss_config: dict) -> dict:
-        """Collect custom loss kwargs from config while removing actor-runtime keys."""
+    def _collect_custom_algorithm_kwargs(algorithm_config: dict) -> dict:
+        """Collect custom algorithm kwargs from config while removing actor-runtime keys."""
         reserved_keys = {
-            "loss_type",
-            "loss_path",
-            "loss_kwargs",
+            "algorithm_type",
+            "algorithm_path",
+            "algorithm_kwargs",
             "guidance_scale",
         }
         kwargs = {
             key: value
-            for key, value in loss_config.items()
+            for key, value in algorithm_config.items()
             if key not in reserved_keys and value is not None
         }
-        extra = loss_config.get("loss_kwargs")
-        if isinstance(extra, dict):
+        algorithm_kwargs = algorithm_config.get("algorithm_kwargs")
+        if isinstance(algorithm_kwargs, dict):
             kwargs.update(
                 {
                     key: value
-                    for key, value in extra.items()
-                    if key not in TrainingActor._LOSS_RUNTIME_KEYS
+                    for key, value in algorithm_kwargs.items()
+                    if key not in TrainingActor._ALGORITHM_RUNTIME_KEYS
                 }
             )
         return kwargs
 
-    def _load_loss(self, loss_config: dict) -> None:
-        """Load algorithm/loss via load_function(algorithm_path) + cls.from_config().
+    def _load_algorithm(self, algorithm_config: dict) -> None:
+        """Load the train-side Algorithm instance."""
+        self._algorithm_type = str(algorithm_config["algorithm_type"])
+        self._algorithm_path = str(algorithm_config["algorithm_path"])
+        self._guidance_scale = float(algorithm_config["guidance_scale"])
 
-        The algorithm class is the single source of truth for both rollout-side
-        requirements and training-side gradient computation.  Falls back to
-        ``loss_path`` when ``algorithm_path`` is not present for backward compat.
-        """
-        self._loss_type = str(loss_config["loss_type"])
-        # Prefer algorithm_path (new unified path), fall back to loss_path (legacy)
-        self._loss_path = loss_config.get("algorithm_path") or loss_config.get("loss_path")
-        self._guidance_scale = float(loss_config["guidance_scale"])
-        self._ema_updater = None
-
-        ctor_loss_kwargs, runtime_loss_kwargs = self._split_loss_kwargs(loss_config)
-        self._nft_timestep_mode = str(runtime_loss_kwargs.get("nft_timestep_mode", "random"))
-        self._nft_shuffle_timesteps = bool(runtime_loss_kwargs.get("nft_shuffle_timesteps", True))
-        self._nft_apply_shift = bool(runtime_loss_kwargs.get("nft_apply_shift", False))
-        self._shuffle_samples = bool(runtime_loss_kwargs.get("shuffle_samples", True))
-        raw_shuffle_seed = runtime_loss_kwargs.get("shuffle_seed", None)
+        ctor_algorithm_kwargs, runtime_algorithm_kwargs = self._split_algorithm_kwargs(algorithm_config)
+        self._shuffle_samples = bool(runtime_algorithm_kwargs.get("shuffle_samples", True))
+        raw_shuffle_seed = runtime_algorithm_kwargs.get("shuffle_seed", None)
         self._shuffle_seed = int(raw_shuffle_seed) if raw_shuffle_seed is not None else None
-        self._ema_decay = float(runtime_loss_kwargs.get("ema_decay", 0.001))
-        self._eval_ema_decay = float(runtime_loss_kwargs.get("eval_ema_decay", 0.9))
-        self._eval_ema_update_interval = int(runtime_loss_kwargs.get("eval_ema_update_interval", 1))
-        self._use_ema = bool(runtime_loss_kwargs.get("use_ema", self._loss_type == "nft"))
-        ema_decay_type = str(runtime_loss_kwargs.get("decay_type", "constant"))
-        ema_flat_steps = int(runtime_loss_kwargs.get("ema_flat_steps", 0))
-        ema_uprate = float(runtime_loss_kwargs.get("ema_uprate", 0.001))
-        ema_uphold = float(runtime_loss_kwargs.get("ema_uphold", 0.5))
-        old_adapter_name = str(runtime_loss_kwargs.get("old_adapter_name", "old"))
-        new_adapter_name = str(runtime_loss_kwargs.get("new_adapter_name", "default"))
 
-        if not self._loss_path:
-            raise ValueError(
-                "loss_config requires algorithm_path (or loss_path) before TrainingActor.init. "
-                f"Got empty path for loss_type={self._loss_type!r}. "
-                "Ensure build_domain_args resolves algorithm_path from loss_type, "
-                "or pass --algorithm.algorithm-path explicitly."
-            )
+        if not self._algorithm_path:
+            raise ValueError("algorithm_config.algorithm_path must be set before TrainingActor.init.")
 
-        loss_cls = load_function(self._loss_path)
+        algorithm_cls = load_function(self._algorithm_path)
 
-        if hasattr(loss_cls, "from_config"):
-            self.loss_fn = loss_cls.from_config(loss_config)
+        if hasattr(algorithm_cls, "from_config"):
+            self.algorithm = algorithm_cls.from_config(algorithm_config)
         else:
-            custom_kwargs = self._collect_custom_loss_kwargs(loss_config)
-            filtered_kwargs = self._filter_constructor_kwargs(loss_cls, custom_kwargs)
-            self.loss_fn = loss_cls(**filtered_kwargs)
+            custom_kwargs = self._collect_custom_algorithm_kwargs(algorithm_config)
+            filtered_kwargs = self._filter_constructor_kwargs(algorithm_cls, custom_kwargs)
+            self.algorithm = algorithm_cls(**{**filtered_kwargs, **ctor_algorithm_kwargs})
 
         logger.info(
-            "Rank %s: Loss loaded from %s (type=%s)",
-            self.rank, self._loss_path, type(self.loss_fn).__name__,
+            "Rank %s: Train-side algorithm loaded from %s (type=%s)",
+            self.rank, self._algorithm_path, type(self.algorithm).__name__,
         )
 
-        # --- EMA setup ---
-        # NFT + LoRA: DualAdapterEMA for old/new adapter synchronisation.
-        # NFT + full-param: EMAModuleWrapper as old-model reference.
-        # All algorithms: EMAModuleWrapper for eval-time smoothed weights.
-        self._init_ema(
-            ema_decay_type=ema_decay_type,
-            ema_flat_steps=ema_flat_steps,
-            ema_uprate=ema_uprate,
-            ema_uphold=ema_uphold,
-            old_adapter_name=old_adapter_name,
-            new_adapter_name=new_adapter_name,
-        )
-
-        if hasattr(self.loss_fn, "model_type"):
-            self.loss_fn.model_type = getattr(self.model_bundle, "model_type", "default")
-        if hasattr(self.loss_fn, "_forward_plugin"):
+        if hasattr(self.algorithm, "model_type"):
+            self.algorithm.model_type = getattr(self.model_bundle, "model_type", "default")
+        if hasattr(self.algorithm, "_forward_plugin"):
             forward_plugin_fn = getattr(self.model_bundle.__class__, "forward_plugin", None)
             if not callable(forward_plugin_fn):
                 raise ValueError(
                     f"Model bundle {self.model_bundle.__class__.__name__} must define "
-                    "classmethod forward_plugin() for loss forward dispatch."
+                    "classmethod forward_plugin() for algorithm forward dispatch."
                 )
             forward_plugin = forward_plugin_fn()
             if forward_plugin is None:
@@ -649,152 +676,59 @@ class TrainingActor(BaseTrainRayActor):
                     f"Model bundle {self.model_bundle.__class__.__name__}.forward_plugin() "
                     "returned None; expected a forward plugin instance."
                 )
-            self.loss_fn._forward_plugin = forward_plugin
+            self.algorithm._forward_plugin = forward_plugin
 
-        debug_output_dir = loss_config.get("debug_output_dir")
-        if debug_output_dir and hasattr(self.loss_fn, "_debug_output_dir"):
-            self.loss_fn._debug_output_dir = debug_output_dir
-            logger.info("Rank %s: Debug output dir set on loss_fn: %s", self.rank, debug_output_dir)
+        debug_output_dir = algorithm_config.get("debug_output_dir")
+        if debug_output_dir and hasattr(self.algorithm, "_debug_output_dir"):
+            self.algorithm._debug_output_dir = debug_output_dir
+            logger.info("Rank %s: Debug output dir set on algorithm: %s", self.rank, debug_output_dir)
 
         logger.info(
-            "Rank %s: Loss function loaded (loss_type=%s, loss_path=%s)",
+            "Rank %s: Algorithm loaded (type=%s, path=%s)",
             self.rank,
-            self._loss_type,
-            self._loss_path,
+            self._algorithm_type,
+            self._algorithm_path,
         )
 
-    # ------------------------------------------------------------------
-    # EMA initialisation & eval helpers
-    # ------------------------------------------------------------------
+        from diffusionrl.utils.ema import EMAManager
 
-    def _init_ema(
-        self,
-        *,
-        ema_decay_type: str,
-        ema_flat_steps: int,
-        ema_uprate: float,
-        ema_uphold: float,
-        old_adapter_name: str,
-        new_adapter_name: str,
-    ) -> None:
-        """Create all EMA trackers after model + loss are ready."""
-        from diffusionrl.utils.ema import EMAModuleWrapper, DualAdapterEMA
-
-        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        if not trainable_params:
-            logger.warning("Rank %s: No trainable params found, skipping EMA init", self.rank)
-            return
-
-        # When FSDP shards the model, parameters become DTensors.  Storing EMA
-        # copies on CPU would strip DTensor metadata and cause type/shape
-        # mismatches on every subsequent copy.  Keep EMA on-device (None) so
-        # all operations remain DTensor↔DTensor.
-        is_sharded = (
-            self._train_backend is not None
-            and self._train_backend.uses_sharded_model()
+        ema_spec = self.algorithm.get_ema_spec()
+        self._ema_manager = EMAManager.from_model_and_spec(
+            model=self.model,
+            spec=ema_spec,
+            use_lora=self._use_lora,
+            uses_sharded_model=bool(self._train_backend and self._train_backend.uses_sharded_model()),
+            algorithm=self.algorithm,
         )
-        ema_device = None if is_sharded else torch.device("cpu")
-
-        # 1) Eval EMA — always created for every algorithm.
-        self._eval_ema = EMAModuleWrapper(
-            trainable_params,
-            decay=self._eval_ema_decay,
-            update_step_interval=self._eval_ema_update_interval,
-            device=ema_device,
-        )
-        logger.info(
-            "Rank %s: Eval EMA initialised (decay=%s, update_interval=%d, params=%d, device=%s)",
-            self.rank, self._eval_ema_decay, self._eval_ema_update_interval,
-            len(trainable_params), ema_device or "same-as-model",
-        )
-
-        # 2) NFT-specific reference-model EMA.
-        is_nft = self._loss_type == "nft"
-        if is_nft and self._use_lora:
-            # LoRA mode: keep the dual-adapter mechanism.
-            self._ema_updater = DualAdapterEMA(
-                decay=self._ema_decay,
-                decay_type=ema_decay_type,
-                flat_steps=ema_flat_steps,
-                uprate=ema_uprate,
-                uphold=ema_uphold,
-                old_adapter_name=old_adapter_name,
-                new_adapter_name=new_adapter_name,
-            )
-            self._use_ema = True
-            logger.info(
-                "Rank %s: NFT DualAdapterEMA enabled (decay=%s, decay_type=%s, "
-                "flat_steps=%s, uprate=%s, uphold=%s, old=%s, new=%s)",
-                self.rank, self._ema_decay, ema_decay_type,
-                ema_flat_steps, ema_uprate, ema_uphold,
-                old_adapter_name, new_adapter_name,
-            )
-        elif is_nft and not self._use_lora:
-            # Full-param mode: old model = EMA of trainable params.
-            decay_fn = self._build_nft_decay_fn(
-                ema_decay_type, self._ema_decay,
-                ema_flat_steps, ema_uprate, ema_uphold,
-            )
-            self._nft_old_params_ema = EMAModuleWrapper(
-                trainable_params,
-                decay=self._ema_decay,
-                decay_fn=decay_fn,
-                update_step_interval=1,
-                device=ema_device,
-            )
-            # Inject into loss so get_old_prediction can use it.
-            self.loss_fn._old_params_ema = self._nft_old_params_ema
-            self._use_ema = False  # DualAdapterEMA not used
-            logger.info(
-                "Rank %s: NFT full-param old-model EMA initialised "
-                "(decay=%s, decay_type=%s, params=%d)",
-                self.rank, self._ema_decay, ema_decay_type, len(trainable_params),
-            )
-
-    @staticmethod
-    def _build_nft_decay_fn(
-        decay_type: str,
-        base_decay: float,
-        flat_steps: int,
-        uprate: float,
-        uphold: float,
-    ):
-        """Build NFT decay schedule (matches DualAdapterEMA logic)."""
-        if decay_type == "linear":
-            return lambda step: min(step * uprate, uphold)
-        if decay_type == "warmup":
-            return lambda step: 0.0 if step < flat_steps else min((step - flat_steps) * uprate, uphold)
-        # "constant" or unknown
-        return None  # fall back to EMAModuleWrapper default formula
 
     def apply_ema_for_eval(self) -> bool:
         """Swap eval-EMA weights into the model for evaluation."""
-        if self._eval_ema is None:
+        if self._ema_manager is None:
             return False
-        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        self._eval_ema.copy_ema_to(trainable_params, store_temp=True, grad=False)
-        logger.debug("Rank %s: EMA weights applied for eval", self.rank)
-        return True
+        applied = self._ema_manager.apply_eval_ema(self.model)
+        if applied:
+            logger.debug("Rank %s: EMA weights applied for eval", self.rank)
+        return applied
 
     def restore_from_eval(self) -> bool:
         """Restore training weights after evaluation."""
-        if self._eval_ema is None or self._eval_ema.temp_stored_parameters is None:
+        if self._ema_manager is None:
             return False
-        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        self._eval_ema.copy_temp_to(trainable_params)
-        logger.debug("Rank %s: Training weights restored after eval", self.rank)
-        return True
+        restored = self._ema_manager.restore_from_eval(self.model)
+        if restored:
+            logger.debug("Rank %s: Training weights restored after eval", self.rank)
+        return restored
 
     def _maybe_replay_old_log_probs(self, batch: BackwardTrainingBatch) -> BackwardTrainingBatch:
         if self._guidance_scale is None:
             raise RuntimeError(
                 "TrainingActor guidance_scale is not initialized. "
-                "Ensure loss_config.guidance_scale is provided before replay."
+                "Ensure algorithm_config.guidance_scale is provided before replay."
             )
         return self._replay_logprob_patch.maybe_replay_old_log_probs(
             batch=batch,
             enabled=self._replay_log_probs,
-            loss_type=self._loss_type,
+            algorithm_type=self._algorithm_type,
             sampling_config=self._sampling_config,
             model_bundle=self.model_bundle,
             model=self.model,
@@ -805,22 +739,19 @@ class TrainingActor(BaseTrainRayActor):
         )
 
     def generate(self, request: RolloutRequest) -> RolloutOutput:
-        output = self._sampling_service.generate_local(self, request)
+        output = self._sampling_runtime.generate_local(self, request)
         prompts = request.prompts
-        prompt_metadata = request.kwargs.get("_prompt_metadata")
         output = self._attach_local_reward_to_output(
             output=output,
             prompts=prompts,
-            prompt_metadata=prompt_metadata,
-            num_samples_per_prompt=int(request.kwargs.get("num_samples_per_prompt", 1) or 1),
-            keep_reward_media_for_manager=bool(
-                request.kwargs.get("_keep_reward_media_for_manager", False)
-            ),
+            prompt_ids=request.prompt_ids,
+            sample_ids=request.sample_ids,
+            group_ids=request.group_ids,
+            prompt_metadata=request.prompt_metadata,
+            keep_reward_media_for_manager=bool(request.keep_reward_media_for_manager),
+            samples_per_prompt=int(request.samples_per_prompt or 1),
         )
         return output.to_device("cpu")
-
-    def generate_batch(self, requests: List[RolloutRequest]) -> List[RolloutOutput]:
-        return self._sampling_service.generate_batch(self, requests)
 
     def get_train_backend_info(self) -> Dict[str, Any]:
         if self._train_backend is None:
@@ -849,19 +780,13 @@ class TrainingActor(BaseTrainRayActor):
             dp_size=dp_size,
             device=self._device,
             use_fsdp=bool(self._train_backend and self._train_backend.uses_sharded_model()),
-            loss_type=self._loss_type,
+            algorithm_type=self._algorithm_type,
             guidance_scale=self._guidance_scale,
             max_grad_norm=self._max_grad_norm,
             gradient_accumulation_batch_size=self._gradient_accumulation_batch_size,
             multi_update_batch_size=self._multi_update_batch_size,
             update_mode=self._update_mode,
-            use_ema=self._use_ema,
-            ema_updater=self._ema_updater,
-            eval_ema=self._eval_ema,
-            nft_old_params_ema=self._nft_old_params_ema,
-            nft_timestep_mode=self._nft_timestep_mode,
-            nft_shuffle_timesteps=self._nft_shuffle_timesteps,
-            nft_apply_shift=self._nft_apply_shift,
+            ema_manager=self._ema_manager,
             timestep_fraction=getattr(self, "_timestep_fraction", 1.0),
             shuffle_samples=self._shuffle_samples,
             shuffle_seed=self._shuffle_seed,
@@ -879,7 +804,7 @@ class TrainingActor(BaseTrainRayActor):
             model=self.model,
             optimizer=self.optimizer,
             lr_scheduler=self.lr_scheduler,
-            loss_fn=self.loss_fn,
+            algorithm=self.algorithm,
             config=config,
         )
 
@@ -935,51 +860,34 @@ class TrainingActor(BaseTrainRayActor):
         self._log_gpu_state("training_train_end")
         return metrics
 
-    def create_debug_forward_batch(
+    def create_debug_training_batch(
         self,
         batch_size: int,
         height: int,
         width: int,
         *,
+        num_inference_steps: int,
         latent_channels: int = 16,
         vae_scale_factor: int = 8,
         max_sequence_length: int = 256,
-    ) -> "ForwardTrainingBatch":
-        """Create a synthetic ForwardTrainingBatch for debug/testing.
-
-        Infers embedding dimensions from the loaded transformer config so
-        shapes are always correct for the current model.
-        """
-        from diffusionrl.types.training_batch import ForwardTrainingBatch
-        from diffusionrl.types.sampling import PromptEmbeddings
-
-        transformer = self.model
-        config = getattr(transformer, "config", None)
-        if config is not None:
-            joint_dim = int(getattr(config, "joint_attention_dim", 4096))
-            pooled_dim = int(getattr(config, "pooled_projection_dim", 2048))
-        else:
-            joint_dim, pooled_dim = 4096, 2048
-
-        latent_h = height // vae_scale_factor
-        latent_w = width // vae_scale_factor
-        dtype = next(transformer.parameters()).dtype
-
-        clean_latents = torch.randn(batch_size, latent_channels, latent_h, latent_w, dtype=dtype)
-        prompt_embeds = torch.randn(batch_size, max_sequence_length, joint_dim, dtype=dtype)
-        pooled_prompt_embeds = torch.randn(batch_size, pooled_dim, dtype=dtype)
-        advantages = torch.randn(batch_size, dtype=dtype)
-        rewards = torch.randn(batch_size, dtype=dtype)
-
-        return ForwardTrainingBatch(
-            clean_latents=clean_latents,
-            advantages=advantages,
-            embeddings=PromptEmbeddings(
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-            ),
-            rewards=rewards,
-            prompts=[f"debug_prompt_{i}" for i in range(batch_size)],
+    ) -> TrainingBatch:
+        """Create a synthetic debug batch with the algorithm's expected type."""
+        model_type = (
+            self.model_bundle.model_type
+            if self.model_bundle is not None and hasattr(self.model_bundle, "model_type")
+            else ""
+        )
+        return _build_synthetic_debug_training_batch(
+            model=self.model,
+            algorithm=self.algorithm,
+            model_type=model_type,
+            batch_size=batch_size,
+            height=height,
+            width=width,
+            num_inference_steps=num_inference_steps,
+            latent_channels=latent_channels,
+            vae_scale_factor=vae_scale_factor,
+            max_sequence_length=max_sequence_length,
         )
 
     # --- State IO methods ---
@@ -1374,6 +1282,8 @@ class TrainingActor(BaseTrainRayActor):
             }
             if self.lr_scheduler is not None:
                 checkpoint["scheduler_state_dict"] = self.lr_scheduler.state_dict()
+            if self._ema_manager is not None:
+                checkpoint["ema_state_dict"] = self._ema_manager.state_dict()
             torch.save(checkpoint, os.path.join(path, "checkpoint.pt"))
             logger.info("Checkpoint saved to %s", path)
         finally:
@@ -1391,6 +1301,11 @@ class TrainingActor(BaseTrainRayActor):
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         if self.lr_scheduler is not None and "scheduler_state_dict" in checkpoint:
             self.lr_scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        if self._ema_manager is not None and "ema_state_dict" in checkpoint:
+            self._ema_manager.load_state_dict(
+                checkpoint["ema_state_dict"],
+                algorithm=self.algorithm,
+            )
         logger.info("Checkpoint loaded from %s", path)
 
     # --- Memory methods ---
@@ -1430,6 +1345,8 @@ class TrainingActor(BaseTrainRayActor):
 
     def offload(self) -> None:
         """Offload model and optimizer to CPU."""
+        if self._local_reward_runtime is not None:
+            self._local_reward_runtime.offload()
         backend = getattr(self, "_train_backend", None)
         if backend is not None:
             try:
@@ -1467,6 +1384,8 @@ class TrainingActor(BaseTrainRayActor):
 
     def onload(self) -> None:
         """Load model and optimizer back to GPU."""
+        if self._local_reward_runtime is not None:
+            self._local_reward_runtime.onload()
         backend = getattr(self, "_train_backend", None)
         if backend is not None:
             try:

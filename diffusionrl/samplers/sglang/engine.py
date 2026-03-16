@@ -202,14 +202,14 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             )
         return response
 
-    def _sglang_logprob_mode(self) -> str:
-        mode = str((self.config.engine_kwargs or {}).get("sglang_logprob_mode", "replay")).strip().lower()
+    def _logprob_source(self) -> str:
+        mode = str((self.config.engine_kwargs or {}).get("logprob_source", "replay")).strip().lower()
         if mode not in {"replay", "native"}:
             return "replay"
         return mode
 
     def _native_rollout_logprob_enabled(self) -> bool:
-        return self._sglang_logprob_mode() == "native"
+        return self._logprob_source() == "native"
 
     def _build_server_kwargs(self, server_args_cls: Any) -> Dict[str, Any]:
         raw = dict(self.config.engine_kwargs or {})
@@ -1068,9 +1068,9 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         if rollout_enabled and not self._native_rollout_logprob_enabled():
             if not self._warned_disabled_native_rollout:
                 logger.warning(
-                    "enable_rollout_logprob requested but sglang_logprob_mode=%r. "
+                    "enable_rollout_logprob requested but logprob_source=%r. "
                     "Disabling native rollout logprob and using replay path.",
-                    self._sglang_logprob_mode(),
+                    self._logprob_source(),
                 )
                 self._warned_disabled_native_rollout = True
             rollout_enabled = False
@@ -1283,7 +1283,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         metadata: Dict[str, Any] = {
             "generator_type": "sglang",
             "engine_capabilities": self.get_capabilities_dict(),
-            "sglang_logprob_mode": self._sglang_logprob_mode(),
+            "logprob_source": self._logprob_source(),
             "encode_prompt_in_generate": bool(self._encode_prompt_in_generate),
             "trajectory_format": trajectory_format,
             "timestep_type": "sigma",

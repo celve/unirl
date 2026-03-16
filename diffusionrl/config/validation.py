@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Dict, Optional
 
@@ -78,8 +77,8 @@ def validate_reward_config(args) -> None:
     local_reward_device = str(
         getattr(args.reward, "local_reward_device", "cpu") or "cpu"
     ).strip().lower()
-    reward_execution_mode = str(
-        getattr(args.reward, "reward_execution_mode", "manager") or "manager"
+    reward_location = str(
+        getattr(args.reward, "reward_location", "manager") or "manager"
     ).strip().lower()
     allow_local_reward_cuda_contention = bool(
         getattr(args.reward, "allow_local_reward_cuda_contention", False)
@@ -93,20 +92,20 @@ def validate_reward_config(args) -> None:
             "use_http_reward=true requires reward_service_url or reward_service_urls."
         )
 
-    if reward_execution_mode == "rollout":
+    if reward_location == "sampling_actor":
         if has_http_reward:
             raise ValueError(
-                "reward_execution_mode='rollout' cannot be combined with HTTP reward service. "
-                "Use reward_execution_mode='manager' for HTTP reward."
+                "reward_location='sampling_actor' cannot be combined with HTTP reward service. "
+                "Use reward_location='manager' for HTTP reward."
             )
         if has_dedicated_reward_pool:
             raise ValueError(
-                "reward_execution_mode='rollout' cannot be combined with dedicated reward actors. "
-                "Use reward_execution_mode='manager' for reward_dedicated_* modes."
+                "reward_location='sampling_actor' cannot be combined with dedicated reward actors. "
+                "Use reward_location='manager' for reward_dedicated_* modes."
             )
 
     uses_local_same_process_reward = (
-        reward_execution_mode == "manager"
+        reward_location == "manager"
         and not has_http_reward
         and not has_dedicated_reward_pool
     )
@@ -121,9 +120,9 @@ def validate_reward_config(args) -> None:
             "use_http_reward, or set allow_local_reward_cuda_contention=true to force."
         )
 
-    if reward_execution_mode == "rollout":
+    if reward_location == "sampling_actor":
         logger.info(
-            "Reward mode: rollout-local worker (local_reward_device=%s)",
+            "Reward mode: sampling-actor-local worker (local_reward_device=%s)",
             local_reward_device,
         )
     elif has_http_reward:
@@ -166,10 +165,6 @@ def validate_dynamic_dotpaths(args: Any) -> None:
         validate_dotpath(args.training.train_backend_path, label="train_backend")
     if getattr(args.sampling, "replay_sampler_path", None):
         validate_dotpath(args.sampling.replay_sampler_path, label="replay_sampler")
-    if getattr(args.rollout, "rollout_pipeline_path", None):
-        validate_dotpath(args.rollout.rollout_pipeline_path, label="rollout_pipeline")
-    if getattr(args.algorithm, "loss_path", None):
-        validate_dotpath(args.algorithm.loss_path, label="loss")
     rollout_buffer_plugin_paths = getattr(args.rollout, "rollout_buffer_plugin_paths", "") or ""
     if isinstance(rollout_buffer_plugin_paths, str):
         for plugin_path in [part.strip() for part in rollout_buffer_plugin_paths.split(",") if part.strip()]:
@@ -241,7 +236,7 @@ def validate_reward_and_rollout_buffer_config(args: Any) -> None:
     if int(getattr(args.rollout, "rollout_buffer_dispatch_groups", 0)) < 0:
         raise ValueError(
             "rollout_buffer_dispatch_groups must be >= 0 "
-            f"(0 means prompts_per_batch), got: {args.rollout.rollout_buffer_dispatch_groups}"
+            f"(0 means prompts_per_rollout), got: {args.rollout.rollout_buffer_dispatch_groups}"
         )
     if float(getattr(args.rollout, "rollout_buffer_group_ttl_seconds", 0.0)) < 0:
         raise ValueError(
@@ -258,10 +253,10 @@ def validate_reward_and_rollout_buffer_config(args: Any) -> None:
 def validate_rollout_layout(
     args: Any,
     *,
-    training_actor_direct_sampling: bool,
+    training_actor_sampling_mode: bool,
 ) -> None:
     """Validate rollout actor GPU layout and colocate constraints."""
-    if training_actor_direct_sampling:
+    if training_actor_sampling_mode:
         return
 
     rollout_gpus = get_rollout_gpus_per_actor(args)
@@ -317,33 +312,33 @@ def validate_model_specific_logic(args: Any, *, model_cls: Any) -> None:
                         source="model_validate_config",
                     )
 
-    if args.algorithm.loss_type == "nft":
+    if args.algorithm.algorithm_type == "nft":
         # DiffusionNFT reproduction contract:
         # - rollout samples from old adapter
         # - deterministic solver (dpm2)
         old_adapter_name = "old"
-        loss_kwargs = getattr(args.algorithm, "loss_kwargs", {})
+        algorithm_kwargs = getattr(args.algorithm, "algorithm_kwargs", {})
         parsed: Dict[str, Any] = {}
-        if loss_kwargs is None:
+        if algorithm_kwargs is None:
             parsed = {}
-        elif isinstance(loss_kwargs, dict):
-            parsed = dict(loss_kwargs)
+        elif isinstance(algorithm_kwargs, dict):
+            parsed = dict(algorithm_kwargs)
         else:
             raise ValueError(
-                "algorithm.loss_kwargs must be a dict after validate_loss_kwargs(), "
-                f"got: {type(loss_kwargs).__name__}"
+                "algorithm.algorithm_kwargs must be a dict after normalization, "
+                f"got: {type(algorithm_kwargs).__name__}"
             )
         if parsed:
             old_adapter_name = str(parsed.get("old_adapter_name", old_adapter_name) or old_adapter_name)
 
         if not args.sampling.sampling_adapter:
             raise ValueError(
-                "loss_type='nft' requires --sampling.sampling-adapter to be set "
+                "algorithm_type='nft' requires --sampling.sampling-adapter to be set "
                 f"(must match old_adapter_name={old_adapter_name!r})."
             )
         if str(args.sampling.sampling_adapter) != old_adapter_name:
             raise ValueError(
-                "loss_type='nft' requires rollout sampling from the old adapter. "
+                "algorithm_type='nft' requires rollout sampling from the old adapter. "
                 f"Set --sampling.sampling-adapter {old_adapter_name!r}, "
                 f"got {args.sampling.sampling_adapter!r}."
             )
@@ -351,52 +346,23 @@ def validate_model_specific_logic(args: Any, *, model_cls: Any) -> None:
         eta = float(getattr(args.sampling, "eta", 1.0))
         if sde_type != "dpm2" and not (sde_type == "sde" and eta == 0.0):
             raise ValueError(
-                "loss_type='nft' targets DiffusionNFT deterministic sampling. "
+                "algorithm_type='nft' targets DiffusionNFT deterministic sampling. "
                 "Set --sampling.sde-type dpm2, or use --sampling.sde-type sde "
                 f"with --sampling.eta 0.0 (ODE mode). "
                 f"Got sde_type={sde_type!r}, eta={eta}."
             )
 
 
-def validate_loss_kwargs(args: Any) -> None:
-    """Validate and normalize loss_kwargs into a dict."""
-    raw = getattr(args.algorithm, "loss_kwargs", "")
-    if raw is None:
-        args.algorithm.loss_kwargs = {}
-        return
-    if isinstance(raw, dict):
-        args.algorithm.loss_kwargs = dict(raw)
-        return
-    if not isinstance(raw, str):
-        raise ValueError(
-            "loss_kwargs must be a JSON object (YAML mapping) "
-            f"or JSON object string, got: {type(raw).__name__}"
-        )
-
-    text = raw.strip()
-    if not text:
-        args.algorithm.loss_kwargs = {}
-        return
-
-    try:
-        parsed = json.loads(text)
-    except Exception as exc:
-        raise ValueError(f"Invalid loss_kwargs: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("loss_kwargs must decode to a JSON object.")
-    args.algorithm.loss_kwargs = dict(parsed)
-
-
-def validate_resolved_engine_loss_contract(
+def validate_resolved_engine_algorithm_contract(
     args: Any,
     *,
-    training_actor_direct_sampling: bool,
+    training_actor_sampling_mode: bool,
     is_sglang_engine: bool,
     replay_guard: bool,
-    sglang_logprob_mode: str,
+    logprob_source: str,
 ) -> None:
-    """Validate engine/loss compatibility using resolved capabilities."""
-    if training_actor_direct_sampling:
+    """Validate engine/algorithm compatibility using resolved capabilities."""
+    if training_actor_sampling_mode:
         return
 
     sampler_engine_type = str(getattr(args.sampling, "sampler_engine_type", "") or "")
@@ -404,7 +370,7 @@ def validate_resolved_engine_loss_contract(
 
     allow_replay = (
         bool(getattr(args.sampling, "replay_log_probs", False))
-        and getattr(args.algorithm, "loss_type", "grpo") == "grpo"
+        and getattr(args.algorithm, "algorithm_type", "grpo") == "grpo"
     )
     if allow_replay:
         engine_caps = dict(engine_caps, requires_log_prob=True, requires_embeddings=True)
@@ -414,7 +380,7 @@ def validate_resolved_engine_loss_contract(
             sampler_engine_type,
         )
 
-    if is_sglang_engine and replay_guard and sglang_logprob_mode == "native":
+    if is_sglang_engine and replay_guard and logprob_source == "native":
         engine_caps = dict(engine_caps, requires_log_prob=True, requires_embeddings=True)
 
     required = resolve_sampling_requirements(args)
@@ -424,8 +390,8 @@ def validate_resolved_engine_loss_contract(
         if bool(required.requires_trajectory):
             raise ValueError(
                 "sampler_engine_type='sglang' with model_type='sd3' currently does not "
-                "provide trajectory_latents required by trajectory-based losses "
-                "(e.g. GRPO/MixGRPO). Use sampler_engine_type='fsdp', or use loss_type='nft' "
+                "provide trajectory_latents required by trajectory-based algorithms "
+                "(e.g. GRPO/MixGRPO). Use sampler_engine_type='fsdp', or use algorithm_type='nft' "
                 "when running SD3 with sglang."
             )
         engine_caps = dict(engine_caps, requires_trajectory=False)
@@ -438,22 +404,22 @@ def validate_resolved_engine_loss_contract(
     ]
     if missing:
         raise ValueError(
-            f"Engine capability mismatch for loss_type={args.algorithm.loss_type}: "
+            f"Engine capability mismatch for algorithm_type={args.algorithm.algorithm_type}: "
             f"sampler_engine_type={sampler_engine_type} lacks {missing}. "
             f"engine_capabilities={engine_caps}, required={required_dict}. "
-            "Use a compatible engine/loss pair (for example: fsdp+grpo or fsdp+nft)."
+            "Use a compatible engine/algorithm pair (for example: fsdp+grpo or fsdp+nft)."
         )
 
 
 def validate_runtime_mode_constraints(
     args: Any,
     *,
-    training_actor_direct_sampling: bool,
+    training_actor_sampling_mode: bool,
     model_cls: Any,
 ) -> None:
     """Validate runtime mode constraints and mutually-exclusive switches."""
     if (
-        not training_actor_direct_sampling
+        not training_actor_sampling_mode
         and str(getattr(args.sampling, "sampler_engine_type", "")).lower() == "sglang"
     ):
         supports_sglang = getattr(model_cls, "supports_sglang_prompt_mode", None)
@@ -471,8 +437,8 @@ def validate_runtime_mode_constraints(
     if getattr(args.rollout, "async_pipeline", False):
         if args.ray.colocate_rollout_training:
             raise ValueError("async_pipeline requires separate mode (colocate_rollout_training=False).")
-        if training_actor_direct_sampling:
-            raise ValueError("async_pipeline currently requires training_actor_direct_sampling=false.")
+        if training_actor_sampling_mode:
+            raise ValueError("async_pipeline currently requires sampling_mode='rollout_actor'.")
         if int(getattr(args.rollout, "async_max_inflight", 1)) < 1:
             raise ValueError("async_max_inflight must be >= 1.")
         if args.rollout.update_weights_interval <= 0:
@@ -494,7 +460,6 @@ __all__ = [
     "validate_reward_and_rollout_buffer_config",
     "validate_rollout_layout",
     "validate_model_specific_logic",
-    "validate_loss_kwargs",
-    "validate_resolved_engine_loss_contract",
+    "validate_resolved_engine_algorithm_contract",
     "validate_runtime_mode_constraints",
 ]

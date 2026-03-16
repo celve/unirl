@@ -357,7 +357,8 @@ class SD3Sampler(BaseSampler):
         sde_indices: Optional[Set[int]] = None,
         max_sequence_length: int = 256,
         init_same_noise: bool = False,
-        num_samples_per_prompt: int = 1,
+        samples_per_prompt: int = 1,
+        noise_group_ids: Optional[List[str]] = None,
         debug_output_dir: Optional[str] = None,
         **kwargs,
     ) -> RolloutOutput:
@@ -379,7 +380,7 @@ class SD3Sampler(BaseSampler):
                 If None, all timesteps use SDE.
             max_sequence_length: Maximum T5 sequence length
             init_same_noise: Share initial noise across K samples for same prompt (DanceGRPO/MixGRPO)
-            num_samples_per_prompt: Number of samples per prompt (for init_same_noise)
+            samples_per_prompt: Number of samples per prompt (for init_same_noise)
             debug_output_dir: If set, dump per-step SDE tensors to this directory for
                 train-inference consistency debugging.
 
@@ -436,7 +437,8 @@ class SD3Sampler(BaseSampler):
                 dtype=dtype,
                 generator=generator,
                 init_same_noise=init_same_noise,
-                num_samples_per_prompt=num_samples_per_prompt,
+                samples_per_prompt=samples_per_prompt,
+                noise_group_ids=noise_group_ids,
             )
         else:
             latents = latents.to(device=device, dtype=dtype)

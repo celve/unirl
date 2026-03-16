@@ -11,17 +11,17 @@ Reference:
 - MixGRPO: Same technique for reduced variance in advantage estimation
 """
 
-from typing import Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 import torch
 
 
 def generate_shared_noise(
     batch_size: int,
-    num_samples_per_prompt: int,
     latent_shape: Tuple[int, ...],
     device: torch.device,
     dtype: torch.dtype = torch.float32,
     generator: Optional[torch.Generator] = None,
+    noise_group_ids: Optional[List[str]] = None,
 ) -> torch.Tensor:
     """
     Generate initial noise where samples from the same prompt share the same noise.
@@ -34,12 +34,12 @@ def generate_shared_noise(
     3. Improves training stability
 
     Example:
-        # For batch_size=8, num_samples_per_prompt=4:
+        # For batch_size=8, samples_per_prompt=4:
         # - prompt_0: samples [0,1,2,3] share noise_0
         # - prompt_1: samples [4,5,6,7] share noise_1
         noise = generate_shared_noise(
             batch_size=8,
-            num_samples_per_prompt=4,
+            samples_per_prompt=4,
             latent_shape=(16, 64, 64),  # channels, height, width
             device=device,
             dtype=dtype,
@@ -50,59 +50,37 @@ def generate_shared_noise(
 
     Args:
         batch_size: Total number of samples in batch
-        num_samples_per_prompt: Number of samples generated per prompt
         latent_shape: Shape of a single latent (C, H, W) or (C, T, H, W) for video
         device: Device for the tensor
         dtype: Data type for the tensor
         generator: Optional random generator for reproducibility
+        noise_group_ids: Explicit per-sample noise sharing groups aligned to the batch
 
     Returns:
-        Noise tensor [batch_size, *latent_shape] with shared noise per prompt group
+        Noise tensor [batch_size, *latent_shape] with shared noise per explicit group
     """
-    if num_samples_per_prompt <= 1:
-        # No sharing needed, generate independent noise
-        return torch.randn(
-            batch_size,
-            *latent_shape,
-            device=device,
-            dtype=dtype,
-            generator=generator,
+    if not isinstance(noise_group_ids, list) or len(noise_group_ids) != batch_size:
+        raise ValueError(
+            "generate_shared_noise requires explicit noise_group_ids aligned to batch_size. "
+            f"Got batch_size={batch_size}, noise_group_ids_len="
+            f"{len(noise_group_ids) if isinstance(noise_group_ids, list) else None}."
         )
 
-    # Calculate number of unique prompts
-    num_unique_prompts = batch_size // num_samples_per_prompt
-
-    if batch_size % num_samples_per_prompt != 0:
-        # Handle incomplete groups - generate extra noise for remaining samples
-        remaining = batch_size % num_samples_per_prompt
-    else:
-        remaining = 0
-
-    # Generate noise for unique prompts only
-    base_noise = torch.randn(
-        num_unique_prompts,
-        *latent_shape,
-        device=device,
-        dtype=dtype,
-        generator=generator,
-    )
-
-    # Repeat each noise sample num_samples_per_prompt times
-    # [num_unique, C, H, W] -> [num_unique * K, C, H, W]
-    shared_noise = base_noise.repeat_interleave(num_samples_per_prompt, dim=0)
-
-    # Handle remaining samples if batch doesn't divide evenly
-    if remaining > 0:
-        extra_noise = torch.randn(
-            remaining,
-            *latent_shape,
-            device=device,
-            dtype=dtype,
-            generator=generator,
-        )
-        shared_noise = torch.cat([shared_noise, extra_noise], dim=0)
-
-    return shared_noise
+    group_noise: Dict[str, torch.Tensor] = {}
+    chunks: List[torch.Tensor] = []
+    for raw_group_id in noise_group_ids:
+        group_id = str(raw_group_id)
+        noise = group_noise.get(group_id)
+        if noise is None:
+            noise = torch.randn(
+                *latent_shape,
+                device=device,
+                dtype=dtype,
+                generator=generator,
+            )
+            group_noise[group_id] = noise
+        chunks.append(noise)
+    return torch.stack(chunks, dim=0)
 
 
 def generate_latents(
@@ -112,7 +90,8 @@ def generate_latents(
     dtype: torch.dtype = torch.float32,
     generator: Optional[torch.Generator] = None,
     init_same_noise: bool = False,
-    num_samples_per_prompt: int = 1,
+    samples_per_prompt: int = 1,
+    noise_group_ids: Optional[List[str]] = None,
 ) -> torch.Tensor:
     """
     High-level function for generating initial latents with optional noise sharing.
@@ -127,27 +106,24 @@ def generate_latents(
         dtype: Data type for the tensor
         generator: Optional random generator
         init_same_noise: Whether to share noise across samples for same prompt
-        num_samples_per_prompt: Number of samples per prompt (used if init_same_noise=True)
+        samples_per_prompt: Rollout geometry hint kept for sampler API compatibility
 
     Returns:
         Latent tensor [batch_size, *latent_shape]
     """
-    if init_same_noise and num_samples_per_prompt > 1:
+    if init_same_noise:
         return generate_shared_noise(
             batch_size=batch_size,
-            num_samples_per_prompt=num_samples_per_prompt,
             latent_shape=latent_shape,
             device=device,
             dtype=dtype,
             generator=generator,
+            noise_group_ids=noise_group_ids,
         )
-    else:
-        return torch.randn(
-            batch_size,
-            *latent_shape,
-            device=device,
-            dtype=dtype,
-            generator=generator,
-        )
-
-
+    return torch.randn(
+        batch_size,
+        *latent_shape,
+        device=device,
+        dtype=dtype,
+        generator=generator,
+    )
