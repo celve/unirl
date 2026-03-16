@@ -427,7 +427,7 @@ class RolloutManager:
         # 5. 计算优势函数
         advantages = self.algorithm.compute_advantages(
             rewards,
-            num_samples_per_prompt=self.num_samples_per_prompt
+            samples_per_prompt=self.samples_per_prompt
         )
         # advantages: Tensor[B]，归一化后的奖励
 
@@ -1103,7 +1103,7 @@ class BaseAlgorithm:
         return 0.0
 
     def get_filtered_training_indices(self, sde_indices, num_steps) -> Set[int]:
-        """获取过滤后的训练时间步（支持 ignore_last, frozen_init_timesteps）"""
+        """获取过滤后的训练时间步（支持 skip_last_timestep, skip_initial_timesteps）"""
         ...
 
     def compute_aggregated_loss(self, model, batch, **kwargs):
@@ -1117,7 +1117,7 @@ class BaseAlgorithm:
 classDiagram
     class BaseAlgorithm {
         <<abstract>>
-        +str advantage_type
+        +str adv_normalization
         +float clip_range
         +float kl_coef
         +float epsilon
@@ -1141,10 +1141,10 @@ classDiagram
         +float kl_coef = 0.01
         +str sde_type = "sde"
         +float eta = 1.0
-        +str advantage_type = "group"
+        +str adv_normalization = "group"
         +bool use_global_std
-        +bool ignore_last
-        +int frozen_init_timesteps
+        +bool skip_last_timestep
+        +int skip_initial_timesteps
         -PerPromptStatTracker per_prompt_tracker
         -RunningRewardNormalizer running_reward_normalizer
         +_normalize_global()
@@ -1197,8 +1197,8 @@ classDiagram
 | **RunningRewardNormalizer** | `use_running_stats=True`, `running_stats_warmup` | DanceGRPO 跨批次累积统计量，Welford 算法 |
 | **Per-Prompt Batch 模式** | `per_prompt_mode="batch"` | 批内 per-prompt 归一化，可选 `use_global_std` |
 | **Per-Prompt Running 模式** | `per_prompt_mode="running"` | 跨批次追踪，使用 PerPromptStatTracker |
-| **忽略最后时间步** | `ignore_last=True` | MixGRPO 稳定性：跳过 t→0 的不稳定 log_prob |
-| **冻结初始时间步** | `frozen_init_timesteps=N` | MixGRPO 稳定性：跳过前 N 步高方差区域 |
+| **忽略最后时间步** | `skip_last_timestep=True` | MixGRPO 稳定性：跳过 t→0 的不稳定 log_prob |
+| **冻结初始时间步** | `skip_initial_timesteps=N` | MixGRPO 稳定性：跳过前 N 步高方差区域 |
 
 #### Advantage 归一化策略
 
@@ -1284,7 +1284,7 @@ class GRPOLoss(BaseLoss):
     def __init__(
         self,
         clip_range: float = 1e-4,
-        clip_range_mode: str = "constant",  # constant, linear_decay, cosine_decay
+        clip_schedule: str = "constant",  # constant, linear_decay, cosine_decay
         kl_coef: float = 0.01,
         sde_type: str = "sde",  # sde, cps, dance, flux_dance, flux_flow
         use_kl_penalty: bool = True,
@@ -1296,11 +1296,11 @@ class GRPOLoss(BaseLoss):
 
     def get_clip_range(self, progress: float) -> float:
         """根据训练进度获取 clip_range"""
-        if self.clip_range_mode == "constant":
+        if self.clip_schedule == "constant":
             return self.clip_range
-        elif self.clip_range_mode == "linear_decay":
+        elif self.clip_schedule == "linear_decay":
             return self.clip_range * (1 - progress)
-        elif self.clip_range_mode == "cosine_decay":
+        elif self.clip_schedule == "cosine_decay":
             return self.clip_range * 0.5 * (1 + math.cos(math.pi * progress))
 
     def compute_log_prob(self, noise_pred, prev_sample, sample, sigma, sigma_next, eta):
@@ -1601,7 +1601,7 @@ classDiagram
         -EMAUpdater ema_updater
         -int rank
         -int world_size
-        -Optional sampler (training_actor_direct_sampling=true)
+        -Optional sampler (sampling_mode='training_actor')
         -Optional _sampling_config
         -bool _sampling_ready
         +init(config: Dict)
@@ -1613,7 +1613,7 @@ classDiagram
         +offload()
         +onload()
         +clear_memory()
-        +generate() (training_actor_direct_sampling=true)
+        +generate() (sampling_mode='training_actor')
     }
 
     RayActor <|-- BaseTrainRayActor
@@ -2391,7 +2391,7 @@ sequenceDiagram
 
     RS-->>RM: rewards: Tensor[B]
 
-    RM->>Algo: compute_advantages(rewards, num_samples_per_prompt)
+    RM->>Algo: compute_advantages(rewards, samples_per_prompt)
     Note over Algo: 归一化: global / group / per_prompt
     Algo-->>RM: advantages: Tensor[B]
 
@@ -2526,7 +2526,7 @@ class LocalRewardWorker:
 # 配置示例
 reward_models: List[str] = ["pickscore", "hpsv2"]
 reward_weights: List[float] = [0.3, 0.7]
-reward_aggregation: str = "weighted_sum"  # weighted_sum, mean, min, max
+component_aggregation: str = "weighted_sum"  # weighted_sum, mean, min, max
 ```
 
 **聚合流程**：
@@ -2735,7 +2735,7 @@ reward_dedicated_num_gpus_per_node: int = 0  # 每节点 GPU 数
 |-------|---------|------|
 | **动态加载路径** | `algorithm_path`, `sampler_path`, `reward_path`, `model_path` | 支持自定义实现 |
 | **模型配置** | `pretrained_model_saved_path`, `model_type`, `vae_saved_path` | FLUX/SD3/Hunyuan/Mochi |
-| **算法配置** | `clip_range`, `kl_coef`, `advantage_type`, `sde_type` | PPO 超参数 |
+| **算法配置** | `clip_range`, `kl_coef`, `adv_normalization`, `sde_type` | PPO 超参数 |
 | **采样配置** | `num_inference_steps`, `eta`, `shift`, `sde_ratio`, `init_same_noise` | SDE 采样控制 |
 | **NFT 配置** | `nft_beta`, `nft_adv_mode`, `use_ema`, `ema_decay`, `nft_timestep_mode`, `nft_shuffle_timesteps`, `nft_apply_shift` | DiffusionNFT 特定 |
 | **DanceGRPO 配置** | `use_running_stats`, `running_stats_warmup`, `use_global_std` | 跨批次统计 |
@@ -2744,7 +2744,7 @@ reward_dedicated_num_gpus_per_node: int = 0  # 每节点 GPU 数
 | **Offload** | `offload`, `offload_train`, `offload_rollout`, `colocate_rollout_training` | 内存优化 |
 | **采样模式** | `training_actor_direct_sampling` | `false`=独立 rollout actor, `true`=training actor 直采样 |
 | **训练优化** | `use_gradient_checkpointing`, `gradient_steps_per_epoch`, `cross_rank_shuffle` | 内存/性能优化 |
-| **数据分区** | `partition_train_data`, `prompts_per_batch` | 大批次数据分区 |
+| **数据分区** | `partition_train_data`, `prompts_per_rollout` | 大批次数据分区 |
 | **Colocate 精细控制** | `colocate_training_gpu_fraction`, `colocate_rollout_gpu_fraction` | GPU 分配比例 |
 | **异步管道** | `async_pipeline`, `async_max_inflight`, `update_weights_interval` | 异步 rollout/train 重叠 [v4.0] |
 | **权重同步** | `weight_sync_mode`, `weight_sync_dir` | ObjectRef / checkpoint_path 双模式 [v4.0] |

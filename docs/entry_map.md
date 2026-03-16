@@ -12,7 +12,7 @@ Read in this order:
    - Converts flat args into actor/runtime domain configs.
 4. `diffusionrl/ray/rollout_manager.py`
    - Sampling, reward/advantage computation, training-batch assembly.
-5. `diffusionrl/ray/rollout_buffer.py`
+5. `diffusionrl/ray/buffer_actor.py`
    - Rollout/training handoff buffer and alignment/queue semantics.
 6. `diffusionrl/ray/training_group.py`
    - Training actor-group orchestration and high-level train API.

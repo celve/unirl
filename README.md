@@ -22,33 +22,29 @@ DiffusionRL supports the following diffusion models:
 
 **Module Descriptions**:
 
-- **Training Actors (Ray + TrainBackend)**: Responsible for the main training process through pluggable training backends (FSDP2 / VeOmni native; Megatron scaffold), reads `TrainingBatch` from the rollout pipeline, and synchronizes parameters to the inference actors after training.
+- **Training Actors (Ray + TrainBackend)**: Responsible for the main training process through pluggable training backends (FSDP2 / VeOmni native; Megatron scaffold), reads `TrainingBatch` from the rollout buffer, and synchronizes parameters to the inference actors after training.
 - **Inference Actors (FSDP / FastVideo / SGLang)**: Generates denoising trajectories and latent samples using pluggable sampling engines, producing `RolloutOutput` with a unified v1 contract.
-- **Reward Service**: Evaluates generated samples using configurable reward models (HPS, CLIP, PickScore, OCR, etc.) and feeds reward signals back to the training loop.
-- **RolloutManager**: The central orchestrator that coordinates sampling, reward computation, advantage calculation, and batch assembly.
+- **Reward Runtime**: Evaluates generated samples using configurable reward models (HPS, CLIP, PickScore, OCR, etc.) with a clean split between reward semantics and execution placement.
+- **RolloutManager**: The rollout-side producer facade that coordinates sampling, reward computation, advantage calculation, and batch assembly before handing data to the rollout buffer.
 
 ```
- ┌─────────────────────────────────────────────────────────────┐
- │                      RolloutManager                         │
- │  ┌──────────┐    ┌──────────────┐    ┌──────────────────┐  │
- │  │  Prompts  │───>│  Inference   │───>│  Reward Service  │  │
- │  │  (Data)   │    │  ActorGroup  │    │  (Local / HTTP)  │  │
- │  └──────────┘    └──────┬───────┘    └────────┬─────────┘  │
- │                         │ RolloutOutput (v1)   │ rewards    │
- │                         v                      v            │
- │               ┌─────────────────────────────────┐           │
- │               │  Advantage Calc + Batch Assembly │           │
- │               └──────────────┬──────────────────┘           │
- └──────────────────────────────┼──────────────────────────────┘
-                                │ TrainingBatch
-                                v
-                    ┌───────────────────────┐
-                    │   Training ActorGroup  │
-                    │   (FSDP + LoRA/Full)   │
-                    └───────────┬───────────┘
-                                │ weight sync
-                                v
-                       Back to Inference
+ ┌────────────────────┐     ┌─────────────────────────────┐
+ │   Prompt Source     │────>│ RolloutManager / Producer   │
+ └────────────────────┘     │  Sampling + Reward + Algo    │
+                            └──────────────┬───────────────┘
+                                           │ BufferPayload
+                                           v
+                              ┌──────────────────────────┐
+                              │      Rollout Buffer      │
+                              └─────────────┬────────────┘
+                                            │ TrainingBatch
+                                            v
+                              ┌──────────────────────────┐
+                              │    Training ActorGroup   │
+                              └─────────────┬────────────┘
+                                            │ weight sync
+                                            v
+                                   Back to Inference
 ```
 
 **Deployment Modes**:
@@ -252,7 +248,7 @@ See [scripts/README.md](scripts/README.md) for exact per-script defaults.
 Arguments in DiffusionRL are organized into the following categories:
 
 1.  **Model arguments**: `--model.model-type`, `--model.pretrained-model-saved-path`, `--training.use-lora`, `--training.lora-rank`, `--training.lora-alpha`, etc.
-2.  **Sampling arguments**: `--sampling.sde-type`, `--sampling.eta`, `--sampling.num-inference-steps`, `--sampling.guidance-scale`, `--sampling.shift`, `--sampling.timestep-fraction`, etc.
+2.  **Sampling arguments**: `--sampling.sde-type`, `--sampling.eta`, `--sampling.num-inference-steps`, `--sampling.guidance-scale`, `--sampling.time-shift`, `--sampling.timestep-fraction`, etc.
 3.  **Algorithm arguments**: `--algorithm.algorithm-path`, `--algorithm.clip-range`, `--algorithm.use-kl-penalty`, `--algorithm.advantage-type`, etc.
 4.  **Reward arguments**: `--reward.reward-path`, `--reward.reward-model-name`, `--reward.reward-batch-size`, etc.
 5.  **Training arguments**: `--training.learning-rate`, `--training.gradient-accumulation-batch-size`, `--training.multi-update-batch-size`, `--training.update-mode`, `--training.max-grad-norm`, etc.
@@ -295,7 +291,7 @@ diffusionrl/
 │   ├── rollout_manager.py          #   Central orchestrator
 │   ├── rollout_actor.py / training_actor.py
 │   ├── rollout_group.py / training_group.py / group_factory.py
-│   ├── rollout_buffer.py / placement_group.py / ray_utils.py
+│   ├── buffer_actor.py / placement_group.py / ray_utils.py
 ├── runtime/                        # Async runtime + ray-agnostic execution logic
 ├── patches/                        # Non-invasive patches for FastVideo
 └── utils/                          # Checkpointing, logging, EMA, weight sync
@@ -329,8 +325,6 @@ class MyAlgorithm(BaseAlgorithm):
 ```
 
 Then pass it via `--algorithm.algorithm-path your_module.MyAlgorithm`.
-If you need a custom training objective, implement a loss plugin and pass
-`--algorithm.loss-type custom --algorithm.loss-path your_module.MyLoss`.
 See the full minimal template: [docs/Algorithm_Minimal_Template.md](docs/Algorithm_Minimal_Template.md)
 
 ### Plugin Templates (diffusionrl_plugins)
@@ -341,10 +335,7 @@ points:
 - Model: `diffusionrl_plugins.models.wan21.Wan21ModelBundle`
 - Sampler: `diffusionrl_plugins.samplers.minimal_sampler.MinimalSampler`
 - Algorithm: `diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm`
-- Loss: `diffusionrl_plugins.losses.minimal_loss.MinimalBackwardLoss`
 - Reward: `diffusionrl_plugins.rewards.minimal_reward.MinimalRewardWorker`
-- Rollout pipeline function: `diffusionrl_plugins.rollout_fns.minimal_pipeline.minimal_pipeline`
-
 Notes:
 - There is no plugin auto-registration; pass full dotpaths via CLI args.
 - `--model.model-type <name>` short-name resolution works only when the model class
