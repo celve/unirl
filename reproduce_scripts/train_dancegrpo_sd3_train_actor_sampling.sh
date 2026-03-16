@@ -12,12 +12,12 @@
 # LoRA: The original setup uses LoRA by default (rank=32, alpha=64), matching this script
 #
 # =============================================================================
-# batch_geometry: total_samples = prompts_per_batch * num_samples_per_prompt
+# batch_geometry: total_samples = prompts_per_rollout * samples_per_prompt
 # per_rank_batch = total_samples / num_train_gpus (must be divisible)
 #
 # This script runs flow_grpo with SD3 using training-actor sampling. flow_grpo uses:
 # - SDE (standard) or CPS (Coefficient-Preserving Sampling) SDE type
-# - Per-prompt advantage normalization
+# - Group advantage normalization
 # - KL coefficient for stability (β=0.04)
 #
 # Reference: flow_grpo/config/grpo.py
@@ -29,17 +29,17 @@
 # - num_inference_steps=10 (training steps)
 # - guidance_scale=4.5
 # - kl_coef=0.04 (KL penalty)
-# - advantage_type=per_prompt (per-prompt statistic tracking)
+# - adv_normalization=group
 # - learning_rate=3e-4 (higher than DanceGRPO's 1e-5)
 # - LoRA: rank=32, alpha=64 (SD3 default uses LoRA)
 # - timestep_fraction=0.99 (nearly all timesteps)
 # - training.update_mode=multi_update for Flow-style multi-update inner loops
 # - sampling.direct_sampling_batch_size only controls OOM-safe request splitting;
-#   rollout_total_samples still equals prompts_per_batch * num_samples_per_prompt
+#   rollout_total_samples still equals prompts_per_rollout * samples_per_prompt
 #
 # Batch/group configuration (8 GPU):
-# - batch_size=3, num_samples_per_prompt=24 (original _get_config defaults)
-# - For 4 GPU: batch_size=8, num_samples_per_prompt=16
+# - batch_size=3, samples_per_prompt=24 (original _get_config defaults)
+# - For 4 GPU: batch_size=8, samples_per_prompt=16
 #
 # NOTE: Use --sampling.sde-type cps for CPS variant (e.g., geneval_sd3_fast_nocfg)
 #
@@ -68,7 +68,7 @@ DIRECT_SAMPLING_BATCH_SIZE=16 # Actual peak forward batch size during sampling s
 
 # Training settings
 GRADIENT_ACCUMULATION_BATCH_SIZE=16 # Actually peak forward/backward batch size during optimization
-MULTI_UPDATE_BATCH_SIZE=48 # Effective batch size for multi-update. Set `prompts_per_batch * num_samples_per_prompt` // NUM_GPUS // n for n updates per epoch
+MULTI_UPDATE_BATCH_SIZE=48 # Effective batch size for multi-update. Set `prompts_per_rollout * samples_per_prompt` // NUM_GPUS // n for n updates per epoch
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 UPDATE_MODE="multi_update" # multi_update or single_update. single_update for NFT, multi_update for GRPO.
 
@@ -115,7 +115,7 @@ fi
 
 REWARD_NAME="pickscore" # pickscore, ocr, clip, hpsv2
 REWARD_DEVICE="cuda"
-REWARD_EXECUTION_MODE="rollout" # compute reward during rollout stage
+REWARD_LOCATION="sampling_actor" # run reward worker on sampling actors
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 
@@ -130,33 +130,33 @@ python -m diffusionrl.train \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
     --reward.reward-model-name ${REWARD_NAME} \
-    --reward.reward-execution-mode "${REWARD_EXECUTION_MODE}" \
+    --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device ${REWARD_DEVICE} \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
     --sampling.sde-type "dance" \
     --sampling.eta 0.3 \
-    --sampling.shift 3.0 \
+    --sampling.time-shift 3.0 \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
-    --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
+    --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 4.5 \
     --sampling.timestep-fraction 0.6 \
     \
-    --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
-    --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
+    --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
+    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     "${GRADIENT_ACCUMULATION_ARGS[@]}" \
     --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \
-    --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
     --algorithm.kl-coef 0.04 \
-    --algorithm.advantage-type per_prompt \
+    --algorithm.adv-normalization group \
     --algorithm.use-global-std true \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --sampling.training-actor-direct-sampling true \
+    --sampling.sampling-mode training_actor \
     --ray.colocate-rollout-training true \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \

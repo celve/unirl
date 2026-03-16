@@ -17,7 +17,7 @@
 #   - Disadvantage: no async overlap between sampling and training
 #
 # ENGINE: FSDP (via training actors)
-#   When training_actor_direct_sampling=true, the TrainingActor lazy-loads VAE and
+#   When sampling_mode='training_actor', the TrainingActor lazy-loads VAE and
 #   text encoder, then uses the FSDP-wrapped transformer to sample.
 #   Log_prob is computed during sampling (needed for GRPO).
 #
@@ -27,7 +27,7 @@
 #               → compute advantage → GRPO train → sync weights
 #
 #   This script: Ray actors, each training actor does the same loop.
-#               training_actor_direct_sampling=true → training actors call generate()
+#               sampling_mode='training_actor' → training actors call generate()
 #               with the same FSDP model they use for training.
 #
 # ALIGNMENT with DanceGRPO:
@@ -128,7 +128,7 @@ FPS=${FPS:-8}
 # Reward model
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-"hpsv2"}
 REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardWorker"}
-REWARD_EXECUTION_MODE=${REWARD_EXECUTION_MODE:-rollout}
+REWARD_LOCATION=${REWARD_LOCATION:-sampling_actor}
 LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cuda}
 REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
 WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
@@ -195,7 +195,7 @@ python -m diffusionrl.train \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-path "${REWARD_PATH}" \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
-    --reward.reward-execution-mode "${REWARD_EXECUTION_MODE}" \
+    --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
@@ -203,25 +203,25 @@ python -m diffusionrl.train \
     `# ===== SDE Sampling (aligned with DanceGRPO) =====` \
     --sampling.sde-type dance \
     --sampling.eta 0.25 \
-    --sampling.shift 5.0 \
+    --sampling.time-shift 5.0 \
     --sampling.num-inference-steps 16 \
     --sampling.guidance-scale 6018.0 \
     --sampling.timestep-fraction 0.6 \
     --sampling.init-same-noise true \
     \
-    --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
-    --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
+    --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
+    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     "${GRADIENT_ACCUMULATION_ARGS[@]}" \
-    --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
-    --algorithm.advantage-type group \
-    --algorithm.advantage-clip-max 5.0 \
+    --algorithm.adv-normalization group \
+    --algorithm.adv-clip-abs 5.0 \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --sampling.training-actor-direct-sampling true \
-    --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
+    --sampling.sampling-mode training_actor \
+    --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --ray.colocate-rollout-training true \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \

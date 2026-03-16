@@ -15,7 +15,7 @@
 # LoRA: Use LoRA (rank=32, alpha=64) to reduce memory usage
 #
 # =============================================================================
-# batch_geometry: total_samples = prompts_per_batch * num_samples_per_prompt
+# batch_geometry: total_samples = prompts_per_rollout * samples_per_prompt
 # per_rank_batch = total_samples / num_train_gpus (must be divisible)
 #
 # This script runs MixGRPO with SD3 using training-actor sampling. MixGRPO uses:
@@ -35,7 +35,7 @@
 #
 # NOTE:
 # - Core MixGRPO knobs used here are implemented in diffusionrl
-#   (window scheduler / sde_ratio / trimmed_ratio / ignore_last / frozen_init_timesteps).
+#   (window scheduler / sde_ratio / trimmed_ratio / skip_last_timestep / skip_initial_timesteps).
 # - This script is still an adapted SD3 variant (not a bit-for-bit upstream run).
 #
 # Training-actor sampling now reuses the main manager -> rollout_buffer -> train path.
@@ -95,8 +95,8 @@ if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${ROLLOUT_TOTAL_SAMPLES}" ] && [ $(( R
 fi
 
 # Reward
-REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward_aggr}
-REWARD_EXECUTION_MODE=${REWARD_EXECUTION_MODE:-rollout}
+REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward}
+REWARD_LOCATION=${REWARD_LOCATION:-sampling_actor}
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-hpsv2}
 LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cuda}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
@@ -126,18 +126,18 @@ python -m diffusionrl.train \
     --algorithm.algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
     --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
-    --reward.reward-execution-mode "${REWARD_EXECUTION_MODE}" \
+    --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
     --sampling.sde-type sde \
     --sampling.eta 0.7 \
-    --sampling.shift 3.0 \
+    --sampling.time-shift 3.0 \
     --sampling.num-inference-steps 25 \
     --sampling.guidance-scale 4.5 \
     \
-    --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
+    --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --sampling.sde-ratio 0.16 \
     --algorithm.window.timestep-strategy window \
     --algorithm.window.window-strategy progressive \
@@ -148,18 +148,18 @@ python -m diffusionrl.train \
     --algorithm.window.window-overlap true \
     --algorithm.window.window-roll-back true \
     \
-    --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
+    --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
-    --algorithm.advantage-type group \
-    --algorithm.advantage-clip-max 5.0 \
+    --algorithm.adv-normalization group \
+    --algorithm.adv-clip-abs 5.0 \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
-    --reward.reward-mix-mode ${REWARD_MIX_MODE} \
+    --reward.component-mix-stage ${REWARD_MIX_MODE} \
     \
-    --sampling.training-actor-direct-sampling true \
-    --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
+    --sampling.sampling-mode training_actor \
+    --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --ray.colocate-rollout-training true \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \

@@ -57,13 +57,13 @@ bash scripts/train_dancegrpo_hunyuan_sglang_separate.sh
 ## Plugin demo
 
 ```bash
-# End-to-end plugin wiring example (algorithm/loss/reward/rollout pipeline)
+# End-to-end plugin wiring example (algorithm/reward)
 bash scripts/train_plugin_demo.sh --rollout.num-rollout 1
 ```
 
 ## Engine note
 
-`sampling.training_actor_direct_sampling=true` currently only supports `--sampling.sampler-engine-type fsdp`.
+`sampling.sampling_mode='training_actor'` currently only supports `--sampling.sampler-engine-type fsdp`.
 For SGLang, use dedicated rollout actors (`--ray.colocate-rollout-training true/false`)
 with scripts named `*_sglang_colocate.sh` or `*_sglang_separate.sh`.
 

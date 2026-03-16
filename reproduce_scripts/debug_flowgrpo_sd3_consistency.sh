@@ -28,7 +28,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Default values
 PRETRAINED_MODEL="stabilityai/stable-diffusion-3.5-medium"
 DEBUG_OUTPUT_DIR=${DEBUG_OUTPUT_DIR:-"${REPO_ROOT}/debug_output"}
-DATA_PATH="${REPO_ROOT}/data/datasets/pickscore/train.txt"
+DATA_PATH="${REPO_ROOT}/data/samples/prompts_toy.json"
 NUM_GPUS=${NUM_GPUS:-8}
 
 # Minimal batch settings for fast debug iteration
@@ -40,9 +40,6 @@ GRADIENT_ACCUMULATION_BATCH_SIZE=16
 MULTI_UPDATE_BATCH_SIZE=48 # NUM_SAMPLES_PER_PROMPT * PROMPTS_PER_BATCH // gpu // n = 
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 UPDATE_MODE="multi_update"
-
-# Export env var for debug tensor dumping (picked up by sampler + loss_fn)
-export DIFFUSIONRL_DEBUG_OUTPUT_DIR="${DEBUG_OUTPUT_DIR}"
 
 # Parse --sampling.sde-type and --sampling.eta from cmdline for logging
 SDE_TYPE_OVERRIDE=""
@@ -75,7 +72,7 @@ mkdir -p "${DEBUG_OUTPUT_DIR}"
 
 REWARD_NAME="pickscore"
 REWARD_DEVICE="cuda"
-REWARD_EXECUTION_MODE="rollout"
+REWARD_LOCATION="sampling_actor"
 
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
@@ -88,33 +85,33 @@ python -m diffusionrl.train \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
     --reward.reward-model-name ${REWARD_NAME} \
-    --reward.reward-execution-mode "${REWARD_EXECUTION_MODE}" \
+    --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device ${REWARD_DEVICE} \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
     --sampling.sde-type sde \
     --sampling.eta 0.7 \
-    --sampling.shift 3.0 \
+    --sampling.time-shift 3.0 \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
-    --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
+    --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 4.5 \
     --sampling.timestep-fraction 0.1,0.3 \
     \
-    --algorithm.loss-kwargs "{\"shuffle_seed\":42,\"shuffle_samples\":false}" \
-    --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
+    --algorithm.algorithm-kwargs "{\"shuffle_seed\":42,\"shuffle_samples\":false}" \
+    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --training.gradient-accumulation-batch-size "${GRADIENT_ACCUMULATION_BATCH_SIZE}" \
     --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \
-    --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
     --algorithm.kl-coef 0.04 \
-    --algorithm.advantage-type per_prompt \
+    --algorithm.adv-normalization group \
     --algorithm.use-global-std true \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --sampling.training-actor-direct-sampling true \
+    --sampling.sampling-mode training_actor \
     --ray.colocate-rollout-training true \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \

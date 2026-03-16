@@ -14,7 +14,7 @@
 # LoRA: Use LoRA by default (rank=16, alpha=32) to reduce memory usage
 #
 # =============================================================================
-# batch_geometry: total_samples = prompts_per_batch * num_samples_per_prompt
+# batch_geometry: total_samples = prompts_per_rollout * samples_per_prompt
 # per_rank_batch = total_samples / num_train_gpus (must be divisible)
 #
 # This script runs DanceGRPO with SD3 using training-actor sampling.
@@ -63,7 +63,7 @@ REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
 WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-dancegrpo_sd3_train_actor_sampling}
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-ocr}
-REWARD_EXECUTION_MODE=${REWARD_EXECUTION_MODE:-rollout}
+REWARD_LOCATION=${REWARD_LOCATION:-sampling_actor}
 LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cpu}
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-8}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
@@ -94,32 +94,32 @@ python -m diffusionrl.train \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
-    --reward.reward-execution-mode "${REWARD_EXECUTION_MODE}" \
+    --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
     --sampling.sde-type sde \
     --sampling.eta 0.3 \
-    --sampling.shift 3.0 \
+    --sampling.time-shift 3.0 \
     --sampling.num-inference-steps 25 \
-    --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
+    --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 4.5 \
     --sampling.timestep-fraction 0.6 \
     \
-    --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
-    --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
+    --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
+    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     "${GRADIENT_ACCUMULATION_ARGS[@]}" \
     --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \
-    --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
-    --algorithm.advantage-type group \
-    --algorithm.advantage-clip-max 5.0 \
+    --algorithm.adv-normalization group \
+    --algorithm.adv-clip-abs 5.0 \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --sampling.training-actor-direct-sampling true \
+    --sampling.sampling-mode training_actor \
     --ray.colocate-rollout-training true \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \

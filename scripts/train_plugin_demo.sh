@@ -1,13 +1,11 @@
 #!/bin/bash
 # =============================================================================
-# Plugin Demo (algorithm/loss/reward/rollout-pipeline via diffusionrl_plugins)
+# Plugin Demo (algorithm/reward via diffusionrl_plugins)
 # =============================================================================
 #
 # This script demonstrates end-to-end plugin wiring with dotpaths:
 # - algorithm: diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm
-# - loss: diffusionrl_plugins.losses.minimal_loss.MinimalBackwardLoss
 # - reward: diffusionrl_plugins.rewards.minimal_reward.MinimalRewardWorker
-# - rollout pipeline: diffusionrl_plugins.rollout_fns.minimal_pipeline.minimal_pipeline
 #
 # Note:
 # - `wan21` model and `minimal_sampler` are templates only. They are not used here.
@@ -43,28 +41,24 @@ python -m diffusionrl.train \
     --sampling.sampler-engine-type fsdp \
     \
     --algorithm.algorithm-path diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm \
-    --algorithm.loss-type custom \
-    --algorithm.loss-path diffusionrl_plugins.losses.minimal_loss.MinimalBackwardLoss \
-    --algorithm.loss-kwargs '{"scale": 1.0}' \
     --reward.reward-path diffusionrl_plugins.rewards.minimal_reward.MinimalRewardWorker \
-    --rollout.rollout-pipeline-path diffusionrl_plugins.rollout_fns.minimal_pipeline.minimal_pipeline \
     \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
     --sampling.sde-type sde \
     --sampling.eta 0.3 \
-    --sampling.shift 3.0 \
+    --sampling.time-shift 3.0 \
     --sampling.num-inference-steps 8 \
     --sampling.guidance-scale 4.5 \
     \
-    --algorithm.prompts-per-batch 1 \
+    --algorithm.prompts-per-rollout 1 \
     --training.gradient-accumulation-batch-size 1 \
-    --algorithm.num-samples-per-prompt 2 \
+    --algorithm.samples-per-prompt 2 \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --sampling.training-actor-direct-sampling true \
+    --sampling.sampling-mode training_actor \
     --ray.colocate-rollout-training true \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \

@@ -64,7 +64,7 @@ REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
 REPLAY_SAMPLER_PATH=${REPLAY_SAMPLER_PATH:-diffusionrl.samplers.fsdp.flux_sampler.FluxSampler}
 
 # Reward
-REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward_aggr}
+REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward}
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-hpsv2}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
@@ -88,7 +88,7 @@ python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type flux \
     --sampling.sampler-engine-type sglang \
-    --sampling.sglang-logprob-mode "${SGLANG_LOGPROB_MODE}" \
+    --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --sampling.replay-sampler-path "${REPLAY_SAMPLER_PATH}" \
     --sampling.tp-size ${TP_SIZE} \
@@ -100,11 +100,11 @@ python -m diffusionrl.train \
     \
     --sampling.sde-type flux_flow \
     --sampling.eta 0.7 \
-    --sampling.shift 3.0 \
+    --sampling.time-shift 3.0 \
     --sampling.num-inference-steps 25 \
     --sampling.guidance-scale 3.5 \
     \
-    --algorithm.loss-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
+    --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --sampling.sde-ratio 0.16 \
     --algorithm.window.timestep-strategy window \
     --algorithm.window.window-strategy progressive \
@@ -115,15 +115,15 @@ python -m diffusionrl.train \
     --algorithm.window.window-overlap true \
     --algorithm.window.window-roll-back true \
     \
-    --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
-    --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
+    --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
-    --algorithm.advantage-type group \
-    --algorithm.advantage-clip-max 5.0 \
+    --algorithm.adv-normalization group \
+    --algorithm.adv-clip-abs 5.0 \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
-    --reward.reward-mix-mode ${REWARD_MIX_MODE} \
+    --reward.component-mix-stage ${REWARD_MIX_MODE} \
     \
     --ray.colocate-rollout-training false \
     --ray.rollout-num-gpus-per-node ${ROLLOUT_GPUS} \

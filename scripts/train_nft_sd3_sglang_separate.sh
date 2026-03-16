@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # NOTE:
-#   training_actor_direct_sampling=true currently requires sampler_engine_type=fsdp.
+#   sampling_mode='training_actor' currently requires sampler_engine_type=fsdp.
 #   This script is the SGLang equivalent in separate rollout/training mode.
 #
 # Usage:
@@ -45,14 +45,16 @@ BATCH_SIZE=${BATCH_SIZE:-6}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-24}
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
+REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
 
 if [ $(( TRAINING_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: TRAINING_GPUS*BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
     exit 1
 fi
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
-NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"ema_decay":0.001}'}
-NFT_LOSS_KWARGS=${NFT_LOSS_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"nft_timestep_mode":"all","nft_shuffle_timesteps":true,"nft_apply_shift":false,"use_ema":true,"ema_decay":0.001,"decay_type":"warmup","ema_flat_steps":75,"ema_uprate":0.0075,"ema_uphold":0.999,"shuffle_seed":42,"shuffle_samples":true}'}
+SHUFFLE_SEED=${SHUFFLE_SEED:-42}
+SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
+NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-"{\"beta\":0.1,\"adv_mode\":\"raw\",\"adv_clip_max\":5.0,\"use_adaptive_weight\":true,\"train_timestep_mode\":\"all\",\"shuffle_train_timesteps\":true,\"apply_time_shift_in_loss\":false,\"use_reference_ema\":true,\"ema_decay\":0.001,\"decay_type\":\"warmup\",\"ema_flat_steps\":75,\"ema_uprate\":0.0075,\"ema_uphold\":0.999,\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}"}
 
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
@@ -62,7 +64,8 @@ python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
     --sampling.sampler-engine-type sglang \
-    --sampling.sglang-logprob-mode "${SGLANG_LOGPROB_MODE}" \
+    --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
+    --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --sampling.tp-size ${TP_SIZE} \
     --algorithm.algorithm-path diffusionrl.algorithms.nft.NFTAlgorithm \
     --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
@@ -70,21 +73,19 @@ python -m diffusionrl.train \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
-    --algorithm.loss-type nft \
-    --sampling.shift 3.0 \
+    --sampling.time-shift 3.0 \
     --sampling.sde-type dpm2 \
     --sampling.num-inference-steps 10 \
     --sampling.guidance-scale 1.0 \
     --sampling.sampling-adapter old \
     --algorithm.algorithm-kwargs "${NFT_ALGO_KWARGS}" \
-    --algorithm.loss-kwargs "${NFT_LOSS_KWARGS}" \
     \
-    --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
+    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --training.gradient-accumulation-batch-size ${BATCH_SIZE} \
-    --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.kl-coef 0.0001 \
-    --algorithm.advantage-type per_prompt \
+    --algorithm.adv-normalization group \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \

@@ -12,7 +12,7 @@
 # LoRA: The original setup uses LoRA by default (rank=32, alpha=64), matching this script
 #
 # =============================================================================
-# batch_geometry: total_samples = prompts_per_batch * num_samples_per_prompt
+# batch_geometry: total_samples = prompts_per_rollout * samples_per_prompt
 # per_rank_batch = total_samples / num_train_gpus (must be divisible)
 #
 # This script runs DiffusionNFT (Negative Fine-Tuning) with SD3 for OCR task (default).
@@ -22,19 +22,19 @@
 # Reference: DiffusionNFT/config/nft.py, DiffusionNFT/scripts/train_nft_sd3.py
 #
 # Key alignment with original DiffusionNFT (OCR task):
-# - loss_type=nft (forward process diffusion RL)
+# - algorithm_type=nft (forward process diffusion RL)
 # - beta=1.0 (interpolation weight: positive_prediction = beta*new + (1-beta)*old)
 # - kl_coef=0.0001 (KL regularization coefficient, separate from beta)
 # - num_inference_steps=10 (training steps, NOT 40)
 # - guidance_scale=1.0 (no CFG during training)
-# - advantage_type=per_prompt (per-prompt statistic tracking)
-# - loss_kwargs.nft_timestep_mode=all (DiffusionNFT uses full timestep schedule)
+# - adv_normalization=group
+# - algorithm_kwargs.train_timestep_mode=all (DiffusionNFT uses full timestep schedule)
 # - adv_mode=raw
 # - EMA decay: warmup curve (decay_type=2 in original)
 #   - ema_flat_steps=75, ema_uprate=0.0075, ema_uphold=0.999
 #
 # Two beta parameters in DiffusionNFT (IMPORTANT!):
-# 1. config.beta (algorithm/loss kwargs JSON): Controls positive_prediction interpolation
+# 1. config.beta (algorithm kwargs JSON): Controls positive_prediction interpolation
 #    - OCR: 0.1 (mostly use old adapter prediction)
 # 2. config.train.beta (--algorithm.kl-coef): KL regularization weight
 #    - Fixed: 0.0001
@@ -72,12 +72,13 @@ DIRECT_SAMPLING_BATCH_SIZE=192 # Actual peak forward batch size during sampling 
 
 # Training settings
 GRADIENT_ACCUMULATION_BATCH_SIZE=12 # Actually peak forward/backward batch size during optimization
-MULTI_UPDATE_BATCH_SIZE=72 # Effective batch size for multi-update. Set `prompts_per_batch * num_samples_per_prompt` // NUM_GPUS // n for n updates per epoch.
+MULTI_UPDATE_BATCH_SIZE=72 # Effective batch size for multi-update. Set `prompts_per_rollout * samples_per_prompt` // NUM_GPUS // n for n updates per epoch.
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 UPDATE_MODE="single_update"
 
-NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"ema_decay":0.001}'}
-NFT_LOSS_KWARGS=${NFT_LOSS_KWARGS:-'{"beta":0.1,"adv_mode":"raw","adv_clip_max":5.0,"use_adaptive_weight":true,"nft_timestep_mode":"all","nft_shuffle_timesteps":true,"nft_apply_shift":false,"use_ema":true,"ema_decay":0.001,"decay_type":"warmup","ema_flat_steps":75,"ema_uprate":0.0075,"ema_uphold":0.999,"shuffle_seed":42,"shuffle_samples":true}'}
+SHUFFLE_SEED=${SHUFFLE_SEED:-42}
+SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-false}
+NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-"{\"beta\":0.1,\"adv_mode\":\"raw\",\"adv_clip_max\":5.0,\"use_adaptive_weight\":true,\"train_timestep_mode\":\"all\",\"shuffle_train_timesteps\":true,\"apply_time_shift_in_loss\":false,\"use_reference_ema\":true,\"ema_decay\":0.001,\"decay_type\":\"warmup\",\"ema_flat_steps\":75,\"ema_uprate\":0.0075,\"ema_uphold\":0.999,\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}"}
 if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
     exit 1
@@ -112,13 +113,11 @@ fi
 
 REWARD_NAME="ocr" # pickscore, ocr, clip, hpsv2
 REWARD_DEVICE="cuda"
-REWARD_EXECUTION_MODE="rollout" # compute reward during rollout stage
+REWARD_LOCATION="sampling_actor" # run reward worker on sampling actors
 
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
-SHUFFLE_SEED=${SHUFFLE_SEED:-42}
-SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-false}
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
@@ -127,14 +126,13 @@ python -m diffusionrl.train \
     --algorithm.algorithm-path diffusionrl.algorithms.nft.NFTAlgorithm \
     --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
     --reward.reward-model-name "${REWARD_NAME}" \
-    --reward.reward-execution-mode "${REWARD_EXECUTION_MODE}" \
+    --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device "${REWARD_DEVICE}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     --eval-data-path "${EVAL_DATA_PATH}" \
     \
-    --algorithm.loss-type nft \
-    --sampling.shift 3.0 \
+    --sampling.time-shift 3.0 \
     --sampling.eta 0.0 \
     --sampling.sde-type sde \
     --sampling.timestep-fraction 0.0,0.3 \
@@ -142,21 +140,20 @@ python -m diffusionrl.train \
     --sampling.guidance-scale 1.0 \
     --sampling.sampling-adapter old \
     --algorithm.algorithm-kwargs "${NFT_ALGO_KWARGS}" \
-    --algorithm.loss-kwargs "${NFT_LOSS_KWARGS}" \
     \
-    --algorithm.prompts-per-batch ${PROMPTS_PER_BATCH} \
+    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     "${GRADIENT_ACCUMULATION_ARGS[@]}" \
     --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \
-    --algorithm.num-samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.kl-coef 0.0001 \
-    --algorithm.advantage-type per_prompt \
+    --algorithm.adv-normalization group \
     --algorithm.use-global-std true \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --sampling.training-actor-direct-sampling true \
-    --sampling.direct-sampling-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
+    --sampling.sampling-mode training_actor \
+    --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --ray.colocate-rollout-training true \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
