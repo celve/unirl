@@ -60,6 +60,7 @@ class GRPOCoreWandBLogger:
         enabled: bool = True,
         tags: Optional[List[str]] = None,
         entity: Optional[str] = None,
+        require_success: bool = False,
     ):
         """Initialize WandB logger.
 
@@ -73,6 +74,7 @@ class GRPOCoreWandBLogger:
             enabled: Whether to enable logging
             tags: List of tags for the WandB run. Defaults to ['diffusionrl-reproduce'] if not provided.
             entity: WandB entity (team or username). If None, uses the default entity.
+            require_success: Raise immediately if WandB is unavailable or init fails.
         """
         self.project = project
         self.run_name = run_name
@@ -81,17 +83,43 @@ class GRPOCoreWandBLogger:
         self.image_log_interval = image_log_interval
         self.rank = rank
         self.tags = tags if tags is not None else ["diffusionrl"]
+        self.require_success = bool(require_success)
         self._initialized = False
 
         # Only enable on rank 0
-        self.enabled = enabled and WANDB_AVAILABLE and rank == 0
+        self.enabled = enabled and rank == 0
 
         if self.enabled and project:
+            if not WANDB_AVAILABLE:
+                self._handle_init_failure(
+                    "wandb package is not installed but WandB reporting was requested"
+                )
+                return
             self._init_wandb(config)
+
+    @property
+    def initialized(self) -> bool:
+        """Whether wandb.init completed successfully."""
+        return bool(self._initialized)
+
+    def _handle_init_failure(
+        self,
+        message: str,
+        exc: Optional[BaseException] = None,
+    ) -> None:
+        """Disable the logger or raise immediately when strict mode is enabled."""
+        self.enabled = False
+        full_message = f"{message}: {exc}" if exc is not None else message
+        if self.require_success:
+            raise RuntimeError(full_message) from exc
+        print(f"Warning: {full_message}")
 
     def _init_wandb(self, config: Optional[Any] = None):
         """Initialize wandb run."""
         if not WANDB_AVAILABLE:
+            self._handle_init_failure(
+                "wandb package is not installed but WandB reporting was requested"
+            )
             return
 
         try:
@@ -119,8 +147,7 @@ class GRPOCoreWandBLogger:
             self._init_metric_axes()
             self._initialized = True
         except Exception as e:
-            print(f"Warning: Failed to initialize wandb: {e}")
-            self.enabled = False
+            self._handle_init_failure("Failed to initialize wandb", exc=e)
 
     def _init_metric_axes(self) -> None:
         """Define metric namespaces and their step axes."""
@@ -406,6 +433,7 @@ def init_logger(
     rank: int = 0,
     tags: Optional[List[str]] = None,
     entity: Optional[str] = None,
+    require_success: bool = False,
     **kwargs,
 ) -> GRPOCoreWandBLogger:
     """Initialize and set the global wandb logger.
@@ -417,6 +445,7 @@ def init_logger(
         rank: Process rank
         tags: List of tags for the WandB run. Defaults to ['diffusionrl-reproduce'] if not provided.
         entity: WandB entity (team or username). If None, uses the default entity.
+        require_success: Raise immediately if WandB init fails.
         **kwargs: Additional arguments for GRPOCoreWandBLogger
 
     Returns:
@@ -431,6 +460,7 @@ def init_logger(
         rank=rank,
         tags=tags,
         entity=entity,
+        require_success=require_success,
         **kwargs,
     )
     return _global_logger

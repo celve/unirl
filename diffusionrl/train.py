@@ -120,8 +120,14 @@ def train(args):
             rank=0,
             tags=wandb_tags,
             entity=wandb_entity,
+            require_success=True,
         )
-        logger.info(f"WandB initialized: project={args.rollout.project_name}, run={args.rollout.run_name}")
+        if wandb_logger.initialized:
+            logger.info(
+                "WandB initialized: project=%s, run=%s",
+                args.rollout.project_name,
+                args.rollout.run_name,
+            )
 
     # 1. Resource allocation
     pgs = create_placement_groups_from_args(args)
