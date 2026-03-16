@@ -88,6 +88,13 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Load environment variables (.env)
+if [ -f "${REPO_ROOT}/.env" ]; then
+    set -a
+    source "${REPO_ROOT}/.env"
+    set +a
+fi
+
 
 # ===== Configurable defaults (override via env vars or CLI "$@") =====
 # Keep local checkpoints under models/local by default.

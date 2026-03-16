@@ -40,6 +40,13 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Load environment variables (.env)
+if [ -f "${REPO_ROOT}/.env" ]; then
+    set -a
+    source "${REPO_ROOT}/.env"
+    set +a
+fi
+
 
 # Default values (can be overridden via command line)
 # SD3.5-medium is much smaller than FLUX, so we can use larger batch sizes
