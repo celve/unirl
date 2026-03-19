@@ -17,7 +17,7 @@
 #   - Disadvantage: no async overlap between sampling and training
 #
 # ENGINE: FSDP (via training actors)
-#   When sampling_mode='training_actor', the TrainingActor lazy-loads VAE and
+#   When rollout.mode='direct_rollout', the TrainingActor lazy-loads VAE and
 #   text encoder, then uses the FSDP-wrapped transformer to sample.
 #   Log_prob is computed during sampling (needed for GRPO).
 #
@@ -27,7 +27,7 @@
 #               → compute advantage → GRPO train → sync weights
 #
 #   This script: Ray actors, each training actor does the same loop.
-#               sampling_mode='training_actor' → training actors call generate()
+#               rollout.mode='direct_rollout' → training actors call generate()
 #               with the same FSDP model they use for training.
 #
 # ALIGNMENT with DanceGRPO:
@@ -69,7 +69,7 @@
 #
 # NOTE on reward:
 #   DanceGRPO uses VideoAlign (VQ score). Default here is hpsv2 (proxy).
-#   For faithful reproduction, implement VideoAlign reward worker.
+#   For faithful reproduction, implement VideoAlign reward scorer.
 #
 # Training-actor sampling now reuses the main manager -> rollout_buffer -> train path.
 # The main speed knob left in this branch is rollout-side reward execution.
@@ -117,7 +117,7 @@ NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-8}
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-${TOTAL_GPUS}}
 
 # Training geometry
-GRADIENT_ACCUMULATION_BATCH_SIZE=${GRADIENT_ACCUMULATION_BATCH_SIZE-2}
+LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE-2}
 
 # Resolution (DanceGRPO: 480×480, 53 frames)
 HEIGHT=${HEIGHT:-480}
@@ -127,7 +127,7 @@ FPS=${FPS:-8}
 
 # Reward model
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-"hpsv2"}
-REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardWorker"}
+REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardScorer"}
 REWARD_LOCATION=${REWARD_LOCATION:-sampling_actor}
 LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cuda}
 REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
@@ -168,9 +168,9 @@ if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${TOTAL_SAMPLES}" ] && [ $(( TOTAL_SAM
     echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must evenly divide total_samples (${TOTAL_SAMPLES})"
     exit 1
 fi
-GRADIENT_ACCUMULATION_ARGS=()
-if [ -n "${GRADIENT_ACCUMULATION_BATCH_SIZE}" ]; then
-    GRADIENT_ACCUMULATION_ARGS+=(--training.gradient-accumulation-batch-size "${GRADIENT_ACCUMULATION_BATCH_SIZE}")
+LOCAL_MICRO_BATCH_ARGS=()
+if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
+    LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
 fi
 
 echo "======================================================"
@@ -181,7 +181,7 @@ echo " Prompts per batch:      ${PROMPTS_PER_BATCH}"
 echo " Samples per prompt (K): ${NUM_SAMPLES_PER_PROMPT}"
 echo " Total samples/rollout:  ${TOTAL_SAMPLES}"
 echo " Per-rank local batch:   ${LOCAL_BATCH_SIZE}"
-echo " Gradient accum batch:   ${GRADIENT_ACCUMULATION_BATCH_SIZE:-disabled}"
+echo " Gradient accum batch:   ${LOCAL_MICRO_BATCH_SIZE:-disabled}"
 echo " Resolution:             ${HEIGHT}×${WIDTH}×${NUM_FRAMES}f"
 echo " Reward:                 ${REWARD_MODEL_NAME}"
 echo " FSDP CPU offload:       ${FSDP_CPU_OFFLOAD}"
@@ -190,7 +190,6 @@ echo "======================================================"
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type hunyuan \
-    --sampling.sampler-engine-type fsdp \
     --sampling.sampler-path diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-path "${REWARD_PATH}" \
@@ -211,7 +210,7 @@ python -m diffusionrl.train \
     \
     --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
-    "${GRADIENT_ACCUMULATION_ARGS[@]}" \
+    "${LOCAL_MICRO_BATCH_ARGS[@]}" \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
@@ -220,9 +219,9 @@ python -m diffusionrl.train \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --sampling.sampling-mode training_actor \
+    --rollout.mode direct_rollout \
+    --rollout.service-engine fsdp \
     --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
-    --ray.colocate-rollout-training true \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-nodes ${TRAINING_NUM_NODES} \
@@ -231,7 +230,6 @@ python -m diffusionrl.train \
     \
     `# ===== Training Hyperparams (aligned with DanceGRPO) =====` \
     --training.learning-rate 1e-5 \
-    --training.update-mode single_update \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.fsdp-cpu-offload ${FSDP_CPU_OFFLOAD} \

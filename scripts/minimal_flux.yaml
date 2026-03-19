@@ -13,15 +13,15 @@ model:
 
 sampling:
   sampler_path: diffusionrl.samplers.fsdp.flux_sampler.FluxSampler
-  sde_type: flux_dance
+  sde_type: dance
   eta: 0.3
-  shift: 3.0
+  time_shift: 3.0
   num_inference_steps: 25
   guidance_scale: 3.5
   timestep_fraction: 0.6
 
 reward:
-  reward_path: diffusionrl.reward.local.LocalRewardWorker
+  reward_path: diffusionrl.reward.local.LocalRewardScorer
   reward_model_name: ocr
 
 algorithm:
@@ -34,9 +34,10 @@ algorithm:
   adv_clip_abs: 5.0
 
 training:
-  gradient_accumulation_batch_size: 1
+  local_update_batch_size: 1
+  local_micro_batch_size: 1
+  num_updates_per_local_batch: 1
   learning_rate: 0.00001
-  update_mode: single_update
   max_grad_norm: 1.0
   weight_decay: 0.0001
   use_lora: true
@@ -44,16 +45,18 @@ training:
   lora_alpha: 32
 
 ray:
-  colocate_rollout_training: false
-  rollout_num_gpus_per_node: 4
+  rollout_num_nodes: 0
+  rollout_num_gpus_per_node: 0
   training_num_gpus_per_node: 4
   placement_strategy: SPREAD
 
 rollout:
+  mode: direct_rollout
+  service_engine: fsdp
   num_rollout: 300
   save_steps: 40
   logging_steps: 10
-  output_dir: outputs/dancegrpo_flux_separate
+  output_dir: outputs/dancegrpo_flux_direct
 
 data_source_path: diffusionrl.data.data_source.ImageRLDataSource
 data_path: data/samples/prompts_toy.json

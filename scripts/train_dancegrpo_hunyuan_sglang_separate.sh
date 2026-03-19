@@ -41,7 +41,7 @@ TRAINING_GPUS=${TRAINING_GPUS:-4}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-8}
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-${ROLLOUT_GPUS}}
 
-GRADIENT_ACCUMULATION_BATCH_SIZE=${GRADIENT_ACCUMULATION_BATCH_SIZE-2}
+LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE-2}
 
 HEIGHT=${HEIGHT:-480}
 WIDTH=${WIDTH:-480}
@@ -49,7 +49,7 @@ NUM_FRAMES=${NUM_FRAMES:-53}
 FPS=${FPS:-8}
 
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-"hpsv2"}
-REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardWorker"}
+REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardScorer"}
 
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
@@ -72,18 +72,20 @@ if [ $((TOTAL_SAMPLES % TRAINING_GPUS)) -ne 0 ]; then
     exit 1
 fi
 LOCAL_BATCH_SIZE=$((TOTAL_SAMPLES / TRAINING_GPUS))
-GRADIENT_ACCUMULATION_ARGS=()
-if [ -n "${GRADIENT_ACCUMULATION_BATCH_SIZE}" ]; then
-    GRADIENT_ACCUMULATION_ARGS+=(--training.gradient-accumulation-batch-size "${GRADIENT_ACCUMULATION_BATCH_SIZE}")
+LOCAL_MICRO_BATCH_ARGS=()
+if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
+    LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
 fi
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type hunyuan \
-    --sampling.sampler-engine-type sglang \
+    --rollout.mode separate_rollout \
+    --rollout.service-engine sglang \
+    --rollout.service-num-gpus ${TP_SIZE} \
+    --rollout.engine-tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
-    --sampling.tp-size ${TP_SIZE} \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-path "${REWARD_PATH}" \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
@@ -100,7 +102,7 @@ python -m diffusionrl.train \
     \
     --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
-    "${GRADIENT_ACCUMULATION_ARGS[@]}" \
+    "${LOCAL_MICRO_BATCH_ARGS[@]}" \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
@@ -109,13 +111,11 @@ python -m diffusionrl.train \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --ray.colocate-rollout-training false \
     --ray.rollout-num-gpus-per-node ${ROLLOUT_GPUS} \
     --ray.training-num-gpus-per-node ${TRAINING_GPUS} \
     --ray.placement-strategy PACK \
     \
     --training.learning-rate 1e-5 \
-    --training.update-mode single_update \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.use-gradient-checkpointing true \

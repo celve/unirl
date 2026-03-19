@@ -25,7 +25,7 @@
 #   # Pass through extra diffusionrl CLI overrides
 #   HEAD_IP=10.0.0.1 WEIGHT_SYNC_DIR=/mnt/shared/diffusionrl_weight_sync \
 #     bash reproduce_scripts/train_flowgrpo_sd3_2x8.sh train \
-#       --rollout.num-rollout 100 --training.gradient-accumulation-batch-size 6
+#       --rollout.num-rollout 100 --training.local-micro-batch-size 6
 #
 # =============================================================================
 
@@ -172,7 +172,7 @@ case "${ROLE}" in
             --ray.training-num-nodes "${NUM_NODES}" \
             --ray.training-num-gpus-per-node "${GPUS_PER_NODE}" \
             --ray.placement-strategy "${RAY_PLACEMENT_STRATEGY}" \
-            --ray.weight-sync-dir "${WEIGHT_SYNC_DIR}" \
+            --sync.dir "${WEIGHT_SYNC_DIR}" \
             --rollout.run-name "${WANDB_RUN_NAME}" \
             --rollout.output-dir "${OUTPUT_DIR}" \
             --rollout.wandb-tags "${WANDB_TAGS}" \

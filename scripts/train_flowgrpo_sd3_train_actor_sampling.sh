@@ -23,7 +23,7 @@
 # Reference: flow_grpo/config/grpo.py
 #
 # Current defaults in this script:
-# - sde_type=sde (use cps via CLI for CPS variants)
+# - sde_type=flow (use cps via CLI for CPS variants)
 # - eta=0.7
 # - shift=3.0
 # - num_inference_steps=10
@@ -33,7 +33,7 @@
 # - learning_rate=3e-4
 # - LoRA: rank=32, alpha=64
 # - timestep_fraction=0.99
-# - training.update_mode=multi_update
+# - training.local_update_batch_size + num_updates_per_local_batch
 # - reward_location=sampling_actor
 # - reward_model_name defaults to pickscore
 # - prompts_per_rollout=16, samples_per_prompt=8 on 8 GPUs
@@ -73,10 +73,9 @@ PROMPTS_PER_BATCH=16 # number of prompts per epoch
 DIRECT_SAMPLING_BATCH_SIZE=8 # Lower peak sampling batch size to reduce OOM risk.
 
 # Training settings
-GRADIENT_ACCUMULATION_BATCH_SIZE=2 # Lower peak forward/backward batch size during optimization.
-MULTI_UPDATE_BATCH_SIZE=16 # Smaller effective update chunk to keep training memory usage conservative.
+LOCAL_MICRO_BATCH_SIZE=2 # Lower local forward/backward batch size during optimization.
+LOCAL_UPDATE_BATCH_SIZE=16 # Smaller local update chunk to keep training memory usage conservative.
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
-UPDATE_MODE=${UPDATE_MODE:-multi_update}
 
 if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
@@ -86,9 +85,9 @@ if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${ROLLOUT_TOTAL_SAMPLES}" ] && [ $(( R
     echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must evenly divide rollout_total_samples (${ROLLOUT_TOTAL_SAMPLES})"
     exit 1
 fi
-GRADIENT_ACCUMULATION_ARGS=()
-if [ -n "${GRADIENT_ACCUMULATION_BATCH_SIZE}" ]; then
-    GRADIENT_ACCUMULATION_ARGS+=(--training.gradient-accumulation-batch-size "${GRADIENT_ACCUMULATION_BATCH_SIZE}")
+LOCAL_MICRO_BATCH_ARGS=()
+if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
+    LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
 fi
 NUM_INFERENCE_STEPS_OVERRIDE=""
 prev=""
@@ -127,14 +126,14 @@ python -m diffusionrl.train \
     --model.model-type sd3 \
     --sampling.sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardScorer \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
     --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
-    --sampling.sde-type sde \
+    --sampling.sde-type flow \
     --sampling.eta 0.7 \
     --sampling.time-shift 3.0 \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
@@ -144,8 +143,8 @@ python -m diffusionrl.train \
     \
     --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
-    "${GRADIENT_ACCUMULATION_ARGS[@]}" \
-    --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \
+    "${LOCAL_MICRO_BATCH_ARGS[@]}" \
+    --training.local-update-batch-size ${LOCAL_UPDATE_BATCH_SIZE} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty true \
@@ -154,15 +153,14 @@ python -m diffusionrl.train \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --sampling.sampling-mode training_actor \
-    --ray.colocate-rollout-training true \
+    --rollout.mode direct_rollout \
+    --rollout.service-engine fsdp \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
     --ray.offload false \
     \
     --training.learning-rate 3e-4 \
-    --training.update-mode ${UPDATE_MODE} \
     --training.max-grad-norm 1.0 \
     --training.lora-rank 32 \
     --training.lora-alpha 64 \

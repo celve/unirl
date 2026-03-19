@@ -36,10 +36,9 @@ NUM_INFERENCE_STEPS=10
 NUM_SAMPLES_PER_PROMPT=16
 PROMPTS_PER_BATCH=48
 DIRECT_SAMPLING_BATCH_SIZE=128
-GRADIENT_ACCUMULATION_BATCH_SIZE=16
-MULTI_UPDATE_BATCH_SIZE=48 # NUM_SAMPLES_PER_PROMPT * PROMPTS_PER_BATCH // gpu // n = 
+LOCAL_MICRO_BATCH_SIZE=16
+LOCAL_UPDATE_BATCH_SIZE=48 # NUM_SAMPLES_PER_PROMPT * PROMPTS_PER_BATCH // gpu // n
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
-UPDATE_MODE="multi_update"
 
 # Parse --sampling.sde-type and --sampling.eta from cmdline for logging
 SDE_TYPE_OVERRIDE=""
@@ -83,14 +82,14 @@ python -m diffusionrl.train \
     --model.model-type sd3 \
     --sampling.sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardScorer \
     --reward.reward-model-name ${REWARD_NAME} \
     --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device ${REWARD_DEVICE} \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
-    --sampling.sde-type sde \
+    --sampling.sde-type flow \
     --sampling.eta 0.7 \
     --sampling.time-shift 3.0 \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
@@ -100,8 +99,8 @@ python -m diffusionrl.train \
     \
     --algorithm.algorithm-kwargs "{\"shuffle_seed\":42,\"shuffle_samples\":false}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
-    --training.gradient-accumulation-batch-size "${GRADIENT_ACCUMULATION_BATCH_SIZE}" \
-    --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \
+    --training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}" \
+    --training.local-update-batch-size ${LOCAL_UPDATE_BATCH_SIZE} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
@@ -111,15 +110,14 @@ python -m diffusionrl.train \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --sampling.sampling-mode training_actor \
-    --ray.colocate-rollout-training true \
+    --rollout.mode direct_rollout \
+    --rollout.service-engine fsdp \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
     --ray.offload false \
     \
     --training.learning-rate 3e-4 \
-    --training.update-mode ${UPDATE_MODE} \
     --training.max-grad-norm 1.0 \
     --training.lora-rank 32 \
     --training.lora-alpha 64 \

@@ -23,7 +23,7 @@
 # Reference: flow_grpo/config/grpo.py
 #
 # Key alignment with original flow_grpo:
-# - sde_type=sde (default; use cps for fast variants like geneval_sd3_fast_nocfg)
+# - sde_type=flow (default; use cps for fast variants like geneval_sd3_fast_nocfg)
 # - eta=0.7 (noise coefficient)
 # - shift=3.0 (SD3 time shift)
 # - num_inference_steps=10 (training steps)
@@ -33,7 +33,7 @@
 # - learning_rate=3e-4 (higher than DanceGRPO's 1e-5)
 # - LoRA: rank=32, alpha=64 (SD3 default uses LoRA)
 # - timestep_fraction=0.99 (nearly all timesteps)
-# - training.update_mode=multi_update for Flow-style multi-update inner loops
+# - training.local_update_batch_size + num_updates_per_local_batch for Flow-style multi-update inner loops
 # - sampling.direct_sampling_batch_size only controls OOM-safe request splitting;
 #   rollout_total_samples still equals prompts_per_rollout * samples_per_prompt
 #
@@ -55,9 +55,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Default values (can be overridden via command line)
-PRETRAINED_MODEL="stabilityai/stable-diffusion-3.5-medium"
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-"stabilityai/stable-diffusion-3.5-medium"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/flowgrpo_sd3_train_sampling"}
-DATA_PATH="${REPO_ROOT}/data/datasets/pickscore/train.txt"
+DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/datasets/pickscore/train.txt"}
 NUM_GPUS=8
 
 # Rollout setttings
@@ -67,10 +67,9 @@ PROMPTS_PER_BATCH=48 # number of (unique) prompts per epoch
 DIRECT_SAMPLING_BATCH_SIZE=16 # Actual peak forward batch size during sampling stage.
 
 # Training settings
-GRADIENT_ACCUMULATION_BATCH_SIZE=16 # Actually peak forward/backward batch size during optimization
-MULTI_UPDATE_BATCH_SIZE=48 # Effective batch size for multi-update. Set `prompts_per_rollout * samples_per_prompt` // NUM_GPUS // n for n updates per epoch
+LOCAL_MICRO_BATCH_SIZE=16 # Local peak forward/backward batch size during optimization
+LOCAL_UPDATE_BATCH_SIZE=48 # Local optimizer-update batch size. Set `prompts_per_rollout * samples_per_prompt` // NUM_GPUS // n for n updates.
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
-UPDATE_MODE="multi_update" # multi_update or single_update. single_update for NFT, multi_update for GRPO.
 
 if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
@@ -80,9 +79,9 @@ if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${ROLLOUT_TOTAL_SAMPLES}" ] && [ $(( R
     echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must evenly divide rollout_total_samples (${ROLLOUT_TOTAL_SAMPLES})"
     exit 1
 fi
-GRADIENT_ACCUMULATION_ARGS=()
-if [ -n "${GRADIENT_ACCUMULATION_BATCH_SIZE}" ]; then
-    GRADIENT_ACCUMULATION_ARGS+=(--training.gradient-accumulation-batch-size "${GRADIENT_ACCUMULATION_BATCH_SIZE}")
+LOCAL_MICRO_BATCH_ARGS=()
+if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
+    LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
 fi
 NUM_INFERENCE_STEPS_OVERRIDE=""
 prev=""
@@ -115,7 +114,7 @@ fi
 
 REWARD_NAME="pickscore" # pickscore, ocr, clip, hpsv2
 REWARD_DEVICE="cuda"
-REWARD_LOCATION="sampling_actor" # run reward worker on sampling actors
+REWARD_LOCATION="sampling_actor" # run reward scorer on sampling actors
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 
@@ -128,7 +127,7 @@ python -m diffusionrl.train \
     --model.model-type sd3 \
     --sampling.sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardScorer \
     --reward.reward-model-name ${REWARD_NAME} \
     --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device ${REWARD_DEVICE} \
@@ -145,8 +144,8 @@ python -m diffusionrl.train \
     \
     --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
-    "${GRADIENT_ACCUMULATION_ARGS[@]}" \
-    --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \
+    "${LOCAL_MICRO_BATCH_ARGS[@]}" \
+    --training.local-update-batch-size ${LOCAL_UPDATE_BATCH_SIZE} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
@@ -156,15 +155,14 @@ python -m diffusionrl.train \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --sampling.sampling-mode training_actor \
-    --ray.colocate-rollout-training true \
+    --rollout.mode direct_rollout \
+    --rollout.service-engine fsdp \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
     --ray.offload false \
     \
     --training.learning-rate 3e-4 \
-    --training.update-mode ${UPDATE_MODE} \
     --training.max-grad-norm 1.0 \
     --training.lora-rank 32 \
     --training.lora-alpha 64 \

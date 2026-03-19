@@ -28,7 +28,7 @@
 # - Using LoRA here enables running on fewer GPUs (8x A100-40GB).
 #
 # Key alignment with original MixGRPO:
-# - sde_type=flux_flow (MixGRPO FLUX flow-SDE formulation)
+# - sde_type=flow (MixGRPO FLUX flow-SDE formulation)
 # - eta=0.7 (noise coefficient)
 # - shift=3.0 (FLUX time shift)
 # - num_inference_steps=25
@@ -48,7 +48,7 @@
 #
 # Usage:
 #   bash train_mixgrpo_flux_train_actor_sampling.sh
-#   bash train_mixgrpo_flux_train_actor_sampling.sh --rollout.num-rollout 100 --training.gradient-accumulation-batch-size 2 --training.multi-update-batch-size 2
+#   bash train_mixgrpo_flux_train_actor_sampling.sh --rollout.num-rollout 100 --training.local-micro-batch-size 2 --training.local-update-batch-size 2
 #
 # =============================================================================
 
@@ -83,21 +83,8 @@ PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-32}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-12}
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 
-if [ "${NUM_SAMPLES_PER_PROMPT}" -lt 2 ]; then
-    echo "ERROR: MixGRPO uses group advantages; set NUM_SAMPLES_PER_PROMPT >= 2 to avoid NaN."
-    exit 1
-fi
-
 # Rollout (direct sampling)
 DIRECT_SAMPLING_BATCH_SIZE=${DIRECT_SAMPLING_BATCH_SIZE:-${ROLLOUT_TOTAL_SAMPLES}}
-if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
-    echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
-    exit 1
-fi
-if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${ROLLOUT_TOTAL_SAMPLES}" ] && [ $(( ROLLOUT_TOTAL_SAMPLES % DIRECT_SAMPLING_BATCH_SIZE )) -ne 0 ]; then
-    echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must evenly divide rollout_total_samples (${ROLLOUT_TOTAL_SAMPLES})"
-    exit 1
-fi
 
 # Reward
 REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward}
@@ -112,16 +99,10 @@ EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
 
 # Training
-if [ $(( ROLLOUT_TOTAL_SAMPLES % NUM_GPUS )) -ne 0 ]; then
-    echo "ERROR: PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT must be divisible by NUM_GPUS"
-    exit 1
-fi
-
-UPDATE_MODE=${UPDATE_MODE:-multi_update}
 NUM_UPDATE_STEPS_PER_ROLLOUT=${NUM_UPDATE_STEPS_PER_ROLLOUT:-4}
-GRADIENT_ACCUMULATION_BATCH_SIZE=${GRADIENT_ACCUMULATION_BATCH_SIZE:-4}
+LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE:-4}
 LOCAL_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / NUM_GPUS ))
-MULTI_UPDATE_BATCH_SIZE=$(( LOCAL_BATCH_SIZE / NUM_UPDATE_STEPS_PER_ROLLOUT ))
+LOCAL_UPDATE_BATCH_SIZE=$(( LOCAL_BATCH_SIZE / NUM_UPDATE_STEPS_PER_ROLLOUT ))
 
 
 python -m diffusionrl.train \
@@ -129,14 +110,14 @@ python -m diffusionrl.train \
     --model.model-type flux \
     --sampling.sampler-path diffusionrl.samplers.fsdp.flux_sampler.FluxSampler \
     --algorithm.algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
-    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardScorer \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
     --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
-    --sampling.sde-type flux_flow \
+    --sampling.sde-type flow \
     --sampling.eta 0.7 \
     --sampling.time-shift 3.0 \
     --sampling.num-inference-steps 25 \
@@ -153,7 +134,6 @@ python -m diffusionrl.train \
     --algorithm.window.window-overlap true \
     --algorithm.window.window-roll-back true \
     \
-    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
@@ -161,20 +141,20 @@ python -m diffusionrl.train \
     --algorithm.adv-clip-abs 5.0 \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
-    --reward.component-mix-stage ${REWARD_MIX_MODE} \
+    --algorithm.component-mix-stage ${REWARD_MIX_MODE} \
     \
-    --sampling.sampling-mode training_actor \
+    --rollout.mode direct_rollout \
+    --rollout.service-engine fsdp \
     --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
-    --ray.colocate-rollout-training true \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
     --ray.offload false \
     \
     --training.learning-rate 1e-5 \
-    --training.update-mode ${UPDATE_MODE} \
-    --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \
-    --training.gradient-accumulation-batch-size ${GRADIENT_ACCUMULATION_BATCH_SIZE} \
+    --training.local-update-batch-size ${LOCAL_UPDATE_BATCH_SIZE} \
+    --training.num-updates-per-local-batch ${NUM_UPDATE_STEPS_PER_ROLLOUT} \
+    --training.local-micro-batch-size ${LOCAL_MICRO_BATCH_SIZE} \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.lora-rank 64 \

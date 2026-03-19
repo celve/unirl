@@ -5,7 +5,7 @@
 #
 # This script demonstrates end-to-end plugin wiring with dotpaths:
 # - algorithm: diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm
-# - reward: diffusionrl_plugins.rewards.minimal_reward.MinimalRewardWorker
+# - reward: diffusionrl_plugins.rewards.minimal_reward.MinimalRewardScorer
 #
 # Note:
 # - `wan21` model and `minimal_sampler` are templates only. They are not used here.
@@ -38,34 +38,32 @@ python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
     --sampling.sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
-    --sampling.sampler-engine-type fsdp \
     \
     --algorithm.algorithm-path diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm \
-    --reward.reward-path diffusionrl_plugins.rewards.minimal_reward.MinimalRewardWorker \
+    --reward.reward-path diffusionrl_plugins.rewards.minimal_reward.MinimalRewardScorer \
     \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
-    --sampling.sde-type sde \
+    --sampling.sde-type flow \
     --sampling.eta 0.3 \
     --sampling.time-shift 3.0 \
     --sampling.num-inference-steps 8 \
     --sampling.guidance-scale 4.5 \
     \
     --algorithm.prompts-per-rollout 1 \
-    --training.gradient-accumulation-batch-size 1 \
+    --training.local-micro-batch-size 1 \
     --algorithm.samples-per-prompt 2 \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --sampling.sampling-mode training_actor \
-    --ray.colocate-rollout-training true \
+    --rollout.mode direct_rollout \
+    --rollout.service-engine fsdp \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node "${NUM_GPUS}" \
     \
     --training.learning-rate 1e-5 \
-    --training.update-mode single_update \
     --training.max-grad-norm 1.0 \
     --training.use-lora true \
     --training.lora-rank 8 \

@@ -31,6 +31,17 @@ Eval data:
 - `eval_data_path` is optional; when unset, periodic eval reads a deterministic, unshuffled view of `data_path`.
 - For a real validation split, set `eval_data_path` explicitly.
 - Prompt datasets should provide text via `prompt` or `caption`; legacy embedding fields are ignored.
+- Prompt datasets should ideally provide `prompt_id`; when omitted, the prompt loaders now synthesize deterministic IDs.
+
+Group-reassembly rollout buffer:
+
+- When `rollout.rollout_buffer_reassemble_by_group=true`,
+  `rollout.rollout_buffer_group_size` must be set explicitly.
+- This mode decomposes incoming rollout batches to sample locators and
+  reassembles outgoing training batches by `group_id`.
+- This mode is incompatible with sample-dropping built-in buffer filters
+  (`rollout_buffer_drop_invalid=true` or reward-range filtering), because the
+  producer contract requires complete groups.
 
 ## Typical usage
 
@@ -63,33 +74,36 @@ bash scripts/train_plugin_demo.sh --rollout.num-rollout 1
 
 ## Engine note
 
-`sampling.sampling_mode='training_actor'` currently only supports `--sampling.sampler-engine-type fsdp`.
-For SGLang, use dedicated rollout actors (`--ray.colocate-rollout-training true/false`)
-with scripts named `*_sglang_colocate.sh` or `*_sglang_separate.sh`.
+Use `rollout.mode=direct_rollout` with `rollout.service_engine=fsdp`
+for training-actor direct sampling.
+For SGLang, use `rollout.mode=separate_rollout` or `rollout.mode=colocate_rollout`
+with `rollout.service_engine=sglang`.
 
 ### SGLang remote scheduler mode (TCP, non-HTTP data plane)
 
-Use `local_mode=false` and pass explicit scheduler endpoint(s) in `engine_kwargs`:
+Use `rollout.sglang_local_mode=false` and pass explicit scheduler endpoint(s)
+through `rollout.sglang_kwargs`:
 
-```bash
---sampling.engine-kwargs '{
-  "local_mode": false,
-  "remote_scheduler_endpoints": [
-    "tcp://10.0.0.11:35555",
-    "tcp://10.0.0.12:35555"
-  ],
-  "num_gpus": 4,
-  "tp_size": 4,
-  "rollout_transport_dtype": "bf16",
-  "rollout_transport_drop_decoded_videos": true,
-  "rollout_transport_log_payload_bytes": true
-}'
+```yaml
+rollout:
+  mode: separate_rollout
+  service_engine: sglang
+  service_num_gpus: 4
+  engine_tp_size: 4
+  service_transport_dtype: bf16
+  service_transport_drop_decoded_videos: true
+  service_transport_log_payload_bytes: true
+  sglang_local_mode: false
+  sglang_kwargs:
+    remote_scheduler_endpoints:
+      - tcp://10.0.0.11:35555
+      - tcp://10.0.0.12:35555
 ```
 
 Notes:
 - When `remote_scheduler_endpoints` is set, rollout actors map by rank (`rank % len(endpoints)`).
 - Rollout weight updates are deduplicated per logical scheduler endpoint (avoids repeated updates to the same scheduler).
-- For SGLang rollout, `encode_prompt_in_generate` now defaults to `false` (can be re-enabled in `engine_kwargs`).
+- SGLang rollout now encodes prompts inside `generate()` unconditionally so sampler outputs satisfy the rollout embedding contract without manager-side fallback.
 
 ## Local model setup
 

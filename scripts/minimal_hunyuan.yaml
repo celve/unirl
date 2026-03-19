@@ -12,18 +12,17 @@ model:
   pretrained_model_saved_path: models/local/hunyuan-video
 
 sampling:
-  sampler_engine_type: fsdp
   sampler_path: diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler
   sde_type: dance
   eta: 0.25
-  shift: 5.0
+  time_shift: 5.0
   num_inference_steps: 16
   guidance_scale: 6018.0
   timestep_fraction: 0.6
   init_same_noise: true
 
 reward:
-  reward_path: diffusionrl.reward.local.LocalRewardWorker
+  reward_path: diffusionrl.reward.local.LocalRewardScorer
   reward_model_name: hpsv2
 
 algorithm:
@@ -36,24 +35,27 @@ algorithm:
   adv_clip_abs: 5.0
 
 training:
-  gradient_accumulation_batch_size: 1
+  local_update_batch_size: 8
+  local_micro_batch_size: 1
+  num_updates_per_local_batch: 1
   learning_rate: 0.00001
-  update_mode: single_update
   max_grad_norm: 1.0
   weight_decay: 0.0001
   use_gradient_checkpointing: true
 
 ray:
-  colocate_rollout_training: false
-  rollout_num_gpus_per_node: 8
+  rollout_num_nodes: 0
+  rollout_num_gpus_per_node: 0
   training_num_gpus_per_node: 8
   placement_strategy: PACK
 
 rollout:
+  mode: direct_rollout
+  service_engine: fsdp
   num_rollout: 202
   save_steps: 50
   logging_steps: 1
-  output_dir: outputs/dancegrpo_hunyuan_separate
+  output_dir: outputs/dancegrpo_hunyuan_direct
 
 data_source_path: diffusionrl.data.data_source.ImageRLDataSource
 data_path: data/samples/video_prompts_toy.txt

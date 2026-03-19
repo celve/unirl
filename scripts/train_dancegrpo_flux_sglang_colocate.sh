@@ -8,7 +8,7 @@
 # memory between inference and training phases.
 #
 # Key differences from the separate mode:
-#   - --ray.colocate-rollout-training true
+#   - --rollout.mode colocate_rollout
 #   - --ray.offload-rollout true  (offload inference weights during training)
 #   - GPU allocation: all GPUs shared (no separate inference/training groups)
 #
@@ -73,17 +73,19 @@ PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( NUM_GPUS * BATCH_SIZE / NUM_SAMPLES_P
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type flux \
-    --sampling.sampler-engine-type sglang \
+    --rollout.mode colocate_rollout \
+    --rollout.service-engine sglang \
+    --rollout.service-num-gpus ${TP_SIZE} \
+    --rollout.engine-tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
-    --sampling.tp-size ${TP_SIZE} \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardScorer \
     --reward.reward-model-name ocr \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
-    --sampling.sde-type flux_dance \
+    --sampling.sde-type dance \
     --sampling.eta 0.3 \
     --sampling.time-shift 3.0 \
     --sampling.num-inference-steps 25 \
@@ -92,7 +94,7 @@ python -m diffusionrl.train \
     \
     --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
-    --training.gradient-accumulation-batch-size ${BATCH_SIZE} \
+    --training.local-micro-batch-size ${BATCH_SIZE} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
@@ -101,13 +103,12 @@ python -m diffusionrl.train \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --ray.colocate-rollout-training true \
+    --rollout.mode colocate_rollout \
     --ray.offload-rollout true \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
     --ray.rollout-num-gpus-per-node ${NUM_GPUS} \
     \
     --training.learning-rate 1e-5 \
-    --training.update-mode single_update \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.lora-rank ${LORA_RANK} \

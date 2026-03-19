@@ -34,10 +34,9 @@ PROMPTS_PER_BATCH=48 # number of (unique) prompts per epoch
 DIRECT_SAMPLING_BATCH_SIZE=192 # Actual peak forward batch size during sampling stage.
 
 # Training settings
-GRADIENT_ACCUMULATION_BATCH_SIZE=12 # Actually peak forward/backward batch size during optimization
-MULTI_UPDATE_BATCH_SIZE=72 # Effective batch size for multi-update. Set `prompts_per_rollout * samples_per_prompt` // NUM_GPUS // n for n updates per epoch.
+LOCAL_MICRO_BATCH_SIZE=12 # Local peak forward/backward batch size during optimization
+LOCAL_UPDATE_BATCH_SIZE=72 # Local optimizer-update batch size. Set `prompts_per_rollout * samples_per_prompt` // NUM_GPUS // n for n updates.
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
-UPDATE_MODE="single_update" # multi_update or single_update. single_update for NFT, multi_update for GRPO.
 
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-false}
@@ -50,9 +49,9 @@ if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${ROLLOUT_TOTAL_SAMPLES}" ] && [ $(( R
     echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must evenly divide rollout_total_samples (${ROLLOUT_TOTAL_SAMPLES})"
     exit 1
 fi
-GRADIENT_ACCUMULATION_ARGS=()
-if [ -n "${GRADIENT_ACCUMULATION_BATCH_SIZE}" ]; then
-    GRADIENT_ACCUMULATION_ARGS+=(--training.gradient-accumulation-batch-size "${GRADIENT_ACCUMULATION_BATCH_SIZE}")
+LOCAL_MICRO_BATCH_ARGS=()
+if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
+    LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
 fi
 
 if [ ! -f "${DATA_PATH}" ]; then
@@ -76,7 +75,7 @@ fi
 
 REWARD_NAME="pickscore" # pickscore, ocr, clip, hpsv2
 REWARD_DEVICE="cuda"
-REWARD_LOCATION="sampling_actor" # run reward worker on sampling actors
+REWARD_LOCATION="sampling_actor" # run reward scorer on sampling actors
 
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
@@ -100,7 +99,7 @@ python -m diffusionrl.train \
     --model.model-type sd3 \
     --sampling.sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
     --algorithm.algorithm-path diffusionrl.algorithms.nft.NFTAlgorithm \
-    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardScorer \
     --reward.reward-model-name "${REWARD_NAME}" \
     --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device "${REWARD_DEVICE}" \
@@ -109,7 +108,7 @@ python -m diffusionrl.train \
     \
     --sampling.time-shift 3.0 \
     --sampling.eta 0.0 \
-    --sampling.sde-type sde \
+    --sampling.sde-type flow \
     --sampling.timestep-fraction 0.1,0.4 \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
     --sampling.guidance-scale 1.0 \
@@ -117,7 +116,7 @@ python -m diffusionrl.train \
     --algorithm.algorithm-kwargs "${NFT_ALGO_KWARGS}" \
     \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
-    "${GRADIENT_ACCUMULATION_ARGS[@]}" \
+    "${LOCAL_MICRO_BATCH_ARGS[@]}" \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty true \
@@ -126,16 +125,15 @@ python -m diffusionrl.train \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --sampling.sampling-mode training_actor \
+    --rollout.mode direct_rollout \
+    --rollout.service-engine fsdp \
     --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
-    --ray.colocate-rollout-training true \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
     --ray.offload false \
     \
     --training.learning-rate 3e-4 \
-    --training.update-mode ${UPDATE_MODE} \
     --training.max-grad-norm 1.0 \
     --training.lora-rank 32 \
     --training.lora-alpha 64 \

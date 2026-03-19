@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # NOTE:
-#   sampling_mode='training_actor' currently requires sampler_engine_type=fsdp.
+#   direct sampling now uses rollout.mode='direct_rollout' with rollout.service_engine=fsdp.
 #   This script is the SGLang equivalent in separate rollout/training mode.
 #
 # Usage:
@@ -63,12 +63,14 @@ EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
-    --sampling.sampler-engine-type sglang \
+    --rollout.mode separate_rollout \
+    --rollout.service-engine sglang \
+    --rollout.service-num-gpus ${TP_SIZE} \
+    --rollout.engine-tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
-    --sampling.tp-size ${TP_SIZE} \
     --algorithm.algorithm-path diffusionrl.algorithms.nft.NFTAlgorithm \
-    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardScorer \
     --reward.reward-model-name ocr \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
@@ -81,7 +83,7 @@ python -m diffusionrl.train \
     --algorithm.algorithm-kwargs "${NFT_ALGO_KWARGS}" \
     \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
-    --training.gradient-accumulation-batch-size ${BATCH_SIZE} \
+    --training.local-micro-batch-size ${BATCH_SIZE} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.kl-coef 0.0001 \
@@ -89,13 +91,11 @@ python -m diffusionrl.train \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --ray.colocate-rollout-training false \
     --ray.rollout-num-gpus-per-node ${ROLLOUT_GPUS} \
     --ray.training-num-gpus-per-node ${TRAINING_GPUS} \
     --ray.placement-strategy SPREAD \
     \
     --training.learning-rate 3e-4 \
-    --training.update-mode single_update \
     --training.max-grad-norm 1.0 \
     --training.lora-rank 32 \
     --training.lora-alpha 64 \

@@ -52,11 +52,6 @@ NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-12}
 NUM_UPDATE_STEPS_PER_ROLLOUT=${NUM_UPDATE_STEPS_PER_ROLLOUT:-4}
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 
-if [ "${NUM_SAMPLES_PER_PROMPT}" -lt 2 ]; then
-    echo "ERROR: MixGRPO uses group advantages; set NUM_SAMPLES_PER_PROMPT >= 2 to avoid NaN."
-    exit 1
-fi
-
 # Rollout (sglang engine)
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
@@ -74,31 +69,28 @@ EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
 
 # Training
-UPDATE_MODE=${UPDATE_MODE:-multi_update}
-if [ $(( ROLLOUT_TOTAL_SAMPLES % TRAINING_GPUS )) -ne 0 ]; then
-    echo "ERROR: PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT must be divisible by TRAINING_GPUS"
-    exit 1
-fi
-GRADIENT_ACCUMULATION_BATCH_SIZE=${GRADIENT_ACCUMULATION_BATCH_SIZE-4}
+LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE-4}
 LOCAL_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / TRAINING_GPUS ))
-MULTI_UPDATE_BATCH_SIZE=$(( LOCAL_BATCH_SIZE / NUM_UPDATE_STEPS_PER_ROLLOUT ))
+LOCAL_UPDATE_BATCH_SIZE=$(( LOCAL_BATCH_SIZE / NUM_UPDATE_STEPS_PER_ROLLOUT ))
 
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type flux \
-    --sampling.sampler-engine-type sglang \
+    --rollout.mode separate_rollout \
+    --rollout.service-engine sglang \
+    --rollout.service-num-gpus ${TP_SIZE} \
+    --rollout.engine-tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --sampling.replay-sampler-path "${REPLAY_SAMPLER_PATH}" \
-    --sampling.tp-size ${TP_SIZE} \
     --algorithm.algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
-    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardScorer \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
-    --sampling.sde-type flux_flow \
+    --sampling.sde-type flow \
     --sampling.eta 0.7 \
     --sampling.time-shift 3.0 \
     --sampling.num-inference-steps 25 \
@@ -115,7 +107,6 @@ python -m diffusionrl.train \
     --algorithm.window.window-overlap true \
     --algorithm.window.window-roll-back true \
     \
-    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
@@ -123,17 +114,16 @@ python -m diffusionrl.train \
     --algorithm.adv-clip-abs 5.0 \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
-    --reward.component-mix-stage ${REWARD_MIX_MODE} \
+    --algorithm.component-mix-stage ${REWARD_MIX_MODE} \
     \
-    --ray.colocate-rollout-training false \
     --ray.rollout-num-gpus-per-node ${ROLLOUT_GPUS} \
     --ray.training-num-gpus-per-node ${TRAINING_GPUS} \
     --ray.placement-strategy SPREAD \
     \
     --training.learning-rate 1e-5 \
-    --training.update-mode ${UPDATE_MODE} \
-    --training.gradient-accumulation-batch-size ${GRADIENT_ACCUMULATION_BATCH_SIZE} \
-    --training.multi-update-batch-size ${MULTI_UPDATE_BATCH_SIZE} \
+    --training.local-micro-batch-size ${LOCAL_MICRO_BATCH_SIZE} \
+    --training.local-update-batch-size ${LOCAL_UPDATE_BATCH_SIZE} \
+    --training.num-updates-per-local-batch ${NUM_UPDATE_STEPS_PER_ROLLOUT} \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.lora-rank 64 \

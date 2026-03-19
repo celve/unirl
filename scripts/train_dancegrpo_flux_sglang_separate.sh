@@ -7,9 +7,9 @@
 # diffusion engine instead of the FSDP sampler.
 #
 # Key differences from the FSDP version:
-#   - --sampling.sampler-engine-type sglang   (instead of --sampling.sampler-path)
+#   - --rollout.service-engine sglang   (instead of --sampling.sampler-path)
 #   - Optional local debug override via SGLANG_PYTHON_PATH/PYTHONPATH
-#   - --sampling.tp-size controls tensor-parallelism inside the SGLang engine
+#   - --rollout.engine-tp-size controls tensor-parallelism inside the SGLang engine
 #   - Weight sync uses checkpoint_path (automatic for sglang engine)
 #
 # Prerequisites:
@@ -65,26 +65,24 @@ SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
 
-if [ $(( TRAINING_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
-    echo "ERROR: TRAINING_GPUS*BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
-    exit 1
-fi
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type flux \
-    --sampling.sampler-engine-type sglang \
+    --rollout.mode separate_rollout \
+    --rollout.service-engine sglang \
+    --rollout.service-num-gpus ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
-    --sampling.tp-size ${TP_SIZE} \
+    --rollout.engine-tp-size ${TP_SIZE} \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardScorer \
     --reward.reward-model-name ocr \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
-    --sampling.sde-type flux_dance \
+    --sampling.sde-type dance \
     --sampling.eta 0.3 \
     --sampling.time-shift 3.0 \
     --sampling.num-inference-steps 25 \
@@ -93,7 +91,7 @@ python -m diffusionrl.train \
     \
     --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
-    --training.gradient-accumulation-batch-size ${BATCH_SIZE} \
+    --training.local-micro-batch-size ${BATCH_SIZE} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
@@ -102,13 +100,11 @@ python -m diffusionrl.train \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --ray.colocate-rollout-training false \
     --ray.rollout-num-gpus-per-node ${ROLLOUT_GPUS} \
     --ray.training-num-gpus-per-node ${TRAINING_GPUS} \
     --ray.placement-strategy SPREAD \
     \
     --training.learning-rate 1e-5 \
-    --training.update-mode single_update \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.lora-rank ${LORA_RANK} \
