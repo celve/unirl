@@ -293,6 +293,7 @@ class NFTAlgorithm(BaseAlgorithm):
             "ema_flat_steps",
             "ema_uprate",
             "ema_uphold",
+            "reference_update_timing",
             "train_timestep_mode",
             "shuffle_train_timesteps",
             "apply_time_shift_in_loss",
@@ -332,6 +333,7 @@ class NFTAlgorithm(BaseAlgorithm):
             ema_flat_steps=int(extra.get("ema_flat_steps", 0)),
             ema_uprate=float(extra.get("ema_uprate", 0.001)),
             ema_uphold=float(extra.get("ema_uphold", 0.5)),
+            reference_update_timing=str(extra.get("reference_update_timing", "optimizer_step")),
             train_timestep_mode=str(extra.get("train_timestep_mode", "random")),
             shuffle_train_timesteps=bool(extra.get("shuffle_train_timesteps", True)),
             apply_time_shift_in_loss=bool(extra.get("apply_time_shift_in_loss", False)),
@@ -359,6 +361,7 @@ class NFTAlgorithm(BaseAlgorithm):
         ema_flat_steps: int = 0,
         ema_uprate: float = 0.001,
         ema_uphold: float = 0.5,
+        reference_update_timing: str = "optimizer_step",
         kl_coef: float = 0.0,
         old_adapter_name: str = "old",
         new_adapter_name: str = "default",
@@ -398,6 +401,7 @@ class NFTAlgorithm(BaseAlgorithm):
         self.ema_flat_steps = int(ema_flat_steps)
         self.ema_uprate = float(ema_uprate)
         self.ema_uphold = float(ema_uphold)
+        self.reference_update_timing = str(reference_update_timing).strip().lower()
         self.old_adapter_name = old_adapter_name
         self.new_adapter_name = new_adapter_name
         self.train_timestep_mode = str(train_timestep_mode)
@@ -487,6 +491,7 @@ class NFTAlgorithm(BaseAlgorithm):
             reference_flat_steps=self.ema_flat_steps,
             reference_uprate=self.ema_uprate,
             reference_uphold=self.ema_uphold,
+            reference_update_timing=self.reference_update_timing,
             old_adapter_name=self.old_adapter_name,
             new_adapter_name=self.new_adapter_name,
         )
@@ -707,14 +712,16 @@ class NFTAlgorithm(BaseAlgorithm):
         old_model: Optional[nn.Module] = None,
     ) -> torch.Tensor:
         """
-        Get prediction from old model/adapter.
+        Get prediction from the NFT old policy.
 
-        Tries in order:
-        1. Separate old_model if provided
-        2. Full-param EMA mode (swap EMA weights, compute, restore)
-        3. Dual adapter mode (switch to old adapter)
-        4. Disable adapter mode (LoRA base model)
-        5. Detached current prediction (fallback)
+        Accepted paths:
+        1. Explicit old_model
+        2. Full-parameter EMA swap
+        3. LoRA old-adapter switch
+
+        Reproduce mode must fail fast if none of these are available or if
+        adapter switching fails. Falling back to the base model or current
+        model would silently change the NFT objective semantics.
         """
         with torch.no_grad():
             if old_model is not None:
@@ -734,17 +741,19 @@ class NFTAlgorithm(BaseAlgorithm):
                 try:
                     with switch_adapter(adapter_model, self.old_adapter_name):
                         return model(**model_kwargs)[0]
-                except Exception:
-                    pass
+                except Exception as exc:
+                    raise RuntimeError(
+                        "NFT old-policy prediction failed while switching adapters. "
+                        f"Expected adapter={self.old_adapter_name!r}. "
+                        "Refusing to fall back to base/current model because that would "
+                        "change the training objective."
+                    ) from exc
 
-            if hasattr(adapter_model, "disable_adapter"):
-                try:
-                    with adapter_model.disable_adapter():
-                        return model(**model_kwargs)[0]
-                except Exception:
-                    pass
-
-            return model(**model_kwargs)[0]
+            raise RuntimeError(
+                "NFT old-policy prediction requires one of: explicit old_model, "
+                "full-parameter EMA, or adapter switching support via set_adapter(). "
+                f"Model type={type(adapter_model).__name__} does not expose a valid old-policy path."
+            )
 
     def get_ref_prediction(
         self,
@@ -759,11 +768,18 @@ class NFTAlgorithm(BaseAlgorithm):
                 try:
                     with adapter_model.disable_adapter():
                         return model(**model_kwargs)[0]
-                except Exception:
-                    pass
+                except Exception as exc:
+                    raise RuntimeError(
+                        "NFT reference prediction failed while disabling adapters. "
+                        "Refusing to fall back to current model because that would collapse "
+                        "the KL term toward zero."
+                    ) from exc
             if ref_model is not None:
                 return ref_model(**model_kwargs)[0]
-            return model(**model_kwargs)[0]
+            raise RuntimeError(
+                "NFT reference prediction requires either disable_adapter() support "
+                "or an explicit ref_model. No valid base-model reference path was available."
+            )
 
     # ------------------------------------------------------------------
     # Algorithm-owned training step (Phase 2)
@@ -956,6 +972,7 @@ class NFTAlgorithm(BaseAlgorithm):
             "ema_flat_steps": self.ema_flat_steps,
             "ema_uprate": self.ema_uprate,
             "ema_uphold": self.ema_uphold,
+            "reference_update_timing": self.reference_update_timing,
             "use_reference_ema": self.use_reference_ema,
             "old_adapter_name": self.old_adapter_name,
             "new_adapter_name": self.new_adapter_name,

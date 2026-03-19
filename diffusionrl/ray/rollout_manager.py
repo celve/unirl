@@ -809,7 +809,14 @@ class RolloutManager:
 
     def dispose(self) -> None:  # [PUBLIC-API → train.py, train_async.py] 清理
         """Clean up resources."""
+        if self.reward_service is not None:
+            self.reward_service.dispose()
+            self.reward_service = None
+        self.eval_runner = None
+        self.data_source = None
+        self.algorithm = None
         self.sampling_group = None
+        self._is_initialized = False
         logger.info("RolloutManager disposed")
 
 

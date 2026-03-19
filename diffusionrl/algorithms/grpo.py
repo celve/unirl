@@ -671,7 +671,6 @@ class GRPOAlgorithm(BaseAlgorithm):
             embeddings=embeddings,
             rewards=rewards,
             prompts=prompts,
-            num_steps=num_inference_steps,
             step_indices=step_indices,
             target_sde_indices=set(int(i) for i in final_sde_indices),
         )

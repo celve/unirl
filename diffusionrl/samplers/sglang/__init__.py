@@ -1,33 +1,30 @@
-"""
-SGLang Engine Samplers (Placeholder).
+"""SGLang sampler/runtime exports with lazy loading."""
 
-This module is reserved for future SGLang-based samplers.
-SGLang provides efficient serving for large language models and
-can be extended to support diffusion model inference.
+from __future__ import annotations
 
-Future implementations may include:
-- SGLangSampler: SGLang-based sampler for distributed inference
-- SGLangHunyuanSampler: HunyuanVideo sampler using SGLang backend
+import importlib
+from typing import Dict, Tuple
 
-Engine:
-- SGLangRolloutEngine: Placeholder engine interface for Ray actors
+_LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
+    "SGLangClient": ("diffusionrl.samplers.sglang.client", "SGLangClient"),
+    "SGLangClientError": ("diffusionrl.samplers.sglang.client", "SGLangClientError"),
+    "SGLangProtocolError": ("diffusionrl.samplers.sglang.client", "SGLangProtocolError"),
+    "SGLangTimeoutError": ("diffusionrl.samplers.sglang.client", "SGLangTimeoutError"),
+    "SGLangRolloutEngine": ("diffusionrl.samplers.sglang.engine", "SGLangRolloutEngine"),
+}
 
-See README.md for implementation plans.
-"""
+__all__ = list(_LAZY_ATTRS.keys())
 
-from .client import (
-    SGLangClient,
-    SGLangClientError,
-    SGLangProtocolError,
-    SGLangTimeoutError,
-)
-from .engine import SGLangRolloutEngine
 
-__all__ = [
-    "SGLangClient",
-    "SGLangClientError",
-    "SGLangProtocolError",
-    "SGLangTimeoutError",
-    # Engine (placeholder)
-    "SGLangRolloutEngine",
-]
+def __getattr__(name: str):
+    if name in _LAZY_ATTRS:
+        module_name, attr_name = _LAZY_ATTRS[name]
+        module = importlib.import_module(module_name)
+        value = getattr(module, attr_name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals().keys()) | set(__all__))

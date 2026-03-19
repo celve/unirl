@@ -19,59 +19,47 @@ import warnings
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from typing import Any, Dict, List, Optional, get_args, get_origin
 
-from diffusionrl.config.paths import (
-    is_probably_local_weight_sync_dir,
-    repo_root,
-)
 from diffusionrl.config.resolution import (
     DEFAULT_MODEL_PATH,
     DEFAULT_SAMPLER_PATH,
-    resolve_algorithm_kwargs,
     resolve_algorithm_path,
-    resolve_debug_mode,
-    resolve_logprob_source,
-    resolve_lora_target_modules,
     resolve_model_runtime,
-    resolve_nominal_local_training_batch_size,
-    resolve_num_updates_per_local_batch,
-    resolve_local_micro_batch_size,
-    resolve_local_update_batch_size,
     resolve_prompts_per_rollout,
-    resolve_global_rollout_batch_size,
     resolve_rollout_topology,
     resolve_sync_protocol,
-    resolve_train_backend_kwargs,
     resolve_train_backend_name,
-    resolve_training_dp_size,
     resolve_training_plan,
     resolve_training_topology,
 )
 from diffusionrl.config.rollout_topology import (
-    DIRECT_ROLLOUT_MODE,
     ROLLOUT_MODES,
-    normalize_rollout_mode,
-    normalize_rollout_service_engine,
-    rollout_mode_is_colocated,
-    rollout_mode_uses_service,
 )
 from diffusionrl.config.validation import (
     apply_model_config_hook,
-    validate_colocate_fractions,
+    validate_algorithm_kwargs_payload,
+    validate_algorithm_path,
+    validate_debug_config,
+    validate_direct_sampling_batch_geometry,
     validate_dotpath,
     validate_dynamic_dotpaths,
     validate_grouped_configs,
     validate_model_runtime_contract,
     validate_nft_sampling_contract,
+    validate_offload_and_colocate_config,
+    validate_replay_mode,
+    validate_rollout_topology_contract,
     validate_resolved_engine_algorithm_contract,
     validate_reward_and_rollout_buffer_config,
     validate_rollout_layout,
     validate_runtime_mode_constraints,
+    validate_sampling_basics,
+    validate_train_backend_config,
+    validate_training_actor_sampling_mode,
+    validate_training_misc,
+    validate_weight_sync,
 )
-from diffusionrl.types.engine import uses_dedicated_rollout_engine
 
 logger = logging.getLogger(__name__)
-
-ENV_REPO_ROOT = "DIFFUSIONRL_REPO_ROOT"
 
 def _validate_precision_name(value: Any, *, field_name: str) -> None:
     valid = {
@@ -153,7 +141,7 @@ class SamplingConfig:
         metadata={"help": "Use identical initial noise for all samples of the same prompt"})
 
     def validate(self) -> None:
-        mode = str(self.logprob_source).strip().lower()
+        mode = self.logprob_source
         if mode not in ("replay", "native"):
             raise ValueError(
                 f"logprob_source must be one of replay/native, got: {self.logprob_source}"
@@ -173,8 +161,8 @@ class SamplingConfig:
 class RewardConfig:
     """Reward path, reward model, and reward pool controls."""
 
-    reward_path: Optional[str] = field(default="diffusionrl.reward.local.LocalRewardScorer",
-        metadata={"help": "Python dotpath to reward scorer class"})
+    reward_path: Optional[str] = field(default=None,
+        metadata={"help": "Optional Python dotpath to a custom reward scorer class; omit to use built-in reward_model_name/reward_models"})
     reward_model_saved_path: Optional[str] = field(default=None,
         metadata={"help": "Path to reward model weights (local path or HuggingFace ID)"})
     reward_model_name: str = field(default="hpsv2",
@@ -228,11 +216,14 @@ class RewardConfig:
             or self.reward_service_url
             or self.reward_service_urls
         )
-        if not has_http_reward and not self.reward_path:
+        has_builtin_reward = bool(
+            str(self.reward_model_name or "").strip()
+            or (isinstance(self.reward_models, list) and len(self.reward_models) > 0)
+        )
+        if not has_http_reward and not self.reward_path and not has_builtin_reward:
             raise ValueError(
-                "reward_path must be set for local/ray reward scoring. "
-                "Available: diffusionrl.reward.local.LocalRewardScorer, "
-                "or provide a custom reward scorer dotpath."
+                "Reward scoring requires either reward_model_name/reward_models for built-ins, "
+                "or reward_path for a custom scorer."
             )
 
 
@@ -636,8 +627,7 @@ class RolloutLoggingConfig:
         metadata={"help": "WandB entity (team or username). If not set, uses the default entity of the logged-in user."})
 
     def validate(self) -> None:
-        normalized_mode = normalize_rollout_mode(self.mode)
-        if normalized_mode and normalized_mode not in ROLLOUT_MODES:
+        if self.mode is not None and self.mode not in ROLLOUT_MODES:
             raise ValueError(
                 "rollout.mode must be one of "
                 f"{sorted(ROLLOUT_MODES)}, got: {self.mode!r}"
@@ -691,7 +681,7 @@ class DebugConfig:
                           "Sampling tensors saved to <dir>/sampling/, training tensors to <dir>/training/."})
 
     def validate(self) -> None:
-        mode = str(self.debug_mode or "none").strip().lower()
+        mode = self.debug_mode
         if mode not in ("none", "train_only"):
             raise ValueError(
                 "debug_mode must be one of: none, train_only. "
@@ -763,13 +753,7 @@ _GROUP_SUBCONFIG_NAMES: Dict[str, set[str]] = {}
 
 def is_training_actor_sampling_mode(args: Any) -> bool:
     """Return whether training actors should directly handle sampling."""
-    rollout_mode = normalize_rollout_mode(getattr(args.rollout, "mode", None))
-    if not rollout_mode:
-        raise ValueError(
-            "rollout.mode must be set explicitly before calling "
-            "is_training_actor_sampling_mode(). Run validate_args()/parse_args() first."
-        )
-    return rollout_mode == DIRECT_ROLLOUT_MODE
+    return resolve_rollout_topology(args).training_actor_sampling_mode
 
 @dataclass
 class TrainingArguments:
@@ -1545,336 +1529,25 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
 
     return args
 
-def _resolve_model_runtime_contract(
+
+def _validate_train_only_dotpaths(
     args: TrainingArguments,
     *,
     explicit_sampler_path: bool,
-) -> tuple[Any, Dict[str, Optional[str]]]:
-    """Resolve model path/type and model-declared runtime defaults without mutating args."""
-    resolved = resolve_model_runtime(
+) -> None:
+    """Validate only the imports exercised by debug_mode=train_only."""
+    resolved_model = resolve_model_runtime(
         args,
         explicit_sampler_path=explicit_sampler_path,
     )
-    model_defaults: Dict[str, Optional[str]] = {
-        "sampler_path": resolved.sampler_path,
-        "sampler_engine_type": resolved.model_default_engine_type,
-    }
-    return resolved.model_cls, model_defaults
+    validate_dotpath(resolved_model.model_path, label="model")
+    validate_dotpath(resolved_model.sampler_path, label="sampler")
+    validate_dotpath(resolve_algorithm_path(args), label="algorithm")
+    if getattr(args.training, "train_backend_path", None):
+        validate_dotpath(args.training.train_backend_path, label="train_backend")
+    if getattr(args.sampling, "replay_sampler_path", None):
+        validate_dotpath(args.sampling.replay_sampler_path, label="replay_sampler")
 
-
-def _validate_rollout_topology(
-    args: TrainingArguments,
-    *,
-    model_default_engine_type: Optional[str],
-) -> tuple[bool, Optional[str]]:
-    """Validate explicit rollout topology without mutating args."""
-    del model_default_engine_type
-    resolved = resolve_rollout_topology(args)
-    return resolved.training_actor_sampling_mode, resolved.service_engine
-
-
-def _validate_sampling_basics(
-    args: TrainingArguments,
-    *,
-    rollout_service_engine: Optional[str],
-) -> tuple[bool, str]:
-    """Validate sampling/runtime basics without mutating args."""
-    if not isinstance(args.sampling.sampler_kwargs, dict):
-        raise ValueError("sampling.sampler_kwargs must be a dict.")
-
-    if args.sampling.sampler_kwargs:
-        logger.info("sampling.sampler_kwargs configured with explicit sampler constructor overrides.")
-
-    is_sglang_engine = normalize_rollout_service_engine(rollout_service_engine) == "sglang"
-    logprob_source = resolve_logprob_source(args)
-    return is_sglang_engine, logprob_source
-
-
-def _apply_training_actor_sampling_overrides(
-    args: TrainingArguments,
-    *,
-    training_actor_sampling_mode: bool,
-) -> None:
-    """Validate direct-sampling runtime compatibility without mutating args."""
-    if not training_actor_sampling_mode:
-        return
-
-    rollout_mode = normalize_rollout_mode(args.rollout.mode)
-    rollout_service_engine = normalize_rollout_service_engine(args.rollout.service_engine)
-    if rollout_mode_uses_service(rollout_mode) or uses_dedicated_rollout_engine(rollout_service_engine):
-        raise ValueError(
-            "Dedicated rollout service engines cannot use direct_rollout mode. "
-            f"Got rollout.mode={rollout_mode!r}, rollout.service_engine={rollout_service_engine!r}."
-        )
-
-    backend_name = str(getattr(args.training, "train_backend", "fsdp") or "fsdp").strip().lower()
-    backend_path = str(getattr(args.training, "train_backend_path", "") or "").strip()
-    from diffusionrl.runtime.training.backends import resolve_train_backend_capabilities
-
-    backend_caps = resolve_train_backend_capabilities(
-        backend_name,
-        backend_path=backend_path or None,
-    )
-    supports_direct_sampling = bool(backend_caps.supports_training_actor_sampling)
-
-    if not supports_direct_sampling:
-        raise ValueError(
-            "rollout.mode=%r resolves to direct training-actor sampling, "
-            "but train_backend=%r does not declare supports_training_actor_sampling=true."
-            % (rollout_mode, backend_name)
-        )
-
-
-def _validate_replay_mode(
-    args: TrainingArguments,
-    *,
-    training_actor_sampling_mode: bool,
-    is_sglang_engine: bool,
-    logprob_source: str,
-) -> tuple[bool, bool, str]:
-    """Validate replay flags for sglang/non-sglang engines."""
-    replay_enabled = bool(getattr(args.sampling, "replay_log_probs", False))
-    replay_guard = (
-        (not training_actor_sampling_mode)
-        and getattr(args.algorithm, "algorithm_type", "grpo") == "grpo"
-    )
-
-    if is_sglang_engine and replay_guard:
-        if logprob_source == "replay" and not replay_enabled:
-            raise ValueError(
-                "rollout.service_engine='sglang' with logprob_source='replay' requires "
-                "--sampling.replay-log-probs=true. Set it explicitly."
-            )
-        if logprob_source == "native" and replay_enabled:
-            raise ValueError(
-                "logprob_source='native' is incompatible with replay_log_probs=true. "
-                "Set --sampling.replay-log-probs=false when using native log_prob mode."
-            )
-
-    if replay_enabled and not replay_guard:
-        raise ValueError(
-            "replay_log_probs=true is only valid for "
-            "dedicated rollout services + algorithm_type='grpo'. "
-            "Either disable replay_log_probs or adjust your config."
-        )
-
-    return replay_guard, replay_enabled, logprob_source
-
-
-def _apply_colocate_and_offload_rules(
-    args: TrainingArguments,
-    *,
-    training_actor_sampling_mode: bool,
-) -> None:
-    """Validate offload/colocate flags without mutating args."""
-    if training_actor_sampling_mode:
-        if bool(args.ray.offload) or bool(args.ray.offload_train) or bool(args.ray.offload_rollout):
-            raise ValueError(
-                "direct_rollout uses training actors for sampling and cannot be combined with "
-                "ray.offload / ray.offload_train / ray.offload_rollout."
-            )
-        return
-
-    if rollout_mode_is_colocated(args.rollout.mode):
-        validate_colocate_fractions(args)
-
-
-def _validate_training_misc(args: TrainingArguments) -> None:
-    """Validate misc training knobs that affect downstream components."""
-    if args.algorithm.adv_normalization not in {"global", "group"}:
-        raise ValueError(
-            "algorithm.adv_normalization must be 'global' or 'group'. "
-            f"Got: {args.algorithm.adv_normalization!r}."
-        )
-
-    resolve_lora_target_modules(args.training.lora_target_modules)
-
-    if bool(getattr(args.rollout, "rollout_buffer_reassemble_by_group", False)):
-        configured_group_size = getattr(args.rollout, "rollout_buffer_group_size", None)
-        if configured_group_size is None:
-            raise ValueError(
-                "rollout.rollout_buffer_reassemble_by_group=true requires rollout.rollout_buffer_group_size "
-                "to be set explicitly. Implicit binding to algorithm.samples_per_prompt was removed."
-            )
-
-    _validate_training_batch_geometry(args)
-
-
-def _resolve_training_dp_size(args: TrainingArguments) -> int:
-    return resolve_training_dp_size(args)
-
-
-def _validate_training_batch_geometry(args: TrainingArguments) -> None:
-    """Validate training batch-geometry knobs without mutating args."""
-    update_batch_size = resolve_local_update_batch_size(args)
-    micro_batch_size = resolve_local_micro_batch_size(args)
-    num_updates_per_local_batch = resolve_num_updates_per_local_batch(args)
-    local_batch_size = resolve_nominal_local_training_batch_size(args)
-    global_batch_size = resolve_global_rollout_batch_size(args)
-    resolved_prompts_per_rollout = resolve_prompts_per_rollout(args)
-
-    if micro_batch_size > update_batch_size:
-        raise ValueError(
-            "training.local_micro_batch_size must be <= "
-            "training.local_update_batch_size. "
-            f"Got micro_batch_size={micro_batch_size}, "
-            f"update_batch_size={update_batch_size}."
-        )
-    if local_batch_size != update_batch_size * num_updates_per_local_batch:
-        raise ValueError(
-            "Resolved local training batch size does not match the training geometry. "
-            f"Got local_batch_size={local_batch_size}, "
-            f"local_update_batch_size={update_batch_size}, "
-            f"num_updates_per_local_batch={num_updates_per_local_batch}."
-        )
-    if global_batch_size != local_batch_size * _resolve_training_dp_size(args):
-        raise ValueError(
-            "Resolved global rollout batch size does not match local_batch_size * dp_size. "
-            f"Got global_batch_size={global_batch_size}, local_batch_size={local_batch_size}, "
-            f"dp_size={_resolve_training_dp_size(args)}."
-        )
-    if resolved_prompts_per_rollout < 1:
-        raise ValueError(
-            "Resolved prompts_per_rollout must be >= 1. "
-            f"Got: {resolved_prompts_per_rollout}."
-        )
-
-
-def _validate_direct_sampling_batch_geometry(
-    args: TrainingArguments,
-    *,
-    training_actor_sampling_mode: bool,
-) -> None:
-    """Validate prompt-batch splitting for training-actor direct sampling."""
-    max_samples_per_request = getattr(args.sampling, "max_samples_per_request", None)
-    if max_samples_per_request is None:
-        return
-
-    if not training_actor_sampling_mode:
-        raise ValueError(
-            "sampling.max_samples_per_request is only valid when "
-            "sampling runs directly on training actors."
-        )
-
-    max_samples_per_request = int(max_samples_per_request)
-    prompts_per_rollout = int(resolve_prompts_per_rollout(args))
-    total_samples = prompts_per_rollout * int(args.algorithm.samples_per_prompt)
-    if max_samples_per_request < 1:
-        raise ValueError("sampling.max_samples_per_request must be >= 1.")
-    if prompts_per_rollout < 1:
-        raise ValueError("Resolved prompts_per_rollout must be >= 1.")
-def _validate_algorithm_kwargs_payload(args: TrainingArguments) -> None:
-    """Validate algorithm_kwargs payload without mutating args."""
-    resolve_algorithm_kwargs(args)
-
-
-def _validate_algorithm_path(args: TrainingArguments) -> None:
-    """Resolve algorithm.algorithm_path for validation without mutating args."""
-    resolve_algorithm_path(args)
-
-
-def _validate_train_backend_config(args: TrainingArguments) -> None:
-    """Validate train-backend selection and kwargs without mutating args."""
-    backend = resolve_train_backend_name(args)
-    backend_path = getattr(args.training, "train_backend_path", None)
-    supported = {"fsdp", "megatron", "veomni"}
-    if backend not in supported and not backend_path:
-        raise ValueError(
-            f"Unsupported train_backend={backend!r}. "
-            f"Expected one of {sorted(supported)} or provide --training.train-backend-path."
-        )
-    if backend in {"megatron"} and not backend_path:
-        logger.warning(
-            "train_backend=%s is currently a scaffold backend: launch/topology interfaces are wired, "
-            "but runtime training flow is not fully implemented yet. "
-            "Use train_backend_kwargs.actor_class_path to provide a Megatron-dedicated actor.",
-            backend,
-        )
-
-    parsed = resolve_train_backend_kwargs(args)
-
-    if backend == "veomni":
-        mode = str(parsed.get("data_parallel_mode", "fsdp2") or "fsdp2").strip().lower()
-        if mode == "ddp":
-            raise ValueError(
-                "train_backend=veomni in diffusionRL does not support data_parallel_mode='ddp'. "
-                "Use data_parallel_mode='fsdp2'."
-            )
-        if mode != "fsdp2":
-            raise ValueError(
-                "train_backend=veomni in diffusionRL now targets FSDP2 only. "
-                "Set data_parallel_mode='fsdp2' or omit this field."
-            )
-    if "num_actors" in parsed:
-        raise ValueError(
-            "training.train_backend_kwargs.num_actors is not supported. "
-            "Training actor count is owned by ray.training_num_nodes × "
-            "ray.training_num_gpus_per_node."
-        )
-    if backend == "megatron" and not backend_path and not str(parsed.get("actor_class_path", "")).strip():
-        logger.warning(
-            "train_backend=%s requires actor_class_path in train_backend_kwargs "
-            "to launch a Megatron-specific training actor.",
-            backend,
-        )
-
-def _validate_weight_sync(args: TrainingArguments, *, training_actor_sampling_mode: bool) -> None:
-    rollout_service_engine = normalize_rollout_service_engine(
-        getattr(args.rollout, "service_engine", None)
-    )
-    resolved_mode = resolve_sync_protocol(
-        args,
-        training_actor_sampling_mode=training_actor_sampling_mode,
-        rollout_service_engine=rollout_service_engine,
-    )
-    is_multi_node = (
-        int(getattr(args.ray, "rollout_num_nodes", 1)) > 1
-        or int(getattr(args.ray, "training_num_nodes", 1)) > 1
-        or int(getattr(args.reward, "reward_dedicated_num_nodes", 0)) > 1
-    )
-    if (
-        resolved_mode in {"tensor_payload", "nccl_broadcast"}
-        and rollout_service_engine != "sglang"
-    ):
-        raise ValueError(
-            "sync.protocol in {tensor_payload,nccl_broadcast} currently requires "
-            "rollout.service_engine='sglang'. "
-            f"Got rollout.service_engine={rollout_service_engine!r}."
-        )
-
-    if (
-        resolved_mode == "checkpoint_path"
-        and is_multi_node
-        and is_probably_local_weight_sync_dir(
-            args.sync.dir,
-            root=repo_root(env_repo_root=ENV_REPO_ROOT),
-        )
-    ):
-        raise ValueError(
-            "sync.protocol=checkpoint_path in multi-node mode requires a shared filesystem path. "
-            f"Got local-only sync.dir={args.sync.dir}. "
-            "Use a shared mount (e.g. /mnt/shared/... or NFS path)."
-        )
-
-
-def _validate_debug_config(args: TrainingArguments) -> str:
-    """Validate debug mode and enforce mode-specific constraints."""
-    debug_mode = resolve_debug_mode(args)
-
-    if debug_mode == "train_only":
-        if bool(getattr(args.rollout, "async_pipeline", False)):
-            raise ValueError(
-                "debug_mode=train_only does not support async_pipeline yet. "
-                "Set --rollout.async-pipeline=false."
-            )
-
-    if bool(getattr(args.debug, "debug_save_intermediates", False)) and bool(getattr(args.rollout, "async_pipeline", False)):
-        raise ValueError(
-            "debug_save_intermediates=true is not supported with async_pipeline yet. "
-            "Set --rollout.async-pipeline=false."
-        )
-
-    return debug_mode
 
 def validate_args(
     args: TrainingArguments,
@@ -1891,50 +1564,42 @@ def validate_args(
     explicit_sampler_path = args.sampling.sampler_path != DEFAULT_SAMPLER_PATH
 
     validate_grouped_configs(args)
-    debug_mode = _validate_debug_config(args)
+    debug_mode = validate_debug_config(args)
 
-    model_cls, model_defaults = _resolve_model_runtime_contract(
+    resolved_model = resolve_model_runtime(
         args,
         explicit_sampler_path=explicit_sampler_path,
     )
-    training_actor_sampling_mode, rollout_service_engine = _validate_rollout_topology(
+    model_cls = resolved_model.model_cls
+    rollout_topology = validate_rollout_topology_contract(args)
+    training_actor_sampling_mode = rollout_topology.training_actor_sampling_mode
+    is_sglang_engine, logprob_source = validate_sampling_basics(
         args,
-        model_default_engine_type=model_defaults.get("sampler_engine_type"),
+        rollout_service_engine=rollout_topology.service_engine,
     )
-    is_sglang_engine, logprob_source = _validate_sampling_basics(
-        args,
-        rollout_service_engine=rollout_service_engine,
-    )
-    _validate_algorithm_kwargs_payload(args)
-    _validate_algorithm_path(args)
-    _validate_train_backend_config(args)
+    validate_algorithm_kwargs_payload(args)
+    validate_algorithm_path(args)
+    validate_train_backend_config(args)
     if debug_mode == "train_only":
         # Keep train_only focused on train-side imports only. Rollout/reward/data
         # extensions are not exercised on this path and should not block replay.
-        resolved_model = resolve_model_runtime(
+        _validate_train_only_dotpaths(
             args,
             explicit_sampler_path=explicit_sampler_path,
         )
-        validate_dotpath(resolved_model.model_path, label="model")
-        validate_dotpath(resolved_model.sampler_path, label="sampler")
-        validate_dotpath(resolve_algorithm_path(args), label="algorithm")
-        if getattr(args.training, "train_backend_path", None):
-            validate_dotpath(args.training.train_backend_path, label="train_backend")
-        if getattr(args.sampling, "replay_sampler_path", None):
-            validate_dotpath(args.sampling.replay_sampler_path, label="replay_sampler")
     else:
         validate_dynamic_dotpaths(args)
-    _apply_training_actor_sampling_overrides(
+    validate_training_actor_sampling_mode(
         args,
         training_actor_sampling_mode=training_actor_sampling_mode,
     )
-    replay_guard, _, logprob_source = _validate_replay_mode(
+    replay_guard, _, logprob_source = validate_replay_mode(
         args,
         training_actor_sampling_mode=training_actor_sampling_mode,
         is_sglang_engine=is_sglang_engine,
         logprob_source=logprob_source,
     )
-    _apply_colocate_and_offload_rules(
+    validate_offload_and_colocate_config(
         args,
         training_actor_sampling_mode=training_actor_sampling_mode,
     )
@@ -1945,8 +1610,8 @@ def validate_args(
             args,
             training_actor_sampling_mode=training_actor_sampling_mode,
         )
-    _validate_training_misc(args)
-    _validate_direct_sampling_batch_geometry(
+    validate_training_misc(args)
+    validate_direct_sampling_batch_geometry(
         args,
         training_actor_sampling_mode=training_actor_sampling_mode,
     )
@@ -1962,7 +1627,7 @@ def validate_args(
             logprob_source=logprob_source,
         )
 
-    _validate_weight_sync(
+    validate_weight_sync(
         args,
         training_actor_sampling_mode=training_actor_sampling_mode,
     )

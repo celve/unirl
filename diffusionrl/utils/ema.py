@@ -278,15 +278,69 @@ class DualAdapterEMA:
         self._step = int(state_dict.get("step", self._step))
 
     @torch.no_grad()
+    def sync_from_new(self, model: nn.Module) -> bool:
+        """Force old adapter to exactly match new adapter or raise on failure."""
+        adapter_model = model.module if hasattr(model, "module") else model
+
+        if not hasattr(adapter_model, "set_adapter"):
+            raise RuntimeError(
+                "NFT adapter EMA requires a model exposing set_adapter(). "
+                f"Got model type={type(adapter_model).__name__}."
+            )
+
+        try:
+            adapter_model.set_adapter(self.new_adapter_name)
+            new_params = {
+                key: param.data.clone()
+                for name, param in adapter_model.named_parameters()
+                for key in [self._adapter_param_key(name, self.new_adapter_name)]
+                if key is not None
+            }
+            if not new_params:
+                raise RuntimeError(
+                    "NFT adapter EMA could not find any parameters for the new adapter "
+                    f"{self.new_adapter_name!r}."
+                )
+
+            adapter_model.set_adapter(self.old_adapter_name)
+            copied = 0
+            for name, param in adapter_model.named_parameters():
+                key = self._adapter_param_key(name, self.old_adapter_name)
+                if key is None or key not in new_params:
+                    continue
+                param.data.copy_(new_params[key])
+                copied += 1
+            if copied == 0:
+                raise RuntimeError(
+                    "NFT adapter EMA could not find any parameters for the old adapter "
+                    f"{self.old_adapter_name!r}."
+                )
+
+            adapter_model.set_adapter(self.new_adapter_name)
+            return True
+        except Exception as exc:
+            try:
+                adapter_model.set_adapter(self.new_adapter_name)
+            except Exception:
+                pass
+            raise RuntimeError(
+                "Failed to initialize NFT old adapter from the new adapter. "
+                f"new_adapter={self.new_adapter_name!r}, old_adapter={self.old_adapter_name!r}."
+            ) from exc
+
+    @torch.no_grad()
     def update(self, model: nn.Module, step: Optional[int] = None) -> bool:
-        """Update old adapter weights using EMA from new adapter.
+        """Update old adapter weights using EMA from new adapter or raise on failure.
 
         Formula: old = decay * old + (1 - decay) * new
         """
         adapter_model = model.module if hasattr(model, "module") else model
 
         if not hasattr(adapter_model, "set_adapter"):
-            return False
+            raise RuntimeError(
+                "NFT adapter EMA requires a model exposing set_adapter(). "
+                f"Got model type={type(adapter_model).__name__}."
+            )
 
         current_decay = self.get_decay(step)
 
@@ -299,21 +353,39 @@ class DualAdapterEMA:
                 if key is not None
             }
             if not new_params:
-                return False
+                raise RuntimeError(
+                    "NFT adapter EMA could not find any parameters for the new adapter "
+                    f"{self.new_adapter_name!r}."
+                )
 
             adapter_model.set_adapter(self.old_adapter_name)
+            updated = 0
             for name, param in adapter_model.named_parameters():
                 key = self._adapter_param_key(name, self.old_adapter_name)
                 if key is None or key not in new_params:
                     continue
                 param.data.mul_(current_decay).add_(new_params[key], alpha=(1 - current_decay))
+                updated += 1
+            if updated == 0:
+                raise RuntimeError(
+                    "NFT adapter EMA could not find any parameters for the old adapter "
+                    f"{self.old_adapter_name!r}."
+                )
 
             adapter_model.set_adapter(self.new_adapter_name)
             self._step += 1
             return True
 
-        except Exception:
-            return False
+        except Exception as exc:
+            try:
+                adapter_model.set_adapter(self.new_adapter_name)
+            except Exception:
+                pass
+            raise RuntimeError(
+                "Failed to update NFT old adapter from the new adapter via EMA. "
+                f"new_adapter={self.new_adapter_name!r}, old_adapter={self.old_adapter_name!r}, "
+                f"step={step if step is not None else self._step}, decay={current_decay}."
+            ) from exc
 
 
 class EMAManager:
@@ -325,10 +397,13 @@ class EMAManager:
         eval_ema: Optional[EMAModuleWrapper] = None,
         reference_param_ema: Optional[EMAModuleWrapper] = None,
         reference_adapter_ema: Optional[DualAdapterEMA] = None,
+        reference_update_timing: str = "optimizer_step",
     ) -> None:
         self.eval_ema = eval_ema
         self.reference_param_ema = reference_param_ema
         self.reference_adapter_ema = reference_adapter_ema
+        self.reference_update_timing = str(reference_update_timing).strip().lower()
+        self._optimizer_step = 0
 
     @classmethod
     def from_model_and_spec(
@@ -381,7 +456,10 @@ class EMAManager:
             eval_ema=eval_ema,
             reference_param_ema=reference_param_ema,
             reference_adapter_ema=reference_adapter_ema,
+            reference_update_timing=str(getattr(spec, "reference_update_timing", "optimizer_step")),
         )
+        if reference_adapter_ema is not None:
+            reference_adapter_ema.sync_from_new(model)
         manager.bind_algorithm(algorithm)
         return manager
 
@@ -420,6 +498,8 @@ class EMAManager:
                 if self.reference_adapter_ema is not None
                 else None
             ),
+            "reference_update_timing": self.reference_update_timing,
+            "optimizer_step": int(self._optimizer_step),
         }
 
     def load_state_dict(
@@ -440,6 +520,10 @@ class EMAManager:
         if self.reference_adapter_ema is not None and isinstance(reference_adapter_state, dict):
             self.reference_adapter_ema.load_state_dict(reference_adapter_state)
 
+        self.reference_update_timing = str(
+            state_dict.get("reference_update_timing", self.reference_update_timing)
+        ).strip().lower()
+        self._optimizer_step = int(state_dict.get("optimizer_step", self._optimizer_step))
         self.bind_algorithm(algorithm)
 
     def post_optimizer_step(self, model: nn.Module, metrics: Optional[Dict[str, Any]] = None) -> None:
@@ -449,9 +533,22 @@ class EMAManager:
         if self.reference_param_ema is not None:
             self.reference_param_ema.step(trainable)
         if self.reference_adapter_ema is not None:
-            ema_success = self.reference_adapter_ema.update(model)
-            if metrics is not None:
-                metrics["ema_updated"] = ema_success
+            if self.reference_update_timing == "optimizer_step":
+                ema_success = self.reference_adapter_ema.update(model, step=self._optimizer_step)
+                if metrics is not None:
+                    metrics["ema_updated"] = ema_success
+            elif metrics is not None:
+                metrics["ema_updated"] = False
+        self._optimizer_step += 1
+
+    def post_rollout_end(self, model: nn.Module, metrics: Optional[Dict[str, Any]] = None) -> None:
+        if self.reference_adapter_ema is None:
+            return
+        if self.reference_update_timing != "rollout_end":
+            return
+        ema_success = self.reference_adapter_ema.update(model, step=self._optimizer_step)
+        if metrics is not None:
+            metrics["ema_updated"] = ema_success
 
     def apply_eval_ema(self, model: nn.Module) -> bool:
         if self.eval_ema is None:

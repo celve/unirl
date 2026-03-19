@@ -7,42 +7,53 @@ This package provides shared dataclasses and validation helpers used by:
 - samplers and losses
 """
 
-from .reward import RewardRequest, RewardResponse, RewardType
-from .engine import EngineCapabilities, EngineConfig
-from .sampling import (
-    RolloutOutput,
-    RolloutRequest,
-    LogProbData,
-    PromptEmbeddings,
-    SamplingRequirements,
-)
-from .sde import SDEConfig, SDEScheduleConfig
-from .training_batch import (
-    BackwardTrainingBatch,
-    ForwardTrainingBatch,
-    TimestepData,
-    TrainingBatch,
-    is_backward_batch,
-    is_forward_batch,
-)
+from __future__ import annotations
 
-__all__ = [
-    "BackwardTrainingBatch",
-    "EngineCapabilities",
-    "EngineConfig",
-    "RolloutOutput",
-    "RolloutRequest",
-    "LogProbData",
-    "ForwardTrainingBatch",
-    "PromptEmbeddings",
-    "RewardRequest",
-    "RewardResponse",
-    "RewardType",
-    "SamplingRequirements",
-    "SDEConfig",
-    "SDEScheduleConfig",
-    "TimestepData",
-    "TrainingBatch",
-    "is_backward_batch",
-    "is_forward_batch",
-]
+import importlib
+from typing import Dict, Tuple
+
+_LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
+    "RewardRequest": ("diffusionrl.types.reward", "RewardRequest"),
+    "RewardResponse": ("diffusionrl.types.reward", "RewardResponse"),
+    "RewardType": ("diffusionrl.types.reward", "RewardType"),
+    "EngineCapabilities": ("diffusionrl.types.engine", "EngineCapabilities"),
+    "EngineConfig": ("diffusionrl.types.engine", "EngineConfig"),
+    "RolloutOutput": ("diffusionrl.types.sampling", "RolloutOutput"),
+    "RolloutRequest": ("diffusionrl.types.sampling", "RolloutRequest"),
+    "LogProbData": ("diffusionrl.types.sampling", "LogProbData"),
+    "PromptEmbeddings": ("diffusionrl.types.sampling", "PromptEmbeddings"),
+    "SamplingRequirements": ("diffusionrl.types.sampling", "SamplingRequirements"),
+    "SDEConfig": ("diffusionrl.types.sde", "SDEConfig"),
+    "SDEScheduleConfig": ("diffusionrl.types.sde", "SDEScheduleConfig"),
+    "BackwardTrainingBatch": (
+        "diffusionrl.types.training_batch",
+        "BackwardTrainingBatch",
+    ),
+    "ForwardTrainingBatch": (
+        "diffusionrl.types.training_batch",
+        "ForwardTrainingBatch",
+    ),
+    "TimestepData": ("diffusionrl.types.training_batch", "TimestepData"),
+    "TrainingBatch": ("diffusionrl.types.training_batch", "TrainingBatch"),
+    "is_backward_batch": (
+        "diffusionrl.types.training_batch",
+        "is_backward_batch",
+    ),
+    "is_forward_batch": ("diffusionrl.types.training_batch", "is_forward_batch"),
+}
+
+__all__ = list(_LAZY_ATTRS.keys())
+
+
+def __getattr__(name: str):
+    if name in _LAZY_ATTRS:
+        module_name, attr_name = _LAZY_ATTRS[name]
+        module = importlib.import_module(module_name)
+        value = getattr(module, attr_name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals().keys()) | set(__all__))

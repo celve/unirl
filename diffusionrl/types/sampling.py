@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
 import torch
@@ -21,8 +20,8 @@ class SamplingRequirements:
     Algorithm-specific extras (for example ``sde_ratio`` for MixGRPO and
     ``requires_clean_latents`` for NFT) live in the open ``extras`` mapping so
     new algorithms can declare sampler requirements without modifying the core
-    contract. The mapping is normalized into a read-only snapshot at
-    construction time.
+    contract. The mapping is normalized into an owned snapshot at construction
+    time so callers cannot retain references to the original input mapping.
     """
 
     requires_trajectory: bool = True
@@ -34,13 +33,13 @@ class SamplingRequirements:
     requires_embeddings: bool = True
     """Whether the algorithm needs prompt embeddings in the sampled batch."""
 
-    extras: Mapping[str, Any] = field(default_factory=dict)
-    """Read-only algorithm-specific sampler extras."""
+    extras: Dict[str, Any] = field(default_factory=dict)
+    """Owned algorithm-specific sampler extras snapshot."""
 
     def __post_init__(self) -> None:
         raw_extras = self.extras
         extras_copy = dict(raw_extras) if isinstance(raw_extras, Mapping) else {}
-        object.__setattr__(self, "extras", MappingProxyType(extras_copy))
+        object.__setattr__(self, "extras", extras_copy)
 
     @property
     def sde_ratio(self) -> float:

@@ -77,7 +77,7 @@ ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
-NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-"{\"beta\":1,\"adv_mode\":\"raw\",\"adv_clip_max\":5.0,\"use_adaptive_weight\":true,\"train_timestep_mode\":\"all\",\"shuffle_train_timesteps\":true,\"apply_time_shift_in_loss\":false,\"use_reference_ema\":true,\"ema_decay\":0.001,\"decay_type\":\"warmup\",\"ema_flat_steps\":0,\"ema_uprate\":0.001,\"ema_uphold\":0.5,\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}"}
+NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-"{\"beta\":1,\"adv_mode\":\"raw\",\"adv_clip_max\":5.0,\"use_adaptive_weight\":true,\"train_timestep_mode\":\"all\",\"shuffle_train_timesteps\":true,\"apply_time_shift_in_loss\":false,\"use_reference_ema\":true,\"reference_update_timing\":\"rollout_end\",\"ema_decay\":0.001,\"decay_type\":\"warmup\",\"ema_flat_steps\":0,\"ema_uprate\":0.001,\"ema_uphold\":0.5,\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}"}
 if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
     exit 1
@@ -125,7 +125,6 @@ python -m diffusionrl.train \
     --model.model-type sd3 \
     --sampling.sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
     --algorithm.algorithm-path diffusionrl.algorithms.nft.NFTAlgorithm \
-    --reward.reward-path diffusionrl.reward.local.LocalRewardScorer \
     --reward.reward-model-name "${REWARD_NAME}" \
     --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device "${REWARD_DEVICE}" \
@@ -135,8 +134,8 @@ python -m diffusionrl.train \
     \
     --sampling.time-shift 3.0 \
     --sampling.eta 0.0 \
-    --sampling.sde-type flow \
-    --sampling.timestep-fraction 0.0,0.3 \
+    --sampling.sde-type dpm2 \
+    --sampling.timestep-fraction 0.99 \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
     --sampling.guidance-scale 1.0 \
     --sampling.sampling-adapter old \
@@ -149,6 +148,7 @@ python -m diffusionrl.train \
     --algorithm.kl-coef 0.0001 \
     --algorithm.adv-normalization group \
     --algorithm.use-global-std true \
+    --algorithm.adv-norm-eps 1e-4 \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \

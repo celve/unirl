@@ -12,7 +12,11 @@ from diffusionrl.utils.misc import load_function
 
 
 def _instantiate_algorithm_for_contracts(args: Any) -> Any:
-    """Instantiate the algorithm so contracts are read from one runtime surface."""
+    """Instantiate a transient algorithm only for contract validation.
+
+    RolloutManager and TrainingActor still own their process-local algorithm
+    instances at runtime. This helper is for config-time contract checks only.
+    """
     algorithm_config = build_algorithm_config(args)
     algorithm_path = algorithm_config.get("algorithm_path")
     if not isinstance(algorithm_path, str) or not algorithm_path.strip():

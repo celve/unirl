@@ -9,7 +9,7 @@ from __future__ import annotations
 import importlib
 from typing import Any, Dict, Optional, Tuple
 
-from diffusionrl.types import SamplingRequirements
+from diffusionrl.types.sampling import SamplingRequirements
 
 from .base import BaseAlgorithm
 from .registry import DEFAULT_ALGORITHM_PATHS

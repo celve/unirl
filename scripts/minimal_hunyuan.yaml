@@ -22,7 +22,6 @@ sampling:
   init_same_noise: true
 
 reward:
-  reward_path: diffusionrl.reward.local.LocalRewardScorer
   reward_model_name: hpsv2
 
 algorithm:

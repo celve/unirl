@@ -49,7 +49,6 @@ NUM_FRAMES=${NUM_FRAMES:-53}
 FPS=${FPS:-8}
 
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-"hpsv2"}
-REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardScorer"}
 
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
@@ -87,7 +86,6 @@ python -m diffusionrl.train \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward.reward-path "${REWARD_PATH}" \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \

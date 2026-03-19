@@ -85,7 +85,6 @@ python -m diffusionrl.train \
     --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --sampling.replay-sampler-path "${REPLAY_SAMPLER_PATH}" \
     --algorithm.algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
-    --reward.reward-path diffusionrl.reward.local.LocalRewardScorer \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \

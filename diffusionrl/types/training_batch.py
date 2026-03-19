@@ -83,7 +83,6 @@ class BackwardTrainingBatch:
     prompt_ids: Optional[List[str]] = None
     sample_ids: Optional[List[str]] = None
     group_ids: Optional[List[str]] = None
-    num_steps: int = 50
     is_partitioned: bool = False
     step_indices: Optional[torch.Tensor] = None
     target_sde_indices: Optional[Set[int]] = None
@@ -216,7 +215,6 @@ class BackwardTrainingBatch:
             prompt_ids=self.prompt_ids,
             sample_ids=self.sample_ids,
             group_ids=self.group_ids,
-            num_steps=self.num_steps,
             is_partitioned=self.is_partitioned,
             step_indices=self.step_indices.to(device)
             if self.step_indices is not None
@@ -286,7 +284,6 @@ class BackwardTrainingBatch:
             prompt_ids=self.prompt_ids[start:end] if self.prompt_ids is not None else None,
             sample_ids=self.sample_ids[start:end] if self.sample_ids is not None else None,
             group_ids=self.group_ids[start:end] if self.group_ids is not None else None,
-            num_steps=self.num_steps,
             is_partitioned=True,
             step_indices=self.step_indices,
             target_sde_indices=self.target_sde_indices,
@@ -300,7 +297,7 @@ class BackwardTrainingBatch:
         training: it permutes all sample-level tensors (trajectories,
         log_probs, advantages, embeddings, rewards, prompts) using the
         given index permutation, while keeping shared fields (timesteps,
-        step_indices, target_sde_indices, num_steps) unchanged.
+        step_indices, target_sde_indices) unchanged.
 
         Args:
             indices: 1-D LongTensor permutation of [0, batch_size)
@@ -336,7 +333,6 @@ class BackwardTrainingBatch:
                 if self.group_ids is not None
                 else None
             ),
-            num_steps=self.num_steps,
             is_partitioned=self.is_partitioned,
             step_indices=self.step_indices,
             target_sde_indices=self.target_sde_indices,
@@ -351,10 +347,8 @@ class BackwardTrainingBatch:
         """
         return {
             "trajectories": self.trajectories,
-            "latents": self.trajectories,
             "log_probs_dict": self.log_probs.to_dict(),
             "timesteps": self.timesteps,
-            "sigmas": self.timesteps,
             "sde_indices": self.sde_indices,
             "target_sde_indices": self.target_sde_indices,
             "step_indices": self.resolved_step_indices,

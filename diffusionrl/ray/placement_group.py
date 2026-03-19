@@ -348,11 +348,6 @@ def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroup
     )
     return create_placement_groups(config)
 
-
-# Backward-compatible alias for older external imports.
-GRPOPlacementConfig = RuntimePlacementConfig
-
-
 def remove_placement_group(pg: PlacementGroup) -> None:
     """Remove a placement group and free its resources."""
     try:

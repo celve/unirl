@@ -1,79 +1,44 @@
-"""
-Samplers for GRPO training.
+"""Sampler subsystem entrypoint with lazy exports."""
 
-These samplers generate trajectories and log probabilities for policy gradient training.
+from __future__ import annotations
 
-Available engines:
-- Direct sampling engines: native PyTorch sampler paths that run on TrainingActor
-- SGLang: dedicated rollout-side engine for separated training/inference
+import importlib
+from typing import Dict, Tuple
 
-Engine selection:
-- Use sampler/model defaults for direct sampling on training actors
-- Use SGLang when rollout is intentionally split into a dedicated service
+_LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
+    "compute_sde_log_prob": ("diffusionrl.sde.runtime", "compute_sde_log_prob"),
+    "get_sigma_schedule": ("diffusionrl.sde.runtime", "get_sigma_schedule"),
+    "sde_step_with_log_prob": ("diffusionrl.sde.runtime", "sde_step_with_log_prob"),
+    "BaseSampler": ("diffusionrl.samplers.base", "BaseSampler"),
+    "RolloutOutput": ("diffusionrl.samplers.base", "RolloutOutput"),
+    "TimestepScheduler": ("diffusionrl.samplers.schedulers", "TimestepScheduler"),
+    "AllSDEScheduler": ("diffusionrl.samplers.schedulers", "AllSDEScheduler"),
+    "WindowScheduler": ("diffusionrl.samplers.schedulers", "WindowScheduler"),
+    "WindowConfig": ("diffusionrl.samplers.schedulers", "WindowConfig"),
+    "get_scheduler": ("diffusionrl.samplers.schedulers", "get_scheduler"),
+    "BaseRolloutEngine": ("diffusionrl.samplers.engine", "BaseRolloutEngine"),
+    "ENGINE_REGISTRY": ("diffusionrl.samplers.engine", "ENGINE_REGISTRY"),
+    "register_engine": ("diffusionrl.samplers.engine", "register_engine"),
+    "get_engine": ("diffusionrl.samplers.engine", "get_engine"),
+    "create_engine": ("diffusionrl.samplers.engine", "create_engine"),
+    "FluxSampler": ("diffusionrl.samplers.fsdp.flux_sampler", "FluxSampler"),
+    "SD3Sampler": ("diffusionrl.samplers.fsdp.sd3_sampler", "SD3Sampler"),
+    "FSDPHunyuanSampler": ("diffusionrl.samplers.fsdp.hunyuan_sampler", "FSDPHunyuanSampler"),
+    "SGLangRolloutEngine": ("diffusionrl.samplers.sglang.engine", "SGLangRolloutEngine"),
+}
 
-Engine Interface:
-Dedicated rollout engines implement BaseRolloutEngine for unified Ray actor integration:
-- initialize(): Load models and setup
-- generate(): Generate samples with log_probs
-- encode_prompt(): Text encoding
-- update_weights(): Sync weights from training
-- sleep()/wake_up(): Memory/runtime lifecycle
-"""
+__all__ = list(_LAZY_ATTRS.keys())
 
-# Base classes and utilities
-from diffusionrl.sde.runtime import (
-    compute_sde_log_prob,
-    get_sigma_schedule,
-    sde_step_with_log_prob,
-)
-from .base import BaseSampler, RolloutOutput
-from .schedulers import (
-    TimestepScheduler,
-    AllSDEScheduler,
-    WindowScheduler,
-    WindowConfig,
-    get_scheduler,
-)
 
-# Engine interface
-from .engine import (
-    BaseRolloutEngine,
-    ENGINE_REGISTRY,
-    register_engine,
-    get_engine,
-    create_engine,
-)
+def __getattr__(name: str):
+    if name in _LAZY_ATTRS:
+        module_name, attr_name = _LAZY_ATTRS[name]
+        module = importlib.import_module(module_name)
+        value = getattr(module, attr_name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-# Native PyTorch samplers used by training-actor direct sampling
-from .fsdp import FluxSampler, SD3Sampler, FSDPHunyuanSampler
 
-# SGLang dedicated rollout engine
-from .sglang import SGLangRolloutEngine
-
-__all__ = [
-    # Log probability computation
-    "compute_sde_log_prob",
-    "get_sigma_schedule",
-    "sde_step_with_log_prob",
-    # Base classes
-    "BaseSampler",
-    "RolloutOutput",
-    # Engine interface
-    "BaseRolloutEngine",
-    "ENGINE_REGISTRY",
-    "register_engine",
-    "get_engine",
-    "create_engine",
-    # Native PyTorch samplers
-    "FluxSampler",
-    "SD3Sampler",
-    "FSDPHunyuanSampler",
-    # SGLang dedicated rollout engine
-    "SGLangRolloutEngine",
-    # Timestep schedulers (MixGRPO)
-    "TimestepScheduler",
-    "AllSDEScheduler",
-    "WindowScheduler",
-    "WindowConfig",
-    "get_scheduler",
-]
+def __dir__():
+    return sorted(set(globals().keys()) | set(__all__))

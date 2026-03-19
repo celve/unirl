@@ -19,6 +19,7 @@ from .base import (
     RewardRequest,
     RewardResponse,
 )
+from .scorers.registry import resolve_builtin_reward_scorer_class
 from .spec import RewardDefinition, RewardExecutionPlan, RewardProviderConfig
 
 logger = logging.getLogger(__name__)
@@ -211,7 +212,6 @@ class RewardService:
 
     def _init_local_executors(self) -> None:
         """Initialize in-process executors backed by local scorers."""
-        from .local import LocalRewardScorer
 
         local_device_pref = str(
             getattr(self.execution_plan, "local_device", "cpu") or "cpu"
@@ -244,31 +244,22 @@ class RewardService:
                 "you need strict resource isolation."
             )
 
-        reward_path = getattr(
-            self.reward_provider,
-            "reward_path",
-            "diffusionrl.reward.local.LocalRewardScorer",
-        )
-        try:
-            scorer_cls = load_function(reward_path) if reward_path else LocalRewardScorer
-        except Exception as e:
-            logger.warning(
-                "Failed to load reward_path=%s (%s). Falling back to LocalRewardScorer.",
-                reward_path,
-                e,
-            )
-            scorer_cls = LocalRewardScorer
-
-        if not isinstance(scorer_cls, type) or not issubclass(scorer_cls, BaseRewardScorer):
-            logger.warning(
-                "Local reward scorer %s does not inherit BaseRewardScorer; "
-                "treating it as a scorer via duck typing.",
-                reward_path,
-            )
-
-        ctor_params = inspect.signature(scorer_cls.__init__).parameters
+        reward_path = getattr(self.reward_provider, "reward_path", None)
 
         def _create_executor(model_name: str, weight: float) -> BaseRewardExecutor:
+            if reward_path:
+                scorer_cls = load_function(reward_path)
+            else:
+                scorer_cls = resolve_builtin_reward_scorer_class(model_name)
+
+            if not isinstance(scorer_cls, type) or not issubclass(scorer_cls, BaseRewardScorer):
+                logger.warning(
+                    "Local reward scorer %s does not inherit BaseRewardScorer; "
+                    "treating it as a scorer via duck typing.",
+                    reward_path or scorer_cls,
+                )
+
+            ctor_params = inspect.signature(scorer_cls.__init__).parameters
             init_kwargs: Dict[str, Any] = {
                 "batch_size": self.reward_provider.batch_size,
                 "timeout": self.reward_provider.timeout,
@@ -278,8 +269,6 @@ class RewardService:
                 init_kwargs["model_name"] = model_name
             elif "frame_reward_model" in ctor_params:
                 init_kwargs["frame_reward_model"] = model_name
-            # Older scorer plugins may still accept `weight`; executor remains
-            # the source of truth for aggregation semantics.
             if "weight" in ctor_params:
                 init_kwargs["weight"] = weight
             scorer = scorer_cls(**init_kwargs)
@@ -301,7 +290,7 @@ class RewardService:
                 logger.info(
                     "Added in-process reward executor: %s via %s (weight=%s)",
                     model,
-                    scorer_cls.__name__,
+                    type(executor.scorer).__name__,
                     weight,
                 )
 
@@ -314,7 +303,7 @@ class RewardService:
             logger.info(
                 "Added in-process reward executor: %s via %s",
                 self.reward_definition.default_model_name,
-                scorer_cls.__name__,
+                type(executor.scorer).__name__,
             )
 
     def compute_rewards(self, request: RewardRequest) -> RewardResponse:
@@ -557,6 +546,22 @@ class RewardService:
         """Check if at least one executor is available."""
         return any(executor.is_available() for executor in self.executors)
 
+    def offload(self) -> None:
+        for executor in self.executors:
+            executor.offload()
+        logger.debug("RewardService offloaded %d executor(s)", len(self.executors))
+
+    def onload(self) -> None:
+        for executor in self.executors:
+            executor.onload()
+        logger.debug("RewardService onloaded %d executor(s)", len(self.executors))
+
+    def dispose(self) -> None:
+        for executor in self.executors:
+            executor.dispose()
+        self.executors = []
+        logger.info("RewardService disposed")
+
 
 class LocalRewardExecutor(RewardService):
     """Lightweight same-process reward service for rollout/training actors."""
@@ -591,22 +596,6 @@ class LocalRewardExecutor(RewardService):
             self.aggregation,
             self.execution_plan.local_device,
         )
-
-    def offload(self) -> None:
-        for executor in self.executors:
-            executor.offload()
-        logger.debug("RewardService offloaded %d executor(s)", len(self.executors))
-
-    def onload(self) -> None:
-        for executor in self.executors:
-            executor.onload()
-        logger.debug("RewardService onloaded %d executor(s)", len(self.executors))
-
-    def dispose(self) -> None:
-        for executor in self.executors:
-            executor.dispose()
-        self.executors = []
-        logger.info("RewardService disposed")
 
 
 __all__ = [

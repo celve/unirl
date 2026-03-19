@@ -8,7 +8,6 @@ from typing import Dict, Tuple
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     # Placement groups
     "RuntimePlacementConfig": ("diffusionrl.ray.placement_group", "RuntimePlacementConfig"),
-    "GRPOPlacementConfig": ("diffusionrl.ray.placement_group", "GRPOPlacementConfig"),
     "PlacementGroupResult": ("diffusionrl.ray.placement_group", "PlacementGroupResult"),
     "create_placement_groups": ("diffusionrl.ray.placement_group", "create_placement_groups"),
     "create_placement_groups_from_args": ("diffusionrl.ray.placement_group", "create_placement_groups_from_args"),

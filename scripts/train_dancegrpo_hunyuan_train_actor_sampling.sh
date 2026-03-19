@@ -127,7 +127,6 @@ FPS=${FPS:-8}
 
 # Reward model
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-"hpsv2"}
-REWARD_PATH=${REWARD_PATH:-"diffusionrl.reward.local.LocalRewardScorer"}
 REWARD_LOCATION=${REWARD_LOCATION:-sampling_actor}
 LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cuda}
 REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
@@ -192,7 +191,6 @@ python -m diffusionrl.train \
     --model.model-type hunyuan \
     --sampling.sampler-path diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward.reward-path "${REWARD_PATH}" \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
     --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \

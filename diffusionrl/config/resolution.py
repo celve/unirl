@@ -28,13 +28,13 @@ from typing import Any, Dict, Optional, Tuple
 from diffusionrl.algorithms.registry import DEFAULT_ALGORITHM_PATHS
 from diffusionrl.config.rollout_topology import (
     DIRECT_ROLLOUT_MODE,
+    ROLLOUT_ENGINE_TYPES,
     ROLLOUT_MODES,
-    normalize_rollout_mode,
-    normalize_rollout_service_engine,
+    resolve_rollout_service_num_gpus,
+    rollout_mode_is_colocated,
     rollout_mode_uses_service,
 )
 from diffusionrl.models import list_model_types, resolve_model_bundle_path
-from diffusionrl.types.engine import uses_dedicated_rollout_engine
 from diffusionrl.utils.misc import load_function
 
 DEFAULT_MODEL_PATH = "diffusionrl.models.hunyuan.HunyuanModelBundle"
@@ -216,11 +216,21 @@ def resolve_lora_target_modules(raw: Any) -> Optional[list[str]]:
 
 
 def resolve_debug_mode(args: Any) -> str:
-    return str(getattr(args.debug, "debug_mode", "none") or "none").strip().lower()
+    value = getattr(args.debug, "debug_mode", "none")
+    if value is None:
+        return "none"
+    if not isinstance(value, str):
+        raise ValueError(f"debug.debug_mode must be a string, got: {type(value).__name__}")
+    return value
 
 
 def resolve_logprob_source(args: Any) -> str:
-    return str(getattr(args.sampling, "logprob_source", "replay") or "replay").strip().lower()
+    value = getattr(args.sampling, "logprob_source", "replay")
+    if value is None:
+        return "replay"
+    if not isinstance(value, str):
+        raise ValueError(f"sampling.logprob_source must be a string, got: {type(value).__name__}")
+    return value
 
 
 def resolve_model_runtime(
@@ -293,86 +303,84 @@ def resolve_model_runtime(
     )
 
 
-def resolve_rollout_topology(args: Any) -> ResolvedRolloutTopology:
-    rollout_mode = normalize_rollout_mode(getattr(args.rollout, "mode", None))
-    if not rollout_mode:
+def _resolve_rollout_mode_value(value: Any) -> str:
+    if value is None:
         raise ValueError(
             "rollout.mode must be set explicitly. "
             "Implicit rollout topology derivation has been removed."
         )
-    if rollout_mode not in ROLLOUT_MODES:
+    if not isinstance(value, str):
         raise ValueError(
             "rollout.mode must be one of "
-            f"{sorted(ROLLOUT_MODES)}, got: {getattr(args.rollout, 'mode', None)!r}"
+            f"{sorted(ROLLOUT_MODES)}, got non-string value: {value!r}"
         )
+    if not value:
+        raise ValueError(
+            "rollout.mode must be set explicitly. "
+            "Implicit rollout topology derivation has been removed."
+        )
+    if value not in ROLLOUT_MODES:
+        raise ValueError(
+            "rollout.mode must be one of "
+            f"{sorted(ROLLOUT_MODES)}, got: {value!r}"
+        )
+    return value
 
-    rollout_service_engine = normalize_rollout_service_engine(
+
+def _resolve_rollout_service_engine_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(
+            "rollout.service_engine must be one of "
+            f"{sorted(ROLLOUT_ENGINE_TYPES)}, got non-string value: {value!r}"
+        )
+    if not value:
+        return None
+    if value not in ROLLOUT_ENGINE_TYPES:
+        raise ValueError(
+            "rollout.service_engine must be one of "
+            f"{sorted(ROLLOUT_ENGINE_TYPES)}, got: {value!r}"
+        )
+    return value
+
+
+def resolve_rollout_topology(args: Any) -> ResolvedRolloutTopology:
+    rollout_mode = _resolve_rollout_mode_value(getattr(args.rollout, "mode", None))
+    rollout_service_engine = _resolve_rollout_service_engine_value(
         getattr(args.rollout, "service_engine", None)
     )
-
-    if rollout_mode_uses_service(rollout_mode):
-        if rollout_service_engine is None:
-            raise ValueError(
-                "Dedicated rollout modes require rollout.service_engine to be set explicitly."
-            )
-        if not uses_dedicated_rollout_engine(rollout_service_engine):
-            raise ValueError(
-                "rollout.mode in {separate_rollout,colocate_rollout} requires a dedicated rollout "
-                f"service engine. Got rollout.service_engine={rollout_service_engine!r}."
-            )
-        if getattr(args.rollout, "service_num_gpus", None) is None:
-            raise ValueError(
-                "Dedicated rollout services require rollout.service_num_gpus to be set explicitly."
-            )
-    elif rollout_service_engine is not None and uses_dedicated_rollout_engine(rollout_service_engine):
-        raise ValueError(
-            "rollout.mode='direct_rollout' cannot be combined with a dedicated rollout service engine. "
-            f"Got rollout.service_engine={rollout_service_engine!r}."
-        )
-
-    if rollout_mode == DIRECT_ROLLOUT_MODE:
-        configured_direct_incompatible_fields = []
-        direct_incompatible_values = {
-            "rollout.service_num_gpus": getattr(args.rollout, "service_num_gpus", None),
-            "rollout.engine_tp_size": getattr(args.rollout, "engine_tp_size", None),
-            "rollout.engine_sp_size": getattr(args.rollout, "engine_sp_size", None),
-            "rollout.service_require_memory_api": getattr(args.rollout, "service_require_memory_api", None),
-            "rollout.service_transport_dtype": getattr(args.rollout, "service_transport_dtype", None),
-            "rollout.service_transport_drop_decoded_videos": getattr(
-                args.rollout, "service_transport_drop_decoded_videos", None
-            ),
-            "rollout.service_transport_log_payload_bytes": getattr(
-                args.rollout, "service_transport_log_payload_bytes", None
-            ),
-            "rollout.sglang_local_mode": getattr(args.rollout, "sglang_local_mode", None),
-            "rollout.sglang_verify_weight_checksum": getattr(
-                args.rollout, "sglang_verify_weight_checksum", None
-            ),
-            "rollout.sglang_prompt_encoder_device": getattr(
-                args.rollout, "sglang_prompt_encoder_device", None
-            ),
-            "rollout.sglang_prompt_encoder_dtype": getattr(
-                args.rollout, "sglang_prompt_encoder_dtype", None
-            ),
-            "rollout.sglang_prompt_encoder_max_length": getattr(
-                args.rollout, "sglang_prompt_encoder_max_length", None
-            ),
-            "rollout.sglang_kwargs": getattr(args.rollout, "sglang_kwargs", None),
-        }
-        for field_name, field_value in direct_incompatible_values.items():
-            if field_value in (None, {}, "", False):
-                continue
-            configured_direct_incompatible_fields.append(field_name)
-        if configured_direct_incompatible_fields:
-            raise ValueError(
-                "direct_rollout runs sampling on training actors, so dedicated rollout-service fields "
-                f"must be unset. Remove: {', '.join(sorted(configured_direct_incompatible_fields))}."
-            )
-
     return ResolvedRolloutTopology(
         mode=rollout_mode,
         service_engine=rollout_service_engine,
     )
+
+
+def resolve_rollout_gpus_per_actor(args: Any) -> int:
+    """Resolve GPUs per rollout actor based on explicit rollout topology."""
+    topology = resolve_rollout_topology(args)
+    if not rollout_mode_uses_service(topology.mode):
+        return 0
+    if not topology.service_engine:
+        raise ValueError(
+            "rollout.mode requires a dedicated rollout service, but rollout.service_engine is unset."
+        )
+    if topology.service_engine != "sglang":
+        raise ValueError(
+            f"Unsupported dedicated rollout engine: {topology.service_engine!r}. "
+            "Expected: sglang."
+        )
+    return resolve_rollout_service_num_gpus(args)
+
+
+def resolve_rollout_gpu_pool_size(args: Any) -> int:
+    """Resolve placement GPU capacity available to rollout actors."""
+    rollout_total_gpus = int(args.ray.rollout_num_nodes) * int(args.ray.rollout_num_gpus_per_node)
+    topology = resolve_rollout_topology(args)
+    if not rollout_mode_is_colocated(topology.mode):
+        return rollout_total_gpus
+    training_total_gpus = int(args.ray.training_num_nodes) * int(args.ray.training_num_gpus_per_node)
+    return max(rollout_total_gpus, training_total_gpus)
 
 
 def _maybe_positive_int(value: Any) -> Optional[int]:
@@ -698,6 +706,8 @@ __all__ = [
     "resolve_local_update_batch_size",
     "resolve_prompts_per_rollout",
     "resolve_global_rollout_batch_size",
+    "resolve_rollout_gpu_pool_size",
+    "resolve_rollout_gpus_per_actor",
     "resolve_rollout_topology",
     "resolve_sync_protocol",
     "resolve_train_backend_kwargs",

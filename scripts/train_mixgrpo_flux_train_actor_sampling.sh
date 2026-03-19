@@ -110,7 +110,6 @@ python -m diffusionrl.train \
     --model.model-type flux \
     --sampling.sampler-path diffusionrl.samplers.fsdp.flux_sampler.FluxSampler \
     --algorithm.algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
-    --reward.reward-path diffusionrl.reward.local.LocalRewardScorer \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
     --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \

@@ -160,7 +160,6 @@ python -m diffusionrl.train \
     --model.model-type flux \
     --sampling.sampler-path diffusionrl.samplers.fsdp.flux_sampler.FluxSampler \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward.reward-path diffusionrl.reward.local.LocalRewardScorer \
     --reward.reward-model-name hpsv2 \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path data/samples/prompts_toy.json \
@@ -264,7 +263,7 @@ Arguments in DiffusionRL are organized into the following categories:
 1.  **Model arguments**: `--model.model-type`, `--model.pretrained-model-saved-path`, `--training.use-lora`, `--training.lora-rank`, `--training.lora-alpha`, etc.
 2.  **Sampling arguments**: `--sampling.sde-type`, `--sampling.eta`, `--sampling.num-inference-steps`, `--sampling.guidance-scale`, `--sampling.time-shift`, `--sampling.timestep-fraction`, etc.
 3.  **Algorithm arguments**: `--algorithm.algorithm-path`, `--algorithm.clip-range`, `--algorithm.use-kl-penalty`, `--algorithm.advantage-type`, etc.
-4.  **Reward arguments**: `--reward.reward-path`, `--reward.reward-model-name`, `--reward.reward-batch-size`, etc.
+4.  **Reward arguments**: `--reward.reward-model-name`, `--reward.reward-batch-size`, `--reward.reward-path` (custom scorers only), etc.
 5.  **Training arguments**: `--training.learning-rate`, `--training.local-micro-batch-size`, `--training.local-update-batch-size`,  `--training.max-grad-norm`, etc.
 6.  **Runtime arguments**: `--ray.colocate-rollout-training`, `--ray.rollout-num-gpus-per-node`, `--ray.training-num-gpus-per-node`, `--ray.placement-strategy`, etc.
 

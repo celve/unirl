@@ -140,7 +140,6 @@ def _build_synthetic_debug_training_batch(
         embeddings=embeddings,
         rewards=rewards,
         prompts=prompts,
-        num_steps=num_inference_steps,
         step_indices=step_indices,
         target_sde_indices=set(range(num_inference_steps)),
     )

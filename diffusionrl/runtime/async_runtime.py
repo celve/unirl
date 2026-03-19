@@ -41,7 +41,6 @@ class AsyncPipelineRuntime:
             raise ValueError(f"max_inflight must be >= 1, got {max_inflight}")
 
         self.max_inflight = int(max_inflight)
-        self.next_rollout_id = int(initial_rollout_id)
         self._inflight: Dict[int, InflightRollout] = {}
 
     @property
@@ -66,7 +65,6 @@ class AsyncPipelineRuntime:
 
         inflight = InflightRollout(rollout_id=rid, future=future)
         self._inflight[rid] = inflight
-        self.next_rollout_id = max(self.next_rollout_id, rid + 1)
         return inflight
 
     def resolve_next_rollout(self, resolver: Callable[[Any], Any]) -> ResolvedRollout:

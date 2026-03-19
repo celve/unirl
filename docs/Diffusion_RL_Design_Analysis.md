@@ -540,7 +540,7 @@ diffusionRL/                          # 总计 ~28,217 行 (含测试 ~1,449行)
 ├── algorithms/                     # 算法实现 (~1,083行)
 │   ├── __init__.py                 # 模块导出 (~13行)
 │   ├── base.py                     # BaseAlgorithm, SamplingRequirements, Hooks (~354行)
-│   ├── grpo.py                     # GRPOAlgorithm (含 running stats, per_prompt_batch) (~320行)
+│   ├── grpo.py                     # GRPOAlgorithm (group/global advantage normalization) (~320行)
 │   ├── mix_grpo.py                 # MixGRPOAlgorithm (SDE/ODE 混合) (~110行)
 │   └── nft.py                      # NFTAlgorithm (双 adapter + EMA) (~286行)
 │
@@ -568,13 +568,7 @@ diffusionRL/                          # 总计 ~28,217 行 (含测试 ~1,449行)
 │       ├── __init__.py             # 模块导出 (~27行)
 │       └── timestep_window.py      # 时间步调度器 (~422行)
 │
-├── advantages/                     # 优势函数计算 (~1,176行)
-│   ├── __init__.py                 # 统一 API + 多奖励字典支持 (~296行)
-│   ├── strategies.py               # Global/Group/PerPrompt 策略 (~185行)
-│   ├── normalizers.py              # 归一化工具 (~134行)
-│   ├── per_prompt_tracker.py       # 跨批次 per-prompt 追踪 (~225行)
-│   ├── running_stats.py            # RunningMeanStd + RunningRewardNormalizer (~311行)
-│   └── utils.py                    # 工具函数 (~36行)
+├── algorithms/normalizers.py       # 全局/分组 advantage normalization
 │
 ├── models/                         # 模型 Bundle (~2,844行)
 │   ├── __init__.py                 # 工厂函数 (~79行)
@@ -1071,7 +1065,7 @@ class SamplingRequirements:
 | 文件 | 类 | 行数 | 说明 |
 |------|-----|------|------|
 | `base.py` | `BaseAlgorithm`, `SamplingRequirements` | ~351 | 抽象基类 + 算法 Hook 系统 |
-| `grpo.py` | `GRPOAlgorithm` | ~320 | 标准 GRPO + running stats + per_prompt_batch |
+| `grpo.py` | `GRPOAlgorithm` | ~320 | 标准 GRPO + group/global advantage normalization |
 | `mix_grpo.py` | `MixGRPOAlgorithm` | ~110 | 混合 SDE/ODE + window_training |
 | `nft.py` | `NFTAlgorithm` | ~286 | NFT 双 adapter + EMA Hook |
 
@@ -1144,12 +1138,8 @@ classDiagram
         +bool use_global_std
         +bool skip_last_timestep
         +int skip_initial_timesteps
-        -PerPromptStatTracker per_prompt_tracker
-        -RunningRewardNormalizer running_reward_normalizer
         +_normalize_global()
         +_normalize_group()
-        +_normalize_per_prompt_batch()
-        +_get_global_std()
         +_get_timestep_samples()
     }
 
@@ -1189,13 +1179,13 @@ classDiagram
 | **MixGRPO** | Yes | 部分 | < 100% | 混合 ODE/SDE，加速采样，窗口调度 |
 | **NFT** | No | No | N/A | 前向扩散训练，双 adapter + EMA |
 
-#### GRPOAlgorithm 高级特性 (v3.0 新增)
+#### GRPOAlgorithm 高级特性 (当前主线)
 
 | 特性 | 配置参数 | 说明 |
 |------|---------|------|
-| **RunningRewardNormalizer** | `use_running_stats=True`, `running_stats_warmup` | DanceGRPO 跨批次累积统计量，Welford 算法 |
-| **Per-Prompt Batch 模式** | `per_prompt_mode="batch"` | 批内 per-prompt 归一化，可选 `use_global_std` |
-| **Per-Prompt Running 模式** | `per_prompt_mode="running"` | 跨批次追踪，使用 PerPromptStatTracker |
+| **Global Normalization** | `adv_normalization="global"` | 全批次 reward 归一化 |
+| **Group Normalization** | `adv_normalization="group"` | 按显式 `group_ids` 分组归一化 |
+| **全局标准差** | `use_global_std=True` | grouped normalization 时使用全局 std |
 | **忽略最后时间步** | `skip_last_timestep=True` | MixGRPO 稳定性：跳过 t→0 的不稳定 log_prob |
 | **冻结初始时间步** | `skip_initial_timesteps=N` | MixGRPO 稳定性：跳过前 N 步高方差区域 |
 
@@ -1204,19 +1194,13 @@ classDiagram
 | 策略类型 | 描述 | 使用场景 |
 |---------|------|---------|
 | **global** | 全批次统计归一化 | 标准 RL |
-| **group** | 按 prompt 分组归一化 | GRPO/MixGRPO/DanceGRPO |
-| **per_prompt** | 跨批次或批内 per-prompt 统计 | flow_grpo, DanceGRPO |
+| **group** | 按显式 sample-aligned `group_ids` 分组归一化 | GRPO/MixGRPO |
 
 ```python
-# Per-Prompt Tracker 配置
-per_prompt_buffer_size: int = 16   # 每个 prompt 的奖励缓冲区大小
-per_prompt_min_count: int = 2      # 使用 per-prompt 统计的最小样本数
-per_prompt_mode: str = "running"   # "running" (跨批次追踪) 或 "batch" (批内统计)
-use_global_std: bool = False       # 使用全局 std (DanceGRPO 风格)
-
-# Running Stats 配置 (DanceGRPO)
-use_running_stats: bool = False    # 启用跨批次 RunningMeanStd
-running_stats_warmup: int = 0      # 预热步数，预热期使用批内统计
+# 当前 GRPO / MixGRPO 归一化相关配置
+adv_normalization: str = "group"   # "global" 或 "group"
+use_global_std: bool = False       # grouped normalization 时是否使用全局 std
+trimmed_ratio: float = 0.0         # grouped normalization 的裁剪比例
 ```
 
 ### 4.3 Loss 函数设计
@@ -2366,8 +2350,8 @@ sequenceDiagram
 
     RS-->>RM: rewards: Tensor[B]
 
-    RM->>Algo: compute_advantages(rewards, samples_per_prompt)
-    Note over Algo: 归一化: global / group / per_prompt
+    RM->>Algo: compute_advantages(rewards, group_ids)
+    Note over Algo: 归一化: global / group
     Algo-->>RM: advantages: Tensor[B]
 
     Note over RM: 组装 TrainingBatch
@@ -2713,7 +2697,7 @@ reward_dedicated_num_gpus_per_node: int = 0  # 每节点 GPU 数
 | **算法配置** | `clip_range`, `kl_coef`, `adv_normalization`, `sde_type` | PPO 超参数 |
 | **采样配置** | `num_inference_steps`, `eta`, `shift`, `sde_ratio`, `init_same_noise` | SDE 采样控制 |
 | **NFT 配置** | `nft_beta`, `nft_adv_mode`, `use_ema`, `ema_decay`, `nft_timestep_mode`, `nft_shuffle_timesteps`, `nft_apply_shift` | DiffusionNFT 特定 |
-| **DanceGRPO 配置** | `use_running_stats`, `running_stats_warmup`, `use_global_std` | 跨批次统计 |
+| **GRPO 归一化配置** | `adv_normalization`, `use_global_std`, `trimmed_ratio` | advantage 归一化 |
 | **Ray 资源** | `rollout_num_nodes/gpus`, `training_num_nodes/gpus`, `reward_num_gpus` | 分布式配置 |
 | **引擎配置** | `sampler_engine_type`, `sp_size`, `tp_size`, `fsdp_num_gpus` | 推理后端 |
 | **Offload** | `offload`, `offload_train`, `offload_rollout`, `colocate_rollout_training` | 内存优化 |
@@ -2730,8 +2714,8 @@ reward_dedicated_num_gpus_per_node: int = 0  # 每节点 GPU 数
 |------|------|--------|------|
 | `training_actor_direct_sampling` | bool | False | `false` 使用独立 rollout actor，`true` 训练 actor 兼做采样（FSDP 直采样） |
 | `init_same_noise` | bool | False | DanceGRPO/MixGRPO：同一 prompt 的多个采样共享初始噪声 |
-| `use_running_stats` | bool | False | 启用跨批次 RunningMeanStd (DanceGRPO) |
-| `running_stats_warmup` | int | 0 | Running stats 预热步数 |
+| `adv_normalization` | str | "group" | advantage 归一化策略：`global` / `group` |
+| `use_global_std` | bool | False | grouped normalization 时使用全局 std |
 | `use_gradient_checkpointing` | bool | False | 梯度检查点，减少显存 |
 | `partition_train_data` | bool | False | 将 rollout 数据分区到各训练 Actor |
 | `cross_rank_shuffle` | bool | False | 跨 rank 数据洗牌 |
@@ -2806,7 +2790,6 @@ MODEL_TYPE_TO_SAMPLER_ENGINE = {
 | **Colocate 优化** | offload/onload 复用 GPU | 4 GPU 完成 8 GPU 的工作 |
 | **类型安全** | dataclass 定义清晰的数据契约 | 减少运行时错误 |
 | **算法 Hook 系统** | post_backward/post_optimizer_step Hook | 算法自定义训练行为无需改 Actor |
-| **跨批次统计** | RunningMeanStd + RunningRewardNormalizer | DanceGRPO 稳定训练 |
 | **双采样后端** | inference / training 采样模式 | 灵活的推理采样策略 |
 | **预设配置** | defaults.py 预设系统 | 快速配置不同模型/算法组合 |
 | **FSDP 集成** | 原生支持大模型分布式训练 | 训练更大的模型 |

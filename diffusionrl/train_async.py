@@ -276,7 +276,10 @@ def train_async_loop(  # [PUBLIC-API → train.py:train()] async 模式入口
         ray.get(rollout_buffer.dispose.remote())
     finally:
         ray.kill(rollout_buffer)
-    ray.get(rollout_manager.dispose.remote())
+    try:
+        ray.get(rollout_manager.dispose.remote())
+    finally:
+        ray.kill(rollout_manager)
     if rollout_group is not None:
         rollout_group.dispose()
     training_group.dispose()

@@ -21,7 +21,6 @@ sampling:
   timestep_fraction: 0.6
 
 reward:
-  reward_path: diffusionrl.reward.local.LocalRewardScorer
   reward_model_name: ocr
 
 algorithm:

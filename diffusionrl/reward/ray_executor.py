@@ -9,9 +9,28 @@ import ray
 
 from diffusionrl.ray.group_base import PlacementGroupActorPool
 from .base import BaseRewardExecutor, BaseRewardScorer, RewardRequest, RewardResponse
+from .scorers.registry import (
+    resolve_builtin_reward_scorer_class,
+    resolve_builtin_reward_scorer_path,
+)
 from diffusionrl.utils import load_function
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_scorer_path_and_class(
+    *,
+    reward_path: Optional[str],
+    model_name: str,
+) -> tuple[str, type]:
+    """Resolve scorer path/class from explicit path or built-in model name."""
+    if reward_path:
+        scorer_path = str(reward_path)
+        scorer_cls = load_function(scorer_path)
+    else:
+        scorer_path = resolve_builtin_reward_scorer_path(model_name)
+        scorer_cls = resolve_builtin_reward_scorer_class(model_name)
+    return scorer_path, scorer_cls
 
 
 @ray.remote
@@ -136,7 +155,6 @@ class RayRewardExecutor(BaseRewardExecutor):
             pg=placement_group,
             bundle_indices=[0],
             gpu_ids=[0],
-            reward_path="diffusionrl.reward.local.LocalRewardScorer",
         )
 
         # Parallel mode (distribute batch across actors)
@@ -145,7 +163,6 @@ class RayRewardExecutor(BaseRewardExecutor):
             pg=placement_group,
             bundle_indices=[0, 1, 2, 3],
             gpu_ids=[0, 1, 2, 3],
-            reward_path="diffusionrl.reward.local.LocalRewardScorer",
             num_actors=4,
             parallel_mode=True,
         )
@@ -157,7 +174,7 @@ class RayRewardExecutor(BaseRewardExecutor):
         pg,  # PlacementGroup
         bundle_indices: List[int],
         gpu_ids: List[int],
-        reward_path: str = "diffusionrl.reward.local.LocalRewardScorer",
+        reward_path: Optional[str] = None,
         model_path: Optional[str] = None,
         num_actors: int = 1,
         gpus_per_actor: int = 1,
@@ -175,7 +192,8 @@ class RayRewardExecutor(BaseRewardExecutor):
             pg: Ray placement group for resource allocation
             bundle_indices: Placement group bundle indices for each actor
             gpu_ids: GPU IDs for each actor
-            reward_path: Python path to reward scorer class
+            reward_path: Optional Python path to a custom reward scorer class.
+                When omitted, built-in scorers are resolved from model_name.
             model_path: Optional path to model weights
             num_actors: Number of reward worker actors to create
             gpus_per_actor: Number of GPUs per actor (for large models)
@@ -196,12 +214,19 @@ class RayRewardExecutor(BaseRewardExecutor):
         self.bundle_indices = bundle_indices
         self.gpu_ids = gpu_ids
         self.reward_path = reward_path
+        self.scorer_path, scorer_cls = _resolve_scorer_path_and_class(
+            reward_path=reward_path,
+            model_name=model_name,
+        )
         self.model_path = model_path
         self.num_actors = num_actors
         self.gpus_per_actor = gpus_per_actor
         self.parallel_mode = parallel_mode
         self.extra_kwargs = kwargs
-        self.input_kind = self._resolve_input_kind(reward_path)
+        self.input_kind = self._resolve_input_kind(
+            scorer_cls=scorer_cls,
+            scorer_path=self.scorer_path,
+        )
 
         self._actor_pool: Optional[PlacementGroupActorPool] = None
         self._is_initialized = False
@@ -210,19 +235,18 @@ class RayRewardExecutor(BaseRewardExecutor):
         self._create_actor_pool()
 
     @staticmethod
-    def _resolve_input_kind(reward_path: str) -> str:
-        scorer_cls = load_function(reward_path)
+    def _resolve_input_kind(*, scorer_cls: type, scorer_path: str) -> str:
         if not isinstance(scorer_cls, type) or not issubclass(scorer_cls, BaseRewardScorer):
             logger.warning(
                 "Ray reward scorer %s does not inherit BaseRewardScorer; "
                 "treating it as a scorer via duck typing.",
-                reward_path,
+                scorer_path,
             )
         input_kind = str(getattr(scorer_cls, "input_kind", "image") or "image").strip().lower()
         if input_kind not in {"image", "video"}:
             raise ValueError(
                 "Reward scorer class must declare input_kind as 'image' or 'video'. "
-                f"Got {input_kind!r} for reward_path={reward_path!r}."
+                f"Got {input_kind!r} for reward_path={scorer_path!r}."
             )
         return input_kind
 
@@ -252,7 +276,7 @@ class RayRewardExecutor(BaseRewardExecutor):
                 num_gpus_per_actor=float(self.gpus_per_actor),
                 num_gpus_per_engine=self.gpus_per_actor,
                 per_actor_kwargs=per_actor_kwargs,
-                reward_path=self.reward_path,
+                reward_path=self.scorer_path,
                 model_name=self.model_name,
                 model_path=self.model_path,
                 batch_size=self.batch_size,

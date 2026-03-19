@@ -234,7 +234,6 @@ def _index_batch(batch: TrainingBatch, keep_indices: Sequence[int]) -> TrainingB
                 if batch.group_ids is not None
                 else None
             ),
-            num_steps=batch.num_steps,
             is_partitioned=batch.is_partitioned,
             step_indices=batch.step_indices,
             target_sde_indices=batch.target_sde_indices,
@@ -395,7 +394,6 @@ def _concat_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
             prompt_ids=prompt_ids,
             sample_ids=sample_ids,
             group_ids=group_ids,
-            num_steps=typed[0].num_steps,
             is_partitioned=False,
             step_indices=typed[0].step_indices,
             target_sde_indices=typed[0].target_sde_indices,
@@ -698,21 +696,15 @@ class BufferActor:
         self._popped_samples = 0
         self._assembled_batches = 0
 
-        # Runtime handles are attached by train loop.
-        self._rollout_manager = None
-
-    def bind_runtime(
+    def configure_consumer(
         self,
         *,
-        rollout_manager: Any,
         consumer_spec: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Attach rollout-manager handle used by request_rollout()."""
-        self._rollout_manager = rollout_manager
+        """Bind rollout-buffer consumer expectations from the train-side contract."""
         if isinstance(consumer_spec, dict) and consumer_spec.get("expected_global_batch_size") is not None:
             self.expected_global_batch_size = int(consumer_spec.get("expected_global_batch_size"))
         return {
-            "has_rollout_manager": self._rollout_manager is not None,
             "expected_global_batch_size": int(self.expected_global_batch_size),
         }
 
@@ -1261,7 +1253,6 @@ class BufferActor:
 
         return {
             "reassemble_by_group_mode": self.reassemble_by_group,
-            "has_rollout_manager": self._rollout_manager is not None,
             "queue_size": len(self._dispatch_queue),
             "pushed_batches": self._pushed_batches,
             "popped_batches": self._popped_batches,
@@ -1290,7 +1281,6 @@ class BufferActor:
     def dispose(self) -> None:
         """Release buffered data and runtime handles."""
         self.clear()
-        self._rollout_manager = None
 
 
 def create_buffer_actor(args: Any):

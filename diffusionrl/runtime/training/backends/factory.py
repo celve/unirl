@@ -23,20 +23,19 @@ def supported_train_backends() -> tuple[str, ...]:
     return tuple(_BUILTIN_BACKENDS.keys())
 
 
-def create_train_backend(
+def _resolve_backend_cls(
     name: str,
     *,
     backend_path: Optional[str] = None,
-    backend_kwargs: Optional[Mapping[str, Any]] = None,
-) -> TrainBackend:
-    """Create backend instance from an explicit built-in branch or a custom dotpath."""
+) -> type[TrainBackend]:
+    """Resolve a backend class from a built-in name or custom dotpath."""
     if backend_path:
         backend_cls = load_function(backend_path)
         if not isinstance(backend_cls, type) or not issubclass(backend_cls, TrainBackend):
             raise TypeError(
                 f"train_backend_path must resolve to a TrainBackend subclass, got: {backend_cls}"
             )
-        return backend_cls(backend_kwargs=backend_kwargs)
+        return backend_cls
 
     backend_name = str(name or "fsdp").strip().lower()
     backend_cls = _BUILTIN_BACKENDS.get(backend_name)
@@ -44,6 +43,20 @@ def create_train_backend(
         raise ValueError(
             f"Unsupported train_backend={name!r}. "
             f"Expected one of {list(_BUILTIN_BACKENDS)} or provide train_backend_path."
+        )
+    return backend_cls
+
+
+def create_train_backend(
+    name: str,
+    *,
+    backend_path: Optional[str] = None,
+    backend_kwargs: Optional[Mapping[str, Any]] = None,
+) -> TrainBackend:
+    """Create backend instance from an explicit built-in branch or a custom dotpath."""
+    backend_cls = _resolve_backend_cls(
+        name,
+        backend_path=backend_path,
     )
     return backend_cls(backend_kwargs=dict(backend_kwargs or {}))
 
@@ -54,21 +67,10 @@ def resolve_train_backend_capabilities(
     backend_path: Optional[str] = None,
 ) -> TrainBackendCapabilities:
     """Resolve backend capabilities without instantiating runtime objects."""
-    if backend_path:
-        backend_cls = load_function(backend_path)
-        if not isinstance(backend_cls, type) or not issubclass(backend_cls, TrainBackend):
-            raise TypeError(
-                f"train_backend_path must resolve to a TrainBackend subclass, got: {backend_cls}"
-            )
-        return backend_cls.declared_capabilities()
-
-    backend_name = str(name or "fsdp").strip().lower()
-    backend_cls = _BUILTIN_BACKENDS.get(backend_name)
-    if backend_cls is None:
-        raise ValueError(
-            f"Unsupported train_backend={name!r}. "
-            f"Expected one of {list(_BUILTIN_BACKENDS)} or provide train_backend_path."
-        )
+    backend_cls = _resolve_backend_cls(
+        name,
+        backend_path=backend_path,
+    )
     return backend_cls.declared_capabilities()
 
 

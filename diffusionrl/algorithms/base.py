@@ -35,6 +35,7 @@ class EMASpec:
     reference_flat_steps: int = 0
     reference_uprate: float = 0.001
     reference_uphold: float = 0.5
+    reference_update_timing: str = "optimizer_step"
     old_adapter_name: str = "old"
     new_adapter_name: str = "default"
 

@@ -49,7 +49,14 @@ def should_log(rollout_id: int, args) -> bool:  # [HELPER] used in train() loop 
 
 
 def _build_control_algorithm(args) -> tuple[dict, Any]:
-    """Instantiate the control-plane algorithm visible from train.py."""
+    """Instantiate the driver-local control-plane algorithm.
+
+    This instance is intentionally separate from the rollout-side
+    RolloutManager and train-side TrainingActor copies:
+    - driver copy owns rollout SDE scheduling decisions
+    - rollout copy owns sampling/reward/batch assembly
+    - train copy owns loss/backward execution
+    """
     from diffusionrl.utils import load_function
 
     algorithm_config = build_algorithm_config(args)
@@ -341,12 +348,11 @@ def train(args):  # [PUBLIC-API → main()] 主入口：资源创建 + sync/asyn
     # 8. Build rollout buffer.
     rollout_buffer = create_buffer_actor(args)
     ray.get(
-        rollout_buffer.bind_runtime.remote(
-            rollout_manager=rollout_manager,
+        rollout_buffer.configure_consumer.remote(
             consumer_spec=buffer_consumer_spec,
         )
     )
-    logger.info("Rollout buffer actor created and bound to rollout manager")
+    logger.info("Rollout buffer actor created and configured from training consumer spec")
 
     # 9. Setup weight-sync coordinator (binds training/rollout runtime facades).
     weight_sync.setup(
@@ -620,7 +626,10 @@ def train(args):  # [PUBLIC-API → main()] 主入口：资源创建 + sync/asyn
         ray.get(rollout_buffer.dispose.remote())
     finally:
         ray.kill(rollout_buffer)
-    ray.get(rollout_manager.dispose.remote())
+    try:
+        ray.get(rollout_manager.dispose.remote())
+    finally:
+        ray.kill(rollout_manager)
     if rollout_group is not None:
         rollout_group.dispose()
     training_group.dispose()

@@ -19,16 +19,12 @@ class BaseLocalRewardScorer(BaseRewardScorer):
     def __init__(
         self,
         model_name: Optional[str] = None,
-        weight: float = 1.0,
         device: str = "cuda",
         dtype: torch.dtype = torch.float16,
         batch_size: int = 8,
         timeout: float = 60.0,
         **model_kwargs,
     ) -> None:
-        # `weight` remains a compatibility-only argument for older call sites.
-        del weight
-
         resolved_model_name = self._resolve_model_name(model_name)
         super().__init__(
             model_name=resolved_model_name or "",

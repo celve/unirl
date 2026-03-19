@@ -274,6 +274,8 @@ class TrainExecutor:
         # Filter out per-timestep metrics (t{N}_...) from aggregated output;
         # these are exposed only via _per_optimizer_step_metrics for train/ namespace.
         metrics = {k: v for k, v in metrics.items() if not re.match(r"^t\d+_", k)}
+        if self.config.ema_manager is not None and optimizer_steps > 0:
+            self.config.ema_manager.post_rollout_end(self.model, metrics)
         metrics.update(
             {
                 "rollout_id": rollout_id,
