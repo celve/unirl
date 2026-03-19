@@ -1,21 +1,10 @@
 """diffusionrl Utilities."""
 from .misc import (
     load_function,
-    load_class,
     set_seed,
     configure_logger,
-    get_rank,
-    get_world_size,
-    is_main_process,
-    get_device,
-    get_gpu_memory_info,
     clear_memory,
-    count_parameters,
-    format_parameters,
-    Timer,
-    safe_divide,
     flatten_dict,
-    get_callable_name,
 )
 from .checkpoint import (
     save_checkpoint,
@@ -36,7 +25,7 @@ from .adapter_utils import (
     switch_adapter,
 )
 from .wandb_logger import (
-    GRPOCoreWandBLogger,
+    DiffusionRLWandBLogger,
     init_logger,
     get_logger,
     set_logger,
@@ -48,25 +37,15 @@ from .weight_sync_checkpoint import (
     cleanup_published_checkpoint,
     checkpoint_ready_marker_path,
 )
+from .media import tensor_frame_to_pil, tensor_to_pil
 
 __all__ = [
     # misc
     "load_function",
-    "load_class",
     "set_seed",
     "configure_logger",
-    "get_rank",
-    "get_world_size",
-    "is_main_process",
-    "get_device",
-    "get_gpu_memory_info",
     "clear_memory",
-    "count_parameters",
-    "format_parameters",
-    "Timer",
-    "safe_divide",
     "flatten_dict",
-    "get_callable_name",
     # checkpoint
     "save_checkpoint",
     "load_checkpoint",
@@ -83,7 +62,7 @@ __all__ = [
     # adapter_utils
     "switch_adapter",
     # wandb_logger
-    "GRPOCoreWandBLogger",
+    "DiffusionRLWandBLogger",
     "init_logger",
     "get_logger",
     "set_logger",
@@ -93,4 +72,6 @@ __all__ = [
     "wait_for_published_checkpoint",
     "cleanup_published_checkpoint",
     "checkpoint_ready_marker_path",
+    "tensor_frame_to_pil",
+    "tensor_to_pil",
 ]

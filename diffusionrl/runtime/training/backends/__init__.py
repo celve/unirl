@@ -8,7 +8,7 @@ from .base import (
     TrainBackendLaunchSpec,
     TrainTopology,
 )
-from .factory import create_train_backend, supported_train_backends
+from .factory import create_train_backend, resolve_train_backend_capabilities, supported_train_backends
 from .fsdp import FSDPTrainBackend
 from .megatron import MegatronTrainBackend
 from .veomni_native import VeOmniNativeTrainBackend
@@ -20,6 +20,7 @@ __all__ = [
     "TrainBackendLaunchSpec",
     "TrainTopology",
     "create_train_backend",
+    "resolve_train_backend_capabilities",
     "supported_train_backends",
     "FSDPTrainBackend",
     "MegatronTrainBackend",

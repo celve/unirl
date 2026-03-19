@@ -1,15 +1,15 @@
-"""Minimal reward worker plugin template."""
+"""Minimal reward scorer plugin template."""
 
 from __future__ import annotations
 
 import time
 
-from diffusionrl.reward.base import BaseRewardWorker
+from diffusionrl.reward.base import BaseRewardScorer
 from diffusionrl.types.reward import RewardRequest, RewardResponse
 
 
-class MinimalRewardWorker(BaseRewardWorker):
-    """Template reward worker that returns constant zero rewards."""
+class MinimalRewardScorer(BaseRewardScorer):
+    """Template reward scorer that returns constant zero rewards."""
 
     def compute_rewards(self, request: RewardRequest) -> RewardResponse:
         start = time.time()
@@ -25,4 +25,3 @@ class MinimalRewardWorker(BaseRewardWorker):
 
     def is_available(self) -> bool:
         return True
-

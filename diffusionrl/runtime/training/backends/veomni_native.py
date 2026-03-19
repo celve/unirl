@@ -457,7 +457,9 @@ class VeOmniNativeTrainBackend(TrainBackend):
             lora_state = self._filter_lora_state(state_dict)
             if lora_state:
                 return lora_state
-            logger.warning("LoRA-only sync found no LoRA keys; falling back to full state_dict.")
+            raise ValueError(
+                "LoRA-only sync requested but no LoRA parameters were found in the VeOmni state dict."
+            )
         return state_dict
 
     def load_state_dict(self, actor: Any, state_dict: Dict[str, Any]) -> None:

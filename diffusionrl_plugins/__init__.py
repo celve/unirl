@@ -8,7 +8,7 @@ the corresponding CLI argument:
     --model-path   diffusionrl_plugins.models.wan21.Wan21ModelBundle
     --sampler-path diffusionrl_plugins.samplers.minimal_sampler.MinimalSampler
     --algorithm-path diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm
-    --reward-path diffusionrl_plugins.rewards.minimal_reward.MinimalRewardWorker
+    --reward-path diffusionrl_plugins.rewards.minimal_reward.MinimalRewardScorer
     --rollout-buffer-plugin-paths your_module.your_buffer_plugin
 
 Plugin paths are validated by importability only.

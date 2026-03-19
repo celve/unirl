@@ -13,7 +13,8 @@ from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Tuple
 import ray
 import torch
 
-from diffusionrl.runtime.pipeline.rollout_pipeline import maybe_partition_training_batch
+from diffusionrl.config.resolution import resolve_global_rollout_batch_size
+from diffusionrl.runtime.training.batch_partition import partition_training_batch
 from diffusionrl.types.sampling import LogProbData, PromptEmbeddings
 from diffusionrl.types.training_batch import (
     BackwardTrainingBatch,
@@ -29,6 +30,7 @@ def _put_training_data(
     *,
     train_data: Any,
     dp_size: Optional[int],
+    per_rank_batch_size: Optional[int] = None,
     partition_train_data: bool = True,
     partition_mode: str = "data_parallel",
 ) -> Any:
@@ -42,10 +44,11 @@ def _put_training_data(
         )
 
     partition_t0 = time.perf_counter()
-    partitioned_batches = maybe_partition_training_batch(
-        train_data=train_data,
+    partitioned_batches = partition_training_batch(
+        train_data,
         dp_size=dp_size,
         partition_train_data=bool(partition_train_data),
+        per_rank_batch_size=per_rank_batch_size,
     )
     partition_t1 = time.perf_counter()
     if partitioned_batches is not None:
@@ -55,14 +58,14 @@ def _put_training_data(
             refs.append(ray.put(part))
             shard_t1 = time.perf_counter()
             if shard_t1 - shard_t0 > 1.0:
-                logger.warning(
+                logger.debug(
                     "[TIMING] _put_training_data shard %d/%d ray.put=%.2fs",
                     shard_idx + 1,
                     len(partitioned_batches),
                     shard_t1 - shard_t0,
                 )
         partition_t2 = time.perf_counter()
-        logger.warning(
+        logger.debug(
             "[TIMING] _put_training_data: partition=%.2fs ray_put_all=%.2fs n_shards=%d",
             partition_t1 - partition_t0,
             partition_t2 - partition_t1,
@@ -77,23 +80,33 @@ def _resolve_consumer_spec(
     default_partition_train_data: bool,
     dp_size: Optional[int],
     consumer_spec: Optional[Dict[str, Any]],
-) -> Tuple[Optional[int], bool, str]:
+) -> Tuple[Optional[int], Optional[int], bool, str]:
     resolved_dp_size = dp_size
+    per_rank_batch_size = None
     partition_train_data = bool(default_partition_train_data)
     partition_mode = "data_parallel"
 
     if isinstance(consumer_spec, dict):
         if consumer_spec.get("dp_size") is not None:
-            try:
-                resolved_dp_size = int(consumer_spec.get("dp_size"))
-            except (TypeError, ValueError):
-                resolved_dp_size = dp_size
+            resolved_dp_size = int(consumer_spec.get("dp_size"))
+        if consumer_spec.get("per_rank_batch_size") is not None:
+            per_rank_batch_size = int(consumer_spec.get("per_rank_batch_size"))
         if consumer_spec.get("partition_train_data") is not None:
             partition_train_data = bool(consumer_spec.get("partition_train_data"))
         if consumer_spec.get("partition_mode") is not None:
             partition_mode = str(consumer_spec.get("partition_mode")).strip().lower()
 
-    return resolved_dp_size, partition_train_data, partition_mode
+    if partition_train_data and partition_mode == "data_parallel":
+        if resolved_dp_size is None:
+            raise ValueError(
+                "Data-parallel rollout buffer dispatch requires consumer_spec.dp_size."
+            )
+        if per_rank_batch_size is None:
+            raise ValueError(
+                "Data-parallel rollout buffer dispatch requires consumer_spec.per_rank_batch_size."
+            )
+
+    return resolved_dp_size, per_rank_batch_size, partition_train_data, partition_mode
 
 
 @dataclass
@@ -558,7 +571,9 @@ class MinSamplesGuardPlugin(BufferPlugin):
 
     def __init__(self, *, min_samples: int = 1) -> None:
         super().__init__()
-        self.min_samples = max(1, int(min_samples))
+        self.min_samples = int(min_samples)
+        if self.min_samples < 1:
+            raise ValueError(f"min_samples must be >= 1, got {self.min_samples}.")
         self.rejected_batches = 0
 
     def process(self, batch: TrainingBatch, *, context: BufferPluginContext) -> TrainingBatch:
@@ -613,7 +628,7 @@ def build_buffer_plugins(args: Any) -> List[BufferPlugin]:
 
     plugins.append(
         MinSamplesGuardPlugin(
-            min_samples=max(1, int(getattr(args.rollout, "rollout_buffer_min_samples", 1)))
+            min_samples=int(getattr(args.rollout, "rollout_buffer_min_samples", 1))
         )
     )
 
@@ -653,30 +668,23 @@ class BufferActor:
     def __init__(self, args: Any):
         self.args = args
         self.partition_train_data = bool(getattr(args.ray, "partition_train_data", True))
-        self.max_queue_size = max(0, int(getattr(args.rollout, "rollout_buffer_max_queue_size", 0)))
+        self.max_queue_size = int(getattr(args.rollout, "rollout_buffer_max_queue_size", 0))
         self.plugins = build_buffer_plugins(args)
 
-        self.grouped = bool(getattr(args.rollout, "rollout_buffer_grouped", False))
+        self.reassemble_by_group = bool(getattr(args.rollout, "rollout_buffer_reassemble_by_group", False))
         raw_group_size = getattr(args.rollout, "rollout_buffer_group_size", None)
-        if raw_group_size is None:
-            self.group_size = None
-        else:
-            self.group_size = max(1, int(raw_group_size))
-
-        raw_dispatch_groups = int(getattr(args.rollout, "rollout_buffer_dispatch_groups", 0) or 0)
-        prompts_per_rollout = getattr(args.algorithm, "prompts_per_rollout", None)
-        if prompts_per_rollout is None:
-            raise ValueError("algorithm.prompts_per_rollout must be set explicitly.")
-        default_dispatch_groups = max(1, int(prompts_per_rollout))
-        self.dispatch_groups = raw_dispatch_groups if raw_dispatch_groups > 0 else default_dispatch_groups
-        self.allow_partial_group = bool(getattr(args.rollout, "rollout_buffer_allow_partial_group", True))
-        self.group_ttl_seconds = max(0.0, float(getattr(args.rollout, "rollout_buffer_group_ttl_seconds", 0.0)))
-        self.max_pending_samples = max(0, int(getattr(args.rollout, "rollout_buffer_max_pending_samples", 0)))
-        self.min_samples = max(1, int(getattr(args.rollout, "rollout_buffer_min_samples", 1)))
+        if self.reassemble_by_group and raw_group_size is None:
+            raise ValueError(
+                "rollout_buffer_reassemble_by_group requires rollout.rollout_buffer_group_size to be "
+                "validated before BufferActor initialization."
+            )
+        self.group_size = None if raw_group_size is None else int(raw_group_size)
+        self.expected_global_batch_size = int(resolve_global_rollout_batch_size(args))
+        self.group_ttl_seconds = float(getattr(args.rollout, "rollout_buffer_group_ttl_seconds", 0.0))
+        self.max_pending_samples = int(getattr(args.rollout, "rollout_buffer_max_pending_samples", 0))
 
         self._dispatch_queue: Deque[BufferItem] = deque()
         self._groups: Dict[str, Deque[GroupSampleLocator]] = {}
-        self._group_expected_sizes: Dict[str, int] = {}
 
         self._counter = 0
         self._dropped_queue_items = 0
@@ -689,28 +697,23 @@ class BufferActor:
         self._pushed_samples = 0
         self._popped_samples = 0
         self._assembled_batches = 0
-        self._assembled_partial_batches = 0
 
         # Runtime handles are attached by train loop.
         self._rollout_manager = None
-        self._training_group = None
 
-    def bind_runtime(self, *, rollout_manager: Any, training_group: Optional[Any] = None) -> Dict[str, bool]:
-        """Attach rollout/training handles used by request_rollout()."""
+    def bind_runtime(
+        self,
+        *,
+        rollout_manager: Any,
+        consumer_spec: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Attach rollout-manager handle used by request_rollout()."""
         self._rollout_manager = rollout_manager
-        if training_group is not None:
-            self._training_group = training_group
+        if isinstance(consumer_spec, dict) and consumer_spec.get("expected_global_batch_size") is not None:
+            self.expected_global_batch_size = int(consumer_spec.get("expected_global_batch_size"))
         return {
             "has_rollout_manager": self._rollout_manager is not None,
-            "has_training_group": self._training_group is not None,
-        }
-
-    def bind_training_group(self, training_group: Any) -> Dict[str, bool]:
-        """Attach or update training-group handle."""
-        self._training_group = training_group
-        return {
-            "has_rollout_manager": self._rollout_manager is not None,
-            "has_training_group": self._training_group is not None,
+            "expected_global_batch_size": int(self.expected_global_batch_size),
         }
 
     def _new_item_id(self) -> str:
@@ -748,9 +751,10 @@ class BufferActor:
 
     def _group_key_for_sample(self, *, group_id: Optional[str], rollout_id: int, sample_idx: int) -> str:
         if group_id is not None:
-            return f"group::{group_id}"
+            return f"rollout:{int(rollout_id)}:group:{group_id}"
         raise ValueError(
-            "Grouped rollout buffer requires explicit group_ids; fallback grouping is removed. "
+            "rollout_buffer_reassemble_by_group requires explicit group_ids; "
+            "fallback grouping is removed. "
             f"Got rollout_id={rollout_id}, sample_idx={sample_idx}."
         )
 
@@ -768,12 +772,12 @@ class BufferActor:
         group = self._groups.get(group_key)
         if group is not None and len(group) == 0:
             del self._groups[group_key]
-            self._group_expected_sizes.pop(group_key, None)
 
     def _required_group_size(self, group_key: str) -> int:
-        if self.group_size is not None:
-            return int(self.group_size)
-        return max(1, int(self._group_expected_sizes.get(group_key, 1)))
+        del group_key
+        if self.group_size is None:
+            return 1
+        return int(self.group_size)
 
     def _cleanup_expired_groups(self) -> None:
         if self.group_ttl_seconds <= 0:
@@ -825,36 +829,35 @@ class BufferActor:
             return []
 
         items: List[GroupSampleLocator] = []
-        take = max(0, int(count))
+        take = int(count)
         for _ in range(min(take, len(group))):
             items.append(group.popleft())
         self._cleanup_empty_group(group_key)
         return items
 
-    def _select_dispatch_plan(self, *, allow_partial: bool) -> Tuple[List[Tuple[str, int]], bool]:
+    def _select_dispatch_plan(self) -> List[Tuple[str, int]]:
+        target_samples = int(self.expected_global_batch_size)
+        if target_samples <= 0:
+            raise ValueError(
+                f"expected_global_batch_size must be positive, got {self.expected_global_batch_size}."
+            )
         plan: List[Tuple[str, int]] = []
+        selected_samples = 0
         for key in list(self._groups.keys()):
             group = self._groups.get(key)
             required_size = self._required_group_size(key)
             if group is None or len(group) < required_size:
                 continue
-            plan.append((key, required_size))
-            if len(plan) >= self.dispatch_groups:
-                return plan, False
-
-        if plan:
-            return plan, False
-
-        if not allow_partial:
-            return [], False
-
-        for key in list(self._groups.keys()):
-            group = self._groups.get(key)
-            if group is None or len(group) < self.min_samples:
+            if selected_samples + required_size > target_samples:
                 continue
-            return [(key, min(len(group), self._required_group_size(key)))], True
+            plan.append((key, required_size))
+            selected_samples += required_size
+            if selected_samples == target_samples:
+                return plan
 
-        return [], False
+        if selected_samples == target_samples:
+            return plan
+        return []
 
     def _materialize_batch_from_locators(self, locators: Sequence[GroupSampleLocator]) -> TrainingBatch:
         if not locators:
@@ -899,8 +902,8 @@ class BufferActor:
         self._dispatch_queue.append(item)
         self._assembled_batches += 1
 
-    def _promote_ready_groups(self, *, allow_partial: bool) -> int:
-        if not self.grouped:
+    def _promote_ready_groups(self) -> int:
+        if not self.reassemble_by_group:
             return 0
 
         self._cleanup_expired_groups()
@@ -908,7 +911,7 @@ class BufferActor:
         promoted = 0
 
         while self._queue_has_capacity():
-            plan, partial = self._select_dispatch_plan(allow_partial=allow_partial)
+            plan = self._select_dispatch_plan()
             if not plan:
                 break
 
@@ -927,7 +930,6 @@ class BufferActor:
                 batch=batch,
                 metadata={
                     "group_keys": selected_group_keys,
-                    "partial_group": bool(partial),
                     "group_size": (
                         self._required_group_size(selected_group_keys[0])
                         if selected_group_keys
@@ -935,13 +937,7 @@ class BufferActor:
                     ),
                 },
             )
-            if partial:
-                self._assembled_partial_batches += 1
             promoted += 1
-
-            # Partial fallback is only used to make progress; keep one partial per call.
-            if partial:
-                break
 
         return promoted
 
@@ -960,7 +956,7 @@ class BufferActor:
         push_t0 = time.perf_counter()
         batch_ref = ray.put(current)
         push_t1 = time.perf_counter()
-        logger.warning(
+        logger.debug(
             "[TIMING] buffer.push[grouped] ray.put=%.2fs samples=%d",
             push_t1 - push_t0,
             sample_count,
@@ -970,7 +966,7 @@ class BufferActor:
         group_ids = current.group_ids
         if group_ids is None or len(group_ids) != sample_count:
             raise ValueError(
-                "Grouped rollout buffer requires explicit sample-aligned group_ids. "
+                "rollout_buffer_reassemble_by_group requires explicit sample-aligned group_ids. "
                 f"Got batch_size={sample_count}, group_ids_len={len(group_ids) if group_ids is not None else None}."
             )
 
@@ -980,7 +976,7 @@ class BufferActor:
             group_id = self._normalize_group_id(raw_group_id)
             if group_id is None:
                 raise ValueError(
-                    "Grouped rollout buffer requires non-empty group_ids for every sample. "
+                    "rollout_buffer_reassemble_by_group requires non-empty group_ids for every sample. "
                     f"Found invalid group_id at sample_idx={sample_idx}."
                 )
             group_key = self._group_key_for_sample(
@@ -991,19 +987,30 @@ class BufferActor:
             normalized_group_ids.append(group_id)
             group_counts[group_key] = group_counts.get(group_key, 0) + 1
 
-        if self.group_size is None:
-            for group_key, count in group_counts.items():
-                expected = self._group_expected_sizes.get(group_key)
-                if expected is None:
-                    self._group_expected_sizes[group_key] = int(count)
-                elif int(expected) != int(count):
-                    logger.warning(
-                        "Grouped rollout buffer saw inconsistent inferred group size for %s: expected=%s new=%s. "
-                        "Keeping the first inferred size.",
-                        group_key,
-                        expected,
-                        count,
-                    )
+        for group_key, count in group_counts.items():
+            pending_count = len(self._groups.get(group_key, ()))
+            required_group_size = self._required_group_size(group_key)
+            if pending_count > 0:
+                raise ValueError(
+                    "rollout_buffer_reassemble_by_group encountered a duplicate pending group key. "
+                    f"Got group_key={group_key}, pending={pending_count}. "
+                    "Each rollout must provide one complete logical group per group_id."
+                )
+            if int(count) != required_group_size:
+                raise ValueError(
+                    "rollout_buffer_reassemble_by_group requires each incoming group "
+                    "to remain complete after buffer plugins. "
+                    f"Got group_key={group_key}, incoming={int(count)}, "
+                    f"required_group_size={required_group_size}. "
+                    "Disable sample-dropping filters or keep this mode off."
+                )
+            if pending_count + int(count) > required_group_size:
+                raise ValueError(
+                    "rollout_buffer_reassemble_by_group received more samples than the configured group size "
+                    f"for {group_key}: pending={pending_count}, incoming={int(count)}, "
+                    f"group_size={required_group_size}. "
+                    "Set rollout.rollout_buffer_group_size explicitly to match the producer contract."
+                )
 
         rewards_tensor = current.rewards
         for sample_idx in range(sample_count):
@@ -1031,8 +1038,8 @@ class BufferActor:
                 self._groups[group_key] = deque()
             self._groups[group_key].append(locator)
 
-        # Promote full groups immediately; partial fallback happens on pop only.
-        promoted = self._promote_ready_groups(allow_partial=False)
+        # Promote complete groups immediately. Partial-group fallback is removed.
+        promoted = self._promote_ready_groups()
         self._pushed_batches += 1
         self._pushed_samples += sample_count
 
@@ -1044,7 +1051,7 @@ class BufferActor:
             "pending_groups": len(self._groups),
             "pending_samples": self._pending_samples(),
             "promoted_batches": promoted,
-            "grouped_mode": True,
+            "reassemble_by_group_mode": True,
             "metadata": context.metadata,
         }
 
@@ -1054,7 +1061,6 @@ class BufferActor:
     def clear(self) -> None:
         self._dispatch_queue.clear()
         self._groups.clear()
-        self._group_expected_sizes.clear()
 
     def push(
         self,
@@ -1076,7 +1082,7 @@ class BufferActor:
 
             current.validate()
 
-            if self.grouped:
+            if self.reassemble_by_group:
                 return self._push_grouped(
                     rollout_id=rollout_id,
                     current=current,
@@ -1091,7 +1097,7 @@ class BufferActor:
             push_t0 = time.perf_counter()
             batch_ref = ray.put(current)
             push_t1 = time.perf_counter()
-            logger.warning(
+            logger.debug(
                 "[TIMING] buffer.push ray.put=%.2fs samples=%d",
                 push_t1 - push_t0,
                 sample_count,
@@ -1114,7 +1120,7 @@ class BufferActor:
                 "rollout_id": item.rollout_id,
                 "sample_count": sample_count,
                 "queue_size": len(self._dispatch_queue),
-                "grouped_mode": False,
+                "reassemble_by_group_mode": False,
             }
         except Exception as exc:
             logger.warning("BufferActor drop rollout_id=%s due to: %s", rollout_id, exc)
@@ -1133,8 +1139,8 @@ class BufferActor:
         consumer_spec: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """Pop one training batch, optionally partitioned using consumer spec."""
-        if self.grouped and not self._dispatch_queue:
-            self._promote_ready_groups(allow_partial=self.allow_partial_group)
+        if self.reassemble_by_group and not self._dispatch_queue:
+            self._promote_ready_groups()
 
         if not self._dispatch_queue:
             return None
@@ -1143,7 +1149,7 @@ class BufferActor:
         self._popped_batches += 1
         self._popped_samples += int(item.sample_count)
 
-        resolved_dp_size, partition_train_data, partition_mode = _resolve_consumer_spec(
+        resolved_dp_size, per_rank_batch_size, partition_train_data, partition_mode = _resolve_consumer_spec(
             default_partition_train_data=self.partition_train_data,
             dp_size=dp_size,
             consumer_spec=consumer_spec,
@@ -1158,6 +1164,7 @@ class BufferActor:
                 "training_data": item.batch_ref,
                 "consumer_spec": {
                     "dp_size": resolved_dp_size,
+                    "per_rank_batch_size": per_rank_batch_size,
                     "partition_train_data": partition_train_data,
                     "partition_mode": partition_mode,
                 },
@@ -1169,11 +1176,12 @@ class BufferActor:
         training_data_ref = _put_training_data(
             train_data=train_data,
             dp_size=resolved_dp_size,
+            per_rank_batch_size=per_rank_batch_size,
             partition_train_data=partition_train_data,
             partition_mode=partition_mode,
         )
         pop_t2 = time.perf_counter()
-        logger.warning(
+        logger.debug(
             "[TIMING] buffer.pop: ray_get=%.2fs partition_put=%.2fs dp=%s mode=%s",
             pop_t1 - pop_t0,
             pop_t2 - pop_t1,
@@ -1188,6 +1196,7 @@ class BufferActor:
             "training_data": training_data_ref,
             "consumer_spec": {
                 "dp_size": resolved_dp_size,
+                "per_rank_batch_size": per_rank_batch_size,
                 "partition_train_data": partition_train_data,
                 "partition_mode": partition_mode,
             },
@@ -1210,7 +1219,7 @@ class BufferActor:
                 raise RuntimeError(
                     "Rollout/training payload mismatch: "
                     f"expected rollout_id={expected_rollout_id}, got {got}. "
-                    "Disable strict alignment when using grouped rollout buffer dispatch."
+                    "Disable strict alignment when using rollout_buffer_reassemble_by_group."
                 )
         return payload
 
@@ -1251,16 +1260,14 @@ class BufferActor:
         avg_pending_reward = reward_sum / reward_count if reward_count > 0 else None
 
         return {
-            "grouped_mode": self.grouped,
+            "reassemble_by_group_mode": self.reassemble_by_group,
             "has_rollout_manager": self._rollout_manager is not None,
-            "has_training_group": self._training_group is not None,
             "queue_size": len(self._dispatch_queue),
             "pushed_batches": self._pushed_batches,
             "popped_batches": self._popped_batches,
             "pushed_samples": self._pushed_samples,
             "popped_samples": self._popped_samples,
             "assembled_batches": self._assembled_batches,
-            "assembled_partial_batches": self._assembled_partial_batches,
             "dropped_queue_items": self._dropped_queue_items,
             "dropped_batches": self._dropped_batches,
             "dropped_samples": self._dropped_samples,
@@ -1270,8 +1277,7 @@ class BufferActor:
             "partition_train_data": self.partition_train_data,
             "plugins": plugin_stats,
             "group_size": self.group_size,
-            "dispatch_groups": self.dispatch_groups,
-            "allow_partial_group": self.allow_partial_group,
+            "expected_global_batch_size": self.expected_global_batch_size,
             "group_ttl_seconds": self.group_ttl_seconds,
             "max_pending_samples": self.max_pending_samples,
             "pending_group_count": len(self._groups),
@@ -1285,7 +1291,6 @@ class BufferActor:
         """Release buffered data and runtime handles."""
         self.clear()
         self._rollout_manager = None
-        self._training_group = None
 
 
 def create_buffer_actor(args: Any):

@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional
 
-from diffusionrl.config.build_domain_args import RewardSchema
+from diffusionrl.reward.pipeline import score_from_rollout_outputs as compute_rewards_stage
 from diffusionrl.runtime.pipeline.rollout_pipeline import (
-    compute_rewards as compute_rewards_stage,
     distributed_sample,
 )
 from diffusionrl.runtime.rollout.request_builder import RolloutRequestBuilder
-from diffusionrl.types.sampling import RolloutRequest
 
 
 class EvalRunner:
@@ -20,19 +19,22 @@ class EvalRunner:
         self,
         *,
         args: Any,
+        sampling_config: Dict[str, Any],
         data_source: Any,
-        reward_schema: RewardSchema,
         reward_service: Any,
         algorithm: Any,
         default_prompt_batch_fn: Callable[[], Dict[str, Any]],
     ) -> None:
         self.args = args
         self.data_source = data_source
-        self.reward_schema = reward_schema
         self.reward_service = reward_service
         self.algorithm = algorithm
+        self.sampling_config = dict(sampling_config)
         self._default_prompt_batch_fn = default_prompt_batch_fn
-        self._request_builder = RolloutRequestBuilder.from_args(args)
+        self._request_builder = RolloutRequestBuilder.from_args(
+            args,
+            sampling_defaults=self.sampling_config,
+        )
 
     def _build_eval_batch(self) -> Dict[str, Any]:
         if self.data_source is not None and hasattr(self.data_source, "get_eval_samples"):
@@ -74,20 +76,8 @@ class EvalRunner:
             },
             samples_per_prompt=int(getattr(self.algorithm, "samples_per_prompt", 1)),
         )
-        request = RolloutRequest(
-            prompts=request.prompts,
-            prompt_ids=request.prompt_ids,
-            sample_ids=request.sample_ids,
-            group_ids=request.group_ids,
-            noise_group_ids=request.noise_group_ids,
-            prompt_metadata=request.prompt_metadata,
-            num_inference_steps=int(self.args.sampling.num_inference_steps),
-            guidance_scale=float(self.args.sampling.guidance_scale),
-            height=int(self.args.height),
-            width=int(self.args.width),
-            num_frames=int(self.args.num_frames),
-            init_same_noise=bool(getattr(self.args.sampling, "init_same_noise", False)),
-            samples_per_prompt=int(getattr(self.algorithm, "samples_per_prompt", 1)),
+        request = replace(
+            request,
             sde_indices=None,
             decode_for_reward=True,
         )
@@ -97,7 +87,6 @@ class EvalRunner:
         )
         rewards, _ = compute_rewards_stage(
             reward_service=self.reward_service,
-            reward_path=str(self.reward_schema.reward_path or ""),
             samples_per_prompt=int(getattr(self.algorithm, "samples_per_prompt", 1)),
             sampler_outputs=outputs,
             prompts=prompts,

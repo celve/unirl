@@ -2,49 +2,21 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
+from diffusionrl.config.build_domain_args import build_algorithm_config
 from diffusionrl.samplers.engine import get_engine_class_path
+from diffusionrl.types.sampling import SamplingRequirements
 from diffusionrl.utils.misc import load_function
 
 
-@dataclass(frozen=True)
-class ResolvedSamplingRequirements:
-    """Final sampling contract: loss-required fields + algorithm extras."""
-
-    requires_trajectory: bool = True
-    requires_log_prob: bool = True
-    requires_embeddings: bool = True
-    extras: Dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def sde_ratio(self) -> float:
-        return float(self.extras.get("sde_ratio", 1.0))
-
-    @property
-    def requires_clean_latents(self) -> bool:
-        return bool(self.extras.get("requires_clean_latents", False))
-
-    @property
-    def forward_diffusion_in_loss(self) -> bool:
-        return bool(self.extras.get("forward_diffusion_in_loss", False))
-
-    def to_dict(self) -> Dict[str, bool]:
-        return {
-            "requires_trajectory": bool(self.requires_trajectory),
-            "requires_log_prob": bool(self.requires_log_prob),
-            "requires_embeddings": bool(self.requires_embeddings),
-        }
-
-def get_algorithm_requirements(args: Any) -> Dict[str, bool]:
-    """Get algorithm requirements from the Algorithm class declaration."""
-    algorithm_path = getattr(args.algorithm, "algorithm_path", None)
+def _instantiate_algorithm_for_contracts(args: Any) -> Any:
+    """Instantiate the algorithm so contracts are read from one runtime surface."""
+    algorithm_config = build_algorithm_config(args)
+    algorithm_path = algorithm_config.get("algorithm_path")
     if not isinstance(algorithm_path, str) or not algorithm_path.strip():
-        raise ValueError(
-            "Cannot resolve algorithm class because args.algorithm.algorithm_path is empty. "
-            f"algorithm_type={getattr(args.algorithm, 'algorithm_type', None)!r}."
-        )
+        raise ValueError("build_algorithm_config() returned an empty algorithm_path.")
     try:
         algorithm_cls = load_function(algorithm_path.strip())
     except Exception as exc:
@@ -52,40 +24,28 @@ def get_algorithm_requirements(args: Any) -> Dict[str, bool]:
             "Cannot resolve algorithm class from args.algorithm.algorithm_path="
             f"{algorithm_path!r}."
         ) from exc
-    declared = getattr(algorithm_cls, "declared_requirements", None)
-    if not callable(declared):
+    if not hasattr(algorithm_cls, "from_config"):
         raise ValueError(
-            f"Algorithm class {algorithm_cls.__name__} must define classmethod declared_requirements() "
-            "returning a dict like {'requires_trajectory': True, 'requires_log_prob': True, ...}."
+            f"Algorithm class {algorithm_cls.__name__} must define classmethod from_config(config)."
         )
-    return dict(declared())
+    return algorithm_cls.from_config(algorithm_config)
 
 
 def resolve_sampling_requirements(
     args: Any,
     *,
-    algorithm_requirements: Optional[Any] = None,
-) -> ResolvedSamplingRequirements:
-    """Resolve final sampling contract with Algorithm as the single source of requires_*."""
-    required = get_algorithm_requirements(args)
-    extras: Dict[str, Any] = {}
-    if algorithm_requirements is not None:
-        raw_extras = getattr(algorithm_requirements, "extras", None)
-        if isinstance(raw_extras, dict):
-            extras.update(dict(raw_extras))
-        for key in ("sde_ratio", "requires_clean_latents", "forward_diffusion_in_loss"):
-            if key in extras:
-                continue
-            if hasattr(algorithm_requirements, key):
-                try:
-                    extras[key] = getattr(algorithm_requirements, key)
-                except Exception:
-                    continue
+    algorithm: Optional[Any] = None,
+) -> SamplingRequirements:
+    """Resolve final sampling contract from `algorithm.get_sampling_requirements()`."""
+    resolved_algorithm = algorithm if algorithm is not None else _instantiate_algorithm_for_contracts(args)
+    requirements = resolved_algorithm.get_sampling_requirements()
+    raw_extras = getattr(requirements, "extras", None)
+    extras: Dict[str, Any] = dict(raw_extras) if isinstance(raw_extras, Mapping) else {}
 
-    return ResolvedSamplingRequirements(
-        requires_trajectory=bool(required.get("requires_trajectory", True)),
-        requires_log_prob=bool(required.get("requires_log_prob", True)),
-        requires_embeddings=bool(required.get("requires_embeddings", True)),
+    return SamplingRequirements(
+        requires_trajectory=bool(getattr(requirements, "requires_trajectory", True)),
+        requires_log_prob=bool(getattr(requirements, "requires_log_prob", True)),
+        requires_embeddings=bool(getattr(requirements, "requires_embeddings", True)),
         extras=extras,
     )
 
@@ -103,8 +63,6 @@ def resolve_engine_capabilities(*, engine_type: str) -> Dict[str, bool]:
 
 
 __all__ = [
-    "ResolvedSamplingRequirements",
-    "get_algorithm_requirements",
     "resolve_sampling_requirements",
     "resolve_engine_capabilities",
 ]

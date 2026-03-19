@@ -5,12 +5,20 @@ from __future__ import annotations
 import logging
 
 from diffusionrl.config.build_domain_args import (
-    build_rollout_engine_config,
+    build_rollout_actor_init_config,
     build_training_actor_init_config,
-    validate_rollout_engine_config,
+    validate_rollout_actor_init_config,
     validate_training_actor_init_config,
 )
+from diffusionrl.config.resolution import resolve_training_topology
+from diffusionrl.config.rollout_topology import (
+    normalize_rollout_service_engine,
+    resolve_rollout_service_num_gpus,
+    resolve_rollout_service_kwargs,
+    rollout_mode_is_colocated,
+)
 from diffusionrl.runtime.training import create_train_backend
+from diffusionrl.types.engine import uses_dedicated_rollout_engine
 
 from .rollout_group import RolloutActorGroup
 from .training_group import TrainingActorGroup
@@ -22,10 +30,7 @@ def create_rollout_actor_group(
     pg_result,
 ) -> RolloutActorGroup:
     """
-    Factory function to create RolloutActorGroup from args.
-
-    GPU Allocation Strategy:
-    - FSDP engine: 1 GPU per rollout actor (default)
+    Factory function to create RolloutActorGroup for dedicated rollout engines.
 
     Args:
         args: TrainingArguments instance
@@ -36,74 +41,31 @@ def create_rollout_actor_group(
     """
     pg, bundle_indices, gpu_ids = pg_result
 
-    # Get sampler_engine_type (should be set by validate_args in arguments.py)
-    sampler_engine_type = args.sampling.sampler_engine_type
-    if sampler_engine_type is None:
+    rollout_service_engine = normalize_rollout_service_engine(args.rollout.service_engine)
+    if not rollout_service_engine:
         raise ValueError(
-            "sampling.sampler_engine_type is unset after normalize/validate. "
-            "Expected non-empty engine type."
+            "rollout.service_engine is unset after normalize/validate. "
+            "Expected a dedicated rollout service engine."
+        )
+    if not uses_dedicated_rollout_engine(rollout_service_engine):
+        raise ValueError(
+            f"rollout.service_engine={rollout_service_engine!r} does not use dedicated rollout actors. "
+            "Sampling should run directly on training actors for this engine."
         )
 
     # Determine GPUs per actor based on engine type
-    engine_kwargs = args.sampling.engine_kwargs
-    if not isinstance(engine_kwargs, dict):
-        raise ValueError(
-            "sampling.engine_kwargs must be a dict after normalize/validate, "
-            f"got: {type(engine_kwargs).__name__}"
-        )
+    engine_kwargs = resolve_rollout_service_kwargs(args)
 
-    # [FastVideo-suspended] BEGIN — FastVideo GPU allocation branch
-    # if sampler_engine_type == "fastvideo":
-    #     ...
-    # [FastVideo-suspended] END
-    if sampler_engine_type == "fsdp":
-        # FSDP GPU allocation:
-        # - fsdp_num_gpus: GPUs per FSDP rollout actor (default: 1)
-        # - fsdp_sharding_strategy: Sharding strategy (NO_SHARD for inference)
-        #
-        # Scenarios:
-        # 1. fsdp_num_gpus=1: Single GPU, data parallel across actors (default)
-        # 2. fsdp_num_gpus=4: 4 GPUs with FSDP model parallelism
-        #
-        # For multi-node: each node gets one actor, actor uses local GPUs only
-        # (torch.distributed doesn't support cross-node within single actor)
+    num_gpus_per_actor = resolve_rollout_service_num_gpus(args)
 
-        fsdp_num_gpus = args.sampling.fsdp_num_gpus
-        fsdp_sharding_strategy = args.sampling.fsdp_inference_sharding_strategy
-
-        num_gpus_per_actor = fsdp_num_gpus
-
-        # Update engine_kwargs
-        engine_kwargs["num_gpus"] = num_gpus_per_actor
-        engine_kwargs["fsdp_sharding_strategy"] = fsdp_sharding_strategy
-        engine_kwargs.setdefault("cpu_offload", args.training.fsdp_cpu_offload)
-
-        if num_gpus_per_actor > 1:
-            logger.info(
-                f"FSDP engine: num_gpus_per_actor={num_gpus_per_actor}, "
-                f"sharding_strategy={fsdp_sharding_strategy}"
-            )
-        else:
-            logger.info("FSDP engine: single GPU per actor (default)")
-    elif sampler_engine_type == "sglang":
+    if rollout_service_engine == "sglang":
         # sglang-diffusion GPU allocation:
         # - num_gpus: worker processes launched by DiffGenerator (authoritative)
         # - tp_size/sp_degree: optional parallel hints forwarded to ServerArgs
-        raw_num_gpus = engine_kwargs.get("num_gpus")
-        if raw_num_gpus is None:
-            raw_num_gpus = engine_kwargs.get("tp_size", args.sampling.tp_size)
-        num_gpus_per_actor = int(raw_num_gpus)
-        if num_gpus_per_actor < 1:
-            raise ValueError(f"sglang engine num_gpus must be >= 1, got: {num_gpus_per_actor}")
-
         engine_kwargs["num_gpus"] = num_gpus_per_actor
-        if "tp_size" not in engine_kwargs:
-            engine_kwargs["tp_size"] = int(args.sampling.tp_size)
         if "sp_degree" not in engine_kwargs:
             if engine_kwargs.get("sp_size") is not None:
                 engine_kwargs["sp_degree"] = int(engine_kwargs["sp_size"])
-            elif args.sampling.sp_size > 1:
-                engine_kwargs["sp_degree"] = int(args.sampling.sp_size)
         if bool(args.ray.offload_rollout):
             # Pre-release policy: when rollout offload is requested, require
             # concrete SGLang memory handlers instead of best-effort fallbacks.
@@ -116,16 +78,22 @@ def create_rollout_actor_group(
             engine_kwargs.get("sp_degree", 1),
         )
     else:
-        # Other engines: single GPU per actor.
-        num_gpus_per_actor = 1
+        raise ValueError(
+            f"Unsupported dedicated rollout engine: {rollout_service_engine!r}. "
+            "Expected: sglang."
+        )
 
     # Calculate number of actors
     # Multi-GPU engines allocate more than one GPU per actor.
-    total_gpus = args.ray.rollout_num_nodes * args.ray.rollout_num_gpus_per_node
+    available_rollout_bundles = len(bundle_indices)
+    if available_rollout_bundles < 1:
+        raise ValueError(
+            "Rollout placement group did not allocate any GPU bundles for dedicated rollout actors."
+        )
 
     # In colocate mode with single-GPU setup, use fractional GPU allocation
     # This allows both rollout and training actors to share the same GPU bundle
-    colocate = bool(args.ray.colocate_rollout_training)
+    colocate = rollout_mode_is_colocated(args.rollout.mode)
     if colocate and num_gpus_per_actor == 1:
         num_gpus_per_actor = float(args.ray.colocate_rollout_gpu_fraction)
         logger.info(
@@ -144,12 +112,19 @@ def create_rollout_actor_group(
 
         actual_gpus_per_engine = int(num_gpus_per_actor)
         ray_num_gpus = 0.5  # Fractional claim to satisfy Ray scheduler
-        num_actors = total_gpus // actual_gpus_per_engine
+        if available_rollout_bundles % actual_gpus_per_engine != 0:
+            raise ValueError(
+                "Placement-group rollout bundle count must be divisible by rollout.service_num_gpus "
+                "for multi-GPU rollout actors. "
+                f"Available rollout bundles: {available_rollout_bundles}, "
+                f"rollout.service_num_gpus: {actual_gpus_per_engine}."
+            )
+        num_actors = available_rollout_bundles // actual_gpus_per_engine
 
         if num_actors < 1:
             raise ValueError(
                 f"Not enough GPUs for rollout. "
-                f"Total GPUs: {total_gpus}, GPUs per engine: {actual_gpus_per_engine}"
+                f"Available rollout bundles: {available_rollout_bundles}, GPUs per engine: {actual_gpus_per_engine}"
             )
 
         noset_env = {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST}
@@ -169,21 +144,21 @@ def create_rollout_actor_group(
             num_gpus_per_engine=actual_gpus_per_engine,
             capture_child_tasks=True,
             runtime_env={"env_vars": noset_env},
-            sampler_engine_type=sampler_engine_type,
+            sampler_engine_type=rollout_service_engine,
             num_gpus_allocated=actual_gpus_per_engine,
             force_set_cuda_visible_devices=True,
         )
     else:
         # Single GPU or colocate mode: standard scheduling
         if colocate and num_gpus_per_actor < 1:
-            num_actors = total_gpus
+            num_actors = available_rollout_bundles
         else:
-            num_actors = int(total_gpus / num_gpus_per_actor)
+            num_actors = int(available_rollout_bundles / num_gpus_per_actor)
 
         if num_actors < 1:
             raise ValueError(
                 f"Not enough GPUs for rollout. "
-                f"Total GPUs: {total_gpus}, GPUs per actor: {num_gpus_per_actor}"
+                f"Available rollout bundles: {available_rollout_bundles}, GPUs per actor: {num_gpus_per_actor}"
             )
 
         logger.info(
@@ -196,36 +171,25 @@ def create_rollout_actor_group(
             pg=pg,
             bundle_indices=bundle_indices,
             num_gpus_per_actor=num_gpus_per_actor,
-            sampler_engine_type=sampler_engine_type,
+            sampler_engine_type=rollout_service_engine,
         )
 
     # Initialize actors with domain-split runtime/model schema.
-    engine_config = build_rollout_engine_config(
+    actor_init_config = build_rollout_actor_init_config(
         args=args,
-        sampler_engine_type=sampler_engine_type,
+        sampler_engine_type=rollout_service_engine,
         engine_kwargs=engine_kwargs,
     )
-    validate_rollout_engine_config(engine_config)
-    group.init(engine_config)
-    if hasattr(group, "refresh_weight_update_targets"):
-        try:
-            dedupe_payload = group.refresh_weight_update_targets()
-            logger.info(
-                "Rollout weight-update target topology: %s",
-                dedupe_payload,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to refresh rollout weight-update targets; fallback to per-actor updates. %s",
-                exc,
-            )
-
+    validate_rollout_actor_init_config(actor_init_config)
+    group.init(actor_init_config)
     return group
 
 
 def create_training_actor_group(
     args,
     pg_result,
+    *,
+    algorithm_config=None,
 ) -> TrainingActorGroup:
     """
     Factory function to create TrainingActorGroup from args.
@@ -239,9 +203,17 @@ def create_training_actor_group(
     """
     pg, bundle_indices, gpu_ids = pg_result
 
-    default_num_actors = args.ray.training_num_nodes * args.ray.training_num_gpus_per_node
+    training_topology = resolve_training_topology(args)
+    # Actor-group size is currently driven by the resolved training actor_count.
+    # This is a launch/orchestration quantity; it should not be conflated with
+    # world_size or dp_size even when they happen to match in the mainline path.
+    num_actors = int(training_topology.actor_count)
 
-    config = build_training_actor_init_config(args=args, dp_size=default_num_actors)
+    config = build_training_actor_init_config(
+        args=args,
+        topology=training_topology,
+        algorithm_config=algorithm_config,
+    )
     validate_training_actor_init_config(config)
     backend_config = config["train_backend_config"]
     backend_name = str(backend_config["name"]).strip().lower()
@@ -251,7 +223,7 @@ def create_training_actor_group(
         backend_path=backend_config.get("backend_path"),
         backend_kwargs=backend_kwargs,
     )
-    launch_spec = backend.launch_spec(args=args, default_num_actors=default_num_actors)
+    launch_spec = backend.launch_spec(args=args, topology=training_topology)
     caps = backend.capabilities
     if bool(caps.requires_custom_actor_class) and not launch_spec.actor_class_path:
         raise ValueError(
@@ -260,22 +232,16 @@ def create_training_actor_group(
             "or override via --train-backend-path to a backend that does not require a custom actor."
         )
 
-    num_actors = int(launch_spec.num_actors) if launch_spec.num_actors else int(default_num_actors)
-    if num_actors != default_num_actors:
-        logger.info(
-            "Training backend=%s overrides num_actors: %s -> %s",
-            backend.name,
-            default_num_actors,
-            num_actors,
-        )
-        config = build_training_actor_init_config(args=args, dp_size=num_actors)
-        validate_training_actor_init_config(config)
-    else:
-        logger.info("Training backend=%s launch spec: %s", backend.name, launch_spec.as_dict())
+    logger.info(
+        "Training backend=%s launch spec: %s; resolved topology=%s",
+        backend.name,
+        launch_spec.as_dict(),
+        training_topology.as_dict(),
+    )
 
     # In colocate mode, use fractional GPU allocation to allow sharing
     # Both rollout and training actors will claim fractional GPU each
-    colocate = bool(args.ray.colocate_rollout_training)
+    colocate = rollout_mode_is_colocated(args.rollout.mode)
     if launch_spec.num_gpus_per_actor is not None:
         num_gpus_per_actor = float(launch_spec.num_gpus_per_actor)
     else:
@@ -295,6 +261,13 @@ def create_training_actor_group(
         actor_init_kwargs=dict(launch_spec.actor_kwargs or {}),
         runtime_env=dict(launch_spec.runtime_env or {}) or None,
     )
+
+    master_info = group.call_rank0("get_master_info")
+    if not isinstance(master_info, dict):
+        raise RuntimeError(f"Invalid rank0 master payload: {master_info!r}")
+    master_addr = str(master_info["master_addr"])
+    master_port = int(master_info["master_port"])
+    group.broadcast("set_master_info", master_addr, master_port)
 
     group.init(config)
 

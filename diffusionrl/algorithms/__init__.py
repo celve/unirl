@@ -3,19 +3,21 @@
 The algorithms module is the single source of truth for both rollout-side
 requirements (sampling, advantages) and training-side gradient computation.
 """
-from typing import Any, Optional
 
-from .base import BaseAlgorithm, SamplingRequirements
-from .grpo import GRPOAlgorithm
-from .mix_grpo import MixGRPOAlgorithm
-from .nft import NFTAlgorithm
+from __future__ import annotations
 
-# Default dotpaths for built-in algorithm classes.
-# Used by get_algorithm() and _normalize_algorithm_path() for resolution.
-DEFAULT_ALGORITHM_PATHS = {
-    "grpo": "diffusionrl.algorithms.grpo.GRPOAlgorithm",
-    "nft": "diffusionrl.algorithms.nft.NFTAlgorithm",
-    "mix_grpo": "diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm",
+import importlib
+from typing import Any, Dict, Optional, Tuple
+
+from diffusionrl.types import SamplingRequirements
+
+from .base import BaseAlgorithm
+from .registry import DEFAULT_ALGORITHM_PATHS
+
+_LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
+    "GRPOAlgorithm": ("diffusionrl.algorithms.grpo", "GRPOAlgorithm"),
+    "MixGRPOAlgorithm": ("diffusionrl.algorithms.mix_grpo", "MixGRPOAlgorithm"),
+    "NFTAlgorithm": ("diffusionrl.algorithms.nft", "NFTAlgorithm"),
 }
 
 
@@ -64,3 +66,17 @@ __all__ = [
     "DEFAULT_ALGORITHM_PATHS",
     "get_algorithm",
 ]
+
+
+def __getattr__(name: str):
+    if name in _LAZY_ATTRS:
+        module_name, attr_name = _LAZY_ATTRS[name]
+        module = importlib.import_module(module_name)
+        value = getattr(module, attr_name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals().keys()) | set(__all__))

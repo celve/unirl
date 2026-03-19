@@ -5,6 +5,24 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
+from diffusionrl.config.rollout_topology import (
+    normalize_rollout_service_engine,
+    resolve_rollout_service_num_gpus,
+    rollout_mode_is_colocated,
+    rollout_mode_uses_service,
+)
+from diffusionrl.config.resolution import (
+    DEFAULT_SAMPLER_PATH,
+    resolve_algorithm_kwargs,
+    resolve_algorithm_path,
+    resolve_global_rollout_batch_size,
+    resolve_model_runtime,
+)
+from diffusionrl.sde.rules import (
+    SUPPORTED_USER_SDE_TYPES,
+    is_deterministic_sde_type,
+    supported_sde_type_text,
+)
 from diffusionrl.runtime.contracts import (
     resolve_engine_capabilities,
     resolve_sampling_requirements,
@@ -12,22 +30,6 @@ from diffusionrl.runtime.contracts import (
 from diffusionrl.utils.misc import load_function
 
 logger = logging.getLogger(__name__)
-
-
-def _trace_normalize_change(
-    args: Any,
-    key: str,
-    before: Any,
-    after: Any,
-    *,
-    source: str,
-) -> None:
-    """Emit normalize trace through callback set by arguments.validate_args()."""
-    if before == after:
-        return
-    callback = getattr(args, "_normalize_trace_callback", None)
-    if callable(callback):
-        callback(key, before, after, source=source)
 
 
 def validate_dotpath(path: str, *, label: str) -> None:
@@ -149,17 +151,23 @@ def validate_grouped_configs(args: Any) -> None:
     args.sampling.validate()
     args.reward.validate()
     args.ray.validate()
+    args.sync.validate()
     args.algorithm.validate()
     args.training.validate()
+    args.precision.validate()
     args.rollout.validate()
     args.debug.validate()
 
 
 def validate_dynamic_dotpaths(args: Any) -> None:
     """Validate configured runtime extension dotpaths."""
-    validate_dotpath(args.model.model_path, label="model")
-    validate_dotpath(args.sampling.sampler_path, label="sampler")
-    validate_dotpath(args.algorithm.algorithm_path, label="algorithm")
+    resolved_model = resolve_model_runtime(
+        args,
+        explicit_sampler_path=(getattr(args.sampling, "sampler_path", None) != DEFAULT_SAMPLER_PATH),
+    )
+    validate_dotpath(resolved_model.model_path, label="model")
+    validate_dotpath(resolved_model.sampler_path, label="sampler")
+    validate_dotpath(resolve_algorithm_path(args), label="algorithm")
     validate_dotpath(args.data_source_path, label="data_source")
     if getattr(args.training, "train_backend_path", None):
         validate_dotpath(args.training.train_backend_path, label="train_backend")
@@ -185,28 +193,28 @@ def validate_colocate_fractions(args) -> None:
 
 def get_rollout_gpus_per_actor(args) -> int:
     """Resolve GPUs per rollout actor based on sampler engine and engine config."""
-    sampler_engine_type = str(getattr(args.sampling, "sampler_engine_type", "") or "fsdp").lower()
-    if sampler_engine_type == "fsdp":
-        return args.sampling.fsdp_num_gpus
-    if sampler_engine_type == "sglang":
-        engine_kwargs = getattr(args.sampling, "engine_kwargs", {})
-        if not isinstance(engine_kwargs, dict):
-            engine_kwargs = {}
-        num_gpus = engine_kwargs.get("num_gpus")
-        if num_gpus is None:
-            # Keep this consistent with RolloutActorGroup factory:
-            # tp_size is treated as the per-engine GPU count when num_gpus
-            # is not explicitly provided.
-            num_gpus = engine_kwargs.get("tp_size", getattr(args.sampling, "tp_size", 1))
-        if num_gpus is None:
-            # Keep behavior explicit: default single-GPU engine unless user opts in.
-            return 1
-        try:
-            resolved = int(num_gpus)
-        except (TypeError, ValueError):
-            return 1
-        return max(1, resolved)
-    return 1
+    service_engine = normalize_rollout_service_engine(getattr(args.rollout, "service_engine", None))
+    if not rollout_mode_uses_service(getattr(args.rollout, "mode", None)):
+        return 0
+    if not service_engine:
+        raise ValueError(
+            "rollout.mode requires a dedicated rollout service, but rollout.service_engine is unset."
+        )
+    if service_engine != "sglang":
+        raise ValueError(
+            f"Unsupported dedicated rollout engine: {service_engine!r}. "
+            "Expected: sglang."
+        )
+    return resolve_rollout_service_num_gpus(args)
+
+
+def _resolve_rollout_gpu_pool_size(args: Any) -> int:
+    """Resolve bundle capacity available to rollout actors from placement topology."""
+    rollout_total_gpus = int(args.ray.rollout_num_nodes) * int(args.ray.rollout_num_gpus_per_node)
+    if not rollout_mode_is_colocated(args.rollout.mode):
+        return rollout_total_gpus
+    training_total_gpus = int(args.ray.training_num_nodes) * int(args.ray.training_num_gpus_per_node)
+    return max(rollout_total_gpus, training_total_gpus)
 
 
 def validate_reward_and_rollout_buffer_config(args: Any) -> None:
@@ -233,11 +241,6 @@ def validate_reward_and_rollout_buffer_config(args: Any) -> None:
         raise ValueError(
             f"rollout_buffer_group_size must be >= 1 when provided, got: {group_size}"
         )
-    if int(getattr(args.rollout, "rollout_buffer_dispatch_groups", 0)) < 0:
-        raise ValueError(
-            "rollout_buffer_dispatch_groups must be >= 0 "
-            f"(0 means prompts_per_rollout), got: {args.rollout.rollout_buffer_dispatch_groups}"
-        )
     if float(getattr(args.rollout, "rollout_buffer_group_ttl_seconds", 0.0)) < 0:
         raise ValueError(
             "rollout_buffer_group_ttl_seconds must be >= 0, "
@@ -248,6 +251,32 @@ def validate_reward_and_rollout_buffer_config(args: Any) -> None:
             "rollout_buffer_max_pending_samples must be >= 0, "
             f"got: {args.rollout.rollout_buffer_max_pending_samples}"
         )
+    if bool(getattr(args.rollout, "rollout_buffer_reassemble_by_group", False)) and group_size is not None:
+        if bool(getattr(args.rollout, "rollout_buffer_drop_invalid", True)):
+            raise ValueError(
+                "rollout_buffer_reassemble_by_group is incompatible with "
+                "rollout_buffer_drop_invalid=true. Sample-dropping finite-value "
+                "filtering can leave incomplete groups pending forever. Set "
+                "rollout.rollout_buffer_drop_invalid=false so invalid batches fail fast."
+            )
+        if reward_min is not None or reward_max is not None:
+            raise ValueError(
+                "rollout_buffer_reassemble_by_group is incompatible with "
+                "rollout_buffer_reward_min/max. Reward-range filtering drops "
+                "samples and breaks the complete-group producer contract."
+            )
+        target_batch_size = int(resolve_global_rollout_batch_size(args))
+        if int(group_size) > target_batch_size:
+            raise ValueError(
+                "rollout_buffer_group_size cannot exceed the resolved training batch size. "
+                f"Got group_size={group_size}, target_batch_size={target_batch_size}."
+            )
+        if target_batch_size % int(group_size) != 0:
+            raise ValueError(
+                "rollout_buffer_reassemble_by_group requires the resolved training batch size "
+                "to be divisible by rollout_buffer_group_size. "
+                f"Got target_batch_size={target_batch_size}, group_size={group_size}."
+            )
 
 
 def validate_rollout_layout(
@@ -260,15 +289,43 @@ def validate_rollout_layout(
         return
 
     rollout_gpus = get_rollout_gpus_per_actor(args)
-    is_sglang_engine = str(getattr(args.sampling, "sampler_engine_type", "")).lower() == "sglang"
-    if rollout_gpus > 1 and args.ray.colocate_rollout_training and not is_sglang_engine:
+    rollout_gpu_pool_size = _resolve_rollout_gpu_pool_size(args)
+    service_engine = normalize_rollout_service_engine(getattr(args.rollout, "service_engine", None))
+    if not rollout_mode_uses_service(getattr(args.rollout, "mode", None)):
         raise ValueError(
-            "colocate_rollout_training=True with multi-GPU rollout actors is only supported "
-            "for sampler_engine_type='sglang'."
+            "Dedicated rollout actor layout validation only applies to dedicated rollout engines. "
+            f"Got rollout.mode={getattr(args.rollout, 'mode', None)!r}."
+        )
+    if rollout_gpu_pool_size < 1:
+        raise ValueError(
+            "Dedicated rollout services require a positive rollout GPU pool from placement config. "
+            f"Got rollout_num_nodes={args.ray.rollout_num_nodes}, "
+            f"rollout_num_gpus_per_node={args.ray.rollout_num_gpus_per_node}, "
+            f"training_num_nodes={args.ray.training_num_nodes}, "
+            f"training_num_gpus_per_node={args.ray.training_num_gpus_per_node}."
+        )
+    if rollout_gpu_pool_size < rollout_gpus:
+        raise ValueError(
+            "Dedicated rollout placement does not have enough GPUs for one rollout actor. "
+            f"Available rollout GPU pool={rollout_gpu_pool_size}, "
+            f"rollout.service_num_gpus={rollout_gpus}."
+        )
+    if rollout_gpus > 1 and rollout_gpu_pool_size % rollout_gpus != 0:
+        raise ValueError(
+            "Dedicated rollout GPU pool must be divisible by rollout.service_num_gpus "
+            "for multi-GPU rollout actors. "
+            f"Available rollout GPU pool={rollout_gpu_pool_size}, "
+            f"rollout.service_num_gpus={rollout_gpus}."
+        )
+    is_sglang_engine = service_engine == "sglang"
+    if rollout_gpus > 1 and rollout_mode_is_colocated(args.rollout.mode) and not is_sglang_engine:
+        raise ValueError(
+            "colocate_rollout with multi-GPU rollout actors is only supported "
+            "for rollout.service_engine='sglang'."
         )
     if (
         rollout_gpus > 1
-        and args.ray.colocate_rollout_training
+        and rollout_mode_is_colocated(args.rollout.mode)
         and is_sglang_engine
         and not bool(getattr(args.ray, "allow_noset_multi_gpu_inference", False))
     ):
@@ -289,13 +346,18 @@ def validate_rollout_layout(
         )
 
 
-def validate_model_specific_logic(args: Any, *, model_cls: Any) -> None:
-    """Run model-specific runtime validation."""
-    if args.model.model_type != "flux" and args.sampling.sde_type.startswith("flux_"):
+def validate_model_runtime_contract(args: Any) -> None:
+    """Validate model/runtime combinations that should never reach model hooks."""
+    raw_sde_type = str(getattr(args.sampling, "sde_type", "") or "").strip().lower()
+    if raw_sde_type not in SUPPORTED_USER_SDE_TYPES:
         raise ValueError(
-            f"sde_type '{args.sampling.sde_type}' is only valid for model_type='flux'"
+            f"Unknown sampling.sde_type={args.sampling.sde_type!r}. "
+            f"Supported values: {supported_sde_type_text()}."
         )
 
+
+def apply_model_config_hook(args: Any, *, model_cls: Any) -> None:
+    """Run model-provided config hook without allowing it to mutate args."""
     model_validate_fn = getattr(model_cls, "validate_config", None)
     if callable(model_validate_fn):
         before_flat = args.to_flat_dict() if hasattr(args, "to_flat_dict") else None
@@ -303,31 +365,29 @@ def validate_model_specific_logic(args: Any, *, model_cls: Any) -> None:
         if isinstance(before_flat, dict) and hasattr(args, "to_flat_dict"):
             after_flat = args.to_flat_dict()
             if isinstance(after_flat, dict):
+                changed = []
                 for key in sorted(set(before_flat) | set(after_flat)):
-                    _trace_normalize_change(
-                        args,
-                        key,
-                        before_flat.get(key),
-                        after_flat.get(key),
-                        source="model_validate_config",
+                    before = before_flat.get(key)
+                    after = after_flat.get(key)
+                    if before != after:
+                        changed.append(
+                            f"{key}: {before!r} -> {after!r}"
+                        )
+                if changed:
+                    raise ValueError(
+                        "model.validate_config() must not mutate TrainingArguments. "
+                        f"Observed changes: {', '.join(changed[:5])}"
                     )
 
+
+def validate_nft_sampling_contract(args: Any) -> None:
+    """Validate NFT-specific rollout sampling contract."""
     if args.algorithm.algorithm_type == "nft":
         # DiffusionNFT reproduction contract:
         # - rollout samples from old adapter
         # - deterministic solver (dpm2)
         old_adapter_name = "old"
-        algorithm_kwargs = getattr(args.algorithm, "algorithm_kwargs", {})
-        parsed: Dict[str, Any] = {}
-        if algorithm_kwargs is None:
-            parsed = {}
-        elif isinstance(algorithm_kwargs, dict):
-            parsed = dict(algorithm_kwargs)
-        else:
-            raise ValueError(
-                "algorithm.algorithm_kwargs must be a dict after normalization, "
-                f"got: {type(algorithm_kwargs).__name__}"
-            )
+        parsed: Dict[str, Any] = resolve_algorithm_kwargs(args)
         if parsed:
             old_adapter_name = str(parsed.get("old_adapter_name", old_adapter_name) or old_adapter_name)
 
@@ -344,10 +404,10 @@ def validate_model_specific_logic(args: Any, *, model_cls: Any) -> None:
             )
         sde_type = str(args.sampling.sde_type)
         eta = float(getattr(args.sampling, "eta", 1.0))
-        if sde_type != "dpm2" and not (sde_type == "sde" and eta == 0.0):
+        if not is_deterministic_sde_type(sde_type, eta):
             raise ValueError(
                 "algorithm_type='nft' targets DiffusionNFT deterministic sampling. "
-                "Set --sampling.sde-type dpm2, or use --sampling.sde-type sde "
+                "Set --sampling.sde-type dpm2, or use another transition rule "
                 f"with --sampling.eta 0.0 (ODE mode). "
                 f"Got sde_type={sde_type!r}, eta={eta}."
             )
@@ -365,8 +425,13 @@ def validate_resolved_engine_algorithm_contract(
     if training_actor_sampling_mode:
         return
 
-    sampler_engine_type = str(getattr(args.sampling, "sampler_engine_type", "") or "")
-    engine_caps = resolve_engine_capabilities(engine_type=args.sampling.sampler_engine_type)
+    service_engine = normalize_rollout_service_engine(getattr(args.rollout, "service_engine", None))
+    if not service_engine:
+        raise ValueError(
+            "Dedicated rollout validation requires rollout.service_engine to be set explicitly. "
+            "Run validate_args() before resolving dedicated rollout engine capabilities."
+        )
+    engine_caps = resolve_engine_capabilities(engine_type=service_engine)
 
     allow_replay = (
         bool(getattr(args.sampling, "replay_log_probs", False))
@@ -377,7 +442,7 @@ def validate_resolved_engine_algorithm_contract(
         logger.warning(
             "replay_log_probs=true enabled: allowing %s+GRPO with "
             "training-side old-log-prob replay (experimental path).",
-            sampler_engine_type,
+            service_engine,
         )
 
     if is_sglang_engine and replay_guard and logprob_source == "native":
@@ -389,10 +454,11 @@ def validate_resolved_engine_algorithm_contract(
         # trajectory latents. Fail fast for trajectory-dependent losses.
         if bool(required.requires_trajectory):
             raise ValueError(
-                "sampler_engine_type='sglang' with model_type='sd3' currently does not "
+                "rollout.service_engine='sglang' with model_type='sd3' currently does not "
                 "provide trajectory_latents required by trajectory-based algorithms "
-                "(e.g. GRPO/MixGRPO). Use sampler_engine_type='fsdp', or use algorithm_type='nft' "
-                "when running SD3 with sglang."
+                "(e.g. GRPO/MixGRPO). Use a direct-sampling engine path "
+                "(the non-sglang default, which runs on training actors), or use "
+                "algorithm_type='nft' when running SD3 with sglang."
             )
         engine_caps = dict(engine_caps, requires_trajectory=False)
 
@@ -405,9 +471,10 @@ def validate_resolved_engine_algorithm_contract(
     if missing:
         raise ValueError(
             f"Engine capability mismatch for algorithm_type={args.algorithm.algorithm_type}: "
-            f"sampler_engine_type={sampler_engine_type} lacks {missing}. "
+            f"rollout.service_engine={service_engine} lacks {missing}. "
             f"engine_capabilities={engine_caps}, required={required_dict}. "
-            "Use a compatible engine/algorithm pair (for example: fsdp+grpo or fsdp+nft)."
+            "Use a compatible dedicated rollout engine, or fall back to direct "
+            "training-actor sampling for trajectory/log-prob-heavy algorithms."
         )
 
 
@@ -418,27 +485,31 @@ def validate_runtime_mode_constraints(
     model_cls: Any,
 ) -> None:
     """Validate runtime mode constraints and mutually-exclusive switches."""
+    model_label = f"{model_cls.__module__}.{model_cls.__qualname__}"
     if (
         not training_actor_sampling_mode
-        and str(getattr(args.sampling, "sampler_engine_type", "")).lower() == "sglang"
+        and normalize_rollout_service_engine(getattr(args.rollout, "service_engine", None)) == "sglang"
     ):
         supports_sglang = getattr(model_cls, "supports_sglang_prompt_mode", None)
         if not callable(supports_sglang):
             raise ValueError(
-                f"sampler_engine_type='sglang' requires model {args.model.model_path!r} "
+                f"rollout.service_engine='sglang' requires model {model_label!r} "
                 "to define classmethod supports_sglang_prompt_mode()."
             )
         if not supports_sglang():
             raise ValueError(
-                f"sampler_engine_type='sglang' is not supported by model {args.model.model_path!r}. "
+                f"rollout.service_engine='sglang' is not supported by model {model_label!r}. "
                 "The model must implement classmethod supports_sglang_prompt_mode() returning True."
             )
 
     if getattr(args.rollout, "async_pipeline", False):
-        if args.ray.colocate_rollout_training:
-            raise ValueError("async_pipeline requires separate mode (colocate_rollout_training=False).")
+        if rollout_mode_is_colocated(args.rollout.mode):
+            raise ValueError("async_pipeline requires rollout.mode='separate_rollout'.")
         if training_actor_sampling_mode:
-            raise ValueError("async_pipeline currently requires sampling_mode='rollout_actor'.")
+            raise ValueError(
+                "async_pipeline currently requires a dedicated rollout engine "
+                "(for example rollout.service_engine='sglang')."
+            )
         if int(getattr(args.rollout, "async_max_inflight", 1)) < 1:
             raise ValueError("async_max_inflight must be >= 1.")
         if args.rollout.update_weights_interval <= 0:
@@ -451,15 +522,17 @@ def validate_runtime_mode_constraints(
             )
 
 __all__ = [
+    "apply_model_config_hook",
     "validate_colocate_fractions",
     "get_rollout_gpus_per_actor",
     "validate_dotpath",
     "validate_grouped_configs",
     "validate_dynamic_dotpaths",
+    "validate_model_runtime_contract",
     "validate_reward_config",
     "validate_reward_and_rollout_buffer_config",
     "validate_rollout_layout",
-    "validate_model_specific_logic",
+    "validate_nft_sampling_contract",
     "validate_resolved_engine_algorithm_contract",
     "validate_runtime_mode_constraints",
 ]

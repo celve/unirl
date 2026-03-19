@@ -1,4 +1,4 @@
-"""Weight synchronization protocols for rollout updates.
+"""Weight synchronization coordinators for rollout updates.
 
 Two-phase lifecycle: setup() -> sync() x N -> teardown().
 """
@@ -11,10 +11,13 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Type
 
-import ray
 import logging
 
-from diffusionrl.utils.misc import load_function
+from diffusionrl.config.resolution import resolve_rollout_topology, resolve_sync_protocol
+from diffusionrl.config.rollout_topology import (
+    normalize_rollout_service_engine,
+    resolve_rollout_service_kwargs,
+)
 from diffusionrl.utils.weight_sync_checkpoint import cleanup_published_checkpoint
 
 logger = logging.getLogger(__name__)
@@ -25,43 +28,29 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _resolve_target_modules(args: Any) -> list[str]:
-    engine_kwargs = getattr(args.sampling, "engine_kwargs", {}) or {}
-    if not isinstance(engine_kwargs, dict):
-        return ["transformer"]
-    raw = engine_kwargs.get("target_modules")
+    raw = getattr(args.sync, "target_modules", None)
     if isinstance(raw, (list, tuple)) and raw:
         return [str(name) for name in raw]
     return ["transformer"]
 
 
 def _resolve_bucket_size_mb(args: Any) -> int:
-    explicit = getattr(args.ray, "weight_sync_bucket_mb", None)
-    if explicit is not None:
-        return max(1, int(explicit))
-    engine_kwargs = getattr(args.sampling, "engine_kwargs", {}) or {}
-    if isinstance(engine_kwargs, dict) and engine_kwargs.get("weight_sync_bucket_mb") is not None:
-        return max(1, int(engine_kwargs["weight_sync_bucket_mb"]))
-    return 256
+    bucket_size_mb = int(getattr(args.sync, "bucket_mb", 256))
+    if bucket_size_mb < 1:
+        raise ValueError(f"sync.bucket_mb must be >= 1, got {bucket_size_mb}.")
+    return bucket_size_mb
 
 
 def _resolve_flush_cache(args: Any) -> bool:
-    explicit = getattr(args.ray, "weight_sync_flush_cache", None)
-    if explicit is not None:
-        return bool(explicit)
-    engine_kwargs = getattr(args.sampling, "engine_kwargs", {}) or {}
-    if isinstance(engine_kwargs, dict) and engine_kwargs.get("weight_sync_flush_cache") is not None:
-        return bool(engine_kwargs["weight_sync_flush_cache"])
-    return True
+    return bool(getattr(args.sync, "flush_cache", True))
 
 
 def _validate_tensor_sync_topology(args: Any) -> None:
     """Guard invalid topology values for tensor/distributed sync paths."""
-    engine_kwargs = getattr(args.sampling, "engine_kwargs", {}) or {}
-    tp_size = None
-    if isinstance(engine_kwargs, dict):
+    engine_kwargs = resolve_rollout_service_kwargs(args)
+    tp_size = 1
+    if isinstance(engine_kwargs, dict) and engine_kwargs.get("tp_size") is not None:
         tp_size = engine_kwargs.get("tp_size")
-    if tp_size is None:
-        tp_size = getattr(args.sampling, "tp_size", 1)
     try:
         tp_size_int = int(tp_size)
     except Exception:
@@ -70,19 +59,37 @@ def _validate_tensor_sync_topology(args: Any) -> None:
         raise ValueError(f"Invalid tp_size={tp_size_int}. Expected tp_size >= 1.")
 
 
-def _resolve_rollout_tp_payload_count(rollout_manager: Any) -> int:
+def _resolve_train_backend_capabilities(args: Any) -> Optional[Any]:
+    train_backend = str(getattr(args.training, "train_backend", "fsdp") or "fsdp").strip().lower()
+    backend_path = str(getattr(args.training, "train_backend_path", "") or "").strip()
+    from diffusionrl.runtime.training.backends import resolve_train_backend_capabilities
+
+    return resolve_train_backend_capabilities(
+        train_backend,
+        backend_path=backend_path or None,
+    )
+
+
+def _resolve_rollout_tp_payload_count(rollout_runtime: Any) -> int:
     """Resolve payload fan-out count for IPC tensor updates.
 
     SGLang workers index `serialized_named_tensors` by local TP rank.
     For tp_size>1, provide one slot per TP rank (same payload can be reused).
     """
-    topology = ray.get(rollout_manager.get_weight_sync_topology.remote())
+    if rollout_runtime is None:
+        return 1
+    topology = rollout_runtime.get_weight_sync_topology()
     if not isinstance(topology, dict):
-        return 1
-    try:
-        return max(1, int(topology.get("num_gpus_per_actor", 1)))
-    except Exception:
-        return 1
+        raise ValueError(
+            f"Invalid rollout weight-sync topology payload: {topology!r}"
+        )
+    payload_count = int(topology.get("num_gpus_per_actor", 1))
+    if payload_count < 1:
+        raise ValueError(
+            "rollout weight-sync topology must expose num_gpus_per_actor >= 1. "
+            f"Got {payload_count}."
+        )
+    return payload_count
 
 
 # ---------------------------------------------------------------------------
@@ -100,46 +107,42 @@ class SyncResult:
 
 
 # ---------------------------------------------------------------------------
-# WeightSyncProtocol (two-phase base class)
+# WeightSyncCoordinator (two-phase base class)
 # ---------------------------------------------------------------------------
 
-class WeightSyncProtocol(ABC):
-    """Two-phase weight sync: setup() -> sync() x N -> teardown()."""
+class WeightSyncCoordinator(ABC):
+    """Two-phase weight sync coordinator: setup() -> sync() x N -> teardown()."""
 
     def __init__(self, args: Any) -> None:
         self.args = args
         self._version = 0
         self._is_setup = False
-        self._training_group = None
-        self._rollout_manager = None
+        self._training_runtime = None
+        self._rollout_runtime = None
 
-    def setup(self, *, training_group: Any, rollout_manager: Any) -> None:
+    def setup(
+        self,
+        *,
+        training_runtime: Any,
+        rollout_runtime: Optional[Any] = None,
+    ) -> None:
         """Bind runtime handles and perform one-time initialization."""
-        self._training_group = training_group
-        self._rollout_manager = rollout_manager
+        self._training_runtime = training_runtime
+        self._rollout_runtime = rollout_runtime
         self._do_setup()
         self._is_setup = True
 
-    def sync(self, *, rollout_id: int, **kwargs: Any) -> SyncResult:
-        """Synchronize latest policy weights to rollout side.
-
-        Accepts **kwargs for backward compatibility with callers that still
-        pass training_group/rollout_manager as keyword arguments.
-        """
+    def sync(self, *, rollout_id: int) -> SyncResult:
+        """Synchronize latest policy weights to rollout side."""
         if not self._is_setup:
-            # Backward compat: auto-setup from kwargs if setup() was not called.
-            training_group = kwargs.get("training_group")
-            rollout_manager = kwargs.get("rollout_manager")
-            if training_group is not None and rollout_manager is not None:
-                self.setup(training_group=training_group, rollout_manager=rollout_manager)
-            else:
-                raise RuntimeError(
-                    "WeightSyncProtocol.sync() called before setup(). "
-                    "Call setup(training_group=..., rollout_manager=...) first."
-                )
+            raise RuntimeError(
+                "WeightSyncCoordinator.sync() called before setup(). "
+                "Call setup(training_runtime=..., rollout_runtime=...) first."
+            )
 
         t0 = time.monotonic()
-        ray.get(self._rollout_manager.wake_up.remote())
+        if self._rollout_runtime is not None:
+            self._rollout_runtime.wake_up()
         extra = self._do_sync(rollout_id=rollout_id) or {}
         self._version += 1
         elapsed_ms = (time.monotonic() - t0) * 1000
@@ -176,17 +179,38 @@ class WeightSyncProtocol(ABC):
 
     def _do_teardown(self) -> None:
         """Override for teardown work."""
+# ---------------------------------------------------------------------------
+# DisabledWeightSync
+# ---------------------------------------------------------------------------
 
+class DisabledWeightSync(WeightSyncCoordinator):
+    """No-op coordinator used when sampling runs directly on training actors."""
 
-# Backward compat alias
-WeightSyncStrategy = WeightSyncProtocol
+    @property
+    def _mode_name(self) -> str:
+        return "disabled"
+
+    def sync(self, *, rollout_id: int) -> SyncResult:
+        if not self._is_setup:
+            self._is_setup = True
+        self._version += 1
+        return SyncResult(
+            version=self._version,
+            mode=self._mode_name,
+            rollout_id=rollout_id,
+            elapsed_ms=0.0,
+            extra={"skipped": True},
+        )
+
+    def _do_sync(self, *, rollout_id: int) -> Optional[Dict[str, Any]]:
+        return {"skipped": True}
 
 
 # ---------------------------------------------------------------------------
 # TensorPayloadWeightSync (renamed from IPC)
 # ---------------------------------------------------------------------------
 
-class TensorPayloadWeightSync(WeightSyncProtocol):
+class TensorPayloadWeightSync(WeightSyncCoordinator):
     """Same-node SGLang: serialized tensor via UpdateWeightsFromTensorReqInput."""
 
     @property
@@ -195,31 +219,28 @@ class TensorPayloadWeightSync(WeightSyncProtocol):
 
     def _do_setup(self) -> None:
         _validate_tensor_sync_topology(self.args)
+        if self._rollout_runtime is None:
+            raise RuntimeError("tensor_payload weight sync requires a rollout runtime.")
         self._target_modules = _resolve_target_modules(self.args)
         self._bucket_size_mb = _resolve_bucket_size_mb(self.args)
         self._flush_cache = _resolve_flush_cache(self.args)
-        self._tp_payload_count = _resolve_rollout_tp_payload_count(self._rollout_manager)
+        self._rollout_runtime.refresh_weight_update_targets()
+        self._tp_payload_count = _resolve_rollout_tp_payload_count(self._rollout_runtime)
 
     def _do_sync(self, *, rollout_id: int) -> Dict[str, Any]:
-        stats = self._training_group.sync_weights_to_rollout_ipc(
-            rollout_manager=self._rollout_manager,
+        stats = self._training_runtime.sync_weights_to_rollout_ipc(
+            rollout_runtime=self._rollout_runtime,
             target_modules=self._target_modules,
             bucket_size_mb=self._bucket_size_mb,
             flush_cache=self._flush_cache,
             tp_payload_count=self._tp_payload_count,
         )
         return {"stats": stats, "tp_payload_count": self._tp_payload_count}
-
-
-# Backward compat alias
-IPCWeightSync = TensorPayloadWeightSync
-
-
 # ---------------------------------------------------------------------------
 # NCCLBroadcastWeightSync (persistent group)
 # ---------------------------------------------------------------------------
 
-class NCCLBroadcastWeightSync(WeightSyncProtocol):
+class NCCLBroadcastWeightSync(WeightSyncCoordinator):
     """Cross-node SGLang: persistent NCCL group, GPU-to-GPU broadcast."""
 
     @property
@@ -228,14 +249,17 @@ class NCCLBroadcastWeightSync(WeightSyncProtocol):
 
     def _do_setup(self) -> None:
         _validate_tensor_sync_topology(self.args)
+        if self._rollout_runtime is None:
+            raise RuntimeError("nccl_broadcast weight sync requires a rollout runtime.")
         self._target_modules = _resolve_target_modules(self.args)
         self._bucket_size_mb = _resolve_bucket_size_mb(self.args)
         self._flush_cache = _resolve_flush_cache(self.args)
         self._group_name: Optional[str] = None
+        self._rollout_runtime.refresh_weight_update_targets()
         self._init_persistent_group()
 
     def _init_persistent_group(self) -> None:
-        topology = ray.get(self._rollout_manager.get_weight_sync_topology.remote())
+        topology = self._rollout_runtime.get_weight_sync_topology()
         if not isinstance(topology, dict):
             raise RuntimeError(f"Invalid rollout weight sync topology payload: {topology!r}")
         total_rollout_gpus = int(topology.get("total_gpus", 0))
@@ -243,21 +267,20 @@ class NCCLBroadcastWeightSync(WeightSyncProtocol):
             logger.warning("No rollout GPUs for NCCL group, skipping init.")
             return
 
-        endpoint = self._training_group.get_rank0_ip_and_free_port()
+        endpoint = self._training_runtime.get_rank0_ip_and_free_port()
         master_address = str(endpoint["master_address"])
         master_port = int(endpoint["master_port"])
         world_size = int(total_rollout_gpus + 1)
         self._group_name = f"diffusionrl_wsync_{int(time.time_ns())}"
 
-        # Parallel init on both sides.
-        rollout_ref = self._rollout_manager.init_weights_update_group.remote(
+        self._rollout_runtime.init_weights_update_group(
             master_address=master_address,
             master_port=master_port,
             world_size=world_size,
             group_name=self._group_name,
             backend="nccl",
         )
-        train_ref = self._training_group.async_init_weights_update_group(
+        train_ref = self._training_runtime.async_init_weights_update_group(
             master_address=master_address,
             master_port=master_port,
             world_size=world_size,
@@ -265,7 +288,9 @@ class NCCLBroadcastWeightSync(WeightSyncProtocol):
             backend="nccl",
         )
         try:
-            ray.get([rollout_ref, train_ref])
+            import ray
+
+            ray.get(train_ref)
         except Exception:
             logger.exception("NCCL group init failed: %s", self._group_name)
             self._destroy_group_best_effort()
@@ -277,11 +302,11 @@ class NCCLBroadcastWeightSync(WeightSyncProtocol):
             return
         gn = self._group_name
         try:
-            self._training_group.destroy_weights_update_group(group_name=gn)
+            self._training_runtime.destroy_weights_update_group(group_name=gn)
         except Exception:
             logger.debug("Training-side group destroy failed: %s", gn, exc_info=True)
         try:
-            ray.get(self._rollout_manager.destroy_weights_update_group.remote(group_name=gn))
+            self._rollout_runtime.destroy_weights_update_group(group_name=gn)
         except Exception:
             logger.debug("Rollout-side group destroy failed: %s", gn, exc_info=True)
 
@@ -289,8 +314,8 @@ class NCCLBroadcastWeightSync(WeightSyncProtocol):
         if not self._group_name:
             return {"skipped": True}
         try:
-            stats = self._training_group.sync_weights_to_rollout_nccl(
-                rollout_manager=self._rollout_manager,
+            stats = self._training_runtime.sync_weights_to_rollout_nccl(
+                rollout_runtime=self._rollout_runtime,
                 group_name=self._group_name,
                 target_modules=self._target_modules,
                 bucket_size_mb=self._bucket_size_mb,
@@ -304,8 +329,8 @@ class NCCLBroadcastWeightSync(WeightSyncProtocol):
             self._init_persistent_group()
             if not self._group_name:
                 raise
-            stats = self._training_group.sync_weights_to_rollout_nccl(
-                rollout_manager=self._rollout_manager,
+            stats = self._training_runtime.sync_weights_to_rollout_nccl(
+                rollout_runtime=self._rollout_runtime,
                 group_name=self._group_name,
                 target_modules=self._target_modules,
                 bucket_size_mb=self._bucket_size_mb,
@@ -316,41 +341,49 @@ class NCCLBroadcastWeightSync(WeightSyncProtocol):
     def _do_teardown(self) -> None:
         self._destroy_group_best_effort()
         self._group_name = None
-
-
-# Backward compat alias
-NCCLWeightSync = NCCLBroadcastWeightSync
-
-
 # ---------------------------------------------------------------------------
-# CheckpointWeightSync (renamed from CheckpointPathWeightSync)
+# CheckpointWeightSync
 # ---------------------------------------------------------------------------
 
-class CheckpointWeightSync(WeightSyncProtocol):
-    """Filesystem sync. Suitable for: FSDP engine, SGLang fallback."""
+class CheckpointWeightSync(WeightSyncCoordinator):
+    """Filesystem sync for dedicated rollout engines that consume checkpoints."""
 
     @property
     def _mode_name(self) -> str:
-        return "checkpoint"
+        return "checkpoint_path"
 
     def _do_setup(self) -> None:
+        if self._rollout_runtime is None:
+            raise RuntimeError("checkpoint_path weight sync requires a rollout runtime.")
         self._export_format = self._select_export_format()
 
     def _select_export_format(self) -> str:
-        engine_type = str(getattr(self.args.sampling, "sampler_engine_type", "") or "").lower()
+        engine_type = normalize_rollout_service_engine(
+            getattr(self.args.rollout, "service_engine", None)
+        )
+        if not engine_type:
+            raise ValueError(
+                "Checkpoint weight sync requires rollout.service_engine to be normalized. "
+                "Validate args before selecting dedicated rollout checkpoint export format."
+            )
+        backend_caps = _resolve_train_backend_capabilities(self.args)
+        if backend_caps is not None:
+            preferred_format = backend_caps.preferred_export_format_for_rollout_engine(engine_type)
+            if preferred_format in set(backend_caps.supported_weight_export_formats):
+                return str(preferred_format)
         if engine_type == "sglang":
             return "sglang_transformer_safetensors"
         return "state_dict"
 
     def _build_weight_checkpoint_path(self, rollout_id: int, *, export_format: str) -> str:
-        os.makedirs(self.args.ray.weight_sync_dir, exist_ok=True)
+        os.makedirs(self.args.sync.dir, exist_ok=True)
         if export_format == "sglang_transformer_safetensors":
             return os.path.join(
-                self.args.ray.weight_sync_dir,
+                self.args.sync.dir,
                 f"weights_rollout_{rollout_id}_{int(time.time_ns())}",
             )
         return os.path.join(
-            self.args.ray.weight_sync_dir,
+            self.args.sync.dir,
             f"weights_rollout_{rollout_id}_{int(time.time_ns())}.pt",
         )
 
@@ -359,91 +392,49 @@ class CheckpointWeightSync(WeightSyncProtocol):
             rollout_id,
             export_format=self._export_format,
         )
-        self._training_group.export_weights_to_path(
+        self._training_runtime.export_weights_to_path(
             path,
             export_format=self._export_format,
         )
-        ray.get(self._rollout_manager.update_weights_from_path.remote(path))
+        self._rollout_runtime.update_weights_from_path(path)
         cleanup_published_checkpoint(path)
         return {"checkpoint_path": path}
 
 
-# Backward compat alias
-CheckpointPathWeightSync = CheckpointWeightSync
-
-
-# ---------------------------------------------------------------------------
-# ObjectRefWeightSync (deprecated -> falls back to CheckpointWeightSync)
-# ---------------------------------------------------------------------------
-
-class ObjectRefWeightSync(CheckpointWeightSync):
-    """Deprecated: use CheckpointWeightSync instead."""
-
-    def __init__(self, args: Any) -> None:
-        logger.warning(
-            "ObjectRefWeightSync is deprecated, falling back to CheckpointWeightSync"
-        )
-        super().__init__(args)
-
-
-# ---------------------------------------------------------------------------
-# Registry + factory
-# ---------------------------------------------------------------------------
-
-_BUILTIN_PROTOCOLS: Dict[str, Type[WeightSyncProtocol]] = {
-    # Primary names
+_BUILTIN_COORDINATORS: Dict[str, Type[WeightSyncCoordinator]] = {
+    "disabled": DisabledWeightSync,
     "tensor_payload": TensorPayloadWeightSync,
     "nccl_broadcast": NCCLBroadcastWeightSync,
     "checkpoint_path": CheckpointWeightSync,
-    # Legacy aliases
-    "ipc": TensorPayloadWeightSync,
-    "nccl": NCCLBroadcastWeightSync,
-    "object_ref": ObjectRefWeightSync,
 }
 
-# Keep old name for code that imports it directly.
-_BUILTIN_WEIGHT_SYNC_STRATEGIES = _BUILTIN_PROTOCOLS
 
+def create_weight_sync(args: Any) -> WeightSyncCoordinator:
+    """Create a weight-sync coordinator from runtime args.
 
-def create_weight_sync_protocol(args: Any) -> WeightSyncProtocol:
-    """Create weight sync protocol from runtime args.
-
-    Extension point:
-    - If args.weight_sync_strategy_path exists, dynamically load custom strategy.
-    - Otherwise resolve built-in protocols from args.ray.weight_sync_mode.
+    Resolve built-in coordinators from the normalized ``sync.protocol`` setting.
     """
-    strategy_path = getattr(args, "weight_sync_strategy_path", None)
-    if strategy_path:
-        strategy_cls = load_function(strategy_path)
-        return strategy_cls(args)
-
-    mode = getattr(args.ray, "weight_sync_mode", "checkpoint_path")
-    cls = _BUILTIN_PROTOCOLS.get(mode)
+    rollout_topology = resolve_rollout_topology(args)
+    mode = resolve_sync_protocol(
+        args,
+        training_actor_sampling_mode=rollout_topology.training_actor_sampling_mode,
+        rollout_service_engine=rollout_topology.service_engine,
+    )
+    cls = _BUILTIN_COORDINATORS.get(mode)
     if cls is None:
         raise ValueError(
-            f"Unsupported weight_sync_mode={mode}. "
-            f"Expected one of: {sorted(_BUILTIN_PROTOCOLS.keys())}"
+            f"Unsupported sync.protocol={mode}. "
+            f"Expected one of: {sorted(_BUILTIN_COORDINATORS.keys())}"
         )
     return cls(args)
 
 
-# Backward compat alias
-create_weight_sync_strategy = create_weight_sync_protocol
-
-
 __all__ = [
-    # Primary
-    "WeightSyncProtocol",
+    "WeightSyncCoordinator",
     "SyncResult",
+    "DisabledWeightSync",
     "TensorPayloadWeightSync",
     "NCCLBroadcastWeightSync",
     "CheckpointWeightSync",
-    "create_weight_sync_protocol",
-    # Deprecated aliases
-    "WeightSyncStrategy",
-    "IPCWeightSync",
-    "NCCLWeightSync",
-    "CheckpointPathWeightSync",
-    "ObjectRefWeightSync",
-    "create_weight_sync_strategy",
+    "create_weight_sync",
 ]

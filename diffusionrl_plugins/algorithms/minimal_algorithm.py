@@ -22,14 +22,6 @@ class _MinimalLoss:
     def __init__(self, algorithm: "MinimalAlgorithm") -> None:
         self.algorithm = algorithm
 
-    @classmethod
-    def declared_requirements(cls) -> Dict[str, bool]:
-        return {
-            "requires_trajectory": True,
-            "requires_log_prob": True,
-            "requires_embeddings": True,
-        }
-
     def compute_loss(
         self,
         model: nn.Module,
@@ -77,7 +69,6 @@ class MinimalAlgorithm(BaseAlgorithm):
         self.train_only_sde_steps = bool(train_only_sde_steps)
         self.skip_last_timestep = bool(skip_last_timestep)
         self.skip_initial_timesteps = int(skip_initial_timesteps)
-        self._current_sde_indices: Optional[Set[int]] = None
         self._forward_plugin = None
         self.model_type = "default"
 
@@ -88,14 +79,18 @@ class MinimalAlgorithm(BaseAlgorithm):
         return cls.from_config(build_algorithm_config(args))
 
     def get_sampling_requirements(self) -> SamplingRequirements:
-        return self._build_sampling_requirements(extras={"sde_ratio": self.sde_ratio})
+        return SamplingRequirements(
+            requires_trajectory=True,
+            requires_log_prob=True,
+            requires_embeddings=True,
+            extras={"sde_ratio": self.sde_ratio},
+        )
 
     def compute_advantages_with_components(
         self,
         *,
         rewards: torch.Tensor,
         group_ids: Optional[list[str]] = None,
-        component_mix_stage: str = "reward",
         reward_components: Optional[Dict[str, list[float]]] = None,
         reward_component_weights: Optional[Dict[str, float]] = None,
     ) -> torch.Tensor:
@@ -103,7 +98,6 @@ class MinimalAlgorithm(BaseAlgorithm):
             self,
             rewards=rewards,
             group_ids=group_ids,
-            component_mix_stage=component_mix_stage,
             reward_components=reward_components,
             reward_component_weights=reward_component_weights,
         )
@@ -119,9 +113,7 @@ class MinimalAlgorithm(BaseAlgorithm):
     ) -> Optional[Set[int]]:
         if timestep_scheduler is None:
             return None
-        sde_indices = set(int(i) for i in timestep_scheduler.get_sde_indices(current_step))
-        self.set_sde_indices(sde_indices)
-        return sde_indices
+        return set(int(i) for i in timestep_scheduler.get_sde_indices(current_step))
 
     def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:
         return {
@@ -174,12 +166,11 @@ class MinimalAlgorithm(BaseAlgorithm):
         *,
         model: nn.Module,
         batch: Any,
-        gradient_accumulation_batch_size: int,
+        mini_batch_slices: Tuple[Tuple[int, int], ...],
         guidance_scale: float = 3.5,
         **kwargs: Any,
     ) -> tuple:
         del guidance_scale, kwargs
-        from diffusionrl.runtime.training.update_schedule import resolve_gradient_accumulation_plan
         from diffusionrl.types.training_batch import BackwardTrainingBatch
 
         if not isinstance(batch, BackwardTrainingBatch):
@@ -187,10 +178,10 @@ class MinimalAlgorithm(BaseAlgorithm):
                 f"{type(self).__name__} expects BackwardTrainingBatch, got {type(batch).__name__}"
             )
 
-        mini_batches, actual_mini_batches = resolve_gradient_accumulation_plan(
-            batch_size=batch.batch_size,
-            gradient_accumulation_batch_size=gradient_accumulation_batch_size,
-        )
+        mini_batches = tuple((int(start), int(end)) for start, end in mini_batch_slices)
+        if not mini_batches:
+            raise ValueError(f"{type(self).__name__} requires non-empty mini_batch_slices.")
+        actual_mini_batches = len(mini_batches)
         num_mini_batches = len(mini_batches)
         available_steps = set(int(s) for s in batch.resolved_step_indices[:-1].tolist())
         valid_step_indices = sorted(int(i) for i in batch.sde_indices if int(i) in available_steps)
@@ -217,19 +208,20 @@ class MinimalAlgorithm(BaseAlgorithm):
 
         return total_loss_accum, {"placeholder": 1.0}, len(valid_step_indices), actual_mini_batches, has_backward
 
-    def set_sde_indices(self, sde_indices: Set[int]) -> None:
-        """Optional callback used by RolloutManager when scheduler updates."""
-        self._current_sde_indices = set(int(i) for i in sde_indices)
-
-    def get_training_indices(self, num_steps: int) -> Set[int]:
+    def resolve_training_indices(
+        self,
+        *,
+        num_steps: int,
+        sde_indices: Optional[Set[int]] = None,
+    ) -> Set[int]:
         """Optional hook to constrain which timesteps are optimized."""
         if not self.train_only_sde_steps:
             return set(range(num_steps))
 
-        if self._current_sde_indices is not None:
-            return set(int(i) for i in self._current_sde_indices)
+        if sde_indices is not None:
+            return set(int(i) for i in sde_indices)
 
-        # Fallback when scheduler callback has not run yet.
+        # Fallback when control-plane scheduling is not provided.
         num_sde_steps = max(1, int(num_steps * self.sde_ratio + 0.5))
         return set(range(num_sde_steps))
 

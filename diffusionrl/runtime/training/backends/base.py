@@ -24,6 +24,8 @@ class TrainBackendCapabilities:
     supports_backend_managed_offload: bool = False
     preferred_weight_transport: Optional[str] = None
     preferred_weight_export_format: Optional[str] = None
+    preferred_weight_transport_by_rollout_engine: Mapping[str, str] = ()
+    preferred_weight_export_format_by_rollout_engine: Mapping[str, str] = ()
     supported_weight_export_formats: tuple[str, ...] = ("state_dict",)
     notes: str = ""
 
@@ -42,9 +44,31 @@ class TrainBackendCapabilities:
             "supports_backend_managed_offload": self.supports_backend_managed_offload,
             "preferred_weight_transport": self.preferred_weight_transport,
             "preferred_weight_export_format": self.preferred_weight_export_format,
+            "preferred_weight_transport_by_rollout_engine": dict(
+                self.preferred_weight_transport_by_rollout_engine or {}
+            ),
+            "preferred_weight_export_format_by_rollout_engine": dict(
+                self.preferred_weight_export_format_by_rollout_engine or {}
+            ),
             "supported_weight_export_formats": list(self.supported_weight_export_formats),
             "notes": self.notes,
         }
+
+    def preferred_transport_for_rollout_engine(self, rollout_engine: Optional[str]) -> Optional[str]:
+        key = str(rollout_engine or "").strip().lower()
+        if key and self.preferred_weight_transport_by_rollout_engine:
+            value = self.preferred_weight_transport_by_rollout_engine.get(key)
+            if value:
+                return str(value)
+        return self.preferred_weight_transport
+
+    def preferred_export_format_for_rollout_engine(self, rollout_engine: Optional[str]) -> Optional[str]:
+        key = str(rollout_engine or "").strip().lower()
+        if key and self.preferred_weight_export_format_by_rollout_engine:
+            value = self.preferred_weight_export_format_by_rollout_engine.get(key)
+            if value:
+                return str(value)
+        return self.preferred_weight_export_format
 
 
 @dataclass(frozen=True)
@@ -81,7 +105,6 @@ class TrainBackendLaunchSpec:
 
     actor_class_path: Optional[str] = None
     actor_kwargs: Mapping[str, Any] = None
-    num_actors: Optional[int] = None
     num_gpus_per_actor: Optional[float] = None
     runtime_env: Mapping[str, Any] = None
     notes: str = ""
@@ -90,7 +113,6 @@ class TrainBackendLaunchSpec:
         return {
             "actor_class_path": self.actor_class_path,
             "actor_kwargs": dict(self.actor_kwargs or {}),
-            "num_actors": self.num_actors,
             "num_gpus_per_actor": self.num_gpus_per_actor,
             "runtime_env": dict(self.runtime_env or {}),
             "notes": self.notes,
@@ -198,9 +220,9 @@ class TrainBackend(abc.ABC):
 
     # ---- Optional hooks (override only when needed) ----
 
-    def launch_spec(self, *, args: Any, default_num_actors: int) -> TrainBackendLaunchSpec:
+    def launch_spec(self, *, args: Any, topology: Any) -> TrainBackendLaunchSpec:
         """Launch-time actor/group hints consumed by group factory."""
-        del args, default_num_actors
+        del args, topology
         return TrainBackendLaunchSpec()
 
     def build_optimizer(self, actor: Any, optimizer_config: Mapping[str, Any]) -> Any:
@@ -265,6 +287,10 @@ class TrainBackend(abc.ABC):
             "weight_sync": {
                 "preferred_mode": caps.preferred_weight_transport,
                 "preferred_export_format": caps.preferred_weight_export_format,
+                "preferred_mode_by_rollout_engine": dict(caps.preferred_weight_transport_by_rollout_engine or {}),
+                "preferred_export_format_by_rollout_engine": dict(
+                    caps.preferred_weight_export_format_by_rollout_engine or {}
+                ),
                 "supported_export_formats": list(caps.supported_weight_export_formats),
             },
         }

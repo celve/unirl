@@ -1,32 +1,18 @@
-"""Reward runtime helpers that separate semantics from deployment."""
+"""Actor-local reward precompute helpers."""
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
 from diffusionrl.config.build_domain_args import RewardSchema
-from diffusionrl.runtime.pipeline.rollout_pipeline import compute_rewards as compute_rollout_rewards
 from diffusionrl.types.sampling import RolloutOutput
 
-from .service import LocalRewardExecutor, RewardService
+from .pipeline import score_from_rollout_outputs
+from .service import LocalRewardExecutor
 
 
-def create_manager_reward_service(
-    reward_schema: RewardSchema,
-    *,
-    reward_pg_result: Optional[Any] = None,
-) -> Optional[RewardService]:
-    """Create the manager-side reward executor when manager owns reward runtime."""
-    if reward_schema.to_execution_plan().uses_sampling_actor_execution:
-        return None
-    return RewardService(
-        reward_schema=reward_schema,
-        reward_pg_result=reward_pg_result,
-    )
-
-
-class SamplingActorRewardRuntime:
-    """Actor-local reward runtime shared by rollout and training actors."""
+class ActorLocalRewardPrecompute:
+    """Shared adapter that precomputes rewards on rollout/training actors."""
 
     def __init__(
         self,
@@ -36,17 +22,15 @@ class SamplingActorRewardRuntime:
     ) -> None:
         if not isinstance(reward_schema, RewardSchema):
             raise TypeError(
-                "SamplingActorRewardRuntime requires RewardSchema, "
+                "ActorLocalRewardPrecompute requires RewardSchema, "
                 f"got: {type(reward_schema).__name__}"
             )
         execution_plan = reward_schema.to_execution_plan()
         if not execution_plan.uses_sampling_actor_execution:
             raise ValueError(
-                "SamplingActorRewardRuntime requires reward_location='sampling_actor'."
+                "ActorLocalRewardPrecompute requires reward_location='sampling_actor'."
             )
         self.reward_schema = reward_schema
-        self.reward_spec = reward_schema.to_spec()
-        self.execution_plan = execution_plan
         self.executor = LocalRewardExecutor(
             reward_schema=reward_schema,
             device_override=device_override,
@@ -64,9 +48,8 @@ class SamplingActorRewardRuntime:
         keep_reward_media_for_manager: bool,
         samples_per_prompt: int,
     ) -> RolloutOutput:
-        rewards, reward_components = compute_rollout_rewards(
+        rewards, reward_components = score_from_rollout_outputs(
             reward_service=self.executor,
-            reward_path=str(self.reward_spec.reward_path or ""),
             samples_per_prompt=max(1, int(samples_per_prompt)),
             sampler_outputs=[output],
             prompts=list(prompts),
@@ -96,3 +79,7 @@ class SamplingActorRewardRuntime:
 
     def dispose(self) -> None:
         self.executor.dispose()
+
+__all__ = [
+    "ActorLocalRewardPrecompute",
+]

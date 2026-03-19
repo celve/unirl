@@ -8,12 +8,15 @@ This package provides shared dataclasses and validation helpers used by:
 """
 
 from .reward import RewardRequest, RewardResponse, RewardType
+from .engine import EngineCapabilities, EngineConfig
 from .sampling import (
     RolloutOutput,
     RolloutRequest,
     LogProbData,
     PromptEmbeddings,
+    SamplingRequirements,
 )
+from .sde import SDEConfig, SDEScheduleConfig
 from .training_batch import (
     BackwardTrainingBatch,
     ForwardTrainingBatch,
@@ -25,6 +28,8 @@ from .training_batch import (
 
 __all__ = [
     "BackwardTrainingBatch",
+    "EngineCapabilities",
+    "EngineConfig",
     "RolloutOutput",
     "RolloutRequest",
     "LogProbData",
@@ -33,6 +38,9 @@ __all__ = [
     "RewardRequest",
     "RewardResponse",
     "RewardType",
+    "SamplingRequirements",
+    "SDEConfig",
+    "SDEScheduleConfig",
     "TimestepData",
     "TrainingBatch",
     "is_backward_batch",

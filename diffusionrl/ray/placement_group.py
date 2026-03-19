@@ -1,7 +1,5 @@
 """
 diffusionrl Ray Placement Groups - GPU allocation and resource management.
-
-Reference: slime/ray/placement_group.py
 """
 import logging
 from dataclasses import dataclass
@@ -10,6 +8,9 @@ from typing import Dict, List, Optional, Tuple
 import ray
 from ray.util.placement_group import PlacementGroup
 
+from diffusionrl.config.arguments import is_training_actor_sampling_mode
+from diffusionrl.config.rollout_topology import rollout_mode_is_colocated
+
 logger = logging.getLogger(__name__)
 
 # Type alias: (PlacementGroup, bundle_indices, gpu_ids)
@@ -17,8 +18,8 @@ PlacementGroupResult = Tuple[PlacementGroup, List[int], List[int]]
 
 
 @dataclass
-class GRPOPlacementConfig:
-    """Resource allocation configuration for GRPO training."""
+class RuntimePlacementConfig:
+    """Resource allocation configuration for diffusionRL training."""
 
     # Rollout resources
     rollout_num_nodes: int = 1
@@ -32,7 +33,7 @@ class GRPOPlacementConfig:
     reward_dedicated_num_gpus: int = 0  # 0 means no dedicated reward GPU pool
 
     # Deployment strategy
-    colocate_rollout_training: bool = False
+    colocate_rollout: bool = False
     strategy: str = "PACK"  # "PACK" or "SPREAD"
 
     # Node-level dedicated reward configuration
@@ -139,7 +140,7 @@ def _create_placement_group(
     """
     Create a placement group with uniform single-GPU bundles.
 
-    Multi-GPU engines (e.g. FastVideo SP) are supported via the Slime pattern:
+    Multi-GPU rollout engines (for example SGLang TP) are supported via the Slime pattern:
     NOSET_VISIBLE_DEVICES + base_gpu_id + manual CUDA_VISIBLE_DEVICES,
     so every bundle is always {"GPU": 1, "CPU": 1}.
 
@@ -188,10 +189,10 @@ def _create_colocate_pg(
 
 
 def create_placement_groups(
-    config: GRPOPlacementConfig,
+    config: RuntimePlacementConfig,
 ) -> Dict[str, Optional[PlacementGroupResult]]:
     """
-    Create placement groups for GRPO training (unified single_pg mode).
+    Create placement groups for diffusionRL training (unified single_pg mode).
 
     Creates one placement group with uniform {"GPU": 1} bundles, then
     slices bundles by linear offsets for rollout / training / reward roles.
@@ -209,7 +210,7 @@ def create_placement_groups(
 
 
 def _create_single_pg(
-    config: GRPOPlacementConfig,
+    config: RuntimePlacementConfig,
 ) -> Dict[str, Optional[PlacementGroupResult]]:
     """
     Create a single placement group and slice bundles by linear offsets.
@@ -230,7 +231,7 @@ def _create_single_pg(
     else:
         reward_total_gpus = config.reward_dedicated_num_gpus
 
-    if config.colocate_rollout_training:
+    if config.colocate_rollout:
         # Colocate: rollout and training share same GPU bundles
         shared_gpus = max(rollout_total_gpus, training_total_gpus)
         total_gpus = shared_gpus + reward_total_gpus
@@ -241,7 +242,7 @@ def _create_single_pg(
         pg, bundle_indices, gpu_ids = _create_colocate_pg(
             total_gpus=total_gpus,
             strategy=config.strategy,
-            name="grpo_colocated",
+            name="diffusionrl_colocated",
         )
 
         # Shared bundles for rollout/training
@@ -264,7 +265,7 @@ def _create_single_pg(
     pg = _create_placement_group(
         num_gpus=total_gpus,
         strategy=config.strategy,
-        name="grpo_single",
+        name="diffusionrl_single",
     )
 
     gpu_info = _get_gpu_info_from_pg(pg, total_gpus)
@@ -314,6 +315,7 @@ def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroup
     reward_dedicated_num_gpus = int(args.reward.reward_dedicated_num_gpus)
     reward_dedicated_num_nodes = int(getattr(args.reward, "reward_dedicated_num_nodes", 0))
     reward_dedicated_num_gpus_per_node = int(getattr(args.reward, "reward_dedicated_num_gpus_per_node", 0))
+    training_actor_sampling_mode = is_training_actor_sampling_mode(args)
 
     if debug_mode == "train_only":
         rollout_num_nodes = 0
@@ -324,14 +326,20 @@ def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroup
         logger.info(
             "Debug mode train_only: rollout/reward placement is disabled."
         )
+    elif training_actor_sampling_mode:
+        rollout_num_nodes = 0
+        rollout_num_gpus_per_node = 0
+        logger.info(
+            "Direct training-actor sampling active: rollout placement is disabled."
+        )
 
-    config = GRPOPlacementConfig(
+    config = RuntimePlacementConfig(
         rollout_num_nodes=rollout_num_nodes,
         rollout_num_gpus_per_node=rollout_num_gpus_per_node,
         training_num_nodes=training_num_nodes,
         training_num_gpus_per_node=training_num_gpus_per_node,
         reward_dedicated_num_gpus=reward_dedicated_num_gpus,
-        colocate_rollout_training=args.ray.colocate_rollout_training,
+        colocate_rollout=rollout_mode_is_colocated(args.rollout.mode),
         strategy=args.ray.placement_strategy,
         # Node-level reward configuration
         reward_dedicated_num_nodes=reward_dedicated_num_nodes,
@@ -339,6 +347,10 @@ def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroup
         reward_dedicated_gpus_per_actor=getattr(args.reward, "reward_dedicated_gpus_per_actor", 1),
     )
     return create_placement_groups(config)
+
+
+# Backward-compatible alias for older external imports.
+GRPOPlacementConfig = RuntimePlacementConfig
 
 
 def remove_placement_group(pg: PlacementGroup) -> None:

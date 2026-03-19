@@ -1,4 +1,4 @@
-"""Typed reward semantics and execution plans."""
+"""Typed reward semantics, provider config, and execution plans."""
 
 from __future__ import annotations
 
@@ -15,13 +15,9 @@ class RewardComponentSpec:
 
 
 @dataclass(frozen=True)
-class RewardSpec:
+class RewardDefinition:
     """Semantic reward definition: what to compute and how to aggregate it."""
 
-    reward_path: Optional[str]
-    reward_model_saved_path: Optional[str]
-    batch_size: int
-    timeout: float
     component_aggregation: str
     components: Tuple[RewardComponentSpec, ...]
 
@@ -52,6 +48,16 @@ class RewardSpec:
             str(component.model_name): float(component.weight)
             for component in self.components
         }
+
+
+@dataclass(frozen=True)
+class RewardProviderConfig:
+    """Provider/scorer configuration: which scorer to load and with what limits."""
+
+    reward_path: Optional[str]
+    reward_model_saved_path: Optional[str]
+    batch_size: int
+    timeout: float
 
 
 @dataclass(frozen=True)

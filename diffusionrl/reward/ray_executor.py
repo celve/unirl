@@ -1,9 +1,4 @@
-"""
-Ray-based reward worker for GPU-isolated reward computation.
-
-Uses Ray actors and placement groups to isolate GPU memory
-from rollout and training actors.
-"""
+"""Ray reward executor backend for GPU-isolated reward computation."""
 
 import logging
 import os
@@ -11,9 +6,9 @@ import time
 from typing import Any, Dict, List, Optional
 
 import ray
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from .base import BaseRewardWorker, RewardRequest, RewardResponse
+from diffusionrl.ray.group_base import PlacementGroupActorPool
+from .base import BaseRewardExecutor, BaseRewardScorer, RewardRequest, RewardResponse
 from diffusionrl.utils import load_function
 
 logger = logging.getLogger(__name__)
@@ -48,14 +43,14 @@ class _RewardActor:
         Initialize reward actor.
 
         Args:
-            reward_path: Python path to reward worker class
+            reward_path: Python path to reward scorer class
             model_name: Name of the reward model
             device_id: GPU device ID to use
             gpus_per_actor: Number of GPUs for this actor (for large models)
             model_path: Optional path to model weights
             batch_size: Maximum batch size for processing
             timeout: Timeout for reward computation
-            **kwargs: Additional arguments for reward worker
+            **kwargs: Additional arguments for reward scorer
         """
         import torch
 
@@ -68,8 +63,8 @@ class _RewardActor:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
             logger.info(f"_RewardActor using GPU {device_id}")
 
-        # Load the reward worker
-        worker_cls = load_function(reward_path)
+        # Load the reward scorer.
+        scorer_cls = load_function(reward_path)
 
         init_kwargs = {
             "model_name": model_name,
@@ -83,7 +78,7 @@ class _RewardActor:
 
         init_kwargs.update(kwargs)
 
-        self.worker = worker_cls(**init_kwargs)
+        self.scorer = scorer_cls(**init_kwargs)
         self._is_available = True
         logger.info(f"_RewardActor initialized: {model_name} on GPU {device_id}")
 
@@ -97,32 +92,32 @@ class _RewardActor:
         Returns:
             RewardResponse with computed rewards
         """
-        return self.worker.compute_rewards(request)
+        return self.scorer.compute_rewards(request)
 
     def offload(self) -> None:
         """Offload model from GPU to CPU."""
-        if hasattr(self.worker, "offload"):
-            self.worker.offload()
+        if hasattr(self.scorer, "offload"):
+            self.scorer.offload()
             logger.debug(f"_RewardActor offloaded: {self.model_name}")
 
     def onload(self) -> None:
         """Load model back to GPU."""
-        if hasattr(self.worker, "onload"):
-            self.worker.onload()
+        if hasattr(self.scorer, "onload"):
+            self.scorer.onload()
             logger.debug(f"_RewardActor onloaded: {self.model_name}")
 
     def is_available(self) -> bool:
         """Check if the actor is available."""
-        return self._is_available and self.worker.is_available()
+        return self._is_available and self.scorer.is_available()
 
     def get_model_name(self) -> str:
         """Get the model name."""
         return self.model_name
 
 
-class RayRewardWorker(BaseRewardWorker):
+class RayRewardExecutor(BaseRewardExecutor):
     """
-    Ray-based reward worker for GPU-isolated reward computation.
+    Ray-based reward executor for GPU-isolated reward computation.
 
     Uses Ray actors and placement groups to isolate GPU memory
     from rollout and training actors.
@@ -136,21 +131,21 @@ class RayRewardWorker(BaseRewardWorker):
 
     Example usage:
         # Single actor mode
-        worker = RayRewardWorker(
+        executor = RayRewardExecutor(
             model_name="hpsv2",
             pg=placement_group,
             bundle_indices=[0],
             gpu_ids=[0],
-            reward_path="diffusionrl.reward.local.LocalRewardWorker",
+            reward_path="diffusionrl.reward.local.LocalRewardScorer",
         )
 
         # Parallel mode (distribute batch across actors)
-        worker = RayRewardWorker(
+        executor = RayRewardExecutor(
             model_name="hpsv2",
             pg=placement_group,
             bundle_indices=[0, 1, 2, 3],
             gpu_ids=[0, 1, 2, 3],
-            reward_path="diffusionrl.reward.local.LocalRewardWorker",
+            reward_path="diffusionrl.reward.local.LocalRewardScorer",
             num_actors=4,
             parallel_mode=True,
         )
@@ -162,7 +157,7 @@ class RayRewardWorker(BaseRewardWorker):
         pg,  # PlacementGroup
         bundle_indices: List[int],
         gpu_ids: List[int],
-        reward_path: str = "diffusionrl.reward.local.LocalRewardWorker",
+        reward_path: str = "diffusionrl.reward.local.LocalRewardScorer",
         model_path: Optional[str] = None,
         num_actors: int = 1,
         gpus_per_actor: int = 1,
@@ -173,16 +168,16 @@ class RayRewardWorker(BaseRewardWorker):
         **kwargs,
     ):
         """
-        Initialize Ray reward worker.
+        Initialize Ray reward executor.
 
         Args:
             model_name: Name of the reward model
             pg: Ray placement group for resource allocation
             bundle_indices: Placement group bundle indices for each actor
             gpu_ids: GPU IDs for each actor
-            reward_path: Python path to reward worker class
+            reward_path: Python path to reward scorer class
             model_path: Optional path to model weights
-            num_actors: Number of actors to create
+            num_actors: Number of reward worker actors to create
             gpus_per_actor: Number of GPUs per actor (for large models)
             batch_size: Maximum batch size per actor
             timeout: Timeout for reward computation
@@ -206,48 +201,73 @@ class RayRewardWorker(BaseRewardWorker):
         self.gpus_per_actor = gpus_per_actor
         self.parallel_mode = parallel_mode
         self.extra_kwargs = kwargs
+        self.input_kind = self._resolve_input_kind(reward_path)
 
-        self.actors: List[ray.actor.ActorHandle] = []
+        self._actor_pool: Optional[PlacementGroupActorPool] = None
         self._is_initialized = False
 
-        # Create actors
-        self._create_actors()
+        # Create actor pool
+        self._create_actor_pool()
 
-    def _create_actors(self) -> None:
-        """Create reward actors on the placement group."""
+    @staticmethod
+    def _resolve_input_kind(reward_path: str) -> str:
+        scorer_cls = load_function(reward_path)
+        if not isinstance(scorer_cls, type) or not issubclass(scorer_cls, BaseRewardScorer):
+            logger.warning(
+                "Ray reward scorer %s does not inherit BaseRewardScorer; "
+                "treating it as a scorer via duck typing.",
+                reward_path,
+            )
+        input_kind = str(getattr(scorer_cls, "input_kind", "image") or "image").strip().lower()
+        if input_kind not in {"image", "video"}:
+            raise ValueError(
+                "Reward scorer class must declare input_kind as 'image' or 'video'. "
+                f"Got {input_kind!r} for reward_path={reward_path!r}."
+            )
+        return input_kind
+
+    def _actor_handles(self) -> List[ray.actor.ActorHandle]:
+        if self._actor_pool is None:
+            return []
+        return self._actor_pool.get_actors()
+
+    def _create_actor_pool(self) -> None:
+        """Create reward actors on the placement group via a generic actor pool."""
         try:
+            per_actor_kwargs: List[Dict[str, Any]] = []
             for i in range(self.num_actors):
-                bundle_idx = self.bundle_indices[i * self.gpus_per_actor]
-                gpu_id = self.gpu_ids[i * self.gpus_per_actor]
-
-                actor_options = {
-                    "num_gpus": self.gpus_per_actor,
-                    "scheduling_strategy": PlacementGroupSchedulingStrategy(
-                        placement_group=self.pg,
-                        placement_group_bundle_index=bundle_idx,
-                    ),
-                }
-
-                actor = _RewardActor.options(**actor_options).remote(
-                    reward_path=self.reward_path,
-                    model_name=self.model_name,
-                    device_id=gpu_id,
-                    gpus_per_actor=self.gpus_per_actor,
-                    model_path=self.model_path,
-                    batch_size=self.batch_size,
-                    timeout=self.timeout,
-                    **self.extra_kwargs,
+                per_actor_kwargs.append(
+                    {
+                        "device_id": self.gpu_ids[i * self.gpus_per_actor],
+                        "gpus_per_actor": self.gpus_per_actor,
+                    }
                 )
-                self.actors.append(actor)
+
+            self._actor_pool = PlacementGroupActorPool(
+                actor_class=_RewardActor,
+                num_actors=self.num_actors,
+                pg=self.pg,
+                bundle_indices=self.bundle_indices,
+                gpu_ids=self.gpu_ids,
+                num_gpus_per_actor=float(self.gpus_per_actor),
+                num_gpus_per_engine=self.gpus_per_actor,
+                per_actor_kwargs=per_actor_kwargs,
+                reward_path=self.reward_path,
+                model_name=self.model_name,
+                model_path=self.model_path,
+                batch_size=self.batch_size,
+                timeout=self.timeout,
+                **self.extra_kwargs,
+            )
 
             self._is_initialized = True
             logger.info(
-                f"RayRewardWorker created {self.num_actors} actors "
+                f"RayRewardExecutor created {self.num_actors} actors "
                 f"(parallel_mode={self.parallel_mode})"
             )
 
         except Exception as e:
-            logger.error(f"Failed to create RayRewardWorker actors: {e}")
+            logger.error(f"Failed to create RayRewardExecutor actors: {e}")
             self._is_initialized = False
             raise
 
@@ -264,21 +284,22 @@ class RayRewardWorker(BaseRewardWorker):
         Returns:
             RewardResponse with computed rewards
         """
-        if not self._is_initialized or not self.actors:
+        actor_handles = self._actor_handles()
+        if not self._is_initialized or not actor_handles:
             return RewardResponse(
                 rewards=[0.0] * request.batch_size,
                 successes=[False] * request.batch_size,
-                errors=["Worker not initialized"] * request.batch_size,
+                errors=["Reward actor pool not initialized"] * request.batch_size,
                 compute_time=0.0,
             )
 
         start_time = time.time()
 
-        if self.parallel_mode and len(self.actors) > 1:
+        if self.parallel_mode and len(actor_handles) > 1:
             response = self._compute_parallel(request)
         else:
             # Single actor mode
-            response = ray.get(self.actors[0].compute_rewards.remote(request))
+            response = self._actor_pool.call_rank0("compute_rewards", request)
 
         # Update compute time to include Ray overhead
         response.compute_time = time.time() - start_time
@@ -295,30 +316,33 @@ class RayRewardWorker(BaseRewardWorker):
             Merged RewardResponse
         """
         batch_size = request.batch_size
-        num_actors = len(self.actors)
+        actor_handles = self._actor_handles()
+        num_actors = len(actor_handles)
         chunk_size = (batch_size + num_actors - 1) // num_actors
 
         # Split request into chunks
-        futures = []
-        for i, actor in enumerate(self.actors):
+        shards: List[Optional[RewardRequest]] = [None] * num_actors
+        for i in range(num_actors):
             start = i * chunk_size
             end = min(start + chunk_size, batch_size)
             if start >= batch_size:
                 break
 
             # Create chunk request
-            chunk_request = RewardRequest(
+            shards[i] = RewardRequest(
                 images=request.images[start:end] if request.images else None,
                 videos=request.videos[start:end] if request.videos else None,
                 prompts=request.prompts[start:end],
+                prompt_ids=request.prompt_ids[start:end] if request.prompt_ids else None,
+                sample_ids=request.sample_ids[start:end] if request.sample_ids else None,
+                group_ids=request.group_ids[start:end] if request.group_ids else None,
                 metadata=request.metadata[start:end] if request.metadata else None,
                 reward_types=request.reward_types,
                 return_components=request.return_components,
             )
-            futures.append(actor.compute_rewards.remote(chunk_request))
 
         # Gather results
-        responses = ray.get(futures)
+        responses = self._actor_pool.scatter_gather("compute_rewards", shards)
 
         # Merge responses
         return self._merge_responses(responses)
@@ -368,37 +392,38 @@ class RayRewardWorker(BaseRewardWorker):
 
     def is_available(self) -> bool:
         """Check if all actors are available."""
-        if not self._is_initialized or not self.actors:
+        if not self._is_initialized or self._actor_pool is None:
             return False
 
         try:
-            availabilities = ray.get(
-                [actor.is_available.remote() for actor in self.actors]
-            )
+            availabilities = self._actor_pool.call_all("is_available")
             return all(availabilities)
         except Exception:
             return False
 
     def offload(self) -> None:
         """Offload all actors' models from GPU."""
-        if self.actors:
-            ray.get([actor.offload.remote() for actor in self.actors])
-            logger.debug(f"RayRewardWorker offloaded {len(self.actors)} actors")
+        actor_handles = self._actor_handles()
+        if actor_handles and self._actor_pool is not None:
+            self._actor_pool.call_all("offload")
+            logger.debug(f"RayRewardExecutor offloaded {len(actor_handles)} actors")
 
     def onload(self) -> None:
         """Load all actors' models back to GPU."""
-        if self.actors:
-            ray.get([actor.onload.remote() for actor in self.actors])
-            logger.debug(f"RayRewardWorker onloaded {len(self.actors)} actors")
+        actor_handles = self._actor_handles()
+        if actor_handles and self._actor_pool is not None:
+            self._actor_pool.call_all("onload")
+            logger.debug(f"RayRewardExecutor onloaded {len(actor_handles)} actors")
 
     def dispose(self) -> None:
         """Kill all actors and clean up."""
-        for actor in self.actors:
-            try:
-                ray.kill(actor)
-            except Exception as e:
-                logger.warning(f"Failed to kill actor: {e}")
-
-        self.actors = []
+        if self._actor_pool is not None:
+            self._actor_pool.dispose()
+            self._actor_pool = None
         self._is_initialized = False
-        logger.info("RayRewardWorker disposed")
+        logger.info("RayRewardExecutor disposed")
+
+
+__all__ = [
+    "RayRewardExecutor",
+]

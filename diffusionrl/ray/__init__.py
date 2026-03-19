@@ -7,6 +7,7 @@ from typing import Dict, Tuple
 
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     # Placement groups
+    "RuntimePlacementConfig": ("diffusionrl.ray.placement_group", "RuntimePlacementConfig"),
     "GRPOPlacementConfig": ("diffusionrl.ray.placement_group", "GRPOPlacementConfig"),
     "PlacementGroupResult": ("diffusionrl.ray.placement_group", "PlacementGroupResult"),
     "create_placement_groups": ("diffusionrl.ray.placement_group", "create_placement_groups"),
@@ -18,9 +19,13 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "BufferActor": ("diffusionrl.ray.buffer_actor", "BufferActor"),
     "create_buffer_actor": ("diffusionrl.ray.buffer_actor", "create_buffer_actor"),
     # Actor groups
-    "BaseActorGroup": ("diffusionrl.ray.group_base", "BaseActorGroup"),
+    "ActorGroupHandle": ("diffusionrl.ray.group_base", "ActorGroupHandle"),
+    "PlacementGroupActorPool": ("diffusionrl.ray.group_base", "PlacementGroupActorPool"),
+    "ActorGroup": ("diffusionrl.ray.group_base", "ActorGroup"),
     "RolloutActorGroup": ("diffusionrl.ray.rollout_group", "RolloutActorGroup"),
     "TrainingActorGroup": ("diffusionrl.ray.training_group", "TrainingActorGroup"),
+    "RolloutGroupRuntime": ("diffusionrl.ray.group_runtime", "RolloutGroupRuntime"),
+    "TrainingGroupRuntime": ("diffusionrl.ray.group_runtime", "TrainingGroupRuntime"),
     "create_rollout_actor_group": ("diffusionrl.ray.group_factory", "create_rollout_actor_group"),
     "create_training_actor_group": ("diffusionrl.ray.group_factory", "create_training_actor_group"),
     # Actors
@@ -52,7 +57,6 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "batch_ray_get": ("diffusionrl.ray.ray_utils", "batch_ray_get"),
     "wait_for_placement_group": ("diffusionrl.ray.ray_utils", "wait_for_placement_group"),
     # Utils - Timing
-    "Timer": ("diffusionrl.ray.ray_utils", "Timer"),
     "timed": ("diffusionrl.ray.ray_utils", "timed"),
     # Utils - Memory
     "clear_gpu_memory": ("diffusionrl.ray.ray_utils", "clear_gpu_memory"),
@@ -62,8 +66,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "check_actor_health": ("diffusionrl.ray.ray_utils", "check_actor_health"),
     "wait_for_actors_ready": ("diffusionrl.ray.ray_utils", "wait_for_actors_ready"),
     # Utils - Actor sampling
-    "ActorSamplingExecutor": ("diffusionrl.ray.ray_utils", "ActorSamplingExecutor"),
-    "ActorSamplingRuntime": ("diffusionrl.ray.ray_utils", "ActorSamplingRuntime"),
+    "ActorSamplingExecutor": ("diffusionrl.ray.actor_sampling", "ActorSamplingExecutor"),
 }
 
 __all__ = list(_LAZY_ATTRS.keys())

@@ -2,7 +2,7 @@
 """
 diffusionrl async training loop (separate mode only).
 
-This mirrors slime's overlap pattern:
+This overlaps rollout and training with explicit synchronization boundaries:
 - launch rollout N+1 while training on rollout N
 - periodically synchronize weights with explicit boundary
 """
@@ -23,34 +23,38 @@ from diffusionrl.utils.wandb_metrics import (
 )
 
 if TYPE_CHECKING:
-    from diffusionrl.utils.weight_sync import WeightSyncProtocol
+    from diffusionrl.runtime.weight_sync import WeightSyncCoordinator
 
 logger = logging.getLogger(__name__)
 
 
-def _should_log_rollout(rollout_id: int, args) -> bool:
+def _should_log_rollout(rollout_id: int, args) -> bool:  # [HELPER] train_async_loop 内部
     interval = int(getattr(args.rollout, "logging_steps", 0))
     return interval > 0 and rollout_id % interval == 0
 
 
-def train_async_loop(
+def train_async_loop(  # [PUBLIC-API → train.py:train()] async 模式入口
     *,
     args,
     rollout_manager,
     rollout_buffer,
     training_group,
+    training_runtime,
+    rollout_group,
+    rollout_runtime,
+    rollout_sde_controller,
     wandb_logger: Optional[Any],
     should_save_fn: Callable[[int, Any], bool],
     should_eval_fn: Callable[[int, Any], bool],
-    weight_sync: "WeightSyncProtocol",
+    weight_sync: "WeightSyncCoordinator",
 ) -> None:
     """Asynchronous train loop with rollout/train overlap."""
     logger.info("Starting async pipeline loop (separate mode)")
     max_inflight = int(getattr(args.rollout, "async_max_inflight", 1))
     update_interval = max(1, int(getattr(args.rollout, "update_weights_interval", 1)))
-    enforce_rollout_alignment = not bool(getattr(args.rollout, "rollout_buffer_grouped", False))
+    enforce_rollout_alignment = not bool(getattr(args.rollout, "rollout_buffer_reassemble_by_group", False))
     rollout_on_gpu = True
-    buffer_consumer_spec = training_group.get_buffer_consumer_spec()
+    buffer_consumer_spec = training_runtime.get_buffer_consumer_spec()
     runtime = AsyncPipelineRuntime(
         max_inflight=max_inflight,
         initial_rollout_id=args.rollout.start_rollout_id,
@@ -69,8 +73,10 @@ def train_async_loop(
                 f"(inflight={runtime.inflight_count}, max_inflight={runtime.max_inflight})"
             )
         should_log_rollout = _should_log_rollout(rollout_id, args)
+        rollout_sde_indices = rollout_sde_controller.next_sde_indices()
         rollout_future = rollout_manager.produce_training_payload.remote(
             rollout_id=rollout_id,
+            sde_indices=rollout_sde_indices,
             collect_media_preview=bool(should_log_rollout and wandb_media_enabled),
             media_max_items=wandb_media_max_items,
         )
@@ -91,8 +97,12 @@ def train_async_loop(
 
     def _ensure_rollout_on_gpu() -> None:
         nonlocal rollout_on_gpu
-        if bool(getattr(args.ray, "offload_rollout", False)) and not rollout_on_gpu:
-            ray.get(rollout_manager.wake_up.remote())
+        if (
+            bool(getattr(args.ray, "offload_rollout", False))
+            and rollout_runtime is not None
+            and not rollout_on_gpu
+        ):
+            rollout_runtime.wake_up()
             rollout_on_gpu = True
 
     wandb_media_enabled = bool(
@@ -159,7 +169,7 @@ def train_async_loop(
 
         if should_save_fn(rollout_id, args):
             save_path = f"{args.rollout.output_dir}/checkpoint-{rollout_id}"
-            training_group.save_model(save_path)
+            training_runtime.save_model(save_path)
             logger.info(f"[async] Checkpoint saved: {save_path}")
 
         # Bound updates at a generation boundary to avoid update during active generation.
@@ -168,7 +178,7 @@ def train_async_loop(
             sync_phase_start_t = time.perf_counter()
             sync_result = weight_sync.sync(rollout_id=rollout_id)
             sync_phase_s = time.perf_counter() - sync_phase_start_t
-            rollout_on_gpu = True  # Protocol internally calls wake_up
+            rollout_on_gpu = True  # Coordinator internally calls wake_up
 
         if should_eval_fn(rollout_id, args):
             eval_phase_start_t = time.perf_counter()
@@ -267,6 +277,8 @@ def train_async_loop(
     finally:
         ray.kill(rollout_buffer)
     ray.get(rollout_manager.dispose.remote())
+    if rollout_group is not None:
+        rollout_group.dispose()
     training_group.dispose()
     if wandb_logger is not None:
         wandb_logger.finish()

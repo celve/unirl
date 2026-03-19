@@ -31,6 +31,8 @@ class VeOmniTrainBackend(VeOmniNativeTrainBackend):
             supports_backend_managed_offload=caps.supports_backend_managed_offload,
             preferred_weight_transport=caps.preferred_weight_transport,
             preferred_weight_export_format=caps.preferred_weight_export_format,
+            preferred_weight_transport_by_rollout_engine=caps.preferred_weight_transport_by_rollout_engine,
+            preferred_weight_export_format_by_rollout_engine=caps.preferred_weight_export_format_by_rollout_engine,
             supported_weight_export_formats=caps.supported_weight_export_formats,
             notes=(
                 "Built-in VeOmni backend. Uses VeOmni native APIs for model parallelization, "

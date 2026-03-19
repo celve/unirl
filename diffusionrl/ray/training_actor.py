@@ -1,12 +1,11 @@
 """
 diffusionrl Training Actor - Manages model training via pluggable train backends.
 """
-import inspect
+import importlib
 import logging
 import os
 import socket
 import sys
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -16,15 +15,16 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from diffusionrl.config.build_domain_args import RewardSchema
-from diffusionrl.reward.runtime import SamplingActorRewardRuntime
+from diffusionrl.config.build_domain_args import resolve_sde_schedule_config
+from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
 from diffusionrl.types.sampling import LogProbData, PromptEmbeddings, RolloutRequest, RolloutOutput
 from diffusionrl.types.training_batch import (
     BackwardTrainingBatch,
-    ForwardTrainingBatch,
     TrainingBatch,
 )
 from diffusionrl.patches.replay_logprob import ReplayLogProbPatch
-from diffusionrl.ray.ray_utils import ActorSamplingRuntime
+from diffusionrl.ray.actor_sampling import ActorSamplingExecutor
+from diffusionrl.utils.dtypes import inject_model_dtype_kwarg, parse_torch_dtype
 from diffusionrl.utils import clear_memory as _clear_gpu_memory
 from diffusionrl.utils.weight_sync_checkpoint import (
     publish_checkpoint_atomic,
@@ -190,6 +190,21 @@ class TrainingActor(BaseTrainRayActor):
         self._train_backend = None
         self._train_backend_name = "fsdp"
         self._train_backend_capabilities: Dict[str, Any] = {}
+        self._resolved_train_topology: Dict[str, Any] = {
+            "actor_count": int(world_size),
+            "world_size": int(world_size),
+            "dp_size": int(world_size),
+            "partition_mode": "data_parallel",
+        }
+        self._resolved_training_plan: Dict[str, Any] = {
+            "global_batch_size": int(world_size),
+            "local_batch_size": 1,
+            "local_update_batch_size": 1,
+            "local_micro_batch_size": 1,
+            "num_updates_per_local_batch": 1,
+            "update_slices": [[0, 1]],
+            "mini_batch_slices_per_update": [[[0, 1]]],
+        }
 
         # EMA runtime ----------------------------------------------------------
         self._ema_manager = None
@@ -202,16 +217,15 @@ class TrainingActor(BaseTrainRayActor):
 
         # Training config (read from config in init)
         self._max_grad_norm = 1.0
-        self._gradient_accumulation_batch_size = 1
-        self._multi_update_batch_size: Optional[int] = None
-        self._update_mode = "single_update"
+        self._local_micro_batch_size = 1
+        self._local_update_batch_size = 1
+        self._num_updates_per_local_batch = 1
         self._replay_log_probs = False
 
         # Sampling support (training-actor sampling mode)
         self._sampling_config: Dict[str, Any] = {}
         self._sampler = None
-        self._sampling_runtime = ActorSamplingRuntime()
-        self._actor_sampling_executor = self._sampling_runtime.executor
+        self._actor_sampling_executor = ActorSamplingExecutor()
         self._replay_logprob_patch = ReplayLogProbPatch()
         self._sampling_ready = False
         self.text_encoder = None
@@ -220,7 +234,7 @@ class TrainingActor(BaseTrainRayActor):
         self._weights_update_groups: Dict[str, Any] = {}
         self._reward_config: Dict[str, Any] = {}
         self._reward_schema: Optional[RewardSchema] = None
-        self._local_reward_runtime: Optional[SamplingActorRewardRuntime] = None
+        self._local_reward_runtime: Optional[ActorLocalRewardPrecompute] = None
 
     def _log_resource_ids(self, tag: str) -> None:
         log_resource_ids(tag, self.rank)
@@ -263,7 +277,7 @@ class TrainingActor(BaseTrainRayActor):
     @classmethod
     def _ensure_sglang_importable(cls) -> None:
         try:
-            import sglang.srt.utils  # noqa: F401
+            importlib.import_module("sglang.srt.utils")
             return
         except ModuleNotFoundError:
             pass
@@ -275,7 +289,7 @@ class TrainingActor(BaseTrainRayActor):
             if candidate_str not in sys.path:
                 sys.path.insert(0, candidate_str)
             try:
-                import sglang.srt.utils  # noqa: F401
+                importlib.import_module("sglang.srt.utils")
                 return
             except ModuleNotFoundError:
                 continue
@@ -294,8 +308,9 @@ class TrainingActor(BaseTrainRayActor):
                 - optimizer_config: dict with lr, betas, weight_decay
                 - scheduler_config: dict with scheduler type and params
                 - algorithm_config: dict with algorithm_type, algorithm_path, algorithm_kwargs, guidance_scale
-                - training_config: dict with max_grad_norm, gradient_accumulation_batch_size,
-                  multi_update_batch_size, update_mode
+                - training_config: dict with max_grad_norm and replay/runtime-only knobs
+                - topology_config: dict with actor_count/world_size/dp_size
+                - training_plan_config: dict with explicit local/update/micro batch execution plan
                 - train_backend_config: dict(name/backend_path/kwargs)
 
         Note:
@@ -330,6 +345,44 @@ class TrainingActor(BaseTrainRayActor):
         self._train_backend_name = self._train_backend.name
         self._train_backend_capabilities = self._train_backend.capabilities.as_dict()
 
+        topology_config = self._require_dict_config(config, "topology_config")
+        if int(topology_config["world_size"]) != int(self.world_size):
+            raise ValueError(
+                "TrainingActor topology_config.world_size must match the actor-group world_size. "
+                f"Got topology_config.world_size={topology_config['world_size']}, "
+                f"actor.world_size={self.world_size}."
+            )
+        self._resolved_train_topology = {
+            key: int(value)
+            if key
+            in {
+                "actor_count",
+                "world_size",
+                "dp_size",
+                "dp_replicate_size",
+                "dp_shard_size",
+                "tp_size",
+                "pp_size",
+                "sp_size",
+                "ep_size",
+            }
+            else value
+            for key, value in dict(topology_config).items()
+        }
+        self._resolved_training_plan = {
+            key: int(value)
+            if key
+            in {
+                "global_batch_size",
+                "local_batch_size",
+                "local_update_batch_size",
+                "local_micro_batch_size",
+                "num_updates_per_local_batch",
+            }
+            else value
+            for key, value in dict(self._require_dict_config(config, "training_plan_config")).items()
+        }
+
         # Initialize distributed
         self._init_distributed(backend=self._train_backend.capabilities.distributed_backend)
 
@@ -357,20 +410,23 @@ class TrainingActor(BaseTrainRayActor):
         # Load training config
         training_config = self._require_dict_config(config, "training_config")
         self._max_grad_norm = float(training_config["max_grad_norm"])
-        self._gradient_accumulation_batch_size = int(training_config["gradient_accumulation_batch_size"])
-        raw_multi_update_batch_size = training_config.get("multi_update_batch_size")
-        self._multi_update_batch_size = (
-            int(raw_multi_update_batch_size)
-            if raw_multi_update_batch_size is not None
-            else None
+        self._local_micro_batch_size = int(
+            self._resolved_training_plan["local_micro_batch_size"]
         )
-        self._update_mode = str(training_config["update_mode"]).strip().lower()
+        self._local_update_batch_size = int(
+            self._resolved_training_plan["local_update_batch_size"]
+        )
+        self._num_updates_per_local_batch = int(
+            self._resolved_training_plan["num_updates_per_local_batch"]
+        )
         self._replay_log_probs = bool(training_config["replay_log_probs"])
 
         # Sampling config (used when training actors perform sampling)
         sampling_config = self._require_dict_config(config, "sampling_config")
         self._sampling_config = sampling_config
-        self._timestep_fraction = sampling_config.get("timestep_fraction", 1.0)
+        self._timestep_fraction = resolve_sde_schedule_config(
+            sampling_config
+        ).timestep_fraction
         reward_config = self._require_dict_config(config, "reward_config")
         self._reward_config = reward_config
         self._reward_schema = RewardSchema(**reward_config)
@@ -380,9 +436,10 @@ class TrainingActor(BaseTrainRayActor):
             f"Rank {self.rank}: Training actor initialized "
             f"(backend={self._train_backend_name}, "
             f"max_grad_norm={self._max_grad_norm}, "
-            f"update_mode={self._update_mode}, "
-            f"gradient_accumulation_batch_size={self._gradient_accumulation_batch_size}, "
-            f"multi_update_batch_size={self._multi_update_batch_size})"
+            f"local_micro_batch_size={self._local_micro_batch_size}, "
+            f"local_update_batch_size={self._local_update_batch_size}, "
+            f"num_updates_per_local_batch={self._num_updates_per_local_batch}, "
+            f"training_plan={self._resolved_training_plan})"
         )
         self._log_resource_ids("training_init")
         self._log_gpu_state("training_init")
@@ -390,11 +447,11 @@ class TrainingActor(BaseTrainRayActor):
     def _uses_rollout_local_reward(self) -> bool:
         return bool(self._reward_schema is not None and self._reward_schema.uses_sampling_actor_execution)
 
-    def _ensure_local_reward_runtime(self) -> SamplingActorRewardRuntime:
+    def _ensure_local_reward_runtime(self) -> ActorLocalRewardPrecompute:
         if not self._uses_rollout_local_reward():
             raise RuntimeError("Local reward runtime requested but reward_location!='sampling_actor'.")
         if self._local_reward_runtime is None:
-            self._local_reward_runtime = SamplingActorRewardRuntime(self._reward_schema)
+            self._local_reward_runtime = ActorLocalRewardPrecompute(self._reward_schema)
         return self._local_reward_runtime
 
     def _attach_local_reward_to_output(
@@ -441,6 +498,15 @@ class TrainingActor(BaseTrainRayActor):
             # Skip device move if using FSDP CPU offload (FSDP manages device placement)
             "skip_device_move": getattr(self, '_fsdp_cpu_offload', False),
         }
+        model_precision = parse_torch_dtype(
+            model_config.get("model_precision", "bf16"),
+            field_name="model_config.model_precision",
+        )
+        inject_model_dtype_kwarg(
+            model_cls=model_cls,
+            model_kwargs=model_kwargs,
+            dtype=model_precision,
+        )
 
         # Pass LoRA parameters only when explicitly enabled
         use_lora = bool(model_config["use_lora"])
@@ -570,68 +636,15 @@ class TrainingActor(BaseTrainRayActor):
     }
 
     @classmethod
-    def _split_algorithm_kwargs(cls, algorithm_config: dict) -> tuple[dict, dict]:
-        """Split algorithm kwargs into constructor kwargs and actor runtime kwargs."""
-        extra: Dict[str, Any] = {}
-        algorithm_kwargs = algorithm_config.get("algorithm_kwargs")
-        if isinstance(algorithm_kwargs, dict):
-            extra.update(algorithm_kwargs)
-        if not extra:
-            return {}, {}
-
-        ctor_kwargs: Dict[str, Any] = {}
+    def _extract_runtime_algorithm_kwargs(cls, algorithm_config: dict) -> dict:
+        """Extract actor-runtime-only algorithm kwargs from config payload."""
         runtime_kwargs: Dict[str, Any] = {}
-        for key, value in extra.items():
-            if key in cls._ALGORITHM_RUNTIME_KEYS:
-                runtime_kwargs[key] = value
-            else:
-                ctor_kwargs[key] = value
-        return ctor_kwargs, runtime_kwargs
-
-    @staticmethod
-    def _filter_constructor_kwargs(algorithm_cls: type, kwargs: dict) -> dict:
-        """Drop kwargs that are not accepted by the target algorithm constructor."""
-        try:
-            sig = inspect.signature(algorithm_cls.__init__)
-        except (TypeError, ValueError):
-            return dict(kwargs)
-
-        params = sig.parameters
-        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
-            return dict(kwargs)
-
-        allowed = {
-            name
-            for name, param in params.items()
-            if name != "self"
-            and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-        }
-        return {key: value for key, value in kwargs.items() if key in allowed}
-
-    @staticmethod
-    def _collect_custom_algorithm_kwargs(algorithm_config: dict) -> dict:
-        """Collect custom algorithm kwargs from config while removing actor-runtime keys."""
-        reserved_keys = {
-            "algorithm_type",
-            "algorithm_path",
-            "algorithm_kwargs",
-            "guidance_scale",
-        }
-        kwargs = {
-            key: value
-            for key, value in algorithm_config.items()
-            if key not in reserved_keys and value is not None
-        }
         algorithm_kwargs = algorithm_config.get("algorithm_kwargs")
         if isinstance(algorithm_kwargs, dict):
-            kwargs.update(
-                {
-                    key: value
-                    for key, value in algorithm_kwargs.items()
-                    if key not in TrainingActor._ALGORITHM_RUNTIME_KEYS
-                }
-            )
-        return kwargs
+            for key, value in algorithm_kwargs.items():
+                if key in cls._ALGORITHM_RUNTIME_KEYS:
+                    runtime_kwargs[key] = value
+        return runtime_kwargs
 
     def _load_algorithm(self, algorithm_config: dict) -> None:
         """Load the train-side Algorithm instance."""
@@ -639,7 +652,7 @@ class TrainingActor(BaseTrainRayActor):
         self._algorithm_path = str(algorithm_config["algorithm_path"])
         self._guidance_scale = float(algorithm_config["guidance_scale"])
 
-        ctor_algorithm_kwargs, runtime_algorithm_kwargs = self._split_algorithm_kwargs(algorithm_config)
+        runtime_algorithm_kwargs = self._extract_runtime_algorithm_kwargs(algorithm_config)
         self._shuffle_samples = bool(runtime_algorithm_kwargs.get("shuffle_samples", True))
         raw_shuffle_seed = runtime_algorithm_kwargs.get("shuffle_seed", None)
         self._shuffle_seed = int(raw_shuffle_seed) if raw_shuffle_seed is not None else None
@@ -648,13 +661,12 @@ class TrainingActor(BaseTrainRayActor):
             raise ValueError("algorithm_config.algorithm_path must be set before TrainingActor.init.")
 
         algorithm_cls = load_function(self._algorithm_path)
-
-        if hasattr(algorithm_cls, "from_config"):
-            self.algorithm = algorithm_cls.from_config(algorithm_config)
-        else:
-            custom_kwargs = self._collect_custom_algorithm_kwargs(algorithm_config)
-            filtered_kwargs = self._filter_constructor_kwargs(algorithm_cls, custom_kwargs)
-            self.algorithm = algorithm_cls(**{**filtered_kwargs, **ctor_algorithm_kwargs})
+        from_config = getattr(algorithm_cls, "from_config", None)
+        if not callable(from_config):
+            raise TypeError(
+                f"Algorithm {self._algorithm_path} must implement classmethod from_config(config)."
+            )
+        self.algorithm = from_config(algorithm_config)
 
         logger.info(
             "Rank %s: Train-side algorithm loaded from %s (type=%s)",
@@ -739,7 +751,7 @@ class TrainingActor(BaseTrainRayActor):
         )
 
     def generate(self, request: RolloutRequest) -> RolloutOutput:
-        output = self._sampling_runtime.generate_local(self, request)
+        output = self._actor_sampling_executor.generate_local(self, request)
         prompts = request.prompts
         output = self._attach_local_reward_to_output(
             output=output,
@@ -749,7 +761,7 @@ class TrainingActor(BaseTrainRayActor):
             group_ids=request.group_ids,
             prompt_metadata=request.prompt_metadata,
             keep_reward_media_for_manager=bool(request.keep_reward_media_for_manager),
-            samples_per_prompt=int(request.samples_per_prompt or 1),
+            samples_per_prompt=int(request.samples_per_prompt),
         )
         return output.to_device("cpu")
 
@@ -758,23 +770,49 @@ class TrainingActor(BaseTrainRayActor):
             return {
                 "name": self._train_backend_name,
                 "capabilities": dict(self._train_backend_capabilities),
+                "topology": dict(self._resolved_train_topology),
+                "training_plan": dict(self._resolved_training_plan),
             }
-        return dict(self._train_backend.backend_info(self))
+        info = dict(self._train_backend.backend_info(self))
+        backend_topology = info.get("topology")
+        resolved_topology = dict(self._resolved_train_topology)
+        if isinstance(backend_topology, dict) and backend_topology != resolved_topology:
+            info["backend_reported_topology"] = dict(backend_topology)
+        info["topology"] = resolved_topology
+        info["training_plan"] = dict(self._resolved_training_plan)
+        return info
 
     def get_buffer_consumer_spec(self) -> Dict[str, Any]:
+        dp_size = int(self._resolved_train_topology["dp_size"])
+        partition_mode = str(self._resolved_train_topology["partition_mode"])
+        per_rank_batch_size = int(self._resolved_training_plan["local_batch_size"])
+        expected_global_batch_size = int(self._resolved_training_plan["global_batch_size"])
         if self._train_backend is None:
-            dp_size = int(getattr(self, "world_size", 1))
             return {
                 "dp_size": dp_size,
+                "per_rank_batch_size": per_rank_batch_size,
+                "expected_global_batch_size": expected_global_batch_size,
                 "partition_train_data": True,
-                "partition_mode": "data_parallel",
+                "partition_mode": partition_mode,
             }
-        return dict(self._train_backend.buffer_consumer_spec(self))
+        spec = dict(self._train_backend.buffer_consumer_spec(self))
+        missing = [
+            name
+            for name in ("partition_train_data", "partition_mode")
+            if name not in spec
+        ]
+        if missing:
+            raise RuntimeError(
+                "Train backend buffer_consumer_spec() is missing required fields: "
+                f"{', '.join(missing)}."
+            )
+        spec["dp_size"] = dp_size
+        spec["per_rank_batch_size"] = per_rank_batch_size
+        spec["expected_global_batch_size"] = expected_global_batch_size
+        return spec
 
     def _build_train_executor(self) -> TrainExecutor:
-        dp_size = int(getattr(self, "world_size", 1))
-        if self._train_backend is not None:
-            dp_size = int(self._train_backend.data_parallel_size(self))
+        dp_size = int(self._resolved_train_topology["dp_size"])
         config = TrainExecutorConfig(
             rank=self.rank,
             dp_size=dp_size,
@@ -783,9 +821,10 @@ class TrainingActor(BaseTrainRayActor):
             algorithm_type=self._algorithm_type,
             guidance_scale=self._guidance_scale,
             max_grad_norm=self._max_grad_norm,
-            gradient_accumulation_batch_size=self._gradient_accumulation_batch_size,
-            multi_update_batch_size=self._multi_update_batch_size,
-            update_mode=self._update_mode,
+            local_micro_batch_size=self._local_micro_batch_size,
+            local_update_batch_size=self._local_update_batch_size,
+            num_updates_per_local_batch=self._num_updates_per_local_batch,
+            training_plan=dict(self._resolved_training_plan),
             ema_manager=self._ema_manager,
             timestep_fraction=getattr(self, "_timestep_fraction", 1.0),
             shuffle_samples=self._shuffle_samples,
@@ -1134,7 +1173,7 @@ class TrainingActor(BaseTrainRayActor):
     def sync_weights_to_rollout_ipc(
         self,
         *,
-        rollout_manager: Any,
+        rollout_weight_sink: Any,
         target_modules: Optional[List[str]] = None,
         bucket_size_mb: int = 256,
         flush_cache: bool = True,
@@ -1171,13 +1210,12 @@ class TrainingActor(BaseTrainRayActor):
                             and payload_idx == len(serialized_payloads) - 1
                         )
                         payload_batch = [serialized_payload] * max(1, int(tp_payload_count))
-                        ref = rollout_manager.update_weights_from_tensor.remote(
+                        rollout_weight_sink.update_weights_from_tensor(
                             serialized_named_tensors=payload_batch,
                             target_modules=target_modules,
                             load_format="flattened_bucket",
                             flush_cache=flush_this_payload,
                         )
-                        ray.get(ref)
                         total_payloads += 1
                 finally:
                     del long_lived_payloads
@@ -1198,7 +1236,7 @@ class TrainingActor(BaseTrainRayActor):
     def sync_weights_to_rollout_nccl(
         self,
         *,
-        rollout_manager: Any,
+        rollout_weight_sink: Any,
         group_name: str,
         target_modules: Optional[List[str]] = None,
         bucket_size_mb: int = 256,
@@ -1235,7 +1273,7 @@ class TrainingActor(BaseTrainRayActor):
                 dtypes = [self._to_rollout_dtype_name(tensor.dtype) for _, tensor in named_tensors]
                 shapes = [list(tensor.shape) for _, tensor in named_tensors]
 
-                ref = rollout_manager.update_weights_from_distributed.remote(
+                rollout_weight_sink.update_weights_from_distributed(
                     names=names,
                     dtypes=dtypes,
                     shapes=shapes,
@@ -1249,7 +1287,6 @@ class TrainingActor(BaseTrainRayActor):
                 ]
                 for handle in handles:
                     handle.wait()
-                ray.get(ref)
                 total_tensors += len(named_tensors)
 
                 del named_tensors
@@ -1349,15 +1386,12 @@ class TrainingActor(BaseTrainRayActor):
             self._local_reward_runtime.offload()
         backend = getattr(self, "_train_backend", None)
         if backend is not None:
-            try:
-                if backend.offload(self):
-                    self._is_offloaded = True
-                    _clear_gpu_memory()
-                    logger.info("Rank %s: Offload handled by backend=%s", self.rank, backend.name)
-                    self._log_gpu_state("training_offload")
-                    return
-            except Exception as exc:
-                logger.warning("Rank %s: backend offload failed (%s), falling back to default flow", self.rank, exc)
+            if backend.offload(self):
+                self._is_offloaded = True
+                _clear_gpu_memory()
+                logger.info("Rank %s: Offload handled by backend=%s", self.rank, backend.name)
+                self._log_gpu_state("training_offload")
+                return
 
         if getattr(self, "_fsdp_cpu_offload", False):
             self._move_aux_components("cpu", include_transformer=False)
@@ -1388,14 +1422,11 @@ class TrainingActor(BaseTrainRayActor):
             self._local_reward_runtime.onload()
         backend = getattr(self, "_train_backend", None)
         if backend is not None:
-            try:
-                if backend.onload(self):
-                    self._is_offloaded = False
-                    logger.info("Rank %s: Onload handled by backend=%s", self.rank, backend.name)
-                    self._log_gpu_state("training_onload")
-                    return
-            except Exception as exc:
-                logger.warning("Rank %s: backend onload failed (%s), falling back to default flow", self.rank, exc)
+            if backend.onload(self):
+                self._is_offloaded = False
+                logger.info("Rank %s: Onload handled by backend=%s", self.rank, backend.name)
+                self._log_gpu_state("training_onload")
+                return
 
         if getattr(self, "_fsdp_cpu_offload", False):
             if self._device is not None:
@@ -1424,17 +1455,6 @@ class TrainingActor(BaseTrainRayActor):
         """Clear GPU cache without full offload."""
         torch.cuda.empty_cache()
         logger.debug("Rank %s: GPU cache cleared", self.rank)
-
-    def onload_weights(self) -> None:
-        self.onload()
-
-    def onload_post_update(self) -> None:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    def onload_runtime_cache(self) -> None:
-        # Diffusion training actor currently does not hold a KV/cache stage.
-        return None
 
     def health_check(self) -> bool:
         """Check if actor is healthy.

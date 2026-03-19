@@ -1,13 +1,11 @@
 """
 diffusionrl Ray Actor Base Classes.
-
-Reference: slime/ray/ray_actor.py + slime/ray/train_actor.py
 """
 import abc
 import logging
 import os
 import socket
-from typing import Any, List, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import torch
 
@@ -18,22 +16,38 @@ logger = logging.getLogger(__name__)
 # Shared utility functions for all actors (Training & Rollout)
 # ============================================================
 
+
+def _gpu_debug_enabled() -> bool:
+    for env_name in ("DIFFUSIONRL_LOG_GPU", "GRPO_LOG_GPU"):
+        if os.getenv(env_name, "0").lower() in ("1", "true", "yes"):
+            return True
+    return False
+
+
 def log_resource_ids(tag: str, rank: int) -> None:
-    """Log Ray resource IDs for GPU debugging. Enable with GRPO_LOG_GPU=1."""
-    if os.getenv("GRPO_LOG_GPU", "0").lower() not in ("1", "true", "yes"):
+    """Log Ray resource IDs for GPU debugging.
+
+    Preferred toggle: ``DIFFUSIONRL_LOG_GPU=1``.
+    Legacy alias: ``GRPO_LOG_GPU=1``.
+    """
+    if not _gpu_debug_enabled():
         return
     try:
         import ray
         ctx = ray.get_runtime_context()
         resources = ctx.get_resource_ids()
-        logger.warning(f"[GPU_RES] {tag} rank={rank} resources={resources}")
+        logger.info(f"[GPU_RES] {tag} rank={rank} resources={resources}")
     except Exception as e:
         logger.warning(f"[GPU_RES] {tag} failed: {e}")
 
 
 def log_gpu_state(tag: str, rank: int, device: Any = None, offloaded: Any = None) -> None:
-    """Log GPU memory state for debugging. Enable with GRPO_LOG_GPU=1."""
-    if os.getenv("GRPO_LOG_GPU", "0").lower() not in ("1", "true", "yes"):
+    """Log GPU memory state for GPU debugging.
+
+    Preferred toggle: ``DIFFUSIONRL_LOG_GPU=1``.
+    Legacy alias: ``GRPO_LOG_GPU=1``.
+    """
+    if not _gpu_debug_enabled():
         return
     try:
         pid = os.getpid()
@@ -45,36 +59,13 @@ def log_gpu_state(tag: str, rank: int, device: Any = None, offloaded: Any = None
         else:
             allocated = 0.0
             reserved = 0.0
-        logger.warning(
+        logger.info(
             "[GPU_STATE] %s rank=%s pid=%s cuda_visible=%s device=%s allocated_gb=%.3f "
             "reserved_gb=%.3f offloaded=%s",
             tag, rank, pid, cuda_visible, device_str, allocated, reserved, offloaded,
         )
     except Exception as e:
         logger.warning(f"[GPU_STATE] {tag} failed: {e}")
-
-
-def tensor_to_pil(images: torch.Tensor) -> List[Any]:
-    """Convert tensor to PIL images. Handles both image [B,C,H,W] and video [B,C,T,H,W]."""
-    from PIL import Image
-    import numpy as np
-
-    pil_images = []
-    images = images.cpu()
-
-    # Handle video: extract middle frame
-    if images.dim() == 5:
-        T = images.shape[2]
-        images = images[:, :, T // 2]
-
-    for img in images:
-        img_np = img.permute(1, 2, 0).numpy()
-        img_np = (img_np.clip(0, 1) * 255).astype(np.uint8)
-        pil_images.append(Image.fromarray(img_np))
-
-    return pil_images
-
-
 class RayActor:
     """
     Ray Actor base class - provides infrastructure functionality.
@@ -177,6 +168,22 @@ class BaseTrainRayActor(RayActor):
         self.master_addr = master_addr
         self.master_port = master_port
         self._is_distributed_initialized = False
+
+    def get_master_info(self, start_port: int = 10000) -> dict:
+        """Return this actor's node IP and a free port for distributed master."""
+        try:
+            import ray._private.services
+
+            master_addr = str(ray._private.services.get_node_ip_address())
+        except Exception:
+            master_addr = self._get_current_node_ip()
+        master_port = self._get_free_port(start_port)
+        return {"master_addr": master_addr, "master_port": int(master_port)}
+
+    def set_master_info(self, master_addr: str, master_port: int) -> None:
+        """Override distributed master endpoint before process-group init."""
+        self.master_addr = str(master_addr)
+        self.master_port = int(master_port)
 
     def _setup_distributed_env(self) -> None:
         """

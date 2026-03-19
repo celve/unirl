@@ -13,8 +13,6 @@ class RewardType(Enum):
 
     IMAGE_TEXT_ALIGNMENT = "image_text_alignment"
     AESTHETIC = "aesthetic"
-    VIDEO_QUALITY = "video_quality"
-    SAFETY = "safety"
     CUSTOM = "custom"
 
 

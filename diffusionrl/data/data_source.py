@@ -7,13 +7,13 @@ The default data-source contract is prompt-only:
 Runtime prompt embeddings are produced inside rollout engines and training
 pipelines, not provided by the external dataset.
 """
-
-import json
 import logging
 import os
 from typing import Any, Dict, Iterator, List, Optional
 
 from torch.utils.data import DataLoader
+
+from diffusionrl.config.resolution import resolve_prompts_per_rollout
 
 from .datasets import PromptExampleDataset, TextPromptDataset, normalize_prompt_example
 
@@ -26,10 +26,7 @@ class ImageRLDataSource:
 
     Accepted user-facing formats:
     - JSON/TXT/JSONL prompt datasets
-    - Legacy JSON manifests with ``prompt`` or ``caption`` plus extra fields
-
-    Legacy embedding-path fields are ignored at input time; runtime prompt
-    embeddings are derived from text prompts inside the rollout engine.
+    - JSON manifests with ``prompt`` or ``caption`` plus extra metadata
     """
 
     def __init__(self, args):
@@ -46,29 +43,25 @@ class ImageRLDataSource:
         self.data_path = getattr(args, 'data_path', None)
         self.eval_data_path = getattr(args, "eval_data_path", None)
         self.seed = getattr(args, 'seed', 42)
-        self.prompts_per_rollout = getattr(args.algorithm, "prompts_per_rollout", None)
-        if self.prompts_per_rollout is None:
-            raise ValueError("algorithm.prompts_per_rollout must be set explicitly.")
+        self.prompts_per_rollout = int(resolve_prompts_per_rollout(args))
         self.drop_last = True
 
         # Training data and eval data are treated as separate prompt sources.
         self.train_dataset = None
         self.eval_dataset = None
-        self.dataset = None  # Backward-compatible alias for the training dataset.
         self._dataloader = None
         self._iter: Optional[Iterator] = None
         self._eval_dataset_ready = False
-        self._warned_legacy_embedding_paths: set[str] = set()
 
-        if self.data_path is not None and os.path.exists(self.data_path):
-            self._init_dataset()
-        else:
-            logger.warning(f"Data path not found: {self.data_path}. Using default prompts.")
+        if not self.data_path:
+            raise ValueError("ImageRLDataSource requires args.data_path.")
+        if not os.path.exists(self.data_path):
+            raise FileNotFoundError(f"Training data path not found: {self.data_path}")
+        self._init_dataset()
 
     def _init_dataset(self) -> None:
         """Initialize the training dataset and dataloader."""
         self.train_dataset = self._build_dataset(self.data_path, shuffle=True)
-        self.dataset = self.train_dataset
         logger.info(
             "Loaded prompt-only training dataset from %s (%d samples)",
             self.data_path,
@@ -76,41 +69,9 @@ class ImageRLDataSource:
         )
         self._create_dataloader()
 
-    def _warn_if_legacy_embedding_fields_present(self, path: str) -> None:
-        """Warn once when a legacy embedding manifest is used as prompt input."""
-        if not isinstance(path, str) or not path.endswith(".json"):
-            return
-        if path in self._warned_legacy_embedding_paths:
-            return
-        try:
-            with open(path, "r") as f:
-                data = json.load(f)
-        except Exception:
-            return
-
-        first_item = data[0] if isinstance(data, list) and data else None
-        if not isinstance(first_item, dict):
-            return
-        legacy_embedding_keys = (
-            "prompt_embed_path",
-            "pooled_embed_path",
-            "pooled_prompt_embeds_path",
-            "text_ids_path",
-            "prompt_embeds",
-            "pooled_prompt_embeds",
-        )
-        if any(key in first_item for key in legacy_embedding_keys):
-            logger.warning(
-                "Prompt-only data source detected legacy embedding fields in %s. "
-                "These fields are ignored; only prompt/caption text and metadata are used.",
-                path,
-            )
-            self._warned_legacy_embedding_paths.add(path)
-
     def _build_dataset(self, path: str, *, shuffle: bool) -> PromptExampleDataset:
         """Build one prompt dataset instance for either training or evaluation."""
         dataset_seed = self.seed if shuffle else None
-        self._warn_if_legacy_embedding_fields_present(path)
 
         return TextPromptDataset(
             file_path=path,
@@ -179,7 +140,7 @@ class ImageRLDataSource:
     def _collate_text(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Collate function for text prompt dataset."""
         prompts = [item["prompt"] for item in batch]
-        prompt_ids = [str(item["prompt_id"]) for item in batch]
+        prompt_ids = self._resolve_prompt_ids(batch)
         metadata = [item.get("metadata") for item in batch]
         result: Dict[str, Any] = {"prompts": prompts, "prompt_ids": prompt_ids}
         if any(m is not None for m in metadata):
@@ -197,12 +158,23 @@ class ImageRLDataSource:
         """Convert normalized prompt examples into a batch payload."""
         result: Dict[str, Any] = {
             "prompts": [item["prompt"] for item in prompt_examples],
-            "prompt_ids": [str(item["prompt_id"]) for item in prompt_examples],
+            "prompt_ids": self._resolve_prompt_ids(prompt_examples),
         }
         metadata = [item.get("metadata") for item in prompt_examples]
         if any(m is not None for m in metadata):
             result["metadata"] = metadata
         return result
+
+    def _resolve_prompt_ids(self, prompt_examples: List[Dict[str, Any]]) -> List[str]:
+        """Resolve deterministic prompt IDs even if a dataset forgot to provide them."""
+        prompt_ids: List[str] = []
+        for idx, item in enumerate(prompt_examples):
+            prompt_id = item.get("prompt_id")
+            if prompt_id is None or not str(prompt_id).strip():
+                prompt_ids.append(f"prompt:{idx}")
+            else:
+                prompt_ids.append(str(prompt_id))
+        return prompt_ids
 
     def get_samples(self, batch_size: int) -> Dict[str, Any]:
         """
@@ -215,8 +187,9 @@ class ImageRLDataSource:
             Dict containing prompt text plus optional metadata.
         """
         if self._iter is None:
-            # Fallback to default prompts
-            return self._get_default_batch(batch_size)
+            raise RuntimeError(
+                "ImageRLDataSource is not initialized. Training prompt DataLoader is unavailable."
+            )
 
         try:
             batch = next(self._iter)
@@ -227,24 +200,6 @@ class ImageRLDataSource:
 
         return batch
 
-    def _get_default_batch(self, batch_size: int) -> Dict[str, List[str]]:
-        """Return default prompts for testing."""
-        default_prompts = [
-            "A beautiful sunset over the ocean with golden clouds",
-            "A majestic cat sitting on a velvet cushion",
-            "A futuristic city skyline at night with neon lights",
-            "A serene mountain landscape with a crystal clear lake",
-            "A vibrant field of wildflowers in spring",
-            "An ancient forest with towering trees and mystical fog",
-            "A cozy cabin in the woods during a snowfall",
-            "A bustling marketplace in a medieval town",
-        ]
-        prompts = default_prompts[:batch_size]
-        return {
-            "prompts": prompts,
-            "prompt_ids": [f"default:{idx}" for idx in range(len(prompts))],
-        }
-
     def get_eval_samples(self, batch_size: int) -> Dict[str, Any]:
         """Get a stable eval batch from the dedicated evaluation prompt source."""
         batch_size = max(0, int(batch_size))
@@ -253,7 +208,10 @@ class ImageRLDataSource:
 
         self._ensure_eval_dataset()
         if self.eval_dataset is None:
-            return self._get_default_batch(batch_size)
+            raise RuntimeError(
+                "ImageRLDataSource could not initialize evaluation prompt data. "
+                "Provide eval_data_path or a readable training data_path."
+            )
 
         get_prompt_example = getattr(self.eval_dataset, "get_prompt_example", None)
         if not callable(get_prompt_example):
@@ -263,7 +221,10 @@ class ImageRLDataSource:
             )
 
         prompt_examples = [
-            normalize_prompt_example(get_prompt_example(idx))
+            normalize_prompt_example(
+                get_prompt_example(idx),
+                default_prompt_id=f"eval:{idx}",
+            )
             for idx in range(min(batch_size, len(self.eval_dataset)))
         ]
         return self._prompt_examples_to_batch(prompt_examples)

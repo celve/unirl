@@ -4,93 +4,18 @@ diffusionrl Algorithm Base Class.
 Defines algorithm responsibilities in rollout/advantage pipeline.
 """
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
 
+from diffusionrl.types.sampling import SamplingRequirements
+
 from .normalizers import normalize_global, normalize_grouped
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class SamplingRequirements:
-    """
-    Sampling extras specified by algorithm implementations.
-
-    Runtime note:
-    - In diffusionRL, ``requires_*`` is resolved from loss
-      ``declared_requirements()`` as the single source of truth.
-    - The ``requires_*`` fields here are kept for backward compatibility,
-      but runtime control-plane logic may ignore them.
-
-    Algorithm-specific extras (e.g. ``sde_ratio`` for MixGRPO,
-    ``requires_clean_latents`` for NFT) go into the open ``extras``
-    dict.  This lets new algorithms declare their own requirements
-    without modifying this shared dataclass.
-
-    Backward-compatible ``@property`` accessors are provided for
-    commonly used extras so existing consumers keep working.
-    """
-
-    requires_trajectory: bool = True
-    """Whether the algorithm needs full denoising trajectories."""
-
-    requires_log_prob: bool = True
-    """Whether the algorithm needs log probabilities at each step."""
-
-    requires_embeddings: bool = True
-    """Whether the algorithm needs prompt embeddings in the sampled batch."""
-
-    extras: Dict[str, Any] = field(default_factory=dict)
-    """Open dict for algorithm-specific sampler extras.
-
-    Known keys (non-exhaustive):
-    - ``"sde_ratio"`` (float): fraction of SDE steps, default 1.0 (MixGRPO)
-    - ``"requires_clean_latents"`` (bool): need clean x0 (NFT)
-    - ``"forward_diffusion_in_loss"`` (bool): forward process in loss (NFT)
-    """
-
-    # ------------------------------------------------------------------
-    # Backward-compatible property accessors
-    # ------------------------------------------------------------------
-
-    @property
-    def sde_ratio(self) -> float:
-        """Ratio of SDE steps (1.0 = all SDE, 0.0 = all ODE)."""
-        return float(self.extras.get("sde_ratio", 1.0))
-
-    @property
-    def requires_clean_latents(self) -> bool:
-        """Whether the algorithm needs clean latents x0."""
-        return bool(self.extras.get("requires_clean_latents", False))
-
-    @property
-    def forward_diffusion_in_loss(self) -> bool:
-        """Whether forward diffusion happens in loss computation."""
-        return bool(self.extras.get("forward_diffusion_in_loss", False))
-
-    # ------------------------------------------------------------------
-    # Derived convenience properties
-    # ------------------------------------------------------------------
-
-    @property
-    def is_mixed_sampling(self) -> bool:
-        """Whether this uses mixed SDE/ODE sampling."""
-        return 0.0 < self.sde_ratio < 1.0
-
-    @property
-    def is_trajectory_based(self) -> bool:
-        """Whether this is a trajectory-based algorithm (GRPO, MixGRPO)."""
-        return self.requires_trajectory
-
-    @property
-    def is_forward_process(self) -> bool:
-        """Whether this is a forward process algorithm (NFT)."""
-        return self.requires_clean_latents and not self.requires_trajectory
 
 
 @dataclass(frozen=True)
@@ -119,7 +44,6 @@ class BaseAlgorithm(ABC):
     Base class for algorithm plugins.
 
     Each algorithm variant implements:
-    - declared_requirements(): Static data requirements (delegated from loss)
     - from_config(): Construct from algorithm_config dict (classmethod)
     - get_sampling_requirements(): What the sampler needs to provide
     - compute_advantages(): How to compute advantages from rewards
@@ -134,8 +58,8 @@ class BaseAlgorithm(ABC):
 
     def __init__(
         self,
-        clip_range: float = 1e-4,
         kl_coef: float = 0.01,
+        component_mix_stage: str = "reward",
         adv_normalization: str = "group",
         samples_per_prompt: int = 1,
         eval_ema_decay: float = 0.9,
@@ -150,8 +74,8 @@ class BaseAlgorithm(ABC):
         Initialize algorithm.
 
         Args:
-            clip_range: PPO clip range for importance ratio
             kl_coef: KL penalty coefficient
+            component_mix_stage: Multi-component reward mixing stage ("reward" or "advantage")
             adv_normalization: Type of advantage normalization ("global" or "group")
             samples_per_prompt: Number of rollout samples to generate per prompt
             eval_ema_decay: Eval-time EMA decay
@@ -162,8 +86,8 @@ class BaseAlgorithm(ABC):
             trimmed_ratio: Ratio of outliers trimmed from each side for grouped stats
             **kwargs: Additional algorithm-specific arguments
         """
-        self.clip_range = clip_range
         self.kl_coef = kl_coef
+        self.component_mix_stage = str(component_mix_stage)
         self.adv_normalization = adv_normalization
         self.samples_per_prompt = max(1, int(samples_per_prompt))
         self.eval_ema_decay = float(eval_ema_decay)
@@ -176,15 +100,6 @@ class BaseAlgorithm(ABC):
 
         self.loss_fn = self._create_loss_fn()
 
-    @classmethod
-    def _resolve_loss_class(cls):
-        loss_cls = getattr(cls, "_loss_cls", None)
-        if loss_cls is None:
-            raise NotImplementedError(
-                f"{cls.__name__} must define _loss_cls or override declared_requirements()."
-            )
-        return loss_cls
-
     def _create_loss_fn(self):
         loss_cls = getattr(type(self), "_loss_cls", None)
         if loss_cls is None:
@@ -196,19 +111,7 @@ class BaseAlgorithm(ABC):
     # ------------------------------------------------------------------
 
     @classmethod
-    def declared_requirements(cls) -> Dict[str, bool]:
-        """Declare data requirements for contracts / validation pipeline."""
-        loss_cls = cls._resolve_loss_class()
-        declared = getattr(loss_cls, "declared_requirements", None)
-        if not callable(declared):
-            raise NotImplementedError(
-                f"{cls.__name__} loss class {loss_cls.__name__} must define "
-                "declared_requirements()."
-            )
-        return dict(declared())
-
-    @classmethod
-    def from_config(cls, config: dict) -> "BaseAlgorithm":
+    def from_config(cls, config: dict) -> "BaseAlgorithm":  # [PUBLIC-API → rollout_manager.init(), training_actor.init()]
         """Construct algorithm from an algorithm_config dictionary.
 
         TrainingActor calls ``algorithm_cls.from_config(algorithm_config)`` to
@@ -223,15 +126,8 @@ class BaseAlgorithm(ABC):
             f"{cls.__name__} must implement from_config() classmethod."
         )
 
-    @classmethod
-    def from_args(cls, args: Any) -> "BaseAlgorithm":
-        """Legacy wrapper that normalizes args into algorithm_config first."""
-        from diffusionrl.config.build_domain_args import build_algorithm_config
-
-        return cls.from_config(build_algorithm_config(args))
-
     @abstractmethod
-    def get_sampling_requirements(self) -> SamplingRequirements:
+    def get_sampling_requirements(self) -> SamplingRequirements:  # [PUBLIC-API → rollout_manager.init()] 推理侧: 声明采样需求
         """
         Return the sampling requirements for this algorithm.
 
@@ -240,21 +136,7 @@ class BaseAlgorithm(ABC):
         """
         ...
 
-    def _build_sampling_requirements(
-        self,
-        *,
-        extras: Optional[Dict[str, Any]] = None,
-    ) -> SamplingRequirements:
-        """Build SamplingRequirements from the algorithm-owned loss contract."""
-        declared = type(self).declared_requirements()
-        return SamplingRequirements(
-            requires_trajectory=bool(declared.get("requires_trajectory", True)),
-            requires_log_prob=bool(declared.get("requires_log_prob", True)),
-            requires_embeddings=bool(declared.get("requires_embeddings", True)),
-            extras=dict(extras or {}),
-        )
-
-    def compute_advantages(
+    def compute_advantages(  # [PUBLIC-API → rollout_manager via compute_advantages_with_components()] 推理侧
         self,
         rewards: torch.Tensor,
         group_ids: Optional[List[str]] = None,
@@ -283,13 +165,25 @@ class BaseAlgorithm(ABC):
             raise ValueError(f"Unknown adv_normalization: {self.adv_normalization}")
 
     @staticmethod
-    def _normalize_group_id(group_id: Any) -> Optional[str]:
+    def _normalize_group_id(group_id: Any) -> Optional[str]:  # [HELPER]
         if group_id is None:
             return None
         text = str(group_id).strip()
         return text if text else None
 
-    def _build_groups_from_ids(self, group_ids: List[str]) -> List[List[int]]:
+    def _require_valid_group_ids(self, group_ids: List[str]) -> List[str]:  # [HELPER → _normalize_group()]
+        normalized: List[str] = []
+        for sample_idx, raw_group_id in enumerate(group_ids):
+            group_id = self._normalize_group_id(raw_group_id)
+            if group_id is None:
+                raise ValueError(
+                    "adv_normalization='group' requires a non-empty group_id for every sample. "
+                    f"Found invalid group_id at sample_idx={sample_idx}."
+                )
+            normalized.append(group_id)
+        return normalized
+
+    def _build_groups_from_ids(self, group_ids: List[str]) -> List[List[int]]:  # [HELPER → _normalize_group()]
         ordered_groups: Dict[str, List[int]] = {}
         for sample_idx, raw_group_id in enumerate(group_ids):
             group_id = self._normalize_group_id(raw_group_id)
@@ -298,11 +192,11 @@ class BaseAlgorithm(ABC):
             ordered_groups.setdefault(group_id, []).append(sample_idx)
         return list(ordered_groups.values())
 
-    def _normalize_global(self, rewards: torch.Tensor) -> torch.Tensor:
+    def _normalize_global(self, rewards: torch.Tensor) -> torch.Tensor:  # [HELPER → compute_advantages()]
         """Global normalization across all samples."""
         return normalize_global(rewards, epsilon=self.epsilon, clip_max=self.clip_max)
 
-    def _normalize_group(
+    def _normalize_group(  # [HELPER → compute_advantages()]
         self,
         rewards: torch.Tensor,
         group_ids: Optional[List[str]] = None,
@@ -310,7 +204,8 @@ class BaseAlgorithm(ABC):
         """Group normalization using explicit sample-group identities."""
         batch_size = rewards.shape[0]
         if group_ids is not None and len(group_ids) == batch_size:
-            groups = self._build_groups_from_ids(group_ids)
+            normalized_group_ids = self._require_valid_group_ids(group_ids)
+            groups = self._build_groups_from_ids(normalized_group_ids)
             if groups:
                 return normalize_grouped(
                     rewards,
@@ -332,12 +227,11 @@ class BaseAlgorithm(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def compute_advantages_with_components(
+    def compute_advantages_with_components(  # [PUBLIC-API → rollout_manager._generate_training_data()] 推理侧
         self,
         *,
         rewards: torch.Tensor,
         group_ids: Optional[List[str]] = None,
-        component_mix_stage: str = "reward",
         reward_components: Optional[Dict[str, List[float]]] = None,
         reward_component_weights: Optional[Dict[str, float]] = None,
     ) -> torch.Tensor:
@@ -348,9 +242,6 @@ class BaseAlgorithm(ABC):
 
         Args:
             rewards: Aggregated reward tensor [batch_size].
-            component_mix_stage: ``"reward"`` (default) uses aggregated rewards.
-                ``"advantage"`` computes per-component advantages and
-                aggregates with weights.
             reward_components: Per-component reward values, keyed by name.
             reward_component_weights: Per-component weights for aggregation.
 
@@ -360,35 +251,47 @@ class BaseAlgorithm(ABC):
         ...
 
     @abstractmethod
-    def get_ema_spec(self) -> EMASpec:
+    def get_ema_spec(self) -> EMASpec:  # [PUBLIC-API → training_actor.init()] 训练侧
         """Declare EMA policy for this algorithm."""
         ...
+
+    def prepare_loss_advantages(  # [PUBLIC-API → train_executor] 训练侧: loss 前 advantage 变换
+        self,
+        advantages: torch.Tensor,
+    ) -> torch.Tensor:
+        """Transform rollout advantages into the signal consumed by the loss.
+
+        Default behavior is identity. Algorithms such as NFT can override this
+        hook to map rollout advantages into loss-side weighting signals without
+        mutating the rollout-visible advantage semantics.
+        """
+        return advantages
 
     # ------------------------------------------------------------------
     # Phase 2: Algorithm-owned training step
     # ------------------------------------------------------------------
 
-    def compute_loss_and_backward(
+    def compute_loss_and_backward(  # [PUBLIC-API → train_executor._train_update_chunk()] 训练侧: 核心 loss+backward
         self,
         *,
         model: nn.Module,
         batch: Any,
-        gradient_accumulation_batch_size: int,
+        mini_batch_slices: Tuple[Tuple[int, int], ...],
         guidance_scale: float = 3.5,
         **kwargs: Any,
     ) -> tuple:
         """Compute loss and call backward for a single update chunk."""
-        del model, batch, gradient_accumulation_batch_size, guidance_scale, kwargs
+        del model, batch, mini_batch_slices, guidance_scale, kwargs
         raise NotImplementedError(
             f"{type(self).__name__} must implement compute_loss_and_backward()."
         )
 
-    def is_forward_process(self) -> bool:
+    def is_forward_process(self) -> bool:  # [PUBLIC-API → training_actor] 训练侧: 判断算法类型
         """Whether this algorithm trains via forward process (NFT-style)."""
         return bool(self.get_sampling_requirements().is_forward_process)
 
     @abstractmethod
-    def resolve_rollout_sde_indices(
+    def resolve_rollout_sde_indices(  # [PUBLIC-API → train.py RolloutSDEController] 推理侧
         self,
         *,
         timestep_scheduler: Optional[Any],
@@ -398,18 +301,17 @@ class BaseAlgorithm(ABC):
 
         Default behavior:
         - Forward-process algorithms do not use rollout SDE indices.
-        - Trajectory algorithms read indices from scheduler and receive the
-          optional `set_sde_indices` callback when implemented.
+        - Trajectory algorithms read indices from the caller-provided scheduler.
         """
         ...
 
     @abstractmethod
-    def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:
+    def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:  # [PUBLIC-API → rollout_manager] 推理侧
         """Get sampler-output validation flags for rollout orchestration."""
         ...
 
     @abstractmethod
-    def assemble_training_batch(
+    def assemble_training_batch(  # [PUBLIC-API → rollout_manager._generate_training_data()] 推理侧: 组装 TrainingBatch
         self,
         *,
         num_inference_steps: int,
@@ -422,8 +324,22 @@ class BaseAlgorithm(ABC):
         """Assemble the typed training batch for this algorithm."""
         ...
 
+    def resolve_training_indices(
+        self,
+        *,
+        num_steps: int,
+        sde_indices: Optional[Set[int]] = None,
+    ) -> Set[int]:
+        """Resolve the timestep indices that should contribute to training.
+
+        This is the explicit counterpart to rollout-time ``sde_indices``.
+        """
+        if sde_indices is not None:
+            return set(int(i) for i in sde_indices)
+        return set(range(num_steps))
+
     @abstractmethod
-    def get_filtered_training_indices(
+    def get_filtered_training_indices(  # [PUBLIC-API → assemble_training_batch() 内部] 推理侧: 过滤训练 timestep
         self,
         sde_indices: Set[int],
         num_steps: int,
@@ -446,12 +362,12 @@ class BaseAlgorithm(ABC):
         """
         ...
 
-    def get_config(self) -> Dict[str, Any]:
+    def get_config(self) -> Dict[str, Any]:  # [PUBLIC-API → 序列化/日志]
         """Get algorithm configuration as dictionary."""
         return {
             "algorithm_type": self.__class__.__name__,
-            "clip_range": self.clip_range,
             "kl_coef": self.kl_coef,
+            "component_mix_stage": self.component_mix_stage,
             "adv_normalization": self.adv_normalization,
             **self._extra_kwargs,
         }
@@ -459,7 +375,7 @@ class BaseAlgorithm(ABC):
     def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}("
-            f"clip_range={self.clip_range}, "
             f"kl_coef={self.kl_coef}, "
+            f"component_mix_stage={self.component_mix_stage}, "
             f"adv_normalization={self.adv_normalization})"
         )

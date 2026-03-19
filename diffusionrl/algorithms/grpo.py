@@ -16,10 +16,15 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import torch
 import torch.nn as nn
 
-from diffusionrl.types import TimestepData, PromptEmbeddings
+from diffusionrl.config.build_domain_args import resolve_sde_config
+from diffusionrl.types import PromptEmbeddings, SDEConfig, TimestepData
 from .base import BaseAlgorithm, EMASpec, SamplingRequirements
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_algorithm_sde_config(config: Dict[str, Any]) -> SDEConfig:
+    return resolve_sde_config(config)
 
 
 def _save_training_debug_tensor(base_dir: str, step_idx: int, name: str, tensor: torch.Tensor, rank: int = 0) -> None:
@@ -37,14 +42,6 @@ class _GRPOLoss:
 
     def __init__(self, algorithm: "GRPOAlgorithm") -> None:
         self.algorithm = algorithm
-
-    @classmethod
-    def declared_requirements(cls) -> Dict[str, bool]:
-        return {
-            "requires_trajectory": True,
-            "requires_log_prob": True,
-            "requires_embeddings": True,
-        }
 
     def compute_loss(
         self,
@@ -249,19 +246,17 @@ class GRPOAlgorithm(BaseAlgorithm):
         same algorithm_config surface.
         """
         extra = dict(config.get("algorithm_kwargs") or {})
+        sde_config = _resolve_algorithm_sde_config(config)
         known_keys = {
             "clip_range",
             "clip_schedule",
             "use_kl_penalty",
             "kl_coef",
+            "component_mix_stage",
             "samples_per_prompt",
             "eval_ema_decay",
             "eval_ema_update_interval",
             "ratio_reg_coef",
-            "eta",
-            "sde_type",
-            "sde_ratio",
-            "time_shift",
             "skip_last_timestep",
             "skip_initial_timesteps",
             "window_training",
@@ -289,12 +284,12 @@ class GRPOAlgorithm(BaseAlgorithm):
             clip_schedule=str(extra.get("clip_schedule", "constant")),
             use_kl_penalty=bool(extra.get("use_kl_penalty", True)),
             kl_coef=float(extra.get("kl_coef", 0.01)),
+            component_mix_stage=str(extra.get("component_mix_stage", "reward")),
             samples_per_prompt=int(extra.get("samples_per_prompt", 1)),
             eval_ema_decay=float(extra.get("eval_ema_decay", 0.9)),
             eval_ema_update_interval=int(extra.get("eval_ema_update_interval", 1)),
             ratio_reg_coef=float(extra.get("ratio_reg_coef", 0.0)),
-            eta=float(extra.get("eta", 0.7)),
-            sde_type=str(extra.get("sde_type", "sde")),
+            sde_config=sde_config,
             skip_last_timestep=bool(extra.get("skip_last_timestep", False)),
             skip_initial_timesteps=int(extra.get("skip_initial_timesteps", 0)),
             model_type=str(extra.get("model_type", "default")),
@@ -311,9 +306,9 @@ class GRPOAlgorithm(BaseAlgorithm):
         clip_schedule: str = "constant",
         use_kl_penalty: bool = True,
         kl_coef: float = 0.01,
+        component_mix_stage: str = "reward",
         ratio_reg_coef: float = 0.0,
-        eta: float = 1.0,
-        sde_type: str = "sde",
+        sde_config: Optional[SDEConfig] = None,
         skip_last_timestep: bool = False,
         skip_initial_timesteps: int = 0,
         model_type: str = "default",
@@ -336,9 +331,9 @@ class GRPOAlgorithm(BaseAlgorithm):
             clip_schedule: Clip range schedule ("constant", "linear_decay", "cosine_decay")
             use_kl_penalty: Whether to add KL penalty
             kl_coef: KL penalty coefficient
+            component_mix_stage: Multi-component reward mixing stage
             ratio_reg_coef: Coefficient for ratio regularization
-            eta: SDE noise coefficient
-            sde_type: Type of SDE ("sde", "cps", "dance")
+            sde_config: Shared SDE config consumed by rollout and training math
             skip_last_timestep: Skip the last timestep (t->0) in loss computation (MixGRPO).
                 The last step has very low noise level, causing unstable log_prob.
             skip_initial_timesteps: Skip the first N timesteps in loss computation (MixGRPO).
@@ -355,8 +350,8 @@ class GRPOAlgorithm(BaseAlgorithm):
             **kwargs: Additional arguments
         """
         super().__init__(
-            clip_range=clip_range,
             kl_coef=kl_coef,
+            component_mix_stage=component_mix_stage,
             adv_normalization=adv_normalization,
             samples_per_prompt=samples_per_prompt,
             eval_ema_decay=eval_ema_decay,
@@ -367,11 +362,11 @@ class GRPOAlgorithm(BaseAlgorithm):
             trimmed_ratio=trimmed_ratio,
             **kwargs,
         )
+        self.clip_range = clip_range
         self.clip_schedule = clip_schedule
         self.use_kl_penalty = use_kl_penalty
         self.ratio_reg_coef = ratio_reg_coef
-        self.eta = eta
-        self.sde_type = sde_type
+        self.sde_config = sde_config or SDEConfig()
         self.model_type = model_type
 
         # MixGRPO stability controls
@@ -383,20 +378,35 @@ class GRPOAlgorithm(BaseAlgorithm):
         self._debug_output_dir = None  # Set externally for train-inference consistency debugging
         self._debug_dumped_steps: set = set()  # Track which steps already dumped (one-shot guard)
 
+    @property
+    def eta(self) -> float:
+        return self.sde_config.eta
+
+    @property
+    def sde_type(self) -> str:
+        return self.sde_config.sde_type
+
+    @property
+    def time_shift(self) -> float:
+        return self.sde_config.shift
+
     def get_sampling_requirements(self) -> SamplingRequirements:
         """Return GRPO sampling requirements."""
-        return self._build_sampling_requirements()
+        return SamplingRequirements(
+            requires_trajectory=True,
+            requires_log_prob=True,
+            requires_embeddings=True,
+        )
 
     def compute_advantages_with_components(
         self,
         *,
         rewards: torch.Tensor,
         group_ids: Optional[List[str]] = None,
-        component_mix_stage: str = "reward",
         reward_components: Optional[Dict[str, List[float]]] = None,
         reward_component_weights: Optional[Dict[str, float]] = None,
     ) -> torch.Tensor:
-        if component_mix_stage != "advantage" or not reward_components:
+        if self.component_mix_stage != "advantage" or not reward_components:
             return self.compute_advantages(rewards=rewards, group_ids=group_ids)
 
         default_weights = {name: 1.0 for name in reward_components}
@@ -444,10 +454,7 @@ class GRPOAlgorithm(BaseAlgorithm):
     ) -> Optional[Set[int]]:
         if timestep_scheduler is None:
             return None
-        sde_indices = set(int(i) for i in timestep_scheduler.get_sde_indices(current_step))
-        if hasattr(self, "set_sde_indices"):
-            self.set_sde_indices(sde_indices)
-        return sde_indices
+        return set(int(i) for i in timestep_scheduler.get_sde_indices(current_step))
 
     def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:
         allow_replay = bool(getattr(args.sampling, "replay_log_probs", False))
@@ -505,6 +512,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         log_probs_dicts = []
         timesteps = None
         step_indices = None
+        scheduler_was_provided = sde_indices is not None
         raw_scheduler_indices = {int(i) for i in sde_indices} if sde_indices is not None else None
         final_sde_indices: Set[int] = set(raw_scheduler_indices or set())
         all_prompt_embeds = []
@@ -598,19 +606,22 @@ class GRPOAlgorithm(BaseAlgorithm):
                 set(int(i) for i in final_sde_indices), source="Scheduler/Sampler SDE"
             )
 
-        if hasattr(self, "get_training_indices"):
-            raw_train_indices = set(int(i) for i in self.get_training_indices(len(step_labels)))
-            train_indices = _normalize_to_step_labels(
-                raw_train_indices, source=f"{type(self).__name__}.get_training_indices"
-            )
-            if not train_indices:
-                train_indices = step_label_set
-            if sde_indices is None:
-                final_sde_indices = train_indices
-            else:
-                final_sde_indices = final_sde_indices & train_indices
-            if not final_sde_indices:
-                final_sde_indices = train_indices if train_indices else set(step_labels)
+        raw_train_indices = self.resolve_training_indices(
+            num_steps=len(step_labels),
+            sde_indices=set(final_sde_indices) if scheduler_was_provided else None,
+        )
+        train_indices = _normalize_to_step_labels(
+            set(int(i) for i in raw_train_indices),
+            source=f"{type(self).__name__}.resolve_training_indices",
+        )
+        if not train_indices:
+            train_indices = step_label_set
+        if not scheduler_was_provided:
+            final_sde_indices = train_indices
+        else:
+            final_sde_indices = final_sde_indices & train_indices if final_sde_indices else train_indices
+        if not final_sde_indices:
+            final_sde_indices = train_indices if train_indices else set(step_labels)
 
         num_steps = len(step_labels)
         final_sde_indices = self.get_filtered_training_indices(final_sde_indices, num_steps)
@@ -664,10 +675,11 @@ class GRPOAlgorithm(BaseAlgorithm):
             step_indices=step_indices,
             target_sde_indices=set(int(i) for i in final_sde_indices),
         )
+
         batch.validate()
         assemble_t2 = _time.perf_counter()
         traj_gb = trajectories_tensor.nelement() * trajectories_tensor.element_size() / 1e9
-        logger.warning(
+        logger.debug(
             "[TIMING] assemble_backward: cat_traj=%.2fs total=%.2fs n=%d shapes=%s traj_gb=%.2f",
             assemble_t1 - assemble_t0,
             assemble_t2 - assemble_t0,
@@ -712,7 +724,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         """
         Compute log probability for SDE step.
 
-        Delegates to the canonical implementation in samplers/log_prob.py
+        Delegates to the canonical implementation in diffusionrl.sde.runtime
         to ensure consistency between sampling and training paths.
 
         Args:
@@ -726,7 +738,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         Returns:
             Tuple of (log_prob [B], prev_sample_mean [B, C, ...])
         """
-        from diffusionrl.samplers.log_prob import compute_sde_log_prob
+        from diffusionrl.sde.runtime import compute_sde_log_prob
 
         return compute_sde_log_prob(
             noise_pred=pred,
@@ -777,7 +789,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         *,
         model: nn.Module,
         batch: Any,
-        gradient_accumulation_batch_size: int,
+        mini_batch_slices: Tuple[Tuple[int, int], ...],
         guidance_scale: float = 3.5,
         **kwargs: Any,
     ) -> tuple:
@@ -789,18 +801,16 @@ class GRPOAlgorithm(BaseAlgorithm):
             ``(avg_loss, metrics_dict, num_timesteps, actual_mini_batches, has_backward)``
         """
         from diffusionrl.types.training_batch import BackwardTrainingBatch
-        from diffusionrl.runtime.training.update_schedule import resolve_gradient_accumulation_plan
 
         if not isinstance(batch, BackwardTrainingBatch):
             raise TypeError(
                 f"{type(self).__name__} expects BackwardTrainingBatch, got {type(batch).__name__}"
             )
 
-        batch_size = batch.batch_size
-        mini_batches, actual_mini_batches = resolve_gradient_accumulation_plan(
-            batch_size=batch_size,
-            gradient_accumulation_batch_size=gradient_accumulation_batch_size,
-        )
+        mini_batches = tuple((int(start), int(end)) for start, end in mini_batch_slices)
+        if not mini_batches:
+            raise ValueError(f"{type(self).__name__} requires non-empty mini_batch_slices.")
+        actual_mini_batches = len(mini_batches)
         num_mini_batches = len(mini_batches)
 
         available_steps = set(int(s) for s in batch.resolved_step_indices[:-1].tolist())

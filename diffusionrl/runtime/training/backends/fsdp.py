@@ -7,20 +7,18 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 import torch
 
+from diffusionrl.utils.dtypes import parse_torch_dtype
+
 from .base import TrainBackend, TrainBackendCapabilities, TrainTopology
 
 logger = logging.getLogger(__name__)
 
 
 def _safe_dtype(name: str) -> torch.dtype:
-    key = str(name or "bf16").strip().lower()
-    if key in {"bf16", "bfloat16"}:
-        return torch.bfloat16
-    if key in {"fp16", "float16", "half"}:
-        return torch.float16
-    if key in {"fp32", "float32", "float"}:
-        return torch.float32
-    raise ValueError(f"Unsupported FSDP2 param_dtype={name!r}. Use one of bf16/fp16/fp32.")
+    return parse_torch_dtype(
+        name or "fp32",
+        field_name="train_backend_kwargs.param_dtype",
+    )
 
 
 class FSDPTrainBackend(TrainBackend):
@@ -69,6 +67,8 @@ class FSDPTrainBackend(TrainBackend):
             supports_backend_managed_offload=False,
             preferred_weight_transport="checkpoint_path",
             preferred_weight_export_format="state_dict",
+            preferred_weight_transport_by_rollout_engine={"sglang": "nccl_broadcast"},
+            preferred_weight_export_format_by_rollout_engine={"sglang": "sglang_transformer_safetensors"},
             supported_weight_export_formats=("state_dict", "sglang_transformer_safetensors"),
             notes=(
                 "Default backend. Uses FSDP2 fully_shard path. "
@@ -235,16 +235,15 @@ class FSDPTrainBackend(TrainBackend):
                 return {}
             model = self._unwrap_model(actor.model)
             if lora_only:
-                try:
-                    peft_lora_state = self._extract_peft_lora_state(model)
-                    if peft_lora_state:
-                        return self._to_cpu_state_dict(peft_lora_state)
-                    lora_state = self._filter_lora_state(model.state_dict())
-                    if lora_state:
-                        return self._to_cpu_state_dict(lora_state)
-                    logger.warning("LoRA-only sync found no LoRA keys; falling back to full state_dict.")
-                except Exception as exc:
-                    logger.warning("LoRA-only sync failed; falling back to full sync: %s", exc)
+                peft_lora_state = self._extract_peft_lora_state(model)
+                if peft_lora_state:
+                    return self._to_cpu_state_dict(peft_lora_state)
+                lora_state = self._filter_lora_state(model.state_dict())
+                if lora_state:
+                    return self._to_cpu_state_dict(lora_state)
+                raise ValueError(
+                    "LoRA-only sync requested but no LoRA parameters were found in the model state."
+                )
             return self._to_cpu_state_dict(model.state_dict())
 
         full_state_dict = self._get_full_state_dict(actor, cpu_offload=True)
@@ -254,13 +253,12 @@ class FSDPTrainBackend(TrainBackend):
         full_state_dict = self._to_cpu_state_dict(full_state_dict)
 
         if lora_only:
-            try:
-                lora_state = self._filter_lora_state(full_state_dict)
-                if lora_state:
-                    return lora_state
-                logger.warning("LoRA-only sync found no LoRA keys; falling back to full state_dict.")
-            except Exception as exc:
-                logger.warning("LoRA-only sync failed; falling back to full sync: %s", exc)
+            lora_state = self._filter_lora_state(full_state_dict)
+            if lora_state:
+                return lora_state
+            raise ValueError(
+                "LoRA-only sync requested but no LoRA parameters were found in the FSDP state dict."
+            )
 
         return full_state_dict
 

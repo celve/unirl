@@ -29,7 +29,11 @@ _PROMPT_EXAMPLE_EXCLUDED_KEYS = {
 }
 
 
-def normalize_prompt_example(item: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_prompt_example(
+    item: Dict[str, Any],
+    *,
+    default_prompt_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Normalize one raw dataset entry into prompt/metadata form."""
     if not isinstance(item, dict):
         raise TypeError(f"Prompt example must be a dict, got {type(item).__name__}.")
@@ -53,6 +57,8 @@ def normalize_prompt_example(item: Dict[str, Any]) -> Dict[str, Any]:
 
     result: Dict[str, Any] = {"prompt": prompt}
     prompt_id = item.get("prompt_id")
+    if prompt_id is None and default_prompt_id is not None:
+        prompt_id = default_prompt_id
     if prompt_id is not None:
         result["prompt_id"] = str(prompt_id)
     if metadata:
@@ -126,28 +132,24 @@ class TextPromptDataset(PromptExampleDataset):
     def _load_prompts(self) -> None:
         """Load prompts from file."""
         def _append_item(item: Any, *, context: str) -> None:
+            sample_idx = len(self.samples)
+            default_prompt_id = f"{self._source_prefix}:{sample_idx}"
             if isinstance(item, str):
-                sample_idx = len(self.samples)
-                self.samples.append(
-                    {
-                        "prompt": item,
-                        "prompt_id": f"{self._source_prefix}:{sample_idx}",
-                    }
-                )
-                return
+                candidate: Any = {"prompt": item}
+            else:
+                candidate = item
             if not isinstance(item, dict):
-                logger.warning("Skipping invalid %s: %r", context, item)
-                return
-
-            candidate = dict(item)
+                if not isinstance(candidate, dict):
+                    logger.warning("Skipping invalid %s: %r", context, item)
+                    return
+            candidate = dict(candidate)
             if self.prompt_key in candidate and self.prompt_key != "prompt":
                 candidate["prompt"] = candidate.pop(self.prompt_key)
 
             try:
-                normalized = normalize_prompt_example(candidate)
-                normalized.setdefault(
-                    "prompt_id",
-                    f"{self._source_prefix}:{len(self.samples)}",
+                normalized = normalize_prompt_example(
+                    candidate,
+                    default_prompt_id=default_prompt_id,
                 )
                 self.samples.append(normalized)
             except (TypeError, ValueError) as exc:
@@ -168,7 +170,7 @@ class TextPromptDataset(PromptExampleDataset):
                         for item in prompts:
                             _append_item(item, context="prompts item")
                     elif isinstance(prompts, str):
-                        self.samples.append({"prompt": prompts})
+                        _append_item(prompts, context="prompts item")
                 elif self.prompt_key in data:
                     prompt_val = data[self.prompt_key]
                     if isinstance(prompt_val, list):
@@ -197,14 +199,11 @@ class TextPromptDataset(PromptExampleDataset):
 
         elif self.file_path.endswith('.txt'):
             with open(self.file_path, 'r') as f:
-                prompts = [line.strip() for line in f if line.strip()]
-            self.samples = [
-                {
-                    "prompt": prompt,
-                    "prompt_id": f"{self._source_prefix}:{idx}",
-                }
-                for idx, prompt in enumerate(prompts)
-            ]
+                for line_num, line in enumerate(f, 1):
+                    prompt = line.strip()
+                    if not prompt:
+                        continue
+                    _append_item(prompt, context=f"txt line {line_num}")
 
         else:
             raise ValueError(f"Unsupported file format: {self.file_path}. Supported formats: .json, .jsonl, .txt")
@@ -219,4 +218,7 @@ class TextPromptDataset(PromptExampleDataset):
         return self.samples[idx]
 
     def get_prompt_example(self, idx: int) -> Dict[str, Any]:
-        return normalize_prompt_example(self.samples[idx])
+        return normalize_prompt_example(
+            self.samples[idx],
+            default_prompt_id=f"{self._source_prefix}:{idx}",
+        )

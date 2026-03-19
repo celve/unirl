@@ -22,7 +22,6 @@ Usage:
 """
 
 import os
-import tempfile
 from typing import Any, Dict, List, Optional, Union
 
 from PIL import Image
@@ -35,7 +34,7 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 
-class GRPOCoreWandBLogger:
+class DiffusionRLWandBLogger:
     """WandB logger for diffusionrl training.
 
     Logs metrics compatible with DanceGRPO, flow_grpo, DiffusionNFT, and MixGRPO
@@ -329,21 +328,15 @@ class GRPOCoreWandBLogger:
 
             # Create wandb images with captions
             wandb_images = []
-            with tempfile.TemporaryDirectory() as tmpdir:
-                for i, idx in enumerate(sample_indices):
-                    # Save image to temp file
-                    img_path = os.path.join(tmpdir, f"{i}.jpg")
-                    images[idx].save(img_path)
+            for idx in sample_indices:
+                prompt = prompts[idx] if idx < len(prompts) else ""
+                if reward_values and idx < len(reward_values):
+                    caption = f"{prompt[:100]} | reward: {reward_values[idx]:.2f}"
+                else:
+                    caption = f"{prompt[:100]}"
 
-                    # Create caption
-                    prompt = prompts[idx] if idx < len(prompts) else ""
-                    if reward_values and idx < len(reward_values):
-                        caption = f"{prompt[:100]} | reward: {reward_values[idx]:.2f}"
-                    else:
-                        caption = f"{prompt[:100]}"
-
-                    # wandb_images.append(wandb.Image(img_path, caption=caption)) # Bug with temp file here
-                    wandb_images.append(wandb.Image(images[idx], caption=caption)) # Bug with temp file here
+                # Pass PIL images directly to avoid temporary-file lifetime issues.
+                wandb_images.append(wandb.Image(images[idx], caption=caption))
 
             wandb.log(
                 {
@@ -409,17 +402,16 @@ class GRPOCoreWandBLogger:
             except Exception:
                 pass
 
-
 # Global logger instance
-_global_logger: Optional[GRPOCoreWandBLogger] = None
+_global_logger: Optional[DiffusionRLWandBLogger] = None
 
 
-def get_logger() -> Optional[GRPOCoreWandBLogger]:
+def get_logger() -> Optional[DiffusionRLWandBLogger]:
     """Get the global wandb logger instance."""
     return _global_logger
 
 
-def set_logger(logger: GRPOCoreWandBLogger):
+def set_logger(logger: DiffusionRLWandBLogger):
     """Set the global wandb logger instance."""
     global _global_logger
     _global_logger = logger
@@ -435,7 +427,7 @@ def init_logger(
     entity: Optional[str] = None,
     require_success: bool = False,
     **kwargs,
-) -> GRPOCoreWandBLogger:
+) -> DiffusionRLWandBLogger:
     """Initialize and set the global wandb logger.
 
     Args:
@@ -446,13 +438,13 @@ def init_logger(
         tags: List of tags for the WandB run. Defaults to ['diffusionrl-reproduce'] if not provided.
         entity: WandB entity (team or username). If None, uses the default entity.
         require_success: Raise immediately if WandB init fails.
-        **kwargs: Additional arguments for GRPOCoreWandBLogger
+        **kwargs: Additional arguments for DiffusionRLWandBLogger
 
     Returns:
         The initialized logger
     """
     global _global_logger
-    _global_logger = GRPOCoreWandBLogger(
+    _global_logger = DiffusionRLWandBLogger(
         project=project,
         run_name=run_name,
         config=config,

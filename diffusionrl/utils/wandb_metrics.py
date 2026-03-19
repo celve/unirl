@@ -169,7 +169,6 @@ _BUFFER_CORE_KEYS = (
     "pushed_samples",
     "popped_samples",
     "assembled_batches",
-    "assembled_partial_batches",
     "dropped_queue_items",
     "dropped_batches",
     "dropped_samples",

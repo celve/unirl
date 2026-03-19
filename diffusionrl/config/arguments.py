@@ -1,17 +1,16 @@
 """
 diffusionrl Arguments - Configuration parameters for training.
 
-Default resolution order:
+Resolution order:
 1) Explicit CLI flags
 2) YAML values from --config
 3) Dataclass field defaults
-4) validate_args() normalize/derive rewrites
+4) validate_args() checks the explicit config and runtime builders derive
+   resolved values without mutating TrainingArguments
 
 New contributors: start from parse_args() -> validate_args().
 """
 import argparse
-import copy
-import inspect
 import json
 import logging
 import os
@@ -22,32 +21,76 @@ from typing import Any, Dict, List, Optional, get_args, get_origin
 
 from diffusionrl.config.paths import (
     is_probably_local_weight_sync_dir,
-    normalize_repo_relative_paths,
     repo_root,
-    resolve_repo_relative_path,
+)
+from diffusionrl.config.resolution import (
+    DEFAULT_MODEL_PATH,
+    DEFAULT_SAMPLER_PATH,
+    resolve_algorithm_kwargs,
+    resolve_algorithm_path,
+    resolve_debug_mode,
+    resolve_logprob_source,
+    resolve_lora_target_modules,
+    resolve_model_runtime,
+    resolve_nominal_local_training_batch_size,
+    resolve_num_updates_per_local_batch,
+    resolve_local_micro_batch_size,
+    resolve_local_update_batch_size,
+    resolve_prompts_per_rollout,
+    resolve_global_rollout_batch_size,
+    resolve_rollout_topology,
+    resolve_sync_protocol,
+    resolve_train_backend_kwargs,
+    resolve_train_backend_name,
+    resolve_training_dp_size,
+    resolve_training_plan,
+    resolve_training_topology,
+)
+from diffusionrl.config.rollout_topology import (
+    DIRECT_ROLLOUT_MODE,
+    ROLLOUT_MODES,
+    normalize_rollout_mode,
+    normalize_rollout_service_engine,
+    rollout_mode_is_colocated,
+    rollout_mode_uses_service,
 )
 from diffusionrl.config.validation import (
+    apply_model_config_hook,
     validate_colocate_fractions,
     validate_dotpath,
     validate_dynamic_dotpaths,
     validate_grouped_configs,
-    validate_model_specific_logic,
+    validate_model_runtime_contract,
+    validate_nft_sampling_contract,
     validate_resolved_engine_algorithm_contract,
     validate_reward_and_rollout_buffer_config,
     validate_rollout_layout,
     validate_runtime_mode_constraints,
 )
-from diffusionrl.models import list_model_types, resolve_model_bundle_path
-from diffusionrl.utils.misc import load_function
+from diffusionrl.types.engine import uses_dedicated_rollout_engine
 
 logger = logging.getLogger(__name__)
 
 ENV_REPO_ROOT = "DIFFUSIONRL_REPO_ROOT"
-ENV_DATA_ROOT = "DIFFUSIONRL_DATA_ROOT"
-ENV_MODEL_ROOT = "DIFFUSIONRL_MODEL_ROOT"
 
-DEFAULT_MODEL_PATH = "diffusionrl.models.hunyuan.HunyuanModelBundle"
-DEFAULT_SAMPLER_PATH = "diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler"
+def _validate_precision_name(value: Any, *, field_name: str) -> None:
+    valid = {
+        "bf16",
+        "bfloat16",
+        "fp16",
+        "float16",
+        "half",
+        "fp32",
+        "float32",
+        "float",
+    }
+    key = str(value or "").strip().lower()
+    if key not in valid:
+        raise ValueError(
+            f"{field_name} must be one of bf16/fp16/fp32, got: {value!r}"
+        )
+
+
 @dataclass
 class ModelConfig:
     """Model/runtime identity and checkpoint paths."""
@@ -78,10 +121,6 @@ class SamplingConfig:
 
     sampler_path: str = field(default=DEFAULT_SAMPLER_PATH,
         metadata={"help": "Python dotpath to Sampler class (auto-resolved from model_type)"})
-    sampler_engine_type: Optional[str] = field(default=None,
-        metadata={"help": "Rollout engine type: fsdp or sglang (auto-resolved from model)"})
-    sampling_mode: str = field(default="rollout_actor",
-        metadata={"help": "Where sampling runs: rollout_actor or training_actor"})
     max_samples_per_request: Optional[int] = field(default=None,
         metadata={"help": "Generated-sample cap per training-actor direct-sampling request; rollout_total_samples stays prompts_per_rollout*samples_per_prompt"})
     logprob_source: str = field(default="replay",
@@ -90,12 +129,14 @@ class SamplingConfig:
         metadata={"help": "Replay old log-probs on training actor (for SGLang replay mode)"})
     replay_sampler_path: Optional[str] = field(default=None,
         metadata={"help": "Python dotpath to replay sampler, if different from sampler_path"})
+    sampler_kwargs: Dict[str, Any] = field(default_factory=dict,
+        metadata={"help": "Explicit sampler constructor kwargs for direct sampling and replay sampler instantiation."})
     num_inference_steps: int = field(default=50,
         metadata={"help": "Number of denoising steps during sampling"})
     eta: float = field(default=1.0,
         metadata={"help": "SDE noise coefficient (eta=0 is ODE, eta=1 is full SDE)"})
-    sde_type: str = field(default="sde",
-        metadata={"help": "SDE formulation: sde, dance, flux_dance, dpm2, etc."})
+    sde_type: str = field(default="flow",
+        metadata={"help": "Transition rule. Supported: flow, cps, dance, dpm2"})
     time_shift: float = field(default=3.0,
         metadata={"help": "Time-shift parameter for the sampling timestep schedule (model-specific)"})
     guidance_scale: float = field(default=7.5,
@@ -110,24 +151,8 @@ class SamplingConfig:
         metadata={"help": "Sampling adapter type for special modes (e.g. 'old' for NFT)"})
     init_same_noise: bool = field(default=False,
         metadata={"help": "Use identical initial noise for all samples of the same prompt"})
-    fsdp_num_gpus: int = field(default=1,
-        metadata={"help": "Number of GPUs per FSDP rollout actor"})
-    fsdp_inference_sharding_strategy: str = field(default="NO_SHARD",
-        metadata={"help": "FSDP sharding for inference: NO_SHARD, FULL_SHARD, SHARD_GRAD_OP"})
-    sp_size: int = field(default=1,
-        metadata={"help": "Sequence parallelism size for inference"})
-    tp_size: int = field(default=1,
-        metadata={"help": "Tensor parallelism size for SGLang inference engine"})
-    engine_kwargs: Dict[str, Any] = field(default_factory=dict,
-        metadata={"help": "Additional kwargs passed to the rollout engine"})
 
     def validate(self) -> None:
-        sampling_mode = str(self.sampling_mode or "rollout_actor").strip().lower()
-        if sampling_mode not in ("rollout_actor", "training_actor"):
-            raise ValueError(
-                "sampling_mode must be one of rollout_actor/training_actor, "
-                f"got: {self.sampling_mode}"
-            )
         mode = str(self.logprob_source).strip().lower()
         if mode not in ("replay", "native"):
             raise ValueError(
@@ -135,6 +160,8 @@ class SamplingConfig:
             )
         if self.max_samples_per_request is not None and int(self.max_samples_per_request) < 1:
             raise ValueError("max_samples_per_request must be >= 1 when set.")
+        if not isinstance(self.sampler_kwargs, dict):
+            raise ValueError("sampling.sampler_kwargs must be a dict.")
         if not self.sampler_path:
             raise ValueError(
                 "sampler_path must be set. It is usually auto-resolved from model_type. "
@@ -146,8 +173,8 @@ class SamplingConfig:
 class RewardConfig:
     """Reward path, reward model, and reward pool controls."""
 
-    reward_path: Optional[str] = field(default="diffusionrl.reward.local.LocalRewardWorker",
-        metadata={"help": "Python dotpath to RewardWorker class"})
+    reward_path: Optional[str] = field(default="diffusionrl.reward.local.LocalRewardScorer",
+        metadata={"help": "Python dotpath to reward scorer class"})
     reward_model_saved_path: Optional[str] = field(default=None,
         metadata={"help": "Path to reward model weights (local path or HuggingFace ID)"})
     reward_model_name: str = field(default="hpsv2",
@@ -166,8 +193,6 @@ class RewardConfig:
         metadata={"help": "Weights for each reward model in multi-reward aggregation"})
     component_aggregation: str = field(default="weighted_sum",
         metadata={"help": "Multi-reward aggregation method: weighted_sum"})
-    component_mix_stage: str = field(default="reward",
-        metadata={"help": "Multi-reward mixing: reward (mix rewards) or advantage (mix advantages)"})
     reward_dedicated_num_gpus: int = field(default=0,
         metadata={"help": "Total GPUs for dedicated reward actors (0 = CPU reward)"})
     reward_dedicated_num_nodes: int = field(default=0,
@@ -181,15 +206,11 @@ class RewardConfig:
     reward_location: str = field(default="manager",
         metadata={"help": "Where reward-model inference runs: manager or sampling_actor"})
     local_reward_device: str = field(default="cpu",
-        metadata={"help": "Device for local (non-HTTP, non-dedicated) reward workers: cpu, auto, or cuda"})
+        metadata={"help": "Device for local in-process reward scorers: cpu, auto, or cuda"})
     allow_local_reward_cuda_contention: bool = field(default=False,
         metadata={"help": "Allow local_reward_device=cuda without dedicated reward GPUs (may contend with rollout/training GPUs)"})
 
     def validate(self) -> None:
-        if self.component_mix_stage not in ("reward", "advantage"):
-            raise ValueError(
-                f"component_mix_stage must be one of reward/advantage, got: {self.component_mix_stage}"
-            )
         reward_location = str(self.reward_location or "manager").strip().lower()
         if reward_location not in ("manager", "sampling_actor"):
             raise ValueError(
@@ -209,15 +230,15 @@ class RewardConfig:
         )
         if not has_http_reward and not self.reward_path:
             raise ValueError(
-                "reward_path must be set for local/ray reward workers. "
-                "Available: diffusionrl.reward.local.LocalRewardWorker, "
-                "or provide a custom RewardWorker dotpath."
+                "reward_path must be set for local/ray reward scoring. "
+                "Available: diffusionrl.reward.local.LocalRewardScorer, "
+                "or provide a custom reward scorer dotpath."
             )
 
 
 @dataclass
 class RayConfig:
-    """Ray resource layout, colocate/offload, and weight sync controls."""
+    """Ray resource layout, colocate/offload, and scheduling controls."""
 
     ray_address: Optional[str] = field(default=None,
         metadata={"help": "Ray cluster address (None = auto-detect or start local)"})
@@ -229,8 +250,6 @@ class RayConfig:
         metadata={"help": "Number of nodes for training actors"})
     training_num_gpus_per_node: int = field(default=4,
         metadata={"help": "GPUs per node for training actors"})
-    colocate_rollout_training: bool = field(default=False,
-        metadata={"help": "Run rollout and training on same GPUs (requires offload)"})
     placement_strategy: str = field(default="PACK",
         metadata={"help": "Ray placement group strategy: PACK or SPREAD"})
     colocate_training_gpu_fraction: float = field(default=0.4,
@@ -247,27 +266,63 @@ class RayConfig:
         metadata={"help": "Enable model offload for training actors (None = auto)"})
     offload_rollout: Optional[bool] = field(default=None,
         metadata={"help": "Enable model offload for rollout actors (None = auto)"})
-    weight_sync_mode: str = field(default="auto",
-        metadata={"help": "Weight sync mode: auto, tensor_payload, nccl_broadcast, checkpoint_path "
-                          "(legacy: ipc, nccl, object_ref)"})
-    weight_sync_dir: str = field(default="outputs/weight_sync",
+
+    def validate(self) -> None:
+        """Keep RayConfig validation intentionally thin.
+
+        Topology-dependent and cross-field rollout/Ray checks happen later after
+        explicit rollout validation in validate_args()/config.validation.
+        """
+        for attr_name in (
+            "rollout_num_nodes",
+            "rollout_num_gpus_per_node",
+            "training_num_nodes",
+            "training_num_gpus_per_node",
+        ):
+            if int(getattr(self, attr_name)) < 0:
+                raise ValueError(f"ray.{attr_name} must be >= 0.")
+
+        strategy = str(self.placement_strategy or "PACK").strip().upper()
+        valid_strategies = {"PACK", "SPREAD", "STRICT_PACK", "STRICT_SPREAD"}
+        if strategy not in valid_strategies:
+            raise ValueError(
+                "ray.placement_strategy must be one of "
+                f"{sorted(valid_strategies)}, got: {self.placement_strategy!r}"
+            )
+
+
+@dataclass
+class SyncConfig:
+    """Train->rollout weight synchronization controls."""
+
+    protocol: str = field(default="auto",
+        metadata={"help": "Weight sync mode: auto, disabled, tensor_payload, nccl_broadcast, checkpoint_path"})
+    dir: str = field(default="outputs/weight_sync",
         metadata={"help": "Directory for checkpoint-based weight sync (use shared FS for multi-node)"})
-    weight_sync_bucket_mb: int = field(default=256,
-        metadata={"help": "Weight sync tensor bucket size (MB) for ipc/nccl strategies"})
-    weight_sync_flush_cache: bool = field(default=True,
+    bucket_mb: int = field(default=256,
+        metadata={"help": "Weight sync tensor bucket size (MB) for tensor/distributed strategies"})
+    flush_cache: bool = field(default=True,
         metadata={"help": "Whether rollout side flushes runtime cache after each weight sync bucket"})
+    target_modules: Optional[List[str]] = field(default=None,
+        metadata={"help": "Rollout-side modules that receive weight updates (defaults to ['transformer'])."})
 
     def validate(self) -> None:
         _valid_modes = (
-            "auto", "tensor_payload", "nccl_broadcast", "checkpoint_path",
-            "ipc", "nccl", "object_ref",
+            "auto", "disabled", "tensor_payload", "nccl_broadcast", "checkpoint_path",
         )
-        if self.weight_sync_mode not in _valid_modes:
+        if self.protocol not in _valid_modes:
             raise ValueError(
-                f"weight_sync_mode must be one of {'/'.join(_valid_modes)}, "
-                f"got: {self.weight_sync_mode!r}. "
-                "Use 'auto' (recommended) to let diffusionrl choose the best mode."
+                f"sync.protocol must be one of {'/'.join(_valid_modes)}, "
+                f"got: {self.protocol!r}. Use 'auto' (recommended) to let diffusionrl choose the best mode."
             )
+        if int(self.bucket_mb) < 1:
+            raise ValueError("sync.bucket_mb must be >= 1.")
+        if self.target_modules is not None:
+            if not isinstance(self.target_modules, list):
+                raise ValueError("sync.target_modules must be a list of module names.")
+            for module_name in self.target_modules:
+                if not str(module_name).strip():
+                    raise ValueError("sync.target_modules cannot contain empty names.")
 
 
 @dataclass
@@ -298,7 +353,7 @@ class WindowSchedulerConfig:
 
 @dataclass
 class AlgorithmConfig:
-    """Algorithm controls normalized into one algorithm-owned config surface."""
+    """Algorithm controls and shared algorithm-construction surface."""
 
     # Algorithm selection
     algorithm_type: str = field(default="grpo",
@@ -306,7 +361,7 @@ class AlgorithmConfig:
     algorithm_path: Optional[str] = field(default=None,
         metadata={"help": "Python dotpath to Algorithm class (auto-resolved from algorithm_type when omitted)"})
     algorithm_kwargs: Dict[str, Any] = field(default_factory=dict,
-        metadata={"help": "Canonical extension surface for algorithm-specific kwargs. Both rollout and training instantiate algorithms from the same normalized algorithm_kwargs payload."})
+        metadata={"help": "Canonical extension surface for algorithm-specific kwargs. Both rollout and training instantiate algorithms from the same algorithm_kwargs payload."})
 
     # Advantage and policy objective
     clip_range: float = field(default=1e-4,
@@ -317,6 +372,8 @@ class AlgorithmConfig:
         metadata={"help": "KL divergence penalty coefficient"})
     use_kl_penalty: bool = field(default=True,
         metadata={"help": "Add KL penalty term to the loss"})
+    component_mix_stage: str = field(default="reward",
+        metadata={"help": "Where multi-component reward mixing happens: reward or advantage"})
     adv_normalization: str = field(default="group",
         metadata={"help": "Advantage normalization: global or group"})
     samples_per_prompt: int = field(default=4,
@@ -353,10 +410,12 @@ class AlgorithmConfig:
             )
         if self.samples_per_prompt < 1:
             raise ValueError("samples_per_prompt must be >= 1.")
-        if self.prompts_per_rollout is None:
-            raise ValueError("prompts_per_rollout must be set explicitly.")
-        if self.prompts_per_rollout < 1:
+        if self.prompts_per_rollout is not None and self.prompts_per_rollout < 1:
             raise ValueError("prompts_per_rollout must be >= 1.")
+        if self.component_mix_stage not in ("reward", "advantage"):
+            raise ValueError(
+                f"component_mix_stage must be one of reward/advantage, got: {self.component_mix_stage}"
+            )
         if not (0.0 <= self.trimmed_ratio < 0.5):
             raise ValueError("trimmed_ratio must be in [0.0, 0.5).")
         window_cfg = self.window
@@ -375,12 +434,12 @@ class TrainingConfig:
     """Optimizer, LoRA/FSDP, and core training runtime controls."""
 
     # Optimizer and update schedule
-    gradient_accumulation_batch_size: Optional[int] = field(default=None,
-        metadata={"help": "Per-GPU micro-batch size used inside one optimizer update. Set to null/None to disable extra gradient accumulation and use the effective update batch size directly"})
-    multi_update_batch_size: Optional[int] = field(default=None,
-        metadata={"help": "Per-GPU update-chunk size for multi_update. If >= the local rollout batch size, validation normalizes update_mode back to single_update"})
-    update_mode: str = field(default="single_update",
-        metadata={"help": "Training update schedule: single_update does one optimizer step per rollout pass; multi_update does one optimizer step per update chunk"})
+    local_update_batch_size: Optional[int] = field(default=None,
+        metadata={"help": "Local optimizer-update batch size in samples. This is the primary training geometry owner when set."})
+    local_micro_batch_size: Optional[int] = field(default=None,
+        metadata={"help": "Local micro-batch size for one forward/backward pass. Defaults to local_update_batch_size when omitted."})
+    num_updates_per_local_batch: Optional[int] = field(default=None,
+        metadata={"help": "Number of optimizer updates performed from one local batch. Defaults to 1 when local_update_batch_size is set."})
     learning_rate: float = field(default=1e-6,
         metadata={"help": "Peak learning rate for the optimizer"})
     adam_beta1: float = field(default=0.9,
@@ -416,9 +475,6 @@ class TrainingConfig:
     lora_target_modules: Optional[str] = field(default=None,
         metadata={"help": "Comma-separated LoRA target modules (e.g. 'to_q,to_k,to_v')"})
 
-    # FSDP
-    fsdp_sharding_strategy: str = field(default="FULL_SHARD",
-        metadata={"help": "Legacy compatibility knob. diffusionrl train_backend=fsdp is fully_shard-only; keep FULL_SHARD"})
     fsdp_cpu_offload: bool = field(default=False,
         metadata={"help": "Offload FSDP parameters and gradients to CPU"})
 
@@ -427,18 +483,22 @@ class TrainingConfig:
         metadata={"help": "Enable gradient checkpointing to save memory at the cost of compute"})
 
     def validate(self) -> None:
+        explicit_geometry_fields = {
+            "local_update_batch_size": self.local_update_batch_size,
+            "local_micro_batch_size": self.local_micro_batch_size,
+            "num_updates_per_local_batch": self.num_updates_per_local_batch,
+        }
+        for field_name, value in explicit_geometry_fields.items():
+            if value is not None and int(value) < 1:
+                raise ValueError(f"{field_name} must be >= 1 when set.")
+
         if (
-            self.gradient_accumulation_batch_size is not None
-            and int(self.gradient_accumulation_batch_size) < 1
+            self.num_updates_per_local_batch is not None
+            and self.local_update_batch_size is None
         ):
-            raise ValueError("gradient_accumulation_batch_size must be >= 1 when set.")
-        if self.multi_update_batch_size is not None and int(self.multi_update_batch_size) < 1:
-            raise ValueError("multi_update_batch_size must be >= 1 when set.")
-        mode = str(self.update_mode).strip().lower()
-        if mode not in {"single_update", "multi_update"}:
             raise ValueError(
-                "update_mode must be one of single_update/multi_update, "
-                f"got: {self.update_mode!r}"
+                "training.num_updates_per_local_batch requires "
+                "training.local_update_batch_size."
             )
         backend = str(self.train_backend or "fsdp").strip().lower()
         supported = {"fsdp", "megatron", "veomni"}
@@ -447,18 +507,65 @@ class TrainingConfig:
                 f"Unsupported train_backend={self.train_backend!r}. "
                 f"Expected one of {sorted(supported)} or provide --training.train-backend-path."
             )
-        sharding = str(self.fsdp_sharding_strategy or "FULL_SHARD").strip().upper()
-        if sharding != "FULL_SHARD":
-            raise ValueError(
-                "fsdp_sharding_strategy is a legacy compatibility argument and "
-                "must be FULL_SHARD in the current FSDP2 backend. "
-                f"Got: {self.fsdp_sharding_strategy!r}"
-            )
+
+
+@dataclass
+class PrecisionConfig:
+    """Precision controls for model load, FSDP wrapping, and rollout tensors."""
+
+    model_precision: str = field(default="bf16",
+        metadata={"help": "Precision used to load model weights/components (default: bf16)"})
+    fsdp_precision: str = field(default="fp32",
+        metadata={"help": "FSDP param precision on the training side (default: fp32)"})
+    autocast_precision: str = field(default="bf16",
+        metadata={"help": "Autocast precision for sampler/model forward passes (default: bf16)"})
+    trajectory_precision: str = field(default="fp16",
+        metadata={"help": "Precision used to store rollout trajectory latents (default: fp16)"})
+    logprob_precision: str = field(default="fp32",
+        metadata={"help": "Precision used to store rollout log-prob tensors (default: fp32)"})
+
+    def validate(self) -> None:
+        _validate_precision_name(self.model_precision, field_name="precision.model_precision")
+        _validate_precision_name(self.fsdp_precision, field_name="precision.fsdp_precision")
+        _validate_precision_name(self.autocast_precision, field_name="precision.autocast_precision")
+        _validate_precision_name(self.trajectory_precision, field_name="precision.trajectory_precision")
+        _validate_precision_name(self.logprob_precision, field_name="precision.logprob_precision")
 
 
 @dataclass
 class RolloutLoggingConfig:
     """Rollout loop/buffer, checkpoint/eval, and logging controls."""
+
+    mode: Optional[str] = field(default=None,
+        metadata={"help": "Canonical rollout topology: direct_rollout, separate_rollout, or colocate_rollout"})
+    service_engine: Optional[str] = field(default=None,
+        metadata={"help": "Canonical rollout engine selector: fsdp for direct_rollout, sglang for separate_rollout or colocate_rollout."})
+    service_num_gpus: Optional[int] = field(default=None,
+        metadata={"help": "Dedicated rollout service GPUs per actor/engine. Required for separate_rollout and colocate_rollout."})
+    engine_tp_size: Optional[int] = field(default=None,
+        metadata={"help": "Dedicated rollout service tensor parallel hint. Does not determine actor GPU ownership."})
+    engine_sp_size: Optional[int] = field(default=None,
+        metadata={"help": "Dedicated rollout service sequence/spatial parallel hint. Does not determine actor GPU ownership."})
+    service_require_memory_api: Optional[bool] = field(default=None,
+        metadata={"help": "Whether dedicated rollout service requires concrete memory API handlers."})
+    service_transport_dtype: Optional[str] = field(default=None,
+        metadata={"help": "Dedicated rollout transport payload dtype override."})
+    service_transport_drop_decoded_videos: Optional[bool] = field(default=None,
+        metadata={"help": "Whether rollout transport drops decoded video payloads after reward handling."})
+    service_transport_log_payload_bytes: Optional[bool] = field(default=None,
+        metadata={"help": "Whether rollout transport logs serialized payload sizes for debugging."})
+    sglang_local_mode: Optional[bool] = field(default=None,
+        metadata={"help": "Whether SGLang rollout uses in-actor local generator mode."})
+    sglang_verify_weight_checksum: Optional[bool] = field(default=None,
+        metadata={"help": "Whether SGLang verifies weight checksum after rollout-side updates."})
+    sglang_prompt_encoder_device: Optional[str] = field(default=None,
+        metadata={"help": "Device for SGLang-side prompt encoder construction."})
+    sglang_prompt_encoder_dtype: Optional[str] = field(default=None,
+        metadata={"help": "Prompt encoder dtype for SGLang rollout (auto/fp16/bf16/fp32)."})
+    sglang_prompt_encoder_max_length: Optional[int] = field(default=None,
+        metadata={"help": "Prompt encoder max sequence length for SGLang rollout."})
+    sglang_kwargs: Dict[str, Any] = field(default_factory=dict,
+        metadata={"help": "Engine-scoped SGLang rollout kwargs. ServerArgs-compatible keys are forwarded to the SGLang rollout runtime."})
 
     # Rollout buffer actor (data-centric handoff with validation/filter plugins)
     rollout_buffer_max_queue_size: int = field(default=0,
@@ -471,14 +578,10 @@ class RolloutLoggingConfig:
         metadata={"help": "Maximum reward threshold for sample filtering (None = no filter)"})
     rollout_buffer_min_samples: int = field(default=1,
         metadata={"help": "Minimum samples required before dispatching a batch"})
-    rollout_buffer_grouped: bool = field(default=False,
-        metadata={"help": "Group samples by explicit group_ids in the rollout buffer"})
+    rollout_buffer_reassemble_by_group: bool = field(default=False,
+        metadata={"help": "Reassemble outgoing training batches in the rollout buffer by explicit group_ids"})
     rollout_buffer_group_size: Optional[int] = field(default=None,
-        metadata={"help": "Optional explicit samples per logical group; when unset, infer from incoming group_ids batches"})
-    rollout_buffer_dispatch_groups: int = field(default=0,
-        metadata={"help": "Number of prompt-groups merged into one training batch (0 = prompts_per_rollout)"})
-    rollout_buffer_allow_partial_group: bool = field(default=True,
-        metadata={"help": "Allow dispatching groups with fewer samples than group_size"})
+        metadata={"help": "Explicit samples per logical group. Required when rollout_buffer_reassemble_by_group=true"})
     rollout_buffer_group_ttl_seconds: float = field(default=0.0,
         metadata={"help": "Time-to-live for incomplete groups in seconds (0 = no timeout)"})
     rollout_buffer_max_pending_samples: int = field(default=0,
@@ -533,6 +636,23 @@ class RolloutLoggingConfig:
         metadata={"help": "WandB entity (team or username). If not set, uses the default entity of the logged-in user."})
 
     def validate(self) -> None:
+        normalized_mode = normalize_rollout_mode(self.mode)
+        if normalized_mode and normalized_mode not in ROLLOUT_MODES:
+            raise ValueError(
+                "rollout.mode must be one of "
+                f"{sorted(ROLLOUT_MODES)}, got: {self.mode!r}"
+            )
+        for attr_name in (
+            "service_num_gpus",
+            "engine_tp_size",
+            "engine_sp_size",
+            "sglang_prompt_encoder_max_length",
+        ):
+            value = getattr(self, attr_name)
+            if value is not None and int(value) < 1:
+                raise ValueError(f"rollout.{attr_name} must be >= 1 when set.")
+        if not isinstance(self.sglang_kwargs, dict):
+            raise ValueError("rollout.sglang_kwargs must be a dict.")
         if self.num_rollout < 1:
             raise ValueError("num_rollout must be >= 1.")
         if self.save_steps < 0:
@@ -591,8 +711,10 @@ _GROUP_CONFIG_TYPES = {
     "sampling": SamplingConfig,
     "reward": RewardConfig,
     "ray": RayConfig,
+    "sync": SyncConfig,
     "algorithm": AlgorithmConfig,
     "training": TrainingConfig,
+    "precision": PrecisionConfig,
     "rollout": RolloutLoggingConfig,
     "debug": DebugConfig,
 }
@@ -641,7 +763,13 @@ _GROUP_SUBCONFIG_NAMES: Dict[str, set[str]] = {}
 
 def is_training_actor_sampling_mode(args: Any) -> bool:
     """Return whether training actors should directly handle sampling."""
-    return str(getattr(args.sampling, "sampling_mode", "rollout_actor") or "rollout_actor").strip().lower() == "training_actor"
+    rollout_mode = normalize_rollout_mode(getattr(args.rollout, "mode", None))
+    if not rollout_mode:
+        raise ValueError(
+            "rollout.mode must be set explicitly before calling "
+            "is_training_actor_sampling_mode(). Run validate_args()/parse_args() first."
+        )
+    return rollout_mode == DIRECT_ROLLOUT_MODE
 
 @dataclass
 class TrainingArguments:
@@ -656,8 +784,10 @@ class TrainingArguments:
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
     ray: RayConfig = field(default_factory=RayConfig)
+    sync: SyncConfig = field(default_factory=SyncConfig)
     algorithm: AlgorithmConfig = field(default_factory=AlgorithmConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    precision: PrecisionConfig = field(default_factory=PrecisionConfig)
     rollout: RolloutLoggingConfig = field(default_factory=RolloutLoggingConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
 
@@ -946,6 +1076,7 @@ _GROUP_DISPLAY_NAMES: Dict[str, str] = {
     "sampling": "Sampling & Inference",
     "reward": "Reward Configuration",
     "ray": "Ray & Resource Layout",
+    "sync": "Weight Sync",
     "algorithm": "Algorithm & Advantage",
     "algorithm.window": "Window/Timestep Scheduler",
     "training": "Training & Optimization",
@@ -1082,6 +1213,7 @@ def _flatten_yaml_mapping(
             if not key_parts:
                 continue
             parts = prefix + key_parts
+            source_path = ".".join(parts)
             # Only grouped style is supported for grouped fields in YAML.
             # Example: use `training: {train_backend: fsdp}` (or `training.train_backend`)
             # instead of legacy flat key `train_backend`.
@@ -1102,19 +1234,19 @@ def _flatten_yaml_mapping(
             if isinstance(value, dict):
                 leaf_dest = _resolve_yaml_leaf_dest(parts)
                 if leaf_dest is not None and not _is_yaml_container_path(parts):
-                    _assign(leaf_dest, value, source_path=".".join(parts))
+                    _assign(leaf_dest, value, source_path=source_path)
                     continue
                 if _is_yaml_container_path(parts):
                     _walk(value, parts)
                     continue
-                _assign(".".join(parts), value, source_path=".".join(parts))
+                _assign(".".join(parts), value, source_path=source_path)
                 continue
 
             leaf_dest = _resolve_yaml_leaf_dest(parts)
             if leaf_dest is not None:
-                _assign(leaf_dest, value, source_path=".".join(parts))
+                _assign(leaf_dest, value, source_path=source_path)
             else:
-                _assign(".".join(parts), value, source_path=".".join(parts))
+                _assign(".".join(parts), value, source_path=source_path)
 
     _walk(yaml_data, [])
     return flattened
@@ -1236,101 +1368,54 @@ def _format_config_value(value: Any) -> str:
         return repr(value)
 
 
-def _infer_normalize_source() -> str:
-    """Best-effort infer of normalize rewrite source function name."""
-    frame = inspect.currentframe()
-    try:
-        frame = frame.f_back if frame is not None else None
-        skip = {
-            "_infer_normalize_source",
-            "_set_normalized_attr",
-            "_set_normalized_dict_item",
-            "_trace_normalize_change",
-        }
-        while frame is not None:
-            name = frame.f_code.co_name
-            if name not in skip:
-                return name
-            frame = frame.f_back
-    finally:
-        # Avoid reference cycles in frame objects.
-        del frame
-    return "<unknown>"
-
-
-def _normalize_trace_enabled(args: Any) -> bool:
-    return bool(getattr(args, "_print_normalize_changes", False))
-
-
-def _print_normalize_header_once(args: Any) -> None:
-    if not _normalize_trace_enabled(args):
-        return
-    if bool(getattr(args, "_normalize_change_header_printed", False)):
-        return
-    use_color = _supports_color_output()
-    print(_color("[Normalize Changes] rewritten fields during validation", "bold", enabled=use_color))
-    setattr(args, "_normalize_change_header_printed", True)
-
-
-def _trace_normalize_change(
-    args: Any,
-    key: str,
-    before: Any,
-    after: Any,
-    *,
-    source: Optional[str] = None,
-) -> None:
-    if before == after or not _normalize_trace_enabled(args):
-        return
-    _print_normalize_header_once(args)
-    use_color = _supports_color_output()
-    before_text = _format_config_value(before)
-    after_text = _format_config_value(after)
-    source_text = str(source or _infer_normalize_source())
-    print(
-        f"  {_color(key, 'orange', enabled=use_color)}: "
-        f"{_color(before_text, 'red', enabled=use_color)} "
-        f"{_color('->', 'orange', enabled=use_color)} "
-        f"{_color(after_text, 'green', enabled=use_color)} "
-        f"{_color(f'(source={source_text})', 'cyan', enabled=use_color)}"
+def _build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
+    """Build a read-only resolved config view for debugging/inspection."""
+    resolved = args.to_flat_dict()
+    explicit_sampler_path = args.sampling.sampler_path != DEFAULT_SAMPLER_PATH
+    model_runtime = resolve_model_runtime(
+        args,
+        explicit_sampler_path=explicit_sampler_path,
     )
-
-
-def _set_normalized_attr(
-    args: Any,
-    owner: Any,
-    attr: str,
-    value: Any,
-    *,
-    key: str,
-    source: Optional[str] = None,
-) -> None:
-    before = getattr(owner, attr)
-    if before == value:
-        return
-    setattr(owner, attr, value)
-    _trace_normalize_change(args, key, before, value, source=source or _infer_normalize_source())
-
-
-def _set_normalized_dict_item(
-    args: Any,
-    mapping: Dict[str, Any],
-    item: str,
-    value: Any,
-    *,
-    key: str,
-    source: Optional[str] = None,
-) -> None:
-    before = mapping.get(item, "<missing>")
-    if before == value:
-        return
-    mapping[item] = value
-    _trace_normalize_change(args, key, before, value, source=source or _infer_normalize_source())
+    rollout_topology = resolve_rollout_topology(args)
+    resolved["model.model_path"] = model_runtime.model_path
+    resolved["model.model_type"] = model_runtime.model_type
+    resolved["sampling.sampler_path"] = model_runtime.sampler_path
+    resolved["algorithm.algorithm_path"] = resolve_algorithm_path(args)
+    resolved["training.train_backend"] = resolve_train_backend_name(args)
+    resolved["rollout.mode"] = rollout_topology.mode
+    resolved["rollout.service_engine"] = rollout_topology.service_engine
+    resolved["sync.protocol"] = resolve_sync_protocol(
+        args,
+        training_actor_sampling_mode=rollout_topology.training_actor_sampling_mode,
+        rollout_service_engine=rollout_topology.service_engine,
+    )
+    train_topology = resolve_training_topology(args)
+    train_plan = resolve_training_plan(args)
+    resolved["runtime.training_actor_count"] = train_topology.actor_count
+    resolved["runtime.training_world_size"] = train_topology.world_size
+    resolved["runtime.training_dp_size"] = train_topology.dp_size
+    resolved["runtime.training_tp_size"] = train_topology.tp_size
+    resolved["runtime.training_pp_size"] = train_topology.pp_size
+    resolved["runtime.training_sp_size"] = train_topology.sp_size
+    resolved["runtime.training_ep_size"] = train_topology.ep_size
+    resolved["runtime.prompts_per_rollout"] = resolve_prompts_per_rollout(args)
+    resolved["runtime.training_global_batch_size"] = train_plan.global_batch_size
+    resolved["runtime.training_local_batch_size"] = train_plan.local_batch_size
+    resolved["runtime.training_local_update_batch_size"] = (
+        train_plan.local_update_batch_size
+    )
+    resolved["runtime.training_local_micro_batch_size"] = (
+        train_plan.local_micro_batch_size
+    )
+    resolved["runtime.training_num_updates_per_local_batch"] = (
+        train_plan.num_updates_per_local_batch
+    )
+    return resolved
 
 
 def _print_config_views(
     *,
-    after_flat: Dict[str, Any],
+    args: TrainingArguments,
     print_resolved_config: bool,
 ) -> None:
     if not print_resolved_config:
@@ -1340,8 +1425,9 @@ def _print_config_views(
 
     if print_resolved_config:
         print(_color("[Resolved Config] final runtime values", "bold", enabled=use_color))
-        for key in sorted(after_flat.keys()):
-            value_text = _format_config_value(after_flat.get(key))
+        resolved_flat = _build_resolved_config_view(args)
+        for key in sorted(resolved_flat.keys()):
+            value_text = _format_config_value(resolved_flat.get(key))
             print(f"  {_color(key, 'cyan', enabled=use_color)}: {value_text}")
 
 
@@ -1366,7 +1452,7 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
     parser.add_argument(
         "--print-resolved-config",
         action="store_true",
-        help="Print resolved runtime config after normalization/validation.",
+        help="Print resolved runtime config after validation.",
     )
     parser.add_argument(
         "--allow-unknown-config-keys",
@@ -1450,11 +1536,10 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
 
     args = TrainingArguments(**top_level_kwargs)
 
-    # Validate and normalize arguments
-    args = validate_args(args, print_normalize_changes=True)
-    post_validate_flat = args.to_flat_dict()
+    # Validate explicit config. Runtime builders derive resolved values separately.
+    args = validate_args(args)
     _print_config_views(
-        after_flat=post_validate_flat,
+        args=args,
         print_resolved_config=print_resolved_config,
     )
 
@@ -1464,147 +1549,45 @@ def _resolve_model_runtime_contract(
     args: TrainingArguments,
     *,
     explicit_sampler_path: bool,
-    explicit_sampler_engine_type: bool,
-) -> Any:
-    """Resolve model path/type and model-declared runtime defaults."""
-    if args.model.model_path == DEFAULT_MODEL_PATH:
-        resolved_model_path = resolve_model_bundle_path(args.model.model_type)
-        if not resolved_model_path:
-            raise ValueError(
-                f"Unknown model_type={args.model.model_type!r}. "
-                f"Discovered model types: {list_model_types()}. "
-                "Provide --model.model-path explicitly for custom models."
-            )
-        _set_normalized_attr(
-            args,
-            args.model,
-            "model_path",
-            resolved_model_path,
-            key="model.model_path",
-        )
-        logger.info(
-            "Auto-resolved model_type=%s to model_path=%s",
-            args.model.model_type,
-            args.model.model_path,
-        )
-
-    validate_dotpath(args.model.model_path, label="model")
-    model_cls = load_function(args.model.model_path)
-
-    declared_model_type_fn = getattr(model_cls, "declared_model_type", None)
-    if callable(declared_model_type_fn):
-        declared_model_type = declared_model_type_fn()
-        if isinstance(declared_model_type, str) and declared_model_type.strip():
-            normalized_declared = declared_model_type.strip().lower()
-            if str(args.model.model_type).strip().lower() != normalized_declared:
-                logger.info(
-                    "Aligning model_type=%s to declared model_type=%s from model_path=%s",
-                    args.model.model_type,
-                    normalized_declared,
-                    args.model.model_path,
-                )
-            _set_normalized_attr(
-                args,
-                args.model,
-                "model_type",
-                normalized_declared,
-                key="model.model_type",
-            )
-
-    model_defaults: Dict[str, Optional[str]] = {"sampler_path": None, "sampler_engine_type": None}
-    sampler_path_fn = getattr(model_cls, "default_sampler_path", None)
-    if callable(sampler_path_fn):
-        model_defaults["sampler_path"] = sampler_path_fn()
-    engine_type_fn = getattr(model_cls, "default_sampler_engine", None)
-    if callable(engine_type_fn):
-        model_defaults["sampler_engine_type"] = engine_type_fn()
-
-    if args.sampling.sampler_path == DEFAULT_SAMPLER_PATH and not explicit_sampler_path:
-        model_sampler_path = model_defaults.get("sampler_path")
-        if model_sampler_path:
-            _set_normalized_attr(
-                args,
-                args.sampling,
-                "sampler_path",
-                model_sampler_path,
-                key="sampling.sampler_path",
-            )
-            logger.info(
-                "Auto-mapped model_path=%s to sampler_path=%s",
-                args.model.model_path,
-                args.sampling.sampler_path,
-            )
-        else:
-            logger.warning(
-                "Model %s does not declare default_sampler_path(); keeping sampler_path=%s.",
-                args.model.model_path,
-                args.sampling.sampler_path,
-            )
-
-    if args.sampling.sampler_engine_type is None:
-        model_engine_type = model_defaults.get("sampler_engine_type")
-        if model_engine_type:
-            _set_normalized_attr(
-                args,
-                args.sampling,
-                "sampler_engine_type",
-                model_engine_type,
-                key="sampling.sampler_engine_type",
-            )
-            logger.info(
-                "Auto-selected sampler_engine_type=%s from model_path=%s",
-                args.sampling.sampler_engine_type,
-                args.model.model_path,
-            )
-        else:
-            raise ValueError(
-                f"Model {args.model.model_path} does not declare default_sampler_engine(). "
-                "Provide --sampling.sampler-engine-type explicitly."
-            )
-
-    return model_cls
-
-
-def _normalize_sampling_basics(args: TrainingArguments) -> tuple[bool, bool, str]:
-    """Normalize sampling mode, engine kwargs, and sglang mode."""
-    if not isinstance(args.sampling.engine_kwargs, dict):
-        logger.warning("engine_kwargs is not a dict. Resetting to empty dict.")
-        _set_normalized_attr(
-            args,
-            args.sampling,
-            "engine_kwargs",
-            {},
-            key="sampling.engine_kwargs",
-        )
-
-    sampling_mode = str(args.sampling.sampling_mode or "rollout_actor").strip().lower()
-    _set_normalized_attr(
+) -> tuple[Any, Dict[str, Optional[str]]]:
+    """Resolve model path/type and model-declared runtime defaults without mutating args."""
+    resolved = resolve_model_runtime(
         args,
-        args.sampling,
-        "sampling_mode",
-        sampling_mode,
-        key="sampling.sampling_mode",
+        explicit_sampler_path=explicit_sampler_path,
     )
-    direct_sampling = sampling_mode == "training_actor"
+    model_defaults: Dict[str, Optional[str]] = {
+        "sampler_path": resolved.sampler_path,
+        "sampler_engine_type": resolved.model_default_engine_type,
+    }
+    return resolved.model_cls, model_defaults
 
-    is_sglang_engine = str(args.sampling.sampler_engine_type).lower() == "sglang"
-    logprob_source = str(args.sampling.logprob_source or "replay").strip().lower()
-    _set_normalized_attr(
-        args,
-        args.sampling,
-        "logprob_source",
-        logprob_source,
-        key="sampling.logprob_source",
-    )
-    if is_sglang_engine:
-        _set_normalized_dict_item(
-            args,
-            args.sampling.engine_kwargs,
-            "logprob_source",
-            logprob_source,
-            key="sampling.engine_kwargs.logprob_source",
-        )
-    return direct_sampling, is_sglang_engine, logprob_source
+
+def _validate_rollout_topology(
+    args: TrainingArguments,
+    *,
+    model_default_engine_type: Optional[str],
+) -> tuple[bool, Optional[str]]:
+    """Validate explicit rollout topology without mutating args."""
+    del model_default_engine_type
+    resolved = resolve_rollout_topology(args)
+    return resolved.training_actor_sampling_mode, resolved.service_engine
+
+
+def _validate_sampling_basics(
+    args: TrainingArguments,
+    *,
+    rollout_service_engine: Optional[str],
+) -> tuple[bool, str]:
+    """Validate sampling/runtime basics without mutating args."""
+    if not isinstance(args.sampling.sampler_kwargs, dict):
+        raise ValueError("sampling.sampler_kwargs must be a dict.")
+
+    if args.sampling.sampler_kwargs:
+        logger.info("sampling.sampler_kwargs configured with explicit sampler constructor overrides.")
+
+    is_sglang_engine = normalize_rollout_service_engine(rollout_service_engine) == "sglang"
+    logprob_source = resolve_logprob_source(args)
+    return is_sglang_engine, logprob_source
 
 
 def _apply_training_actor_sampling_overrides(
@@ -1612,52 +1595,37 @@ def _apply_training_actor_sampling_overrides(
     *,
     training_actor_sampling_mode: bool,
 ) -> None:
-    """Apply training-actor direct-sampling-only constraints and overrides."""
+    """Validate direct-sampling runtime compatibility without mutating args."""
     if not training_actor_sampling_mode:
         return
 
-    logger.warning(
-        "sampling_mode='training_actor' is an experimental path. "
-        "Default production path remains dedicated rollout actors."
-    )
-    if args.sampling.sampler_engine_type != "fsdp":
+    rollout_mode = normalize_rollout_mode(args.rollout.mode)
+    rollout_service_engine = normalize_rollout_service_engine(args.rollout.service_engine)
+    if rollout_mode_uses_service(rollout_mode) or uses_dedicated_rollout_engine(rollout_service_engine):
         raise ValueError(
-            "sampling_mode='training_actor' requires sampler_engine_type='fsdp'. "
-            f"Got sampler_engine_type={args.sampling.sampler_engine_type}."
+            "Dedicated rollout service engines cannot use direct_rollout mode. "
+            f"Got rollout.mode={rollout_mode!r}, rollout.service_engine={rollout_service_engine!r}."
         )
+
     backend_name = str(getattr(args.training, "train_backend", "fsdp") or "fsdp").strip().lower()
-    backend_path = str(getattr(args.training, "train_backend_path", "") or "").strip().lower()
-    veomni_like_backend = backend_name == "veomni" or ("veomni" in backend_path)
-    if backend_name != "fsdp" and not veomni_like_backend:
-        raise ValueError(
-            "sampling_mode='training_actor' currently supports train_backend='fsdp' "
-            "or VeOmni-native backends. "
-            f"Got train_backend={getattr(args.training, 'train_backend', None)!r}, "
-            f"train_backend_path={getattr(args.training, 'train_backend_path', None)!r}."
-        )
+    backend_path = str(getattr(args.training, "train_backend_path", "") or "").strip()
+    from diffusionrl.runtime.training.backends import resolve_train_backend_capabilities
 
-    if args.ray.rollout_num_nodes != 0 or args.ray.rollout_num_gpus_per_node != 0:
-        raise ValueError(
-            "sampling_mode='training_actor' requires rollout_num_nodes=0 and "
-            "rollout_num_gpus_per_node=0 (no separate rollout actors). "
-            f"Got rollout_num_nodes={args.ray.rollout_num_nodes}, "
-            f"rollout_num_gpus_per_node={args.ray.rollout_num_gpus_per_node}."
-        )
+    backend_caps = resolve_train_backend_capabilities(
+        backend_name,
+        backend_path=backend_path or None,
+    )
+    supports_direct_sampling = bool(backend_caps.supports_training_actor_sampling)
 
-    if not args.ray.colocate_rollout_training:
+    if not supports_direct_sampling:
         raise ValueError(
-            "sampling_mode='training_actor' requires colocate_rollout_training=true. "
-            "Set --ray.colocate-rollout-training."
-        )
-
-    if args.ray.offload or args.ray.offload_train or args.ray.offload_rollout:
-        raise ValueError(
-            "sampling_mode='training_actor' is incompatible with offload. "
-            "Set --ray.offload=false --ray.offload-train=false --ray.offload-rollout=false."
+            "rollout.mode=%r resolves to direct training-actor sampling, "
+            "but train_backend=%r does not declare supports_training_actor_sampling=true."
+            % (rollout_mode, backend_name)
         )
 
 
-def _normalize_replay_mode(
+def _validate_replay_mode(
     args: TrainingArguments,
     *,
     training_actor_sampling_mode: bool,
@@ -1674,7 +1642,7 @@ def _normalize_replay_mode(
     if is_sglang_engine and replay_guard:
         if logprob_source == "replay" and not replay_enabled:
             raise ValueError(
-                "sampler_engine_type='sglang' with logprob_source='replay' requires "
+                "rollout.service_engine='sglang' with logprob_source='replay' requires "
                 "--sampling.replay-log-probs=true. Set it explicitly."
             )
         if logprob_source == "native" and replay_enabled:
@@ -1686,7 +1654,7 @@ def _normalize_replay_mode(
     if replay_enabled and not replay_guard:
         raise ValueError(
             "replay_log_probs=true is only valid for "
-            "sampling_mode='rollout_actor' + algorithm_type='grpo'. "
+            "dedicated rollout services + algorithm_type='grpo'. "
             "Either disable replay_log_probs or adjust your config."
         )
 
@@ -1698,32 +1666,20 @@ def _apply_colocate_and_offload_rules(
     *,
     training_actor_sampling_mode: bool,
 ) -> None:
-    """Normalize offload and colocate flags."""
+    """Validate offload/colocate flags without mutating args."""
     if training_actor_sampling_mode:
-        # Training-actor sampling has no separate rollout actors; keep offload disabled.
-        _set_normalized_attr(args, args.ray, "offload", False, key="ray.offload")
-        _set_normalized_attr(args, args.ray, "offload_train", False, key="ray.offload_train")
-        _set_normalized_attr(args, args.ray, "offload_rollout", False, key="ray.offload_rollout")
+        if bool(args.ray.offload) or bool(args.ray.offload_train) or bool(args.ray.offload_rollout):
+            raise ValueError(
+                "direct_rollout uses training actors for sampling and cannot be combined with "
+                "ray.offload / ray.offload_train / ray.offload_rollout."
+            )
         return
 
-    if args.ray.offload:
-        _set_normalized_attr(args, args.ray, "offload_train", True, key="ray.offload_train")
-        _set_normalized_attr(args, args.ray, "offload_rollout", True, key="ray.offload_rollout")
-
-    if args.ray.colocate_rollout_training:
-        if args.ray.offload_train is None:
-            _set_normalized_attr(args, args.ray, "offload_train", True, key="ray.offload_train")
-        if args.ray.offload_rollout is None:
-            _set_normalized_attr(args, args.ray, "offload_rollout", True, key="ray.offload_rollout")
+    if rollout_mode_is_colocated(args.rollout.mode):
         validate_colocate_fractions(args)
 
-    if args.ray.offload_train is None:
-        _set_normalized_attr(args, args.ray, "offload_train", False, key="ray.offload_train")
-    if args.ray.offload_rollout is None:
-        _set_normalized_attr(args, args.ray, "offload_rollout", False, key="ray.offload_rollout")
 
-
-def _normalize_training_misc(args: TrainingArguments) -> None:
+def _validate_training_misc(args: TrainingArguments) -> None:
     """Validate misc training knobs that affect downstream components."""
     if args.algorithm.adv_normalization not in {"global", "group"}:
         raise ValueError(
@@ -1731,183 +1687,57 @@ def _normalize_training_misc(args: TrainingArguments) -> None:
             f"Got: {args.algorithm.adv_normalization!r}."
         )
 
-    if isinstance(args.training.lora_target_modules, str):
-        stripped = args.training.lora_target_modules.strip()
-        if stripped:
-            _set_normalized_attr(
-                args,
-                args.training,
-                "lora_target_modules",
-                [s.strip() for s in stripped.split(",") if s.strip()],
-                key="training.lora_target_modules",
-            )
-        else:
-            _set_normalized_attr(
-                args,
-                args.training,
-                "lora_target_modules",
-                None,
-                key="training.lora_target_modules",
+    resolve_lora_target_modules(args.training.lora_target_modules)
+
+    if bool(getattr(args.rollout, "rollout_buffer_reassemble_by_group", False)):
+        configured_group_size = getattr(args.rollout, "rollout_buffer_group_size", None)
+        if configured_group_size is None:
+            raise ValueError(
+                "rollout.rollout_buffer_reassemble_by_group=true requires rollout.rollout_buffer_group_size "
+                "to be set explicitly. Implicit binding to algorithm.samples_per_prompt was removed."
             )
 
-    _normalize_training_batch_geometry(args)
-
-
-def _maybe_positive_int(value: Any) -> Optional[int]:
-    try:
-        resolved = int(value)
-    except (TypeError, ValueError):
-        return None
-    if resolved < 1:
-        return None
-    return resolved
+    _validate_training_batch_geometry(args)
 
 
 def _resolve_training_dp_size(args: TrainingArguments) -> int:
-    default_dp_size = max(
-        1,
-        int(args.ray.training_num_nodes) * int(args.ray.training_num_gpus_per_node),
-    )
-    backend = str(getattr(args.training, "train_backend", "fsdp") or "fsdp").strip().lower()
-    backend_kwargs = getattr(args.training, "train_backend_kwargs", {})
-    if not isinstance(backend_kwargs, dict):
-        backend_kwargs = {}
-
-    if backend == "veomni":
-        return _maybe_positive_int(backend_kwargs.get("dp_size")) or default_dp_size
-
-    if backend == "megatron":
-        hinted_dp_size = _maybe_positive_int(backend_kwargs.get("dp_size"))
-        if hinted_dp_size is not None:
-            return hinted_dp_size
-        tp_size = _maybe_positive_int(backend_kwargs.get("tp_size")) or 1
-        pp_size = _maybe_positive_int(backend_kwargs.get("pp_size")) or 1
-        sp_size = _maybe_positive_int(backend_kwargs.get("sp_size")) or 1
-        denom = max(1, tp_size * pp_size * sp_size)
-        return max(1, default_dp_size // denom)
-
-    return default_dp_size
+    return resolve_training_dp_size(args)
 
 
-def _resolve_nominal_local_training_batch_size(args: TrainingArguments) -> int:
-    total_samples = max(
-        1,
-        int(args.algorithm.prompts_per_rollout) * int(args.algorithm.samples_per_prompt),
-    )
-    dp_size = _resolve_training_dp_size(args)
-    if total_samples % dp_size != 0:
+def _validate_training_batch_geometry(args: TrainingArguments) -> None:
+    """Validate training batch-geometry knobs without mutating args."""
+    update_batch_size = resolve_local_update_batch_size(args)
+    micro_batch_size = resolve_local_micro_batch_size(args)
+    num_updates_per_local_batch = resolve_num_updates_per_local_batch(args)
+    local_batch_size = resolve_nominal_local_training_batch_size(args)
+    global_batch_size = resolve_global_rollout_batch_size(args)
+    resolved_prompts_per_rollout = resolve_prompts_per_rollout(args)
+
+    if micro_batch_size > update_batch_size:
         raise ValueError(
-            "Nominal rollout batch size must be divisible by the effective training dp_size. "
-            f"Got total_samples={total_samples}, dp_size={dp_size}. "
-            "Adjust algorithm.prompts_per_rollout, algorithm.samples_per_prompt, "
-            "or the training backend topology."
+            "training.local_micro_batch_size must be <= "
+            "training.local_update_batch_size. "
+            f"Got micro_batch_size={micro_batch_size}, "
+            f"update_batch_size={update_batch_size}."
         )
-    return max(1, total_samples // dp_size)
-
-
-def _normalize_training_batch_geometry(args: TrainingArguments) -> None:
-    """Normalize training batch-geometry knobs onto explicit runtime semantics."""
-    local_batch_size = _resolve_nominal_local_training_batch_size(args)
-    update_mode = str(args.training.update_mode or "single_update").strip().lower()
-    gradient_accumulation_batch_size = (
-        max(1, int(args.training.gradient_accumulation_batch_size))
-        if args.training.gradient_accumulation_batch_size is not None
-        else None
-    )
-    multi_update_batch_size = (
-        max(1, int(args.training.multi_update_batch_size))
-        if args.training.multi_update_batch_size is not None
-        else None
-    )
-
-    if update_mode == "multi_update":
-        if multi_update_batch_size is None:
-            raise ValueError(
-                "update_mode='multi_update' requires training.multi_update_batch_size."
-            )
-
-        if multi_update_batch_size >= local_batch_size:
-            _set_normalized_attr(
-                args,
-                args.training,
-                "update_mode",
-                "single_update",
-                key="training.update_mode",
-            )
-            _set_normalized_attr(
-                args,
-                args.training,
-                "multi_update_batch_size",
-                None,
-                key="training.multi_update_batch_size",
-            )
-            update_mode = "single_update"
-            multi_update_batch_size = None
-        elif local_batch_size % multi_update_batch_size != 0:
-            raise ValueError(
-                "multi_update requires the nominal local training batch size to be divisible by "
-                "multi_update_batch_size. "
-                f"Got local_batch_size={local_batch_size}, "
-                f"multi_update_batch_size={multi_update_batch_size}."
-            )
-
-    if update_mode == "single_update":
-        normalized_grad_accum_batch_size = (
-            local_batch_size
-            if gradient_accumulation_batch_size is None
-            else min(gradient_accumulation_batch_size, local_batch_size)
+    if local_batch_size != update_batch_size * num_updates_per_local_batch:
+        raise ValueError(
+            "Resolved local training batch size does not match the training geometry. "
+            f"Got local_batch_size={local_batch_size}, "
+            f"local_update_batch_size={update_batch_size}, "
+            f"num_updates_per_local_batch={num_updates_per_local_batch}."
         )
-        if args.training.gradient_accumulation_batch_size != normalized_grad_accum_batch_size:
-            _set_normalized_attr(
-                args,
-                args.training,
-                "gradient_accumulation_batch_size",
-                normalized_grad_accum_batch_size,
-                key="training.gradient_accumulation_batch_size",
-            )
-        gradient_accumulation_batch_size = normalized_grad_accum_batch_size
-        if args.training.multi_update_batch_size is not None:
-            _set_normalized_attr(
-                args,
-                args.training,
-                "multi_update_batch_size",
-                None,
-                key="training.multi_update_batch_size",
-            )
-
-        if local_batch_size % gradient_accumulation_batch_size != 0:
-            raise ValueError(
-                "single_update requires the nominal local training batch size to be divisible by "
-                "gradient_accumulation_batch_size. "
-                f"Got local_batch_size={local_batch_size}, "
-                f"gradient_accumulation_batch_size={gradient_accumulation_batch_size}."
-            )
-    else:
-        normalized_grad_accum_batch_size = (
-            multi_update_batch_size
-            if gradient_accumulation_batch_size is None
-            else min(
-                gradient_accumulation_batch_size,
-                multi_update_batch_size,
-            )
+    if global_batch_size != local_batch_size * _resolve_training_dp_size(args):
+        raise ValueError(
+            "Resolved global rollout batch size does not match local_batch_size * dp_size. "
+            f"Got global_batch_size={global_batch_size}, local_batch_size={local_batch_size}, "
+            f"dp_size={_resolve_training_dp_size(args)}."
         )
-        if args.training.gradient_accumulation_batch_size != normalized_grad_accum_batch_size:
-            _set_normalized_attr(
-                args,
-                args.training,
-                "gradient_accumulation_batch_size",
-                normalized_grad_accum_batch_size,
-                key="training.gradient_accumulation_batch_size",
-            )
-        gradient_accumulation_batch_size = normalized_grad_accum_batch_size
-
-        if multi_update_batch_size % gradient_accumulation_batch_size != 0:
-            raise ValueError(
-                "multi_update requires multi_update_batch_size to be divisible by "
-                "gradient_accumulation_batch_size. "
-                f"Got multi_update_batch_size={multi_update_batch_size}, "
-                f"gradient_accumulation_batch_size={gradient_accumulation_batch_size}."
-            )
+    if resolved_prompts_per_rollout < 1:
+        raise ValueError(
+            "Resolved prompts_per_rollout must be >= 1. "
+            f"Got: {resolved_prompts_per_rollout}."
+        )
 
 
 def _validate_direct_sampling_batch_geometry(
@@ -1923,120 +1753,29 @@ def _validate_direct_sampling_batch_geometry(
     if not training_actor_sampling_mode:
         raise ValueError(
             "sampling.max_samples_per_request is only valid when "
-            "sampling.sampling_mode='training_actor'."
+            "sampling runs directly on training actors."
         )
 
     max_samples_per_request = int(max_samples_per_request)
-    prompts_per_rollout = getattr(args.algorithm, "prompts_per_rollout", None)
-    if prompts_per_rollout is None:
-        raise ValueError(
-            "sampling.max_samples_per_request requires algorithm.prompts_per_rollout to be set explicitly."
-        )
-    prompts_per_rollout = int(prompts_per_rollout)
+    prompts_per_rollout = int(resolve_prompts_per_rollout(args))
+    total_samples = prompts_per_rollout * int(args.algorithm.samples_per_prompt)
     if max_samples_per_request < 1:
         raise ValueError("sampling.max_samples_per_request must be >= 1.")
     if prompts_per_rollout < 1:
-        raise ValueError("algorithm.prompts_per_rollout must be >= 1.")
+        raise ValueError("Resolved prompts_per_rollout must be >= 1.")
+def _validate_algorithm_kwargs_payload(args: TrainingArguments) -> None:
+    """Validate algorithm_kwargs payload without mutating args."""
+    resolve_algorithm_kwargs(args)
 
 
-def _normalize_algorithm_kwargs_payload(args: TrainingArguments) -> None:
-    """Normalize algorithm_kwargs into a dictionary payload."""
-    raw = getattr(args.algorithm, "algorithm_kwargs", {})
-    if raw is None:
-        _set_normalized_attr(
-            args,
-            args.algorithm,
-            "algorithm_kwargs",
-            {},
-            key="algorithm.algorithm_kwargs",
-        )
-        return
-    if isinstance(raw, dict):
-        _set_normalized_attr(
-            args,
-            args.algorithm,
-            "algorithm_kwargs",
-            dict(raw),
-            key="algorithm.algorithm_kwargs",
-        )
-        return
-    if isinstance(raw, str):
-        text = raw.strip()
-        if not text:
-            _set_normalized_attr(
-                args,
-                args.algorithm,
-                "algorithm_kwargs",
-                {},
-                key="algorithm.algorithm_kwargs",
-            )
-            return
-        try:
-            parsed = json.loads(text)
-        except Exception as exc:
-            raise ValueError(f"Invalid algorithm_kwargs: {exc}") from exc
-        if not isinstance(parsed, dict):
-            raise ValueError(
-                "algorithm_kwargs must decode to a JSON object, "
-                f"got: {type(parsed).__name__}"
-            )
-        _set_normalized_attr(
-            args,
-            args.algorithm,
-            "algorithm_kwargs",
-            dict(parsed),
-            key="algorithm.algorithm_kwargs",
-        )
-        return
-    raise ValueError(
-        "algorithm_kwargs must be a JSON object (YAML mapping) "
-        f"or JSON object string, got: {type(raw).__name__}"
-    )
+def _validate_algorithm_path(args: TrainingArguments) -> None:
+    """Resolve algorithm.algorithm_path for validation without mutating args."""
+    resolve_algorithm_path(args)
 
 
-def _normalize_algorithm_path(args: TrainingArguments) -> None:
-    """Resolve algorithm.algorithm_path from algorithm_type exactly once."""
-    raw_algorithm_path = getattr(args.algorithm, "algorithm_path", None)
-    if isinstance(raw_algorithm_path, str) and raw_algorithm_path.strip():
-        normalized = raw_algorithm_path.strip()
-        _set_normalized_attr(
-            args,
-            args.algorithm,
-            "algorithm_path",
-            normalized,
-            key="algorithm.algorithm_path",
-        )
-        return
-
-    from diffusionrl.algorithms import DEFAULT_ALGORITHM_PATHS
-
-    algorithm_type = str(getattr(args.algorithm, "algorithm_type", "") or "").strip()
-    resolved = DEFAULT_ALGORITHM_PATHS.get(algorithm_type)
-    if not resolved:
-        raise ValueError(
-            f"Cannot resolve algorithm.algorithm_path for algorithm_type={algorithm_type!r}. "
-            "Provide --algorithm.algorithm-path explicitly or register this algorithm_type."
-        )
-    _set_normalized_attr(
-        args,
-        args.algorithm,
-        "algorithm_path",
-        resolved,
-        key="algorithm.algorithm_path",
-    )
-
-
-def _normalize_train_backend_config(args: TrainingArguments) -> None:
-    """Normalize train-backend selection and backend kwargs JSON payload."""
-    backend = str(getattr(args.training, "train_backend", "fsdp") or "fsdp").strip().lower()
-    _set_normalized_attr(
-        args,
-        args.training,
-        "train_backend",
-        backend,
-        key="training.train_backend",
-    )
-
+def _validate_train_backend_config(args: TrainingArguments) -> None:
+    """Validate train-backend selection and kwargs without mutating args."""
+    backend = resolve_train_backend_name(args)
     backend_path = getattr(args.training, "train_backend_path", None)
     supported = {"fsdp", "megatron", "veomni"}
     if backend not in supported and not backend_path:
@@ -2052,34 +1791,7 @@ def _normalize_train_backend_config(args: TrainingArguments) -> None:
             backend,
         )
 
-    raw = getattr(args.training, "train_backend_kwargs", {})
-    if raw is None:
-        parsed: Dict[str, Any] = {}
-    elif isinstance(raw, dict):
-        parsed = dict(raw)
-    elif isinstance(raw, str):
-        text = raw.strip()
-        if not text:
-            parsed = {}
-            if backend == "megatron" and not backend_path:
-                logger.warning(
-                    "train_backend=%s without actor_class_path will fail at runtime. "
-                    "Set train_backend_kwargs with actor_class_path.",
-                    backend,
-                )
-        else:
-            try:
-                parsed_obj = json.loads(text)
-            except Exception as exc:
-                raise ValueError(f"Invalid train_backend_kwargs: {exc}") from exc
-            if not isinstance(parsed_obj, dict):
-                raise ValueError("train_backend_kwargs must decode to a JSON object.")
-            parsed = dict(parsed_obj)
-    else:
-        raise ValueError(
-            "train_backend_kwargs must be a JSON object (YAML mapping) "
-            f"or JSON object string, got: {type(raw).__name__}"
-        )
+    parsed = resolve_train_backend_kwargs(args)
 
     if backend == "veomni":
         mode = str(parsed.get("data_parallel_mode", "fsdp2") or "fsdp2").strip().lower()
@@ -2093,6 +1805,12 @@ def _normalize_train_backend_config(args: TrainingArguments) -> None:
                 "train_backend=veomni in diffusionRL now targets FSDP2 only. "
                 "Set data_parallel_mode='fsdp2' or omit this field."
             )
+    if "num_actors" in parsed:
+        raise ValueError(
+            "training.train_backend_kwargs.num_actors is not supported. "
+            "Training actor count is owned by ray.training_num_nodes × "
+            "ray.training_num_gpus_per_node."
+        )
     if backend == "megatron" and not backend_path and not str(parsed.get("actor_class_path", "")).strip():
         logger.warning(
             "train_backend=%s requires actor_class_path in train_backend_kwargs "
@@ -2100,139 +1818,48 @@ def _normalize_train_backend_config(args: TrainingArguments) -> None:
             backend,
         )
 
-    _set_normalized_attr(
-        args,
-        args.training,
-        "train_backend_kwargs",
-        parsed,
-        key="training.train_backend_kwargs",
+def _validate_weight_sync(args: TrainingArguments, *, training_actor_sampling_mode: bool) -> None:
+    rollout_service_engine = normalize_rollout_service_engine(
+        getattr(args.rollout, "service_engine", None)
     )
-
-def _normalize_weight_sync(args: TrainingArguments, *, training_actor_sampling_mode: bool) -> None:
-    weight_sync_mode = getattr(args.ray, "weight_sync_mode", "auto")
-    train_backend = str(getattr(args.training, "train_backend", "fsdp") or "fsdp").strip().lower()
-    backend_path = str(getattr(args.training, "train_backend_path", "") or "").strip().lower()
-    veomni_like_backend = train_backend == "veomni" or ("veomni" in backend_path)
-    sampler_engine_type = str(getattr(args.sampling, "sampler_engine_type", "") or "").lower()
+    resolved_mode = resolve_sync_protocol(
+        args,
+        training_actor_sampling_mode=training_actor_sampling_mode,
+        rollout_service_engine=rollout_service_engine,
+    )
     is_multi_node = (
         int(getattr(args.ray, "rollout_num_nodes", 1)) > 1
         or int(getattr(args.ray, "training_num_nodes", 1)) > 1
         or int(getattr(args.reward, "reward_dedicated_num_nodes", 0)) > 1
     )
-
-    if weight_sync_mode == "auto":
-        if not training_actor_sampling_mode and sampler_engine_type == "sglang":
-            if is_multi_node:
-                _set_normalized_attr(
-                    args,
-                    args.ray,
-                    "weight_sync_mode",
-                    "nccl_broadcast",
-                    key="ray.weight_sync_mode",
-                )
-            else:
-                # Single-node sglang runs are more robust with checkpoint-based
-                # sync under Ray actor-local CUDA_VISIBLE_DEVICES mapping.
-                _set_normalized_attr(
-                    args,
-                    args.ray,
-                    "weight_sync_mode",
-                    "checkpoint_path",
-                    key="ray.weight_sync_mode",
-                )
-        elif (
-            not training_actor_sampling_mode
-            and (sampler_engine_type == "fsdp" or veomni_like_backend)
-        ):
-            _set_normalized_attr(
-                args,
-                args.ray,
-                "weight_sync_mode",
-                "checkpoint_path",
-                key="ray.weight_sync_mode",
-            )
-        else:
-            _set_normalized_attr(
-                args,
-                args.ray,
-                "weight_sync_mode",
-                "checkpoint_path",
-                key="ray.weight_sync_mode",
-            )
-
-    # Legacy alias normalization.
-    _alias_map = {"ipc": "tensor_payload", "nccl": "nccl_broadcast"}
-    if args.ray.weight_sync_mode in _alias_map:
-        _set_normalized_attr(
-            args,
-            args.ray,
-            "weight_sync_mode",
-            _alias_map[args.ray.weight_sync_mode],
-            key="ray.weight_sync_mode",
-        )
-    if args.ray.weight_sync_mode == "object_ref":
-        logger.warning("weight_sync_mode='object_ref' is deprecated, using 'checkpoint_path'")
-        _set_normalized_attr(
-            args,
-            args.ray,
-            "weight_sync_mode",
-            "checkpoint_path",
-            key="ray.weight_sync_mode",
-        )
-
     if (
-        args.ray.weight_sync_mode in {"tensor_payload", "nccl_broadcast"}
-        and sampler_engine_type != "sglang"
+        resolved_mode in {"tensor_payload", "nccl_broadcast"}
+        and rollout_service_engine != "sglang"
     ):
         raise ValueError(
-            "weight_sync_mode in {tensor_payload,nccl_broadcast} currently requires "
-            f"sampler_engine_type='sglang'. Got sampler_engine_type={sampler_engine_type!r}."
+            "sync.protocol in {tensor_payload,nccl_broadcast} currently requires "
+            "rollout.service_engine='sglang'. "
+            f"Got rollout.service_engine={rollout_service_engine!r}."
         )
 
     if (
-        args.ray.weight_sync_mode == "checkpoint_path"
-        and sampler_engine_type == "sglang"
-    ):
-        root = repo_root(env_repo_root=ENV_REPO_ROOT)
-        default_sync_dir = resolve_repo_relative_path("outputs/weight_sync", root)
-        if os.path.realpath(args.ray.weight_sync_dir) == os.path.realpath(default_sync_dir):
-            _set_normalized_attr(
-                args,
-                args.ray,
-                "weight_sync_dir",
-                "/dev/shm/diffusionrl_weight_sync",
-                key="ray.weight_sync_dir",
-            )
-            logger.info(
-                "Auto-switched weight_sync_dir to %s for sglang checkpoint sync performance.",
-                args.ray.weight_sync_dir,
-            )
-
-    if (
-        args.ray.weight_sync_mode == "checkpoint_path"
+        resolved_mode == "checkpoint_path"
         and is_multi_node
         and is_probably_local_weight_sync_dir(
-            args.ray.weight_sync_dir,
+            args.sync.dir,
             root=repo_root(env_repo_root=ENV_REPO_ROOT),
         )
     ):
         raise ValueError(
-            "weight_sync_mode=checkpoint_path in multi-node mode requires a shared filesystem path. "
-            f"Got local-only weight_sync_dir={args.ray.weight_sync_dir}. "
+            "sync.protocol=checkpoint_path in multi-node mode requires a shared filesystem path. "
+            f"Got local-only sync.dir={args.sync.dir}. "
             "Use a shared mount (e.g. /mnt/shared/... or NFS path)."
         )
 
 
-def _normalize_debug_config(args: TrainingArguments) -> str:
-    """Normalize debug mode and enforce mode-specific constraints."""
-    debug_mode = str(getattr(args.debug, "debug_mode", "none") or "none").strip().lower()
-    _set_normalized_attr(
-        args,
-        args.debug,
-        "debug_mode",
-        debug_mode,
-        key="debug.debug_mode",
-    )
+def _validate_debug_config(args: TrainingArguments) -> str:
+    """Validate debug mode and enforce mode-specific constraints."""
+    debug_mode = resolve_debug_mode(args)
 
     if debug_mode == "train_only":
         if bool(getattr(args.rollout, "async_pipeline", False)):
@@ -2251,60 +1878,46 @@ def _normalize_debug_config(args: TrainingArguments) -> str:
 
 def validate_args(
     args: TrainingArguments,
-    *,
-    print_normalize_changes: bool = False,
 ) -> TrainingArguments:
     """
-    Validate and normalize arguments for colocate/offload logic.
+    Validate arguments without mutating the original config values.
 
     Args:
         args: TrainingArguments instance to validate
 
     Returns:
-        Validated and normalized TrainingArguments
+        Validated TrainingArguments
     """
-    setattr(args, "_print_normalize_changes", bool(print_normalize_changes))
-    setattr(args, "_normalize_change_header_printed", False)
-    setattr(
-        args,
-        "_normalize_trace_callback",
-        lambda key, before, after, source=None: _trace_normalize_change(
-            args,
-            key,
-            before,
-            after,
-            source=source,
-        ),
-    )
-
     explicit_sampler_path = args.sampling.sampler_path != DEFAULT_SAMPLER_PATH
-    explicit_sampler_engine_type = getattr(args.sampling, "sampler_engine_type", None) is not None
 
     validate_grouped_configs(args)
-    debug_mode = _normalize_debug_config(args)
+    debug_mode = _validate_debug_config(args)
 
-    normalize_repo_relative_paths(
-        args,
-        env_repo_root=ENV_REPO_ROOT,
-        env_data_root=ENV_DATA_ROOT,
-        env_model_root=ENV_MODEL_ROOT,
-    )
-
-    model_cls = _resolve_model_runtime_contract(
+    model_cls, model_defaults = _resolve_model_runtime_contract(
         args,
         explicit_sampler_path=explicit_sampler_path,
-        explicit_sampler_engine_type=explicit_sampler_engine_type,
     )
-    training_actor_sampling_mode, is_sglang_engine, logprob_source = _normalize_sampling_basics(args)
-    _normalize_algorithm_kwargs_payload(args)
-    _normalize_algorithm_path(args)
-    _normalize_train_backend_config(args)
+    training_actor_sampling_mode, rollout_service_engine = _validate_rollout_topology(
+        args,
+        model_default_engine_type=model_defaults.get("sampler_engine_type"),
+    )
+    is_sglang_engine, logprob_source = _validate_sampling_basics(
+        args,
+        rollout_service_engine=rollout_service_engine,
+    )
+    _validate_algorithm_kwargs_payload(args)
+    _validate_algorithm_path(args)
+    _validate_train_backend_config(args)
     if debug_mode == "train_only":
         # Keep train_only focused on train-side imports only. Rollout/reward/data
         # extensions are not exercised on this path and should not block replay.
-        validate_dotpath(args.model.model_path, label="model")
-        validate_dotpath(args.sampling.sampler_path, label="sampler")
-        validate_dotpath(args.algorithm.algorithm_path, label="algorithm")
+        resolved_model = resolve_model_runtime(
+            args,
+            explicit_sampler_path=explicit_sampler_path,
+        )
+        validate_dotpath(resolved_model.model_path, label="model")
+        validate_dotpath(resolved_model.sampler_path, label="sampler")
+        validate_dotpath(resolve_algorithm_path(args), label="algorithm")
         if getattr(args.training, "train_backend_path", None):
             validate_dotpath(args.training.train_backend_path, label="train_backend")
         if getattr(args.sampling, "replay_sampler_path", None):
@@ -2315,7 +1928,7 @@ def validate_args(
         args,
         training_actor_sampling_mode=training_actor_sampling_mode,
     )
-    replay_guard, _, logprob_source = _normalize_replay_mode(
+    replay_guard, _, logprob_source = _validate_replay_mode(
         args,
         training_actor_sampling_mode=training_actor_sampling_mode,
         is_sglang_engine=is_sglang_engine,
@@ -2332,12 +1945,14 @@ def validate_args(
             args,
             training_actor_sampling_mode=training_actor_sampling_mode,
         )
-    _normalize_training_misc(args)
+    _validate_training_misc(args)
     _validate_direct_sampling_batch_geometry(
         args,
         training_actor_sampling_mode=training_actor_sampling_mode,
     )
-    validate_model_specific_logic(args, model_cls=model_cls)
+    apply_model_config_hook(args, model_cls=model_cls)
+    validate_model_runtime_contract(args)
+    validate_nft_sampling_contract(args)
     if debug_mode != "train_only":
         validate_resolved_engine_algorithm_contract(
             args,
@@ -2347,15 +1962,7 @@ def validate_args(
             logprob_source=logprob_source,
         )
 
-    if args.sampling.sampling_adapter:
-        _set_normalized_dict_item(
-            args,
-            args.sampling.engine_kwargs,
-            "sampling_adapter",
-            args.sampling.sampling_adapter,
-            key="sampling.engine_kwargs.sampling_adapter",
-        )
-    _normalize_weight_sync(
+    _validate_weight_sync(
         args,
         training_actor_sampling_mode=training_actor_sampling_mode,
     )
@@ -2365,14 +1972,6 @@ def validate_args(
             training_actor_sampling_mode=training_actor_sampling_mode,
             model_cls=model_cls,
         )
-
-    for transient in (
-        "_print_normalize_changes",
-        "_normalize_change_header_printed",
-        "_normalize_trace_callback",
-    ):
-        if hasattr(args, transient):
-            delattr(args, transient)
 
     return args
 

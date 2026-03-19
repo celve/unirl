@@ -14,11 +14,16 @@ import torch
 import torch.nn as nn
 from diffusers.utils.torch_utils import randn_tensor
 
-from diffusionrl.types import ForwardTrainingBatch
+from diffusionrl.config.build_domain_args import resolve_sde_config
+from diffusionrl.types import ForwardTrainingBatch, SDEConfig
 from diffusionrl.utils.adapter_utils import switch_adapter
 from .base import BaseAlgorithm, EMASpec, SamplingRequirements
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_algorithm_sde_config(config: Dict[str, Any]) -> SDEConfig:
+    return resolve_sde_config(config)
 
 
 class _NFTLoss:
@@ -26,14 +31,6 @@ class _NFTLoss:
 
     def __init__(self, algorithm: "NFTAlgorithm") -> None:
         self.algorithm = algorithm
-
-    @classmethod
-    def declared_requirements(cls) -> Dict[str, bool]:
-        return {
-            "requires_trajectory": False,
-            "requires_log_prob": False,
-            "requires_embeddings": True,
-        }
 
     def _compute_core(
         self,
@@ -132,7 +129,7 @@ class _NFTLoss:
         if hasattr(adapter_model, "set_adapter"):
             adapter_model.set_adapter(algorithm.new_adapter_name)
 
-        adv_processed = algorithm.process_advantages(advantages)
+        adv_processed = algorithm.prepare_loss_advantages(advantages)
         adv_clipped = torch.clamp(adv_processed, -algorithm.adv_clip_max, algorithm.adv_clip_max)
         r = (adv_clipped / algorithm.adv_clip_max) / 2.0 + 0.5
         r = torch.clamp(r, 0, 1)
@@ -277,18 +274,13 @@ class NFTAlgorithm(BaseAlgorithm):
         payload only.
         """
         extra = dict(config.get("algorithm_kwargs") or {})
+        sde_config = _resolve_algorithm_sde_config(config)
         known_keys = {
             "beta",
             "adv_clip_max",
             "adv_mode",
             "use_adaptive_weight",
-            "clip_range",
-            "clip_schedule",
-            "use_kl_penalty",
-            "time_shift",
-            "eta",
-            "sde_type",
-            "sde_ratio",
+            "component_mix_stage",
             "window_training",
             "skip_last_timestep",
             "skip_initial_timesteps",
@@ -330,7 +322,8 @@ class NFTAlgorithm(BaseAlgorithm):
             adv_clip_max=float(extra.get("adv_clip_max", 5.0)),
             adv_mode=str(extra.get("adv_mode", "raw")),
             use_adaptive_weight=bool(extra.get("use_adaptive_weight", True)),
-            time_shift=float(extra.get("time_shift", 3.0)),
+            component_mix_stage=str(extra.get("component_mix_stage", "reward")),
+            sde_config=sde_config,
             use_reference_ema=bool(extra.get("use_reference_ema", True)),
             old_adapter_name=str(extra.get("old_adapter_name", "old")),
             new_adapter_name=str(extra.get("new_adapter_name", "default")),
@@ -358,7 +351,8 @@ class NFTAlgorithm(BaseAlgorithm):
         adv_clip_max: float = 5.0,
         adv_mode: str = "raw",
         use_adaptive_weight: bool = True,
-        time_shift: float = 3.0,
+        component_mix_stage: str = "reward",
+        sde_config: Optional[SDEConfig] = None,
         use_reference_ema: bool = True,
         ema_decay: float = 0.001,
         ema_decay_type: str = "constant",
@@ -381,11 +375,9 @@ class NFTAlgorithm(BaseAlgorithm):
         use_global_std: bool = False,
         **kwargs,
     ):
-        # Remove clip_range from kwargs if present, NFT doesn't use it
-        kwargs.pop('clip_range', None)
         super().__init__(
-            clip_range=0.0,  # Not used by NFT
             kl_coef=kl_coef,
+            component_mix_stage=component_mix_stage,
             adv_normalization=adv_normalization,
             samples_per_prompt=samples_per_prompt,
             eval_ema_decay=eval_ema_decay,
@@ -399,7 +391,7 @@ class NFTAlgorithm(BaseAlgorithm):
         self.adv_clip_max = adv_clip_max
         self.adv_mode = adv_mode
         self.use_adaptive_weight = use_adaptive_weight
-        self.time_shift = time_shift
+        self.sde_config = sde_config or SDEConfig()
         self.use_reference_ema = bool(use_reference_ema)
         self.ema_decay = ema_decay
         self.ema_decay_type = str(ema_decay_type)
@@ -414,9 +406,24 @@ class NFTAlgorithm(BaseAlgorithm):
         self.model_type = "default"
         self._forward_plugin = None
 
+    @property
+    def eta(self) -> float:
+        return self.sde_config.eta
+
+    @property
+    def sde_type(self) -> str:
+        return self.sde_config.sde_type
+
+    @property
+    def time_shift(self) -> float:
+        return self.sde_config.shift
+
     def get_sampling_requirements(self) -> SamplingRequirements:
         """Return NFT sampling requirements."""
-        return self._build_sampling_requirements(
+        return SamplingRequirements(
+            requires_trajectory=False,
+            requires_log_prob=False,
+            requires_embeddings=True,
             extras={
                 "sde_ratio": 0.0,
                 "requires_clean_latents": True,
@@ -429,11 +436,10 @@ class NFTAlgorithm(BaseAlgorithm):
         *,
         rewards: torch.Tensor,
         group_ids: Optional[List[str]] = None,
-        component_mix_stage: str = "reward",
         reward_components: Optional[Dict[str, List[float]]] = None,
         reward_component_weights: Optional[Dict[str, float]] = None,
     ) -> torch.Tensor:
-        if component_mix_stage != "advantage" or not reward_components:
+        if self.component_mix_stage != "advantage" or not reward_components:
             return self.compute_advantages(rewards=rewards, group_ids=group_ids)
 
         default_weights = {name: 1.0 for name in reward_components}
@@ -632,20 +638,18 @@ class NFTAlgorithm(BaseAlgorithm):
     def name(self) -> str:
         return "NFT"
 
-    def process_advantages(
+    def prepare_loss_advantages(
         self,
         advantages: torch.Tensor,
-        epsilon: float = 1e-8,
     ) -> torch.Tensor:
         """
-        Process advantages according to the specified mode.
+        Transform rollout advantages into NFT loss-side weighting signal.
 
         Args:
-            advantages: Raw advantages [B]
-            epsilon: Small value for numerical stability
+            advantages: Rollout advantages [B]
 
         Returns:
-            Processed advantages [B]
+            Loss-side transformed advantages [B]
         """
         if self.adv_mode == "raw":
             return advantages
@@ -661,7 +665,7 @@ class NFTAlgorithm(BaseAlgorithm):
             )
         elif self.adv_mode == "all":
             mean = advantages.mean()
-            std = advantages.std() + epsilon
+            std = advantages.std() + self.epsilon
             return (advantages - mean) / std
         elif self.adv_mode == "per_timestep":
             return advantages
@@ -770,7 +774,7 @@ class NFTAlgorithm(BaseAlgorithm):
         *,
         model: nn.Module,
         batch: Any,
-        gradient_accumulation_batch_size: int,
+        mini_batch_slices: Tuple[Tuple[int, int], ...],
         guidance_scale: float = 3.5,
         **kwargs: Any,
     ) -> tuple:
@@ -786,17 +790,15 @@ class NFTAlgorithm(BaseAlgorithm):
                 f"{type(self).__name__} expects ForwardTrainingBatch, got {type(batch).__name__}"
             )
 
-        from diffusionrl.runtime.training.update_schedule import resolve_gradient_accumulation_plan
-
         timestep_mode = kwargs.get("timestep_mode", self.train_timestep_mode)
         shuffle_timesteps = kwargs.get("shuffle_timesteps", self.shuffle_train_timesteps)
         apply_shift = kwargs.get("apply_shift", self.apply_time_shift_in_loss)
         timestep_fraction = kwargs.get("timestep_fraction", 1.0)
 
-        mini_batches, actual_mini_batches = resolve_gradient_accumulation_plan(
-            batch_size=batch.batch_size,
-            gradient_accumulation_batch_size=gradient_accumulation_batch_size,
-        )
+        mini_batches = tuple((int(start), int(end)) for start, end in mini_batch_slices)
+        if not mini_batches:
+            raise ValueError(f"{type(self).__name__} requires non-empty mini_batch_slices.")
+        actual_mini_batches = len(mini_batches)
         num_mini_batches = len(mini_batches)
 
         if timestep_mode == "all" and batch.timesteps is not None:
@@ -936,8 +938,8 @@ class NFTAlgorithm(BaseAlgorithm):
             **kwargs,
         )
 
-    # ==================================================================
-    # Dual adapter EMA update
+    # ------------------------------------------------------------------
+    # Configuration export
     def get_config(self) -> Dict[str, Any]:
         """Get algorithm configuration as dictionary."""
         config = super().get_config()
@@ -947,6 +949,7 @@ class NFTAlgorithm(BaseAlgorithm):
             "adv_clip_max": self.adv_clip_max,
             "adv_mode": self.adv_mode,
             "use_adaptive_weight": self.use_adaptive_weight,
+            "sde_config": self.sde_config.to_dict(),
             "time_shift": self.time_shift,
             "ema_decay": self.ema_decay,
             "ema_decay_type": self.ema_decay_type,

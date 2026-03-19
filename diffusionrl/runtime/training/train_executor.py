@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from math import log
-import os
 import re
 from functools import partial
 import tqdm as tqdm_
@@ -19,6 +17,7 @@ from diffusionrl.types.training_batch import (
     ForwardTrainingBatch,
     TrainingBatch,
 )
+from diffusionrl.runtime.training.batch_partition import shard_training_batch_for_rank
 from diffusionrl.runtime.training.update_schedule import (
     TrainingUpdateSchedule,
     create_training_update_schedule,
@@ -38,9 +37,10 @@ class TrainExecutorConfig:
     algorithm_type: str
     guidance_scale: float
     max_grad_norm: float
-    gradient_accumulation_batch_size: int
-    multi_update_batch_size: Optional[int]
-    update_mode: str
+    local_micro_batch_size: int
+    local_update_batch_size: int
+    num_updates_per_local_batch: int
+    training_plan: Dict[str, Any]
     ema_manager: Optional[Any]
     timestep_fraction: Any = 1.0
     shuffle_samples: bool = True
@@ -94,39 +94,8 @@ class TrainExecutor:
         self.algorithm = algorithm
         self.config = config
         self.update_schedule: TrainingUpdateSchedule = create_training_update_schedule(
-            config.update_mode
+            config.training_plan
         )
-
-    def _shard_batch_by_rank(self, batch: TrainingBatch) -> Optional[TrainingBatch]:
-        dp_size = max(1, int(self.config.dp_size))
-        if dp_size <= 1 or getattr(batch, "is_partitioned", False):
-            return batch
-
-        batch_size = batch.batch_size
-        per_rank = batch_size // dp_size
-        remainder = batch_size % dp_size
-
-        if per_rank == 0:
-            raise ValueError(
-                "Training batch size is smaller than dp_size; each rank needs at least one sample. "
-                f"Got batch_size={batch_size}, dp_size={dp_size}."
-            )
-
-        if remainder != 0 and self.config.rank == 0:
-            raise ValueError(
-                "Training batch size must be divisible by dp_size. "
-                "DiffusionRL no longer drops remainder samples implicitly. "
-                f"Got batch_size={batch_size}, dp_size={dp_size}, remainder={remainder}."
-            )
-        if remainder != 0:
-            raise ValueError(
-                "Training batch size must be divisible by dp_size. "
-                f"Got batch_size={batch_size}, dp_size={dp_size}, remainder={remainder}."
-            )
-
-        start = self.config.rank * per_rank
-        end = start + per_rank
-        return batch.slice(start, end)
 
     def prepare_batch(self, batch: TrainingBatch) -> Optional[TrainingBatch]:
         """Validate, shard, and move training batch to compute device."""
@@ -137,7 +106,12 @@ class TrainExecutor:
                 "Legacy dict format is not supported - use typed batches."
             )
 
-        sharded = self._shard_batch_by_rank(batch)
+        sharded = shard_training_batch_for_rank(
+            batch,
+            dp_size=int(self.config.dp_size),
+            rank=int(self.config.rank),
+            per_rank_batch_size=int(self.config.training_plan.get("local_batch_size", 0) or 0),
+        )
         if sharded is None:
             return None
 
@@ -162,20 +136,6 @@ class TrainExecutor:
             except Exception:
                 pass
         return 0.0
-
-    def _train_update_chunk(
-        self,
-        *,
-        batch: TrainingBatch,
-        gradient_accumulation_batch_size: int,
-    ) -> tuple[float, Dict[str, Any], int, int, bool]:
-        return self.algorithm.compute_loss_and_backward(
-            model=self.model,
-            batch=batch,
-            gradient_accumulation_batch_size=gradient_accumulation_batch_size,
-            guidance_scale=self.config.guidance_scale,
-            timestep_fraction=getattr(self.config, "timestep_fraction", 1.0),
-        )
 
     def _clip_grad_norm(self) -> float:
         """Clip gradients using backend-aware semantics and return the norm."""
@@ -258,27 +218,28 @@ class TrainExecutor:
         last_mini_batches_per_update = 1
         total_mini_batches_consumed = 0
         optimizer_steps = 0
-        last_effective_update_batch_size = int(batch.batch_size)
-        last_effective_gradient_accumulation_batch_size = int(
-            self.config.gradient_accumulation_batch_size
+        last_effective_update_batch_size = int(self.config.local_update_batch_size)
+        last_effective_local_micro_batch_size = int(
+            self.config.local_micro_batch_size
         )
-        update_mode = self.update_schedule.name
+        training_schedule = self.update_schedule.name
 
         rank = self.config.rank
         for update_chunk in tqdm(
             self.update_schedule.iter_update_chunks(
                 batch=batch,
-                gradient_accumulation_batch_size=self.config.gradient_accumulation_batch_size,
-                multi_update_batch_size=self.config.multi_update_batch_size,
             ),
             desc=f"Training {rollout_id}:",
             unit="update",
             disable=(rank != 0),
         ):
             self.optimizer.zero_grad()
-            total_loss, all_metrics, num_timesteps, actual_mini_batches, has_backward = self._train_update_chunk(
+            total_loss, all_metrics, num_timesteps, actual_mini_batches, has_backward = self.algorithm.compute_loss_and_backward(
+                model=self.model,
                 batch=update_chunk.batch,
-                gradient_accumulation_batch_size=update_chunk.gradient_accumulation_batch_size,
+                mini_batch_slices=update_chunk.mini_batch_slices,
+                guidance_scale=self.config.guidance_scale,
+                timestep_fraction=getattr(self.config, "timestep_fraction", 1.0),
             )
 
             if has_backward:
@@ -290,14 +251,11 @@ class TrainExecutor:
                 grad_norm = 0.0
                 logger.warning(
                     "No valid timesteps to train in %s update, skipping optimizer step",
-                    update_mode,
+                    training_schedule,
                 )
 
             last_mini_batches_per_update = actual_mini_batches
             last_effective_update_batch_size = int(update_chunk.update_batch_size)
-            last_effective_gradient_accumulation_batch_size = int(
-                update_chunk.gradient_accumulation_batch_size
-            )
             total_mini_batches_consumed += actual_mini_batches
             total_timesteps += num_timesteps
 
@@ -320,11 +278,12 @@ class TrainExecutor:
             {
                 "rollout_id": rollout_id,
                 "algorithm_type": self.config.algorithm_type,
-                "training_update_mode": update_mode,
-                "configured_gradient_accumulation_batch_size": self.config.gradient_accumulation_batch_size,
-                "configured_multi_update_batch_size": self.config.multi_update_batch_size,
-                "effective_gradient_accumulation_batch_size": last_effective_gradient_accumulation_batch_size,
-                "effective_update_batch_size": last_effective_update_batch_size,
+                "training_schedule": training_schedule,
+                "configured_local_micro_batch_size": self.config.local_micro_batch_size,
+                "configured_local_update_batch_size": self.config.local_update_batch_size,
+                "configured_num_updates_per_local_batch": self.config.num_updates_per_local_batch,
+                "effective_local_micro_batch_size": last_effective_local_micro_batch_size,
+                "effective_local_update_batch_size": last_effective_update_batch_size,
                 "num_timesteps_trained": total_timesteps,
                 "mini_batches_per_update": last_mini_batches_per_update,
                 "mini_batches_consumed": total_mini_batches_consumed,

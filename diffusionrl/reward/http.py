@@ -1,23 +1,19 @@
-"""
-HTTP reward worker for GRPO training.
-
-Connects to remote reward services via HTTP API.
-"""
+"""HTTP reward executors for remote reward services."""
 
 import base64
 import io
 import json
 import time
-from typing import Dict, List, Optional, Any, Union
+from typing import Any, Dict, Optional, Union
 import torch
 from PIL import Image
 
-from .base import BaseRewardWorker, RewardRequest, RewardResponse, RewardType
+from .base import BaseRewardExecutor, RewardRequest, RewardResponse
 
 
-class HTTPRewardWorker(BaseRewardWorker):
+class HTTPRewardExecutor(BaseRewardExecutor):
     """
-    HTTP-based reward worker that connects to remote reward services.
+    HTTP-based reward executor that connects to remote reward services.
 
     This worker sends images/videos to a remote server and receives
     reward scores. Useful for:
@@ -26,13 +22,13 @@ class HTTPRewardWorker(BaseRewardWorker):
     - Integrating with existing reward APIs
 
     Example usage:
-        worker = HTTPRewardWorker(
+        executor = HTTPRewardExecutor(
             base_url="http://reward-server:8000",
             endpoint="/compute_reward",
             api_key="your-api-key",
         )
 
-        response = worker.compute_rewards(
+        response = executor.compute_rewards(
             RewardRequest(
                 images=[img1, img2],
                 prompts=["a cat", "a dog"],
@@ -71,17 +67,18 @@ class HTTPRewardWorker(BaseRewardWorker):
         max_retries: int = 3,
         retry_delay: float = 1.0,
         batch_size: int = 8,
+        input_kind: str = "image",
         verify_ssl: bool = True,
         headers: Optional[Dict[str, str]] = None,
     ):
         """
-        Initialize HTTP reward worker.
+        Initialize HTTP reward executor.
 
         Args:
             base_url: Base URL of the reward server
             endpoint: API endpoint for reward computation
-            model_name: Name identifier for this worker
-            weight: Weight for this worker in multi-reward aggregation
+            model_name: Name identifier for this executor
+            weight: Semantic aggregation weight for this executor
             api_key: Optional API key for authentication
             timeout: Request timeout in seconds
             max_retries: Number of retries on failure
@@ -96,6 +93,7 @@ class HTTPRewardWorker(BaseRewardWorker):
             batch_size=batch_size,
             timeout=timeout,
         )
+        self.input_kind = str(input_kind or "image").strip().lower()
 
         self.base_url = base_url.rstrip("/")
         self.endpoint = endpoint
@@ -281,9 +279,9 @@ class HTTPRewardWorker(BaseRewardWorker):
             return False
 
 
-class AsyncHTTPRewardWorker(HTTPRewardWorker):
+class AsyncHTTPRewardExecutor(HTTPRewardExecutor):
     """
-    Async version of HTTPRewardWorker using aiohttp.
+    Async version of HTTPRewardExecutor using aiohttp.
 
     Useful for high-throughput scenarios where multiple
     reward requests can be made concurrently.
@@ -355,3 +353,8 @@ class AsyncHTTPRewardWorker(HTTPRewardWorker):
 
         raise RuntimeError(f"Failed after {self.max_retries} retries: {last_error}")
 
+
+__all__ = [
+    "HTTPRewardExecutor",
+    "AsyncHTTPRewardExecutor",
+]

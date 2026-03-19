@@ -2,13 +2,84 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
 import torch
 
 if TYPE_CHECKING:
     from torch import device as TorchDevice
+
+
+@dataclass(frozen=True)
+class SamplingRequirements:
+    """
+    Algorithm-declared sampling contract shared with runtime.
+
+    Algorithm-specific extras (for example ``sde_ratio`` for MixGRPO and
+    ``requires_clean_latents`` for NFT) live in the open ``extras`` mapping so
+    new algorithms can declare sampler requirements without modifying the core
+    contract. The mapping is normalized into a read-only snapshot at
+    construction time.
+    """
+
+    requires_trajectory: bool = True
+    """Whether the algorithm needs full denoising trajectories."""
+
+    requires_log_prob: bool = True
+    """Whether the algorithm needs log probabilities at each step."""
+
+    requires_embeddings: bool = True
+    """Whether the algorithm needs prompt embeddings in the sampled batch."""
+
+    extras: Mapping[str, Any] = field(default_factory=dict)
+    """Read-only algorithm-specific sampler extras."""
+
+    def __post_init__(self) -> None:
+        raw_extras = self.extras
+        extras_copy = dict(raw_extras) if isinstance(raw_extras, Mapping) else {}
+        object.__setattr__(self, "extras", MappingProxyType(extras_copy))
+
+    @property
+    def sde_ratio(self) -> float:
+        """Ratio of SDE steps (1.0 = all SDE, 0.0 = all ODE)."""
+        return float(self.extras.get("sde_ratio", 1.0))
+
+    @property
+    def requires_clean_latents(self) -> bool:
+        """Whether the algorithm needs clean latents x0."""
+        return bool(self.extras.get("requires_clean_latents", False))
+
+    @property
+    def forward_diffusion_in_loss(self) -> bool:
+        """Whether forward diffusion happens in loss computation."""
+        return bool(self.extras.get("forward_diffusion_in_loss", False))
+
+    @property
+    def is_mixed_sampling(self) -> bool:
+        """Whether this uses mixed SDE/ODE sampling."""
+        return 0.0 < self.sde_ratio < 1.0
+
+    @property
+    def is_trajectory_based(self) -> bool:
+        """Whether this is a trajectory-based algorithm (GRPO, MixGRPO)."""
+        return self.requires_trajectory
+
+    @property
+    def is_forward_process(self) -> bool:
+        """Whether this is a forward process algorithm (NFT)."""
+        return self.requires_clean_latents and not self.requires_trajectory
+
+    def to_dict(self) -> Dict[str, bool]:
+        """Convert core boolean requirements to a plain dictionary."""
+        return {
+            "requires_trajectory": bool(self.requires_trajectory),
+            "requires_log_prob": bool(self.requires_log_prob),
+            "requires_embeddings": bool(self.requires_embeddings),
+        }
+
 
 @dataclass
 class LogProbData:
@@ -244,7 +315,7 @@ class RolloutOutput:
     """
     Output from a sampler.
 
-    This is the unified interface for all samplers (FastVideo, image models, etc.)
+    This is the unified interface for all current samplers (image/video, FSDP/SGLang, etc.)
 
     Attributes:
         latents: Final denoised latents [B, C, H, W] or [B, C, T, H, W] for video
@@ -440,9 +511,10 @@ class RolloutRequest:
     throughout the rollout pipeline (engines, actors, actor-groups,
     distributed helpers).
 
-    External callers are expected to provide text prompts. Optional embedding
-    tensor fields remain available only for internal compatibility paths and
-    fallback plumbing.
+    External callers are expected to provide text prompts plus rollout control
+    metadata. Prompt embeddings are produced inside the rollout runtime and
+    carried on ``RolloutOutput`` / training batches rather than being passed
+    through the request contract.
     """
 
     prompts: List[str]
@@ -451,14 +523,8 @@ class RolloutRequest:
     group_ids: Optional[List[str]] = None
     noise_group_ids: Optional[List[str]] = None
     prompt_metadata: Optional[List[Optional[Dict[str, Any]]]] = None
-    prompt_embeds: Optional[torch.Tensor] = None
-    pooled_prompt_embeds: Optional[torch.Tensor] = None
-    encoder_attention_mask: Optional[torch.Tensor] = None
-    text_ids: Optional[torch.Tensor] = None
-    num_inference_steps: int = 28
-    guidance_scale: float = 3.5
-    eta: float = 1.0
-    sde_type: str = "sde"
+    num_inference_steps: Optional[int] = None
+    guidance_scale: Optional[float] = None
     height: Optional[int] = None
     width: Optional[int] = None
     num_frames: Optional[int] = None
@@ -496,13 +562,7 @@ class RolloutRequest:
                 setattr(req, attr, value[start:end])
 
         # Slice tensor fields that may be batched along dim-0
-        for attr in (
-            "prompt_embeds",
-            "pooled_prompt_embeds",
-            "encoder_attention_mask",
-            "text_ids",
-            "latents",
-        ):
+        for attr in ("latents",):
             val = getattr(self, attr, None)
             if (
                 val is not None

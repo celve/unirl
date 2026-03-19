@@ -8,13 +8,32 @@ This decouples actors from the TrainingArguments structure.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
+from diffusionrl.config.resolution import (
+    DEFAULT_SAMPLER_PATH,
+    ResolvedTrainingPlan,
+    ResolvedTrainTopology,
+    resolve_algorithm_kwargs,
+    resolve_algorithm_path,
+    resolve_lora_target_modules,
+    resolve_model_runtime,
+    resolve_train_backend_kwargs,
+    resolve_train_backend_name,
+    resolve_training_plan,
+)
+from diffusionrl.config.rollout_topology import (
+    normalize_rollout_service_engine,
+    resolve_rollout_service_kwargs,
+)
 from diffusionrl.reward.spec import (
     RewardComponentSpec,
+    RewardDefinition,
     RewardExecutionPlan,
-    RewardSpec,
+    RewardProviderConfig,
 )
+from diffusionrl.sde.rules import normalize_sde_type
+from diffusionrl.types.sde import SDEConfig, SDEScheduleConfig
 
 # ---------------------------------------------------------------------------
 # Model domain
@@ -23,20 +42,27 @@ from diffusionrl.reward.spec import (
 def build_model_config(args) -> Dict[str, Any]:
     """Build model config consumed by training and rollout actors.
 
-    Pulls from: ModelConfig (identity/paths) + TrainingConfig (LoRA/checkpointing).
+    Pulls from: ModelConfig (identity/paths) + TrainingConfig (LoRA/checkpointing)
+    + PrecisionConfig (model load dtype).
     """
+    resolved_model = resolve_model_runtime(
+        args,
+        explicit_sampler_path=(getattr(args.sampling, "sampler_path", None) != DEFAULT_SAMPLER_PATH),
+    )
     mc = args.model    # ModelConfig
     tc = args.training  # TrainingConfig
+    pc = args.precision  # PrecisionConfig
     return {
-        "model_path": mc.model_path,
+        "model_path": resolved_model.model_path,
         "pretrained_model_saved_path": mc.pretrained_model_saved_path,
         "vae_saved_path": mc.vae_saved_path,
         "text_encoder_path": mc.text_encoder_path,
         "use_lora": bool(tc.use_lora),
         "lora_rank": int(tc.lora_rank),
         "lora_alpha": int(tc.lora_alpha),
-        "lora_target_modules": tc.lora_target_modules,
+        "lora_target_modules": resolve_lora_target_modules(tc.lora_target_modules),
         "use_gradient_checkpointing": bool(tc.use_gradient_checkpointing),
+        "model_precision": str(pc.model_precision),
     }
 
 
@@ -64,7 +90,6 @@ class RewardSchema:
     reward_models: Optional[List[str]]
     reward_weights: Optional[List[float]]
     component_aggregation: str
-    component_mix_stage: str
     reward_dedicated_gpus_per_actor: int
     reward_dedicated_num_gpus: int
     reward_dedicated_num_nodes: int
@@ -88,7 +113,6 @@ class RewardSchema:
             reward_models=rc.reward_models,
             reward_weights=rc.reward_weights,
             component_aggregation=rc.component_aggregation,
-            component_mix_stage=rc.component_mix_stage,
             reward_dedicated_gpus_per_actor=int(rc.reward_dedicated_gpus_per_actor),
             reward_dedicated_num_gpus=int(rc.reward_dedicated_num_gpus),
             reward_dedicated_num_nodes=int(rc.reward_dedicated_num_nodes),
@@ -100,7 +124,7 @@ class RewardSchema:
     def uses_sampling_actor_execution(self) -> bool:
         return self.to_execution_plan().uses_sampling_actor_execution
 
-    def to_spec(self) -> RewardSpec:
+    def to_definition(self) -> RewardDefinition:
         if self.reward_models:
             weights = self.reward_weights or []
             components = tuple(
@@ -117,13 +141,17 @@ class RewardSchema:
                     weight=1.0,
                 ),
             )
-        return RewardSpec(
+        return RewardDefinition(
+            component_aggregation=str(self.component_aggregation),
+            components=components,
+        )
+
+    def to_provider_config(self) -> RewardProviderConfig:
+        return RewardProviderConfig(
             reward_path=self.reward_path,
             reward_model_saved_path=self.reward_model_saved_path,
             batch_size=int(self.reward_batch_size),
             timeout=float(self.reward_timeout),
-            component_aggregation=str(self.component_aggregation),
-            components=components,
         )
 
     def to_execution_plan(self) -> RewardExecutionPlan:
@@ -156,7 +184,7 @@ class RewardSchema:
         )
 
     def component_weights(self) -> Dict[str, float]:
-        return self.to_spec().component_weights()
+        return self.to_definition().component_weights()
 
 
 def build_reward_config(args) -> Dict[str, Any]:
@@ -168,6 +196,72 @@ def build_reward_config(args) -> Dict[str, Any]:
 # Sampling / runtime domain
 # ---------------------------------------------------------------------------
 
+def _resolve_nested_contract(
+    payload: Optional[Mapping[str, object]],
+    *,
+    key: str,
+    fallback: Any,
+    builder: Any,
+) -> Any:
+    """Resolve a nested typed contract from a domain-config dict."""
+
+    if payload is None:
+        return fallback
+    raw_nested = payload.get(key)
+    nested = raw_nested if isinstance(raw_nested, Mapping) else None
+    return builder.from_mapping(nested, **fallback.to_dict())
+
+
+def resolve_sde_config(
+    payload: Optional[Mapping[str, object]],
+    *,
+    default: Optional[SDEConfig] = None,
+) -> SDEConfig:
+    """Resolve canonical nested ``sde_config`` payload."""
+
+    fallback = default or SDEConfig()
+    return _resolve_nested_contract(
+        payload,
+        key="sde_config",
+        fallback=fallback,
+        builder=SDEConfig,
+    )
+
+
+def resolve_sde_schedule_config(
+    payload: Optional[Mapping[str, object]],
+    *,
+    default: Optional[SDEScheduleConfig] = None,
+) -> SDEScheduleConfig:
+    """Resolve canonical nested ``sde_schedule_config`` payload."""
+
+    fallback = default or SDEScheduleConfig()
+    return _resolve_nested_contract(
+        payload,
+        key="sde_schedule_config",
+        fallback=fallback,
+        builder=SDEScheduleConfig,
+    )
+
+def _build_sde_config(args) -> SDEConfig:
+    """Build the stable SDE math contract from sampling args."""
+    sc = args.sampling  # SamplingConfig
+    return SDEConfig(
+        eta=float(sc.eta),
+        sde_type=normalize_sde_type(sc.sde_type),
+        shift=float(sc.time_shift),
+    )
+
+
+def _build_sde_schedule_config(args) -> SDEScheduleConfig:
+    """Build the rollout-time SDE scheduling policy from sampling args."""
+    sc = args.sampling  # SamplingConfig
+    return SDEScheduleConfig(
+        sde_ratio=float(sc.sde_ratio),
+        timestep_fraction=getattr(sc, "timestep_fraction", 1.0),
+    )
+
+
 def build_sampling_config(args) -> Dict[str, Any]:
     """Build sampling config consumed by TrainingActor sampling path.
 
@@ -175,30 +269,56 @@ def build_sampling_config(args) -> Dict[str, Any]:
     Rollout collection geometry stays in rollout/training runtime config rather than
     sampler config so engines only receive knobs they actually consume.
     """
+    resolved_model = resolve_model_runtime(
+        args,
+        explicit_sampler_path=(getattr(args.sampling, "sampler_path", None) != DEFAULT_SAMPLER_PATH),
+    )
     sc = args.sampling  # SamplingConfig
-    engine_kwargs = sc.engine_kwargs
-    if not isinstance(engine_kwargs, dict):
-        raise ValueError(
-            "sampling.engine_kwargs must be a dict after normalization, "
-            f"got: {type(engine_kwargs).__name__}"
-        )
-    engine_kwargs = dict(engine_kwargs)
+    pc = args.precision  # PrecisionConfig
+    sde_config = _build_sde_config(args)
+    sde_schedule_config = _build_sde_schedule_config(args)
+    sampler_kwargs = dict(sc.sampler_kwargs or {})
+    sampler_kwargs["autocast_precision"] = str(pc.autocast_precision)
+    sampler_kwargs["trajectory_precision"] = str(pc.trajectory_precision)
+    sampler_kwargs["logprob_precision"] = str(pc.logprob_precision)
+
     return {
-        "sampler_path": sc.sampler_path,
-        "sampler_engine_type": sc.sampler_engine_type,
+        "sampler_path": resolved_model.sampler_path,
+        "sampler_engine_type": normalize_rollout_service_engine(
+            getattr(args.rollout, "service_engine", None)
+        ),
         "replay_sampler_path": sc.replay_sampler_path,
         "num_inference_steps": int(sc.num_inference_steps),
-        "eta": float(sc.eta),
-        "sde_type": str(sc.sde_type),
-        "shift": float(sc.time_shift),
+        "sde_config": sde_config.to_dict(),
         "guidance_scale": float(sc.guidance_scale),
-        "timestep_fraction": getattr(sc, "timestep_fraction", 1.0),
+        "sde_schedule_config": sde_schedule_config.to_dict(),
         "height": int(args.height),
         "width": int(args.width),
         "num_frames": int(args.num_frames),
+        "seed": int(args.seed),
         "sampling_adapter": sc.sampling_adapter,
         "init_same_noise": bool(sc.init_same_noise),
-        "sampler_kwargs": engine_kwargs.get("sampler_kwargs", {}),
+        "sampler_kwargs": sampler_kwargs,
+    }
+
+
+def build_rollout_sampling_config(args) -> Dict[str, Any]:
+    """Build sampling defaults consumed by dedicated rollout actors/engines."""
+    resolved_model = resolve_model_runtime(
+        args,
+        explicit_sampler_path=(getattr(args.sampling, "sampler_path", None) != DEFAULT_SAMPLER_PATH),
+    )
+    sc = args.sampling  # SamplingConfig
+    sde_config = _build_sde_config(args)
+
+    return {
+        "sampler_path": resolved_model.sampler_path,
+        "num_inference_steps": int(sc.num_inference_steps),
+        "sde_config": sde_config.to_dict(),
+        "guidance_scale": float(sc.guidance_scale),
+        "height": int(args.height),
+        "width": int(args.width),
+        "num_frames": int(args.num_frames),
     }
 
 
@@ -206,16 +326,18 @@ def build_rollout_engine_config(
     *,
     args,
     sampler_engine_type: str,
-    engine_kwargs: Dict[str, Any],
+    engine_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Build rollout actor engine config directly from args.
+    """Build dedicated rollout engine bootstrap config directly from args.
 
-    Pulls from: build_model_config + build_sampling_config + caller-provided engine_kwargs.
+    Pulls from: build_model_config + caller-provided engine_kwargs.
     """
     model_config = build_model_config(args)
-    sampling_config = build_sampling_config(args)
+    pc = args.precision  # PrecisionConfig
 
-    merged_engine_kwargs = dict(engine_kwargs)
+    merged_engine_kwargs = resolve_rollout_service_kwargs(args)
+    if engine_kwargs:
+        merged_engine_kwargs.update(dict(engine_kwargs))
     merged_engine_kwargs.setdefault("use_lora", model_config["use_lora"])
     merged_engine_kwargs.setdefault("lora_rank", model_config["lora_rank"])
     merged_engine_kwargs.setdefault("lora_alpha", model_config["lora_alpha"])
@@ -224,27 +346,40 @@ def build_rollout_engine_config(
         merged_engine_kwargs.setdefault("vae_saved_path", model_config["vae_saved_path"])
     if model_config.get("text_encoder_path"):
         merged_engine_kwargs.setdefault("text_encoder_path", model_config["text_encoder_path"])
+    merged_engine_kwargs["model_precision"] = str(pc.model_precision)
+    merged_engine_kwargs["fsdp_precision"] = str(pc.fsdp_precision)
+    merged_engine_kwargs.setdefault("prompt_encoder_dtype", str(pc.model_precision))
     # Wire top-level fps into engine_kwargs so SGLang engine can consume it
-    # without requiring users to pass it through --engine-kwargs JSON.
+    # without requiring users to duplicate rollout-runtime config.
     merged_engine_kwargs.setdefault("fps", int(args.fps))
+    merged_engine_kwargs.setdefault("weight_sync_dir", str(args.sync.dir))
+    if getattr(args.sync, "target_modules", None) is not None:
+        merged_engine_kwargs.setdefault("target_modules", list(args.sync.target_modules))
+    if sampler_engine_type == "sglang":
+        merged_engine_kwargs["logprob_source"] = str(args.sampling.logprob_source)
 
     return {
         "sampler_engine_type": sampler_engine_type,
-        "sampler_path": sampling_config["sampler_path"],
         "model_path": model_config["model_path"],
         "pretrained_model_saved_path": model_config["pretrained_model_saved_path"],
-        "lora_rank": model_config["lora_rank"],
-        "lora_alpha": model_config["lora_alpha"],
-        "lora_target_modules": model_config["lora_target_modules"],
-        "num_inference_steps": sampling_config["num_inference_steps"],
-        "eta": sampling_config["eta"],
-        "sde_type": sampling_config["sde_type"],
-        "shift": sampling_config["shift"],
-        "guidance_scale": sampling_config["guidance_scale"],
-        "height": sampling_config["height"],
-        "width": sampling_config["width"],
-        "num_frames": sampling_config["num_frames"],
         "engine_kwargs": merged_engine_kwargs,
+    }
+
+
+def build_rollout_actor_init_config(
+    *,
+    args,
+    sampler_engine_type: str,
+    engine_kwargs: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build dedicated rollout actor init config with split engine/sampling sections."""
+    return {
+        "engine_config": build_rollout_engine_config(
+            args=args,
+            sampler_engine_type=sampler_engine_type,
+            engine_kwargs=engine_kwargs,
+        ),
+        "sampling_config": build_rollout_sampling_config(args),
         "reward_config": build_reward_config(args),
     }
 
@@ -274,81 +409,83 @@ def _build_scheduler_config(args, *, total_steps: int) -> Dict[str, Any]:
 
 def _build_algorithm_kwargs(args) -> Dict[str, Any]:
     ac = args.algorithm  # AlgorithmConfig
-    sc = args.sampling   # SamplingConfig
-    algorithm_kwargs = _require_normalized_kwargs_dict(
-        ac.algorithm_kwargs,
-        field_name="algorithm.algorithm_kwargs",
-    )
+    algorithm_kwargs = resolve_algorithm_kwargs(args)
 
     # Single source of truth for algorithm construction.
     # Both rollout-side and train-side algorithms consume this same payload.
-    normalized = dict(algorithm_kwargs)
-    normalized.setdefault("clip_range", float(ac.clip_range))
-    normalized.setdefault("clip_schedule", str(ac.clip_schedule))
-    normalized.setdefault("use_kl_penalty", bool(ac.use_kl_penalty))
-    normalized.setdefault("kl_coef", float(ac.kl_coef))
-    normalized.setdefault("adv_normalization", str(ac.adv_normalization))
-    normalized.setdefault("samples_per_prompt", int(ac.samples_per_prompt))
-    normalized.setdefault("adv_norm_eps", float(ac.adv_norm_eps))
-    normalized.setdefault("adv_clip_abs", ac.adv_clip_abs)
-    normalized.setdefault("trimmed_ratio", float(ac.trimmed_ratio))
-    normalized.setdefault("use_global_std", bool(ac.use_global_std))
-    normalized.setdefault("skip_last_timestep", bool(ac.skip_last_timestep))
-    normalized.setdefault("skip_initial_timesteps", int(ac.skip_initial_timesteps))
-    normalized.setdefault("eval_ema_decay", float(ac.eval_ema_decay))
-    normalized.setdefault("eval_ema_update_interval", int(ac.eval_ema_update_interval))
-    normalized.setdefault("eta", float(sc.eta))
-    normalized.setdefault("sde_type", str(sc.sde_type))
-    normalized.setdefault("sde_ratio", float(sc.sde_ratio))
-    normalized.setdefault("time_shift", float(sc.time_shift))
-    normalized.setdefault("window_training", bool(ac.window.window_training))
-    return normalized
+    resolved_kwargs = dict(algorithm_kwargs)
+    algorithm_type = str(ac.algorithm_type or "").strip().lower()
+    if algorithm_type in {"grpo", "mix_grpo"}:
+        resolved_kwargs.setdefault("clip_range", float(ac.clip_range))
+        resolved_kwargs.setdefault("clip_schedule", str(ac.clip_schedule))
+        resolved_kwargs.setdefault("use_kl_penalty", bool(ac.use_kl_penalty))
+    resolved_kwargs.setdefault("kl_coef", float(ac.kl_coef))
+    resolved_kwargs.setdefault("component_mix_stage", str(ac.component_mix_stage))
+    resolved_kwargs.setdefault("adv_normalization", str(ac.adv_normalization))
+    resolved_kwargs.setdefault("samples_per_prompt", int(ac.samples_per_prompt))
+    resolved_kwargs.setdefault("adv_norm_eps", float(ac.adv_norm_eps))
+    resolved_kwargs.setdefault("adv_clip_abs", ac.adv_clip_abs)
+    resolved_kwargs.setdefault("trimmed_ratio", float(ac.trimmed_ratio))
+    resolved_kwargs.setdefault("use_global_std", bool(ac.use_global_std))
+    resolved_kwargs.setdefault("skip_last_timestep", bool(ac.skip_last_timestep))
+    resolved_kwargs.setdefault("skip_initial_timesteps", int(ac.skip_initial_timesteps))
+    resolved_kwargs.setdefault("eval_ema_decay", float(ac.eval_ema_decay))
+    resolved_kwargs.setdefault("eval_ema_update_interval", int(ac.eval_ema_update_interval))
+    resolved_kwargs.setdefault("window_training", bool(ac.window.window_training))
+    return resolved_kwargs
 
 
 def build_algorithm_config(args) -> Dict[str, Any]:
     ac = args.algorithm  # AlgorithmConfig
     sc = args.sampling   # SamplingConfig
+    sde_config = _build_sde_config(args)
+    sde_schedule_config = _build_sde_schedule_config(args)
 
     algorithm_path = str(ac.algorithm_path or "").strip()
     if not algorithm_path:
-        raise ValueError(
-            "algorithm.algorithm_path must be resolved before build_domain_args(). "
-            "validate_args() should set this from algorithm_type or explicit config."
-        )
+        algorithm_path = resolve_algorithm_path(args)
 
     return {
         "algorithm_type": str(ac.algorithm_type),
         "algorithm_path": algorithm_path,
         "algorithm_kwargs": _build_algorithm_kwargs(args),
+        "sde_config": sde_config.to_dict(),
+        "sde_schedule_config": sde_schedule_config.to_dict(),
         "guidance_scale": float(sc.guidance_scale),
         "debug_output_dir": getattr(args.debug, "debug_output_dir", None),
     }
 
-def _build_training_runtime_config(args, *, dp_size: int) -> Dict[str, Any]:
+def _build_training_runtime_config(
+    args,
+    *,
+    dp_size: int,
+    training_plan: ResolvedTrainingPlan,
+) -> Dict[str, Any]:
     tc = args.training    # TrainingConfig
-    if tc.gradient_accumulation_batch_size is None:
-        raise ValueError(
-            "training.gradient_accumulation_batch_size must be normalized before "
-            "build_domain_args()."
-        )
     return {
         "max_grad_norm": float(tc.max_grad_norm),
-        "gradient_accumulation_batch_size": int(tc.gradient_accumulation_batch_size),
-        "multi_update_batch_size": (
-            int(tc.multi_update_batch_size)
-            if tc.multi_update_batch_size is not None
-            else None
-        ),
-        "update_mode": str(tc.update_mode),
+        "local_micro_batch_size": int(training_plan.local_micro_batch_size),
+        "local_update_batch_size": int(training_plan.local_update_batch_size),
+        "num_updates_per_local_batch": int(training_plan.num_updates_per_local_batch),
         "dp_size": int(dp_size),
         "replay_log_probs": bool(args.sampling.replay_log_probs),
     }
 
 
+def _build_training_topology_config(topology: ResolvedTrainTopology) -> Dict[str, Any]:
+    return topology.as_dict()
+
+
+def _build_training_plan_config(training_plan: ResolvedTrainingPlan) -> Dict[str, Any]:
+    return training_plan.as_dict()
+
+
 def _build_fsdp_config(args) -> Dict[str, Any]:
     tc = args.training  # TrainingConfig
+    pc = args.precision  # PrecisionConfig
     return {
         "cpu_offload": bool(tc.fsdp_cpu_offload),
+        "param_dtype": str(pc.fsdp_precision),
     }
 
 
@@ -364,9 +501,9 @@ def _build_veomni_config(args, *, dp_size: Optional[int] = None) -> Dict[str, An
         "dp_size": int(world_size),
         "dp_replicate_size": 1,
         "dp_shard_size": int(world_size),
-        "tp_size": int(args.sampling.tp_size),
+        "tp_size": 1,
         "pp_size": 1,
-        "sp_size": int(args.sampling.sp_size),
+        "sp_size": 1,
         "ep_size": 1,
         "enable_full_shard": True,
         "enable_reshard_after_forward": True,
@@ -378,32 +515,20 @@ def _build_veomni_config(args, *, dp_size: Optional[int] = None) -> Dict[str, An
     }
 
 
-def _require_normalized_kwargs_dict(raw: Any, *, field_name: str) -> Dict[str, Any]:
-    if isinstance(raw, dict):
-        return dict(raw)
-    raise ValueError(
-        f"{field_name} must be a dict after normalize/validate, "
-        f"got: {type(raw).__name__}"
-    )
-
-
 def _build_train_backend_config(args, *, dp_size: Optional[int] = None) -> Dict[str, Any]:
     tc = args.training  # TrainingConfig
-    backend_name = str(tc.train_backend or "").strip().lower()
+    backend_name = resolve_train_backend_name(args)
     if not backend_name:
         raise ValueError(
-            "training.train_backend is empty after normalization; "
+            "training.train_backend is empty after validation; "
             "expected a non-empty backend name."
         )
 
-    backend_kwargs = _require_normalized_kwargs_dict(
-        tc.train_backend_kwargs,
-        field_name="training.train_backend_kwargs",
-    )
+    backend_kwargs = resolve_train_backend_kwargs(args)
 
     if backend_name == "fsdp":
-        merged = _build_fsdp_config(args)
-        merged.update(backend_kwargs)
+        merged = dict(backend_kwargs)
+        merged.update(_build_fsdp_config(args))
         backend_kwargs = merged
     elif backend_name == "veomni":
         merged = _build_veomni_config(args, dp_size=dp_size)
@@ -417,19 +542,31 @@ def _build_train_backend_config(args, *, dp_size: Optional[int] = None) -> Dict[
     }
 
 
-def build_training_actor_init_config(*, args, dp_size: int) -> Dict[str, Any]:
+def build_training_actor_init_config(
+    *,
+    args,
+    topology: ResolvedTrainTopology,
+    algorithm_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Build full TrainingActor.init config directly from args.
 
     Pulls from: ModelConfig + TrainingConfig + AlgorithmConfig + SamplingConfig.
     """
-    backend_config = _build_train_backend_config(args, dp_size=dp_size)
+    training_plan = resolve_training_plan(args)
+    backend_config = _build_train_backend_config(args, dp_size=topology.dp_size)
     return {
         "model_config": build_model_config(args),
         "reward_config": build_reward_config(args),
         "optimizer_config": _build_optimizer_config(args),
         "scheduler_config": _build_scheduler_config(args, total_steps=args.rollout.num_rollout),
-        "algorithm_config": build_algorithm_config(args),
-        "training_config": _build_training_runtime_config(args, dp_size=dp_size),
+        "algorithm_config": dict(algorithm_config) if algorithm_config is not None else build_algorithm_config(args),
+        "training_config": _build_training_runtime_config(
+            args,
+            dp_size=topology.dp_size,
+            training_plan=training_plan,
+        ),
+        "topology_config": _build_training_topology_config(topology),
+        "training_plan_config": _build_training_plan_config(training_plan),
         "sampling_config": build_sampling_config(args),
         "train_backend_config": backend_config,
     }
@@ -443,7 +580,7 @@ def _require_dict_section(config: Dict[str, Any], *, name: str) -> Dict[str, Any
 
 
 def validate_rollout_engine_config(config: Dict[str, Any]) -> None:
-    """Minimal pre-dispatch validation for rollout actor config."""
+    """Minimal pre-dispatch validation for dedicated rollout engine config."""
     if not isinstance(config, dict):
         raise ValueError(f"rollout_engine_config must be a dict, got: {type(config).__name__}")
     if not isinstance(config.get("engine_kwargs"), dict):
@@ -451,10 +588,33 @@ def validate_rollout_engine_config(config: Dict[str, Any]) -> None:
             "rollout_engine_config.engine_kwargs must be a dict, "
             f"got: {type(config.get('engine_kwargs')).__name__}"
         )
-    if not isinstance(config.get("reward_config"), dict):
+
+
+def validate_rollout_actor_init_config(config: Dict[str, Any]) -> None:
+    """Minimal pre-dispatch validation for rollout actor init config."""
+    if not isinstance(config, dict):
+        raise ValueError(f"rollout_actor_init_config must be a dict, got: {type(config).__name__}")
+
+    engine_config = _require_dict_section(config, name="engine_config")
+    sampling_config = _require_dict_section(config, name="sampling_config")
+    reward_config = _require_dict_section(config, name="reward_config")
+
+    validate_rollout_engine_config(engine_config)
+
+    sampler_path = str(sampling_config.get("sampler_path", "") or "").strip()
+    if not sampler_path:
         raise ValueError(
-            "rollout_engine_config.reward_config must be a dict, "
-            f"got: {type(config.get('reward_config')).__name__}"
+            "rollout_actor_init_config.sampling_config.sampler_path is required."
+        )
+    if not isinstance(sampling_config.get("sde_config"), dict):
+        raise ValueError(
+            "rollout_actor_init_config.sampling_config.sde_config must be a dict, "
+            f"got: {type(sampling_config.get('sde_config')).__name__}"
+        )
+    if not isinstance(reward_config, dict):
+        raise ValueError(
+            "rollout_actor_init_config.reward_config must be a dict, "
+            f"got: {type(reward_config).__name__}"
         )
 
 
@@ -470,6 +630,8 @@ def validate_training_actor_init_config(config: Dict[str, Any]) -> None:
         "scheduler_config",
         "algorithm_config",
         "training_config",
+        "topology_config",
+        "training_plan_config",
         "sampling_config",
         "train_backend_config",
     ):
@@ -492,14 +654,89 @@ def validate_training_actor_init_config(config: Dict[str, Any]) -> None:
     if not backend_name:
         raise ValueError("train_backend_config.name is required.")
 
+    topology_config = config["topology_config"]
+    for required_key in ("actor_count", "world_size", "dp_size"):
+        value = topology_config.get(required_key)
+        if value is None:
+            raise ValueError(f"topology_config.{required_key} is required.")
+        if int(value) < 1:
+            raise ValueError(
+                f"topology_config.{required_key} must be >= 1, got: {value!r}"
+            )
+
+    training_plan_config = config["training_plan_config"]
+    for required_key in (
+        "global_batch_size",
+        "local_batch_size",
+        "local_update_batch_size",
+        "local_micro_batch_size",
+        "num_updates_per_local_batch",
+    ):
+        value = training_plan_config.get(required_key)
+        if value is None:
+            raise ValueError(f"training_plan_config.{required_key} is required.")
+        if int(value) < 1:
+            raise ValueError(
+                f"training_plan_config.{required_key} must be >= 1, got: {value!r}"
+            )
+
+    update_slices = training_plan_config.get("update_slices")
+    if not isinstance(update_slices, list) or not update_slices:
+        raise ValueError("training_plan_config.update_slices must be a non-empty list.")
+    for index, item in enumerate(update_slices):
+        if not isinstance(item, list) or len(item) != 2:
+            raise ValueError(
+                f"training_plan_config.update_slices[{index}] must be a length-2 list."
+            )
+        start, end = int(item[0]), int(item[1])
+        if start < 0 or end <= start:
+            raise ValueError(
+                f"training_plan_config.update_slices[{index}] must satisfy 0 <= start < end."
+            )
+
+    mini_batch_slices = training_plan_config.get("mini_batch_slices_per_update")
+    if not isinstance(mini_batch_slices, list) or not mini_batch_slices:
+        raise ValueError(
+            "training_plan_config.mini_batch_slices_per_update must be a non-empty list."
+        )
+    if len(mini_batch_slices) != len(update_slices):
+        raise ValueError(
+            "training_plan_config.mini_batch_slices_per_update must align with update_slices. "
+            f"Got {len(mini_batch_slices)} vs {len(update_slices)}."
+        )
+    for update_index, per_update in enumerate(mini_batch_slices):
+        if not isinstance(per_update, list) or not per_update:
+            raise ValueError(
+                "training_plan_config.mini_batch_slices_per_update entries must be non-empty lists. "
+                f"Got index={update_index}."
+            )
+        update_size = int(update_slices[update_index][1]) - int(update_slices[update_index][0])
+        for mini_index, mini_slice in enumerate(per_update):
+            if not isinstance(mini_slice, list) or len(mini_slice) != 2:
+                raise ValueError(
+                    "training_plan_config.mini_batch_slices_per_update"
+                    f"[{update_index}][{mini_index}] must be a length-2 list."
+                )
+            start, end = int(mini_slice[0]), int(mini_slice[1])
+            if start < 0 or end <= start or end > update_size:
+                raise ValueError(
+                    "training_plan_config.mini_batch_slices_per_update"
+                    f"[{update_index}][{mini_index}] must satisfy 0 <= start < end <= update_size."
+                )
+
 
 __all__ = [
     "RewardSchema",
     "build_model_config",
     "build_reward_config",
+    "resolve_sde_config",
+    "resolve_sde_schedule_config",
     "build_sampling_config",
+    "build_rollout_sampling_config",
     "build_rollout_engine_config",
+    "build_rollout_actor_init_config",
     "build_training_actor_init_config",
     "validate_rollout_engine_config",
+    "validate_rollout_actor_init_config",
     "validate_training_actor_init_config",
 ]

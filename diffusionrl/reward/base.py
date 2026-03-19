@@ -1,144 +1,131 @@
-"""
-Base reward worker interface.
+"""Base abstractions for reward scorers and executors."""
 
-All reward workers must inherit from BaseRewardWorker.
-"""
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
 import time
+from typing import Any, Callable, List, Optional, Tuple
 
 from diffusionrl.types.reward import RewardRequest, RewardResponse, RewardType
 
 
-class BaseRewardWorker(ABC):
-    """
-    Abstract base class for reward workers.
+class _BaseRewardNode(ABC):
+    """Shared runtime metadata for reward scorers and executors."""
 
-    Reward workers compute rewards for generated images/videos given prompts.
-    They can run locally or connect to remote services.
-
-    This is the unified interface that merges the old Worker and Backend concepts.
-    All reward workers should inherit from this class.
-
-    Example usage:
-        worker = LocalRewardWorker(
-            model_name="pickscore",
-            device="cuda",
-            weight=1.0,
-        )
-
-        response = worker.compute_rewards(
-            RewardRequest(
-                images=[img1, img2],
-                prompts=["a cat", "a dog"],
-            )
-        )
-        print(response.rewards)  # [0.8, 0.7]
-    """
+    input_kind = "image"
 
     def __init__(
         self,
         model_name: str = "",
-        weight: float = 1.0,
-        reward_types: Optional[List[RewardType]] = None,
         batch_size: int = 8,
         timeout: float = 60.0,
         **kwargs,
-    ):
-        """
-        Initialize reward worker.
-
-        Args:
-            model_name: Name of the reward model
-            weight: Weight for this worker in multi-reward aggregation
-            reward_types: Types of rewards this worker can compute
-            batch_size: Maximum batch size for processing
-            timeout: Timeout for reward computation (seconds)
-        """
+    ) -> None:
         self.model_name = model_name
-        self.weight = weight
-        self.reward_types = reward_types or [RewardType.IMAGE_TEXT_ALIGNMENT]
         self.batch_size = batch_size
         self.timeout = timeout
 
-    @abstractmethod
-    def compute_rewards(self, request: RewardRequest) -> RewardResponse:
-        """
-        Compute rewards for the given request.
-
-        Args:
-            request: RewardRequest with images/videos and prompts
-
-        Returns:
-            RewardResponse with computed rewards
-        """
-        pass
-
-    @abstractmethod
-    def is_available(self) -> bool:
-        """Check if the reward worker is available."""
-        pass
-
-    def get_weight(self) -> float:
-        """Get the weight for multi-reward aggregation."""
-        return self.weight
-
     def get_model_name(self) -> str:
-        """Get the model name."""
+        """Get the model or component name for this runtime node."""
         return self.model_name
 
+    @property
+    def preferred_input_kind(self) -> str:
+        """Return the decoded media kind consumed by this runtime node."""
+        return str(getattr(self, "input_kind", "image") or "image").strip().lower()
+
     async def compute_rewards_async(self, request: RewardRequest) -> RewardResponse:
-        """
-        Async version of compute_rewards.
-
-        Default implementation falls back to sync version.
-        Subclasses may override for true async support.
-
-        Args:
-            request: RewardRequest with images/videos and prompts
-
-        Returns:
-            RewardResponse with computed rewards
-        """
+        """Async fallback that delegates to the sync implementation."""
         return self.compute_rewards(request)
 
     def offload(self) -> None:
-        """
-        Offload model to CPU to free GPU memory.
-
-        Default implementation does nothing.
-        Subclasses with GPU models should override.
-        """
+        """Optional lifecycle hook for releasing device memory."""
         pass
 
     def onload(self) -> None:
-        """
-        Load model back to GPU.
-
-        Default implementation does nothing.
-        Subclasses with GPU models should override.
-        """
+        """Optional lifecycle hook for reacquiring device memory."""
         pass
 
     def dispose(self) -> None:
-        """
-        Clean up resources.
-
-        Default implementation does nothing.
-        Subclasses should override to release resources.
-        """
+        """Optional lifecycle hook for terminal cleanup."""
         pass
 
     def _timed_compute(
         self,
-        func,
+        func: Callable[..., Any],
         *args,
         **kwargs,
-    ) -> tuple:
+    ) -> Tuple[Any, float]:
         """Helper to time computation."""
         start = time.time()
         result = func(*args, **kwargs)
         elapsed = time.time() - start
         return result, elapsed
 
+
+class BaseRewardScorer(_BaseRewardNode):
+    """Leaf scorer interface: turn a RewardRequest into scores."""
+
+    def __init__(
+        self,
+        model_name: str = "",
+        reward_types: Optional[List[RewardType]] = None,
+        batch_size: int = 8,
+        timeout: float = 60.0,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            model_name=model_name,
+            batch_size=batch_size,
+            timeout=timeout,
+            **kwargs,
+        )
+        self.reward_types = reward_types or [RewardType.IMAGE_TEXT_ALIGNMENT]
+
+    @abstractmethod
+    def compute_rewards(self, request: RewardRequest) -> RewardResponse:
+        """Compute rewards for the given request."""
+
+    @abstractmethod
+    def is_available(self) -> bool:
+        """Check if the scorer is available."""
+
+
+class BaseRewardExecutor(_BaseRewardNode):
+    """Execution interface: run one reward component on some backend."""
+
+    def __init__(
+        self,
+        model_name: str = "",
+        weight: float = 1.0,
+        batch_size: int = 8,
+        timeout: float = 60.0,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            model_name=model_name,
+            batch_size=batch_size,
+            timeout=timeout,
+            **kwargs,
+        )
+        self.weight = float(weight)
+
+    def get_weight(self) -> float:
+        """Get the semantic aggregation weight for this executor."""
+        return self.weight
+
+    @abstractmethod
+    def compute_rewards(self, request: RewardRequest) -> RewardResponse:
+        """Execute one reward component against the given request."""
+
+    @abstractmethod
+    def is_available(self) -> bool:
+        """Check if the executor backend is available."""
+
+__all__ = [
+    "BaseRewardScorer",
+    "BaseRewardExecutor",
+    "RewardRequest",
+    "RewardResponse",
+    "RewardType",
+]

@@ -1,17 +1,25 @@
-"""Manager-side reward execution runtime."""
+"""Reward executors and aggregation helpers."""
 
+from __future__ import annotations
+
+from dataclasses import replace
 import inspect
 import logging
 import time
-from dataclasses import replace
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
 from diffusionrl.config.build_domain_args import RewardSchema
-from .spec import RewardExecutionPlan, RewardSpec
-from .base import BaseRewardWorker, RewardRequest, RewardResponse
 from diffusionrl.utils import load_function
+
+from .base import (
+    BaseRewardExecutor,
+    BaseRewardScorer,
+    RewardRequest,
+    RewardResponse,
+)
+from .spec import RewardDefinition, RewardExecutionPlan, RewardProviderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -19,63 +27,83 @@ logger = logging.getLogger(__name__)
 PlacementGroupResult = Tuple[Any, List[int], List[int]]  # (pg, bundle_indices, gpu_ids)
 
 
-class RewardService:
-    """
-    Manager-side reward runtime.
+class InProcessRewardExecutor(BaseRewardExecutor):
+    """Thin executor wrapper around one in-process reward scorer."""
 
-    This class only owns deployment/execution mechanics. Reward semantics are
-    captured by ``RewardSpec`` and resource placement is captured by
-    ``RewardExecutionPlan``.
-    """
+    def __init__(
+        self,
+        scorer: BaseRewardScorer,
+        *,
+        weight: float,
+    ) -> None:
+        super().__init__(
+            model_name=scorer.get_model_name(),
+            weight=weight,
+            batch_size=scorer.batch_size,
+            timeout=scorer.timeout,
+        )
+        self.scorer = scorer
+
+    @property
+    def preferred_input_kind(self) -> str:
+        return self.scorer.preferred_input_kind
+
+    def compute_rewards(self, request: RewardRequest) -> RewardResponse:
+        return self.scorer.compute_rewards(request)
+
+    def is_available(self) -> bool:
+        return self.scorer.is_available()
+
+    def offload(self) -> None:
+        self.scorer.offload()
+
+    def onload(self) -> None:
+        self.scorer.onload()
+
+    def dispose(self) -> None:
+        self.scorer.dispose()
+
+
+class RewardService:
+    """Manager-side reward service that owns per-component executors."""
 
     def __init__(
         self,
         reward_schema: RewardSchema,
         reward_pg_result: Optional[PlacementGroupResult] = None,
-    ):
-        """
-        Initialize RewardService.
-
-        Args:
-            reward_schema: typed reward schema with semantic and execution info
-            reward_pg_result: Optional placement group result for GPU rewards
-                             Tuple of (placement_group, bundle_indices, gpu_ids)
-        """
+    ) -> None:
         if not isinstance(reward_schema, RewardSchema):
             raise TypeError(
                 "RewardService requires RewardSchema, "
                 f"got: {type(reward_schema).__name__}"
             )
         self.reward_schema = reward_schema
-        self.reward_spec: RewardSpec = reward_schema.to_spec()
+        self.reward_definition: RewardDefinition = reward_schema.to_definition()
+        self.reward_provider: RewardProviderConfig = reward_schema.to_provider_config()
         self.execution_plan: RewardExecutionPlan = reward_schema.to_execution_plan()
         self.reward_pg = reward_pg_result
 
-        # Workers list (supports multiple for multi-reward)
-        self.workers: List[BaseRewardWorker] = []
+        self.executors: List[BaseRewardExecutor] = []
+        self.aggregation = self.reward_definition.component_aggregation
 
-        # Aggregation configuration
-        self.aggregation = self.reward_spec.component_aggregation
-
-        # Initialize workers based on configuration
-        self._init_workers()
+        self._init_executors()
 
         logger.info(
-            f"RewardService initialized with {len(self.workers)} worker(s), "
-            f"aggregation={self.aggregation}"
+            "RewardService initialized with %d executor(s), aggregation=%s",
+            len(self.executors),
+            self.aggregation,
         )
 
-    def _init_workers(self) -> None:
-        """Initialize workers based on args configuration."""
+    def _init_executors(self) -> None:
+        """Initialize executors based on execution plan."""
         if self.execution_plan.uses_http_backend:
-            self._init_http_workers()
-        elif self._should_use_ray_workers():
-            self._init_ray_workers()
+            self._init_http_executors()
+        elif self._should_use_ray_executors():
+            self._init_ray_executors()
         else:
-            self._init_local_workers()
+            self._init_local_executors()
 
-    def _should_use_ray_workers(self) -> bool:
-        """Check if Ray workers should be used."""
+    def _should_use_ray_executors(self) -> bool:
         has_gpu_config = (
             self.execution_plan.uses_ray_backend
             and (
@@ -84,17 +112,16 @@ class RewardService:
             )
         )
         has_pg = self.reward_pg is not None
-
         return has_gpu_config and has_pg
 
-    def _init_http_workers(self) -> None:
-        """Initialize HTTP reward workers."""
-        from .http import HTTPRewardWorker
+    def _init_http_executors(self) -> None:
+        """Initialize HTTP reward executors."""
+        from .http import HTTPRewardExecutor
 
         urls = list(self.execution_plan.reward_service_urls or ())
         if not urls and self.execution_plan.reward_service_url:
             urls = [self.execution_plan.reward_service_url]
-        reward_weights = self.reward_spec.reward_weights
+        reward_weights = self.reward_definition.reward_weights
 
         for i, url in enumerate(urls):
             if url is None:
@@ -104,90 +131,88 @@ class RewardService:
             if reward_weights and i < len(reward_weights):
                 weight = reward_weights[i]
 
-            worker = HTTPRewardWorker(
+            executor = HTTPRewardExecutor(
                 base_url=url,
                 model_name=f"http_{i}",
                 weight=weight,
-                timeout=self.reward_spec.timeout,
-                batch_size=self.reward_spec.batch_size,
+                timeout=self.reward_provider.timeout,
+                batch_size=self.reward_provider.batch_size,
             )
-            self.workers.append(worker)
-            logger.info(f"Added HTTPRewardWorker: {url}")
+            self.executors.append(executor)
+            logger.info("Added HTTPRewardExecutor: %s", url)
 
-    def _init_ray_workers(self) -> None:
-        """Initialize Ray-based workers for GPU-isolated rewards."""
-        from .ray_worker import RayRewardWorker
+    def _init_ray_executors(self) -> None:
+        """Initialize Ray reward executors for GPU-isolated rewards."""
+        from .ray_executor import RayRewardExecutor
 
         pg, bundle_indices, gpu_ids = self.reward_pg
         gpus_per_actor = self.execution_plan.dedicated_gpus_per_actor
-        reward_models = self.reward_spec.reward_models
-        reward_weights = self.reward_spec.reward_weights
+        reward_models = self.reward_definition.reward_models
+        reward_weights = self.reward_definition.reward_weights
 
         if reward_models:
-            # Multi-reward: each model gets its own actor(s)
             weights = reward_weights or [1.0] * len(reward_models)
 
             for i, model in enumerate(reward_models):
                 weight = weights[i] if i < len(weights) else 1.0
 
-                # Allocate GPUs for this model
                 actor_start = i * gpus_per_actor
                 actor_end = actor_start + gpus_per_actor
 
                 if actor_end > len(bundle_indices):
                     logger.warning(
-                        f"Not enough GPUs for model {model}. "
-                        f"Required {gpus_per_actor}, available "
-                        f"{len(bundle_indices) - actor_start}"
+                        "Not enough GPUs for model %s. Required %s, available %s",
+                        model,
+                        gpus_per_actor,
+                        len(bundle_indices) - actor_start,
                     )
                     break
 
-                worker = RayRewardWorker(
+                executor = RayRewardExecutor(
                     model_name=model,
                     pg=pg,
                     bundle_indices=bundle_indices[actor_start:actor_end],
                     gpu_ids=gpu_ids[actor_start:actor_end],
-                    reward_path=self.reward_spec.reward_path,
-                    model_path=self.reward_spec.reward_model_saved_path,
+                    reward_path=self.reward_provider.reward_path,
+                    model_path=self.reward_provider.reward_model_saved_path,
                     num_actors=1,
                     gpus_per_actor=gpus_per_actor,
-                    batch_size=self.reward_spec.batch_size,
-                    timeout=self.reward_spec.timeout,
+                    batch_size=self.reward_provider.batch_size,
+                    timeout=self.reward_provider.timeout,
                     parallel_mode=False,
                     weight=weight,
                 )
-                self.workers.append(worker)
-                logger.info(f"Added RayRewardWorker: {model} (weight={weight})")
+                self.executors.append(executor)
+                logger.info("Added RayRewardExecutor: %s (weight=%s)", model, weight)
 
         else:
-            # Single reward model: multiple actors process batch in parallel
             num_actors = len(gpu_ids) // gpus_per_actor
 
-            worker = RayRewardWorker(
-                model_name=self.reward_spec.default_model_name,
+            executor = RayRewardExecutor(
+                model_name=self.reward_definition.default_model_name,
                 pg=pg,
                 bundle_indices=bundle_indices,
                 gpu_ids=gpu_ids,
-                reward_path=self.reward_spec.reward_path,
-                model_path=self.reward_spec.reward_model_saved_path,
+                reward_path=self.reward_provider.reward_path,
+                model_path=self.reward_provider.reward_model_saved_path,
                 num_actors=num_actors,
                 gpus_per_actor=gpus_per_actor,
-                batch_size=self.reward_spec.batch_size,
-                timeout=self.reward_spec.timeout,
-                parallel_mode=True,  # Distribute batch across actors
+                batch_size=self.reward_provider.batch_size,
+                timeout=self.reward_provider.timeout,
+                parallel_mode=True,
                 weight=1.0,
             )
-            self.workers.append(worker)
+            self.executors.append(executor)
             logger.info(
-                f"Added RayRewardWorker: {self.reward_spec.default_model_name} "
-                f"({num_actors} parallel actors)"
+                "Added RayRewardExecutor: %s (%s parallel actors)",
+                self.reward_definition.default_model_name,
+                num_actors,
             )
 
-    def _init_local_workers(self) -> None:
-        """Initialize local workers (CPU or same-process GPU)."""
-        from .local import LocalRewardWorker
+    def _init_local_executors(self) -> None:
+        """Initialize in-process executors backed by local scorers."""
+        from .local import LocalRewardScorer
 
-        # Determine device for local same-process rewards.
         local_device_pref = str(
             getattr(self.execution_plan, "local_device", "cpu") or "cpu"
         ).strip().lower()
@@ -213,133 +238,123 @@ class RewardService:
 
         if device == "cuda":
             logger.warning(
-                "Local reward worker is running on CUDA in-process. "
+                "Local reward scorer is running on CUDA in-process. "
                 "This can contend with rollout/training GPUs. Prefer dedicated reward "
                 "actors (reward_dedicated_*) or HTTP reward service for isolation when "
                 "you need strict resource isolation."
             )
 
         reward_path = getattr(
-            self.reward_spec,
+            self.reward_provider,
             "reward_path",
-            "diffusionrl.reward.local.LocalRewardWorker",
+            "diffusionrl.reward.local.LocalRewardScorer",
         )
         try:
-            worker_cls = load_function(reward_path) if reward_path else LocalRewardWorker
+            scorer_cls = load_function(reward_path) if reward_path else LocalRewardScorer
         except Exception as e:
             logger.warning(
-                "Failed to load reward_path=%s (%s). Falling back to LocalRewardWorker.",
+                "Failed to load reward_path=%s (%s). Falling back to LocalRewardScorer.",
                 reward_path,
                 e,
             )
-            worker_cls = LocalRewardWorker
+            scorer_cls = LocalRewardScorer
 
-        ctor_params = inspect.signature(worker_cls.__init__).parameters
+        if not isinstance(scorer_cls, type) or not issubclass(scorer_cls, BaseRewardScorer):
+            logger.warning(
+                "Local reward scorer %s does not inherit BaseRewardScorer; "
+                "treating it as a scorer via duck typing.",
+                reward_path,
+            )
 
-        def _create_worker(model_name: str, weight: float) -> BaseRewardWorker:
+        ctor_params = inspect.signature(scorer_cls.__init__).parameters
+
+        def _create_executor(model_name: str, weight: float) -> BaseRewardExecutor:
             init_kwargs: Dict[str, Any] = {
-                "weight": weight,
-                "batch_size": self.reward_spec.batch_size,
-                "timeout": self.reward_spec.timeout,
+                "batch_size": self.reward_provider.batch_size,
+                "timeout": self.reward_provider.timeout,
                 "device": device,
             }
             if "model_name" in ctor_params:
                 init_kwargs["model_name"] = model_name
             elif "frame_reward_model" in ctor_params:
                 init_kwargs["frame_reward_model"] = model_name
-            return worker_cls(**init_kwargs)
+            # Older scorer plugins may still accept `weight`; executor remains
+            # the source of truth for aggregation semantics.
+            if "weight" in ctor_params:
+                init_kwargs["weight"] = weight
+            scorer = scorer_cls(**init_kwargs)
+            return InProcessRewardExecutor(
+                scorer=scorer,
+                weight=weight,
+            )
 
-        reward_models = self.reward_spec.reward_models
-        reward_weights = self.reward_spec.reward_weights
+        reward_models = self.reward_definition.reward_models
+        reward_weights = self.reward_definition.reward_weights
 
         if reward_models:
-            # Multi-reward: create worker for each model
             weights = reward_weights or [1.0] * len(reward_models)
 
             for i, model in enumerate(reward_models):
                 weight = weights[i] if i < len(weights) else 1.0
-
-                worker = _create_worker(model_name=model, weight=weight)
-                self.workers.append(worker)
+                executor = _create_executor(model_name=model, weight=weight)
+                self.executors.append(executor)
                 logger.info(
-                    "Added local reward worker: %s via %s (weight=%s)",
+                    "Added in-process reward executor: %s via %s (weight=%s)",
                     model,
-                    worker_cls.__name__,
+                    scorer_cls.__name__,
                     weight,
                 )
 
         else:
-            # Single reward model
-            worker = _create_worker(model_name=self.reward_spec.default_model_name, weight=1.0)
-            self.workers.append(worker)
+            executor = _create_executor(
+                model_name=self.reward_definition.default_model_name,
+                weight=1.0,
+            )
+            self.executors.append(executor)
             logger.info(
-                "Added local reward worker: %s via %s",
-                self.reward_spec.default_model_name,
-                worker_cls.__name__,
+                "Added in-process reward executor: %s via %s",
+                self.reward_definition.default_model_name,
+                scorer_cls.__name__,
             )
 
     def compute_rewards(self, request: RewardRequest) -> RewardResponse:
-        """
-        Compute rewards using configured workers.
-
-        For multi-worker setups, rewards are aggregated according to
-        the configured aggregation strategy.
-
-        Args:
-            request: RewardRequest with images/videos and prompts
-
-        Returns:
-            RewardResponse with computed (and possibly aggregated) rewards
-        """
-        if not self.workers:
+        """Compute rewards using configured executors."""
+        if not self.executors:
             return RewardResponse(
                 rewards=[0.0] * request.batch_size,
                 successes=[False] * request.batch_size,
-                errors=["No workers configured"] * request.batch_size,
+                errors=["No executors configured"] * request.batch_size,
                 compute_time=0.0,
             )
 
         start_time = time.time()
 
-        # Single worker: direct computation
-        if len(self.workers) == 1:
-            response = self.workers[0].compute_rewards(request)
-            return response
+        if len(self.executors) == 1:
+            return self.executors[0].compute_rewards(request)
 
-        # Multiple workers: compute and aggregate
         responses = []
-        for worker in self.workers:
+        for executor in self.executors:
             try:
-                resp = worker.compute_rewards(request)
-                responses.append((resp, worker))
+                resp = executor.compute_rewards(request)
+                responses.append((resp, executor))
             except Exception as e:
-                logger.error(f"Worker {worker.get_model_name()} failed: {e}")
-                # Create error response for failed worker
+                logger.error("Executor %s failed: %s", executor.get_model_name(), e)
                 error_resp = RewardResponse(
                     rewards=[0.0] * request.batch_size,
                     successes=[False] * request.batch_size,
                     errors=[str(e)] * request.batch_size,
                     compute_time=0.0,
                 )
-                responses.append((error_resp, worker))
+                responses.append((error_resp, executor))
 
         return self._aggregate_responses(responses, time.time() - start_time)
 
     def _aggregate_responses(
         self,
-        responses: List[Tuple[RewardResponse, BaseRewardWorker]],
+        responses: List[Tuple[RewardResponse, BaseRewardExecutor]],
         total_time: float,
     ) -> RewardResponse:
-        """
-        Aggregate responses from multiple workers.
-
-        Args:
-            responses: List of (response, worker) tuples
-            total_time: Total computation time
-
-        Returns:
-            Aggregated RewardResponse
-        """
+        """Aggregate responses from multiple executors."""
         if not responses:
             return RewardResponse(
                 rewards=[],
@@ -352,46 +367,37 @@ class RewardService:
 
         if self.aggregation == "weighted_sum":
             return self._aggregate_weighted_sum(responses, batch_size, total_time)
-        elif self.aggregation == "mean":
+        if self.aggregation == "mean":
             return self._aggregate_mean(responses, batch_size, total_time)
-        elif self.aggregation == "min":
+        if self.aggregation == "min":
             return self._aggregate_min(responses, batch_size, total_time)
-        elif self.aggregation == "max":
+        if self.aggregation == "max":
             return self._aggregate_max(responses, batch_size, total_time)
-        elif self.aggregation == "concat":
+        if self.aggregation == "concat":
             return self._aggregate_concat(responses, batch_size, total_time)
-        else:
-            logger.warning(f"Unknown aggregation '{self.aggregation}', using weighted_sum")
-            return self._aggregate_weighted_sum(responses, batch_size, total_time)
+
+        logger.warning("Unknown aggregation '%s', using weighted_sum", self.aggregation)
+        return self._aggregate_weighted_sum(responses, batch_size, total_time)
 
     def _aggregate_weighted_sum(
         self,
-        responses: List[Tuple[RewardResponse, BaseRewardWorker]],
+        responses: List[Tuple[RewardResponse, BaseRewardExecutor]],
         batch_size: int,
         total_time: float,
     ) -> RewardResponse:
-        """Compute weighted sum of rewards."""
         total = torch.zeros(batch_size)
         total_weight = 0.0
         reward_components = {}
 
-        for resp, worker in responses:
-            weight = worker.get_weight()
+        for resp, executor in responses:
+            weight = executor.get_weight()
             rewards_tensor = torch.tensor(resp.rewards)
             total += rewards_tensor * weight
             total_weight += weight
+            reward_components[executor.get_model_name()] = resp.rewards
 
-            # Store component
-            model_name = worker.get_model_name()
-            reward_components[model_name] = resp.rewards
+        final_rewards = (total / total_weight).tolist() if total_weight > 0 else total.tolist()
 
-        # Normalize by total weight
-        if total_weight > 0:
-            final_rewards = (total / total_weight).tolist()
-        else:
-            final_rewards = total.tolist()
-
-        # Merge successes (all must succeed)
         all_successes = [True] * batch_size
         all_errors = [None] * batch_size
         for resp, _ in responses:
@@ -410,18 +416,17 @@ class RewardService:
 
     def _aggregate_mean(
         self,
-        responses: List[Tuple[RewardResponse, BaseRewardWorker]],
+        responses: List[Tuple[RewardResponse, BaseRewardExecutor]],
         batch_size: int,
         total_time: float,
     ) -> RewardResponse:
-        """Compute mean of rewards (ignores weights)."""
         total = torch.zeros(batch_size)
         reward_components = {}
 
-        for resp, worker in responses:
+        for resp, executor in responses:
             rewards_tensor = torch.tensor(resp.rewards)
             total += rewards_tensor
-            reward_components[worker.get_model_name()] = resp.rewards
+            reward_components[executor.get_model_name()] = resp.rewards
 
         final_rewards = (total / len(responses)).tolist()
 
@@ -443,19 +448,17 @@ class RewardService:
 
     def _aggregate_min(
         self,
-        responses: List[Tuple[RewardResponse, BaseRewardWorker]],
+        responses: List[Tuple[RewardResponse, BaseRewardExecutor]],
         batch_size: int,
         total_time: float,
     ) -> RewardResponse:
-        """Take minimum reward across workers."""
         all_rewards = torch.stack(
             [torch.tensor(resp.rewards) for resp, _ in responses]
         )
         final_rewards = all_rewards.min(dim=0)[0].tolist()
-
         reward_components = {
-            worker.get_model_name(): resp.rewards
-            for resp, worker in responses
+            executor.get_model_name(): resp.rewards
+            for resp, executor in responses
         }
 
         all_successes = [True] * batch_size
@@ -476,19 +479,17 @@ class RewardService:
 
     def _aggregate_max(
         self,
-        responses: List[Tuple[RewardResponse, BaseRewardWorker]],
+        responses: List[Tuple[RewardResponse, BaseRewardExecutor]],
         batch_size: int,
         total_time: float,
     ) -> RewardResponse:
-        """Take maximum reward across workers."""
         all_rewards = torch.stack(
             [torch.tensor(resp.rewards) for resp, _ in responses]
         )
         final_rewards = all_rewards.max(dim=0)[0].tolist()
-
         reward_components = {
-            worker.get_model_name(): resp.rewards
-            for resp, worker in responses
+            executor.get_model_name(): resp.rewards
+            for resp, executor in responses
         }
 
         all_successes = [True] * batch_size
@@ -509,14 +510,13 @@ class RewardService:
 
     def _aggregate_concat(
         self,
-        responses: List[Tuple[RewardResponse, BaseRewardWorker]],
+        responses: List[Tuple[RewardResponse, BaseRewardExecutor]],
         batch_size: int,
         total_time: float,
     ) -> RewardResponse:
-        """Return all rewards without aggregation."""
         reward_components = {
-            worker.get_model_name(): resp.rewards
-            for resp, worker in responses
+            executor.get_model_name(): resp.rewards
+            for resp, executor in responses
         }
         final_rewards = responses[0][0].rewards
 
@@ -536,17 +536,30 @@ class RewardService:
             compute_time=total_time,
         )
 
+    @property
+    def preferred_input_kind(self) -> str:
+        """Return the media kind expected by the configured executor set."""
+        kinds = {
+            str(getattr(executor, "preferred_input_kind", "image") or "image").strip().lower()
+            for executor in self.executors
+        }
+        kinds.discard("")
+        if not kinds:
+            return "image"
+        if len(kinds) > 1:
+            raise ValueError(
+                "Mixed reward input kinds in one service are not supported. "
+                f"Configured kinds={sorted(kinds)}."
+            )
+        return next(iter(kinds))
+
     def is_available(self) -> bool:
-        """Check if at least one worker is available."""
-        return any(worker.is_available() for worker in self.workers)
+        """Check if at least one executor is available."""
+        return any(executor.is_available() for executor in self.executors)
 
 
 class LocalRewardExecutor(RewardService):
-    """Lightweight same-process reward executor for rollout/training actors.
-
-    This reuses RewardService's local-worker creation and aggregation logic
-    without enabling HTTP or dedicated Ray reward modes.
-    """
+    """Lightweight same-process reward service for rollout/training actors."""
 
     def __init__(
         self,
@@ -565,34 +578,39 @@ class LocalRewardExecutor(RewardService):
                 local_reward_device=str(device_override),
             )
         self.reward_schema = reward_schema
-        self.reward_spec = reward_schema.to_spec()
+        self.reward_definition = reward_schema.to_definition()
+        self.reward_provider = reward_schema.to_provider_config()
         self.execution_plan = reward_schema.to_execution_plan()
         self.reward_pg = None
-        self.workers = []
-        self.aggregation = self.reward_spec.component_aggregation
-        self._init_local_workers()
+        self.executors = []
+        self.aggregation = self.reward_definition.component_aggregation
+        self._init_local_executors()
         logger.info(
-            "LocalRewardExecutor initialized with %d worker(s), aggregation=%s, device=%s",
-            len(self.workers),
+            "LocalRewardExecutor initialized with %d executor(s), aggregation=%s, device=%s",
+            len(self.executors),
             self.aggregation,
             self.execution_plan.local_device,
         )
 
     def offload(self) -> None:
-        """Offload all workers."""
-        for worker in self.workers:
-            worker.offload()
-        logger.debug(f"RewardService offloaded {len(self.workers)} worker(s)")
+        for executor in self.executors:
+            executor.offload()
+        logger.debug("RewardService offloaded %d executor(s)", len(self.executors))
 
     def onload(self) -> None:
-        """Onload all workers."""
-        for worker in self.workers:
-            worker.onload()
-        logger.debug(f"RewardService onloaded {len(self.workers)} worker(s)")
+        for executor in self.executors:
+            executor.onload()
+        logger.debug("RewardService onloaded %d executor(s)", len(self.executors))
 
     def dispose(self) -> None:
-        """Clean up all workers."""
-        for worker in self.workers:
-            worker.dispose()
-        self.workers = []
+        for executor in self.executors:
+            executor.dispose()
+        self.executors = []
         logger.info("RewardService disposed")
+
+
+__all__ = [
+    "InProcessRewardExecutor",
+    "RewardService",
+    "LocalRewardExecutor",
+]

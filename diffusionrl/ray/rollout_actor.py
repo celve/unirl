@@ -6,18 +6,23 @@ from typing import Any, Dict, List, Optional, Tuple
 import ray
 import torch
 
-from diffusionrl.config.build_domain_args import RewardSchema
-from diffusionrl.reward.runtime import SamplingActorRewardRuntime
+from diffusionrl.config.build_domain_args import RewardSchema, resolve_sde_config
+from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
+from diffusionrl.types.engine import (
+    EngineConfig,
+    normalize_engine_type,
+    uses_dedicated_rollout_engine,
+)
 from diffusionrl.types.sampling import PromptEmbeddings, RolloutRequest, RolloutOutput
 from diffusionrl.samplers.engine import (
     BaseRolloutEngine,
     DistributedWeightSyncCapable,
-    EngineConfig,
     get_engine,
 )
+from diffusionrl.utils.media import tensor_to_pil
 from diffusionrl.utils.weight_sync_checkpoint import wait_for_published_checkpoint
 
-from .actor_base import log_gpu_state, log_resource_ids, tensor_to_pil
+from .actor_base import log_gpu_state, log_resource_ids
 
 logger = logging.getLogger(__name__)
 
@@ -27,34 +32,19 @@ class RolloutActor:
     """
     Rollout Actor - Manages sampling and generation via Engine interface.
 
-    This actor provides a unified interface for different rollout backends:
-    - FSDP: Native PyTorch, DanceGRPO-aligned (single or multi-GPU)
-    - FastVideo: Efficient video generation (supports multi-GPU SP/TP)
-    - SGLang: Distributed rollout inference (future)
+    This actor hosts dedicated rollout-side services only:
+    - SGLang: Distributed rollout inference service
 
-    All engines implement the same interface, making Ray scheduling consistent.
+    Direct-sampling engines (for example the default FSDP sampler path) run on
+    TrainingActor and should never be instantiated here.
 
     GPU Allocation:
         GPU count is configured at actor creation via .options(num_gpus=N).
         - FSDP: num_gpus=1 (single GPU per actor, default)
         - FSDP multi-GPU: num_gpus>1 (uses FSDP wrapper for model parallelism)
-        - FastVideo: num_gpus=sp_size (SP requires multiple GPUs per actor)
-
-        FastVideo spawns MultiprocExecutor internally, which creates
-        worker processes for each GPU. The Ray actor acts as the coordinator.
-
     Example:
-        # Single GPU (FSDP)
-        actor = RolloutActor.options(num_gpus=1).remote(rank=0, world_size=1)
-
-        # Multi-GPU FSDP (4 GPUs)
-        actor = RolloutActor.options(num_gpus=4).remote(
-            rank=0, world_size=1, num_gpus_allocated=4
-        )
-
-        # Multi-GPU (FastVideo SP=4)
-        actor = RolloutActor.options(num_gpus=4).remote(
-            rank=0, world_size=1, num_gpus_allocated=4
+        actor = RolloutActor.options(num_gpus=1).remote(
+            rank=0, world_size=1, num_gpus_allocated=1
         )
     """
 
@@ -96,14 +86,13 @@ class RolloutActor:
         self.force_set_cuda_visible_devices = bool(force_set_cuda_visible_devices)
         self.engine: Optional[BaseRolloutEngine] = None
         self._device = None
-        self._warned_ignored_prompt_embedding_input = False
         self._transport_dtype: Optional[torch.dtype] = None
         self._transport_drop_decoded_videos: bool = False
         self._transport_log_payload_bytes: bool = False
         self._scheduler_endpoint: Optional[str] = None
         self._weight_update_target: str = f"actor_rank:{self.rank}"
         self._reward_schema: Optional[RewardSchema] = None
-        self._local_reward_runtime: Optional[SamplingActorRewardRuntime] = None
+        self._local_reward_runtime: Optional[ActorLocalRewardPrecompute] = None
 
     def _log_resource_ids(self, tag: str) -> None:
         log_resource_ids(tag, self.rank)
@@ -185,11 +174,11 @@ class RolloutActor:
     def _uses_rollout_local_reward(self) -> bool:
         return bool(self._reward_schema is not None and self._reward_schema.uses_sampling_actor_execution)
 
-    def _ensure_local_reward_runtime(self) -> SamplingActorRewardRuntime:
+    def _ensure_local_reward_runtime(self) -> ActorLocalRewardPrecompute:
         if not self._uses_rollout_local_reward():
             raise RuntimeError("Local reward runtime requested but reward_location!='sampling_actor'.")
         if self._local_reward_runtime is None:
-            self._local_reward_runtime = SamplingActorRewardRuntime(self._reward_schema)
+            self._local_reward_runtime = ActorLocalRewardPrecompute(self._reward_schema)
         return self._local_reward_runtime
 
     @staticmethod
@@ -672,24 +661,18 @@ class RolloutActor:
         )
         return resolved
 
-    def init(self, engine_config: dict) -> None:
+    def init(self, config: dict) -> None:
         """
-        Initialize the rollout engine.
+        Initialize the rollout actor and underlying engine.
 
         Args:
-            engine_config: Configuration for the engine including:
-                - sampler_engine_type: "fsdp" or "sglang" (required)
-                - sampler_path: Path to sampler class (required)
-                - model_path: Path to model bundle class
-                - pretrained_model_saved_path: Path to pretrained weights
-                - num_inference_steps: Number of denoising steps
-                - eta: SDE noise coefficient
-                - sde_type: Type of SDE ("sde", "cps", "dance")
-                - shift: Time shift for sigma schedule
-                - engine_kwargs: Additional engine-specific arguments
+            config: Rollout actor init config including:
+                - engine_config: rollout service bootstrap section
+                - sampling_config: sampler defaults and SDE math config
+                - reward_config: rollout-side reward execution config
 
         Raises:
-            ValueError: If sampler_engine_type or sampler_path is not provided
+            ValueError: If required sections or fields are not provided
         """
         logger.info(f"Rank {self.rank}: Initializing rollout actor (num_gpus={self.num_gpus_allocated})...")
 
@@ -698,26 +681,46 @@ class RolloutActor:
         # Setup distributed environment for multi-GPU
         self._setup_distributed_env()
 
+        if not isinstance(config, dict):
+            raise ValueError(f"rollout actor init config must be a dict, got: {type(config).__name__}")
+        engine_config = config.get("engine_config")
+        if not isinstance(engine_config, dict):
+            raise ValueError(
+                "rollout actor init config must provide engine_config as dict. "
+                f"Got: {type(engine_config).__name__}"
+            )
+        sampling_config = config.get("sampling_config")
+        if not isinstance(sampling_config, dict):
+            raise ValueError(
+                "rollout actor init config must provide sampling_config as dict. "
+                f"Got: {type(sampling_config).__name__}"
+            )
+
         # Get sampler_engine_type (must be provided by caller, validated in arguments.py)
-        sampler_engine_type = engine_config.get("sampler_engine_type")
-        if sampler_engine_type is None:
+        sampler_engine_type = normalize_engine_type(engine_config.get("sampler_engine_type"))
+        if not sampler_engine_type:
             raise ValueError(
                 "sampler_engine_type must be provided in engine_config. "
                 "This should be set automatically via --model-type or explicitly via --sampler-engine-type"
             )
-
-        # Get sampler_path (must be provided by caller, validated in arguments.py)
-        sampler_path = engine_config.get("sampler_path")
-        if sampler_path is None:
+        if not uses_dedicated_rollout_engine(sampler_engine_type):
             raise ValueError(
-                "sampler_path must be provided in engine_config. "
-                "This should be set automatically via --model-type or explicitly via --sampler-path"
+                f"sampler_engine_type={sampler_engine_type!r} does not use rollout actors. "
+                "Instantiate this sampler on TrainingActor instead."
             )
 
-        reward_config = engine_config.get("reward_config", {})
+        # Get sampler_path (must be provided by caller, validated in arguments.py)
+        sampler_path = sampling_config.get("sampler_path")
+        if sampler_path is None:
+            raise ValueError(
+                "sampler_path must be provided in sampling_config. "
+                "This should be set automatically via --model-type or explicitly via --sampler-path."
+            )
+
+        reward_config = config.get("reward_config", {})
         if not isinstance(reward_config, dict):
             raise ValueError(
-                "reward_config must be provided in engine_config as dict. "
+                "reward_config must be provided in rollout actor init config as dict. "
                 f"Got: {type(reward_config).__name__}"
             )
         self._reward_schema = RewardSchema(**reward_config)
@@ -733,25 +736,21 @@ class RolloutActor:
         engine_kwargs["base_gpu_id"] = self.base_gpu_id
         engine_kwargs["force_set_cuda_visible_devices"] = self.force_set_cuda_visible_devices
 
-        # For multi-GPU FSDP, ensure num_gpus is set in engine_kwargs
-        if sampler_engine_type == "fsdp" and self.num_gpus_allocated > 1:
-            if "num_gpus" not in engine_kwargs:
-                engine_kwargs["num_gpus"] = self.num_gpus_allocated
-                logger.info(f"Rank {self.rank}: Setting FSDP num_gpus={self.num_gpus_allocated}")
-        elif sampler_engine_type == "sglang":
+        if sampler_engine_type == "sglang":
             engine_kwargs = self._configure_sglang_ports(engine_kwargs)
 
-        config = EngineConfig(
+        sde_config = resolve_sde_config(sampling_config)
+        engine_runtime_config = EngineConfig(
             model_path=engine_config.get("model_path", ""),
             pretrained_model_saved_path=engine_config.get("pretrained_model_saved_path", ""),
-            num_inference_steps=engine_config.get("num_inference_steps", 50),
-            eta=engine_config.get("eta", 1.0),
-            sde_type=engine_config.get("sde_type", "sde"),
-            shift=engine_config.get("shift", 3.0),
-            guidance_scale=engine_config.get("guidance_scale", 7.5),
-            height=engine_config.get("height", 256),
-            width=engine_config.get("width", 256),
-            num_frames=engine_config.get("num_frames", 16),
+            num_inference_steps=sampling_config.get("num_inference_steps", 50),
+            eta=sde_config.eta,
+            sde_type=sde_config.sde_type,
+            shift=sde_config.shift,
+            guidance_scale=sampling_config.get("guidance_scale", 7.5),
+            height=sampling_config.get("height", 256),
+            width=sampling_config.get("width", 256),
+            num_frames=sampling_config.get("num_frames", 16),
             engine_kwargs=engine_kwargs,
         )
 
@@ -760,7 +759,7 @@ class RolloutActor:
             engine_cls = get_engine(sampler_engine_type)
         except ValueError as exc:
             raise ValueError(f"Unknown sampler_engine_type: {sampler_engine_type}. {exc}") from exc
-        self.engine = engine_cls(config)
+        self.engine = engine_cls(engine_runtime_config)
 
         # Initialize engine
         self.engine.initialize(self._device)
@@ -791,42 +790,6 @@ class RolloutActor:
                 "Prompt-embedding-only input is no longer supported."
             )
 
-        ignored_embedding_input = (
-            request.prompt_embeds is not None
-            or request.pooled_prompt_embeds is not None
-            or request.encoder_attention_mask is not None
-            or request.text_ids is not None
-            or request.kwargs.get("negative_prompt_embeds") is not None
-            or request.kwargs.get("negative_pooled_prompt_embeds") is not None
-        )
-        if ignored_embedding_input:
-            if not self._warned_ignored_prompt_embedding_input:
-                logger.warning(
-                    "RolloutActor now uses prompt-only input; external embedding tensors are ignored. "
-                    "Engines are responsible for per-request prompt encoding."
-                )
-                self._warned_ignored_prompt_embedding_input = True
-            # Clear embedding fields before passing to engine
-            request = RolloutRequest(
-                prompts=request.prompts,
-                num_inference_steps=request.num_inference_steps,
-                guidance_scale=request.guidance_scale,
-                eta=request.eta,
-                sde_type=request.sde_type,
-                height=request.height,
-                width=request.width,
-                num_frames=request.num_frames,
-                seed=request.seed,
-                latents=request.latents,
-                sde_indices=request.sde_indices,
-                decode_for_reward=request.decode_for_reward,
-                sampling_adapter=request.sampling_adapter,
-                return_trajectories=request.return_trajectories,
-                return_log_probs=request.return_log_probs,
-                kwargs={k: v for k, v in request.kwargs.items()
-                        if k not in ("negative_prompt_embeds", "negative_pooled_prompt_embeds")},
-            )
-
         self._ensure_engine_ready_for_generate()
         engine_caps = self.engine.get_capabilities_dict()
         if (
@@ -850,10 +813,13 @@ class RolloutActor:
 
         # Decode latents for reward if requested
         if request.decode_for_reward:
-            if not output.has_decoded_images:
+            has_decoded_videos = bool(
+                isinstance(output.metadata, dict) and torch.is_tensor(output.metadata.get("decoded_videos"))
+            )
+            if not output.has_decoded_images and not has_decoded_videos:
                 try:
                     decoded = self.engine.decode_latents(output.latents)
-                    decoded_images = self._tensor_to_pil(decoded)
+                    decoded_images = tensor_to_pil(decoded)
                     output = RolloutOutput(
                         latents=output.latents,
                         timesteps=output.timesteps,
@@ -865,7 +831,10 @@ class RolloutActor:
                         step_indices=output.step_indices,
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to decode latents: {e}")
+                    raise RuntimeError(
+                        "decode_for_reward requested but rollout engine produced no decoded media "
+                        f"and latent decoding failed: {e}"
+                    ) from e
 
         if request.decode_for_reward and self._uses_rollout_local_reward():
             output = self._ensure_local_reward_runtime().attach_to_output(
@@ -876,7 +845,7 @@ class RolloutActor:
                 group_ids=request.group_ids,
                 prompt_metadata=request.prompt_metadata,
                 keep_reward_media_for_manager=bool(request.keep_reward_media_for_manager),
-                samples_per_prompt=int(request.samples_per_prompt or 1),
+                samples_per_prompt=int(request.samples_per_prompt),
             )
 
         output = self._optimize_output_for_transport(output)
@@ -885,39 +854,6 @@ class RolloutActor:
         output = output.to_device("cpu")
         self._log_gpu_state("inference_generate_end")
         return output
-
-    def _tensor_to_pil(self, images: torch.Tensor) -> List[Any]:
-        return tensor_to_pil(images)
-
-    def encode_prompt(
-        self,
-        prompts: List[str],
-        **kwargs,
-    ) -> Dict[str, torch.Tensor]:
-        """Encode prompts via engine-side prompt encoder for rollout fallback wiring."""
-        if self.engine is None:
-            raise RuntimeError("Engine not initialized. Call init() first.")
-        if not isinstance(prompts, list) or len(prompts) == 0:
-            raise ValueError("encode_prompt requires non-empty prompts list.")
-
-        fn = getattr(self.engine, "encode_prompt", None)
-        if not callable(fn):
-            raise NotImplementedError(
-                f"Engine {type(self.engine).__name__} does not support encode_prompt()."
-            )
-
-        self._ensure_engine_ready_for_generate()
-        encoded = fn(list(prompts), **kwargs)
-        if not isinstance(encoded, dict):
-            raise TypeError(
-                f"Engine encode_prompt() must return dict, got {type(encoded).__name__}."
-            )
-
-        result: Dict[str, torch.Tensor] = {}
-        for key, value in encoded.items():
-            if torch.is_tensor(value):
-                result[str(key)] = value.detach().cpu()
-        return result
 
     def update_weights(self, state_dict_or_ref) -> None:
         """

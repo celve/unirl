@@ -44,7 +44,13 @@ class MegatronTrainBackend(TrainBackend):
         self._sp_size = _as_optional_int(kwargs.pop("sp_size", None)) or 1
         self._ep_size = _as_optional_int(kwargs.pop("ep_size", None)) or 1
 
-        self._launch_num_actors = _as_optional_int(kwargs.pop("num_actors", None))
+        unsupported_num_actors = kwargs.pop("num_actors", None)
+        if unsupported_num_actors is not None:
+            raise ValueError(
+                "train_backend_kwargs.num_actors is no longer supported. "
+                "Training actor count is owned by ray.training_num_nodes × "
+                "ray.training_num_gpus_per_node."
+            )
         self._launch_num_gpus_per_actor = kwargs.pop("num_gpus_per_actor", None)
         runtime_env = kwargs.pop("runtime_env", None)
         actor_kwargs = kwargs.pop("actor_kwargs", None)
@@ -83,12 +89,11 @@ class MegatronTrainBackend(TrainBackend):
             ),
         )
 
-    def launch_spec(self, *, args: Any, default_num_actors: int) -> TrainBackendLaunchSpec:
-        del args
+    def launch_spec(self, *, args: Any, topology: Any) -> TrainBackendLaunchSpec:
+        del args, topology
         return TrainBackendLaunchSpec(
             actor_class_path=self._actor_class_path,
             actor_kwargs=dict(self._launch_actor_kwargs),
-            num_actors=self._launch_num_actors or default_num_actors,
             num_gpus_per_actor=self._launch_num_gpus_per_actor,
             runtime_env=dict(self._launch_runtime_env),
             notes=(
