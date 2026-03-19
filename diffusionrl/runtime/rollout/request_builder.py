@@ -314,12 +314,12 @@ class RolloutRequestBuilder:
                 )
 
             _req_t0 = _time.perf_counter()
-            sampled_request = sample_request(current_request)
+            sampled_request = sample_request(request=current_request)
             _req_t1 = _time.perf_counter()
             sampler_outputs = sampled_request.sampler_outputs
 
             if validate_sampler_outputs is not None:
-                validate_sampler_outputs(sampler_outputs)
+                validate_sampler_outputs(sampler_outputs=sampler_outputs)
             _req_t2 = _time.perf_counter()
             logger.debug(
                 "[TIMING] sample_rollout req=%d/%d: sample=%.2fs validate=%.2fs",

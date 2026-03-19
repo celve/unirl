@@ -528,9 +528,9 @@ class RolloutManager:
 
     def _sample(  # [INTERNAL → _generate_training_data()] 构造完整 RolloutRequest 并调 distributed_sample
         self,
+        request: RolloutRequest,
         *,
         actor_group: Any,
-        request: RolloutRequest,
         sde_indices: Optional[Set[int]],
         requirements: Optional[Any] = None,
         sampling_overrides: Optional[Dict[str, Any]] = None,

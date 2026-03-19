@@ -7,6 +7,7 @@ from typing import List
 
 from PIL import Image
 from tqdm import tqdm
+import torch
 
 from diffusionrl.reward.base import RewardRequest, RewardType
 
@@ -34,7 +35,9 @@ class OCRRewardScorer(BaseLocalRewardScorer):
                 "pip install python-Levenshtein"
             )
 
+        use_gpu = str(self.device or "cpu").strip().lower().startswith("cuda") and torch.cuda.is_available()
         self._ocr_reader = PaddleOCR(
+            use_gpu=use_gpu,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,
@@ -63,10 +66,8 @@ class OCRRewardScorer(BaseLocalRewardScorer):
                 img = np.array(img)
 
             try:
-                result = self._ocr_reader.predict(img)
-                recognized_text = ""
-                for res in result:
-                    recognized_text += "".join(res["rec_texts"])
+                result = self._run_ocr(img)
+                recognized_text = self._extract_recognized_text(result)
 
                 recognized_text = recognized_text.replace(" ", "").lower()
                 prompt = prompt.replace(" ", "").lower()
@@ -83,3 +84,30 @@ class OCRRewardScorer(BaseLocalRewardScorer):
             rewards.append(1 - dist / len(prompt))
 
         return rewards
+
+    def _run_ocr(self, img):
+        predict_fn = getattr(self._ocr_reader, "predict", None)
+        if callable(predict_fn):
+            return predict_fn(img)
+        return self._ocr_reader.ocr(img, cls=False)
+
+    def _extract_recognized_text(self, result) -> str:
+        texts: List[str] = []
+        if isinstance(result, list):
+            for page in result:
+                if isinstance(page, dict):
+                    rec_texts = page.get("rec_texts")
+                    if isinstance(rec_texts, list):
+                        texts.extend(str(text) for text in rec_texts if text)
+                    continue
+                if not isinstance(page, list):
+                    continue
+                for line in page:
+                    if not isinstance(line, (list, tuple)) or len(line) < 2:
+                        continue
+                    candidate = line[1]
+                    if isinstance(candidate, (list, tuple)) and candidate:
+                        text = candidate[0]
+                        if isinstance(text, str) and text:
+                            texts.append(text)
+        return "".join(texts)
