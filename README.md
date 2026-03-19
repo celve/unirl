@@ -3,7 +3,7 @@
 **DiffusionRL** is a distributed reinforcement learning framework for diffusion model optimization, providing two core capabilities:
 
 1.  **High-Performance Distributed Training**: Supports efficient RL training in various deployment modes (separate, colocate, async pipeline) by orchestrating Ray-based inference and training actor pools;
-2.  **Flexible Algorithm & Engine Integration**: Enables pluggable RL algorithms (GRPO, MixGRPO, DanceGRPO, FlowGRPO, NFT), sampling engines (FSDP, FastVideo, SGLang), and reward models through a unified contract-driven architecture.
+2.  **Flexible Algorithm & Engine Integration**: Enables pluggable RL algorithms (GRPO, MixGRPO, DanceGRPO, FlowGRPO, NFT), sampling engines (FSDP, SGLang), and reward models through a unified contract-driven architecture.
 
 DiffusionRL supports the following diffusion models:
 - **Image**: FLUX.1 (Black Forest Labs), Stable Diffusion 3 (Stability AI);
@@ -23,7 +23,7 @@ DiffusionRL supports the following diffusion models:
 **Module Descriptions**:
 
 - **Training Actors (Ray + TrainBackend)**: Responsible for the main training process through pluggable training backends (FSDP2 / VeOmni native; Megatron scaffold), reads `TrainingBatch` from the rollout buffer, and synchronizes parameters to the inference actors after training.
-- **Inference Actors (FSDP / FastVideo / SGLang)**: Generates denoising trajectories and latent samples using pluggable sampling engines, producing `RolloutOutput` with a unified v1 contract.
+- **Inference Actors (FSDP / SGLang)**: Generates denoising trajectories and latent samples using pluggable sampling engines, producing `RolloutOutput` with a unified v1 contract.
 - **Reward Runtime**: Evaluates generated samples using configurable reward models (HPS, CLIP, PickScore, OCR, etc.) with a clean split between reward semantics and execution placement.
 - **RolloutManager**: The rollout-side producer facade that coordinates sampling, reward computation, advantage calculation, and batch assembly before handing data to the rollout buffer.
 
@@ -120,7 +120,7 @@ Default local paths are resolved against the repository root:
 - `data_path`: `data/samples/prompts_toy.json`
 - `eval_data_path`: unset by default; periodic eval then uses `data_path` with deterministic ordering
 - `output_dir`: `outputs/`
-- `weight_sync_dir`: `outputs/weight_sync/`
+- `sync.dir`: `outputs/weight_sync/`
 - local model mount (optional symlink): `models/local/`
 
 For a real validation split, pass `eval_data_path` explicitly. This keeps eval prompts independent from the training iterator and avoids train/eval data-stream coupling.
@@ -160,12 +160,12 @@ python -m diffusionrl.train \
     --model.model-type flux \
     --sampling.sampler-path diffusionrl.samplers.fsdp.flux_sampler.FluxSampler \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward.reward-path diffusionrl.reward.local.LocalRewardWorker \
+    --reward.reward-path diffusionrl.reward.local.LocalRewardScorer \
     --reward.reward-model-name hpsv2 \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path data/samples/prompts_toy.json \
     --eval-data-path data/samples/prompts_toy.json \
-    --sampling.sde-type flux_dance \
+    --sampling.sde-type dance \
     --sampling.eta 0.3 \
     --sampling.num-inference-steps 25 \
     --training.use-lora true \
@@ -192,6 +192,20 @@ Grouped YAML is now the only supported style for grouped fields.
 Grouped CLI options also use dotted names (for example `--training.train-backend`).
 CLI options always override YAML. Unknown YAML keys fail fast by default; use
 `--allow-unknown-config-keys` only when you intentionally want to ignore unknown keys.
+When `rollout.rollout_buffer_reassemble_by_group=true`,
+`rollout.rollout_buffer_group_size` must be set explicitly.
+
+Training geometry ownership has two modes:
+
+- Mode A, rollout-driven: leave `training.local_update_batch_size`,
+  and `training.num_updates_per_local_batch` unset. Batch geometry then comes from
+  `algorithm.prompts_per_rollout * algorithm.samples_per_prompt`.
+- Mode B, local-training-driven: set `training.local_update_batch_size` or
+  `training.num_updates_per_local_batch`. Local training geometry then owns batch planning, and
+  `algorithm.prompts_per_rollout` is derived from the resolved plan plus
+  `algorithm.samples_per_prompt`.
+- `training.local_micro_batch_size` only controls micro-step slicing inside one
+  local update batch; by itself it does not switch ownership mode.
 
 ### Training Backend Selection
 
@@ -235,11 +249,11 @@ See [scripts/README.md](scripts/README.md) for exact per-script defaults.
 
 ## Supported Algorithms
 
-| Algorithm | Description | SDE Type | Key Feature |
+| Algorithm | Description | Transition Rule | Key Feature |
 |-----------|-------------|----------|-------------|
-| **GRPO** | Group Relative Policy Optimization | `sde`, `cps`, `dpm2` | Standard trajectory-based RL |
-| **DanceGRPO** | GRPO with dance-specific SDE formulation | `dance`, `flux_dance` | Optimized for FLUX/SD3 |
-| **FlowGRPO** | Flow matching formulation | `flux_flow` | Flow-based objective |
+| **GRPO** | Group Relative Policy Optimization | `flow`, `cps`, `dpm2` | Standard trajectory-based RL |
+| **DanceGRPO** | GRPO with dance-specific SDE formulation | `dance` | Optimized for FLUX/SD3 |
+| **FlowGRPO** | Flow matching formulation | `flow` | Flow-based objective |
 | **MixGRPO** | Mixed ODE/SDE sampling | Configurable | Flexible SDE ratio (0~1) with window scheduler |
 | **NFT** | Negative Fine-Tuning | N/A | Forward diffusion, no trajectory needed |
 
@@ -251,7 +265,7 @@ Arguments in DiffusionRL are organized into the following categories:
 2.  **Sampling arguments**: `--sampling.sde-type`, `--sampling.eta`, `--sampling.num-inference-steps`, `--sampling.guidance-scale`, `--sampling.time-shift`, `--sampling.timestep-fraction`, etc.
 3.  **Algorithm arguments**: `--algorithm.algorithm-path`, `--algorithm.clip-range`, `--algorithm.use-kl-penalty`, `--algorithm.advantage-type`, etc.
 4.  **Reward arguments**: `--reward.reward-path`, `--reward.reward-model-name`, `--reward.reward-batch-size`, etc.
-5.  **Training arguments**: `--training.learning-rate`, `--training.gradient-accumulation-batch-size`, `--training.multi-update-batch-size`, `--training.update-mode`, `--training.max-grad-norm`, etc.
+5.  **Training arguments**: `--training.learning-rate`, `--training.local-micro-batch-size`, `--training.local-update-batch-size`,  `--training.max-grad-norm`, etc.
 6.  **Runtime arguments**: `--ray.colocate-rollout-training`, `--ray.rollout-num-gpus-per-node`, `--ray.training-num-gpus-per-node`, `--ray.placement-strategy`, etc.
 
 For the full argument reference, please refer to: [diffusionrl/config/arguments.py](diffusionrl/config/arguments.py)
@@ -276,15 +290,13 @@ Detailed layer diagram:
 ```
 diffusionrl/
 ├── train.py / train_async.py      # Training entry points
-├── types/                          # Canonical shared data types (RolloutOutput, TrainingBatch, Reward, WeightSync)
+├── types/                          # Canonical shared data types (RolloutOutput, TrainingBatch, Reward, Engine, SDE)
 ├── config/                         # Configuration system (TrainingArguments)
 ├── algorithms/                     # RL algorithms + advantage normalization helpers
-├── samplers/                       # Inference engines (FSDP, FastVideo, SGLang)
+├── samplers/                       # Inference engines (FSDP, SGLang)
 │   ├── fsdp/                       #   FSDP-based: FluxSampler, SD3Sampler, HunyuanSampler
-│   ├── fastvideo/                  #   FastVideo-based: FastVideoSampler
 │   └── sglang/                     #   SGLang external service engine
-├── losses/                         # Loss functions (GRPOLoss, NFTLoss)
-├── reward/                 # Reward workers (Local, HTTP, Ray service)
+├── reward/                         # Reward executors (local, HTTP, Ray service, actor-local precompute)
 ├── models/                         # Model implementations (FLUX, SD3, Hunyuan, Mochi)
 ├── data/                           # Data loading and datasets
 ├── ray/                            # Ray distributed orchestration
@@ -293,39 +305,69 @@ diffusionrl/
 │   ├── rollout_group.py / training_group.py / group_factory.py
 │   ├── buffer_actor.py / placement_group.py / ray_utils.py
 ├── runtime/                        # Async runtime + ray-agnostic execution logic
-├── patches/                        # Non-invasive patches for FastVideo
-└── utils/                          # Checkpointing, logging, EMA, weight sync
+├── patches/                        # Runtime patches (for example replay log-prob support)
+└── utils/                          # Checkpointing, logging, EMA, media helpers
 ```
 
 ### Adding a Custom Algorithm
 
-Subclass `BaseAlgorithm` and focus on rollout/advantage hooks:
-`from_args()`, `get_sampling_requirements()`, `compute_advantages()`, and optional timestep filters.
+Subclass `BaseAlgorithm` and implement the current algorithm-centric contract:
+`from_config()`, `get_sampling_requirements()`, reward/advantage handling, and
+the training objective owned by the algorithm (`_loss_cls` / `compute_loss_and_backward()`).
 For new code, always import shared data types from `diffusionrl.types` (single entry).
 
 ```python
+from typing import Any, Dict, Tuple
+
+import torch
+import torch.nn as nn
+
 from diffusionrl.algorithms.base import BaseAlgorithm, SamplingRequirements
+from diffusionrl.types import PromptEmbeddings, TimestepData
+
+
+class _MyLoss:
+    def __init__(self, algorithm: "MyAlgorithm") -> None:
+        self.algorithm = algorithm
+
+    def compute_loss(
+        self,
+        model: nn.Module,
+        timestep_data: TimestepData,
+        advantages: torch.Tensor,
+        embeddings: PromptEmbeddings,
+        **kwargs: Any,
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        del model, advantages, embeddings, kwargs
+        loss = timestep_data.latents.float().sum() * 0.0
+        return loss, {"placeholder": True}
+
 
 class MyAlgorithm(BaseAlgorithm):
+    _loss_cls = _MyLoss
+
     @classmethod
-    def from_args(cls, args):
-        kwargs = cls._base_kwargs_from_args(args)
-        return cls(**kwargs)
+    def from_config(cls, config: dict) -> "MyAlgorithm":
+        extra = dict(config.get("algorithm_kwargs") or {})
+        return cls(sde_ratio=float(extra.get("sde_ratio", 1.0)))
+
+    def __init__(self, *, sde_ratio: float = 1.0, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.sde_ratio = float(sde_ratio)
 
     def get_sampling_requirements(self) -> SamplingRequirements:
         return SamplingRequirements(
             requires_trajectory=True,
             requires_log_prob=True,
+            requires_embeddings=True,
             extras={"sde_ratio": 1.0},
         )
-
-    def compute_advantages(self, rewards):
-        # Replace with your advantage shaping/normalization.
-        return super().compute_advantages(rewards)
 ```
 
 Then pass it via `--algorithm.algorithm-path your_module.MyAlgorithm`.
-See the full minimal template: [docs/Algorithm_Minimal_Template.md](docs/Algorithm_Minimal_Template.md)
+See the fully working reference implementation:
+`diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm`.
+For the current extension contract, see [docs/Algorithm_Minimal_Template.md](docs/Algorithm_Minimal_Template.md).
 
 ### Plugin Templates (diffusionrl_plugins)
 
@@ -335,27 +377,28 @@ points:
 - Model: `diffusionrl_plugins.models.wan21.Wan21ModelBundle`
 - Sampler: `diffusionrl_plugins.samplers.minimal_sampler.MinimalSampler`
 - Algorithm: `diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm`
-- Reward: `diffusionrl_plugins.rewards.minimal_reward.MinimalRewardWorker`
+- Reward: `diffusionrl_plugins.rewards.minimal_reward.MinimalRewardScorer`
 Notes:
 - There is no plugin auto-registration; pass full dotpaths via CLI args.
 - `--model.model-type <name>` short-name resolution works only when the model class
   declares `declared_model_type()`, `default_sampler_path()`, and
   `default_sampler_engine()`.
 
-### Adding a Custom Reward Worker
+### Adding a Custom Reward Scorer
 
-Subclass `BaseRewardWorker`:
+Subclass `BaseRewardScorer`:
 
 ```python
-from diffusionrl.reward.base import BaseRewardWorker
+from diffusionrl.types.reward import RewardRequest, RewardResponse
+from diffusionrl.reward.base import BaseRewardScorer
 
-class MyRewardWorker(BaseRewardWorker):
-    def compute_reward(self, images, prompts, **kwargs):
+class MyRewardScorer(BaseRewardScorer):
+    def compute_rewards(self, request: RewardRequest) -> RewardResponse:
         # Your reward logic here
-        return rewards
+        ...
 ```
 
-Then pass it via `--reward.reward-path your_module.MyRewardWorker`.
+Then pass it via `--reward.reward-path your_module.MyRewardScorer`.
 
 ### Running Tests
 

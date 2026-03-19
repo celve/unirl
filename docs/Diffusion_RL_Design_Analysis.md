@@ -5,6 +5,11 @@
 > 文档状态（2026-03-01）：
 > 这份分析报告是阶段性设计快照，包含部分历史脚本名与旧结构示例。
 > 当前代码行为请以 `README.md`、`scripts/README.md` 以及 `diffusionrl/` 实际实现为准。
+> 文中若出现 `FastVideo`、`ray/rollout_buffer.py`、`weight_sync_mode`、`weight_sync_dir`、
+> `losses/`、`from_args()`、`--loss-path`
+> 等旧术语，请按当前实现对应到 `FSDP/SGLang`、`ray/buffer_actor.py`、
+> `sync.protocol`、`sync.dir`、algorithm-owned loss、`from_config()`、
+> `algorithm.algorithm_kwargs`。
 
 ## 目录
 
@@ -29,8 +34,8 @@
 
 ```python
 @dataclass
-class GRPOPlacementConfig:
-    """Resource allocation configuration for GRPO training."""
+class RuntimePlacementConfig:
+    """Resource allocation configuration for diffusionRL training."""
 
     # Inference resources
     rollout_num_nodes: int = 1
@@ -61,7 +66,7 @@ class GRPOPlacementConfig:
 
 > **资源调度**：统一使用单 PG + `{"GPU": 1}` uniform bundle 模式（slime 风格）。
 > "训推分离"通过**单 PG 内按节点切片**实现（逻辑隔离）。
-> 多 GPU 引擎（如 FastVideo SP）通过 NOSET_VISIBLE_DEVICES + `base_gpu_id` 实现。
+> 多 GPU rollout 引擎（例如 SGLang TP）通过 NOSET_VISIBLE_DEVICES + `base_gpu_id` 实现。
 
 ### 1.2 两种部署模式
 
@@ -136,8 +141,8 @@ graph TB
 `placement_group.py:160-206` 中的 `create_placement_groups()` 函数实现了两种模式的创建：
 
 ```python
-def create_placement_groups(config: GRPOPlacementConfig):
-    if config.colocate_rollout_training:
+def create_placement_groups(config: RuntimePlacementConfig):
+    if config.colocate_rollout:
         # 共享 Placement Group - 取最大值
         total_gpus = max(inference_total_gpus, training_total_gpus)
         pg = _create_placement_group(total_gpus, strategy, name="grpo_colocated")
@@ -241,15 +246,17 @@ flowchart TB
 
 `train.py` 是主训练入口（~238 行）。
 
-**v4.0 重构**：引入 `SamplingModePlugin` 模式插件，将 offload/onload 状态转换逻辑从主循环中解耦。新增 `weight_sync_mode`（ObjectRef / checkpoint_path）双模式权重同步、`async_pipeline` 异步训练切换、带版本号的权重同步 `_sync_weights_to_rollout()`。
+**当前主线重构**：主循环使用 `runtime/weight_sync.py` 中的 coordinator 模型，将权重同步统一收口到 `sync.protocol`（`disabled` / `tensor_payload` / `nccl_broadcast` / `checkpoint_path`），并与 `async_pipeline`、dedicated rollout engine 拓扑联动。
 
 ```python
-def _sync_weights_to_rollout(args, rollout_id, training_group, rollout_manager,
-                              *, target_weight_version):
-    """权重同步：支持 ObjectRef 和 checkpoint_path 两种模式"""
-    if args.weight_sync_mode == "checkpoint_path":
-        checkpoint_path = _build_weight_checkpoint_path(args, rollout_id)
-        training_group.export_weights_to_path(checkpoint_path)
+def create_weight_sync(args):
+    """按 sync.protocol 创建当前权重同步 coordinator。"""
+    if args.sync.protocol == "checkpoint_path":
+        return CheckpointWeightSync(args)
+    if args.sync.protocol == "tensor_payload":
+        return TensorPayloadWeightSync(args)
+    if args.sync.protocol == "nccl_broadcast":
+        return NCCLBroadcastWeightSync(args)
         ray.get(rollout_manager.load_weights.remote())
         ray.get(rollout_manager.update_weights_from_path.remote(
             checkpoint_path, int(target_weight_version)))
@@ -537,27 +544,22 @@ diffusionRL/                          # 总计 ~28,217 行 (含测试 ~1,449行)
 │   ├── mix_grpo.py                 # MixGRPOAlgorithm (SDE/ODE 混合) (~110行)
 │   └── nft.py                      # NFTAlgorithm (双 adapter + EMA) (~286行)
 │
-├── losses/                         # 损失函数 (~1,577行)
-│   ├── __init__.py                 # 工厂函数和注册表 (~94行)
-│   ├── grpo_loss.py                # GRPOLoss with Registry (~858行)
-│   └── nft_loss.py                 # NFTLoss (~625行)
+├── algorithms/                     # 算法同时拥有 rollout 合约与 loss 逻辑
+│   ├── grpo.py                     # _GRPOLoss + GRPOAlgorithm
+│   ├── mix_grpo.py                 # MixGRPOAlgorithm
+│   └── nft.py                      # _NFTLoss + NFTAlgorithm
 │
 ├── samplers/                       # 采样器 (~4,937行)
 │   ├── __init__.py                 # 模块导出 (~88行)
-│   ├── base.py                     # BaseSampler, TrajectoryReplaySampler (~243行)
+│   ├── base.py                     # BaseSampler 抽象 (~140行)
 │   ├── engine.py                   # 引擎注册表 + BaseRolloutEngine (~287行)
-│   ├── log_prob.py                 # SDE 对数概率计算 (~369行)
 │   ├── noise_utils.py              # 共享噪声生成 init_same_noise (~172行)
 │   ├── fsdp/                       # 原生 PyTorch 采样器 (~2,056行)
 │   │   ├── __init__.py             # 模块导出 (~29行)
 │   │   ├── flux_sampler.py         # FluxSampler (~508行)
 │   │   ├── sd3_sampler.py          # SD3Sampler (~570行)
 │   │   ├── hunyuan_sampler.py      # FSDPHunyuanSampler (~343行)
-│   │   └── engine.py               # FSDPRolloutEngine (~606行)
-│   ├── fastvideo/                   # FastVideo 引擎 (~1,058行)
-│   │   ├── __init__.py             # 模块导出 (~25行)
-│   │   ├── fastvideo_sampler.py    # FastVideoSampler (~494行)
-│   │   └── engine.py               # FastVideoRolloutEngine (~539行)
+│   │   └── sampler_runner.py       # 直采样共享执行核心
 │   ├── sglang/                     # SGLang 引擎
 │   │   ├── __init__.py             # 模块导出 (~33行)
 │   │   ├── engine.py               # SGLangRolloutEngine (~178行)
@@ -602,12 +604,9 @@ diffusionRL/                          # 总计 ~28,217 行 (含测试 ~1,449行)
 │   ├── arguments.py                # TrainingArguments (~864行)
 │   └── defaults.py                 # 预设配置 HunyuanVideo/Flux/Mochi等 (~616行)
 │
-├── patches/                        # FastVideo 补丁
-│   ├── __init__.py                 # 补丁协调器 (~1行)
-│   └── fastvideo/
-│       ├── __init__.py             # 补丁应用 (~14行)
-│       ├── gpu_worker_patch.py     # GPU worker 补丁 (~176行)
-│       ├── executor_patch.py       # Executor 补丁 (~45行)
+├── patches/                        # 当前主线只保留少量运行时补丁
+│   ├── __init__.py                 # 补丁导出
+│   └── replay_logprob.py           # rollout 缺失 log_prob 时的重放补丁
 │       └── video_generator_patch.py # 视频生成器补丁 (~45行)
 │
 ├── utils/                          # 工具 (~1,947行)
@@ -1222,29 +1221,23 @@ running_stats_warmup: int = 0      # 预热步数，预热期使用批内统计
 
 ### 4.3 Loss 函数设计
 
-#### Loss 注册表系统
+#### 当前主线：Algorithm-Owned Loss
 
 ```python
-# losses/__init__.py
-LOSS_REGISTRY = {
-    "grpo": GRPOLoss,
-    "nft": NFTLoss,
-}
+class _GRPOLoss:
+    def __init__(self, algorithm: "GRPOAlgorithm"):
+        self.algorithm = algorithm
 
-def get_loss(loss_type: str, **kwargs) -> BaseLoss:
-    """工厂函数，支持注册表和动态加载"""
-    if loss_type in LOSS_REGISTRY:
-        return LOSS_REGISTRY[loss_type](**kwargs)
-    elif "loss_path" in kwargs:
-        return load_class(kwargs["loss_path"])(**kwargs)
-    raise ValueError(f"Unknown loss: {loss_type}")
+    def compute_loss(self, ...):
+        ...
 
-def register_loss(name: str):
-    """装饰器注册新的 Loss"""
-    def decorator(cls):
-        LOSS_REGISTRY[name] = cls
-        return cls
-    return decorator
+
+class GRPOAlgorithm(BaseAlgorithm):
+    _loss_cls = _GRPOLoss
+
+    @classmethod
+    def from_config(cls, config: dict) -> "GRPOAlgorithm":
+        ...
 ```
 
 #### LossOutput 数据结构
@@ -1403,20 +1396,12 @@ classDiagram
         +BaseSampler sampler
     }
 
-    class FastVideoRolloutEngine {
-        说明: FastVideo 框架引擎
-        支持 Sequence Parallel
-        视频模型优化
-        +sp_size: int
-    }
-
     class SGLangRolloutEngine {
-        说明: SGLang 引擎 (占位)
+        说明: SGLang dedicated rollout engine
         支持 Tensor Parallel
     }
 
     BaseRolloutEngine <|-- FSDPRolloutEngine
-    BaseRolloutEngine <|-- FastVideoRolloutEngine
     BaseRolloutEngine <|-- SGLangRolloutEngine
 ```
 
@@ -1432,11 +1417,6 @@ classDiagram
         +sample(batch)* RolloutOutput
         +requires_extra_forward: bool
         +supports_video: bool
-    }
-
-    class TrajectoryReplaySampler {
-        说明: 基于轨迹回放计算 log_prob
-        +compute_log_probs_from_trajectory()
     }
 
     class FluxSampler {
@@ -1456,17 +1436,12 @@ classDiagram
         DanceGRPO 对齐
     }
 
-    class FastVideoSampler {
-        说明: FastVideo 引擎
-        轨迹回放方式
-    }
-
-    BaseSampler <|-- TrajectoryReplaySampler
     BaseSampler <|-- FluxSampler
     BaseSampler <|-- SD3Sampler
     BaseSampler <|-- FSDPHunyuanSampler
-    TrajectoryReplaySampler <|-- FastVideoSampler
 ```
+
+> 注：`TrajectoryReplaySampler` / `FastVideoSampler` 属于历史设计，当前主线代码已删除。
 
 #### 模型到引擎/采样器映射
 
@@ -1475,16 +1450,16 @@ classDiagram
 MODEL_TYPE_TO_SAMPLER_ENGINE = {
     "flux": "fsdp",      # FSDP 原生 PyTorch
     "sd3": "fsdp",       # FSDP 原生 PyTorch
-    "hunyuan": "fastvideo",  # FastVideo 框架
-    "mochi": "fastvideo",    # FastVideo 框架
+    "hunyuan": "fsdp",   # FSDP 原生 PyTorch 视频采样
+    "mochi": "sglang",   # dedicated rollout engine
 }
 
 # 采样器路径映射
 MODEL_TYPE_TO_SAMPLER = {
     "flux": "diffusionRL.samplers.fsdp.flux_sampler.FluxSampler",
     "sd3": "diffusionRL.samplers.fsdp.sd3_sampler.SD3Sampler",
-    "hunyuan": "diffusionRL.samplers.fastvideo.fastvideo_sampler.FastVideoSampler",
-    "mochi": "diffusionRL.samplers.fastvideo.fastvideo_sampler.FastVideoSampler",
+    "hunyuan": "diffusionRL.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler",
+    "mochi": "diffusionRL.samplers.sglang.engine.SGLangRolloutEngine",
 }
 
 # FSDP 采样器 (视频模型可选)
@@ -1628,8 +1603,7 @@ InferenceActor 通过 `BaseRolloutEngine` 抽象支持多种推理后端。v3.0 
 | 引擎类型 | 配置参数 | GPU 分配 | 特点 |
 |---------|---------|---------|------|
 | **FSDP** | `fsdp_num_gpus=1` | 单 GPU | 原生 PyTorch，DanceGRPO 对齐 |
-| **FastVideo** | `sp_size`, `fastvideo_num_gpus` | 多 GPU SP | 视频模型优化，序列并行 |
-| **SGLang** | `tp_size` | 多 GPU TP | 张量并行（占位） |
+| **SGLang** | `tp_size` | 多 GPU TP | dedicated rollout service，张量并行 |
 
 > 多 GPU 推理通过 Slime 模式实现：NOSET_VISIBLE_DEVICES + `base_gpu_id` + 手动 `CUDA_VISIBLE_DEVICES`。
 
@@ -1842,13 +1816,13 @@ graph TB
 
     subgraph AlgorithmLayer["Algorithm Layer (算法层)"]
         Algo["algorithms/<br/>BaseAlgorithm<br/>GRPO, MixGRPO, NFT"]
-        Loss["losses/<br/>BaseLoss<br/>GRPOLoss, NFTLoss"]
+        Loss["algorithm-owned loss<br/>_GRPOLoss / _NFTLoss"]
         Adv["advantages/<br/>RunningStats + Normalizers<br/>Global/Group/PerPrompt"]
     end
 
     subgraph SamplingLayer["Sampling Layer (采样层)"]
-        Sampler["samplers/<br/>BaseSampler<br/>FastVideo, Flux, SD3"]
-        Model["models/<br/>ModelBundle<br/>Flux, SD3, Hunyuan"]
+        Sampler["samplers/<br/>BaseSampler<br/>Flux, SD3, FSDPHunyuan"]
+        Model["models/<br/>ModelBundle<br/>Flux, SD3, Hunyuan, Mochi"]
         Sched["schedulers/<br/>TimestepWindow<br/>MixGRPO 时间步调度"]
     end
 
@@ -2197,14 +2171,15 @@ sequenceDiagram
 | **同步后递增** | `advance_weight_version()` | 更新预期权重版本 |
 | **双重校验** | `assert_inference_weight_version.remote()` | 远程 Actor 验证版本一致 |
 
-#### 权重同步双模式 [v4.0 NEW]
+#### 权重同步协议 [current]
 
-`_sync_weights_to_rollout()` 支持两种权重传输模式：
+当前实现通过 `sync.protocol` 选择权重同步协议：
 
 | 模式 | 配置 | 传输方式 | 适用场景 |
 |------|------|----------|---------|
-| **ObjectRef** (默认) | `weight_sync_mode="object_ref"` | `ray.put(state_dict)` → `ray.get()` | 单节点、小模型 |
-| **Checkpoint Path** | `weight_sync_mode="checkpoint_path"` | 原子写文件 → 各 Actor 读文件 | 多节点、大模型、共享存储 |
+| **Tensor Payload** | `sync.protocol="tensor_payload"` | 训练端分桶张量 → rollout service 直接接收 | 单节点 / SGLang rollout |
+| **NCCL Broadcast** | `sync.protocol="nccl_broadcast"` | 持久 NCCL 组广播 | 多节点 / SGLang rollout |
+| **Checkpoint Path** | `sync.protocol="checkpoint_path"` | 原子写文件 → 各 Actor 读文件 | 共享存储 / checkpoint 消费型 rollout |
 
 Checkpoint Path 模式使用 `weight_sync_checkpoint.py` 实现原子写入：
 ```python
@@ -2747,7 +2722,7 @@ reward_dedicated_num_gpus_per_node: int = 0  # 每节点 GPU 数
 | **数据分区** | `partition_train_data`, `prompts_per_rollout` | 大批次数据分区 |
 | **Colocate 精细控制** | `colocate_training_gpu_fraction`, `colocate_rollout_gpu_fraction` | GPU 分配比例 |
 | **异步管道** | `async_pipeline`, `async_max_inflight`, `update_weights_interval` | 异步 rollout/train 重叠 [v4.0] |
-| **权重同步** | `weight_sync_mode`, `weight_sync_dir` | ObjectRef / checkpoint_path 双模式 [v4.0] |
+| **权重同步** | `sync.protocol`, `sync.dir` | disabled / tensor_payload / nccl_broadcast / checkpoint_path |
 
 #### v3.0 新增参数说明
 
@@ -2771,8 +2746,8 @@ reward_dedicated_num_gpus_per_node: int = 0  # 每节点 GPU 数
 | `async_pipeline` | bool | False | 启用异步训练管道（rollout N+1 与 train N 重叠） |
 | `async_max_inflight` | int | 1 | 异步管道最大 inflight rollout 数量 |
 | `update_weights_interval` | int | 1 | 权重同步频率（每 N 个 rollout 同步一次） |
-| `weight_sync_mode` | str | "object_ref" | 权重传输模式："object_ref"（Ray ObjectRef）或 "checkpoint_path"（文件系统） |
-| `weight_sync_dir` | str | "" | checkpoint_path 模式下的权重临时目录 |
+| `sync.protocol` | str | "auto" | 权重同步协议：`auto` / `disabled` / `tensor_payload` / `nccl_broadcast` / `checkpoint_path` |
+| `sync.dir` | str | "outputs/weight_sync" | checkpoint_path 模式下的权重临时目录 |
 
 #### validate_args() 验证逻辑 (v3.0 新增)
 
@@ -2812,8 +2787,8 @@ MODEL_TYPE_TO_PATH = {
 MODEL_TYPE_TO_SAMPLER_ENGINE = {
     "flux": "fsdp",      # 图像模型用 FSDP
     "sd3": "fsdp",
-    "hunyuan": "fastvideo",  # 视频模型用 FastVideo
-    "mochi": "fastvideo",
+    "hunyuan": "fsdp",   # 视频模型可走 FSDP 原生采样
+    "mochi": "sglang",   # Mochi 使用 dedicated rollout engine
 }
 ```
 
@@ -2826,7 +2801,7 @@ MODEL_TYPE_TO_SAMPLER_ENGINE = {
 | 特性 | 描述 | 优势 |
 |------|------|------|
 | **模块化架构** | 算法、采样器、奖励、损失函数都是可插拔的 | 易于扩展新算法 |
-| **多引擎支持** | FSDP/FastVideo/SGLang 推理后端 | 灵活适配不同模型 |
+| **多引擎支持** | FSDP/SGLang 推理后端 | 灵活适配图像/视频模型 |
 | **Ray 分布式** | PlacementGroup + Actor 实现灵活的资源调度 | 支持多机多卡 |
 | **Colocate 优化** | offload/onload 复用 GPU | 4 GPU 完成 8 GPU 的工作 |
 | **类型安全** | dataclass 定义清晰的数据契约 | 减少运行时错误 |
@@ -2838,7 +2813,7 @@ MODEL_TYPE_TO_SAMPLER_ENGINE = {
 | **注册表系统** | Loss/Engine/Strategy 注册表 | 运行时扩展无需改代码 |
 | **SamplingModePlugin** | 模式插件解耦 offload/onload 状态转换 | 主循环模式无关 [v4.0] |
 | **异步训练管道** | AsyncPipelineRuntime 状态机 + 权重版本追踪 | rollout/train 重叠提升吞吐 [v4.0] |
-| **双模式权重同步** | ObjectRef / checkpoint_path 两种传输模式 | 适配单节点/多节点场景 [v4.0] |
+| **多协议权重同步** | tensor_payload / nccl_broadcast / checkpoint_path | 适配单节点/多节点场景 [v4.0] |
 | **原子 checkpoint 发布** | weight_sync_checkpoint.py 原子写入 | 避免读写竞争和数据损坏 [v4.0] |
 | **完整测试套件** | 12 个测试模块覆盖核心契约 | 回归保护 [v4.0] |
 
@@ -2901,7 +2876,7 @@ mindmap
 | **资源有限** | Colocate + PACK | 最小化 GPU 需求 |
 | **大模型训练** | FSDP + FULL_SHARD | 内存效率最高 |
 | **多节点训练** | FSDP + HYBRID_SHARD | 减少跨节点通信 |
-| **视频模型** | FastVideo + SP | 序列并行优化 |
+| **视频模型** | Hunyuan(FSDP) / Mochi(SGLang) | 依据模型默认 rollout 路径选择 |
 | **多节点** | SPREAD + Pipeline | 容错性好，吞吐稳定 |
 
 ### 10.5 支持的模型
@@ -2910,8 +2885,8 @@ mindmap
 |---------|------|-----|-------|
 | **FLUX** | 图像生成 | FSDP | FluxSampler |
 | **SD3** | 图像生成 | FSDP | SD3Sampler |
-| **HunyuanVideo** | 视频生成 | FastVideo/FSDP | FastVideoSampler/FSDPHunyuanSampler |
-| **Mochi** | 视频生成 | FastVideo | FastVideoSampler |
+| **HunyuanVideo** | 视频生成 | FSDP | FSDPHunyuanSampler |
+| **Mochi** | 视频生成 | SGLang | SGLangRolloutEngine |
 
 ---
 

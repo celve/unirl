@@ -18,9 +18,9 @@ Read in this order:
    - Training actor-group orchestration and high-level train API.
 7. `diffusionrl/ray/training_actor.py`
    - Per-actor initialization, backend wiring, and step execution.
-8. `diffusionrl/runtime/training/backward_train_step.py`
-   - Backward/update core path (loss forward/backward/optimizer step).
+8. `diffusionrl/runtime/training/train_executor.py`
+   - Training-side execution core (batch partition/update schedule/algorithm-driven loss+backward).
 
 Notes:
 - Start with these files before `ray/group_factory.py` and `ray/placement_group.py`.
-- Most algorithm-specific logic should be tracked via `algorithms/*` and `losses/*` after the 8-file pass above.
+- Most algorithm-specific loss/advantage logic now lives under `algorithms/*` after the 8-file pass above.
