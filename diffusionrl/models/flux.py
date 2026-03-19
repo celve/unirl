@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import torch
 import torch.nn as nn
 
+from diffusionrl.sde.rules import normalize_sde_type
+
 from .base import ModelBundle
 
 logger = logging.getLogger(__name__)
@@ -118,20 +120,10 @@ class FluxModelBundle(ModelBundle):
 
     @classmethod
     def validate_config(cls, args: Any) -> None:
-        sde_type = str(getattr(args.sampling, "sde_type", "") or "")
-        valid_sde_types = ("flux_dance", "flux_flow", "")
+        sde_type = normalize_sde_type(getattr(args.sampling, "sde_type", "") or "")
+        valid_sde_types = ("dance", "flow", "dpm2", "")
         if sde_type in valid_sde_types:
             return
-        if sde_type in ("dance", "sde"):
-            raise ValueError(
-                f"model_type='flux' requires flux-specific sde_type. "
-                f"Got sde_type='{sde_type}'. Use --sampling.sde-type flux_dance instead."
-            )
-        if sde_type == "flow":
-            raise ValueError(
-                f"model_type='flux' requires flux-specific sde_type. "
-                f"Got sde_type='flow'. Use --sampling.sde-type flux_flow instead."
-            )
         raise ValueError(
             f"Unknown sde_type='{sde_type}' for model_type='flux'. "
             f"Valid options: {', '.join(t for t in valid_sde_types if t)}."
@@ -360,7 +352,7 @@ class FluxModelBundle(ModelBundle):
         with torch.no_grad():
             # FLUX VAE scaling factor
             # Ensure latents match VAE dtype to avoid "Input type and bias type should be the same" errors
-            latents = latents.to(dtype=self._dtype) / self._vae.config.scaling_factor
+            latents = latents.to(dtype=self.dtype) / self._vae.config.scaling_factor
 
             # Decode
             images = self._vae.decode(latents, return_dict=False)[0]
@@ -417,7 +409,7 @@ class FluxModelBundle(ModelBundle):
 
         FLUX dev uses shift=1.0, schnell can use shift=0.0.
         """
-        from diffusionrl.samplers.log_prob import get_sigma_schedule
+        from diffusionrl.sde.runtime import get_sigma_schedule
         return get_sigma_schedule(num_steps, shift, self.device)
 
 

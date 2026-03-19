@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 import torch
 
+from diffusionrl.config.build_domain_args import resolve_sde_config
 from diffusionrl.types.training_batch import BackwardTrainingBatch
 from diffusionrl.utils import load_function
 
@@ -91,14 +92,15 @@ class ReplayLogProbPatch:
         )
 
         sampler_kwargs = dict(sampling_config.get("sampler_kwargs", {}) or {})
+        sde_config = resolve_sde_config(sampling_config)
         base_kwargs: Dict[str, Any] = {
             "model": model,
             "text_encoder": text_encoder,
             "vae": vae,
             "scheduler": scheduler,
-            "eta": sampling_config.get("eta", 1.0),
-            "sde_type": sampling_config.get("sde_type", "sde"),
-            "shift": sampling_config.get("shift", 3.0),
+            "eta": sde_config.eta,
+            "sde_type": sde_config.sde_type,
+            "shift": sde_config.shift,
             **sampler_kwargs,
         }
         filtered_kwargs: Dict[str, Any] = {}

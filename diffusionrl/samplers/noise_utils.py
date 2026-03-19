@@ -1,18 +1,17 @@
-"""
-Noise utilities for GRPO sampling.
+"""Noise utilities for GRPO sampling."""
 
-This module provides utilities for generating initial noise in various patterns,
-particularly for algorithms that benefit from specific noise initialization strategies.
-
-Used by DanceGRPO and MixGRPO for init_same_noise feature.
-
-Reference:
-- DanceGRPO: Shared initial noise across K samples for same prompt
-- MixGRPO: Same technique for reduced variance in advantage estimation
-"""
-
+import hashlib
 from typing import Dict, List, Optional, Tuple, Union
 import torch
+
+
+_MAX_TORCH_SEED = (1 << 63) - 1
+
+
+def _derive_group_seed(base_seed: int, group_id: str) -> int:
+    payload = f"{int(base_seed)}::{str(group_id)}".encode("utf-8")
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=False) % _MAX_TORCH_SEED
 
 
 def generate_shared_noise(
@@ -22,6 +21,7 @@ def generate_shared_noise(
     dtype: torch.dtype = torch.float32,
     generator: Optional[torch.Generator] = None,
     noise_group_ids: Optional[List[str]] = None,
+    base_seed: Optional[int] = None,
 ) -> torch.Tensor:
     """
     Generate initial noise where samples from the same prompt share the same noise.
@@ -72,12 +72,22 @@ def generate_shared_noise(
         group_id = str(raw_group_id)
         noise = group_noise.get(group_id)
         if noise is None:
-            noise = torch.randn(
-                *latent_shape,
-                device=device,
-                dtype=dtype,
-                generator=generator,
-            )
+            if base_seed is None:
+                noise = torch.randn(
+                    *latent_shape,
+                    device=device,
+                    dtype=dtype,
+                    generator=generator,
+                )
+            else:
+                group_generator = torch.Generator(device=device)
+                group_generator.manual_seed(_derive_group_seed(base_seed, group_id))
+                noise = torch.randn(
+                    *latent_shape,
+                    device=device,
+                    dtype=dtype,
+                    generator=group_generator,
+                )
             group_noise[group_id] = noise
         chunks.append(noise)
     return torch.stack(chunks, dim=0)
@@ -92,6 +102,7 @@ def generate_latents(
     init_same_noise: bool = False,
     samples_per_prompt: int = 1,
     noise_group_ids: Optional[List[str]] = None,
+    base_seed: Optional[int] = None,
 ) -> torch.Tensor:
     """
     High-level function for generating initial latents with optional noise sharing.
@@ -119,6 +130,7 @@ def generate_latents(
             dtype=dtype,
             generator=generator,
             noise_group_ids=noise_group_ids,
+            base_seed=base_seed,
         )
     return torch.randn(
         batch_size,

@@ -1,8 +1,8 @@
 """
 Inference Engine Interface for GRPO Training.
 
-This module defines the unified interface for inference engines (FSDP, FastVideo, SGLang).
-All engines must implement the BaseRolloutEngine interface to work with Ray actors.
+This module defines the unified interface for dedicated rollout-side inference engines.
+Dedicated engines implement BaseRolloutEngine to work with RolloutActor and Ray actors.
 
 Engine Responsibilities:
 1. Model loading and initialization
@@ -13,58 +13,20 @@ Engine Responsibilities:
 
 import importlib
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Optional, Set
+from dataclasses import asdict
+from typing import Any, Dict, List, Optional
 import torch
 
 from diffusionrl.types import RolloutOutput, RolloutRequest
-
-
-@dataclass
-class EngineConfig:
-    """Configuration for inference engine."""
-
-    # Model configuration
-    model_path: str = ""
-    pretrained_model_saved_path: str = ""
-
-    # Sampler configuration
-    num_inference_steps: int = 50
-    eta: float = 1.0
-    sde_type: str = "sde"
-    shift: float = 3.0
-    guidance_scale: float = 7.5
-
-    # Video/Image configuration
-    height: int = 256
-    width: int = 256
-    num_frames: int = 16
-
-    # Engine-specific configuration
-    engine_kwargs: Dict[str, Any] = None
-
-    def __post_init__(self):
-        if self.engine_kwargs is None:
-            self.engine_kwargs = {}
-
-
-@dataclass
-class EngineCapabilities:
-    """Runtime capabilities exposed by an inference engine."""
-
-    supports_logprob: bool = True
-    supports_trajectory: bool = True
-    supports_prompt_embeddings: bool = True
-    supports_guidance_scale: bool = True
-    weight_load_mode: str = "state_dict"  # state_dict | checkpoint_path | external
+from diffusionrl.types.engine import EngineCapabilities, EngineConfig, normalize_engine_type
 
 
 class BaseRolloutEngine(ABC):
     """
     Abstract base class for inference engines.
 
-    All inference engines (FSDP, FastVideo, SGLang) must implement this interface
-    to be compatible with RolloutActor and Ray scheduling.
+    Dedicated rollout engines (SGLang, future service engines) implement
+    this interface to be compatible with RolloutActor and Ray scheduling.
 
     Key Design Principles:
     1. Unified interface for all engines
@@ -100,9 +62,8 @@ class BaseRolloutEngine(ABC):
         Generate samples with log probabilities.
 
         Args:
-            request: A RolloutRequest containing text prompts and generation
-                parameters. Optional embedding tensors remain available only
-                for internal compatibility paths.
+            request: A RolloutRequest containing prompts and resolved
+                generation parameters.
 
         Returns:
             RolloutOutput with trajectories, log_probs, etc.
@@ -221,7 +182,7 @@ class BaseRolloutEngine(ABC):
 class DistributedWeightSyncCapable:
     """Mixin protocol for engines that support advanced weight sync.
 
-    SGLangRolloutEngine implements this; FSDPRolloutEngine does not.
+    SGLangRolloutEngine implements this for distributed rollout-side weight sync.
     RolloutActor checks isinstance() instead of hasattr().
     """
 
@@ -272,8 +233,6 @@ ENGINE_REGISTRY: Dict[str, type] = {}
 # Built-in engine modules for lazy self-registration.
 # Engines register themselves via @register_engine at module import time.
 ENGINE_MODULE_PATHS: Dict[str, str] = {
-    "fsdp": "diffusionrl.samplers.fsdp.engine",
-    # [FastVideo-suspended] "fastvideo": "diffusionrl.samplers.fastvideo.engine",
     "sglang": "diffusionrl.samplers.sglang.engine",
 }
 
@@ -284,11 +243,9 @@ def register_engine(name: str):
         ENGINE_REGISTRY[str(name).strip().lower()] = cls
         return cls
     return decorator
-
-
 def ensure_engine_registered(name: str) -> str:
     """Ensure the target engine is present in ENGINE_REGISTRY."""
-    normalized = str(name or "").strip().lower()
+    normalized = normalize_engine_type(name)
     if not normalized:
         raise ValueError("Engine name must be a non-empty string.")
 

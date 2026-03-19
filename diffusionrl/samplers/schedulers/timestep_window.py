@@ -9,7 +9,7 @@ Key concepts:
 - SDE timesteps compute log_prob and contribute to policy gradient loss
 - ODE timesteps are faster but don't contribute to training
 
-Based on: MixGRPO/fastvideo/utils/grpo_states.py
+Based on the original MixGRPO timestep-window scheduling logic.
 """
 
 from abc import ABC, abstractmethod

@@ -76,7 +76,7 @@ class MochiModelBundle(ModelBundle):
 
     @classmethod
     def default_sampler_path(cls) -> Optional[str]:
-        # SGLang engine handles Mochi rollout directly; no FastVideo sampler fallback.
+        # Mochi rollout is served by the dedicated SGLang engine in the current runtime.
         return "diffusionrl.samplers.sglang.engine.SGLangRolloutEngine"
 
     @classmethod
@@ -288,7 +288,7 @@ class MochiModelBundle(ModelBundle):
 
         Mochi uses a slightly different shift value by default.
         """
-        from diffusionrl.samplers.log_prob import get_sigma_schedule
+        from diffusionrl.sde.runtime import get_sigma_schedule
         return get_sigma_schedule(num_steps, shift, self.device)
 
 
@@ -337,19 +337,9 @@ class MochiTextEncoderWrapper:
             Tuple of (prompt_embeds, attention_mask)
         """
         if self.encoder is None:
-            # Return dummy embeddings if encoder not loaded
-            batch_size = len(prompt)
-            prompt_embeds = torch.zeros(
-                batch_size, self.max_length, 4096,  # T5-XXL dimension
-                dtype=self.dtype,
-                device=self.device,
+            raise RuntimeError(
+                "MochiTextEncoderWrapper is not initialized: T5 encoder is unavailable."
             )
-            attention_mask = torch.ones(
-                batch_size, self.max_length,
-                dtype=torch.long,
-                device=self.device,
-            )
-            return prompt_embeds, attention_mask
 
         with torch.no_grad():
             # Tokenize

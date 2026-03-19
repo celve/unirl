@@ -5,11 +5,12 @@ All samplers must inherit from BaseSampler and implement the sample() method.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Set, Any
+from typing import List, Optional, Set
 import torch
 
 # Import shared data types from canonical types package
-from diffusionrl.types import LogProbData, PromptEmbeddings, RolloutOutput
+from diffusionrl.sde.rules import is_deterministic_sde_type, normalize_sde_type
+from diffusionrl.types import RolloutOutput
 
 
 class BaseSampler(ABC):
@@ -22,7 +23,6 @@ class BaseSampler(ABC):
     Key Design Principles:
     1. Log probabilities MUST be computed at sampling time
     2. Trajectories are stored as [B, num_steps+1, C, ...] tensors
-    3. Each sampler specifies whether it requires extra forward for log_prob
 
     Model-Specific Parameter Contracts:
         Different model architectures handle certain parameters differently.
@@ -42,7 +42,7 @@ class BaseSampler(ABC):
     def __init__(
         self,
         eta: float = 1.0,
-        sde_type: str = "sde",
+        sde_type: str = "flow",
         shift: float = 3.0,
     ):
         """
@@ -50,12 +50,18 @@ class BaseSampler(ABC):
 
         Args:
             eta: Noise level for SDE (controls stochasticity)
-            sde_type: SDE formulation ("sde", "cps", "dance", "flux_dance", "flux_flow")
+            sde_type: Transition rule (flow/cps/dance/dpm2)
             shift: Time shift parameter for sigma schedule
         """
         self.eta = eta
-        self.sde_type = sde_type
+        self.sde_type = normalize_sde_type(sde_type)
         self.shift = shift
+
+    @property
+    def uses_deterministic_solver(self) -> bool:
+        """Whether rollout should bypass stochastic SDE steps."""
+
+        return is_deterministic_sde_type(self.sde_type, eta=self.eta)
 
     @abstractmethod
     def sample(
@@ -94,30 +100,6 @@ class BaseSampler(ABC):
         """
         pass
 
-    @property
-    @abstractmethod
-    def requires_extra_forward_for_log_prob(self) -> bool:
-        """
-        Whether this sampler requires an extra forward pass to compute log_prob.
-
-        If True, the sampler computes log_prob using a separate forward pass
-        after sampling (less efficient but works without modifying inference code).
-
-        If False, the sampler computes log_prob during the sampling loop
-        (more efficient, requires inference code modification).
-        """
-        pass
-
-    @property
-    def supports_video(self) -> bool:
-        """Whether this sampler supports video models."""
-        return False
-
-    @property
-    def supports_image(self) -> bool:
-        """Whether this sampler supports image models."""
-        return True
-
     def get_sigma_schedule(
         self,
         num_steps: int,
@@ -133,66 +115,5 @@ class BaseSampler(ABC):
         Returns:
             Tensor of sigmas [num_steps + 1]
         """
-        from .log_prob import get_sigma_schedule
+        from diffusionrl.sde.runtime import get_sigma_schedule
         return get_sigma_schedule(num_steps, self.shift, device)
-
-
-class TrajectoryReplaySampler(BaseSampler):
-    """
-    Base class for samplers that replay trajectories to compute log probabilities.
-
-    This is used when the inference backend (e.g., FastVideo) doesn't expose
-    noise_pred during sampling. The sampler:
-    1. Runs inference to get trajectories
-    2. Replays the trajectory with extra forward passes to compute log_probs
-    """
-
-    def __init__(
-        self,
-        model: torch.nn.Module,
-        eta: float = 1.0,
-        sde_type: str = "sde",
-        shift: float = 3.0,
-    ):
-        """
-        Initialize replay sampler.
-
-        Args:
-            model: The diffusion model for computing log probabilities
-            eta: Noise level for SDE
-            sde_type: SDE formulation
-            shift: Time shift parameter
-        """
-        super().__init__(eta=eta, sde_type=sde_type, shift=shift)
-        self.model = model
-
-    @property
-    def requires_extra_forward_for_log_prob(self) -> bool:
-        return True
-
-    @abstractmethod
-    def _forward_model(
-        self,
-        latents: torch.Tensor,
-        sigma: torch.Tensor,
-        prompt_embeds: torch.Tensor,
-        pooled_prompt_embeds: Optional[torch.Tensor],
-        guidance_scale: float,
-        **kwargs,
-    ) -> torch.Tensor:
-        """
-        Forward pass through the model to get noise prediction.
-
-        This should handle CFG and return the final noise_pred.
-
-        Args:
-            latents: [B, C, ...] noisy latents
-            sigma: Current sigma value
-            prompt_embeds: [B, seq, hidden] prompt embeddings
-            pooled_prompt_embeds: [B, hidden] pooled embeddings
-            guidance_scale: CFG scale
-
-        Returns:
-            noise_pred: [B, C, ...] velocity prediction
-        """
-        pass

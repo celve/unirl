@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import logging
 import os
 import sys
@@ -11,14 +12,15 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
-from diffusionrl.samplers.log_prob import get_sigma_schedule
+from diffusionrl.sde.rules import normalize_sde_type
+from diffusionrl.sde.runtime import get_sigma_schedule
 from diffusionrl.types import LogProbData, PromptEmbeddings, RolloutOutput, RolloutRequest
+from diffusionrl.types.engine import EngineCapabilities, EngineConfig
+from diffusionrl.utils.media import tensor_frame_to_pil
 
 from ..engine import (
     BaseRolloutEngine,
     DistributedWeightSyncCapable,
-    EngineCapabilities,
-    EngineConfig,
     register_engine,
 )
 
@@ -52,12 +54,10 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         self._last_weight_checksum: Dict[str, str] = {}
         self._supports_prompt_encoding: bool = False
         self._prompt_encoder: Any = None
-        self._encode_prompt_in_generate: bool = False
         self._supports_memory_api: bool = False
         self._require_memory_api: bool = False
         self._warned_missing_initial_noise: bool = False
         self._warned_missing_decoded: bool = False
-        self._warned_ignored_external_embeddings: bool = False
         self._warned_logprob_shape: bool = False
         self._warned_unsupported_rollout_sde: bool = False
         self._warned_trimmed_logprob_prefix: bool = False
@@ -108,7 +108,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
     def _ensure_sglang_importable(self) -> None:
         last_error: Optional[BaseException] = None
         try:
-            import sglang.multimodal_gen  # noqa: F401
+            importlib.import_module("sglang.multimodal_gen")
             return
         except ModuleNotFoundError as exc:
             last_error = exc
@@ -120,7 +120,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             if candidate_str not in sys.path:
                 sys.path.insert(0, candidate_str)
             try:
-                import sglang.multimodal_gen  # noqa: F401
+                importlib.import_module("sglang.multimodal_gen")
                 logger.info("Added local sglang python path: %s", candidate_str)
                 return
             except ModuleNotFoundError as exc:
@@ -222,13 +222,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             raw.get("require_memory_api", False),
             default=False,
         )
-        self._encode_prompt_in_generate = _to_bool(
-            raw.get(
-                "encode_prompt_in_generate",
-                raw.get("sglang_encode_prompt_in_generate", False),
-            ),
-            default=False,
-        )
 
         target_modules = raw.get("target_modules")
         if isinstance(target_modules, (list, tuple)) and target_modules:
@@ -244,8 +237,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             "require_memory_api",
             "prompt_encoder_device",
             "prompt_encoder_dtype",
-            "encode_prompt_in_generate",
-            "sglang_encode_prompt_in_generate",
             "server_kwargs",
         }
 
@@ -834,22 +825,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             )
         return timesteps, step_indices, has_initial_noise
 
-    @staticmethod
-    def _tensor_to_pil(frame: torch.Tensor) -> Any:
-        from PIL import Image
-
-        if frame.dim() != 3:
-            raise ValueError(f"Expected CHW frame tensor, got shape={tuple(frame.shape)}")
-
-        frame = frame.detach().float().cpu()
-        if frame.max().item() > 1.0:
-            frame = frame / 255.0
-        frame = frame.clamp(0.0, 1.0)
-        if frame.shape[0] == 1:
-            frame = frame.repeat(3, 1, 1)
-        img = frame.permute(1, 2, 0).mul(255).byte().numpy()
-        return Image.fromarray(img)
-
     def _extract_decoded_media(self, result: Any) -> tuple[Optional[Any], Optional[torch.Tensor]]:
         sample = getattr(result, "samples", None)
         if isinstance(sample, (tuple, list)) and len(sample) == 2:
@@ -864,32 +839,32 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         # Possible formats:
         # - [C,H,W] image
         # - [C,T,H,W] video
-        # - [T,H,W,C] video
-        # - [H,W,C] image
+            # - [T,H,W,C] video
+            # - [H,W,C] image
         if sample_tensor.dim() == 3:
             if sample_tensor.shape[0] in (1, 3, 4):
-                return self._tensor_to_pil(sample_tensor[:3]), None
+                return tensor_frame_to_pil(sample_tensor[:3]), None
             if sample_tensor.shape[-1] in (1, 3, 4):
                 chw = sample_tensor.permute(2, 0, 1)
-                return self._tensor_to_pil(chw[:3]), None
+                return tensor_frame_to_pil(chw[:3]), None
             return None, None
 
         if sample_tensor.dim() == 4:
             if sample_tensor.shape[0] in (1, 3, 4):
                 # [C,T,H,W]
                 mid = sample_tensor[:, sample_tensor.shape[1] // 2]
-                return self._tensor_to_pil(mid[:3]), sample_tensor
+                return tensor_frame_to_pil(mid[:3]), sample_tensor
             if sample_tensor.shape[1] in (1, 3, 4):
                 # [T,C,H,W]
                 mid = sample_tensor[sample_tensor.shape[0] // 2]
                 video = sample_tensor.permute(1, 0, 2, 3)
-                return self._tensor_to_pil(mid[:3]), video
+                return tensor_frame_to_pil(mid[:3]), video
             if sample_tensor.shape[-1] in (1, 3, 4):
                 # [T,H,W,C]
                 mid = sample_tensor[sample_tensor.shape[0] // 2]
                 chw = mid.permute(2, 0, 1)
                 video = sample_tensor.permute(3, 0, 1, 2)
-                return self._tensor_to_pil(chw[:3]), video
+                return tensor_frame_to_pil(chw[:3]), video
             return None, None
 
         return None, None
@@ -982,9 +957,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
 
         # Extract fields from request
         prompts = request.prompts
-        prompt_embeds = request.prompt_embeds
-        pooled_prompt_embeds = request.pooled_prompt_embeds
-        encoder_attention_mask = request.encoder_attention_mask
         num_inference_steps = request.num_inference_steps
         guidance_scale = request.guidance_scale
         height = request.height
@@ -999,58 +971,57 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         if prompts is None or len(prompts) == 0:
             raise ValueError("SGLang engine requires non-empty prompts")
 
-        has_external_embeddings = bool(
-            prompt_embeds is not None
-            or pooled_prompt_embeds is not None
-            or encoder_attention_mask is not None
-            or kwargs.get("negative_prompt_embeds") is not None
-            or kwargs.get("negative_pooled_prompt_embeds") is not None
-            or kwargs.get("text_ids") is not None
-            or kwargs.get("image_ids") is not None
-        )
-        if has_external_embeddings and not self._warned_ignored_external_embeddings:
-            if self._encode_prompt_in_generate:
-                logger.warning(
-                    "SGLang engine ignores external prompt embedding tensors and recomputes prompt embeddings "
-                    "from text prompts on every generate() call."
-                )
-            else:
-                logger.warning(
-                    "SGLang engine ignores external prompt embedding tensors in generate(); "
-                    "expect rollout-level fallback embedding attachment."
-                )
-            self._warned_ignored_external_embeddings = True
-
-        steps = int(num_inference_steps or self.config.num_inference_steps)
-        scale = float(guidance_scale if guidance_scale is not None else self.config.guidance_scale)
-        out_h = int(height or self.config.height)
-        out_w = int(width or self.config.width)
-        out_f = int(num_frames or self.config.num_frames)
-
-        if self._encode_prompt_in_generate:
-            encoded = self.encode_prompt(
-                list(prompts),
-                height=out_h,
-                width=out_w,
-                num_frames=out_f,
+        unsupported_embedding_kwargs = [
+            name
+            for name in (
+                "negative_prompt_embeds",
+                "negative_pooled_prompt_embeds",
+                "text_ids",
+                "image_ids",
             )
-            prompt_embeds = encoded.get("prompt_embeds")
-            if prompt_embeds is None:
-                raise RuntimeError("SGLang encode_prompt() returned no prompt_embeds")
-            pooled_prompt_embeds = encoded.get("pooled_prompt_embeds")
-            encoder_attention_mask = encoded.get("encoder_attention_mask")
-            negative_prompt_embeds = encoded.get("negative_prompt_embeds")
-            negative_pooled_prompt_embeds = encoded.get("negative_pooled_prompt_embeds")
-            text_ids = encoded.get("text_ids")
-            image_ids = encoded.get("image_ids")
-        else:
-            prompt_embeds = None
-            pooled_prompt_embeds = None
-            encoder_attention_mask = None
-            negative_prompt_embeds = None
-            negative_pooled_prompt_embeds = None
-            text_ids = None
-            image_ids = None
+            if kwargs.get(name) is not None
+        ]
+        if unsupported_embedding_kwargs:
+            raise ValueError(
+                "SGLang rollout engine uses prompt-only RolloutRequest input. "
+                f"Unsupported embedding kwargs: {unsupported_embedding_kwargs}."
+            )
+
+        if num_inference_steps is None:
+            raise ValueError("SGLang engine requires request.num_inference_steps to be resolved.")
+        if guidance_scale is None:
+            raise ValueError("SGLang engine requires request.guidance_scale to be resolved.")
+        if height is None or width is None or num_frames is None:
+            raise ValueError(
+                "SGLang engine requires request geometry to be resolved "
+                f"(height={height}, width={width}, num_frames={num_frames})."
+            )
+        steps = int(num_inference_steps)
+        scale = float(guidance_scale)
+        out_h = int(height)
+        out_w = int(width)
+        out_f = int(num_frames)
+
+        # TODO(architecture): Align SGLang rollout conditioning with flow_grpo
+        # semantics. The training path should eventually receive the exact prompt
+        # conditioning tensors used by the internal denoising pipeline, surfaced
+        # from sglang-diffusion itself, instead of this parallel prompt-encoder
+        # path in diffusionrl.
+        encoded = self.encode_prompt(
+            list(prompts),
+            height=out_h,
+            width=out_w,
+            num_frames=out_f,
+        )
+        prompt_embeds = encoded.get("prompt_embeds")
+        if prompt_embeds is None:
+            raise RuntimeError("SGLang encode_prompt() returned no prompt_embeds")
+        pooled_prompt_embeds = encoded.get("pooled_prompt_embeds")
+        encoder_attention_mask = encoded.get("encoder_attention_mask")
+        negative_prompt_embeds = encoded.get("negative_prompt_embeds")
+        negative_pooled_prompt_embeds = encoded.get("negative_pooled_prompt_embeds")
+        text_ids = encoded.get("text_ids")
+        image_ids = encoded.get("image_ids")
         model_type = self._infer_model_type()
 
         require_trajectory = bool(request.return_trajectories)
@@ -1075,19 +1046,22 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 self._warned_disabled_native_rollout = True
             rollout_enabled = False
         requested_rollout_sde = str(
-            kwargs.pop("rollout_sde_type", getattr(self.config, "sde_type", "sde"))
+            normalize_sde_type(
+                kwargs.pop("rollout_sde_type", getattr(self.config, "sde_type", "flow"))
+            )
         ).strip().lower()
-        if requested_rollout_sde in {"sde", "flow", "flux_flow"}:
+        # Internal config only uses canonical flow/cps/dance/dpm2 names.
+        # The native SGLang backend still expects "sde" as the flow-kernel label,
+        # so translate only at this external boundary.
+        if requested_rollout_sde == "flow":
             rollout_sde_type = "sde"
-        elif requested_rollout_sde in {"dance", "flux_dance"}:
-            rollout_sde_type = "dance"
         elif requested_rollout_sde == "cps":
             rollout_sde_type = "cps"
         else:
             rollout_sde_type = "sde"
             if rollout_enabled and not self._warned_unsupported_rollout_sde:
                 logger.warning(
-                    "SGLang native rollout logprob currently supports only sde/cps, got sde_type=%r. "
+                    "SGLang native rollout logprob currently supports only flow/cps, got sde_type=%r. "
                     "Disabling native rollout logprob and falling back to replay path.",
                     requested_rollout_sde,
                 )
@@ -1109,8 +1083,8 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             "save_output": False,
             "return_file_paths_only": False,
             "return_trajectory_latents": bool(require_trajectory or require_log_probs),
-            # Keep rollout path latent-only; reward-side image decoding is handled
-            # by diffusionrl fallback in RolloutActor.generate().
+            # Keep rollout path latent-only; decoded reward media must come from
+            # the sampler output itself or explicit decode_latents().
             "return_trajectory_decoded": False,
         }
         if seed is not None:
@@ -1259,7 +1233,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             ):
                 logger.warning(
                     "SGLang generate(return_decoded_for_reward=True) returned no decodable media. "
-                    "Reward stage will fall back to latent tensors."
+                    "Reward stage will fail without decoded media."
                 )
                 self._warned_missing_decoded = True
 
@@ -1284,7 +1258,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             "generator_type": "sglang",
             "engine_capabilities": self.get_capabilities_dict(),
             "logprob_source": self._logprob_source(),
-            "encode_prompt_in_generate": bool(self._encode_prompt_in_generate),
             "trajectory_format": trajectory_format,
             "timestep_type": "sigma",
             "timestep_scale": 1.0,
@@ -1334,6 +1307,11 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             output["encoder_attention_mask"] = secondary
         else:
             output["pooled_prompt_embeds"] = secondary
+        if model_type == "sd3":
+            negative = self._prompt_encoder.encode_prompt([""] * len(prompts))
+            if isinstance(negative, (tuple, list)) and len(negative) >= 2:
+                output["negative_prompt_embeds"] = negative[0]
+                output["negative_pooled_prompt_embeds"] = negative[1]
         if model_type == "flux":
             height = int(kwargs.get("height", self.config.height))
             width = int(kwargs.get("width", self.config.width))

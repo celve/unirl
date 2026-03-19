@@ -35,10 +35,6 @@ class MinimalSampler(BaseSampler):
         self.vae = vae
         self.extra_kwargs = dict(kwargs)
 
-    @property
-    def requires_extra_forward_for_log_prob(self) -> bool:
-        return False
-
     def sample(
         self,
         prompts: List[str],
@@ -67,4 +63,3 @@ class MinimalSampler(BaseSampler):
             "`diffusionrl_plugins/samplers/minimal_sampler.py` and implement sample() "
             "to return a valid RolloutOutput."
         )
-

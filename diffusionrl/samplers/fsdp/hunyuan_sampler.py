@@ -6,7 +6,7 @@ for HunyuanVideo models using native PyTorch (FSDP-compatible).
 It is fully aligned with DanceGRPO's implementation.
 
 Reference:
-- DanceGRPO: fastvideo/train_grpo_hunyuan.py (lines 54-96, 104-143)
+- DanceGRPO Hunyuan training implementation (lines 54-96, 104-143)
 
 Key alignment points with DanceGRPO:
 - sd3_time_shift(): sigma schedule transformation (line 54-55)
@@ -19,13 +19,15 @@ Key alignment points with DanceGRPO:
 """
 
 import logging
-from typing import Dict, List, Optional, Set, Tuple, Any
+from contextlib import nullcontext
+from typing import Any, Dict, List, Optional, Set
 import torch
 import torch.nn as nn
 
 from ..base import BaseSampler, RolloutOutput
-from ..log_prob import get_sigma_schedule, sd3_time_shift, flux_sde_step
+from diffusionrl.sde.runtime import sd3_time_shift, sde_step_with_log_prob
 from diffusionrl.types import LogProbData, PromptEmbeddings
+from diffusionrl.utils.dtypes import parse_torch_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +78,9 @@ class FSDPHunyuanSampler(BaseSampler):
         shift: float = 1.0,  # DanceGRPO default
         use_sde_solver: bool = True,  # Enable SDE solver correction
         guidance_scale: float = DEFAULT_GUIDANCE_VALUE,
+        autocast_precision: Any = "bf16",
+        trajectory_precision: Any = "fp16",
+        logprob_precision: Any = "fp32",
     ):
         """
         Initialize HunyuanVideo FSDP sampler.
@@ -97,18 +102,35 @@ class FSDPHunyuanSampler(BaseSampler):
         self.vae = vae
         self.use_sde_solver = use_sde_solver
         self.default_guidance_scale = float(guidance_scale)
+        self.autocast_dtype = parse_torch_dtype(autocast_precision, field_name="autocast_precision")
+        self.trajectory_dtype = parse_torch_dtype(trajectory_precision, field_name="trajectory_precision")
+        self.logprob_dtype = parse_torch_dtype(logprob_precision, field_name="logprob_precision")
 
-    @property
-    def requires_extra_forward_for_log_prob(self) -> bool:
-        return False  # Log prob computed during sampling
+    def _resolve_runtime_device(
+        self,
+        prompt_embeds: Optional[torch.Tensor],
+        latents: Optional[torch.Tensor],
+    ) -> torch.device:
+        """
+        Resolve sampling device robustly under FSDP CPU offload.
 
-    @property
-    def supports_image(self) -> bool:
-        return False
-
-    @property
-    def supports_video(self) -> bool:
-        return True
+        Like FLUX, Hunyuan can run with parameters parked on CPU outside forward,
+        so prefer live runtime tensors over `next(model.parameters()).device`.
+        """
+        if latents is not None and torch.is_tensor(latents) and latents.is_cuda:
+            return latents.device
+        if prompt_embeds is not None and torch.is_tensor(prompt_embeds) and prompt_embeds.is_cuda:
+            return prompt_embeds.device
+        if torch.cuda.is_available():
+            try:
+                return torch.device(f"cuda:{torch.cuda.current_device()}")
+            except Exception:
+                return torch.device("cuda")
+        if latents is not None and torch.is_tensor(latents):
+            return latents.device
+        if prompt_embeds is not None and torch.is_tensor(prompt_embeds):
+            return prompt_embeds.device
+        return next(self.model.parameters()).device
 
     def sample(
         self,
@@ -158,22 +180,22 @@ class FSDPHunyuanSampler(BaseSampler):
         if prompt_embeds is None:
             raise ValueError("prompt_embeds (encoder_hidden_states) is required for HunyuanVideo")
 
-        device = next(self.model.parameters()).device
+        device = self._resolve_runtime_device(prompt_embeds=prompt_embeds, latents=latents)
         batch_size = prompt_embeds.shape[0]
 
         # Move embeddings to device
-        prompt_embeds = prompt_embeds.to(device=device)
+        prompt_embeds = prompt_embeds.to(device=device, dtype=self.autocast_dtype)
         if pooled_prompt_embeds is not None:
-            pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=torch.bfloat16)
+            pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=self.autocast_dtype)
         else:
             # Newer diffusers Hunyuan forward requires pooled_projections.
-            # pooled_prompt_embeds stays bfloat16 for model forward (not trajectory storage).
+            # pooled_prompt_embeds stays in autocast precision for model forward.
             proj_dim = getattr(getattr(self.model, "config", None), "pooled_projection_dim", 768)
             pooled_prompt_embeds = torch.zeros(
                 batch_size,
                 int(proj_dim),
                 device=device,
-                dtype=torch.bfloat16,
+                dtype=self.autocast_dtype,
             )
         if encoder_attention_mask is not None:
             encoder_attention_mask = encoder_attention_mask.to(device=device)
@@ -195,7 +217,7 @@ class FSDPHunyuanSampler(BaseSampler):
         # Use float16 for trajectory storage (more mantissa bits than bfloat16).
         # Natural image latents are within float16 range.
         # Model forward still uses bfloat16 via torch.autocast.
-        trajectory_dtype = torch.float16
+        trajectory_dtype = self.trajectory_dtype
 
         if latents is None:
             latents = torch.randn(
@@ -216,9 +238,12 @@ class FSDPHunyuanSampler(BaseSampler):
         sigma_schedule = sd3_time_shift(self.shift, sigma_schedule)
         sigma_schedule = sigma_schedule.to(device)
 
-        # Default: all timesteps use SDE
+        # Default: all timesteps use SDE; deterministic mode uses ODE only.
         if sde_indices is None:
-            sde_indices = set(range(num_inference_steps))
+            if self.uses_deterministic_solver:
+                sde_indices = set()
+            else:
+                sde_indices = set(range(num_inference_steps))
         actual_guidance = (
             float(guidance_scale)
             if guidance_scale is not None
@@ -229,6 +254,12 @@ class FSDPHunyuanSampler(BaseSampler):
         all_latents = [latents.clone()]
         all_log_probs: Dict[int, torch.Tensor] = {}
 
+        autocast_ctx = (
+            torch.autocast("cuda", self.autocast_dtype)
+            if device.type == "cuda" and self.autocast_dtype in (torch.float16, torch.bfloat16)
+            else nullcontext()
+        )
+
         # Denoising loop (DanceGRPO line 117-139)
         for i in range(num_inference_steps):
             sigma = sigma_schedule[i]
@@ -238,7 +269,7 @@ class FSDPHunyuanSampler(BaseSampler):
             # Forward pass (DanceGRPO line 123-135)
             self.model.eval()
             with torch.no_grad():
-                with torch.autocast("cuda", torch.bfloat16):
+                with autocast_ctx:
                     model_pred = self.model(
                         hidden_states=latents,
                         encoder_hidden_states=prompt_embeds,
@@ -247,29 +278,35 @@ class FSDPHunyuanSampler(BaseSampler):
                         guidance=torch.tensor(
                             [actual_guidance],
                             device=device,
-                            dtype=torch.bfloat16
+                            dtype=self.autocast_dtype
                         ),
                         encoder_attention_mask=encoder_attention_mask,
                         return_dict=False,
                     )[0]
 
             # Check if this step uses SDE
-            if i in sde_indices:
+            if (not self.uses_deterministic_solver) and i in sde_indices:
                 # SDE step with log probability (DanceGRPO line 136)
                 # output_dtype=float16: align log_prob with trajectory storage precision
                 # float16 has more mantissa bits than bfloat16
-                latents, pred_original, log_prob = flux_sde_step(
-                    model_pred,
-                    latents.to(torch.float32),
-                    sigma_schedule,
-                    index=i,
+                current_latents = latents.to(torch.float32)
+                pred_original = current_latents - sigma * model_pred
+                latents, log_prob, _ = sde_step_with_log_prob(
+                    noise_pred=model_pred,
+                    sample=current_latents,
+                    sigmas=sigma_schedule,
+                    step_index=i,
                     eta=self.eta,
                     use_sde_solver=self.use_sde_solver,
+                    sde_type=self.sde_type,
                     output_dtype=trajectory_dtype,
                 )
                 latents = latents.to(trajectory_dtype)
+                all_log_probs[i] = log_prob.to(dtype=self.logprob_dtype)
             else:
                 # ODE step (deterministic)
+                current_latents = latents.to(torch.float32)
+                pred_original = current_latents - sigma * model_pred
                 dsigma = sigma_schedule[i + 1] - sigma
                 latents = latents + dsigma * model_pred
 
@@ -372,12 +409,17 @@ class FSDPHunyuanSampler(BaseSampler):
             batch_size,
             int(proj_dim),
             device=device,
-            dtype=torch.bfloat16,
+            dtype=self.autocast_dtype,
         )
 
         # Forward pass with gradients (DanceGRPO line 158-171)
         self.model.train()
-        with torch.autocast("cuda", torch.bfloat16):
+        autocast_ctx = (
+            torch.autocast("cuda", self.autocast_dtype)
+            if latents.is_cuda and self.autocast_dtype in (torch.float16, torch.bfloat16)
+            else nullcontext()
+        )
+        with autocast_ctx:
             model_pred = self.model(
                 hidden_states=latents,
                 encoder_hidden_states=prompt_embeds,
@@ -386,7 +428,7 @@ class FSDPHunyuanSampler(BaseSampler):
                 guidance=torch.tensor(
                     [actual_guidance],
                     device=device,
-                    dtype=torch.bfloat16
+                    dtype=self.autocast_dtype
                 ),
                 encoder_attention_mask=encoder_attention_mask,
                 return_dict=False,
@@ -395,14 +437,20 @@ class FSDPHunyuanSampler(BaseSampler):
         # Compute log probability (DanceGRPO line 172)
         # Training side: prev_latents is float16 from trajectory.
         # Upcast to float32 so that compute is on the same truncated value.
-        _, _, log_prob = flux_sde_step(
-            model_pred,
-            latents.to(torch.float32),
-            sigma_schedule,
-            index=timestep_index,
+        if self.uses_deterministic_solver:
+            raise ValueError(
+                "Deterministic Hunyuan sampling does not define stochastic log-prob replay."
+            )
+
+        _, log_prob, _ = sde_step_with_log_prob(
+            noise_pred=model_pred,
+            sample=latents.to(torch.float32),
+            sigmas=sigma_schedule,
+            step_index=timestep_index,
             eta=self.eta,
             use_sde_solver=self.use_sde_solver,
             prev_sample=prev_latents.to(torch.float32),
+            sde_type=self.sde_type,
         )
 
-        return log_prob
+        return log_prob.to(dtype=self.logprob_dtype)

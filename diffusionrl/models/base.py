@@ -243,7 +243,7 @@ class ModelBundle(ABC):
         Returns:
             Sigma schedule tensor [num_steps + 1]
         """
-        from diffusionrl.samplers.log_prob import get_sigma_schedule
+        from diffusionrl.sde.runtime import get_sigma_schedule
         return get_sigma_schedule(num_steps, shift, self.device)
 
     def to(self, device: Union[str, torch.device]) -> "ModelBundle":

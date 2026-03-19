@@ -341,19 +341,9 @@ class HunyuanTextEncoderWrapper:
             Tuple of (prompt_embeds, pooled_prompt_embeds)
         """
         if self.llama_encoder is None or self.clip_encoder is None:
-            # Return dummy embeddings if encoders not loaded
-            batch_size = len(prompt)
-            prompt_embeds = torch.zeros(
-                batch_size, 256, 4096,  # Typical HunyuanVideo dimensions
-                dtype=self.dtype,
-                device=self.device,
+            raise RuntimeError(
+                "HunyuanTextEncoderWrapper is not initialized: LLAMA/CLIP encoders are unavailable."
             )
-            pooled_embeds = torch.zeros(
-                batch_size, 768,  # CLIP dimension
-                dtype=self.dtype,
-                device=self.device,
-            )
-            return prompt_embeds, pooled_embeds
 
         with torch.no_grad():
             # LLAMA encoding

@@ -1,11 +1,11 @@
 """
-SD3 Image Sampler for GRPO Training (FSDP Engine).
+SD3 Image Sampler for GRPO Training (native direct rollout).
 
 This sampler implements SDE sampling with log probability computation
 for Stable Diffusion 3 image models using native PyTorch (FSDP-compatible).
-It supports:
-- Standard SDE sampling (sde)
-- CPS sampling (cps) - recommended for flow_grpo
+    It supports:
+    - Flow sampling (flow)
+    - CPS sampling (cps) - recommended for flow_grpo
 - Mixed ODE/SDE sampling for MixGRPO
 
 Reference:
@@ -22,8 +22,13 @@ import torch
 import torch.nn as nn
 
 from ..base import BaseSampler, RolloutOutput
-from ..log_prob import compute_sde_log_prob, sde_step_with_log_prob, get_sigma_schedule
+from diffusionrl.sde.runtime import (
+    compute_sde_log_prob,
+    get_sigma_schedule,
+    sde_step_with_log_prob,
+)
 from diffusionrl.types import LogProbData, PromptEmbeddings
+from diffusionrl.utils.dtypes import parse_torch_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +176,7 @@ def _dpm_step(
 
 class SD3Sampler(BaseSampler):
     """
-    SD3 image sampler with log probability computation (FSDP Engine).
+    SD3 image sampler with log probability computation for native direct rollout.
 
     This sampler is designed for Stable Diffusion 3 models and implements:
     - Standard SDE formulation
@@ -205,10 +210,13 @@ class SD3Sampler(BaseSampler):
         vae: Optional[nn.Module] = None,
         scheduler: Optional[Any] = None,
         eta: float = 0.7,
-        sde_type: str = "cps",  # SD3 typically uses "cps" or "sde"
+        sde_type: str = "cps",  # SD3 typically uses "cps" or "flow"
         shift: float = 3.0,    # SD3 uses shift=3.0
         latent_channels: int = 16,  # SD3 uses 16 latent channels
         vae_scale_factor: int = 8,  # VAE 8x compression
+        autocast_precision: Any = "bf16",
+        trajectory_precision: Any = "fp16",
+        logprob_precision: Any = "fp32",
     ):
         """
         Initialize SD3 sampler.
@@ -223,7 +231,7 @@ class SD3Sampler(BaseSampler):
             tokenizer_3: T5 tokenizer
             vae: VAE for encoding/decoding
             eta: Noise level for SDE (controls stochasticity)
-            sde_type: SDE formulation ("sde", "cps")
+            sde_type: Transition rule ("flow", "cps", "dpm2")
             shift: Time shift parameter (SD3 uses 3.0)
             latent_channels: Number of latent channels (16 for SD3)
             vae_scale_factor: VAE spatial compression factor
@@ -240,20 +248,11 @@ class SD3Sampler(BaseSampler):
         self.scheduler = scheduler
         self.latent_channels = latent_channels
         self.vae_scale_factor = vae_scale_factor
+        self.autocast_dtype = parse_torch_dtype(autocast_precision, field_name="autocast_precision")
+        self.trajectory_dtype = parse_torch_dtype(trajectory_precision, field_name="trajectory_precision")
+        self.logprob_dtype = parse_torch_dtype(logprob_precision, field_name="logprob_precision")
         # 防止多个sub-batch覆盖同一step的debug tensor（只保留第一个sub-batch的数据）
         self._debug_dumped_steps: set = set()
-
-    @property
-    def requires_extra_forward_for_log_prob(self) -> bool:
-        return False  # Log prob computed during sampling
-
-    @property
-    def supports_image(self) -> bool:
-        return True
-
-    @property
-    def supports_video(self) -> bool:
-        return False
 
     def _predict_noise_with_cfg(
         self,
@@ -391,9 +390,9 @@ class SD3Sampler(BaseSampler):
             raise RuntimeError("Model not set. Initialize sampler with model parameter.")
 
         device = self._resolve_runtime_device(prompt_embeds, latents)
-        # For SD3 with PEFT, always use bfloat16 for inference to match base model
-        # float16 for trajectory (more mantissa bits than bfloat16)
-        dtype = torch.float16
+        # SD3 keeps rollout trajectories in trajectory_precision while model forward
+        # can still use a separate autocast precision.
+        dtype = self.trajectory_dtype
 
         # Encode prompts if needed
         if prompt_embeds is None:
@@ -418,9 +417,8 @@ class SD3Sampler(BaseSampler):
         if negative_pooled_prompt_embeds is not None:
             negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(device=device, dtype=dtype)
         if guidance_scale > 1.0 and negative_prompt_embeds is None:
-            logger.warning(
-                "SD3 CFG: negative_prompt_embeds not provided. "
-                "Falling back to zero embeddings."
+            raise ValueError(
+                "SD3 CFG requires negative_prompt_embeds when guidance_scale > 1.0."
             )
 
         # Calculate latent dimensions
@@ -439,6 +437,7 @@ class SD3Sampler(BaseSampler):
                 init_same_noise=init_same_noise,
                 samples_per_prompt=samples_per_prompt,
                 noise_group_ids=noise_group_ids,
+                base_seed=(None if generator is None else int(generator.initial_seed())),
             )
         else:
             latents = latents.to(device=device, dtype=dtype)
@@ -450,7 +449,7 @@ class SD3Sampler(BaseSampler):
         # When eta=0 the SDE degenerates to ODE (no noise), so skip SDE steps
         # to avoid division-by-zero in the log-prob variance term.
         if sde_indices is None:
-            if self.sde_type == "dpm2" or self.eta == 0.0:
+            if self.uses_deterministic_solver:
                 sde_indices = set()
             else:
                 sde_indices = set(range(num_inference_steps))
@@ -464,6 +463,11 @@ class SD3Sampler(BaseSampler):
         if self.sde_type == "dpm2":
             dpm_state = _DPMState(order=2)
             timesteps = sigmas[:-1]
+        autocast_ctx = (
+            torch.autocast("cuda", self.autocast_dtype)
+            if device.type == "cuda" and self.autocast_dtype in (torch.float16, torch.bfloat16)
+            else nullcontext()
+        )
         rank = int(os.environ.get("RANK", 0))
         for i in tqdm(
             range(num_inference_steps),
@@ -478,15 +482,16 @@ class SD3Sampler(BaseSampler):
 
             # Forward pass with CFG
             with torch.no_grad():
-                noise_pred = self._predict_noise_with_cfg(
-                    latents=latents,
-                    timestep=timestep,
-                    prompt_embeds=prompt_embeds,
-                    pooled_prompt_embeds=pooled_prompt_embeds,
-                    guidance_scale=guidance_scale,
-                    negative_prompt_embeds=negative_prompt_embeds,
-                    negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-                )
+                with autocast_ctx:
+                    noise_pred = self._predict_noise_with_cfg(
+                        latents=latents,
+                        timestep=timestep,
+                        prompt_embeds=prompt_embeds,
+                        pooled_prompt_embeds=pooled_prompt_embeds,
+                        guidance_scale=guidance_scale,
+                        negative_prompt_embeds=negative_prompt_embeds,
+                        negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                    )
 
             # Debug: resolve sampling dump directory
             # Check explicit arg first, then env var fallback
@@ -496,7 +501,7 @@ class SD3Sampler(BaseSampler):
                 _sampling_debug_dir = os.path.join(_resolved_debug_dir, "sampling")
 
             # Check if this step uses SDE
-            if self.sde_type == "dpm2":
+            if self.uses_deterministic_solver:
                 latents = _dpm_step(
                     order=2,
                     model_output=noise_pred.float(),
@@ -558,7 +563,7 @@ class SD3Sampler(BaseSampler):
                                     "width": width,
                                 }, f, indent=2)
 
-                log_probs_dict[i] = log_prob
+                log_probs_dict[i] = log_prob.to(dtype=self.logprob_dtype)
             else:
                 # Deterministic ODE step (no log_prob)
                 dt = sigma_next - sigma
@@ -648,8 +653,8 @@ class SD3Sampler(BaseSampler):
             )
 
         autocast_ctx = (
-            torch.autocast("cuda", torch.bfloat16)
-            if latents.is_cuda
+            torch.autocast("cuda", self.autocast_dtype)
+            if latents.is_cuda and self.autocast_dtype in (torch.float16, torch.bfloat16)
             else nullcontext()
         )
         self.model.train()
@@ -662,6 +667,11 @@ class SD3Sampler(BaseSampler):
                 guidance_scale=actual_guidance,
                 negative_prompt_embeds=negative_prompt_embeds,
                 negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+            )
+
+        if self.uses_deterministic_solver:
+            raise ValueError(
+                "Deterministic SD3 sampling does not define stochastic log-prob replay."
             )
 
         log_prob, _ = compute_sde_log_prob(
@@ -678,7 +688,7 @@ class SD3Sampler(BaseSampler):
                 else 1.0
             ),
         )
-        return log_prob
+        return log_prob.to(dtype=self.logprob_dtype)
 
     def _get_sigma_schedule(
         self,
