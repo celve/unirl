@@ -81,7 +81,7 @@ def run_debug_train_only(args: Any) -> None:
 
         # 3. Create training actor group (loads model, LoRA, optimizer, loss)
         training_group = create_training_actor_group(args, training_pg_result)
-        training_group.update_weights()
+        # training_group.update_weights() # Legacy code. 
         logger.info("Training actor group created and weights synced")
 
         # 4. Prepare training batch

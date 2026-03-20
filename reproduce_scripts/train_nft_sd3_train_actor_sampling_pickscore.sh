@@ -72,12 +72,13 @@ DIRECT_SAMPLING_BATCH_SIZE=192 # Actual peak forward batch size during sampling 
 
 # Training settings
 LOCAL_MICRO_BATCH_SIZE=12 # Local peak forward/backward batch size during optimization
-LOCAL_UPDATE_BATCH_SIZE=144 # Local optimizer-update batch size. Set `prompts_per_rollout * samples_per_prompt` // NUM_GPUS // n for n updates.
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
+NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-1}
+LOCAL_UPDATE_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / NUM_GPUS / NUM_UPDATES_PER_LOCAL_BATCH ))
 
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
-NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-"{\"beta\":0.1,\"adv_mode\":\"raw\",\"adv_clip_max\":5.0,\"use_adaptive_weight\":true,\"train_timestep_mode\":\"all\",\"shuffle_train_timesteps\":true,\"apply_time_shift_in_loss\":false,\"use_reference_ema\":true,\"reference_update_timing\":\"rollout_end\",\"ema_decay\":0.001,\"decay_type\":\"warmup\",\"ema_flat_steps\":0,\"ema_uprate\":0.001,\"ema_uphold\":0.5,\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}"}
+NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-"{\"beta\":1,\"adv_mode\":\"raw\",\"adv_clip_max\":5.0,\"use_adaptive_weight\":true,\"train_timestep_mode\":\"all\",\"shuffle_train_timesteps\":true,\"apply_time_shift_in_loss\":false,\"use_reference_ema\":true,\"reference_update_timing\":\"rollout_end\",\"ema_decay\":0.001,\"decay_type\":\"warmup\",\"ema_flat_steps\":0,\"ema_uprate\":0.001,\"ema_uphold\":0.5,\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}"}
 if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
     exit 1
@@ -143,6 +144,8 @@ python -m diffusionrl.train \
     \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
+    --training.local-update-batch-size ${LOCAL_UPDATE_BATCH_SIZE} \
+    --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.kl-coef 0.0001 \
