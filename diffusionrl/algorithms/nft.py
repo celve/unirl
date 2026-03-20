@@ -869,9 +869,10 @@ class NFTAlgorithm(BaseAlgorithm):
                     timestep_values=t,
                     apply_shift=apply_shift,
                 )
-                (loss / effective_mini_batches).backward()
+                scaled_loss = loss / effective_mini_batches
+                scaled_loss.backward()
                 has_backward = True
-                mini_loss_sum += loss.detach().item()
+                mini_loss_sum += scaled_loss.detach().item()
 
                 for key, value in metrics.items():
                     metric_val = value.item() if isinstance(value, torch.Tensor) else float(value)
@@ -886,7 +887,7 @@ class NFTAlgorithm(BaseAlgorithm):
                     mini_metrics[key] = total / count
 
             mini_batch_metrics_list.append(mini_metrics)
-            total_loss_accum += mini_loss_sum / timesteps.numel()
+            total_loss_accum += mini_loss_sum
 
         all_metrics: Dict[str, Any] = {}
         if mini_batch_metrics_list:
@@ -899,7 +900,7 @@ class NFTAlgorithm(BaseAlgorithm):
                     all_metrics[key] = mini_batch_metrics_list[-1].get(key)
 
         return (
-            total_loss_accum / max(1, num_mini_batches),
+            total_loss_accum,
             all_metrics,
             timesteps.numel(),
             effective_mini_batches,

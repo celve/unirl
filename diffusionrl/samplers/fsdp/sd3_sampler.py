@@ -390,32 +390,32 @@ class SD3Sampler(BaseSampler):
             raise RuntimeError("Model not set. Initialize sampler with model parameter.")
 
         device = self._resolve_runtime_device(prompt_embeds, latents)
-        # SD3 keeps rollout trajectories in trajectory_precision while model forward
-        # can still use a separate autocast precision.
-        dtype = self.trajectory_dtype
+        embed_dtype = self.autocast_dtype
+        latent_dtype = self.trajectory_dtype
 
         # Encode prompts if needed
         if prompt_embeds is None:
             if prompts is None:
                 raise ValueError("Either prompts or prompt_embeds must be provided")
             prompt_embeds, pooled_prompt_embeds = self._encode_prompt(
-                prompts, max_sequence_length, device, dtype
+                prompts, max_sequence_length, device, embed_dtype
             )
             if guidance_scale > 1.0 and negative_prompt_embeds is None:
                 negative_prompt_embeds, negative_pooled_prompt_embeds = self._encode_prompt(
-                    [""] * len(prompts), max_sequence_length, device, dtype
+                    [""] * len(prompts), max_sequence_length, device, embed_dtype
                 )
 
         batch_size = prompt_embeds.shape[0]
 
-        # Move embeddings to device
-        prompt_embeds = prompt_embeds.to(device=device, dtype=dtype)
+        # Embeddings use autocast_dtype (model compute precision);
+        # latents use trajectory_dtype (compact storage precision).
+        prompt_embeds = prompt_embeds.to(device=device, dtype=embed_dtype)
         if pooled_prompt_embeds is not None:
-            pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=dtype)
+            pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=embed_dtype)
         if negative_prompt_embeds is not None:
-            negative_prompt_embeds = negative_prompt_embeds.to(device=device, dtype=dtype)
+            negative_prompt_embeds = negative_prompt_embeds.to(device=device, dtype=embed_dtype)
         if negative_pooled_prompt_embeds is not None:
-            negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(device=device, dtype=dtype)
+            negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(device=device, dtype=embed_dtype)
         if guidance_scale > 1.0 and negative_prompt_embeds is None:
             raise ValueError(
                 "SD3 CFG requires negative_prompt_embeds when guidance_scale > 1.0."
@@ -425,14 +425,14 @@ class SD3Sampler(BaseSampler):
         latent_height = height // self.vae_scale_factor
         latent_width = width // self.vae_scale_factor
 
-        # Initialize latents (with optional shared noise for DanceGRPO/MixGRPO)
+        # Initialize latents in trajectory_dtype (storage precision)
         if latents is None:
             from ..noise_utils import generate_latents
             latents = generate_latents(
                 batch_size=batch_size,
                 latent_shape=(self.latent_channels, latent_height, latent_width),
                 device=device,
-                dtype=dtype,
+                dtype=latent_dtype,
                 generator=generator,
                 init_same_noise=init_same_noise,
                 samples_per_prompt=samples_per_prompt,
@@ -440,7 +440,7 @@ class SD3Sampler(BaseSampler):
                 base_seed=(None if generator is None else int(generator.initial_seed())),
             )
         else:
-            latents = latents.to(device=device, dtype=dtype)
+            latents = latents.to(device=device, dtype=latent_dtype)
 
         # Get sigma schedule (align with diffusers scheduler if available)
         sigmas = self._get_sigma_schedule(num_inference_steps, device)
@@ -501,7 +501,7 @@ class SD3Sampler(BaseSampler):
                 _sampling_debug_dir = os.path.join(_resolved_debug_dir, "sampling")
 
             # Check if this step uses SDE
-            if self.uses_deterministic_solver:
+            if self.sde_type == "dpm2":
                 latents = _dpm_step(
                     order=2,
                     model_output=noise_pred.float(),
@@ -511,7 +511,7 @@ class SD3Sampler(BaseSampler):
                     sigmas=sigmas,
                     dpm_state=dpm_state,
                 )
-                latents = latents.to(dtype=dtype)
+                latents = latents.to(dtype=latent_dtype)
             elif i in sde_indices:
                 # Save pre-step latents for debug before SDE step mutates them
                 _pre_step_latents = latents.clone()
@@ -528,7 +528,7 @@ class SD3Sampler(BaseSampler):
                     eta=self.eta,
                     generator=generator,
                     sde_type=self.sde_type,
-                    output_dtype=dtype,
+                    output_dtype=latent_dtype,
                 )
 
                 # Dump debug tensors for this SDE step
@@ -568,7 +568,7 @@ class SD3Sampler(BaseSampler):
                 # Deterministic ODE step (no log_prob)
                 dt = sigma_next - sigma
                 latents = latents + dt * noise_pred
-                latents = latents.to(dtype=dtype)
+                latents = latents.to(dtype=self.trajectory_dtype)
 
             trajectory.append(latents.clone())
 
@@ -623,7 +623,6 @@ class SD3Sampler(BaseSampler):
             raise RuntimeError("Model not set. Initialize sampler with model parameter.")
 
         device = latents.device
-        dtype = latents.dtype
         batch_size = latents.shape[0]
         actual_guidance = float(guidance_scale if guidance_scale is not None else 1.0)
 
@@ -639,17 +638,20 @@ class SD3Sampler(BaseSampler):
         # Keep timestep in float32 to avoid reduced-precision loss
         timestep = (sigma * 1000).expand(batch_size)
 
-        prompt_embeds = prompt_embeds.to(device=device, dtype=dtype)
+        # Embeddings use autocast_dtype (model compute precision), independent
+        # of the trajectory storage dtype carried by latents.
+        embed_dtype = self.autocast_dtype
+        prompt_embeds = prompt_embeds.to(device=device, dtype=embed_dtype)
         pooled_prompt_embeds = (
-            pooled_prompt_embeds.to(device=device, dtype=dtype)
+            pooled_prompt_embeds.to(device=device, dtype=embed_dtype)
             if pooled_prompt_embeds is not None
             else None
         )
         if negative_prompt_embeds is not None:
-            negative_prompt_embeds = negative_prompt_embeds.to(device=device, dtype=dtype)
+            negative_prompt_embeds = negative_prompt_embeds.to(device=device, dtype=embed_dtype)
         if negative_pooled_prompt_embeds is not None:
             negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(
-                device=device, dtype=dtype
+                device=device, dtype=embed_dtype
             )
 
         autocast_ctx = (

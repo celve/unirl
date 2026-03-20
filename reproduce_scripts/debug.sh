@@ -23,7 +23,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Default values (can be overridden via command line)
 PRETRAINED_MODEL="stabilityai/stable-diffusion-3.5-medium"
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/flowgrpo_sd3_train_sampling"}
-DATA_PATH="${REPO_ROOT}/data/samples/prompts_toy.json"
+DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/datasets/ocr/train.txt"}
 
 NUM_GPUS=${NUM_GPUS:-8}
 
@@ -35,8 +35,9 @@ DIRECT_SAMPLING_BATCH_SIZE=192 # Actual peak forward batch size during sampling 
 
 # Training settings
 LOCAL_MICRO_BATCH_SIZE=12 # Local peak forward/backward batch size during optimization
-LOCAL_UPDATE_BATCH_SIZE=72 # Local optimizer-update batch size. Set `prompts_per_rollout * samples_per_prompt` // NUM_GPUS // n for n updates.
+NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-1}
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
+LOCAL_UPDATE_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / NUM_GPUS / NUM_UPDATES_PER_LOCAL_BATCH ))
 
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-false}
@@ -92,8 +93,9 @@ DEBUG_NUM_ROLLOUTS=${DEBUG_NUM_ROLLOUTS:-1}
     # --debug.debug-load-path "${DEBUG_SAVE_DIR}/rollout_payload_0.pt" \
     # --debug.debug-num-rollouts 3 \
 python -m diffusionrl.train \
-    --debug.debug-save-intermediates true \
-    --debug.debug-save-dir "${DEBUG_SAVE_DIR}" \
+    --debug.debug-mode train_only \
+    --debug.debug-load-path "${DEBUG_SAVE_DIR}/rollout_payload_0.pt" \
+    --debug.debug-num-rollouts 3 \
     \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
@@ -107,7 +109,7 @@ python -m diffusionrl.train \
     \
     --sampling.time-shift 3.0 \
     --sampling.eta 0.0 \
-    --sampling.sde-type flow \
+    --sampling.sde-type dpm2 \
     --sampling.timestep-fraction 0.1,0.4 \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
     --sampling.guidance-scale 1.0 \
@@ -116,9 +118,10 @@ python -m diffusionrl.train \
     \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
+    --training.local-update-batch-size ${LOCAL_UPDATE_BATCH_SIZE} \
+    --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
-    --algorithm.use-kl-penalty true \
     --algorithm.kl-coef 0.0001 \
     --algorithm.adv-normalization group \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \

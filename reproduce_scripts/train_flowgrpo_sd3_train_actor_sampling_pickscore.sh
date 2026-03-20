@@ -69,8 +69,9 @@ DIRECT_SAMPLING_BATCH_SIZE=192 # Actual peak forward batch size during sampling 
 
 # Training settings
 LOCAL_MICRO_BATCH_SIZE=12 # Local peak forward/backward batch size during optimization
-LOCAL_UPDATE_BATCH_SIZE=72 # Local optimizer-update batch size. Set `prompts_per_rollout * samples_per_prompt` // NUM_GPUS // n for n updates.
+NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-2}
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
+LOCAL_UPDATE_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / NUM_GPUS / NUM_UPDATES_PER_LOCAL_BATCH ))
 
 if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
     echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
@@ -148,6 +149,7 @@ python -m diffusionrl.train \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
     --training.local-update-batch-size ${LOCAL_UPDATE_BATCH_SIZE} \
+    --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty true \

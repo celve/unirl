@@ -37,8 +37,9 @@ NUM_SAMPLES_PER_PROMPT=16
 PROMPTS_PER_BATCH=48
 DIRECT_SAMPLING_BATCH_SIZE=128
 LOCAL_MICRO_BATCH_SIZE=16
-LOCAL_UPDATE_BATCH_SIZE=48 # NUM_SAMPLES_PER_PROMPT * PROMPTS_PER_BATCH // gpu // n
+NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-2}
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
+LOCAL_UPDATE_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / NUM_GPUS / NUM_UPDATES_PER_LOCAL_BATCH ))
 
 # Parse --sampling.sde-type and --sampling.eta from cmdline for logging
 SDE_TYPE_OVERRIDE=""
@@ -100,6 +101,7 @@ python -m diffusionrl.train \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}" \
     --training.local-update-batch-size ${LOCAL_UPDATE_BATCH_SIZE} \
+    --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.clip-range 1e-4 \
     --algorithm.use-kl-penalty false \
