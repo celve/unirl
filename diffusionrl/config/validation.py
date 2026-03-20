@@ -795,7 +795,7 @@ def validate_resolved_engine_algorithm_contract(
             "Dedicated rollout validation requires rollout.service_engine to be set explicitly. "
             "Run validate_args() before resolving dedicated rollout engine capabilities."
         )
-    engine_caps = resolve_engine_capabilities(engine_type=service_engine)
+    engine_caps = resolve_engine_capabilities(service_engine)
 
     allow_replay = (
         bool(getattr(args.sampling, "replay_log_probs", False))

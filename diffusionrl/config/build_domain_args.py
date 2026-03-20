@@ -546,12 +546,17 @@ def build_training_actor_init_config(
     *,
     args,
     topology: ResolvedTrainTopology,
-    algorithm_config: Optional[Dict[str, Any]] = None,
+    algorithm_config: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Build full TrainingActor.init config directly from args.
 
     Pulls from: ModelConfig + TrainingConfig + AlgorithmConfig + SamplingConfig.
     """
+    if not isinstance(algorithm_config, dict):
+        raise ValueError(
+            "build_training_actor_init_config requires algorithm_config to be provided by the driver."
+        )
+
     training_plan = resolve_training_plan(args)
     backend_config = _build_train_backend_config(args, dp_size=topology.dp_size)
     return {
@@ -559,7 +564,7 @@ def build_training_actor_init_config(
         "reward_config": build_reward_config(args),
         "optimizer_config": _build_optimizer_config(args),
         "scheduler_config": _build_scheduler_config(args, total_steps=args.rollout.num_rollout),
-        "algorithm_config": dict(algorithm_config) if algorithm_config is not None else build_algorithm_config(args),
+        "algorithm_config": dict(algorithm_config),
         "training_config": _build_training_runtime_config(
             args,
             dp_size=topology.dp_size,

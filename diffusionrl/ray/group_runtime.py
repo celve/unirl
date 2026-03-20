@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class TrainingGroupRuntime:
     """Training-side runtime control layered above a thin actor group."""
 
-    def __init__(self, *, handle: ActorGroupHandle):
+    def __init__(self, handle: ActorGroupHandle):
         self._handle = handle.snapshot()
         self.num_actors = int(self._handle.num_actors)
         self._buffer_consumer_spec_cache: Optional[Dict[str, Any]] = None
@@ -23,12 +23,12 @@ class TrainingGroupRuntime:
 
     @classmethod
     def from_group(cls, group: Any) -> "TrainingGroupRuntime":
-        return cls(handle=group.snapshot())
+        return cls(group.snapshot())
 
     def update_weights(self) -> None:
         self._handle.call_all("update_weights")
 
-    def get_rank0_ip_and_free_port(self, *, start_port: int = 26000) -> Dict[str, Any]:
+    def get_rank0_ip_and_free_port(self, start_port: int = 26000) -> Dict[str, Any]:
         payload = self._handle.call_rank0(
             "get_node_ip_and_free_port",
             start_port=int(start_port),
@@ -58,7 +58,7 @@ class TrainingGroupRuntime:
             backend=str(backend),
         )
 
-    def destroy_weights_update_group(self, *, group_name: str) -> None:
+    def destroy_weights_update_group(self, group_name: str) -> None:
         self._handle.call_rank0(
             "destroy_weights_update_group",
             group_name=str(group_name),
@@ -114,7 +114,7 @@ class TrainingGroupRuntime:
             "broadcast_tensors": int(rank0.get("broadcast_tensors", 0)),
         }
 
-    def get_train_backend_info(self, *, force_refresh: bool = False) -> Dict[str, Any]:
+    def get_train_backend_info(self, force_refresh: bool = False) -> Dict[str, Any]:
         if self._train_backend_info_cache is not None and not force_refresh:
             return dict(self._train_backend_info_cache)
         info = self._handle.call_rank0("get_train_backend_info")
@@ -123,7 +123,7 @@ class TrainingGroupRuntime:
             return dict(info)
         return {}
 
-    def get_buffer_consumer_spec(self, *, force_refresh: bool = False) -> Dict[str, Any]:
+    def get_buffer_consumer_spec(self, force_refresh: bool = False) -> Dict[str, Any]:
         if self._buffer_consumer_spec_cache is not None and not force_refresh:
             return dict(self._buffer_consumer_spec_cache)
         spec = self._handle.call_rank0("get_buffer_consumer_spec")
@@ -355,7 +355,7 @@ class RolloutGroupRuntime:
             per_actor_kwargs=per_actor_kwargs,
         )
 
-    def destroy_weights_update_group(self, *, group_name: str) -> None:
+    def destroy_weights_update_group(self, group_name: str) -> None:
         self._ensure_weight_update_targets()
         self._handle.call_subset(
             self._weight_update_actor_indices,

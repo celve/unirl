@@ -54,7 +54,7 @@ def resolve_sampling_requirements(
     )
 
 
-def resolve_engine_capabilities(*, engine_type: str) -> Dict[str, bool]:
+def resolve_engine_capabilities(engine_type: str) -> Dict[str, bool]:
     """Resolve engine capabilities from engine class declaration."""
     engine_path = get_engine_class_path(engine_type)
     engine_cls = load_function(engine_path)

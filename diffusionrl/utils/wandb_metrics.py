@@ -183,7 +183,6 @@ _BUFFER_CORE_KEYS = (
 
 def build_buffer_metrics(
     stats: Optional[Dict[str, Any]],
-    *,
     prefix: str = "buffer/",
 ) -> Dict[str, float]:
     """Extract numeric rollout-buffer health metrics."""
@@ -212,7 +211,6 @@ def build_buffer_metrics(
 
 def build_sync_metrics(
     sync_result: Any,
-    *,
     prefix: str = "sync/",
 ) -> Dict[str, float]:
     """Flatten weight-sync result into numeric metrics."""

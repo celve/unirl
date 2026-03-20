@@ -10,7 +10,6 @@ import torch
 
 from diffusionrl.config.build_domain_args import (
     RewardSchema,
-    build_algorithm_config,
     build_sampling_config,
 )
 from diffusionrl.config.resolution import resolve_prompts_per_rollout
@@ -53,7 +52,8 @@ class RolloutManager:
         self,
         args,
         reward_pg_result: Optional[Tuple] = None,
-        algorithm_config: Optional[Dict[str, Any]] = None,
+        *,
+        algorithm_config: Dict[str, Any],
     ):
         """
         Initialize RolloutManager.
@@ -85,7 +85,9 @@ class RolloutManager:
             args,
             sampling_defaults=self._sampling_config,
         )
-        self._algorithm_config = dict(algorithm_config) if algorithm_config is not None else build_algorithm_config(args)
+        if not isinstance(algorithm_config, dict):
+            raise ValueError("RolloutManager requires a non-empty algorithm_config dict from the driver.")
+        self._algorithm_config = dict(algorithm_config)
         self._prompt_batch_size = int(resolve_prompts_per_rollout(self.args))
 
     def init(self) -> None:  # [PUBLIC-API → create_rollout_manager()] 初始化全部子组件
@@ -823,7 +825,8 @@ class RolloutManager:
 def create_rollout_manager(  # [PUBLIC-API → train.py] 工厂：创建 + init + 返回 handle
     args,
     reward_pg_result: Optional[Tuple] = None,
-    algorithm_config: Optional[Dict[str, Any]] = None,
+    *,
+    algorithm_config: Dict[str, Any],
 ) -> Tuple[ray.ObjectRef, Dict[str, Any]]:
     """
     Factory function to create RolloutManager.
@@ -835,10 +838,13 @@ def create_rollout_manager(  # [PUBLIC-API → train.py] 工厂：创建 + init 
     Returns:
         Tuple of (RolloutManager actor handle, dataset step info)
     """
+    if not isinstance(algorithm_config, dict):
+        raise ValueError("create_rollout_manager requires algorithm_config to be built by the driver.")
+
     rollout_manager = RolloutManager.options(
         num_cpus=1,
         num_gpus=0,
-    ).remote(args, reward_pg_result, algorithm_config)
+    ).remote(args, reward_pg_result, algorithm_config=algorithm_config)
 
     # Initialize
     ray.get(rollout_manager.init.remote())

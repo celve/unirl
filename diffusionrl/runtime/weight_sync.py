@@ -302,11 +302,11 @@ class NCCLBroadcastWeightSync(WeightSyncCoordinator):
             return
         gn = self._group_name
         try:
-            self._training_runtime.destroy_weights_update_group(group_name=gn)
+            self._training_runtime.destroy_weights_update_group(gn)
         except Exception:
             logger.debug("Training-side group destroy failed: %s", gn, exc_info=True)
         try:
-            self._rollout_runtime.destroy_weights_update_group(group_name=gn)
+            self._rollout_runtime.destroy_weights_update_group(gn)
         except Exception:
             logger.debug("Rollout-side group destroy failed: %s", gn, exc_info=True)
 

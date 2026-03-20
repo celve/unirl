@@ -189,7 +189,7 @@ def create_training_actor_group(
     args,
     pg_result,
     *,
-    algorithm_config=None,
+    algorithm_config,
 ) -> TrainingActorGroup:
     """
     Factory function to create TrainingActorGroup from args.
@@ -202,6 +202,8 @@ def create_training_actor_group(
         Initialized TrainingActorGroup
     """
     pg, bundle_indices, gpu_ids = pg_result
+    if not isinstance(algorithm_config, dict):
+        raise ValueError("create_training_actor_group requires algorithm_config to be built by the driver.")
 
     training_topology = resolve_training_topology(args)
     # Actor-group size is currently driven by the resolved training actor_count.
