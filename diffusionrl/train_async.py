@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import logging
 import time
+
+import torch
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
@@ -412,6 +414,15 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
                 media_preview = rollout_metadata.get("wandb_media_preview")
                 if media_preview:
                     wandb_logger.log_generated_media(rollout_id, media_preview)
+
+                # Per-component reward metrics (e.g. hpsv3_mean, diversity_mean)
+                reward_components = rollout_metadata.get("reward_components", {})
+                for comp_name, comp_rewards in reward_components.items():
+                    t = torch.tensor(comp_rewards, dtype=torch.float32)
+                    wandb_logger.log_rollout(rollout_id, {
+                        f"rollout/{comp_name}_mean": t.mean().item(),
+                        f"rollout/{comp_name}_std": t.std(unbiased=False).item(),
+                    })
 
                 perf_metrics = {
                     "rollout_phase_s": rollout_phase_s,
