@@ -228,7 +228,7 @@ class BaseAlgorithm(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def compute_advantages_with_components(  # [PUBLIC-API → rollout_manager._generate_training_data()] 推理侧
+    def compute_advantages_with_components(  # [PUBLIC-API → rollout_workflow.compute_advantages()] 推理侧
         self,
         *,
         rewards: torch.Tensor,
@@ -238,8 +238,8 @@ class BaseAlgorithm(ABC):
     ) -> torch.Tensor:
         """Full advantage computation pipeline including reward component mixing.
 
-        This consolidates the logic that was previously scattered in
-        ``rollout_pipeline.compute_advantages`` into the algorithm itself.
+        This consolidates the logic that was previously scattered in rollout
+        workflow helpers into the algorithm itself.
 
         Args:
             rewards: Aggregated reward tensor [batch_size].
@@ -312,7 +312,7 @@ class BaseAlgorithm(ABC):
         ...
 
     @abstractmethod
-    def assemble_training_batch(  # [PUBLIC-API → rollout_manager._generate_training_data()] 推理侧: 组装 TrainingBatch
+    def assemble_training_batch(  # [PUBLIC-API → rollout_workflow.build_training_batch()] 推理侧: 组装 TrainingBatch
         self,
         *,
         num_inference_steps: int,

@@ -5,7 +5,7 @@ Mixed SDE/ODE GRPO with configurable ratio.
 """
 from typing import Any, Dict, Optional, Set
 
-from diffusionrl.config.build_domain_args import resolve_sde_schedule_config
+from diffusionrl.types.sde import SDEScheduleConfig
 from .base import SamplingRequirements
 from .grpo import GRPOAlgorithm, _resolve_algorithm_sde_config
 
@@ -46,7 +46,9 @@ class MixGRPOAlgorithm(GRPOAlgorithm):
     def from_config(cls, config: dict) -> "MixGRPOAlgorithm":
         extra = dict(config.get("algorithm_kwargs") or {})
         sde_config = _resolve_algorithm_sde_config(config)
-        sde_schedule_config = resolve_sde_schedule_config(config)
+        sde_schedule_config = SDEScheduleConfig.from_mapping(
+            config.get("sde_schedule_config")
+        )
         known_keys = {
             "clip_range",
             "clip_schedule",

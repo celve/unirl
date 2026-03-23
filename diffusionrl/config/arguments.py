@@ -26,7 +26,6 @@ from diffusionrl.config.resolution import (
     resolve_model_runtime,
     resolve_prompts_per_rollout,
     resolve_rollout_topology,
-    resolve_sync_protocol,
     resolve_train_backend_name,
     resolve_training_plan,
     resolve_training_topology,
@@ -249,8 +248,6 @@ class RayConfig:
         metadata={"help": "GPU memory fraction for rollout when colocated"})
     allow_noset_multi_gpu_inference: bool = field(default=False,
         metadata={"help": "Allow multi-GPU rollout actors (experimental NOSET layout)"})
-    partition_train_data: bool = field(default=True,
-        metadata={"help": "Partition training data across rollout actors"})
     offload: bool = field(default=False,
         metadata={"help": "Enable model offload for both training and rollout"})
     offload_train: Optional[bool] = field(default=None,
@@ -286,8 +283,8 @@ class RayConfig:
 class SyncConfig:
     """Train->rollout weight synchronization controls."""
 
-    protocol: str = field(default="auto",
-        metadata={"help": "Weight sync mode: auto, disabled, tensor_payload, nccl_broadcast, checkpoint_path"})
+    protocol: Optional[str] = field(default=None,
+        metadata={"help": "Explicit weight sync mode. Must be one of: disabled, tensor_payload, nccl_broadcast, checkpoint_path"})
     dir: str = field(default="outputs/weight_sync",
         metadata={"help": "Directory for checkpoint-based weight sync (use shared FS for multi-node)"})
     bucket_mb: int = field(default=256,
@@ -299,12 +296,18 @@ class SyncConfig:
 
     def validate(self) -> None:
         _valid_modes = (
-            "auto", "disabled", "tensor_payload", "nccl_broadcast", "checkpoint_path",
+            "disabled", "tensor_payload", "nccl_broadcast", "checkpoint_path",
         )
-        if self.protocol not in _valid_modes:
+        normalized_protocol = str(self.protocol or "").strip().lower()
+        if not normalized_protocol:
+            raise ValueError(
+                "sync.protocol must be set explicitly. "
+                "Choose one of disabled/tensor_payload/nccl_broadcast/checkpoint_path."
+            )
+        if normalized_protocol not in _valid_modes:
             raise ValueError(
                 f"sync.protocol must be one of {'/'.join(_valid_modes)}, "
-                f"got: {self.protocol!r}. Use 'auto' (recommended) to let diffusionrl choose the best mode."
+                f"got: {self.protocol!r}."
             )
         if int(self.bucket_mb) < 1:
             raise ValueError("sync.bucket_mb must be >= 1.")
@@ -585,12 +588,10 @@ class RolloutLoggingConfig:
         metadata={"help": "Total number of rollout iterations (outer-loop steps; analogous to global step)"})
     start_rollout_id: int = field(default=0,
         metadata={"help": "Starting rollout step/ID for resuming training (acts like an outer-loop global step)"})
-    async_pipeline: bool = field(default=False,
-        metadata={"help": "Enable async rollout/training overlap (separate mode only)"})
     async_max_inflight: int = field(default=1,
-        metadata={"help": "Max in-flight rollout futures in async pipeline"})
+        metadata={"help": "Max in-flight rollout futures for the async training runner"})
     update_weights_interval: int = field(default=1,
-        metadata={"help": "Sync weights from training to rollout every N steps"})
+        metadata={"help": "Sync weights from training to rollout every N steps in async/separate training"})
 
     # Checkpointing
     output_dir: str = field(default="outputs",
@@ -1368,30 +1369,26 @@ def _build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
     resolved["training.train_backend"] = resolve_train_backend_name(args)
     resolved["rollout.mode"] = rollout_topology.mode
     resolved["rollout.service_engine"] = rollout_topology.service_engine
-    resolved["sync.protocol"] = resolve_sync_protocol(
-        args,
-        training_actor_sampling_mode=rollout_topology.training_actor_sampling_mode,
-        rollout_service_engine=rollout_topology.service_engine,
-    )
+    resolved["sync.protocol"] = str(args.sync.protocol).strip().lower()
     train_topology = resolve_training_topology(args)
     train_plan = resolve_training_plan(args)
-    resolved["runtime.training_actor_count"] = train_topology.actor_count
-    resolved["runtime.training_world_size"] = train_topology.world_size
-    resolved["runtime.training_dp_size"] = train_topology.dp_size
-    resolved["runtime.training_tp_size"] = train_topology.tp_size
-    resolved["runtime.training_pp_size"] = train_topology.pp_size
-    resolved["runtime.training_sp_size"] = train_topology.sp_size
-    resolved["runtime.training_ep_size"] = train_topology.ep_size
-    resolved["runtime.prompts_per_rollout"] = resolve_prompts_per_rollout(args)
-    resolved["runtime.training_global_batch_size"] = train_plan.global_batch_size
-    resolved["runtime.training_local_batch_size"] = train_plan.local_batch_size
-    resolved["runtime.training_local_update_batch_size"] = (
+    resolved["resolved.training.actor_count"] = train_topology.actor_count
+    resolved["resolved.training.world_size"] = train_topology.world_size
+    resolved["resolved.training.dp_size"] = train_topology.dp_size
+    resolved["resolved.training.tp_size"] = train_topology.tp_size
+    resolved["resolved.training.pp_size"] = train_topology.pp_size
+    resolved["resolved.training.sp_size"] = train_topology.sp_size
+    resolved["resolved.training.ep_size"] = train_topology.ep_size
+    resolved["resolved.rollout.prompts_per_rollout"] = resolve_prompts_per_rollout(args)
+    resolved["resolved.training.global_batch_size"] = train_plan.global_batch_size
+    resolved["resolved.training.local_batch_size"] = train_plan.local_batch_size
+    resolved["resolved.training.local_update_batch_size"] = (
         train_plan.local_update_batch_size
     )
-    resolved["runtime.training_local_micro_batch_size"] = (
+    resolved["resolved.training.local_micro_batch_size"] = (
         train_plan.local_micro_batch_size
     )
-    resolved["runtime.training_num_updates_per_local_batch"] = (
+    resolved["resolved.training.num_updates_per_local_batch"] = (
         train_plan.num_updates_per_local_batch
     )
     return resolved
@@ -1580,6 +1577,9 @@ def validate_args(
     validate_algorithm_kwargs_payload(args)
     validate_algorithm_path(args)
     validate_train_backend_config(args)
+    from diffusionrl.training.backends import resolve_train_backend_capabilities_from_args
+
+    backend_capabilities = resolve_train_backend_capabilities_from_args(args)
     if debug_mode == "train_only":
         # Keep train_only focused on train-side imports only. Rollout/reward/data
         # extensions are not exercised on this path and should not block replay.
@@ -1592,6 +1592,7 @@ def validate_args(
     validate_training_actor_sampling_mode(
         args,
         training_actor_sampling_mode=training_actor_sampling_mode,
+        backend_capabilities=backend_capabilities,
     )
     replay_guard, _, logprob_source = validate_replay_mode(
         args,

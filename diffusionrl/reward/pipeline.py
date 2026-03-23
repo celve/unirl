@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import torch
 
@@ -11,6 +11,8 @@ from diffusionrl.types.reward import RewardRequest
 from diffusionrl.types.sampling import RolloutOutput
 
 logger = logging.getLogger(__name__)
+
+RewardScoringMode = Literal["service", "precomputed"]
 
 
 def extract_images_from_output(output: RolloutOutput) -> List[Any]:
@@ -262,6 +264,7 @@ def build_request_from_rollout_outputs(
 
 def score_from_rollout_outputs(
     *,
+    reward_scoring_mode: RewardScoringMode,
     reward_service: Any,
     samples_per_prompt: int,
     sampler_outputs: List[RolloutOutput],
@@ -272,12 +275,29 @@ def score_from_rollout_outputs(
     prompt_metadata: Optional[List[Optional[Dict[str, Any]]]] = None,
 ) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
     """Score rollout outputs through the reward subsystem."""
+    mode = str(reward_scoring_mode or "").strip().lower()
+    if mode not in {"service", "precomputed"}:
+        raise ValueError(
+            "Reward scoring mode must be one of service/precomputed. "
+            f"Got: {reward_scoring_mode!r}."
+        )
+
     precomputed = collect_precomputed_rewards(sampler_outputs=sampler_outputs)
-    if precomputed is not None:
+    if mode == "precomputed":
+        if precomputed is None:
+            raise RuntimeError(
+                "Reward scoring mode='precomputed' requires precomputed rewards on all "
+                "sampler outputs."
+            )
         return precomputed
+    if precomputed is not None:
+        raise RuntimeError(
+            "Reward scoring mode='service' does not accept precomputed rewards on sampler "
+            "outputs."
+        )
     if reward_service is None:
         raise RuntimeError(
-            "Reward executor is not initialized and sampler outputs do not include precomputed rewards."
+            "Reward executor is not initialized for reward scoring mode='service'."
         )
 
     request = build_request_from_rollout_outputs(
@@ -298,6 +318,7 @@ def score_from_rollout_outputs(
 
 
 __all__ = [
+    "RewardScoringMode",
     "extract_images_from_output",
     "extract_videos_from_output",
     "resolve_reward_input_kind",

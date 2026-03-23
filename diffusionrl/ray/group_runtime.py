@@ -18,7 +18,7 @@ class TrainingGroupRuntime:
     def __init__(self, handle: ActorGroupHandle):
         self._handle = handle.snapshot()
         self.num_actors = int(self._handle.num_actors)
-        self._buffer_consumer_spec_cache: Optional[Dict[str, Any]] = None
+        self._expected_global_batch_size_cache: Optional[int] = None
         self._train_backend_info_cache: Optional[Dict[str, Any]] = None
 
     @classmethod
@@ -123,28 +123,19 @@ class TrainingGroupRuntime:
             return dict(info)
         return {}
 
-    def get_buffer_consumer_spec(self, force_refresh: bool = False) -> Dict[str, Any]:
-        if self._buffer_consumer_spec_cache is not None and not force_refresh:
-            return dict(self._buffer_consumer_spec_cache)
-        spec = self._handle.call_rank0("get_buffer_consumer_spec")
-        if not isinstance(spec, dict):
-            raise RuntimeError(f"Invalid buffer consumer spec payload: {spec!r}")
-        spec = dict(spec)
-        required_fields = (
-            "dp_size",
-            "per_rank_batch_size",
-            "expected_global_batch_size",
-            "partition_train_data",
-            "partition_mode",
-        )
-        missing = [name for name in required_fields if name not in spec]
-        if missing:
+    def get_expected_global_batch_size(self, force_refresh: bool = False) -> int:
+        if self._expected_global_batch_size_cache is not None and not force_refresh:
+            return int(self._expected_global_batch_size_cache)
+        expected_global_batch_size = self._handle.call_rank0("get_expected_global_batch_size")
+        try:
+            resolved = int(expected_global_batch_size)
+        except (TypeError, ValueError) as exc:
             raise RuntimeError(
-                "Buffer consumer spec is missing required fields: "
-                f"{', '.join(missing)}."
-            )
-        self._buffer_consumer_spec_cache = spec
-        return dict(spec)
+                "Invalid expected_global_batch_size payload: "
+                f"{expected_global_batch_size!r}"
+            ) from exc
+        self._expected_global_batch_size_cache = resolved
+        return resolved
 
     def export_weights_to_path(
         self,

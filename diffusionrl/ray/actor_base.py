@@ -18,17 +18,13 @@ logger = logging.getLogger(__name__)
 
 
 def _gpu_debug_enabled() -> bool:
-    for env_name in ("DIFFUSIONRL_LOG_GPU", "GRPO_LOG_GPU"):
-        if os.getenv(env_name, "0").lower() in ("1", "true", "yes"):
-            return True
-    return False
+    return os.getenv("DIFFUSIONRL_LOG_GPU", "0").lower() in ("1", "true", "yes")
 
 
 def log_resource_ids(tag: str, rank: int) -> None:
     """Log Ray resource IDs for GPU debugging.
 
-    Preferred toggle: ``DIFFUSIONRL_LOG_GPU=1``.
-    Legacy alias: ``GRPO_LOG_GPU=1``.
+    Toggle with ``DIFFUSIONRL_LOG_GPU=1``.
     """
     if not _gpu_debug_enabled():
         return
@@ -44,8 +40,7 @@ def log_resource_ids(tag: str, rank: int) -> None:
 def log_gpu_state(tag: str, rank: int, device: Any = None, offloaded: Any = None) -> None:
     """Log GPU memory state for GPU debugging.
 
-    Preferred toggle: ``DIFFUSIONRL_LOG_GPU=1``.
-    Legacy alias: ``GRPO_LOG_GPU=1``.
+    Toggle with ``DIFFUSIONRL_LOG_GPU=1``.
     """
     if not _gpu_debug_enabled():
         return
@@ -253,13 +248,16 @@ class BaseTrainRayActor(RayActor):
         ...
 
     @abc.abstractmethod
-    def train(self, rollout_id: int, data_ref) -> dict:
+    def train(self, rollout_id: int, training_data_handle) -> dict:
         """
         Execute one training step.
 
         Args:
             rollout_id: Current rollout iteration number
-            data_ref: Ray ObjectRef containing training data
+            training_data_handle: Buffer-owned training-data handle for this actor.
+                In the Ray-backed path this is typically an ObjectRef, but
+                actor implementations may also receive already-materialized
+                training batches.
 
         Returns:
             Dictionary of training metrics

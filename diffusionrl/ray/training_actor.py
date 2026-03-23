@@ -14,9 +14,9 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from diffusionrl.config.build_domain_args import RewardSchema
-from diffusionrl.config.build_domain_args import resolve_sde_schedule_config
 from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
+from diffusionrl.reward.schema import RewardSchema
+from diffusionrl.types.sde import SDEScheduleConfig
 from diffusionrl.types.sampling import LogProbData, PromptEmbeddings, RolloutRequest, RolloutOutput
 from diffusionrl.types.training_batch import (
     BackwardTrainingBatch,
@@ -24,17 +24,19 @@ from diffusionrl.types.training_batch import (
 )
 from diffusionrl.patches.replay_logprob import ReplayLogProbPatch
 from diffusionrl.ray.actor_sampling import ActorSamplingExecutor
+from diffusionrl.ray.sampling_runtime import finalize_sampling_output
 from diffusionrl.utils.dtypes import inject_model_dtype_kwarg, parse_torch_dtype
 from diffusionrl.utils import clear_memory as _clear_gpu_memory
-from diffusionrl.utils.weight_sync_checkpoint import (
+from diffusionrl.distributed.weight_sync_checkpoint import (
     publish_checkpoint_atomic,
     publish_sglang_transformer_checkpoint_atomic,
 )
-from diffusionrl.runtime.training import (
+from diffusionrl.training import (
     TrainExecutor,
     TrainExecutorConfig,
     create_train_backend,
 )
+from diffusionrl.orchestration import TrainingWorkflow
 from diffusionrl.utils import load_function
 
 from .actor_base import BaseTrainRayActor, log_gpu_state, log_resource_ids
@@ -234,6 +236,7 @@ class TrainingActor(BaseTrainRayActor):
         self._reward_config: Dict[str, Any] = {}
         self._reward_schema: Optional[RewardSchema] = None
         self._local_reward_runtime: Optional[ActorLocalRewardPrecompute] = None
+        self._training_workflow = TrainingWorkflow()
 
     def _log_resource_ids(self, tag: str) -> None:
         log_resource_ids(tag, self.rank)
@@ -423,8 +426,8 @@ class TrainingActor(BaseTrainRayActor):
         # Sampling config (used when training actors perform sampling)
         sampling_config = self._require_dict_config(config, "sampling_config")
         self._sampling_config = sampling_config
-        self._timestep_fraction = resolve_sde_schedule_config(
-            sampling_config
+        self._timestep_fraction = SDEScheduleConfig.from_mapping(
+            sampling_config.get("sde_schedule_config")
         ).timestep_fraction
         reward_config = self._require_dict_config(config, "reward_config")
         self._reward_config = reward_config
@@ -444,6 +447,10 @@ class TrainingActor(BaseTrainRayActor):
         self._log_gpu_state("training_init")
 
     def _uses_rollout_local_reward(self) -> bool:
+        # Local reward follows the active sampling host rather than the
+        # training/update path itself. In direct actor-sampling mode the
+        # TrainingActor temporarily acts as that host, so it needs the same
+        # actor-local reward attach step that dedicated rollout actors use.
         return bool(self._reward_schema is not None and self._reward_schema.uses_sampling_actor_execution)
 
     def _ensure_local_reward_runtime(self) -> ActorLocalRewardPrecompute:
@@ -750,19 +757,27 @@ class TrainingActor(BaseTrainRayActor):
         )
 
     def generate(self, request: RolloutRequest) -> RolloutOutput:
-        output = self._actor_sampling_executor.generate_local(self, request)
+        output = self._actor_sampling_executor.generate_raw(self, request)
         prompts = request.prompts
-        output = self._attach_local_reward_to_output(
+        return finalize_sampling_output(
             output=output,
-            prompts=prompts,
-            prompt_ids=request.prompt_ids,
-            sample_ids=request.sample_ids,
-            group_ids=request.group_ids,
-            prompt_metadata=request.prompt_metadata,
-            keep_reward_media_for_manager=bool(request.keep_reward_media_for_manager),
-            samples_per_prompt=int(request.samples_per_prompt),
+            request=request,
+            host_label="training-actor sampling",
+            decode_latents_fn=lambda latents: self._actor_sampling_executor.decode_latents(self, latents),
+            local_reward_attach_fn=(
+                lambda current_output: self._attach_local_reward_to_output(
+                    output=current_output,
+                    prompts=prompts,
+                    prompt_ids=request.prompt_ids,
+                    sample_ids=request.sample_ids,
+                    group_ids=request.group_ids,
+                    prompt_metadata=request.prompt_metadata,
+                    keep_reward_media_for_manager=bool(request.keep_reward_media_for_manager),
+                    samples_per_prompt=int(request.samples_per_prompt),
+                )
+            ),
+            move_output_to_cpu=True,
         )
-        return output.to_device("cpu")
 
     def get_train_backend_info(self) -> Dict[str, Any]:
         if self._train_backend is None:
@@ -781,34 +796,8 @@ class TrainingActor(BaseTrainRayActor):
         info["training_plan"] = dict(self._resolved_training_plan)
         return info
 
-    def get_buffer_consumer_spec(self) -> Dict[str, Any]:
-        dp_size = int(self._resolved_train_topology["dp_size"])
-        partition_mode = str(self._resolved_train_topology["partition_mode"])
-        per_rank_batch_size = int(self._resolved_training_plan["local_batch_size"])
-        expected_global_batch_size = int(self._resolved_training_plan["global_batch_size"])
-        if self._train_backend is None:
-            return {
-                "dp_size": dp_size,
-                "per_rank_batch_size": per_rank_batch_size,
-                "expected_global_batch_size": expected_global_batch_size,
-                "partition_train_data": True,
-                "partition_mode": partition_mode,
-            }
-        spec = dict(self._train_backend.buffer_consumer_spec(self))
-        missing = [
-            name
-            for name in ("partition_train_data", "partition_mode")
-            if name not in spec
-        ]
-        if missing:
-            raise RuntimeError(
-                "Train backend buffer_consumer_spec() is missing required fields: "
-                f"{', '.join(missing)}."
-            )
-        spec["dp_size"] = dp_size
-        spec["per_rank_batch_size"] = per_rank_batch_size
-        spec["expected_global_batch_size"] = expected_global_batch_size
-        return spec
+    def get_expected_global_batch_size(self) -> int:
+        return int(self._resolved_training_plan["global_batch_size"])
 
     def _build_train_executor(self) -> TrainExecutor:
         dp_size = int(self._resolved_train_topology["dp_size"])
@@ -849,16 +838,16 @@ class TrainingActor(BaseTrainRayActor):
     def train(
         self,
         rollout_id: int,
-        batch_or_ref: Union[ray.ObjectRef, TrainingBatch],
+        training_data_handle_or_batch: Union[ray.ObjectRef, TrainingBatch],
     ) -> Dict[str, Any]:
         """
         Execute one training step with gradient accumulation support.
 
         Args:
             rollout_id: Current rollout iteration number
-            batch_or_ref: Either an ObjectRef containing typed TrainingBatch,
-                or the TrainingBatch directly (Ray auto-resolves ObjectRefs
-                when passed to remote methods)
+            training_data_handle_or_batch: Either a buffer-provided training-data
+                handle (typically an ObjectRef in the Ray-backed path) or the
+                typed TrainingBatch directly.
 
         Returns:
             Dictionary of training metrics
@@ -867,34 +856,36 @@ class TrainingActor(BaseTrainRayActor):
             raise RuntimeError("Actor not initialized. Call init() first.")
 
         self._log_gpu_state("training_train_start")
-        # Handle both cases: ObjectRef or actual batch (Ray auto-resolves ObjectRefs)
-        if isinstance(batch_or_ref, ray.ObjectRef):
-            batch: TrainingBatch = ray.get(batch_or_ref)
+        if isinstance(training_data_handle_or_batch, ray.ObjectRef):
+            batch: TrainingBatch = ray.get(training_data_handle_or_batch)
         else:
-            batch = batch_or_ref
+            batch = training_data_handle_or_batch
 
-        executor = self._build_train_executor()
-        batch = executor.prepare_batch(batch)
-        if batch is None:
+        # Intended boundary: the actor keeps Ray/process-local concerns
+        # (ObjectRef resolution, device/resource logging, backend handles),
+        # while TrainingWorkflow owns the readable materialized-batch business chain.
+        metrics = self._training_workflow.execute(
+            rollout_id=rollout_id,
+            batch=batch,
+            build_executor=self._build_train_executor,
+            on_prepared_batch=lambda: self._log_gpu_state("training_after_batch_to_device"),
+            replay_batch=self._maybe_replay_old_log_probs,
+            backend_train_step=(
+                (
+                    lambda *, rollout_id, batch, executor: self._train_backend.run_train_step(
+                        self,
+                        rollout_id=rollout_id,
+                        batch=batch,
+                        executor=executor,
+                    )
+                )
+                if self._train_backend is not None
+                else None
+            ),
+        )
+        if bool(metrics.get("skipped", False)):
             self._log_gpu_state("training_train_skipped")
-            return executor.skipped_metrics(rollout_id)
-
-        self._log_gpu_state("training_after_batch_to_device")
-        if isinstance(batch, BackwardTrainingBatch):
-            batch = self._maybe_replay_old_log_probs(batch)
-
-        if self._train_backend is not None:
-            backend_metrics = self._train_backend.run_train_step(
-                self,
-                rollout_id=rollout_id,
-                batch=batch,
-                executor=executor,
-            )
-            if backend_metrics is not None:
-                self._log_gpu_state("training_train_end")
-                return backend_metrics
-
-        metrics = executor.execute_prepared_batch(rollout_id=rollout_id, batch=batch)
+            return metrics
         self._log_gpu_state("training_train_end")
         return metrics
 

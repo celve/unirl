@@ -28,6 +28,16 @@ _PROMPT_EXAMPLE_EXCLUDED_KEYS = {
     "prompt_id",
 }
 
+_LEGACY_EMBEDDING_FIELDS = {
+    "prompt_embed_path",
+    "pooled_embed_path",
+    "pooled_prompt_embeds_path",
+    "text_ids_path",
+    "text_ids",
+    "prompt_embeds",
+    "pooled_prompt_embeds",
+}
+
 
 def normalize_prompt_example(
     item: Dict[str, Any],
@@ -145,6 +155,15 @@ class TextPromptDataset(PromptExampleDataset):
             candidate = dict(candidate)
             if self.prompt_key in candidate and self.prompt_key != "prompt":
                 candidate["prompt"] = candidate.pop(self.prompt_key)
+            legacy_fields = sorted(
+                field for field in _LEGACY_EMBEDDING_FIELDS
+                if field in candidate
+            )
+            if legacy_fields:
+                raise ValueError(
+                    "Prompt manifests must be prompt-first and may not include legacy embedding fields. "
+                    f"Got fields={legacy_fields} in {self.file_path}."
+                )
 
             try:
                 normalized = normalize_prompt_example(

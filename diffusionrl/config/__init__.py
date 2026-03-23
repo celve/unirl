@@ -15,15 +15,12 @@ from .arguments import (
     validate_args,
 )
 from .build_domain_args import (
-    RewardSchema,
     build_model_config,
     build_rollout_actor_init_config,
     build_sampling_config,
     build_rollout_sampling_config,
     build_rollout_engine_config,
     build_training_actor_init_config,
-    resolve_sde_config,
-    resolve_sde_schedule_config,
 )
 
 __all__ = [
@@ -32,8 +29,6 @@ __all__ = [
     "parse_args",
     "get_default_args",
     "validate_args",
-    "resolve_sde_config",
-    "resolve_sde_schedule_config",
     "AlgorithmConfig",
     "DebugConfig",
     "WindowSchedulerConfig",
@@ -44,7 +39,6 @@ __all__ = [
     "RewardConfig",
     "RayConfig",
     # Domain config builders
-    "RewardSchema",
     "build_model_config",
     "build_rollout_actor_init_config",
     "build_sampling_config",

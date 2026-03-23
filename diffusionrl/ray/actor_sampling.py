@@ -9,10 +9,9 @@ from typing import Any, List, Set, Tuple
 import torch
 import torch.nn as nn
 
-from diffusionrl.config.build_domain_args import resolve_sde_config
 from diffusionrl.samplers.fsdp import sampler_runner
+from diffusionrl.types.sde import SDEConfig
 from diffusionrl.types.sampling import RolloutOutput, RolloutRequest
-from diffusionrl.utils.media import tensor_to_pil
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,7 @@ def sampling_eval_context(modules: List[nn.Module]):
 
 
 class ActorSamplingExecutor:
-    """Sampling executor used by the TrainingActor RPC boundary."""
+    """Training-actor sampling runtime owned by the TrainingActor RPC boundary."""
 
     def iter_reflection_modules(
         self,
@@ -75,7 +74,7 @@ class ActorSamplingExecutor:
             )
 
         sampler_kwargs = dict(actor._sampling_config.get("sampler_kwargs", {}))
-        sde_config = resolve_sde_config(actor._sampling_config)
+        sde_config = SDEConfig.from_mapping(actor._sampling_config.get("sde_config"))
         actor._sampler = sampler_runner.create_sampler(
             sampler_path=sampler_path,
             model=actor.model,
@@ -89,6 +88,10 @@ class ActorSamplingExecutor:
         )
 
         actor._sampling_ready = True
+
+    def decode_latents(self, actor: Any, latents: torch.Tensor) -> torch.Tensor:
+        self.ensure_sampling_components(actor)
+        return sampler_runner.decode_latents(actor.vae, latents)
 
     def _iter_sampling_mode_modules(self, actor: Any) -> List[nn.Module]:
         modules: List[nn.Module] = []
@@ -119,13 +122,12 @@ class ActorSamplingExecutor:
         with sampling_eval_context(modules):
             yield
 
-    def generate(
+    def generate_raw(
         self,
         actor: Any,
         request: RolloutRequest,
-        *,
-        move_output_to_cpu: bool = True,
     ) -> RolloutOutput:
+        """Run the sampler only; output finalization stays in TrainingActor."""
         if not actor._is_initialized:
             raise RuntimeError("Actor not initialized. Call init() first.")
 
@@ -135,7 +137,7 @@ class ActorSamplingExecutor:
         self.ensure_sampling_components(actor)
 
         with self._sampling_eval_context(actor):
-            output = sampler_runner.generate_prompt_only_rollout(
+            return sampler_runner.generate_prompt_only_rollout(
                 host_label="Training-actor sampling",
                 request=request,
                 model=actor.model,
@@ -143,38 +145,6 @@ class ActorSamplingExecutor:
                 model_bundle=actor.model_bundle,
                 device=actor._device,
             )
-
-        if request.decode_for_reward:
-            has_decoded_videos = bool(
-                isinstance(output.metadata, dict)
-                and torch.is_tensor(output.metadata.get("decoded_videos"))
-            )
-            if not (output.has_decoded_images or has_decoded_videos):
-                try:
-                    decoded = sampler_runner.decode_latents(actor.vae, output.latents)
-                    decoded_images = tensor_to_pil(decoded)
-                    output = RolloutOutput(
-                        latents=output.latents,
-                        timesteps=output.timesteps,
-                        trajectories=output.trajectories,
-                        log_probs=output.log_probs,
-                        embeddings=output.embeddings,
-                        decoded_images=decoded_images,
-                        metadata=output.metadata,
-                        step_indices=output.step_indices,
-                    )
-                except Exception as e:
-                    raise RuntimeError(
-                        "decode_for_reward requested but training-actor sampling produced "
-                        f"no decoded media and latent decoding failed: {e}"
-                    ) from e
-
-        if move_output_to_cpu:
-            return output.to_device("cpu")
-        return output
-
-    def generate_local(self, actor: Any, request: RolloutRequest) -> RolloutOutput:
-        return self.generate(actor, request, move_output_to_cpu=False)
 
 
 __all__ = [

@@ -16,7 +16,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import torch
 import torch.nn as nn
 
-from diffusionrl.config.build_domain_args import resolve_sde_config
 from diffusionrl.types import PromptEmbeddings, SDEConfig, TimestepData
 from .base import BaseAlgorithm, EMASpec, SamplingRequirements
 
@@ -24,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_algorithm_sde_config(config: Dict[str, Any]) -> SDEConfig:
-    return resolve_sde_config(config)
+    return SDEConfig.from_mapping(config.get("sde_config"))
 
 
 def _save_training_debug_tensor(base_dir: str, step_idx: int, name: str, tensor: torch.Tensor, rank: int = 0) -> None:

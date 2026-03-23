@@ -60,21 +60,22 @@ class TrainingActorGroup(ActorGroup):
             **merged_actor_kwargs,
         )
 
-    def async_train(self, rollout_id: int, batch_ref: Any) -> List[ray.ObjectRef]:
-        if isinstance(batch_ref, list):
-            if len(batch_ref) != self.num_actors:
+    def async_train(self, rollout_id: int, training_data_handle: Any) -> List[ray.ObjectRef]:
+        if isinstance(training_data_handle, list):
+            if len(training_data_handle) != self.num_actors:
                 raise ValueError(
-                    f"batch_ref list length {len(batch_ref)} does not match num_actors {self.num_actors}"
+                    "training_data_handle list length "
+                    f"{len(training_data_handle)} does not match num_actors {self.num_actors}"
                 )
             per_actor_args = [
                 (rollout_id, ref)
-                for ref in batch_ref
+                for ref in training_data_handle
             ]
             return self.call_per_actor_async("train", per_actor_args=per_actor_args)
-        return self.call_all_async("train", rollout_id, batch_ref)
+        return self.call_all_async("train", rollout_id, training_data_handle)
 
-    def train(self, rollout_id: int, batch_ref: Any) -> List[Dict[str, Any]]:
-        return ray.get(self.async_train(rollout_id, batch_ref))
+    def train(self, rollout_id: int, training_data_handle: Any) -> List[Dict[str, Any]]:
+        return ray.get(self.async_train(rollout_id, training_data_handle))
 
     def _build_generate_plan(self, request: RolloutRequest):
         return build_generate_shard_plan(

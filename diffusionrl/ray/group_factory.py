@@ -17,7 +17,7 @@ from diffusionrl.config.rollout_topology import (
     resolve_rollout_service_kwargs,
     rollout_mode_is_colocated,
 )
-from diffusionrl.runtime.training import create_train_backend
+from diffusionrl.training import create_train_backend
 from diffusionrl.types.engine import uses_dedicated_rollout_engine
 
 from .rollout_group import RolloutActorGroup

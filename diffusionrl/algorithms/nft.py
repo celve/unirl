@@ -14,7 +14,6 @@ import torch
 import torch.nn as nn
 from diffusers.utils.torch_utils import randn_tensor
 
-from diffusionrl.config.build_domain_args import resolve_sde_config
 from diffusionrl.types import ForwardTrainingBatch, SDEConfig
 from diffusionrl.utils.adapter_utils import switch_adapter
 from .base import BaseAlgorithm, EMASpec, SamplingRequirements
@@ -23,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_algorithm_sde_config(config: Dict[str, Any]) -> SDEConfig:
-    return resolve_sde_config(config)
+    return SDEConfig.from_mapping(config.get("sde_config"))
 
 
 class _NFTLoss:

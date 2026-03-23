@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+import os
+from typing import Any, Dict, Mapping, Optional
 
-from diffusionrl.config.paths import (
-    is_probably_local_weight_sync_dir,
-    repo_root,
-)
 from diffusionrl.config.rollout_topology import (
     rollout_mode_is_colocated,
     rollout_mode_uses_service,
@@ -19,6 +16,7 @@ from diffusionrl.config.resolution import (
     resolve_algorithm_kwargs,
     resolve_algorithm_path,
     resolve_debug_mode,
+    resolve_engine_capabilities,
     resolve_global_rollout_batch_size,
     resolve_local_micro_batch_size,
     resolve_local_update_batch_size,
@@ -31,7 +29,7 @@ from diffusionrl.config.resolution import (
     resolve_rollout_gpu_pool_size,
     resolve_rollout_gpus_per_actor,
     resolve_rollout_topology,
-    resolve_sync_protocol,
+    resolve_sampling_requirements,
     resolve_train_backend_kwargs,
     resolve_train_backend_name,
     resolve_training_dp_size,
@@ -41,16 +39,33 @@ from diffusionrl.sde.rules import (
     is_deterministic_sde_type,
     supported_sde_type_text,
 )
-from diffusionrl.runtime.contracts import (
-    resolve_engine_capabilities,
-    resolve_sampling_requirements,
-)
 from diffusionrl.types.engine import uses_dedicated_rollout_engine
 from diffusionrl.utils.misc import load_function
 
 logger = logging.getLogger(__name__)
 
 ENV_REPO_ROOT = "DIFFUSIONRL_REPO_ROOT"
+
+
+def repo_root(*, env_repo_root: str) -> str:
+    """Resolve repository root from environment override or package-relative path."""
+    env_root = os.getenv(env_repo_root)
+    if env_root:
+        return os.path.abspath(os.path.expanduser(env_root))
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def is_probably_local_weight_sync_dir(path: str, *, root: str) -> bool:
+    """Best-effort guard for local-only paths in multi-node checkpoint sync."""
+    if not path:
+        return True
+    real = os.path.realpath(path)
+    for prefix in ("/tmp", "/var/tmp", "/dev/shm"):
+        if real == prefix or real.startswith(prefix + os.sep):
+            return True
+    if real == root or real.startswith(root + os.sep):
+        return True
+    return False
 
 
 def validate_dotpath(path: str, *, label: str) -> None:
@@ -216,20 +231,40 @@ def validate_colocate_fractions(args) -> None:
 def validate_debug_config(args: Any) -> str:
     """Validate debug mode and mode-specific runtime constraints."""
     debug_mode = resolve_debug_mode(args)
-
-    if debug_mode == "train_only" and bool(getattr(args.rollout, "async_pipeline", False)):
-        raise ValueError(
-            "debug_mode=train_only does not support async_pipeline yet. "
-            "Set --rollout.async-pipeline=false."
-        )
-
-    if bool(getattr(args.debug, "debug_save_intermediates", False)) and bool(getattr(args.rollout, "async_pipeline", False)):
-        raise ValueError(
-            "debug_save_intermediates=true is not supported with async_pipeline yet. "
-            "Set --rollout.async-pipeline=false."
-        )
-
     return debug_mode
+
+
+def validate_async_training_runner(args: Any) -> None:
+    """Validate constraints that apply only to the async entrypoint."""
+    debug_mode = resolve_debug_mode(args)
+    if debug_mode == "train_only":
+        raise ValueError(
+            "train_async.py does not support debug_mode=train_only. "
+            "Use python -m diffusionrl.train for train_only debug runs."
+        )
+    if bool(getattr(args.debug, "debug_save_intermediates", False)):
+        raise ValueError(
+            "train_async.py does not support debug_save_intermediates=true. "
+            "Use python -m diffusionrl.train for rollout debug artifact capture."
+        )
+
+    rollout_topology = resolve_rollout_topology(args)
+    if rollout_mode_is_colocated(rollout_topology.mode):
+        raise ValueError("train_async.py requires rollout.mode='separate_rollout'.")
+    if rollout_topology.training_actor_sampling_mode:
+        raise ValueError(
+            "train_async.py requires a dedicated rollout engine "
+            "(for example rollout.service_engine='sglang')."
+        )
+    if int(getattr(args.rollout, "async_max_inflight", 1)) < 1:
+        raise ValueError("async_max_inflight must be >= 1.")
+    if args.rollout.update_weights_interval <= 0:
+        raise ValueError("update_weights_interval must be > 0.")
+    if args.ray.offload_train or args.ray.offload_rollout:
+        raise ValueError(
+            "train_async.py is incompatible with offload_train/offload_rollout. "
+            "Set --ray.offload-train=false --ray.offload-rollout=false."
+        )
 
 
 def validate_rollout_topology_contract(args: Any) -> ResolvedRolloutTopology:
@@ -378,6 +413,7 @@ def validate_training_actor_sampling_mode(
     args: Any,
     *,
     training_actor_sampling_mode: bool,
+    backend_capabilities: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Validate direct-sampling runtime compatibility."""
     if not training_actor_sampling_mode:
@@ -390,15 +426,11 @@ def validate_training_actor_sampling_mode(
             f"Got rollout.mode={rollout_topology.mode!r}, rollout.service_engine={rollout_topology.service_engine!r}."
         )
 
-    backend_name = resolve_train_backend_name(args)
-    backend_path = str(getattr(args.training, "train_backend_path", "") or "").strip()
-    from diffusionrl.runtime.training.backends import resolve_train_backend_capabilities
+    if backend_capabilities is None:
+        return
 
-    backend_caps = resolve_train_backend_capabilities(
-        backend_name,
-        backend_path=backend_path or None,
-    )
-    if not bool(backend_caps.supports_training_actor_sampling):
+    backend_name = resolve_train_backend_name(args)
+    if not bool(backend_capabilities.get("supports_training_actor_sampling", False)):
         raise ValueError(
             "rollout.mode=%r resolves to direct training-actor sampling, "
             "but train_backend=%r does not declare supports_training_actor_sampling=true."
@@ -547,13 +579,25 @@ def validate_weight_sync(
     *,
     training_actor_sampling_mode: bool,
 ) -> None:
-    """Validate resolved weight-sync protocol against runtime topology."""
+    """Validate explicit weight-sync protocol against runtime topology."""
     rollout_service_engine = resolve_rollout_topology(args).service_engine
-    resolved_mode = resolve_sync_protocol(
-        args,
-        training_actor_sampling_mode=training_actor_sampling_mode,
-        rollout_service_engine=rollout_service_engine,
-    )
+    resolved_mode = str(getattr(args.sync, "protocol", "") or "").strip().lower()
+    if not resolved_mode:
+        raise ValueError(
+            "sync.protocol must be set explicitly before validate_weight_sync()."
+        )
+    if training_actor_sampling_mode:
+        if resolved_mode != "disabled":
+            raise ValueError(
+                "direct training-actor sampling requires sync.protocol='disabled'. "
+                f"Got sync.protocol={resolved_mode!r}."
+            )
+        return
+    if resolved_mode == "disabled":
+        raise ValueError(
+            "sync.protocol='disabled' is only valid when sampling runs directly on training actors. "
+            f"Got rollout.service_engine={rollout_service_engine!r}."
+        )
     is_multi_node = (
         int(getattr(args.ray, "rollout_num_nodes", 1)) > 1
         or int(getattr(args.ray, "training_num_nodes", 1)) > 1
@@ -867,28 +911,9 @@ def validate_runtime_mode_constraints(
                 "The model must implement classmethod supports_sglang_prompt_mode() returning True."
             )
 
-    if getattr(args.rollout, "async_pipeline", False):
-        if rollout_mode_is_colocated(rollout_topology.mode):
-            raise ValueError("async_pipeline requires rollout.mode='separate_rollout'.")
-        if training_actor_sampling_mode:
-            raise ValueError(
-                "async_pipeline currently requires a dedicated rollout engine "
-                "(for example rollout.service_engine='sglang')."
-            )
-        if int(getattr(args.rollout, "async_max_inflight", 1)) < 1:
-            raise ValueError("async_max_inflight must be >= 1.")
-        if args.rollout.update_weights_interval <= 0:
-            raise ValueError("update_weights_interval must be > 0.")
-        if args.ray.offload_train or args.ray.offload_rollout:
-            raise ValueError(
-                "async_pipeline is incompatible with offload_train/offload_rollout. "
-                "Set --ray.offload-train=false --ray.offload-rollout=false "
-                "when using --rollout.async-pipeline."
-            )
-
-
 __all__ = [
     "apply_model_config_hook",
+    "validate_async_training_runner",
     "validate_algorithm_kwargs_payload",
     "validate_algorithm_path",
     "validate_colocate_fractions",

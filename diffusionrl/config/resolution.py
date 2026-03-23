@@ -1,8 +1,13 @@
-"""Pure config resolution helpers.
+"""Config resolution helpers.
 
 These helpers derive runtime-facing values from ``TrainingArguments`` without
 mutating the original config object. Validation and builders should use this
 module instead of relying on validate-time argument rewrites.
+
+Most helpers are pure data resolution. A small number of contract helpers
+currently instantiate transient algorithm objects so validation can read
+algorithm-declared requirements. Those helpers should remain side-effect-light:
+they must not initialize device/runtime state, actors, or placement resources.
 
 Training geometry is resolved in one of two explicit modes:
 
@@ -23,7 +28,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from diffusionrl.algorithms.registry import DEFAULT_ALGORITHM_PATHS
 from diffusionrl.config.rollout_topology import (
@@ -35,10 +40,65 @@ from diffusionrl.config.rollout_topology import (
     rollout_mode_uses_service,
 )
 from diffusionrl.models import list_model_types, resolve_model_bundle_path
+from diffusionrl.samplers.engine import get_engine_class_path
+from diffusionrl.types.sampling import SamplingRequirements
 from diffusionrl.utils.misc import load_function
 
 DEFAULT_MODEL_PATH = "diffusionrl.models.hunyuan.HunyuanModelBundle"
 DEFAULT_SAMPLER_PATH = "diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler"
+
+
+def _instantiate_algorithm_for_contracts(args: Any) -> Any:
+    """Instantiate a transient algorithm only for config-time contract checks."""
+    from diffusionrl.config.build_domain_args import build_algorithm_config
+
+    algorithm_config = build_algorithm_config(args)
+    algorithm_path = algorithm_config.get("algorithm_path")
+    if not isinstance(algorithm_path, str) or not algorithm_path.strip():
+        raise ValueError("build_algorithm_config() returned an empty algorithm_path.")
+    try:
+        algorithm_cls = load_function(algorithm_path.strip())
+    except Exception as exc:
+        raise ValueError(
+            "Cannot resolve algorithm class from args.algorithm.algorithm_path="
+            f"{algorithm_path!r}."
+        ) from exc
+    if not hasattr(algorithm_cls, "from_config"):
+        raise ValueError(
+            f"Algorithm class {algorithm_cls.__name__} must define classmethod from_config(config)."
+        )
+    return algorithm_cls.from_config(algorithm_config)
+
+
+def resolve_sampling_requirements(
+    args: Any,
+    *,
+    algorithm: Optional[Any] = None,
+) -> SamplingRequirements:
+    """Resolve final sampling contract from algorithm.get_sampling_requirements()."""
+    resolved_algorithm = algorithm if algorithm is not None else _instantiate_algorithm_for_contracts(args)
+    requirements = resolved_algorithm.get_sampling_requirements()
+    raw_extras = getattr(requirements, "extras", None)
+    extras: Dict[str, Any] = dict(raw_extras) if isinstance(raw_extras, Mapping) else {}
+
+    return SamplingRequirements(
+        requires_trajectory=bool(getattr(requirements, "requires_trajectory", True)),
+        requires_log_prob=bool(getattr(requirements, "requires_log_prob", True)),
+        requires_embeddings=bool(getattr(requirements, "requires_embeddings", True)),
+        extras=extras,
+    )
+
+
+def resolve_engine_capabilities(engine_type: str) -> Dict[str, bool]:
+    """Resolve engine capabilities from engine class declaration."""
+    engine_path = get_engine_class_path(engine_type)
+    engine_cls = load_function(engine_path)
+    declared = getattr(engine_cls, "declared_capabilities", None)
+    if not callable(declared):
+        raise ValueError(
+            f"Engine class {engine_path} must define classmethod declared_capabilities()."
+        )
+    return dict(declared())
 
 
 @dataclass(frozen=True)
@@ -639,53 +699,6 @@ def resolve_training_plan(args: Any) -> ResolvedTrainingPlan:
     )
 
 
-def resolve_sync_protocol(
-    args: Any,
-    *,
-    training_actor_sampling_mode: bool,
-    rollout_service_engine: Optional[str],
-) -> str:
-    mode = str(getattr(args.sync, "protocol", "checkpoint_path") or "checkpoint_path").strip().lower()
-    if mode != "auto":
-        return mode
-    if training_actor_sampling_mode:
-        return "disabled"
-
-    train_backend = resolve_train_backend_name(args)
-    backend_path = str(getattr(args.training, "train_backend_path", "") or "").strip()
-    is_multi_node = (
-        int(getattr(args.ray, "rollout_num_nodes", 1)) > 1
-        or int(getattr(args.ray, "training_num_nodes", 1)) > 1
-        or int(getattr(args.reward, "reward_dedicated_num_nodes", 0)) > 1
-    )
-
-    from diffusionrl.runtime.training.backends import resolve_train_backend_capabilities
-
-    backend_caps = resolve_train_backend_capabilities(
-        train_backend,
-        backend_path=backend_path or None,
-    )
-
-    resolved_mode = backend_caps.preferred_transport_for_rollout_engine(
-        rollout_service_engine
-    )
-
-    if not resolved_mode:
-        if rollout_service_engine == "sglang":
-            resolved_mode = "nccl_broadcast" if is_multi_node else "checkpoint_path"
-        else:
-            resolved_mode = "checkpoint_path"
-
-    if (
-        resolved_mode == "nccl_broadcast"
-        and rollout_service_engine == "sglang"
-        and not is_multi_node
-    ):
-        resolved_mode = "checkpoint_path"
-
-    return resolved_mode
-
-
 __all__ = [
     "ResolvedModelRuntime",
     "ResolvedRolloutTopology",
@@ -697,6 +710,7 @@ __all__ = [
     "resolve_algorithm_kwargs",
     "resolve_algorithm_path",
     "resolve_debug_mode",
+    "resolve_engine_capabilities",
     "resolve_logprob_source",
     "resolve_lora_target_modules",
     "resolve_model_runtime",
@@ -709,7 +723,7 @@ __all__ = [
     "resolve_rollout_gpu_pool_size",
     "resolve_rollout_gpus_per_actor",
     "resolve_rollout_topology",
-    "resolve_sync_protocol",
+    "resolve_sampling_requirements",
     "resolve_train_backend_kwargs",
     "resolve_train_backend_name",
     "resolve_training_dp_size",

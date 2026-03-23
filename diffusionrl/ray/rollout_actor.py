@@ -6,23 +6,24 @@ from typing import Any, Dict, List, Optional, Tuple
 import ray
 import torch
 
-from diffusionrl.config.build_domain_args import RewardSchema, resolve_sde_config
 from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
+from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.types.engine import (
     EngineConfig,
     normalize_engine_type,
     uses_dedicated_rollout_engine,
 )
+from diffusionrl.types.sde import SDEConfig
 from diffusionrl.types.sampling import PromptEmbeddings, RolloutRequest, RolloutOutput
 from diffusionrl.samplers.engine import (
     BaseRolloutEngine,
     DistributedWeightSyncCapable,
     get_engine,
 )
-from diffusionrl.utils.media import tensor_to_pil
-from diffusionrl.utils.weight_sync_checkpoint import wait_for_published_checkpoint
+from diffusionrl.distributed.weight_sync_checkpoint import wait_for_published_checkpoint
 
 from .actor_base import log_gpu_state, log_resource_ids
+from .sampling_runtime import finalize_sampling_output
 
 logger = logging.getLogger(__name__)
 
@@ -739,7 +740,7 @@ class RolloutActor:
         if sampler_engine_type == "sglang":
             engine_kwargs = self._configure_sglang_ports(engine_kwargs)
 
-        sde_config = resolve_sde_config(sampling_config)
+        sde_config = SDEConfig.from_mapping(sampling_config.get("sde_config"))
         engine_runtime_config = EngineConfig(
             model_path=engine_config.get("model_path", ""),
             pretrained_model_saved_path=engine_config.get("pretrained_model_saved_path", ""),
@@ -803,55 +804,30 @@ class RolloutActor:
             )
 
         self._log_gpu_state("inference_generate_start")
-        # Generate
         output = self.engine.generate(request)
-
-        # Attach capability snapshot for control-plane decisions/debugging.
-        meta = dict(output.metadata or {})
-        meta.setdefault("engine_capabilities", self.engine.get_capabilities_dict())
-        output.metadata = meta
-
-        # Decode latents for reward if requested
-        if request.decode_for_reward:
-            has_decoded_videos = bool(
-                isinstance(output.metadata, dict) and torch.is_tensor(output.metadata.get("decoded_videos"))
-            )
-            if not output.has_decoded_images and not has_decoded_videos:
-                try:
-                    decoded = self.engine.decode_latents(output.latents)
-                    decoded_images = tensor_to_pil(decoded)
-                    output = RolloutOutput(
-                        latents=output.latents,
-                        timesteps=output.timesteps,
-                        trajectories=output.trajectories,
-                        log_probs=output.log_probs,
-                        embeddings=output.embeddings,
-                        decoded_images=decoded_images,
-                        metadata=output.metadata,
-                        step_indices=output.step_indices,
-                    )
-                except Exception as e:
-                    raise RuntimeError(
-                        "decode_for_reward requested but rollout engine produced no decoded media "
-                        f"and latent decoding failed: {e}"
-                    ) from e
-
-        if request.decode_for_reward and self._uses_rollout_local_reward():
-            output = self._ensure_local_reward_runtime().attach_to_output(
-                output=output,
-                prompts=list(request.prompts),
-                prompt_ids=request.prompt_ids,
-                sample_ids=request.sample_ids,
-                group_ids=request.group_ids,
-                prompt_metadata=request.prompt_metadata,
-                keep_reward_media_for_manager=bool(request.keep_reward_media_for_manager),
-                samples_per_prompt=int(request.samples_per_prompt),
-            )
-
-        output = self._optimize_output_for_transport(output)
-
-        # Move tensors to CPU for Ray serialization (RolloutManager has no GPU)
-        output = output.to_device("cpu")
+        output = finalize_sampling_output(
+            output=output,
+            request=request,
+            host_label="rollout engine",
+            decode_latents_fn=self.engine.decode_latents,
+            metadata_defaults={
+                "engine_capabilities": engine_caps,
+            },
+            local_reward_attach_fn=(
+                lambda current_output: self._ensure_local_reward_runtime().attach_to_output(
+                    output=current_output,
+                    prompts=list(request.prompts),
+                    prompt_ids=request.prompt_ids,
+                    sample_ids=request.sample_ids,
+                    group_ids=request.group_ids,
+                    prompt_metadata=request.prompt_metadata,
+                    keep_reward_media_for_manager=bool(request.keep_reward_media_for_manager),
+                    samples_per_prompt=int(request.samples_per_prompt),
+                )
+            ) if self._uses_rollout_local_reward() else None,
+            transport_optimize_fn=self._optimize_output_for_transport,
+            move_output_to_cpu=True,
+        )
         self._log_gpu_state("inference_generate_end")
         return output
 

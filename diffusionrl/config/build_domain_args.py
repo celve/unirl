@@ -7,8 +7,8 @@ This decouples actors from the TrainingArguments structure.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Mapping, Optional
+from dataclasses import asdict
+from typing import Any, Dict, Optional
 
 from diffusionrl.config.resolution import (
     DEFAULT_SAMPLER_PATH,
@@ -26,12 +26,7 @@ from diffusionrl.config.rollout_topology import (
     normalize_rollout_service_engine,
     resolve_rollout_service_kwargs,
 )
-from diffusionrl.reward.spec import (
-    RewardComponentSpec,
-    RewardDefinition,
-    RewardExecutionPlan,
-    RewardProviderConfig,
-)
+from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.types.sde import SDEConfig, SDEScheduleConfig
 
@@ -70,122 +65,6 @@ def build_model_config(args) -> Dict[str, Any]:
 # Reward domain
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
-class RewardSchema:
-    """Typed view of reward-related CLI/config options.
-
-    Mirrors RewardConfig fields. Use ``from_args()`` to construct from
-    TrainingArguments — it delegates to the ``args.reward`` group internally.
-    """
-
-    reward_path: Optional[str]
-    reward_model_saved_path: Optional[str]
-    reward_model_name: str
-    reward_batch_size: int
-    reward_timeout: float
-    local_reward_device: str
-    use_http_reward: bool
-    reward_service_url: Optional[str]
-    reward_service_urls: Optional[List[str]]
-    reward_models: Optional[List[str]]
-    reward_weights: Optional[List[float]]
-    component_aggregation: str
-    reward_dedicated_gpus_per_actor: int
-    reward_dedicated_num_gpus: int
-    reward_dedicated_num_nodes: int
-    reward_dedicated_num_gpus_per_node: int
-    reward_location: str
-
-    @classmethod
-    def from_args(cls, args) -> "RewardSchema":
-        """Construct from TrainingArguments, delegating to the RewardConfig group."""
-        rc = args.reward  # RewardConfig
-        return cls(
-            reward_path=rc.reward_path,
-            reward_model_saved_path=rc.reward_model_saved_path,
-            reward_model_name=rc.reward_model_name,
-            reward_batch_size=int(rc.reward_batch_size),
-            reward_timeout=float(rc.reward_timeout),
-            local_reward_device=str(getattr(rc, "local_reward_device", "cpu")),
-            use_http_reward=bool(rc.use_http_reward),
-            reward_service_url=rc.reward_service_url,
-            reward_service_urls=getattr(rc, "reward_service_urls", None),
-            reward_models=rc.reward_models,
-            reward_weights=rc.reward_weights,
-            component_aggregation=rc.component_aggregation,
-            reward_dedicated_gpus_per_actor=int(rc.reward_dedicated_gpus_per_actor),
-            reward_dedicated_num_gpus=int(rc.reward_dedicated_num_gpus),
-            reward_dedicated_num_nodes=int(rc.reward_dedicated_num_nodes),
-            reward_dedicated_num_gpus_per_node=int(rc.reward_dedicated_num_gpus_per_node),
-            reward_location=str(getattr(rc, "reward_location", "manager")),
-        )
-
-    @property
-    def uses_sampling_actor_execution(self) -> bool:
-        return self.to_execution_plan().uses_sampling_actor_execution
-
-    def to_definition(self) -> RewardDefinition:
-        if self.reward_models:
-            weights = self.reward_weights or []
-            components = tuple(
-                RewardComponentSpec(
-                    model_name=str(model),
-                    weight=float(weights[idx]) if idx < len(weights) else 1.0,
-                )
-                for idx, model in enumerate(self.reward_models)
-            )
-        else:
-            components = (
-                RewardComponentSpec(
-                    model_name=str(self.reward_model_name),
-                    weight=1.0,
-                ),
-            )
-        return RewardDefinition(
-            component_aggregation=str(self.component_aggregation),
-            components=components,
-        )
-
-    def to_provider_config(self) -> RewardProviderConfig:
-        return RewardProviderConfig(
-            reward_path=self.reward_path,
-            reward_model_saved_path=self.reward_model_saved_path,
-            batch_size=int(self.reward_batch_size),
-            timeout=float(self.reward_timeout),
-        )
-
-    def to_execution_plan(self) -> RewardExecutionPlan:
-        service_urls = tuple(
-            str(url)
-            for url in (self.reward_service_urls or [])
-            if str(url or "").strip()
-        )
-        service_url = (
-            str(self.reward_service_url)
-            if self.reward_service_url is not None and str(self.reward_service_url).strip()
-            else None
-        )
-        if self.use_http_reward or service_urls or service_url:
-            backend = "http"
-        elif int(self.reward_dedicated_num_gpus) > 0 or int(self.reward_dedicated_num_nodes) > 0:
-            backend = "ray_pool"
-        else:
-            backend = "local"
-        return RewardExecutionPlan(
-            location=str(self.reward_location or "manager"),
-            backend=backend,
-            local_device=str(self.local_reward_device or "cpu"),
-            reward_service_url=service_url,
-            reward_service_urls=service_urls,
-            dedicated_num_gpus=int(self.reward_dedicated_num_gpus),
-            dedicated_num_nodes=int(self.reward_dedicated_num_nodes),
-            dedicated_num_gpus_per_node=int(self.reward_dedicated_num_gpus_per_node),
-            dedicated_gpus_per_actor=int(self.reward_dedicated_gpus_per_actor),
-        )
-
-    def component_weights(self) -> Dict[str, float]:
-        return self.to_definition().component_weights()
-
 
 def build_reward_config(args) -> Dict[str, Any]:
     """Build reward config consumed by actors and services."""
@@ -195,53 +74,6 @@ def build_reward_config(args) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Sampling / runtime domain
 # ---------------------------------------------------------------------------
-
-def _resolve_nested_contract(
-    payload: Optional[Mapping[str, object]],
-    *,
-    key: str,
-    fallback: Any,
-    builder: Any,
-) -> Any:
-    """Resolve a nested typed contract from a domain-config dict."""
-
-    if payload is None:
-        return fallback
-    raw_nested = payload.get(key)
-    nested = raw_nested if isinstance(raw_nested, Mapping) else None
-    return builder.from_mapping(nested, **fallback.to_dict())
-
-
-def resolve_sde_config(
-    payload: Optional[Mapping[str, object]],
-    *,
-    default: Optional[SDEConfig] = None,
-) -> SDEConfig:
-    """Resolve canonical nested ``sde_config`` payload."""
-
-    fallback = default or SDEConfig()
-    return _resolve_nested_contract(
-        payload,
-        key="sde_config",
-        fallback=fallback,
-        builder=SDEConfig,
-    )
-
-
-def resolve_sde_schedule_config(
-    payload: Optional[Mapping[str, object]],
-    *,
-    default: Optional[SDEScheduleConfig] = None,
-) -> SDEScheduleConfig:
-    """Resolve canonical nested ``sde_schedule_config`` payload."""
-
-    fallback = default or SDEScheduleConfig()
-    return _resolve_nested_contract(
-        payload,
-        key="sde_schedule_config",
-        fallback=fallback,
-        builder=SDEScheduleConfig,
-    )
 
 def _build_sde_config(args) -> SDEConfig:
     """Build the stable SDE math contract from sampling args."""
@@ -268,6 +100,10 @@ def build_sampling_config(args) -> Dict[str, Any]:
     Pulls from: SamplingConfig + TrainingArguments top-level (height/width/num_frames).
     Rollout collection geometry stays in rollout/training runtime config rather than
     sampler config so engines only receive knobs they actually consume.
+
+    This is intentionally the superset config: direct actor sampling needs a few
+    train-side extras such as replay sampler wiring, scheduling policy, seed, and
+    adapter knobs that dedicated rollout engines do not consume.
     """
     resolved_model = resolve_model_runtime(
         args,
@@ -303,7 +139,12 @@ def build_sampling_config(args) -> Dict[str, Any]:
 
 
 def build_rollout_sampling_config(args) -> Dict[str, Any]:
-    """Build sampling defaults consumed by dedicated rollout actors/engines."""
+    """Build sampling defaults consumed by dedicated rollout actors/engines.
+
+    Keep this as the subset of ``build_sampling_config()`` that the dedicated
+    rollout path actually consumes. Direct actor sampling remains a transitional
+    mode, so the split is intentional even though the two payloads overlap.
+    """
     resolved_model = resolve_model_runtime(
         args,
         explicit_sampler_path=(getattr(args.sampling, "sampler_path", None) != DEFAULT_SAMPLER_PATH),
@@ -731,11 +572,8 @@ def validate_training_actor_init_config(config: Dict[str, Any]) -> None:
 
 
 __all__ = [
-    "RewardSchema",
     "build_model_config",
     "build_reward_config",
-    "resolve_sde_config",
-    "resolve_sde_schedule_config",
     "build_sampling_config",
     "build_rollout_sampling_config",
     "build_rollout_engine_config",

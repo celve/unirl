@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from diffusionrl.config.build_domain_args import RewardSchema
+from diffusionrl.reward.schema import RewardSchema
 
 from .service import RewardService
 

@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from diffusionrl.config.build_domain_args import RewardSchema
+from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.utils import load_function
 
 from .base import (
@@ -20,7 +20,6 @@ from .base import (
     RewardResponse,
 )
 from .scorers.registry import resolve_builtin_reward_scorer_class
-from .spec import RewardDefinition, RewardExecutionPlan, RewardProviderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -68,24 +67,36 @@ class InProcessRewardExecutor(BaseRewardExecutor):
 class RewardService:
     """Manager-side reward service that owns per-component executors."""
 
+    def _bind_reward_schema(
+        self,
+        reward_schema: RewardSchema,
+        *,
+        reward_pg_result: Optional[PlacementGroupResult],
+        owner_name: str,
+    ) -> None:
+        if not isinstance(reward_schema, RewardSchema):
+            raise TypeError(
+                f"{owner_name} requires RewardSchema, "
+                f"got: {type(reward_schema).__name__}"
+            )
+        self.reward_schema = reward_schema
+        self.reward_definition = reward_schema.to_definition()
+        self.reward_provider = reward_schema.to_provider_config()
+        self.execution_plan = reward_schema.to_execution_plan()
+        self.reward_pg = reward_pg_result
+        self.executors = []
+        self.aggregation = self.reward_definition.component_aggregation
+
     def __init__(
         self,
         reward_schema: RewardSchema,
         reward_pg_result: Optional[PlacementGroupResult] = None,
     ) -> None:
-        if not isinstance(reward_schema, RewardSchema):
-            raise TypeError(
-                "RewardService requires RewardSchema, "
-                f"got: {type(reward_schema).__name__}"
-            )
-        self.reward_schema = reward_schema
-        self.reward_definition: RewardDefinition = reward_schema.to_definition()
-        self.reward_provider: RewardProviderConfig = reward_schema.to_provider_config()
-        self.execution_plan: RewardExecutionPlan = reward_schema.to_execution_plan()
-        self.reward_pg = reward_pg_result
-
-        self.executors: List[BaseRewardExecutor] = []
-        self.aggregation = self.reward_definition.component_aggregation
+        self._bind_reward_schema(
+            reward_schema,
+            reward_pg_result=reward_pg_result,
+            owner_name="RewardService",
+        )
 
         self._init_executors()
 
@@ -572,23 +583,16 @@ class LocalRewardExecutor(RewardService):
         *,
         device_override: Optional[str] = None,
     ) -> None:
-        if not isinstance(reward_schema, RewardSchema):
-            raise TypeError(
-                "LocalRewardExecutor requires RewardSchema, "
-                f"got: {type(reward_schema).__name__}"
-            )
         if device_override is not None:
             reward_schema = replace(
                 reward_schema,
                 local_reward_device=str(device_override),
             )
-        self.reward_schema = reward_schema
-        self.reward_definition = reward_schema.to_definition()
-        self.reward_provider = reward_schema.to_provider_config()
-        self.execution_plan = reward_schema.to_execution_plan()
-        self.reward_pg = None
-        self.executors = []
-        self.aggregation = self.reward_definition.component_aggregation
+        self._bind_reward_schema(
+            reward_schema,
+            reward_pg_result=None,
+            owner_name="LocalRewardExecutor",
+        )
         self._init_local_executors()
         logger.info(
             "LocalRewardExecutor initialized with %d executor(s), aggregation=%s, device=%s",

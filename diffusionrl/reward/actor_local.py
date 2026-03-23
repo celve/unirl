@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from diffusionrl.config.build_domain_args import RewardSchema
+from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.types.sampling import RolloutOutput
 
 from .pipeline import score_from_rollout_outputs
@@ -49,6 +49,7 @@ class ActorLocalRewardPrecompute:
         samples_per_prompt: int,
     ) -> RolloutOutput:
         rewards, reward_components = score_from_rollout_outputs(
+            reward_scoring_mode="service",
             reward_service=self.executor,
             samples_per_prompt=max(1, int(samples_per_prompt)),
             sampler_outputs=[output],

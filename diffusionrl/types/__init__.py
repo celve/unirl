@@ -13,6 +13,7 @@ import importlib
 from typing import Dict, Tuple
 
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
+    "BufferedTrainingPayload": ("diffusionrl.types.buffer_contracts", "BufferedTrainingPayload"),
     "RewardRequest": ("diffusionrl.types.reward", "RewardRequest"),
     "RewardResponse": ("diffusionrl.types.reward", "RewardResponse"),
     "RewardType": ("diffusionrl.types.reward", "RewardType"),
@@ -22,6 +23,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "RolloutRequest": ("diffusionrl.types.sampling", "RolloutRequest"),
     "LogProbData": ("diffusionrl.types.sampling", "LogProbData"),
     "PromptEmbeddings": ("diffusionrl.types.sampling", "PromptEmbeddings"),
+    "RolloutPayload": ("diffusionrl.types.buffer_contracts", "RolloutPayload"),
     "SamplingRequirements": ("diffusionrl.types.sampling", "SamplingRequirements"),
     "SDEConfig": ("diffusionrl.types.sde", "SDEConfig"),
     "SDEScheduleConfig": ("diffusionrl.types.sde", "SDEScheduleConfig"),
