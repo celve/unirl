@@ -87,7 +87,7 @@ class MyAlgorithm(BaseAlgorithm):
 
 Define a private loss helper inside the algorithm module and bind it via
 `_loss_cls`, as shown above. There is no standalone `--loss-path` / `--loss-type`
-extension point in the current algorithm-centric runtime.
+extension point in the current algorithm-centric workflow surface.
 
 ## Use in Training
 

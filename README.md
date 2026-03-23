@@ -25,12 +25,14 @@ DiffusionRL supports the following diffusion models:
 - **Training Actors (Ray + TrainBackend)**: Responsible for the main training process through pluggable training backends (FSDP2 / VeOmni native; Megatron scaffold), reads `TrainingBatch` from the rollout buffer, and synchronizes parameters to the inference actors after training.
 - **Inference Actors (FSDP / SGLang)**: Generates denoising trajectories and latent samples using pluggable sampling engines, producing `RolloutOutput` with a unified v1 contract.
 - **Reward Runtime**: Evaluates generated samples using configurable reward models (HPS, CLIP, PickScore, OCR, etc.) with a clean split between reward semantics and execution placement.
-- **RolloutManager**: The rollout-side producer facade that coordinates sampling, reward computation, advantage calculation, and batch assembly before handing data to the rollout buffer.
+- **RolloutManager + RolloutWorkflow**: The rollout-side producer boundary. `RolloutManager` owns rollout-local services and public Ray-facing entrypoints; `RolloutWorkflow` owns the readable `sample -> reward -> advantage -> assemble` business chain before data is handed to the rollout buffer.
 
 ```
  ┌────────────────────┐     ┌─────────────────────────────┐
  │   Prompt Source     │────>│ RolloutManager / Producer   │
- └────────────────────┘     │  Sampling + Reward + Algo    │
+ └────────────────────┘     │   local services + facade    │
+                            │        RolloutWorkflow       │
+                            │ sample -> reward -> assemble │
                             └──────────────┬───────────────┘
                                            │ BufferPayload
                                            v
@@ -173,6 +175,12 @@ python -m diffusionrl.train \
     --rollout.output-dir outputs/my_experiment
 ```
 
+For asynchronous separate rollout/training overlap, use the dedicated async entry:
+
+```bash
+python -m diffusionrl.train_async --config scripts/minimal_flux.yaml
+```
+
 You can also start from YAML configs:
 
 ```bash
@@ -263,7 +271,7 @@ Arguments in DiffusionRL are organized into the following categories:
 1.  **Model arguments**: `--model.model-type`, `--model.pretrained-model-saved-path`, `--training.use-lora`, `--training.lora-rank`, `--training.lora-alpha`, etc.
 2.  **Sampling arguments**: `--sampling.sde-type`, `--sampling.eta`, `--sampling.num-inference-steps`, `--sampling.guidance-scale`, `--sampling.time-shift`, `--sampling.timestep-fraction`, etc.
 3.  **Algorithm arguments**: `--algorithm.algorithm-path`, `--algorithm.clip-range`, `--algorithm.use-kl-penalty`, `--algorithm.advantage-type`, etc.
-4.  **Reward arguments**: `--reward.reward-model-name`, `--reward.reward-batch-size`, `--reward.reward-path` (custom scorers only), etc.
+4.  **Reward arguments**: `--reward.reward-model-name` / `--reward.reward-models` for built-in scorers, `--reward.reward-path` for custom scorer dotpaths, `--reward.reward-location` for manager vs sampling-actor execution, `--reward.use-http-reward` + `--reward.reward-service-url` for HTTP-backed scoring, etc.
 5.  **Training arguments**: `--training.learning-rate`, `--training.local-micro-batch-size`, `--training.local-update-batch-size`,  `--training.max-grad-norm`, etc.
 6.  **Runtime arguments**: `--ray.colocate-rollout-training`, `--ray.rollout-num-gpus-per-node`, `--ray.training-num-gpus-per-node`, `--ray.placement-strategy`, etc.
 
@@ -279,7 +287,9 @@ The Ray control plane is split into worker implementations and worker-group orch
 - `diffusionrl/ray/{rollout_group.py,training_group.py,group_factory.py}`: group orchestration and factories
 - `diffusionrl/ray/ray_utils.py`: Ray distributed utilities + training-actor helper/service modules
 - `diffusionrl/ray/rollout_manager.py`: control-plane actor
-- `diffusionrl/runtime/**`: Ray-agnostic runtime logic
+- `diffusionrl/orchestration/**`: rollout/eval/train workflow logic
+- `diffusionrl/training/**`: training execution + train backend logic
+- `diffusionrl/distributed/**`: distributed coordination such as weight sync
 
 Detailed layer diagram:
 - [docs/Ray_Layering.md](docs/Ray_Layering.md)
@@ -298,12 +308,19 @@ diffusionrl/
 ├── reward/                         # Reward executors (local, HTTP, Ray service, actor-local precompute)
 ├── models/                         # Model implementations (FLUX, SD3, Hunyuan, Mochi)
 ├── data/                           # Data loading and datasets
+├── orchestration/                  # Rollout / eval / train business workflows
+│   ├── request_builder.py          #   typed rollout request expansion/sub-batching
+│   ├── rollout_workflow.py         #   sample -> reward -> advantage -> assemble
+│   ├── eval_workflow.py            #   evaluation sampling + scoring path
+│   └── training_workflow.py        #   replay -> backend step -> executor fallback
+├── training/                       # Train executor, update schedule, train backends
+├── buffer/                         # Buffer subsystem (queue/filter/reassembly/store)
+├── distributed/                    # Distributed coordination (for example weight sync)
 ├── ray/                            # Ray distributed orchestration
 │   ├── rollout_manager.py          #   Central orchestrator
 │   ├── rollout_actor.py / training_actor.py
 │   ├── rollout_group.py / training_group.py / group_factory.py
 │   ├── buffer_actor.py / placement_group.py / ray_utils.py
-├── runtime/                        # Async runtime + ray-agnostic execution logic
 ├── patches/                        # Runtime patches (for example replay log-prob support)
 └── utils/                          # Checkpointing, logging, EMA, media helpers
 ```
@@ -367,6 +384,7 @@ Then pass it via `--algorithm.algorithm-path your_module.MyAlgorithm`.
 See the fully working reference implementation:
 `diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm`.
 For the current extension contract, see [docs/Algorithm_Minimal_Template.md](docs/Algorithm_Minimal_Template.md).
+For the supported user-facing extension surface, see [docs/Supported_Extension_Surface.md](docs/Supported_Extension_Surface.md).
 
 ### Plugin Templates (diffusionrl_plugins)
 
@@ -385,7 +403,21 @@ Notes:
 
 ### Adding a Custom Reward Scorer
 
-Subclass `BaseRewardScorer`:
+Use reward config in three layers:
+
+- Built-in scorer: set `--reward.reward-model-name <builtin>` for one scorer, or
+  `--reward.reward-models a,b --reward.reward-weights wa,wb` for multi-component reward.
+- Custom scorer: set `--reward.reward-path your_module.MyRewardScorer` to a full
+  scorer class dotpath.
+- Execution placement: keep the default manager-local path, set
+  `--reward.reward-location sampling_actor` when the sampling host should compute
+  rewards inline, or use `--reward.use-http-reward true` plus
+  `--reward.reward-service-url ...` to call an HTTP reward service.
+
+Historical compatibility aliases under `diffusionrl.reward.local.*` are removed.
+Use the real scorer class path directly.
+
+Subclass `BaseRewardScorer` for the minimal contract:
 
 ```python
 from diffusionrl.types.reward import RewardRequest, RewardResponse
@@ -398,6 +430,10 @@ class MyRewardScorer(BaseRewardScorer):
 ```
 
 Then pass it via `--reward.reward-path your_module.MyRewardScorer`.
+
+If you want the built-in local scorer lifecycle helpers (`device`, eager model
+load, standard `offload()` / `onload()` behavior), subclass
+`diffusionrl.reward.scorers.base_local.BaseLocalRewardScorer` instead.
 
 ### Running Tests
 

@@ -2,14 +2,19 @@
 
 ---
 
-> 文档状态（2026-03-01）：
-> 这份分析报告是阶段性设计快照，包含部分历史脚本名与旧结构示例。
-> 当前代码行为请以 `README.md`、`scripts/README.md` 以及 `diffusionrl/` 实际实现为准。
-> 文中若出现 `FastVideo`、`ray/rollout_buffer.py`、`weight_sync_mode`、`weight_sync_dir`、
-> `losses/`、`from_args()`、`--loss-path`
+> 文档状态（2026-03-22）：
+> 这份分析报告是阶段性设计快照，保留了部分历史结构与旧术语示例。
+> 当前实现已经完成 semantic package migration：`diffusionrl/runtime/`、
+> `SamplingModePlugin`、`config/defaults.py` 都不再是现行主线结构。
+> 当前代码行为请以 `README.md`、`docs/entry_map.md`、`docs/Component_Architecture.md`
+> 以及 `diffusionrl/` 实际实现为准。
+> 文中若出现 `FastVideo`、`ray/rollout_buffer.py`、`weight_sync_mode`、
+> `weight_sync_dir`、`losses/`、`from_args()`、`--loss-path`、
+> `SamplingModePlugin`、`config/defaults.py`、`AsyncPipelineRuntime` 权重版本追踪
 > 等旧术语，请按当前实现对应到 `FSDP/SGLang`、`ray/buffer_actor.py`、
 > `sync.protocol`、`sync.dir`、algorithm-owned loss、`from_config()`、
-> `algorithm.algorithm_kwargs`。
+> `algorithm.algorithm_kwargs`、driver-local helper、`scripts/minimal_*.yaml`、
+> 以及 `train_async.py` 内联的最小 async 状态机。
 
 ## 目录
 
@@ -244,9 +249,13 @@ flowchart TB
 
 ### 2.2 同步训练循环 (train.py)
 
-`train.py` 是主训练入口（~238 行）。
+`train.py` 是主训练入口。
 
-**当前主线重构**：主循环使用 `runtime/weight_sync.py` 中的 coordinator 模型，将权重同步统一收口到 `sync.protocol`（`disabled` / `tensor_payload` / `nccl_broadcast` / `checkpoint_path`），并与 `async_pipeline`、dedicated rollout engine 拓扑联动。
+**当前主线实现**：主循环使用 `distributed/weight_sync.py` 中的
+coordinator 模型，将权重同步统一收口到 `sync.protocol`
+（`disabled` / `tensor_payload` / `nccl_broadcast` / `checkpoint_path`）。
+异步 inflight 状态目前是 `train_async.py` 内部的私有 helper，而不是单独
+的 runtime 包。
 
 ```python
 def create_weight_sync(args):
@@ -257,24 +266,7 @@ def create_weight_sync(args):
         return TensorPayloadWeightSync(args)
     if args.sync.protocol == "nccl_broadcast":
         return NCCLBroadcastWeightSync(args)
-        ray.get(rollout_manager.load_weights.remote())
-        ray.get(rollout_manager.update_weights_from_path.remote(
-            checkpoint_path, int(target_weight_version)))
-        ray.get(rollout_manager.after_weight_update.remote())
-        ray.get(rollout_manager.reload_runtime_cache.remote())
-        ray.get(rollout_manager.assert_inference_weight_version.remote(
-            int(target_weight_version)))
-        cleanup_published_checkpoint(checkpoint_path)
-        return int(target_weight_version)
-
-    # Legacy ObjectRef path
-    weights_ref = training_group.get_weights()
-    ray.wait([weights_ref], num_returns=1)
-    ray.get(rollout_manager.load_weights.remote())
-    ray.get(rollout_manager.update_weights.remote(
-        weights_ref, int(target_weight_version)))
-    # ... onload_post_update, onload_runtime_cache, assert_inference_weight_version
-    return int(target_weight_version)
+    return DisabledWeightSync(args)
 
 
 def train(args):
@@ -292,53 +284,40 @@ def train(args):
     # 3. 创建 Placement Groups (资源分配)
     pgs = create_placement_groups_from_args(args)
 
-    # 4. 创建 SamplingModePlugin（模式无关的状态转换层）[v4.0 NEW]
-    sampling_mode = create_sampling_mode_plugin(args)
+    # 4. 创建 RolloutManager / ActorGroups / RolloutBuffer
+    algorithm_config = build_algorithm_config(args)
+    rollout_manager, dataset_step_info = create_rollout_manager(
+        args,
+        reward_pg_result=reward_pg_result,
+        algorithm_config=algorithm_config,
+    )
+    rollout_group, rollout_runtime = create_rollout_actor_group(...)
+    training_group, training_runtime = create_training_actor_group(...)
+    rollout_buffer = create_buffer_actor(args)
+    ray.get(rollout_manager.attach_sampling_group.remote(rollout_group))
 
-    # 5. 创建 RolloutManager
-    rollout_pg_result = sampling_mode.rollout_pg_result(pgs)
-    rollout_manager, num_rollout_per_epoch = create_rollout_manager(
-        args, pg_result=rollout_pg_result, reward_pg_result=pgs.get("reward"))
+    # 5. 建立权重同步 coordinator
+    weight_sync = create_weight_sync(args, mode=sync_mode)
+    weight_sync.setup(training_runtime=training_runtime, rollout_runtime=rollout_runtime)
 
-    # 6. 创建 TrainingActorGroup + 模式特定初始化 [v4.0 重构]
-    training_group = sampling_mode.create_training_group(pgs, rollout_manager)
+    # 6. 核心同步训练循环
+    for rollout_id in range(args.rollout.start_rollout_id, args.rollout.num_rollout):
+        rollout_on_gpu = _ensure_rollout_on_gpu(...)
+        _produce_and_push_rollout(...)
+        rollout_payload = ray.get(
+            rollout_buffer.pop_training_data.remote(...)
+        )
 
-    # 7. 异步训练模式切换 [v4.0 NEW]
-    if args.async_pipeline:
-        from diffusionRL.train_async import train_async_loop
-        train_async_loop(
-            args=args, rollout_manager=rollout_manager,
-            training_group=training_group, wandb_logger=wandb_logger,
-            should_save_fn=should_save, should_eval_fn=should_eval,
-            sync_weights_fn=_sync_weights_to_rollout,
-            initial_weight_version=sampling_mode.current_weight_version)
-        return
+        if args.ray.offload_rollout:
+            rollout_runtime.sleep()
 
-    # 8. 核心同步训练循环
-    for rollout_id in range(args.start_rollout_id, args.num_rollout):
-        sampling_mode.before_rollout(rollout_manager)  # [v4.0] 适配器管理 onload
+        metrics = training_group.train(rollout_id, rollout_payload["training_data"])
 
-        # === PHASE 1: Rollout 生成 ===
-        rollout_result = ray.get(
-            rollout_manager.generate.remote(rollout_id, world_size=training_group.num_actors))
-        rollout_data_ref = _normalize_rollout_result(rollout_result)
+        _offload_train_phase(...)
+        if should_sync:
+            sync_result = weight_sync.sync(rollout_id=rollout_id)
 
-        sampling_mode.after_rollout(rollout_manager)   # [v4.0] 适配器管理 offload
-
-        # === PHASE 2: Training ===
-        sampling_mode.before_train(training_group)     # [v4.0] 适配器管理 onload
-        metrics = training_group.train(rollout_id, rollout_data_ref)
-        # ... 日志记录、周期性保存 ...
-
-        # === PHASE 3: Weight Sync ===
-        sampling_mode.after_train(training_group)      # [v4.0] 适配器管理 offload
-        sampling_mode.maybe_sync_weights(              # [v4.0] 带版本的权重同步
-            rollout_id=rollout_id, training_group=training_group,
-            rollout_manager=rollout_manager, sync_weights_fn=_sync_weights_to_rollout)
-
-        # 周期性评估
         if should_eval(rollout_id, args):
-            sampling_mode.before_eval(rollout_manager)
             eval_metrics = ray.get(rollout_manager.eval.remote(rollout_id))
 
     # 清理
@@ -346,28 +325,14 @@ def train(args):
     training_group.dispose()
 ```
 
-#### SamplingModePlugin 模式插件 [v4.0 NEW]
+#### 当前主线中的状态切换收口
 
-train.py 通过 `SamplingModePlugin` 将 offload/onload 状态转换逻辑从主循环中解耦，保持主循环骨架模式无关：
+当前主线不再使用 `SamplingModePlugin`。offload/onload 与权重同步的状态
+切换主要集中在 driver helper 和 coordinator 上：
 
-```python
-class SamplingModePlugin:
-    """采样后端运行时差异的薄插件"""
-    def rollout_pg_result(self, pgs) -> Optional[...]: ...
-    def create_training_group(self, pgs, rollout_manager): ...
-    def before_rollout(self, rollout_manager) -> None: ...
-    def after_rollout(self, rollout_manager) -> None: ...
-    def before_train(self, training_group) -> None: ...
-    def after_train(self, training_group) -> None: ...
-    def maybe_sync_weights(self, *, rollout_id, training_group,
-                           rollout_manager, sync_weights_fn) -> None: ...
-    def before_eval(self, rollout_manager) -> None: ...
-```
-
-| 插件 | 说明 | offload/onload 行为 |
-|--------|------|---------------------|
-| **InferenceSamplingMode** | 默认模式，独立推理 Actor | 管理 rollout↔train 间的 offload/onload 切换 |
-| **TrainingSamplingMode** | 训练 Actor 兼做采样 | 无需 offload，通过 `attach_sampling_actors()` 连接 |
+- `_ensure_rollout_on_gpu()`
+- `_offload_train_phase()`
+- `WeightSyncCoordinator.sync()`
 
 ### 2.3 三个阶段的详细说明
 
@@ -375,131 +340,71 @@ class SamplingModePlugin:
 |------|------|----------|------|
 | **Phase 1: Rollout** | `rollout_manager.generate()` | InferenceActors | 采样生成轨迹、计算奖励、转换为训练数据 |
 | **Phase 2: Training** | `training_group.train()` | TrainingActors | 前向/反向传播、梯度更新 |
-| **Phase 3: Weight Sync** | `_sync_weights_to_rollout()` | 短暂两者都用 | 带版本号的权重同步到推理模型 |
+| **Phase 3: Weight Sync** | `weight_sync.sync()` | 短暂两者都用 | 通过 `WeightSyncCoordinator` 同步最新权重到 rollout 侧 |
 
 ### 2.4 RolloutManager 内部流程
 
-`rollout_manager.py` 是数据生成的核心协调器（~1,319 行）。**v3.0 新增**：支持 `external_sampling_actors`（训练 Actor 兼做采样）和 `attach_sampling_actors()` 方法：
+`rollout_manager.py` 是 rollout-side producer facade。当前主线里它不再承担
+权重同步或 rollout actor 生命周期控制；这些能力已经收口到
+`ray/group_runtime.py` 中的 `RolloutGroupRuntime`。`RolloutManager` 负责：
+
+- 动态加载算法 / 数据源 / manager-local reward runtime
+- 挂接 sampling actor group
+- 暴露 `build_training_batch()` / `produce_training_payload()` / `eval()` 等 driver 入口
+- 保留 rollout 侧 metadata、计数器与 debug seam
+
+当前主线更接近下面的结构：
 
 ```python
-@ray.remote(num_cpus=1)  # 只需 CPU，不占 GPU
+@ray.remote
 class RolloutManager:
-    """
-    协调数据生成管道的核心组件
+    def init(self):
+        self.algorithm = algorithm_cls.from_config(algorithm_config)
+        self.reward_service = create_manager_reward_executor(...)
+        self.data_source = data_source_cls(self.args)
+        self.eval_runner = EvalRunner(...)
+        self.rollout_workflow = RolloutWorkflow(...)
 
-    职责:
-        - 管理 InferenceActorGroup
-        - 协调采样、奖励计算、优势归一化
-        - 动态加载算法/采样器/奖励模型
+    def attach_sampling_group(self, actor_group):
+        self.sampling_group = actor_group
 
-    组件:
-        - Algorithm: GRPO/MixGRPO/NFT
-        - InferenceActorGroup: 采样 Actor 组
-        - RewardService: 奖励计算服务
-        - DataSource: 数据源
-        - TimestepScheduler: 时间步调度器 (MixGRPO)
-    """
-
-    def init(self, config):
-        # 动态加载所有组件
-        self.algorithm = load_class(config["algorithm_path"])(**config)
-        self.data_source = load_class(config["data_source_path"])(**config)
-        self.reward_service = RewardService.create(config)  # 自动选择后端
-        self.timestep_scheduler = create_timestep_scheduler(config)  # MixGRPO
-
-        # 创建 InferenceActorGroup
-        self.inference_group = InferenceActorGroup.create(config, pg_result)
-
-    def generate(self, rollout_id: int):
-        """生成一个 rollout 的训练数据"""
-        # 1. 获取数据批次
-        batch = self.data_source.get_batch()  # {prompts, embeddings, ...}
-
-        # 2. 获取 SDE 时间步索引 (MixGRPO)
-        sde_indices = self.timestep_scheduler.get_sde_indices(
-            rollout_id, self.num_inference_steps
+    def build_training_batch(self, rollout_id: int, ...):
+        return self.rollout_workflow.build_training_batch(
+            rollout_id=rollout_id,
+            execute_sampling_request=self._execute_sampling_request,
+            ...
         )
 
-        # 3. 分布式采样（分发到所有 InferenceActor）
-        sampler_outputs = self.inference_group.generate(batch, sde_indices)
-        # sampler_outputs: List[RolloutOutput]
-        #   每个包含: trajectories, log_probs, latents, decoded_images
-
-        # 4. 计算奖励
-        rewards = self.reward_service.compute_rewards(
-            sampler_outputs, batch["prompts"]
-        )
-        # rewards: Tensor[B]
-
-        # 5. 计算优势函数
-        advantages = self.algorithm.compute_advantages(
-            rewards,
-            samples_per_prompt=self.samples_per_prompt
-        )
-        # advantages: Tensor[B]，归一化后的奖励
-
-        # 6. 转换为训练数据格式
-        if self.algorithm.get_sampling_requirements().is_forward_process:
-            batch = self.assemble_forward_training_batch(sampler_outputs, advantages)
-            # ForwardTrainingBatch: 只需 clean_latents
-        else:
-            batch = self.assemble_backward_training_batch(sampler_outputs, advantages)
-            # BackwardTrainingBatch: 需要 trajectories + log_probs
-
-        # 7. 存入 Ray Object Store
-        return ray.put(batch)
+    def produce_training_payload(self, rollout_id: int, ...) -> Dict[str, Any]:
+        batch = self.build_training_batch(rollout_id, ...)
+        return {
+            "training_data": ray.put(batch),
+            "sample_count": ...,
+            "metadata": ...,
+        }
 
     def eval(self, rollout_id: int) -> Dict[str, Any]:
-        """评估当前模型"""
-        # 使用固定种子生成评估样本
-        # 计算并返回评估指标
-
-    def update_weights(self, weights_ref: ObjectRef, weight_version: int):
-        """更新所有 InferenceActor 的权重（带版本号）"""
-        self.inference_group.update_weights(weights_ref)
-
-    def update_weights_from_path(self, checkpoint_path: str, weight_version: int):
-        """从文件路径更新权重 [v4.0 NEW]"""
-        self.inference_group.update_weights_from_path(checkpoint_path)
-
-    def onload_weights(self):
-        """推理模型权重部分移至 GPU [v4.0 NEW]"""
-
-    def onload_post_update(self):
-        """权重更新后的 onload 步骤 [v4.0 NEW]"""
-
-    def onload_runtime_cache(self):
-        """恢复运行时缓存 [v4.0 NEW]"""
-
-    def assert_inference_weight_version(self, expected_version: int):
-        """断言所有推理 Actor 的权重版本一致 [v4.0 NEW]"""
-
-    def offload(self):
-        """将所有 InferenceActor 模型移至 CPU"""
-        self.inference_group.offload()
-
-    def onload(self):
-        """将所有 InferenceActor 模型移至 GPU"""
-        self.inference_group.onload()
+        return self.eval_runner.run(...)
 
     def dispose(self):
-        """清理资源"""
-        self.inference_group.dispose()
+        if self.reward_service is not None:
+            self.reward_service.shutdown()
 ```
 
 #### RolloutManager 工厂函数
 
 ```python
 def create_rollout_manager(
-    args: TrainingArguments,
-    pg_result: Tuple[PlacementGroup, List[int], List[int]],
-    reward_pg_result: Optional[Tuple[...]] = None,  # 独立 GPU reward
-) -> Tuple[ActorHandle, int]:
+    args,
+    reward_pg_result: Optional[Tuple] = None,
+    *,
+    algorithm_config: Dict[str, Any],
+) -> Tuple[ray.ObjectRef, Dict[str, Any]]:
     """
     创建 RolloutManager Actor
 
     返回:
-        (rollout_manager_handle, num_rollout_per_epoch)
+        (rollout_manager_handle, dataset_step_info)
     """
 ```
 
@@ -510,132 +415,27 @@ def create_rollout_manager(
 ### 3.1 模块目录结构
 
 ```
-diffusionRL/                          # 总计 ~28,217 行 (含测试 ~1,449行)
-├── __init__.py                     # 模块导出 (~147行)
-├── train.py                        # 同步训练入口 (~238行)
-├── train_async.py                  # 异步训练循环 (~145行) [v4.0 NEW]
-├── types/                          # 核心数据结构（sampling/training/reward）
-│
-├── runtime/                        # 运行时编排层 (~327行) [v4.0 NEW]
-│   ├── __init__.py                 # 模块导出 (~9行)
-│   ├── async_runtime.py            # AsyncPipelineRuntime 状态机 (~127行)
-│   └── sampling_mode/              # 采样模式插件
-│       ├── __init__.py             # 工厂函数 create_sampling_mode_plugin (~22行)
-│       ├── base.py                 # SamplingModePlugin 基类 (~53行)
-│       ├── inference_mode.py       # InferenceSamplingMode (独立推理Actor) (~90行)
-│       └── training_mode.py        # TrainingSamplingMode (训练Actor兼采样) (~26行)
-│
-├── ray/                            # Ray 分布式层 (~4,643行)
-│   ├── __init__.py                 # 模块导出 (~107行)
-│   ├── placement_group.py          # GPU 资源分配 (~467行)
-│   ├── rollout_manager.py          # 数据生成协调器 (~1,496行)
-│   ├── actor_group.py              # Actor 组管理 (~1,076行)
-│   ├── utils.py                    # 分布式工具 (~618行)
-│   └── actors/
-│       ├── __init__.py             # 模块导出 (~11行)
-│       ├── base.py                 # Actor 基类 (~326行)
-│       ├── training.py             # TrainingActor (~1,564行)
-│       └── inference.py            # InferenceActor (~563行)
-│
-├── algorithms/                     # 算法实现 (~1,083行)
-│   ├── __init__.py                 # 模块导出 (~13行)
-│   ├── base.py                     # BaseAlgorithm, SamplingRequirements, Hooks (~354行)
-│   ├── grpo.py                     # GRPOAlgorithm (group/global advantage normalization) (~320行)
-│   ├── mix_grpo.py                 # MixGRPOAlgorithm (SDE/ODE 混合) (~110行)
-│   └── nft.py                      # NFTAlgorithm (双 adapter + EMA) (~286行)
-│
-├── algorithms/                     # 算法同时拥有 rollout 合约与 loss 逻辑
-│   ├── grpo.py                     # _GRPOLoss + GRPOAlgorithm
-│   ├── mix_grpo.py                 # MixGRPOAlgorithm
-│   └── nft.py                      # _NFTLoss + NFTAlgorithm
-│
-├── samplers/                       # 采样器 (~4,937行)
-│   ├── __init__.py                 # 模块导出 (~88行)
-│   ├── base.py                     # BaseSampler 抽象 (~140行)
-│   ├── engine.py                   # 引擎注册表 + BaseRolloutEngine (~287行)
-│   ├── noise_utils.py              # 共享噪声生成 init_same_noise (~172行)
-│   ├── fsdp/                       # 原生 PyTorch 采样器 (~2,056行)
-│   │   ├── __init__.py             # 模块导出 (~29行)
-│   │   ├── flux_sampler.py         # FluxSampler (~508行)
-│   │   ├── sd3_sampler.py          # SD3Sampler (~570行)
-│   │   ├── hunyuan_sampler.py      # FSDPHunyuanSampler (~343行)
-│   │   └── sampler_runner.py       # 直采样共享执行核心
-│   ├── sglang/                     # SGLang 引擎
-│   │   ├── __init__.py             # 模块导出 (~33行)
-│   │   ├── engine.py               # SGLangRolloutEngine (~178行)
-│   │   └── client.py               # SGLang 客户端 (~225行) [v4.0 NEW]
-│   └── schedulers/
-│       ├── __init__.py             # 模块导出 (~27行)
-│       └── timestep_window.py      # 时间步调度器 (~422行)
-│
-├── algorithms/normalizers.py       # 全局/分组 advantage normalization
-│
-├── models/                         # 模型 Bundle (~2,844行)
-│   ├── __init__.py                 # 工厂函数 (~79行)
-│   ├── base.py                     # ModelBundle 接口 (~312行)
-│   ├── flux.py                     # FluxModelBundle (~679行)
-│   ├── sd3.py                      # SD3ModelBundle (~461行)
-│   ├── hunyuan.py                  # HunyuanModelBundle (~367行)
-│   ├── mochi.py                    # MochiModelBundle (~472行)
-│   └── forward_plugins.py          # 前向扩散 plugin 工具 (~474行)
-│
-├── data/                           # 数据处理 (~853行)
-│   ├── __init__.py                 # 模块导出 (~27行)
-│   ├── data_source.py              # ImageRLDataSource (~250行)
-│   ├── datasets.py                 # TextPromptDataset, FluxRLDataset, SD3RLDataset (~397行)
-│   └── k_repeat_sampler.py         # K-repeat 采样器 (~179行)
-│
-├── reward/                         # Reward 实现 (~2,263行)
-│   ├── __init__.py                 # 模块导出 (~67行)
-│   ├── base.py                     # BaseRewardWorker, RewardRequest/Response (~242行)
-│   ├── local.py                    # LocalRewardWorker (~581行)
-│   ├── http.py                     # HTTPRewardWorker (~387行)
-│   ├── ray_worker.py               # RayRewardWorker (~404行)
-│   └── service.py                  # RewardService 统一入口 (~555行)
-│
-├── config/                         # 配置 (~1,547行)
-│   ├── __init__.py                 # 模块导出 (~67行)
-│   ├── arguments.py                # TrainingArguments (~864行)
-│   └── defaults.py                 # 预设配置 HunyuanVideo/Flux/Mochi等 (~616行)
-│
-├── patches/                        # 当前主线只保留少量运行时补丁
-│   ├── __init__.py                 # 补丁导出
-│   └── replay_logprob.py           # rollout 缺失 log_prob 时的重放补丁
-│       └── video_generator_patch.py # 视频生成器补丁 (~45行)
-│
-├── utils/                          # 工具 (~1,947行)
-│   ├── __init__.py                 # load_function, load_class, set_seed (~96行)
-│   ├── checkpoint.py               # CheckpointManager (~593行)
-│   ├── ema.py                      # EMA 更新器 (~363行)
-│   ├── wandb_logger.py             # WandB 日志 (~481行)
-│   ├── adapter_utils.py            # LoRA adapter 切换工具 (~45行)
-│   ├── misc.py                     # 杂项工具 (~282行)
-│   └── weight_sync_checkpoint.py   # 原子 checkpoint 权重同步 (~87行) [v4.0 NEW]
-│
-├── tests/                          # 测试套件 (~1,449行) [v4.0 NEW]
-│   ├── test_async_runtime.py       # AsyncPipelineRuntime 状态机测试 (~54行)
-│   ├── test_sampling_contract_v1.py # 采样器契约验证 (~210行)
-│   ├── test_training_batch_step_indices.py  # 步索引处理 (~105行)
-│   ├── test_rollout_manager_contract_logic.py # RolloutManager 契约 (~199行)
-│   ├── test_engine_stage_protocol.py  # 引擎生命周期 (~110行)
-│   ├── test_weight_sync_checkpoint.py # Checkpoint 原子性 (~37行)
-│   ├── test_wandb_metrics_aggregate.py # 指标聚合 (~41行)
-│   ├── test_args_runtime_modes.py  # 参数解析 (~232行)
-│   ├── test_sglang_client.py       # SGLang 集成 (~188行)
-│   ├── test_sampling_mode_plugins.py # 采样模式插件 (~166行)
-│   ├── test_data_metadata_passthrough.py # 数据元数据 (~58行)
-│   └── test_training_sampling_state.py # 训练状态恢复 (~49行)
-│
-└── scripts/                        # 运行脚本 [v4.0 NEW]
-    ├── README.md
-    ├── test_ray_single_gpu.sh
-    ├── train_dancegrpo_flux_separate.sh
-    ├── train_dancegrpo_hunyuan_separate.sh
-    ├── train_dancegrpo_sd3_separate.sh
-    ├── train_mixgrpo_flux_separate.sh
-    ├── train_mixgrpo_sd3_separate.sh
-    ├── train_nft_sd3_separate.sh
-    └── ... (含 *_train_actor_sampling.sh 变体)
+diffusionRL/
+├── README.md
+├── docs/
+├── scripts/
+├── diffusionrl/
+│   ├── train.py                    # driver / sync loop / async dispatch
+│   ├── train_async.py              # async-only loop + private AsyncPipelineRuntime
+│   ├── algorithms/                 # builtin algorithms + loss/backward ownership
+│   ├── config/                     # args / validation / resolution / domain config
+│   ├── orchestration/              # rollout / eval / train workflows
+│   ├── ray/                        # actors / groups / placement / Ray plumbing
+│   ├── buffer/                     # rollout-to-train queueing / reassembly semantics
+│   ├── training/                   # train executor / update schedule / backends
+│   ├── distributed/                # weight sync / checkpoint publish protocols
+│   ├── reward/                     # reward services / scoring pipeline / scorers
+│   ├── samplers/                   # FSDP + SGLang sampling backends
+│   ├── models/
+│   ├── data/
+│   ├── types/
+│   └── utils/
+└── diffusionrl_plugins/            # external extension namespace
 ```
 
 ### 3.2 Actor 概念与生命周期
@@ -1771,16 +1571,15 @@ classDiagram
 ```mermaid
 graph TB
     subgraph EntryLayer["Entry Layer (入口层)"]
-        Train["train.py<br/>同步训练入口 (~238行)"]
-        TrainAsync["train_async.py<br/>异步训练循环 (~145行)"]
-        Config["config/arguments.py<br/>TrainingArguments<br/>(~864行)"]
-        Defaults["config/defaults.py<br/>预设配置 (~616行)"]
+        Train["train.py<br/>同步训练入口"]
+        TrainAsync["train_async.py<br/>异步训练循环 + 私有 AsyncPipelineRuntime"]
+        Config["config/{arguments.py, build_domain_args.py}<br/>参数解析 / domain config"]
     end
 
-    subgraph RuntimeLayer["Runtime Layer (运行时编排层) [v4.0 NEW]"]
-        SMA["SamplingModePlugin<br/>InferenceSamplingMode<br/>TrainingSamplingMode"]
-        APR["AsyncPipelineRuntime<br/>InflightRollout / ResolvedRollout<br/>权重版本追踪"]
-        WSC["weight_sync_checkpoint.py<br/>原子 checkpoint 发布"]
+    subgraph RuntimeLayer["Driver + Semantic Kernel Layer"]
+        WF["orchestration/*<br/>rollout / eval / train workflows"]
+        APR["train_async.py<br/>AsyncPipelineRuntime<br/>最小 inflight 状态机"]
+        WSC["distributed/weight_sync*.py<br/>同步协议 / checkpoint 发布"]
     end
 
     subgraph RayLayer["Ray Distributed Layer (分布式层)"]
@@ -1826,9 +1625,7 @@ graph TB
     Train --> RuntimeLayer
     TrainAsync --> APR
     Config --> Train
-    Defaults --> Config
-
-    SMA --> RayLayer
+    WF --> RayLayer
     APR --> RayLayer
     WSC --> TA
 
@@ -2064,29 +1861,29 @@ class TrainingActor:
 
 ### 7.4 异步训练模式 (train_async.py) [v4.0 重构]
 
-`train_async.py`（~145 行）配合 `runtime/async_runtime.py`（~127 行）实现异步 rollout/train 重叠。通过 `--async-pipeline=true` 启用。
+`train_async.py` 单文件实现异步 rollout/train 重叠。通过
+`python -m diffusionrl.train_async ...` 启用。`AsyncPipelineRuntime` 现在是该文件内联的私有
+helper，而不是额外的 `runtime/async_runtime.py`。
 
 当前约束：
 - 仅支持 separate（`colocate_rollout_training=false`）
 - 默认关闭 offload（避免 rollout/train overlap 期间的状态抖动）
 - 通过 `update_weights_interval` 在 generation 边界执行权重同步
 
-#### AsyncPipelineRuntime 状态机 [v4.0 NEW]
+#### AsyncPipelineRuntime 状态机（当前主线）
 
 ```python
 @dataclass(frozen=True)
 class InflightRollout:
     """已启动但尚未消费的 rollout"""
     rollout_id: int
-    weight_version: int    # 启动时的权重版本
     future: Any            # ray.ObjectRef
 
 @dataclass(frozen=True)
 class ResolvedRollout:
-    """从 inflight future 解析出的 rollout 数据"""
+    """从 inflight future 解析出的结果"""
     rollout_id: int
-    weight_version: int
-    payload: Any           # 实际训练数据
+    result: Any            # buffer admission 结果
 
 class AsyncPipelineRuntime:
     """
@@ -2095,17 +1892,13 @@ class AsyncPipelineRuntime:
     追踪:
     - inflight rollout futures (有界队列)
     - rollout id 排序
-    - 权重版本一致性
     """
-    def __init__(self, *, max_inflight=1, initial_rollout_id=0,
-                 initial_weight_version=0): ...
+    def __init__(self, *, max_inflight=1, initial_rollout_id=0): ...
 
-    def can_launch(self) -> bool: ...          # 队列未满时可启动
-    def launch_rollout(self, rollout_id, future, *, weight_version=None): ...
+    def can_launch(self) -> bool: ...
+    def launch_rollout(self, rollout_id, future): ...
     def resolve_next_rollout(self, resolver) -> ResolvedRollout: ...
-    def ensure_rollout_version(self, rollout, *, allow_stale=False) -> bool: ...
-    def assert_no_inflight_for_weight_sync(self) -> None: ...  # 同步前必须清空队列
-    def advance_weight_version(self) -> int: ...               # 版本号递增
+    def assert_no_inflight_for_weight_sync(self) -> None: ...
 ```
 
 #### 异步训练循环时序图
@@ -2117,43 +1910,29 @@ sequenceDiagram
     participant RM as RolloutManager
     participant TG as TrainingActorGroup
 
-    TL->>RT: launch_rollout(0, future)
-    TL->>RM: generate.remote(0)
     Note over TL: 循环开始
 
     loop rollout_id = 0..N
+        TL->>RT: fill inflight window (up to sync boundary)
         TL->>RT: resolve_next_rollout(ray.get)
         RT-->>TL: ResolvedRollout(data)
-        TL->>RT: ensure_rollout_version(resolved)
-
-        alt 不需要权重同步 且 下一轮存在
-            TL->>RT: launch_rollout(id+1, future)
-            TL->>RM: generate.remote(id+1)
-            Note over RM: 重叠执行采样
-        end
-
         TL->>TG: train(rollout_id, data)
-        Note over TG: 训练当前批次
+        Note over RM: 下一轮 rollout 可与当前训练重叠
 
-        alt 需要权重同步 (id+1 % interval == 0)
+        alt 到达 generation 边界
             TL->>RT: assert_no_inflight_for_weight_sync()
-            TL->>TL: sync_weights_fn(target_version)
-            TL->>RT: advance_weight_version()
-            TL->>RT: launch_rollout(id+1, future)
-            Note over RT: 新版本权重下启动
+            TL->>TL: weight_sync.sync()
         end
     end
 ```
 
-#### 权重版本一致性保证
+#### 同步边界保证
 
 | 检查点 | 方法 | 说明 |
 |--------|------|------|
-| **启动时标记** | `launch_rollout(weight_version=...)` | 记录 rollout 使用的权重版本 |
-| **消费时验证** | `ensure_rollout_version()` | 确保 rollout 版本 ≤ 当前训练版本 |
-| **同步前清空** | `assert_no_inflight_for_weight_sync()` | 权重同步前队列必须为空 |
-| **同步后递增** | `advance_weight_version()` | 更新预期权重版本 |
-| **双重校验** | `assert_inference_weight_version.remote()` | 远程 Actor 验证版本一致 |
+| **有界 inflight** | `can_launch()` / `launch_rollout()` | rollout overlap 不超过 `async_max_inflight` |
+| **按 rollout_id 消费** | `resolve_next_rollout()` | 始终按最老的 inflight rollout 取回 |
+| **同步前清空** | `assert_no_inflight_for_weight_sync()` | generation 边界上才允许权重同步 |
 
 #### 权重同步协议 [current]
 
@@ -2688,7 +2467,7 @@ reward_dedicated_num_gpus_per_node: int = 0  # 每节点 GPU 数
 
 ## 9. 配置参数详解
 
-### 9.1 TrainingArguments 主要参数组 (~864 行)
+### 9.1 TrainingArguments 主要参数组
 
 | 参数组 | 关键参数 | 说明 |
 |-------|---------|------|
@@ -2705,7 +2484,7 @@ reward_dedicated_num_gpus_per_node: int = 0  # 每节点 GPU 数
 | **训练优化** | `use_gradient_checkpointing`, `gradient_steps_per_epoch`, `cross_rank_shuffle` | 内存/性能优化 |
 | **数据分区** | `partition_train_data`, `prompts_per_rollout` | 大批次数据分区 |
 | **Colocate 精细控制** | `colocate_training_gpu_fraction`, `colocate_rollout_gpu_fraction` | GPU 分配比例 |
-| **异步管道** | `async_pipeline`, `async_max_inflight`, `update_weights_interval` | 异步 rollout/train 重叠 [v4.0] |
+| **异步入口参数** | `async_max_inflight`, `update_weights_interval` | `train_async.py` 的 rollout/train 重叠控制 [v4.0] |
 | **权重同步** | `sync.protocol`, `sync.dir` | disabled / tensor_payload / nccl_broadcast / checkpoint_path |
 
 #### v3.0 新增参数说明
@@ -2727,7 +2506,6 @@ reward_dedicated_num_gpus_per_node: int = 0  # 每节点 GPU 数
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `async_pipeline` | bool | False | 启用异步训练管道（rollout N+1 与 train N 重叠） |
 | `async_max_inflight` | int | 1 | 异步管道最大 inflight rollout 数量 |
 | `update_weights_interval` | int | 1 | 权重同步频率（每 N 个 rollout 同步一次） |
 | `sync.protocol` | str | "auto" | 权重同步协议：`auto` / `disabled` / `tensor_payload` / `nccl_broadcast` / `checkpoint_path` |
@@ -2740,21 +2518,16 @@ reward_dedicated_num_gpus_per_node: int = 0  # 每节点 GPU 数
 - **算法-损失一致性验证**：确保算法类型和损失类型匹配
 - **资源配置验证**：检查 GPU 分配合理性
 
-### 9.2 预设配置系统 (v3.0 新增)
+### 9.2 当前推荐配置入口
 
-`config/defaults.py` (~616 行) 提供模型和算法的预设配置：
+当前主线不再维护 `config/defaults.py` 预设模块。推荐的入口是：
 
-| 预设类 | 说明 |
+| 入口 | 说明 |
 |--------|------|
-| `HunyuanVideoDefaults` | HunyuanVideo 模型默认参数 |
-| `FluxDefaults` | FLUX 模型默认参数 |
-| `MochiDefaults` | Mochi 模型默认参数 |
-| `GRPODefaults` | GRPO 算法默认参数 |
-| `MixGRPODefaults` | MixGRPO 算法默认参数 |
-| `NFTDefaults` | NFT 算法默认参数 |
-| `SingleGPUPreset` | 单 GPU 部署预设 |
-| `MultiGPUPreset` | 多 GPU 部署预设 |
-| `MultiNodePreset` | 多节点部署预设 |
+| `scripts/minimal_flux.yaml` | FLUX 的最小 YAML 配置 |
+| `scripts/minimal_hunyuan.yaml` | Hunyuan 的最小 YAML 配置 |
+| `scripts/train_*.sh` | 常用算法/模型/模式脚本模板 |
+| `README.md` 中的 CLI 示例 | 直接从命令行启动时的最短路径 |
 
 ### 9.3 模型类型自动映射
 
@@ -2791,14 +2564,13 @@ MODEL_TYPE_TO_SAMPLER_ENGINE = {
 | **类型安全** | dataclass 定义清晰的数据契约 | 减少运行时错误 |
 | **算法 Hook 系统** | post_backward/post_optimizer_step Hook | 算法自定义训练行为无需改 Actor |
 | **双采样后端** | inference / training 采样模式 | 灵活的推理采样策略 |
-| **预设配置** | defaults.py 预设系统 | 快速配置不同模型/算法组合 |
+| **语义包分层** | `orchestration` / `buffer` / `training` / `distributed` | 当前主线结构更清晰 |
 | **FSDP 集成** | 原生支持大模型分布式训练 | 训练更大的模型 |
 | **注册表系统** | Loss/Engine/Strategy 注册表 | 运行时扩展无需改代码 |
-| **SamplingModePlugin** | 模式插件解耦 offload/onload 状态转换 | 主循环模式无关 [v4.0] |
-| **异步训练管道** | AsyncPipelineRuntime 状态机 + 权重版本追踪 | rollout/train 重叠提升吞吐 [v4.0] |
+| **异步训练循环** | `train_async.py` + 最小 `AsyncPipelineRuntime` | rollout/train 重叠提升吞吐 [v4.0] |
 | **多协议权重同步** | tensor_payload / nccl_broadcast / checkpoint_path | 适配单节点/多节点场景 [v4.0] |
 | **原子 checkpoint 发布** | weight_sync_checkpoint.py 原子写入 | 避免读写竞争和数据损坏 [v4.0] |
-| **完整测试套件** | 12 个测试模块覆盖核心契约 | 回归保护 [v4.0] |
+| **完整测试套件** | `tests/` 下的多个模块覆盖核心契约 | 回归保护 [v4.0] |
 
 ### 10.2 设计模式总结
 
@@ -2813,7 +2585,7 @@ mindmap
             create_rollout_manager()
             create_training_actor_group()
             get_loss() / create_engine()
-            create_sampling_mode_plugin()
+            create_weight_sync()
         注册表模式
             LOSS_REGISTRY
             ENGINE_REGISTRY
@@ -2822,7 +2594,7 @@ mindmap
             Algorithm 选择
             Advantage 归一化策略
             Sampler 选择
-            SamplingModePlugin
+            WeightSyncCoordinator
         模板方法
             BaseAlgorithm
             BaseSampler
@@ -2831,7 +2603,7 @@ mindmap
         状态机模式
             AsyncPipelineRuntime
             InflightRollout 生命周期
-            权重版本追踪
+            inflight rollout 队列
         观察者模式
             WandB Logger
             Metrics 收集
@@ -2874,4 +2646,4 @@ mindmap
 ---
 
 *文档版本: 4.0*
-*最后更新: 2026-02-08*
+*最后更新: 2026-03-22*

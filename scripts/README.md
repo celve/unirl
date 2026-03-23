@@ -30,7 +30,7 @@ Eval data:
 - `data_path` is the training prompt source.
 - `eval_data_path` is optional; when unset, periodic eval reads a deterministic, unshuffled view of `data_path`.
 - For a real validation split, set `eval_data_path` explicitly.
-- Prompt datasets should provide text via `prompt` or `caption`; legacy embedding fields are ignored.
+- Prompt datasets should provide text via `prompt` or `caption`; legacy embedding fields are no longer supported.
 - Prompt datasets should ideally provide `prompt_id`; when omitted, the prompt loaders now synthesize deterministic IDs.
 
 Group-reassembly rollout buffer:
