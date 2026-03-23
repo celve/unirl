@@ -136,6 +136,7 @@ python -m diffusionrl.train \
     \
     --debug.debug-output-dir "${DEBUG_OUTPUT_DIR}" \
     \
+    --sync.protocol disabled \
     "$@"
 
 echo ""

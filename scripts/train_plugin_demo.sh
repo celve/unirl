@@ -76,4 +76,5 @@ python -m diffusionrl.train \
     --rollout.save-steps 1000 \
     --rollout.logging-steps 1 \
     --rollout.output-dir "${OUTPUT_DIR}" \
+    --sync.protocol disabled \
     "$@"

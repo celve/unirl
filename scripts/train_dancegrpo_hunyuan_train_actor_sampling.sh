@@ -247,4 +247,5 @@ python -m diffusionrl.train \
     --rollout.report-to-wandb ${REPORT_TO_WANDB} \
     --rollout.project-name "${WANDB_PROJECT_NAME}" \
     --rollout.run-name "${WANDB_RUN_NAME}" \
+    --sync.protocol disabled \
     "$@"

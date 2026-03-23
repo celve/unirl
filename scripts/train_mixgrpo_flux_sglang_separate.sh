@@ -136,4 +136,5 @@ python -m diffusionrl.train \
     --rollout.save-steps 50 \
     --rollout.logging-steps 1 \
     --rollout.output-dir "${OUTPUT_DIR}" \
+    --sync.protocol tensor_payload \
     "$@"

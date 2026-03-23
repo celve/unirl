@@ -242,6 +242,7 @@ run_training() {
         --rollout.wandb-media-max-items "${WANDB_MEDIA_MAX_ITEMS}" \
         --rollout.wandb-tags "${WANDB_TAGS}" \
         "${wandb_entity_args[@]}" \
+        --sync.protocol disabled \
         "$@"
 }
 

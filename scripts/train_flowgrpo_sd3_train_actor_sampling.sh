@@ -178,4 +178,5 @@ python -m diffusionrl.train \
     --rollout.run-name "${WANDB_RUN_NAME}" \
     --rollout.wandb-log-media ${WANDB_LOG_MEDIA} \
     --rollout.wandb-media-max-items ${WANDB_MEDIA_MAX_ITEMS} \
+    --sync.protocol disabled \
     "$@"

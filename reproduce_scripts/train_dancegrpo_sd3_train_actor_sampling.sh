@@ -184,4 +184,5 @@ python -m diffusionrl.train \
     --rollout.wandb-media-max-items ${WANDB_MEDIA_MAX_ITEMS} \
     --rollout.wandb-tags "${WANDB_TAGS}" \
     "${WANDB_ENTITY_ARGS[@]}" \
+    --sync.protocol disabled \
     "$@"
