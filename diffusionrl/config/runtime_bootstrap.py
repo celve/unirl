@@ -29,6 +29,7 @@ from diffusionrl.config.resolution import (
     require_rollout_service_num_gpus,
     rollout_mode_is_colocated,
 )
+from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.training.backends import (
     resolve_train_backend_capabilities_from_config,
     resolve_train_backend_config_from_args,
@@ -156,14 +157,19 @@ def resolve_runtime_config(
         args,
         rollout_mode_info=rollout_mode_info,
     )
+    reward_schema = RewardSchema.from_args(args)
 
     model_config = build_model_config(
-        args,
         model_spec=model_spec,
+        model_settings=args.model,
+        training_settings=args.training,
+        precision_settings=args.precision,
     )
-    reward_config = build_reward_config(args)
+    reward_config = build_reward_config(
+        reward_schema=reward_schema,
+    )
     training_sampling_config = build_training_sampling_config(
-        args,
+        precision_settings=args.precision,
         sampling_spec=sampling_spec,
         sampler_engine_type=derive_sampling_host_engine_type(
             args,
@@ -171,11 +177,12 @@ def resolve_runtime_config(
         ),
     )
     train_backend_payload = build_train_backend_config(
-        args,
         resolved_backend_config=train_backend_config,
     )
     training_actor_init_config = build_training_actor_init_config(
-        args=args,
+        training_settings=args.training,
+        rollout_control_settings=args.rollout.control,
+        replay_log_probs=bool(args.sampling.replay_log_probs),
         topology=training_topology,
         training_plan=training_plan,
         algorithm_config=algorithm_config,
@@ -204,7 +211,11 @@ def resolve_runtime_config(
                 "Resolved rollout bootstrap requires rollout.topology.service_engine to be set."
             )
         rollout_engine_runtime_config = build_rollout_engine_config(
-            args=args,
+            rollout_topology_settings=args.rollout.topology,
+            precision_settings=args.precision,
+            sync_settings=args.sync,
+            fps=int(args.fps),
+            logprob_source=rollout_mode_info.logprob_source,
             sampler_engine_type=service_engine,
             model_config=model_config,
             sampling_spec=sampling_spec,

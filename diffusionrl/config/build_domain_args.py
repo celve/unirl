@@ -1,14 +1,9 @@
-"""Config builders — convert TrainingArguments into domain-specific dicts for actors.
-
-Each build_*() function extracts a domain-specific slice from args and returns a
-plain dict that the corresponding actor/service consumes via its init() method.
-This decouples actors from the TrainingArguments structure.
-"""
+"""Projection helpers from resolved config slices to actor/service payload dicts."""
 
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from diffusionrl.config.resolution import (
     ResolvedModelSpec,
@@ -16,13 +11,9 @@ from diffusionrl.config.resolution import (
     ResolvedTrainTopology,
     normalize_rollout_service_engine,
     normalize_lora_target_modules,
-    derive_model_spec,
 )
 from diffusionrl.reward.schema import RewardSchema
-from diffusionrl.training.backends import (
-    ResolvedTrainBackendConfig,
-    resolve_train_backend_config_from_args,
-)
+from diffusionrl.training.backends import ResolvedTrainBackendConfig
 from diffusionrl.types.sampling import ResolvedSamplingSpec
 
 # ---------------------------------------------------------------------------
@@ -30,30 +21,28 @@ from diffusionrl.types.sampling import ResolvedSamplingSpec
 # ---------------------------------------------------------------------------
 
 def build_model_config(
-    args,
     *,
-    model_spec: Optional[ResolvedModelSpec] = None,
+    model_spec: ResolvedModelSpec,
+    model_settings,
+    training_settings,
+    precision_settings,
 ) -> Dict[str, Any]:
     """Build model config consumed by training and rollout actors.
 
     Pulls from: ModelConfig (identity/paths) + TrainingConfig (LoRA/checkpointing)
     + PrecisionConfig (model load dtype).
     """
-    resolved_model = model_spec if model_spec is not None else derive_model_spec(args)
-    mc = args.model    # ModelConfig
-    tc = args.training  # TrainingConfig
-    pc = args.precision  # PrecisionConfig
     return {
-        "model_path": resolved_model.model_path,
-        "pretrained_model_saved_path": mc.pretrained_model_saved_path,
-        "vae_saved_path": mc.vae_saved_path,
-        "text_encoder_path": mc.text_encoder_path,
-        "use_lora": tc.use_lora,
-        "lora_rank": tc.lora_rank,
-        "lora_alpha": tc.lora_alpha,
-        "lora_target_modules": normalize_lora_target_modules(tc.lora_target_modules),
-        "use_gradient_checkpointing": tc.use_gradient_checkpointing,
-        "model_precision": pc.model_precision,
+        "model_path": model_spec.model_path,
+        "pretrained_model_saved_path": model_settings.pretrained_model_saved_path,
+        "vae_saved_path": model_settings.vae_saved_path,
+        "text_encoder_path": model_settings.text_encoder_path,
+        "use_lora": training_settings.use_lora,
+        "lora_rank": training_settings.lora_rank,
+        "lora_alpha": training_settings.lora_alpha,
+        "lora_target_modules": normalize_lora_target_modules(training_settings.lora_target_modules),
+        "use_gradient_checkpointing": training_settings.use_gradient_checkpointing,
+        "model_precision": precision_settings.model_precision,
     }
 
 
@@ -62,9 +51,12 @@ def build_model_config(
 # ---------------------------------------------------------------------------
 
 
-def build_reward_config(args) -> Dict[str, Any]:
+def build_reward_config(
+    *,
+    reward_schema: RewardSchema,
+) -> Dict[str, Any]:
     """Build reward config consumed by actors and services."""
-    return asdict(RewardSchema.from_args(args))
+    return asdict(reward_schema)
 
 
 # ---------------------------------------------------------------------------
@@ -84,18 +76,17 @@ def _build_shared_sampling_payload(sampling_spec: ResolvedSamplingSpec) -> Dict[
 
 
 def build_training_sampling_config(
-    args,
     *,
+    precision_settings,
     sampling_spec: ResolvedSamplingSpec,
     sampler_engine_type: str,
 ) -> Dict[str, Any]:
     """Build training-actor sampling config from the canonical resolved sampling spec."""
-    pc = args.precision  # PrecisionConfig
     payload = _build_shared_sampling_payload(sampling_spec)
     sampler_kwargs = dict(sampling_spec.sampler_kwargs)
-    sampler_kwargs["autocast_precision"] = pc.autocast_precision
-    sampler_kwargs["trajectory_precision"] = pc.trajectory_precision
-    sampler_kwargs["logprob_precision"] = pc.logprob_precision
+    sampler_kwargs["autocast_precision"] = precision_settings.autocast_precision
+    sampler_kwargs["trajectory_precision"] = precision_settings.trajectory_precision
+    sampler_kwargs["logprob_precision"] = precision_settings.logprob_precision
     payload.update({
         "sampler_engine_type": normalize_rollout_service_engine(sampler_engine_type)
         or str(sampler_engine_type).strip().lower(),
@@ -109,10 +100,12 @@ def build_training_sampling_config(
     return payload
 
 
-def _build_rollout_engine_base_kwargs(args) -> Dict[str, Any]:
+def _build_rollout_engine_base_kwargs(
+    *,
+    rollout_topology_settings,
+) -> Dict[str, Any]:
     """Build dedicated rollout-engine kwargs from canonical rollout fields."""
     resolved: Dict[str, Any] = {}
-    rollout_topology_config = args.rollout.topology
 
     field_map = {
         "service_num_gpus": "num_gpus",
@@ -124,7 +117,7 @@ def _build_rollout_engine_base_kwargs(args) -> Dict[str, Any]:
         "service_require_memory_api": "require_memory_api",
     }
     for attr_name, engine_key in field_map.items():
-        value = getattr(rollout_topology_config, attr_name, None)
+        value = getattr(rollout_topology_settings, attr_name)
         if value is not None:
             resolved[engine_key] = value
 
@@ -136,11 +129,11 @@ def _build_rollout_engine_base_kwargs(args) -> Dict[str, Any]:
         "sglang_prompt_encoder_max_length": "prompt_encoder_max_length",
     }
     for attr_name, engine_key in sglang_field_map.items():
-        value = getattr(rollout_topology_config, attr_name, None)
+        value = getattr(rollout_topology_settings, attr_name)
         if value is not None:
             resolved[engine_key] = value
 
-    sglang_kwargs = getattr(rollout_topology_config, "sglang_kwargs", None)
+    sglang_kwargs = rollout_topology_settings.sglang_kwargs
     if sglang_kwargs:
         if not isinstance(sglang_kwargs, dict):
             raise ValueError(
@@ -153,16 +146,20 @@ def _build_rollout_engine_base_kwargs(args) -> Dict[str, Any]:
 
 def build_rollout_engine_config(
     *,
-    args,
+    rollout_topology_settings,
+    precision_settings,
+    sync_settings,
+    fps: int,
+    logprob_source: str,
     sampler_engine_type: str,
     model_config: Dict[str, Any],
     sampling_spec: ResolvedSamplingSpec,
     offload_rollout: bool = False,
 ) -> Dict[str, Any]:
     """Build final dedicated rollout engine runtime config."""
-    pc = args.precision  # PrecisionConfig
-
-    merged_engine_kwargs = _build_rollout_engine_base_kwargs(args)
+    merged_engine_kwargs = _build_rollout_engine_base_kwargs(
+        rollout_topology_settings=rollout_topology_settings,
+    )
     merged_engine_kwargs.setdefault("use_lora", model_config["use_lora"])
     merged_engine_kwargs.setdefault("lora_rank", model_config["lora_rank"])
     merged_engine_kwargs.setdefault("lora_alpha", model_config["lora_alpha"])
@@ -171,17 +168,17 @@ def build_rollout_engine_config(
         merged_engine_kwargs.setdefault("vae_saved_path", model_config["vae_saved_path"])
     if model_config.get("text_encoder_path"):
         merged_engine_kwargs.setdefault("text_encoder_path", model_config["text_encoder_path"])
-    merged_engine_kwargs["model_precision"] = pc.model_precision
-    merged_engine_kwargs["fsdp_precision"] = pc.fsdp_precision
-    merged_engine_kwargs.setdefault("prompt_encoder_dtype", pc.model_precision)
+    merged_engine_kwargs["model_precision"] = precision_settings.model_precision
+    merged_engine_kwargs["fsdp_precision"] = precision_settings.fsdp_precision
+    merged_engine_kwargs.setdefault("prompt_encoder_dtype", precision_settings.model_precision)
     # Wire top-level fps into engine_kwargs so SGLang engine can consume it
     # without requiring users to duplicate rollout-topology config.
-    merged_engine_kwargs.setdefault("fps", args.fps)
-    merged_engine_kwargs.setdefault("weight_sync_dir", args.sync.dir)
-    if args.sync.target_modules is not None:
-        merged_engine_kwargs.setdefault("target_modules", list(args.sync.target_modules))
+    merged_engine_kwargs.setdefault("fps", fps)
+    merged_engine_kwargs.setdefault("weight_sync_dir", sync_settings.dir)
+    if sync_settings.target_modules is not None:
+        merged_engine_kwargs.setdefault("target_modules", list(sync_settings.target_modules))
     if sampler_engine_type == "sglang":
-        merged_engine_kwargs["logprob_source"] = args.sampling.logprob_source
+        merged_engine_kwargs["logprob_source"] = str(logprob_source)
         if offload_rollout:
             merged_engine_kwargs["require_memory_api"] = True
 
@@ -217,33 +214,32 @@ def build_rollout_actor_init_config(
 # Training domain
 # ---------------------------------------------------------------------------
 
-def _build_optimizer_config(args) -> Dict[str, Any]:
-    tc = args.training  # TrainingConfig
+def _build_optimizer_config(training_settings) -> Dict[str, Any]:
     return {
-        "learning_rate": tc.learning_rate,
-        "adam_beta1": tc.adam_beta1,
-        "adam_beta2": tc.adam_beta2,
-        "adam_epsilon": tc.adam_epsilon,
-        "weight_decay": tc.weight_decay,
+        "learning_rate": training_settings.learning_rate,
+        "adam_beta1": training_settings.adam_beta1,
+        "adam_beta2": training_settings.adam_beta2,
+        "adam_epsilon": training_settings.adam_epsilon,
+        "weight_decay": training_settings.weight_decay,
     }
 
 
-def _build_scheduler_config(args, *, total_steps: int) -> Dict[str, Any]:
-    tc = args.training  # TrainingConfig
+def _build_scheduler_config(training_settings, *, total_steps: int) -> Dict[str, Any]:
     return {
-        "type": tc.lr_scheduler_type,
-        "warmup_steps": tc.warmup_steps,
+        "type": training_settings.lr_scheduler_type,
+        "warmup_steps": training_settings.warmup_steps,
         "total_steps": total_steps,
     }
 
 
 def _build_training_execution_config(
-    args,
+    *,
+    training_settings,
+    replay_log_probs: bool,
 ) -> Dict[str, Any]:
-    tc = args.training    # TrainingConfig
     return {
-        "max_grad_norm": tc.max_grad_norm,
-        "replay_log_probs": args.sampling.replay_log_probs,
+        "max_grad_norm": training_settings.max_grad_norm,
+        "replay_log_probs": bool(replay_log_probs),
     }
 
 
@@ -256,22 +252,18 @@ def _build_training_plan_config(training_plan: ResolvedTrainingPlan) -> Dict[str
 
 
 def build_train_backend_config(
-    args,
     *,
-    resolved_backend_config: Optional[ResolvedTrainBackendConfig] = None,
+    resolved_backend_config: ResolvedTrainBackendConfig,
 ) -> Dict[str, Any]:
     """Build canonical backend config payload for TrainingActor.init."""
-    backend_config = (
-        resolved_backend_config
-        if resolved_backend_config is not None
-        else resolve_train_backend_config_from_args(args)
-    )
-    return backend_config.as_dict()
+    return resolved_backend_config.as_dict()
 
 
 def build_training_actor_init_config(
     *,
-    args,
+    training_settings,
+    rollout_control_settings,
+    replay_log_probs: bool,
     topology: ResolvedTrainTopology,
     training_plan: ResolvedTrainingPlan,
     algorithm_config: Dict[str, Any],
@@ -280,7 +272,7 @@ def build_training_actor_init_config(
     sampling_config: Dict[str, Any],
     train_backend_config: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Build full TrainingActor.init config directly from args.
+    """Build full TrainingActor.init config from resolved/runtime config slices.
 
     Pulls from: ModelConfig + TrainingConfig + AlgorithmConfig + SamplingConfig.
     """
@@ -289,17 +281,19 @@ def build_training_actor_init_config(
             "build_training_actor_init_config requires algorithm_config to be provided by the driver."
         )
 
-    rollout_control = args.rollout.control
     return {
         "model_config": dict(model_config),
         "reward_config": dict(reward_config),
-        "optimizer_config": _build_optimizer_config(args),
+        "optimizer_config": _build_optimizer_config(training_settings),
         "scheduler_config": _build_scheduler_config(
-            args,
-            total_steps=rollout_control.num_rollout,
+            training_settings,
+            total_steps=rollout_control_settings.num_rollout,
         ),
         "algorithm_config": dict(algorithm_config),
-        "training_config": _build_training_execution_config(args),
+        "training_config": _build_training_execution_config(
+            training_settings=training_settings,
+            replay_log_probs=replay_log_probs,
+        ),
         "topology_config": _build_training_topology_config(topology),
         "training_plan_config": _build_training_plan_config(training_plan),
         "sampling_config": dict(sampling_config),
