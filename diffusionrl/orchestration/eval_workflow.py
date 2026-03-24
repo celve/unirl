@@ -38,9 +38,32 @@ class EvalRunner:
             sampling_defaults=self.sampling_config,
         )
 
+    def _resolve_eval_request_overrides(self) -> Dict[str, Any]:
+        rollout_eval = self.args.rollout.evaluation
+        overrides: Dict[str, Any] = {}
+
+        if getattr(rollout_eval, "num_inference_steps", None) is not None:
+            overrides["num_inference_steps"] = int(rollout_eval.num_inference_steps)
+
+        sampling_adapter = getattr(rollout_eval, "sampling_adapter", None)
+        if sampling_adapter is not None and str(sampling_adapter).strip():
+            overrides["sampling_adapter"] = str(sampling_adapter).strip()
+
+        sampler_overrides: Dict[str, Any] = {}
+        raw_sde_type = getattr(rollout_eval, "sde_type", None)
+        if raw_sde_type is not None and str(raw_sde_type).strip():
+            sampler_overrides["sde_type"] = str(raw_sde_type).strip()
+        if getattr(rollout_eval, "eta", None) is not None:
+            sampler_overrides["eta"] = float(rollout_eval.eta)
+        if sampler_overrides:
+            overrides["kwargs"] = {"sampler_overrides": sampler_overrides}
+
+        return overrides
+
     def _build_eval_batch(self) -> Dict[str, Any]:
+        rollout_eval = self.args.rollout.evaluation
         if self.data_source is not None and hasattr(self.data_source, "get_eval_samples"):
-            eval_samples = self.data_source.get_eval_samples(self.args.rollout.eval_batch_size)
+            eval_samples = self.data_source.get_eval_samples(rollout_eval.eval_batch_size)
             if isinstance(eval_samples, dict):
                 return dict(eval_samples)
             if isinstance(eval_samples, list):
@@ -58,7 +81,8 @@ class EvalRunner:
         actor_group: Any,
     ) -> Dict[str, Any]:
         eval_batch = self._build_eval_batch()
-        prompts = list(eval_batch.get("prompts", [])[: self.args.rollout.eval_batch_size])
+        rollout_eval = self.args.rollout.evaluation
+        prompts = list(eval_batch.get("prompts", [])[: rollout_eval.eval_batch_size])
         prompt_ids = eval_batch.get("prompt_ids")
         if isinstance(prompt_ids, list):
             prompt_ids = prompt_ids[: len(prompts)]
@@ -70,12 +94,33 @@ class EvalRunner:
         else:
             prompt_metadata = None
 
+        request_batch: Dict[str, Any] = {
+            "prompts": prompts,
+            "prompt_ids": prompt_ids,
+            "metadata": prompt_metadata,
+        }
+        raw_request_kwargs = eval_batch.get("kwargs")
+        if isinstance(raw_request_kwargs, dict):
+            request_batch["kwargs"] = dict(raw_request_kwargs)
+
+        eval_overrides = self._resolve_eval_request_overrides()
+        if eval_overrides:
+            request_batch.update(
+                {key: value for key, value in eval_overrides.items() if key != "kwargs"}
+            )
+            override_kwargs = eval_overrides.get("kwargs")
+            if isinstance(override_kwargs, dict):
+                merged_kwargs = dict(request_batch.get("kwargs") or {})
+                merged_sampler_overrides = dict(merged_kwargs.get("sampler_overrides") or {})
+                merged_sampler_overrides.update(
+                    dict(override_kwargs.get("sampler_overrides") or {})
+                )
+                if merged_sampler_overrides:
+                    merged_kwargs["sampler_overrides"] = merged_sampler_overrides
+                request_batch["kwargs"] = merged_kwargs
+
         request = self._request_builder.build_request(
-            batch={
-                "prompts": prompts,
-                "prompt_ids": prompt_ids,
-                "metadata": prompt_metadata,
-            },
+            batch=request_batch,
             samples_per_prompt=int(getattr(self.algorithm, "samples_per_prompt", 1)),
         )
         request = replace(

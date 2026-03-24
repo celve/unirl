@@ -9,8 +9,17 @@ from .base import (
     TrainBackendLaunchSpec,
     TrainTopology,
 )
-from .factory import create_train_backend, resolve_train_backend_capabilities, supported_train_backends
-from .factory import resolve_train_backend_capabilities_from_args
+from .factory import (
+    ResolvedTrainBackendConfig,
+    create_train_backend,
+    create_train_backend_from_config,
+    resolve_train_backend_capabilities,
+    resolve_train_backend_capabilities_from_args,
+    resolve_train_backend_capabilities_from_config,
+    resolve_train_backend_config_from_args,
+    resolve_train_backend_launch_spec,
+    supported_train_backends,
+)
 from .fsdp import FSDPTrainBackend
 from .megatron import MegatronTrainBackend
 from .veomni_native import VeOmniNativeTrainBackend
@@ -22,9 +31,14 @@ __all__ = [
     "TrainBackendCapabilities",
     "TrainBackendLaunchSpec",
     "TrainTopology",
+    "ResolvedTrainBackendConfig",
     "create_train_backend",
+    "create_train_backend_from_config",
     "resolve_train_backend_capabilities",
     "resolve_train_backend_capabilities_from_args",
+    "resolve_train_backend_capabilities_from_config",
+    "resolve_train_backend_config_from_args",
+    "resolve_train_backend_launch_spec",
     "supported_train_backends",
     "FSDPTrainBackend",
     "MegatronTrainBackend",

@@ -242,10 +242,24 @@ class TrainBackend(abc.ABC):
 
     # ---- Optional hooks (override only when needed) ----
 
-    def launch_spec(self, *, args: Any, topology: Any) -> TrainBackendLaunchSpec:
+    @classmethod
+    def declared_launch_spec(
+        cls,
+        *,
+        args: Any,
+        topology: Any,
+        backend_kwargs: Optional[Mapping[str, Any]] = None,
+    ) -> TrainBackendLaunchSpec:
         """Launch-time actor/group hints consumed by group factory."""
-        del args, topology
+        del cls, args, topology, backend_kwargs
         return TrainBackendLaunchSpec()
+
+    def launch_spec(self, *, args: Any, topology: Any) -> TrainBackendLaunchSpec:
+        return type(self).declared_launch_spec(
+            args=args,
+            topology=topology,
+            backend_kwargs=self.backend_kwargs,
+        )
 
     def build_optimizer(self, actor: Any, optimizer_config: Mapping[str, Any]) -> Any:
         """Optimizer construction hook; return None to use actor default."""

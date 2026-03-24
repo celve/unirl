@@ -8,8 +8,10 @@ from typing import Dict, List, Optional, Tuple
 import ray
 from ray.util.placement_group import PlacementGroup
 
-from diffusionrl.config.arguments import is_training_actor_sampling_mode
-from diffusionrl.config.rollout_topology import rollout_mode_is_colocated
+from diffusionrl.config.runtime_bootstrap import (
+    ResolvedRuntimeConfig,
+    resolve_runtime_placement_spec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -307,44 +309,43 @@ def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroup
     Returns:
         Dictionary of placement group results
     """
-    debug_mode = str(getattr(args.debug, "debug_mode", "none") or "none").strip().lower()
-    rollout_num_nodes = int(args.ray.rollout_num_nodes)
-    rollout_num_gpus_per_node = int(args.ray.rollout_num_gpus_per_node)
-    training_num_nodes = int(args.ray.training_num_nodes)
-    training_num_gpus_per_node = int(args.ray.training_num_gpus_per_node)
-    reward_dedicated_num_gpus = int(args.reward.reward_dedicated_num_gpus)
-    reward_dedicated_num_nodes = int(getattr(args.reward, "reward_dedicated_num_nodes", 0))
-    reward_dedicated_num_gpus_per_node = int(getattr(args.reward, "reward_dedicated_num_gpus_per_node", 0))
-    training_actor_sampling_mode = is_training_actor_sampling_mode(args)
-
-    if debug_mode == "train_only":
-        rollout_num_nodes = 0
-        rollout_num_gpus_per_node = 0
-        reward_dedicated_num_gpus = 0
-        reward_dedicated_num_nodes = 0
-        reward_dedicated_num_gpus_per_node = 0
-        logger.info(
-            "Debug mode train_only: rollout/reward placement is disabled."
-        )
-    elif training_actor_sampling_mode:
-        rollout_num_nodes = 0
-        rollout_num_gpus_per_node = 0
-        logger.info(
-            "Direct training-actor sampling active: rollout placement is disabled."
-        )
-
+    placement = resolve_runtime_placement_spec(args)
+    if placement.rollout_num_nodes == 0 and placement.rollout_num_gpus_per_node == 0:
+        debug_mode = str(args.debug.debug_mode or "none").strip().lower()
+        if debug_mode == "train_only":
+            logger.info("Debug mode train_only: rollout/reward placement is disabled.")
+        else:
+            logger.info("Direct training-actor sampling active: rollout placement is disabled.")
     config = RuntimePlacementConfig(
-        rollout_num_nodes=rollout_num_nodes,
-        rollout_num_gpus_per_node=rollout_num_gpus_per_node,
-        training_num_nodes=training_num_nodes,
-        training_num_gpus_per_node=training_num_gpus_per_node,
-        reward_dedicated_num_gpus=reward_dedicated_num_gpus,
-        colocate_rollout=rollout_mode_is_colocated(args.rollout.mode),
-        strategy=args.ray.placement_strategy,
-        # Node-level reward configuration
-        reward_dedicated_num_nodes=reward_dedicated_num_nodes,
-        reward_dedicated_num_gpus_per_node=reward_dedicated_num_gpus_per_node,
-        reward_dedicated_gpus_per_actor=getattr(args.reward, "reward_dedicated_gpus_per_actor", 1),
+        rollout_num_nodes=placement.rollout_num_nodes,
+        rollout_num_gpus_per_node=placement.rollout_num_gpus_per_node,
+        training_num_nodes=placement.training_num_nodes,
+        training_num_gpus_per_node=placement.training_num_gpus_per_node,
+        reward_dedicated_num_gpus=placement.reward_dedicated_num_gpus,
+        colocate_rollout=placement.colocate_rollout,
+        strategy=placement.strategy,
+        reward_dedicated_num_nodes=placement.reward_dedicated_num_nodes,
+        reward_dedicated_num_gpus_per_node=placement.reward_dedicated_num_gpus_per_node,
+        reward_dedicated_gpus_per_actor=placement.reward_dedicated_gpus_per_actor,
+    )
+    return create_placement_groups(config)
+
+
+def create_placement_groups_from_runtime(
+    runtime_config: ResolvedRuntimeConfig,
+) -> Dict[str, Optional[PlacementGroupResult]]:
+    placement = runtime_config.placement
+    config = RuntimePlacementConfig(
+        rollout_num_nodes=placement.rollout_num_nodes,
+        rollout_num_gpus_per_node=placement.rollout_num_gpus_per_node,
+        training_num_nodes=placement.training_num_nodes,
+        training_num_gpus_per_node=placement.training_num_gpus_per_node,
+        reward_dedicated_num_gpus=placement.reward_dedicated_num_gpus,
+        colocate_rollout=placement.colocate_rollout,
+        strategy=placement.strategy,
+        reward_dedicated_num_nodes=placement.reward_dedicated_num_nodes,
+        reward_dedicated_num_gpus_per_node=placement.reward_dedicated_num_gpus_per_node,
+        reward_dedicated_gpus_per_actor=placement.reward_dedicated_gpus_per_actor,
     )
     return create_placement_groups(config)
 

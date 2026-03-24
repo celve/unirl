@@ -11,6 +11,11 @@ from typing import Any, Dict, Optional, Tuple
 
 from diffusionrl.types.sampling import SamplingRequirements
 
+from .construction import (
+    build_algorithm_config,
+    build_algorithm_kwargs,
+    resolve_algorithm_path,
+)
 from .base import BaseAlgorithm
 from .registry import DEFAULT_ALGORITHM_PATHS
 
@@ -64,7 +69,10 @@ __all__ = [
     "MixGRPOAlgorithm",
     "NFTAlgorithm",
     "DEFAULT_ALGORITHM_PATHS",
+    "build_algorithm_config",
+    "build_algorithm_kwargs",
     "get_algorithm",
+    "resolve_algorithm_path",
 ]
 
 

@@ -21,12 +21,8 @@ from typing import Any, Dict, Optional, Type
 
 import logging
 
-from diffusionrl.config.rollout_topology import (
-    normalize_rollout_service_engine,
-    resolve_rollout_service_kwargs,
-)
+from diffusionrl.config.runtime_bootstrap import ResolvedRuntimeConfig
 from diffusionrl.distributed.weight_sync_checkpoint import cleanup_published_checkpoint
-from diffusionrl.training.backends import resolve_train_backend_capabilities_from_args
 
 logger = logging.getLogger(__name__)
 
@@ -36,33 +32,32 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _resolve_target_modules(args: Any) -> list[str]:
-    raw = getattr(args.sync, "target_modules", None)
+    raw = args.sync.target_modules
     if isinstance(raw, (list, tuple)) and raw:
         return [str(name) for name in raw]
     return ["transformer"]
 
 
 def _resolve_bucket_size_mb(args: Any) -> int:
-    bucket_size_mb = int(getattr(args.sync, "bucket_mb", 256))
+    bucket_size_mb = int(args.sync.bucket_mb)
     if bucket_size_mb < 1:
         raise ValueError(f"sync.bucket_mb must be >= 1, got {bucket_size_mb}.")
     return bucket_size_mb
 
 
 def _resolve_flush_cache(args: Any) -> bool:
-    return bool(getattr(args.sync, "flush_cache", True))
+    return bool(args.sync.flush_cache)
 
 
-def _validate_tensor_sync_topology(args: Any) -> None:
+def _validate_tensor_sync_topology(runtime_config: ResolvedRuntimeConfig) -> None:
     """Guard invalid topology values for tensor/distributed sync paths."""
-    engine_kwargs = resolve_rollout_service_kwargs(args)
-    tp_size = 1
-    if isinstance(engine_kwargs, dict) and engine_kwargs.get("tp_size") is not None:
-        tp_size = engine_kwargs.get("tp_size")
-    try:
-        tp_size_int = int(tp_size)
-    except Exception:
-        tp_size_int = 1
+    rollout = runtime_config.rollout
+    if rollout is None:
+        raise ValueError(
+            "Tensor/distributed weight sync requires a dedicated rollout runtime config."
+        )
+    engine_kwargs = dict(rollout.engine_runtime_config.get("engine_kwargs") or {})
+    tp_size_int = int(engine_kwargs.get("tp_size", 1) or 1)
     if tp_size_int < 1:
         raise ValueError(f"Invalid tp_size={tp_size_int}. Expected tp_size >= 1.")
 
@@ -110,8 +105,9 @@ class SyncResult:
 class WeightSyncCoordinator(ABC):
     """Two-phase weight sync coordinator: setup() -> sync() x N -> teardown()."""
 
-    def __init__(self, args: Any) -> None:
+    def __init__(self, args: Any, runtime_config: ResolvedRuntimeConfig) -> None:
         self.args = args
+        self.runtime_config = runtime_config
         self._version = 0
         self._is_setup = False
         self._training_runtime = None
@@ -215,7 +211,7 @@ class TensorPayloadWeightSync(WeightSyncCoordinator):
         return "tensor_payload"
 
     def _do_setup(self) -> None:
-        _validate_tensor_sync_topology(self.args)
+        _validate_tensor_sync_topology(self.runtime_config)
         if self._rollout_runtime is None:
             raise RuntimeError("tensor_payload weight sync requires a rollout runtime.")
         self._target_modules = _resolve_target_modules(self.args)
@@ -245,7 +241,7 @@ class NCCLBroadcastWeightSync(WeightSyncCoordinator):
         return "nccl_broadcast"
 
     def _do_setup(self) -> None:
-        _validate_tensor_sync_topology(self.args)
+        _validate_tensor_sync_topology(self.runtime_config)
         if self._rollout_runtime is None:
             raise RuntimeError("nccl_broadcast weight sync requires a rollout runtime.")
         self._target_modules = _resolve_target_modules(self.args)
@@ -357,15 +353,18 @@ class CheckpointWeightSync(WeightSyncCoordinator):
         self._export_format = self._select_export_format()
 
     def _select_export_format(self) -> str:
-        engine_type = normalize_rollout_service_engine(
-            getattr(self.args.rollout, "service_engine", None)
-        )
+        rollout = self.runtime_config.rollout
+        if rollout is None:
+            raise ValueError(
+                "Checkpoint weight sync requires a dedicated rollout runtime config."
+            )
+        engine_type = str(rollout.service_engine or "").strip().lower()
         if not engine_type:
             raise ValueError(
-                "Checkpoint weight sync requires rollout.service_engine to be normalized. "
+                "Checkpoint weight sync requires rollout.topology.service_engine to be normalized. "
                 "Validate args before selecting dedicated rollout checkpoint export format."
             )
-        backend_caps = resolve_train_backend_capabilities_from_args(self.args)
+        backend_caps = dict(self.runtime_config.training.backend_capabilities or {})
         if backend_caps:
             preferred_by_engine = backend_caps.get("preferred_weight_export_format_by_rollout_engine")
             preferred_format = None
@@ -414,12 +413,17 @@ _BUILTIN_COORDINATORS: Dict[str, Type[WeightSyncCoordinator]] = {
 }
 
 
-def create_weight_sync(args: Any, *, mode: Optional[str] = None) -> WeightSyncCoordinator:
+def create_weight_sync(
+    args: Any,
+    runtime_config: ResolvedRuntimeConfig,
+    *,
+    mode: Optional[str] = None,
+) -> WeightSyncCoordinator:
     """Create a weight-sync coordinator from runtime args.
 
     Resolve built-in coordinators from the explicit ``sync.protocol`` setting.
     """
-    resolved_mode = str(mode if mode is not None else getattr(args.sync, "protocol", "")).strip().lower()
+    resolved_mode = str(mode if mode is not None else args.sync.protocol).strip().lower()
     if not resolved_mode:
         raise ValueError(
             "sync.protocol must be set explicitly before create_weight_sync()."
@@ -430,7 +434,7 @@ def create_weight_sync(args: Any, *, mode: Optional[str] = None) -> WeightSyncCo
             f"Unsupported sync.protocol={resolved_mode}. "
             f"Expected one of: {sorted(_BUILTIN_COORDINATORS.keys())}"
         )
-    return cls(args)
+    return cls(args, runtime_config)
 
 
 __all__ = [

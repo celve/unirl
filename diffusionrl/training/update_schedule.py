@@ -153,6 +153,21 @@ def coerce_training_execution_plan(raw: Any) -> TrainingExecutionPlan:
         name="training_plan.num_updates_per_local_batch",
         value=raw["num_updates_per_local_batch"],
     )
+    if local_batch_size != local_update_batch_size * num_updates_per_local_batch:
+        raise ValueError(
+            "training_plan.local_batch_size must equal "
+            "training_plan.local_update_batch_size * training_plan.num_updates_per_local_batch. "
+            f"Got local_batch_size={local_batch_size}, "
+            f"local_update_batch_size={local_update_batch_size}, "
+            f"num_updates_per_local_batch={num_updates_per_local_batch}."
+        )
+    if local_update_batch_size % local_micro_batch_size != 0:
+        raise ValueError(
+            "training_plan.local_micro_batch_size must evenly divide "
+            "training_plan.local_update_batch_size. "
+            f"Got local_micro_batch_size={local_micro_batch_size}, "
+            f"local_update_batch_size={local_update_batch_size}."
+        )
     update_slices = _coerce_update_slices(raw.get("update_slices"), local_batch_size=local_batch_size)
     mini_batch_slices_per_update = _coerce_per_update_mini_batch_slices(
         raw.get("mini_batch_slices_per_update"),

@@ -47,12 +47,12 @@ class MinimalAlgorithm(BaseAlgorithm):
 
     @classmethod
     def from_config(cls, config: dict) -> "MinimalAlgorithm":
-        extra = config.get("algorithm_kwargs") or {}
+        extra = cls.resolve_config_kwargs(config)
         return cls(
-            sde_ratio=float(extra.get("sde_ratio", config.get("sde_ratio", 1.0))),
+            sde_ratio=float(extra.get("sde_ratio", 1.0)),
             train_only_sde_steps=bool(extra.get("train_only_sde_steps", False)),
-            skip_last_timestep=bool(extra.get("skip_last_timestep", config.get("skip_last_timestep", False))),
-            skip_initial_timesteps=int(extra.get("skip_initial_timesteps", config.get("skip_initial_timesteps", 0))),
+            skip_last_timestep=bool(extra.get("skip_last_timestep", False)),
+            skip_initial_timesteps=int(extra.get("skip_initial_timesteps", 0)),
         )
 
     def __init__(
@@ -74,7 +74,7 @@ class MinimalAlgorithm(BaseAlgorithm):
 
     @classmethod
     def from_args(cls, args: Any) -> "MinimalAlgorithm":
-        from diffusionrl.config.build_domain_args import build_algorithm_config
+        from diffusionrl.algorithms.construction import build_algorithm_config
 
         return cls.from_config(build_algorithm_config(args))
 

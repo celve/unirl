@@ -199,14 +199,15 @@ def _parse_plugin_paths(raw: Any) -> List[str]:
 
 def build_buffer_plugins(args: Any) -> List[BufferPlugin]:
     """Build built-in and custom rollout-buffer plugins from args."""
+    rollout_buffer = args.rollout.buffer
     plugins: List[BufferPlugin] = [
         FiniteTensorFilterPlugin(
-            drop_invalid=bool(getattr(args.rollout, "rollout_buffer_drop_invalid", True))
+            drop_invalid=bool(rollout_buffer.drop_invalid)
         )
     ]
 
-    min_reward = getattr(args.rollout, "rollout_buffer_reward_min", None)
-    max_reward = getattr(args.rollout, "rollout_buffer_reward_max", None)
+    min_reward = rollout_buffer.reward_min
+    max_reward = rollout_buffer.reward_max
     if min_reward is not None or max_reward is not None:
         plugins.append(
             RewardRangeFilterPlugin(
@@ -217,11 +218,11 @@ def build_buffer_plugins(args: Any) -> List[BufferPlugin]:
 
     plugins.append(
         MinSamplesGuardPlugin(
-            min_samples=int(getattr(args.rollout, "rollout_buffer_min_samples", 1))
+            min_samples=int(rollout_buffer.min_samples)
         )
     )
 
-    for path in _parse_plugin_paths(getattr(args.rollout, "rollout_buffer_plugin_paths", "")):
+    for path in _parse_plugin_paths(rollout_buffer.plugin_paths):
         target = load_function(path)
         if inspect.isclass(target):
             if hasattr(target, "from_args") and callable(getattr(target, "from_args")):

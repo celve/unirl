@@ -6,7 +6,6 @@ requirements, advantage processing, and the forward-process loss entrypoint.
 """
 
 import logging
-import warnings
 from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -269,18 +268,16 @@ class NFTAlgorithm(BaseAlgorithm):
     def from_config(cls, config: dict) -> "NFTAlgorithm":
         """Create NFTAlgorithm from an algorithm_config dictionary.
 
-        Reads constructor parameters from the normalized ``algorithm_kwargs``
-        payload only.
+        Reads NFT-specific extension keys from ``algorithm_kwargs`` and shared
+        framework-owned fields from the top-level algorithm_config surface.
         """
-        extra = dict(config.get("algorithm_kwargs") or {})
+        extra = cls.resolve_config_kwargs(config)
         sde_config = _resolve_algorithm_sde_config(config)
         known_keys = {
             "beta",
             "adv_clip_max",
             "adv_mode",
             "use_adaptive_weight",
-            "component_mix_stage",
-            "window_training",
             "skip_last_timestep",
             "skip_initial_timesteps",
             "old_adapter_name",
@@ -296,25 +293,12 @@ class NFTAlgorithm(BaseAlgorithm):
             "train_timestep_mode",
             "shuffle_train_timesteps",
             "apply_time_shift_in_loss",
-            "adv_normalization",
-            "adv_norm_eps",
-            "adv_clip_abs",
-            "use_global_std",
-            "trimmed_ratio",
-            "samples_per_prompt",
-            "eval_ema_decay",
-            "eval_ema_update_interval",
         }
-        runtime_only_keys = {
-            "shuffle_samples",
-            "shuffle_seed",
-        }
-        unknown = sorted(key for key in extra.keys() if key not in known_keys and key not in runtime_only_keys)
+        unknown = sorted(key for key in extra.keys() if key not in known_keys)
         if unknown:
-            warnings.warn(
-                f"NFTAlgorithm.from_config received unknown algorithm_kwargs keys: {unknown}. "
-                "These keys are ignored by NFT algorithm constructor.",
-                stacklevel=3,
+            raise ValueError(
+                "algorithm.algorithm_kwargs contains unsupported keys for algorithm_type='nft': "
+                f"{unknown}."
             )
 
         return cls(
@@ -322,7 +306,7 @@ class NFTAlgorithm(BaseAlgorithm):
             adv_clip_max=float(extra.get("adv_clip_max", 5.0)),
             adv_mode=str(extra.get("adv_mode", "raw")),
             use_adaptive_weight=bool(extra.get("use_adaptive_weight", True)),
-            component_mix_stage=str(extra.get("component_mix_stage", "reward")),
+            component_mix_stage=str(config.get("component_mix_stage", "reward")),
             sde_config=sde_config,
             use_reference_ema=bool(extra.get("use_reference_ema", True)),
             old_adapter_name=str(extra.get("old_adapter_name", "old")),
@@ -336,14 +320,15 @@ class NFTAlgorithm(BaseAlgorithm):
             train_timestep_mode=str(extra.get("train_timestep_mode", "random")),
             shuffle_train_timesteps=bool(extra.get("shuffle_train_timesteps", True)),
             apply_time_shift_in_loss=bool(extra.get("apply_time_shift_in_loss", False)),
-            samples_per_prompt=int(extra.get("samples_per_prompt", 1)),
-            eval_ema_decay=float(extra.get("eval_ema_decay", 0.9)),
-            eval_ema_update_interval=int(extra.get("eval_ema_update_interval", 1)),
+            samples_per_prompt=int(config.get("samples_per_prompt", 1)),
+            eval_ema_decay=float(config.get("eval_ema_decay", 0.9)),
+            eval_ema_update_interval=int(config.get("eval_ema_update_interval", 1)),
             kl_coef=float(extra.get("kl_coef", 0.0)),
-            adv_normalization=str(extra.get("adv_normalization", "group")),
-            epsilon=float(extra.get("adv_norm_eps", 1e-8)),
-            clip_max=extra.get("adv_clip_abs", 5.0),
-            use_global_std=bool(extra.get("use_global_std", False)),
+            adv_normalization=str(config.get("adv_normalization", "group")),
+            epsilon=float(config.get("adv_norm_eps", 1e-8)),
+            clip_max=config.get("adv_clip_abs", 5.0),
+            use_global_std=bool(config.get("use_global_std", False)),
+            trimmed_ratio=float(config.get("trimmed_ratio", 0.0)),
         )
 
     def __init__(
@@ -375,6 +360,7 @@ class NFTAlgorithm(BaseAlgorithm):
         epsilon: float = 1e-8,
         clip_max: float = 5.0,
         use_global_std: bool = False,
+        trimmed_ratio: float = 0.0,
         **kwargs,
     ):
         super().__init__(
@@ -387,6 +373,7 @@ class NFTAlgorithm(BaseAlgorithm):
             epsilon=epsilon,
             clip_max=clip_max,
             use_global_std=use_global_std,
+            trimmed_ratio=trimmed_ratio,
             **kwargs,
         )
         self.beta = beta

@@ -88,13 +88,25 @@ class MegatronTrainBackend(TrainBackend):
             ),
         )
 
-    def launch_spec(self, *, args: Any, topology: Any) -> TrainBackendLaunchSpec:
-        del args, topology
+    @classmethod
+    def declared_launch_spec(
+        cls,
+        *,
+        args: Any,
+        topology: Any,
+        backend_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> TrainBackendLaunchSpec:
+        del cls, args, topology
+        kwargs = dict(backend_kwargs or {})
+        actor_class_path = kwargs.get("actor_class_path")
+        num_gpus_per_actor = kwargs.get("num_gpus_per_actor")
+        runtime_env = kwargs.get("runtime_env")
+        actor_kwargs = kwargs.get("actor_kwargs")
         return TrainBackendLaunchSpec(
-            actor_class_path=self._actor_class_path,
-            actor_kwargs=dict(self._launch_actor_kwargs),
-            num_gpus_per_actor=self._launch_num_gpus_per_actor,
-            runtime_env=dict(self._launch_runtime_env),
+            actor_class_path=actor_class_path,
+            actor_kwargs=dict(actor_kwargs or {}) if isinstance(actor_kwargs, dict) else {},
+            num_gpus_per_actor=num_gpus_per_actor,
+            runtime_env=dict(runtime_env or {}) if isinstance(runtime_env, dict) else {},
             notes=(
                 "Use backend_kwargs.actor_class_path to switch to a Megatron-dedicated Ray actor "
                 "when runtime implementation is ready."

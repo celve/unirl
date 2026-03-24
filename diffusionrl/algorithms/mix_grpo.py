@@ -44,7 +44,7 @@ class MixGRPOAlgorithm(GRPOAlgorithm):
 
     @classmethod
     def from_config(cls, config: dict) -> "MixGRPOAlgorithm":
-        extra = dict(config.get("algorithm_kwargs") or {})
+        extra = cls.resolve_config_kwargs(config)
         sde_config = _resolve_algorithm_sde_config(config)
         sde_schedule_config = SDEScheduleConfig.from_mapping(
             config.get("sde_schedule_config")
@@ -54,33 +54,16 @@ class MixGRPOAlgorithm(GRPOAlgorithm):
             "clip_schedule",
             "use_kl_penalty",
             "kl_coef",
-            "component_mix_stage",
-            "samples_per_prompt",
-            "eval_ema_decay",
-            "eval_ema_update_interval",
             "ratio_reg_coef",
             "skip_last_timestep",
             "skip_initial_timesteps",
             "model_type",
-            "adv_normalization",
-            "adv_norm_eps",
-            "adv_clip_abs",
-            "use_global_std",
-            "trimmed_ratio",
-            "window_training",
         }
-        runtime_only_keys = {
-            "shuffle_samples",
-            "shuffle_seed",
-        }
-        unknown = sorted(key for key in extra.keys() if key not in known_keys and key not in runtime_only_keys)
+        unknown = sorted(key for key in extra.keys() if key not in known_keys)
         if unknown:
-            import warnings
-
-            warnings.warn(
-                f"MixGRPOAlgorithm.from_config received unknown algorithm_kwargs keys: {unknown}. "
-                "These keys are ignored by MixGRPO algorithm constructor.",
-                stacklevel=3,
+            raise ValueError(
+                "algorithm.algorithm_kwargs contains unsupported keys for algorithm_type='mix_grpo': "
+                f"{unknown}."
             )
 
         return cls(
@@ -88,22 +71,22 @@ class MixGRPOAlgorithm(GRPOAlgorithm):
             clip_schedule=str(extra.get("clip_schedule", "constant")),
             use_kl_penalty=bool(extra.get("use_kl_penalty", True)),
             kl_coef=float(extra.get("kl_coef", 0.01)),
-            component_mix_stage=str(extra.get("component_mix_stage", "reward")),
-            samples_per_prompt=int(extra.get("samples_per_prompt", 1)),
-            eval_ema_decay=float(extra.get("eval_ema_decay", 0.9)),
-            eval_ema_update_interval=int(extra.get("eval_ema_update_interval", 1)),
+            component_mix_stage=str(config.get("component_mix_stage", "reward")),
+            samples_per_prompt=int(config.get("samples_per_prompt", 1)),
+            eval_ema_decay=float(config.get("eval_ema_decay", 0.9)),
+            eval_ema_update_interval=int(config.get("eval_ema_update_interval", 1)),
             ratio_reg_coef=float(extra.get("ratio_reg_coef", 0.0)),
             sde_config=sde_config,
             skip_last_timestep=bool(extra.get("skip_last_timestep", False)),
             skip_initial_timesteps=int(extra.get("skip_initial_timesteps", 0)),
             model_type=str(extra.get("model_type", "default")),
-            adv_normalization=str(extra.get("adv_normalization", "group")),
-            epsilon=float(extra.get("adv_norm_eps", 1e-8)),
-            clip_max=extra.get("adv_clip_abs", 5.0),
-            use_global_std=bool(extra.get("use_global_std", False)),
-            trimmed_ratio=float(extra.get("trimmed_ratio", 0.0)),
+            adv_normalization=str(config.get("adv_normalization", "group")),
+            epsilon=float(config.get("adv_norm_eps", 1e-8)),
+            clip_max=config.get("adv_clip_abs", 5.0),
+            use_global_std=bool(config.get("use_global_std", False)),
+            trimmed_ratio=float(config.get("trimmed_ratio", 0.0)),
             sde_ratio=float(sde_schedule_config.sde_ratio),
-            window_training=bool(extra.get("window_training", False)),
+            window_training=bool(config.get("window_training", False)),
         )
 
     def get_sampling_requirements(self) -> SamplingRequirements:

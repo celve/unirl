@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from torch.utils.data import DataLoader
 
-from diffusionrl.config.resolution import resolve_prompts_per_rollout
+from diffusionrl.config.resolution import require_prompts_per_rollout
 
 from .datasets import PromptExampleDataset, TextPromptDataset, normalize_prompt_example
 
@@ -40,10 +40,10 @@ class ImageRLDataSource:
                 - seed: Random seed
         """
         self.args = args
-        self.data_path = getattr(args, 'data_path', None)
-        self.eval_data_path = getattr(args, "eval_data_path", None)
-        self.seed = getattr(args, 'seed', 42)
-        self.prompts_per_rollout = int(resolve_prompts_per_rollout(args))
+        self.data_path = args.data_path
+        self.eval_data_path = args.eval_data_path
+        self.seed = args.seed
+        self.prompts_per_rollout = int(require_prompts_per_rollout(args))
         self.drop_last = True
 
         # Training data and eval data are treated as separate prompt sources.
@@ -121,7 +121,7 @@ class ImageRLDataSource:
         if len(self.train_dataset) < self.prompts_per_rollout:
             raise ValueError(
                 "Training dataset is smaller than prompts_per_rollout, which would produce an "
-                f"empty DataLoader with drop_last=True (num_samples={len(self.train_dataset)}, "
+                f"empty DataLoader with drop_last=True (num_prompts={len(self.train_dataset)}, "
                 f"prompts_per_rollout={self.prompts_per_rollout})."
             )
 
@@ -148,8 +148,8 @@ class ImageRLDataSource:
         return result
 
     @property
-    def num_samples(self) -> int:
-        """Total number of samples in dataset."""
+    def num_prompts(self) -> int:
+        """Total number of prompts in the training dataset."""
         if self.train_dataset is not None:
             return len(self.train_dataset)
         return 0
@@ -262,7 +262,7 @@ class DefaultDataSource:
         self._index = 0
 
     @property
-    def num_samples(self) -> int:
+    def num_prompts(self) -> int:
         return len(self.prompts)
 
     def get_samples(self, batch_size: int) -> Dict[str, List[str]]:

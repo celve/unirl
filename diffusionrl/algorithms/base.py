@@ -112,13 +112,24 @@ class BaseAlgorithm(ABC):
     # ------------------------------------------------------------------
 
     @classmethod
+    def resolve_config_kwargs(cls, config: dict) -> Dict[str, Any]:
+        """Return normalized raw algorithm_kwargs from algorithm_config."""
+        extra = config.get("algorithm_kwargs") or {}
+        if not isinstance(extra, dict):
+            raise ValueError(
+                "algorithm_config.algorithm_kwargs must be a dict. "
+                f"Got: {type(extra).__name__}"
+            )
+        return dict(extra)
+
+    @classmethod
     def from_config(cls, config: dict) -> "BaseAlgorithm":  # [PUBLIC-API → rollout_manager.init(), training_actor.init()]
         """Construct algorithm from an algorithm_config dictionary.
 
         TrainingActor calls ``algorithm_cls.from_config(algorithm_config)`` to
         create the train-side algorithm instance.  Subclasses should override
-        to read their specific parameters from ``config`` and
-        ``config['algorithm_kwargs']``.
+        to read their specific parameters from framework-owned top-level config
+        fields plus ``cls.resolve_config_kwargs(config)``.
 
         Default implementation raises NotImplementedError so custom
         plugins fail loudly if they forget to implement this.
@@ -184,14 +195,39 @@ class BaseAlgorithm(ABC):
             normalized.append(group_id)
         return normalized
 
-    def _build_groups_from_ids(self, group_ids: List[str]) -> List[List[int]]:  # [HELPER → _normalize_group()]
+    def _build_group_index_map(self, group_ids: List[str]) -> Dict[str, List[int]]:  # [HELPER → _normalize_group()]
         ordered_groups: Dict[str, List[int]] = {}
         for sample_idx, raw_group_id in enumerate(group_ids):
             group_id = self._normalize_group_id(raw_group_id)
             if group_id is None:
                 continue
             ordered_groups.setdefault(group_id, []).append(sample_idx)
-        return list(ordered_groups.values())
+        return ordered_groups
+
+    def _require_expected_group_sizes(
+        self,
+        group_index_map: Dict[str, List[int]],
+    ) -> List[List[int]]:
+        expected_group_size = max(1, int(self.samples_per_prompt))
+        invalid_groups = [
+            (group_id, len(indices))
+            for group_id, indices in group_index_map.items()
+            if len(indices) != expected_group_size
+        ]
+        if invalid_groups:
+            formatted = ", ".join(
+                f"{group_id!r}:{group_size}"
+                for group_id, group_size in invalid_groups[:5]
+            )
+            if len(invalid_groups) > 5:
+                formatted = f"{formatted}, ..."
+            raise ValueError(
+                "adv_normalization='group' requires every sample group to contain exactly "
+                "algorithm.samples_per_prompt samples. "
+                f"Got algorithm.samples_per_prompt={expected_group_size}; "
+                f"invalid group sizes: {formatted}."
+            )
+        return list(group_index_map.values())
 
     def _normalize_global(self, rewards: torch.Tensor) -> torch.Tensor:  # [HELPER → compute_advantages()]
         """Global normalization across all samples."""
@@ -206,7 +242,8 @@ class BaseAlgorithm(ABC):
         batch_size = rewards.shape[0]
         if group_ids is not None and len(group_ids) == batch_size:
             normalized_group_ids = self._require_valid_group_ids(group_ids)
-            groups = self._build_groups_from_ids(normalized_group_ids)
+            group_index_map = self._build_group_index_map(normalized_group_ids)
+            groups = self._require_expected_group_sizes(group_index_map)
             if groups:
                 return normalize_grouped(
                     rewards,

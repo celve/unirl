@@ -10,12 +10,14 @@ and decode latents. This module owns the shared core.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
+from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.types import RolloutRequest
 from diffusionrl.utils import load_function
 from diffusionrl.utils.adapter_utils import switch_adapter
@@ -94,10 +96,43 @@ def run_sample(
     Returns:
         ``RolloutOutput`` from the sampler.
     """
-    if sampling_adapter and model is not None:
-        with switch_adapter(model, sampling_adapter):
-            return sampler.sample(**sample_kwargs)
-    return sampler.sample(**sample_kwargs)
+    sampler_overrides = sample_kwargs.pop("sampler_overrides", None)
+    with temporary_sampler_overrides(sampler, sampler_overrides):
+        if sampling_adapter and model is not None:
+            with switch_adapter(model, sampling_adapter):
+                return sampler.sample(**sample_kwargs)
+        return sampler.sample(**sample_kwargs)
+
+
+@contextmanager
+def temporary_sampler_overrides(
+    sampler: Any,
+    overrides: Optional[Dict[str, Any]],
+):
+    """Temporarily override mutable sampler attributes for one request."""
+    if sampler is None or not isinstance(overrides, dict) or not overrides:
+        yield
+        return
+
+    original_values: Dict[str, Any] = {}
+    try:
+        for raw_key, raw_value in overrides.items():
+            key = str(raw_key).strip()
+            if key not in {"eta", "sde_type"}:
+                continue
+            if not hasattr(sampler, key):
+                continue
+            original_values[key] = getattr(sampler, key)
+            value = raw_value
+            if key == "sde_type":
+                value = normalize_sde_type(str(raw_value))
+            else:
+                value = float(raw_value)
+            setattr(sampler, key, value)
+        yield
+    finally:
+        for key, value in original_values.items():
+            setattr(sampler, key, value)
 
 
 def generate_prompt_only_rollout(

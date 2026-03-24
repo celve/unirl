@@ -120,7 +120,7 @@ class FluxModelBundle(ModelBundle):
 
     @classmethod
     def validate_config(cls, args: Any) -> None:
-        sde_type = normalize_sde_type(getattr(args.sampling, "sde_type", "") or "")
+        sde_type = normalize_sde_type(args.sampling.sde_type or "")
         valid_sde_types = ("dance", "flow", "dpm2", "")
         if sde_type in valid_sde_types:
             return

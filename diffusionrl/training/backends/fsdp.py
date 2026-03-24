@@ -34,24 +34,9 @@ class FSDPTrainBackend(TrainBackend):
 
     def __init__(self, *, backend_kwargs: Optional[Mapping[str, Any]] = None) -> None:
         super().__init__(backend_kwargs=backend_kwargs)
-        kwargs = dict(self.backend_kwargs)
-        fsdp_config = kwargs.pop("fsdp_config", None)
-
-        merged: Dict[str, Any] = {}
-        if isinstance(fsdp_config, dict):
-            merged.update(fsdp_config)
-        merged.update(kwargs)
-
+        merged: Dict[str, Any] = dict(self.backend_kwargs)
         self._use_fsdp = bool(merged.pop("use_fsdp", True))
         self._fsdp_config = merged
-        known_keys = {"cpu_offload", "param_dtype", "mixed_precision"}
-        unknown = sorted(key for key in self._fsdp_config.keys() if key not in known_keys)
-        if unknown:
-            logger.warning(
-                "FSDPTrainBackend received unknown train_backend_kwargs keys: %s. "
-                "These keys are currently ignored by the built-in fsdp backend.",
-                unknown,
-            )
 
     @classmethod
     def declared_capabilities(cls) -> TrainBackendCapabilities:

@@ -13,7 +13,6 @@ from diffusionrl.types.engine import (
     normalize_engine_type,
     uses_dedicated_rollout_engine,
 )
-from diffusionrl.types.sde import SDEConfig
 from diffusionrl.types.sampling import PromptEmbeddings, RolloutRequest, RolloutOutput
 from diffusionrl.samplers.engine import (
     BaseRolloutEngine,
@@ -668,8 +667,7 @@ class RolloutActor:
 
         Args:
             config: Rollout actor init config including:
-                - engine_config: rollout service bootstrap section
-                - sampling_config: sampler defaults and SDE math config
+                - engine_runtime_config: final rollout-engine runtime payload
                 - reward_config: rollout-side reward execution config
 
         Raises:
@@ -684,25 +682,19 @@ class RolloutActor:
 
         if not isinstance(config, dict):
             raise ValueError(f"rollout actor init config must be a dict, got: {type(config).__name__}")
-        engine_config = config.get("engine_config")
-        if not isinstance(engine_config, dict):
+        engine_runtime_config = config.get("engine_runtime_config")
+        if not isinstance(engine_runtime_config, dict):
             raise ValueError(
-                "rollout actor init config must provide engine_config as dict. "
-                f"Got: {type(engine_config).__name__}"
-            )
-        sampling_config = config.get("sampling_config")
-        if not isinstance(sampling_config, dict):
-            raise ValueError(
-                "rollout actor init config must provide sampling_config as dict. "
-                f"Got: {type(sampling_config).__name__}"
+                "rollout actor init config must provide engine_runtime_config as dict. "
+                f"Got: {type(engine_runtime_config).__name__}"
             )
 
         # Get sampler_engine_type (must be provided by caller, validated in arguments.py)
-        sampler_engine_type = normalize_engine_type(engine_config.get("sampler_engine_type"))
+        sampler_engine_type = normalize_engine_type(engine_runtime_config.get("sampler_engine_type"))
         if not sampler_engine_type:
             raise ValueError(
-                "sampler_engine_type must be provided in engine_config. "
-                "This should be set automatically via --model-type or explicitly via --sampler-engine-type"
+                "sampler_engine_type must be provided in engine_runtime_config. "
+                "This should be resolved from rollout.topology.service_engine before actor init."
             )
         if not uses_dedicated_rollout_engine(sampler_engine_type):
             raise ValueError(
@@ -710,12 +702,11 @@ class RolloutActor:
                 "Instantiate this sampler on TrainingActor instead."
             )
 
-        # Get sampler_path (must be provided by caller, validated in arguments.py)
-        sampler_path = sampling_config.get("sampler_path")
+        sampler_path = engine_runtime_config.get("sampler_path")
         if sampler_path is None:
             raise ValueError(
-                "sampler_path must be provided in sampling_config. "
-                "This should be set automatically via --model-type or explicitly via --sampler-path."
+                "sampler_path must be provided in engine_runtime_config. "
+                "This should be resolved from sampling.sampler_path before actor init."
             )
 
         reward_config = config.get("reward_config", {})
@@ -727,7 +718,7 @@ class RolloutActor:
         self._reward_schema = RewardSchema(**reward_config)
 
         # Build EngineConfig
-        engine_kwargs = dict(engine_config.get("engine_kwargs", {}))
+        engine_kwargs = dict(engine_runtime_config.get("engine_kwargs", {}))
         self._configure_transport_options(engine_kwargs)
 
         # Add sampler_path to engine_kwargs
@@ -740,18 +731,17 @@ class RolloutActor:
         if sampler_engine_type == "sglang":
             engine_kwargs = self._configure_sglang_ports(engine_kwargs)
 
-        sde_config = SDEConfig.from_mapping(sampling_config.get("sde_config"))
-        engine_runtime_config = EngineConfig(
-            model_path=engine_config.get("model_path", ""),
-            pretrained_model_saved_path=engine_config.get("pretrained_model_saved_path", ""),
-            num_inference_steps=sampling_config.get("num_inference_steps", 50),
-            eta=sde_config.eta,
-            sde_type=sde_config.sde_type,
-            shift=sde_config.shift,
-            guidance_scale=sampling_config.get("guidance_scale", 7.5),
-            height=sampling_config.get("height", 256),
-            width=sampling_config.get("width", 256),
-            num_frames=sampling_config.get("num_frames", 16),
+        resolved_engine_config = EngineConfig(
+            model_path=engine_runtime_config.get("model_path", ""),
+            pretrained_model_saved_path=engine_runtime_config.get("pretrained_model_saved_path", ""),
+            num_inference_steps=int(engine_runtime_config.get("num_inference_steps", 50)),
+            eta=float(engine_runtime_config.get("eta", 1.0)),
+            sde_type=str(engine_runtime_config.get("sde_type", "flow")),
+            shift=float(engine_runtime_config.get("shift", 1.0)),
+            guidance_scale=float(engine_runtime_config.get("guidance_scale", 7.5)),
+            height=int(engine_runtime_config.get("height", 256)),
+            width=int(engine_runtime_config.get("width", 256)),
+            num_frames=int(engine_runtime_config.get("num_frames", 16)),
             engine_kwargs=engine_kwargs,
         )
 
@@ -760,7 +750,7 @@ class RolloutActor:
             engine_cls = get_engine(sampler_engine_type)
         except ValueError as exc:
             raise ValueError(f"Unknown sampler_engine_type: {sampler_engine_type}. {exc}") from exc
-        self.engine = engine_cls(engine_runtime_config)
+        self.engine = engine_cls(resolved_engine_config)
 
         # Initialize engine
         self.engine.initialize(self._device)

@@ -7,9 +7,49 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
 import torch
+from diffusionrl.types.sde import SDEConfig, SDEScheduleConfig
 
 if TYPE_CHECKING:
     from torch import device as TorchDevice
+
+
+@dataclass(frozen=True)
+class ResolvedSamplingSpec:
+    """Canonical resolved sampling view built once from SamplingConfig."""
+
+    sampler_path: str
+    num_inference_steps: int
+    guidance_scale: float
+    height: int
+    width: int
+    num_frames: int
+    seed: int
+    replay_sampler_path: Optional[str] = None
+    sampling_adapter: Optional[str] = None
+    init_same_noise: bool = False
+    sampler_kwargs: Dict[str, Any] = field(default_factory=dict)
+    sde_config: SDEConfig = field(default_factory=SDEConfig)
+    sde_schedule_config: SDEScheduleConfig = field(default_factory=SDEScheduleConfig)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "sampler_kwargs", dict(self.sampler_kwargs or {}))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "sampler_path": self.sampler_path,
+            "num_inference_steps": int(self.num_inference_steps),
+            "guidance_scale": float(self.guidance_scale),
+            "height": int(self.height),
+            "width": int(self.width),
+            "num_frames": int(self.num_frames),
+            "seed": int(self.seed),
+            "replay_sampler_path": self.replay_sampler_path,
+            "sampling_adapter": self.sampling_adapter,
+            "init_same_noise": bool(self.init_same_noise),
+            "sampler_kwargs": dict(self.sampler_kwargs),
+            "sde_config": self.sde_config.to_dict(),
+            "sde_schedule_config": self.sde_schedule_config.to_dict(),
+        }
 
 
 @dataclass(frozen=True)

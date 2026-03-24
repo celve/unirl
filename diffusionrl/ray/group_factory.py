@@ -2,23 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 
-from diffusionrl.config.build_domain_args import (
-    build_rollout_actor_init_config,
-    build_training_actor_init_config,
+from diffusionrl.config.runtime_bootstrap import ResolvedRuntimeConfig
+from diffusionrl.config.validation_payload import (
     validate_rollout_actor_init_config,
     validate_training_actor_init_config,
 )
-from diffusionrl.config.resolution import resolve_training_topology
-from diffusionrl.config.rollout_topology import (
-    normalize_rollout_service_engine,
-    resolve_rollout_service_num_gpus,
-    resolve_rollout_service_kwargs,
-    rollout_mode_is_colocated,
-)
-from diffusionrl.training import create_train_backend
-from diffusionrl.types.engine import uses_dedicated_rollout_engine
 
 from .rollout_group import RolloutActorGroup
 from .training_group import TrainingActorGroup
@@ -26,56 +17,38 @@ from .training_group import TrainingActorGroup
 logger = logging.getLogger(__name__)
 
 def create_rollout_actor_group(
-    args,
+    runtime_config: ResolvedRuntimeConfig,
     pg_result,
 ) -> RolloutActorGroup:
     """
     Factory function to create RolloutActorGroup for dedicated rollout engines.
 
     Args:
-        args: TrainingArguments instance
+        runtime_config: Resolved runtime bootstrap built on the driver
         pg_result: Tuple of (PlacementGroup, bundle_indices, gpu_ids)
 
     Returns:
         Initialized RolloutActorGroup
     """
+    rollout = runtime_config.rollout
+    if rollout is None:
+        raise ValueError(
+            "Resolved runtime config does not include a dedicated rollout bootstrap payload."
+        )
     pg, bundle_indices, gpu_ids = pg_result
+    rollout_service_engine = rollout.service_engine
 
-    rollout_service_engine = normalize_rollout_service_engine(args.rollout.service_engine)
-    if not rollout_service_engine:
-        raise ValueError(
-            "rollout.service_engine is unset after normalize/validate. "
-            "Expected a dedicated rollout service engine."
-        )
-    if not uses_dedicated_rollout_engine(rollout_service_engine):
-        raise ValueError(
-            f"rollout.service_engine={rollout_service_engine!r} does not use dedicated rollout actors. "
-            "Sampling should run directly on training actors for this engine."
-        )
-
-    # Determine GPUs per actor based on engine type
-    engine_kwargs = resolve_rollout_service_kwargs(args)
-
-    num_gpus_per_actor = resolve_rollout_service_num_gpus(args)
+    actor_init_config = copy.deepcopy(rollout.actor_init_config)
+    engine_runtime_config = dict(rollout.engine_runtime_config)
+    engine_kwargs = dict(engine_runtime_config.get("engine_kwargs") or {})
+    num_gpus_per_actor = int(rollout.actor_gpu_requirement)
 
     if rollout_service_engine == "sglang":
-        # sglang-diffusion GPU allocation:
-        # - num_gpus: worker processes launched by DiffGenerator (authoritative)
-        # - tp_size/sp_degree: optional parallel hints forwarded to ServerArgs
-        engine_kwargs["num_gpus"] = num_gpus_per_actor
-        if "sp_degree" not in engine_kwargs:
-            if engine_kwargs.get("sp_size") is not None:
-                engine_kwargs["sp_degree"] = int(engine_kwargs["sp_size"])
-        if bool(args.ray.offload_rollout):
-            # Pre-release policy: when rollout offload is requested, require
-            # concrete SGLang memory handlers instead of best-effort fallbacks.
-            engine_kwargs["require_memory_api"] = True
-
         logger.info(
             "SGLang engine: num_gpus_per_actor=%s, tp_size=%s, sp_degree=%s",
             num_gpus_per_actor,
             engine_kwargs.get("tp_size", "auto"),
-            engine_kwargs.get("sp_degree", 1),
+            engine_kwargs.get("sp_degree", engine_kwargs.get("sp_size", 1)),
         )
     else:
         raise ValueError(
@@ -93,17 +66,17 @@ def create_rollout_actor_group(
 
     # In colocate mode with single-GPU setup, use fractional GPU allocation
     # This allows both rollout and training actors to share the same GPU bundle
-    colocate = rollout_mode_is_colocated(args.rollout.mode)
+    colocate = bool(rollout.colocate)
     if colocate and num_gpus_per_actor == 1:
-        num_gpus_per_actor = float(args.ray.colocate_rollout_gpu_fraction)
+        num_gpus_per_actor = float(rollout.colocate_gpu_fraction)
         logger.info(
             f"Colocate mode: RolloutActorGroup actors using {num_gpus_per_actor} GPU each"
         )
 
     # Multi-GPU engine: use Slime/NOSET pattern.
-    # This path supports both separate and colocate runtime modes.
+    # This path supports both separate and colocate rollout modes.
     if num_gpus_per_actor > 1:
-        if not bool(args.ray.allow_noset_multi_gpu_inference):
+        if not bool(rollout.allow_noset_multi_gpu_inference):
             raise ValueError(
                 "Multi-GPU rollout actor layout requires --allow-noset-multi-gpu-inference=true. "
                 "Default layout only supports integer single-GPU actors."
@@ -114,10 +87,10 @@ def create_rollout_actor_group(
         ray_num_gpus = 0.5  # Fractional claim to satisfy Ray scheduler
         if available_rollout_bundles % actual_gpus_per_engine != 0:
             raise ValueError(
-                "Placement-group rollout bundle count must be divisible by rollout.service_num_gpus "
+                "Placement-group rollout bundle count must be divisible by rollout.topology.service_num_gpus "
                 "for multi-GPU rollout actors. "
                 f"Available rollout bundles: {available_rollout_bundles}, "
-                f"rollout.service_num_gpus: {actual_gpus_per_engine}."
+                f"rollout.topology.service_num_gpus: {actual_gpus_per_engine}."
             )
         num_actors = available_rollout_bundles // actual_gpus_per_engine
 
@@ -175,79 +148,58 @@ def create_rollout_actor_group(
         )
 
     # Initialize actors with domain-split runtime/model schema.
-    actor_init_config = build_rollout_actor_init_config(
-        args=args,
-        sampler_engine_type=rollout_service_engine,
-        engine_kwargs=engine_kwargs,
-    )
     validate_rollout_actor_init_config(actor_init_config)
     group.init(actor_init_config)
     return group
 
 
 def create_training_actor_group(
-    args,
+    runtime_config: ResolvedRuntimeConfig,
     pg_result,
-    *,
-    algorithm_config,
 ) -> TrainingActorGroup:
     """
     Factory function to create TrainingActorGroup from args.
 
     Args:
-        args: TrainingArguments instance
+        runtime_config: Resolved runtime bootstrap built on the driver
         pg_result: Tuple of (PlacementGroup, bundle_indices, gpu_ids)
 
     Returns:
         Initialized TrainingActorGroup
     """
     pg, bundle_indices, gpu_ids = pg_result
-    if not isinstance(algorithm_config, dict):
-        raise ValueError("create_training_actor_group requires algorithm_config to be built by the driver.")
-
-    training_topology = resolve_training_topology(args)
+    training = runtime_config.training
+    training_topology = training.topology
     # Actor-group size is currently driven by the resolved training actor_count.
     # This is a launch/orchestration quantity; it should not be conflated with
     # world_size or dp_size even when they happen to match in the mainline path.
     num_actors = int(training_topology.actor_count)
 
-    config = build_training_actor_init_config(
-        args=args,
-        topology=training_topology,
-        algorithm_config=algorithm_config,
-    )
+    config = copy.deepcopy(training.actor_init_config)
     validate_training_actor_init_config(config)
-    backend_config = config["train_backend_config"]
-    backend_name = str(backend_config["name"]).strip().lower()
-    backend_kwargs = dict(backend_config.get("kwargs") or {})
-    backend = create_train_backend(
-        backend_name,
-        backend_path=backend_config.get("backend_path"),
-        backend_kwargs=backend_kwargs,
-    )
-    launch_spec = backend.launch_spec(args=args, topology=training_topology)
-    caps = backend.capabilities
-    if bool(caps.requires_custom_actor_class) and not launch_spec.actor_class_path:
+    launch_spec = training.launch_spec
+    caps = training.backend_capabilities
+    if bool(caps.get("requires_custom_actor_class", False)) and not launch_spec.actor_class_path:
         raise ValueError(
-            f"train_backend={backend.name!r} requires a backend-specific actor class. "
+            f"train_backend={training.backend_name!r} requires a backend-specific actor class. "
             "Provide train_backend_kwargs with `actor_class_path`, "
             "or override via --train-backend-path to a backend that does not require a custom actor."
         )
 
     logger.info(
         "Training backend=%s launch spec: %s; resolved topology=%s",
-        backend.name,
+        training.backend_name,
         launch_spec.as_dict(),
         training_topology.as_dict(),
     )
 
     # In colocate mode, use fractional GPU allocation to allow sharing
     # Both rollout and training actors will claim fractional GPU each
-    colocate = rollout_mode_is_colocated(args.rollout.mode)
+    colocate = bool(training.colocate)
     if launch_spec.num_gpus_per_actor is not None:
         num_gpus_per_actor = float(launch_spec.num_gpus_per_actor)
     else:
-        num_gpus_per_actor = float(args.ray.colocate_training_gpu_fraction) if colocate else 1.0
+        num_gpus_per_actor = float(training.colocate_gpu_fraction) if colocate else 1.0
 
     if colocate:
         logger.info(

@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import torch
 import tqdm as tqdm_
 
-from diffusionrl.config.arguments import is_training_actor_sampling_mode
+from diffusionrl.config.resolution import derive_rollout_topology
 from diffusionrl.types.sampling import RolloutRequest
 
 tqdm = partial(tqdm_.tqdm, dynamic_ncols=True)
@@ -83,8 +83,8 @@ class RolloutRequestBuilder:
         sampling_defaults: Dict[str, Any],
     ) -> "RolloutRequestBuilder":
         return cls(
-            is_direct_sampling_mode=is_training_actor_sampling_mode(args),
-            max_samples_per_request=getattr(args.sampling, "max_samples_per_request", None),
+            is_direct_sampling_mode=derive_rollout_topology(args).training_actor_sampling_mode,
+            max_samples_per_request=args.sampling.max_samples_per_request,
             sampling_defaults=sampling_defaults,
         )
 
@@ -184,6 +184,11 @@ class RolloutRequestBuilder:
         )
         raw_seed = batch.get("seed", self.sampling_defaults.get("seed"))
         seed = None if raw_seed is None else int(raw_seed)
+        request_kwargs = batch.get("kwargs")
+        if isinstance(request_kwargs, dict):
+            request_kwargs = dict(request_kwargs)
+        else:
+            request_kwargs = {}
 
         return RolloutRequest(
             prompts=expanded_prompts,
@@ -202,6 +207,7 @@ class RolloutRequestBuilder:
             init_same_noise=init_same_noise,
             samples_per_prompt=k,
             sampling_adapter=sampling_adapter,
+            kwargs=request_kwargs,
         )
 
     def estimate_request_batches(

@@ -5,82 +5,80 @@ Resolution order:
 1) Explicit CLI flags
 2) YAML values from --config
 3) Dataclass field defaults
-4) validate_args() checks the explicit config and runtime builders derive
+4) public config entrypoints validate the explicit config and derived helpers compute
    resolved values without mutating TrainingArguments
 
-New contributors: start from parse_args() -> validate_args().
+Schema and public config entrypoints stay in this file. Parser mechanics live
+in ``argument_parsing.py`` and generic config derivation lives in
+``resolution.py``.
 """
 import argparse
+import copy
 import json
 import logging
 import os
 import sys
-import warnings
-from dataclasses import MISSING, dataclass, field, fields, is_dataclass
-from typing import Any, Dict, List, Optional, get_args, get_origin
+from dataclasses import dataclass, field, fields, is_dataclass, replace
+from typing import Any, Dict, List, Optional
 
+from diffusionrl.algorithms.construction import (
+    instantiate_algorithm_from_config,
+    resolve_algorithm_path,
+    build_algorithm_config,
+)
+from diffusionrl.config.argument_parsing import (
+    GROUP_DISPLAY_NAMES,
+    build_add_argument_kwargs,
+    build_cli_option_strings,
+    collect_cli_field_specs,
+    collect_explicit_cli_destinations,
+    load_yaml_mapping,
+    merge_yaml_overrides,
+    parse_cli_key_value,
+)
 from diffusionrl.config.resolution import (
     DEFAULT_MODEL_PATH,
     DEFAULT_SAMPLER_PATH,
-    resolve_algorithm_path,
-    resolve_model_runtime,
-    resolve_prompts_per_rollout,
-    resolve_rollout_topology,
-    resolve_train_backend_name,
-    resolve_training_plan,
-    resolve_training_topology,
-)
-from diffusionrl.config.rollout_topology import (
     ROLLOUT_MODES,
+    derive_model_spec,
+    require_prompts_per_rollout,
+    derive_rollout_mode_info,
+    derive_rollout_topology,
+    collect_sampling_requirements,
+    normalize_train_backend_name,
+    derive_training_plan,
+    derive_training_topology,
 )
 from diffusionrl.config.validation import (
     apply_model_config_hook,
     validate_algorithm_kwargs_payload,
     validate_algorithm_path,
-    validate_debug_config,
-    validate_direct_sampling_batch_geometry,
     validate_dotpath,
     validate_dynamic_dotpaths,
     validate_grouped_configs,
-    validate_model_runtime_contract,
+    validate_model_sampling_contract,
     validate_nft_sampling_contract,
-    validate_offload_and_colocate_config,
-    validate_replay_mode,
-    validate_rollout_topology_contract,
     validate_resolved_engine_algorithm_contract,
     validate_reward_and_rollout_buffer_config,
     validate_rollout_layout,
-    validate_runtime_mode_constraints,
-    validate_sampling_basics,
+    validate_rollout_mode,
+    validate_rollout_mode_constraints,
+    validate_precision_name,
     validate_train_backend_config,
-    validate_training_actor_sampling_mode,
+    validate_training_batch_geometry,
     validate_training_misc,
-    validate_weight_sync,
+)
+from diffusionrl.training.backends import (
+    resolve_train_backend_capabilities_from_config,
+    resolve_train_backend_config_from_args,
 )
 
 logger = logging.getLogger(__name__)
 
-def _validate_precision_name(value: Any, *, field_name: str) -> None:
-    valid = {
-        "bf16",
-        "bfloat16",
-        "fp16",
-        "float16",
-        "half",
-        "fp32",
-        "float32",
-        "float",
-    }
-    key = str(value or "").strip().lower()
-    if key not in valid:
-        raise ValueError(
-            f"{field_name} must be one of bf16/fp16/fp32, got: {value!r}"
-        )
-
 
 @dataclass
 class ModelConfig:
-    """Model/runtime identity and checkpoint paths."""
+    """Model identity and checkpoint paths."""
 
     model_type: str = field(default="hunyuan",
         metadata={"help": "Model architecture type (hunyuan, flux, sd3, mochi, wan2.1, bagel)"})
@@ -124,8 +122,8 @@ class SamplingConfig:
         metadata={"help": "SDE noise coefficient (eta=0 is ODE, eta=1 is full SDE)"})
     sde_type: str = field(default="flow",
         metadata={"help": "Transition rule. Supported: flow, cps, dance, dpm2"})
-    time_shift: float = field(default=3.0,
-        metadata={"help": "Time-shift parameter for the sampling timestep schedule (model-specific)"})
+    shift: float = field(default=3.0,
+        metadata={"help": "Shift parameter for the sampling timestep schedule (model-specific)"})
     guidance_scale: float = field(default=7.5,
         metadata={"help": "Classifier-free guidance scale (0.0 = no guidance)"})
     sde_ratio: float = field(default=1.0,
@@ -248,12 +246,10 @@ class RayConfig:
         metadata={"help": "GPU memory fraction for rollout when colocated"})
     allow_noset_multi_gpu_inference: bool = field(default=False,
         metadata={"help": "Allow multi-GPU rollout actors (experimental NOSET layout)"})
-    offload: bool = field(default=False,
-        metadata={"help": "Enable model offload for both training and rollout"})
-    offload_train: Optional[bool] = field(default=None,
-        metadata={"help": "Enable model offload for training actors (None = auto)"})
-    offload_rollout: Optional[bool] = field(default=None,
-        metadata={"help": "Enable model offload for rollout actors (None = auto)"})
+    offload_train: bool = field(default=False,
+        metadata={"help": "Enable model offload for training actors"})
+    offload_rollout: bool = field(default=False,
+        metadata={"help": "Enable model offload for rollout actors"})
 
     def validate(self) -> None:
         """Keep RayConfig validation intentionally thin.
@@ -290,7 +286,7 @@ class SyncConfig:
     bucket_mb: int = field(default=256,
         metadata={"help": "Weight sync tensor bucket size (MB) for tensor/distributed strategies"})
     flush_cache: bool = field(default=True,
-        metadata={"help": "Whether rollout side flushes runtime cache after each weight sync bucket"})
+        metadata={"help": "Whether the rollout side flushes inference-engine caches after each weight sync bucket"})
     target_modules: Optional[List[str]] = field(default=None,
         metadata={"help": "Rollout-side modules that receive weight updates (defaults to ['transformer'])."})
 
@@ -347,7 +343,14 @@ class WindowSchedulerConfig:
 
 @dataclass
 class AlgorithmConfig:
-    """Algorithm controls and shared algorithm-construction surface."""
+    """Algorithm selection, rollout geometry, and raw algorithm kwargs.
+
+    Public/common surface:
+    - algorithm_type / algorithm_path
+    - algorithm_kwargs
+    - samples_per_prompt / prompts_per_rollout
+    - window scheduler sub-config
+    """
 
     # Algorithm selection
     algorithm_type: str = field(default="grpo",
@@ -355,43 +358,35 @@ class AlgorithmConfig:
     algorithm_path: Optional[str] = field(default=None,
         metadata={"help": "Python dotpath to Algorithm class (auto-resolved from algorithm_type when omitted)"})
     algorithm_kwargs: Dict[str, Any] = field(default_factory=dict,
-        metadata={"help": "Canonical extension surface for algorithm-specific kwargs. Both rollout and training instantiate algorithms from the same algorithm_kwargs payload."})
+        metadata={"help": "YAML-only extension surface for algorithm-specific kwargs. Shared framework fields have dedicated algorithm.* entries. On CLI, use repeated --algorithm.kwarg KEY=VALUE only for true algorithm-specific extension keys."})
 
-    # Advantage and policy objective
-    clip_range: float = field(default=1e-4,
-        metadata={"help": "PPO clipping range for policy ratio. Smaller = more conservative"})
-    clip_schedule: str = field(default="constant",
-        metadata={"help": "Clip range schedule: constant, linear_decay, cosine_decay"})
-    kl_coef: float = field(default=0.01,
-        metadata={"help": "KL divergence penalty coefficient"})
-    use_kl_penalty: bool = field(default=True,
-        metadata={"help": "Add KL penalty term to the loss"})
-    component_mix_stage: str = field(default="reward",
-        metadata={"help": "Where multi-component reward mixing happens: reward or advantage"})
-    adv_normalization: str = field(default="group",
-        metadata={"help": "Advantage normalization: global or group"})
+    # Framework-owned rollout geometry
     samples_per_prompt: int = field(default=4,
-        metadata={"help": "Number of generated samples per prompt for GRPO"})
+        metadata={"help": "Number of generated samples per prompt. This remains framework-owned because rollout geometry depends on it."})
     prompts_per_rollout: Optional[int] = field(default=None,
-        metadata={"help": "Number of unique prompts per rollout step. Required."})
-    adv_norm_eps: float = field(default=1e-8,
-        metadata={"help": "Epsilon for numerical stability in advantage normalization"})
-    adv_clip_abs: Optional[float] = field(default=None,
-        metadata={"help": "Max absolute advantage value (None = no clipping)"})
-    trimmed_ratio: float = field(default=0.0,
-        metadata={"help": "Trim ratio for grouped advantage stats (MixGRPO-style outlier trimming)"})
-    use_global_std: bool = field(default=False,
-        metadata={"help": "Use global (cross-prompt) std for advantage normalization"})
-    skip_last_timestep: bool = field(default=False,
-        metadata={"help": "Skip last timestep (t->0) in algorithm objective (can be numerically unstable)"})
-    skip_initial_timesteps: int = field(default=0,
-        metadata={"help": "Skip first N timesteps in algorithm objective computation (frozen warmup)"})
+        metadata={"help": "Number of unique prompts per rollout step. Required because rollout geometry is defined by prompts_per_rollout * samples_per_prompt."})
 
-    # Evaluation EMA
+    # Shared algorithm surface
+    component_mix_stage: str = field(default="reward",
+        metadata={"help": "Stage that applies multi-component reward mixing: reward or advantage"})
+    adv_normalization: str = field(default="group",
+        metadata={"help": "Advantage normalization scope: group or global"})
+    adv_norm_eps: float = field(default=1e-8,
+        metadata={"help": "Numerical epsilon for advantage normalization"})
+    adv_clip_abs: Optional[float] = field(default=5.0,
+        metadata={"help": "Optional absolute clip for normalized advantages (null disables clipping)"})
+    use_global_std: bool = field(default=False,
+        metadata={"help": "Use global std instead of per-group std during grouped normalization"})
+    trimmed_ratio: float = field(default=0.0,
+        metadata={"help": "Fraction of outliers to trim from each side for grouped reward normalization"})
     eval_ema_decay: float = field(default=0.9,
-        metadata={"help": "EMA decay rate for evaluation model (warmup schedule: min((1+step)/(10+step), decay))"})
+        metadata={"help": "Eval EMA decay shared by built-in algorithms"})
     eval_ema_update_interval: int = field(default=1,
-        metadata={"help": "Update evaluation EMA every N optimizer steps"})
+        metadata={"help": "Eval EMA update interval in optimizer steps"})
+    shuffle_samples: bool = field(default=True,
+        metadata={"help": "Shuffle training samples before local update execution"})
+    shuffle_seed: Optional[int] = field(default=None,
+        metadata={"help": "Optional deterministic shuffle seed for training sample order"})
 
     # Sub-configuration
     window: WindowSchedulerConfig = field(default_factory=WindowSchedulerConfig)
@@ -404,14 +399,37 @@ class AlgorithmConfig:
             )
         if self.samples_per_prompt < 1:
             raise ValueError("samples_per_prompt must be >= 1.")
-        if self.prompts_per_rollout is not None and self.prompts_per_rollout < 1:
+        if self.prompts_per_rollout is None:
+            raise ValueError("prompts_per_rollout is required.")
+        if self.prompts_per_rollout < 1:
             raise ValueError("prompts_per_rollout must be >= 1.")
-        if self.component_mix_stage not in ("reward", "advantage"):
+        if not isinstance(self.algorithm_kwargs, dict):
+            raise ValueError("algorithm.algorithm_kwargs must be a dict.")
+        component_mix_stage = str(self.component_mix_stage or "").strip().lower()
+        if component_mix_stage not in {"reward", "advantage"}:
             raise ValueError(
-                f"component_mix_stage must be one of reward/advantage, got: {self.component_mix_stage}"
+                "algorithm.component_mix_stage must be 'reward' or 'advantage'. "
+                f"Got: {self.component_mix_stage!r}."
             )
-        if not (0.0 <= self.trimmed_ratio < 0.5):
-            raise ValueError("trimmed_ratio must be in [0.0, 0.5).")
+        adv_normalization = str(self.adv_normalization or "").strip().lower()
+        if adv_normalization not in {"global", "group"}:
+            raise ValueError(
+                "algorithm.adv_normalization must be 'global' or 'group'. "
+                f"Got: {self.adv_normalization!r}."
+            )
+        if float(self.adv_norm_eps) <= 0:
+            raise ValueError("algorithm.adv_norm_eps must be > 0.")
+        if self.adv_clip_abs is not None and float(self.adv_clip_abs) <= 0:
+            raise ValueError("algorithm.adv_clip_abs must be > 0 when set.")
+        if not (0.0 <= float(self.trimmed_ratio) < 0.5):
+            raise ValueError(
+                "algorithm.trimmed_ratio must be in [0.0, 0.5). "
+                f"Got: {self.trimmed_ratio}."
+            )
+        if float(self.eval_ema_decay) < 0:
+            raise ValueError("algorithm.eval_ema_decay must be >= 0.")
+        if int(self.eval_ema_update_interval) < 1:
+            raise ValueError("algorithm.eval_ema_update_interval must be >= 1.")
         window_cfg = self.window
         if (
             window_cfg.window_max_iters_per_group is not None
@@ -425,15 +443,13 @@ class AlgorithmConfig:
 
 @dataclass
 class TrainingConfig:
-    """Optimizer, LoRA/FSDP, and core training runtime controls."""
+    """Optimizer, LoRA/FSDP, and core training controls."""
 
     # Optimizer and update schedule
-    local_update_batch_size: Optional[int] = field(default=None,
-        metadata={"help": "Local optimizer-update batch size in samples. This is the primary training geometry owner when set."})
     local_micro_batch_size: Optional[int] = field(default=None,
-        metadata={"help": "Local micro-batch size for one forward/backward pass. Defaults to local_update_batch_size when omitted."})
+        metadata={"help": "Local micro-batch size for one forward/backward pass. Defaults to the resolved local_update_batch_size when omitted and must evenly divide it."})
     num_updates_per_local_batch: Optional[int] = field(default=None,
-        metadata={"help": "Number of optimizer updates performed from one local batch. Defaults to 1 when local_update_batch_size is set."})
+        metadata={"help": "Number of optimizer updates performed from one resolved local batch. Defaults to 1. local_batch_size must be divisible by this value, and local_update_batch_size is derived from the quotient."})
     learning_rate: float = field(default=1e-6,
         metadata={"help": "Peak learning rate for the optimizer"})
     adam_beta1: float = field(default=0.9,
@@ -478,29 +494,14 @@ class TrainingConfig:
 
     def validate(self) -> None:
         explicit_geometry_fields = {
-            "local_update_batch_size": self.local_update_batch_size,
             "local_micro_batch_size": self.local_micro_batch_size,
             "num_updates_per_local_batch": self.num_updates_per_local_batch,
         }
         for field_name, value in explicit_geometry_fields.items():
             if value is not None and int(value) < 1:
                 raise ValueError(f"{field_name} must be >= 1 when set.")
-
-        if (
-            self.num_updates_per_local_batch is not None
-            and self.local_update_batch_size is None
-        ):
-            raise ValueError(
-                "training.num_updates_per_local_batch requires "
-                "training.local_update_batch_size."
-            )
-        backend = str(self.train_backend or "fsdp").strip().lower()
-        supported = {"fsdp", "megatron", "veomni"}
-        if backend not in supported and not self.train_backend_path:
-            raise ValueError(
-                f"Unsupported train_backend={self.train_backend!r}. "
-                f"Expected one of {sorted(supported)} or provide --training.train-backend-path."
-            )
+        if not isinstance(self.train_backend_kwargs, dict):
+            raise ValueError("training.train_backend_kwargs must be a dict.")
 
 
 @dataclass
@@ -519,21 +520,21 @@ class PrecisionConfig:
         metadata={"help": "Precision used to store rollout log-prob tensors (default: fp32)"})
 
     def validate(self) -> None:
-        _validate_precision_name(self.model_precision, field_name="precision.model_precision")
-        _validate_precision_name(self.fsdp_precision, field_name="precision.fsdp_precision")
-        _validate_precision_name(self.autocast_precision, field_name="precision.autocast_precision")
-        _validate_precision_name(self.trajectory_precision, field_name="precision.trajectory_precision")
-        _validate_precision_name(self.logprob_precision, field_name="precision.logprob_precision")
+        validate_precision_name(self.model_precision, field_name="precision.model_precision")
+        validate_precision_name(self.fsdp_precision, field_name="precision.fsdp_precision")
+        validate_precision_name(self.autocast_precision, field_name="precision.autocast_precision")
+        validate_precision_name(self.trajectory_precision, field_name="precision.trajectory_precision")
+        validate_precision_name(self.logprob_precision, field_name="precision.logprob_precision")
 
 
-@dataclass
-class RolloutLoggingConfig:
-    """Rollout loop/buffer, checkpoint/eval, and logging controls."""
+@dataclass(frozen=True)
+class RolloutTopologySettings:
+    """Rollout topology and dedicated-engine knobs."""
 
     mode: Optional[str] = field(default=None,
         metadata={"help": "Canonical rollout topology: direct_rollout, separate_rollout, or colocate_rollout"})
     service_engine: Optional[str] = field(default=None,
-        metadata={"help": "Canonical rollout engine selector: fsdp for direct_rollout, sglang for separate_rollout or colocate_rollout."})
+        metadata={"help": "Dedicated rollout engine selector for separate_rollout or colocate_rollout. Must be unset in direct_rollout."})
     service_num_gpus: Optional[int] = field(default=None,
         metadata={"help": "Dedicated rollout service GPUs per actor/engine. Required for separate_rollout and colocate_rollout."})
     engine_tp_size: Optional[int] = field(default=None,
@@ -559,31 +560,95 @@ class RolloutLoggingConfig:
     sglang_prompt_encoder_max_length: Optional[int] = field(default=None,
         metadata={"help": "Prompt encoder max sequence length for SGLang rollout."})
     sglang_kwargs: Dict[str, Any] = field(default_factory=dict,
-        metadata={"help": "Engine-scoped SGLang rollout kwargs. ServerArgs-compatible keys are forwarded to the SGLang rollout runtime."})
+        metadata={"help": "Engine-scoped SGLang rollout kwargs. ServerArgs-compatible keys are forwarded to the SGLang rollout engine."})
 
-    # Rollout buffer actor (data-centric handoff with validation/filter plugins)
-    rollout_buffer_max_queue_size: int = field(default=0,
+    def validate(self) -> None:
+        if self.mode is not None and self.mode not in ROLLOUT_MODES:
+            raise ValueError(
+                "rollout.topology.mode must be one of "
+                f"{sorted(ROLLOUT_MODES)}, got: {self.mode!r}"
+            )
+        for attr_name in (
+            "service_num_gpus",
+            "engine_tp_size",
+            "engine_sp_size",
+            "sglang_prompt_encoder_max_length",
+        ):
+            value = getattr(self, attr_name)
+            if value is not None and int(value) < 1:
+                raise ValueError(f"rollout.topology.{attr_name} must be >= 1 when set.")
+        if not isinstance(self.sglang_kwargs, dict):
+            raise ValueError("rollout.topology.sglang_kwargs must be a dict.")
+
+
+@dataclass(frozen=True)
+class RolloutBufferSettings:
+    """Rollout-buffer queueing, filtering, and reassembly knobs."""
+
+    max_queue_size: int = field(default=0,
         metadata={"help": "Max rollout buffer queue size (0 = unbounded)"})
-    rollout_buffer_drop_invalid: bool = field(default=True,
+    drop_invalid: bool = field(default=True,
         metadata={"help": "Drop samples that fail validation checks"})
-    rollout_buffer_reward_min: Optional[float] = field(default=None,
+    reward_min: Optional[float] = field(default=None,
         metadata={"help": "Minimum reward threshold for sample filtering (None = no filter)"})
-    rollout_buffer_reward_max: Optional[float] = field(default=None,
+    reward_max: Optional[float] = field(default=None,
         metadata={"help": "Maximum reward threshold for sample filtering (None = no filter)"})
-    rollout_buffer_min_samples: int = field(default=1,
+    min_samples: int = field(default=1,
         metadata={"help": "Minimum samples required before dispatching a batch"})
-    rollout_buffer_reassemble_by_group: bool = field(default=False,
+    reassemble_by_group: bool = field(default=False,
         metadata={"help": "Reassemble outgoing training batches in the rollout buffer by explicit group_ids"})
-    rollout_buffer_group_size: Optional[int] = field(default=None,
-        metadata={"help": "Explicit samples per logical group. Required when rollout_buffer_reassemble_by_group=true"})
-    rollout_buffer_group_ttl_seconds: float = field(default=0.0,
+    group_size: Optional[int] = field(default=None,
+        metadata={"help": "Explicit samples per logical group. Required when reassemble_by_group=true"})
+    group_ttl_seconds: float = field(default=0.0,
         metadata={"help": "Time-to-live for incomplete groups in seconds (0 = no timeout)"})
-    rollout_buffer_max_pending_samples: int = field(default=0,
+    max_pending_samples: int = field(default=0,
         metadata={"help": "Max pending samples in buffer before blocking rollout (0 = unbounded)"})
-    rollout_buffer_plugin_paths: str = field(default="",
+    plugin_paths: str = field(default="",
         metadata={"help": "Comma-separated dotpaths to rollout buffer filter plugins"})
 
-    # Rollout loop
+    def validate(self) -> None:
+        if int(self.max_queue_size) < 0:
+            raise ValueError(
+                f"rollout.buffer.max_queue_size must be >= 0, got: {self.max_queue_size}"
+            )
+        if int(self.min_samples) < 1:
+            raise ValueError(
+                f"rollout.buffer.min_samples must be >= 1, got: {self.min_samples}"
+            )
+        if (
+            self.reward_min is not None
+            and self.reward_max is not None
+            and float(self.reward_min) > float(self.reward_max)
+        ):
+            raise ValueError(
+                "rollout.buffer.reward_min must be <= rollout.buffer.reward_max, "
+                f"got min={self.reward_min}, max={self.reward_max}"
+            )
+        if self.group_size is not None and int(self.group_size) < 1:
+            raise ValueError(
+                f"rollout.buffer.group_size must be >= 1 when provided, got: {self.group_size}"
+            )
+        if bool(self.reassemble_by_group) and self.group_size is None:
+            raise ValueError(
+                "rollout.buffer.reassemble_by_group=true requires rollout.buffer.group_size "
+                "to be set explicitly. Implicit binding to algorithm.samples_per_prompt was removed."
+            )
+        if float(self.group_ttl_seconds) < 0:
+            raise ValueError(
+                "rollout.buffer.group_ttl_seconds must be >= 0, "
+                f"got: {self.group_ttl_seconds}"
+            )
+        if int(self.max_pending_samples) < 0:
+            raise ValueError(
+                "rollout.buffer.max_pending_samples must be >= 0, "
+                f"got: {self.max_pending_samples}"
+            )
+
+
+@dataclass(frozen=True)
+class RolloutControlSettings:
+    """Outer-loop rollout scheduling and async control knobs."""
+
     num_rollout: int = field(default=1000,
         metadata={"help": "Total number of rollout iterations (outer-loop steps; analogous to global step)"})
     start_rollout_id: int = field(default=0,
@@ -593,7 +658,21 @@ class RolloutLoggingConfig:
     update_weights_interval: int = field(default=1,
         metadata={"help": "Sync weights from training to rollout every N steps in async/separate training"})
 
-    # Checkpointing
+    def validate(self) -> None:
+        if int(self.num_rollout) < 1:
+            raise ValueError("num_rollout must be >= 1.")
+        if int(self.start_rollout_id) < 0:
+            raise ValueError("start_rollout_id must be >= 0.")
+        if int(self.async_max_inflight) < 1:
+            raise ValueError("async_max_inflight must be >= 1.")
+        if int(self.update_weights_interval) < 1:
+            raise ValueError("update_weights_interval must be >= 1.")
+
+
+@dataclass(frozen=True)
+class RolloutArtifactSettings:
+    """Checkpoint/artifact root and save policy knobs."""
+
     output_dir: str = field(default="outputs",
         metadata={"help": "Output directory for checkpoints, logs, and generated samples"})
     save_steps: int = field(default=100,
@@ -601,13 +680,43 @@ class RolloutLoggingConfig:
     resume_from_checkpoint: Optional[str] = field(default=None,
         metadata={"help": "Path to checkpoint directory to resume training from"})
 
-    # Evaluation
+    def validate(self) -> None:
+        if int(self.save_steps) < 0:
+            raise ValueError("save_steps must be >= 0 (0 disables periodic saves).")
+
+
+@dataclass(frozen=True)
+class RolloutEvaluationSettings:
+    """Evaluation cadence and batch sizing knobs."""
+
     eval_steps: int = field(default=100,
         metadata={"help": "Run evaluation every N training steps (0 disables periodic eval)"})
     eval_batch_size: int = field(default=4,
         metadata={"help": "Batch size for evaluation"})
+    num_inference_steps: Optional[int] = field(default=None,
+        metadata={"help": "Optional eval-only denoising step override. If unset, eval reuses sampling.num_inference_steps."})
+    sampling_adapter: Optional[str] = field(default=None,
+        metadata={"help": "Optional eval-only LoRA adapter override. Useful when rollout sampling uses a different adapter than evaluation."})
+    sde_type: Optional[str] = field(default=None,
+        metadata={"help": "Optional eval-only sampler transition override (direct/native sampler hosts only). If unset, eval reuses sampling.sde_type."})
+    eta: Optional[float] = field(default=None,
+        metadata={"help": "Optional eval-only eta override (direct/native sampler hosts only). If unset, eval reuses sampling.eta."})
 
-    # Logging
+    def validate(self) -> None:
+        if int(self.eval_steps) < 0:
+            raise ValueError("eval_steps must be >= 0 (0 disables periodic eval).")
+        if int(self.eval_batch_size) < 1:
+            raise ValueError("eval_batch_size must be >= 1.")
+        if self.num_inference_steps is not None and int(self.num_inference_steps) < 1:
+            raise ValueError("rollout.evaluation.num_inference_steps must be >= 1 when set.")
+        if self.eta is not None and float(self.eta) < 0:
+            raise ValueError("rollout.evaluation.eta must be >= 0 when set.")
+
+
+@dataclass(frozen=True)
+class RolloutLoggingSettings:
+    """Experiment-logging and reporting knobs."""
+
     logging_steps: int = field(default=10,
         metadata={"help": "Log metrics every N training steps (0 disables periodic step logging)"})
     logging_dir: Optional[str] = field(default=None,
@@ -628,32 +737,8 @@ class RolloutLoggingConfig:
         metadata={"help": "WandB entity (team or username). If not set, uses the default entity of the logged-in user."})
 
     def validate(self) -> None:
-        if self.mode is not None and self.mode not in ROLLOUT_MODES:
-            raise ValueError(
-                "rollout.mode must be one of "
-                f"{sorted(ROLLOUT_MODES)}, got: {self.mode!r}"
-            )
-        for attr_name in (
-            "service_num_gpus",
-            "engine_tp_size",
-            "engine_sp_size",
-            "sglang_prompt_encoder_max_length",
-        ):
-            value = getattr(self, attr_name)
-            if value is not None and int(value) < 1:
-                raise ValueError(f"rollout.{attr_name} must be >= 1 when set.")
-        if not isinstance(self.sglang_kwargs, dict):
-            raise ValueError("rollout.sglang_kwargs must be a dict.")
-        if self.num_rollout < 1:
-            raise ValueError("num_rollout must be >= 1.")
-        if self.save_steps < 0:
-            raise ValueError("save_steps must be >= 0 (0 disables periodic saves).")
-        if self.eval_steps < 0:
-            raise ValueError("eval_steps must be >= 0 (0 disables periodic eval).")
-        if self.logging_steps < 0:
+        if int(self.logging_steps) < 0:
             raise ValueError("logging_steps must be >= 0 (0 disables periodic step logging).")
-        if self.update_weights_interval < 1:
-            raise ValueError("update_weights_interval must be >= 1.")
         if not isinstance(self.report_to_wandb, bool):
             raise ValueError(
                 "report_to_wandb must be a boolean (true/false). "
@@ -663,9 +748,57 @@ class RolloutLoggingConfig:
             raise ValueError("wandb_media_max_items must be >= 1.")
 
 
+_ROLLOUT_SECTION_NAMES = frozenset({
+    "topology",
+    "buffer",
+    "control",
+    "artifacts",
+    "evaluation",
+    "logging",
+})
+
+
+@dataclass
+class RolloutConfig:
+    """Aggregated rollout topology, buffer, control, artifact, and logging config."""
+
+    topology: RolloutTopologySettings = field(default_factory=RolloutTopologySettings)
+    buffer: RolloutBufferSettings = field(default_factory=RolloutBufferSettings)
+    control: RolloutControlSettings = field(default_factory=RolloutControlSettings)
+    artifacts: RolloutArtifactSettings = field(default_factory=RolloutArtifactSettings)
+    evaluation: RolloutEvaluationSettings = field(default_factory=RolloutEvaluationSettings)
+    logging: RolloutLoggingSettings = field(default_factory=RolloutLoggingSettings)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name.startswith("_") or name in _ROLLOUT_SECTION_NAMES:
+            object.__setattr__(self, name, value)
+            return
+
+        raise AttributeError(
+            f"Unknown rollout config field {name!r}. "
+            "Use rollout.topology / rollout.buffer / rollout.control / "
+            "rollout.artifacts / rollout.evaluation / rollout.logging."
+        )
+
+    def set_start_rollout_id(self, rollout_id: int) -> None:
+        """Update the rollout control cursor on the canonical config owner."""
+        rollout_id = int(rollout_id)
+        if rollout_id < 0:
+            raise ValueError("start_rollout_id must be >= 0.")
+        self.control = replace(self.control, start_rollout_id=rollout_id)
+
+    def validate(self) -> None:
+        self.topology.validate()
+        self.buffer.validate()
+        self.control.validate()
+        self.artifacts.validate()
+        self.evaluation.validate()
+        self.logging.validate()
+
+
 @dataclass
 class DebugConfig:
-    """Debug runtime mode and intermediate artifact controls."""
+    """Debug mode and intermediate artifact controls."""
 
     debug_mode: str = field(default="none",
         metadata={"help": "Debug mode: none or train_only"})
@@ -696,66 +829,6 @@ class DebugConfig:
                 "will generate synthetic training data."
             )
 
-
-_GROUP_CONFIG_TYPES = {
-    "model": ModelConfig,
-    "sampling": SamplingConfig,
-    "reward": RewardConfig,
-    "ray": RayConfig,
-    "sync": SyncConfig,
-    "algorithm": AlgorithmConfig,
-    "training": TrainingConfig,
-    "precision": PrecisionConfig,
-    "rollout": RolloutLoggingConfig,
-    "debug": DebugConfig,
-}
-_GROUP_CONFIG_NAMES = set(_GROUP_CONFIG_TYPES.keys())
-
-
-def _build_flat_field_path_index() -> tuple[Dict[str, str], Dict[str, tuple[str, Optional[str]]]]:
-    """Build flat-field owner/path mappings for grouped dataclasses.
-
-    Returns:
-        owners: field_name -> group_name
-        nested_path: field_name -> (group_name, sub_field_name or None)
-            e.g. "clip_range" -> ("algorithm", None)
-    """
-    owners: Dict[str, str] = {}
-    nested_path: Dict[str, tuple[str, Optional[str]]] = {}
-    for config_name, config_type in _GROUP_CONFIG_TYPES.items():
-        for config_field in fields(config_type):
-            ft = config_field.type
-            # Check if this field is itself a dataclass (sub-config)
-            if isinstance(ft, type) and is_dataclass(ft):
-                # Register all leaf fields of the sub-dataclass
-                for sub_field in fields(ft):
-                    if sub_field.name in owners:
-                        raise ValueError(
-                            f"Duplicated grouped config field '{sub_field.name}' in "
-                            f"{owners[sub_field.name]} and {config_name}.{config_field.name}."
-                        )
-                    owners[sub_field.name] = config_name
-                    nested_path[sub_field.name] = (config_name, config_field.name)
-            else:
-                if config_field.name in owners:
-                    raise ValueError(
-                        f"Duplicated grouped config field '{config_field.name}' in "
-                        f"{owners[config_field.name]} and {config_name}."
-                    )
-                owners[config_field.name] = config_name
-                nested_path[config_field.name] = (config_name, None)
-    return owners, nested_path
-
-
-_, _FLAT_FIELD_PATH_INDEX = _build_flat_field_path_index()
-_TOP_LEVEL_FIELD_NAMES: set[str] = set()
-_GROUP_SUBCONFIG_NAMES: Dict[str, set[str]] = {}
-
-
-def is_training_actor_sampling_mode(args: Any) -> bool:
-    """Return whether training actors should directly handle sampling."""
-    return resolve_rollout_topology(args).training_actor_sampling_mode
-
 @dataclass
 class TrainingArguments:
     """All configuration parameters for GRPO training."""
@@ -773,7 +846,7 @@ class TrainingArguments:
     algorithm: AlgorithmConfig = field(default_factory=AlgorithmConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     precision: PrecisionConfig = field(default_factory=PrecisionConfig)
-    rollout: RolloutLoggingConfig = field(default_factory=RolloutLoggingConfig)
+    rollout: RolloutConfig = field(default_factory=RolloutConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
 
     # ========== Data Configuration ==========
@@ -795,537 +868,35 @@ class TrainingArguments:
     seed: int = field(default=42,
         metadata={"help": "Random seed for reproducibility"})
 
-    def to_flat_dict(self) -> Dict[str, Any]:
-        """Flatten grouped + top-level args to a single dictionary."""
-        flat: Dict[str, Any] = {}
-        for info in fields(type(self)):
-            if info.name in _GROUP_CONFIG_NAMES:
-                continue
-            flat[info.name] = getattr(self, info.name)
-        for owner, config_type in _GROUP_CONFIG_TYPES.items():
-            config_obj = getattr(self, owner)
-            for info in fields(config_type):
-                ft = info.type
-                if isinstance(ft, type) and is_dataclass(ft):
-                    # Expand sub-dataclass fields
-                    sub_obj = getattr(config_obj, info.name)
-                    for sub_info in fields(ft):
-                        flat[sub_info.name] = getattr(sub_obj, sub_info.name)
-                else:
-                    flat[info.name] = getattr(config_obj, info.name)
-        return flat
+    def to_dotted_dict(self) -> Dict[str, Any]:
+        """Export config using namespace-preserving dotted keys."""
+        dotted: Dict[str, Any] = {}
+        _populate_dotted_config_dict(dotted, value=self)
+        return dotted
 
 
+_GROUP_CONFIG_TYPES = {
+    info.name: info.type
+    for info in fields(TrainingArguments)
+    if isinstance(info.type, type) and is_dataclass(info.type)
+}
+_GROUP_CONFIG_NAMES = set(_GROUP_CONFIG_TYPES)
 _TOP_LEVEL_FIELD_NAMES = {
     info.name for info in fields(TrainingArguments) if info.name not in _GROUP_CONFIG_NAMES
 }
-for _group_name, _group_type in _GROUP_CONFIG_TYPES.items():
-    _GROUP_SUBCONFIG_NAMES[_group_name] = {
+_GROUP_SUBCONFIG_NAMES: Dict[str, set[str]] = {
+    _group_name: {
         info.name
         for info in fields(_group_type)
         if isinstance(info.type, type) and is_dataclass(info.type)
     }
-
-
-def _resolve_field_default(field_info: Any) -> Any:
-    if field_info.default is not MISSING:
-        return field_info.default
-    if field_info.default_factory is not MISSING:
-        return field_info.default_factory()
-    return None
-
-
-def _resolve_cli_field_type(field_type: Any) -> Any:
-    origin = get_origin(field_type)
-    if origin is None:
-        return field_type
-    inner_types = [t for t in get_args(field_type) if t is not type(None)]
-    if len(inner_types) == 1:
-        return inner_types[0]
-    return field_type
-
-
-def _parse_cli_bool(value: Any) -> bool:
-    """Parse boolean CLI values with strict validation."""
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in ("1", "true", "yes", "y", "on"):
-        return True
-    if text in ("0", "false", "no", "n", "off"):
-        return False
-    raise argparse.ArgumentTypeError(
-        f"Invalid boolean value: {value!r}. Use true/false (or 1/0, yes/no)."
-    )
-
-
-def _parse_cli_timestep_fraction(value: Any) -> Any:
-    """Parse timestep_fraction CLI value.
-
-    Accepts:
-    - A single float: 0.6  -> returns 0.6
-    - A comma-separated pair: "0.2,0.8" -> returns (0.2, 0.8)
-    - A JSON-style list: "[0.2, 0.8]" -> returns (0.2, 0.8)
-    - Already a list/tuple (from YAML): [0.2, 0.8] -> returns (0.2, 0.8)
-    """
-    if isinstance(value, (list, tuple)):
-        if len(value) == 2:
-            return (float(value[0]), float(value[1]))
-        raise argparse.ArgumentTypeError(
-            f"timestep_fraction tuple must have exactly 2 elements, got {len(value)}"
-        )
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip()
-    if not text:
-        return 1.0
-    # Try JSON list: "[0.2, 0.8]"
-    if text.startswith("["):
-        try:
-            parsed = json.loads(text)
-        except Exception as exc:
-            raise argparse.ArgumentTypeError(
-                f"Invalid timestep_fraction value: {value!r}. Error: {exc}"
-            ) from exc
-        if isinstance(parsed, list) and len(parsed) == 2:
-            return (float(parsed[0]), float(parsed[1]))
-        raise argparse.ArgumentTypeError(
-            f"timestep_fraction list must have exactly 2 elements, got: {parsed!r}"
-        )
-    # Try comma-separated: "0.2,0.8"
-    if "," in text:
-        parts = [p.strip() for p in text.split(",") if p.strip()]
-        if len(parts) == 2:
-            try:
-                return (float(parts[0]), float(parts[1]))
-            except ValueError as exc:
-                raise argparse.ArgumentTypeError(
-                    f"Invalid timestep_fraction value: {value!r}. Error: {exc}"
-                ) from exc
-        raise argparse.ArgumentTypeError(
-            f"timestep_fraction comma-separated value must have exactly 2 elements, got {len(parts)}"
-        )
-    # Single float
-    try:
-        return float(text)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            f"Invalid timestep_fraction value: {value!r}. Error: {exc}"
-        ) from exc
-
-
-def _parse_cli_json_object(value: Any) -> Dict[str, Any]:
-    """Parse a CLI value into a JSON object."""
-    if isinstance(value, dict):
-        return value
-    text = str(value).strip()
-    if not text:
-        return {}
-    try:
-        parsed = json.loads(text)
-    except Exception as exc:
-        raise argparse.ArgumentTypeError(
-            f"Expected a JSON object string, got: {value!r}. Error: {exc}"
-        ) from exc
-    if not isinstance(parsed, dict):
-        raise argparse.ArgumentTypeError(
-            f"Expected a JSON object string, got {type(parsed).__name__}."
-        )
-    return parsed
-
-
-def _parse_cli_list(value: Any, *, item_type: Any = str) -> List[Any]:
-    """Parse comma-separated or JSON list CLI values into typed Python lists."""
-    if isinstance(value, list):
-        raw_items = list(value)
-    else:
-        text = str(value).strip()
-        if not text:
-            return []
-        if text.startswith("["):
-            try:
-                parsed = json.loads(text)
-            except Exception as exc:
-                raise argparse.ArgumentTypeError(
-                    f"Expected a list value, got: {value!r}. Error: {exc}"
-                ) from exc
-            if not isinstance(parsed, list):
-                raise argparse.ArgumentTypeError(
-                    f"Expected a list value, got {type(parsed).__name__}."
-                )
-            raw_items = list(parsed)
-        else:
-            raw_items = [part.strip() for part in text.split(",") if part.strip()]
-
-    normalized_item_type = _resolve_cli_field_type(item_type)
-    parsed_items: List[Any] = []
-    for raw in raw_items:
-        if normalized_item_type == bool:
-            parsed_items.append(_parse_cli_bool(raw))
-        elif normalized_item_type == int:
-            try:
-                parsed_items.append(int(raw))
-            except Exception as exc:
-                raise argparse.ArgumentTypeError(
-                    f"Expected integer list item, got: {raw!r}"
-                ) from exc
-        elif normalized_item_type == float:
-            try:
-                parsed_items.append(float(raw))
-            except Exception as exc:
-                raise argparse.ArgumentTypeError(
-                    f"Expected float list item, got: {raw!r}"
-                ) from exc
-        else:
-            parsed_items.append(str(raw))
-    return parsed_items
-
-
-def _resolve_field_help_text(field_info) -> str:
-    """Extract help text from field metadata, with fallback to auto-generated."""
-    help_text = (field_info.metadata or {}).get("help")
-    if help_text:
-        return help_text
-    default = _resolve_field_default(field_info)
-    return f"{field_info.name} (default: {default})"
-
-
-def _collect_field_specs_from_dataclass(
-    config_type, group_key: str, seen_names: set, specs: list,
-) -> None:
-    """Recursively collect (name, type, default, help, group_key) from a dataclass."""
-    for field_info in fields(config_type):
-        ft = field_info.type
-        # Check if this field is itself a dataclass (sub-config)
-        resolved_type = None
-        if isinstance(ft, type) and is_dataclass(ft):
-            resolved_type = ft
-
-        if resolved_type is not None:
-            # Recurse into sub-dataclass fields with dotted group key
-            sub_key = f"{group_key}.{field_info.name}"
-            _collect_field_specs_from_dataclass(resolved_type, sub_key, seen_names, specs)
-        else:
-            if field_info.name in seen_names:
-                raise ValueError(
-                    f"Duplicated parser argument field '{field_info.name}' between "
-                    "TrainingArguments and grouped configs."
-                )
-            specs.append(
-                (
-                    field_info.name,
-                    _resolve_cli_field_type(field_info.type),
-                    _resolve_field_default(field_info),
-                    _resolve_field_help_text(field_info),
-                    group_key,
-                )
-            )
-            seen_names.add(field_info.name)
-
-
-def _collect_cli_field_specs() -> List[tuple[str, Any, Any, str, str]]:
-    """Return (name, type, default, help, group_key) for every CLI-exposed field.
-
-    group_key is used for argparse grouping:
-      - "" for TrainingArguments top-level
-      - "model", "sampling", etc. for group configs
-      - "algorithm.window" for nested sub-configs
-    """
-    specs: List[tuple[str, Any, Any, str, str]] = []
-    seen_names: set[str] = set()
-
-    for field_info in fields(TrainingArguments):
-        if field_info.name in _GROUP_CONFIG_NAMES:
-            continue
-        specs.append(
-            (
-                field_info.name,
-                _resolve_cli_field_type(field_info.type),
-                _resolve_field_default(field_info),
-                _resolve_field_help_text(field_info),
-                "",  # top-level
-            )
-        )
-        seen_names.add(field_info.name)
-
-    for group_name, config_type in _GROUP_CONFIG_TYPES.items():
-        _collect_field_specs_from_dataclass(config_type, group_name, seen_names, specs)
-
-    return specs
-
-
-# Display names for argument groups in --help output
-_GROUP_DISPLAY_NAMES: Dict[str, str] = {
-    "": "General",
-    "model": "Model Configuration",
-    "sampling": "Sampling & Inference",
-    "reward": "Reward Configuration",
-    "ray": "Ray & Resource Layout",
-    "sync": "Weight Sync",
-    "algorithm": "Algorithm & Advantage",
-    "algorithm.window": "Window/Timestep Scheduler",
-    "training": "Training & Optimization",
-    "rollout": "Rollout, Checkpointing & Logging",
-    "debug": "Debug Mode & Artifact Saving",
+    for _group_name, _group_type in _GROUP_CONFIG_TYPES.items()
 }
-
-
-def _load_yaml_mapping(path: str) -> Dict[str, Any]:
-    """Load a YAML config file and return a mapping."""
-    try:
-        import yaml
-    except ImportError:
-        raise ImportError(
-            "PyYAML is required for --config support. Install it with: pip install pyyaml"
-        )
-    with open(path, "r") as f:
-        data = yaml.safe_load(f)
-    if data is None:
-        return {}
-    if not isinstance(data, dict):
-        raise ValueError(f"YAML config must be a mapping, got {type(data).__name__}")
-    return data
-
-
-def _merge_yaml_overrides(
-    raw_args: Dict[str, Any],
-    yaml_data: Dict[str, Any],
-    defaults: Dict[str, Any],
-    explicit_cli_keys: set[str],
-    action_by_dest: Dict[str, argparse.Action],
-    allow_unknown_config_keys: bool,
-) -> None:
-    """Apply YAML values to raw_args for keys the user did NOT explicitly set on CLI."""
-    flattened_yaml = _flatten_yaml_mapping(yaml_data)
-    all_known_keys = set(defaults.keys())
-    reported_cli_overrides: set[str] = set()
-    for key, value in flattened_yaml.items():
-        cli_key = key.replace("-", "_")
-        if cli_key not in all_known_keys:
-            message = f"Unknown key '{key}' in YAML config (no matching CLI argument)."
-            if not allow_unknown_config_keys:
-                raise ValueError(
-                    message
-                    + " Remove/fix the key, or pass --allow-unknown-config-keys "
-                    "to ignore unknown YAML keys."
-                )
-            warnings.warn(
-                message + " Ignoring because --allow-unknown-config-keys is set.",
-                stacklevel=3,
-            )
-            continue
-        # Only apply YAML value if user did not explicitly set via CLI
-        if cli_key in explicit_cli_keys:
-            if cli_key not in reported_cli_overrides:
-                warnings.warn(
-                    f"YAML key '{key}' ignored because CLI explicitly set '{cli_key}' (CLI takes precedence).",
-                    stacklevel=3,
-                )
-                reported_cli_overrides.add(cli_key)
-            continue
-        if raw_args.get(cli_key) == defaults.get(cli_key):
-            raw_args[cli_key] = _coerce_yaml_value(
-                key=key,
-                cli_key=cli_key,
-                value=value,
-                action_by_dest=action_by_dest,
-            )
-
-
-def _is_yaml_container_path(parts: List[str]) -> bool:
-    if len(parts) == 1 and parts[0] in _GROUP_CONFIG_NAMES:
-        return True
-    if len(parts) == 2 and parts[0] in _GROUP_SUBCONFIG_NAMES:
-        return parts[1] in _GROUP_SUBCONFIG_NAMES[parts[0]]
-    return False
-
-
-def _resolve_yaml_leaf_dest(parts: List[str]) -> Optional[str]:
-    if not parts:
-        return None
-    if len(parts) == 1:
-        key = parts[0]
-        if key in _TOP_LEVEL_FIELD_NAMES:
-            return key
-        return None
-
-    group = parts[0]
-    leaf = parts[-1]
-    path = _FLAT_FIELD_PATH_INDEX.get(leaf)
-    if path is None:
-        return None
-    owner, sub_name = path
-    if owner != group:
-        return None
-    if len(parts) == 2:
-        # Accept both group.leaf and group.sub_leaf for contributor convenience.
-        return leaf
-    if len(parts) == 3 and sub_name is not None and parts[1] == sub_name:
-        return leaf
-    return None
-
-
-def _flatten_yaml_mapping(
-    yaml_data: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Flatten nested YAML mapping into parser destination keys."""
-    flattened: Dict[str, Any] = {}
-    origins: Dict[str, str] = {}
-
-    def _value_repr(value: Any) -> str:
-        try:
-            return json.dumps(value, ensure_ascii=False, sort_keys=True)
-        except Exception:
-            return repr(value)
-
-    def _assign(dest_key: str, value: Any, *, source_path: str) -> None:
-        if dest_key in flattened:
-            previous_source = origins[dest_key]
-            if previous_source != source_path:
-                raise ValueError(
-                    "Conflicting YAML keys map to the same argument destination "
-                    f"'{dest_key}': '{previous_source}'={_value_repr(flattened[dest_key])} "
-                    f"and '{source_path}'={_value_repr(value)}. "
-                    "Keep only one style (prefer grouped keys)."
-                )
-        flattened[dest_key] = value
-        origins[dest_key] = source_path
-
-    def _walk(node: Dict[str, Any], prefix: List[str]) -> None:
-        for raw_key, value in node.items():
-            key = str(raw_key).replace("-", "_")
-            key_parts = [part for part in key.split(".") if part]
-            if not key_parts:
-                continue
-            parts = prefix + key_parts
-            source_path = ".".join(parts)
-            # Only grouped style is supported for grouped fields in YAML.
-            # Example: use `training: {train_backend: fsdp}` (or `training.train_backend`)
-            # instead of legacy flat key `train_backend`.
-            if len(parts) == 1:
-                flat_key = parts[0]
-                if flat_key not in _TOP_LEVEL_FIELD_NAMES and flat_key in _FLAT_FIELD_PATH_INDEX:
-                    owner, sub_name = _FLAT_FIELD_PATH_INDEX[flat_key]
-                    expected = (
-                        f"{owner}.{sub_name}.{flat_key}"
-                        if sub_name is not None
-                        else f"{owner}.{flat_key}"
-                    )
-                    raise ValueError(
-                        f"Unsupported flat YAML key '{flat_key}'. "
-                        f"Use grouped YAML key '{expected}' instead."
-                    )
-
-            if isinstance(value, dict):
-                leaf_dest = _resolve_yaml_leaf_dest(parts)
-                if leaf_dest is not None and not _is_yaml_container_path(parts):
-                    _assign(leaf_dest, value, source_path=source_path)
-                    continue
-                if _is_yaml_container_path(parts):
-                    _walk(value, parts)
-                    continue
-                _assign(".".join(parts), value, source_path=source_path)
-                continue
-
-            leaf_dest = _resolve_yaml_leaf_dest(parts)
-            if leaf_dest is not None:
-                _assign(leaf_dest, value, source_path=source_path)
-            else:
-                _assign(".".join(parts), value, source_path=source_path)
-
-    _walk(yaml_data, [])
-    return flattened
-
-
-def _coerce_yaml_value(
-    *,
-    key: str,
-    cli_key: str,
-    value: Any,
-    action_by_dest: Dict[str, argparse.Action],
-) -> Any:
-    """Coerce YAML value using argparse converter for the destination key."""
-    if cli_key in {"algorithm_kwargs", "train_backend_kwargs"}:
-        return _parse_cli_json_object(value)
-
-    action = action_by_dest.get(cli_key)
-    converter = getattr(action, "type", None) if action is not None else None
-    if converter is None or value is None:
-        return value
-    if converter is str and not isinstance(value, str):
-        return value
-    try:
-        return converter(value)
-    except argparse.ArgumentTypeError as exc:
-        raise ValueError(f"Invalid value for YAML key '{key}': {exc}") from exc
-    except Exception as exc:
-        raise ValueError(f"Invalid value for YAML key '{key}': {exc}") from exc
-
-
-def _build_cli_option_strings(field_name: str, group_key: str) -> List[str]:
-    """Build CLI option strings.
-
-    Grouped fields use dotted CLI style only (e.g. --training.train-backend).
-    """
-    field_opt = field_name.replace("_", "-")
-    flat_option = f"--{field_opt}"
-
-    if not group_key:
-        return [flat_option]
-
-    dotted_group = ".".join(part.replace("_", "-") for part in group_key.split("."))
-    dotted_option = f"--{dotted_group}.{field_opt}"
-    return [dotted_option]
-
-
-def _build_add_argument_kwargs(field_type: Any, default: Any, help_text: str, *, field_name: str = "") -> Dict[str, Any]:
-    kwargs: Dict[str, Any] = {
-        "default": default,
-        "help": help_text,
-    }
-    # Field-specific custom parsers
-    if field_name == "timestep_fraction":
-        kwargs["type"] = _parse_cli_timestep_fraction
-    elif field_type == bool:
-        kwargs["type"] = _parse_cli_bool
-    elif field_type == int:
-        kwargs["type"] = int
-    elif field_type == float:
-        kwargs["type"] = float
-    elif field_type is dict or get_origin(field_type) is dict:
-        kwargs["type"] = _parse_cli_json_object
-    elif get_origin(field_type) is list:
-        item_type = get_args(field_type)[0] if get_args(field_type) else str
-        kwargs["type"] = (
-            lambda value, item_type=item_type: _parse_cli_list(value, item_type=item_type)
-        )
-    else:
-        kwargs["type"] = str
-    return kwargs
-
-
-def _collect_explicit_cli_destinations(argv: List[str], parser: argparse.ArgumentParser) -> set[str]:
-    """Collect parser destination names explicitly provided via CLI options."""
-    explicit: set[str] = set()
-    option_to_action = getattr(parser, "_option_string_actions", {})
-    for token in argv:
-        if not token.startswith("-"):
-            continue
-        option = token.split("=", 1)[0]
-        action = option_to_action.get(option)
-        if action is not None:
-            explicit.add(action.dest)
-    return explicit
-
 
 _ANSI_COLORS = {
     "reset": "\033[0m",
     "bold": "\033[1m",
     "cyan": "\033[36m",
-    "green": "\033[32m",
-    "yellow": "\033[33m",
-    "orange": "\033[38;5;208m",
-    "red": "\033[31m",
 }
 
 
@@ -1353,79 +924,166 @@ def _format_config_value(value: Any) -> str:
         return repr(value)
 
 
-def _build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
-    """Build a read-only resolved config view for debugging/inspection."""
-    resolved = args.to_flat_dict()
-    explicit_sampler_path = args.sampling.sampler_path != DEFAULT_SAMPLER_PATH
-    model_runtime = resolve_model_runtime(
-        args,
-        explicit_sampler_path=explicit_sampler_path,
-    )
-    rollout_topology = resolve_rollout_topology(args)
-    resolved["model.model_path"] = model_runtime.model_path
-    resolved["model.model_type"] = model_runtime.model_type
-    resolved["sampling.sampler_path"] = model_runtime.sampler_path
-    resolved["algorithm.algorithm_path"] = resolve_algorithm_path(args)
-    resolved["training.train_backend"] = resolve_train_backend_name(args)
-    resolved["rollout.mode"] = rollout_topology.mode
-    resolved["rollout.service_engine"] = rollout_topology.service_engine
+def _copy_config_value(value: Any) -> Any:
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        return value
+
+
+def _populate_dotted_config_dict(
+    target: Dict[str, Any],
+    *,
+    value: Any,
+    prefix: Optional[str] = None,
+) -> None:
+    if not is_dataclass(value):
+        if prefix is None:
+            raise ValueError("Dotted config export requires a key prefix for leaf values.")
+        target[prefix] = _copy_config_value(value)
+        return
+
+    for info in fields(type(value)):
+        child = getattr(value, info.name)
+        child_prefix = info.name if prefix is None else f"{prefix}.{info.name}"
+        if is_dataclass(child):
+            _populate_dotted_config_dict(target, value=child, prefix=child_prefix)
+        else:
+            target[child_prefix] = _copy_config_value(child)
+
+
+def _record_resolution_error(
+    resolved: Dict[str, Any],
+    *,
+    scope: str,
+    exc: Exception,
+) -> None:
+    resolved[f"resolved.errors.{scope}"] = f"{type(exc).__name__}: {exc}"
+
+
+def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
+    """Build a dotted canonical config view with resolved derived values."""
+    resolved = args.to_dotted_dict()
+    for key in (
+        "resolved.training.actor_count",
+        "resolved.training.world_size",
+        "resolved.training.dp_size",
+        "resolved.training.tp_size",
+        "resolved.training.pp_size",
+        "resolved.training.sp_size",
+        "resolved.training.ep_size",
+        "resolved.rollout.prompts_per_rollout",
+        "resolved.training.global_batch_size",
+        "resolved.training.local_batch_size",
+        "resolved.training.local_update_batch_size",
+        "resolved.training.local_micro_batch_size",
+        "resolved.training.num_updates_per_local_batch",
+    ):
+        resolved.setdefault(key, None)
+
+    try:
+        model_spec = derive_model_spec(args)
+    except Exception as exc:
+        model_spec = None
+        _record_resolution_error(resolved, scope="model_spec", exc=exc)
+    if model_spec is not None:
+        resolved["model.model_path"] = model_spec.model_path
+        resolved["model.model_type"] = model_spec.model_type
+        resolved["sampling.sampler_path"] = model_spec.sampler_path
+    try:
+        resolved["algorithm.algorithm_path"] = resolve_algorithm_path(
+            algorithm_type=args.algorithm.algorithm_type,
+            algorithm_path=args.algorithm.algorithm_path,
+        )
+    except Exception as exc:
+        _record_resolution_error(resolved, scope="algorithm_path", exc=exc)
+    resolved["training.train_backend"] = normalize_train_backend_name(args)
+    try:
+        rollout_topology = derive_rollout_topology(args)
+    except Exception as exc:
+        rollout_topology = None
+        _record_resolution_error(resolved, scope="rollout_topology", exc=exc)
+    if rollout_topology is not None:
+        resolved["rollout.topology.mode"] = rollout_topology.mode
+        resolved["rollout.topology.service_engine"] = rollout_topology.service_engine
+    else:
+        resolved["rollout.topology.mode"] = args.rollout.topology.mode
+        resolved["rollout.topology.service_engine"] = args.rollout.topology.service_engine
     resolved["sync.protocol"] = str(args.sync.protocol).strip().lower()
-    train_topology = resolve_training_topology(args)
-    train_plan = resolve_training_plan(args)
-    resolved["resolved.training.actor_count"] = train_topology.actor_count
-    resolved["resolved.training.world_size"] = train_topology.world_size
-    resolved["resolved.training.dp_size"] = train_topology.dp_size
-    resolved["resolved.training.tp_size"] = train_topology.tp_size
-    resolved["resolved.training.pp_size"] = train_topology.pp_size
-    resolved["resolved.training.sp_size"] = train_topology.sp_size
-    resolved["resolved.training.ep_size"] = train_topology.ep_size
-    resolved["resolved.rollout.prompts_per_rollout"] = resolve_prompts_per_rollout(args)
-    resolved["resolved.training.global_batch_size"] = train_plan.global_batch_size
-    resolved["resolved.training.local_batch_size"] = train_plan.local_batch_size
-    resolved["resolved.training.local_update_batch_size"] = (
-        train_plan.local_update_batch_size
-    )
-    resolved["resolved.training.local_micro_batch_size"] = (
-        train_plan.local_micro_batch_size
-    )
-    resolved["resolved.training.num_updates_per_local_batch"] = (
-        train_plan.num_updates_per_local_batch
-    )
+    try:
+        train_topology = derive_training_topology(args)
+    except Exception as exc:
+        train_topology = None
+        _record_resolution_error(resolved, scope="training_topology", exc=exc)
+    if train_topology is not None:
+        resolved["resolved.training.actor_count"] = train_topology.actor_count
+        resolved["resolved.training.world_size"] = train_topology.world_size
+        resolved["resolved.training.dp_size"] = train_topology.dp_size
+        resolved["resolved.training.tp_size"] = train_topology.tp_size
+        resolved["resolved.training.pp_size"] = train_topology.pp_size
+        resolved["resolved.training.sp_size"] = train_topology.sp_size
+        resolved["resolved.training.ep_size"] = train_topology.ep_size
+    try:
+        resolved["resolved.rollout.prompts_per_rollout"] = require_prompts_per_rollout(args)
+    except Exception as exc:
+        _record_resolution_error(resolved, scope="prompts_per_rollout", exc=exc)
+    try:
+        train_plan = derive_training_plan(args)
+    except Exception as exc:
+        train_plan = None
+        _record_resolution_error(resolved, scope="training_plan", exc=exc)
+    if train_plan is not None:
+        resolved["resolved.training.global_batch_size"] = train_plan.global_batch_size
+        resolved["resolved.training.local_batch_size"] = train_plan.local_batch_size
+        resolved["resolved.training.local_update_batch_size"] = (
+            train_plan.local_update_batch_size
+        )
+        resolved["resolved.training.local_micro_batch_size"] = (
+            train_plan.local_micro_batch_size
+        )
+        resolved["resolved.training.num_updates_per_local_batch"] = (
+            train_plan.num_updates_per_local_batch
+        )
     return resolved
 
 
-def _print_config_views(
-    *,
-    args: TrainingArguments,
-    print_resolved_config: bool,
-) -> None:
+def print_config_views(*, args: TrainingArguments, print_resolved_config: bool) -> None:
     if not print_resolved_config:
         return
 
     use_color = _supports_color_output()
+    print(_color("[Resolved Config] final derived values", "bold", enabled=use_color))
+    resolved_dotted = build_resolved_config_view(args)
+    for key in sorted(resolved_dotted.keys()):
+        value_text = _format_config_value(resolved_dotted.get(key))
+        print(f"  {_color(key, 'cyan', enabled=use_color)}: {value_text}")
 
-    if print_resolved_config:
-        print(_color("[Resolved Config] final runtime values", "bold", enabled=use_color))
-        resolved_flat = _build_resolved_config_view(args)
-        for key in sorted(resolved_flat.keys()):
-            value_text = _format_config_value(resolved_flat.get(key))
-            print(f"  {_color(key, 'cyan', enabled=use_color)}: {value_text}")
+
+def _merge_algorithm_kwarg_overrides(raw_args: Dict[str, Any]) -> None:
+    """Overlay repeated algorithm-specific ``--algorithm.kwarg key=value`` items."""
+    overrides = raw_args.pop("_algorithm_kwarg_overrides", None) or []
+    if not overrides:
+        return
+
+    dest = "algorithm.algorithm_kwargs"
+    merged = dict(raw_args.get(dest) or {})
+    for item in overrides:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise ValueError(
+                "Internal error: parsed --algorithm.kwarg item must be a (key, value) pair. "
+                f"Got: {item!r}"
+            )
+        key, value = item
+        merged[str(key)] = value
+    raw_args[dest] = merged
 
 
 def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
-    """Parse command line arguments and return TrainingArguments.
-
-    Supports ``--config path/to/config.yaml`` for YAML-based configuration.
-    CLI arguments override YAML values when both are provided.
-    Grouped fields in YAML must use grouped keys (for example ``training.train_backend``
-    or nested ``training: {train_backend: ...}``).
-    """
+    """Parse command line arguments and return ``TrainingArguments``."""
     parser = argparse.ArgumentParser(
         description="diffusionrl training",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-
-    # --config: YAML configuration file (parsed before other args)
     parser.add_argument(
         "--config", type=str, default=None,
         help="Path to YAML config file. CLI args override YAML values.",
@@ -1433,7 +1091,7 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
     parser.add_argument(
         "--print-resolved-config",
         action="store_true",
-        help="Print resolved runtime config after validation.",
+        help="Print resolved config after validation.",
     )
     parser.add_argument(
         "--allow-unknown-config-keys",
@@ -1441,24 +1099,59 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
         help="Allow unknown keys in --config YAML (default is fail-fast).",
     )
 
-    # Build argument groups for organized --help output
-    _arg_groups: Dict[str, argparse._ArgumentGroup] = {}
-    for field_name, field_type, default, help_text, group_key in _collect_cli_field_specs():
-        # Get or create the argument group
-        if group_key not in _arg_groups:
-            display_name = _GROUP_DISPLAY_NAMES.get(group_key, group_key)
-            _arg_groups[group_key] = parser.add_argument_group(display_name)
-        group = _arg_groups[group_key]
+    cli_field_specs = collect_cli_field_specs(
+        training_args_type=TrainingArguments,
+        group_config_names=_GROUP_CONFIG_NAMES,
+        group_config_types=_GROUP_CONFIG_TYPES,
+    )
 
-        # Build CLI option names (dotted style for grouped args).
-        option_strings = _build_cli_option_strings(field_name, group_key)
-        add_kwargs = _build_add_argument_kwargs(field_type, default, help_text, field_name=field_name)
-        add_kwargs["dest"] = field_name
+    hidden_cli_destinations = {
+        "algorithm.algorithm_kwargs",
+    }
+
+    arg_groups: Dict[str, argparse._ArgumentGroup] = {}
+    for field_name, field_type, default, help_text, group_key in cli_field_specs:
+        dest = f"{group_key}.{field_name}" if group_key else field_name
+        if dest in hidden_cli_destinations:
+            continue
+        if group_key not in arg_groups:
+            display_name = GROUP_DISPLAY_NAMES.get(group_key, group_key)
+            arg_groups[group_key] = parser.add_argument_group(display_name)
+        group = arg_groups[group_key]
+
+        option_strings = build_cli_option_strings(field_name, group_key)
+        add_kwargs = build_add_argument_kwargs(
+            field_type,
+            default,
+            help_text,
+            field_name=field_name,
+        )
+        add_kwargs["dest"] = dest
         group.add_argument(*option_strings, **add_kwargs)
+
+    algorithm_group = arg_groups.get("algorithm")
+    if algorithm_group is None:
+        algorithm_group = parser.add_argument_group(
+            GROUP_DISPLAY_NAMES.get("algorithm", "Algorithm & Advantage")
+        )
+        arg_groups["algorithm"] = algorithm_group
+    algorithm_group.add_argument(
+        "--algorithm.kwarg",
+        dest="_algorithm_kwarg_overrides",
+        action="append",
+        default=[],
+        type=parse_cli_key_value,
+        metavar="KEY=VALUE",
+        help=(
+            "Append one algorithm-specific algorithm.algorithm_kwargs override. "
+            "Shared framework-owned keys must use dedicated --algorithm.* flags. "
+            "Repeat this flag to set multiple extension keys."
+        ),
+    )
 
     cli_argv = list(argv) if argv is not None else sys.argv[1:]
     parsed_args = parser.parse_args(cli_argv)
-    explicit_cli_keys = _collect_explicit_cli_destinations(cli_argv, parser)
+    explicit_cli_keys = collect_explicit_cli_destinations(cli_argv, parser)
     action_by_dest = {
         action.dest: action for action in parser._actions if getattr(action, "dest", None)
     }
@@ -1467,7 +1160,6 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
     print_resolved_config = bool(raw_args.get("print_resolved_config", False))
     allow_unknown_config_keys = bool(raw_args.get("allow_unknown_config_keys", False))
 
-    # YAML config merging: CLI values take precedence over YAML
     if raw_args.get("config"):
         defaults: Dict[str, Any] = {}
         for action in parser._actions:
@@ -1475,39 +1167,47 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
             if not dest or dest == "help" or dest in defaults:
                 continue
             defaults[dest] = action.default
-        yaml_data = _load_yaml_mapping(raw_args["config"])
-        _merge_yaml_overrides(
+        defaults.setdefault("algorithm.algorithm_kwargs", {})
+        yaml_data = load_yaml_mapping(raw_args["config"])
+        merge_yaml_overrides(
             raw_args,
-            yaml_data,
-            defaults,
-            explicit_cli_keys,
+            yaml_data=yaml_data,
+            defaults=defaults,
+            explicit_cli_keys=explicit_cli_keys,
             action_by_dest=action_by_dest,
             allow_unknown_config_keys=allow_unknown_config_keys,
+            top_level_field_names=_TOP_LEVEL_FIELD_NAMES,
+            group_config_names=_GROUP_CONFIG_NAMES,
+            group_subconfig_names=_GROUP_SUBCONFIG_NAMES,
         )
 
-    # Remove --config from raw_args (not a TrainingArguments field)
     raw_args.pop("config", None)
     raw_args.pop("print_resolved_config", None)
     raw_args.pop("allow_unknown_config_keys", None)
+    _merge_algorithm_kwarg_overrides(raw_args)
 
     grouped_kwargs: Dict[str, Dict[str, Any]] = {name: {} for name in _GROUP_CONFIG_TYPES}
-    # sub_kwargs: group_name -> sub_field_name -> {leaf_field: value}
     sub_kwargs: Dict[str, Dict[str, Dict[str, Any]]] = {}
     top_level_kwargs: Dict[str, Any] = {}
     for key, value in raw_args.items():
-        path = _FLAT_FIELD_PATH_INDEX.get(key)
-        if path is not None:
-            group_name, sub_name = path
-            if sub_name is not None:
-                sub_kwargs.setdefault(group_name, {}).setdefault(sub_name, {})[key] = value
+        if "." in key:
+            parts = key.split(".")
+            group_name = parts[0]
+            if len(parts) == 2 and group_name in _GROUP_CONFIG_TYPES:
+                grouped_kwargs[group_name][parts[1]] = value
+            elif (
+                len(parts) == 3
+                and group_name in _GROUP_CONFIG_TYPES
+                and parts[1] in _GROUP_SUBCONFIG_NAMES.get(group_name, set())
+            ):
+                sub_kwargs.setdefault(group_name, {}).setdefault(parts[1], {})[parts[2]] = value
             else:
-                grouped_kwargs[group_name][key] = value
+                top_level_kwargs[key] = value
         else:
             top_level_kwargs[key] = value
 
     for group_name, group_type in _GROUP_CONFIG_TYPES.items():
         kwargs = dict(grouped_kwargs[group_name])
-        # Build sub-dataclass instances
         for info in fields(group_type):
             ft = info.type
             if isinstance(ft, type) and is_dataclass(ft):
@@ -1516,127 +1216,81 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
         top_level_kwargs[group_name] = group_type(**kwargs)
 
     args = TrainingArguments(**top_level_kwargs)
-
-    # Validate explicit config. Runtime builders derive resolved values separately.
     args = validate_args(args)
-    _print_config_views(
-        args=args,
-        print_resolved_config=print_resolved_config,
-    )
-
+    print_config_views(args=args, print_resolved_config=print_resolved_config)
     return args
 
-
-def _validate_train_only_dotpaths(
-    args: TrainingArguments,
-    *,
-    explicit_sampler_path: bool,
-) -> None:
-    """Validate only the imports exercised by debug_mode=train_only."""
-    resolved_model = resolve_model_runtime(
-        args,
-        explicit_sampler_path=explicit_sampler_path,
-    )
-    validate_dotpath(resolved_model.model_path, label="model")
-    validate_dotpath(resolved_model.sampler_path, label="sampler")
-    validate_dotpath(resolve_algorithm_path(args), label="algorithm")
-    if getattr(args.training, "train_backend_path", None):
-        validate_dotpath(args.training.train_backend_path, label="train_backend")
-    if getattr(args.sampling, "replay_sampler_path", None):
-        validate_dotpath(args.sampling.replay_sampler_path, label="replay_sampler")
-
-
-def validate_args(
-    args: TrainingArguments,
-) -> TrainingArguments:
-    """
-    Validate arguments without mutating the original config values.
-
-    Args:
-        args: TrainingArguments instance to validate
-
-    Returns:
-        Validated TrainingArguments
-    """
-    explicit_sampler_path = args.sampling.sampler_path != DEFAULT_SAMPLER_PATH
-
+def validate_args(args: TrainingArguments) -> TrainingArguments:
+    """Validate arguments without mutating the original config values."""
     validate_grouped_configs(args)
-    debug_mode = validate_debug_config(args)
+    debug_mode = args.debug.debug_mode
 
-    resolved_model = resolve_model_runtime(
-        args,
-        explicit_sampler_path=explicit_sampler_path,
-    )
+    resolved_model = derive_model_spec(args)
     model_cls = resolved_model.model_cls
-    rollout_topology = validate_rollout_topology_contract(args)
-    training_actor_sampling_mode = rollout_topology.training_actor_sampling_mode
-    is_sglang_engine, logprob_source = validate_sampling_basics(
-        args,
-        rollout_service_engine=rollout_topology.service_engine,
-    )
+    backend_config = resolve_train_backend_config_from_args(args)
+    backend_name = backend_config.name
+    rollout_mode_info = derive_rollout_mode_info(args)
     validate_algorithm_kwargs_payload(args)
     validate_algorithm_path(args)
-    validate_train_backend_config(args)
-    from diffusionrl.training.backends import resolve_train_backend_capabilities_from_args
-
-    backend_capabilities = resolve_train_backend_capabilities_from_args(args)
+    validate_train_backend_config(
+        backend_name=backend_name,
+        backend_kwargs=backend_config.kwargs,
+        backend_path=backend_config.backend_path,
+    )
+    backend_capabilities = resolve_train_backend_capabilities_from_config(
+        backend_config
+    ).as_dict()
+    validate_rollout_mode(
+        args,
+        rollout_mode_info=rollout_mode_info,
+        backend_capabilities=backend_capabilities,
+        backend_name=backend_name,
+    )
+    rollout_topology = rollout_mode_info.rollout_topology
+    training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
+    is_sglang_engine = rollout_mode_info.is_sglang_engine
+    logprob_source = rollout_mode_info.logprob_source
+    replay_guard = rollout_mode_info.replay_guard
     if debug_mode == "train_only":
-        # Keep train_only focused on train-side imports only. Rollout/reward/data
-        # extensions are not exercised on this path and should not block replay.
-        _validate_train_only_dotpaths(
+        validate_dynamic_dotpaths(
             args,
-            explicit_sampler_path=explicit_sampler_path,
+            resolved_model=resolved_model,
+            include_data_source=False,
+            include_rollout_buffer_plugins=False,
         )
     else:
-        validate_dynamic_dotpaths(args)
-    validate_training_actor_sampling_mode(
-        args,
-        training_actor_sampling_mode=training_actor_sampling_mode,
-        backend_capabilities=backend_capabilities,
-    )
-    replay_guard, _, logprob_source = validate_replay_mode(
-        args,
-        training_actor_sampling_mode=training_actor_sampling_mode,
-        is_sglang_engine=is_sglang_engine,
-        logprob_source=logprob_source,
-    )
-    validate_offload_and_colocate_config(
-        args,
-        training_actor_sampling_mode=training_actor_sampling_mode,
-    )
+        validate_dynamic_dotpaths(args, resolved_model=resolved_model)
 
     if debug_mode != "train_only":
         validate_reward_and_rollout_buffer_config(args)
         validate_rollout_layout(
             args,
-            training_actor_sampling_mode=training_actor_sampling_mode,
+            rollout_mode_info=rollout_mode_info,
         )
+    validate_training_batch_geometry(args)
     validate_training_misc(args)
-    validate_direct_sampling_batch_geometry(
-        args,
-        training_actor_sampling_mode=training_actor_sampling_mode,
-    )
     apply_model_config_hook(args, model_cls=model_cls)
-    validate_model_runtime_contract(args)
+    validate_model_sampling_contract(args)
     validate_nft_sampling_contract(args)
     if debug_mode != "train_only":
+        validation_algorithm = instantiate_algorithm_from_config(build_algorithm_config(args))
+        sampling_requirements = collect_sampling_requirements(algorithm=validation_algorithm)
         validate_resolved_engine_algorithm_contract(
             args,
             training_actor_sampling_mode=training_actor_sampling_mode,
             is_sglang_engine=is_sglang_engine,
             replay_guard=replay_guard,
             logprob_source=logprob_source,
+            sampling_requirements=sampling_requirements,
+            rollout_topology=rollout_topology,
         )
 
-    validate_weight_sync(
-        args,
-        training_actor_sampling_mode=training_actor_sampling_mode,
-    )
     if debug_mode != "train_only":
-        validate_runtime_mode_constraints(
+        validate_rollout_mode_constraints(
             args,
             training_actor_sampling_mode=training_actor_sampling_mode,
             model_cls=model_cls,
+            rollout_topology=rollout_topology,
         )
 
     return args

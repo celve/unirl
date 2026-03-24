@@ -14,6 +14,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
+from diffusionrl.algorithms.construction import instantiate_algorithm_from_config
 from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
 from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.types.sde import SDEScheduleConfig
@@ -636,43 +637,20 @@ class TrainingActor(BaseTrainRayActor):
         else:
             self.lr_scheduler = None
 
-    _ALGORITHM_RUNTIME_KEYS = {
-        "shuffle_samples",
-        "shuffle_seed",
-    }
-
-    @classmethod
-    def _extract_runtime_algorithm_kwargs(cls, algorithm_config: dict) -> dict:
-        """Extract actor-runtime-only algorithm kwargs from config payload."""
-        runtime_kwargs: Dict[str, Any] = {}
-        algorithm_kwargs = algorithm_config.get("algorithm_kwargs")
-        if isinstance(algorithm_kwargs, dict):
-            for key, value in algorithm_kwargs.items():
-                if key in cls._ALGORITHM_RUNTIME_KEYS:
-                    runtime_kwargs[key] = value
-        return runtime_kwargs
-
     def _load_algorithm(self, algorithm_config: dict) -> None:
         """Load the train-side Algorithm instance."""
         self._algorithm_type = str(algorithm_config["algorithm_type"])
         self._algorithm_path = str(algorithm_config["algorithm_path"])
         self._guidance_scale = float(algorithm_config["guidance_scale"])
 
-        runtime_algorithm_kwargs = self._extract_runtime_algorithm_kwargs(algorithm_config)
-        self._shuffle_samples = bool(runtime_algorithm_kwargs.get("shuffle_samples", True))
-        raw_shuffle_seed = runtime_algorithm_kwargs.get("shuffle_seed", None)
+        self._shuffle_samples = bool(algorithm_config.get("shuffle_samples", True))
+        raw_shuffle_seed = algorithm_config.get("shuffle_seed", None)
         self._shuffle_seed = int(raw_shuffle_seed) if raw_shuffle_seed is not None else None
 
         if not self._algorithm_path:
             raise ValueError("algorithm_config.algorithm_path must be set before TrainingActor.init.")
 
-        algorithm_cls = load_function(self._algorithm_path)
-        from_config = getattr(algorithm_cls, "from_config", None)
-        if not callable(from_config):
-            raise TypeError(
-                f"Algorithm {self._algorithm_path} must implement classmethod from_config(config)."
-            )
-        self.algorithm = from_config(algorithm_config)
+        self.algorithm = instantiate_algorithm_from_config(algorithm_config)
 
         logger.info(
             "Rank %s: Train-side algorithm loaded from %s (type=%s)",

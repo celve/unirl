@@ -6,10 +6,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import ray
 import torch
 
-from diffusionrl.config.build_domain_args import (
-    build_sampling_config,
+from diffusionrl.algorithms.construction import instantiate_algorithm_from_config
+from diffusionrl.config.runtime_bootstrap import ResolvedRuntimeConfig
+from diffusionrl.config.resolution import (
+    collect_sampling_requirements,
 )
-from diffusionrl.config.resolution import resolve_prompts_per_rollout, resolve_sampling_requirements
 from diffusionrl.orchestration import EvalRunner
 from diffusionrl.orchestration.request_builder import (
     RolloutRequestBuilder,
@@ -50,7 +51,7 @@ class RolloutManager:
         args,
         reward_pg_result: Optional[Tuple] = None,
         *,
-        algorithm_config: Dict[str, Any],
+        runtime_config: ResolvedRuntimeConfig,
     ):
         """
         Initialize RolloutManager.
@@ -78,15 +79,17 @@ class RolloutManager:
         self._total_samples_generated = 0
         self._sampling_requirements = None
         self._last_rollout_metadata: Dict[str, Any] = {}
-        self._sampling_config = build_sampling_config(args)
+        if not isinstance(runtime_config, ResolvedRuntimeConfig):
+            raise ValueError(
+                "RolloutManager requires a ResolvedRuntimeConfig built on the driver."
+            )
+        self._sampling_config = dict(runtime_config.training_sampling_config)
         self._request_builder = RolloutRequestBuilder.from_args(
             args,
             sampling_defaults=self._sampling_config,
         )
-        if not isinstance(algorithm_config, dict):
-            raise ValueError("RolloutManager requires a non-empty algorithm_config dict from the driver.")
-        self._algorithm_config = dict(algorithm_config)
-        self._prompt_batch_size = int(resolve_prompts_per_rollout(self.args))
+        self._algorithm_config = dict(runtime_config.algorithm_config)
+        self._prompt_batch_size = int(self._algorithm_config["prompts_per_rollout"])
 
     def init(self) -> None:  # [PUBLIC-API → create_rollout_manager()] 初始化全部子组件
         """
@@ -98,16 +101,11 @@ class RolloutManager:
 
         # 1. Load algorithm
         algorithm_path = str(self._algorithm_config["algorithm_path"])
-        algorithm_cls = load_function(algorithm_path)
-        if not hasattr(algorithm_cls, "from_config"):
-            raise TypeError(
-                f"Algorithm {algorithm_path} must implement classmethod from_config(config)."
-            )
-        self.algorithm = algorithm_cls.from_config(self._algorithm_config)
-        self._sampling_requirements = resolve_sampling_requirements(self.args, algorithm=self.algorithm)
+        self.algorithm = instantiate_algorithm_from_config(self._algorithm_config)
+        self._sampling_requirements = collect_sampling_requirements(algorithm=self.algorithm)
         logger.info(
             f"Algorithm loaded: {algorithm_path} "
-            f"(clip_max={self.args.algorithm.adv_clip_abs}, "
+            f"(clip_max={getattr(self.algorithm, 'clip_max', 'N/A')}, "
             f"sde_ratio={dict(self._algorithm_config.get('sde_schedule_config') or {}).get('sde_ratio', 'N/A')})"
         )
         requests_per_rollout = self._request_builder.estimate_request_batches(
@@ -220,7 +218,7 @@ class RolloutManager:
         # 2. Get algorithm requirements to determine pipeline
         requirements = self._sampling_requirements
         if requirements is None:
-            requirements = resolve_sampling_requirements(self.args, algorithm=self.algorithm)
+            requirements = collect_sampling_requirements(algorithm=self.algorithm)
             self._sampling_requirements = requirements
         actor_group = self.sampling_group
         if actor_group is None:
@@ -436,27 +434,27 @@ class RolloutManager:
         prompts_per_rollout = self._prompt_batch_size
         drop_last = bool(getattr(self.data_source, "drop_last", False))
         info: Dict[str, Any] = {
-            "num_samples": 0,
+            "num_prompts": 0,
             "prompts_per_rollout": prompts_per_rollout,
             "estimated_steps_per_dataset_pass": 0,
             "steps_before_reset": 0,
-            "remainder_samples": 0,
+            "remainder_prompts": 0,
             "drop_last": drop_last,
             "exact_dataset_pass_per_cycle": False,
         }
 
-        if self.data_source is None or not hasattr(self.data_source, "num_samples"):
+        if self.data_source is None or not hasattr(self.data_source, "num_prompts"):
             return info
 
-        num_samples = int(self.data_source.num_samples)
-        info["num_samples"] = num_samples
-        if num_samples <= 0:
+        num_prompts = int(self.data_source.num_prompts)
+        info["num_prompts"] = num_prompts
+        if num_prompts <= 0:
             return info
 
-        estimated_steps = (num_samples + prompts_per_rollout - 1) // prompts_per_rollout
-        remainder = num_samples % prompts_per_rollout
+        estimated_steps = (num_prompts + prompts_per_rollout - 1) // prompts_per_rollout
+        remainder = num_prompts % prompts_per_rollout
         if drop_last:
-            steps_before_reset = num_samples // prompts_per_rollout
+            steps_before_reset = num_prompts // prompts_per_rollout
         else:
             steps_before_reset = estimated_steps
 
@@ -464,7 +462,7 @@ class RolloutManager:
             {
                 "estimated_steps_per_dataset_pass": int(estimated_steps),
                 "steps_before_reset": int(steps_before_reset),
-                "remainder_samples": int(remainder),
+                "remainder_prompts": int(remainder),
                 "exact_dataset_pass_per_cycle": bool(
                     remainder == 0 and steps_before_reset == estimated_steps
                 ),
@@ -496,7 +494,7 @@ def create_rollout_manager(  # [PUBLIC-API → train.py] 工厂：创建 + init 
     args,
     reward_pg_result: Optional[Tuple] = None,
     *,
-    algorithm_config: Dict[str, Any],
+    runtime_config: ResolvedRuntimeConfig,
 ) -> Tuple[ray.ObjectRef, Dict[str, Any]]:
     """
     Factory function to create RolloutManager.
@@ -508,13 +506,15 @@ def create_rollout_manager(  # [PUBLIC-API → train.py] 工厂：创建 + init 
     Returns:
         Tuple of (RolloutManager actor handle, dataset step info)
     """
-    if not isinstance(algorithm_config, dict):
-        raise ValueError("create_rollout_manager requires algorithm_config to be built by the driver.")
+    if not isinstance(runtime_config, ResolvedRuntimeConfig):
+        raise ValueError(
+            "create_rollout_manager requires ResolvedRuntimeConfig to be built by the driver."
+        )
 
     rollout_manager = RolloutManager.options(
         num_cpus=1,
         num_gpus=0,
-    ).remote(args, reward_pg_result, algorithm_config=algorithm_config)
+    ).remote(args, reward_pg_result, runtime_config=runtime_config)
 
     # Initialize
     ray.get(rollout_manager.init.remote())

@@ -3,27 +3,28 @@
 diffusionrl Training Entry Point.
 
 Usage:
-    python -m diffusionrl.train --pretrained-model-saved-path /path/to/model --num-rollout 100
+    python -m diffusionrl.train --config scripts/example_flux_dancegrpo_direct.yaml
 """
 import logging
-import os
-import re
 import time
 
-from diffusionrl.config import parse_args
-from diffusionrl.config.arguments import is_training_actor_sampling_mode
-from diffusionrl.config.resolution import resolve_rollout_topology
-from diffusionrl.config.rollout_topology import runtime_mode_label_for_rollout_mode
-from diffusionrl.config.validation import (
-    validate_training_actor_sampling_mode,
-    validate_weight_sync,
+from diffusionrl.config import (
+    build_resolved_config_view,
+    parse_args,
 )
-from diffusionrl.training.backends import resolve_train_backend_capabilities_from_args
+from diffusionrl.config.runtime_bootstrap import resolve_runtime_config
+from diffusionrl.config.resolution import (
+    rollout_mode_label,
+)
+from diffusionrl.config.validation import (
+    validate_rollout_mode,
+)
 from diffusionrl.utils.train_utils import (
     RolloutSDEController,
     build_control_algorithm,
     collect_rollout_batch_metrics,
     create_rollout_timestep_scheduler,
+    maybe_restore_start_rollout_id_from_checkpoint,
     should_eval,
     should_log,
     should_save,
@@ -132,7 +133,7 @@ def _produce_and_push_rollout(
 
 def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步训练循环
     """Synchronous training entrypoint."""
-    debug_mode = str(getattr(args.debug, "debug_mode", "none") or "none").strip().lower()
+    debug_mode = str(args.debug.debug_mode or "none").strip().lower()
     if debug_mode == "train_only":
         from diffusionrl.debug import run_debug_train_only
 
@@ -142,7 +143,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
     from diffusionrl.ray.group_factory import create_rollout_actor_group, create_training_actor_group
     from diffusionrl.ray.group_runtime import RolloutGroupRuntime, TrainingGroupRuntime
-    from diffusionrl.ray.placement_group import create_placement_groups_from_args
+    from diffusionrl.ray.placement_group import create_placement_groups_from_runtime
     from diffusionrl.ray.buffer_actor import create_buffer_actor
     from diffusionrl.ray.rollout_manager import create_rollout_manager
     from diffusionrl.utils import configure_logger, set_seed
@@ -156,43 +157,46 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
     configure_logger()
     set_seed(args.seed)
-    training_actor_sampling_mode = is_training_actor_sampling_mode(args)
-    algorithm_config, control_algorithm = build_control_algorithm(args)
-    rollout_topology = resolve_rollout_topology(args)
-    backend_capabilities = resolve_train_backend_capabilities_from_args(args)
-    validate_training_actor_sampling_mode(
+    runtime_config = resolve_runtime_config(args)
+    algorithm_config, control_algorithm = build_control_algorithm(runtime_config.algorithm_config)
+    rollout_mode_info = runtime_config.rollout_mode_info
+    validate_rollout_mode(
         args,
-        training_actor_sampling_mode=rollout_topology.training_actor_sampling_mode,
-        backend_capabilities=backend_capabilities,
+        rollout_mode_info=rollout_mode_info,
+        backend_capabilities=runtime_config.training.backend_capabilities,
+        backend_name=runtime_config.training.backend_name,
     )
-    sync_mode = str(args.sync.protocol).strip().lower()
-    validate_weight_sync(
-        args,
-        training_actor_sampling_mode=rollout_topology.training_actor_sampling_mode,
-    )
-    runtime_mode_label = runtime_mode_label_for_rollout_mode(rollout_topology.mode)
+    rollout_topology = rollout_mode_info.rollout_topology
+    training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
+    sync_mode = rollout_mode_info.sync_protocol
+    rollout_mode_name = rollout_mode_label(rollout_topology.mode)
     rollout_sde_controller = RolloutSDEController(
         algorithm=control_algorithm,
         timestep_scheduler=create_rollout_timestep_scheduler(args, algorithm=control_algorithm),
     )
+    rollout_control = args.rollout.control
+    rollout_artifacts = args.rollout.artifacts
+    rollout_evaluation = args.rollout.evaluation
+    rollout_logging = args.rollout.logging
+    rollout_buffer_settings = args.rollout.buffer
 
     logger.info("Starting diffusionRL training...")
     logger.info(f"Model: {args.model.pretrained_model_saved_path}")
     logger.info(f"Algorithm: {algorithm_config['algorithm_path']}")
-    logger.info(f"Mode: {runtime_mode_label}")
+    logger.info(f"Mode: {rollout_mode_name}")
     logger.info(f"Offload train: {args.ray.offload_train}, Offload rollout: {args.ray.offload_rollout}")
     logger.info("Weight sync mode: %s", sync_mode)
     logger.info(
         "Periodic controls: save_steps=%s eval_steps=%s logging_steps=%s",
-        args.rollout.save_steps,
-        args.rollout.eval_steps,
-        args.rollout.logging_steps,
+        rollout_artifacts.save_steps,
+        rollout_evaluation.eval_steps,
+        rollout_logging.logging_steps,
     )
     logger.info(
         "Debug flags: mode=%s save_intermediates=%s save_dir=%s",
         debug_mode,
-        bool(getattr(args.debug, "debug_save_intermediates", False)),
-        getattr(args.debug, "debug_save_dir", ""),
+        bool(args.debug.debug_save_intermediates),
+        args.debug.debug_save_dir,
     )
 
     # Initialize Ray
@@ -209,22 +213,22 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
     rollout_runtime = None
     training_group = None
     training_runtime = None
-    weight_sync = create_weight_sync(args, mode=sync_mode)
+    weight_sync = create_weight_sync(args, runtime_config, mode=sync_mode)
 
     try:
-        if args.rollout.report_to_wandb and args.rollout.project_name:
-            wandb_tags_str = getattr(args.rollout, "wandb_tags", None)
+        if rollout_logging.report_to_wandb and rollout_logging.project_name:
+            wandb_tags_str = rollout_logging.wandb_tags
             wandb_tags = (
                 [t.strip() for t in wandb_tags_str.split(",") if t.strip()]
                 if wandb_tags_str
                 else None
             )
-            wandb_entity = getattr(args.rollout, "wandb_entity", None) or None
+            wandb_entity = rollout_logging.wandb_entity or None
             wandb_logger = init_logger(
-                project=args.rollout.project_name,
-                run_name=args.rollout.run_name,
-                config=args.to_flat_dict() if hasattr(args, "to_flat_dict") else vars(args),
-                log_dir=getattr(args.rollout, "logging_dir", None),
+                project=rollout_logging.project_name,
+                run_name=rollout_logging.run_name,
+                config=build_resolved_config_view(args),
+                log_dir=rollout_logging.logging_dir,
                 rank=0,
                 tags=wandb_tags,
                 entity=wandb_entity,
@@ -233,12 +237,12 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             if wandb_logger.initialized:
                 logger.info(
                     "WandB initialized: project=%s, run=%s",
-                    args.rollout.project_name,
-                    args.rollout.run_name,
+                    rollout_logging.project_name,
+                    rollout_logging.run_name,
                 )
 
         # 1. Resource allocation
-        pgs = create_placement_groups_from_args(args)
+        pgs = create_placement_groups_from_runtime(runtime_config)
         logger.info("Placement groups created")
 
         rollout_on_gpu = True
@@ -247,14 +251,14 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
         rollout_manager, dataset_step_info = create_rollout_manager(
             args,
             reward_pg_result=pgs.get("reward"),
-            algorithm_config=algorithm_config,
+            runtime_config=runtime_config,
         )
         logger.info("Rollout manager created")
-        if dataset_step_info.get("num_samples", 0) > 0:
+        if dataset_step_info.get("num_prompts", 0) > 0:
             logger.info(
-                "Dataset step info: num_samples=%s prompts_per_rollout=%s "
+                "Dataset step info: num_prompts=%s prompts_per_rollout=%s "
                 "estimated_steps_per_dataset_pass=%s steps_before_reset=%s",
-                dataset_step_info.get("num_samples"),
+                dataset_step_info.get("num_prompts"),
                 dataset_step_info.get("prompts_per_rollout"),
                 dataset_step_info.get("estimated_steps_per_dataset_pass"),
                 dataset_step_info.get("steps_before_reset"),
@@ -262,17 +266,18 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             if not dataset_step_info.get("exact_dataset_pass_per_cycle", False):
                 logger.warning(
                     "Dataset pass is not exact under current data-source batching: "
-                    "drop_last=%s remainder_samples=%s. "
-                    "One reset cycle will not cover the full dataset exactly once.",
+                    "drop_last=%s remainder_prompts=%s. "
+                    "The data source will drop trailing prompts rather than emit a short rollout batch, "
+                    "so one reset cycle will not cover the full dataset exactly once.",
                     dataset_step_info.get("drop_last"),
-                    dataset_step_info.get("remainder_samples"),
+                    dataset_step_info.get("remainder_prompts"),
                 )
 
         if not training_actor_sampling_mode:
             rollout_pg_result = pgs.get("rollout")
             if rollout_pg_result is None:
                 raise ValueError("Missing rollout placement-group allocation.")
-            rollout_group = create_rollout_actor_group(args, rollout_pg_result)
+            rollout_group = create_rollout_actor_group(runtime_config, rollout_pg_result)
             rollout_runtime = RolloutGroupRuntime.from_group(rollout_group)
             ray.get(rollout_manager.attach_sampling_group.remote(rollout_group))
             logger.info("Rollout actor group created and attached")
@@ -287,23 +292,23 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
         if training_pg_result is None:
             raise ValueError("Missing training placement-group allocation.")
         training_group = create_training_actor_group(
-            args,
+            runtime_config,
             training_pg_result,
-            algorithm_config=algorithm_config,
         )
         training_runtime = TrainingGroupRuntime.from_group(training_group)
-        resume_from_checkpoint = getattr(args.rollout, "resume_from_checkpoint", None)
+        resume_from_checkpoint = rollout_artifacts.resume_from_checkpoint
         if resume_from_checkpoint:
             training_runtime.load_checkpoint(resume_from_checkpoint)
             logger.info("Checkpoint loaded: %s", resume_from_checkpoint)
-            if int(getattr(args.rollout, "start_rollout_id", 0)) == 0:
-                match = re.search(r"checkpoint-(\d+)$", os.path.basename(os.path.normpath(resume_from_checkpoint)))
-                if match:
-                    args.rollout.start_rollout_id = int(match.group(1)) + 1
-                    logger.info(
-                        "Auto-set start_rollout_id=%s from checkpoint path.",
-                        args.rollout.start_rollout_id,
-                    )
+            restored_rollout_id = maybe_restore_start_rollout_id_from_checkpoint(
+                args,
+                resume_from_checkpoint,
+            )
+            if restored_rollout_id is not None:
+                logger.info(
+                    "Auto-set start_rollout_id=%s from checkpoint path.",
+                    restored_rollout_id,
+                )
         train_backend_info = training_runtime.get_train_backend_info()
         expected_global_batch_size = training_runtime.get_expected_global_batch_size()
         logger.info("Training actor group created")
@@ -346,26 +351,25 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             rollout_runtime=rollout_runtime,
         )
 
-        debug_save_intermediates = bool(getattr(args.debug, "debug_save_intermediates", False))
+        debug_save_intermediates = bool(args.debug.debug_save_intermediates)
 
         # 10. Core synchronous training loop
-        enforce_rollout_alignment = not bool(getattr(args.rollout, "rollout_buffer_reassemble_by_group", False))
+        rollout_control = args.rollout.control
+        enforce_rollout_alignment = not bool(rollout_buffer_settings.reassemble_by_group)
         save_rollout_debug_payload = None
         if debug_save_intermediates:
             from diffusionrl.debug.runner import save_rollout_debug_payload as _save_rollout_debug_payload
 
             save_rollout_debug_payload = _save_rollout_debug_payload
 
-        wandb_media_enabled = bool(
-            wandb_logger is not None and bool(getattr(args.rollout, "wandb_log_media", False))
-        )
-        wandb_media_max_items = max(1, int(getattr(args.rollout, "wandb_media_max_items", 8)))
+        wandb_media_enabled = bool(wandb_logger is not None and bool(rollout_logging.wandb_log_media))
+        wandb_media_max_items = max(1, int(rollout_logging.wandb_media_max_items))
 
         # rollout_id is the outer rollout-train loop step; it behaves similarly to
         # a framework-level global step, but may differ from optimizer step count.
         # global_optimizer_step tracks real optimizer step for wandb logging
         global_optimizer_step = 0
-        for rollout_id in range(args.rollout.start_rollout_id, args.rollout.num_rollout):
+        for rollout_id in range(rollout_control.start_rollout_id, rollout_control.num_rollout):
             step_start_t = time.perf_counter()
             sync_result = None
             sync_phase_s = 0.0
@@ -418,7 +422,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
             # Periodic: save (before offload to ensure model is on GPU)
             if should_save(rollout_id, args):
-                save_path = f"{args.rollout.output_dir}/checkpoint-{rollout_id}"
+                save_path = f"{rollout_artifacts.output_dir}/checkpoint-{rollout_id}"
                 training_runtime.save_model(save_path)
                 logger.info(f"Checkpoint saved: {save_path}")
 
@@ -427,7 +431,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
             if (
                 not training_actor_sampling_mode
-                and (rollout_id + 1) % args.rollout.update_weights_interval == 0
+                and (rollout_id + 1) % rollout_control.update_weights_interval == 0
             ):
                 sync_phase_start_t = time.perf_counter()
                 sync_result = weight_sync.sync(rollout_id=rollout_id)
