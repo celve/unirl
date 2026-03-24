@@ -1,14 +1,5 @@
-# =============================================================================
-# DanceGRPO FLUX - Minimal Config (grouped YAML style)
-# =============================================================================
-# Tiny sanity-check config. For fuller researcher examples, start from
-# scripts/*.sh or scripts/example_*.yaml.
-#
-# Usage: python -m diffusionrl.train --config scripts/minimal_flux.yaml
-#
-# Override via dotted CLI:
-#   python -m diffusionrl.train --config scripts/minimal_flux.yaml --rollout.control.num-rollout 100
-# =============================================================================
+# Auxiliary committed example for grouped-YAML editing.
+# Primary researcher entrypoint remains scripts/train_dancegrpo_flux_sglang_separate.sh.
 
 model:
   model_type: flux
@@ -21,23 +12,28 @@ sampling:
   num_inference_steps: 25
   guidance_scale: 3.5
   timestep_fraction: 0.6
+  logprob_source: replay
+  replay_log_probs: true
 
 reward:
   reward_model_name: ocr
 
 algorithm:
   algorithm_type: grpo
-  prompts_per_rollout: 1
+  prompts_per_rollout: 4
   samples_per_prompt: 4
+  shuffle_seed: 42
+  shuffle_samples: true
   adv_normalization: group
   adv_clip_abs: 5.0
+  eval_ema_decay: 0.9
+  eval_ema_update_interval: 1
   algorithm_kwargs:
     clip_range: 0.0001
     use_kl_penalty: false
 
 training:
   local_micro_batch_size: 1
-  num_updates_per_local_batch: 1
   learning_rate: 0.00001
   max_grad_norm: 1.0
   weight_decay: 0.0001
@@ -46,26 +42,28 @@ training:
   lora_alpha: 32
 
 ray:
-  rollout_num_nodes: 0
-  rollout_num_gpus_per_node: 0
+  rollout_num_gpus_per_node: 4
   training_num_gpus_per_node: 4
   placement_strategy: SPREAD
 
 rollout:
   topology:
-    mode: direct_rollout
+    mode: separate_rollout
+    service_engine: sglang
+    service_num_gpus: 1
+    engine_tp_size: 1
   control:
     num_rollout: 300
   artifacts:
     save_steps: 40
-    output_dir: outputs/dancegrpo_flux_direct
+    output_dir: outputs/scripts_example_flux_dancegrpo_sglang_separate
   logging:
     logging_steps: 10
 
 sync:
-  protocol: disabled
+  protocol: tensor_payload
 
 data_source_path: diffusionrl.data.data_source.ImageRLDataSource
-data_path: data/samples/prompts_toy.json
+data_path: data/samples/ocr_prompts_toy.json
 height: 256
 width: 256

@@ -17,7 +17,7 @@
 #   - Disadvantage: no async overlap between sampling and training
 #
 # ENGINE: FSDP (via training actors)
-#   When rollout.mode='direct_rollout', the TrainingActor lazy-loads VAE and
+#   When rollout.topology.mode='direct_rollout', the TrainingActor lazy-loads VAE and
 #   text encoder, then uses the FSDP-wrapped transformer to sample.
 #   Log_prob is computed during sampling (needed for GRPO).
 #
@@ -27,7 +27,7 @@
 #               → compute advantage → GRPO train → sync weights
 #
 #   This script: Ray actors, each training actor does the same loop.
-#               rollout.mode='direct_rollout' → training actors call generate()
+#               rollout.topology.mode='direct_rollout' → training actors call generate()
 #               with the same FSDP model they use for training.
 #
 # ALIGNMENT with DanceGRPO:
@@ -140,6 +140,16 @@ SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+DANCEGRPO_ALGO_KWARG_ARGS=(
+    --algorithm.shuffle-seed "${SHUFFLE_SEED}"
+    --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}"
+    --algorithm.kwarg "clip_range=1e-4"
+    --algorithm.kwarg "use_kl_penalty=false"
+    --algorithm.adv-normalization "group"
+    --algorithm.adv-clip-abs "5.0"
+    --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}"
+    --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}"
+)
 
 # Note: shell-level path existence check removed. The Python-level fallback in
 # arguments.py handles missing local paths by falling back to HuggingFace IDs.
@@ -150,23 +160,9 @@ if [ ! -f "${DATA_PATH}" ]; then
     echo "Set DATA_PATH to an existing prompt file (recommended: ${REPO_ROOT}/data/samples/video_prompts_toy.txt)."
     exit 1
 fi
-
-# Validate batch geometry
 TOTAL_SAMPLES=$((PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT))
-if [ $((TOTAL_SAMPLES % TOTAL_GPUS)) -ne 0 ]; then
-    echo "ERROR: total_samples (${TOTAL_SAMPLES} = ${PROMPTS_PER_BATCH}×${NUM_SAMPLES_PER_PROMPT}) must be divisible by TOTAL_GPUS (${TOTAL_GPUS})"
-    exit 1
-fi
 LOCAL_BATCH_SIZE=$((TOTAL_SAMPLES / TOTAL_GPUS))
 DIRECT_SAMPLING_BATCH_SIZE=${DIRECT_SAMPLING_BATCH_SIZE:-${TOTAL_SAMPLES}}
-if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
-    echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
-    exit 1
-fi
-if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${TOTAL_SAMPLES}" ] && [ $(( TOTAL_SAMPLES % DIRECT_SAMPLING_BATCH_SIZE )) -ne 0 ]; then
-    echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must evenly divide total_samples (${TOTAL_SAMPLES})"
-    exit 1
-fi
 LOCAL_MICRO_BATCH_ARGS=()
 if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
     LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
@@ -200,31 +196,23 @@ python -m diffusionrl.train \
     `# ===== SDE Sampling (aligned with DanceGRPO) =====` \
     --sampling.sde-type dance \
     --sampling.eta 0.25 \
-    --sampling.time-shift 5.0 \
+    --sampling.shift 5.0 \
     --sampling.num-inference-steps 16 \
     --sampling.guidance-scale 6018.0 \
     --sampling.timestep-fraction 0.6 \
     --sampling.init-same-noise true \
     \
-    --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
+    "${DANCEGRPO_ALGO_KWARG_ARGS[@]}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --algorithm.clip-range 1e-4 \
-    --algorithm.use-kl-penalty false \
-    --algorithm.adv-normalization group \
-    --algorithm.adv-clip-abs 5.0 \
-    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
-    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --rollout.mode direct_rollout \
-    --rollout.service-engine fsdp \
-    --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
+    --rollout.topology.mode direct_rollout \
+--sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-nodes ${TRAINING_NUM_NODES} \
     --ray.training-num-gpus-per-node ${TRAINING_GPUS_PER_NODE} \
-    --ray.offload false \
     \
     `# ===== Training Hyperparams (aligned with DanceGRPO) =====` \
     --training.learning-rate 1e-5 \
@@ -240,12 +228,12 @@ python -m diffusionrl.train \
     --fps ${FPS} \
     \
     `# ===== Rollout / Checkpoint =====` \
-    --rollout.num-rollout 202 \
-    --rollout.save-steps 50 \
-    --rollout.logging-steps 1 \
-    --rollout.output-dir "${OUTPUT_DIR}" \
-    --rollout.report-to-wandb ${REPORT_TO_WANDB} \
-    --rollout.project-name "${WANDB_PROJECT_NAME}" \
-    --rollout.run-name "${WANDB_RUN_NAME}" \
+    --rollout.control.num-rollout 202 \
+    --rollout.artifacts.save-steps 50 \
+    --rollout.logging.logging-steps 1 \
+    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
+    --rollout.logging.report-to-wandb ${REPORT_TO_WANDB} \
+    --rollout.logging.project-name "${WANDB_PROJECT_NAME}" \
+    --rollout.logging.run-name "${WANDB_RUN_NAME}" \
     --sync.protocol disabled \
     "$@"

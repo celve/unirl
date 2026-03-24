@@ -1,14 +1,9 @@
-# =============================================================================
-# DanceGRPO FLUX - Minimal Config (grouped YAML style)
-# =============================================================================
-# Tiny sanity-check config. For fuller researcher examples, start from
-# scripts/*.sh or scripts/example_*.yaml.
-#
-# Usage: python -m diffusionrl.train --config scripts/minimal_flux.yaml
-#
-# Override via dotted CLI:
-#   python -m diffusionrl.train --config scripts/minimal_flux.yaml --rollout.control.num-rollout 100
-# =============================================================================
+# Auxiliary grouped-YAML example with nested subgroup overrides.
+# Primary researcher entrypoint remains scripts/train_dancegrpo_flux_train_actor_sampling.sh.
+# Unlike minimal_flux.yaml, this example demonstrates:
+# - algorithm.window nested config
+# - explicit LoRA target modules
+# - eval-only rollout overrides
 
 model:
   model_type: flux
@@ -31,6 +26,11 @@ algorithm:
   samples_per_prompt: 4
   adv_normalization: group
   adv_clip_abs: 5.0
+  window:
+    window_training: true
+    timestep_strategy: window
+    window_group_size: 6
+    window_strategy: progressive
   algorithm_kwargs:
     clip_range: 0.0001
     use_kl_penalty: false
@@ -44,6 +44,7 @@ training:
   use_lora: true
   lora_rank: 16
   lora_alpha: 32
+  lora_target_modules: to_q,to_k,to_v,to_out.0
 
 ray:
   rollout_num_nodes: 0
@@ -58,14 +59,21 @@ rollout:
     num_rollout: 300
   artifacts:
     save_steps: 40
-    output_dir: outputs/dancegrpo_flux_direct
+    output_dir: outputs/scripts_example_flux_dancegrpo_direct
+  evaluation:
+    eval_steps: 50
+    eval_batch_size: 2
+    num_inference_steps: 30
+    eta: 0.2
   logging:
     logging_steps: 10
+    wandb_tags: example,flux,direct
 
 sync:
   protocol: disabled
 
 data_source_path: diffusionrl.data.data_source.ImageRLDataSource
 data_path: data/samples/prompts_toy.json
+eval_data_path: data/samples/prompts_toy.json
 height: 256
 width: 256

@@ -58,6 +58,16 @@ SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+DANCEGRPO_ALGO_KWARG_ARGS=(
+    --algorithm.shuffle-seed "${SHUFFLE_SEED}"
+    --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}"
+    --algorithm.kwarg "clip_range=1e-4"
+    --algorithm.kwarg "use_kl_penalty=false"
+    --algorithm.adv-normalization "group"
+    --algorithm.adv-clip-abs "5.0"
+    --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}"
+    --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}"
+)
 
 if [ ! -f "${DATA_PATH}" ]; then
     echo "ERROR: DATA_PATH not found: ${DATA_PATH}"
@@ -66,10 +76,6 @@ if [ ! -f "${DATA_PATH}" ]; then
 fi
 
 TOTAL_SAMPLES=$((PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT))
-if [ $((TOTAL_SAMPLES % TRAINING_GPUS)) -ne 0 ]; then
-    echo "ERROR: total_samples (${TOTAL_SAMPLES} = ${PROMPTS_PER_BATCH}x${NUM_SAMPLES_PER_PROMPT}) must be divisible by TRAINING_GPUS (${TRAINING_GPUS})"
-    exit 1
-fi
 LOCAL_BATCH_SIZE=$((TOTAL_SAMPLES / TRAINING_GPUS))
 LOCAL_MICRO_BATCH_ARGS=()
 if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
@@ -79,10 +85,10 @@ fi
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type hunyuan \
-    --rollout.mode separate_rollout \
-    --rollout.service-engine sglang \
-    --rollout.service-num-gpus ${TP_SIZE} \
-    --rollout.engine-tp-size ${TP_SIZE} \
+    --rollout.topology.mode separate_rollout \
+    --rollout.topology.service-engine sglang \
+    --rollout.topology.service-num-gpus ${TP_SIZE} \
+    --rollout.topology.engine-tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
@@ -92,22 +98,16 @@ python -m diffusionrl.train \
     \
     --sampling.sde-type dance \
     --sampling.eta 0.25 \
-    --sampling.time-shift 5.0 \
+    --sampling.shift 5.0 \
     --sampling.num-inference-steps 16 \
     --sampling.guidance-scale 6018.0 \
     --sampling.timestep-fraction 0.6 \
     --sampling.init-same-noise true \
     \
-    --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
+    "${DANCEGRPO_ALGO_KWARG_ARGS[@]}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --algorithm.clip-range 1e-4 \
-    --algorithm.use-kl-penalty false \
-    --algorithm.adv-normalization group \
-    --algorithm.adv-clip-abs 5.0 \
-    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
-    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
     --ray.rollout-num-gpus-per-node ${ROLLOUT_GPUS} \
     --ray.training-num-gpus-per-node ${TRAINING_GPUS} \
@@ -123,9 +123,9 @@ python -m diffusionrl.train \
     --num-frames ${NUM_FRAMES} \
     --fps ${FPS} \
     \
-    --rollout.num-rollout 202 \
-    --rollout.save-steps 50 \
-    --rollout.logging-steps 1 \
-    --rollout.output-dir "${OUTPUT_DIR}" \
+    --rollout.control.num-rollout 202 \
+    --rollout.artifacts.save-steps 50 \
+    --rollout.logging.logging-steps 1 \
+    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
     --sync.protocol tensor_payload \
     "$@"

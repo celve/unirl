@@ -49,7 +49,7 @@ TRAINING_GPUS=${TRAINING_GPUS:-4}
 # Rollout
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-32}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-12}
-NUM_UPDATE_STEPS_PER_ROLLOUT=${NUM_UPDATE_STEPS_PER_ROLLOUT:-4}
+NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-4}
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 
 # Rollout (sglang engine)
@@ -67,20 +67,30 @@ SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+MIXGRPO_ALGO_KWARG_ARGS=(
+    --algorithm.shuffle-seed "${SHUFFLE_SEED}"
+    --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}"
+    --algorithm.kwarg "clip_range=1e-4"
+    --algorithm.kwarg "use_kl_penalty=false"
+    --algorithm.adv-normalization "group"
+    --algorithm.adv-clip-abs "5.0"
+    --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}"
+    --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}"
+    --algorithm.component-mix-stage "${REWARD_MIX_MODE}"
+)
 
 # Training
 LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE-4}
 LOCAL_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / TRAINING_GPUS ))
-LOCAL_UPDATE_BATCH_SIZE=$(( LOCAL_BATCH_SIZE / NUM_UPDATE_STEPS_PER_ROLLOUT ))
 
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type flux \
-    --rollout.mode separate_rollout \
-    --rollout.service-engine sglang \
-    --rollout.service-num-gpus ${TP_SIZE} \
-    --rollout.engine-tp-size ${TP_SIZE} \
+    --rollout.topology.mode separate_rollout \
+    --rollout.topology.service-engine sglang \
+    --rollout.topology.service-num-gpus ${TP_SIZE} \
+    --rollout.topology.engine-tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --sampling.replay-sampler-path "${REPLAY_SAMPLER_PATH}" \
@@ -91,11 +101,11 @@ python -m diffusionrl.train \
     \
     --sampling.sde-type flow \
     --sampling.eta 0.7 \
-    --sampling.time-shift 3.0 \
+    --sampling.shift 3.0 \
     --sampling.num-inference-steps 25 \
     --sampling.guidance-scale 3.5 \
     \
-    --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
+    "${MIXGRPO_ALGO_KWARG_ARGS[@]}" \
     --sampling.sde-ratio 0.16 \
     --algorithm.window.timestep-strategy window \
     --algorithm.window.window-strategy progressive \
@@ -107,13 +117,6 @@ python -m diffusionrl.train \
     --algorithm.window.window-roll-back true \
     \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --algorithm.clip-range 1e-4 \
-    --algorithm.use-kl-penalty false \
-    --algorithm.adv-normalization group \
-    --algorithm.adv-clip-abs 5.0 \
-    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
-    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
-    --algorithm.component-mix-stage ${REWARD_MIX_MODE} \
     \
     --ray.rollout-num-gpus-per-node ${ROLLOUT_GPUS} \
     --ray.training-num-gpus-per-node ${TRAINING_GPUS} \
@@ -121,8 +124,7 @@ python -m diffusionrl.train \
     \
     --training.learning-rate 1e-5 \
     --training.local-micro-batch-size ${LOCAL_MICRO_BATCH_SIZE} \
-    --training.local-update-batch-size ${LOCAL_UPDATE_BATCH_SIZE} \
-    --training.num-updates-per-local-batch ${NUM_UPDATE_STEPS_PER_ROLLOUT} \
+    --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.lora-rank 64 \
@@ -132,9 +134,9 @@ python -m diffusionrl.train \
     --height 720 \
     --width 720 \
     \
-    --rollout.num-rollout 300 \
-    --rollout.save-steps 50 \
-    --rollout.logging-steps 1 \
-    --rollout.output-dir "${OUTPUT_DIR}" \
+    --rollout.control.num-rollout 300 \
+    --rollout.artifacts.save-steps 50 \
+    --rollout.logging.logging-steps 1 \
+    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
     --sync.protocol tensor_payload \
     "$@"

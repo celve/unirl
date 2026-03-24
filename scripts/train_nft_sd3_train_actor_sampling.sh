@@ -27,6 +27,7 @@
 # - kl_coef=0.0001 (KL regularization coefficient, separate from beta)
 # - num_inference_steps=10 (training steps, NOT 40)
 # - guidance_scale=1.0 (no CFG during training)
+# - periodic eval: 40 steps, default adapter, deterministic flow solver
 # - adv_normalization=group
 # - algorithm_kwargs.train_timestep_mode=all (DiffusionNFT uses full timestep schedule)
 # - adv_mode=raw
@@ -36,7 +37,7 @@
 # Two beta parameters in DiffusionNFT (IMPORTANT!):
 # 1. config.beta (algorithm kwargs JSON): Controls positive_prediction interpolation
 #    - OCR: 0.1 (mostly use old adapter prediction)
-# 2. config.train.beta (--algorithm.kl-coef): KL regularization weight
+# 2. config.train.beta (algorithm_kwargs.kl_coef): KL regularization weight
 #    - Fixed: 0.0001
 #
 # NOTE: diffusionrl now supports dpm2 deterministic sampling for SD3 NFT path.
@@ -46,7 +47,7 @@
 #
 # Usage:
 #   bash train_nft_sd3_train_actor_sampling.sh
-#   bash train_nft_sd3_train_actor_sampling.sh --rollout.num-rollout 100 --training.local-micro-batch-size 2
+#   bash train_nft_sd3_train_actor_sampling.sh --rollout.control.num-rollout 100 --training.local-micro-batch-size 2
 #
 # =============================================================================
 
@@ -87,11 +88,35 @@ ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 DIRECT_SAMPLING_BATCH_SIZE=${DIRECT_SAMPLING_BATCH_SIZE:-${ROLLOUT_TOTAL_SAMPLES}}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
-NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-"{\"beta\":0.1,\"adv_mode\":\"raw\",\"adv_clip_max\":5.0,\"use_adaptive_weight\":true,\"train_timestep_mode\":\"all\",\"shuffle_train_timesteps\":true,\"apply_time_shift_in_loss\":false,\"use_reference_ema\":true,\"reference_update_timing\":\"rollout_end\",\"ema_decay\":0.001,\"decay_type\":\"warmup\",\"ema_flat_steps\":75,\"ema_uprate\":0.0075,\"ema_uphold\":0.999,\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}"}
 
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+NFT_ALGO_KWARG_ARGS=(
+    --algorithm.kwarg "beta=0.1"
+    --algorithm.kwarg "adv_mode=raw"
+    --algorithm.kwarg "adv_clip_max=5.0"
+    --algorithm.kwarg "use_adaptive_weight=true"
+    --algorithm.kwarg "train_timestep_mode=all"
+    --algorithm.kwarg "shuffle_train_timesteps=true"
+    --algorithm.kwarg "apply_time_shift_in_loss=false"
+    --algorithm.kwarg "use_reference_ema=true"
+    --algorithm.kwarg "reference_update_timing=rollout_end"
+    --algorithm.kwarg "ema_decay=0.001"
+    --algorithm.kwarg "decay_type=warmup"
+    --algorithm.kwarg "ema_flat_steps=75"
+    --algorithm.kwarg "ema_uprate=0.0075"
+    --algorithm.kwarg "ema_uphold=0.999"
+    --algorithm.shuffle-seed "${SHUFFLE_SEED}"
+    --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}"
+    --algorithm.kwarg "clip_range=1e-4"
+    --algorithm.kwarg "kl_coef=0.0001"
+    --algorithm.adv-normalization "group"
+    --algorithm.use-global-std "true"
+    --algorithm.adv-norm-eps "1e-4"
+    --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}"
+    --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}"
+)
 
 LOCAL_MICRO_BATCH_ARGS=()
 if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
@@ -121,35 +146,26 @@ python -m diffusionrl.train \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
-    --sampling.time-shift 3.0 \
+    --sampling.shift 3.0 \
     --sampling.sde-type dpm2 \
     --sampling.num-inference-steps 10 \
     --sampling.timestep-fraction 0.99 \
     --sampling.guidance-scale 1.0 \
     --sampling.sampling-adapter old \
-    --algorithm.algorithm-kwargs "${NFT_ALGO_KWARGS}" \
+    "${NFT_ALGO_KWARG_ARGS[@]}" \
     \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --algorithm.clip-range 1e-4 \
-    --algorithm.kl-coef 0.0001 \
-    --algorithm.adv-normalization group \
-    --algorithm.use-global-std true \
-    --algorithm.adv-norm-eps 1e-4 \
-    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
-    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --rollout.mode direct_rollout \
-    --rollout.service-engine fsdp \
-    --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
+    --rollout.topology.mode direct_rollout \
+--sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     "${RAY_ADDRESS_ARGS[@]}" \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-nodes ${TRAINING_NUM_NODES} \
     --ray.training-num-gpus-per-node ${TRAINING_GPUS_PER_NODE} \
     --ray.placement-strategy ${RAY_PLACEMENT_STRATEGY} \
-    --ray.offload false \
     "${SYNC_DIR_ARGS[@]}" \
     \
     --training.learning-rate 3e-4 \
@@ -162,13 +178,17 @@ python -m diffusionrl.train \
     --height 512 \
     --width 512 \
     \
-    --rollout.num-rollout 1000 \
-    --rollout.save-steps 60 \
-    --rollout.eval-steps 60 \
-    --rollout.logging-steps 10 \
-    --rollout.output-dir "${OUTPUT_DIR}" \
-    --rollout.report-to-wandb ${REPORT_TO_WANDB} \
-    --rollout.project-name "${WANDB_PROJECT_NAME}" \
-    --rollout.run-name "${WANDB_RUN_NAME}" \
+    --rollout.control.num-rollout 1000 \
+    --rollout.artifacts.save-steps 60 \
+    --rollout.evaluation.eval-steps 60 \
+    --rollout.evaluation.num-inference-steps 40 \
+    --rollout.evaluation.sampling-adapter default \
+    --rollout.evaluation.sde-type flow \
+    --rollout.evaluation.eta 0.0 \
+    --rollout.logging.logging-steps 10 \
+    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
+    --rollout.logging.report-to-wandb ${REPORT_TO_WANDB} \
+    --rollout.logging.project-name "${WANDB_PROJECT_NAME}" \
+    --rollout.logging.run-name "${WANDB_RUN_NAME}" \
     --sync.protocol disabled \
     "$@"

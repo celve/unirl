@@ -46,7 +46,7 @@
 #
 # Usage:
 #   bash train_dancegrpo_flux_train_actor_sampling.sh
-#   bash train_dancegrpo_flux_train_actor_sampling.sh --rollout.num-rollout 100 --training.local-micro-batch-size 2 --training.local-update-batch-size 2
+#   bash train_dancegrpo_flux_train_actor_sampling.sh --rollout.control.num-rollout 100 --training.local-micro-batch-size 2 --training.num-updates-per-local-batch 2
 #
 # =============================================================================
 
@@ -70,7 +70,7 @@ OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/dancegrpo_flux_train_sampling"}
 DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/ocr_prompts_toy_16.json"}
 NUM_GPUS=${NUM_GPUS:-8}
 LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE-1}
-LOCAL_UPDATE_BATCH_SIZE=${LOCAL_UPDATE_BATCH_SIZE:-1}
+NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-1}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-4}
 LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-32}
@@ -86,10 +86,18 @@ SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+DANCEGRPO_ALGO_KWARG_ARGS=(
+    --algorithm.shuffle-seed "${SHUFFLE_SEED}"
+    --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}"
+    --algorithm.kwarg "clip_range=1e-4"
+    --algorithm.kwarg "use_kl_penalty=false"
+    --algorithm.adv-normalization "group"
+    --algorithm.adv-clip-abs "5.0"
+    --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}"
+    --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}"
+)
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 DIRECT_SAMPLING_BATCH_SIZE=${DIRECT_SAMPLING_BATCH_SIZE:-${ROLLOUT_TOTAL_SAMPLES}}
-LOCAL_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / NUM_GPUS ))
-NUM_UPDATES_PER_LOCAL_BATCH=$(( LOCAL_BATCH_SIZE / LOCAL_UPDATE_BATCH_SIZE ))
 LOCAL_MICRO_BATCH_ARGS=()
 if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
     LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
@@ -108,30 +116,21 @@ python -m diffusionrl.train \
     \
     --sampling.sde-type dance \
     --sampling.eta 0.3 \
-    --sampling.time-shift 3.0 \
+    --sampling.shift 3.0 \
     --sampling.num-inference-steps 25 \
     --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 3.5 \
     --sampling.timestep-fraction 0.6 \
     \
-    --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
+    "${DANCEGRPO_ALGO_KWARG_ARGS[@]}" \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
-    --training.local-update-batch-size ${LOCAL_UPDATE_BATCH_SIZE} \
     --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --algorithm.clip-range 1e-4 \
-    --algorithm.use-kl-penalty false \
-    --algorithm.adv-normalization group \
-    --algorithm.adv-clip-abs 5.0 \
-    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
-    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --rollout.mode direct_rollout \
-    --rollout.service-engine fsdp \
-    --ray.rollout-num-nodes 0 \
+    --rollout.topology.mode direct_rollout \
+--ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
-    --ray.offload false \
     \
     --training.learning-rate 1e-5 \
     --training.max-grad-norm 1.0 \
@@ -144,12 +143,12 @@ python -m diffusionrl.train \
     --height 256 \
     --width 256 \
     \
-    --rollout.num-rollout 300 \
-    --rollout.save-steps 40 \
-    --rollout.logging-steps 10 \
-    --rollout.output-dir "${OUTPUT_DIR}" \
-    --rollout.report-to-wandb ${REPORT_TO_WANDB} \
-    --rollout.project-name "${WANDB_PROJECT_NAME}" \
-    --rollout.run-name "${WANDB_RUN_NAME}" \
+    --rollout.control.num-rollout 300 \
+    --rollout.artifacts.save-steps 40 \
+    --rollout.logging.logging-steps 10 \
+    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
+    --rollout.logging.report-to-wandb ${REPORT_TO_WANDB} \
+    --rollout.logging.project-name "${WANDB_PROJECT_NAME}" \
+    --rollout.logging.run-name "${WANDB_RUN_NAME}" \
     --sync.protocol disabled \
     "$@"

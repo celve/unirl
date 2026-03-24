@@ -1,6 +1,13 @@
 # Training Scripts
 
-These shell scripts are reproducible experiment templates.
+These shell scripts are the primary researcher entrypoints in this repo.
+
+Use `scripts/*.sh` as the maintained experiment templates.
+If you prefer editing grouped YAML directly, use `scripts/example_*.yaml` as
+auxiliary examples. A local `configs/recipes/` directory may exist in some
+working trees, but it is gitignored and should not be treated as the public
+repo interface.
+Public config tests cover the committed YAMLs in this directory.
 
 All scripts now resolve paths relative to repository root:
 
@@ -15,8 +22,8 @@ All scripts now resolve paths relative to repository root:
 ```bash
 DATA_PATH=data/samples/ocr_prompts_toy.json \
   bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh \
-  --rollout.num-rollout 1 \
-  --rollout.save-steps 1000
+  --rollout.control.num-rollout 1 \
+  --rollout.artifacts.save-steps 1000
 ```
 
 Terminology:
@@ -35,12 +42,12 @@ Eval data:
 
 Group-reassembly rollout buffer:
 
-- When `rollout.rollout_buffer_reassemble_by_group=true`,
-  `rollout.rollout_buffer_group_size` must be set explicitly.
+- When `rollout.buffer.reassemble_by_group=true`,
+  `rollout.buffer.group_size` must be set explicitly.
 - This mode decomposes incoming rollout batches to sample locators and
   reassembles outgoing training batches by `group_id`.
 - This mode is incompatible with sample-dropping built-in buffer filters
-  (`rollout_buffer_drop_invalid=true` or reward-range filtering), because the
+  (`rollout.buffer.drop_invalid=true` or reward-range filtering), because the
   producer contract requires complete groups.
 
 ## Typical usage
@@ -65,39 +72,60 @@ bash scripts/train_dancegrpo_hunyuan_train_actor_sampling.sh
 bash scripts/train_dancegrpo_hunyuan_sglang_separate.sh
 ```
 
+## Auxiliary YAML examples
+
+These committed YAMLs are small, reviewable snapshots mirrored from selected
+local recipes:
+
+- `scripts/example_flux_dancegrpo_direct.yaml`
+- `scripts/example_flux_dancegrpo_sglang_separate.yaml`
+- `scripts/example_hunyuan_dancegrpo_direct.yaml`
+
+Use them like this:
+
+```bash
+python -m diffusionrl.train --config scripts/example_flux_dancegrpo_direct.yaml
+python -m diffusionrl.train_async --config scripts/example_flux_dancegrpo_sglang_separate.yaml
+```
+
 ## Plugin demo
 
 ```bash
 # End-to-end plugin wiring example (algorithm/reward)
-bash scripts/train_plugin_demo.sh --rollout.num-rollout 1
+bash scripts/train_plugin_demo.sh --rollout.control.num-rollout 1
 ```
 
 ## Engine note
 
-Use `rollout.mode=direct_rollout` with `rollout.service_engine=fsdp`
-for training-actor direct sampling.
-For SGLang, use `rollout.mode=separate_rollout` or `rollout.mode=colocate_rollout`
-with `rollout.service_engine=sglang`.
+For training-actor direct sampling, set `rollout.topology.mode=direct_rollout`
+and `sync.protocol=disabled`.
+Leave `rollout.topology.service_engine` unset in direct mode.
+For SGLang, use `rollout.topology.mode=separate_rollout` or `rollout.topology.mode=colocate_rollout`
+with `rollout.topology.service_engine=sglang`, and set an explicit dedicated-rollout
+weight-sync mode such as `tensor_payload`, `nccl_broadcast`, or
+`checkpoint_path`.
+Dedicated rollout modes also require `rollout.topology.service_num_gpus` to be set explicitly.
 
 ### SGLang remote scheduler mode (TCP, non-HTTP data plane)
 
-Use `rollout.sglang_local_mode=false` and pass explicit scheduler endpoint(s)
-through `rollout.sglang_kwargs`:
+Use `rollout.topology.sglang_local_mode=false` and pass explicit scheduler endpoint(s)
+through `rollout.topology.sglang_kwargs`:
 
 ```yaml
 rollout:
-  mode: separate_rollout
-  service_engine: sglang
-  service_num_gpus: 4
-  engine_tp_size: 4
-  service_transport_dtype: bf16
-  service_transport_drop_decoded_videos: true
-  service_transport_log_payload_bytes: true
-  sglang_local_mode: false
-  sglang_kwargs:
-    remote_scheduler_endpoints:
-      - tcp://10.0.0.11:35555
-      - tcp://10.0.0.12:35555
+  topology:
+    mode: separate_rollout
+    service_engine: sglang
+    service_num_gpus: 4
+    engine_tp_size: 4
+    service_transport_dtype: bf16
+    service_transport_drop_decoded_videos: true
+    service_transport_log_payload_bytes: true
+    sglang_local_mode: false
+    sglang_kwargs:
+      remote_scheduler_endpoints:
+        - tcp://10.0.0.11:35555
+        - tcp://10.0.0.12:35555
 ```
 
 Notes:

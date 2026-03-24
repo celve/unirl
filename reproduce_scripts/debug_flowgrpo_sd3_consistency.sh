@@ -39,7 +39,6 @@ DIRECT_SAMPLING_BATCH_SIZE=128
 LOCAL_MICRO_BATCH_SIZE=16
 NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-2}
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
-LOCAL_UPDATE_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / NUM_GPUS / NUM_UPDATES_PER_LOCAL_BATCH ))
 
 # Parse --sampling.sde-type and --sampling.eta from cmdline for logging
 SDE_TYPE_OVERRIDE=""
@@ -77,6 +76,17 @@ REWARD_LOCATION="sampling_actor"
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+FLOWGRPO_ALGO_KWARG_ARGS=(
+    --algorithm.shuffle-seed "42"
+    --algorithm.shuffle-samples "false"
+    --algorithm.kwarg "clip_range=1e-4"
+    --algorithm.kwarg "use_kl_penalty=false"
+    --algorithm.kwarg "kl_coef=0.04"
+    --algorithm.adv-normalization "group"
+    --algorithm.use-global-std "true"
+    --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}"
+    --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}"
+)
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
@@ -91,32 +101,22 @@ python -m diffusionrl.train \
     \
     --sampling.sde-type flow \
     --sampling.eta 0.7 \
-    --sampling.time-shift 3.0 \
+    --sampling.shift 3.0 \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
     --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 4.5 \
     --sampling.timestep-fraction 0.1,0.3 \
     \
-    --algorithm.algorithm-kwargs "{\"shuffle_seed\":42,\"shuffle_samples\":false}" \
+    "${FLOWGRPO_ALGO_KWARG_ARGS[@]}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}" \
-    --training.local-update-batch-size ${LOCAL_UPDATE_BATCH_SIZE} \
     --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --algorithm.clip-range 1e-4 \
-    --algorithm.use-kl-penalty false \
-    --algorithm.kl-coef 0.04 \
-    --algorithm.adv-normalization group \
-    --algorithm.use-global-std true \
-    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
-    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --rollout.mode direct_rollout \
-    --rollout.service-engine fsdp \
-    --ray.rollout-num-nodes 0 \
+    --rollout.topology.mode direct_rollout \
+--ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
-    --ray.offload false \
     \
     --training.learning-rate 3e-4 \
     --training.max-grad-norm 1.0 \
@@ -127,12 +127,12 @@ python -m diffusionrl.train \
     --height 512 \
     --width 512 \
     \
-    --rollout.num-rollout 1 \
-    --rollout.save-steps 0 \
-    --rollout.eval-steps 0 \
-    --rollout.logging-steps 1 \
-    --rollout.output-dir "${DEBUG_OUTPUT_DIR}/train_output" \
-    --rollout.report-to-wandb false \
+    --rollout.control.num-rollout 1 \
+    --rollout.artifacts.save-steps 0 \
+    --rollout.evaluation.eval-steps 0 \
+    --rollout.logging.logging-steps 1 \
+    --rollout.artifacts.output-dir "${DEBUG_OUTPUT_DIR}/train_output" \
+    --rollout.logging.report-to-wandb false \
     \
     --debug.debug-output-dir "${DEBUG_OUTPUT_DIR}" \
     \

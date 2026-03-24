@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # NOTE:
-#   direct sampling now uses rollout.mode='direct_rollout' with rollout.service_engine=fsdp.
+#   direct sampling now uses rollout.topology.mode='direct_rollout' with direct_rollout only.
 #   This script is the SGLang equivalent in separate rollout/training mode.
 #
 # Usage:
@@ -53,16 +53,26 @@ SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+DANCEGRPO_ALGO_KWARG_ARGS=(
+    --algorithm.shuffle-seed "${SHUFFLE_SEED}"
+    --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}"
+    --algorithm.kwarg "clip_range=1e-4"
+    --algorithm.kwarg "use_kl_penalty=false"
+    --algorithm.adv-normalization "group"
+    --algorithm.adv-clip-abs "5.0"
+    --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}"
+    --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}"
+)
 
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
-    --rollout.mode separate_rollout \
-    --rollout.service-engine sglang \
-    --rollout.service-num-gpus ${TP_SIZE} \
-    --rollout.engine-tp-size ${TP_SIZE} \
+    --rollout.topology.mode separate_rollout \
+    --rollout.topology.service-engine sglang \
+    --rollout.topology.service-num-gpus ${TP_SIZE} \
+    --rollout.topology.engine-tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
@@ -72,21 +82,15 @@ python -m diffusionrl.train \
     \
     --sampling.sde-type flow \
     --sampling.eta 0.3 \
-    --sampling.time-shift 3.0 \
+    --sampling.shift 3.0 \
     --sampling.num-inference-steps 25 \
     --sampling.guidance-scale 4.5 \
     --sampling.timestep-fraction 0.6 \
     \
-    --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
+    "${DANCEGRPO_ALGO_KWARG_ARGS[@]}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --training.local-micro-batch-size ${BATCH_SIZE} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --algorithm.clip-range 1e-4 \
-    --algorithm.use-kl-penalty false \
-    --algorithm.adv-normalization group \
-    --algorithm.adv-clip-abs 5.0 \
-    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
-    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
     --ray.rollout-num-gpus-per-node ${ROLLOUT_GPUS} \
     --ray.training-num-gpus-per-node ${TRAINING_GPUS} \
@@ -102,9 +106,9 @@ python -m diffusionrl.train \
     --height 512 \
     --width 512 \
     \
-    --rollout.num-rollout 300 \
-    --rollout.save-steps 40 \
-    --rollout.logging-steps 10 \
-    --rollout.output-dir "${OUTPUT_DIR}" \
+    --rollout.control.num-rollout 300 \
+    --rollout.artifacts.save-steps 40 \
+    --rollout.logging.logging-steps 10 \
+    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
     --sync.protocol tensor_payload \
     "$@"

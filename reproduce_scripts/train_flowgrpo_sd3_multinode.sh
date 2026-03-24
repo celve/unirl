@@ -20,7 +20,7 @@
 #
 #   # Pass through extra diffusionrl CLI overrides:
 #   bash reproduce_scripts/train_flowgrpo_sd3_multinode.sh auto \
-#       --rollout.num-rollout 100 --training.local-micro-batch-size 6
+#       --rollout.control.num-rollout 100 --training.local-micro-batch-size 6
 #
 # Key alignment with original flow_grpo:
 #   sde_type=flow, eta=0.7, shift=3.0, num_inference_steps=10,
@@ -88,12 +88,22 @@ LOCAL_MICRO_BATCH_SIZE=12
 NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-2}
 TOTAL_GPUS=$(( NUM_NODES * GPUS_PER_NODE ))
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
-LOCAL_UPDATE_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / TOTAL_GPUS / NUM_UPDATES_PER_LOCAL_BATCH ))
 
 SHUFFLE_SEED="${SHUFFLE_SEED:-42}"
 SHUFFLE_SAMPLES="${SHUFFLE_SAMPLES:-false}"
 EVAL_EMA_DECAY="${EVAL_EMA_DECAY:-0.9}"
 EVAL_EMA_UPDATE_INTERVAL="${EVAL_EMA_UPDATE_INTERVAL:-1}"
+FLOWGRPO_ALGO_KWARG_ARGS=(
+    --algorithm.shuffle-seed "${SHUFFLE_SEED}"
+    --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}"
+    --algorithm.kwarg "clip_range=1e-4"
+    --algorithm.kwarg "use_kl_penalty=true"
+    --algorithm.kwarg "kl_coef=0.04"
+    --algorithm.adv-normalization "group"
+    --algorithm.use-global-std "true"
+    --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}"
+    --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}"
+)
 
 REPORT_TO_WANDB=true
 WANDB_PROJECT_NAME="diffusionrl-flowgrpo"
@@ -147,14 +157,6 @@ wait_for_workers() {
 
 # ── Training command ──
 run_training() {
-    # Validate batch geometry
-    if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
-        echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"; exit 1
-    fi
-    if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${ROLLOUT_TOTAL_SAMPLES}" ] && \
-       [ $(( ROLLOUT_TOTAL_SAMPLES % DIRECT_SAMPLING_BATCH_SIZE )) -ne 0 ]; then
-        echo "ERROR: DIRECT_SAMPLING_BATCH_SIZE must evenly divide rollout_total_samples (${ROLLOUT_TOTAL_SAMPLES})"; exit 1
-    fi
 
     local micro_batch_args=()
     if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
@@ -163,7 +165,7 @@ run_training() {
 
     local wandb_entity_args=()
     if [ -n "${WANDB_ENTITY}" ]; then
-        wandb_entity_args+=(--rollout.wandb-entity "${WANDB_ENTITY}")
+        wandb_entity_args+=(--rollout.logging.wandb-entity "${WANDB_ENTITY}")
     fi
 
     mkdir -p "${OUTPUT_DIR}"
@@ -186,32 +188,22 @@ run_training() {
         \
         --sampling.sde-type flow \
         --sampling.eta 0.7 \
-        --sampling.time-shift 3.0 \
+        --sampling.shift 3.0 \
         --sampling.num-inference-steps "${NUM_INFERENCE_STEPS}" \
         --sampling.max-samples-per-request "${DIRECT_SAMPLING_BATCH_SIZE}" \
         --sampling.guidance-scale 4.5 \
         --sampling.timestep-fraction 0.99 \
         \
-        --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
+        "${FLOWGRPO_ALGO_KWARG_ARGS[@]}" \
         --algorithm.prompts-per-rollout "${PROMPTS_PER_BATCH}" \
         "${micro_batch_args[@]}" \
-        --training.local-update-batch-size "${LOCAL_UPDATE_BATCH_SIZE}" \
         --training.num-updates-per-local-batch "${NUM_UPDATES_PER_LOCAL_BATCH}" \
         --algorithm.samples-per-prompt "${NUM_SAMPLES_PER_PROMPT}" \
-        --algorithm.clip-range 1e-4 \
-        --algorithm.use-kl-penalty true \
-        --algorithm.kl-coef 0.04 \
-        --algorithm.adv-normalization group \
-        --algorithm.use-global-std true \
-        --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}" \
-        --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}" \
         \
-        --rollout.mode direct_rollout \
-        --rollout.service-engine fsdp \
-        --ray.rollout-num-nodes 0 \
+        --rollout.topology.mode direct_rollout \
+--ray.rollout-num-nodes 0 \
         --ray.rollout-num-gpus-per-node 0 \
         --ray.training-num-gpus-per-node "${GPUS_PER_NODE}" \
-        --ray.offload false \
         --ray.ray-address "${HEAD_IP}:${HEAD_PORT}" \
         --ray.training-num-nodes "${NUM_NODES}" \
         --ray.placement-strategy "${RAY_PLACEMENT_STRATEGY}" \
@@ -226,17 +218,17 @@ run_training() {
         --height 512 \
         --width 512 \
         \
-        --rollout.num-rollout 10000 \
-        --rollout.save-steps 0 \
-        --rollout.eval-steps 30 \
-        --rollout.logging-steps "${LOGGING_STEPS}" \
-        --rollout.output-dir "${OUTPUT_DIR}" \
-        --rollout.report-to-wandb "${REPORT_TO_WANDB}" \
-        --rollout.project-name "${WANDB_PROJECT_NAME}" \
-        --rollout.run-name "${WANDB_RUN_NAME}" \
-        --rollout.wandb-log-media "${WANDB_LOG_MEDIA}" \
-        --rollout.wandb-media-max-items "${WANDB_MEDIA_MAX_ITEMS}" \
-        --rollout.wandb-tags "${WANDB_TAGS}" \
+        --rollout.control.num-rollout 10000 \
+        --rollout.artifacts.save-steps 0 \
+        --rollout.evaluation.eval-steps 30 \
+        --rollout.logging.logging-steps "${LOGGING_STEPS}" \
+        --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
+        --rollout.logging.report-to-wandb "${REPORT_TO_WANDB}" \
+        --rollout.logging.project-name "${WANDB_PROJECT_NAME}" \
+        --rollout.logging.run-name "${WANDB_RUN_NAME}" \
+        --rollout.logging.wandb-log-media "${WANDB_LOG_MEDIA}" \
+        --rollout.logging.wandb-media-max-items "${WANDB_MEDIA_MAX_ITEMS}" \
+        --rollout.logging.wandb-tags "${WANDB_TAGS}" \
         "${wandb_entity_args[@]}" \
         --sync.protocol disabled \
         "$@"

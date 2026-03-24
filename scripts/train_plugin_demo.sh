@@ -33,6 +33,10 @@ NUM_GPUS=${NUM_GPUS:-1}
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+PLUGIN_ALGO_KWARG_ARGS=(
+    --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}"
+    --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}"
+)
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
@@ -47,19 +51,17 @@ python -m diffusionrl.train \
     \
     --sampling.sde-type flow \
     --sampling.eta 0.3 \
-    --sampling.time-shift 3.0 \
+    --sampling.shift 3.0 \
     --sampling.num-inference-steps 8 \
     --sampling.guidance-scale 4.5 \
     \
+    "${PLUGIN_ALGO_KWARG_ARGS[@]}" \
     --algorithm.prompts-per-rollout 1 \
     --training.local-micro-batch-size 1 \
     --algorithm.samples-per-prompt 2 \
-    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
-    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --rollout.mode direct_rollout \
-    --rollout.service-engine fsdp \
-    --ray.rollout-num-nodes 0 \
+    --rollout.topology.mode direct_rollout \
+--ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node "${NUM_GPUS}" \
     \
@@ -72,9 +74,9 @@ python -m diffusionrl.train \
     --height 256 \
     --width 256 \
     \
-    --rollout.num-rollout 5 \
-    --rollout.save-steps 1000 \
-    --rollout.logging-steps 1 \
-    --rollout.output-dir "${OUTPUT_DIR}" \
+    --rollout.control.num-rollout 5 \
+    --rollout.artifacts.save-steps 1000 \
+    --rollout.logging.logging-steps 1 \
+    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
     --sync.protocol disabled \
     "$@"

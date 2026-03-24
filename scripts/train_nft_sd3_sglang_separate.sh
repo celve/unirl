@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # NOTE:
-#   direct sampling now uses rollout.mode='direct_rollout' with rollout.service_engine=fsdp.
+#   direct sampling now uses rollout.topology.mode='direct_rollout' with direct_rollout only.
 #   This script is the SGLang equivalent in separate rollout/training mode.
 #
 # Usage:
@@ -47,26 +47,46 @@ TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
 REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
 
-if [ $(( TRAINING_GPUS * BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
-    echo "ERROR: TRAINING_GPUS*BATCH_SIZE must be divisible by NUM_SAMPLES_PER_PROMPT"
-    exit 1
-fi
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
-NFT_ALGO_KWARGS=${NFT_ALGO_KWARGS:-"{\"beta\":0.1,\"adv_mode\":\"raw\",\"adv_clip_max\":5.0,\"use_adaptive_weight\":true,\"train_timestep_mode\":\"all\",\"shuffle_train_timesteps\":true,\"apply_time_shift_in_loss\":false,\"use_reference_ema\":true,\"reference_update_timing\":\"rollout_end\",\"ema_decay\":0.001,\"decay_type\":\"warmup\",\"ema_flat_steps\":75,\"ema_uprate\":0.0075,\"ema_uphold\":0.999,\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}"}
 
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+NFT_ALGO_KWARG_ARGS=(
+    --algorithm.kwarg "beta=0.1"
+    --algorithm.kwarg "adv_mode=raw"
+    --algorithm.kwarg "adv_clip_max=5.0"
+    --algorithm.kwarg "use_adaptive_weight=true"
+    --algorithm.kwarg "train_timestep_mode=all"
+    --algorithm.kwarg "shuffle_train_timesteps=true"
+    --algorithm.kwarg "apply_time_shift_in_loss=false"
+    --algorithm.kwarg "use_reference_ema=true"
+    --algorithm.kwarg "reference_update_timing=rollout_end"
+    --algorithm.kwarg "ema_decay=0.001"
+    --algorithm.kwarg "decay_type=warmup"
+    --algorithm.kwarg "ema_flat_steps=75"
+    --algorithm.kwarg "ema_uprate=0.0075"
+    --algorithm.kwarg "ema_uphold=0.999"
+    --algorithm.shuffle-seed "${SHUFFLE_SEED}"
+    --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}"
+    --algorithm.kwarg "clip_range=1e-4"
+    --algorithm.kwarg "kl_coef=0.0001"
+    --algorithm.adv-normalization "group"
+    --algorithm.use-global-std "true"
+    --algorithm.adv-norm-eps "1e-4"
+    --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}"
+    --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}"
+)
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
-    --rollout.mode separate_rollout \
-    --rollout.service-engine sglang \
-    --rollout.service-num-gpus ${TP_SIZE} \
-    --rollout.engine-tp-size ${TP_SIZE} \
+    --rollout.topology.mode separate_rollout \
+    --rollout.topology.service-engine sglang \
+    --rollout.topology.service-num-gpus ${TP_SIZE} \
+    --rollout.topology.engine-tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --algorithm.algorithm-path diffusionrl.algorithms.nft.NFTAlgorithm \
@@ -74,24 +94,17 @@ python -m diffusionrl.train \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
-    --sampling.time-shift 3.0 \
+    --sampling.shift 3.0 \
     --sampling.sde-type dpm2 \
     --sampling.num-inference-steps 10 \
     --sampling.timestep-fraction 0.99 \
     --sampling.guidance-scale 1.0 \
     --sampling.sampling-adapter old \
-    --algorithm.algorithm-kwargs "${NFT_ALGO_KWARGS}" \
+    "${NFT_ALGO_KWARG_ARGS[@]}" \
     \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --training.local-micro-batch-size ${BATCH_SIZE} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --algorithm.clip-range 1e-4 \
-    --algorithm.kl-coef 0.0001 \
-    --algorithm.adv-normalization group \
-    --algorithm.use-global-std true \
-    --algorithm.adv-norm-eps 1e-4 \
-    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
-    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
     --ray.rollout-num-gpus-per-node ${ROLLOUT_GPUS} \
     --ray.training-num-gpus-per-node ${TRAINING_GPUS} \
@@ -106,10 +119,10 @@ python -m diffusionrl.train \
     --height 512 \
     --width 512 \
     \
-    --rollout.num-rollout 1000 \
-    --rollout.save-steps 60 \
-    --rollout.eval-steps 60 \
-    --rollout.logging-steps 10 \
-    --rollout.output-dir "${OUTPUT_DIR}" \
+    --rollout.control.num-rollout 1000 \
+    --rollout.artifacts.save-steps 60 \
+    --rollout.evaluation.eval-steps 60 \
+    --rollout.logging.logging-steps 10 \
+    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
     --sync.protocol tensor_payload \
     "$@"

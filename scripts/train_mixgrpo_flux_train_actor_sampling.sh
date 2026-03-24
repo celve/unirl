@@ -48,7 +48,7 @@
 #
 # Usage:
 #   bash train_mixgrpo_flux_train_actor_sampling.sh
-#   bash train_mixgrpo_flux_train_actor_sampling.sh --rollout.num-rollout 100 --training.local-micro-batch-size 2 --training.local-update-batch-size 2
+#   bash train_mixgrpo_flux_train_actor_sampling.sh --rollout.control.num-rollout 100 --training.local-micro-batch-size 2 --training.num-updates-per-local-batch 2
 #
 # =============================================================================
 
@@ -97,12 +97,22 @@ SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+MIXGRPO_ALGO_KWARG_ARGS=(
+    --algorithm.shuffle-seed "${SHUFFLE_SEED}"
+    --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}"
+    --algorithm.kwarg "clip_range=1e-4"
+    --algorithm.kwarg "use_kl_penalty=false"
+    --algorithm.adv-normalization "group"
+    --algorithm.adv-clip-abs "5.0"
+    --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}"
+    --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}"
+    --algorithm.component-mix-stage "${REWARD_MIX_MODE}"
+)
 
 # Training
-NUM_UPDATE_STEPS_PER_ROLLOUT=${NUM_UPDATE_STEPS_PER_ROLLOUT:-4}
+NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-4}
 LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE:-4}
 LOCAL_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / NUM_GPUS ))
-LOCAL_UPDATE_BATCH_SIZE=$(( LOCAL_BATCH_SIZE / NUM_UPDATE_STEPS_PER_ROLLOUT ))
 
 
 python -m diffusionrl.train \
@@ -118,11 +128,11 @@ python -m diffusionrl.train \
     \
     --sampling.sde-type flow \
     --sampling.eta 0.7 \
-    --sampling.time-shift 3.0 \
+    --sampling.shift 3.0 \
     --sampling.num-inference-steps 25 \
     --sampling.guidance-scale 3.5 \
     \
-    --algorithm.algorithm-kwargs "{\"shuffle_seed\":${SHUFFLE_SEED},\"shuffle_samples\":${SHUFFLE_SAMPLES}}" \
+    "${MIXGRPO_ALGO_KWARG_ARGS[@]}" \
     --sampling.sde-ratio 0.16 \
     --algorithm.window.timestep-strategy window \
     --algorithm.window.window-strategy progressive \
@@ -134,25 +144,15 @@ python -m diffusionrl.train \
     --algorithm.window.window-roll-back true \
     \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
-    --algorithm.clip-range 1e-4 \
-    --algorithm.use-kl-penalty false \
-    --algorithm.adv-normalization group \
-    --algorithm.adv-clip-abs 5.0 \
-    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
-    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
-    --algorithm.component-mix-stage ${REWARD_MIX_MODE} \
     \
-    --rollout.mode direct_rollout \
-    --rollout.service-engine fsdp \
-    --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
+    --rollout.topology.mode direct_rollout \
+--sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
-    --ray.offload false \
     \
     --training.learning-rate 1e-5 \
-    --training.local-update-batch-size ${LOCAL_UPDATE_BATCH_SIZE} \
-    --training.num-updates-per-local-batch ${NUM_UPDATE_STEPS_PER_ROLLOUT} \
+    --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
     --training.local-micro-batch-size ${LOCAL_MICRO_BATCH_SIZE} \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
@@ -163,12 +163,12 @@ python -m diffusionrl.train \
     --height 720 \
     --width 720 \
     \
-    --rollout.num-rollout 300 \
-    --rollout.save-steps 50 \
-    --rollout.logging-steps 1 \
-    --rollout.output-dir "${OUTPUT_DIR}" \
-    --rollout.report-to-wandb ${REPORT_TO_WANDB} \
-    --rollout.project-name "${WANDB_PROJECT_NAME}" \
-    --rollout.run-name "${WANDB_RUN_NAME}" \
+    --rollout.control.num-rollout 300 \
+    --rollout.artifacts.save-steps 50 \
+    --rollout.logging.logging-steps 1 \
+    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
+    --rollout.logging.report-to-wandb ${REPORT_TO_WANDB} \
+    --rollout.logging.project-name "${WANDB_PROJECT_NAME}" \
+    --rollout.logging.run-name "${WANDB_RUN_NAME}" \
     --sync.protocol disabled \
     "$@"
