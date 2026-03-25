@@ -122,6 +122,8 @@ class SamplingConfig:
         metadata={"help": "Fraction of total timesteps to train on. "
                           "Single float x means [0, x) range; "
                           "tuple (x, y) means [x, y) range (e.g. (0.2, 0.8) = timesteps 20%%-80%%)"})
+    num_sde_steps: Optional[int] = field(default=None,
+        metadata={"help": "If set, randomly sample this many SDE timesteps from the timestep_fraction range each rollout."})
     sampling_adapter: Optional[str] = field(default=None,
         metadata={"help": "Sampling adapter type for special modes (e.g. 'old' for NFT)"})
     init_same_noise: bool = field(default=False,
@@ -135,6 +137,8 @@ class SamplingConfig:
             )
         if self.max_samples_per_request is not None and int(self.max_samples_per_request) < 1:
             raise ValueError("max_samples_per_request must be >= 1 when set.")
+        if self.num_sde_steps is not None and int(self.num_sde_steps) < 1:
+            raise ValueError("sampling.num_sde_steps must be >= 1 when set.")
         if not isinstance(self.sampler_kwargs, dict):
             raise ValueError("sampling.sampler_kwargs must be a dict.")
 
@@ -595,6 +599,10 @@ class RolloutTopologySettings:
         metadata={"help": "Device for SGLang-side prompt encoder construction."})
     sglang_prompt_encoder_max_length: Optional[int] = field(default=None,
         metadata={"help": "Prompt encoder max sequence length for SGLang rollout."})
+    sglang_disable_autocast: Optional[bool] = field(default=None,
+        metadata={"help": "Disable torch.autocast inside SGLang rollout engine."})
+    rollout_batch_size: Optional[int] = field(default=None,
+        metadata={"help": "Max prompts per rollout-engine generate() call before actor-side sub-batching."})
     sglang_kwargs: Dict[str, Any] = field(default_factory=dict,
         metadata={"help": "Engine-scoped SGLang rollout kwargs. ServerArgs-compatible keys are forwarded to the SGLang rollout engine."})
 
@@ -609,6 +617,7 @@ class RolloutTopologySettings:
             "engine_tp_size",
             "engine_sp_size",
             "sglang_prompt_encoder_max_length",
+            "rollout_batch_size",
         ):
             value = getattr(self, attr_name)
             if value is not None and int(value) < 1:

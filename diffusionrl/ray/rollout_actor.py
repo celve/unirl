@@ -7,12 +7,18 @@ import ray
 import torch
 from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
 from diffusionrl.reward.schema import RewardSchema
+from diffusionrl.types.batch_ops import concat_columnar_values
 from diffusionrl.types.engine import (
     EngineConfig,
     normalize_engine_type,
     uses_dedicated_rollout_engine,
 )
-from diffusionrl.types.sampling import PromptEmbeddings, RolloutRequest, RolloutSamples
+from diffusionrl.types.sampling import (
+    LogProbData,
+    PromptEmbeddings,
+    RolloutRequest,
+    RolloutSamples,
+)
 from diffusionrl.samplers.engine import (
     BaseRolloutEngine,
     DistributedWeightSyncCapable,
@@ -78,6 +84,7 @@ class RolloutActor:
         self.rank = rank
         self.world_size = world_size
         self.config = config or {}
+        self._rollout_batch_size: Optional[int] = None
         self.num_gpus_allocated = num_gpus_allocated
         self.master_addr = master_addr
         self.master_port = master_port
@@ -753,6 +760,8 @@ class RolloutActor:
             num_frames=int(engine_runtime_config.get("num_frames", 16)),
             engine_kwargs=engine_kwargs,
         )
+        rollout_batch_size = engine_runtime_config.get("rollout_batch_size")
+        self._rollout_batch_size = int(rollout_batch_size) if rollout_batch_size is not None else None
 
         # Create engine
         try:
@@ -768,7 +777,12 @@ class RolloutActor:
             engine_kwargs=engine_kwargs,
         )
 
-        logger.info(f"Rank {self.rank}: Rollout actor initialized with {sampler_engine_type} engine")
+        logger.info(
+            "Rank %s: Rollout actor initialized with %s engine%s",
+            self.rank,
+            sampler_engine_type,
+            f" (rollout_batch_size={self._rollout_batch_size})" if self._rollout_batch_size else "",
+        )
         self._log_resource_ids("rollout_init")
         self._log_gpu_state("rollout_init")
 
@@ -803,7 +817,16 @@ class RolloutActor:
             )
 
         self._log_gpu_state("inference_generate_start")
-        output = self.engine.generate(request)
+        batch_size = self._rollout_batch_size
+        n_prompts = len(request.prompts)
+        if batch_size and n_prompts > batch_size:
+            outputs = []
+            for i in range(0, n_prompts, batch_size):
+                sub_request = request.slice_prompts(i, min(i + batch_size, n_prompts))
+                outputs.append(self.engine.generate(sub_request))
+            output = self._merge_rollout_samples(outputs)
+        else:
+            output = self.engine.generate(request)
         output = finalize_sampling_output(
             output=output,
             request=request,
@@ -833,6 +856,103 @@ class RolloutActor:
         )
         self._log_gpu_state("inference_generate_end")
         return output
+
+    @staticmethod
+    def _merge_rollout_samples(outputs: List[RolloutSamples]) -> RolloutSamples:
+        """Merge multiple rollout sub-batches into a single batch-shaped payload."""
+        if not outputs:
+            raise ValueError("Cannot merge empty rollout outputs.")
+        if len(outputs) == 1:
+            return outputs[0]
+
+        batch_sizes = [output.batch_size for output in outputs]
+        latents = torch.cat([output.latents for output in outputs], dim=0)
+        timesteps = outputs[0].timesteps
+
+        aux: Dict[str, Any] = {}
+
+        trajectories = [output.aux.get("trajectories") for output in outputs]
+        if all(value is not None for value in trajectories):
+            aux["trajectories"] = torch.cat(trajectories, dim=0)
+
+        log_probs = [output.aux.get("log_probs") for output in outputs]
+        if all(value is not None for value in log_probs):
+            merged_log_probs: Dict[int, torch.Tensor] = {}
+            all_indices = sorted(set().union(*(value.sde_indices for value in log_probs)))
+            for step_idx in all_indices:
+                merged_log_probs[step_idx] = torch.cat(
+                    [value[step_idx] for value in log_probs],
+                    dim=0,
+                )
+            aux["log_probs"] = LogProbData.from_dict(merged_log_probs)
+
+        embeddings = [output.aux.get("embeddings") for output in outputs]
+        if all(value is not None for value in embeddings):
+            def _cat_embed(attr: str):
+                values = [getattr(value, attr) for value in embeddings]
+                if all(v is not None for v in values):
+                    return torch.cat(values, dim=0)
+                return None
+
+            aux["embeddings"] = PromptEmbeddings(
+                prompt_embeds=_cat_embed("prompt_embeds"),
+                pooled_prompt_embeds=_cat_embed("pooled_prompt_embeds"),
+                encoder_attention_mask=_cat_embed("encoder_attention_mask"),
+                negative_prompt_embeds=_cat_embed("negative_prompt_embeds"),
+                negative_pooled_prompt_embeds=_cat_embed("negative_pooled_prompt_embeds"),
+                text_ids=_cat_embed("text_ids"),
+                image_ids=_cat_embed("image_ids"),
+            )
+
+        decoded_images = [output.aux.get("decoded_images") for output in outputs]
+        if any(value is not None for value in decoded_images):
+            merged_decoded_images = []
+            for value in decoded_images:
+                if value:
+                    merged_decoded_images.extend(list(value))
+            if merged_decoded_images:
+                aux["decoded_images"] = merged_decoded_images
+
+        metadata_values = [
+            dict(output.aux.get("metadata") or {})
+            for output in outputs
+            if isinstance(output.aux.get("metadata"), dict)
+        ]
+        if metadata_values:
+            merged_metadata = dict(metadata_values[0])
+            decoded_videos = [value.get("decoded_videos") for value in metadata_values]
+            if all(torch.is_tensor(value) for value in decoded_videos):
+                merged_metadata["decoded_videos"] = torch.cat(decoded_videos, dim=0)
+            aux["metadata"] = merged_metadata
+
+        step_indices_values = [output.aux.get("step_indices") for output in outputs]
+        if all(value is not None for value in step_indices_values):
+            aux["step_indices"] = step_indices_values[0]
+
+        handled_keys = {
+            "trajectories",
+            "log_probs",
+            "embeddings",
+            "decoded_images",
+            "metadata",
+            "step_indices",
+        }
+        other_keys = sorted(set().union(*(output.aux.keys() for output in outputs)) - handled_keys)
+        for key in other_keys:
+            merged_value = concat_columnar_values(
+                [output.aux.get(key) for output in outputs],
+                batch_sizes=batch_sizes,
+            )
+            if merged_value is not None:
+                aux[key] = merged_value
+
+        merged_meta = concat_columnar_values([output.meta for output in outputs], batch_sizes=batch_sizes) or {}
+        return RolloutSamples(
+            latents=latents,
+            timesteps=timesteps,
+            aux=aux,
+            meta=merged_meta,
+        )
 
     def update_weights(self, state_dict_or_ref) -> None:
         """
@@ -917,6 +1037,18 @@ class RolloutActor:
             load_format=load_format,
             flush_cache=flush_cache,
         )
+
+    def set_lora_from_tensors(self, adapter_name: str, lora_tensors: dict) -> None:
+        """Set LoRA adapter weights on rollout engines from serialized tensors."""
+        if self.engine is None:
+            logger.warning("No engine to set LoRA tensors")
+            return
+        if not isinstance(self.engine, DistributedWeightSyncCapable):
+            raise NotImplementedError(
+                f"{type(self.engine).__name__} does not support set_lora_from_tensors. "
+                "Only engines implementing DistributedWeightSyncCapable support tensor/distributed weight sync."
+            )
+        self.engine.set_lora_from_tensors(adapter_name, lora_tensors)
 
     def init_weights_update_group(
         self,

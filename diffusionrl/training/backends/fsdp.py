@@ -172,7 +172,7 @@ class FSDPTrainBackend(TrainBackend):
 
         fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy, *_ = self._fsdp2_runtime_apis()
 
-        fsdp_kwargs: Dict[str, Any] = {}
+        fsdp_kwargs: Dict[str, Any] = {"reshard_after_forward": True}
 
         if self._fsdp_config.get("mixed_precision", True):
             param_dtype = _safe_dtype(self._fsdp_config.get("param_dtype", "bf16"))

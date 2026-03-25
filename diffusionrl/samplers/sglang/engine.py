@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import torch
 
 from diffusionrl.sde.rules import normalize_sde_type
-from diffusionrl.sde.runtime import get_sigma_schedule
+from diffusionrl.sde.runtime import get_sigma_schedule_diffusers
 from diffusionrl.types import LogProbData, PromptEmbeddings, RolloutSamples, RolloutRequest
 from diffusionrl.types.engine import EngineCapabilities, EngineConfig
 from diffusionrl.utils.media import tensor_frame_to_pil
@@ -26,8 +26,6 @@ from ..engine import (
 
 logger = logging.getLogger(__name__)
 
-_SUPPORTED_PROMPT_ENCODER_MODEL_TYPES = {"hunyuan", "flux", "mochi", "sd3"}
-
 
 def _to_bool(value: Any, default: bool) -> bool:
     if value is None:
@@ -37,6 +35,32 @@ def _to_bool(value: Any, default: bool) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
     return bool(value)
+
+
+def _deexpand_prompts(
+    prompts: List[str],
+    num_samples_per_prompt: int,
+) -> Tuple[List[str], int]:
+    """Collapse prompt-major repeated prompts back to unique prompts when possible."""
+    k = int(num_samples_per_prompt)
+    if k <= 1:
+        return list(prompts), 1
+
+    n = len(prompts)
+    if n == 0 or n % k != 0:
+        return list(prompts), 1
+
+    num_unique = n // k
+    unique_prompts: List[str] = []
+    for i in range(num_unique):
+        group_start = i * k
+        base = prompts[group_start]
+        for j in range(1, k):
+            if prompts[group_start + j] != base:
+                return list(prompts), 1
+        unique_prompts.append(base)
+
+    return unique_prompts, k
 
 
 @register_engine("sglang")
@@ -52,8 +76,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         self._target_modules: List[str] = ["transformer"]
         self._verify_weight_checksum: bool = True
         self._last_weight_checksum: Dict[str, str] = {}
-        self._supports_prompt_encoding: bool = False
-        self._prompt_encoder: Any = None
         self._supports_memory_api: bool = False
         self._require_memory_api: bool = False
         self._warned_missing_initial_noise: bool = False
@@ -185,7 +207,13 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 "release_memory_occupation/resume_memory_occupation."
             )
 
-    def _call_memory_api(self, method_name: str, *, tags: Sequence[str]) -> Any:
+    def _call_memory_api(
+        self,
+        method_name: str,
+        *,
+        tags: Sequence[str],
+        cpu_backup_tags: Optional[Sequence[str]] = None,
+    ) -> Any:
         if self._generator is None:
             raise RuntimeError("SGLang generator is not initialized.")
 
@@ -195,7 +223,15 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 f"SGLang generator missing required memory API: {method_name}."
             )
 
-        response = method(tags=list(tags))
+        kwargs: Dict[str, Any] = {"tags": list(tags)}
+        if cpu_backup_tags is not None:
+            kwargs["cpu_backup_tags"] = list(cpu_backup_tags)
+        try:
+            response = method(**kwargs)
+        except TypeError:
+            if cpu_backup_tags is None:
+                raise
+            response = method(tags=list(tags))
         if isinstance(response, dict) and not bool(response.get("success", True)):
             raise RuntimeError(
                 str(response.get("message", f"{method_name} failed"))
@@ -235,8 +271,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             "target_modules",
             "verify_weight_checksum",
             "require_memory_api",
-            "prompt_encoder_device",
-            "prompt_encoder_dtype",
             "server_kwargs",
         }
 
@@ -262,6 +296,14 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
 
         server_kwargs.setdefault("model_path", model_path)
         server_kwargs.setdefault("num_gpus", int(raw.get("num_gpus", 1)))
+        if "disable_autocast" in allowed_keys:
+            server_kwargs.setdefault(
+                "disable_autocast",
+                _to_bool(raw.get("disable_autocast", False), default=False),
+            )
+        if "lora_merge_mode" in allowed_keys:
+            if raw.get("use_lora") or server_kwargs.get("lora_merge_mode") == "online":
+                server_kwargs.setdefault("lora_merge_mode", "online")
 
         if "tp_size" not in server_kwargs and raw.get("tp_size") is not None:
             server_kwargs["tp_size"] = int(raw["tp_size"])
@@ -286,7 +328,10 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             self._local_mode,
             self._target_modules,
         )
+        disable_autocast = server_kwargs.get("disable_autocast")
         server_args = runtime["ServerArgs"].from_kwargs(**server_kwargs)
+        if disable_autocast is not None:
+            server_args.disable_autocast = disable_autocast
         generator = runtime["DiffGenerator"].from_pretrained(
             server_args=server_args,
             local_mode=self._local_mode,
@@ -312,206 +357,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         if "mochi" in value:
             return "mochi"
         return "unknown"
-
-    def _ensure_prompt_encoder(self) -> None:
-        if self._prompt_encoder is not None:
-            return
-
-        model_type = self._infer_model_type()
-        engine_kwargs = dict(self.config.engine_kwargs or {})
-        encoder_device = str(engine_kwargs.get("prompt_encoder_device", "cuda"))
-        dtype_name = str(engine_kwargs.get("prompt_encoder_dtype", "auto")).lower()
-        if dtype_name == "fp16" or dtype_name == "float16":
-            encoder_dtype = torch.float16
-        elif dtype_name == "bf16" or dtype_name == "bfloat16":
-            encoder_dtype = torch.bfloat16
-        elif dtype_name == "fp32" or dtype_name == "float32":
-            encoder_dtype = torch.float32
-        else:
-            encoder_dtype = torch.bfloat16 if encoder_device.startswith("cuda") else torch.float32
-
-        model_path = self.config.pretrained_model_saved_path or self.config.model_path
-
-        if model_type == "hunyuan":
-            from diffusionrl.models.hunyuan import HunyuanTextEncoderWrapper
-
-            self._prompt_encoder = HunyuanTextEncoderWrapper(
-                pretrained_path=model_path,
-                device=encoder_device,
-                dtype=encoder_dtype,
-            )
-        elif model_type == "flux":
-            from diffusionrl.models.flux import FluxTextEncoderWrapper
-            from transformers import (
-                CLIPTextModel,
-                CLIPTokenizer,
-                T5EncoderModel,
-                T5TokenizerFast,
-            )
-
-            clip_encoder = CLIPTextModel.from_pretrained(
-                model_path,
-                subfolder="text_encoder",
-                torch_dtype=encoder_dtype,
-            ).to(encoder_device)
-            clip_encoder.eval()
-            t5_encoder = T5EncoderModel.from_pretrained(
-                model_path,
-                subfolder="text_encoder_2",
-                torch_dtype=encoder_dtype,
-            ).to(encoder_device)
-            t5_encoder.eval()
-            clip_tokenizer = CLIPTokenizer.from_pretrained(
-                model_path,
-                subfolder="tokenizer",
-            )
-            t5_tokenizer = T5TokenizerFast.from_pretrained(
-                model_path,
-                subfolder="tokenizer_2",
-            )
-
-            self._prompt_encoder = FluxTextEncoderWrapper(
-                clip_encoder=clip_encoder,
-                clip_tokenizer=clip_tokenizer,
-                t5_encoder=t5_encoder,
-                t5_tokenizer=t5_tokenizer,
-                device=encoder_device,
-                dtype=encoder_dtype,
-            )
-        elif model_type == "mochi":
-            from diffusionrl.models.mochi import MochiTextEncoderWrapper
-            from transformers import T5EncoderModel, T5TokenizerFast
-
-            t5_encoder = T5EncoderModel.from_pretrained(
-                model_path,
-                subfolder="text_encoder",
-                torch_dtype=encoder_dtype,
-            ).to(encoder_device)
-            t5_encoder.eval()
-            tokenizer = T5TokenizerFast.from_pretrained(
-                model_path,
-                subfolder="tokenizer",
-            )
-            self._prompt_encoder = MochiTextEncoderWrapper(
-                encoder=t5_encoder,
-                tokenizer=tokenizer,
-                device=encoder_device,
-                dtype=encoder_dtype,
-                max_length=int(engine_kwargs.get("prompt_encoder_max_length", 256)),
-            )
-        elif model_type == "sd3":
-            from transformers import (
-                CLIPTextModelWithProjection,
-                CLIPTokenizer,
-                T5EncoderModel,
-                T5TokenizerFast,
-            )
-
-            class _SD3PromptEncoder:
-                def __init__(
-                    self,
-                    *,
-                    pretrained_path: str,
-                    device: str,
-                    dtype: torch.dtype,
-                    max_sequence_length: int,
-                ) -> None:
-                    self.device = device
-                    self.dtype = dtype
-                    self.max_sequence_length = max_sequence_length
-
-                    self.tokenizer_1 = CLIPTokenizer.from_pretrained(
-                        pretrained_path, subfolder="tokenizer"
-                    )
-                    self.tokenizer_2 = CLIPTokenizer.from_pretrained(
-                        pretrained_path, subfolder="tokenizer_2"
-                    )
-                    self.tokenizer_3 = T5TokenizerFast.from_pretrained(
-                        pretrained_path, subfolder="tokenizer_3"
-                    )
-
-                    self.text_encoder_1 = CLIPTextModelWithProjection.from_pretrained(
-                        pretrained_path,
-                        subfolder="text_encoder",
-                        torch_dtype=dtype,
-                    ).to(device)
-                    self.text_encoder_1.eval()
-                    self.text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
-                        pretrained_path,
-                        subfolder="text_encoder_2",
-                        torch_dtype=dtype,
-                    ).to(device)
-                    self.text_encoder_2.eval()
-                    self.text_encoder_3 = T5EncoderModel.from_pretrained(
-                        pretrained_path,
-                        subfolder="text_encoder_3",
-                        torch_dtype=dtype,
-                    ).to(device)
-                    self.text_encoder_3.eval()
-
-                @torch.no_grad()
-                def encode_prompt(self, prompts: List[str]) -> tuple[torch.Tensor, torch.Tensor]:
-                    text_inputs_1 = self.tokenizer_1(
-                        prompts,
-                        padding="max_length",
-                        max_length=77,
-                        truncation=True,
-                        return_tensors="pt",
-                    )
-                    text_inputs_2 = self.tokenizer_2(
-                        prompts,
-                        padding="max_length",
-                        max_length=77,
-                        truncation=True,
-                        return_tensors="pt",
-                    )
-                    text_inputs_3 = self.tokenizer_3(
-                        prompts,
-                        padding="max_length",
-                        max_length=self.max_sequence_length,
-                        truncation=True,
-                        return_tensors="pt",
-                    )
-
-                    clip_out_1 = self.text_encoder_1(
-                        text_inputs_1.input_ids.to(self.device),
-                        output_hidden_states=True,
-                    )
-                    clip_out_2 = self.text_encoder_2(
-                        text_inputs_2.input_ids.to(self.device),
-                        output_hidden_states=True,
-                    )
-                    t5_out = self.text_encoder_3(
-                        text_inputs_3.input_ids.to(self.device),
-                    )
-
-                    pooled = torch.cat(
-                        [clip_out_1.text_embeds, clip_out_2.text_embeds],
-                        dim=-1,
-                    ).to(dtype=self.dtype)
-                    prompt_embeds = t5_out.last_hidden_state.to(dtype=self.dtype)
-                    return prompt_embeds, pooled
-
-            self._prompt_encoder = _SD3PromptEncoder(
-                pretrained_path=model_path,
-                device=encoder_device,
-                dtype=encoder_dtype,
-                max_sequence_length=int(engine_kwargs.get("prompt_encoder_max_length", 256)),
-            )
-        else:
-            raise NotImplementedError(
-                "SGLang prompt-only rollout input mode requires a built-in prompt encoder. "
-                f"Unsupported model_type={model_type!r}. "
-                f"Supported model types: {sorted(_SUPPORTED_PROMPT_ENCODER_MODEL_TYPES)}."
-            )
-
-        self._supports_prompt_encoding = True
-        logger.info(
-            "Initialized SGLang prompt encoder (model_type=%s, device=%s, dtype=%s)",
-            model_type,
-            encoder_device,
-            encoder_dtype,
-        )
 
     # ---------------------------------------------------------------------
     # Data conversion helpers
@@ -803,13 +648,13 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         traj_len = int(trajectories_tensor.shape[1])
         has_initial_noise = traj_len == int(num_inference_steps) + 1
         if has_initial_noise:
-            timesteps = get_sigma_schedule(
+            timesteps = get_sigma_schedule_diffusers(
                 int(num_inference_steps),
                 shift=float(self.config.shift),
             ).cpu()
             step_indices = torch.arange(timesteps.shape[0], dtype=torch.long)
         else:
-            full_sigmas = get_sigma_schedule(traj_len, shift=float(self.config.shift)).cpu()
+            full_sigmas = get_sigma_schedule_diffusers(traj_len, shift=float(self.config.shift)).cpu()
             timesteps = full_sigmas[1:]
             step_indices = torch.arange(1, full_sigmas.shape[0], dtype=torch.long)
             if not self._warned_missing_initial_noise:
@@ -949,6 +794,126 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         return image_ids.reshape(packed_h * packed_w, 3)
 
     # ---------------------------------------------------------------------
+    # Embedding extraction from sglang results
+    # ---------------------------------------------------------------------
+    @staticmethod
+    def _unwrap_embed_field(value: Any) -> Optional[torch.Tensor]:
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)):
+            tensors = [item for item in value if torch.is_tensor(item)]
+            if not tensors:
+                return None
+            if len(tensors) == 1:
+                value = tensors[0]
+            elif tensors[0].dim() >= 3:
+                value = torch.cat(tensors, dim=-2)
+            else:
+                value = torch.cat(tensors, dim=-1)
+        if not torch.is_tensor(value):
+            return None
+        return value
+
+    def _build_embeddings_from_results(
+        self,
+        *,
+        results: Sequence[Any],
+        model_type: str,
+        batch_size: int,
+        height: int,
+        width: int,
+    ) -> Optional[PromptEmbeddings]:
+        prompt_embeds_list: List[torch.Tensor] = []
+        pooled_list: List[torch.Tensor] = []
+        mask_list: List[torch.Tensor] = []
+        negative_prompt_list: List[torch.Tensor] = []
+        negative_pooled_list: List[torch.Tensor] = []
+
+        for result in results:
+            prompt_embeds = self._unwrap_embed_field(getattr(result, "prompt_embeds", None))
+            if prompt_embeds is None:
+                return None
+            prompt_embeds_list.append(prompt_embeds.detach().cpu())
+
+            pooled_prompt_embeds = self._unwrap_embed_field(
+                getattr(result, "pooled_prompt_embeds", None)
+            )
+            if pooled_prompt_embeds is not None:
+                pooled_list.append(pooled_prompt_embeds.detach().cpu())
+
+            encoder_attention_mask = self._unwrap_embed_field(
+                getattr(result, "encoder_attention_mask", None)
+            )
+            if encoder_attention_mask is not None:
+                mask_list.append(encoder_attention_mask.detach().cpu())
+
+            negative_prompt_embeds = self._unwrap_embed_field(
+                getattr(result, "negative_prompt_embeds", None)
+            )
+            if negative_prompt_embeds is not None:
+                negative_prompt_list.append(negative_prompt_embeds.detach().cpu())
+
+            negative_pooled_prompt_embeds = self._unwrap_embed_field(
+                getattr(result, "negative_pooled_prompt_embeds", None)
+            )
+            if negative_pooled_prompt_embeds is None:
+                negative_pooled_prompt_embeds = self._unwrap_embed_field(
+                    getattr(result, "neg_pooled_prompt_embeds", None)
+                )
+            if negative_pooled_prompt_embeds is not None:
+                negative_pooled_list.append(negative_pooled_prompt_embeds.detach().cpu())
+
+        prompt_embeds = torch.cat(prompt_embeds_list, dim=0) if prompt_embeds_list else None
+        if prompt_embeds is None:
+            return None
+
+        pooled_prompt_embeds = torch.cat(pooled_list, dim=0) if pooled_list else None
+        encoder_attention_mask = torch.cat(mask_list, dim=0) if mask_list else None
+        negative_prompt_embeds = (
+            torch.cat(negative_prompt_list, dim=0) if negative_prompt_list else None
+        )
+        negative_pooled_prompt_embeds = (
+            torch.cat(negative_pooled_list, dim=0) if negative_pooled_list else None
+        )
+
+        text_ids = None
+        image_ids = None
+        if model_type == "flux":
+            text_ids = self._build_flux_text_ids(prompt_embeds)
+            image_ids = self._build_flux_image_ids(
+                height=height,
+                width=width,
+                device=prompt_embeds.device,
+                dtype=prompt_embeds.dtype,
+            )
+
+        return PromptEmbeddings(
+            prompt_embeds=self._align_embedding_tensor("prompt_embeds", prompt_embeds, batch_size),
+            pooled_prompt_embeds=self._align_embedding_tensor(
+                "pooled_prompt_embeds",
+                pooled_prompt_embeds,
+                batch_size,
+            ),
+            encoder_attention_mask=self._align_embedding_tensor(
+                "encoder_attention_mask",
+                encoder_attention_mask,
+                batch_size,
+            ),
+            negative_prompt_embeds=self._align_embedding_tensor(
+                "negative_prompt_embeds",
+                negative_prompt_embeds,
+                batch_size,
+            ),
+            negative_pooled_prompt_embeds=self._align_embedding_tensor(
+                "negative_pooled_prompt_embeds",
+                negative_pooled_prompt_embeds,
+                batch_size,
+            ),
+            text_ids=self._align_embedding_tensor("text_ids", text_ids, batch_size),
+            image_ids=self._align_embedding_tensor("image_ids", image_ids, batch_size),
+        )
+
+    # ---------------------------------------------------------------------
     # Core inference API
     # ---------------------------------------------------------------------
     def generate(self, request: RolloutRequest) -> RolloutSamples:
@@ -1006,26 +971,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         out_w = int(width)
         out_f = int(num_frames)
 
-        # TODO(architecture): Align SGLang rollout conditioning with flow_grpo
-        # semantics. The training path should eventually receive the exact prompt
-        # conditioning tensors used by the internal denoising pipeline, surfaced
-        # from sglang-diffusion itself, instead of this parallel prompt-encoder
-        # path in diffusionrl.
-        encoded = self.encode_prompt(
-            list(prompts),
-            height=out_h,
-            width=out_w,
-            num_frames=out_f,
-        )
-        prompt_embeds = encoded.get("prompt_embeds")
-        if prompt_embeds is None:
-            raise RuntimeError("SGLang encode_prompt() returned no prompt_embeds")
-        pooled_prompt_embeds = encoded.get("pooled_prompt_embeds")
-        encoder_attention_mask = encoded.get("encoder_attention_mask")
-        negative_prompt_embeds = encoded.get("negative_prompt_embeds")
-        negative_pooled_prompt_embeds = encoded.get("negative_pooled_prompt_embeds")
-        text_ids = encoded.get("text_ids")
-        image_ids = encoded.get("image_ids")
         model_type = self._infer_model_type()
 
         require_trajectory = bool(request.sampling.get("return_trajectories", True))
@@ -1037,6 +982,13 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         negative_prompt = kwargs.pop("negative_prompt", None)
         fps = kwargs.pop("fps", None)
         num_outputs_per_prompt = kwargs.pop("num_outputs_per_prompt", None)
+        init_same_noise = _to_bool(request.sampling.get("init_same_noise", False), default=False)
+        samples_per_prompt = int(
+            kwargs.pop(
+                "num_samples_per_prompt",
+                request.sampling.get("samples_per_prompt", 1),
+            )
+        )
         default_rollout_enabled = bool(
             require_log_probs and sde_indices is not None and self._native_rollout_logprob_enabled()
         )
@@ -1091,6 +1043,8 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             # Keep rollout path latent-only; decoded reward media must come from
             # the sampler output itself or explicit decode_latents().
             "return_trajectory_decoded": False,
+            "return_prompt_embeds": True,
+            "return_negative_prompt_embeds": bool(negative_prompt is not None),
         }
         if seed is not None:
             sampling_params_kwargs["seed"] = int(seed)
@@ -1100,29 +1054,53 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             sampling_params_kwargs["fps"] = int(fps)
         if num_outputs_per_prompt is not None:
             sampling_params_kwargs["num_outputs_per_prompt"] = int(num_outputs_per_prompt)
+        sampling_params_kwargs["sigmas"] = get_sigma_schedule_diffusers(
+            steps,
+            shift=float(self.config.shift),
+        )[:-1].tolist()
         if rollout_enabled:
             sampling_params_kwargs["rollout"] = True
             sampling_params_kwargs["rollout_sde_type"] = rollout_sde_type
             sampling_params_kwargs["rollout_noise_level"] = rollout_noise_level
+            if sde_indices is not None:
+                sampling_params_kwargs["rollout_sde_indices"] = sorted(
+                    int(i) for i in sde_indices
+                )
 
-        # The local DiffGenerator API currently validates `prompt` as a single
-        # string before it expands batched inputs internally. Dispatch one
-        # request per prompt here to keep diffusionrl compatible with both the
-        # local checkout and installed sglang variants.
+        unique_prompts, validated_k = _deexpand_prompts(list(prompts), samples_per_prompt)
+        if num_outputs_per_prompt is not None:
+            validated_k = 1
+            unique_prompts = list(prompts)
+            sampling_params_kwargs["num_outputs_per_prompt"] = int(num_outputs_per_prompt)
+
+        if validated_k > 1:
+            logger.info(
+                "SGLang batched generation: %d expanded prompts -> %d unique prompts x K=%d "
+                "(init_same_noise=%s)",
+                len(prompts),
+                len(unique_prompts),
+                validated_k,
+                init_same_noise,
+            )
+
+        request_kwargs = dict(sampling_params_kwargs)
+        request_kwargs["prompt"] = (
+            unique_prompts if len(unique_prompts) > 1 else unique_prompts[0]
+        )
+        if validated_k > 1:
+            request_kwargs["num_outputs_per_prompt"] = validated_k
+            request_kwargs["init_same_noise"] = init_same_noise
+        if seed is not None:
+            request_kwargs["seed"] = int(seed)
+
+        raw_results = self._generator.generate(sampling_params_kwargs=request_kwargs)
+        if raw_results is None:
+            raise RuntimeError("SGLang generator returned no results for prompt batch")
         results: List[Any] = []
-        for prompt in prompts:
-            request_kwargs = dict(sampling_params_kwargs)
-            request_kwargs["prompt"] = str(prompt)
-            if seed is not None:
-                request_kwargs["seed"] = int(seed)
-
-            raw_results = self._generator.generate(sampling_params_kwargs=request_kwargs)
-            if raw_results is None:
-                raise RuntimeError("SGLang generator returned no results for prompt batch")
-            if isinstance(raw_results, list):
-                results.extend(list(raw_results))
-            else:
-                results.append(raw_results)
+        if isinstance(raw_results, list):
+            results.extend(list(raw_results))
+        else:
+            results.append(raw_results)
 
         trajectory_items: List[Optional[torch.Tensor]] = [
             self._extract_trajectory_from_result(result, required=require_trajectory)
@@ -1156,7 +1134,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 results=results,
                 model_type=model_type,
             )
-            timesteps = get_sigma_schedule(steps, shift=float(self.config.shift)).cpu()
+            timesteps = get_sigma_schedule_diffusers(steps, shift=float(self.config.shift)).cpu()
             step_indices = torch.arange(timesteps.shape[0], dtype=torch.long)
 
         per_result_log_probs: List[Optional[torch.Tensor]] = []
@@ -1198,26 +1176,22 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 )
                 self._warned_logprob_shape = True
 
-        embeddings = None
-        if prompt_embeds is not None:
-            batch_size = int(final_latents.shape[0])
-            embeddings = PromptEmbeddings(
-                prompt_embeds=self._align_embedding_tensor("prompt_embeds", prompt_embeds, batch_size),
-                pooled_prompt_embeds=self._align_embedding_tensor(
-                    "pooled_prompt_embeds", pooled_prompt_embeds, batch_size
-                ),
-                encoder_attention_mask=self._align_embedding_tensor(
-                    "encoder_attention_mask", encoder_attention_mask, batch_size
-                ),
-                negative_prompt_embeds=self._align_embedding_tensor(
-                    "negative_prompt_embeds", negative_prompt_embeds, batch_size
-                ),
-                negative_pooled_prompt_embeds=self._align_embedding_tensor(
-                    "negative_pooled_prompt_embeds", negative_pooled_prompt_embeds, batch_size
-                ),
-                text_ids=self._align_embedding_tensor("text_ids", text_ids, batch_size),
-                image_ids=self._align_embedding_tensor("image_ids", image_ids, batch_size),
-            )
+        rollout_noise_preds_tensor: Optional[torch.Tensor] = None
+        per_result_noise_preds = [
+            getattr(result, "trajectory_noise_preds", None) for result in results
+        ]
+        if any(item is not None for item in per_result_noise_preds):
+            valid_noise_preds = [item for item in per_result_noise_preds if item is not None]
+            if valid_noise_preds:
+                rollout_noise_preds_tensor = torch.cat(valid_noise_preds, dim=0)
+
+        embeddings = self._build_embeddings_from_results(
+            results=results,
+            model_type=model_type,
+            batch_size=int(final_latents.shape[0]),
+            height=out_h,
+            width=out_w,
+        )
 
         decoded_images = None
         decoded_video_tensors: List[torch.Tensor] = []
@@ -1263,6 +1237,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             "generator_type": "sglang",
             "engine_capabilities": self.get_capabilities_dict(),
             "logprob_source": self._logprob_source(),
+            "prompt_embeds_source": "sglang",
             "trajectory_format": trajectory_format,
             "timestep_type": "sigma",
             "timestep_scale": 1.0,
@@ -1270,6 +1245,8 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             "has_initial_noise": has_initial_noise,
             "trajectory_available": bool(trajectories_tensor is not None),
         }
+        if rollout_noise_preds_tensor is not None:
+            metadata["rollout_noise_preds"] = rollout_noise_preds_tensor
         if decoded_video_tensors:
             metadata["decoded_videos"] = torch.stack(decoded_video_tensors, dim=0)
         if self._last_weight_checksum:
@@ -1295,31 +1272,29 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
     ) -> Dict[str, torch.Tensor]:
         if prompts is None or len(prompts) == 0:
             raise ValueError("encode_prompt requires non-empty prompts")
+        if not self._is_initialized or self._generator is None:
+            raise RuntimeError("SGLang engine is not initialized")
 
-        self._ensure_prompt_encoder()
-        encoded = self._prompt_encoder.encode_prompt(list(prompts))
-        if not isinstance(encoded, (tuple, list)) or len(encoded) < 2:
-            raise RuntimeError(
-                f"Unexpected prompt encoder output type: {type(encoded).__name__}"
+        encode_fn = getattr(self._generator, "encode_prompt", None)
+        if not callable(encode_fn):
+            raise NotImplementedError(
+                "SGLang DiffGenerator does not support encode_prompt(). "
+                "Upgrade sglang to a version with encode_prompt support."
             )
 
-        prompt_embeds = encoded[0]
-        secondary = encoded[1]
-        model_type = self._infer_model_type()
+        output = encode_fn(list(prompts))
+        if isinstance(output, dict) and "error" in output:
+            raise RuntimeError(f"SGLang encode_prompt failed: {output['error']}")
+        if not isinstance(output, dict):
+            raise RuntimeError(
+                f"Unexpected SGLang encode_prompt output type: {type(output).__name__}"
+            )
 
-        output: Dict[str, torch.Tensor] = {
-            "prompt_embeds": prompt_embeds,
-        }
-        if model_type == "mochi":
-            output["encoder_attention_mask"] = secondary
-        else:
-            output["pooled_prompt_embeds"] = secondary
-        if model_type == "sd3":
-            negative = self._prompt_encoder.encode_prompt([""] * len(prompts))
-            if isinstance(negative, (tuple, list)) and len(negative) >= 2:
-                output["negative_prompt_embeds"] = negative[0]
-                output["negative_pooled_prompt_embeds"] = negative[1]
+        model_type = self._infer_model_type()
+        prompt_embeds = output.get("prompt_embeds")
         if model_type == "flux":
+            if prompt_embeds is None:
+                raise RuntimeError("SGLang encode_prompt() returned no prompt_embeds for FLUX")
             height = int(kwargs.get("height", self.config.height))
             width = int(kwargs.get("width", self.config.width))
             output["text_ids"] = self._build_flux_text_ids(prompt_embeds)
@@ -1383,6 +1358,34 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             self._target_modules,
             len(named_tensors),
         )
+
+    def set_lora_from_tensors(
+        self,
+        adapter_name: str,
+        lora_tensors: Dict[str, torch.Tensor],
+    ) -> None:
+        """Initialize LoRA adapter state on SGLang from in-memory tensors."""
+        if not self._is_initialized:
+            raise RuntimeError("SGLang engine is not initialized")
+        runtime = self._import_sglang_runtime()
+        try:
+            from sglang.multimodal_gen.runtime.entrypoints.utils import SetLoraFromTensorsReq
+        except Exception as exc:
+            raise RuntimeError(
+                "Installed sglang runtime does not expose SetLoraFromTensorsReq."
+            ) from exc
+
+        request = SetLoraFromTensorsReq(
+            lora_nickname=str(adapter_name),
+            lora_tensors=lora_tensors,
+            target="all",
+            strength=1.0,
+        )
+        response = runtime["sync_scheduler_client"].forward(request)
+        error = getattr(response, "error", None)
+        if error is not None:
+            raise RuntimeError(f"set_lora_from_tensors failed: {error}")
+        logger.info("SGLang LoRA initialized from tensors (adapter=%s)", adapter_name)
 
     def update_weights_from_path(self, checkpoint_path: str) -> None:
         if not self._is_initialized:
@@ -1545,7 +1548,11 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         return dict(self._last_weight_checksum)
 
     def sleep(self) -> None:
-        self._call_memory_api("release_memory_occupation", tags=["weights"])
+        self._call_memory_api(
+            "release_memory_occupation",
+            tags=["transformer", "vae", "text_encoder"],
+            cpu_backup_tags=["vae", "text_encoder"],
+        )
         self._is_offloaded = True
         logger.info("SGLang engine entered sleep state via release_memory_occupation().")
 
@@ -1553,7 +1560,10 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         if not self._is_offloaded:
             return
 
-        self._call_memory_api("resume_memory_occupation", tags=["weights"])
+        self._call_memory_api(
+            "resume_memory_occupation",
+            tags=["transformer", "vae", "text_encoder"],
+        )
         self._is_offloaded = False
 
     # ---------------------------------------------------------------------
@@ -1568,15 +1578,11 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         return not self._local_mode
 
     def get_capabilities(self) -> EngineCapabilities:
-        supports_prompt_encoding = bool(
-            self._supports_prompt_encoding
-            or self._infer_model_type() in _SUPPORTED_PROMPT_ENCODER_MODEL_TYPES
-        )
         supports_native_logprob = self._native_rollout_logprob_enabled()
         return EngineCapabilities(
             supports_logprob=supports_native_logprob,
             supports_trajectory=True,
-            supports_prompt_embeddings=supports_prompt_encoding,
+            supports_prompt_embeddings=True,
             supports_guidance_scale=True,
             weight_load_mode="state_dict",
         )

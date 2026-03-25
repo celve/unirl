@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 from typing import Any, Dict, List, Optional
 
 import ray
+from ray.actor import ActorHandle
 
 from .group_base import ActorGroupHandle
 
@@ -114,6 +116,18 @@ class TrainingGroupRuntime:
             "broadcast_tensors": int(rank0.get("broadcast_tensors", 0)),
         }
 
+    def setup_weight_sync(self, config: dict) -> None:
+        """Fan out weight-sync handler setup to all training actors."""
+        self._handle.call_all("setup_weight_sync", config)
+
+    def sync_weights_to_rollout_manager(self) -> None:
+        """Fan out handler-based weight sync to all training actors."""
+        self._handle.call_all("sync_weights_to_rollout_manager")
+
+    def teardown_weight_sync(self) -> None:
+        """Fan out weight-sync handler teardown to all training actors."""
+        self._handle.call_all("teardown_weight_sync")
+
     def get_train_backend_info(self, force_refresh: bool = False) -> Dict[str, Any]:
         if self._train_backend_info_cache is not None and not force_refresh:
             return dict(self._train_backend_info_cache)
@@ -175,6 +189,15 @@ class TrainingGroupRuntime:
     def restore_from_eval(self) -> None:
         self._handle.call_all("restore_from_eval")
 
+    @contextmanager
+    def eval_ema_context(self):
+        """Swap eval EMA weights in for the duration of a sampling/eval block."""
+        self.apply_ema_for_eval()
+        try:
+            yield
+        finally:
+            self.restore_from_eval()
+
 
 class RolloutGroupRuntime:
     """Rollout-side lifecycle and weight-sink runtime facade."""
@@ -202,6 +225,10 @@ class RolloutGroupRuntime:
             num_gpus_allocated=int(getattr(group, "num_gpus_allocated", 1) or 1),
             sampler_engine_type=str(getattr(group, "sampler_engine_type", "unknown") or "unknown"),
         )
+
+    def get_rollout_actors(self) -> List[ActorHandle]:
+        """Return concrete rollout actor handles for direct handler injection."""
+        return self._handle.get_actors()
 
     def refresh_weight_update_targets(self) -> Dict[str, Any]:
         if self._handle.num_actors <= 0:

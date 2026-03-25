@@ -21,7 +21,7 @@ def should_save(rollout_id: int, args) -> bool:
 def should_eval(rollout_id: int, args) -> bool:
     """Check if we should run evaluation at this rollout."""
     interval = int(args.rollout.evaluation.eval_steps)
-    return interval > 0 and (rollout_id + 1) % interval == 0
+    return interval > 0 and rollout_id % interval == 0
 
 
 def should_log(rollout_id: int, args) -> bool:
@@ -114,14 +114,16 @@ def create_rollout_timestep_scheduler(args, *, algorithm: Any):
         scheduler_type="all",
         num_timesteps=num_timesteps,
         timestep_fraction=timestep_fraction,
+        num_sde_steps=args.sampling.num_sde_steps,
     )
     frac_start, frac_end = _normalize_timestep_fraction(timestep_fraction)
-    if frac_start > 0.0 or frac_end < 1.0:
+    if frac_start > 0.0 or frac_end < 1.0 or args.sampling.num_sde_steps is not None:
         eff_start = int(num_timesteps * frac_start)
         eff_end = int(num_timesteps * frac_end)
         logger.info(
-            "Control-plane all-SDE scheduler initialized; timestep_fraction=%s (SDE on timesteps [%s, %s)/%s)",
+            "Control-plane all-SDE scheduler initialized; timestep_fraction=%s num_sde_steps=%s (SDE pool [%s, %s)/%s)",
             timestep_fraction,
+            args.sampling.num_sde_steps,
             eff_start,
             eff_end,
             num_timesteps,

@@ -145,7 +145,8 @@ def _normalize_timestep_fraction(
 
 class AllSDEScheduler(TimestepScheduler):
     """
-    All SDE scheduler (standard GRPO) with optional timestep_fraction (DanceGRPO).
+    All SDE scheduler (standard GRPO) with optional timestep_fraction (DanceGRPO)
+    and optional sparse random SDE sub-sampling.
 
     When timestep_fraction=1.0 (default): All timesteps use SDE sampling.
     When timestep_fraction<1.0 (single float): Only the first fraction of timesteps use SDE.
@@ -154,12 +155,15 @@ class AllSDEScheduler(TimestepScheduler):
     This implements DanceGRPO's timestep_fraction parameter which restricts
     training to a subset of timesteps (e.g., timestep_fraction=0.6 trains on
     first 60% of timesteps; timestep_fraction=(0.2, 0.8) trains on 20%-80%).
+    When ``num_sde_steps`` is set, the scheduler randomly samples a fixed-size
+    sparse subset from that fraction range for each rollout step.
     """
 
     def __init__(
         self,
         num_timesteps: int,
         timestep_fraction: Union[float, Tuple[float, float]] = 1.0,
+        num_sde_steps: Optional[int] = None,
     ):
         """
         Initialize AllSDE scheduler.
@@ -169,16 +173,35 @@ class AllSDEScheduler(TimestepScheduler):
             timestep_fraction: Fraction of timesteps to train.
                 Single float x means [0, x) range (backward compatible).
                 Tuple (x, y) means [x, y) range.
+            num_sde_steps: Optional sparse random subset size within the
+                effective timestep range for each rollout.
         """
         super().__init__(num_timesteps)
         self.timestep_fraction = timestep_fraction
+        self.num_sde_steps = num_sde_steps
         self._fraction_start, self._fraction_end = _normalize_timestep_fraction(timestep_fraction)
         self._effective_start = int(num_timesteps * self._fraction_start)
         self._effective_end = int(num_timesteps * self._fraction_end)
+        if num_sde_steps is not None:
+            pool_size = self._effective_end - self._effective_start
+            if num_sde_steps <= 0:
+                raise ValueError(f"num_sde_steps must be positive, got {num_sde_steps}")
+            if num_sde_steps > pool_size:
+                raise ValueError(
+                    f"num_sde_steps ({num_sde_steps}) exceeds available timesteps "
+                    f"in fraction range [{self._effective_start}, {self._effective_end}) "
+                    f"(pool_size={pool_size})"
+                )
 
     def get_sde_indices(self, step: Optional[int] = None) -> Set[int]:
         """Return timestep indices in [start, end) fraction range."""
-        return set(range(self._effective_start, self._effective_end))
+        pool = list(range(self._effective_start, self._effective_end))
+        if self.num_sde_steps is None or self.num_sde_steps >= len(pool):
+            return set(pool)
+        seed = int(step or 0)
+        rng = np.random.default_rng(seed)
+        chosen = rng.choice(pool, size=self.num_sde_steps, replace=False)
+        return set(int(i) for i in chosen)
 
     def update(self, step: int) -> None:
         """No-op for all SDE scheduler."""
@@ -189,6 +212,7 @@ class AllSDEScheduler(TimestepScheduler):
         return {
             "num_timesteps": self.num_timesteps,
             "timestep_fraction": self.timestep_fraction,
+            "num_sde_steps": self.num_sde_steps,
         }
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
@@ -196,6 +220,7 @@ class AllSDEScheduler(TimestepScheduler):
         super().load_state_dict(state_dict)
         raw = state_dict.get("timestep_fraction", 1.0)
         self.timestep_fraction = raw
+        self.num_sde_steps = state_dict.get("num_sde_steps")
         self._fraction_start, self._fraction_end = _normalize_timestep_fraction(raw)
         self._effective_start = int(self.num_timesteps * self._fraction_start)
         self._effective_end = int(self.num_timesteps * self._fraction_end)
@@ -440,7 +465,11 @@ def get_scheduler(
         )
     """
     if scheduler_type == "all":
-        return AllSDEScheduler(num_timesteps, timestep_fraction=timestep_fraction)
+        return AllSDEScheduler(
+            num_timesteps,
+            timestep_fraction=timestep_fraction,
+            num_sde_steps=kwargs.get("num_sde_steps"),
+        )
     elif scheduler_type == "window":
         # Build config from kwargs
         config = WindowConfig(

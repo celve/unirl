@@ -266,17 +266,6 @@ def validate_resolved_engine_algorithm_contract(
 
     required = sampling_requirements
 
-    # SD3 + SGLang does not provide trajectory latents.
-    if rollout_mode_info.is_sglang_engine and str(args.model.model_type or "").strip().lower() == "sd3":
-        if bool(required.requires_trajectory):
-            raise ValueError(
-                "rollout.topology.service_engine='sglang' with model_type='sd3' currently does not "
-                "provide trajectory_latents required by trajectory-based algorithms "
-                "(e.g. GRPO/MixGRPO). Use a direct-sampling engine path "
-                "(the non-sglang default, which runs on training actors), or use "
-                "algorithm_type='nft' when running SD3 with sglang."
-            )
-
     required_dict = required.to_dict()
     missing = [
         key

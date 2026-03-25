@@ -7,7 +7,6 @@ from typing import List
 
 from PIL import Image
 from tqdm import tqdm
-import torch
 
 from diffusionrl.reward.base import RewardRequest, RewardType
 
@@ -35,12 +34,17 @@ class OCRRewardScorer(BaseLocalRewardScorer):
                 "pip install python-Levenshtein"
             )
 
-        use_gpu = str(self.device or "cpu").strip().lower().startswith("cuda") and torch.cuda.is_available()
+        import paddle
+
+        # PaddleOCR v3 removed `use_gpu=` and can aggressively reserve GPU memory
+        # during initialization. Force CPU init so colocate mode does not contend
+        # with training/SGLang allocations.
+        paddle.set_device("cpu")
         self._ocr_reader = PaddleOCR(
-            use_gpu=use_gpu,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,
+            lang="en",
         )
         self._levenshtein_distance = levenshtein_distance
         self.model = "ocr"

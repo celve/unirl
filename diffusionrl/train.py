@@ -415,6 +415,33 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             training_data_handle = None
             rollout_metadata = {}
             sample_count = 0
+            # Periodic: evaluate at loop start before rollout/train of this step.
+            if should_eval(rollout_id, args):
+                eval_phase_start_t = time.perf_counter()
+                rollout_on_gpu = _ensure_rollout_on_gpu(
+                    args=args,
+                    rollout_runtime=rollout_runtime,
+                    rollout_on_gpu=rollout_on_gpu,
+                )
+                if training_actor_sampling_mode:
+                    with training_runtime.eval_ema_context():
+                        eval_metrics = eval_function(
+                            services=rollout_services,
+                            reward_hook=reward_hook,
+                            rollout_id=int(rollout_id),
+                        )
+                else:
+                    eval_metrics = eval_function(
+                        services=rollout_services,
+                        reward_hook=reward_hook,
+                        rollout_id=int(rollout_id),
+                    )
+                eval_phase_s = time.perf_counter() - eval_phase_start_t
+                logger.info(f"Eval at {rollout_id}: mean_reward={eval_metrics['mean_reward']:.4f}")
+
+                if wandb_logger:
+                    wandb_logger.log_eval(rollout_id, eval_metrics)
+
             # === PHASE 1: Rollout ===
             rollout_phase_start_t = time.perf_counter()
             rollout_on_gpu = _ensure_rollout_on_gpu(
@@ -476,32 +503,6 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
                 sync_result = weight_sync.sync(rollout_id=rollout_id)
                 sync_phase_s = time.perf_counter() - sync_phase_start_t
                 rollout_on_gpu = True  # Coordinator internally calls wake_up
-
-            # Periodic: evaluate (after weight sync, rollout actors are on GPU)
-            if should_eval(rollout_id, args):
-                eval_phase_start_t = time.perf_counter()
-                rollout_on_gpu = _ensure_rollout_on_gpu(
-                    args=args,
-                    rollout_runtime=rollout_runtime,
-                    rollout_on_gpu=rollout_on_gpu,
-                )
-                # Swap in EMA weights for stable evaluation when training actors
-                # serve as sampling source (direct-sampling mode).
-                if training_actor_sampling_mode:
-                    training_runtime.apply_ema_for_eval()
-                eval_metrics = eval_function(
-                    services=rollout_services,
-                    reward_hook=reward_hook,
-                    rollout_id=int(rollout_id),
-                )
-                if training_actor_sampling_mode:
-                    training_runtime.restore_from_eval()
-                eval_phase_s = time.perf_counter() - eval_phase_start_t
-                logger.info(f"Eval at {rollout_id}: mean_reward={eval_metrics['mean_reward']:.4f}")
-
-                # Log eval metrics to WandB
-                if wandb_logger:
-                    wandb_logger.log_eval(rollout_id, eval_metrics)
 
             # === Per-optimizer-step wandb logging ===
             if wandb_logger and metrics:

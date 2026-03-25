@@ -127,6 +127,7 @@ def _build_rollout_engine_base_kwargs(
         "sglang_verify_weight_checksum": "verify_weight_checksum",
         "sglang_prompt_encoder_device": "prompt_encoder_device",
         "sglang_prompt_encoder_max_length": "prompt_encoder_max_length",
+        "sglang_disable_autocast": "disable_autocast",
     }
     for attr_name, engine_key in sglang_field_map.items():
         value = getattr(rollout_topology_settings, attr_name)
@@ -169,6 +170,8 @@ def build_rollout_engine_config(
         merged_engine_kwargs.setdefault("vae_saved_path", model_config["vae_saved_path"])
     if model_config.get("text_encoder_path"):
         merged_engine_kwargs.setdefault("text_encoder_path", model_config["text_encoder_path"])
+    if model_config.get("use_lora"):
+        merged_engine_kwargs.setdefault("lora_merge_mode", "online")
     # Keep SGLang prompt-encoder precision on the canonical rollout precision
     # surface so rollout compute settings do not split across config namespaces.
     merged_engine_kwargs["prompt_encoder_dtype"] = rollout_precision.autocast_precision
@@ -182,6 +185,7 @@ def build_rollout_engine_config(
         merged_engine_kwargs["logprob_source"] = str(logprob_source)
         if offload_rollout:
             merged_engine_kwargs["require_memory_api"] = True
+    rollout_batch_size = getattr(rollout_topology_settings, "rollout_batch_size", None)
 
     return {
         "sampler_engine_type": sampler_engine_type,
@@ -197,6 +201,7 @@ def build_rollout_engine_config(
         "width": int(sampling_spec.width),
         "num_frames": int(sampling_spec.num_frames),
         "engine_kwargs": merged_engine_kwargs,
+        "rollout_batch_size": int(rollout_batch_size) if rollout_batch_size is not None else None,
     }
 
 

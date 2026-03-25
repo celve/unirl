@@ -43,6 +43,19 @@ def _save_debug_tensor(base_dir: str, step_idx: int, name: str, tensor: torch.Te
     torch.save(tensor.detach().cpu().float(), path)
 
 
+def calculate_shift(
+    image_seq_len: int,
+    base_seq_len: int = 256,
+    max_seq_len: int = 4096,
+    base_shift: float = 0.5,
+    max_shift: float = 1.15,
+) -> float:
+    """Mirror diffusers SD3 dynamic-shift interpolation for image sequence length."""
+    m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
+    b = base_shift - m * base_seq_len
+    return image_seq_len * m + b
+
+
 @dataclass
 class _DPMState:
     order: int
@@ -443,7 +456,13 @@ class SD3Sampler(BaseSampler):
             latents = latents.to(device=device, dtype=latent_dtype)
 
         # Get sigma schedule (align with diffusers scheduler if available)
-        sigmas = self._get_sigma_schedule(num_inference_steps, device)
+        patch_size = int(getattr(getattr(self.model, "config", None), "patch_size", 1) or 1)
+        image_seq_len = (latents.shape[-2] // patch_size) * (latents.shape[-1] // patch_size)
+        sigmas = self._get_sigma_schedule(
+            num_inference_steps,
+            device,
+            image_seq_len=image_seq_len,
+        )
 
         # Default: all timesteps use SDE; in deterministic (dpm2) mode, use ODE only.
         # When eta=0 the SDE degenerates to ODE (no noise), so skip SDE steps
@@ -700,12 +719,35 @@ class SD3Sampler(BaseSampler):
         self,
         num_inference_steps: int,
         device: torch.device,
+        image_seq_len: int = 256,
+        sigmas: Optional[torch.Tensor] = None,
+        mu: Optional[float] = None,
     ) -> torch.Tensor:
         if self.scheduler is None:
             return get_sigma_schedule(num_inference_steps, self.shift, device)
         try:
             from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import retrieve_timesteps
-            retrieve_timesteps(self.scheduler, num_inference_steps, device, sigmas=None)
+
+            scheduler_config = getattr(self.scheduler, "config", None)
+            scheduler_kwargs: Dict[str, Any] = {}
+            if scheduler_config is not None and bool(scheduler_config.get("use_dynamic_shifting", False)):
+                if mu is None:
+                    mu = calculate_shift(
+                        image_seq_len,
+                        int(scheduler_config.get("base_image_seq_len", 256)),
+                        int(scheduler_config.get("max_image_seq_len", 4096)),
+                        float(scheduler_config.get("base_shift", 0.5)),
+                        float(scheduler_config.get("max_shift", 1.16)),
+                    )
+                scheduler_kwargs["mu"] = mu
+
+            retrieve_timesteps(
+                self.scheduler,
+                num_inference_steps,
+                device,
+                sigmas=sigmas,
+                **scheduler_kwargs,
+            )
             sigmas = self.scheduler.sigmas
             if sigmas is None:
                 raise ValueError("Scheduler did not provide sigmas")

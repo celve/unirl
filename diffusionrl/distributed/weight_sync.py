@@ -13,7 +13,6 @@ Two-phase lifecycle: setup() -> sync() x N -> teardown().
 
 from __future__ import annotations
 
-import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -22,8 +21,6 @@ from typing import Any, Dict, Optional, Type
 import logging
 
 from diffusionrl.config.launch_resolution import ResolvedLaunchConfig
-from diffusionrl.distributed.weight_sync_checkpoint import cleanup_published_checkpoint
-
 logger = logging.getLogger(__name__)
 
 
@@ -219,16 +216,23 @@ class TensorPayloadWeightSync(WeightSyncCoordinator):
         self._flush_cache = _resolve_flush_cache(self.args)
         self._rollout_runtime.refresh_weight_update_targets()
         self._tp_payload_count = _resolve_rollout_tp_payload_count(self._rollout_runtime)
+        rollout_actors = self._rollout_runtime.get_rollout_actors()
+        self._training_runtime.setup_weight_sync({
+            "mode": "tensor_payload",
+            "rollout_actors": rollout_actors,
+            "target_modules": self._target_modules,
+            "bucket_size_mb": self._bucket_size_mb,
+            "flush_cache": self._flush_cache,
+            "rollout_num_gpus_per_engine": self._tp_payload_count,
+        })
 
     def _do_sync(self, *, rollout_id: int) -> Dict[str, Any]:
-        stats = self._training_runtime.sync_weights_to_rollout_ipc(
-            rollout_runtime=self._rollout_runtime,
-            target_modules=self._target_modules,
-            bucket_size_mb=self._bucket_size_mb,
-            flush_cache=self._flush_cache,
-            tp_payload_count=self._tp_payload_count,
-        )
-        return {"stats": stats, "tp_payload_count": self._tp_payload_count}
+        del rollout_id
+        self._training_runtime.sync_weights_to_rollout_manager()
+        return {"tp_payload_count": self._tp_payload_count}
+
+    def _do_teardown(self) -> None:
+        self._training_runtime.teardown_weight_sync()
 # ---------------------------------------------------------------------------
 # NCCLBroadcastWeightSync (persistent group)
 # ---------------------------------------------------------------------------
@@ -250,6 +254,23 @@ class NCCLBroadcastWeightSync(WeightSyncCoordinator):
         self._group_name: Optional[str] = None
         self._rollout_runtime.refresh_weight_update_targets()
         self._init_persistent_group()
+        self._setup_handler()
+
+    def _setup_handler(self) -> None:
+        rollout_actors = self._rollout_runtime.get_rollout_actors()
+        topology = self._rollout_runtime.get_weight_sync_topology()
+        total_rollout_gpus = int(topology.get("total_gpus", 0)) if isinstance(topology, dict) else 0
+        self._training_runtime.setup_weight_sync({
+            "mode": "nccl_broadcast",
+            "rollout_actors": rollout_actors,
+            "target_modules": self._target_modules,
+            "bucket_size_mb": self._bucket_size_mb,
+            "flush_cache": self._flush_cache,
+            "rollout_num_gpus": total_rollout_gpus,
+            "rollout_num_gpus_per_engine": int(
+                topology.get("num_gpus_per_actor", 1)
+            ) if isinstance(topology, dict) else 1,
+        })
 
     def _init_persistent_group(self) -> None:
         topology = self._rollout_runtime.get_weight_sync_topology()
@@ -306,36 +327,28 @@ class NCCLBroadcastWeightSync(WeightSyncCoordinator):
             logger.debug("Rollout-side group destroy failed: %s", gn, exc_info=True)
 
     def _do_sync(self, *, rollout_id: int) -> Dict[str, Any]:
+        del rollout_id
         if not self._group_name:
             return {"skipped": True}
         try:
-            stats = self._training_runtime.sync_weights_to_rollout_nccl(
-                rollout_runtime=self._rollout_runtime,
-                group_name=self._group_name,
-                target_modules=self._target_modules,
-                bucket_size_mb=self._bucket_size_mb,
-                flush_cache=self._flush_cache,
-            )
-            return {"stats": stats}
+            self._training_runtime.sync_weights_to_rollout_manager()
+            return {}
         except Exception:
             logger.warning("NCCL sync failed, rebuilding group...", exc_info=True)
+            self._training_runtime.teardown_weight_sync()
             self._destroy_group_best_effort()
             self._group_name = None
             self._init_persistent_group()
             if not self._group_name:
                 raise
-            stats = self._training_runtime.sync_weights_to_rollout_nccl(
-                rollout_runtime=self._rollout_runtime,
-                group_name=self._group_name,
-                target_modules=self._target_modules,
-                bucket_size_mb=self._bucket_size_mb,
-                flush_cache=self._flush_cache,
-            )
-            return {"stats": stats, "recovered": True}
+            self._setup_handler()
+            self._training_runtime.sync_weights_to_rollout_manager()
+            return {"recovered": True}
 
     def _do_teardown(self) -> None:
         self._destroy_group_best_effort()
         self._group_name = None
+        self._training_runtime.teardown_weight_sync()
 # ---------------------------------------------------------------------------
 # CheckpointWeightSync
 # ---------------------------------------------------------------------------
@@ -351,6 +364,13 @@ class CheckpointWeightSync(WeightSyncCoordinator):
         if self._rollout_runtime is None:
             raise RuntimeError("checkpoint_path weight sync requires a rollout runtime.")
         self._export_format = self._select_export_format()
+        self._training_runtime.setup_weight_sync({
+            "mode": "checkpoint_path",
+            "rollout_actors": [],
+            "rollout_runtime": self._rollout_runtime,
+            "export_format": self._export_format,
+            "weight_sync_dir": str(self.args.sync.dir),
+        })
 
     def _select_export_format(self) -> str:
         rollout = self.launch_config.rollout
@@ -379,30 +399,13 @@ class CheckpointWeightSync(WeightSyncCoordinator):
             return "sglang_transformer_safetensors"
         return "state_dict"
 
-    def _build_weight_checkpoint_path(self, rollout_id: int, *, export_format: str) -> str:
-        os.makedirs(self.args.sync.dir, exist_ok=True)
-        if export_format == "sglang_transformer_safetensors":
-            return os.path.join(
-                self.args.sync.dir,
-                f"weights_rollout_{rollout_id}_{int(time.time_ns())}",
-            )
-        return os.path.join(
-            self.args.sync.dir,
-            f"weights_rollout_{rollout_id}_{int(time.time_ns())}.pt",
-        )
-
     def _do_sync(self, *, rollout_id: int) -> Dict[str, Any]:
-        path = self._build_weight_checkpoint_path(
-            rollout_id,
-            export_format=self._export_format,
-        )
-        self._training_runtime.export_weights_to_path(
-            path,
-            export_format=self._export_format,
-        )
-        self._rollout_runtime.update_weights_from_path(path)
-        cleanup_published_checkpoint(path)
-        return {"checkpoint_path": path}
+        del rollout_id
+        self._training_runtime.sync_weights_to_rollout_manager()
+        return {}
+
+    def _do_teardown(self) -> None:
+        self._training_runtime.teardown_weight_sync()
 
 
 _BUILTIN_COORDINATORS: Dict[str, Type[WeightSyncCoordinator]] = {

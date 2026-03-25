@@ -77,17 +77,26 @@ WORKER_WAIT_TIMEOUT="${WORKER_WAIT_TIMEOUT:-600}"
 # ── Training hyperparameters ──
 PRETRAINED_MODEL="${PRETRAINED_MODEL:-stabilityai/stable-diffusion-3.5-medium}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/flowgrpo_fast_sd3_multinode}"
-DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/pickscore/train.txt}"
-EVAL_DATA_PATH="${EVAL_DATA_PATH:-${REPO_ROOT}/data/datasets/pickscore/test.txt}"
+SDE_TYPE="${SDE_TYPE:-flow}"
+TIMESTEP_FRACTION="${TIMESTEP_FRACTION:-0.1,0.3}"
+NUM_SDE_STEPS="${NUM_SDE_STEPS:-}"
+GUIDANCE_SCALE="${GUIDANCE_SCALE:-4.5}"
+REWARD_NAME="${REWARD_NAME:-pickscore}"
+DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/${REWARD_NAME}/train.txt}"
+EVAL_DATA_PATH="${EVAL_DATA_PATH:-${REPO_ROOT}/data/datasets/${REWARD_NAME}/test.txt}"
+EVAL_STEPS="${EVAL_STEPS:-30}"
 
-NUM_INFERENCE_STEPS=10
-NUM_SAMPLES_PER_PROMPT=24
-PROMPTS_PER_BATCH=48
-DIRECT_SAMPLING_BATCH_SIZE=192
-LOCAL_MICRO_BATCH_SIZE=12
-NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-2}
-TOTAL_GPUS=$(( NUM_NODES * GPUS_PER_NODE ))
-ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
+NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-10}"
+PROMPTS_PER_BATCH="${PROMPTS_PER_BATCH:-48}"
+NUM_SAMPLES_PER_PROMPT="${NUM_SAMPLES_PER_PROMPT:-24}"
+SAMPLING_FORWARD_BATCH="${SAMPLING_FORWARD_BATCH:-192}"
+TRAINING_FORWARD_BATCH="${TRAINING_FORWARD_BATCH:-12}"
+NUM_UPDATES="${NUM_UPDATES:-2}"
+
+source "${SCRIPT_DIR}/_batch_config.sh"
+resolve_batch_params
+validate_batch_params
+print_batch_params
 
 SHUFFLE_SEED="${SHUFFLE_SEED:-42}"
 SHUFFLE_SAMPLES="${SHUFFLE_SAMPLES:-false}"
@@ -110,7 +119,7 @@ WANDB_PROJECT_NAME="diffusionrl-flowgrpo"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-SD3.5-Flow-GRPO-Fast-multinode}"
 WANDB_LOG_MEDIA=true
 WANDB_MEDIA_MAX_ITEMS=48
-WANDB_TAGS="${WANDB_TAGS:-reproduce,sd3.5,flow_fast,pickscore,multinode}"
+WANDB_TAGS="${WANDB_TAGS:-reproduce,sd3.5,flow_fast,${REWARD_NAME},multinode}"
 WANDB_ENTITY="${WANDB_ENTITY:-diffusionrl-reproduce}"
 LOGGING_STEPS=1
 
@@ -162,6 +171,10 @@ run_training() {
     if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
         micro_batch_args+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
     fi
+    local num_sde_step_args=()
+    if [ -n "${NUM_SDE_STEPS}" ]; then
+        num_sde_step_args+=(--sampling.num-sde-steps "${NUM_SDE_STEPS}")
+    fi
 
     local wandb_entity_args=()
     if [ -n "${WANDB_ENTITY}" ]; then
@@ -186,13 +199,14 @@ run_training() {
         --data-path "${DATA_PATH}" \
         --eval-data-path "${EVAL_DATA_PATH}" \
         \
-        --sampling.sde-type flow \
+        --sampling.sde-type "${SDE_TYPE}" \
         --sampling.eta 0.7 \
         --sampling.shift 3.0 \
         --sampling.num-inference-steps "${NUM_INFERENCE_STEPS}" \
         --sampling.max-samples-per-request "${DIRECT_SAMPLING_BATCH_SIZE}" \
-        --sampling.guidance-scale 4.5 \
-        --sampling.timestep-fraction 0.1,0.3 \
+        --sampling.guidance-scale "${GUIDANCE_SCALE}" \
+        --sampling.timestep-fraction "${TIMESTEP_FRACTION}" \
+        "${num_sde_step_args[@]}" \
         \
         "${FLOWGRPO_ALGO_KWARG_ARGS[@]}" \
         --algorithm.prompts-per-rollout "${PROMPTS_PER_BATCH}" \
@@ -220,7 +234,7 @@ run_training() {
         \
         --rollout.control.num-rollout 10000 \
         --rollout.artifacts.save-steps 0 \
-        --rollout.evaluation.eval-steps 30 \
+        --rollout.evaluation.eval-steps "${EVAL_STEPS}" \
         --rollout.logging.logging-steps "${LOGGING_STEPS}" \
         --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
         --rollout.logging.report-to-wandb "${REPORT_TO_WANDB}" \

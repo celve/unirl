@@ -98,7 +98,12 @@ class _NFTLoss:
         xt_cast = xt.to(model_dtype)
         prompt_embeds_cast = prompt_embeds.to(model_dtype) if prompt_embeds is not None else None
         pooled_embeds_cast = pooled_prompt_embeds.to(model_dtype) if pooled_prompt_embeds is not None else None
-        guidance_scale = getattr(config, "guidance_scale", 3.5) if config is not None else 3.5
+        guidance_scale = float(
+            kwargs.get(
+                "guidance_scale",
+                getattr(config, "guidance_scale", 3.5) if config is not None else 3.5,
+            )
+        )
         plugin = algorithm._get_forward_plugin(model)
         model_kwargs = plugin.prepare_model_kwargs(
             latents=xt_cast,
@@ -882,6 +887,7 @@ class NFTAlgorithm(BaseAlgorithm):
                     batch=mini_batch,
                     timestep_values=t,
                     apply_shift=apply_shift,
+                    guidance_scale=guidance_scale,
                 )
                 scaled_loss = loss / effective_mini_batches
                 scaled_loss.backward()

@@ -29,6 +29,23 @@ def get_sigma_schedule(
     return sigmas
 
 
+def get_sigma_schedule_diffusers(
+    num_steps: int,
+    shift: float = 3.0,
+    num_train_timesteps: int = 1000,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Get sigma schedule aligned with diffusers FlowMatchEulerDiscreteScheduler."""
+
+    timesteps = torch.linspace(float(num_train_timesteps), 0.0, num_steps)
+    sigmas = timesteps / num_train_timesteps
+    sigmas = sd3_time_shift(shift, sigmas)
+    sigmas = torch.cat([sigmas, torch.zeros(1)])
+    if device is not None:
+        sigmas = sigmas.to(device)
+    return sigmas
+
+
 def compute_sde_log_prob(
     noise_pred: torch.Tensor,
     sample: torch.Tensor,
@@ -116,6 +133,7 @@ def sde_step_with_log_prob(
 __all__ = [
     "sd3_time_shift",
     "get_sigma_schedule",
+    "get_sigma_schedule_diffusers",
     "compute_sde_log_prob",
     "sde_step_with_log_prob",
 ]

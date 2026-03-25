@@ -436,7 +436,11 @@ class GRPOAlgorithm(BaseAlgorithm):
         return weighted_advantages / total_weight
 
     def get_ema_spec(self) -> EMASpec:
-        return EMASpec(enable_eval_ema=False)
+        return EMASpec(
+            enable_eval_ema=True,
+            eval_decay=self.eval_ema_decay,
+            eval_update_interval=self.eval_ema_update_interval,
+        )
 
     def resolve_rollout_sde_indices(
         self,

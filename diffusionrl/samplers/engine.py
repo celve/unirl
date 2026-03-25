@@ -226,6 +226,14 @@ class DistributedWeightSyncCapable:
     ) -> None:
         raise NotImplementedError
 
+    def set_lora_from_tensors(
+        self,
+        adapter_name: str,
+        lora_tensors: dict,
+    ) -> None:
+        """Load LoRA tensors directly into the rollout engine."""
+        raise NotImplementedError
+
 
 # Engine registry for dynamic loading
 ENGINE_REGISTRY: Dict[str, type] = {}

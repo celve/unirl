@@ -171,7 +171,7 @@ class EMAModuleWrapper:
             if grad or self.device is None:
                 self.temp_stored_parameters = [p.data.clone() for p in parameters]
             else:
-                self.temp_stored_parameters = [p.detach().cpu() for p in parameters]
+                self.temp_stored_parameters = [p.detach().cpu().clone() for p in parameters]
 
         for ema_parameter, parameter in zip(self.ema_parameters, parameters, strict=True):
             _copy_into_param(parameter, ema_parameter)
