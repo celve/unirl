@@ -43,7 +43,7 @@
 # - This script remains an approximate reproduction because reward stack,
 #   dataset, and model initialization may differ from the upstream project.
 #
-# Training-actor sampling now reuses the main manager -> rollout_buffer -> train path.
+# Training-actor sampling now reuses the main driver rollout pipeline -> rollout_buffer -> train path.
 # The main speed knob left in this branch is rollout-side reward execution.
 #
 # Usage:
@@ -126,6 +126,7 @@ python -m diffusionrl.train \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
+    --sampling.init-same-noise true \
     --sampling.sde-type flow \
     --sampling.eta 0.7 \
     --sampling.shift 3.0 \
@@ -143,6 +144,7 @@ python -m diffusionrl.train \
     --algorithm.window.window-overlap true \
     --algorithm.window.window-roll-back true \
     \
+    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
     --rollout.topology.mode direct_rollout \
@@ -151,7 +153,7 @@ python -m diffusionrl.train \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
     \
-    --training.learning-rate 1e-5 \
+    --training.learning-rate 1e-4 \
     --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
     --training.local-micro-batch-size ${LOCAL_MICRO_BATCH_SIZE} \
     --training.max-grad-norm 1.0 \
@@ -159,6 +161,10 @@ python -m diffusionrl.train \
     --training.lora-rank 64 \
     --training.lora-alpha 128 \
     --training.use-lora true \
+    \
+    --precision.training.model-precision fp32 \
+    --precision.training.autocast-precision bf16 \
+    --precision.rollout.autocast-precision bf16 \
     \
     --height 720 \
     --width 720 \

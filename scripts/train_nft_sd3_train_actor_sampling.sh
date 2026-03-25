@@ -42,7 +42,7 @@
 #
 # NOTE: diffusionrl now supports dpm2 deterministic sampling for SD3 NFT path.
 #
-# Training-actor sampling now reuses the main manager -> rollout_buffer -> train path.
+# Training-actor sampling now reuses the main driver rollout pipeline -> rollout_buffer -> train path.
 # The main speed knob left in this branch is rollout-side reward execution.
 #
 # Usage:

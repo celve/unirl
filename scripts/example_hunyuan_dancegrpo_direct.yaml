@@ -35,6 +35,16 @@ training:
   weight_decay: 0.0001
   use_gradient_checkpointing: true
 
+precision:
+  training:
+    model_precision: bf16
+    fsdp_precision: fp32
+    autocast_precision: bf16
+  rollout:
+    autocast_precision: bf16
+    trajectory_precision: fp16
+    logprob_precision: fp32
+
 ray:
   rollout_num_nodes: 0
   rollout_num_gpus_per_node: 0

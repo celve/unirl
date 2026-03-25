@@ -38,7 +38,7 @@
 #   (window scheduler / sde_ratio / trimmed_ratio / skip_last_timestep / skip_initial_timesteps).
 # - This script is still an adapted SD3 variant (not a bit-for-bit upstream run).
 #
-# Training-actor sampling now reuses the main manager -> rollout_buffer -> train path.
+# Training-actor sampling now reuses the main driver rollout pipeline -> rollout_buffer -> train path.
 # The main speed knob left in this branch is rollout-side reward execution.
 #
 # Usage:
@@ -138,6 +138,7 @@ python -m diffusionrl.train \
     --algorithm.window.window-overlap true \
     --algorithm.window.window-roll-back true \
     \
+    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
     --rollout.topology.mode direct_rollout \

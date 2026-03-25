@@ -108,6 +108,7 @@ python -m diffusionrl.train \
     --sampling.timestep-fraction 0.6 \
     \
     "${DANCEGRPO_ALGO_KWARG_ARGS[@]}" \
+    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
     --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \

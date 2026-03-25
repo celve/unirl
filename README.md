@@ -23,19 +23,31 @@ DiffusionRL supports the following diffusion models:
 **Module Descriptions**:
 
 - **Training Actors (Ray + TrainBackend)**: Responsible for the main training process through pluggable training backends (FSDP2 / VeOmni native; Megatron scaffold), reads `TrainingBatch` from the rollout buffer, and synchronizes parameters to the inference actors after training.
-- **Inference Actors (FSDP / SGLang)**: Generates denoising trajectories and latent samples using pluggable sampling engines, producing `RolloutOutput` with a unified v1 contract.
+- **Inference Actors (FSDP / SGLang)**: Generates denoising trajectories and latent samples using pluggable sampling engines, producing lightweight `RolloutSamples`.
 - **Reward Runtime**: Evaluates generated samples using configurable reward models (HPS, CLIP, PickScore, OCR, etc.) with a clean split between reward semantics and execution placement.
-- **RolloutManager + RolloutWorkflow**: The rollout-side producer boundary. `RolloutManager` owns rollout-local services and public Ray-facing entrypoints; `RolloutWorkflow` owns the readable `sample -> reward -> advantage -> assemble` business chain before data is handed to the rollout buffer.
+- **Driver Rollout Runtime + RolloutServices + Rollout Function**: The driver owns the outer rollout loop and can explicitly plan `RolloutRequest` batches. `DriverRolloutRuntime` owns rollout-local services and hook loading; `RolloutServices` exposes stable request-level operations such as `build_request`, `plan_request_batches`, `execute_sampling_request`, `launch_sampling_request`, and reward/assemble helpers; the configured rollout function (`rollout_function_path`) can orchestrate `prompt batch -> RolloutRequest -> sample -> reward hook -> advantage -> assemble`.
+- **Reward Hook**: Reward is a first-class rollout hook (`reward_hook_path`) rather than a hard-coded workflow stage, so researchers can swap reward logic or insert shaping/filtering without rewriting the runtime.
 
 ```
- ┌────────────────────┐     ┌─────────────────────────────┐
- │   Prompt Source     │────>│ RolloutManager / Producer   │
- └────────────────────┘     │   local services + facade    │
-                            │        RolloutWorkflow       │
-                            │ sample -> reward -> assemble │
+ ┌────────────────────┐     ┌──────────────────────────────┐
+ │   Prompt Source     │────>│  Driver Rollout Runtime     │
+ └────────────────────┘     │  plan RolloutRequest(s)      │
+                            │  RolloutServices API         │
+                            │  rollout_function_path       │
+                            │  reward_hook_path            │
                             └──────────────┬───────────────┘
-                                           │ BufferPayload
+                                           │ actor_group.generate(request)
                                            v
+                              ┌──────────────────────────┐
+                              │   Inference ActorGroup   │
+                              └─────────────┬────────────┘
+                                            │ sampled outputs
+                                            v
+                              ┌──────────────────────────┐
+                              │ reward hook + assemble   │
+                              └─────────────┬────────────┘
+                                            │ TrainingBatch
+                                            v
                               ┌──────────────────────────┐
                               │      Rollout Buffer      │
                               └─────────────┬────────────┘
@@ -171,6 +183,11 @@ python -m diffusionrl.train \
     --sampling.num-inference-steps 25 \
     --training.use-lora true \
     --training.lora-rank 16 \
+    --precision.training.model-precision bf16 \
+    --precision.training.autocast-precision bf16 \
+    --precision.rollout.autocast-precision bf16 \
+    --precision.rollout.trajectory-precision fp16 \
+    --precision.rollout.logprob-precision fp32 \
     --rollout.topology.mode direct_rollout \
     --rollout.control.num-rollout 300 \
     --rollout.artifacts.output-dir outputs/my_experiment \
@@ -210,6 +227,14 @@ For rollout, use nested sections such as `rollout.topology`, `rollout.control`,
 and `rollout.logging` so the file shape matches the config sections in code.
 Grouped YAML is now the only supported style for grouped fields.
 Grouped CLI options also use dotted names (for example `--training.train-backend`).
+Precision is grouped by runtime owner: use `precision.training.*` for training
+model/FSDP/loss-forward precision, and `precision.rollout.*` for sampler/replay
+autocast plus trajectory/logprob storage precision.
+For dedicated SGLang rollout, the rollout-side prompt encoder also follows
+`precision.rollout.autocast_precision`; do not configure a separate
+prompt-encoder dtype under `rollout.topology`.
+`rollout.topology.service_transport_dtype` remains a rollout transport setting,
+not a `precision.*` field.
 CLI options always override YAML. Unknown YAML keys fail fast by default; use
 `--allow-unknown-config-keys` only when you intentionally want to ignore unknown keys.
 `sync.protocol` must now be set explicitly: use `disabled` for `direct_rollout`,
@@ -288,15 +313,15 @@ Arguments in DiffusionRL are organized into the following categories:
 1.  **Model arguments**: `--model.model-type`, `--model.pretrained-model-saved-path`, `--training.use-lora`, `--training.lora-rank`, `--training.lora-alpha`, etc.
 2.  **Sampling arguments**: `--sampling.sde-type`, `--sampling.eta`, `--sampling.num-inference-steps`, `--sampling.guidance-scale`, `--sampling.shift`, `--sampling.timestep-fraction`, etc.
 3.  **Algorithm arguments**: `--algorithm.algorithm-path`, `--algorithm.prompts-per-rollout`, `--algorithm.samples-per-prompt`, plus shared typed fields such as `--algorithm.adv-normalization`, `--algorithm.eval-ema-decay`, and `--algorithm.shuffle-samples`. Use repeated `--algorithm.kwarg key=value` only for true algorithm-specific extension keys. In YAML, put those extension keys under `algorithm.algorithm_kwargs`.
-4.  **Reward arguments**: `--reward.reward-model-name` / `--reward.reward-models` for built-in scorers, `--reward.reward-path` for custom scorer dotpaths, `--reward.reward-location` for manager vs sampling-actor execution, `--reward.use-http-reward` + `--reward.reward-service-url` for HTTP-backed scoring, etc.
+4.  **Reward arguments**: `--reward.reward-model-name` / `--reward.reward-models` for built-in scorers, `--reward.reward-path` for custom scorer dotpaths, `--reward.reward-location` for driver vs sampling-actor execution (`auto` resolves the default path), `--reward.use-http-reward` + `--reward.reward-service-url` for HTTP-backed scoring, etc.
 5.  **Training arguments**: `--training.learning-rate`, `--training.num-updates-per-local-batch`, `--training.local-micro-batch-size`, `--training.max-grad-norm`, etc.
 6.  **Runtime arguments**: `--ray.rollout-num-gpus-per-node`, `--ray.training-num-gpus-per-node`, `--ray.colocate-training-gpu-fraction`, `--ray.colocate-rollout-gpu-fraction`, `--ray.placement-strategy`, `--ray.offload-train`, `--ray.offload-rollout`, etc.
 
-For config mechanics and current conventions, start with
-[docs/Parameter_System_Guide.md](docs/Parameter_System_Guide.md).
-For the full argument reference, read [diffusionrl/config/arguments.py](diffusionrl/config/arguments.py)
+For config mechanics and current conventions, read
+[diffusionrl/config/arguments.py](diffusionrl/config/arguments.py)
 alongside `diffusionrl/config/argument_parsing.py`, `diffusionrl/config/validation.py`,
-and `diffusionrl/config/resolution.py`.
+and `diffusionrl/config/resolution.py`. For runnable config examples, start with
+[scripts/README.md](scripts/README.md) and the committed YAMLs under `scripts/`.
 
 ## Developer Guide
 
@@ -307,20 +332,18 @@ The Ray control plane is split into worker implementations and worker-group orch
 - `diffusionrl/ray/{rollout_actor.py,training_actor.py}`: single worker implementations
 - `diffusionrl/ray/{rollout_group.py,training_group.py,group_factory.py}`: group orchestration and factories
 - `diffusionrl/ray/ray_utils.py`: Ray distributed utilities + training-actor helper/service modules
-- `diffusionrl/ray/rollout_manager.py`: control-plane actor
-- `diffusionrl/orchestration/**`: rollout/eval/train workflow logic
+- `diffusionrl/rollout/**`: driver-side rollout runtime, request planning/execution primitives, default rollout hooks
 - `diffusionrl/training/**`: training execution + train backend logic
 - `diffusionrl/distributed/**`: distributed coordination such as weight sync
 
-Detailed layer diagram:
-- [docs/Ray_Layering.md](docs/Ray_Layering.md)
+The layer summary above is the current authoritative control-plane map.
 
 ### Project Structure
 
 ```
 diffusionrl/
 ├── train.py / train_async.py      # Training entry points
-├── types/                          # Canonical shared data types (RolloutOutput, TrainingBatch, Reward, Engine, SDE)
+├── types/                          # Canonical shared data types (RolloutRequest, RolloutSamples, TrainingBatch, Reward, Engine, SDE)
 ├── config/                         # Configuration system (TrainingArguments)
 ├── algorithms/                     # RL algorithms + advantage normalization helpers
 ├── samplers/                       # Inference engines (FSDP, SGLang)
@@ -329,16 +352,11 @@ diffusionrl/
 ├── reward/                         # Reward executors (local, HTTP, Ray service, actor-local precompute)
 ├── models/                         # Model implementations (FLUX, SD3, Hunyuan, Mochi)
 ├── data/                           # Data loading and datasets
-├── orchestration/                  # Rollout / eval / train business workflows
-│   ├── request_builder.py          #   typed rollout request expansion/sub-batching
-│   ├── rollout_workflow.py         #   sample -> reward -> advantage -> assemble
-│   ├── eval_workflow.py            #   evaluation sampling + scoring path
-│   └── training_workflow.py        #   replay -> backend step -> executor fallback
-├── training/                       # Train executor, update schedule, train backends
+├── rollout/                        # Driver rollout runtime, request planning/execution, default hooks
+├── training/                       # Training workflow, executor, update schedule, train backends
 ├── buffer/                         # Buffer subsystem (queue/filter/reassembly/store)
 ├── distributed/                    # Distributed coordination (for example weight sync)
 ├── ray/                            # Ray distributed orchestration
-│   ├── rollout_manager.py          #   Central orchestrator
 │   ├── rollout_actor.py / training_actor.py
 │   ├── rollout_group.py / training_group.py / group_factory.py
 │   ├── buffer_actor.py / placement_group.py / ray_utils.py
@@ -404,8 +422,9 @@ class MyAlgorithm(BaseAlgorithm):
 Then pass it via `--algorithm.algorithm-path your_module.MyAlgorithm`.
 See the fully working reference implementation:
 `diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm`.
-For the current extension contract, see [docs/Algorithm_Minimal_Template.md](docs/Algorithm_Minimal_Template.md).
-For the supported user-facing extension surface, see [docs/Supported_Extension_Surface.md](docs/Supported_Extension_Surface.md).
+For the current extension contract, read [`diffusionrl/algorithms/base.py`](diffusionrl/algorithms/base.py)
+and the minimal reference implementation in
+`diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm`.
 
 ### Plugin Templates (diffusionrl_plugins)
 
@@ -430,10 +449,11 @@ Use reward config in three layers:
   `--reward.reward-models a,b --reward.reward-weights wa,wb` for multi-component reward.
 - Custom scorer: set `--reward.reward-path your_module.MyRewardScorer` to a full
   scorer class dotpath.
-- Execution placement: keep the default manager-local path, set
-  `--reward.reward-location sampling_actor` when the sampling host should compute
-  rewards inline, or use `--reward.use-http-reward true` plus
-  `--reward.reward-service-url ...` to call an HTTP reward service.
+- Execution placement: keep the default `--reward.reward-location auto`, set
+  `--reward.reward-location driver` when scoring should stay on the driver side,
+  or `--reward.reward-location sampling_actor` when the active sampling host
+  should compute rewards inline. With `auto`, local and HTTP backends resolve to
+  `sampling_actor`, while dedicated reward pools resolve to `driver`.
 
 Historical compatibility aliases under `diffusionrl.reward.local.*` are removed.
 Use the real scorer class path directly.

@@ -71,7 +71,7 @@
 #   DanceGRPO uses VideoAlign (VQ score). Default here is hpsv2 (proxy).
 #   For faithful reproduction, implement VideoAlign reward scorer.
 #
-# Training-actor sampling now reuses the main manager -> rollout_buffer -> train path.
+# Training-actor sampling now reuses the main driver rollout pipeline -> rollout_buffer -> train path.
 # The main speed knob left in this branch is rollout-side reward execution.
 #
 # Usage:

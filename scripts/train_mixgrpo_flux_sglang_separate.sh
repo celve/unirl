@@ -116,6 +116,7 @@ python -m diffusionrl.train \
     --algorithm.window.window-overlap true \
     --algorithm.window.window-roll-back true \
     \
+    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
     --ray.rollout-num-gpus-per-node ${ROLLOUT_GPUS} \

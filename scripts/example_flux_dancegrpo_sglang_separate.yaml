@@ -41,6 +41,16 @@ training:
   lora_rank: 16
   lora_alpha: 32
 
+precision:
+  training:
+    model_precision: bf16
+    fsdp_precision: fp32
+    autocast_precision: bf16
+  rollout:
+    autocast_precision: bf16
+    trajectory_precision: fp16
+    logprob_precision: fp32
+
 ray:
   rollout_num_gpus_per_node: 4
   training_num_gpus_per_node: 4
@@ -64,6 +74,9 @@ sync:
   protocol: tensor_payload
 
 data_source_path: diffusionrl.data.data_source.ImageRLDataSource
+rollout_function_path: diffusionrl.rollout.default_rollout.generate_rollout
+eval_function_path: diffusionrl.rollout.default_rollout.evaluate_rollout
+reward_hook_path: diffusionrl.rollout.default_rollout.score_rewards_hook
 data_path: data/samples/ocr_prompts_toy.json
 height: 256
 width: 256

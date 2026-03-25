@@ -26,6 +26,13 @@ DATA_PATH=data/samples/ocr_prompts_toy.json \
   --rollout.artifacts.save-steps 1000
 ```
 
+Precision config:
+
+- Use `precision.training.*` for training model load precision, FSDP param precision, and train-side autocast.
+- Use `precision.rollout.*` for sampler/replay autocast plus trajectory/logprob storage precision.
+- In dedicated SGLang rollout, prompt encoder precision also follows `precision.rollout.autocast_precision`.
+- Keep `rollout.topology.service_transport_dtype` under `rollout.topology`; it is a transport setting, not part of `precision.*`.
+
 Terminology:
 
 - `rollout_id` is the outer rollout-train loop step.
@@ -75,7 +82,8 @@ bash scripts/train_dancegrpo_hunyuan_sglang_separate.sh
 ## Auxiliary YAML examples
 
 These committed YAMLs are small, reviewable snapshots mirrored from selected
-local recipes:
+local recipes and include the nested `precision.training` / `precision.rollout`
+schema:
 
 - `scripts/example_flux_dancegrpo_direct.yaml`
 - `scripts/example_flux_dancegrpo_sglang_separate.yaml`
@@ -131,7 +139,7 @@ rollout:
 Notes:
 - When `remote_scheduler_endpoints` is set, rollout actors map by rank (`rank % len(endpoints)`).
 - Rollout weight updates are deduplicated per logical scheduler endpoint (avoids repeated updates to the same scheduler).
-- SGLang rollout now encodes prompts inside `generate()` unconditionally so sampler outputs satisfy the rollout embedding contract without manager-side fallback.
+- SGLang rollout now encodes prompts inside `generate()` unconditionally so sampler outputs satisfy the rollout embedding contract without a driver-side fallback path.
 
 ## Local model setup
 

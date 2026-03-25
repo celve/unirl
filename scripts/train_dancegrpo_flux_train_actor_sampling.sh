@@ -41,7 +41,7 @@
 #       diffusionrl now supports multi-reward through reward_models/reward_weights.
 #       Use a custom reward scorer only when the built-in scorer set is not enough.
 #
-# Training-actor sampling now reuses the main manager -> rollout_buffer -> train path.
+# Training-actor sampling now reuses the main driver rollout pipeline -> rollout_buffer -> train path.
 # The main speed knob left in this branch is rollout-side reward execution.
 #
 # Usage:
@@ -124,6 +124,7 @@ python -m diffusionrl.train \
     \
     "${DANCEGRPO_ALGO_KWARG_ARGS[@]}" \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
+    --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
