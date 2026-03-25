@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import MISSING, fields as dataclass_fields
 import logging
-from typing import Any, Mapping, Optional
+from typing import Any, Optional
 
 from diffusionrl.algorithms.construction import build_algorithm_kwargs, resolve_algorithm_path
 from diffusionrl.config.resolution import (
@@ -16,9 +16,8 @@ from diffusionrl.config.resolution import (
     derive_rollout_actor_gpu_count,
     derive_rollout_topology,
 )
-from diffusionrl.training.backends.factory import supported_train_backends
 from diffusionrl.types.engine import uses_dedicated_rollout_engine
-
+from .argument_parsing import resolve_dataclass_field_default
 from .validation_common import (
     ENV_REPO_ROOT,
     is_probably_local_weight_sync_dir,
@@ -27,23 +26,13 @@ from .validation_common import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_dataclass_field_default(field_info: Any) -> Any:
-    if field_info.default is not MISSING:
-        return field_info.default
-    if field_info.default_factory is not MISSING:
-        return field_info.default_factory()
-    return MISSING
-
-
 def _collect_direct_rollout_incompatible_fields(rollout_topology_config: Any) -> list[str]:
     incompatible: list[str] = []
     for field_info in dataclass_fields(type(rollout_topology_config)):
         if field_info.name in {"mode", "service_engine"}:
             continue
         field_value = getattr(rollout_topology_config, field_info.name)
-        field_default = _resolve_dataclass_field_default(field_info)
+        field_default = resolve_dataclass_field_default(field_info, missing=MISSING)
         if field_default is not MISSING and field_value == field_default:
             continue
         if field_value in (None, "", False):
@@ -54,9 +43,11 @@ def _collect_direct_rollout_incompatible_fields(rollout_topology_config: Any) ->
     return incompatible
 
 
-def _format_rollout_mode_state(rollout_state: Mapping[str, Any]) -> str:
-    args = rollout_state["args"]
-    rollout_mode_info: ResolvedRolloutModeInfo = rollout_state["rollout_mode_info"]
+def _format_rollout_mode_state(
+    args: Any,
+    *,
+    rollout_mode_info: ResolvedRolloutModeInfo,
+) -> str:
     rollout_topology = rollout_mode_info.rollout_topology
     training_actor_sampling_mode = bool(rollout_mode_info.training_actor_sampling_mode)
     replay_enabled = bool(rollout_mode_info.replay_enabled)
@@ -140,17 +131,6 @@ def validate_rollout_topology_contract(
             )
         return topology
 
-    if topology.service_engine is not None and uses_dedicated_rollout_engine(topology.service_engine):
-        raise ValueError(
-            "rollout.topology.mode='direct_rollout' cannot be combined with a dedicated rollout service engine. "
-            f"Got rollout.topology.service_engine={topology.service_engine!r}."
-        )
-    if topology.service_engine is not None:
-        raise ValueError(
-            "direct_rollout is the only public direct-sampling selector. "
-            "Leave rollout.topology.service_engine unset in direct_rollout mode."
-        )
-
     configured_direct_incompatible_fields = _collect_direct_rollout_incompatible_fields(
         rollout_topology_config
     )
@@ -179,6 +159,7 @@ def validate_algorithm_kwargs_payload(args: Any) -> None:
         "shuffle_samples": "algorithm.shuffle_samples",
         "shuffle_seed": "algorithm.shuffle_seed",
         "window_training": "algorithm.window.window_training",
+        "autocast_precision": "precision.training.autocast_precision",
     }
     collisions = [
         f"algorithm.algorithm_kwargs.{key} (use {reserved_paths[key]} instead)"
@@ -199,38 +180,6 @@ def validate_algorithm_path(args: Any) -> None:
         algorithm_type=args.algorithm.algorithm_type,
         algorithm_path=args.algorithm.algorithm_path,
     )
-
-
-def validate_train_backend_config(
-    *,
-    backend_name: str,
-    backend_kwargs: Mapping[str, Any],
-    backend_path: Optional[str],
-) -> None:
-    """Validate cross-domain backend constraints after canonicalization."""
-    backend = backend_name
-    supported = supported_train_backends()
-    if backend not in supported and not backend_path:
-        raise ValueError(
-            f"Unsupported train_backend={backend!r}. "
-            f"Expected one of {sorted(supported)} or provide --training.train-backend-path."
-        )
-    if backend == "megatron" and not backend_path:
-        logger.warning(
-            "train_backend=%s is currently a scaffold backend: launch/topology interfaces are wired, "
-            "but the training execution path is not fully implemented yet. "
-            "Use train_backend_kwargs.actor_class_path to provide a Megatron-dedicated actor.",
-            backend,
-        )
-
-    if backend == "megatron" and not backend_path and not str(
-        dict(backend_kwargs).get("actor_class_path", "") or ""
-    ).strip():
-        logger.warning(
-            "train_backend=%s requires actor_class_path in train_backend_kwargs "
-            "to launch a Megatron-specific training actor.",
-            backend,
-        )
 
 
 def validate_training_actor_sampling_mode(
@@ -349,10 +298,8 @@ def validate_rollout_mode(
                 [
                     f"Invalid rollout mode while validating {check_name}.",
                     _format_rollout_mode_state(
-                        {
-                            "args": args,
-                            "rollout_mode_info": rollout_mode_info,
-                        }
+                        args,
+                        rollout_mode_info=rollout_mode_info,
                     ),
                     f"Cause: {exc}",
                 ]
@@ -389,10 +336,6 @@ def validate_weight_sync(
     """Validate explicit weight-sync protocol against rollout topology."""
     rollout_service_engine = rollout_mode_info.rollout_topology.service_engine
     resolved_mode = rollout_mode_info.sync_protocol
-    if not resolved_mode:
-        raise ValueError(
-            "sync.protocol must be set explicitly before validate_weight_sync()."
-        )
     if rollout_mode_info.training_actor_sampling_mode:
         if resolved_mode != "disabled":
             raise ValueError(
@@ -448,11 +391,6 @@ def validate_rollout_layout(
         raise ValueError(
             "Dedicated rollout actor layout validation only applies to dedicated rollout engines. "
             f"Got rollout.topology.mode={rollout_topology.mode!r}."
-        )
-    if rollout_topology.service_engine != "sglang":
-        raise ValueError(
-            f"Unsupported dedicated rollout engine for actor layout: {rollout_topology.service_engine!r}. "
-            "Expected: sglang."
         )
     if rollout_gpu_pool_size < 1:
         raise ValueError(
@@ -510,7 +448,6 @@ __all__ = [
     "validate_rollout_layout",
     "validate_rollout_mode",
     "validate_rollout_topology_contract",
-    "validate_train_backend_config",
     "validate_training_actor_sampling_mode",
     "validate_weight_sync",
 ]

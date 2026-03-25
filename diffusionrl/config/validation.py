@@ -38,11 +38,11 @@ from .validation_rollout import (
     validate_rollout_layout,
     validate_rollout_mode,
     validate_rollout_topology_contract,
-    validate_train_backend_config,
     validate_training_actor_sampling_mode,
     validate_weight_sync,
 )
 from .validation_training import (
+    validate_train_backend_config,
     validate_training_batch_geometry,
     validate_training_misc,
 )

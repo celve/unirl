@@ -204,7 +204,7 @@ def _resolve_fsdp_backend_kwargs(
         _raise_backend_duplicate_entry(
             backend_name="fsdp",
             key="param_dtype",
-            canonical_path="precision.fsdp_precision",
+            canonical_path="precision.training.fsdp_precision",
         )
 
     if strict_unknowns:
@@ -214,7 +214,7 @@ def _resolve_fsdp_backend_kwargs(
         )
 
     merged["cpu_offload"] = bool(args.training.fsdp_cpu_offload)
-    merged["param_dtype"] = str(args.precision.fsdp_precision)
+    merged["param_dtype"] = str(args.precision.training.fsdp_precision)
     if "use_fsdp" in merged:
         merged["use_fsdp"] = bool(merged["use_fsdp"])
     if "mixed_precision" in merged:

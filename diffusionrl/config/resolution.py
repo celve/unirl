@@ -1,8 +1,13 @@
 """Config resolution helpers.
 
-These helpers derive config-facing values from ``TrainingArguments`` without
-mutating the original config object. Validation and builders should use this
-module instead of relying on validate-time argument rewrites.
+This module owns config semantics only:
+
+- derive canonical config-facing values from ``TrainingArguments``
+- share one cached ``ResolvedConfig`` across validation and launch assembly
+- avoid validate-time rewrites of the user-facing config object
+
+Launch payload assembly, placement planning, and actor init config construction
+live in ``launch_resolution.py``.
 
 Training geometry is rollout-driven only:
 
@@ -21,7 +26,8 @@ Training geometry is rollout-driven only:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from diffusionrl.algorithms.construction import (
@@ -30,9 +36,17 @@ from diffusionrl.algorithms.construction import (
 from diffusionrl.models import list_model_types, resolve_model_bundle_path
 from diffusionrl.samplers.engine import get_engine_class_path
 from diffusionrl.sde.rules import normalize_sde_type
+from diffusionrl.training.backends import (
+    ResolvedTrainBackendConfig,
+    TrainBackendCapabilities,
+    resolve_train_backend_capabilities_from_config,
+    resolve_train_backend_config_from_args,
+)
 from diffusionrl.types.engine import normalize_engine_type
 from diffusionrl.types.sampling import ResolvedSamplingSpec, SamplingRequirements
 from diffusionrl.utils.misc import load_function
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_PATH = "diffusionrl.models.hunyuan.HunyuanModelBundle"
 DEFAULT_SAMPLER_PATH = "diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler"
@@ -49,6 +63,8 @@ ROLLOUT_ENGINE_TYPES = {
     "fsdp",
     "sglang",
 }
+
+_RESOLVED_CONFIG_CACHE_ATTR = "_diffusionrl_resolved_config"
 
 
 def normalize_rollout_mode(value: Any) -> str:
@@ -150,6 +166,7 @@ class ResolvedRolloutModeInfo:
     sync_protocol: str
     algorithm_type: str
     max_samples_per_request: Optional[int]
+    effective_engine_capabilities: Optional[Dict[str, bool]] = None
 
 
 @dataclass(frozen=True)
@@ -222,6 +239,19 @@ class ResolvedTrainingPlan:
         }
 
 
+@dataclass(frozen=True)
+class ResolvedConfig:
+    """Canonical resolved config state shared by validation and launch assembly."""
+
+    model_spec: ResolvedModelSpec
+    rollout_mode_info: ResolvedRolloutModeInfo
+    sampling_spec: ResolvedSamplingSpec
+    train_backend_config: ResolvedTrainBackendConfig
+    train_backend_capabilities: TrainBackendCapabilities
+    training_topology: ResolvedTrainTopology
+    training_plan: Optional[ResolvedTrainingPlan] = None
+
+
 def derive_sampling_spec(
     args: Any,
     *,
@@ -266,11 +296,7 @@ def normalize_logprob_source(args: Any) -> str:
 
 def derive_model_spec(
     args: Any,
-    *,
-    explicit_sampler_path: Optional[bool] = None,
 ) -> ResolvedModelSpec:
-    if explicit_sampler_path is None:
-        explicit_sampler_path = args.sampling.sampler_path != DEFAULT_SAMPLER_PATH
     raw_model_path = str(args.model.model_path or "").strip()
     if not raw_model_path or raw_model_path == DEFAULT_MODEL_PATH:
         resolved_model_path = resolve_model_bundle_path(args.model.model_type)
@@ -316,12 +342,11 @@ def derive_model_spec(
         model_default_engine_type = engine_type_fn()
 
     raw_sampler_path = str(args.sampling.sampler_path or "").strip()
-    if raw_sampler_path and not (raw_sampler_path == DEFAULT_SAMPLER_PATH and not explicit_sampler_path):
-        resolved_sampler_path = raw_sampler_path
-    elif model_default_sampler_path:
+    resolved_sampler_path = raw_sampler_path
+    if not resolved_sampler_path and model_default_sampler_path:
         resolved_sampler_path = str(model_default_sampler_path).strip()
-    else:
-        resolved_sampler_path = raw_sampler_path or DEFAULT_SAMPLER_PATH
+    if not resolved_sampler_path:
+        resolved_sampler_path = DEFAULT_SAMPLER_PATH
 
     return ResolvedModelSpec(
         model_path=resolved_model_path,
@@ -384,6 +409,49 @@ def derive_rollout_mode_info(args: Any) -> ResolvedRolloutModeInfo:
         algorithm_type=algorithm_type,
         max_samples_per_request=args.sampling.max_samples_per_request,
     )
+
+
+def resolve_effective_engine_capabilities(
+    *,
+    rollout_mode_info: ResolvedRolloutModeInfo,
+) -> Optional[Dict[str, bool]]:
+    """Resolve adjusted engine capabilities accounting for replay and logprob modes.
+
+    Returns None when no dedicated rollout engine is used (direct sampling mode).
+    The returned capabilities reflect effective availability after accounting for
+    training-side replay and native logprob paths.
+    """
+    if rollout_mode_info.training_actor_sampling_mode:
+        return None
+    service_engine = rollout_mode_info.rollout_topology.service_engine
+    if not service_engine:
+        return None
+
+    engine_caps = load_engine_capabilities(service_engine)
+
+    # Replay mode: training-side replay provides log_prob and embeddings,
+    # so the engine does not need to supply them natively.
+    allow_replay = (
+        rollout_mode_info.replay_enabled
+        and rollout_mode_info.algorithm_type == "grpo"
+    )
+    if allow_replay:
+        engine_caps = dict(engine_caps, requires_log_prob=True, requires_embeddings=True)
+        logger.warning(
+            "replay_log_probs=true enabled: allowing %s+GRPO with "
+            "training-side old-log-prob replay (experimental path).",
+            service_engine,
+        )
+
+    # Native logprob with replay guard: engine provides log_prob natively.
+    if (
+        rollout_mode_info.is_sglang_engine
+        and rollout_mode_info.replay_guard
+        and rollout_mode_info.logprob_source == "native"
+    ):
+        engine_caps = dict(engine_caps, requires_log_prob=True, requires_embeddings=True)
+
+    return engine_caps
 
 
 def derive_sampling_host_engine_type(
@@ -487,7 +555,11 @@ def _build_relative_slices(
     return tuple(slices)
 
 
-def _derive_local_batch_from_rollout_geometry(args: Any) -> int:
+def _derive_local_batch_from_rollout_geometry(
+    args: Any,
+    *,
+    training_topology: Optional[ResolvedTrainTopology] = None,
+) -> int:
     prompts_per_rollout = args.algorithm.prompts_per_rollout
     if prompts_per_rollout is None:
         raise ValueError(
@@ -506,7 +578,10 @@ def _derive_local_batch_from_rollout_geometry(args: Any) -> int:
             value=args.algorithm.samples_per_prompt,
         )
     )
-    dp_size = derive_training_topology(args).dp_size
+    resolved_training_topology = (
+        training_topology if training_topology is not None else derive_training_topology(args)
+    )
+    dp_size = resolved_training_topology.dp_size
     if total_samples % dp_size != 0:
         raise ValueError(
             "Nominal rollout batch size must be divisible by the effective training dp_size. "
@@ -527,8 +602,6 @@ def derive_training_topology(
         int(args.ray.training_num_nodes) * int(args.ray.training_num_gpus_per_node),
     )
     if backend_name is None or backend_kwargs is None:
-        from diffusionrl.training.backends import resolve_train_backend_config_from_args
-
         resolved_backend_config = resolve_train_backend_config_from_args(args)
         backend = resolved_backend_config.name
         resolved_backend_kwargs = dict(resolved_backend_config.kwargs)
@@ -620,13 +693,20 @@ def require_prompts_per_rollout(args: Any) -> int:
     )
 
 
-def derive_training_plan(args: Any) -> ResolvedTrainingPlan:
+def derive_training_plan(
+    args: Any,
+    *,
+    training_topology: Optional[ResolvedTrainTopology] = None,
+) -> ResolvedTrainingPlan:
     """Derive the resolved local/update/micro execution plan from validated args."""
     # Expects args that already passed validate_args(); this helper only derives
     # the resolved execution plan and does not repeat user-facing geometry
     # validation.
     global_batch_size = derive_global_rollout_batch_size(args)
-    local_batch_size = _derive_local_batch_from_rollout_geometry(args)
+    local_batch_size = _derive_local_batch_from_rollout_geometry(
+        args,
+        training_topology=training_topology,
+    )
     num_updates_per_local_batch = derive_num_updates_per_local_batch(args)
     update_batch_size = local_batch_size // num_updates_per_local_batch
     raw_micro_batch_size = args.training.local_micro_batch_size
@@ -658,7 +738,66 @@ def derive_training_plan(args: Any) -> ResolvedTrainingPlan:
     )
 
 
+def resolve_config(
+    args: Any,
+    *,
+    include_training_plan: bool = False,
+) -> ResolvedConfig:
+    """Resolve and cache canonical config-derived state for one args object."""
+    cached = getattr(args, _RESOLVED_CONFIG_CACHE_ATTR, None)
+    if isinstance(cached, ResolvedConfig):
+        if include_training_plan and cached.training_plan is None:
+            cached = replace(
+                cached,
+                training_plan=derive_training_plan(
+                    args,
+                    training_topology=cached.training_topology,
+                ),
+            )
+            setattr(args, _RESOLVED_CONFIG_CACHE_ATTR, cached)
+        return cached
+
+    model_spec = derive_model_spec(args)
+    rollout_mode_info = derive_rollout_mode_info(args)
+    effective_caps = resolve_effective_engine_capabilities(
+        rollout_mode_info=rollout_mode_info,
+    )
+    if effective_caps is not None:
+        rollout_mode_info = replace(
+            rollout_mode_info,
+            effective_engine_capabilities=effective_caps,
+        )
+    sampling_spec = derive_sampling_spec(args, model_spec=model_spec)
+    train_backend_config = resolve_train_backend_config_from_args(args)
+    train_backend_capabilities = resolve_train_backend_capabilities_from_config(
+        train_backend_config
+    )
+    training_topology = derive_training_topology(
+        args,
+        backend_name=train_backend_config.name,
+        backend_kwargs=train_backend_config.kwargs,
+    )
+    training_plan = None
+    if include_training_plan:
+        training_plan = derive_training_plan(
+            args,
+            training_topology=training_topology,
+        )
+    resolved = ResolvedConfig(
+        model_spec=model_spec,
+        rollout_mode_info=rollout_mode_info,
+        sampling_spec=sampling_spec,
+        train_backend_config=train_backend_config,
+        train_backend_capabilities=train_backend_capabilities,
+        training_topology=training_topology,
+        training_plan=training_plan,
+    )
+    setattr(args, _RESOLVED_CONFIG_CACHE_ATTR, resolved)
+    return resolved
+
+
 __all__ = [
+    "ResolvedConfig",
     "ResolvedModelSpec",
     "ResolvedRolloutModeInfo",
     "ResolvedRolloutTopology",
@@ -691,6 +830,8 @@ __all__ = [
     "normalize_train_backend_name",
     "require_prompts_per_rollout",
     "require_rollout_service_num_gpus",
+    "resolve_effective_engine_capabilities",
+    "resolve_config",
     "rollout_mode_is_colocated",
     "rollout_mode_uses_service",
     "rollout_mode_label",

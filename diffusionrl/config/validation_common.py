@@ -103,6 +103,12 @@ def validate_dynamic_dotpaths(
     )
     if include_data_source:
         validate_dotpath(args.data_source_path, label="data_source")
+    if getattr(args, "rollout_function_path", None):
+        validate_dotpath(args.rollout_function_path, label="rollout_function")
+    if getattr(args, "eval_function_path", None):
+        validate_dotpath(args.eval_function_path, label="eval_function")
+    if getattr(args, "reward_hook_path", None):
+        validate_dotpath(args.reward_hook_path, label="reward_hook")
     if args.training.train_backend_path:
         validate_dotpath(args.training.train_backend_path, label="train_backend")
     if args.sampling.replay_sampler_path:

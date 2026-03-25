@@ -7,8 +7,8 @@ from typing import Any, Dict
 
 from diffusionrl.algorithms.construction import build_algorithm_kwargs
 from diffusionrl.config.resolution import (
+    ResolvedRolloutModeInfo,
     ResolvedRolloutTopology,
-    load_engine_capabilities,
 )
 from diffusionrl.sde.rules import (
     SUPPORTED_USER_SDE_TYPES,
@@ -87,42 +87,38 @@ def validate_nft_sampling_contract(args: Any) -> None:
 def validate_resolved_engine_algorithm_contract(
     args: Any,
     *,
-    training_actor_sampling_mode: bool,
-    is_sglang_engine: bool,
-    replay_guard: bool,
-    logprob_source: str,
+    rollout_mode_info: ResolvedRolloutModeInfo,
     sampling_requirements: SamplingRequirements,
-    rollout_topology: ResolvedRolloutTopology,
 ) -> None:
-    """Validate engine/algorithm compatibility using resolved capabilities."""
-    if training_actor_sampling_mode:
+    """Validate engine/algorithm compatibility using pre-resolved capabilities.
+
+    Engine capability adjustments (replay mode, native logprob) are handled
+    upstream in ``resolve_effective_engine_capabilities()``.  This function
+    only performs pure constraint checks against the already-resolved
+    capabilities stored in ``rollout_mode_info.effective_engine_capabilities``.
+    """
+    if rollout_mode_info.training_actor_sampling_mode:
         return
 
+    rollout_topology = rollout_mode_info.rollout_topology
     service_engine = rollout_topology.service_engine
     if not service_engine:
         raise ValueError(
             "Dedicated rollout validation requires rollout.topology.service_engine to be set explicitly. "
             "Run validate_args() before resolving dedicated rollout engine capabilities."
         )
-    engine_caps = load_engine_capabilities(service_engine)
 
-    allow_replay = (
-        bool(args.sampling.replay_log_probs)
-        and args.algorithm.algorithm_type == "grpo"
-    )
-    if allow_replay:
-        engine_caps = dict(engine_caps, requires_log_prob=True, requires_embeddings=True)
-        logger.warning(
-            "replay_log_probs=true enabled: allowing %s+GRPO with "
-            "training-side old-log-prob replay (experimental path).",
-            service_engine,
+    engine_caps = rollout_mode_info.effective_engine_capabilities
+    if engine_caps is None:
+        raise ValueError(
+            "Dedicated rollout validation requires resolved engine capabilities. "
+            "Run resolve_config() before validate_args()."
         )
 
-    if is_sglang_engine and replay_guard and logprob_source == "native":
-        engine_caps = dict(engine_caps, requires_log_prob=True, requires_embeddings=True)
-
     required = sampling_requirements
-    if is_sglang_engine and str(args.model.model_type or "").strip().lower() == "sd3":
+
+    # SD3 + SGLang does not provide trajectory latents.
+    if rollout_mode_info.is_sglang_engine and str(args.model.model_type or "").strip().lower() == "sd3":
         if bool(required.requires_trajectory):
             raise ValueError(
                 "rollout.topology.service_engine='sglang' with model_type='sd3' currently does not "
@@ -131,7 +127,6 @@ def validate_resolved_engine_algorithm_contract(
                 "(the non-sglang default, which runs on training actors), or use "
                 "algorithm_type='nft' when running SD3 with sglang."
             )
-        engine_caps = dict(engine_caps, requires_trajectory=False)
 
     required_dict = required.to_dict()
     missing = [

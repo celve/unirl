@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from typing import Any, Dict
-
 from diffusionrl.config.resolution import (
     ResolvedModelSpec,
     ResolvedTrainingPlan,
@@ -30,8 +29,9 @@ def build_model_config(
     """Build model config consumed by training and rollout actors.
 
     Pulls from: ModelConfig (identity/paths) + TrainingConfig (LoRA/checkpointing)
-    + PrecisionConfig (model load dtype).
+    + precision.training (model load dtype).
     """
+    training_precision = precision_settings.training
     return {
         "model_path": model_spec.model_path,
         "pretrained_model_saved_path": model_settings.pretrained_model_saved_path,
@@ -42,7 +42,7 @@ def build_model_config(
         "lora_alpha": training_settings.lora_alpha,
         "lora_target_modules": normalize_lora_target_modules(training_settings.lora_target_modules),
         "use_gradient_checkpointing": training_settings.use_gradient_checkpointing,
-        "model_precision": precision_settings.model_precision,
+        "model_precision": training_precision.model_precision,
     }
 
 
@@ -84,9 +84,10 @@ def build_training_sampling_config(
     """Build training-actor sampling config from the canonical resolved sampling spec."""
     payload = _build_shared_sampling_payload(sampling_spec)
     sampler_kwargs = dict(sampling_spec.sampler_kwargs)
-    sampler_kwargs["autocast_precision"] = precision_settings.autocast_precision
-    sampler_kwargs["trajectory_precision"] = precision_settings.trajectory_precision
-    sampler_kwargs["logprob_precision"] = precision_settings.logprob_precision
+    rollout_precision = precision_settings.rollout
+    sampler_kwargs["autocast_precision"] = rollout_precision.autocast_precision
+    sampler_kwargs["trajectory_precision"] = rollout_precision.trajectory_precision
+    sampler_kwargs["logprob_precision"] = rollout_precision.logprob_precision
     payload.update({
         "sampler_engine_type": normalize_rollout_service_engine(sampler_engine_type)
         or str(sampler_engine_type).strip().lower(),
@@ -125,7 +126,6 @@ def _build_rollout_engine_base_kwargs(
         "sglang_local_mode": "local_mode",
         "sglang_verify_weight_checksum": "verify_weight_checksum",
         "sglang_prompt_encoder_device": "prompt_encoder_device",
-        "sglang_prompt_encoder_dtype": "prompt_encoder_dtype",
         "sglang_prompt_encoder_max_length": "prompt_encoder_max_length",
     }
     for attr_name, engine_key in sglang_field_map.items():
@@ -160,6 +160,7 @@ def build_rollout_engine_config(
     merged_engine_kwargs = _build_rollout_engine_base_kwargs(
         rollout_topology_settings=rollout_topology_settings,
     )
+    rollout_precision = precision_settings.rollout
     merged_engine_kwargs.setdefault("use_lora", model_config["use_lora"])
     merged_engine_kwargs.setdefault("lora_rank", model_config["lora_rank"])
     merged_engine_kwargs.setdefault("lora_alpha", model_config["lora_alpha"])
@@ -168,9 +169,9 @@ def build_rollout_engine_config(
         merged_engine_kwargs.setdefault("vae_saved_path", model_config["vae_saved_path"])
     if model_config.get("text_encoder_path"):
         merged_engine_kwargs.setdefault("text_encoder_path", model_config["text_encoder_path"])
-    merged_engine_kwargs["model_precision"] = precision_settings.model_precision
-    merged_engine_kwargs["fsdp_precision"] = precision_settings.fsdp_precision
-    merged_engine_kwargs.setdefault("prompt_encoder_dtype", precision_settings.model_precision)
+    # Keep SGLang prompt-encoder precision on the canonical rollout precision
+    # surface so rollout compute settings do not split across config namespaces.
+    merged_engine_kwargs["prompt_encoder_dtype"] = rollout_precision.autocast_precision
     # Wire top-level fps into engine_kwargs so SGLang engine can consume it
     # without requiring users to duplicate rollout-topology config.
     merged_engine_kwargs.setdefault("fps", fps)

@@ -38,16 +38,11 @@ from diffusionrl.config.argument_parsing import (
 )
 from diffusionrl.config.resolution import (
     DEFAULT_MODEL_PATH,
-    DEFAULT_SAMPLER_PATH,
     ROLLOUT_MODES,
-    derive_model_spec,
-    require_prompts_per_rollout,
-    derive_rollout_mode_info,
-    derive_rollout_topology,
+    ResolvedConfig,
     collect_sampling_requirements,
     normalize_train_backend_name,
-    derive_training_plan,
-    derive_training_topology,
+    resolve_config,
 )
 from diffusionrl.config.validation import (
     apply_model_config_hook,
@@ -68,11 +63,6 @@ from diffusionrl.config.validation import (
     validate_training_batch_geometry,
     validate_training_misc,
 )
-from diffusionrl.training.backends import (
-    resolve_train_backend_capabilities_from_config,
-    resolve_train_backend_config_from_args,
-)
-
 logger = logging.getLogger(__name__)
 
 
@@ -104,8 +94,8 @@ class ModelConfig:
 class SamplingConfig:
     """Sampling engine, sampler, and denoising controls."""
 
-    sampler_path: str = field(default=DEFAULT_SAMPLER_PATH,
-        metadata={"help": "Python dotpath to Sampler class (auto-resolved from model_type)"})
+    sampler_path: str = field(default="",
+        metadata={"help": "Optional Python dotpath to Sampler class; omit to auto-resolve from model_type"})
     max_samples_per_request: Optional[int] = field(default=None,
         metadata={"help": "Generated-sample cap per training-actor direct-sampling request; rollout_total_samples stays prompts_per_rollout*samples_per_prompt"})
     logprob_source: str = field(default="replay",
@@ -147,11 +137,6 @@ class SamplingConfig:
             raise ValueError("max_samples_per_request must be >= 1 when set.")
         if not isinstance(self.sampler_kwargs, dict):
             raise ValueError("sampling.sampler_kwargs must be a dict.")
-        if not self.sampler_path:
-            raise ValueError(
-                "sampler_path must be set. It is usually auto-resolved from model_type. "
-                "Set --model.model-type or provide --sampling.sampler-path explicitly."
-            )
 
 
 @dataclass
@@ -188,18 +173,39 @@ class RewardConfig:
         metadata={"help": "GPUs per individual reward actor"})
     reward_service_urls: Optional[List[str]] = field(default=None,
         metadata={"help": "List of HTTP reward service URLs for load balancing"})
-    reward_location: str = field(default="manager",
-        metadata={"help": "Where reward-model inference runs: manager or sampling_actor"})
+    reward_location: str = field(default="auto",
+        metadata={"help": "Where default reward scoring runs: auto, driver, or sampling_actor"})
     local_reward_device: str = field(default="cpu",
         metadata={"help": "Device for local in-process reward scorers: cpu, auto, or cuda"})
     allow_local_reward_cuda_contention: bool = field(default=False,
         metadata={"help": "Allow local_reward_device=cuda without dedicated reward GPUs (may contend with rollout/training GPUs)"})
 
+    @property
+    def has_http_reward_urls(self) -> bool:
+        return bool(self.reward_service_url or self.reward_service_urls)
+
+    @property
+    def has_http_reward(self) -> bool:
+        return bool(self.use_http_reward or self.has_http_reward_urls)
+
+    @property
+    def has_builtin_reward(self) -> bool:
+        return bool(
+            str(self.reward_model_name or "").strip()
+            or (isinstance(self.reward_models, list) and len(self.reward_models) > 0)
+        )
+
+    @property
+    def has_dedicated_reward_pool(self) -> bool:
+        return bool(
+            self.reward_dedicated_num_gpus > 0 or self.reward_dedicated_num_nodes > 0
+        )
+
     def validate(self) -> None:
-        reward_location = str(self.reward_location or "manager").strip().lower()
-        if reward_location not in ("manager", "sampling_actor"):
+        reward_location = str(self.reward_location or "auto").strip().lower()
+        if reward_location not in ("driver", "sampling_actor", "auto"):
             raise ValueError(
-                "reward_location must be one of manager/sampling_actor, "
+                "reward_location must be one of driver/sampling_actor/auto, "
                 f"got: {self.reward_location}"
             )
         local_reward_device = str(self.local_reward_device or "cpu").strip().lower()
@@ -208,16 +214,7 @@ class RewardConfig:
                 "local_reward_device must be one of cpu/auto/cuda, "
                 f"got: {self.local_reward_device}"
             )
-        has_http_reward = bool(
-            self.use_http_reward
-            or self.reward_service_url
-            or self.reward_service_urls
-        )
-        has_builtin_reward = bool(
-            str(self.reward_model_name or "").strip()
-            or (isinstance(self.reward_models, list) and len(self.reward_models) > 0)
-        )
-        if not has_http_reward and not self.reward_path and not has_builtin_reward:
+        if not self.has_http_reward and not self.reward_path and not self.has_builtin_reward:
             raise ValueError(
                 "Reward scoring requires either reward_model_name/reward_models for built-ins, "
                 "or reward_path for a custom scorer."
@@ -505,26 +502,67 @@ class TrainingConfig:
 
 
 @dataclass
-class PrecisionConfig:
-    """Precision controls for model load, FSDP wrapping, and rollout tensors."""
+class TrainingPrecisionConfig:
+    """Training-side precision controls."""
 
     model_precision: str = field(default="bf16",
-        metadata={"help": "Precision used to load model weights/components (default: bf16)"})
+        metadata={"help": "Training model/component load precision (default: bf16)"})
     fsdp_precision: str = field(default="fp32",
-        metadata={"help": "FSDP param precision on the training side (default: fp32)"})
+        metadata={"help": "Training-side FSDP param precision (default: fp32)"})
     autocast_precision: str = field(default="bf16",
-        metadata={"help": "Autocast precision for sampler/model forward passes (default: bf16)"})
+        metadata={"help": "Training-side autocast precision for loss/model forwards (default: bf16)"})
+
+    def validate(self) -> None:
+        validate_precision_name(
+            self.model_precision,
+            field_name="precision.training.model_precision",
+        )
+        validate_precision_name(
+            self.fsdp_precision,
+            field_name="precision.training.fsdp_precision",
+        )
+        validate_precision_name(
+            self.autocast_precision,
+            field_name="precision.training.autocast_precision",
+        )
+
+
+@dataclass
+class RolloutPrecisionConfig:
+    """Rollout/replay-side precision controls."""
+
+    autocast_precision: str = field(default="bf16",
+        metadata={"help": "Rollout-side autocast precision for sampler/replay forwards (default: bf16)"})
     trajectory_precision: str = field(default="fp16",
         metadata={"help": "Precision used to store rollout trajectory latents (default: fp16)"})
     logprob_precision: str = field(default="fp32",
         metadata={"help": "Precision used to store rollout log-prob tensors (default: fp32)"})
 
     def validate(self) -> None:
-        validate_precision_name(self.model_precision, field_name="precision.model_precision")
-        validate_precision_name(self.fsdp_precision, field_name="precision.fsdp_precision")
-        validate_precision_name(self.autocast_precision, field_name="precision.autocast_precision")
-        validate_precision_name(self.trajectory_precision, field_name="precision.trajectory_precision")
-        validate_precision_name(self.logprob_precision, field_name="precision.logprob_precision")
+        validate_precision_name(
+            self.autocast_precision,
+            field_name="precision.rollout.autocast_precision",
+        )
+        validate_precision_name(
+            self.trajectory_precision,
+            field_name="precision.rollout.trajectory_precision",
+        )
+        validate_precision_name(
+            self.logprob_precision,
+            field_name="precision.rollout.logprob_precision",
+        )
+
+
+@dataclass
+class PrecisionConfig:
+    """Precision controls grouped by runtime owner."""
+
+    training: TrainingPrecisionConfig = field(default_factory=TrainingPrecisionConfig)
+    rollout: RolloutPrecisionConfig = field(default_factory=RolloutPrecisionConfig)
+
+    def validate(self) -> None:
+        self.training.validate()
+        self.rollout.validate()
 
 
 @dataclass(frozen=True)
@@ -555,8 +593,6 @@ class RolloutTopologySettings:
         metadata={"help": "Whether SGLang verifies weight checksum after rollout-side updates."})
     sglang_prompt_encoder_device: Optional[str] = field(default=None,
         metadata={"help": "Device for SGLang-side prompt encoder construction."})
-    sglang_prompt_encoder_dtype: Optional[str] = field(default=None,
-        metadata={"help": "Prompt encoder dtype for SGLang rollout (auto/fp16/bf16/fp32)."})
     sglang_prompt_encoder_max_length: Optional[int] = field(default=None,
         metadata={"help": "Prompt encoder max sequence length for SGLang rollout."})
     sglang_kwargs: Dict[str, Any] = field(default_factory=dict,
@@ -577,8 +613,45 @@ class RolloutTopologySettings:
             value = getattr(self, attr_name)
             if value is not None and int(value) < 1:
                 raise ValueError(f"rollout.topology.{attr_name} must be >= 1 when set.")
+        if self.service_transport_dtype is not None:
+            transport_dtype = str(self.service_transport_dtype).strip().lower()
+            if transport_dtype not in {
+                "",
+                "none",
+                "off",
+                "disable",
+                "disabled",
+                "fp32",
+                "float32",
+                "fp16",
+                "float16",
+                "half",
+                "bf16",
+                "bfloat16",
+            }:
+                raise ValueError(
+                    "rollout.topology.service_transport_dtype must be one of "
+                    "fp32/fp16/bf16/none, "
+                    f"got: {self.service_transport_dtype!r}"
+                )
         if not isinstance(self.sglang_kwargs, dict):
             raise ValueError("rollout.topology.sglang_kwargs must be a dict.")
+        forbidden_sglang_precision_keys = {
+            "prompt_encoder_dtype",
+            "sglang_prompt_encoder_dtype",
+        }
+        precision_override_keys = sorted(
+            key
+            for key in self.sglang_kwargs.keys()
+            if str(key) in forbidden_sglang_precision_keys
+        )
+        if precision_override_keys:
+            raise ValueError(
+                "SGLang prompt-encoder precision is controlled by "
+                "precision.rollout.autocast_precision; remove the following "
+                "engine-specific override(s) from rollout.topology.sglang_kwargs: "
+                f"{precision_override_keys}"
+            )
 
 
 @dataclass(frozen=True)
@@ -836,6 +909,12 @@ class TrainingArguments:
     # ========== Paths (Dynamic Loading) ==========
     data_source_path: str = field(default="diffusionrl.data.DefaultDataSource",
         metadata={"help": "Python dotpath to DataSource class for loading training/eval prompt streams"})
+    rollout_function_path: str = field(default="diffusionrl.rollout.default_rollout.generate_rollout",
+        metadata={"help": "Python dotpath to the rollout function invoked by the rollout service. This is the main rollout extension seam."})
+    eval_function_path: str = field(default="diffusionrl.rollout.default_rollout.evaluate_rollout",
+        metadata={"help": "Python dotpath to the evaluation function invoked by the rollout service."})
+    reward_hook_path: str = field(default="diffusionrl.rollout.default_rollout.score_rewards_hook",
+        metadata={"help": "Python dotpath to the reward hook used by rollout/eval functions. This makes reward a first-class rollout hook."})
 
     # ========== Grouped Configuration ==========
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -981,15 +1060,11 @@ def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
     ):
         resolved.setdefault(key, None)
 
-    try:
-        model_spec = derive_model_spec(args)
-    except Exception as exc:
-        model_spec = None
-        _record_resolution_error(resolved, scope="model_spec", exc=exc)
-    if model_spec is not None:
-        resolved["model.model_path"] = model_spec.model_path
-        resolved["model.model_type"] = model_spec.model_type
-        resolved["sampling.sampler_path"] = model_spec.sampler_path
+    resolved["training.train_backend"] = normalize_train_backend_name(args)
+    resolved["rollout.topology.mode"] = args.rollout.topology.mode
+    resolved["rollout.topology.service_engine"] = args.rollout.topology.service_engine
+    resolved["sync.protocol"] = str(args.sync.protocol).strip().lower()
+
     try:
         resolved["algorithm.algorithm_path"] = resolve_algorithm_path(
             algorithm_type=args.algorithm.algorithm_type,
@@ -997,50 +1072,38 @@ def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
         )
     except Exception as exc:
         _record_resolution_error(resolved, scope="algorithm_path", exc=exc)
-    resolved["training.train_backend"] = normalize_train_backend_name(args)
+
     try:
-        rollout_topology = derive_rollout_topology(args)
+        resolved_config = resolve_config(args, include_training_plan=True)
     except Exception as exc:
-        rollout_topology = None
-        _record_resolution_error(resolved, scope="rollout_topology", exc=exc)
-    if rollout_topology is not None:
-        resolved["rollout.topology.mode"] = rollout_topology.mode
-        resolved["rollout.topology.service_engine"] = rollout_topology.service_engine
-    else:
-        resolved["rollout.topology.mode"] = args.rollout.topology.mode
-        resolved["rollout.topology.service_engine"] = args.rollout.topology.service_engine
-    resolved["sync.protocol"] = str(args.sync.protocol).strip().lower()
-    try:
-        train_topology = derive_training_topology(args)
-    except Exception as exc:
-        train_topology = None
-        _record_resolution_error(resolved, scope="training_topology", exc=exc)
-    if train_topology is not None:
-        resolved["resolved.training.actor_count"] = train_topology.actor_count
-        resolved["resolved.training.world_size"] = train_topology.world_size
-        resolved["resolved.training.dp_size"] = train_topology.dp_size
-        resolved["resolved.training.tp_size"] = train_topology.tp_size
-        resolved["resolved.training.pp_size"] = train_topology.pp_size
-        resolved["resolved.training.sp_size"] = train_topology.sp_size
-        resolved["resolved.training.ep_size"] = train_topology.ep_size
-    try:
-        resolved["resolved.rollout.prompts_per_rollout"] = require_prompts_per_rollout(args)
-    except Exception as exc:
-        _record_resolution_error(resolved, scope="prompts_per_rollout", exc=exc)
-    try:
-        train_plan = derive_training_plan(args)
-    except Exception as exc:
-        train_plan = None
-        _record_resolution_error(resolved, scope="training_plan", exc=exc)
+        _record_resolution_error(resolved, scope="config", exc=exc)
+        return resolved
+
+    model_spec = resolved_config.model_spec
+    rollout_topology = resolved_config.rollout_mode_info.rollout_topology
+    train_topology = resolved_config.training_topology
+    train_plan = resolved_config.training_plan
+
+    resolved["model.model_path"] = model_spec.model_path
+    resolved["model.model_type"] = model_spec.model_type
+    resolved["sampling.sampler_path"] = model_spec.sampler_path
+    resolved["training.train_backend"] = resolved_config.train_backend_config.name
+    resolved["rollout.topology.mode"] = rollout_topology.mode
+    resolved["rollout.topology.service_engine"] = rollout_topology.service_engine
+    resolved["sync.protocol"] = resolved_config.rollout_mode_info.sync_protocol
+    resolved["resolved.training.actor_count"] = train_topology.actor_count
+    resolved["resolved.training.world_size"] = train_topology.world_size
+    resolved["resolved.training.dp_size"] = train_topology.dp_size
+    resolved["resolved.training.tp_size"] = train_topology.tp_size
+    resolved["resolved.training.pp_size"] = train_topology.pp_size
+    resolved["resolved.training.sp_size"] = train_topology.sp_size
+    resolved["resolved.training.ep_size"] = train_topology.ep_size
+    resolved["resolved.rollout.prompts_per_rollout"] = int(args.algorithm.prompts_per_rollout)
     if train_plan is not None:
         resolved["resolved.training.global_batch_size"] = train_plan.global_batch_size
         resolved["resolved.training.local_batch_size"] = train_plan.local_batch_size
-        resolved["resolved.training.local_update_batch_size"] = (
-            train_plan.local_update_batch_size
-        )
-        resolved["resolved.training.local_micro_batch_size"] = (
-            train_plan.local_micro_batch_size
-        )
+        resolved["resolved.training.local_update_batch_size"] = train_plan.local_update_batch_size
+        resolved["resolved.training.local_micro_batch_size"] = train_plan.local_micro_batch_size
         resolved["resolved.training.num_updates_per_local_batch"] = (
             train_plan.num_updates_per_local_batch
         )
@@ -1220,16 +1283,21 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
     print_config_views(args=args, print_resolved_config=print_resolved_config)
     return args
 
-def validate_args(args: TrainingArguments) -> TrainingArguments:
+def validate_args(
+    args: TrainingArguments,
+    *,
+    resolved: Optional[ResolvedConfig] = None,
+) -> TrainingArguments:
     """Validate arguments without mutating the original config values."""
     validate_grouped_configs(args)
     debug_mode = args.debug.debug_mode
 
-    resolved_model = derive_model_spec(args)
+    resolved_config = resolved if resolved is not None else resolve_config(args)
+    resolved_model = resolved_config.model_spec
     model_cls = resolved_model.model_cls
-    backend_config = resolve_train_backend_config_from_args(args)
+    backend_config = resolved_config.train_backend_config
     backend_name = backend_config.name
-    rollout_mode_info = derive_rollout_mode_info(args)
+    rollout_mode_info = resolved_config.rollout_mode_info
     validate_algorithm_kwargs_payload(args)
     validate_algorithm_path(args)
     validate_train_backend_config(
@@ -1237,9 +1305,7 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
         backend_kwargs=backend_config.kwargs,
         backend_path=backend_config.backend_path,
     )
-    backend_capabilities = resolve_train_backend_capabilities_from_config(
-        backend_config
-    ).as_dict()
+    backend_capabilities = resolved_config.train_backend_capabilities.as_dict()
     validate_rollout_mode(
         args,
         rollout_mode_info=rollout_mode_info,
@@ -1248,9 +1314,6 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
     )
     rollout_topology = rollout_mode_info.rollout_topology
     training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
-    is_sglang_engine = rollout_mode_info.is_sglang_engine
-    logprob_source = rollout_mode_info.logprob_source
-    replay_guard = rollout_mode_info.replay_guard
     if debug_mode == "train_only":
         validate_dynamic_dotpaths(
             args,
@@ -1267,22 +1330,26 @@ def validate_args(args: TrainingArguments) -> TrainingArguments:
             args,
             rollout_mode_info=rollout_mode_info,
         )
-    validate_training_batch_geometry(args)
+    validate_training_batch_geometry(
+        args,
+        topology=resolved_config.training_topology,
+    )
     validate_training_misc(args)
     apply_model_config_hook(args, model_cls=model_cls)
     validate_model_sampling_contract(args)
     validate_nft_sampling_contract(args)
     if debug_mode != "train_only":
-        validation_algorithm = instantiate_algorithm_from_config(build_algorithm_config(args))
+        validation_algorithm = instantiate_algorithm_from_config(
+            build_algorithm_config(
+                args,
+                sampling_spec=resolved_config.sampling_spec,
+            )
+        )
         sampling_requirements = collect_sampling_requirements(algorithm=validation_algorithm)
         validate_resolved_engine_algorithm_contract(
             args,
-            training_actor_sampling_mode=training_actor_sampling_mode,
-            is_sglang_engine=is_sglang_engine,
-            replay_guard=replay_guard,
-            logprob_source=logprob_source,
+            rollout_mode_info=rollout_mode_info,
             sampling_requirements=sampling_requirements,
-            rollout_topology=rollout_topology,
         )
 
     if debug_mode != "train_only":

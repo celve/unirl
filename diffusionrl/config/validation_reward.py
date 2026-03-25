@@ -6,68 +6,62 @@ import logging
 from typing import Any
 
 from diffusionrl.config.resolution import derive_global_rollout_batch_size
+from diffusionrl.reward.schema import RewardSchema
 
 logger = logging.getLogger(__name__)
 
 
 def validate_reward_config(args: Any) -> None:
     """Validate reward pool/source configuration consistency."""
-    if args.reward.reward_dedicated_gpus_per_actor > 1 and args.reward.reward_dedicated_num_gpus > 0:
-        if args.reward.reward_dedicated_num_gpus < args.reward.reward_dedicated_gpus_per_actor:
+    reward_config = args.reward
+
+    if reward_config.reward_dedicated_gpus_per_actor > 1 and reward_config.reward_dedicated_num_gpus > 0:
+        if reward_config.reward_dedicated_num_gpus < reward_config.reward_dedicated_gpus_per_actor:
             raise ValueError(
-                f"reward_dedicated_num_gpus ({args.reward.reward_dedicated_num_gpus}) must be >= "
-                f"reward_dedicated_gpus_per_actor ({args.reward.reward_dedicated_gpus_per_actor})"
+                f"reward_dedicated_num_gpus ({reward_config.reward_dedicated_num_gpus}) must be >= "
+                f"reward_dedicated_gpus_per_actor ({reward_config.reward_dedicated_gpus_per_actor})"
             )
-        if args.reward.reward_dedicated_num_gpus % args.reward.reward_dedicated_gpus_per_actor != 0:
+        if reward_config.reward_dedicated_num_gpus % reward_config.reward_dedicated_gpus_per_actor != 0:
             raise ValueError(
-                f"reward_dedicated_num_gpus ({args.reward.reward_dedicated_num_gpus}) must be divisible by "
-                f"reward_dedicated_gpus_per_actor ({args.reward.reward_dedicated_gpus_per_actor})"
+                f"reward_dedicated_num_gpus ({reward_config.reward_dedicated_num_gpus}) must be divisible by "
+                f"reward_dedicated_gpus_per_actor ({reward_config.reward_dedicated_gpus_per_actor})"
             )
 
-    if args.reward.reward_dedicated_num_nodes > 0 and args.reward.reward_dedicated_num_gpus_per_node <= 0:
+    if reward_config.reward_dedicated_num_nodes > 0 and reward_config.reward_dedicated_num_gpus_per_node <= 0:
         raise ValueError(
             "reward_dedicated_num_gpus_per_node must be > 0 when reward_dedicated_num_nodes > 0"
         )
 
-    if args.reward.reward_dedicated_num_gpus > 0 and args.reward.reward_dedicated_num_nodes > 0:
+    if reward_config.reward_dedicated_num_gpus > 0 and reward_config.reward_dedicated_num_nodes > 0:
         raise ValueError(
             "reward_dedicated_num_gpus and reward_dedicated_num_nodes are mutually exclusive. "
             "Use either total dedicated GPUs, or nodes * gpus_per_node."
         )
 
-    has_dedicated_reward_pool = (
-        args.reward.reward_dedicated_num_gpus > 0 or args.reward.reward_dedicated_num_nodes > 0
-    )
-    has_http_reward_urls = bool(
-        args.reward.reward_service_url
-        or args.reward.reward_service_urls
-    )
-    has_http_reward = bool(
-        args.reward.use_http_reward or has_http_reward_urls
-    )
-    local_reward_device = str(args.reward.local_reward_device or "cpu").strip().lower()
-    reward_location = str(args.reward.reward_location or "manager").strip().lower()
-    allow_local_reward_cuda_contention = bool(args.reward.allow_local_reward_cuda_contention)
+    reward_schema = RewardSchema.from_args(args)
+    execution_plan = reward_schema.to_execution_plan()
+    has_dedicated_reward_pool = reward_config.has_dedicated_reward_pool
+    has_http_reward_urls = reward_config.has_http_reward_urls
+    has_http_reward = reward_config.has_http_reward
+    local_reward_device = str(reward_config.local_reward_device or "cpu").strip().lower()
+    requested_reward_location = str(reward_config.reward_location or "auto").strip().lower()
+    reward_location = str(execution_plan.location or "driver").strip().lower()
+    allow_local_reward_cuda_contention = bool(reward_config.allow_local_reward_cuda_contention)
 
-    if args.reward.use_http_reward and not has_http_reward_urls:
+    if reward_config.use_http_reward and not has_http_reward_urls:
         raise ValueError(
             "use_http_reward=true requires reward_service_url or reward_service_urls."
         )
 
     if reward_location == "sampling_actor":
-        if has_http_reward:
-            raise ValueError(
-                "reward_location='sampling_actor' cannot be combined with HTTP reward service. "
-                "Use reward_location='manager' for HTTP reward."
-            )
         if has_dedicated_reward_pool:
             raise ValueError(
                 "reward_location='sampling_actor' cannot be combined with dedicated reward actors. "
-                "Use reward_location='manager' for reward_dedicated_* modes."
+                "Use reward_location='driver' for reward_dedicated_* modes."
             )
 
     uses_local_same_process_reward = (
-        reward_location == "manager"
+        reward_location == "driver"
         and not has_http_reward
         and not has_dedicated_reward_pool
     )
@@ -77,32 +71,42 @@ def validate_reward_config(args: Any) -> None:
         and not allow_local_reward_cuda_contention
     ):
         raise ValueError(
-            "local_reward_device='cuda' in local same-process reward mode can contend with "
+            "local_reward_device='cuda' in driver-local reward mode can contend with "
             "rollout/training GPUs. Use dedicated reward actors (reward_dedicated_*), "
             "use_http_reward, or set allow_local_reward_cuda_contention=true to force."
         )
 
-    if reward_location == "sampling_actor":
+    if requested_reward_location == "auto":
         logger.info(
-            "Reward mode: sampling-actor-local worker (local_reward_device=%s)",
-            local_reward_device,
+            "Resolved reward_location='auto' -> %s (backend=%s)",
+            reward_location,
+            execution_plan.backend,
         )
+
+    if reward_location == "sampling_actor":
+        if has_http_reward:
+            logger.info("Reward mode: sampling-actor HTTP (external service)")
+        else:
+            logger.info(
+                "Reward mode: sampling-actor-local worker (local_reward_device=%s)",
+                local_reward_device,
+            )
     elif has_http_reward:
-        logger.info("Reward mode: HTTP (external service)")
+        logger.info("Reward mode: driver HTTP (external service)")
     elif has_dedicated_reward_pool:
-        total_gpus = args.reward.reward_dedicated_num_gpus
-        if args.reward.reward_dedicated_num_nodes > 0:
-            total_gpus = args.reward.reward_dedicated_num_nodes * args.reward.reward_dedicated_num_gpus_per_node
-        num_actors = total_gpus // args.reward.reward_dedicated_gpus_per_actor
+        total_gpus = reward_config.reward_dedicated_num_gpus
+        if reward_config.reward_dedicated_num_nodes > 0:
+            total_gpus = reward_config.reward_dedicated_num_nodes * reward_config.reward_dedicated_num_gpus_per_node
+        num_actors = total_gpus // reward_config.reward_dedicated_gpus_per_actor
         logger.info(
             "Reward mode: Independent GPU (%s GPUs, %s actors, %s GPUs/actor)",
             total_gpus,
             num_actors,
-            args.reward.reward_dedicated_gpus_per_actor,
+            reward_config.reward_dedicated_gpus_per_actor,
         )
     else:
         logger.info(
-            "Reward mode: Local same-process worker (local_reward_device=%s)",
+            "Reward mode: driver-local same-process worker (local_reward_device=%s)",
             local_reward_device,
         )
 

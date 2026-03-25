@@ -1,10 +1,12 @@
-"""Training-geometry and optimizer-facing validation helpers."""
+"""Training-geometry, backend, and optimizer-facing validation helpers."""
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import logging
+from typing import Any, Mapping, Optional
 
 from diffusionrl.config.resolution import (
+    ResolvedTrainTopology,
     derive_global_rollout_batch_size,
     normalize_lora_target_modules,
     derive_num_updates_per_local_batch,
@@ -13,7 +15,48 @@ from diffusionrl.config.resolution import (
 )
 
 
-def validate_training_batch_geometry(args: Any) -> None:
+from diffusionrl.training.backends.factory import supported_train_backends
+
+logger = logging.getLogger(__name__)
+
+
+def validate_train_backend_config(
+    *,
+    backend_name: str,
+    backend_kwargs: Mapping[str, Any],
+    backend_path: Optional[str],
+) -> None:
+    """Validate cross-domain backend constraints after canonicalization."""
+    backend = backend_name
+    supported = supported_train_backends()
+    if backend not in supported and not backend_path:
+        raise ValueError(
+            f"Unsupported train_backend={backend!r}. "
+            f"Expected one of {sorted(supported)} or provide --training.train-backend-path."
+        )
+    if backend == "megatron" and not backend_path:
+        logger.warning(
+            "train_backend=%s is currently a scaffold backend: launch/topology interfaces are wired, "
+            "but the training execution path is not fully implemented yet. "
+            "Use train_backend_kwargs.actor_class_path to provide a Megatron-dedicated actor.",
+            backend,
+        )
+
+    if backend == "megatron" and not backend_path and not str(
+        dict(backend_kwargs).get("actor_class_path", "") or ""
+    ).strip():
+        logger.warning(
+            "train_backend=%s requires actor_class_path in train_backend_kwargs "
+            "to launch a Megatron-specific training actor.",
+            backend,
+        )
+
+
+def validate_training_batch_geometry(
+    args: Any,
+    *,
+    topology: Optional[ResolvedTrainTopology] = None,
+) -> None:
     """Validate batch-geometry invariants using resolved training geometry."""
     prompts_per_rollout = int(require_prompts_per_rollout(args))
     samples_per_prompt = int(args.algorithm.samples_per_prompt)
@@ -22,7 +65,7 @@ def validate_training_batch_geometry(args: Any) -> None:
 
     num_updates_per_local_batch = derive_num_updates_per_local_batch(args)
     global_batch_size = derive_global_rollout_batch_size(args)
-    topology = derive_training_topology(args)
+    topology = topology if topology is not None else derive_training_topology(args)
     dp_size = int(topology.dp_size)
     dp_replicate_size = int(topology.dp_replicate_size)
     raw_micro_batch_size = args.training.local_micro_batch_size
@@ -147,6 +190,7 @@ def validate_training_misc(args: Any) -> None:
 
 
 __all__ = [
+    "validate_train_backend_config",
     "validate_training_batch_geometry",
     "validate_training_misc",
 ]

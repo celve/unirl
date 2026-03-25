@@ -27,6 +27,8 @@ GROUP_DISPLAY_NAMES: Dict[str, str] = {
     "algorithm": "Algorithm & Advantage",
     "algorithm.window": "Window/Timestep Scheduler",
     "training": "Training & Optimization",
+    "precision.training": "Precision / Training",
+    "precision.rollout": "Precision / Rollout",
     "rollout.topology": "Rollout Topology",
     "rollout.buffer": "Rollout Buffer",
     "rollout.control": "Rollout Control",
@@ -37,12 +39,12 @@ GROUP_DISPLAY_NAMES: Dict[str, str] = {
 }
 
 
-def resolve_field_default(field_info: Any) -> Any:
+def resolve_dataclass_field_default(field_info: Any, *, missing: Any = None) -> Any:
     if field_info.default is not MISSING:
         return field_info.default
     if field_info.default_factory is not MISSING:
         return field_info.default_factory()
-    return None
+    return missing
 
 
 def resolve_cli_field_type(field_type: Any) -> Any:
@@ -237,7 +239,7 @@ def _resolve_field_help_text(field_info: Any) -> str:
     help_text = (field_info.metadata or {}).get("help")
     if help_text:
         return help_text
-    default = resolve_field_default(field_info)
+    default = resolve_dataclass_field_default(field_info)
     return f"{field_info.name} (default: {default})"
 
 
@@ -265,7 +267,7 @@ def _collect_field_specs_from_dataclass(
             (
                 field_info.name,
                 resolve_cli_field_type(field_info.type),
-                resolve_field_default(field_info),
+                resolve_dataclass_field_default(field_info),
                 _resolve_field_help_text(field_info),
                 group_key,
             )
@@ -288,7 +290,7 @@ def collect_cli_field_specs(
             (
                 field_info.name,
                 resolve_cli_field_type(field_info.type),
-                resolve_field_default(field_info),
+                resolve_dataclass_field_default(field_info),
                 _resolve_field_help_text(field_info),
                 "",
             )
