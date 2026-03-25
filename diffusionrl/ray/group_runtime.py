@@ -120,9 +120,9 @@ class TrainingGroupRuntime:
         """Fan out weight-sync handler setup to all training actors."""
         self._handle.call_all("setup_weight_sync", config)
 
-    def sync_weights_to_rollout_manager(self) -> None:
+    def sync_weights_to_rollout(self) -> None:
         """Fan out handler-based weight sync to all training actors."""
-        self._handle.call_all("sync_weights_to_rollout_manager")
+        self._handle.call_all("sync_weights_to_rollout")
 
     def teardown_weight_sync(self) -> None:
         """Fan out weight-sync handler teardown to all training actors."""

@@ -228,7 +228,7 @@ class TensorPayloadWeightSync(WeightSyncCoordinator):
 
     def _do_sync(self, *, rollout_id: int) -> Dict[str, Any]:
         del rollout_id
-        self._training_runtime.sync_weights_to_rollout_manager()
+        self._training_runtime.sync_weights_to_rollout()
         return {"tp_payload_count": self._tp_payload_count}
 
     def _do_teardown(self) -> None:
@@ -331,7 +331,7 @@ class NCCLBroadcastWeightSync(WeightSyncCoordinator):
         if not self._group_name:
             return {"skipped": True}
         try:
-            self._training_runtime.sync_weights_to_rollout_manager()
+            self._training_runtime.sync_weights_to_rollout()
             return {}
         except Exception:
             logger.warning("NCCL sync failed, rebuilding group...", exc_info=True)
@@ -342,7 +342,7 @@ class NCCLBroadcastWeightSync(WeightSyncCoordinator):
             if not self._group_name:
                 raise
             self._setup_handler()
-            self._training_runtime.sync_weights_to_rollout_manager()
+            self._training_runtime.sync_weights_to_rollout()
             return {"recovered": True}
 
     def _do_teardown(self) -> None:
@@ -401,7 +401,7 @@ class CheckpointWeightSync(WeightSyncCoordinator):
 
     def _do_sync(self, *, rollout_id: int) -> Dict[str, Any]:
         del rollout_id
-        self._training_runtime.sync_weights_to_rollout_manager()
+        self._training_runtime.sync_weights_to_rollout()
         return {}
 
     def _do_teardown(self) -> None:

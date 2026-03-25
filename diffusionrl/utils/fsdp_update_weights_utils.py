@@ -262,10 +262,10 @@ class UpdateWeightFromCheckpoint(UpdateWeight):
         else:
             publish_checkpoint_atomic(state_dict, path)
 
-        rollout_manager = self.args.rollout_manager
-        update_fn = getattr(rollout_manager, "update_weights_from_path", None)
+        rollout_target = self.args.rollout_target
+        update_fn = getattr(rollout_target, "update_weights_from_path", None)
         if update_fn is None:
-            raise RuntimeError("rollout_manager does not expose update_weights_from_path().")
+            raise RuntimeError("rollout_target does not expose update_weights_from_path().")
         remote_fn = getattr(update_fn, "remote", None)
         if callable(remote_fn):
             ray.get(remote_fn(path))

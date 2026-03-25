@@ -1055,7 +1055,7 @@ class TrainingActor(BaseTrainRayActor):
             handler_args.weight_sync_dir = config.get("weight_sync_dir", "/tmp/diffusionrl_wsync")
             handler_args.export_format = config.get("export_format", "state_dict")
             handler_args.rollout_runtime = config.get("rollout_runtime")
-            handler_args.rollout_manager = config.get("rollout_runtime")
+            handler_args.rollout_target = config.get("rollout_runtime")
             self._update_weight_handler = UpdateWeightFromCheckpoint(handler_args, self.model)
         else:
             raise ValueError(f"Unknown weight sync mode: {mode!r}")
@@ -1096,12 +1096,12 @@ class TrainingActor(BaseTrainRayActor):
                     result[prefix + ".alpha"] = alpha_val
         return result
 
-    def sync_weights_to_rollout_manager(self) -> None:
+    def sync_weights_to_rollout(self) -> None:
         """Synchronize weights through the configured rollout weight-sync handler."""
         if self._update_weight_handler is None:
             raise RuntimeError(
                 "Weight sync handler not configured. "
-                "Call setup_weight_sync() before sync_weights_to_rollout_manager()."
+                "Call setup_weight_sync() before sync_weights_to_rollout()."
             )
 
         if self._use_lora and not self._lora_initialized_on_rollout:
