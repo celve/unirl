@@ -1,9 +1,7 @@
-"""Driver-side rollout runtime owner."""
+"""Driver-side rollout service construction."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-import logging
 from typing import Any, Dict, Optional, Tuple
 
 from diffusionrl.algorithms.construction import instantiate_algorithm_from_config
@@ -14,65 +12,21 @@ from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.rollout.service_interface import RolloutServices, compute_dataset_step_info
 from diffusionrl.utils import load_function
 
-logger = logging.getLogger(__name__)
-
 DEFAULT_ROLLOUT_FUNCTION_PATH = "diffusionrl.rollout.default_rollout.generate_rollout"
 DEFAULT_EVAL_FUNCTION_PATH = "diffusionrl.rollout.default_rollout.evaluate_rollout"
 DEFAULT_REWARD_HOOK_PATH = "diffusionrl.rollout.default_rollout.score_rewards_hook"
 
 
-@dataclass
-class DriverRolloutRuntime:
-    """Driver-side owner for rollout services, hooks, and attached sampling resources."""
-
-    args: Any
-    services: RolloutServices
-    reward_service: Any
-    reward_schema: RewardSchema
-    rollout_function: Any
-    rollout_function_path: str
-    eval_function: Any
-    eval_function_path: str
-    reward_hook: Any
-    reward_hook_path: str
-    sampling_group: Any = None
-
-    def attach_sampling_group(self, actor_group: Any) -> None:
-        self.sampling_group = actor_group
-        self.services.attach_sampling_group(actor_group)
-
-    def get_sampling_group(self) -> Any:
-        if self.sampling_group is None:
-            raise RuntimeError("No sampling group attached for driver rollout runtime.")
-        return self.sampling_group
-
-    def uses_default_rollout_function(self) -> bool:
-        return str(self.rollout_function_path).strip() == DEFAULT_ROLLOUT_FUNCTION_PATH
-
-    def get_dataset_step_info(self) -> Dict[str, Any]:
-        return compute_dataset_step_info(
-            data_source=self.services.data_source,
-            prompts_per_rollout=self.services.prompt_batch_size,
-        )
-
-    def dispose(self) -> None:
-        if self.reward_service is not None:
-            self.reward_service.dispose()
-            self.reward_service = None
-        self.sampling_group = None
-        self.services.attach_sampling_group(None)
-
-
-def create_driver_rollout_runtime(
+def create_rollout_services(
     args,
     *,
     reward_pg_result: Optional[Any] = None,
     launch_config: ResolvedLaunchConfig,
-) -> Tuple[DriverRolloutRuntime, Dict[str, Any]]:
-    """Create the driver-side rollout runtime and return dataset-step info."""
+) -> Tuple[RolloutServices, Dict[str, Any]]:
+    """Create rollout services and return dataset-step info for the driver."""
     if not isinstance(launch_config, ResolvedLaunchConfig):
         raise ValueError(
-            "create_driver_rollout_runtime requires ResolvedLaunchConfig to be built by the driver."
+            "create_rollout_services requires ResolvedLaunchConfig to be built by the driver."
         )
 
     algorithm = instantiate_algorithm_from_config(dict(launch_config.algorithm_config))
@@ -85,7 +39,7 @@ def create_driver_rollout_runtime(
         reward_pg_result=reward_pg_result,
     )
     if reward_service is None and not reward_schema.uses_sampling_actor_execution:
-        raise RuntimeError("Driver rollout runtime failed to initialize driver-side reward service.")
+        raise RuntimeError("Driver failed to initialize driver-side reward service.")
 
     try:
         data_source_cls = load_function(args.data_source_path)
@@ -104,6 +58,7 @@ def create_driver_rollout_runtime(
     sampler_validation_config = algorithm.get_sampler_validation_config(args=args)
     if not isinstance(sampler_validation_config, dict):
         sampler_validation_config = {}
+
     services = RolloutServices(
         algorithm=algorithm,
         reward_scoring_mode=reward_scoring_mode,
@@ -120,31 +75,16 @@ def create_driver_rollout_runtime(
         debug_mode=str(args.debug.debug_mode or "none"),
         debug_output_dir=getattr(args.debug, "debug_output_dir", None),
     )
-    rollout_function_path = str(args.rollout_function_path)
-    eval_function_path = str(args.eval_function_path)
-    reward_hook_path = str(args.reward_hook_path)
-    rollout_function = load_function(rollout_function_path)
-    eval_function = load_function(eval_function_path)
-    reward_hook = load_function(reward_hook_path)
-    runtime = DriverRolloutRuntime(
-        args=args,
-        services=services,
-        reward_service=reward_service,
-        reward_schema=reward_schema,
-        rollout_function=rollout_function,
-        rollout_function_path=rollout_function_path,
-        eval_function=eval_function,
-        eval_function_path=eval_function_path,
-        reward_hook=reward_hook,
-        reward_hook_path=reward_hook_path,
+    dataset_step_info = compute_dataset_step_info(
+        data_source=services.data_source,
+        prompts_per_rollout=services.prompt_batch_size,
     )
-    return runtime, runtime.get_dataset_step_info()
+    return services, dataset_step_info
 
 
 __all__ = [
     "DEFAULT_EVAL_FUNCTION_PATH",
     "DEFAULT_REWARD_HOOK_PATH",
     "DEFAULT_ROLLOUT_FUNCTION_PATH",
-    "DriverRolloutRuntime",
-    "create_driver_rollout_runtime",
+    "create_rollout_services",
 ]

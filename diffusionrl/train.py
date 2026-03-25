@@ -31,7 +31,7 @@ from diffusionrl.utils.train_utils import (
 logger = logging.getLogger(__name__)
 
 # Main control-plane path (sync mode):
-# parse_args -> create_placement_groups_from_args -> create_driver_rollout_runtime
+# parse_args -> create_placement_groups_from_args -> create_rollout_services
 # -> create_training_actor_group -> prepare RolloutRequest(s) -> execute sampling
 # -> rollout_buffer.push/pop -> training_group.train -> weight_sync.sync
 
@@ -69,7 +69,10 @@ def _produce_and_push_rollout(
     *,
     ray_module,
     args,
-    rollout_driver_runtime,
+    rollout_services,
+    rollout_function,
+    rollout_function_path: str,
+    reward_hook,
     rollout_buffer,
     rollout_id: int,
     rollout_sde_controller,
@@ -80,6 +83,7 @@ def _produce_and_push_rollout(
 ) -> None:
     """Produce one rollout payload and hand it to the buffer."""
     from diffusionrl.rollout.base_types import RolloutContext, RolloutFunctionResult
+    from diffusionrl.rollout.factory import DEFAULT_ROLLOUT_FUNCTION_PATH
 
     rollout_sde_indices = rollout_sde_controller.next_sde_indices()
     context = RolloutContext(
@@ -89,15 +93,15 @@ def _produce_and_push_rollout(
         media_max_items=int(media_max_items),
         debug_trace={} if debug_save_intermediates else None,
     )
-    if debug_save_intermediates and not rollout_driver_runtime.uses_default_rollout_function():
+    if debug_save_intermediates and str(rollout_function_path).strip() != DEFAULT_ROLLOUT_FUNCTION_PATH:
         raise ValueError(
             "debug_save_intermediates currently requires the default request-centric rollout pipeline. "
-            f"Got custom rollout_function_path={rollout_driver_runtime.rollout_function_path!r}."
+            f"Got custom rollout_function_path={rollout_function_path!r}."
         )
 
-    rollout_result = rollout_driver_runtime.rollout_function(
-        services=rollout_driver_runtime.services,
-        reward_hook=rollout_driver_runtime.reward_hook,
+    rollout_result = rollout_function(
+        services=rollout_services,
+        reward_hook=reward_hook,
         context=context,
     )
     if not isinstance(rollout_result, RolloutFunctionResult):
@@ -105,12 +109,12 @@ def _produce_and_push_rollout(
             "Rollout function must return RolloutFunctionResult. "
             f"Got type={type(rollout_result)}"
         )
-    advantages = rollout_driver_runtime.services.compute_advantages(
+    advantages = rollout_services.compute_advantages(
         rewards=rollout_result.rewards,
         group_ids=rollout_result.request.meta.get("group_ids"),
         reward_components=rollout_result.reward_components,
     )
-    training_batch = rollout_driver_runtime.services.assemble_training_batch(
+    training_batch = rollout_services.assemble_training_batch(
         request=rollout_result.request,
         sampler_outputs=rollout_result.sampler_outputs,
         rewards=rollout_result.rewards,
@@ -223,7 +227,11 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             ray.init()
 
     wandb_logger = None
-    rollout_driver_runtime = None
+    rollout_services = None
+    rollout_function = None
+    rollout_function_path = ""
+    eval_function = None
+    reward_hook = None
     rollout_buffer = None
     rollout_group = None
     rollout_runtime = None
@@ -263,17 +271,25 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
         rollout_on_gpu = True
 
-        # 2. Create driver-side rollout runtime.
-        from diffusionrl.rollout.driver_runtime import (
-            create_driver_rollout_runtime,
+        # 2. Create rollout services and load rollout hooks.
+        from diffusionrl.rollout.factory import (
+            DEFAULT_EVAL_FUNCTION_PATH,
+            DEFAULT_REWARD_HOOK_PATH,
+            DEFAULT_ROLLOUT_FUNCTION_PATH,
+            create_rollout_services,
         )
+        from diffusionrl.utils import load_function
 
-        rollout_driver_runtime, dataset_step_info = create_driver_rollout_runtime(
+        rollout_services, dataset_step_info = create_rollout_services(
             args,
             reward_pg_result=pgs.get("reward"),
             launch_config=launch_config,
         )
-        logger.info("Driver rollout runtime created")
+        rollout_function_path = str(args.rollout_function_path or DEFAULT_ROLLOUT_FUNCTION_PATH)
+        rollout_function = load_function(rollout_function_path)
+        eval_function = load_function(str(args.eval_function_path or DEFAULT_EVAL_FUNCTION_PATH))
+        reward_hook = load_function(str(args.reward_hook_path or DEFAULT_REWARD_HOOK_PATH))
+        logger.info("Rollout services created")
         if dataset_step_info.get("num_prompts", 0) > 0:
             logger.info(
                 "Dataset step info: num_prompts=%s prompts_per_rollout=%s "
@@ -299,8 +315,8 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
                 raise ValueError("Missing rollout placement-group allocation.")
             rollout_group = create_rollout_actor_group(launch_config, rollout_pg_result)
             rollout_runtime = RolloutGroupRuntime.from_group(rollout_group)
-            rollout_driver_runtime.attach_sampling_group(rollout_group)
-            logger.info("Rollout actor group created and attached to driver runtime")
+            rollout_services.attach_sampling_group(rollout_group)
+            logger.info("Rollout actor group created and attached to rollout services")
 
         # 3. Optional pre-offload for colocate memory pressure relief before training actor init.
         if args.ray.offload_rollout and rollout_runtime is not None:
@@ -337,7 +353,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
         # 5. Direct-sampling path: training actors serve rollout requests.
         if training_actor_sampling_mode:
-            rollout_driver_runtime.attach_sampling_group(training_group)
+            rollout_services.attach_sampling_group(training_group)
             logger.info("Attached training actors as rollout sampling source")
 
         # 6. Initial weight synchronization for rollout-side actors.
@@ -409,7 +425,10 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             _produce_and_push_rollout(
                 ray_module=ray,
                 args=args,
-                rollout_driver_runtime=rollout_driver_runtime,
+                rollout_services=rollout_services,
+                rollout_function=rollout_function,
+                rollout_function_path=rollout_function_path,
+                reward_hook=reward_hook,
                 rollout_buffer=rollout_buffer,
                 rollout_id=rollout_id,
                 rollout_sde_controller=rollout_sde_controller,
@@ -470,9 +489,9 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
                 # serve as sampling source (direct-sampling mode).
                 if training_actor_sampling_mode:
                     training_runtime.apply_ema_for_eval()
-                eval_metrics = rollout_driver_runtime.eval_function(
-                    services=rollout_driver_runtime.services,
-                    reward_hook=rollout_driver_runtime.reward_hook,
+                eval_metrics = eval_function(
+                    services=rollout_services,
+                    reward_hook=reward_hook,
                     rollout_id=int(rollout_id),
                 )
                 if training_actor_sampling_mode:
@@ -570,8 +589,8 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
                 ray.get(rollout_buffer.dispose.remote())
             finally:
                 ray.kill(rollout_buffer)
-        if rollout_driver_runtime is not None:
-            rollout_driver_runtime.dispose()
+        if rollout_services is not None:
+            rollout_services.dispose()
         if rollout_group is not None:
             rollout_group.dispose()
         if training_group is not None:

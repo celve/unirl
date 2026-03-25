@@ -10,12 +10,11 @@ from diffusionrl.rollout.default_rollout import (
     generate_rollout,
     score_rewards_hook,
 )
-from diffusionrl.rollout.driver_runtime import (
+from diffusionrl.rollout.factory import (
     DEFAULT_EVAL_FUNCTION_PATH,
     DEFAULT_REWARD_HOOK_PATH,
     DEFAULT_ROLLOUT_FUNCTION_PATH,
-    DriverRolloutRuntime,
-    create_driver_rollout_runtime,
+    create_rollout_services,
 )
 from diffusionrl.rollout.primitives import (
     build_rollout_request,
@@ -32,13 +31,12 @@ __all__ = [
     "DEFAULT_EVAL_FUNCTION_PATH",
     "DEFAULT_REWARD_HOOK_PATH",
     "DEFAULT_ROLLOUT_FUNCTION_PATH",
-    "DriverRolloutRuntime",
     "RewardHookResult",
     "RolloutContext",
     "RolloutFunctionResult",
     "RolloutServices",
     "build_rollout_request",
-    "create_driver_rollout_runtime",
+    "create_rollout_services",
     "evaluate_rollout",
     "estimate_request_batches",
     "execute_request_batches",

@@ -25,26 +25,30 @@ DiffusionRL supports the following diffusion models:
 - **Training Actors (Ray + TrainBackend)**: Responsible for the main training process through pluggable training backends (FSDP2 / VeOmni native; Megatron scaffold), reads `TrainingBatch` from the rollout buffer, and synchronizes parameters to the inference actors after training.
 - **Inference Actors (FSDP / SGLang)**: Generates denoising trajectories and latent samples using pluggable sampling engines, producing lightweight `RolloutSamples`.
 - **Reward Runtime**: Evaluates generated samples using configurable reward models (HPS, CLIP, PickScore, OCR, etc.) with a clean split between reward semantics and execution placement.
-- **Driver Rollout Runtime + RolloutServices + Rollout Function**: The driver owns the outer rollout loop and can explicitly plan `RolloutRequest` batches. `DriverRolloutRuntime` owns rollout-local services and hook loading; `RolloutServices` exposes stable request-level operations such as `build_request`, `plan_request_batches`, `execute_sampling_request`, `launch_sampling_request`, and reward/assemble helpers; the configured rollout function (`rollout_function_path`) can orchestrate `prompt batch -> RolloutRequest -> sample -> reward hook -> advantage -> assemble`.
+- **RolloutServices + Rollout Functions**: The driver owns the outer rollout loop and directly holds `RolloutServices` plus the configured rollout/eval/reward hook callables. `RolloutServices` exposes request-level operations such as `build_request`, `plan_request_batches`, `execute_sampling_request`, `launch_sampling_request`, and reward/assemble helpers; the configured rollout function (`rollout_function_path`) is a first-class extension point for `prompt batch -> RolloutRequest -> sample -> reward hook`, and the driver entrypoint then computes advantages and assembles the final `TrainingBatch`.
 - **Reward Hook**: Reward is a first-class rollout hook (`reward_hook_path`) rather than a hard-coded workflow stage, so researchers can swap reward logic or insert shaping/filtering without rewriting the runtime.
 
 ```
- ┌────────────────────┐     ┌──────────────────────────────┐
- │   Prompt Source     │────>│  Driver Rollout Runtime     │
- └────────────────────┘     │  plan RolloutRequest(s)      │
-                            │  RolloutServices API         │
-                            │  rollout_function_path       │
-                            │  reward_hook_path            │
-                            └──────────────┬───────────────┘
+ ┌────────────────────┐     ┌────────────────────────────────────────┐
+ │   Prompt Source    │────>│ Driver Entrypoint + RolloutServices    │
+ └────────────────────┘     │ rollout_function_path / reward_hook    │
+                            │ plan RolloutRequest(s)                 │
+                            └──────────────┬─────────────────────────┘
                                            │ actor_group.generate(request)
                                            v
                               ┌──────────────────────────┐
                               │   Inference ActorGroup   │
                               └─────────────┬────────────┘
-                                            │ sampled outputs
+                                            │ RolloutSamples
                                             v
                               ┌──────────────────────────┐
-                              │ reward hook + assemble   │
+                              │ reward hook              │
+                              └─────────────┬────────────┘
+                                            │ rewards
+                                            v
+                              ┌──────────────────────────┐
+                              │ driver: advantage +      │
+                              │ assemble TrainingBatch   │
                               └─────────────┬────────────┘
                                             │ TrainingBatch
                                             v

@@ -227,6 +227,12 @@ class RolloutServices:
             raise RuntimeError("No sampling group attached. Call attach_sampling_group() first.")
         return actor_group
 
+    def dispose(self) -> None:
+        if self.reward_service is not None:
+            self.reward_service.dispose()
+            self.reward_service = None
+        self._sampling_group = None
+
     def load_prompt_batch(self) -> Dict[str, Any]:
         return load_prompt_batch_from_source(
             data_source=self.data_source,

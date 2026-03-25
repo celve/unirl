@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 
 # Main control-plane path (async mode):
-# parse_args -> create_placement_groups_from_args -> create_driver_rollout_runtime
+# parse_args -> create_placement_groups_from_args -> create_rollout_services
 # -> create_training_actor_group -> prepare RolloutRequest(s) -> async_generate
 # -> resolve requests -> rollout_buffer.push/pop -> training_group.train -> weight_sync.sync
 
@@ -151,7 +151,9 @@ class AsyncPipelineRuntime:
 def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
     *,
     args,
-    rollout_driver_runtime,
+    rollout_services,
+    rollout_eval_function,
+    rollout_reward_hook,
     rollout_buffer,
     training_group,
     training_runtime,
@@ -204,7 +206,7 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
                 f"(inflight={runtime.inflight_count}, max_inflight={runtime.max_inflight})"
             )
         should_log_rollout = should_log_fn(rollout_id, args)
-        services = rollout_driver_runtime.services
+        services = rollout_services
         context = RolloutContext(
             rollout_id=int(rollout_id),
             sde_indices=rollout_sde_controller.next_sde_indices(),
@@ -223,7 +225,7 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
         def _launch_sampling_request(request):
             launched = services.launch_sampling_request(
                 request=request,
-                actor_group=rollout_driver_runtime.get_sampling_group(),
+                actor_group=rollout_services.get_sampling_group(),
                 sde_indices=plan.context.sde_indices,
                 requirements=services.sampling_requirements,
                 sampling_overrides={
@@ -285,7 +287,7 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
                 f"got {resolved.rollout_id}"
             )
         inflight_rollout = resolved.result
-        services = rollout_driver_runtime.services
+        services = rollout_services
         request, sampler_outputs = resolve_request_batches_async(
             inflight_rollout=inflight_rollout.inflight_requests,
             resolve_sampling_request=lambda launched: services.resolve_launched_sampling_request(
@@ -299,7 +301,7 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
         plan = inflight_rollout.plan
         rollout_result = finalize_default_rollout(
             services=services,
-            reward_hook=rollout_driver_runtime.reward_hook,
+            reward_hook=rollout_reward_hook,
             context=plan.context,
             batch=plan.batch,
             request_batches=plan.request_batches,
@@ -366,9 +368,9 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
         if should_eval_fn(rollout_id, args):
             eval_phase_start_t = time.perf_counter()
             _ensure_rollout_on_gpu()
-            eval_metrics = rollout_driver_runtime.eval_function(
-                services=rollout_driver_runtime.services,
-                reward_hook=rollout_driver_runtime.reward_hook,
+            eval_metrics = rollout_eval_function(
+                services=rollout_services,
+                reward_hook=rollout_reward_hook,
                 rollout_id=int(rollout_id),
             )
             eval_phase_s = time.perf_counter() - eval_phase_start_t
@@ -467,8 +469,13 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
     from diffusionrl.ray.group_runtime import RolloutGroupRuntime, TrainingGroupRuntime
     from diffusionrl.ray.placement_group import create_placement_groups_from_launch
     from diffusionrl.distributed.weight_sync import create_weight_sync
-    from diffusionrl.rollout.driver_runtime import create_driver_rollout_runtime
-    from diffusionrl.utils import configure_logger, set_seed
+    from diffusionrl.rollout.factory import (
+        DEFAULT_EVAL_FUNCTION_PATH,
+        DEFAULT_REWARD_HOOK_PATH,
+        DEFAULT_ROLLOUT_FUNCTION_PATH,
+        create_rollout_services,
+    )
+    from diffusionrl.utils import configure_logger, load_function, set_seed
     from diffusionrl.utils.wandb_logger import init_logger
     from diffusionrl.utils.wandb_metrics import compute_rollout_batch_metrics
 
@@ -527,10 +534,15 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
             ray.init()
 
     wandb_logger = None
-    rollout_driver_runtime = None
+    rollout_services = None
+    rollout_function_path = ""
+    rollout_eval_function = None
+    rollout_reward_hook = None
     rollout_buffer = None
     rollout_group = None
+    rollout_runtime = None
     training_group = None
+    training_runtime = None
     weight_sync = create_weight_sync(args, launch_config, mode=sync_mode)
 
     try:
@@ -562,17 +574,24 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
         pgs = create_placement_groups_from_launch(launch_config)
         logger.info("Placement groups created")
 
-        rollout_driver_runtime, dataset_step_info = create_driver_rollout_runtime(
+        rollout_services, dataset_step_info = create_rollout_services(
             args,
             reward_pg_result=pgs.get("reward"),
             launch_config=launch_config,
         )
-        logger.info("Driver rollout runtime created")
-        if not rollout_driver_runtime.uses_default_rollout_function():
+        rollout_function_path = str(args.rollout_function_path or DEFAULT_ROLLOUT_FUNCTION_PATH)
+        rollout_eval_function = load_function(
+            str(args.eval_function_path or DEFAULT_EVAL_FUNCTION_PATH)
+        )
+        rollout_reward_hook = load_function(
+            str(args.reward_hook_path or DEFAULT_REWARD_HOOK_PATH)
+        )
+        logger.info("Rollout services created")
+        if rollout_function_path != DEFAULT_ROLLOUT_FUNCTION_PATH:
             raise ValueError(
                 "train_async.py currently requires the default request-centric rollout function "
                 "so the driver can overlap request launch and training. "
-                f"Got custom rollout_function_path={rollout_driver_runtime.rollout_function_path!r}."
+                f"Got custom rollout_function_path={rollout_function_path!r}."
             )
         if dataset_step_info.get("num_prompts", 0) > 0:
             logger.info(
@@ -598,8 +617,8 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
             raise ValueError("Missing rollout placement-group allocation.")
         rollout_group = create_rollout_actor_group(launch_config, rollout_pg_result)
         rollout_runtime = RolloutGroupRuntime.from_group(rollout_group)
-        rollout_driver_runtime.attach_sampling_group(rollout_group)
-        logger.info("Rollout actor group created and attached to driver runtime")
+        rollout_services.attach_sampling_group(rollout_group)
+        logger.info("Rollout actor group created and attached to rollout services")
 
         training_pg_result = pgs.get("training")
         if training_pg_result is None:
@@ -650,7 +669,9 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
 
         train_async_loop(
             args=args,
-            rollout_driver_runtime=rollout_driver_runtime,
+            rollout_services=rollout_services,
+            rollout_eval_function=rollout_eval_function,
+            rollout_reward_hook=rollout_reward_hook,
             rollout_buffer=rollout_buffer,
             training_group=training_group,
             training_runtime=training_runtime,
@@ -674,8 +695,8 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
                 ray.get(rollout_buffer.dispose.remote())
             finally:
                 ray.kill(rollout_buffer)
-        if rollout_driver_runtime is not None:
-            rollout_driver_runtime.dispose()
+        if rollout_services is not None:
+            rollout_services.dispose()
         if rollout_group is not None:
             rollout_group.dispose()
         if training_group is not None:
