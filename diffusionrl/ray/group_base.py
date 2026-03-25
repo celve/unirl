@@ -121,9 +121,6 @@ class ActorGroupHandle:
             )
         )
 
-    def broadcast(self, method: str, *args: Any, **kwargs: Any) -> List[Any]:
-        return self.call_all(method, *args, **kwargs)
-
     def scatter_gather_async(
         self,
         method: str,

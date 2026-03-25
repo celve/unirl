@@ -6,13 +6,12 @@ from typing import List, Optional, Sequence
 
 import torch
 
+from diffusionrl.types.batch_ops import concat_payload_values, reindex_payload_value
 from diffusionrl.types.sampling import LogProbData, PromptEmbeddings
 from diffusionrl.types.training_batch import (
     BackwardTrainingBatch,
     ForwardTrainingBatch,
     TrainingBatch,
-    _concat_extra_payload,
-    _reindex_extra_payload,
 )
 
 
@@ -99,7 +98,7 @@ def index_training_batch(batch: TrainingBatch, keep_indices: Sequence[int]) -> T
             is_partitioned=batch.is_partitioned,
             step_indices=batch.step_indices,
             target_sde_indices=batch.target_sde_indices,
-            extras=_reindex_extra_payload(
+            extras=reindex_payload_value(
                 batch.extras,
                 indices=idx,
                 batch_size=int(batch.batch_size),
@@ -142,7 +141,7 @@ def index_training_batch(batch: TrainingBatch, keep_indices: Sequence[int]) -> T
             ),
             timesteps=batch.timesteps,
             is_partitioned=batch.is_partitioned,
-            extras=_reindex_extra_payload(
+            extras=reindex_payload_value(
                 batch.extras,
                 indices=idx,
                 batch_size=int(batch.batch_size),
@@ -253,7 +252,7 @@ def concat_training_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
         rewards = None
         if all(b.rewards is not None for b in typed):
             rewards = torch.cat([b.rewards for b in typed if b.rewards is not None], dim=0)
-        extras = _concat_extra_payload(
+        extras = concat_payload_values(
             [b.extras for b in typed],
             batch_sizes=[int(b.batch_size) for b in typed],
         ) or {}
@@ -302,7 +301,7 @@ def concat_training_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
         rewards_f = None
         if all(b.rewards is not None for b in typed_f):
             rewards_f = torch.cat([b.rewards for b in typed_f if b.rewards is not None], dim=0)
-        extras_f = _concat_extra_payload(
+        extras_f = concat_payload_values(
             [b.extras for b in typed_f],
             batch_sizes=[int(b.batch_size) for b in typed_f],
         ) or {}

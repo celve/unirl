@@ -1,4 +1,4 @@
-"""Stateful buffer core independent of Ray actor plumbing."""
+"""Stateful rollout buffer independent of Ray actor plumbing."""
 
 from __future__ import annotations
 

@@ -6,7 +6,7 @@ import copy
 import logging
 
 from diffusionrl.config.launch_resolution import ResolvedLaunchConfig
-from diffusionrl.config.validation_payload import (
+from diffusionrl.config.validation import (
     validate_rollout_actor_init_config,
     validate_training_actor_init_config,
 )
@@ -221,7 +221,7 @@ def create_training_actor_group(
         raise RuntimeError(f"Invalid rank0 master payload: {master_info!r}")
     master_addr = str(master_info["master_addr"])
     master_port = int(master_info["master_port"])
-    group.broadcast("set_master_info", master_addr, master_port)
+    group.call_all("set_master_info", master_addr, master_port)
 
     group.init(config)
 

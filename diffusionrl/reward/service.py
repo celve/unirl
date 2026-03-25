@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import inspect
 import logging
 import time
@@ -574,36 +573,7 @@ class RewardService:
         logger.info("RewardService disposed")
 
 
-class LocalRewardExecutor(RewardService):
-    """Lightweight same-process reward service for rollout/training actors."""
-
-    def __init__(
-        self,
-        reward_schema: RewardSchema,
-        *,
-        device_override: Optional[str] = None,
-    ) -> None:
-        if device_override is not None:
-            reward_schema = replace(
-                reward_schema,
-                local_reward_device=str(device_override),
-            )
-        self._bind_reward_schema(
-            reward_schema,
-            reward_pg_result=None,
-            owner_name="LocalRewardExecutor",
-        )
-        self._init_local_executors()
-        logger.info(
-            "LocalRewardExecutor initialized with %d executor(s), aggregation=%s, device=%s",
-            len(self.executors),
-            self.aggregation,
-            self.execution_plan.local_device,
-        )
-
-
 __all__ = [
     "InProcessRewardExecutor",
     "RewardService",
-    "LocalRewardExecutor",
 ]

@@ -9,7 +9,7 @@ from diffusionrl.buffer.buffer_plugins import (
     RewardRangeFilterPlugin,
     build_buffer_plugins,
 )
-from diffusionrl.buffer.buffer_core import BufferRuntime
+from diffusionrl.buffer.buffer import BufferRuntime
 from diffusionrl.buffer.buffer_store import BatchStore, InMemoryBatchStore, RayBatchStore
 
 __all__ = [

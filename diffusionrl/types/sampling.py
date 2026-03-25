@@ -8,6 +8,12 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
 import torch
 from diffusionrl.types.sde import SDEConfig, SDEScheduleConfig
+from diffusionrl.types.batch_ops import (
+    concat_columnar_values,
+    copy_columnar_mapping,
+    pad_columnar_value,
+    slice_columnar_value,
+)
 
 if TYPE_CHECKING:
     from torch import device as TorchDevice
@@ -349,107 +355,6 @@ class PromptEmbeddings:
         )
 
 
-def _copy_columnar_mapping(
-    mapping: Optional[Mapping[str, Any]],
-) -> Dict[str, Any]:
-    result: Dict[str, Any] = {}
-    if not isinstance(mapping, Mapping):
-        return result
-    for key, value in mapping.items():
-        if isinstance(value, list):
-            result[str(key)] = list(value)
-        elif isinstance(value, tuple):
-            result[str(key)] = list(value)
-        else:
-            result[str(key)] = value
-    return result
-
-
-def _slice_batched_value(
-    value: Any,
-    *,
-    batch_size: int,
-    start: int,
-    end: int,
-) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, list) and len(value) == batch_size:
-        return value[start:end]
-    if isinstance(value, tuple) and len(value) == batch_size:
-        return value[start:end]
-    if isinstance(value, torch.Tensor) and value.dim() > 0 and value.shape[0] == batch_size:
-        return value[start:end].clone()
-    if hasattr(value, "slice") and callable(getattr(value, "slice")):
-        return value.slice(start, end)
-    return value
-
-
-def _pad_batched_value(
-    value: Any,
-    *,
-    batch_size: int,
-    target_size: int,
-) -> Any:
-    if value is None or target_size <= batch_size:
-        return value
-
-    pad_count = target_size - batch_size
-    if isinstance(value, list) and len(value) == batch_size:
-        return value + [value[-1]] * pad_count
-    if isinstance(value, tuple) and len(value) == batch_size:
-        return value + (value[-1],) * pad_count
-    if isinstance(value, torch.Tensor) and value.dim() > 0 and value.shape[0] == batch_size:
-        pad = value[-1:].repeat(pad_count, *([1] * (value.dim() - 1)))
-        return torch.cat([value, pad], dim=0)
-    return value
-
-
-def _concat_batched_values(
-    values: List[Any],
-    *,
-    batch_sizes: List[int],
-) -> Any:
-    non_none = [value for value in values if value is not None]
-    if not non_none:
-        return None
-
-    if all(isinstance(value, list) and len(value) == batch_size for value, batch_size in zip(values, batch_sizes) if value is not None):
-        merged: List[Any] = []
-        for value in values:
-            if value is not None:
-                merged.extend(list(value))
-        return merged
-    if all(isinstance(value, tuple) and len(value) == batch_size for value, batch_size in zip(values, batch_sizes) if value is not None):
-        merged_list: List[Any] = []
-        for value in values:
-            if value is not None:
-                merged_list.extend(list(value))
-        return tuple(merged_list)
-    if all(isinstance(value, torch.Tensor) and value.dim() > 0 and value.shape[0] == batch_size for value, batch_size in zip(values, batch_sizes) if value is not None):
-        return torch.cat([value for value in values if value is not None], dim=0)
-    if all(isinstance(value, Mapping) for value in non_none):
-        merged_mapping: Dict[str, Any] = {}
-        keys = sorted({str(key) for value in non_none for key in value.keys()})
-        for key in keys:
-            merged_mapping[key] = _concat_batched_values(
-                [dict(value).get(key) if isinstance(value, Mapping) else None for value in values],
-                batch_sizes=batch_sizes,
-            )
-        return merged_mapping
-
-    first = non_none[0]
-    if torch.is_tensor(first):
-        if all(torch.is_tensor(value) and torch.equal(value, first) for value in non_none[1:]):
-            return first
-    elif all(value == first for value in non_none[1:]):
-        return first
-    raise ValueError(
-        "Cannot concatenate rollout values with mismatched non-batched content: "
-        f"types={[type(value).__name__ if value is not None else None for value in values]}"
-    )
-
-
 @dataclass
 class RolloutSamples:
     """Lightweight sampler output contract shared across rollout stages."""
@@ -461,7 +366,7 @@ class RolloutSamples:
 
     def __post_init__(self) -> None:
         self.aux = dict(self.aux or {})
-        self.meta = _copy_columnar_mapping(self.meta)
+        self.meta = copy_columnar_mapping(self.meta)
 
     @property
     def num_steps(self) -> int:
@@ -498,11 +403,11 @@ class RolloutSamples:
     def slice(self, start: int, end: int) -> "RolloutSamples":
         batch_size = self.batch_size
         sliced_aux = {
-            key: _slice_batched_value(value, batch_size=batch_size, start=start, end=end)
+            key: slice_columnar_value(value, batch_size=batch_size, start=start, end=end)
             for key, value in self.aux.items()
         }
         sliced_meta = {
-            key: _slice_batched_value(value, batch_size=batch_size, start=start, end=end)
+            key: slice_columnar_value(value, batch_size=batch_size, start=start, end=end)
             for key, value in self.meta.items()
         }
         return RolloutSamples(
@@ -662,7 +567,7 @@ class RolloutRequest:
     def __post_init__(self) -> None:
         self.prompts = list(self.prompts or [])
         self.sampling = dict(self.sampling or {})
-        self.meta = _copy_columnar_mapping(self.meta)
+        self.meta = copy_columnar_mapping(self.meta)
         self.inputs = dict(self.inputs or {})
 
     @property
@@ -678,7 +583,7 @@ class RolloutRequest:
         req = copy.copy(self)
         req.sampling = dict(self.sampling)
         req.sampling["seed"] = int(seed_raw) + int(seed_offset)
-        req.meta = _copy_columnar_mapping(self.meta)
+        req.meta = copy_columnar_mapping(self.meta)
         req.inputs = dict(self.inputs)
         return req
 
@@ -708,9 +613,9 @@ class RolloutRequest:
             height=int(first.height),
             width=int(first.width),
             num_frames=int(first.num_frames),
-            sampling=_concat_batched_values([request.sampling for request in requests], batch_sizes=batch_sizes) or {},
-            meta=_concat_batched_values([request.meta for request in requests], batch_sizes=batch_sizes) or {},
-            inputs=_concat_batched_values([request.inputs for request in requests], batch_sizes=batch_sizes) or {},
+            sampling=concat_columnar_values([request.sampling for request in requests], batch_sizes=batch_sizes) or {},
+            meta=concat_columnar_values([request.meta for request in requests], batch_sizes=batch_sizes) or {},
+            inputs=concat_columnar_values([request.inputs for request in requests], batch_sizes=batch_sizes) or {},
         )
 
     def pad_to(self, target_size: int) -> "RolloutRequest":
@@ -720,23 +625,25 @@ class RolloutRequest:
         import copy
 
         req = copy.copy(self)
-        req.prompts = list(_pad_batched_value(list(self.prompts), batch_size=batch_size, target_size=target_size))
+        req.prompts = list(
+            pad_columnar_value(list(self.prompts), batch_size=batch_size, target_size=target_size)
+        )
         req.meta = {
-            key: _pad_batched_value(value, batch_size=batch_size, target_size=target_size)
+            key: pad_columnar_value(value, batch_size=batch_size, target_size=target_size)
             for key, value in self.meta.items()
         }
         req.inputs = {
-            key: _pad_batched_value(value, batch_size=batch_size, target_size=target_size)
+            key: pad_columnar_value(value, batch_size=batch_size, target_size=target_size)
             for key, value in self.inputs.items()
         }
         req.sampling = {
-            key: _pad_batched_value(value, batch_size=batch_size, target_size=target_size)
+            key: pad_columnar_value(value, batch_size=batch_size, target_size=target_size)
             for key, value in self.sampling.items()
             if key != "kwargs"
         }
         kwargs = self.sampling.get("kwargs")
         req.sampling["kwargs"] = {
-            key: _pad_batched_value(value, batch_size=batch_size, target_size=target_size)
+            key: pad_columnar_value(value, batch_size=batch_size, target_size=target_size)
             for key, value in (kwargs.items() if isinstance(kwargs, dict) else [])
         }
         return req
@@ -748,21 +655,21 @@ class RolloutRequest:
         batch_size = self.batch_size
         req.prompts = self.prompts[start:end]
         req.meta = {
-            key: _slice_batched_value(value, batch_size=batch_size, start=start, end=end)
+            key: slice_columnar_value(value, batch_size=batch_size, start=start, end=end)
             for key, value in self.meta.items()
         }
         req.inputs = {
-            key: _slice_batched_value(value, batch_size=batch_size, start=start, end=end)
+            key: slice_columnar_value(value, batch_size=batch_size, start=start, end=end)
             for key, value in self.inputs.items()
         }
         req.sampling = {
-            key: _slice_batched_value(value, batch_size=batch_size, start=start, end=end)
+            key: slice_columnar_value(value, batch_size=batch_size, start=start, end=end)
             for key, value in self.sampling.items()
             if key != "kwargs"
         }
         kwargs = self.sampling.get("kwargs")
         req.sampling["kwargs"] = {
-            key: _slice_batched_value(value, batch_size=batch_size, start=start, end=end)
+            key: slice_columnar_value(value, batch_size=batch_size, start=start, end=end)
             for key, value in (kwargs.items() if isinstance(kwargs, dict) else [])
         }
         return req
