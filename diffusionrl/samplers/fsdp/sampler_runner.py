@@ -94,7 +94,7 @@ def run_sample(
         **sample_kwargs: Forwarded verbatim to ``sampler.sample()``.
 
     Returns:
-        ``RolloutOutput`` from the sampler.
+        ``RolloutSamples`` from the sampler.
     """
     sampler_overrides = sample_kwargs.pop("sampler_overrides", None)
     with temporary_sampler_overrides(sampler, sampler_overrides):
@@ -152,7 +152,7 @@ def generate_prompt_only_rollout(
             "Prompt-embedding-only input is not supported."
         )
 
-    kwargs = dict(request.kwargs)
+    kwargs = dict(request.sampling.get("kwargs") or {})
     unsupported_embedding_kwargs = [
         name
         for name in (
@@ -170,9 +170,10 @@ def generate_prompt_only_rollout(
         )
 
     generator = None
-    if request.seed is not None:
+    seed_raw = request.sampling.get("seed")
+    if seed_raw is not None:
         generator = torch.Generator(device=device)
-        generator.manual_seed(request.seed)
+        generator.manual_seed(int(seed_raw))
 
     if request.num_inference_steps is None:
         raise ValueError(f"{host_label} requires RolloutRequest.num_inference_steps to be resolved.")
@@ -188,7 +189,9 @@ def generate_prompt_only_rollout(
     height = int(request.height)
     width = int(request.width)
     num_frames = int(request.num_frames)
-    sampling_adapter = request.sampling_adapter
+    sampling_adapter = request.sampling.get("sampling_adapter")
+    sde_indices_raw = request.sampling.get("sde_indices")
+    sde_indices = None if sde_indices_raw is None else {int(v) for v in sde_indices_raw}
 
     encoded = encode_prompt(model_bundle, prompts)
     prompt_embeds = encoded.get("prompt_embeds")
@@ -210,14 +213,14 @@ def generate_prompt_only_rollout(
         height=height,
         width=width,
         num_frames=num_frames,
-        latents=request.latents,
+        latents=request.inputs.get("latents"),
         generator=generator,
-        sde_indices=request.sde_indices,
+        sde_indices=sde_indices,
         text_ids=encoded.get("text_ids"),
         image_ids=encoded.get("image_ids"),
-        init_same_noise=bool(request.init_same_noise),
-        samples_per_prompt=int(request.samples_per_prompt),
-        noise_group_ids=request.noise_group_ids,
+        init_same_noise=bool(request.sampling.get("init_same_noise", False)),
+        samples_per_prompt=max(1, int(request.sampling.get("samples_per_prompt", 1))),
+        noise_group_ids=request.meta.get("noise_group_ids"),
         **kwargs,
     )
 

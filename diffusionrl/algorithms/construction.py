@@ -4,7 +4,7 @@ This module owns the canonical algorithm_config surface consumed by
 ``algorithm_cls.from_config(config)``. The payload contains:
 
 - algorithm selection (`algorithm_type`, `algorithm_path`)
-- exact user-provided `algorithm_kwargs`
+- canonical `algorithm_kwargs` (user-provided values plus framework-injected defaults)
 - a small set of framework-owned shared fields algorithms may read
   (`samples_per_prompt`, `window_training`, SDE configs)
 
@@ -102,16 +102,23 @@ def build_algorithm_config(
 ) -> Dict[str, Any]:
     """Build the canonical algorithm_config passed to algorithm.from_config()."""
     ac = args.algorithm
+    pc = args.precision
+    cached_resolved = getattr(args, "_diffusionrl_resolved_config", None)
+    cached_sampling_spec = getattr(cached_resolved, "sampling_spec", None)
     resolved_sampling_spec = (
         sampling_spec
         if sampling_spec is not None
-        else resolve_sampling_spec(
-            sampling=args.sampling,
-            sampler_path=args.sampling.sampler_path,
-            height=args.height,
-            width=args.width,
-            num_frames=args.num_frames,
-            seed=args.seed,
+        else (
+            cached_sampling_spec
+            if isinstance(cached_sampling_spec, ResolvedSamplingSpec)
+            else resolve_sampling_spec(
+                sampling=args.sampling,
+                sampler_path=args.sampling.sampler_path,
+                height=args.height,
+                width=args.width,
+                num_frames=args.num_frames,
+                seed=args.seed,
+            )
         )
     )
     prompts_per_rollout = ac.prompts_per_rollout
@@ -120,13 +127,15 @@ def build_algorithm_config(
             "algorithm.prompts_per_rollout must be set before building algorithm_config."
         )
 
+    algorithm_kwargs = build_algorithm_kwargs(args)
+
     return {
         "algorithm_type": str(ac.algorithm_type),
         "algorithm_path": resolve_algorithm_path(
             algorithm_type=ac.algorithm_type,
             algorithm_path=ac.algorithm_path,
         ),
-        "algorithm_kwargs": build_algorithm_kwargs(args),
+        "algorithm_kwargs": algorithm_kwargs,
         "samples_per_prompt": int(ac.samples_per_prompt),
         "prompts_per_rollout": int(prompts_per_rollout),
         "component_mix_stage": str(ac.component_mix_stage),
@@ -140,6 +149,10 @@ def build_algorithm_config(
         "shuffle_samples": bool(ac.shuffle_samples),
         "shuffle_seed": ac.shuffle_seed,
         "window_training": bool(ac.window.window_training),
+        # Training compute precision is framework-owned and must not travel
+        # through algorithm_kwargs, otherwise researchers get two competing
+        # config entrypoints for the same runtime contract.
+        "training_autocast_precision": str(pc.training.autocast_precision),
         "sde_config": resolved_sampling_spec.sde_config.to_dict(),
         "sde_schedule_config": resolved_sampling_spec.sde_schedule_config.to_dict(),
         "guidance_scale": float(resolved_sampling_spec.guidance_scale),

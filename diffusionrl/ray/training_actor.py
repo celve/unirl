@@ -18,7 +18,7 @@ from diffusionrl.algorithms.construction import instantiate_algorithm_from_confi
 from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
 from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.types.sde import SDEScheduleConfig
-from diffusionrl.types.sampling import LogProbData, PromptEmbeddings, RolloutRequest, RolloutOutput
+from diffusionrl.types.sampling import LogProbData, PromptEmbeddings, RolloutRequest, RolloutSamples
 from diffusionrl.types.training_batch import (
     BackwardTrainingBatch,
     TrainingBatch,
@@ -35,9 +35,9 @@ from diffusionrl.distributed.weight_sync_checkpoint import (
 from diffusionrl.training import (
     TrainExecutor,
     TrainExecutorConfig,
+    TrainingWorkflow,
     create_train_backend,
 )
-from diffusionrl.orchestration import TrainingWorkflow
 from diffusionrl.utils import load_function
 
 from .actor_base import BaseTrainRayActor, log_gpu_state, log_resource_ids
@@ -317,9 +317,9 @@ class TrainingActor(BaseTrainRayActor):
                 - train_backend_config: dict(name/backend_path/kwargs)
 
         Note:
-            RolloutManager and TrainingActor each instantiate the same
-            Algorithm class locally for their own role. Training owns the
-            train-side algorithm instance.
+            The driver-side rollout runtime and TrainingActor each instantiate
+            the same Algorithm class locally for their own role. Training owns
+            the train-side algorithm instance.
         """
         logger.info(f"Rank {self.rank}: Initializing training actor...")
 
@@ -464,15 +464,15 @@ class TrainingActor(BaseTrainRayActor):
     def _attach_local_reward_to_output(
         self,
         *,
-        output: RolloutOutput,
+        output: RolloutSamples,
         prompts: List[str],
         prompt_ids: Optional[List[str]],
         sample_ids: Optional[List[str]],
         group_ids: Optional[List[str]],
         prompt_metadata: Optional[List[Optional[Dict[str, Any]]]],
-        keep_reward_media_for_manager: bool,
+        keep_reward_media_for_driver: bool,
         samples_per_prompt: int,
-    ) -> RolloutOutput:
+    ) -> RolloutSamples:
         if not self._uses_rollout_local_reward():
             return output
         return self._ensure_local_reward_runtime().attach_to_output(
@@ -482,7 +482,7 @@ class TrainingActor(BaseTrainRayActor):
             sample_ids=sample_ids,
             group_ids=group_ids,
             prompt_metadata=prompt_metadata,
-            keep_reward_media_for_manager=keep_reward_media_for_manager,
+            keep_reward_media_for_driver=keep_reward_media_for_driver,
             samples_per_prompt=int(samples_per_prompt),
         )
 
@@ -562,7 +562,11 @@ class TrainingActor(BaseTrainRayActor):
             if gc_enabled:
                 logger.info(f"Rank {self.rank}: Gradient checkpointing enabled (non-reentrant)")
 
-        logger.info(f"Rank {self.rank}: Model loaded (lora_rank={model_config.get('lora_rank', 'N/A')}, training_only=True)")
+        logger.info(
+            "Rank %s: Model loaded (lora_rank=%s, training_only=True)",
+            self.rank,
+            model_config.get("lora_rank", "N/A") if use_lora else "N/A",
+        )
 
     def _create_optimizer(self, optimizer_config: dict) -> None:
         """Create optimizer."""
@@ -734,7 +738,7 @@ class TrainingActor(BaseTrainRayActor):
             guidance_scale=self._guidance_scale,
         )
 
-    def generate(self, request: RolloutRequest) -> RolloutOutput:
+    def generate(self, request: RolloutRequest) -> RolloutSamples:
         output = self._actor_sampling_executor.generate_raw(self, request)
         prompts = request.prompts
         return finalize_sampling_output(
@@ -746,12 +750,16 @@ class TrainingActor(BaseTrainRayActor):
                 lambda current_output: self._attach_local_reward_to_output(
                     output=current_output,
                     prompts=prompts,
-                    prompt_ids=request.prompt_ids,
-                    sample_ids=request.sample_ids,
-                    group_ids=request.group_ids,
-                    prompt_metadata=request.prompt_metadata,
-                    keep_reward_media_for_manager=bool(request.keep_reward_media_for_manager),
-                    samples_per_prompt=int(request.samples_per_prompt),
+                    prompt_ids=request.meta.get("prompt_ids"),
+                    sample_ids=request.meta.get("sample_ids"),
+                    group_ids=request.meta.get("group_ids"),
+                    prompt_metadata=request.meta.get("prompt_metadata"),
+                    keep_reward_media_for_driver=bool(
+                        request.sampling.get("keep_reward_media_for_driver", False)
+                    ),
+                    samples_per_prompt=max(
+                        1, int(request.sampling.get("samples_per_prompt", 1))
+                    ),
                 )
             ),
             move_output_to_cpu=True,

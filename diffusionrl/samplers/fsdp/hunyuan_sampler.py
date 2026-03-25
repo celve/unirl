@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Set
 import torch
 import torch.nn as nn
 
-from ..base import BaseSampler, RolloutOutput
+from ..base import BaseSampler, RolloutSamples
 from diffusionrl.sde.runtime import sd3_time_shift, sde_step_with_log_prob
 from diffusionrl.types import LogProbData, PromptEmbeddings
 from diffusionrl.utils.dtypes import parse_torch_dtype
@@ -147,7 +147,7 @@ class FSDPHunyuanSampler(BaseSampler):
         generator: Optional[torch.Generator] = None,
         sde_indices: Optional[Set[int]] = None,
         **kwargs,
-    ) -> RolloutOutput:
+    ) -> RolloutSamples:
         """
         Execute SDE sampling and return trajectories with log probabilities.
 
@@ -172,7 +172,7 @@ class FSDPHunyuanSampler(BaseSampler):
             sde_indices: Set of timestep indices for SDE (all by default)
 
         Returns:
-            RolloutOutput with trajectories, log_probs, etc.
+            RolloutSamples with trajectories, log_probs, etc.
         """
         if self.model is None:
             raise RuntimeError("Model not set. Initialize sampler with model parameter.")
@@ -309,6 +309,7 @@ class FSDPHunyuanSampler(BaseSampler):
                 pred_original = current_latents - sigma * model_pred
                 dsigma = sigma_schedule[i + 1] - sigma
                 latents = latents + dsigma * model_pred
+                latents = latents.to(dtype=trajectory_dtype)
 
             all_latents.append(latents.clone())
 
@@ -329,31 +330,35 @@ class FSDPHunyuanSampler(BaseSampler):
             encoder_attention_mask=encoder_attention_mask,
         )
 
-        return RolloutOutput(
+        return RolloutSamples(
             latents=final_latents,
             timesteps=sigma_schedule,
-            trajectories=trajectories,
-            log_probs=LogProbData.from_dict(all_log_probs),
-            embeddings=embeddings,
-            metadata={
-                "sde_indices": sde_indices,
-                "engine_capabilities": {
-                    "supports_logprob": True,
-                    "supports_trajectory": True,
-                    "supports_prompt_embeddings": True,
-                    "supports_guidance_scale": True,
+            aux={
+                "trajectories": trajectories,
+                "log_probs": LogProbData.from_dict(all_log_probs),
+                "embeddings": embeddings,
+                "metadata": {
+                    "sde_indices": sde_indices,
+                    "engine_capabilities": {
+                        "supports_logprob": True,
+                        "supports_trajectory": True,
+                        "supports_prompt_embeddings": True,
+                        "supports_guidance_scale": True,
+                    },
+                    "trajectory_format": "video_dense_latent",
+                    "timestep_type": "sigma",
+                    "timestep_scale": 1.0,
+                    "height": height,
+                    "width": width,
+                    "num_frames": num_frames,
+                    "guidance_scale": float(actual_guidance),
+                    "use_sde_solver": self.use_sde_solver,
+                    "latent_scale": self.LATENT_SCALE,
                 },
-                "trajectory_format": "video_dense_latent",
-                "timestep_type": "sigma",
-                "timestep_scale": 1.0,
-                "height": height,
-                "width": width,
-                "num_frames": num_frames,
-                "guidance_scale": float(actual_guidance),
-                "use_sde_solver": self.use_sde_solver,
-                "latent_scale": self.LATENT_SCALE,
+                "step_indices": torch.arange(
+                    sigma_schedule.shape[0], device=sigma_schedule.device, dtype=torch.long
+                ),
             },
-            step_indices=torch.arange(sigma_schedule.shape[0], device=sigma_schedule.device, dtype=torch.long),
         )
 
     def compute_log_prob_for_training(

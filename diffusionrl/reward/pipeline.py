@@ -8,43 +8,40 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 import torch
 
 from diffusionrl.types.reward import RewardRequest
-from diffusionrl.types.sampling import RolloutOutput
+from diffusionrl.types.sampling import RolloutSamples
 
 logger = logging.getLogger(__name__)
 
 RewardScoringMode = Literal["service", "precomputed"]
 
 
-def extract_images_from_output(output: RolloutOutput) -> List[Any]:
+def extract_images_from_output(output: RolloutSamples) -> List[Any]:
     """Extract decoded images from one rollout output."""
-    if not isinstance(output, RolloutOutput):
+    if not isinstance(output, RolloutSamples):
         raise TypeError(
-            "Reward stage expects RolloutOutput, "
+            "Reward stage expects RolloutSamples, "
             f"got {type(output).__name__}."
         )
 
-    if output.decoded_images is not None:
-        return (
-            output.decoded_images
-            if isinstance(output.decoded_images, list)
-            else [output.decoded_images]
-        )
+    decoded_images = output.aux.get("decoded_images")
+    if decoded_images is not None:
+        return decoded_images if isinstance(decoded_images, list) else [decoded_images]
     raise ValueError(
-        "Reward stage requires decoded_images on RolloutOutput for image rewards. "
+        "Reward stage requires decoded_images on RolloutSamples for image rewards. "
         "Sampler output did not include decoded media."
     )
 
 
-def extract_videos_from_output(output: RolloutOutput) -> List[torch.Tensor]:
+def extract_videos_from_output(output: RolloutSamples) -> List[torch.Tensor]:
     """Extract decoded videos from one rollout output."""
-    if not isinstance(output, RolloutOutput):
+    if not isinstance(output, RolloutSamples):
         raise TypeError(
-            "Reward stage expects RolloutOutput, "
+            "Reward stage expects RolloutSamples, "
             f"got {type(output).__name__}."
         )
 
     decoded_videos = None
-    metadata = output.metadata
+    metadata = output.aux.get("metadata")
     if isinstance(metadata, dict):
         decoded_videos = metadata.get("decoded_videos")
 
@@ -54,7 +51,7 @@ def extract_videos_from_output(output: RolloutOutput) -> List[torch.Tensor]:
         if decoded_videos.dim() == 4:
             return [decoded_videos]
     raise ValueError(
-        "Reward stage requires decoded_videos metadata on RolloutOutput for video rewards. "
+        "Reward stage requires decoded_videos metadata on RolloutSamples for video rewards. "
         "Sampler output did not include decoded video media."
     )
 
@@ -73,9 +70,10 @@ def resolve_reward_input_kind(*, reward_service: Any) -> str:
 
 
 def _read_precomputed_reward_payload(
-    output: RolloutOutput,
+    output: RolloutSamples,
 ) -> Optional[Tuple[List[float], Dict[str, List[float]]]]:
-    metadata = output.metadata if isinstance(output.metadata, dict) else {}
+    raw_metadata = output.aux.get("metadata")
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
     raw_rewards = metadata.get("precomputed_rewards")
     if raw_rewards is None:
         return None
@@ -89,7 +87,7 @@ def _read_precomputed_reward_payload(
 
 def collect_precomputed_rewards(
     *,
-    sampler_outputs: List[RolloutOutput],
+    sampler_outputs: List[RolloutSamples],
 ) -> Optional[Tuple[torch.Tensor, Dict[str, List[float]]]]:
     """Collect precomputed rewards from rollout outputs when available."""
     if not sampler_outputs:
@@ -107,10 +105,10 @@ def collect_precomputed_rewards(
             continue
         saw_precomputed = True
         rewards, components = payload
-        if len(rewards) != int(output.batch_size):
+        if len(rewards) != int(output.latents.shape[0]):
             raise ValueError(
                 "Precomputed rewards length must match rollout output batch_size. "
-                f"Got rewards={len(rewards)} batch_size={int(output.batch_size)}."
+                f"Got rewards={len(rewards)} batch_size={int(output.latents.shape[0])}."
             )
         all_rewards.extend(rewards)
         for name, values in components.items():
@@ -180,7 +178,7 @@ def build_request_from_rollout_outputs(
     *,
     reward_service: Any,
     samples_per_prompt: int,
-    sampler_outputs: List[RolloutOutput],
+    sampler_outputs: List[RolloutSamples],
     prompts: List[str],
     prompt_ids: Optional[List[str]] = None,
     sample_ids: Optional[List[str]] = None,
@@ -267,7 +265,7 @@ def score_from_rollout_outputs(
     reward_scoring_mode: RewardScoringMode,
     reward_service: Any,
     samples_per_prompt: int,
-    sampler_outputs: List[RolloutOutput],
+    sampler_outputs: List[RolloutSamples],
     prompts: List[str],
     prompt_ids: Optional[List[str]] = None,
     sample_ids: Optional[List[str]] = None,

@@ -21,7 +21,7 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 
-from ..base import BaseSampler, RolloutOutput
+from ..base import BaseSampler, RolloutSamples
 from diffusionrl.sde.runtime import (
     compute_sde_log_prob,
     get_sigma_schedule,
@@ -360,7 +360,7 @@ class SD3Sampler(BaseSampler):
         noise_group_ids: Optional[List[str]] = None,
         debug_output_dir: Optional[str] = None,
         **kwargs,
-    ) -> RolloutOutput:
+    ) -> RolloutSamples:
         """
         Execute SDE sampling and return trajectories with log probabilities.
 
@@ -384,7 +384,7 @@ class SD3Sampler(BaseSampler):
                 train-inference consistency debugging.
 
         Returns:
-            RolloutOutput with trajectories, log_probs, etc.
+            RolloutSamples with trajectories, log_probs, etc.
         """
         if self.model is None:
             raise RuntimeError("Model not set. Initialize sampler with model parameter.")
@@ -583,27 +583,31 @@ class SD3Sampler(BaseSampler):
             negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
         )
 
-        return RolloutOutput(
+        return RolloutSamples(
             latents=latents,
             timesteps=sigmas,
-            trajectories=trajectories,
-            log_probs=LogProbData.from_dict(log_probs_dict),
-            embeddings=embeddings,
-            metadata={
-                "sde_indices": sde_indices,
-                "engine_capabilities": {
-                    "supports_logprob": True,
-                    "supports_trajectory": True,
-                    "supports_prompt_embeddings": True,
+            aux={
+                "trajectories": trajectories,
+                "log_probs": LogProbData.from_dict(log_probs_dict),
+                "embeddings": embeddings,
+                "metadata": {
+                    "sde_indices": sde_indices,
+                    "engine_capabilities": {
+                        "supports_logprob": True,
+                        "supports_trajectory": True,
+                        "supports_prompt_embeddings": True,
+                    },
+                    "trajectory_format": "dense_latent",
+                    "timestep_type": "sigma",
+                    "timestep_scale": 1.0,
+                    "height": height,
+                    "width": width,
+                    "guidance_scale": guidance_scale,
                 },
-                "trajectory_format": "dense_latent",
-                "timestep_type": "sigma",
-                "timestep_scale": 1.0,
-                "height": height,
-                "width": width,
-                "guidance_scale": guidance_scale,
+                "step_indices": torch.arange(
+                    sigmas.shape[0], device=sigmas.device, dtype=torch.long
+                ),
             },
-            step_indices=torch.arange(sigmas.shape[0], device=sigmas.device, dtype=torch.long),
         )
 
     def compute_log_prob_for_training(

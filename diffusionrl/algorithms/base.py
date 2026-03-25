@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import torch
 import torch.nn as nn
 
-from diffusionrl.types.sampling import SamplingRequirements
+from diffusionrl.types.sampling import RolloutRequest, SamplingRequirements
 
 from .normalizers import normalize_global, normalize_grouped
 
@@ -123,7 +123,7 @@ class BaseAlgorithm(ABC):
         return dict(extra)
 
     @classmethod
-    def from_config(cls, config: dict) -> "BaseAlgorithm":  # [PUBLIC-API → rollout_manager.init(), training_actor.init()]
+    def from_config(cls, config: dict) -> "BaseAlgorithm":  # [PUBLIC-API → rollout runtime init, training_actor.init()]
         """Construct algorithm from an algorithm_config dictionary.
 
         TrainingActor calls ``algorithm_cls.from_config(algorithm_config)`` to
@@ -139,7 +139,7 @@ class BaseAlgorithm(ABC):
         )
 
     @abstractmethod
-    def get_sampling_requirements(self) -> SamplingRequirements:  # [PUBLIC-API → rollout_manager.init()] 推理侧: 声明采样需求
+    def get_sampling_requirements(self) -> SamplingRequirements:  # [PUBLIC-API → driver rollout runtime] 推理侧: 声明采样需求
         """
         Return the sampling requirements for this algorithm.
 
@@ -148,7 +148,7 @@ class BaseAlgorithm(ABC):
         """
         ...
 
-    def compute_advantages(  # [PUBLIC-API → rollout_manager via compute_advantages_with_components()] 推理侧
+    def compute_advantages(  # [PUBLIC-API → rollout pipeline via compute_advantages_with_components()] 推理侧
         self,
         rewards: torch.Tensor,
         group_ids: Optional[List[str]] = None,
@@ -265,7 +265,7 @@ class BaseAlgorithm(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def compute_advantages_with_components(  # [PUBLIC-API → rollout_workflow.compute_advantages()] 推理侧
+    def compute_advantages_with_components(  # [PUBLIC-API → rollout.primitives.compute_advantages()] 推理侧
         self,
         *,
         rewards: torch.Tensor,
@@ -344,19 +344,18 @@ class BaseAlgorithm(ABC):
         ...
 
     @abstractmethod
-    def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:  # [PUBLIC-API → rollout_manager] 推理侧
+    def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:  # [PUBLIC-API → driver rollout pipeline] 推理侧
         """Get sampler-output validation flags for rollout orchestration."""
         ...
 
     @abstractmethod
-    def assemble_training_batch(  # [PUBLIC-API → rollout_workflow.build_training_batch()] 推理侧: 组装 TrainingBatch
+    def assemble_training_batch(  # [PUBLIC-API → driver rollout pipeline] 推理侧: 组装 TrainingBatch
         self,
         *,
-        num_inference_steps: int,
+        request: RolloutRequest,
         sampler_outputs: List[Any],
         rewards: torch.Tensor,
         advantages: torch.Tensor,
-        prompts: List[str],
         sde_indices: Optional[Set[int]] = None,
     ) -> Any:
         """Assemble the typed training batch for this algorithm."""

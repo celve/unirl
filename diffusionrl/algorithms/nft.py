@@ -15,6 +15,7 @@ from diffusers.utils.torch_utils import randn_tensor
 
 from diffusionrl.types import ForwardTrainingBatch, SDEConfig
 from diffusionrl.utils.adapter_utils import switch_adapter
+from diffusionrl.utils.dtypes import parse_torch_dtype
 from .base import BaseAlgorithm, EMASpec, SamplingRequirements
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,10 @@ class _NFTLoss:
             t_shifted = t
         t_expanded = t_shifted.view(-1, *([1] * (x0.ndim - 1)))
 
-        if config is not None and hasattr(config, "get_torch_dtype"):
+        algorithm_autocast_dtype = getattr(algorithm, "autocast_dtype", None)
+        if algorithm_autocast_dtype in (torch.float16, torch.bfloat16):
+            model_dtype = algorithm_autocast_dtype
+        elif config is not None and hasattr(config, "get_torch_dtype"):
             model_dtype = config.get_torch_dtype()
         else:
             model_dtype = prompt_embeds.dtype if prompt_embeds is not None else xt.dtype
@@ -278,6 +282,10 @@ class NFTAlgorithm(BaseAlgorithm):
             "adv_clip_max",
             "adv_mode",
             "use_adaptive_weight",
+            # Backward-compatibility shim for legacy NFT launch scripts.
+            # NFT never consumed PPO-style ratio clipping, but older bash
+            # entrypoints still pass clip_range through algorithm_kwargs.
+            "clip_range",
             "skip_last_timestep",
             "skip_initial_timesteps",
             "old_adapter_name",
@@ -329,6 +337,7 @@ class NFTAlgorithm(BaseAlgorithm):
             clip_max=config.get("adv_clip_abs", 5.0),
             use_global_std=bool(config.get("use_global_std", False)),
             trimmed_ratio=float(config.get("trimmed_ratio", 0.0)),
+            autocast_precision=config.get("training_autocast_precision"),
         )
 
     def __init__(
@@ -361,6 +370,7 @@ class NFTAlgorithm(BaseAlgorithm):
         clip_max: float = 5.0,
         use_global_std: bool = False,
         trimmed_ratio: float = 0.0,
+        autocast_precision: Any = None,
         **kwargs,
     ):
         super().__init__(
@@ -394,6 +404,11 @@ class NFTAlgorithm(BaseAlgorithm):
         self.shuffle_train_timesteps = bool(shuffle_train_timesteps)
         self.apply_time_shift_in_loss = bool(apply_time_shift_in_loss)
         self.model_type = "default"
+        self.autocast_dtype = parse_torch_dtype(
+            autocast_precision,
+            field_name="training_autocast_precision",
+            allow_none=True,
+        )
         self._forward_plugin = None
 
     @property
@@ -514,31 +529,30 @@ class NFTAlgorithm(BaseAlgorithm):
     def assemble_training_batch(
         self,
         *,
-        num_inference_steps: int,
+        request: Any,
         sampler_outputs: List[Any],
         rewards: torch.Tensor,
         advantages: torch.Tensor,
-        prompts: List[str],
         sde_indices: Optional[Set[int]] = None,
     ) -> Any:
-        del num_inference_steps, sde_indices
+        del sde_indices
         return self._assemble_forward_batch(
+            request=request,
             sampler_outputs=sampler_outputs,
             rewards=rewards,
             advantages=advantages,
-            prompts=prompts,
         )
 
     def _assemble_forward_batch(
         self,
         *,
+        request: Any,
         sampler_outputs: List[Any],
         rewards: torch.Tensor,
         advantages: torch.Tensor,
-        prompts: List[str],
     ) -> Any:
-        from diffusionrl.types.sampling import RolloutOutput, PromptEmbeddings
-        from diffusionrl.types.training_batch import ForwardTrainingBatch
+        from diffusionrl.types.sampling import RolloutSamples, PromptEmbeddings
+        from diffusionrl.types.training_batch import ForwardTrainingBatch, build_rollout_extras
 
         clean_latents = []
         all_prompt_embeds = []
@@ -551,15 +565,16 @@ class NFTAlgorithm(BaseAlgorithm):
         timesteps: Optional[torch.Tensor] = None
 
         for idx, output in enumerate(sampler_outputs):
-            if not isinstance(output, RolloutOutput):
+            if not isinstance(output, RolloutSamples):
                 raise TypeError(
-                    f"Assemble stage expects RolloutOutput, got {type(output).__name__} at index={idx}."
+                    f"Assemble stage expects RolloutSamples, got {type(output).__name__} at index={idx}."
                 )
-            if output.embeddings is None:
-                raise ValueError(f"RolloutOutput at index={idx} missing embeddings in forward path.")
+            embeddings_item = output.aux.get("embeddings")
+            if embeddings_item is None:
+                raise ValueError(f"RolloutSamples at index={idx} missing embeddings in forward path.")
 
             clean_latents.append(output.latents)
-            emb = output.embeddings
+            emb = embeddings_item
             all_prompt_embeds.append(emb.prompt_embeds)
             if emb.pooled_prompt_embeds is not None:
                 all_pooled_prompt_embeds.append(emb.pooled_prompt_embeds)
@@ -577,7 +592,7 @@ class NFTAlgorithm(BaseAlgorithm):
                 timesteps = output.timesteps
             elif output.timesteps is None:
                 raise ValueError(
-                    f"RolloutOutput at index={idx} missing timesteps while earlier outputs provided them."
+                    f"RolloutSamples at index={idx} missing timesteps while earlier outputs provided them."
                 )
             elif not torch.equal(timesteps.to(output.timesteps.device), output.timesteps):
                 raise ValueError("Mismatched timesteps across sampler outputs")
@@ -605,8 +620,21 @@ class NFTAlgorithm(BaseAlgorithm):
             advantages=advantages,
             embeddings=embeddings,
             rewards=rewards,
-            prompts=prompts,
+            prompts=list(request.prompts),
+            prompt_ids=(
+                list(request.meta.get("prompt_ids")) if request.meta.get("prompt_ids") is not None else None
+            ),
+            sample_ids=(
+                list(request.meta.get("sample_ids")) if request.meta.get("sample_ids") is not None else None
+            ),
+            group_ids=(
+                list(request.meta.get("group_ids")) if request.meta.get("group_ids") is not None else None
+            ),
             timesteps=timesteps,
+            extras=build_rollout_extras(
+                request=request,
+                sampler_outputs=sampler_outputs,
+            ),
         )
         batch.validate()
         return batch

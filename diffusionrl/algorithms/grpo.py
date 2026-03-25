@@ -1,13 +1,13 @@
 """
-GRPO Algorithm Implementation — algorithm-owned loss and training logic.
+GRPO Algorithm Implementation - algorithm-owned loss and training logic.
 
 Standard GRPO with group normalization for advantages. The algorithm file is
 the single source of truth for rollout requirements, loss creation, and the
 backward training step.
 """
 
-import math
 import logging
+import math
 import os
 import time as _time
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 
 from diffusionrl.types import PromptEmbeddings, SDEConfig, TimestepData
+from diffusionrl.utils.dtypes import parse_torch_dtype
 from .base import BaseAlgorithm, EMASpec, SamplingRequirements
 
 logger = logging.getLogger(__name__)
@@ -282,6 +283,7 @@ class GRPOAlgorithm(BaseAlgorithm):
             clip_max=config.get("adv_clip_abs", 5.0),
             use_global_std=bool(config.get("use_global_std", False)),
             trimmed_ratio=float(config.get("trimmed_ratio", 0.0)),
+            autocast_precision=config.get("training_autocast_precision"),
         )
 
     def __init__(
@@ -305,6 +307,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         clip_max: float = 5.0,
         use_global_std: bool = False,
         trimmed_ratio: float = 0.0,
+        autocast_precision: Any = None,
         **kwargs,
     ):
         """
@@ -352,6 +355,11 @@ class GRPOAlgorithm(BaseAlgorithm):
         self.ratio_reg_coef = ratio_reg_coef
         self.sde_config = sde_config or SDEConfig()
         self.model_type = model_type
+        self.autocast_dtype = parse_torch_dtype(
+            autocast_precision,
+            field_name="autocast_precision",
+            allow_none=True,
+        )
 
         # MixGRPO stability controls
         self.skip_last_timestep = skip_last_timestep
@@ -463,34 +471,31 @@ class GRPOAlgorithm(BaseAlgorithm):
     def assemble_training_batch(
         self,
         *,
-        num_inference_steps: int,
+        request: Any,
         sampler_outputs: List[Any],
         rewards: torch.Tensor,
         advantages: torch.Tensor,
-        prompts: List[str],
         sde_indices: Optional[Set[int]] = None,
     ) -> Any:
         return self._assemble_backward_batch(
-            num_inference_steps=num_inference_steps,
+            request=request,
             sampler_outputs=sampler_outputs,
             rewards=rewards,
             advantages=advantages,
-            prompts=prompts,
             sde_indices=sde_indices,
         )
 
     def _assemble_backward_batch(
         self,
         *,
-        num_inference_steps: int,
+        request: Any,
         sampler_outputs: List[Any],
         rewards: torch.Tensor,
         advantages: torch.Tensor,
-        prompts: List[str],
         sde_indices: Optional[Set[int]] = None,
     ) -> Any:
-        from diffusionrl.types.sampling import RolloutOutput, LogProbData, PromptEmbeddings
-        from diffusionrl.types.training_batch import BackwardTrainingBatch
+        from diffusionrl.types.sampling import RolloutSamples, LogProbData, PromptEmbeddings
+        from diffusionrl.types.training_batch import BackwardTrainingBatch, build_rollout_extras
 
         trajectories = []
         log_probs_dicts = []
@@ -508,20 +513,29 @@ class GRPOAlgorithm(BaseAlgorithm):
         all_image_ids = []
 
         for idx, output in enumerate(sampler_outputs):
-            if not isinstance(output, RolloutOutput):
+            if not isinstance(output, RolloutSamples):
                 raise TypeError(
-                    f"Assemble stage expects RolloutOutput, got {type(output).__name__} at index={idx}."
+                    f"Assemble stage expects RolloutSamples, got {type(output).__name__} at index={idx}."
                 )
-            if output.trajectories is None:
-                raise ValueError(f"RolloutOutput at index={idx} missing trajectories in backward path.")
-            if output.embeddings is None:
-                raise ValueError(f"RolloutOutput at index={idx} missing embeddings in backward path.")
+            trajectories_item = output.aux.get("trajectories")
+            embeddings_item = output.aux.get("embeddings")
+            log_probs_item = output.aux.get("log_probs")
+            step_indices_item = output.aux.get("step_indices")
+            metadata_item = output.aux.get("metadata")
+            sde_idx = (
+                log_probs_item.sde_indices
+                if log_probs_item is not None
+                else set(int(i) for i in (metadata_item or {}).get("sde_indices", []))
+            )
+            if trajectories_item is None:
+                raise ValueError(f"RolloutSamples at index={idx} missing trajectories in backward path.")
+            if embeddings_item is None:
+                raise ValueError(f"RolloutSamples at index={idx} missing embeddings in backward path.")
 
-            trajectories.append(output.trajectories)
-            log_probs_dicts.append(output.log_probs.to_dict() if output.log_probs is not None else {})
+            trajectories.append(trajectories_item)
+            log_probs_dicts.append(log_probs_item.to_dict() if log_probs_item is not None else {})
             ts = output.timesteps
-            steps = output.step_indices
-            sde_idx = output.sde_indices
+            steps = step_indices_item
 
             if ts is not None and timesteps is None:
                 timesteps = ts
@@ -538,7 +552,7 @@ class GRPOAlgorithm(BaseAlgorithm):
             if sde_indices is None:
                 final_sde_indices.update(int(i) for i in sde_idx)
 
-            emb = output.embeddings
+            emb = embeddings_item
             all_prompt_embeds.append(emb.prompt_embeds)
             if emb.pooled_prompt_embeds is not None:
                 all_pooled_prompt_embeds.append(emb.pooled_prompt_embeds)
@@ -654,9 +668,22 @@ class GRPOAlgorithm(BaseAlgorithm):
             advantages=advantages,
             embeddings=embeddings,
             rewards=rewards,
-            prompts=prompts,
+            prompts=list(request.prompts),
+            prompt_ids=(
+                list(request.meta.get("prompt_ids")) if request.meta.get("prompt_ids") is not None else None
+            ),
+            sample_ids=(
+                list(request.meta.get("sample_ids")) if request.meta.get("sample_ids") is not None else None
+            ),
+            group_ids=(
+                list(request.meta.get("group_ids")) if request.meta.get("group_ids") is not None else None
+            ),
             step_indices=step_indices,
             target_sde_indices=set(int(i) for i in final_sde_indices),
+            extras=build_rollout_extras(
+                request=request,
+                sampler_outputs=sampler_outputs,
+            ),
         )
 
         batch.validate()
@@ -915,6 +942,7 @@ class GRPOAlgorithm(BaseAlgorithm):
             image_ids=image_ids,
             negative_prompt_embeds=negative_prompt_embeds,
             negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+            autocast_dtype=self.autocast_dtype,
             **kwargs,
         )
 

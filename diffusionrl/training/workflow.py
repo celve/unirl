@@ -1,4 +1,4 @@
-"""Train-side orchestration that stays independent of Ray actor plumbing."""
+"""Train-side workflow that stays independent of Ray actor plumbing."""
 
 from __future__ import annotations
 

@@ -19,7 +19,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "RewardType": ("diffusionrl.types.reward", "RewardType"),
     "EngineCapabilities": ("diffusionrl.types.engine", "EngineCapabilities"),
     "EngineConfig": ("diffusionrl.types.engine", "EngineConfig"),
-    "RolloutOutput": ("diffusionrl.types.sampling", "RolloutOutput"),
+    "RolloutSamples": ("diffusionrl.types.sampling", "RolloutSamples"),
     "RolloutRequest": ("diffusionrl.types.sampling", "RolloutRequest"),
     "LogProbData": ("diffusionrl.types.sampling", "LogProbData"),
     "PromptEmbeddings": ("diffusionrl.types.sampling", "PromptEmbeddings"),

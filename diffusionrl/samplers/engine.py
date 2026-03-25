@@ -17,7 +17,7 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 import torch
 
-from diffusionrl.types import RolloutOutput, RolloutRequest
+from diffusionrl.types import RolloutSamples, RolloutRequest
 from diffusionrl.types.engine import EngineCapabilities, EngineConfig, normalize_engine_type
 
 
@@ -32,7 +32,7 @@ class BaseRolloutEngine(ABC):
     1. Unified interface for all engines
     2. Support for model weight synchronization
     3. Memory management via sleep/wake_up
-    4. Consistent RolloutOutput format
+    4. Consistent RolloutSamples format
     """
 
     def __init__(self, config: EngineConfig):
@@ -57,7 +57,7 @@ class BaseRolloutEngine(ABC):
         pass
 
     @abstractmethod
-    def generate(self, request: RolloutRequest) -> RolloutOutput:
+    def generate(self, request: RolloutRequest) -> RolloutSamples:
         """
         Generate samples with log probabilities.
 
@@ -66,7 +66,7 @@ class BaseRolloutEngine(ABC):
                 generation parameters.
 
         Returns:
-            RolloutOutput with trajectories, log_probs, etc.
+            RolloutSamples with trajectories, log_probs, etc.
         """
         pass
 

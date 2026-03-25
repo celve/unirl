@@ -14,7 +14,7 @@ import torch
 
 from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.sde.runtime import get_sigma_schedule
-from diffusionrl.types import LogProbData, PromptEmbeddings, RolloutOutput, RolloutRequest
+from diffusionrl.types import LogProbData, PromptEmbeddings, RolloutSamples, RolloutRequest
 from diffusionrl.types.engine import EngineCapabilities, EngineConfig
 from diffusionrl.utils.media import tensor_frame_to_pil
 
@@ -951,7 +951,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
     # ---------------------------------------------------------------------
     # Core inference API
     # ---------------------------------------------------------------------
-    def generate(self, request: RolloutRequest) -> RolloutOutput:
+    def generate(self, request: RolloutRequest) -> RolloutSamples:
         if not self._is_initialized or self._generator is None:
             raise RuntimeError("SGLang engine is not initialized")
 
@@ -962,9 +962,13 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         height = request.height
         width = request.width
         num_frames = request.num_frames
-        seed = request.seed
-        sde_indices = request.sde_indices
-        kwargs = dict(request.kwargs)
+        seed_raw = request.sampling.get("seed")
+        seed = None if seed_raw is None else int(seed_raw)
+        sde_indices_raw = request.sampling.get("sde_indices")
+        sde_indices = (
+            None if sde_indices_raw is None else {int(v) for v in sde_indices_raw}
+        )
+        kwargs = dict(request.sampling.get("kwargs") or {})
 
         # SGLang runtime samples noise internally.
 
@@ -1024,10 +1028,11 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         image_ids = encoded.get("image_ids")
         model_type = self._infer_model_type()
 
-        require_trajectory = bool(request.return_trajectories)
-        require_log_probs = bool(request.return_log_probs)
+        require_trajectory = bool(request.sampling.get("return_trajectories", True))
+        require_log_probs = bool(request.sampling.get("return_log_probs", True))
         return_decoded_for_reward = bool(
-            request.decode_for_reward or kwargs.pop("return_decoded_for_reward", False)
+            bool(request.sampling.get("decode_for_reward", False))
+            or kwargs.pop("return_decoded_for_reward", False)
         )
         negative_prompt = kwargs.pop("negative_prompt", None)
         fps = kwargs.pop("fps", None)
@@ -1270,15 +1275,17 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         if self._last_weight_checksum:
             metadata["weight_checksum"] = dict(self._last_weight_checksum)
 
-        return RolloutOutput(
+        return RolloutSamples(
             latents=final_latents,
             timesteps=timesteps,
-            trajectories=trajectories_tensor if require_trajectory else None,
-            log_probs=merged_log_probs,
-            embeddings=embeddings,
-            decoded_images=decoded_images,
-            metadata=metadata,
-            step_indices=step_indices,
+            aux={
+                "trajectories": trajectories_tensor if require_trajectory else None,
+                "log_probs": merged_log_probs,
+                "embeddings": embeddings,
+                "decoded_images": decoded_images,
+                "metadata": metadata,
+                "step_indices": step_indices,
+            },
         )
 
     def encode_prompt(

@@ -10,7 +10,7 @@ import torch
 
 # Import shared data types from canonical types package
 from diffusionrl.sde.rules import is_deterministic_sde_type, normalize_sde_type
-from diffusionrl.types import RolloutOutput
+from diffusionrl.types import RolloutSamples
 
 
 class BaseSampler(ABC):
@@ -75,7 +75,7 @@ class BaseSampler(ABC):
         generator: Optional[torch.Generator] = None,
         sde_indices: Optional[Set[int]] = None,
         **kwargs,
-    ) -> RolloutOutput:
+    ) -> RolloutSamples:
         """
         Execute sampling and return trajectories with log probabilities.
 
@@ -94,7 +94,7 @@ class BaseSampler(ABC):
             **kwargs: Additional model-specific arguments
 
         Returns:
-            RolloutOutput with trajectories, log_probs, etc.
+            RolloutSamples with trajectories, log_probs, etc.
             - log_probs will only contain entries for sde_indices
             - sde_indices in output reflects which steps used SDE
         """

@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Set
 import torch
 import torch.nn as nn
 
-from ..base import BaseSampler, RolloutOutput
+from ..base import BaseSampler, RolloutSamples
 from diffusionrl.sde.runtime import (
     sd3_time_shift,
     sde_step_with_log_prob,
@@ -215,7 +215,7 @@ class FluxSampler(BaseSampler):
         samples_per_prompt: int = 1,
         noise_group_ids: Optional[List[str]] = None,
         **kwargs,
-    ) -> RolloutOutput:
+    ) -> RolloutSamples:
         """
         Execute SDE sampling aligned with DanceGRPO run_sample_step.
 
@@ -235,7 +235,7 @@ class FluxSampler(BaseSampler):
             samples_per_prompt: Number of samples per prompt (for init_same_noise)
 
         Returns:
-            RolloutOutput with trajectories, log_probs, etc.
+            RolloutSamples with trajectories, log_probs, etc.
         """
         # Use provided guidance_scale or fall back to instance default
         actual_guidance = guidance_scale if guidance_scale is not None else self.guidance_scale
@@ -398,6 +398,7 @@ class FluxSampler(BaseSampler):
                 pred_original = current_latents - sigma * pred
                 dsigma = sigma_schedule[i + 1] - sigma
                 z = z + dsigma * pred
+                z = z.to(dtype=trajectory_dtype)
 
             all_latents.append(z.clone())
 
@@ -415,32 +416,36 @@ class FluxSampler(BaseSampler):
             image_ids=image_ids,
         )
 
-        return RolloutOutput(
+        return RolloutSamples(
             latents=final_latents,
             timesteps=sigma_schedule,
-            trajectories=trajectories,
-            log_probs=LogProbData.from_dict(all_log_probs),
-            embeddings=embeddings,
-            metadata={
-                "sde_indices": sde_indices,
-                "engine_capabilities": {
-                    "supports_logprob": True,
-                    "supports_trajectory": True,
-                    "supports_prompt_embeddings": True,
+            aux={
+                "trajectories": trajectories,
+                "log_probs": LogProbData.from_dict(all_log_probs),
+                "embeddings": embeddings,
+                "metadata": {
+                    "sde_indices": sde_indices,
+                    "engine_capabilities": {
+                        "supports_logprob": True,
+                        "supports_trajectory": True,
+                        "supports_prompt_embeddings": True,
+                    },
+                    "trajectory_format": "packed_seq_c4",
+                    "timestep_type": "sigma",
+                    "timestep_scale": 1.0,
+                    "height": height,
+                    "width": width,
+                    "latent_h": latent_h,
+                    "latent_w": latent_w,
+                    "guidance_scale": actual_guidance,
+                    "use_sde_solver": self.use_sde_solver,
+                    "vae_scale": self.VAE_SCALE,
+                    "vae_shift": self.VAE_SHIFT,
                 },
-                "trajectory_format": "packed_seq_c4",
-                "timestep_type": "sigma",
-                "timestep_scale": 1.0,
-                "height": height,
-                "width": width,
-                "latent_h": latent_h,
-                "latent_w": latent_w,
-                "guidance_scale": actual_guidance,
-                "use_sde_solver": self.use_sde_solver,
-                "vae_scale": self.VAE_SCALE,
-                "vae_shift": self.VAE_SHIFT,
+                "step_indices": torch.arange(
+                    sigma_schedule.shape[0], device=sigma_schedule.device, dtype=torch.long
+                ),
             },
-            step_indices=torch.arange(sigma_schedule.shape[0], device=sigma_schedule.device, dtype=torch.long),
         )
 
     def compute_log_prob_for_training(

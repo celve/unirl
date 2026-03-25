@@ -354,7 +354,7 @@ class DiffusionRLWandBLogger:
         *,
         key: str = "rollout/generated_media",
     ) -> None:
-        """Log rollout media preview payload produced by rollout manager."""
+        """Log rollout media preview payload produced by the rollout pipeline."""
         if not isinstance(media_preview, dict):
             return
 

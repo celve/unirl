@@ -87,6 +87,7 @@ class MixGRPOAlgorithm(GRPOAlgorithm):
             trimmed_ratio=float(config.get("trimmed_ratio", 0.0)),
             sde_ratio=float(sde_schedule_config.sde_ratio),
             window_training=bool(config.get("window_training", False)),
+            autocast_precision=config.get("training_autocast_precision"),
         )
 
     def get_sampling_requirements(self) -> SamplingRequirements:

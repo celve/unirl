@@ -6,35 +6,35 @@ from typing import Any, Callable, Dict, Optional
 
 import torch
 
-from diffusionrl.types.sampling import RolloutOutput, RolloutRequest
+from diffusionrl.types.sampling import RolloutSamples, RolloutRequest
 from diffusionrl.utils.media import tensor_to_pil
 
 
 def _with_decoded_images(
     *,
-    output: RolloutOutput,
+    output: RolloutSamples,
     decoded_images: list[Any],
-) -> RolloutOutput:
-    return RolloutOutput(
+) -> RolloutSamples:
+    return RolloutSamples(
         latents=output.latents,
         timesteps=output.timesteps,
-        trajectories=output.trajectories,
-        log_probs=output.log_probs,
-        embeddings=output.embeddings,
-        decoded_images=decoded_images,
-        metadata=output.metadata,
-        step_indices=output.step_indices,
+        aux={
+            **dict(output.aux),
+            "decoded_images": list(decoded_images),
+        },
+        meta=output.meta,
     )
 
 
 def _attach_metadata_defaults(
     *,
-    output: RolloutOutput,
+    output: RolloutSamples,
     metadata_defaults: Optional[Dict[str, Any]],
-) -> RolloutOutput:
+) -> RolloutSamples:
     if not metadata_defaults:
         return output
-    metadata = dict(output.metadata or {})
+    raw_metadata = output.aux.get("metadata")
+    metadata = dict(raw_metadata or {})
     changed = False
     for key, value in metadata_defaults.items():
         if key not in metadata:
@@ -42,23 +42,25 @@ def _attach_metadata_defaults(
             changed = True
     if not changed:
         return output
-    output.metadata = metadata
+    output.aux["metadata"] = metadata
     return output
 
 
 def _decode_for_reward_if_needed(
     *,
-    output: RolloutOutput,
+    output: RolloutSamples,
     request: RolloutRequest,
     decode_latents_fn: Optional[Callable[[torch.Tensor], torch.Tensor]],
     host_label: str,
-) -> RolloutOutput:
-    if not request.decode_for_reward:
+) -> RolloutSamples:
+    if not bool(request.sampling.get("decode_for_reward", False)):
         return output
+    raw_metadata = output.aux.get("metadata")
     has_decoded_videos = bool(
-        isinstance(output.metadata, dict) and torch.is_tensor(output.metadata.get("decoded_videos"))
+        isinstance(raw_metadata, dict) and torch.is_tensor(raw_metadata.get("decoded_videos"))
     )
-    if output.has_decoded_images or has_decoded_videos:
+    has_decoded_images = bool(output.aux.get("decoded_images"))
+    if has_decoded_images or has_decoded_videos:
         return output
     if decode_latents_fn is None:
         raise RuntimeError(
@@ -77,15 +79,15 @@ def _decode_for_reward_if_needed(
 
 def finalize_sampling_output(
     *,
-    output: RolloutOutput,
+    output: RolloutSamples,
     request: RolloutRequest,
     host_label: str,
     decode_latents_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
     metadata_defaults: Optional[Dict[str, Any]] = None,
-    local_reward_attach_fn: Optional[Callable[[RolloutOutput], RolloutOutput]] = None,
-    transport_optimize_fn: Optional[Callable[[RolloutOutput], RolloutOutput]] = None,
+    local_reward_attach_fn: Optional[Callable[[RolloutSamples], RolloutSamples]] = None,
+    transport_optimize_fn: Optional[Callable[[RolloutSamples], RolloutSamples]] = None,
     move_output_to_cpu: bool = True,
-) -> RolloutOutput:
+) -> RolloutSamples:
     """Apply shared sampling-output post-processing after raw generation."""
     output = _attach_metadata_defaults(
         output=output,
@@ -97,7 +99,7 @@ def finalize_sampling_output(
         decode_latents_fn=decode_latents_fn,
         host_label=host_label,
     )
-    if request.decode_for_reward and local_reward_attach_fn is not None:
+    if bool(request.sampling.get("decode_for_reward", False)) and local_reward_attach_fn is not None:
         output = local_reward_attach_fn(output)
     if transport_optimize_fn is not None:
         output = transport_optimize_fn(output)

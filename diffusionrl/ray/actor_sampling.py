@@ -11,7 +11,7 @@ import torch.nn as nn
 
 from diffusionrl.samplers.fsdp import sampler_runner
 from diffusionrl.types.sde import SDEConfig
-from diffusionrl.types.sampling import RolloutOutput, RolloutRequest
+from diffusionrl.types.sampling import RolloutSamples, RolloutRequest
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ class ActorSamplingExecutor:
         self,
         actor: Any,
         request: RolloutRequest,
-    ) -> RolloutOutput:
+    ) -> RolloutSamples:
         """Run the sampler only; output finalization stays in TrainingActor."""
         if not actor._is_initialized:
             raise RuntimeError("Actor not initialized. Call init() first.")

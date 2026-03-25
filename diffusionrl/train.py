@@ -7,17 +7,15 @@ Usage:
 """
 import logging
 import time
+from typing import Any, Dict
 
 from diffusionrl.config import (
     build_resolved_config_view,
     parse_args,
 )
-from diffusionrl.config.runtime_bootstrap import resolve_runtime_config
+from diffusionrl.config.launch_resolution import resolve_launch_config
 from diffusionrl.config.resolution import (
     rollout_mode_label,
-)
-from diffusionrl.config.validation import (
-    validate_rollout_mode,
 )
 from diffusionrl.utils.train_utils import (
     RolloutSDEController,
@@ -33,8 +31,8 @@ from diffusionrl.utils.train_utils import (
 logger = logging.getLogger(__name__)
 
 # Main control-plane path (sync mode):
-# parse_args -> create_placement_groups_from_args -> create_rollout_manager
-# -> create_training_actor_group -> rollout_manager.produce_training_payload
+# parse_args -> create_placement_groups_from_args -> create_driver_rollout_runtime
+# -> create_training_actor_group -> prepare RolloutRequest(s) -> execute sampling
 # -> rollout_buffer.push/pop -> training_group.train -> weight_sync.sync
 
 def _offload_train_phase(*, args, training_runtime) -> None:
@@ -67,26 +65,11 @@ def _push_rollout_training_batch(*, ray_module, rollout_buffer, rollout_id: int,
             f"Rollout buffer rejected rollout_id={rollout_id}: {push_result.get('error')}"
         )
 
-
-def _admit_rollout_payload_ref(*, ray_module, rollout_buffer, payload_ref) -> dict:
-    """Hand a rollout payload ref to the buffer and return its admission receipt."""
-    receipt = ray_module.get(
-        rollout_buffer.push_payload_ref.remote(
-            payload_ref=payload_ref,
-        )
-    )
-    if not receipt.get("accepted", False):
-        raise RuntimeError(
-            f"Rollout buffer rejected rollout_id={receipt.get('payload_rollout_id')}: {receipt.get('error')}"
-        )
-    return receipt
-
-
 def _produce_and_push_rollout(
     *,
     ray_module,
     args,
-    rollout_manager,
+    rollout_driver_runtime,
     rollout_buffer,
     rollout_id: int,
     rollout_sde_controller,
@@ -96,13 +79,57 @@ def _produce_and_push_rollout(
     save_rollout_debug_payload=None,
 ) -> None:
     """Produce one rollout payload and hand it to the buffer."""
+    from diffusionrl.rollout.base_types import RolloutContext, RolloutFunctionResult
+
     rollout_sde_indices = rollout_sde_controller.next_sde_indices()
+    context = RolloutContext(
+        rollout_id=int(rollout_id),
+        sde_indices=rollout_sde_indices,
+        collect_media_preview=bool(collect_media_preview),
+        media_max_items=int(media_max_items),
+        debug_trace={} if debug_save_intermediates else None,
+    )
+    if debug_save_intermediates and not rollout_driver_runtime.uses_default_rollout_function():
+        raise ValueError(
+            "debug_save_intermediates currently requires the default request-centric rollout pipeline. "
+            f"Got custom rollout_function_path={rollout_driver_runtime.rollout_function_path!r}."
+        )
+
+    rollout_result = rollout_driver_runtime.rollout_function(
+        services=rollout_driver_runtime.services,
+        reward_hook=rollout_driver_runtime.reward_hook,
+        context=context,
+    )
+    if not isinstance(rollout_result, RolloutFunctionResult):
+        raise TypeError(
+            "Rollout function must return RolloutFunctionResult. "
+            f"Got type={type(rollout_result)}"
+        )
+    advantages = rollout_driver_runtime.services.compute_advantages(
+        rewards=rollout_result.rewards,
+        group_ids=rollout_result.request.meta.get("group_ids"),
+        reward_components=rollout_result.reward_components,
+    )
+    training_batch = rollout_driver_runtime.services.assemble_training_batch(
+        request=rollout_result.request,
+        sampler_outputs=rollout_result.sampler_outputs,
+        rewards=rollout_result.rewards,
+        advantages=advantages,
+        sde_indices=context.sde_indices,
+    )
+    metadata = dict(rollout_result.metadata or {})
+
     if debug_save_intermediates:
-        debug_payload = ray_module.get(
-            rollout_manager.build_training_debug_payload.remote(
-                rollout_id,
-                sde_indices=rollout_sde_indices,
-            )
+        debug_payload = dict(context.debug_trace or {})
+        debug_payload.setdefault("training_batch", training_batch)
+        debug_payload.setdefault("metadata", dict(metadata or {}))
+        debug_payload.setdefault("request", rollout_result.request)
+        debug_payload.setdefault("sampler_outputs", rollout_result.sampler_outputs)
+        debug_payload.setdefault("rewards", rollout_result.rewards)
+        debug_payload.setdefault("advantages", advantages)
+        debug_payload.setdefault(
+            "reward_components",
+            dict(rollout_result.reward_components or {}),
         )
         _push_rollout_training_batch(
             ray_module=ray_module,
@@ -119,16 +146,12 @@ def _produce_and_push_rollout(
             )
         return
 
-    rollout_payload_ref = rollout_manager.produce_training_payload.remote(
-        rollout_id=rollout_id,
-        sde_indices=rollout_sde_indices,
-        collect_media_preview=collect_media_preview,
-        media_max_items=media_max_items,
-    )
-    _admit_rollout_payload_ref(
+    _push_rollout_training_batch(
         ray_module=ray_module,
         rollout_buffer=rollout_buffer,
-        payload_ref=rollout_payload_ref,
+        rollout_id=rollout_id,
+        training_batch=training_batch,
+        metadata=dict(metadata or {}),
     )
 
 def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步训练循环
@@ -143,9 +166,8 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
     from diffusionrl.ray.group_factory import create_rollout_actor_group, create_training_actor_group
     from diffusionrl.ray.group_runtime import RolloutGroupRuntime, TrainingGroupRuntime
-    from diffusionrl.ray.placement_group import create_placement_groups_from_runtime
+    from diffusionrl.ray.placement_group import create_placement_groups_from_launch
     from diffusionrl.ray.buffer_actor import create_buffer_actor
-    from diffusionrl.ray.rollout_manager import create_rollout_manager
     from diffusionrl.utils import configure_logger, set_seed
     from diffusionrl.utils.wandb_metrics import (
         build_buffer_metrics,
@@ -157,15 +179,9 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
     configure_logger()
     set_seed(args.seed)
-    runtime_config = resolve_runtime_config(args)
-    algorithm_config, control_algorithm = build_control_algorithm(runtime_config.algorithm_config)
-    rollout_mode_info = runtime_config.rollout_mode_info
-    validate_rollout_mode(
-        args,
-        rollout_mode_info=rollout_mode_info,
-        backend_capabilities=runtime_config.training.backend_capabilities,
-        backend_name=runtime_config.training.backend_name,
-    )
+    launch_config = resolve_launch_config(args)
+    algorithm_config, control_algorithm = build_control_algorithm(launch_config.algorithm_config)
+    rollout_mode_info = launch_config.rollout_mode_info
     rollout_topology = rollout_mode_info.rollout_topology
     training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
     sync_mode = rollout_mode_info.sync_protocol
@@ -207,13 +223,13 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             ray.init()
 
     wandb_logger = None
-    rollout_manager = None
+    rollout_driver_runtime = None
     rollout_buffer = None
     rollout_group = None
     rollout_runtime = None
     training_group = None
     training_runtime = None
-    weight_sync = create_weight_sync(args, runtime_config, mode=sync_mode)
+    weight_sync = create_weight_sync(args, launch_config, mode=sync_mode)
 
     try:
         if rollout_logging.report_to_wandb and rollout_logging.project_name:
@@ -242,18 +258,22 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
                 )
 
         # 1. Resource allocation
-        pgs = create_placement_groups_from_runtime(runtime_config)
+        pgs = create_placement_groups_from_launch(launch_config)
         logger.info("Placement groups created")
 
         rollout_on_gpu = True
 
-        # 2. Create rollout manager.
-        rollout_manager, dataset_step_info = create_rollout_manager(
+        # 2. Create driver-side rollout runtime.
+        from diffusionrl.rollout.driver_runtime import (
+            create_driver_rollout_runtime,
+        )
+
+        rollout_driver_runtime, dataset_step_info = create_driver_rollout_runtime(
             args,
             reward_pg_result=pgs.get("reward"),
-            runtime_config=runtime_config,
+            launch_config=launch_config,
         )
-        logger.info("Rollout manager created")
+        logger.info("Driver rollout runtime created")
         if dataset_step_info.get("num_prompts", 0) > 0:
             logger.info(
                 "Dataset step info: num_prompts=%s prompts_per_rollout=%s "
@@ -277,10 +297,10 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             rollout_pg_result = pgs.get("rollout")
             if rollout_pg_result is None:
                 raise ValueError("Missing rollout placement-group allocation.")
-            rollout_group = create_rollout_actor_group(runtime_config, rollout_pg_result)
+            rollout_group = create_rollout_actor_group(launch_config, rollout_pg_result)
             rollout_runtime = RolloutGroupRuntime.from_group(rollout_group)
-            ray.get(rollout_manager.attach_sampling_group.remote(rollout_group))
-            logger.info("Rollout actor group created and attached")
+            rollout_driver_runtime.attach_sampling_group(rollout_group)
+            logger.info("Rollout actor group created and attached to driver runtime")
 
         # 3. Optional pre-offload for colocate memory pressure relief before training actor init.
         if args.ray.offload_rollout and rollout_runtime is not None:
@@ -292,7 +312,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
         if training_pg_result is None:
             raise ValueError("Missing training placement-group allocation.")
         training_group = create_training_actor_group(
-            runtime_config,
+            launch_config,
             training_pg_result,
         )
         training_runtime = TrainingGroupRuntime.from_group(training_group)
@@ -317,7 +337,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
         # 5. Direct-sampling path: training actors serve rollout requests.
         if training_actor_sampling_mode:
-            ray.get(rollout_manager.attach_sampling_group.remote(training_group))
+            rollout_driver_runtime.attach_sampling_group(training_group)
             logger.info("Attached training actors as rollout sampling source")
 
         # 6. Initial weight synchronization for rollout-side actors.
@@ -389,7 +409,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             _produce_and_push_rollout(
                 ray_module=ray,
                 args=args,
-                rollout_manager=rollout_manager,
+                rollout_driver_runtime=rollout_driver_runtime,
                 rollout_buffer=rollout_buffer,
                 rollout_id=rollout_id,
                 rollout_sde_controller=rollout_sde_controller,
@@ -450,7 +470,11 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
                 # serve as sampling source (direct-sampling mode).
                 if training_actor_sampling_mode:
                     training_runtime.apply_ema_for_eval()
-                eval_metrics = ray.get(rollout_manager.eval.remote(rollout_id))
+                eval_metrics = rollout_driver_runtime.eval_function(
+                    services=rollout_driver_runtime.services,
+                    reward_hook=rollout_driver_runtime.reward_hook,
+                    rollout_id=int(rollout_id),
+                )
                 if training_actor_sampling_mode:
                     training_runtime.restore_from_eval()
                 eval_phase_s = time.perf_counter() - eval_phase_start_t
@@ -546,11 +570,8 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
                 ray.get(rollout_buffer.dispose.remote())
             finally:
                 ray.kill(rollout_buffer)
-        if rollout_manager is not None:
-            try:
-                ray.get(rollout_manager.dispose.remote())
-            finally:
-                ray.kill(rollout_manager)
+        if rollout_driver_runtime is not None:
+            rollout_driver_runtime.dispose()
         if rollout_group is not None:
             rollout_group.dispose()
         if training_group is not None:

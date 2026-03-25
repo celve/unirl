@@ -10,7 +10,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "get_sigma_schedule": ("diffusionrl.sde.runtime", "get_sigma_schedule"),
     "sde_step_with_log_prob": ("diffusionrl.sde.runtime", "sde_step_with_log_prob"),
     "BaseSampler": ("diffusionrl.samplers.base", "BaseSampler"),
-    "RolloutOutput": ("diffusionrl.samplers.base", "RolloutOutput"),
+    "RolloutSamples": ("diffusionrl.samplers.base", "RolloutSamples"),
     "TimestepScheduler": ("diffusionrl.samplers.schedulers", "TimestepScheduler"),
     "AllSDEScheduler": ("diffusionrl.samplers.schedulers", "AllSDEScheduler"),
     "WindowScheduler": ("diffusionrl.samplers.schedulers", "WindowScheduler"),

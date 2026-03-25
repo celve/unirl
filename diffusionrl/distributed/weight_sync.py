@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional, Type
 
 import logging
 
-from diffusionrl.config.runtime_bootstrap import ResolvedRuntimeConfig
+from diffusionrl.config.launch_resolution import ResolvedLaunchConfig
 from diffusionrl.distributed.weight_sync_checkpoint import cleanup_published_checkpoint
 
 logger = logging.getLogger(__name__)
@@ -49,12 +49,12 @@ def _resolve_flush_cache(args: Any) -> bool:
     return bool(args.sync.flush_cache)
 
 
-def _validate_tensor_sync_topology(runtime_config: ResolvedRuntimeConfig) -> None:
+def _validate_tensor_sync_topology(launch_config: ResolvedLaunchConfig) -> None:
     """Guard invalid topology values for tensor/distributed sync paths."""
-    rollout = runtime_config.rollout
+    rollout = launch_config.rollout
     if rollout is None:
         raise ValueError(
-            "Tensor/distributed weight sync requires a dedicated rollout runtime config."
+            "Tensor/distributed weight sync requires a dedicated rollout launch config."
         )
     engine_kwargs = dict(rollout.engine_runtime_config.get("engine_kwargs") or {})
     tp_size_int = int(engine_kwargs.get("tp_size", 1) or 1)
@@ -105,9 +105,9 @@ class SyncResult:
 class WeightSyncCoordinator(ABC):
     """Two-phase weight sync coordinator: setup() -> sync() x N -> teardown()."""
 
-    def __init__(self, args: Any, runtime_config: ResolvedRuntimeConfig) -> None:
+    def __init__(self, args: Any, launch_config: ResolvedLaunchConfig) -> None:
         self.args = args
-        self.runtime_config = runtime_config
+        self.launch_config = launch_config
         self._version = 0
         self._is_setup = False
         self._training_runtime = None
@@ -211,7 +211,7 @@ class TensorPayloadWeightSync(WeightSyncCoordinator):
         return "tensor_payload"
 
     def _do_setup(self) -> None:
-        _validate_tensor_sync_topology(self.runtime_config)
+        _validate_tensor_sync_topology(self.launch_config)
         if self._rollout_runtime is None:
             raise RuntimeError("tensor_payload weight sync requires a rollout runtime.")
         self._target_modules = _resolve_target_modules(self.args)
@@ -241,7 +241,7 @@ class NCCLBroadcastWeightSync(WeightSyncCoordinator):
         return "nccl_broadcast"
 
     def _do_setup(self) -> None:
-        _validate_tensor_sync_topology(self.runtime_config)
+        _validate_tensor_sync_topology(self.launch_config)
         if self._rollout_runtime is None:
             raise RuntimeError("nccl_broadcast weight sync requires a rollout runtime.")
         self._target_modules = _resolve_target_modules(self.args)
@@ -353,7 +353,7 @@ class CheckpointWeightSync(WeightSyncCoordinator):
         self._export_format = self._select_export_format()
 
     def _select_export_format(self) -> str:
-        rollout = self.runtime_config.rollout
+        rollout = self.launch_config.rollout
         if rollout is None:
             raise ValueError(
                 "Checkpoint weight sync requires a dedicated rollout runtime config."
@@ -364,7 +364,7 @@ class CheckpointWeightSync(WeightSyncCoordinator):
                 "Checkpoint weight sync requires rollout.topology.service_engine to be normalized. "
                 "Validate args before selecting dedicated rollout checkpoint export format."
             )
-        backend_caps = dict(self.runtime_config.training.backend_capabilities or {})
+        backend_caps = dict(self.launch_config.training.backend_capabilities or {})
         if backend_caps:
             preferred_by_engine = backend_caps.get("preferred_weight_export_format_by_rollout_engine")
             preferred_format = None
@@ -415,7 +415,7 @@ _BUILTIN_COORDINATORS: Dict[str, Type[WeightSyncCoordinator]] = {
 
 def create_weight_sync(
     args: Any,
-    runtime_config: ResolvedRuntimeConfig,
+    launch_config: ResolvedLaunchConfig,
     *,
     mode: Optional[str] = None,
 ) -> WeightSyncCoordinator:
@@ -434,7 +434,7 @@ def create_weight_sync(
             f"Unsupported sync.protocol={resolved_mode}. "
             f"Expected one of: {sorted(_BUILTIN_COORDINATORS.keys())}"
         )
-    return cls(args, runtime_config)
+    return cls(args, launch_config)
 
 
 __all__ = [

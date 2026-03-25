@@ -6,6 +6,27 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 
+VALID_REWARD_LOCATIONS = ("driver", "sampling_actor", "auto")
+
+
+def resolve_reward_location(*, location: str, backend: str) -> str:
+    """Resolve configured reward location to a concrete runtime owner."""
+    normalized_location = str(location or "auto").strip().lower()
+    normalized_backend = str(backend or "local").strip().lower()
+    if normalized_location not in VALID_REWARD_LOCATIONS:
+        raise ValueError(
+            "reward_location must be one of driver/sampling_actor/auto, "
+            f"got: {location!r}."
+        )
+    if normalized_location != "auto":
+        return normalized_location
+    if normalized_backend == "ray_pool":
+        return "driver"
+    if normalized_backend in {"http", "local"}:
+        return "sampling_actor"
+    return "driver"
+
+
 @dataclass(frozen=True)
 class RewardComponentSpec:
     """One semantic reward component."""
@@ -76,7 +97,11 @@ class RewardExecutionPlan:
 
     @property
     def uses_sampling_actor_execution(self) -> bool:
-        return str(self.location or "manager").strip().lower() == "sampling_actor"
+        return str(self.location or "driver").strip().lower() == "sampling_actor"
+
+    @property
+    def uses_driver_execution(self) -> bool:
+        return str(self.location or "driver").strip().lower() == "driver"
 
     @property
     def uses_http_backend(self) -> bool:

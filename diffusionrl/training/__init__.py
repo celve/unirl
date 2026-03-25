@@ -4,6 +4,7 @@ from diffusionrl.training.train_executor import (
     TrainExecutor,
     TrainExecutorConfig,
 )
+from diffusionrl.training.workflow import TrainingWorkflow
 from diffusionrl.training.batch_partition import (
     shard_training_batch_for_rank,
 )
@@ -29,6 +30,7 @@ from diffusionrl.training.backends import (
 __all__ = [
     "TrainExecutor",
     "TrainExecutorConfig",
+    "TrainingWorkflow",
     "shard_training_batch_for_rank",
     "TrainingExecutionPlan",
     "TrainingUpdateChunk",

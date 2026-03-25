@@ -8,9 +8,9 @@ from typing import Dict, List, Optional, Tuple
 import ray
 from ray.util.placement_group import PlacementGroup
 
-from diffusionrl.config.runtime_bootstrap import (
-    ResolvedRuntimeConfig,
-    resolve_runtime_placement_spec,
+from diffusionrl.config.launch_resolution import (
+    ResolvedLaunchConfig,
+    resolve_launch_placement_spec,
 )
 
 logger = logging.getLogger(__name__)
@@ -309,7 +309,7 @@ def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroup
     Returns:
         Dictionary of placement group results
     """
-    placement = resolve_runtime_placement_spec(args)
+    placement = resolve_launch_placement_spec(args)
     if placement.rollout_num_nodes == 0 and placement.rollout_num_gpus_per_node == 0:
         debug_mode = str(args.debug.debug_mode or "none").strip().lower()
         if debug_mode == "train_only":
@@ -331,10 +331,10 @@ def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroup
     return create_placement_groups(config)
 
 
-def create_placement_groups_from_runtime(
-    runtime_config: ResolvedRuntimeConfig,
+def create_placement_groups_from_launch(
+    launch_config: ResolvedLaunchConfig,
 ) -> Dict[str, Optional[PlacementGroupResult]]:
-    placement = runtime_config.placement
+    placement = launch_config.placement
     config = RuntimePlacementConfig(
         rollout_num_nodes=placement.rollout_num_nodes,
         rollout_num_gpus_per_node=placement.rollout_num_gpus_per_node,

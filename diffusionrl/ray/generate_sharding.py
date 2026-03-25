@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence
 
-import torch
-
 from diffusionrl.types import RolloutRequest
-from diffusionrl.types.sampling import RolloutOutput
+from diffusionrl.types.sampling import RolloutSamples
 
 
 @dataclass(frozen=True)
@@ -32,53 +29,6 @@ def _balanced_shard_sizes(total_items: int, num_shards: int) -> List[int]:
     return [base + (1 if index < remainder else 0) for index in range(num_shards)]
 
 
-def _pad_batched_value(value: Any, batch_size: int, target_size: int) -> Any:
-    if value is None or target_size <= batch_size:
-        return value
-
-    pad_count = target_size - batch_size
-    if isinstance(value, list) and len(value) == batch_size:
-        return value + [value[-1]] * pad_count
-    if isinstance(value, tuple) and len(value) == batch_size:
-        return value + (value[-1],) * pad_count
-    if isinstance(value, torch.Tensor) and value.dim() > 0 and value.shape[0] == batch_size:
-        pad = value[-1:].repeat(pad_count, *([1] * (value.dim() - 1)))
-        return torch.cat([value, pad], dim=0)
-    return value
-
-
-def _pad_rollout_request(
-    request: RolloutRequest,
-    *,
-    batch_size: int,
-    target_size: int,
-) -> RolloutRequest:
-    if target_size <= batch_size:
-        return request
-
-    padded = copy.copy(request)
-    padded.prompts = list(_pad_batched_value(list(request.prompts), batch_size, target_size))
-    for attr in (
-        "prompt_ids",
-        "sample_ids",
-        "group_ids",
-        "noise_group_ids",
-        "prompt_metadata",
-        "latents",
-    ):
-        setattr(
-            padded,
-            attr,
-            _pad_batched_value(getattr(request, attr, None), batch_size, target_size),
-        )
-
-    padded.kwargs = {
-        key: _pad_batched_value(value, batch_size, target_size)
-        for key, value in dict(request.kwargs).items()
-    }
-    return padded
-
-
 def build_generate_shard_plan(
     request: RolloutRequest,
     *,
@@ -97,11 +47,7 @@ def build_generate_shard_plan(
         if pad_to_actor_count
         else original_batch_size
     )
-    effective_request = _pad_rollout_request(
-        request,
-        batch_size=original_batch_size,
-        target_size=effective_batch_size,
-    )
+    effective_request = request.pad_to(effective_batch_size)
 
     shard_sizes = _balanced_shard_sizes(effective_batch_size, num_actors)
     shards: List[Optional[RolloutRequest]] = []
@@ -121,18 +67,9 @@ def build_generate_shard_plan(
 
 def slice_sampler_output(output: Any, start: int, end: int) -> Any:
     """Slice a batched sampler output along its leading batch dimension."""
-    if not isinstance(output, RolloutOutput):
+    if not isinstance(output, RolloutSamples):
         return output
-    return RolloutOutput(
-        latents=output.latents[start:end],
-        timesteps=output.timesteps,
-        trajectories=output.trajectories[start:end] if output.trajectories is not None else None,
-        log_probs=output.log_probs.slice(start, end) if output.log_probs is not None else None,
-        embeddings=output.embeddings.slice(start, end) if output.embeddings is not None else None,
-        decoded_images=output.decoded_images[start:end] if output.decoded_images is not None else None,
-        metadata=output.metadata,
-        step_indices=output.step_indices,
-    )
+    return output.slice(start, end)
 
 
 def trim_generate_outputs(

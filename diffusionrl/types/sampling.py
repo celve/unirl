@@ -349,91 +349,188 @@ class PromptEmbeddings:
         )
 
 
+def _copy_columnar_mapping(
+    mapping: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    if not isinstance(mapping, Mapping):
+        return result
+    for key, value in mapping.items():
+        if isinstance(value, list):
+            result[str(key)] = list(value)
+        elif isinstance(value, tuple):
+            result[str(key)] = list(value)
+        else:
+            result[str(key)] = value
+    return result
+
+
+def _slice_batched_value(
+    value: Any,
+    *,
+    batch_size: int,
+    start: int,
+    end: int,
+) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, list) and len(value) == batch_size:
+        return value[start:end]
+    if isinstance(value, tuple) and len(value) == batch_size:
+        return value[start:end]
+    if isinstance(value, torch.Tensor) and value.dim() > 0 and value.shape[0] == batch_size:
+        return value[start:end].clone()
+    if hasattr(value, "slice") and callable(getattr(value, "slice")):
+        return value.slice(start, end)
+    return value
+
+
+def _pad_batched_value(
+    value: Any,
+    *,
+    batch_size: int,
+    target_size: int,
+) -> Any:
+    if value is None or target_size <= batch_size:
+        return value
+
+    pad_count = target_size - batch_size
+    if isinstance(value, list) and len(value) == batch_size:
+        return value + [value[-1]] * pad_count
+    if isinstance(value, tuple) and len(value) == batch_size:
+        return value + (value[-1],) * pad_count
+    if isinstance(value, torch.Tensor) and value.dim() > 0 and value.shape[0] == batch_size:
+        pad = value[-1:].repeat(pad_count, *([1] * (value.dim() - 1)))
+        return torch.cat([value, pad], dim=0)
+    return value
+
+
+def _concat_batched_values(
+    values: List[Any],
+    *,
+    batch_sizes: List[int],
+) -> Any:
+    non_none = [value for value in values if value is not None]
+    if not non_none:
+        return None
+
+    if all(isinstance(value, list) and len(value) == batch_size for value, batch_size in zip(values, batch_sizes) if value is not None):
+        merged: List[Any] = []
+        for value in values:
+            if value is not None:
+                merged.extend(list(value))
+        return merged
+    if all(isinstance(value, tuple) and len(value) == batch_size for value, batch_size in zip(values, batch_sizes) if value is not None):
+        merged_list: List[Any] = []
+        for value in values:
+            if value is not None:
+                merged_list.extend(list(value))
+        return tuple(merged_list)
+    if all(isinstance(value, torch.Tensor) and value.dim() > 0 and value.shape[0] == batch_size for value, batch_size in zip(values, batch_sizes) if value is not None):
+        return torch.cat([value for value in values if value is not None], dim=0)
+    if all(isinstance(value, Mapping) for value in non_none):
+        merged_mapping: Dict[str, Any] = {}
+        keys = sorted({str(key) for value in non_none for key in value.keys()})
+        for key in keys:
+            merged_mapping[key] = _concat_batched_values(
+                [dict(value).get(key) if isinstance(value, Mapping) else None for value in values],
+                batch_sizes=batch_sizes,
+            )
+        return merged_mapping
+
+    first = non_none[0]
+    if torch.is_tensor(first):
+        if all(torch.is_tensor(value) and torch.equal(value, first) for value in non_none[1:]):
+            return first
+    elif all(value == first for value in non_none[1:]):
+        return first
+    raise ValueError(
+        "Cannot concatenate rollout values with mismatched non-batched content: "
+        f"types={[type(value).__name__ if value is not None else None for value in values]}"
+    )
+
+
 @dataclass
-class RolloutOutput:
-    """
-    Output from a sampler.
-
-    This is the unified interface for all current samplers (image/video, FSDP/SGLang, etc.)
-
-    Attributes:
-        latents: Final denoised latents [B, C, H, W] or [B, C, T, H, W] for video
-        timesteps: Sigma schedule [num_steps+1]
-        trajectories: Full sampling trajectory [B, num_steps+1, C, ...] (optional)
-        log_probs: Typed log probabilities for each SDE step (optional)
-        embeddings: Bundled prompt embeddings (optional)
-        decoded_images: Already decoded PIL images for reward computation (optional, for image models)
-        metadata: Additional sampler-specific data
-    """
+class RolloutSamples:
+    """Lightweight sampler output contract shared across rollout stages."""
 
     latents: torch.Tensor
     timesteps: torch.Tensor
-    trajectories: Optional[torch.Tensor] = None
-    log_probs: Optional[LogProbData] = None
-    embeddings: Optional[PromptEmbeddings] = None
-    decoded_images: Optional[List[Any]] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    step_indices: Optional[torch.Tensor] = None
+    aux: Dict[str, Any] = field(default_factory=dict)
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.aux = dict(self.aux or {})
+        self.meta = _copy_columnar_mapping(self.meta)
 
     @property
     def num_steps(self) -> int:
-        """Number of denoising steps."""
-        if self.trajectories is not None:
-            return self.trajectories.shape[1] - 1
-        return self.timesteps.shape[0] - 1
+        trajectories = self.aux.get("trajectories")
+        if trajectories is not None:
+            return int(trajectories.shape[1]) - 1
+        return int(self.timesteps.shape[0]) - 1
 
     @property
     def batch_size(self) -> int:
-        """Batch size."""
-        return self.latents.shape[0]
+        return int(self.latents.shape[0])
 
     @property
     def sde_indices(self) -> Set[int]:
-        """Get set of timesteps that used SDE (derived from log_probs)."""
-        if self.log_probs is not None:
-            return self.log_probs.sde_indices
-        if isinstance(self.metadata, dict):
-            meta_indices = self.metadata.get("sde_indices")
-            if meta_indices is not None:
-                return set(int(i) for i in meta_indices)
+        log_probs = self.aux.get("log_probs")
+        if log_probs is not None:
+            return log_probs.sde_indices
+        raw_metadata = self.aux.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+        meta_indices = metadata.get("sde_indices")
+        if meta_indices is not None:
+            return set(int(i) for i in meta_indices)
         return set()
 
     @property
     def resolved_step_indices(self) -> torch.Tensor:
-        """Get explicit step indices aligned with timesteps."""
-        if self.step_indices is not None:
-            return self.step_indices
+        step_indices = self.aux.get("step_indices")
+        if step_indices is not None:
+            return step_indices
         return torch.arange(
             self.timesteps.shape[0], device=self.timesteps.device, dtype=torch.long
         )
 
-    @property
-    def has_log_probs(self) -> bool:
-        """Whether this output includes log probabilities."""
-        return self.log_probs is not None and len(self.log_probs) > 0
+    def slice(self, start: int, end: int) -> "RolloutSamples":
+        batch_size = self.batch_size
+        sliced_aux = {
+            key: _slice_batched_value(value, batch_size=batch_size, start=start, end=end)
+            for key, value in self.aux.items()
+        }
+        sliced_meta = {
+            key: _slice_batched_value(value, batch_size=batch_size, start=start, end=end)
+            for key, value in self.meta.items()
+        }
+        return RolloutSamples(
+            latents=self.latents[start:end].clone(),
+            timesteps=self.timesteps,
+            aux=sliced_aux,
+            meta=sliced_meta,
+        )
 
-    @property
-    def has_decoded_images(self) -> bool:
-        """Whether this output includes decoded images for reward computation."""
-        return self.decoded_images is not None and len(self.decoded_images) > 0
-
-    def to_device(self, device: Union[str, "TorchDevice"]) -> "RolloutOutput":
-        """Move all tensors to specified device."""
-        return RolloutOutput(
+    def to_device(self, device: Union[str, "TorchDevice"]) -> "RolloutSamples":
+        moved_aux: Dict[str, Any] = dict(self.aux)
+        trajectories = self.aux.get("trajectories")
+        log_probs = self.aux.get("log_probs")
+        embeddings = self.aux.get("embeddings")
+        step_indices = self.aux.get("step_indices")
+        if trajectories is not None:
+            moved_aux["trajectories"] = trajectories.to(device)
+        if log_probs is not None:
+            moved_aux["log_probs"] = log_probs.to_device(device)
+        if embeddings is not None:
+            moved_aux["embeddings"] = embeddings.to_device(device)
+        if step_indices is not None:
+            moved_aux["step_indices"] = step_indices.to(device)
+        return RolloutSamples(
             latents=self.latents.to(device),
             timesteps=self.timesteps.to(device),
-            trajectories=self.trajectories.to(device)
-            if self.trajectories is not None
-            else None,
-            log_probs=self.log_probs.to_device(device) if self.log_probs is not None else None,
-            embeddings=self.embeddings.to_device(device)
-            if self.embeddings is not None
-            else None,
-            decoded_images=self.decoded_images,
-            metadata=self.metadata,
-            step_indices=self.step_indices.to(device)
-            if self.step_indices is not None
-            else None,
+            aux=moved_aux,
+            meta=self.meta,
         )
 
     def validate_contract(
@@ -443,191 +540,239 @@ class RolloutOutput:
         requires_trajectory: bool = False,
         requires_embeddings: bool = False,
     ) -> None:
-        """Validate SamplingContractV1 consistency."""
         if self.latents is None or self.timesteps is None:
             raise ValueError(
-                "RolloutOutput contract violation: latents and timesteps must be present."
+                "RolloutSamples contract violation: latents and timesteps must be present."
             )
-
         if self.timesteps.ndim != 1:
             raise ValueError(
-                f"RolloutOutput timesteps must be 1D, got shape={tuple(self.timesteps.shape)}"
+                f"RolloutSamples timesteps must be 1D, got shape={tuple(self.timesteps.shape)}"
             )
 
         batch_size = int(self.latents.shape[0])
         t_plus_1 = int(self.timesteps.shape[0])
-
-        step_indices = self.resolved_step_indices
+        step_indices = self.aux.get("step_indices")
+        if step_indices is None:
+            step_indices = torch.arange(
+                self.timesteps.shape[0], device=self.timesteps.device, dtype=torch.long
+            )
+        trajectories = self.aux.get("trajectories")
+        log_probs = self.aux.get("log_probs")
+        embeddings = self.aux.get("embeddings")
+        raw_metadata = self.aux.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
         if step_indices.shape[0] != t_plus_1:
             raise ValueError(
-                f"RolloutOutput step_indices length {step_indices.shape[0]} != timesteps length {t_plus_1}"
+                f"RolloutSamples step_indices length {step_indices.shape[0]} != timesteps length {t_plus_1}"
             )
         if step_indices.numel() > 1 and not bool(
             torch.all(step_indices[1:] > step_indices[:-1])
         ):
             raise ValueError(
-                f"RolloutOutput step_indices must be strictly increasing, got {step_indices.tolist()}"
+                f"RolloutSamples step_indices must be strictly increasing, got {step_indices.tolist()}"
             )
 
-        if requires_trajectory and self.trajectories is None:
+        if requires_trajectory and trajectories is None:
             raise ValueError(
-                "RolloutOutput contract violation: trajectories required but missing."
+                "RolloutSamples contract violation: trajectories required but missing."
             )
 
-        if self.trajectories is not None:
-            if int(self.trajectories.shape[0]) != batch_size:
+        if trajectories is not None:
+            if int(trajectories.shape[0]) != batch_size:
                 raise ValueError(
-                    f"RolloutOutput trajectories batch {self.trajectories.shape[0]} != latents batch {batch_size}"
+                    f"RolloutSamples trajectories batch {trajectories.shape[0]} != latents batch {batch_size}"
                 )
-            if int(self.trajectories.shape[1]) != t_plus_1:
+            if int(trajectories.shape[1]) != t_plus_1:
                 raise ValueError(
-                    f"RolloutOutput trajectories T+1 {self.trajectories.shape[1]} != timesteps length {t_plus_1}"
+                    f"RolloutSamples trajectories T+1 {trajectories.shape[1]} != timesteps length {t_plus_1}"
                 )
 
-        if requires_log_probs and not self.has_log_probs:
+        if requires_log_probs and not (log_probs is not None and len(log_probs) > 0):
             raise ValueError(
-                "RolloutOutput contract violation: log_probs required but missing."
+                "RolloutSamples contract violation: log_probs required but missing."
             )
 
-        if self.log_probs is not None:
+        if log_probs is not None:
             allowed_steps = set(int(v) for v in step_indices[:-1].tolist())
-            for idx, lp in self.log_probs.data.items():
+            for idx, lp in log_probs.data.items():
                 if idx not in allowed_steps:
                     raise ValueError(
-                        f"RolloutOutput contract violation: log_prob index {idx} not in step_indices[:-1]={sorted(allowed_steps)}"
+                        f"RolloutSamples contract violation: log_prob index {idx} not in step_indices[:-1]={sorted(allowed_steps)}"
                     )
                 if int(lp.shape[0]) != batch_size:
                     raise ValueError(
-                        f"RolloutOutput contract violation: log_prob[{idx}] batch {lp.shape[0]} != {batch_size}"
+                        f"RolloutSamples contract violation: log_prob[{idx}] batch {lp.shape[0]} != {batch_size}"
                     )
-            if self.sde_indices and set(int(i) for i in self.sde_indices) != set(
-                self.log_probs.data.keys()
-            ):
+            sde_indices = (
+                log_probs.sde_indices
+                if log_probs is not None
+                else set(int(i) for i in metadata.get("sde_indices", []))
+            )
+            if sde_indices and set(int(i) for i in sde_indices) != set(log_probs.data.keys()):
                 raise ValueError(
-                    "RolloutOutput contract violation: sde_indices must exactly match log_probs keys"
+                    "RolloutSamples contract violation: sde_indices must exactly match log_probs keys"
                 )
 
-        if requires_embeddings and self.embeddings is None:
+        if requires_embeddings and embeddings is None:
             raise ValueError(
-                "RolloutOutput contract violation: embeddings required but missing."
+                "RolloutSamples contract violation: embeddings required but missing."
             )
 
-        if (
-            self.embeddings is not None
-            and int(self.embeddings.prompt_embeds.shape[0]) != batch_size
-        ):
+        if embeddings is not None and int(embeddings.prompt_embeds.shape[0]) != batch_size:
             raise ValueError(
-                f"RolloutOutput contract violation: embeddings batch {self.embeddings.prompt_embeds.shape[0]} != {batch_size}"
+                f"RolloutSamples contract violation: embeddings batch {embeddings.prompt_embeds.shape[0]} != {batch_size}"
             )
 
-        if self.metadata is not None:
-            trajectory_format = self.metadata.get("trajectory_format")
-            timestep_type = self.metadata.get("timestep_type")
+        if metadata:
+            trajectory_format = metadata.get("trajectory_format")
+            timestep_type = metadata.get("timestep_type")
             if trajectory_format is None:
                 raise ValueError(
-                    "RolloutOutput contract violation: metadata.trajectory_format is required."
+                    "RolloutSamples contract violation: aux['metadata'].trajectory_format is required."
                 )
             if timestep_type is None:
                 raise ValueError(
-                    "RolloutOutput contract violation: metadata.timestep_type is required."
+                    "RolloutSamples contract violation: aux['metadata'].timestep_type is required."
                 )
             valid_formats = {"dense_latent", "video_dense_latent", "packed_seq_c4"}
             if trajectory_format not in valid_formats:
                 raise ValueError(
-                    f"RolloutOutput contract violation: unknown trajectory_format={trajectory_format}"
+                    f"RolloutSamples contract violation: unknown trajectory_format={trajectory_format}"
                 )
             if timestep_type not in {"sigma", "timestep"}:
                 raise ValueError(
-                    f"RolloutOutput contract violation: unknown timestep_type={timestep_type}"
+                    f"RolloutSamples contract violation: unknown timestep_type={timestep_type}"
                 )
 
 
 @dataclass
 class RolloutRequest:
-    """Request for rollout generation.
-
-    This is the single interface contract for all ``generate()`` calls
-    throughout the rollout pipeline (engines, actors, actor-groups,
-    distributed helpers).
-
-    External callers are expected to provide text prompts plus rollout control
-    metadata. Prompt embeddings are produced inside the rollout runtime and
-    carried on ``RolloutOutput`` / training batches rather than being passed
-    through the request contract.
-    """
+    """Lightweight request contract shared across rollout stages."""
 
     prompts: List[str]
-    prompt_ids: Optional[List[str]] = None
-    sample_ids: Optional[List[str]] = None
-    group_ids: Optional[List[str]] = None
-    noise_group_ids: Optional[List[str]] = None
-    prompt_metadata: Optional[List[Optional[Dict[str, Any]]]] = None
-    num_inference_steps: Optional[int] = None
-    guidance_scale: Optional[float] = None
-    height: Optional[int] = None
-    width: Optional[int] = None
-    num_frames: Optional[int] = None
-    seed: Optional[int] = None
-    latents: Optional[torch.Tensor] = None
-    sde_indices: Optional[Set[int]] = None
-    decode_for_reward: bool = False
-    keep_reward_media_for_manager: bool = False
-    init_same_noise: bool = False
-    samples_per_prompt: int = 1
-    sampling_adapter: Optional[str] = None
-    return_trajectories: bool = True
-    return_log_probs: bool = True
-    kwargs: Dict[str, Any] = field(default_factory=dict)
+    num_inference_steps: int
+    guidance_scale: float
+    height: int
+    width: int
+    num_frames: int
+    sampling: Dict[str, Any] = field(default_factory=dict)
+    meta: Dict[str, Any] = field(default_factory=dict)
+    inputs: Dict[str, Any] = field(default_factory=dict)
 
-    def slice_prompts(self, start: int, end: int) -> "RolloutRequest":
-        """Create a sub-request with sliced prompts for distributed actors.
+    def __post_init__(self) -> None:
+        self.prompts = list(self.prompts or [])
+        self.sampling = dict(self.sampling or {})
+        self.meta = _copy_columnar_mapping(self.meta)
+        self.inputs = dict(self.inputs or {})
 
-        Tensor fields that have a batch dimension matching len(prompts)
-        are sliced accordingly.  Scalar / None fields are copied as-is.
-        """
+    @property
+    def batch_size(self) -> int:
+        return len(self.prompts)
+
+    def with_seed_offset(self, seed_offset: int) -> "RolloutRequest":
+        seed_raw = self.sampling.get("seed")
+        if seed_raw is None or int(seed_offset) == 0:
+            return self
         import copy
 
         req = copy.copy(self)
+        req.sampling = dict(self.sampling)
+        req.sampling["seed"] = int(seed_raw) + int(seed_offset)
+        req.meta = _copy_columnar_mapping(self.meta)
+        req.inputs = dict(self.inputs)
+        return req
+
+    @classmethod
+    def concat(cls, requests: List["RolloutRequest"]) -> "RolloutRequest":
+        if not requests:
+            raise ValueError("RolloutRequest.concat requires at least one request.")
+        if len(requests) == 1:
+            return requests[0]
+
+        first = requests[0]
+        for request in requests[1:]:
+            if int(request.num_inference_steps) != int(first.num_inference_steps):
+                raise ValueError("Cannot concatenate RolloutRequest with different num_inference_steps.")
+            if float(request.guidance_scale) != float(first.guidance_scale):
+                raise ValueError("Cannot concatenate RolloutRequest with different guidance_scale.")
+            if int(request.height) != int(first.height) or int(request.width) != int(first.width):
+                raise ValueError("Cannot concatenate RolloutRequest with different geometry.")
+            if int(request.num_frames) != int(first.num_frames):
+                raise ValueError("Cannot concatenate RolloutRequest with different num_frames.")
+
+        batch_sizes = [request.batch_size for request in requests]
+        return cls(
+            prompts=[prompt for request in requests for prompt in request.prompts],
+            num_inference_steps=int(first.num_inference_steps),
+            guidance_scale=float(first.guidance_scale),
+            height=int(first.height),
+            width=int(first.width),
+            num_frames=int(first.num_frames),
+            sampling=_concat_batched_values([request.sampling for request in requests], batch_sizes=batch_sizes) or {},
+            meta=_concat_batched_values([request.meta for request in requests], batch_sizes=batch_sizes) or {},
+            inputs=_concat_batched_values([request.inputs for request in requests], batch_sizes=batch_sizes) or {},
+        )
+
+    def pad_to(self, target_size: int) -> "RolloutRequest":
+        batch_size = self.batch_size
+        if target_size <= batch_size:
+            return self
+        import copy
+
+        req = copy.copy(self)
+        req.prompts = list(_pad_batched_value(list(self.prompts), batch_size=batch_size, target_size=target_size))
+        req.meta = {
+            key: _pad_batched_value(value, batch_size=batch_size, target_size=target_size)
+            for key, value in self.meta.items()
+        }
+        req.inputs = {
+            key: _pad_batched_value(value, batch_size=batch_size, target_size=target_size)
+            for key, value in self.inputs.items()
+        }
+        req.sampling = {
+            key: _pad_batched_value(value, batch_size=batch_size, target_size=target_size)
+            for key, value in self.sampling.items()
+            if key != "kwargs"
+        }
+        kwargs = self.sampling.get("kwargs")
+        req.sampling["kwargs"] = {
+            key: _pad_batched_value(value, batch_size=batch_size, target_size=target_size)
+            for key, value in (kwargs.items() if isinstance(kwargs, dict) else [])
+        }
+        return req
+
+    def slice_prompts(self, start: int, end: int) -> "RolloutRequest":
+        import copy
+
+        req = copy.copy(self)
+        batch_size = self.batch_size
         req.prompts = self.prompts[start:end]
-        for attr in (
-            "prompt_ids",
-            "sample_ids",
-            "group_ids",
-            "noise_group_ids",
-            "prompt_metadata",
-        ):
-            value = getattr(self, attr, None)
-            if isinstance(value, list) and len(value) == len(self.prompts):
-                setattr(req, attr, value[start:end])
-
-        # Slice tensor fields that may be batched along dim-0
-        for attr in ("latents",):
-            val = getattr(self, attr, None)
-            if (
-                val is not None
-                and isinstance(val, torch.Tensor)
-                and val.shape[0] == len(self.prompts)
-            ):
-                setattr(req, attr, val[start:end].clone())
-
-        req.kwargs = {}
-        for key, value in dict(self.kwargs).items():
-            if isinstance(value, list) and len(value) == len(self.prompts):
-                req.kwargs[key] = value[start:end]
-                continue
-            if isinstance(value, tuple) and len(value) == len(self.prompts):
-                req.kwargs[key] = value[start:end]
-                continue
-            if isinstance(value, torch.Tensor) and value.shape[0] == len(self.prompts):
-                req.kwargs[key] = value[start:end].clone()
-                continue
-            req.kwargs[key] = value
+        req.meta = {
+            key: _slice_batched_value(value, batch_size=batch_size, start=start, end=end)
+            for key, value in self.meta.items()
+        }
+        req.inputs = {
+            key: _slice_batched_value(value, batch_size=batch_size, start=start, end=end)
+            for key, value in self.inputs.items()
+        }
+        req.sampling = {
+            key: _slice_batched_value(value, batch_size=batch_size, start=start, end=end)
+            for key, value in self.sampling.items()
+            if key != "kwargs"
+        }
+        kwargs = self.sampling.get("kwargs")
+        req.sampling["kwargs"] = {
+            key: _slice_batched_value(value, batch_size=batch_size, start=start, end=end)
+            for key, value in (kwargs.items() if isinstance(kwargs, dict) else [])
+        }
         return req
 
 
 __all__ = [
-    "RolloutOutput",
+    "RolloutSamples",
     "RolloutRequest",
     "LogProbData",
     "PromptEmbeddings",
+    "ResolvedSamplingSpec",
+    "SamplingRequirements",
 ]

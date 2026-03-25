@@ -11,6 +11,8 @@ from diffusionrl.types.training_batch import (
     BackwardTrainingBatch,
     ForwardTrainingBatch,
     TrainingBatch,
+    _concat_extra_payload,
+    _reindex_extra_payload,
 )
 
 
@@ -97,6 +99,11 @@ def index_training_batch(batch: TrainingBatch, keep_indices: Sequence[int]) -> T
             is_partitioned=batch.is_partitioned,
             step_indices=batch.step_indices,
             target_sde_indices=batch.target_sde_indices,
+            extras=_reindex_extra_payload(
+                batch.extras,
+                indices=idx,
+                batch_size=int(batch.batch_size),
+            ),
         )
 
     if isinstance(batch, ForwardTrainingBatch):
@@ -135,6 +142,11 @@ def index_training_batch(batch: TrainingBatch, keep_indices: Sequence[int]) -> T
             ),
             timesteps=batch.timesteps,
             is_partitioned=batch.is_partitioned,
+            extras=_reindex_extra_payload(
+                batch.extras,
+                indices=idx,
+                batch_size=int(batch.batch_size),
+            ),
         )
 
     raise TypeError(f"Unsupported training batch type: {type(batch).__name__}")
@@ -241,6 +253,10 @@ def concat_training_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
         rewards = None
         if all(b.rewards is not None for b in typed):
             rewards = torch.cat([b.rewards for b in typed if b.rewards is not None], dim=0)
+        extras = _concat_extra_payload(
+            [b.extras for b in typed],
+            batch_sizes=[int(b.batch_size) for b in typed],
+        ) or {}
 
         return BackwardTrainingBatch(
             trajectories=torch.cat([b.trajectories for b in typed], dim=0),
@@ -256,6 +272,7 @@ def concat_training_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
             is_partitioned=False,
             step_indices=typed[0].step_indices,
             target_sde_indices=typed[0].target_sde_indices,
+            extras=extras,
         )
 
     if isinstance(first, ForwardTrainingBatch):
@@ -285,6 +302,10 @@ def concat_training_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
         rewards_f = None
         if all(b.rewards is not None for b in typed_f):
             rewards_f = torch.cat([b.rewards for b in typed_f if b.rewards is not None], dim=0)
+        extras_f = _concat_extra_payload(
+            [b.extras for b in typed_f],
+            batch_sizes=[int(b.batch_size) for b in typed_f],
+        ) or {}
 
         return ForwardTrainingBatch(
             clean_latents=torch.cat([b.clean_latents for b in typed_f], dim=0),
@@ -297,6 +318,7 @@ def concat_training_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
             group_ids=group_ids_f,
             timesteps=base_timesteps,
             is_partitioned=False,
+            extras=extras_f,
         )
 
     raise TypeError(f"Unsupported training batch type: {type(first).__name__}")

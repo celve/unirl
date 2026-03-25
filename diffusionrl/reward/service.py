@@ -65,7 +65,7 @@ class InProcessRewardExecutor(BaseRewardExecutor):
 
 
 class RewardService:
-    """Manager-side reward service that owns per-component executors."""
+    """Reward service that owns per-component executors for one runtime host."""
 
     def _bind_reward_schema(
         self,

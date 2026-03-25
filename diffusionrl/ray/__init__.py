@@ -13,9 +13,6 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "create_placement_groups_from_args": ("diffusionrl.ray.placement_group", "create_placement_groups_from_args"),
     "create_placement_groups_from_runtime": ("diffusionrl.ray.placement_group", "create_placement_groups_from_runtime"),
     "remove_placement_group": ("diffusionrl.ray.placement_group", "remove_placement_group"),
-    # Rollout manager
-    "RolloutManager": ("diffusionrl.ray.rollout_manager", "RolloutManager"),
-    "create_rollout_manager": ("diffusionrl.ray.rollout_manager", "create_rollout_manager"),
     "BufferActor": ("diffusionrl.ray.buffer_actor", "BufferActor"),
     "create_buffer_actor": ("diffusionrl.ray.buffer_actor", "create_buffer_actor"),
     # Actor groups

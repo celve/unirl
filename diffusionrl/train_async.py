@@ -15,19 +15,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import time
-from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from diffusionrl.config import (
     build_resolved_config_view,
     parse_args,
 )
-from diffusionrl.config.runtime_bootstrap import resolve_runtime_config
+from diffusionrl.config.launch_resolution import resolve_launch_config
 from diffusionrl.config.resolution import (
     rollout_mode_label,
 )
 from diffusionrl.config.validation import (
     validate_async_training_runner,
-    validate_rollout_mode,
 )
 from diffusionrl.utils.train_utils import (
     RolloutSDEController,
@@ -52,9 +51,9 @@ logger = logging.getLogger(__name__)
 
 
 # Main control-plane path (async mode):
-# parse_args -> create_placement_groups_from_args -> create_rollout_manager
-# -> create_training_actor_group -> rollout_manager.produce_training_payload
-# -> rollout_buffer.push_payload_ref/pop -> training_group.train -> weight_sync.sync
+# parse_args -> create_placement_groups_from_args -> create_driver_rollout_runtime
+# -> create_training_actor_group -> prepare RolloutRequest(s) -> async_generate
+# -> resolve requests -> rollout_buffer.push/pop -> training_group.train -> weight_sync.sync
 
 @dataclass(frozen=True)
 class InflightRollout:
@@ -71,6 +70,22 @@ class ResolvedRollout:
     rollout_id: int
     result: Any
 
+
+@dataclass(frozen=True)
+class PreparedRolloutPlan:
+    """One rollout request plan visible to the async driver."""
+
+    context: Any
+    batch: Dict[str, Any]
+    request_batches: List[Tuple[int, Any]]
+
+
+@dataclass(frozen=True)
+class InflightPreparedRollout:
+    """One launched rollout plan whose sampling requests are still inflight."""
+
+    plan: PreparedRolloutPlan
+    inflight_requests: Any
 
 class AsyncPipelineRuntime:
     """Minimal producer-consumer state for the async training loop."""
@@ -136,7 +151,7 @@ class AsyncPipelineRuntime:
 def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
     *,
     args,
-    rollout_manager,
+    rollout_driver_runtime,
     rollout_buffer,
     training_group,
     training_runtime,
@@ -151,6 +166,16 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
 ) -> None:
     """Asynchronous train loop with rollout/train overlap."""
     import ray
+    from diffusionrl.rollout.default_rollout import (
+        finalize_default_rollout,
+        prepare_default_rollout_plan,
+    )
+    from diffusionrl.rollout.primitives import (
+        build_sampler_output_validator,
+        launch_request_batches_async,
+        resolve_request_batches_async,
+    )
+    from diffusionrl.rollout.base_types import RolloutContext, RolloutFunctionResult
 
     logger.info("Starting async pipeline loop (separate mode)")
     rollout_control = args.rollout.control
@@ -179,19 +204,45 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
                 f"(inflight={runtime.inflight_count}, max_inflight={runtime.max_inflight})"
             )
         should_log_rollout = should_log_fn(rollout_id, args)
-        rollout_sde_indices = rollout_sde_controller.next_sde_indices()
-        payload_ref = rollout_manager.produce_training_payload.remote(
-            rollout_id=rollout_id,
-            sde_indices=rollout_sde_indices,
+        services = rollout_driver_runtime.services
+        context = RolloutContext(
+            rollout_id=int(rollout_id),
+            sde_indices=rollout_sde_controller.next_sde_indices(),
             collect_media_preview=bool(should_log_rollout and wandb_media_enabled),
             media_max_items=wandb_media_max_items,
         )
-        enqueue_ref = rollout_buffer.push_payload_ref.remote(
-            payload_ref=payload_ref,
+        batch, request_batches = prepare_default_rollout_plan(
+            services=services,
+        )
+        plan = PreparedRolloutPlan(
+            context=context,
+            batch=batch,
+            request_batches=request_batches,
+        )
+
+        def _launch_sampling_request(request):
+            launched = services.launch_sampling_request(
+                request=request,
+                actor_group=rollout_driver_runtime.get_sampling_group(),
+                sde_indices=plan.context.sde_indices,
+                requirements=services.sampling_requirements,
+                sampling_overrides={
+                    "_keep_reward_media_for_driver": bool(plan.context.collect_media_preview),
+                },
+            )
+            return launched.request, launched
+
+        inflight_rollout = InflightPreparedRollout(
+            plan=plan,
+            inflight_requests=launch_request_batches_async(
+                request_batches=plan.request_batches,
+                rollout_id=plan.context.rollout_id,
+                launch_sampling_request=_launch_sampling_request,
+            ),
         )
         runtime.launch_rollout(
             rollout_id,
-            enqueue_ref,
+            inflight_rollout,
         )
 
     def _fill_inflight_window(current_rollout: int) -> None:
@@ -227,16 +278,62 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
         rollout_phase_start_t = time.perf_counter()
         _fill_inflight_window(rollout_id)
 
-        resolved = runtime.resolve_next_rollout(ray.get)
+        resolved = runtime.resolve_next_rollout(lambda future: future)
         if resolved.rollout_id != rollout_id:
             raise RuntimeError(
                 f"Async rollout ordering violated: expected rollout_id={rollout_id}, "
                 f"got {resolved.rollout_id}"
             )
-        push_result = resolved.result
+        inflight_rollout = resolved.result
+        services = rollout_driver_runtime.services
+        request, sampler_outputs = resolve_request_batches_async(
+            inflight_rollout=inflight_rollout.inflight_requests,
+            resolve_sampling_request=lambda launched: services.resolve_launched_sampling_request(
+                launched_request=launched,
+            ),
+            validate_sampler_outputs=build_sampler_output_validator(
+                requirements=services.sampling_requirements,
+                validation_config=services.sampler_validation_config,
+            ),
+        )
+        plan = inflight_rollout.plan
+        rollout_result = finalize_default_rollout(
+            services=services,
+            reward_hook=rollout_driver_runtime.reward_hook,
+            context=plan.context,
+            batch=plan.batch,
+            request_batches=plan.request_batches,
+            request=request,
+            sampler_outputs=sampler_outputs,
+        )
+        if not isinstance(rollout_result, RolloutFunctionResult):
+            raise TypeError(
+                "Default rollout finalizer must return RolloutFunctionResult. "
+                f"Got type={type(rollout_result)}"
+            )
+        rollout_metadata = dict(rollout_result.metadata or {})
+        advantages = services.compute_advantages(
+            rewards=rollout_result.rewards,
+            group_ids=rollout_result.request.meta.get("group_ids"),
+            reward_components=rollout_result.reward_components,
+        )
+        training_batch = services.assemble_training_batch(
+            request=rollout_result.request,
+            sampler_outputs=rollout_result.sampler_outputs,
+            rewards=rollout_result.rewards,
+            advantages=advantages,
+            sde_indices=plan.context.sde_indices,
+        )
+        push_result = ray.get(
+            rollout_buffer.push.remote(
+                rollout_id=int(rollout_id),
+                train_data=training_batch,
+                metadata=dict(rollout_metadata or {}),
+            )
+        )
         if not push_result.get("accepted", False):
             raise RuntimeError(
-                f"Rollout buffer rejected rollout_id={push_result.get('payload_rollout_id')}: {push_result.get('error')}"
+                f"Rollout buffer rejected rollout_id={rollout_id}: {push_result.get('error')}"
             )
         rollout_payload = ray.get(
             rollout_buffer.pop_training_data.remote(
@@ -269,7 +366,11 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
         if should_eval_fn(rollout_id, args):
             eval_phase_start_t = time.perf_counter()
             _ensure_rollout_on_gpu()
-            eval_metrics = ray.get(rollout_manager.eval.remote(rollout_id))
+            eval_metrics = rollout_driver_runtime.eval_function(
+                services=rollout_driver_runtime.services,
+                reward_hook=rollout_driver_runtime.reward_hook,
+                rollout_id=int(rollout_id),
+            )
             eval_phase_s = time.perf_counter() - eval_phase_start_t
             logger.info(
                 "[async] Eval at %s: mean_reward=%.4f",
@@ -364,9 +465,9 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
     from diffusionrl.ray.buffer_actor import create_buffer_actor
     from diffusionrl.ray.group_factory import create_rollout_actor_group, create_training_actor_group
     from diffusionrl.ray.group_runtime import RolloutGroupRuntime, TrainingGroupRuntime
-    from diffusionrl.ray.placement_group import create_placement_groups_from_runtime
-    from diffusionrl.ray.rollout_manager import create_rollout_manager
+    from diffusionrl.ray.placement_group import create_placement_groups_from_launch
     from diffusionrl.distributed.weight_sync import create_weight_sync
+    from diffusionrl.rollout.driver_runtime import create_driver_rollout_runtime
     from diffusionrl.utils import configure_logger, set_seed
     from diffusionrl.utils.wandb_logger import init_logger
     from diffusionrl.utils.wandb_metrics import compute_rollout_batch_metrics
@@ -375,15 +476,9 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
     set_seed(args.seed)
 
     debug_mode = str(args.debug.debug_mode or "none").strip().lower()
-    runtime_config = resolve_runtime_config(args)
-    algorithm_config, control_algorithm = build_control_algorithm(runtime_config.algorithm_config)
-    rollout_mode_info = runtime_config.rollout_mode_info
-    validate_rollout_mode(
-        args,
-        rollout_mode_info=rollout_mode_info,
-        backend_capabilities=runtime_config.training.backend_capabilities,
-        backend_name=runtime_config.training.backend_name,
-    )
+    launch_config = resolve_launch_config(args)
+    algorithm_config, control_algorithm = build_control_algorithm(launch_config.algorithm_config)
+    rollout_mode_info = launch_config.rollout_mode_info
     rollout_topology = rollout_mode_info.rollout_topology
     training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
     sync_mode = rollout_mode_info.sync_protocol
@@ -432,11 +527,11 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
             ray.init()
 
     wandb_logger = None
-    rollout_manager = None
+    rollout_driver_runtime = None
     rollout_buffer = None
     rollout_group = None
     training_group = None
-    weight_sync = create_weight_sync(args, runtime_config, mode=sync_mode)
+    weight_sync = create_weight_sync(args, launch_config, mode=sync_mode)
 
     try:
         if rollout_logging.report_to_wandb and rollout_logging.project_name:
@@ -464,15 +559,21 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
                     rollout_logging.run_name,
                 )
 
-        pgs = create_placement_groups_from_runtime(runtime_config)
+        pgs = create_placement_groups_from_launch(launch_config)
         logger.info("Placement groups created")
 
-        rollout_manager, dataset_step_info = create_rollout_manager(
+        rollout_driver_runtime, dataset_step_info = create_driver_rollout_runtime(
             args,
             reward_pg_result=pgs.get("reward"),
-            runtime_config=runtime_config,
+            launch_config=launch_config,
         )
-        logger.info("Rollout manager created")
+        logger.info("Driver rollout runtime created")
+        if not rollout_driver_runtime.uses_default_rollout_function():
+            raise ValueError(
+                "train_async.py currently requires the default request-centric rollout function "
+                "so the driver can overlap request launch and training. "
+                f"Got custom rollout_function_path={rollout_driver_runtime.rollout_function_path!r}."
+            )
         if dataset_step_info.get("num_prompts", 0) > 0:
             logger.info(
                 "Dataset step info: num_prompts=%s prompts_per_rollout=%s "
@@ -495,16 +596,16 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
         rollout_pg_result = pgs.get("rollout")
         if rollout_pg_result is None:
             raise ValueError("Missing rollout placement-group allocation.")
-        rollout_group = create_rollout_actor_group(runtime_config, rollout_pg_result)
+        rollout_group = create_rollout_actor_group(launch_config, rollout_pg_result)
         rollout_runtime = RolloutGroupRuntime.from_group(rollout_group)
-        ray.get(rollout_manager.attach_sampling_group.remote(rollout_group))
-        logger.info("Rollout actor group created and attached")
+        rollout_driver_runtime.attach_sampling_group(rollout_group)
+        logger.info("Rollout actor group created and attached to driver runtime")
 
         training_pg_result = pgs.get("training")
         if training_pg_result is None:
             raise ValueError("Missing training placement-group allocation.")
         training_group = create_training_actor_group(
-            runtime_config,
+            launch_config,
             training_pg_result,
         )
         training_runtime = TrainingGroupRuntime.from_group(training_group)
@@ -549,7 +650,7 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
 
         train_async_loop(
             args=args,
-            rollout_manager=rollout_manager,
+            rollout_driver_runtime=rollout_driver_runtime,
             rollout_buffer=rollout_buffer,
             training_group=training_group,
             training_runtime=training_runtime,
@@ -573,11 +674,8 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
                 ray.get(rollout_buffer.dispose.remote())
             finally:
                 ray.kill(rollout_buffer)
-        if rollout_manager is not None:
-            try:
-                ray.get(rollout_manager.dispose.remote())
-            finally:
-                ray.kill(rollout_manager)
+        if rollout_driver_runtime is not None:
+            rollout_driver_runtime.dispose()
         if rollout_group is not None:
             rollout_group.dispose()
         if training_group is not None:

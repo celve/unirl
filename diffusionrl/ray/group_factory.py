@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 
-from diffusionrl.config.runtime_bootstrap import ResolvedRuntimeConfig
+from diffusionrl.config.launch_resolution import ResolvedLaunchConfig
 from diffusionrl.config.validation_payload import (
     validate_rollout_actor_init_config,
     validate_training_actor_init_config,
@@ -17,20 +17,20 @@ from .training_group import TrainingActorGroup
 logger = logging.getLogger(__name__)
 
 def create_rollout_actor_group(
-    runtime_config: ResolvedRuntimeConfig,
+    launch_config: ResolvedLaunchConfig,
     pg_result,
 ) -> RolloutActorGroup:
     """
     Factory function to create RolloutActorGroup for dedicated rollout engines.
 
     Args:
-        runtime_config: Resolved runtime bootstrap built on the driver
+        launch_config: Resolved launch config built on the driver
         pg_result: Tuple of (PlacementGroup, bundle_indices, gpu_ids)
 
     Returns:
         Initialized RolloutActorGroup
     """
-    rollout = runtime_config.rollout
+    rollout = launch_config.rollout
     if rollout is None:
         raise ValueError(
             "Resolved runtime config does not include a dedicated rollout bootstrap payload."
@@ -154,21 +154,21 @@ def create_rollout_actor_group(
 
 
 def create_training_actor_group(
-    runtime_config: ResolvedRuntimeConfig,
+    launch_config: ResolvedLaunchConfig,
     pg_result,
 ) -> TrainingActorGroup:
     """
     Factory function to create TrainingActorGroup from args.
 
     Args:
-        runtime_config: Resolved runtime bootstrap built on the driver
+        launch_config: Resolved launch config built on the driver
         pg_result: Tuple of (PlacementGroup, bundle_indices, gpu_ids)
 
     Returns:
         Initialized TrainingActorGroup
     """
     pg, bundle_indices, gpu_ids = pg_result
-    training = runtime_config.training
+    training = launch_config.training
     training_topology = training.topology
     # Actor-group size is currently driven by the resolved training actor_count.
     # This is a launch/orchestration quantity; it should not be conflated with

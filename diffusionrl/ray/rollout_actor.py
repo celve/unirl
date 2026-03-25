@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import ray
 import torch
-
 from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
 from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.types.engine import (
@@ -13,7 +12,7 @@ from diffusionrl.types.engine import (
     normalize_engine_type,
     uses_dedicated_rollout_engine,
 )
-from diffusionrl.types.sampling import PromptEmbeddings, RolloutRequest, RolloutOutput
+from diffusionrl.types.sampling import PromptEmbeddings, RolloutRequest, RolloutSamples
 from diffusionrl.samplers.engine import (
     BaseRolloutEngine,
     DistributedWeightSyncCapable,
@@ -411,20 +410,25 @@ class RolloutActor:
             return sum(RolloutActor._estimate_tree_tensor_bytes(v) for v in value)
         return 0
 
-    def _estimate_rollout_output_bytes(self, output: RolloutOutput) -> int:
+    def _estimate_rollout_output_bytes(self, output: RolloutSamples) -> int:
         total = 0
-        for tensor in (output.latents, output.timesteps, output.trajectories, output.step_indices):
+        trajectories = output.aux.get("trajectories")
+        step_indices = output.aux.get("step_indices")
+        log_probs = output.aux.get("log_probs")
+        embeddings = output.aux.get("embeddings")
+        metadata = output.aux.get("metadata")
+        for tensor in (output.latents, output.timesteps, trajectories, step_indices):
             if torch.is_tensor(tensor):
                 total += int(tensor.numel() * tensor.element_size())
-        if output.log_probs is not None:
-            for value in output.log_probs.data.values():
+        if log_probs is not None:
+            for value in log_probs.data.values():
                 if torch.is_tensor(value):
                     total += int(value.numel() * value.element_size())
-        if output.embeddings is not None:
-            for value in output.embeddings.to_dict().values():
+        if embeddings is not None:
+            for value in embeddings.to_dict().values():
                 if torch.is_tensor(value):
                     total += int(value.numel() * value.element_size())
-        total += self._estimate_tree_tensor_bytes(output.metadata)
+        total += self._estimate_tree_tensor_bytes(metadata)
         return total
 
     def _maybe_cast_tensor_for_transport(self, value: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
@@ -450,7 +454,7 @@ class RolloutActor:
             return tuple(self._cast_metadata_tensors_for_transport(v) for v in value)
         return value
 
-    def _optimize_output_for_transport(self, output: RolloutOutput) -> RolloutOutput:
+    def _optimize_output_for_transport(self, output: RolloutSamples) -> RolloutSamples:
         if (
             self._transport_dtype is None
             and not self._transport_drop_decoded_videos
@@ -460,14 +464,15 @@ class RolloutActor:
 
         bytes_before = self._estimate_rollout_output_bytes(output) if self._transport_log_payload_bytes else 0
 
-        metadata = dict(output.metadata or {})
+        raw_metadata = output.aux.get("metadata")
+        metadata = dict(raw_metadata or {})
         if self._transport_drop_decoded_videos and isinstance(metadata.get("decoded_videos"), torch.Tensor):
             decoded = metadata.pop("decoded_videos")
             metadata["decoded_videos_dropped"] = True
             metadata["decoded_videos_shape"] = tuple(int(v) for v in decoded.shape)
             metadata["decoded_videos_dtype"] = str(decoded.dtype)
 
-        log_probs = output.log_probs
+        log_probs = output.aux.get("log_probs")
         if log_probs is not None and self._transport_dtype is not None:
             log_probs = type(log_probs).from_dict(
                 {
@@ -476,7 +481,7 @@ class RolloutActor:
                 }
             )
 
-        embeddings = output.embeddings
+        embeddings = output.aux.get("embeddings")
         if embeddings is not None and self._transport_dtype is not None:
             embeddings = PromptEmbeddings(
                 prompt_embeds=self._maybe_cast_tensor_for_transport(embeddings.prompt_embeds),
@@ -499,15 +504,19 @@ class RolloutActor:
         if self._transport_dtype is not None:
             metadata = self._cast_metadata_tensors_for_transport(metadata)
 
-        optimized = RolloutOutput(
+        optimized = RolloutSamples(
             latents=self._maybe_cast_tensor_for_transport(output.latents),
             timesteps=output.timesteps,
-            trajectories=self._maybe_cast_tensor_for_transport(output.trajectories),
-            log_probs=log_probs,
-            embeddings=embeddings,
-            decoded_images=output.decoded_images,
-            metadata=metadata,
-            step_indices=output.step_indices,
+            aux={
+                **dict(output.aux),
+                "trajectories": self._maybe_cast_tensor_for_transport(output.aux.get("trajectories")),
+                "log_probs": log_probs,
+                "embeddings": embeddings,
+                "decoded_images": output.aux.get("decoded_images"),
+                "metadata": metadata,
+                "step_indices": output.aux.get("step_indices"),
+            },
+            meta=output.meta,
         )
 
         if self._transport_log_payload_bytes:
@@ -763,7 +772,7 @@ class RolloutActor:
         self._log_resource_ids("rollout_init")
         self._log_gpu_state("rollout_init")
 
-    def generate(self, request: RolloutRequest) -> RolloutOutput:
+    def generate(self, request: RolloutRequest) -> RolloutSamples:
         """
         Generate samples with log probabilities.
 
@@ -771,7 +780,7 @@ class RolloutActor:
             request: RolloutRequest with prompts and generation parameters.
 
         Returns:
-            RolloutOutput containing trajectories, log_probs, etc.
+            RolloutSamples containing trajectories, log_probs, etc.
         """
         if self.engine is None:
             raise RuntimeError("Engine not initialized. Call init() first.")
@@ -807,12 +816,16 @@ class RolloutActor:
                 lambda current_output: self._ensure_local_reward_runtime().attach_to_output(
                     output=current_output,
                     prompts=list(request.prompts),
-                    prompt_ids=request.prompt_ids,
-                    sample_ids=request.sample_ids,
-                    group_ids=request.group_ids,
-                    prompt_metadata=request.prompt_metadata,
-                    keep_reward_media_for_manager=bool(request.keep_reward_media_for_manager),
-                    samples_per_prompt=int(request.samples_per_prompt),
+                    prompt_ids=request.meta.get("prompt_ids"),
+                    sample_ids=request.meta.get("sample_ids"),
+                    group_ids=request.meta.get("group_ids"),
+                    prompt_metadata=request.meta.get("prompt_metadata"),
+                    keep_reward_media_for_driver=bool(
+                        request.sampling.get("keep_reward_media_for_driver", False)
+                    ),
+                    samples_per_prompt=max(
+                        1, int(request.sampling.get("samples_per_prompt", 1))
+                    ),
                 )
             ) if self._uses_rollout_local_reward() else None,
             transport_optimize_fn=self._optimize_output_for_transport,

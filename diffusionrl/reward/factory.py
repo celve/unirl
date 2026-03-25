@@ -2,7 +2,7 @@
 
 This module keeps deployment construction explicit:
 
-- manager-side reward execution -> ``create_manager_reward_executor``
+- driver-side reward execution -> ``create_driver_reward_executor``
 - actor-local precompute -> see ``diffusionrl.reward.actor_local``
 """
 
@@ -15,12 +15,12 @@ from diffusionrl.reward.schema import RewardSchema
 from .service import RewardService
 
 
-def create_manager_reward_executor(
+def create_driver_reward_executor(
     reward_schema: RewardSchema,
     *,
     reward_pg_result: Optional[Any] = None,
 ) -> Optional[RewardService]:
-    """Create the manager-side reward executor when the manager owns scoring."""
+    """Create the driver-side reward executor when the driver owns scoring."""
     if reward_schema.to_execution_plan().uses_sampling_actor_execution:
         return None
     return RewardService(
@@ -30,5 +30,5 @@ def create_manager_reward_executor(
 
 
 __all__ = [
-    "create_manager_reward_executor",
+    "create_driver_reward_executor",
 ]

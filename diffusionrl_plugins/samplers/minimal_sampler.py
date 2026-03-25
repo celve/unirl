@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 from diffusionrl.samplers.base import BaseSampler
-from diffusionrl.types import RolloutOutput
+from diffusionrl.types import RolloutSamples
 
 
 class MinimalSampler(BaseSampler):
@@ -46,7 +46,7 @@ class MinimalSampler(BaseSampler):
         generator: Optional[torch.Generator] = None,
         sde_indices: Optional[Set[int]] = None,
         **kwargs: Any,
-    ) -> RolloutOutput:
+    ) -> RolloutSamples:
         del (
             prompts,
             prompt_embeds,
@@ -61,5 +61,5 @@ class MinimalSampler(BaseSampler):
         raise NotImplementedError(
             "MinimalSampler is a template. Copy "
             "`diffusionrl_plugins/samplers/minimal_sampler.py` and implement sample() "
-            "to return a valid RolloutOutput."
+            "to return a valid RolloutSamples."
         )

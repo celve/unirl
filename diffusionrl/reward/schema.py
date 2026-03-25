@@ -10,6 +10,7 @@ from diffusionrl.reward.spec import (
     RewardDefinition,
     RewardExecutionPlan,
     RewardProviderConfig,
+    resolve_reward_location,
 )
 
 
@@ -45,10 +46,10 @@ class RewardSchema:
             reward_model_name=rc.reward_model_name,
             reward_batch_size=int(rc.reward_batch_size),
             reward_timeout=float(rc.reward_timeout),
-            local_reward_device=str(getattr(rc, "local_reward_device", "cpu")),
+            local_reward_device=str(rc.local_reward_device),
             use_http_reward=bool(rc.use_http_reward),
             reward_service_url=rc.reward_service_url,
-            reward_service_urls=getattr(rc, "reward_service_urls", None),
+            reward_service_urls=rc.reward_service_urls,
             reward_models=rc.reward_models,
             reward_weights=rc.reward_weights,
             component_aggregation=rc.component_aggregation,
@@ -56,12 +57,16 @@ class RewardSchema:
             reward_dedicated_num_gpus=int(rc.reward_dedicated_num_gpus),
             reward_dedicated_num_nodes=int(rc.reward_dedicated_num_nodes),
             reward_dedicated_num_gpus_per_node=int(rc.reward_dedicated_num_gpus_per_node),
-            reward_location=str(getattr(rc, "reward_location", "manager")),
+            reward_location=str(rc.reward_location),
         )
 
     @property
     def uses_sampling_actor_execution(self) -> bool:
         return self.to_execution_plan().uses_sampling_actor_execution
+
+    @property
+    def uses_driver_execution(self) -> bool:
+        return self.to_execution_plan().uses_driver_execution
 
     def to_definition(self) -> RewardDefinition:
         if self.reward_models:
@@ -111,7 +116,10 @@ class RewardSchema:
         else:
             backend = "local"
         return RewardExecutionPlan(
-            location=str(self.reward_location or "manager"),
+            location=resolve_reward_location(
+                location=str(self.reward_location or "auto"),
+                backend=backend,
+            ),
             backend=backend,
             local_device=str(self.local_reward_device or "cpu"),
             reward_service_url=service_url,

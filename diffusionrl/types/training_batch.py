@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
 import torch
@@ -15,6 +15,136 @@ from .sampling import LogProbData, PromptEmbeddings
 
 if TYPE_CHECKING:
     from torch import device as TorchDevice
+
+
+def _clone_extra_payload(value: Any) -> Any:
+    if torch.is_tensor(value):
+        return value.clone()
+    if isinstance(value, dict):
+        return {str(k): _clone_extra_payload(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_clone_extra_payload(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_extra_payload(v) for v in value)
+    if isinstance(value, set):
+        return {_clone_extra_payload(v) for v in value}
+    return value
+
+
+def _move_extra_payload(value: Any, device: Union[str, "TorchDevice"]) -> Any:
+    if torch.is_tensor(value):
+        return value.to(device)
+    if isinstance(value, dict):
+        return {str(k): _move_extra_payload(v, device) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_move_extra_payload(v, device) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_move_extra_payload(v, device) for v in value)
+    if isinstance(value, set):
+        return {_move_extra_payload(v, device) for v in value}
+    return value
+
+
+def _slice_extra_payload(value: Any, *, start: int, end: int, batch_size: int) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {
+            str(k): _slice_extra_payload(v, start=start, end=end, batch_size=batch_size)
+            for k, v in value.items()
+        }
+    if isinstance(value, list) and len(value) == batch_size:
+        return [_clone_extra_payload(v) for v in value[start:end]]
+    if isinstance(value, tuple) and len(value) == batch_size:
+        return tuple(_clone_extra_payload(v) for v in value[start:end])
+    if torch.is_tensor(value) and value.dim() > 0 and int(value.shape[0]) == batch_size:
+        return value[start:end].clone()
+    return _clone_extra_payload(value)
+
+
+def _reindex_extra_payload(value: Any, *, indices: torch.Tensor, batch_size: int) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {
+            str(k): _reindex_extra_payload(v, indices=indices, batch_size=batch_size)
+            for k, v in value.items()
+        }
+    index_list = indices.tolist()
+    if isinstance(value, list) and len(value) == batch_size:
+        return [_clone_extra_payload(value[i]) for i in index_list]
+    if isinstance(value, tuple) and len(value) == batch_size:
+        return tuple(_clone_extra_payload(value[i]) for i in index_list)
+    if torch.is_tensor(value) and value.dim() > 0 and int(value.shape[0]) == batch_size:
+        return value[indices.to(value.device)]
+    return _clone_extra_payload(value)
+
+
+def _concat_extra_payload(values: List[Any], *, batch_sizes: List[int]) -> Any:
+    non_none = [value for value in values if value is not None]
+    if not non_none:
+        return None
+
+    if all(isinstance(value, dict) for value in non_none):
+        keys = sorted({str(k) for value in non_none for k in value.keys()})
+        return {
+            key: _concat_extra_payload(
+                [value.get(key) if isinstance(value, dict) else None for value in values],
+                batch_sizes=batch_sizes,
+            )
+            for key in keys
+        }
+
+    if all(isinstance(value, list) and len(value) == batch_size for value, batch_size in zip(values, batch_sizes) if value is not None):
+        merged: List[Any] = []
+        for value in values:
+            if value is None:
+                continue
+            merged.extend(_clone_extra_payload(item) for item in value)
+        return merged
+
+    if all(isinstance(value, tuple) and len(value) == batch_size for value, batch_size in zip(values, batch_sizes) if value is not None):
+        merged_tuple: List[Any] = []
+        for value in values:
+            if value is None:
+                continue
+            merged_tuple.extend(_clone_extra_payload(item) for item in value)
+        return tuple(merged_tuple)
+
+    if all(torch.is_tensor(value) and value.dim() > 0 and int(value.shape[0]) == batch_size for value, batch_size in zip(values, batch_sizes) if value is not None):
+        return torch.cat([value for value in values if value is not None], dim=0)
+
+    first = non_none[0]
+    if all(value == first for value in non_none[1:]):
+        return _clone_extra_payload(first)
+    return [_clone_extra_payload(value) for value in values]
+
+
+def build_rollout_extras(*, request: Any, sampler_outputs: List[Any]) -> Dict[str, Any]:
+    extras: Dict[str, Any] = {}
+
+    request_meta = getattr(request, "meta", None)
+    if isinstance(request_meta, dict) and request_meta:
+        extras["request_meta"] = _clone_extra_payload(request_meta)
+
+    sample_meta_values: List[Any] = []
+    sample_meta_batch_sizes: List[int] = []
+    for output in sampler_outputs:
+        meta = getattr(output, "meta", None)
+        latents = getattr(output, "latents", None)
+        if not isinstance(meta, dict) or not meta:
+            continue
+        if not torch.is_tensor(latents):
+            continue
+        sample_meta_values.append(meta)
+        sample_meta_batch_sizes.append(int(latents.shape[0]))
+    if sample_meta_values:
+        extras["sample_meta"] = _concat_extra_payload(
+            sample_meta_values,
+            batch_sizes=sample_meta_batch_sizes,
+        )
+
+    return extras
 
 
 @dataclass
@@ -86,6 +216,7 @@ class BackwardTrainingBatch:
     is_partitioned: bool = False
     step_indices: Optional[torch.Tensor] = None
     target_sde_indices: Optional[Set[int]] = None
+    extras: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def batch_size(self) -> int:
@@ -220,6 +351,7 @@ class BackwardTrainingBatch:
             if self.step_indices is not None
             else None,
             target_sde_indices=self.target_sde_indices,
+            extras=_move_extra_payload(self.extras, device),
         )
 
     def get_timestep_data(self, t_idx: int) -> TimestepData:
@@ -287,6 +419,12 @@ class BackwardTrainingBatch:
             is_partitioned=True,
             step_indices=self.step_indices,
             target_sde_indices=self.target_sde_indices,
+            extras=_slice_extra_payload(
+                self.extras,
+                start=start,
+                end=end,
+                batch_size=int(self.batch_size),
+            ),
         )
 
     def shuffle(self, indices: torch.Tensor) -> "BackwardTrainingBatch":
@@ -336,6 +474,11 @@ class BackwardTrainingBatch:
             is_partitioned=self.is_partitioned,
             step_indices=self.step_indices,
             target_sde_indices=self.target_sde_indices,
+            extras=_reindex_extra_payload(
+                self.extras,
+                indices=indices,
+                batch_size=int(self.batch_size),
+            ),
         )
 
     def to_loss_dict(self) -> Dict[str, Any]:
@@ -352,6 +495,7 @@ class BackwardTrainingBatch:
             "sde_indices": self.sde_indices,
             "target_sde_indices": self.target_sde_indices,
             "step_indices": self.resolved_step_indices,
+            "extras": self.extras,
             **self.embeddings.to_dict(),
         }
 
@@ -376,6 +520,7 @@ class ForwardTrainingBatch:
     group_ids: Optional[List[str]] = None
     timesteps: Optional[torch.Tensor] = None
     is_partitioned: bool = False
+    extras: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def batch_size(self) -> int:
@@ -433,6 +578,7 @@ class ForwardTrainingBatch:
             group_ids=self.group_ids,
             timesteps=self.timesteps.to(device) if self.timesteps is not None else None,
             is_partitioned=self.is_partitioned,
+            extras=_move_extra_payload(self.extras, device),
         )
 
     def slice(self, start: int, end: int) -> "ForwardTrainingBatch":
@@ -457,6 +603,12 @@ class ForwardTrainingBatch:
             group_ids=self.group_ids[start:end] if self.group_ids is not None else None,
             timesteps=self.timesteps if self.timesteps is not None else None,
             is_partitioned=True,
+            extras=_slice_extra_payload(
+                self.extras,
+                start=start,
+                end=end,
+                batch_size=int(self.batch_size),
+            ),
         )
 
     def shuffle(self, indices: torch.Tensor) -> "ForwardTrainingBatch":
@@ -500,6 +652,11 @@ class ForwardTrainingBatch:
             ),
             timesteps=self.timesteps,
             is_partitioned=self.is_partitioned,
+            extras=_reindex_extra_payload(
+                self.extras,
+                indices=indices,
+                batch_size=int(self.batch_size),
+            ),
         )
 
     def to_loss_dict(self) -> Dict[str, Any]:
@@ -512,6 +669,7 @@ class ForwardTrainingBatch:
         return {
             "clean_latents": self.clean_latents,
             "timesteps": self.timesteps,
+            "extras": self.extras,
             **self.embeddings.to_dict(),
         }
 
@@ -533,6 +691,7 @@ __all__ = [
     "ForwardTrainingBatch",
     "TimestepData",
     "TrainingBatch",
+    "build_rollout_extras",
     "is_backward_batch",
     "is_forward_batch",
 ]
