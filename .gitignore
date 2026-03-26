@@ -97,6 +97,7 @@ docs/*
 !docs/Component_Architecture.md
 # !docs/Parameter_System_Guide.md
 !docs/GitHub_Issues_Workflow_Guide.md
+!docs/custom_rollout_hooks.md
 
 # IDE / editor metadata
 .vscode/
