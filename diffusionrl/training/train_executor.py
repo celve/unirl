@@ -234,6 +234,8 @@ class TrainExecutor:
             disable=(rank != 0),
         ):
             self.optimizer.zero_grad()
+            # Mixed precision for model forwards is handled inside forward plugins
+            # (see forward_plugin.autocast_dtype / plugin.forward), not here.
             total_loss, all_metrics, num_timesteps, actual_mini_batches, has_backward = self.algorithm.compute_loss_and_backward(
                 model=self.model,
                 batch=update_chunk.batch,

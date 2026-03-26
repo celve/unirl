@@ -4,10 +4,6 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
-# NOTE: "dpm2" is a deterministic ODE solver and has no SDEStrategy implementation
-# in kernels.py. It is only used as a flag in is_deterministic_sde_type().
-# If log_prob computation under DPM2 is ever needed, add a corresponding
-# SDEStrategy subclass and register it via @register_sde_strategy("dpm2").
 CANONICAL_SDE_TYPES: Tuple[str, ...] = ("flow", "cps", "dance", "dpm2")
 SUPPORTED_USER_SDE_TYPES: Tuple[str, ...] = CANONICAL_SDE_TYPES
 

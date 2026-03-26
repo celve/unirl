@@ -146,17 +146,16 @@ def _normalize_timestep_fraction(
 class AllSDEScheduler(TimestepScheduler):
     """
     All SDE scheduler (standard GRPO) with optional timestep_fraction (DanceGRPO)
-    and optional sparse random SDE sub-sampling.
+    and optional num_sde_steps (random sparse SDE).
 
     When timestep_fraction=1.0 (default): All timesteps use SDE sampling.
     When timestep_fraction<1.0 (single float): Only the first fraction of timesteps use SDE.
     When timestep_fraction=(x, y) (tuple): Only timesteps in [x, y) fraction range use SDE.
 
-    This implements DanceGRPO's timestep_fraction parameter which restricts
-    training to a subset of timesteps (e.g., timestep_fraction=0.6 trains on
-    first 60% of timesteps; timestep_fraction=(0.2, 0.8) trains on 20%-80%).
-    When ``num_sde_steps`` is set, the scheduler randomly samples a fixed-size
-    sparse subset from that fraction range for each rollout step.
+    When num_sde_steps is set (int): Instead of using ALL timesteps in the fraction
+    range, randomly sample num_sde_steps non-contiguous timesteps from the range each
+    rollout. The seed is derived from the rollout step so each rollout gets a fresh
+    random selection.  Remaining timesteps in the range fall back to ODE.
     """
 
     def __init__(
@@ -173,8 +172,8 @@ class AllSDEScheduler(TimestepScheduler):
             timestep_fraction: Fraction of timesteps to train.
                 Single float x means [0, x) range (backward compatible).
                 Tuple (x, y) means [x, y) range.
-            num_sde_steps: Optional sparse random subset size within the
-                effective timestep range for each rollout.
+            num_sde_steps: If set, randomly pick this many SDE steps from the
+                fraction range each rollout.  Must be <= number of steps in range.
         """
         super().__init__(num_timesteps)
         self.timestep_fraction = timestep_fraction
@@ -182,23 +181,29 @@ class AllSDEScheduler(TimestepScheduler):
         self._fraction_start, self._fraction_end = _normalize_timestep_fraction(timestep_fraction)
         self._effective_start = int(num_timesteps * self._fraction_start)
         self._effective_end = int(num_timesteps * self._fraction_end)
+        # Validate num_sde_steps
         if num_sde_steps is not None:
             pool_size = self._effective_end - self._effective_start
-            if num_sde_steps <= 0:
-                raise ValueError(f"num_sde_steps must be positive, got {num_sde_steps}")
             if num_sde_steps > pool_size:
                 raise ValueError(
                     f"num_sde_steps ({num_sde_steps}) exceeds available timesteps "
                     f"in fraction range [{self._effective_start}, {self._effective_end}) "
                     f"(pool_size={pool_size})"
                 )
+            if num_sde_steps <= 0:
+                raise ValueError(f"num_sde_steps must be positive, got {num_sde_steps}")
 
     def get_sde_indices(self, step: Optional[int] = None) -> Set[int]:
-        """Return timestep indices in [start, end) fraction range."""
+        """Return timestep indices in [start, end) fraction range.
+
+        If num_sde_steps is set, randomly sub-sample from the range using
+        the rollout step as seed for reproducibility.
+        """
         pool = list(range(self._effective_start, self._effective_end))
         if self.num_sde_steps is None or self.num_sde_steps >= len(pool):
             return set(pool)
-        seed = int(step or 0)
+        # Use rollout step as seed for per-rollout randomness
+        seed = step if step is not None else 0
         rng = np.random.default_rng(seed)
         chosen = rng.choice(pool, size=self.num_sde_steps, replace=False)
         return set(int(i) for i in chosen)
@@ -220,7 +225,7 @@ class AllSDEScheduler(TimestepScheduler):
         super().load_state_dict(state_dict)
         raw = state_dict.get("timestep_fraction", 1.0)
         self.timestep_fraction = raw
-        self.num_sde_steps = state_dict.get("num_sde_steps")
+        self.num_sde_steps = state_dict.get("num_sde_steps", None)
         self._fraction_start, self._fraction_end = _normalize_timestep_fraction(raw)
         self._effective_start = int(self.num_timesteps * self._fraction_start)
         self._effective_end = int(self.num_timesteps * self._fraction_end)
@@ -429,6 +434,7 @@ def get_scheduler(
     scheduler_type: str,
     num_timesteps: int,
     timestep_fraction: Union[float, Tuple[float, float]] = 1.0,
+    num_sde_steps: Optional[int] = None,
     **kwargs: Any,
 ) -> TimestepScheduler:
     """
@@ -440,6 +446,8 @@ def get_scheduler(
         timestep_fraction: Fraction of timesteps to train.
             Single float x: SDE on [0, x) range (e.g. 0.6 = first 60%).
             Tuple (x, y): SDE on [x, y) range (e.g. (0.2, 0.8) = 20%-80%).
+        num_sde_steps: If set, randomly pick this many SDE steps from the
+            fraction range each rollout (only for "all" scheduler).
         **kwargs: Additional arguments for scheduler/config
 
     Returns:
@@ -452,8 +460,8 @@ def get_scheduler(
         # All SDE with timestep_fraction (DanceGRPO)
         scheduler = get_scheduler("all", num_timesteps=50, timestep_fraction=0.6)
 
-        # All SDE with interval timestep_fraction
-        scheduler = get_scheduler("all", num_timesteps=50, timestep_fraction=(0.2, 0.8))
+        # Random sparse SDE: pick 3 random steps from [0.1, 0.3) each rollout
+        scheduler = get_scheduler("all", num_timesteps=50, timestep_fraction=(0.1, 0.3), num_sde_steps=3)
 
         # Window scheduler (MixGRPO)
         scheduler = get_scheduler(
@@ -468,7 +476,7 @@ def get_scheduler(
         return AllSDEScheduler(
             num_timesteps,
             timestep_fraction=timestep_fraction,
-            num_sde_steps=kwargs.get("num_sde_steps"),
+            num_sde_steps=num_sde_steps,
         )
     elif scheduler_type == "window":
         # Build config from kwargs

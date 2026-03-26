@@ -433,6 +433,19 @@ class TrainingActor(BaseTrainRayActor):
         self._timestep_fraction = SDEScheduleConfig.from_mapping(
             sampling_config.get("sde_schedule_config")
         ).timestep_fraction
+
+        _fw_plugin = getattr(self.algorithm, "_forward_plugin", None)
+        if _fw_plugin is not None and hasattr(_fw_plugin, "autocast_dtype"):
+            _sampler_kwargs = sampling_config.get("sampler_kwargs", {})
+            _autocast_prec = _sampler_kwargs.get("autocast_precision", "bf16")
+            from diffusionrl.utils.dtypes import parse_torch_dtype as _parse_dt
+            _fw_plugin.autocast_dtype = _parse_dt(
+                _autocast_prec, field_name="forward_plugin.autocast_dtype"
+            )
+            logger.info(
+                "Rank %s: forward_plugin.autocast_dtype set to %s",
+                self.rank, _fw_plugin.autocast_dtype,
+            )
         reward_config = self._require_dict_config(config, "reward_config")
         self._reward_config = reward_config
         self._reward_schema = RewardSchema(**reward_config)
@@ -704,7 +717,7 @@ class TrainingActor(BaseTrainRayActor):
             algorithm=self.algorithm,
         )
 
-    def apply_ema_for_eval(self) -> bool:
+    def apply_eval_ema(self) -> bool:
         """Swap eval-EMA weights into the model for evaluation."""
         if self._ema_manager is None:
             return False

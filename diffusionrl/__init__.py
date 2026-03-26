@@ -17,6 +17,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     # samplers
     "BaseSampler": ("diffusionrl.samplers", "BaseSampler"),
     "RolloutSamples": ("diffusionrl.samplers", "RolloutSamples"),
+    "sde_step": ("diffusionrl.sde", "sde_step"),
     "compute_sde_log_prob": ("diffusionrl.sde", "compute_sde_log_prob"),
     "get_sigma_schedule": ("diffusionrl.sde", "get_sigma_schedule"),
     "sde_step_with_log_prob": ("diffusionrl.sde", "sde_step_with_log_prob"),

@@ -307,6 +307,34 @@ def build_training_actor_init_config(
     }
 
 
+# ---------------------------------------------------------------------------
+# SDE config resolution helpers
+# ---------------------------------------------------------------------------
+
+def resolve_sde_config(payload=None, *, default=None):
+    """Resolve canonical nested ``sde_config`` from a domain-config dict."""
+    from diffusionrl.types.sde import SDEConfig
+    fallback = default or SDEConfig()
+    if payload is None:
+        return fallback
+    raw = payload.get("sde_config") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return fallback
+    return SDEConfig.from_mapping(raw, **fallback.to_dict())
+
+
+def resolve_sde_schedule_config(payload=None, *, default=None):
+    """Resolve canonical nested ``sde_schedule_config`` from a domain-config dict."""
+    from diffusionrl.types.sde import SDEScheduleConfig
+    fallback = default or SDEScheduleConfig()
+    if payload is None:
+        return fallback
+    raw = payload.get("sde_schedule_config") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return fallback
+    return SDEScheduleConfig.from_mapping(raw, **fallback.to_dict())
+
+
 __all__ = [
     "build_model_config",
     "build_reward_config",
@@ -315,4 +343,6 @@ __all__ = [
     "build_rollout_actor_init_config",
     "build_train_backend_config",
     "build_training_actor_init_config",
+    "resolve_sde_config",
+    "resolve_sde_schedule_config",
 ]

@@ -22,10 +22,10 @@ import torch
 import torch.nn as nn
 
 from ..base import BaseSampler, RolloutSamples
+from diffusionrl.sde.kernels import get_sde_strategy
 from diffusionrl.sde.runtime import (
-    compute_sde_log_prob,
     get_sigma_schedule,
-    sde_step_with_log_prob,
+    denoising_step,
 )
 from diffusionrl.types import LogProbData, PromptEmbeddings
 from diffusionrl.utils.dtypes import parse_torch_dtype
@@ -33,14 +33,31 @@ from diffusionrl.utils.dtypes import parse_torch_dtype
 logger = logging.getLogger(__name__)
 
 
-def _save_debug_tensor(base_dir: str, step_idx: int, name: str, tensor: torch.Tensor, rank: int = 0) -> None:
-    """Save a debug tensor to disk. Only rank 0 saves to avoid conflicts."""
+def _save_debug_tensor(
+    base_dir: str, step_idx: int, name: str, tensor: torch.Tensor,
+    rank: int = 0, *, append: bool = False,
+) -> None:
+    """Save a debug tensor to disk. Only rank 0 saves to avoid conflicts.
+
+    When *append=True* and a file already exists for this step+name, the new
+    tensor is concatenated along dim-0 (batch) with the existing one.  This
+    allows multiple sub-batch ``sample()`` calls within the same rollout to
+    accumulate into a single file that covers the full local batch.
+    """
     if rank != 0:
         return
     step_dir = os.path.join(base_dir, f"step_{step_idx:03d}")
     os.makedirs(step_dir, exist_ok=True)
     path = os.path.join(step_dir, f"{name}.pt")
-    torch.save(tensor.detach().cpu().float(), path)
+    new_tensor = tensor.detach().cpu().float()
+    if append and os.path.exists(path):
+        try:
+            existing = torch.load(path, map_location="cpu", weights_only=True)
+            if existing.ndim >= 1 and new_tensor.ndim >= 1 and existing.shape[1:] == new_tensor.shape[1:]:
+                new_tensor = torch.cat([existing, new_tensor], dim=0)
+        except Exception:
+            pass
+    torch.save(new_tensor, path)
 
 
 def calculate_shift(
@@ -55,136 +72,6 @@ def calculate_shift(
     b = base_shift - m * base_seq_len
     return image_seq_len * m + b
 
-
-@dataclass
-class _DPMState:
-    order: int
-    model_outputs: List[Optional[torch.Tensor]] = None
-    lower_order_nums: int = 0
-
-    def __post_init__(self) -> None:
-        self.model_outputs = [None] * self.order
-
-    def update(self, model_output: torch.Tensor) -> None:
-        for i in range(self.order - 1):
-            self.model_outputs[i] = self.model_outputs[i + 1]
-        self.model_outputs[-1] = model_output
-
-    def update_lower_order(self) -> None:
-        if self.lower_order_nums < self.order:
-            self.lower_order_nums += 1
-
-
-def _convert_model_output(model_output: torch.Tensor, sample: torch.Tensor, sigmas: torch.Tensor, step_index: int) -> torch.Tensor:
-    compute_device = model_output.device
-    if sample.device != compute_device:
-        sample = sample.to(compute_device)
-    sigma_t = sigmas[step_index].to(device=compute_device, dtype=model_output.dtype)
-    x0_pred = sample - sigma_t * model_output
-    return x0_pred
-
-
-def _sigma_to_alpha_sigma_t(sigma: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    alpha_t = 1 - sigma
-    sigma_t = sigma
-    return alpha_t, sigma_t
-
-
-def _dpm_solver_first_order_update(
-    model_output: torch.Tensor,
-    sigmas: torch.Tensor,
-    step_index: int,
-    sample: torch.Tensor,
-) -> torch.Tensor:
-    sigma_t, sigma_s = sigmas[step_index + 1], sigmas[step_index]
-    alpha_t, sigma_t = _sigma_to_alpha_sigma_t(sigma_t)
-    alpha_s, sigma_s = _sigma_to_alpha_sigma_t(sigma_s)
-    lambda_t = torch.log(alpha_t) - torch.log(sigma_t)
-    lambda_s = torch.log(alpha_s) - torch.log(sigma_s)
-
-    h = lambda_t - lambda_s
-    x_t = (sigma_t / sigma_s) * sample - (alpha_t * (torch.exp(-h) - 1.0)) * model_output
-    return x_t
-
-
-def _multistep_dpm_solver_second_order_update(
-    model_output_list: List[torch.Tensor],
-    sigmas: torch.Tensor,
-    step_index: int,
-    sample: torch.Tensor,
-) -> torch.Tensor:
-    sigma_t, sigma_s0, sigma_s1 = (
-        sigmas[step_index + 1],
-        sigmas[step_index],
-        sigmas[step_index - 1],
-    )
-
-    alpha_t, sigma_t = _sigma_to_alpha_sigma_t(sigma_t)
-    alpha_s0, sigma_s0 = _sigma_to_alpha_sigma_t(sigma_s0)
-    alpha_s1, sigma_s1 = _sigma_to_alpha_sigma_t(sigma_s1)
-
-    lambda_t = torch.log(alpha_t) - torch.log(sigma_t)
-    lambda_s0 = torch.log(alpha_s0) - torch.log(sigma_s0)
-    lambda_s1 = torch.log(alpha_s1) - torch.log(sigma_s1)
-
-    m0, m1 = model_output_list[-1], model_output_list[-2]
-
-    h, h_0 = lambda_t - lambda_s0, lambda_s0 - lambda_s1
-    r0 = h_0 / h
-    D0, D1 = m0, (1.0 / r0) * (m0 - m1)
-
-    x_t = (
-        (sigma_t / sigma_s0) * sample
-        - (alpha_t * (torch.exp(-h) - 1.0)) * D0
-        - 0.5 * (alpha_t * (torch.exp(-h) - 1.0)) * D1
-    )
-    return x_t
-
-
-def _dpm_step(
-    order: int,
-    model_output: torch.Tensor,
-    sample: torch.Tensor,
-    step_index: int,
-    timesteps: torch.Tensor,
-    sigmas: torch.Tensor,
-    dpm_state: _DPMState,
-) -> torch.Tensor:
-    lower_order_final = step_index == len(timesteps) - 1
-    lower_order_second = (step_index == len(timesteps) - 2) and len(timesteps) < 15
-
-    model_output = _convert_model_output(model_output, sample, sigmas, step_index=step_index)
-    dpm_state.update(model_output)
-
-    sample = sample.to(device=model_output.device, dtype=torch.float32)
-    local_sigmas = sigmas.to(device=sample.device, dtype=sigmas.dtype)
-
-    if order == 1 or dpm_state.lower_order_nums < 1 or lower_order_final:
-        if step_index == 0 or lower_order_final:
-            # DDIM update with eta=0
-            t, s = local_sigmas[step_index + 1], local_sigmas[step_index]
-            noise_pred = (sample - (1 - s) * model_output) / s
-            prev_mean = (1 - t) * model_output + torch.sqrt(t**2) * noise_pred
-            prev_sample = prev_mean
-        else:
-            prev_sample = _dpm_solver_first_order_update(
-                model_output,
-                local_sigmas.to(dtype=torch.float64),
-                step_index,
-                sample,
-            )
-    elif order == 2 or dpm_state.lower_order_nums < 2 or lower_order_second:
-        prev_sample = _multistep_dpm_solver_second_order_update(
-            dpm_state.model_outputs,
-            local_sigmas.to(dtype=torch.float64),
-            step_index,
-            sample,
-        )
-    else:
-        raise ValueError(f"Unsupported DPM order: {order}")
-
-    dpm_state.update_lower_order()
-    return prev_sample.to(model_output.dtype)
 
 
 class SD3Sampler(BaseSampler):
@@ -264,7 +151,8 @@ class SD3Sampler(BaseSampler):
         self.autocast_dtype = parse_torch_dtype(autocast_precision, field_name="autocast_precision")
         self.trajectory_dtype = parse_torch_dtype(trajectory_precision, field_name="trajectory_precision")
         self.logprob_dtype = parse_torch_dtype(logprob_precision, field_name="logprob_precision")
-        # 防止多个sub-batch覆盖同一step的debug tensor（只保留第一个sub-batch的数据）
+        # Track which steps have been dumped so subsequent sub-batch calls
+        # use append mode to concatenate tensors along the batch dimension.
         self._debug_dumped_steps: set = set()
 
     def _predict_noise_with_cfg(
@@ -365,7 +253,7 @@ class SD3Sampler(BaseSampler):
         height: int = 1024,
         width: int = 1024,
         latents: Optional[torch.Tensor] = None,
-        generator: Optional[torch.Generator] = None,
+        base_seed: Optional[int] = None,
         sde_indices: Optional[Set[int]] = None,
         max_sequence_length: int = 256,
         init_same_noise: bool = False,
@@ -446,11 +334,10 @@ class SD3Sampler(BaseSampler):
                 latent_shape=(self.latent_channels, latent_height, latent_width),
                 device=device,
                 dtype=latent_dtype,
-                generator=generator,
                 init_same_noise=init_same_noise,
                 samples_per_prompt=samples_per_prompt,
                 noise_group_ids=noise_group_ids,
-                base_seed=(None if generator is None else int(generator.initial_seed())),
+                base_seed=base_seed,
             )
         else:
             latents = latents.to(device=device, dtype=latent_dtype)
@@ -473,28 +360,34 @@ class SD3Sampler(BaseSampler):
             else:
                 sde_indices = set(range(num_inference_steps))
 
+        # Obtain a strategy instance once (important for stateful strategies like DPM2)
+        strategy = get_sde_strategy(self.sde_type)
+        if strategy.is_stateful:
+            strategy.init_schedule(sigmas)
+
         # Storage for trajectory and log probs
-        trajectory = [latents.clone()]
+        latents = latents.to(self.trajectory_dtype)
+        trajectory: List[torch.Tensor] = [latents]
         log_probs_dict: Dict[int, torch.Tensor] = {}
 
         # Denoising loop
-        dpm_state: Optional[_DPMState] = None
-        if self.sde_type == "dpm2":
-            dpm_state = _DPMState(order=2)
-            timesteps = sigmas[:-1]
         autocast_ctx = (
             torch.autocast("cuda", self.autocast_dtype)
             if device.type == "cuda" and self.autocast_dtype in (torch.float16, torch.bfloat16)
             else nullcontext()
         )
         rank = int(os.environ.get("RANK", 0))
-        for i in tqdm(
-            range(num_inference_steps),
-            desc="SD3 sampling",
-            disable=True,
-        ):
-            sigma = sigmas[i]
-            sigma_next = sigmas[i + 1]
+        _resolved_debug_dir_pre = debug_output_dir or os.environ.get("DIFFUSIONRL_DEBUG_OUTPUT_DIR")
+        if _resolved_debug_dir_pre and rank == 0:
+            logger.info(
+                "Debug sampling: rank=%d batch_size=%d latents=%s sde_indices=%s "
+                "already_dumped_steps=%s",
+                rank, batch_size, list(latents.shape), sorted(sde_indices),
+                sorted(self._debug_dumped_steps),
+            )
+        for i in range(num_inference_steps):
+            sigma = sigmas[i].to(device)
+            sigma_next = sigmas[i + 1].to(device)
 
             # Create timestep tensor (SD3 uses 0-1000 range)
             timestep = (sigma * 1000).expand(batch_size)
@@ -513,59 +406,47 @@ class SD3Sampler(BaseSampler):
                     )
 
             # Debug: resolve sampling dump directory
-            # Check explicit arg first, then env var fallback
             _resolved_debug_dir = debug_output_dir or os.environ.get("DIFFUSIONRL_DEBUG_OUTPUT_DIR")
             _sampling_debug_dir = None
             if _resolved_debug_dir is not None:
                 _sampling_debug_dir = os.path.join(_resolved_debug_dir, "sampling")
 
-            # Check if this step uses SDE
-            if self.sde_type == "dpm2":
-                latents = _dpm_step(
-                    order=2,
-                    model_output=noise_pred.float(),
-                    sample=latents.float(),
-                    step_index=i,
-                    timesteps=timesteps,
-                    sigmas=sigmas,
-                    dpm_state=dpm_state,
-                )
-                latents = latents.to(dtype=latent_dtype)
-            elif i in sde_indices:
-                # Save pre-step latents for debug before SDE step mutates them
-                _pre_step_latents = latents.clone()
+            _pre_step_latents = latents.clone()
 
-                # SDE step with log probability.
-                # output_dtype=dtype ensures prev_sample is cast to float16 *before*
-                # log_prob is computed, so old_log_prob matches training's new_log_prob
-                # (which also evaluates on float16 trajectory tensors).
-                latents, log_prob, prev_sample_mean = sde_step_with_log_prob(
-                    noise_pred=noise_pred,
-                    sample=_pre_step_latents,
-                    sigmas=sigmas,
-                    step_index=i,
-                    eta=self.eta,
-                    generator=generator,
-                    sde_type=self.sde_type,
-                    output_dtype=latent_dtype,
-                )
+            # Unified step: eta controls SDE vs ODE behaviour.
+            # For DPM2, sde_indices is empty so step_eta is always 0,
+            # but DPM2Strategy.step() uses its own multi-step logic regardless.
+            step_eta = self.eta if i in sde_indices else 0.0
+            latents, log_prob, prev_sample_mean = denoising_step(
+                noise_pred=noise_pred,
+                sample=latents,
+                sigma=sigma,
+                sigma_next=sigma_next,
+                eta=step_eta,
+                sde_type=self.sde_type,
+                sigma_max=sigmas[1].item(),
+                strategy=strategy,
+                step_index=i,
+            )
+            latents = latents.to(dtype=self.trajectory_dtype)
+            trajectory.append(latents)
 
-                # Dump debug tensors for this SDE step
-                # 只保存第一个sub-batch的debug tensor，防止后续sub-batch调用sample()时覆盖
-                if _sampling_debug_dir is not None and i not in self._debug_dumped_steps:
+            if log_prob is not None:
+                log_probs_dict[i] = log_prob.to(dtype=self.logprob_dtype)
+
+                if _sampling_debug_dir is not None:
+                    _append = i in self._debug_dumped_steps
                     self._debug_dumped_steps.add(i)
-                    _save_debug_tensor(_sampling_debug_dir, i, "noise_pred", noise_pred, rank)
-                    _save_debug_tensor(_sampling_debug_dir, i, "latents_input", _pre_step_latents, rank)
-                    _save_debug_tensor(_sampling_debug_dir, i, "latents_output", latents, rank)
-                    _save_debug_tensor(_sampling_debug_dir, i, "prev_sample_mean", prev_sample_mean, rank)
-                    _save_debug_tensor(_sampling_debug_dir, i, "log_prob", log_prob, rank)
+                    _save_debug_tensor(_sampling_debug_dir, i, "noise_pred", noise_pred, rank, append=_append)
+                    _save_debug_tensor(_sampling_debug_dir, i, "latents_input", _pre_step_latents, rank, append=_append)
+                    _save_debug_tensor(_sampling_debug_dir, i, "latents_output", latents, rank, append=_append)
+                    _save_debug_tensor(_sampling_debug_dir, i, "prev_sample_mean", prev_sample_mean, rank, append=_append)
+                    _save_debug_tensor(_sampling_debug_dir, i, "log_prob", log_prob, rank, append=_append)
                     _save_debug_tensor(_sampling_debug_dir, i, "sigma", sigma.unsqueeze(0) if sigma.dim() == 0 else sigma, rank)
                     _save_debug_tensor(_sampling_debug_dir, i, "sigma_next", sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next, rank)
                     _save_debug_tensor(_sampling_debug_dir, i, "timestep", timestep, rank)
-                    # Save full sigma schedule once at step 0
-                    if i == min(sde_indices):
+                    if not _append and i == min(sde_indices):
                         _save_debug_tensor(_sampling_debug_dir, i, "sigmas_schedule", sigmas, rank)
-                        # Save sde config
                         if rank == 0:
                             import json
                             cfg_path = os.path.join(_sampling_debug_dir, "config.json")
@@ -581,15 +462,6 @@ class SD3Sampler(BaseSampler):
                                     "height": height,
                                     "width": width,
                                 }, f, indent=2)
-
-                log_probs_dict[i] = log_prob.to(dtype=self.logprob_dtype)
-            else:
-                # Deterministic ODE step (no log_prob)
-                dt = sigma_next - sigma
-                latents = latents + dt * noise_pred
-                latents = latents.to(dtype=self.trajectory_dtype)
-
-            trajectory.append(latents.clone())
 
         # Stack trajectory
         trajectories = torch.stack(trajectory, dim=1)  # [B, T+1, C, H, W]
@@ -699,19 +571,16 @@ class SD3Sampler(BaseSampler):
                 "Deterministic SD3 sampling does not define stochastic log-prob replay."
             )
 
-        log_prob, _ = compute_sde_log_prob(
+        sigma_max = float(sigma_schedule[1].item()) if int(sigma_schedule.shape[0]) > 1 else 1.0
+        _, log_prob, _ = denoising_step(
             noise_pred=noise_pred,
             sample=latents,
-            prev_sample=prev_latents,
             sigma=sigma,
             sigma_next=sigma_next,
             eta=self.eta,
+            prev_sample=prev_latents,
             sde_type=self.sde_type,
-            sigma_max=(
-                float(sigma_schedule[1].item())
-                if int(sigma_schedule.shape[0]) > 1
-                else 1.0
-            ),
+            sigma_max=sigma_max,
         )
         return log_prob.to(dtype=self.logprob_dtype)
 

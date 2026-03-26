@@ -71,18 +71,28 @@ def build_rollout_request(
         base_group_ids = list(base_prompt_ids)
     expanded_group_ids = [group_id for group_id in base_group_ids for _ in range(k)]
 
-    raw_noise_group_ids = batch.get("noise_group_ids")
-    if isinstance(raw_noise_group_ids, list) and len(raw_noise_group_ids) == base_size:
-        base_noise_group_ids = [str(group_id) for group_id in raw_noise_group_ids]
-    else:
-        base_noise_group_ids = list(base_prompt_ids)
-    expanded_noise_group_ids = [group_id for group_id in base_noise_group_ids for _ in range(k)]
-
     sample_ids = [
         f"prompt:{base_prompt_ids[prompt_idx]}:sample:{replica_idx}"
         for prompt_idx in range(base_size)
         for replica_idx in range(k)
     ]
+
+    init_same_noise = bool(
+        batch.get(
+            "init_same_noise",
+            sampling_defaults.get("init_same_noise", False),
+        )
+    )
+
+    raw_noise_group_ids = batch.get("noise_group_ids")
+    if isinstance(raw_noise_group_ids, list) and len(raw_noise_group_ids) == base_size:
+        base_noise_group_ids = [str(group_id) for group_id in raw_noise_group_ids]
+    else:
+        base_noise_group_ids = list(base_prompt_ids)
+    if init_same_noise:
+        expanded_noise_group_ids = [gid for gid in base_noise_group_ids for _ in range(k)]
+    else:
+        expanded_noise_group_ids = list(sample_ids)
 
     prompt_metadata = batch.get("metadata")
     if isinstance(prompt_metadata, list) and len(prompt_metadata) == base_size:
@@ -122,12 +132,6 @@ def build_rollout_request(
     sampling_adapter = batch.get(
         "sampling_adapter",
         sampling_defaults.get("sampling_adapter"),
-    )
-    init_same_noise = bool(
-        batch.get(
-            "init_same_noise",
-            sampling_defaults.get("init_same_noise", False),
-        )
     )
     raw_seed = batch.get("seed", sampling_defaults.get("seed"))
     seed = None if raw_seed is None else int(raw_seed)

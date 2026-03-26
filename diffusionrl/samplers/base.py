@@ -72,7 +72,7 @@ class BaseSampler(ABC):
         num_inference_steps: int = 28,
         guidance_scale: float = 3.5,
         latents: Optional[torch.Tensor] = None,
-        generator: Optional[torch.Generator] = None,
+        base_seed: Optional[int] = None,
         sde_indices: Optional[Set[int]] = None,
         **kwargs,
     ) -> RolloutSamples:
@@ -86,7 +86,9 @@ class BaseSampler(ABC):
             num_inference_steps: Number of denoising steps
             guidance_scale: CFG scale
             latents: Initial latents (if None, sample from noise)
-            generator: Random number generator for reproducibility
+            base_seed: Base seed for deterministic initial noise generation.
+                Combined with per-sample ``noise_group_ids`` to derive
+                unique or shared noise via hash-based seed derivation.
             sde_indices: Set of timestep indices to use SDE sampling.
                 If None, all timesteps use SDE (standard GRPO).
                 For MixGRPO, this is a subset of timesteps.

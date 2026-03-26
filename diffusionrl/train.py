@@ -424,7 +424,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
                     rollout_on_gpu=rollout_on_gpu,
                 )
                 if training_actor_sampling_mode:
-                    with training_runtime.eval_ema_context():
+                    with training_runtime.use_eval_ema():
                         eval_metrics = eval_function(
                             services=rollout_services,
                             reward_hook=reward_hook,

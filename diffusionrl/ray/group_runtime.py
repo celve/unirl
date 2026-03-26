@@ -183,16 +183,16 @@ class TrainingGroupRuntime:
     def clear_memory(self) -> None:
         self._handle.call_all("clear_memory")
 
-    def apply_ema_for_eval(self) -> None:
-        self._handle.call_all("apply_ema_for_eval")
+    def apply_eval_ema(self) -> None:
+        self._handle.call_all("apply_eval_ema")
 
     def restore_from_eval(self) -> None:
         self._handle.call_all("restore_from_eval")
 
     @contextmanager
-    def eval_ema_context(self):
+    def use_eval_ema(self):
         """Swap eval EMA weights in for the duration of a sampling/eval block."""
-        self.apply_ema_for_eval()
+        self.apply_eval_ema()
         try:
             yield
         finally:

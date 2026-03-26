@@ -25,8 +25,7 @@
 # Key alignment with original DiffusionNFT:
 #   algorithm_type=nft, beta=1.0, kl_coef=0.0001, sde_type=dpm2,
 #   num_inference_steps=10, guidance_scale=1.0, adv_normalization=group,
-#   train_timestep_mode=all, sampling_adapter=old, LoRA rank=32 alpha=64,
-#   periodic eval uses 40 steps on the default adapter with deterministic flow
+#   train_timestep_mode=all, sampling_adapter=old, LoRA rank=32 alpha=64
 #
 # =============================================================================
 
@@ -78,15 +77,20 @@ WORKER_WAIT_TIMEOUT="${WORKER_WAIT_TIMEOUT:-600}"
 # ── Training hyperparameters ──
 PRETRAINED_MODEL="${PRETRAINED_MODEL:-stabilityai/stable-diffusion-3.5-medium}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/nft_sd3_multinode}"
-DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/pickscore/train.txt}"
-EVAL_DATA_PATH="${EVAL_DATA_PATH:-${REPO_ROOT}/data/datasets/pickscore/test.txt}"
+SDE_TYPE="${SDE_TYPE:-dpm2}"
+TIMESTEP_FRACTION="${TIMESTEP_FRACTION:-0.99}"
+REWARD_NAME="${REWARD_NAME:-pickscore}"
+DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/${REWARD_NAME}/train.txt}"
+EVAL_DATA_PATH="${EVAL_DATA_PATH:-${REPO_ROOT}/data/datasets/${REWARD_NAME}/test.txt}"
+EVAL_STEPS="${EVAL_STEPS:-0}"
 
-NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-10}"
-PROMPTS_PER_BATCH="${PROMPTS_PER_BATCH:-48}"
-NUM_SAMPLES_PER_PROMPT="${NUM_SAMPLES_PER_PROMPT:-24}"
-SAMPLING_FORWARD_BATCH="${SAMPLING_FORWARD_BATCH:-$(( NUM_SAMPLES_PER_PROMPT * NUM_NODES ))}"
-TRAINING_FORWARD_BATCH="${TRAINING_FORWARD_BATCH:-12}"
-NUM_UPDATES="${NUM_UPDATES:-1}"
+# ── Batch geometry (5 core knobs — see _batch_config.sh for docs) ──
+NUM_INFERENCE_STEPS=10
+PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-48}
+NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-16}
+SAMPLING_FORWARD_BATCH=${SAMPLING_FORWARD_BATCH:-$(( NUM_SAMPLES_PER_PROMPT * NUM_NODES ))}  # per-device peak forward batch during sampling
+TRAINING_FORWARD_BATCH=${TRAINING_FORWARD_BATCH:-8}     # per-device peak forward batch during training
+NUM_UPDATES=${NUM_UPDATES:-1}                           # gradient update steps per local batch
 
 source "${SCRIPT_DIR}/_batch_config.sh"
 resolve_batch_params
@@ -95,45 +99,18 @@ print_batch_params
 
 SHUFFLE_SEED="${SHUFFLE_SEED:-42}"
 SHUFFLE_SAMPLES="${SHUFFLE_SAMPLES:-true}"
-EVAL_EMA_DECAY="${EVAL_EMA_DECAY:-0.9}"
+EVAL_EMA_DECAY="${EVAL_EMA_DECAY:-0.99}"
 EVAL_EMA_UPDATE_INTERVAL="${EVAL_EMA_UPDATE_INTERVAL:-1}"
-NFT_ALGO_KWARG_ARGS=(
-    --algorithm.kwarg "beta=0.1"
-    --algorithm.kwarg "adv_mode=raw"
-    --algorithm.kwarg "adv_clip_max=5.0"
-    --algorithm.kwarg "use_adaptive_weight=true"
-    --algorithm.kwarg "train_timestep_mode=all"
-    --algorithm.kwarg "shuffle_train_timesteps=true"
-    --algorithm.kwarg "apply_time_shift_in_loss=false"
-    --algorithm.kwarg "use_reference_ema=true"
-    --algorithm.kwarg "reference_update_timing=rollout_end"
-    --algorithm.kwarg "ema_decay=0.001"
-    --algorithm.kwarg "decay_type=warmup"
-    --algorithm.kwarg "ema_flat_steps=75"
-    --algorithm.kwarg "ema_uprate=0.0075"
-    --algorithm.kwarg "ema_uphold=0.999"
-    --algorithm.shuffle-seed "${SHUFFLE_SEED}"
-    --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}"
-    --algorithm.kwarg "clip_range=1e-4"
-    --algorithm.kwarg "kl_coef=0.0001"
-    --algorithm.adv-normalization "group"
-    --algorithm.use-global-std "true"
-    --algorithm.adv-norm-eps "1e-4"
-    --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}"
-    --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}"
-)
-
 
 REPORT_TO_WANDB=true
 WANDB_PROJECT_NAME="diffusionrl-diffusionNFT"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-SD3.5-DiffusionNFT-multinode}"
 WANDB_LOG_MEDIA=true
 WANDB_MEDIA_MAX_ITEMS=48
-WANDB_TAGS="${WANDB_TAGS:-reproduce,sd3.5,nft,pickscore,multinode}"
+WANDB_TAGS="${WANDB_TAGS:-reproduce,sd3.5,nft,${REWARD_NAME},multinode}"
 WANDB_ENTITY="${WANDB_ENTITY:-diffusionrl-reproduce}"
 LOGGING_STEPS=1
 
-REWARD_NAME="pickscore"
 REWARD_DEVICE="cuda"
 REWARD_LOCATION="sampling_actor"
 
@@ -207,23 +184,47 @@ run_training() {
         \
         --sampling.shift 3.0 \
         --sampling.eta 0.0 \
-        --sampling.sde-type dpm2 \
-        --sampling.timestep-fraction 0.99 \
+        --sampling.sde-type "${SDE_TYPE}" \
+        --sampling.timestep-fraction "${TIMESTEP_FRACTION}" \
         --sampling.num-inference-steps "${NUM_INFERENCE_STEPS}" \
         --sampling.guidance-scale 1.0 \
         --sampling.sampling-adapter old \
         --sampling.max-samples-per-request "${DIRECT_SAMPLING_BATCH_SIZE}" \
-        "${NFT_ALGO_KWARG_ARGS[@]}" \
+        --algorithm.shuffle-seed "${SHUFFLE_SEED}" \
+        --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}" \
+        --algorithm.kwarg beta=1 \
+        --algorithm.kwarg adv_mode=raw \
+        --algorithm.kwarg adv_clip_max=5.0 \
+        --algorithm.kwarg use_adaptive_weight=true \
+        --algorithm.kwarg train_timestep_mode=all \
+        --algorithm.kwarg shuffle_train_timesteps=true \
+        --algorithm.kwarg apply_time_shift_in_loss=false \
+        --algorithm.kwarg use_reference_ema=true \
+        --algorithm.kwarg reference_update_timing=rollout_end \
+        --algorithm.kwarg ema_decay=0.001 \
+        --algorithm.kwarg decay_type=warmup \
+        --algorithm.kwarg ema_flat_steps=0 \
+        --algorithm.kwarg ema_uprate=0.001 \
+        --algorithm.kwarg ema_uphold=0.5 \
         \
         --algorithm.prompts-per-rollout "${PROMPTS_PER_BATCH}" \
         "${micro_batch_args[@]}" \
         --training.num-updates-per-local-batch "${NUM_UPDATES_PER_LOCAL_BATCH}" \
         --algorithm.samples-per-prompt "${NUM_SAMPLES_PER_PROMPT}" \
+        --algorithm.kwarg clip_range=1e-4 \
+        --algorithm.kwarg kl_coef=0.0 \
+        --algorithm.adv-normalization group \
+        --algorithm.use-global-std true \
+        --algorithm.adv-norm-eps 1e-4 \
+        --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}" \
+        --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}" \
         \
         --rollout.topology.mode direct_rollout \
---ray.rollout-num-nodes 0 \
+        --sync.protocol disabled \
+        --ray.rollout-num-nodes 0 \
         --ray.rollout-num-gpus-per-node 0 \
         --ray.training-num-gpus-per-node "${GPUS_PER_NODE}" \
+        --ray.offload-train false \
         --ray.ray-address "${HEAD_IP}:${HEAD_PORT}" \
         --ray.training-num-nodes "${NUM_NODES}" \
         --ray.placement-strategy "${RAY_PLACEMENT_STRATEGY}" \
@@ -239,13 +240,9 @@ run_training() {
         --height 512 \
         --width 512 \
         \
-        --rollout.control.num-rollout 1000 \
+        --rollout.control.num-rollout 10000 \
         --rollout.artifacts.save-steps 0 \
-        --rollout.evaluation.eval-steps 60 \
-        --rollout.evaluation.num-inference-steps 40 \
-        --rollout.evaluation.sampling-adapter default \
-        --rollout.evaluation.sde-type flow \
-        --rollout.evaluation.eta 0.0 \
+        --rollout.evaluation.eval-steps ${EVAL_STEPS} \
         --rollout.logging.logging-steps "${LOGGING_STEPS}" \
         --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
         --rollout.logging.report-to-wandb "${REPORT_TO_WANDB}" \
@@ -255,7 +252,6 @@ run_training() {
         --rollout.logging.wandb-media-max-items "${WANDB_MEDIA_MAX_ITEMS}" \
         --rollout.logging.wandb-tags "${WANDB_TAGS}" \
         "${wandb_entity_args[@]}" \
-        --sync.protocol disabled \
         "$@"
 }
 

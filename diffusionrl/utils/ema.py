@@ -11,59 +11,20 @@ For NFT LoRA training, the existing DualAdapterEMA handles old/new adapter
 synchronization without touching this class.
 
 FSDP/DTensor: When model parameters are DTensors (e.g. under FSDP2), all
-EMA buffers and copies must stay DTensor; mixing torch.Tensor and DTensor
-in copy_/in-place ops raises RuntimeError. This module keeps types consistent
-and uses a type-aware copy when needed.
+EMA buffers, temp backups, and copy operations must stay as DTensors.
+Mixing plain Tensor and DTensor in copy_ triggers RuntimeError. The FSDP
+backend enables reshard_after_forward=True so that model.parameters()
+consistently returns DTensors before and after forward passes.
 """
 
 from collections.abc import Iterable
+from contextlib import contextmanager
 from typing import Optional, Callable, Dict, Any
 
 import torch
 import torch.nn as nn
 
 
-def _is_dtensor(t: torch.Tensor) -> bool:
-    """True if t is a distributed tensor (e.g. FSDP sharded)."""
-    return type(t).__name__ == "DTensor"
-
-
-def _copy_into_param(param: nn.Parameter, src: torch.Tensor) -> None:
-    """Copy src into param.data, handling Tensor vs DTensor so distributed ops see consistent types."""
-    dest = param.data
-    if type(dest) == type(src):
-        dest.copy_(src)
-        return
-    if _is_dtensor(dest) and not _is_dtensor(src):
-        from torch.distributed.tensor import distribute_tensor
-
-        src_dt = distribute_tensor(src, dest.device_mesh, dest.placements)
-        dest.copy_(src_dt)
-        return
-    if not _is_dtensor(dest) and _is_dtensor(src):
-        full = src.full_tensor() if hasattr(src, "full_tensor") else src
-        dest.copy_(full)
-        return
-    dest.copy_(src)
-
-
-def _copy_from_param(dest: torch.Tensor, param: nn.Parameter) -> None:
-    """Copy param.data into dest (e.g. EMA buffer), handling Tensor vs DTensor."""
-    src = param.data.detach()
-    if type(dest) == type(src):
-        dest.copy_(src)
-        return
-    if _is_dtensor(dest) and not _is_dtensor(src):
-        from torch.distributed.tensor import distribute_tensor
-
-        src_dt = distribute_tensor(src, dest.device_mesh, dest.placements)
-        dest.copy_(src_dt)
-        return
-    if not _is_dtensor(dest) and _is_dtensor(src):
-        full = src.full_tensor() if hasattr(src, "full_tensor") else src
-        dest.copy_(full)
-        return
-    dest.copy_(src)
 
 
 class EMAModuleWrapper:
@@ -111,19 +72,19 @@ class EMAModuleWrapper:
             optimization_step = self._step_counter
 
         parameters = list(parameters)
-        one_minus_decay = 1 - self.get_current_decay(optimization_step)
+        current_decay = self.get_current_decay(optimization_step)
+        one_minus_decay = 1 - current_decay
 
         if (optimization_step + 1) % self.update_step_interval == 0:
             for ema_parameter, parameter in zip(self.ema_parameters, parameters, strict=True):
                 if parameter.requires_grad:
                     if ema_parameter.device == parameter.device:
-                        ema_parameter.add_(one_minus_decay * (parameter - ema_parameter))
+                        # In-place: ema = decay * ema + (1 - decay) * param
+                        ema_parameter.mul_(current_decay).add_(parameter, alpha=one_minus_decay)
                     else:
-                        parameter_copy = parameter.detach().to(ema_parameter.device)
-                        parameter_copy.sub_(ema_parameter)
-                        parameter_copy.mul_(one_minus_decay)
-                        ema_parameter.add_(parameter_copy)
-                        del parameter_copy
+                        param_copy = parameter.detach().to(ema_parameter.device)
+                        ema_parameter.mul_(current_decay).add_(param_copy, alpha=one_minus_decay)
+                        del param_copy
 
         self._step_counter += 1
 
@@ -147,13 +108,12 @@ class EMAModuleWrapper:
         """Force EMA to be an exact copy of current model parameters."""
         parameters = list(parameters)
         for ema_parameter, parameter in zip(self.ema_parameters, parameters, strict=True):
-            _copy_from_param(ema_parameter, parameter)
+            ema_parameter.data.copy_(parameter.data)
 
     def copy_ema_to(
         self,
         parameters: Iterable[nn.Parameter],
         store_temp: bool = True,
-        grad: bool = False,
     ) -> None:
         """Copy EMA weights into model parameters.
 
@@ -161,28 +121,43 @@ class EMAModuleWrapper:
             parameters: Model parameters to overwrite.
             store_temp: If ``True``, save originals so they can be restored
                 via :meth:`copy_temp_to`.
-            grad: When *store_temp* is ``True``, keep temp tensors on the
-                same device (``grad=True``) or move to CPU (``grad=False``).
-                When ``device is None`` (FSDP / sharded), temps always stay
-                on-device to preserve distributed tensor metadata.
+
+        Following DualAdapterEMA's pattern: ``param.data.clone()`` preserves
+        DTensor type, and ``param.data.copy_(ema)`` stays within DTensor
+        dispatch. For non-FSDP (device!=None), temps go to CPU.
         """
         parameters = list(parameters)
         if store_temp:
-            if grad or self.device is None:
+            if self.device is None:
+                # FSDP/DTensor path: clone preserves DTensor metadata.
                 self.temp_stored_parameters = [p.data.clone() for p in parameters]
             else:
+                # Non-FSDP path: materialize to CPU.
                 self.temp_stored_parameters = [p.detach().cpu().clone() for p in parameters]
 
         for ema_parameter, parameter in zip(self.ema_parameters, parameters, strict=True):
-            _copy_into_param(parameter, ema_parameter)
+            if parameter.numel() > 0:
+                # DTensor→DTensor or Tensor→Tensor: copy_ dispatch handles both.
+                parameter.data.copy_(ema_parameter)
 
     def copy_temp_to(self, parameters: Iterable[nn.Parameter]) -> None:
         """Restore model parameters previously saved by *copy_ema_to*."""
         assert self.temp_stored_parameters is not None, "No temp parameters stored"
         parameters = list(parameters)
         for temp_parameter, parameter in zip(self.temp_stored_parameters, parameters, strict=True):
-            _copy_into_param(parameter, temp_parameter)
+            # DTensor→DTensor or CPU Tensor→GPU Tensor: copy_ handles both.
+            parameter.data.copy_(temp_parameter)
         self.temp_stored_parameters = None
+
+    @contextmanager
+    def use_ema_parameters(self, parameters: Iterable[nn.Parameter]):
+        """Context manager: swap EMA weights in, automatically restore on exit."""
+        parameters = list(parameters)
+        self.copy_ema_to(parameters, store_temp=True)
+        try:
+            yield
+        finally:
+            self.copy_temp_to(parameters)
 
     def state_dict(self) -> Dict[str, Any]:
         return {
@@ -554,7 +529,7 @@ class EMAManager:
         if self.eval_ema is None:
             return False
         trainable = [p for p in model.parameters() if p.requires_grad]
-        self.eval_ema.copy_ema_to(trainable, store_temp=True, grad=False)
+        self.eval_ema.copy_ema_to(trainable, store_temp=True)
         return True
 
     def restore_from_eval(self, model: nn.Module) -> bool:
@@ -563,3 +538,13 @@ class EMAManager:
         trainable = [p for p in model.parameters() if p.requires_grad]
         self.eval_ema.copy_temp_to(trainable)
         return True
+
+    @contextmanager
+    def use_eval_ema(self, model: nn.Module):
+        """Context manager: temporarily switch to EMA parameters, restore on exit."""
+        if self.eval_ema is None:
+            yield
+            return
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        with self.eval_ema.use_ema_parameters(trainable):
+            yield

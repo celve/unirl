@@ -217,6 +217,8 @@ def analyze_step(
         metrics["ratio_max"] = t_ratio.max().item()
         metrics["ratio_min"] = t_ratio.min().item()
         metrics["ratio_max_deviation"] = (t_ratio - 1.0).abs().max().item()
+    if "ratio_max_deviation" in metrics and metrics["ratio_max_deviation"] > threshold:
+        has_divergence = True
 
     if verbose:
         print(f"\n  === Step {step_idx} detailed tensor stats ===")
@@ -334,8 +336,66 @@ def main():
 
     print()
 
+    # ── Training On-Policy Consistency (primary metric) ──
+    # This uses only training-side tensors (old_log_prob vs new_log_prob) which
+    # are always correctly aligned regardless of sampling sub-batch ordering.
+    print("=== Training On-Policy Consistency (primary metric) ===")
+    any_onpolicy_divergence = False
+    for step_idx in common_steps:
+        training_step_dir = os.path.join(training_dir, f"step_{step_idx:03d}")
+        t_tensors = load_step_tensors(training_step_dir)
+        t_old = t_tensors.get("old_log_prob")
+        t_new = t_tensors.get("new_log_prob")
+        t_ratio = t_tensors.get("ratio")
+        if t_old is not None and t_new is not None:
+            lp_diff = (t_old - t_new).abs()
+            max_diff = lp_diff.max().item()
+            mean_diff = lp_diff.mean().item()
+            ratio_dev = (t_ratio - 1.0).abs().max().item() if t_ratio is not None else float("nan")
+            status = "OK" if max_diff <= args.threshold else "DRIFT"
+            if max_diff > args.threshold:
+                any_onpolicy_divergence = True
+            print(
+                f"  step {step_idx}: |old_lp - new_lp| max={max_diff:.8e}  mean={mean_diff:.8e}  "
+                f"ratio_max_dev={ratio_dev:.8e}  [{status}]"
+            )
+    if not any_onpolicy_divergence and common_steps:
+        print("  >> All steps PASS: old_log_prob == new_log_prob (ratio == 1.0)")
+        print("     Training replay is perfectly consistent with transported sampling log-probs.")
+    elif any_onpolicy_divergence:
+        print("  >> WARNING: ratio drift detected — old_log_prob != new_log_prob on training side.")
+    print()
+
+    # ── Shape alignment check ──
+    has_shape_mismatch = False
+    for step_idx in common_steps:
+        m = all_step_metrics.get(step_idx, {})
+        for name in COMPARISON_TENSORS:
+            if m.get(f"{name}_shape_mismatch"):
+                has_shape_mismatch = True
+                break
+        if has_shape_mismatch:
+            break
+    if has_shape_mismatch:
+        print("=== WARNING: Sampling / Training Batch Shape Mismatch ===")
+        m0 = all_step_metrics.get(common_steps[0], {})
+        s_shape = m0.get("latents_input_sampling_shape", "?")
+        t_shape = m0.get("latents_input_training_shape", "?")
+        print(f"  Sampling debug tensor shape: {s_shape}")
+        print(f"  Training debug tensor shape: {t_shape}")
+        print("  The sampling and training debug tensors have different batch sizes.")
+        print("  Cross-side comparisons (noise_pred, latents_in/out, log_prob transport)")
+        print("  use prefix matching but may compare NON-CORRESPONDING samples if the")
+        print("  sample ordering differs between sampling sub-batches and training DP shards.")
+        print("  Rely on the 'Training On-Policy Consistency' section above as the")
+        print("  authoritative consistency metric.")
+        print()
+
     # Summary
-    print("=== Summary ===")
+    print("=== Cross-Side Summary (sampling vs training debug tensors) ===")
+    if has_shape_mismatch:
+        print("  NOTE: batch shape mismatch detected; cross-side diffs may reflect")
+        print("        non-corresponding samples rather than real divergence.")
     if first_divergence_step is not None:
         print(f"  FIRST DIVERGENCE at step {first_divergence_step}")
         m = all_step_metrics[first_divergence_step]

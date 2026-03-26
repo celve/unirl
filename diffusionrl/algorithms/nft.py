@@ -6,239 +6,28 @@ requirements, advantage processing, and the forward-process loss entrypoint.
 """
 
 import logging
+
 from contextlib import nullcontext
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from diffusionrl.types.sampling import RolloutRequest
 
 import torch
 import torch.nn as nn
 from diffusers.utils.torch_utils import randn_tensor
 
+from diffusionrl.config.build_domain_args import resolve_sde_config
 from diffusionrl.types import ForwardTrainingBatch, SDEConfig
 from diffusionrl.utils.adapter_utils import switch_adapter
-from diffusionrl.utils.dtypes import parse_torch_dtype
 from .base import BaseAlgorithm, EMASpec, SamplingRequirements
+from .forward_context import ForwardContext
 
 logger = logging.getLogger(__name__)
 
 
 def _resolve_algorithm_sde_config(config: Dict[str, Any]) -> SDEConfig:
-    return SDEConfig.from_mapping(config.get("sde_config"))
-
-
-class _NFTLoss:
-    """Private NFT objective owned and created by NFTAlgorithm."""
-
-    def __init__(self, algorithm: "NFTAlgorithm") -> None:
-        self.algorithm = algorithm
-
-    def _compute_core(
-        self,
-        model: nn.Module,
-        samples: Dict[str, Any],
-        advantages: torch.Tensor,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        text_ids: Optional[torch.Tensor] = None,
-        image_ids: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        ref_model: Optional[nn.Module] = None,
-        old_model: Optional[nn.Module] = None,
-        generator: Optional[torch.Generator] = None,
-        attn_metadata: Optional[Any] = None,
-        config: Optional[Any] = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        algorithm = self.algorithm
-        del attn_metadata
-
-        device = advantages.device
-        batch_size = advantages.shape[0]
-        x0 = samples["clean_latents"]
-
-        if prompt_embeds is None:
-            prompt_embeds = samples.get("prompt_embeds")
-        if pooled_prompt_embeds is None:
-            pooled_prompt_embeds = samples.get("pooled_prompt_embeds")
-        if text_ids is None:
-            text_ids = samples.get("text_ids")
-        if image_ids is None:
-            image_ids = samples.get("image_ids")
-        if encoder_attention_mask is None:
-            encoder_attention_mask = samples.get("encoder_attention_mask")
-
-        provided_t = kwargs.get("timestep_values")
-        assert provided_t is not None, "timestep_values must be provided"
-        t = provided_t.to(device)
-        if t.ndim == 0:
-            t = t.repeat(batch_size)
-        apply_shift = bool(kwargs.get("apply_shift", False))
-
-        xt, _ = algorithm.forward_diffusion(
-            x0,
-            t,
-            generator=generator,
-            apply_shift=apply_shift,
-        )
-
-        if apply_shift:
-            t_shifted = (algorithm.time_shift * t) / (1 + (algorithm.time_shift - 1) * t)
-        else:
-            t_shifted = t
-        t_expanded = t_shifted.view(-1, *([1] * (x0.ndim - 1)))
-
-        algorithm_autocast_dtype = getattr(algorithm, "autocast_dtype", None)
-        if algorithm_autocast_dtype in (torch.float16, torch.bfloat16):
-            model_dtype = algorithm_autocast_dtype
-        elif config is not None and hasattr(config, "get_torch_dtype"):
-            model_dtype = config.get_torch_dtype()
-        else:
-            model_dtype = prompt_embeds.dtype if prompt_embeds is not None else xt.dtype
-        autocast_enabled = model_dtype in (torch.float16, torch.bfloat16)
-
-        xt_cast = xt.to(model_dtype)
-        prompt_embeds_cast = prompt_embeds.to(model_dtype) if prompt_embeds is not None else None
-        pooled_embeds_cast = pooled_prompt_embeds.to(model_dtype) if pooled_prompt_embeds is not None else None
-        guidance_scale = float(
-            kwargs.get(
-                "guidance_scale",
-                getattr(config, "guidance_scale", 3.5) if config is not None else 3.5,
-            )
-        )
-        plugin = algorithm._get_forward_plugin(model)
-        model_kwargs = plugin.prepare_model_kwargs(
-            latents=xt_cast,
-            sigma=t_shifted,
-            prompt_embeds=prompt_embeds_cast,
-            pooled_prompt_embeds=pooled_embeds_cast,
-            guidance_scale=guidance_scale,
-            text_ids=text_ids,
-            image_ids=image_ids,
-            encoder_attention_mask=encoder_attention_mask,
-        )
-
-        adapter_model = model.module if hasattr(model, "module") else model
-        assert hasattr(adapter_model, "set_adapter"), "adapter_model must have set_adapter method"
-        adapter_model.set_adapter(algorithm.new_adapter_name)
-
-        autocast_ctx_fn = lambda: torch.autocast("cuda", model_dtype) if autocast_enabled else nullcontext[None]()
-        grad_context = torch.enable_grad() if not torch.is_grad_enabled() else nullcontext()
-
-        with grad_context, autocast_ctx_fn():
-            forward_prediction = model(**model_kwargs)[0]
-
-        with autocast_ctx_fn():
-            old_prediction = algorithm.get_old_prediction(
-                model,
-                model_kwargs,
-                old_model=old_model,
-            )
-
-        if hasattr(adapter_model, "set_adapter"):
-            adapter_model.set_adapter(algorithm.new_adapter_name)
-
-        adv_processed = algorithm.prepare_loss_advantages(advantages)
-        adv_clipped = torch.clamp(adv_processed, -algorithm.adv_clip_max, algorithm.adv_clip_max)
-        r = (adv_clipped / algorithm.adv_clip_max) / 2.0 + 0.5
-        r = torch.clamp(r, 0, 1)
-
-        positive_prediction = (
-            algorithm.beta * forward_prediction + (1 - algorithm.beta) * old_prediction.detach()
-        )
-        negative_prediction = (
-            (1 + algorithm.beta) * old_prediction.detach() - algorithm.beta * forward_prediction
-        )
-
-        x0_positive = xt - t_expanded * positive_prediction
-        x0_negative = xt - t_expanded * negative_prediction
-
-        if algorithm.use_adaptive_weight:
-            with torch.no_grad():
-                weight_positive = (
-                    torch.abs(x0_positive.double() - x0.double())
-                    .mean(dim=tuple(range(1, x0.ndim)), keepdim=True)
-                    .clip(min=1e-5)
-                )
-                weight_negative = (
-                    torch.abs(x0_negative.double() - x0.double())
-                    .mean(dim=tuple(range(1, x0.ndim)), keepdim=True)
-                    .clip(min=1e-5)
-                )
-            positive_loss = ((x0_positive - x0) ** 2 / weight_positive).mean(
-                dim=tuple(range(1, x0.ndim))
-            )
-            negative_loss = ((x0_negative - x0) ** 2 / weight_negative).mean(
-                dim=tuple(range(1, x0.ndim))
-            )
-        else:
-            positive_loss = ((x0_positive - x0) ** 2).mean(dim=tuple(range(1, x0.ndim)))
-            negative_loss = ((x0_negative - x0) ** 2).mean(dim=tuple(range(1, x0.ndim)))
-
-        r_expanded = r.view(-1, *([1] * (positive_loss.ndim - 1)))
-        policy_loss = (
-            r_expanded * positive_loss / algorithm.beta
-            + (1 - r_expanded) * negative_loss / algorithm.beta
-        ).mean()
-
-        loss_terms = {
-            "policy_loss": policy_loss.detach(),
-            "positive_loss": positive_loss.mean().detach(),
-            "negative_loss": negative_loss.mean().detach(),
-            "x0_norm": torch.mean(x0**2).detach(),
-            "prediction_deviation": torch.mean(
-                (forward_prediction - old_prediction) ** 2
-            ).detach(),
-            "advantage_mean": advantages.mean().detach(),
-            "advantage_std": advantages.std().detach(),
-            "r_mean": r.mean().detach(),
-        }
-
-        total_loss = policy_loss * algorithm.adv_clip_max
-
-        if algorithm.kl_coef > 0:
-            with autocast_ctx_fn():
-                ref_prediction = algorithm.get_ref_prediction(
-                    model,
-                    model_kwargs,
-                    ref_model=ref_model,
-                )
-            kl_div = ((forward_prediction - ref_prediction) ** 2).mean(
-                dim=tuple(range(1, x0.ndim))
-            )
-            kl_div = torch.mean(kl_div)
-            total_loss = total_loss + algorithm.kl_coef * kl_div
-            loss_terms["kl_div"] = kl_div.detach()
-
-        loss_terms["total_loss"] = total_loss.detach()
-        return total_loss, loss_terms
-
-    def compute_loss(
-        self,
-        model: nn.Module,
-        batch: ForwardTrainingBatch,
-        ref_model: Optional[nn.Module] = None,
-        old_model: Optional[nn.Module] = None,
-        generator: Optional[torch.Generator] = None,
-        attn_metadata: Optional[Any] = None,
-        config: Optional[Any] = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        samples = {"clean_latents": batch.clean_latents}
-        return self._compute_core(
-            model=model,
-            samples=samples,
-            advantages=batch.advantages,
-            prompt_embeds=batch.embeddings.prompt_embeds,
-            pooled_prompt_embeds=batch.embeddings.pooled_prompt_embeds,
-            text_ids=batch.embeddings.text_ids,
-            image_ids=batch.embeddings.image_ids,
-            encoder_attention_mask=batch.embeddings.encoder_attention_mask,
-            ref_model=ref_model,
-            old_model=old_model,
-            generator=generator,
-            attn_metadata=attn_metadata,
-            config=config,
-            **kwargs,
-        )
+    return resolve_sde_config(config)
 
 
 class NFTAlgorithm(BaseAlgorithm):
@@ -248,7 +37,7 @@ class NFTAlgorithm(BaseAlgorithm):
     This class handles:
     1. Sampling requirements (get_sampling_requirements)
     2. Advantage computation and post-processing
-    3. Loss ownership / debug entry (compute_loss -> self.loss_fn)
+    3. Loss computation (compute_loss / _compute_loss_core)
     4. Gradient computation (compute_loss_and_backward)
     5. NFT-specific old/reference prediction handling
 
@@ -271,7 +60,6 @@ class NFTAlgorithm(BaseAlgorithm):
     - loss = r * L_positive + (1-r) * L_negative
     - where r = normalized_advantage in [0, 1]
     """
-    _loss_cls = _NFTLoss
 
     @classmethod
     def from_config(cls, config: dict) -> "NFTAlgorithm":
@@ -287,9 +75,6 @@ class NFTAlgorithm(BaseAlgorithm):
             "adv_clip_max",
             "adv_mode",
             "use_adaptive_weight",
-            # Backward-compatibility shim for legacy NFT launch scripts.
-            # NFT never consumed PPO-style ratio clipping, but older bash
-            # entrypoints still pass clip_range through algorithm_kwargs.
             "clip_range",
             "skip_last_timestep",
             "skip_initial_timesteps",
@@ -342,7 +127,6 @@ class NFTAlgorithm(BaseAlgorithm):
             clip_max=config.get("adv_clip_abs", 5.0),
             use_global_std=bool(config.get("use_global_std", False)),
             trimmed_ratio=float(config.get("trimmed_ratio", 0.0)),
-            autocast_precision=config.get("training_autocast_precision"),
         )
 
     def __init__(
@@ -374,8 +158,6 @@ class NFTAlgorithm(BaseAlgorithm):
         epsilon: float = 1e-8,
         clip_max: float = 5.0,
         use_global_std: bool = False,
-        trimmed_ratio: float = 0.0,
-        autocast_precision: Any = None,
         **kwargs,
     ):
         super().__init__(
@@ -388,7 +170,6 @@ class NFTAlgorithm(BaseAlgorithm):
             epsilon=epsilon,
             clip_max=clip_max,
             use_global_std=use_global_std,
-            trimmed_ratio=trimmed_ratio,
             **kwargs,
         )
         self.beta = beta
@@ -408,13 +189,6 @@ class NFTAlgorithm(BaseAlgorithm):
         self.train_timestep_mode = str(train_timestep_mode)
         self.shuffle_train_timesteps = bool(shuffle_train_timesteps)
         self.apply_time_shift_in_loss = bool(apply_time_shift_in_loss)
-        self.model_type = "default"
-        self.autocast_dtype = parse_torch_dtype(
-            autocast_precision,
-            field_name="training_autocast_precision",
-            allow_none=True,
-        )
-        self._forward_plugin = None
 
     @property
     def eta(self) -> float:
@@ -534,30 +308,29 @@ class NFTAlgorithm(BaseAlgorithm):
     def assemble_training_batch(
         self,
         *,
-        request: Any,
+        request: "RolloutRequest",
         sampler_outputs: List[Any],
         rewards: torch.Tensor,
         advantages: torch.Tensor,
         sde_indices: Optional[Set[int]] = None,
     ) -> Any:
-        del sde_indices
         return self._assemble_forward_batch(
-            request=request,
             sampler_outputs=sampler_outputs,
             rewards=rewards,
             advantages=advantages,
+            prompts=request.prompts,
         )
 
     def _assemble_forward_batch(
         self,
         *,
-        request: Any,
         sampler_outputs: List[Any],
         rewards: torch.Tensor,
         advantages: torch.Tensor,
+        prompts: List[str],
     ) -> Any:
         from diffusionrl.types.sampling import RolloutSamples, PromptEmbeddings
-        from diffusionrl.types.training_batch import ForwardTrainingBatch, build_rollout_extras
+        from diffusionrl.types.training_batch import ForwardTrainingBatch
 
         clean_latents = []
         all_prompt_embeds = []
@@ -574,12 +347,12 @@ class NFTAlgorithm(BaseAlgorithm):
                 raise TypeError(
                     f"Assemble stage expects RolloutSamples, got {type(output).__name__} at index={idx}."
                 )
-            embeddings_item = output.aux.get("embeddings")
-            if embeddings_item is None:
+            _embeddings = output.aux.get("embeddings")
+            if _embeddings is None:
                 raise ValueError(f"RolloutSamples at index={idx} missing embeddings in forward path.")
 
             clean_latents.append(output.latents)
-            emb = embeddings_item
+            emb = _embeddings
             all_prompt_embeds.append(emb.prompt_embeds)
             if emb.pooled_prompt_embeds is not None:
                 all_pooled_prompt_embeds.append(emb.pooled_prompt_embeds)
@@ -625,21 +398,8 @@ class NFTAlgorithm(BaseAlgorithm):
             advantages=advantages,
             embeddings=embeddings,
             rewards=rewards,
-            prompts=list(request.prompts),
-            prompt_ids=(
-                list(request.meta.get("prompt_ids")) if request.meta.get("prompt_ids") is not None else None
-            ),
-            sample_ids=(
-                list(request.meta.get("sample_ids")) if request.meta.get("sample_ids") is not None else None
-            ),
-            group_ids=(
-                list(request.meta.get("group_ids")) if request.meta.get("group_ids") is not None else None
-            ),
+            prompts=prompts,
             timesteps=timesteps,
-            extras=build_rollout_extras(
-                request=request,
-                sampler_outputs=sampler_outputs,
-            ),
         )
         batch.validate()
         return batch
@@ -702,7 +462,6 @@ class NFTAlgorithm(BaseAlgorithm):
         t: torch.Tensor,
         noise: Optional[torch.Tensor] = None,
         generator: Optional[torch.Generator] = None,
-        apply_shift: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Apply forward diffusion to clean samples.
@@ -714,20 +473,19 @@ class NFTAlgorithm(BaseAlgorithm):
                 x0.shape, generator=generator, device=x0.device, dtype=x0.dtype
             )
 
-        if apply_shift:
-            t_shifted = (self.time_shift * t) / (1 + (self.time_shift - 1) * t)
-        else:
-            t_shifted = t
-
-        t_expanded = t_shifted.view(-1, *([1] * (x0.ndim - 1)))
+        t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
         xt = (1 - t_expanded) * x0 + t_expanded * noise
 
         return xt, noise
 
+    @torch.no_grad()
     def get_old_prediction(
         self,
         model: nn.Module,
-        model_kwargs: Dict[str, Any],
+        ctx: ForwardContext,
+        *,
+        latents: torch.Tensor,
+        sigma: torch.Tensor,
         old_model: Optional[nn.Module] = None,
     ) -> torch.Tensor:
         """
@@ -742,63 +500,56 @@ class NFTAlgorithm(BaseAlgorithm):
         adapter switching fails. Falling back to the base model or current
         model would silently change the NFT objective semantics.
         """
-        with torch.no_grad():
-            if old_model is not None:
-                return old_model(**model_kwargs)[0]
+        if old_model is not None:
+            return ctx.forward(old_model, latents=latents, sigma=sigma)
 
-            old_params_ema = getattr(self, "_old_params_ema", None)
-            if old_params_ema is not None:
-                trainable = [p for p in model.parameters() if p.requires_grad]
-                old_params_ema.copy_ema_to(trainable, store_temp=True, grad=True)
-                try:
-                    return model(**model_kwargs)[0]
-                finally:
-                    old_params_ema.copy_temp_to(trainable)
+        adapter_model = model.module if hasattr(model, "module") else model
+        if hasattr(adapter_model, "set_adapter"):
+            try:
+                with switch_adapter(adapter_model, self.old_adapter_name):
+                    return ctx.forward(model, latents=latents, sigma=sigma)
+            except Exception as exc:
+                raise RuntimeError(
+                    "NFT old-policy prediction failed while switching adapters. "
+                    f"Expected adapter={self.old_adapter_name!r}. "
+                    "Refusing to fall back to base/current model because that would "
+                    "change the training objective."
+                ) from exc
 
-            adapter_model = model.module if hasattr(model, "module") else model
-            if hasattr(adapter_model, "set_adapter"):
-                try:
-                    with switch_adapter(adapter_model, self.old_adapter_name):
-                        return model(**model_kwargs)[0]
-                except Exception as exc:
-                    raise RuntimeError(
-                        "NFT old-policy prediction failed while switching adapters. "
-                        f"Expected adapter={self.old_adapter_name!r}. "
-                        "Refusing to fall back to base/current model because that would "
-                        "change the training objective."
-                    ) from exc
+        raise RuntimeError(
+            "NFT old-policy prediction requires one of: explicit old_model, "
+            "full-parameter EMA, or adapter switching support via set_adapter(). "
+            f"Model type={type(adapter_model).__name__} does not expose a valid old-policy path."
+        )
 
-            raise RuntimeError(
-                "NFT old-policy prediction requires one of: explicit old_model, "
-                "full-parameter EMA, or adapter switching support via set_adapter(). "
-                f"Model type={type(adapter_model).__name__} does not expose a valid old-policy path."
-            )
-
+    @torch.no_grad()
     def get_ref_prediction(
         self,
         model: nn.Module,
-        model_kwargs: Dict[str, Any],
+        ctx: ForwardContext,
+        *,
+        latents: torch.Tensor,
+        sigma: torch.Tensor,
         ref_model: Optional[nn.Module] = None,
     ) -> torch.Tensor:
         """Get reference prediction for KL regularization (base model)."""
-        with torch.no_grad():
-            adapter_model = model.module if hasattr(model, "module") else model
-            if hasattr(adapter_model, "disable_adapter"):
-                try:
-                    with adapter_model.disable_adapter():
-                        return model(**model_kwargs)[0]
-                except Exception as exc:
-                    raise RuntimeError(
-                        "NFT reference prediction failed while disabling adapters. "
-                        "Refusing to fall back to current model because that would collapse "
-                        "the KL term toward zero."
-                    ) from exc
-            if ref_model is not None:
-                return ref_model(**model_kwargs)[0]
-            raise RuntimeError(
-                "NFT reference prediction requires either disable_adapter() support "
-                "or an explicit ref_model. No valid base-model reference path was available."
-            )
+        adapter_model = model.module if hasattr(model, "module") else model
+        if hasattr(adapter_model, "disable_adapter"):
+            try:
+                with adapter_model.disable_adapter():
+                    return ctx.forward(model, latents=latents, sigma=sigma)
+            except Exception as exc:
+                raise RuntimeError(
+                    "NFT reference prediction failed while disabling adapters. "
+                    "Refusing to fall back to current model because that would collapse "
+                    "the KL term toward zero."
+                ) from exc
+        if ref_model is not None:
+            return ctx.forward(ref_model, latents=latents, sigma=sigma)
+        raise RuntimeError(
+            "NFT reference prediction requires either disable_adapter() support "
+            "or an explicit ref_model. No valid base-model reference path was available."
+        )
 
     # ------------------------------------------------------------------
     # Algorithm-owned training step (Phase 2)
@@ -876,6 +627,7 @@ class NFTAlgorithm(BaseAlgorithm):
 
         for start, end in mini_batches:
             mini_batch = batch.slice(start, end)
+            mini_ctx = self._make_forward_context(model, mini_batch.embeddings, guidance_scale)
             mini_loss_sum = 0.0
             metric_sums: Dict[str, float] = {}
             metric_counts: Dict[str, int] = {}
@@ -885,9 +637,8 @@ class NFTAlgorithm(BaseAlgorithm):
                 loss, metrics = self.compute_loss(
                     model=model,
                     batch=mini_batch,
+                    ctx=mini_ctx,
                     timestep_values=t,
-                    apply_shift=apply_shift,
-                    guidance_scale=guidance_scale,
                 )
                 scaled_loss = loss / effective_mini_batches
                 scaled_loss.backward()
@@ -931,47 +682,143 @@ class NFTAlgorithm(BaseAlgorithm):
     # Forward plugin
     # ------------------------------------------------------------------
 
-    def _get_forward_plugin(self, model: nn.Module):
-        """Get the forward plugin for this model."""
-        if self._forward_plugin is None:
-            if self.model_type != "default":
-                raise RuntimeError(
-                    "No forward_plugin set on NFTAlgorithm for model_type="
-                    f"{self.model_type!r}. TrainingActor must inject plugin via "
-                    "model_bundle.forward_plugin()."
+    def _compute_loss_core(
+        self,
+        model: nn.Module,
+        x0: torch.Tensor,
+        advantages: torch.Tensor,
+        ctx: ForwardContext,
+        *,
+        ref_model: Optional[nn.Module] = None,
+        old_model: Optional[nn.Module] = None,
+        generator: Optional[torch.Generator] = None,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        device = advantages.device
+        batch_size = advantages.shape[0]
+
+        t = kwargs.pop("timestep_values")
+        assert t is not None, "timestep_values must be provided"
+        t = torch.as_tensor(t, device=device, dtype=torch.float32)
+        if t.ndim == 0:
+            t = t.repeat(batch_size)
+
+        xt, _ = self.forward_diffusion(
+            x0,
+            t,
+            generator=generator,
+        )
+
+        t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
+
+        adapter_model = model.module if hasattr(model, "module") else model
+        assert hasattr(adapter_model, "set_adapter"), "adapter_model must have set_adapter method"
+        adapter_model.set_adapter(self.new_adapter_name)
+
+        grad_context = torch.enable_grad() if not torch.is_grad_enabled() else nullcontext()
+
+        with grad_context:
+            forward_prediction = ctx.forward(model, latents=xt, sigma=t)
+
+        old_prediction = self.get_old_prediction(
+            model, ctx, latents=xt, sigma=t, old_model=old_model,
+        )
+
+        if hasattr(adapter_model, "set_adapter"):
+            adapter_model.set_adapter(self.new_adapter_name)
+
+        adv_processed = self.prepare_loss_advantages(advantages)
+        adv_clipped = torch.clamp(adv_processed, -self.adv_clip_max, self.adv_clip_max)
+        r = (adv_clipped / self.adv_clip_max) / 2.0 + 0.5
+        r = torch.clamp(r, 0, 1)
+
+        positive_prediction = (
+            self.beta * forward_prediction + (1 - self.beta) * old_prediction.detach()
+        )
+        negative_prediction = (
+            (1 + self.beta) * old_prediction.detach() - self.beta * forward_prediction
+        )
+
+        x0_positive = xt - t_expanded * positive_prediction
+        x0_negative = xt - t_expanded * negative_prediction
+
+        if self.use_adaptive_weight:
+            with torch.no_grad():
+                weight_positive = (
+                    torch.abs(x0_positive.double() - x0.double())
+                    .mean(dim=tuple(range(1, x0.ndim)), keepdim=True)
+                    .clip(min=1e-5)
                 )
-            from diffusionrl.models.forward_plugins import DefaultForwardPlugin
-            self._forward_plugin = DefaultForwardPlugin()
-            logger.warning(
-                "No forward_plugin set on NFTAlgorithm (model_type=%s). "
-                "Using DefaultForwardPlugin. Set algorithm._forward_plugin from "
-                "model_bundle.forward_plugin() for model-specific behavior.",
-                self.model_type,
+                weight_negative = (
+                    torch.abs(x0_negative.double() - x0.double())
+                    .mean(dim=tuple(range(1, x0.ndim)), keepdim=True)
+                    .clip(min=1e-5)
+                )
+            positive_loss = ((x0_positive - x0) ** 2 / weight_positive).mean(
+                dim=tuple(range(1, x0.ndim))
             )
-        return self._forward_plugin
+            negative_loss = ((x0_negative - x0) ** 2 / weight_negative).mean(
+                dim=tuple(range(1, x0.ndim))
+            )
+        else:
+            positive_loss = ((x0_positive - x0) ** 2).mean(dim=tuple(range(1, x0.ndim)))
+            negative_loss = ((x0_negative - x0) ** 2).mean(dim=tuple(range(1, x0.ndim)))
+
+        r_expanded = r.view(-1, *([1] * (positive_loss.ndim - 1)))
+        policy_loss = (
+            r_expanded * positive_loss / self.beta
+            + (1 - r_expanded) * negative_loss / self.beta
+        ).mean()
+
+        loss_terms = {
+            "policy_loss": policy_loss.detach(),
+            "positive_loss": positive_loss.mean().detach(),
+            "negative_loss": negative_loss.mean().detach(),
+            "x0_norm": torch.mean(x0**2).detach(),
+            "prediction_deviation": torch.mean(
+                (forward_prediction - old_prediction) ** 2
+            ).detach(),
+            "advantage_mean": advantages.mean().detach(),
+            "advantage_std": advantages.std().detach(),
+            "r_mean": r.mean().detach(),
+        }
+
+        total_loss = policy_loss * self.adv_clip_max
+
+        if self.kl_coef > 0:
+            ref_prediction = self.get_ref_prediction(
+                model, ctx, latents=xt, sigma=t, ref_model=ref_model,
+            )
+            kl_div = ((forward_prediction - ref_prediction) ** 2).mean(
+                dim=tuple(range(1, x0.ndim))
+            )
+            kl_div = torch.mean(kl_div)
+            total_loss = total_loss + self.kl_coef * kl_div
+            loss_terms["kl_div"] = kl_div.detach()
+
+        loss_terms["total_loss"] = total_loss.detach()
+        return total_loss, loss_terms
 
     def compute_loss(
         self,
         model: nn.Module,
         batch: ForwardTrainingBatch,
+        *,
+        ctx: ForwardContext,
         ref_model: Optional[nn.Module] = None,
         old_model: Optional[nn.Module] = None,
         generator: Optional[torch.Generator] = None,
-        attn_metadata: Optional[Any] = None,
-        config: Optional[Any] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """Single NFT loss entrypoint for debugging and training."""
-        if self.loss_fn is None:
-            raise RuntimeError(f"{type(self).__name__} loss_fn is not initialized.")
-        return self.loss_fn.compute_loss(
+        return self._compute_loss_core(
             model=model,
-            batch=batch,
+            x0=batch.clean_latents.float(),
+            advantages=batch.advantages,
+            ctx=ctx,
             ref_model=ref_model,
             old_model=old_model,
             generator=generator,
-            attn_metadata=attn_metadata,
-            config=config,
             **kwargs,
         )
 

@@ -169,11 +169,8 @@ def generate_prompt_only_rollout(
             f"Unsupported embedding kwargs: {unsupported_embedding_kwargs}."
         )
 
-    generator = None
     seed_raw = request.sampling.get("seed")
-    if seed_raw is not None:
-        generator = torch.Generator(device=device)
-        generator.manual_seed(int(seed_raw))
+    base_seed = None if seed_raw is None else int(seed_raw)
 
     if request.num_inference_steps is None:
         raise ValueError(f"{host_label} requires RolloutRequest.num_inference_steps to be resolved.")
@@ -214,7 +211,7 @@ def generate_prompt_only_rollout(
         width=width,
         num_frames=num_frames,
         latents=request.inputs.get("latents"),
-        generator=generator,
+        base_seed=base_seed,
         sde_indices=sde_indices,
         text_ids=encoded.get("text_ids"),
         image_ids=encoded.get("image_ids"),

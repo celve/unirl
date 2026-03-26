@@ -45,7 +45,6 @@ class ModelForwardPlugin(Protocol):
         image_ids: Optional[torch.Tensor] = None,
         negative_prompt_embeds: Optional[torch.Tensor] = None,
         negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        autocast_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -85,7 +84,25 @@ class ModelForwardPlugin(Protocol):
 
 
 class BaseForwardPlugin(ABC):
-    """Base class for forward plugins with common utilities."""
+    """Base class for forward plugins with common utilities.
+
+    Subclasses may set ``autocast_dtype`` (e.g. ``torch.bfloat16``) so that
+    ``forward()`` wraps the model call in ``torch.autocast``, matching the
+    precision used during sampling.  When ``None`` (default) no autocast is
+    applied and the model runs in its native parameter dtype.
+    """
+
+    autocast_dtype: Optional[torch.dtype] = None
+
+    def _build_autocast_ctx(self, device: torch.device):
+        """Return an autocast context matching the sampling path."""
+        if (
+            self.autocast_dtype is not None
+            and device.type == "cuda"
+            and self.autocast_dtype in (torch.float16, torch.bfloat16)
+        ):
+            return torch.autocast("cuda", self.autocast_dtype)
+        return nullcontext()
 
     @abstractmethod
     def prepare_model_kwargs(
@@ -115,21 +132,10 @@ class BaseForwardPlugin(ABC):
         image_ids: Optional[torch.Tensor] = None,
         negative_prompt_embeds: Optional[torch.Tensor] = None,
         negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        autocast_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ) -> torch.Tensor:
         """Execute forward pass through the model."""
         ...
-
-    @staticmethod
-    def _autocast_context(
-        *,
-        device: torch.device,
-        autocast_dtype: Optional[torch.dtype],
-    ):
-        if device.type == "cuda" and autocast_dtype in (torch.float16, torch.bfloat16):
-            return torch.autocast("cuda", autocast_dtype)
-        return nullcontext()
 
     def _prepare_timestep(
         self,
@@ -222,7 +228,6 @@ class FluxForwardPlugin(BaseForwardPlugin):
         image_ids: Optional[torch.Tensor] = None,
         negative_prompt_embeds: Optional[torch.Tensor] = None,
         negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        autocast_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ) -> torch.Tensor:
         """Execute FLUX forward pass."""
@@ -236,10 +241,7 @@ class FluxForwardPlugin(BaseForwardPlugin):
             image_ids=image_ids,
             **kwargs,
         )
-        with self._autocast_context(
-            device=latents.device,
-            autocast_dtype=autocast_dtype,
-        ):
+        with self._build_autocast_ctx(latents.device):
             pred = model(**model_kwargs)[0]
 
         return pred
@@ -274,7 +276,7 @@ class SD3ForwardPlugin(BaseForwardPlugin):
         # Keep timestep in float32 to avoid bfloat16 precision loss
         timestep = self._prepare_timestep(sigma, batch_size, device) * 1000
         model_kwargs: Dict[str, Any] = {
-            "hidden_states": latents.to(dtype),
+            "hidden_states": latents,
             "encoder_hidden_states": prompt_embeds,
             "timestep": timestep,
             "return_dict": False,
@@ -298,73 +300,51 @@ class SD3ForwardPlugin(BaseForwardPlugin):
         image_ids: Optional[torch.Tensor] = None,
         negative_prompt_embeds: Optional[torch.Tensor] = None,
         negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        autocast_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ) -> torch.Tensor:
-        """Execute SD3 forward pass with memory-efficient CFG.
-
-        Uses batched forward (single forward with 2x batch) instead of
-        two separate forwards to reduce peak memory usage.
-        """
+        """Execute SD3 forward pass with memory-efficient CFG."""
         batch_size = latents.shape[0]
         device = latents.device
-        dtype = prompt_embeds.dtype
 
-        timestep = self._prepare_timestep(sigma, batch_size, device)
-        timestep_1000 = timestep * 1000
+        sigma = self._prepare_timestep(sigma, batch_size, device)
+        timestep = sigma * 1000
+        encoder_attention_mask = kwargs.get("encoder_attention_mask")
 
-        with self._autocast_context(
-            device=latents.device,
-            autocast_dtype=autocast_dtype,
-        ):
+        with self._build_autocast_ctx(device):
             if guidance_scale > 1.0:
-                # CFG: single forward with batched inputs (memory efficient)
-                # Following flow_grpo's approach: concat latents x2, concat [neg, pos] embeds
-                uncond_embeds = (
-                    negative_prompt_embeds
-                    if negative_prompt_embeds is not None
-                    else torch.zeros_like(prompt_embeds)
-                )
-
-                uncond_pooled = (
-                    negative_pooled_prompt_embeds
-                    if negative_pooled_prompt_embeds is not None
-                    else (
+                if negative_prompt_embeds is None:
+                    negative_prompt_embeds = torch.zeros_like(prompt_embeds)
+                if negative_pooled_prompt_embeds is None:
+                    negative_pooled_prompt_embeds = (
                         torch.zeros_like(pooled_prompt_embeds)
                         if pooled_prompt_embeds is not None
                         else None
                     )
-                )
 
-                # Concatenate for single batched forward
-                # latents: [B, C, H, W] -> [2B, C, H, W]
-                latents_batched = torch.cat([latents, latents], dim=0)
-                # embeds: [B, seq, hidden] -> [2B, seq, hidden]
-                embeds_batched = torch.cat([uncond_embeds, prompt_embeds], dim=0)
-                # timestep: [B] -> [2B]
-                timestep_batched = torch.cat([timestep_1000, timestep_1000], dim=0)
+                attn_kw: Dict[str, Any] = {}
+                if encoder_attention_mask is not None:
+                    attn_kw["encoder_attention_mask"] = torch.cat(
+                        [encoder_attention_mask, encoder_attention_mask], dim=0
+                    )
 
-                # pooled: [B, hidden] -> [2B, hidden]
-                if pooled_prompt_embeds is not None:
-                    pooled_batched = torch.cat([uncond_pooled, pooled_prompt_embeds], dim=0)
-                else:
-                    pooled_batched = None
-
-                # Single forward pass with doubled batch
                 noise_pred = model(
-                    hidden_states=latents_batched.to(dtype),
-                    encoder_hidden_states=embeds_batched,
-                    timestep=timestep_batched,
-                    pooled_projections=pooled_batched,
+                    hidden_states=torch.cat([latents, latents], dim=0),
+                    encoder_hidden_states=torch.cat([negative_prompt_embeds, prompt_embeds], dim=0),
+                    timestep=torch.cat([timestep, timestep], dim=0),
+                    pooled_projections=(
+                        torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
+                        if pooled_prompt_embeds is not None else None
+                    ),
                     return_dict=False,
+                    **attn_kw,
                 )[0]
 
-                # Split result: [2B, ...] -> 2x [B, ...]
                 noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
-                pred = noise_pred_uncond + guidance_scale * (
-                    noise_pred_cond - noise_pred_uncond
-                )
+                pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
             else:
+                single_kw: Dict[str, Any] = {"return_dict": False}
+                if encoder_attention_mask is not None:
+                    single_kw["encoder_attention_mask"] = encoder_attention_mask
                 pred = model(
                     **self.prepare_model_kwargs(
                         latents=latents,
@@ -446,7 +426,6 @@ class HunyuanForwardPlugin(BaseForwardPlugin):
         negative_prompt_embeds: Optional[torch.Tensor] = None,
         negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
-        autocast_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ) -> torch.Tensor:
         """Execute Hunyuan forward pass."""
@@ -461,10 +440,7 @@ class HunyuanForwardPlugin(BaseForwardPlugin):
             encoder_attention_mask=encoder_attention_mask,
             **kwargs,
         )
-        with self._autocast_context(
-            device=latents.device,
-            autocast_dtype=autocast_dtype,
-        ):
+        with self._build_autocast_ctx(latents.device):
             pred = model(**model_kwargs)[0]
         return pred
 
@@ -522,7 +498,6 @@ class MochiForwardPlugin(BaseForwardPlugin):
         negative_prompt_embeds: Optional[torch.Tensor] = None,
         negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
-        autocast_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ) -> torch.Tensor:
         """Execute Mochi forward pass with optional CFG."""
@@ -532,10 +507,7 @@ class MochiForwardPlugin(BaseForwardPlugin):
         dtype = prompt_embeds.dtype
         timestep_1000 = self._prepare_timestep(sigma, batch_size, device) * 1000
 
-        with self._autocast_context(
-            device=latents.device,
-            autocast_dtype=autocast_dtype,
-        ):
+        with self._build_autocast_ctx(device):
             if guidance_scale > 1.0:
                 uncond_embeds = (
                     negative_prompt_embeds
@@ -628,7 +600,6 @@ class DefaultForwardPlugin(BaseForwardPlugin):
         image_ids: Optional[torch.Tensor] = None,
         negative_prompt_embeds: Optional[torch.Tensor] = None,
         negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        autocast_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ) -> torch.Tensor:
         """Execute forward pass with fallback logic and memory-efficient CFG."""
@@ -636,12 +607,9 @@ class DefaultForwardPlugin(BaseForwardPlugin):
         device = latents.device
         dtype = prompt_embeds.dtype
 
-        timestep = self._prepare_timestep(sigma, batch_size, device) # Keep timestep as float32
+        timestep = self._prepare_timestep(sigma, batch_size, device)
 
-        with self._autocast_context(
-            device=latents.device,
-            autocast_dtype=autocast_dtype,
-        ):
+        with self._build_autocast_ctx(device):
             # Try SD3-style interface (timestep * 1000)
             try:
                 timestep_1000 = timestep * 1000

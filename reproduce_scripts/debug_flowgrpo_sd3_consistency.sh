@@ -27,18 +27,25 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Default values
 PRETRAINED_MODEL="stabilityai/stable-diffusion-3.5-medium"
+MODEL_TYPE="sd3"
+# PRETRAINED_MODEL="black-forest-labs/FLUX.1-dev"
+# MODEL_TYPE="flux"
 DEBUG_OUTPUT_DIR=${DEBUG_OUTPUT_DIR:-"${REPO_ROOT}/debug_output"}
-DATA_PATH="${REPO_ROOT}/data/samples/prompts_toy.json"
+DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/datasets/pickscore/train.txt"}
 NUM_GPUS=${NUM_GPUS:-8}
 
-# Minimal batch settings for fast debug iteration
+# ── Batch geometry (5 core knobs — see _batch_config.sh for docs) ──
 NUM_INFERENCE_STEPS=10
-NUM_SAMPLES_PER_PROMPT=16
-PROMPTS_PER_BATCH=48
-DIRECT_SAMPLING_BATCH_SIZE=128
-LOCAL_MICRO_BATCH_SIZE=16
-NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-2}
-ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
+PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-8}
+NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-8}
+SAMPLING_FORWARD_BATCH=${SAMPLING_FORWARD_BATCH:-64}    # per-device peak forward batch during sampling
+TRAINING_FORWARD_BATCH=${TRAINING_FORWARD_BATCH:-8}     # per-device peak forward batch during training
+NUM_UPDATES=${NUM_UPDATES:-1}                           # gradient update steps per local batch
+
+source "${SCRIPT_DIR}/_batch_config.sh"
+resolve_batch_params
+validate_batch_params
+print_batch_params
 
 # Parse --sampling.sde-type and --sampling.eta from cmdline for logging
 SDE_TYPE_OVERRIDE=""
@@ -76,21 +83,10 @@ REWARD_LOCATION="sampling_actor"
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
-FLOWGRPO_ALGO_KWARG_ARGS=(
-    --algorithm.shuffle-seed "42"
-    --algorithm.shuffle-samples "false"
-    --algorithm.kwarg "clip_range=1e-4"
-    --algorithm.kwarg "use_kl_penalty=false"
-    --algorithm.kwarg "kl_coef=0.04"
-    --algorithm.adv-normalization "group"
-    --algorithm.use-global-std "true"
-    --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}"
-    --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}"
-)
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
-    --model.model-type sd3 \
+    --model.model-type ${MODEL_TYPE} \
     --sampling.sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-model-name ${REWARD_NAME} \
@@ -105,18 +101,28 @@ python -m diffusionrl.train \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
     --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 4.5 \
-    --sampling.timestep-fraction 0.1,0.3 \
+    --sampling.timestep-fraction 0.1,0.5 \
     \
-    "${FLOWGRPO_ALGO_KWARG_ARGS[@]}" \
+    --algorithm.shuffle-seed 42 \
+    --algorithm.shuffle-samples false \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}" \
     --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
+    --algorithm.kwarg clip_range=1e-4 \
+    --algorithm.kwarg use_kl_penalty=true \
+    --algorithm.kwarg kl_coef=0.04 \
+    --algorithm.adv-normalization group \
+    --algorithm.use-global-std true \
+    --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
+    --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
     --rollout.topology.mode direct_rollout \
---ray.rollout-num-nodes 0 \
+        --sync.protocol disabled \
+    --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
+    --ray.offload-train false \
     \
     --training.learning-rate 3e-4 \
     --training.max-grad-norm 1.0 \
@@ -136,7 +142,6 @@ python -m diffusionrl.train \
     \
     --debug.debug-output-dir "${DEBUG_OUTPUT_DIR}" \
     \
-    --sync.protocol disabled \
     "$@"
 
 echo ""
