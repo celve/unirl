@@ -20,7 +20,7 @@ DEFAULT_REWARD_HOOK_PATH = "diffusionrl.rollout.default_rollout.score_rewards_ho
 def create_rollout_services(
     args,
     *,
-    reward_pg_result: Optional[Any] = None,
+    reward_pgs: Optional[Any] = None,
     launch_config: LaunchConfig,
 ) -> Tuple[RolloutServices, Dict[str, Any]]:
     """Create rollout services and return dataset-step info for the driver."""
@@ -36,7 +36,7 @@ def create_rollout_services(
     reward_schema = RewardSchema.from_args(args)
     reward_service = create_driver_reward_executor(
         reward_schema,
-        reward_pg_result=reward_pg_result,
+        reward_pgs=reward_pgs,
     )
     if reward_service is None and not reward_schema.uses_sampling_actor_execution:
         raise RuntimeError("Driver failed to initialize driver-side reward service.")

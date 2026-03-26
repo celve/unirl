@@ -285,7 +285,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
         rollout_services = create_rollout_services(
             args,
-            reward_pg_result=pgs.get("reward"),
+            reward_pgs=pgs.get("reward"),
             launch_config=launch_config,
         )
 
@@ -319,10 +319,10 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
                 )
 
         if not training_actor_sampling_mode:
-            rollout_pg_result = pgs.get("rollout")
-            if rollout_pg_result is None:
+            rollout_pgs = pgs.get("rollout")
+            if rollout_pgs is None:
                 raise ValueError("Missing rollout placement-group allocation.")
-            rollout_group = create_rollout_actor_group(launch_config, rollout_pg_result)
+            rollout_group = create_rollout_actor_group(launch_config, rollout_pgs)
             rollout_runtime = RolloutGroupRuntime.from_group(rollout_group)
             rollout_services.attach_sampling_group(rollout_group)
             logger.info("Rollout actor group created and attached to rollout services")
@@ -333,12 +333,12 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             rollout_on_gpu = False
 
         # 4. Create training actors.
-        training_pg_result = pgs.get("training")
-        if training_pg_result is None:
+        training_pgs = pgs.get("training")
+        if training_pgs is None:
             raise ValueError("Missing training placement-group allocation.")
         training_group = create_training_actor_group(
             launch_config,
-            training_pg_result,
+            training_pgs,
         )
         training_runtime = TrainingGroupRuntime.from_group(training_group)
         resume_from_checkpoint = rollout_artifacts.resume_from_checkpoint

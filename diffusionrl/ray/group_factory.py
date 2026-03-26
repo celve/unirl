@@ -18,14 +18,14 @@ logger = logging.getLogger(__name__)
 
 def create_rollout_actor_group(
     launch_config: LaunchConfig,
-    pg_result,
+    pgs,
 ) -> RolloutActorGroup:
     """
     Factory function to create RolloutActorGroup for dedicated rollout engines.
 
     Args:
         launch_config: Resolved launch config built on the driver
-        pg_result: Tuple of (PlacementGroup, bundle_indices, gpu_ids)
+        pgs: Tuple of (PlacementGroup, bundle_indices, gpu_ids)
 
     Returns:
         Initialized RolloutActorGroup
@@ -35,7 +35,7 @@ def create_rollout_actor_group(
         raise ValueError(
             "Resolved runtime config does not include a dedicated rollout bootstrap payload."
         )
-    pg, bundle_indices, gpu_ids = pg_result
+    pg, bundle_indices, gpu_ids = pgs
     rollout_service_engine = rollout.service_engine
 
     actor_init_config = copy.deepcopy(rollout.actor_init_config)
@@ -155,19 +155,19 @@ def create_rollout_actor_group(
 
 def create_training_actor_group(
     launch_config: LaunchConfig,
-    pg_result,
+    pgs,
 ) -> TrainingActorGroup:
     """
     Factory function to create TrainingActorGroup from args.
 
     Args:
         launch_config: Resolved launch config built on the driver
-        pg_result: Tuple of (PlacementGroup, bundle_indices, gpu_ids)
+        pgs: Tuple of (PlacementGroup, bundle_indices, gpu_ids)
 
     Returns:
         Initialized TrainingActorGroup
     """
-    pg, bundle_indices, gpu_ids = pg_result
+    pg, bundle_indices, gpu_ids = pgs
     training = launch_config.training
     training_topology = training.topology
     # Actor-group size is currently driven by the resolved training actor_count.

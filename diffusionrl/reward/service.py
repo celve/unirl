@@ -70,7 +70,7 @@ class RewardService:
         self,
         reward_schema: RewardSchema,
         *,
-        reward_pg_result: Optional[PlacementGroupResult],
+        reward_pgs: Optional[PlacementGroupResult],
         owner_name: str,
     ) -> None:
         if not isinstance(reward_schema, RewardSchema):
@@ -82,18 +82,18 @@ class RewardService:
         self.reward_definition = reward_schema.to_definition()
         self.reward_provider = reward_schema.to_provider_config()
         self.execution_plan = reward_schema.to_execution_plan()
-        self.reward_pg = reward_pg_result
+        self.reward_pg = reward_pgs
         self.executors = []
         self.aggregation = self.reward_definition.component_aggregation
 
     def __init__(
         self,
         reward_schema: RewardSchema,
-        reward_pg_result: Optional[PlacementGroupResult] = None,
+        reward_pgs: Optional[PlacementGroupResult] = None,
     ) -> None:
         self._bind_reward_schema(
             reward_schema,
-            reward_pg_result=reward_pg_result,
+            reward_pgs=reward_pgs,
             owner_name="RewardService",
         )
 
