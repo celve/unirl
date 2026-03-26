@@ -253,7 +253,7 @@ class SD3Sampler(BaseSampler):
         height: int = 1024,
         width: int = 1024,
         latents: Optional[torch.Tensor] = None,
-        generator: Optional[torch.Generator] = None,
+        base_seed: Optional[int] = None,
         sde_indices: Optional[Set[int]] = None,
         max_sequence_length: int = 256,
         init_same_noise: bool = False,
@@ -334,11 +334,10 @@ class SD3Sampler(BaseSampler):
                 latent_shape=(self.latent_channels, latent_height, latent_width),
                 device=device,
                 dtype=latent_dtype,
-                generator=generator,
                 init_same_noise=init_same_noise,
                 samples_per_prompt=samples_per_prompt,
                 noise_group_ids=noise_group_ids,
-                base_seed=(None if generator is None else int(generator.initial_seed())),
+                base_seed=base_seed,
             )
         else:
             latents = latents.to(device=device, dtype=latent_dtype)
@@ -424,7 +423,6 @@ class SD3Sampler(BaseSampler):
                 sigma=sigma,
                 sigma_next=sigma_next,
                 eta=step_eta,
-                generator=generator,
                 sde_type=self.sde_type,
                 sigma_max=sigmas[1].item(),
                 strategy=strategy,

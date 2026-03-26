@@ -207,7 +207,7 @@ class FluxSampler(BaseSampler):
         height: int = 1024,
         width: int = 1024,
         latents: Optional[torch.Tensor] = None,
-        generator: Optional[torch.Generator] = None,
+        base_seed: Optional[int] = None,
         sde_indices: Optional[Set[int]] = None,
         init_same_noise: bool = False,
         samples_per_prompt: int = 1,
@@ -273,11 +273,10 @@ class FluxSampler(BaseSampler):
                 latent_shape=(self.IN_CHANNELS, latent_h, latent_w),
                 device=device,
                 dtype=trajectory_dtype,
-                generator=generator,
                 init_same_noise=init_same_noise,
                 samples_per_prompt=samples_per_prompt,
                 noise_group_ids=noise_group_ids,
-                base_seed=(None if generator is None else int(generator.initial_seed())),
+                base_seed=base_seed,
             )
         else:
             latents = latents.to(device=device, dtype=trajectory_dtype)
@@ -364,7 +363,6 @@ class FluxSampler(BaseSampler):
                 sigma=sigma,
                 sigma_next=sigma_next,
                 eta=step_eta,
-                generator=generator,
                 sde_type=self.sde_type,
                 sigma_max=sigma_schedule[1].item(),
                 strategy=strategy,

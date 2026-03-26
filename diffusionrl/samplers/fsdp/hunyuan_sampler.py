@@ -141,8 +141,11 @@ class FSDPHunyuanSampler(BaseSampler):
         width: int = 848,
         num_frames: int = 129,
         latents: Optional[torch.Tensor] = None,
-        generator: Optional[torch.Generator] = None,
+        base_seed: Optional[int] = None,
         sde_indices: Optional[Set[int]] = None,
+        init_same_noise: bool = False,
+        samples_per_prompt: int = 1,
+        noise_group_ids: Optional[List[str]] = None,
         **kwargs,
     ) -> RolloutSamples:
         """
@@ -217,15 +220,16 @@ class FSDPHunyuanSampler(BaseSampler):
         trajectory_dtype = self.trajectory_dtype
 
         if latents is None:
-            latents = torch.randn(
-                batch_size,
-                self.IN_CHANNELS,
-                latent_t,
-                latent_h,
-                latent_w,
+            from ..noise_utils import generate_latents
+            latents = generate_latents(
+                batch_size=batch_size,
+                latent_shape=(self.IN_CHANNELS, latent_t, latent_h, latent_w),
                 device=device,
                 dtype=trajectory_dtype,
-                generator=generator,
+                init_same_noise=init_same_noise,
+                samples_per_prompt=samples_per_prompt,
+                noise_group_ids=noise_group_ids,
+                base_seed=base_seed,
             )
         else:
             latents = latents.to(device=device, dtype=trajectory_dtype)
@@ -295,7 +299,6 @@ class FSDPHunyuanSampler(BaseSampler):
                 sigma=sigma,
                 sigma_next=sigma_next,
                 eta=step_eta,
-                generator=generator,
                 sde_type=self.sde_type,
                 sigma_max=sigma_schedule[1].item(),
                 strategy=strategy,

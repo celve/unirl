@@ -19,42 +19,30 @@ def generate_shared_noise(
     latent_shape: Tuple[int, ...],
     device: torch.device,
     dtype: torch.dtype = torch.float32,
-    generator: Optional[torch.Generator] = None,
     noise_group_ids: Optional[List[str]] = None,
     base_seed: Optional[int] = None,
 ) -> torch.Tensor:
     """
-    Generate initial noise where samples from the same prompt share the same noise.
+    Generate initial noise where samples sharing the same noise_group_id
+    receive identical noise.
 
-    This is the core implementation for init_same_noise feature used by
-    DanceGRPO and MixGRPO. When K samples are generated for each prompt,
-    all K samples start from the same initial noise, which:
-    1. Reduces variance in advantage estimation
-    2. Makes differences between samples purely due to stochastic sampling path
-    3. Improves training stability
+    When ``base_seed`` is provided, each unique ``noise_group_id`` gets a
+    deterministic seed via ``_derive_group_seed(base_seed, group_id)``.
+    This is shard-safe: as long as ``base_seed`` (scalar) and per-sample
+    ``noise_group_ids`` (sliced list) are preserved across GPU shards, the
+    same group always produces the same noise.
 
-    Example:
-        # For batch_size=8, samples_per_prompt=4:
-        # - prompt_0: samples [0,1,2,3] share noise_0
-        # - prompt_1: samples [4,5,6,7] share noise_1
-        noise = generate_shared_noise(
-            batch_size=8,
-            samples_per_prompt=4,
-            latent_shape=(16, 64, 64),  # channels, height, width
-            device=device,
-            dtype=dtype,
-        )
-        # noise.shape = [8, 16, 64, 64]
-        # noise[0] == noise[1] == noise[2] == noise[3]  # Same prompt
-        # noise[4] == noise[5] == noise[6] == noise[7]  # Same prompt
+    Used by:
+    - ``init_same_noise=True``: noise_group_ids are per-group (shared within group)
+    - ``init_same_noise=False``: noise_group_ids are per-sample (unique noise)
 
     Args:
         batch_size: Total number of samples in batch
         latent_shape: Shape of a single latent (C, H, W) or (C, T, H, W) for video
         device: Device for the tensor
         dtype: Data type for the tensor
-        generator: Optional random generator for reproducibility
         noise_group_ids: Explicit per-sample noise sharing groups aligned to the batch
+        base_seed: Base seed for deterministic per-group noise derivation
 
     Returns:
         Noise tensor [batch_size, *latent_shape] with shared noise per explicit group
@@ -77,7 +65,6 @@ def generate_shared_noise(
                     *latent_shape,
                     device=device,
                     dtype=dtype,
-                    generator=generator,
                 )
             else:
                 group_generator = torch.Generator(device=device)
@@ -98,37 +85,46 @@ def generate_latents(
     latent_shape: Tuple[int, ...],
     device: torch.device,
     dtype: torch.dtype = torch.float32,
-    generator: Optional[torch.Generator] = None,
     init_same_noise: bool = False,
     samples_per_prompt: int = 1,
     noise_group_ids: Optional[List[str]] = None,
     base_seed: Optional[int] = None,
 ) -> torch.Tensor:
     """
-    High-level function for generating initial latents with optional noise sharing.
+    High-level function for generating initial latents.
 
-    This is the recommended interface for samplers to use when initializing latents.
-    It automatically handles the init_same_noise logic.
+    When ``base_seed`` and ``noise_group_ids`` are both provided, noise is
+    deterministically derived per unique ``noise_group_id`` via
+    ``_derive_group_seed``.  The sharing-vs-uniqueness behaviour is
+    controlled by the caller through the content of ``noise_group_ids``:
+
+    - ``init_same_noise=True``: IDs are per-group → shared noise within group
+    - ``init_same_noise=False``: IDs are per-sample → unique noise per sample
+
+    When ``base_seed`` or ``noise_group_ids`` is absent, falls back to
+    plain random noise.
 
     Args:
         batch_size: Total number of samples
         latent_shape: Shape of a single latent (C, H, W) or (C, T, H, W)
         device: Device for the tensor
         dtype: Data type for the tensor
-        generator: Optional random generator
         init_same_noise: Whether to share noise across samples for same prompt
         samples_per_prompt: Rollout geometry hint kept for sampler API compatibility
+        noise_group_ids: Per-sample noise group identifiers
+        base_seed: Base seed for deterministic noise derivation
 
     Returns:
         Latent tensor [batch_size, *latent_shape]
     """
     if init_same_noise:
+        assert base_seed is not None and noise_group_ids is not None, \
+            "generate_latents requires both base_seed and noise_group_ids when init_same_noise=True."
         return generate_shared_noise(
             batch_size=batch_size,
             latent_shape=latent_shape,
             device=device,
             dtype=dtype,
-            generator=generator,
             noise_group_ids=noise_group_ids,
             base_seed=base_seed,
         )
@@ -137,5 +133,4 @@ def generate_latents(
         *latent_shape,
         device=device,
         dtype=dtype,
-        generator=generator,
     )

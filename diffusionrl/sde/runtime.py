@@ -61,7 +61,6 @@ def denoising_step(
     sigma_next: torch.Tensor,
     eta: float = 1.0,
     prev_sample: Optional[torch.Tensor] = None,
-    generator: Optional[torch.Generator] = None,
     sde_type: str = "flow",
     sigma_max: float = 0.99,
     strategy: Optional["StepStrategy"] = None,
@@ -76,6 +75,10 @@ def denoising_step(
     * **Training replay** (``prev_sample`` provided): computes log
       probability of the given transition without generating noise.
 
+    SDE step noise is always uncontrolled (no seeded generator).  Initial
+    noise determinism is handled upstream by ``generate_latents`` via
+    per-sample ``noise_group_ids`` + ``base_seed``.
+
     Args:
         noise_pred: Model velocity / noise prediction.
         sample: Current noisy sample x_t.
@@ -84,7 +87,6 @@ def denoising_step(
         eta: Stochasticity level.  ``0`` yields a deterministic Euler step.
         prev_sample: If provided, used for training-time log-prob replay
             instead of generating a new sample.
-        generator: Optional RNG for reproducible noise.
         sde_type: SDE formulation name (``flow``, ``cps``, ``dance``,
             ``dpm2``, …).
         sigma_max: Maximum sigma, used by some formulations for numerical
@@ -128,7 +130,7 @@ def denoising_step(
         sigma_next=sigma_next,
         eta=eta,
         prev_sample=prev_sample,
-        generator=generator,
+        generator=None, # DONOT PASS GENERATOR HERE - It will hurt diversity and performance
         sigma_max=float(sigma_max),
         step_index=step_index,
     )
