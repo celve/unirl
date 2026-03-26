@@ -39,6 +39,7 @@ from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.training.backends import (
     ResolvedTrainBackendConfig,
     TrainBackendCapabilities,
+    TrainTopology,
     resolve_train_backend_capabilities_from_config,
     resolve_train_backend_config_from_args,
 )
@@ -157,44 +158,7 @@ class ResolvedRolloutModeInfo:
     effective_engine_capabilities: Optional[Dict[str, bool]] = None
 
 
-@dataclass(frozen=True)
-class ResolvedTrainTopology:
-    """Authoritative training topology derived from explicit config only.
-
-    actor_count is the size of the launched training actor group.
-    world_size is the distributed training rank count.
-    dp_size is the data-parallel consumer count used for training batch geometry.
-
-    These values often coincide in the current FSDP mainline, but they should
-    not be treated as interchangeable concepts.
-    """
-
-    actor_count: int
-    world_size: int
-    dp_size: int
-    dp_replicate_size: int = 1
-    dp_shard_size: int = 1
-    tp_size: int = 1
-    pp_size: int = 1
-    sp_size: int = 1
-    ep_size: int = 1
-    data_partition_axis: str = "dp"
-    partition_mode: str = "data_parallel"
-
-    def as_dict(self) -> Dict[str, Any]:
-        return {
-            "actor_count": self.actor_count,
-            "world_size": self.world_size,
-            "dp_size": self.dp_size,
-            "dp_replicate_size": self.dp_replicate_size,
-            "dp_shard_size": self.dp_shard_size,
-            "tp_size": self.tp_size,
-            "pp_size": self.pp_size,
-            "sp_size": self.sp_size,
-            "ep_size": self.ep_size,
-            "data_partition_axis": self.data_partition_axis,
-            "partition_mode": self.partition_mode,
-        }
+ResolvedTrainTopology = TrainTopology
 
 
 @dataclass(frozen=True)
@@ -791,6 +755,7 @@ __all__ = [
     "ResolvedRolloutTopology",
     "ResolvedTrainingPlan",
     "ResolvedTrainTopology",
+    "TrainTopology",
     "COLOCATE_ROLLOUT_MODE",
     "DEFAULT_MODEL_PATH",
     "DEFAULT_SAMPLER_PATH",

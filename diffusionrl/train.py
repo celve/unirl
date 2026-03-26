@@ -192,7 +192,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
         algorithm=control_algorithm,
         timestep_scheduler=create_rollout_timestep_scheduler(args, algorithm=control_algorithm),
     )
-    
+
     rollout_control = args.rollout.control
     rollout_artifacts = args.rollout.artifacts
     rollout_evaluation = args.rollout.evaluation
@@ -389,7 +389,6 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
         debug_save_intermediates = bool(args.debug.debug_save_intermediates)
 
         # 10. Core synchronous training loop
-        rollout_control = args.rollout.control
         enforce_rollout_alignment = not bool(rollout_buffer_settings.reassemble_by_group)
         save_rollout_debug_payload = None
         if debug_save_intermediates:
