@@ -25,7 +25,8 @@ import torch
 import torch.nn as nn
 
 from ..base import BaseSampler, RolloutSamples
-from diffusionrl.sde.runtime import sd3_time_shift, sde_step_with_log_prob
+from diffusionrl.sde.kernels import get_sde_strategy
+from diffusionrl.sde.runtime import sd3_time_shift, denoising_step
 from diffusionrl.types import LogProbData, PromptEmbeddings
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
@@ -52,7 +53,6 @@ class FSDPHunyuanSampler(BaseSampler):
             model=hunyuan_transformer,
             eta=1.0,
             shift=1.0,
-            use_sde_solver=True,
         )
         output = sampler.sample(
             prompt_embeds=encoder_hidden_states,
@@ -76,7 +76,6 @@ class FSDPHunyuanSampler(BaseSampler):
         eta: float = 1.0,
         sde_type: str = "dance",  # Use DanceGRPO formulation
         shift: float = 1.0,  # DanceGRPO default
-        use_sde_solver: bool = True,  # Enable SDE solver correction
         guidance_scale: float = DEFAULT_GUIDANCE_VALUE,
         autocast_precision: Any = "bf16",
         trajectory_precision: Any = "fp16",
@@ -93,14 +92,12 @@ class FSDPHunyuanSampler(BaseSampler):
             eta: Noise level for SDE (controls stochasticity)
             sde_type: SDE formulation (use "dance" for DanceGRPO alignment)
             shift: Time shift parameter for sigma schedule
-            use_sde_solver: Enable SDE solver correction (DanceGRPO line 76-79)
             guidance_scale: Default guidance scale when request does not override.
         """
         super().__init__(eta=eta, sde_type=sde_type, shift=shift)
         self.model = model
         self.text_encoder = text_encoder
         self.vae = vae
-        self.use_sde_solver = use_sde_solver
         self.default_guidance_scale = float(guidance_scale)
         self.autocast_dtype = parse_torch_dtype(autocast_precision, field_name="autocast_precision")
         self.trajectory_dtype = parse_torch_dtype(trajectory_precision, field_name="trajectory_precision")
@@ -250,8 +247,13 @@ class FSDPHunyuanSampler(BaseSampler):
             else float(self.default_guidance_scale)
         )
 
+        # Obtain a strategy instance once (important for stateful strategies like DPM2)
+        strategy = get_sde_strategy(self.sde_type)
+        if strategy.is_stateful:
+            strategy.init_schedule(sigma_schedule)
+
         # Storage for trajectory and log probs (DanceGRPO line 115-116)
-        all_latents = [latents.clone()]
+        all_latents = [latents.clone().to(dtype=trajectory_dtype)]
         all_log_probs: Dict[int, torch.Tensor] = {}
 
         autocast_ctx = (
@@ -262,7 +264,8 @@ class FSDPHunyuanSampler(BaseSampler):
 
         # Denoising loop (DanceGRPO line 117-139)
         for i in range(num_inference_steps):
-            sigma = sigma_schedule[i]
+            sigma = sigma_schedule[i].to(device)
+            sigma_next = sigma_schedule[i + 1].to(device)
             # Keep timestep in float32 to avoid precision loss (no int truncation)
             timestep = (sigma.float() * 1000).expand(batch_size)
 
@@ -284,44 +287,30 @@ class FSDPHunyuanSampler(BaseSampler):
                         return_dict=False,
                     )[0]
 
-            # Check if this step uses SDE
-            if (not self.uses_deterministic_solver) and i in sde_indices:
-                # SDE step with log probability (DanceGRPO line 136)
-                # output_dtype=float16: align log_prob with trajectory storage precision
-                # float16 has more mantissa bits than bfloat16
-                current_latents = latents.to(torch.float32)
-                pred_original = current_latents - sigma * model_pred
-                latents, log_prob, _ = sde_step_with_log_prob(
-                    noise_pred=model_pred,
-                    sample=current_latents,
-                    sigmas=sigma_schedule,
-                    step_index=i,
-                    eta=self.eta,
-                    use_sde_solver=self.use_sde_solver,
-                    sde_type=self.sde_type,
-                    output_dtype=trajectory_dtype,
-                )
-                latents = latents.to(trajectory_dtype)
-                all_log_probs[i] = log_prob.to(dtype=self.logprob_dtype)
-            else:
-                # ODE step (deterministic)
-                current_latents = latents.to(torch.float32)
-                pred_original = current_latents - sigma * model_pred
-                dsigma = sigma_schedule[i + 1] - sigma
-                latents = latents + dsigma * model_pred
-                latents = latents.to(dtype=trajectory_dtype)
+            # Unified step: eta controls SDE vs ODE behaviour.
+            step_eta = self.eta if i in sde_indices else 0.0
+            latents, log_prob, prev_sample_mean = denoising_step(
+                noise_pred=model_pred,
+                sample=latents,
+                sigma=sigma,
+                sigma_next=sigma_next,
+                eta=step_eta,
+                generator=generator,
+                sde_type=self.sde_type,
+                sigma_max=sigma_schedule[1].item(),
+                strategy=strategy,
+                step_index=i,
+            )
+            latents = latents.to(dtype=self.trajectory_dtype)
+            all_latents.append(latents)
 
-            all_latents.append(latents.clone())
+            if log_prob is not None:
+                all_log_probs[i] = log_prob.to(dtype=self.logprob_dtype)
 
         # Final latent normalization (DanceGRPO line 140)
-        final_latents = pred_original.to(torch.float32) / self.LATENT_SCALE
+        final_latents = latents.to(torch.float32) / self.LATENT_SCALE
 
         # Stack trajectory (DanceGRPO line 141)
-        # Under FSDP CPU offload, some intermediates can temporarily reside on CPU.
-        # Normalize trajectory tensors to the final latent device before stacking.
-        target_device = latents.device
-        if any(t.device != target_device for t in all_latents):
-            all_latents = [t.to(device=target_device) for t in all_latents]
         trajectories = torch.stack(all_latents, dim=1)  # [B, T+1, C, t, H, W]
 
         # Create embeddings bundle
@@ -352,7 +341,6 @@ class FSDPHunyuanSampler(BaseSampler):
                     "width": width,
                     "num_frames": num_frames,
                     "guidance_scale": float(actual_guidance),
-                    "use_sde_solver": self.use_sde_solver,
                     "latent_scale": self.LATENT_SCALE,
                 },
                 "step_indices": torch.arange(
@@ -447,14 +435,15 @@ class FSDPHunyuanSampler(BaseSampler):
                 "Deterministic Hunyuan sampling does not define stochastic log-prob replay."
             )
 
-        _, log_prob, _ = sde_step_with_log_prob(
+        sigma = sigma_schedule[timestep_index].to(device)
+        sigma_next = sigma_schedule[timestep_index + 1].to(device)
+        _, log_prob, _ = denoising_step(
             noise_pred=model_pred,
-            sample=latents.to(torch.float32),
-            sigmas=sigma_schedule,
-            step_index=timestep_index,
+            sample=latents,
+            sigma=sigma,
+            sigma_next=sigma_next,
             eta=self.eta,
-            use_sde_solver=self.use_sde_solver,
-            prev_sample=prev_latents.to(torch.float32),
+            prev_sample=prev_latents,
             sde_type=self.sde_type,
         )
 

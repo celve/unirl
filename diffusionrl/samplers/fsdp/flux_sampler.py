@@ -25,9 +25,10 @@ import torch
 import torch.nn as nn
 
 from ..base import BaseSampler, RolloutSamples
+from diffusionrl.sde.kernels import get_sde_strategy
 from diffusionrl.sde.runtime import (
     sd3_time_shift,
-    sde_step_with_log_prob,
+    denoising_step,
 )
 from diffusionrl.types import LogProbData, PromptEmbeddings
 from diffusionrl.utils.dtypes import parse_torch_dtype
@@ -76,7 +77,6 @@ class FluxSampler(BaseSampler):
         eta: float = 0.7,
         sde_type: str = "dance",  # FLUX uses DanceGRPO formulation by default
         shift: float = 1.0,       # FLUX uses shift=1.0
-        use_sde_solver: bool = True,  # Enable SDE solver correction
         guidance_scale: float = 3.5,  # Configurable guidance (DanceGRPO default: 3.5)
         autocast_precision: Any = "bf16",
         trajectory_precision: Any = "fp16",
@@ -92,14 +92,12 @@ class FluxSampler(BaseSampler):
             eta: Noise level for SDE (controls stochasticity)
             sde_type: Transition rule (dance/flow/dpm2)
             shift: Time shift parameter (FLUX uses 1.0)
-            use_sde_solver: Enable SDE solver correction
             guidance_scale: Guidance scale for classifier-free guidance (default: 3.5)
         """
         super().__init__(eta=eta, sde_type=sde_type, shift=shift)
         self.model = model
         self.text_encoder = text_encoder
         self.vae = vae
-        self.use_sde_solver = use_sde_solver
         self.guidance_scale = guidance_scale
         self.autocast_dtype = parse_torch_dtype(autocast_precision, field_name="autocast_precision")
         self.trajectory_dtype = parse_torch_dtype(trajectory_precision, field_name="trajectory_precision")
@@ -313,8 +311,14 @@ class FluxSampler(BaseSampler):
             else:
                 sde_indices = set(range(num_inference_steps))
 
+        # Obtain a strategy instance once (important for stateful strategies like DPM2)
+        strategy = get_sde_strategy(self.sde_type)
+        if strategy.is_stateful:
+            strategy.init_schedule(sigma_schedule)
+
         # Storage for trajectory and log probs (DanceGRPO line 226-227)
-        all_latents = [packed_latents.clone()]
+        latents = packed_latents.to(dtype=trajectory_dtype)
+        all_latents = [latents]
         all_log_probs: Dict[int, torch.Tensor] = {}
 
         autocast_ctx = (
@@ -324,9 +328,9 @@ class FluxSampler(BaseSampler):
         )
 
         # Denoising loop (DanceGRPO line 228-256)
-        z = packed_latents
         for i in range(num_inference_steps):
-            sigma = sigma_schedule[i]
+            sigma = sigma_schedule[i].to(device=device)
+            sigma_next = sigma_schedule[i + 1].to(device=device)
             # Keep timestep in float32 to avoid precision loss (no int truncation)
             timestep = sigma.float().expand(batch_size)
 
@@ -334,12 +338,8 @@ class FluxSampler(BaseSampler):
             self.model.eval()
             with torch.no_grad():
                 with autocast_ctx:
-                    # Note: timestep normalized by /1000 (line 238)
-                    # text_ids: [seq_len, 3] - position IDs for text tokens (all zeros)
-                    # DanceGRPO line 244: txt_ids=text_ids.repeat(encoder_hidden_states.shape[1],1)
-                    # Our text_ids is [B, seq, 3], so we take [0] to get [seq, 3]
                     pred = self.model(
-                        hidden_states=z,
+                        hidden_states=latents,
                         encoder_hidden_states=prompt_embeds,
                         timestep=timestep,
                         guidance=torch.tensor(
@@ -353,57 +353,31 @@ class FluxSampler(BaseSampler):
                         joint_attention_kwargs=None,
                         return_dict=False,
                     )[0]
-                    if pred.device != z.device:
-                        pred = pred.to(device=z.device)
+                    if pred.device != latents.device:
+                        pred = pred.to(device=latents.device)
 
-            # Check if this step uses SDE
-            if (not self.uses_deterministic_solver) and i in sde_indices:
-                # SDE step with log probability
-                if self.sde_type == "flow":
-                    current_latents = z.to(torch.float32)
-                    sigma = sigma_schedule[i].to(device=current_latents.device)
-                    pred_original = current_latents - sigma * pred
-                    z, log_prob, _ = sde_step_with_log_prob(
-                        noise_pred=pred,
-                        sample=current_latents,
-                        sigmas=sigma_schedule,
-                        step_index=i,
-                        eta=self.eta,
-                        sde_type=self.sde_type,
-                        output_dtype=trajectory_dtype,
-                    )
-                elif self.sde_type == "dance":
-                    # Default to DanceGRPO-style FLUX SDE
-                    # output_dtype=float16: align log_prob with trajectory storage precision
-                    current_latents = z.to(torch.float32)
-                    sigma = sigma_schedule[i].to(device=current_latents.device)
-                    pred_original = current_latents - sigma * pred
-                    z, log_prob, _ = sde_step_with_log_prob(
-                        noise_pred=pred,
-                        sample=current_latents,
-                        sigmas=sigma_schedule,
-                        step_index=i,
-                        eta=self.eta, use_sde_solver=self.use_sde_solver,
-                        sde_type=self.sde_type,
-                        output_dtype=trajectory_dtype,
-                    )
-                else:
-                    raise ValueError(f"Unsupported FLUX sde_type: {self.sde_type}")
-                # z is already in trajectory_dtype (cast inside shared runtime step helpers)
-                # Store log_prob only for SDE steps
+            # Unified step: eta controls SDE vs ODE behaviour.
+            step_eta = self.eta if i in sde_indices else 0.0
+            latents, log_prob, prev_sample_mean = denoising_step(
+                noise_pred=pred,
+                sample=latents,
+                sigma=sigma,
+                sigma_next=sigma_next,
+                eta=step_eta,
+                generator=generator,
+                sde_type=self.sde_type,
+                sigma_max=sigma_schedule[1].item(),
+                strategy=strategy,
+                step_index=i,
+            )
+            latents = latents.to(dtype=trajectory_dtype)
+            all_latents.append(latents)
+
+            if log_prob is not None:
                 all_log_probs[i] = log_prob.to(dtype=self.logprob_dtype)
-            else:
-                # Deterministic ODE step (no log_prob)
-                current_latents = z.to(torch.float32)
-                pred_original = current_latents - sigma * pred
-                dsigma = sigma_schedule[i + 1] - sigma
-                z = z + dsigma * pred
-                z = z.to(dtype=trajectory_dtype)
-
-            all_latents.append(z.clone())
 
         # Unpack final latents for output
-        final_latents = self._unpack_latents(pred_original, latent_h, latent_w)
+        final_latents = self._unpack_latents(latents, latent_h, latent_w)
 
         # Stack trajectory (DanceGRPO line 255)
         trajectories = torch.stack(all_latents, dim=1)  # [B, T+1, seq, C*4]
@@ -438,7 +412,6 @@ class FluxSampler(BaseSampler):
                     "latent_h": latent_h,
                     "latent_w": latent_w,
                     "guidance_scale": actual_guidance,
-                    "use_sde_solver": self.use_sde_solver,
                     "vae_scale": self.VAE_SCALE,
                     "vae_shift": self.VAE_SHIFT,
                 },
@@ -522,30 +495,16 @@ class FluxSampler(BaseSampler):
             raise ValueError(
                 "Deterministic FLUX sampling does not define stochastic log-prob replay."
             )
-        if self.sde_type == "flow":
-            # Flow-GRPO formulation via shared runtime.
-            _, log_prob, _ = sde_step_with_log_prob(
-                noise_pred=pred,
-                sample=latents,
-                sigmas=sigma_schedule,
-                step_index=timestep_index,
-                eta=self.eta,
-                prev_sample=prev_latents,
-                sde_type=self.sde_type,
-            )
-        elif self.sde_type == "dance":
-            # DanceGRPO formulation via shared runtime.
-            _, log_prob, _ = sde_step_with_log_prob(
-                noise_pred=pred,
-                sample=latents.to(torch.float32),
-                sigmas=sigma_schedule,
-                step_index=timestep_index,
-                eta=self.eta,
-                prev_sample=prev_latents.to(torch.float32),
-                sde_type=self.sde_type,
-                use_sde_solver=self.use_sde_solver,
-            )
-        else:
-            raise ValueError(f"Unsupported FLUX sde_type for log-prob replay: {self.sde_type}")
+        sigma = sigma_schedule[timestep_index].to(device)
+        sigma_next = sigma_schedule[timestep_index + 1].to(device)
+        _, log_prob, _ = denoising_step(
+            noise_pred=pred,
+            sample=latents,
+            sigma=sigma,
+            sigma_next=sigma_next,
+            eta=self.eta,
+            prev_sample=prev_latents,
+            sde_type=self.sde_type,
+        )
 
         return log_prob.to(dtype=self.logprob_dtype)
