@@ -370,11 +370,9 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
         logger.info("Initial weights synchronized")
 
         # 7. Restore rollout side and offload train side as needed after initial sync.
-        if args.ray.offload_rollout and args.ray.offload_train and rollout_runtime is not None:
-            training_runtime.offload()
-            rollout_runtime.wake_up()
-            rollout_on_gpu = True
-        elif args.ray.offload_rollout and rollout_runtime is not None:
+        if args.ray.offload_rollout and rollout_runtime is not None:
+            if args.ray.offload_train:
+                training_runtime.offload()
             rollout_runtime.wake_up()
             rollout_on_gpu = True
 
@@ -396,7 +394,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             rollout_runtime=rollout_runtime,
         )
 
-        debug_save_intermediates = bool(args.debug.debug_save_intermediates)
+        debug_save_intermediates = args.debug.debug_save_intermediates
 
         # 10. Core synchronous training loop
         enforce_rollout_alignment = not bool(rollout_buffer_settings.reassemble_by_group)
