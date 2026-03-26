@@ -1,27 +1,34 @@
 #!/bin/bash
-# Shared batch-geometry resolution and validation for reproduce scripts.
+# =============================================================================
+# Shared batch-size parameter resolution and validation.
 #
-# Source this file after defining:
-#   PROMPTS_PER_BATCH
-#   NUM_SAMPLES_PER_PROMPT
-#   SAMPLING_FORWARD_BATCH
-#   TRAINING_FORWARD_BATCH
-#   NUM_UPDATES
+# Source this file from any reproduce script AFTER setting the 5 core knobs:
 #
-# And one of:
-#   NUM_GPUS
-#   NUM_NODES + GPUS_PER_NODE
+#   PROMPTS_PER_BATCH=48           # unique prompts per rollout
+#   NUM_SAMPLES_PER_PROMPT=24      # samples per prompt (group size)
+#   SAMPLING_FORWARD_BATCH=192     # per-device peak forward batch during sampling
+#   TRAINING_FORWARD_BATCH=12      # per-device peak forward batch during training
+#   NUM_UPDATES=2                  # gradient update steps per local batch
 #
-# Derived outputs:
-#   TOTAL_GPUS
-#   ROLLOUT_TOTAL_SAMPLES
-#   LOCAL_BATCH_SIZE
-#   LOCAL_UPDATE_BATCH_SIZE
-#   DIRECT_SAMPLING_BATCH_SIZE
-#   LOCAL_MICRO_BATCH_SIZE
-#   NUM_UPDATES_PER_LOCAL_BATCH
+# Then call:
+#   resolve_batch_params            # derives all secondary params
+#   validate_batch_params           # checks divisibility constraints
+#   print_batch_params              # prints a summary table
+#
+# Outputs (available after resolve_batch_params):
+#   ROLLOUT_TOTAL_SAMPLES           = PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT
+#   TOTAL_GPUS                      = NUM_NODES * GPUS_PER_NODE  (multinode)
+#                                   = NUM_GPUS                    (single-node)
+#   LOCAL_UPDATE_BATCH_SIZE         = ROLLOUT_TOTAL_SAMPLES / TOTAL_GPUS / NUM_UPDATES
+#   DIRECT_SAMPLING_BATCH_SIZE      = SAMPLING_FORWARD_BATCH
+#   LOCAL_MICRO_BATCH_SIZE          = TRAINING_FORWARD_BATCH
+#   NUM_UPDATES_PER_LOCAL_BATCH     = NUM_UPDATES
+# =============================================================================
 
 resolve_batch_params() {
+    # ── Total GPU count ──
+    # Multinode scripts set NUM_NODES + GPUS_PER_NODE;
+    # single-node scripts set NUM_GPUS directly.
     if [ -n "${NUM_NODES:-}" ] && [ -n "${GPUS_PER_NODE:-}" ]; then
         TOTAL_GPUS=$(( NUM_NODES * GPUS_PER_NODE ))
     elif [ -n "${NUM_GPUS:-}" ]; then
@@ -31,10 +38,11 @@ resolve_batch_params() {
         exit 1
     fi
 
+    # ── Derived params ──
     ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
-    LOCAL_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / TOTAL_GPUS ))
-    LOCAL_UPDATE_BATCH_SIZE=$(( LOCAL_BATCH_SIZE / NUM_UPDATES ))
+    LOCAL_UPDATE_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / TOTAL_GPUS / NUM_UPDATES ))
 
+    # ── Map core knobs to CLI param names ──
     DIRECT_SAMPLING_BATCH_SIZE="${SAMPLING_FORWARD_BATCH}"
     LOCAL_MICRO_BATCH_SIZE="${TRAINING_FORWARD_BATCH}"
     NUM_UPDATES_PER_LOCAL_BATCH="${NUM_UPDATES}"
@@ -43,34 +51,28 @@ resolve_batch_params() {
 validate_batch_params() {
     local errors=0
 
-    if [ "${TOTAL_GPUS}" -le 0 ]; then
-        echo "ERROR: TOTAL_GPUS must be positive, got ${TOTAL_GPUS}" >&2
-        errors=$(( errors + 1 ))
-    fi
-
+    # 1. Sampling forward batch must be aligned to group size
     if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
         echo "ERROR: SAMPLING_FORWARD_BATCH (${DIRECT_SAMPLING_BATCH_SIZE}) must be divisible by NUM_SAMPLES_PER_PROMPT (${NUM_SAMPLES_PER_PROMPT})" >&2
         errors=$(( errors + 1 ))
     fi
 
-    if [ $(( ROLLOUT_TOTAL_SAMPLES % TOTAL_GPUS )) -ne 0 ]; then
-        echo "ERROR: ROLLOUT_TOTAL_SAMPLES (${ROLLOUT_TOTAL_SAMPLES}) must be divisible by TOTAL_GPUS (${TOTAL_GPUS})" >&2
+    # 2. Total samples must split evenly across GPUs and updates
+    if [ $(( ROLLOUT_TOTAL_SAMPLES % (TOTAL_GPUS * NUM_UPDATES) )) -ne 0 ]; then
+        echo "ERROR: ROLLOUT_TOTAL_SAMPLES (${ROLLOUT_TOTAL_SAMPLES}) must be divisible by TOTAL_GPUS*NUM_UPDATES (${TOTAL_GPUS}*${NUM_UPDATES}=$(( TOTAL_GPUS * NUM_UPDATES )))" >&2
         errors=$(( errors + 1 ))
     fi
 
-    if [ $(( LOCAL_BATCH_SIZE % NUM_UPDATES )) -ne 0 ]; then
-        echo "ERROR: LOCAL_BATCH_SIZE (${LOCAL_BATCH_SIZE}) must be divisible by NUM_UPDATES (${NUM_UPDATES})" >&2
-        errors=$(( errors + 1 ))
-    fi
-
+    # 3. Update batch must split into whole micro-batches
     if [ $(( LOCAL_UPDATE_BATCH_SIZE % LOCAL_MICRO_BATCH_SIZE )) -ne 0 ]; then
         echo "ERROR: LOCAL_UPDATE_BATCH_SIZE (${LOCAL_UPDATE_BATCH_SIZE}) must be divisible by TRAINING_FORWARD_BATCH (${LOCAL_MICRO_BATCH_SIZE})" >&2
         errors=$(( errors + 1 ))
     fi
 
+    # 4. Sampling batch must evenly divide total samples (if smaller)
     if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${ROLLOUT_TOTAL_SAMPLES}" ] && \
        [ $(( ROLLOUT_TOTAL_SAMPLES % DIRECT_SAMPLING_BATCH_SIZE )) -ne 0 ]; then
-        echo "ERROR: SAMPLING_FORWARD_BATCH (${DIRECT_SAMPLING_BATCH_SIZE}) must evenly divide ROLLOUT_TOTAL_SAMPLES (${ROLLOUT_TOTAL_SAMPLES}) when sub-batching rollout sampling" >&2
+        echo "ERROR: SAMPLING_FORWARD_BATCH (${DIRECT_SAMPLING_BATCH_SIZE}) must evenly divide ROLLOUT_TOTAL_SAMPLES (${ROLLOUT_TOTAL_SAMPLES})" >&2
         errors=$(( errors + 1 ))
     fi
 
@@ -81,18 +83,21 @@ validate_batch_params() {
 }
 
 print_batch_params() {
+    local local_batch=$(( LOCAL_UPDATE_BATCH_SIZE * NUM_UPDATES ))
     local num_micro=$(( LOCAL_UPDATE_BATCH_SIZE / LOCAL_MICRO_BATCH_SIZE ))
-    cat <<EOF
-Batch geometry summary:
-  prompts_per_batch        = ${PROMPTS_PER_BATCH}
-  samples_per_prompt       = ${NUM_SAMPLES_PER_PROMPT}
-  rollout_total_samples    = ${ROLLOUT_TOTAL_SAMPLES}
-  total_gpus               = ${TOTAL_GPUS}
-  local_batch_size         = ${LOCAL_BATCH_SIZE}
-  num_updates              = ${NUM_UPDATES_PER_LOCAL_BATCH}
-  local_update_batch_size  = ${LOCAL_UPDATE_BATCH_SIZE}
-  local_micro_batch_size   = ${LOCAL_MICRO_BATCH_SIZE}
-  micro_batches_per_update = ${num_micro}
-  sampling_forward_batch   = ${DIRECT_SAMPLING_BATCH_SIZE}
-EOF
+    echo "┌─────────────────────────────────────────────────────────┐"
+    echo "│                  Batch Geometry Summary                  │"
+    echo "├──────────────────────────────┬──────────────────────────┤"
+    printf "│ %-28s │ %24s │\n" "Prompts per batch"        "${PROMPTS_PER_BATCH}"
+    printf "│ %-28s │ %24s │\n" "Samples per prompt"       "${NUM_SAMPLES_PER_PROMPT}"
+    printf "│ %-28s │ %24s │\n" "Total rollout samples"    "${ROLLOUT_TOTAL_SAMPLES}"
+    printf "│ %-28s │ %24s │\n" "Total GPUs"               "${TOTAL_GPUS}"
+    echo "├──────────────────────────────┼──────────────────────────┤"
+    printf "│ %-28s │ %24s │\n" "Sampling forward batch"   "${DIRECT_SAMPLING_BATCH_SIZE}"
+    echo "├──────────────────────────────┼──────────────────────────┤"
+    printf "│ %-28s │ %24s │\n" "Local batch (per GPU)"    "${local_batch}"
+    printf "│ %-28s │ %24s │\n" "  ├─ Gradient updates"    "${NUM_UPDATES}"
+    printf "│ %-28s │ %24s │\n" "  ├─ Update batch size"   "${LOCAL_UPDATE_BATCH_SIZE}"
+    printf "│ %-28s │ %24s │\n" "  └─ Micro-batches/update" "${num_micro} × ${LOCAL_MICRO_BATCH_SIZE}"
+    echo "└──────────────────────────────┴──────────────────────────┘"
 }
