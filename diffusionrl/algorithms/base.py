@@ -6,7 +6,7 @@ Defines algorithm responsibilities in rollout/advantage pipeline.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import logging
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -14,6 +14,10 @@ import torch.nn as nn
 from diffusionrl.types.sampling import RolloutRequest, SamplingRequirements
 
 from .normalizers import normalize_global, normalize_grouped
+
+if TYPE_CHECKING:
+    from diffusionrl.types import PromptEmbeddings
+    from .forward_context import ForwardContext
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +57,19 @@ class BaseAlgorithm(ABC):
 
     The Algorithm class is the single source of truth for both rollout-side
     requirements (sampling, advantages) and training-side gradient computation.
+
+    Training-side forward dispatch
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Subclasses that call the model during loss computation should use a
+    :class:`~diffusionrl.algorithms.forward_context.ForwardContext` instead
+    of threading ``prompt_embeds``, ``guidance_scale``, etc. through every
+    helper.  The base class provides :meth:`_get_forward_plugin` (lazy
+    plugin resolution) and :meth:`_make_forward_context` (context factory)
+    so that subclasses do not have to duplicate that boilerplate.
     """
 
-    _loss_cls = None
+    _forward_plugin: object = None  # type: ignore[assignment]
+    model_type: str = "default"
 
     def __init__(
         self,
@@ -98,14 +112,6 @@ class BaseAlgorithm(ABC):
         self.use_global_std = use_global_std
         self.trimmed_ratio = max(0.0, min(float(trimmed_ratio), 0.49))
         self._extra_kwargs = kwargs
-
-        self.loss_fn = self._create_loss_fn()
-
-    def _create_loss_fn(self):
-        loss_cls = getattr(type(self), "_loss_cls", None)
-        if loss_cls is None:
-            return None
-        return loss_cls(self)
 
     # ------------------------------------------------------------------
     # Class-level contracts (override in subclasses)
@@ -308,6 +314,52 @@ class BaseAlgorithm(ABC):
     # ------------------------------------------------------------------
     # Phase 2: Algorithm-owned training step
     # ------------------------------------------------------------------
+
+    def _get_forward_plugin(self, model: nn.Module) -> object:
+        """Return the model forward plugin, lazy-loading a default if needed.
+
+        The plugin is normally injected by ``TrainingActor`` via
+        ``model_bundle.forward_plugin()``.  If it was never set **and**
+        ``model_type`` is ``"default"`` we fall back to
+        :class:`~diffusionrl.models.forward_plugins.DefaultForwardPlugin`
+        with a warning.
+        """
+        if self._forward_plugin is None:
+            if self.model_type != "default":
+                raise RuntimeError(
+                    f"No forward_plugin set on {type(self).__name__} for "
+                    f"model_type={self.model_type!r}. TrainingActor must "
+                    "inject plugin via model_bundle.forward_plugin()."
+                )
+            from diffusionrl.models.forward_plugins import DefaultForwardPlugin
+            self._forward_plugin = DefaultForwardPlugin()
+            logger.warning(
+                "No forward_plugin set on %s (model_type=%s). "
+                "Using DefaultForwardPlugin. Set algorithm._forward_plugin "
+                "from model_bundle.forward_plugin() for model-specific behavior.",
+                type(self).__name__,
+                self.model_type,
+            )
+        return self._forward_plugin
+
+    def _make_forward_context(
+        self,
+        model: nn.Module,
+        embeddings: "PromptEmbeddings",
+        guidance_scale: float,
+    ) -> "ForwardContext":
+        """Create a :class:`ForwardContext` using the current plugin.
+
+        Convenience wrapper so subclasses don't need to import
+        ``ForwardContext`` themselves.
+        """
+        from .forward_context import ForwardContext
+
+        return ForwardContext(
+            plugin=self._get_forward_plugin(model),
+            guidance_scale=guidance_scale,
+            embeddings=embeddings,
+        )
 
     def compute_loss_and_backward(  # [PUBLIC-API → train_executor._train_update_chunk()] 训练侧: 核心 loss+backward
         self,

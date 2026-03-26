@@ -14,45 +14,25 @@ import torch.nn as nn
 from diffusionrl.algorithms.base import BaseAlgorithm, EMASpec, SamplingRequirements
 from diffusionrl.algorithms.grpo import GRPOAlgorithm
 from diffusionrl.types import PromptEmbeddings, TimestepData
-
-
-class _MinimalLoss:
-    """Tiny private loss class used by MinimalAlgorithm."""
-
-    def __init__(self, algorithm: "MinimalAlgorithm") -> None:
-        self.algorithm = algorithm
-
-    def compute_loss(
-        self,
-        model: nn.Module,
-        timestep_data: TimestepData,
-        advantages: torch.Tensor,
-        embeddings: PromptEmbeddings,
-        **kwargs: Any,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        del model, advantages, embeddings, kwargs
-        loss = timestep_data.latents.float().sum() * 0.0
-        return loss, {"placeholder": True}
+from diffusionrl.types.sampling import RolloutRequest
 
 
 class MinimalAlgorithm(BaseAlgorithm):
     """Small unified algorithm plugin example.
 
     This class demonstrates the single-file algorithm pattern:
-    - private `_MinimalLoss`
     - `compute_loss()` as the single public loss entrypoint
     - algorithm-owned training step
     """
-    _loss_cls = _MinimalLoss
 
     @classmethod
     def from_config(cls, config: dict) -> "MinimalAlgorithm":
-        extra = cls.resolve_config_kwargs(config)
+        extra = config.get("algorithm_kwargs") or {}
         return cls(
-            sde_ratio=float(extra.get("sde_ratio", 1.0)),
+            sde_ratio=float(extra.get("sde_ratio", config.get("sde_ratio", 1.0))),
             train_only_sde_steps=bool(extra.get("train_only_sde_steps", False)),
-            skip_last_timestep=bool(extra.get("skip_last_timestep", False)),
-            skip_initial_timesteps=int(extra.get("skip_initial_timesteps", 0)),
+            skip_last_timestep=bool(extra.get("skip_last_timestep", config.get("skip_last_timestep", False))),
+            skip_initial_timesteps=int(extra.get("skip_initial_timesteps", config.get("skip_initial_timesteps", 0))),
         )
 
     def __init__(
@@ -69,12 +49,10 @@ class MinimalAlgorithm(BaseAlgorithm):
         self.train_only_sde_steps = bool(train_only_sde_steps)
         self.skip_last_timestep = bool(skip_last_timestep)
         self.skip_initial_timesteps = int(skip_initial_timesteps)
-        self._forward_plugin = None
-        self.model_type = "default"
 
     @classmethod
     def from_args(cls, args: Any) -> "MinimalAlgorithm":
-        from diffusionrl.algorithms.construction import build_algorithm_config
+        from diffusionrl.config.build_domain_args import build_algorithm_config
 
         return cls.from_config(build_algorithm_config(args))
 
@@ -125,20 +103,18 @@ class MinimalAlgorithm(BaseAlgorithm):
     def assemble_training_batch(
         self,
         *,
-        num_inference_steps: int,
+        request: RolloutRequest,
         sampler_outputs: list[Any],
         rewards: torch.Tensor,
         advantages: torch.Tensor,
-        prompts: list[str],
         sde_indices: Optional[Set[int]] = None,
     ):
         return GRPOAlgorithm.assemble_training_batch(
             self,
-            num_inference_steps=num_inference_steps,
+            request=request,
             sampler_outputs=sampler_outputs,
             rewards=rewards,
             advantages=advantages,
-            prompts=prompts,
             sde_indices=sde_indices,
         )
 
@@ -151,15 +127,9 @@ class MinimalAlgorithm(BaseAlgorithm):
         **kwargs: Any,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """Single loss entrypoint for debugging and training."""
-        if self.loss_fn is None:
-            raise RuntimeError(f"{type(self).__name__} loss_fn is not initialized.")
-        return self.loss_fn.compute_loss(
-            model=model,
-            timestep_data=timestep_data,
-            advantages=advantages,
-            embeddings=embeddings,
-            **kwargs,
-        )
+        del model, advantages, embeddings, kwargs
+        loss = timestep_data.latents.float().sum() * 0.0
+        return loss, {"placeholder": True}
 
     def compute_loss_and_backward(
         self,
