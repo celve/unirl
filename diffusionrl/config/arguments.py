@@ -39,7 +39,7 @@ from diffusionrl.config.argument_parsing import (
 from diffusionrl.config.resolution import (
     DEFAULT_MODEL_PATH,
     ROLLOUT_MODES,
-    ResolvedConfig,
+    ConfigBundle,
     collect_sampling_requirements,
     normalize_train_backend_name,
     resolve_config,
@@ -1295,7 +1295,7 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
 def validate_args(
     args: TrainingArguments,
     *,
-    resolved: Optional[ResolvedConfig] = None,
+    resolved: Optional[ConfigBundle] = None,
 ) -> TrainingArguments:
     """Validate arguments without mutating the original config values."""
     validate_grouped_configs(args)

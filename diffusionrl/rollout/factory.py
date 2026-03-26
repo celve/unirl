@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 
 from diffusionrl.algorithms.construction import instantiate_algorithm_from_config
-from diffusionrl.config.launch_resolution import ResolvedLaunchConfig
+from diffusionrl.config.launch_resolution import LaunchConfig
 from diffusionrl.config.resolution import collect_sampling_requirements, derive_rollout_topology
 from diffusionrl.reward.factory import create_driver_reward_executor
 from diffusionrl.reward.schema import RewardSchema
@@ -21,12 +21,12 @@ def create_rollout_services(
     args,
     *,
     reward_pg_result: Optional[Any] = None,
-    launch_config: ResolvedLaunchConfig,
+    launch_config: LaunchConfig,
 ) -> Tuple[RolloutServices, Dict[str, Any]]:
     """Create rollout services and return dataset-step info for the driver."""
-    if not isinstance(launch_config, ResolvedLaunchConfig):
+    if not isinstance(launch_config, LaunchConfig):
         raise ValueError(
-            "create_rollout_services requires ResolvedLaunchConfig to be built by the driver."
+            "create_rollout_services requires LaunchConfig to be built by the driver."
         )
 
     algorithm = instantiate_algorithm_from_config(dict(launch_config.algorithm_config))

@@ -64,7 +64,7 @@ class InflightRollout:
 
 
 @dataclass(frozen=True)
-class ResolvedRollout:
+class Rollout:
     """A rollout-scoped future result resolved from an inflight future."""
 
     rollout_id: int
@@ -127,14 +127,14 @@ class AsyncPipelineRuntime:
         self._inflight[rid] = inflight
         return inflight
 
-    def resolve_next_rollout(self, resolver: Callable[[Any], Any]) -> ResolvedRollout:
+    def resolve_next_rollout(self, resolver: Callable[[Any], Any]) -> Rollout:
         if not self._inflight:
             raise RuntimeError("No inflight rollout to resolve")
 
         rid = min(self._inflight.keys())
         inflight = self._inflight.pop(rid)
         result = resolver(inflight.future)
-        return ResolvedRollout(
+        return Rollout(
             rollout_id=inflight.rollout_id,
             result=result,
         )

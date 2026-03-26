@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 
-from diffusionrl.config.launch_resolution import ResolvedLaunchConfig
+from diffusionrl.config.launch_resolution import LaunchConfig
 from diffusionrl.config.validation import (
     validate_rollout_actor_init_config,
     validate_training_actor_init_config,
@@ -17,7 +17,7 @@ from .training_group import TrainingActorGroup
 logger = logging.getLogger(__name__)
 
 def create_rollout_actor_group(
-    launch_config: ResolvedLaunchConfig,
+    launch_config: LaunchConfig,
     pg_result,
 ) -> RolloutActorGroup:
     """
@@ -154,7 +154,7 @@ def create_rollout_actor_group(
 
 
 def create_training_actor_group(
-    launch_config: ResolvedLaunchConfig,
+    launch_config: LaunchConfig,
     pg_result,
 ) -> TrainingActorGroup:
     """

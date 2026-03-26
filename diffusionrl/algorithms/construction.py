@@ -20,7 +20,7 @@ from diffusionrl.utils.misc import load_function
 
 from diffusionrl.algorithms.registry import DEFAULT_ALGORITHM_PATHS
 from diffusionrl.sde.rules import normalize_sde_type
-from diffusionrl.types.sampling import ResolvedSamplingSpec
+from diffusionrl.types.sampling import SamplingSpec
 from diffusionrl.types.sde import SDEConfig, SDEScheduleConfig
 
 
@@ -64,9 +64,9 @@ def resolve_sampling_spec(
     width: Any,
     num_frames: Any,
     seed: Any,
-) -> ResolvedSamplingSpec:
+) -> SamplingSpec:
     """Build the canonical resolved sampling spec from a sampling-config-like object."""
-    return ResolvedSamplingSpec(
+    return SamplingSpec(
         sampler_path=str(sampler_path or ""),
         num_inference_steps=int(getattr(sampling, "num_inference_steps")),
         guidance_scale=float(getattr(sampling, "guidance_scale")),
@@ -98,7 +98,7 @@ def build_algorithm_kwargs(args: Any) -> Dict[str, Any]:
 def build_algorithm_config(
     args: Any,
     *,
-    sampling_spec: Optional[ResolvedSamplingSpec] = None,
+    sampling_spec: Optional[SamplingSpec] = None,
 ) -> Dict[str, Any]:
     """Build the canonical algorithm_config passed to algorithm.from_config()."""
     ac = args.algorithm
@@ -110,7 +110,7 @@ def build_algorithm_config(
         if sampling_spec is not None
         else (
             cached_sampling_spec
-            if isinstance(cached_sampling_spec, ResolvedSamplingSpec)
+            if isinstance(cached_sampling_spec, SamplingSpec)
             else resolve_sampling_spec(
                 sampling=args.sampling,
                 sampler_path=args.sampling.sampler_path,

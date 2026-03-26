@@ -9,7 +9,7 @@ import ray
 from ray.util.placement_group import PlacementGroup
 
 from diffusionrl.config.launch_resolution import (
-    ResolvedLaunchConfig,
+    LaunchConfig,
     resolve_launch_placement_spec,
 )
 
@@ -332,7 +332,7 @@ def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroup
 
 
 def create_placement_groups_from_launch(
-    launch_config: ResolvedLaunchConfig,
+    launch_config: LaunchConfig,
 ) -> Dict[str, Optional[PlacementGroupResult]]:
     placement = launch_config.placement
     config = RuntimePlacementConfig(

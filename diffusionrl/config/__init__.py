@@ -17,7 +17,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "get_default_args": ("diffusionrl.config.arguments", "get_default_args"),
     "validate_args": ("diffusionrl.config.arguments", "validate_args"),
     "build_resolved_config_view": ("diffusionrl.config.arguments", "build_resolved_config_view"),
-    "ResolvedLaunchConfig": ("diffusionrl.config.launch_resolution", "ResolvedLaunchConfig"),
+    "LaunchConfig": ("diffusionrl.config.launch_resolution", "LaunchConfig"),
     "resolve_launch_config": ("diffusionrl.config.launch_resolution", "resolve_launch_config"),
     "AlgorithmConfig": ("diffusionrl.config.arguments", "AlgorithmConfig"),
     "DebugConfig": ("diffusionrl.config.arguments", "DebugConfig"),
