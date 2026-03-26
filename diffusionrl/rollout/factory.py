@@ -9,7 +9,7 @@ from diffusionrl.config.launch_resolution import LaunchConfig
 from diffusionrl.config.resolution import collect_sampling_requirements, derive_rollout_topology
 from diffusionrl.reward.factory import create_driver_reward_executor
 from diffusionrl.reward.schema import RewardSchema
-from diffusionrl.rollout.service_interface import RolloutServices, compute_dataset_step_info
+from diffusionrl.rollout.service_interface import RolloutServices
 from diffusionrl.utils import load_function
 
 DEFAULT_ROLLOUT_FUNCTION_PATH = "diffusionrl.rollout.default_rollout.generate_rollout"
@@ -75,11 +75,8 @@ def create_rollout_services(
         debug_mode=str(args.debug.debug_mode or "none"),
         debug_output_dir=getattr(args.debug, "debug_output_dir", None),
     )
-    dataset_step_info = compute_dataset_step_info(
-        data_source=services.data_source,
-        prompts_per_rollout=services.prompt_batch_size,
-    )
-    return services, dataset_step_info
+   
+    return services
 
 
 __all__ = [
