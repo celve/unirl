@@ -105,6 +105,8 @@ class BackwardTrainingBatch:
 
     This batch type is used for trajectory-based algorithms that require
     the full sampling path and importance sampling ratios.
+
+    It always returns trajectories in their original dtype (e.g. float16).
     """
 
     trajectories: torch.Tensor
@@ -240,7 +242,7 @@ class BackwardTrainingBatch:
     def to_device(self, device: Union[str, "TorchDevice"]) -> "BackwardTrainingBatch":
         """Move all tensors to specified device."""
         return BackwardTrainingBatch(
-            trajectories=self.trajectories.to(device),
+            trajectories=self.trajectories.to(device=device),
             log_probs=self.log_probs.to_device(device),
             timesteps=self.timesteps.to(device),
             advantages=self.advantages.to(device),

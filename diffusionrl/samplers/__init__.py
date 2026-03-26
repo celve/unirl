@@ -6,6 +6,7 @@ import importlib
 from typing import Dict, Tuple
 
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
+    "sde_step": ("diffusionrl.sde.runtime", "sde_step"),
     "compute_sde_log_prob": ("diffusionrl.sde.runtime", "compute_sde_log_prob"),
     "get_sigma_schedule": ("diffusionrl.sde.runtime", "get_sigma_schedule"),
     "sde_step_with_log_prob": ("diffusionrl.sde.runtime", "sde_step_with_log_prob"),

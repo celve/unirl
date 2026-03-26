@@ -217,6 +217,8 @@ def analyze_step(
         metrics["ratio_max"] = t_ratio.max().item()
         metrics["ratio_min"] = t_ratio.min().item()
         metrics["ratio_max_deviation"] = (t_ratio - 1.0).abs().max().item()
+    if "ratio_max_deviation" in metrics and metrics["ratio_max_deviation"] > threshold:
+        has_divergence = True
 
     if verbose:
         print(f"\n  === Step {step_idx} detailed tensor stats ===")
