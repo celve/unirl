@@ -436,8 +436,7 @@ class TrainingActor(BaseTrainRayActor):
 
         _fw_plugin = getattr(self.algorithm, "_forward_plugin", None)
         if _fw_plugin is not None and hasattr(_fw_plugin, "autocast_dtype"):
-            _sampler_kwargs = sampling_config.get("sampler_kwargs", {})
-            _autocast_prec = _sampler_kwargs.get("autocast_precision", "bf16")
+            _autocast_prec = sampling_config.get("autocast_precision", "bf16")
             from diffusionrl.utils.dtypes import parse_torch_dtype as _parse_dt
             _fw_plugin.autocast_dtype = _parse_dt(
                 _autocast_prec, field_name="forward_plugin.autocast_dtype"

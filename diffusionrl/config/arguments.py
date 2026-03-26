@@ -141,6 +141,13 @@ class SamplingConfig:
             raise ValueError("sampling.num_sde_steps must be >= 1 when set.")
         if not isinstance(self.sampler_kwargs, dict):
             raise ValueError("sampling.sampler_kwargs must be a dict.")
+        _precision_keys = {"autocast_precision", "trajectory_precision", "logprob_precision"}
+        _leaked = _precision_keys & set(self.sampler_kwargs)
+        if _leaked:
+            raise ValueError(
+                f"sampling.sampler_kwargs must not contain precision keys {sorted(_leaked)}; "
+                "use precision.rollout.* instead."
+            )
 
 
 @dataclass

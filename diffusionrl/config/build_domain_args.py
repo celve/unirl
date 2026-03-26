@@ -83,11 +83,7 @@ def build_training_sampling_config(
 ) -> Dict[str, Any]:
     """Build training-actor sampling config from the canonical resolved sampling spec."""
     payload = _build_shared_sampling_payload(sampling_spec)
-    sampler_kwargs = dict(sampling_spec.sampler_kwargs)
     rollout_precision = precision_settings.rollout
-    sampler_kwargs["autocast_precision"] = rollout_precision.autocast_precision
-    sampler_kwargs["trajectory_precision"] = rollout_precision.trajectory_precision
-    sampler_kwargs["logprob_precision"] = rollout_precision.logprob_precision
     payload.update({
         "sampler_engine_type": normalize_rollout_service_engine(sampler_engine_type)
         or str(sampler_engine_type).strip().lower(),
@@ -96,7 +92,13 @@ def build_training_sampling_config(
         "seed": int(sampling_spec.seed),
         "sampling_adapter": sampling_spec.sampling_adapter,
         "init_same_noise": bool(sampling_spec.init_same_noise),
-        "sampler_kwargs": sampler_kwargs,
+        "sampler_kwargs": dict(sampling_spec.sampler_kwargs),
+        # Rollout precision lives at sampling_config top-level, not inside
+        # sampler_kwargs, because it is a framework contract — not a sampler
+        # constructor parameter.
+        "autocast_precision": rollout_precision.autocast_precision,
+        "trajectory_precision": rollout_precision.trajectory_precision,
+        "logprob_precision": rollout_precision.logprob_precision,
     })
     return payload
 

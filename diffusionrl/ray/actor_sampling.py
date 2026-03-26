@@ -74,6 +74,8 @@ class ActorSamplingExecutor:
             )
 
         sampler_kwargs = dict(actor._sampling_config.get("sampler_kwargs", {}))
+        for _reserved in ("autocast_precision", "trajectory_precision", "logprob_precision"):
+            sampler_kwargs.pop(_reserved, None)
         sde_config = SDEConfig.from_mapping(actor._sampling_config.get("sde_config"))
         actor._sampler = sampler_runner.create_sampler(
             sampler_path=sampler_path,
@@ -84,6 +86,9 @@ class ActorSamplingExecutor:
             sde_type=sde_config.sde_type,
             shift=sde_config.shift,
             model_bundle=actor.model_bundle,
+            autocast_precision=actor._sampling_config.get("autocast_precision", "bf16"),
+            trajectory_precision=actor._sampling_config.get("trajectory_precision", "fp16"),
+            logprob_precision=actor._sampling_config.get("logprob_precision", "fp32"),
             **sampler_kwargs,
         )
 

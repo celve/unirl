@@ -92,6 +92,8 @@ class ReplayLogProbPatch:
         )
 
         sampler_kwargs = dict(sampling_config.get("sampler_kwargs", {}) or {})
+        for _reserved in ("autocast_precision", "trajectory_precision", "logprob_precision"):
+            sampler_kwargs.pop(_reserved, None)
         sde_config = SDEConfig.from_mapping(sampling_config.get("sde_config"))
         base_kwargs: Dict[str, Any] = {
             "model": model,
@@ -101,6 +103,9 @@ class ReplayLogProbPatch:
             "eta": sde_config.eta,
             "sde_type": sde_config.sde_type,
             "shift": sde_config.shift,
+            "autocast_precision": sampling_config.get("autocast_precision", "bf16"),
+            "trajectory_precision": sampling_config.get("trajectory_precision", "fp16"),
+            "logprob_precision": sampling_config.get("logprob_precision", "fp32"),
             **sampler_kwargs,
         }
         filtered_kwargs: Dict[str, Any] = {}
