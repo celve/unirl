@@ -50,15 +50,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_PATH = "diffusionrl.models.hunyuan.HunyuanModelBundle"
 DEFAULT_SAMPLER_PATH = "diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler"
-DIRECT_ROLLOUT_MODE = "direct_rollout"
-SEPARATE_ROLLOUT_MODE = "separate_rollout"
-COLOCATE_ROLLOUT_MODE = "colocate_rollout"
+DIRECT_ROLLOUT_MODE = "direct_sampling"
+SEPARATE_ROLLOUT_MODE = "separate"
+COLOCATE_ROLLOUT_MODE = "colocate"
 
-ROLLOUT_MODES = {
-    DIRECT_ROLLOUT_MODE,
-    SEPARATE_ROLLOUT_MODE,
-    COLOCATE_ROLLOUT_MODE,
-}
+ROLLOUT_MODES = {DIRECT_ROLLOUT_MODE, SEPARATE_ROLLOUT_MODE, COLOCATE_ROLLOUT_MODE}
 ROLLOUT_ENGINE_TYPES = {
     "fsdp",
     "sglang",
@@ -90,14 +86,6 @@ def rollout_mode_uses_service(mode: str) -> bool:
 
 def rollout_mode_is_colocated(mode: str) -> bool:
     return mode == COLOCATE_ROLLOUT_MODE
-
-
-def rollout_mode_label(mode: str) -> str:
-    if mode == DIRECT_ROLLOUT_MODE:
-        return "direct_sampling"
-    if mode == COLOCATE_ROLLOUT_MODE:
-        return "colocate"
-    return "separate"
 
 
 def collect_sampling_requirements(*, algorithm: Any) -> SamplingRequirements:

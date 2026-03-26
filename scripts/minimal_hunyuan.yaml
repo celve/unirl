@@ -52,7 +52,7 @@ ray:
 
 rollout:
   topology:
-    mode: direct_rollout
+    mode: direct_sampling
   control:
     num_rollout: 202
   artifacts:

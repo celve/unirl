@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # NOTE:
-#   direct sampling now uses rollout.topology.mode='direct_rollout' with direct_rollout only.
+#   direct sampling now uses rollout.topology.mode='direct_sampling' with direct_sampling only.
 #   This script is the SGLang equivalent in separate rollout/training mode.
 #
 # Usage:

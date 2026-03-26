@@ -17,7 +17,7 @@
 #   - Disadvantage: no async overlap between sampling and training
 #
 # ENGINE: FSDP (via training actors)
-#   When rollout.topology.mode='direct_rollout', the TrainingActor lazy-loads VAE and
+#   When rollout.topology.mode='direct_sampling', the TrainingActor lazy-loads VAE and
 #   text encoder, then uses the FSDP-wrapped transformer to sample.
 #   Log_prob is computed during sampling (needed for GRPO).
 #
@@ -27,7 +27,7 @@
 #               → compute advantage → GRPO train → sync weights
 #
 #   This script: Ray actors, each training actor does the same loop.
-#               rollout.topology.mode='direct_rollout' → training actors call generate()
+#               rollout.topology.mode='direct_sampling' → training actors call generate()
 #               with the same FSDP model they use for training.
 #
 # ALIGNMENT with DanceGRPO:

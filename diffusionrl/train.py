@@ -14,9 +14,6 @@ from diffusionrl.config import (
     parse_args,
 )
 from diffusionrl.config.launch_resolution import resolve_launch_config
-from diffusionrl.config.resolution import (
-    rollout_mode_label,
-)
 from diffusionrl.utils.train_utils import (
     RolloutSDEController,
     build_control_algorithm,
@@ -189,11 +186,13 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
     rollout_topology = rollout_mode_info.rollout_topology
     training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
     sync_mode = rollout_mode_info.sync_protocol
-    rollout_mode_name = rollout_mode_label(rollout_topology.mode)
+    rollout_mode_name = rollout_topology.mode
+
     rollout_sde_controller = RolloutSDEController(
         algorithm=control_algorithm,
         timestep_scheduler=create_rollout_timestep_scheduler(args, algorithm=control_algorithm),
     )
+    
     rollout_control = args.rollout.control
     rollout_artifacts = args.rollout.artifacts
     rollout_evaluation = args.rollout.evaluation

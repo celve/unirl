@@ -381,7 +381,7 @@ def validate_async_training_runner(args: Any) -> None:
 
     rollout_topology = derive_rollout_topology(args)
     if rollout_mode_is_colocated(rollout_topology.mode):
-        raise ValueError("train_async.py requires rollout.topology.mode='separate_rollout'.")
+        raise ValueError("train_async.py requires rollout.topology.mode='separate'.")
     if rollout_topology.training_actor_sampling_mode:
         raise ValueError(
             "train_async.py requires a dedicated rollout engine "

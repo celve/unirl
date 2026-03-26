@@ -58,7 +58,7 @@ ray:
 
 rollout:
   topology:
-    mode: separate_rollout
+    mode: separate
     service_engine: sglang
     service_num_gpus: 1
     engine_tp_size: 1
