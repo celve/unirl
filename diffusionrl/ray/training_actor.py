@@ -717,7 +717,7 @@ class TrainingActor(BaseTrainRayActor):
             algorithm=self.algorithm,
         )
 
-    def apply_ema_for_eval(self) -> bool:
+    def apply_eval_ema(self) -> bool:
         """Swap eval-EMA weights into the model for evaluation."""
         if self._ema_manager is None:
             return False
