@@ -133,9 +133,9 @@ python -m diffusionrl.train \
     --height 512 \
     --width 512 \
     \
-    --rollout.control.num-rollout 3 \
+    --rollout.control.num-rollout 1 \
     --rollout.artifacts.save-steps 0 \
-    --rollout.evaluation.eval-steps 1 \
+    --rollout.evaluation.eval-steps 0 \
     --rollout.logging.logging-steps 1 \
     --rollout.artifacts.output-dir "${DEBUG_OUTPUT_DIR}/train_output" \
     --rollout.logging.report-to-wandb false \

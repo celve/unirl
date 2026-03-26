@@ -31,14 +31,30 @@ def _resolve_algorithm_sde_config(config: Dict[str, Any]) -> SDEConfig:
     return resolve_sde_config(config)
 
 
-def _save_training_debug_tensor(base_dir: str, step_idx: int, name: str, tensor: torch.Tensor, rank: int = 0) -> None:
-    """Save a debug tensor from training path to disk. Only rank 0 saves."""
+def _save_training_debug_tensor(
+    base_dir: str, step_idx: int, name: str, tensor: torch.Tensor,
+    rank: int = 0, *, append: bool = False,
+) -> None:
+    """Save a debug tensor from training path to disk. Only rank 0 saves.
+
+    When *append=True*, concatenates the new tensor with any existing file
+    along dim-0 (batch) so that multiple micro-batches accumulate into one
+    file covering the full local update batch.
+    """
     if rank != 0:
         return
     step_dir = os.path.join(base_dir, f"step_{step_idx:03d}")
     os.makedirs(step_dir, exist_ok=True)
     path = os.path.join(step_dir, f"{name}.pt")
-    torch.save(tensor.detach().cpu().float(), path)
+    new_tensor = tensor.detach().cpu().float()
+    if append and os.path.exists(path):
+        try:
+            existing = torch.load(path, map_location="cpu", weights_only=True)
+            if existing.ndim >= 1 and new_tensor.ndim >= 1 and existing.shape[1:] == new_tensor.shape[1:]:
+                new_tensor = torch.cat([existing, new_tensor], dim=0)
+        except Exception:
+            pass
+    torch.save(new_tensor, path)
 
 
 class GRPOAlgorithm(BaseAlgorithm):
@@ -623,21 +639,27 @@ class GRPOAlgorithm(BaseAlgorithm):
         ratio = torch.exp(log_prob_diff)
 
         _resolved_debug_dir = self._debug_output_dir or os.environ.get("DIFFUSIONRL_DEBUG_OUTPUT_DIR")
-        if _resolved_debug_dir is not None and timestep_idx not in self._debug_dumped_steps:
+        if _resolved_debug_dir is not None:
+            _append = timestep_idx in self._debug_dumped_steps
             self._debug_dumped_steps.add(timestep_idx)
             _rank = int(os.environ.get("RANK", 0))
+            if _rank == 0:
+                logger.info(
+                    "Debug training: rank=%d timestep_idx=%d batch_size=%d latents=%s append=%s",
+                    _rank, timestep_idx, latents.shape[0], list(latents.shape), _append,
+                )
             _training_debug_dir = os.path.join(_resolved_debug_dir, "training")
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "noise_pred", pred, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "latents_input", latents, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "latents_output", next_latents, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "prev_sample_mean", prev_sample_mean, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "new_log_prob", new_log_prob, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "old_log_prob", old_log_probs, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "ratio", ratio, _rank)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "noise_pred", pred, _rank, append=_append)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "latents_input", latents, _rank, append=_append)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "latents_output", next_latents, _rank, append=_append)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "prev_sample_mean", prev_sample_mean, _rank, append=_append)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "new_log_prob", new_log_prob, _rank, append=_append)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "old_log_prob", old_log_probs, _rank, append=_append)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "ratio", ratio, _rank, append=_append)
             _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma", sigma.unsqueeze(0) if sigma.dim() == 0 else sigma, _rank)
             _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma_next", sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next, _rank)
             _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma_max", torch.tensor([sigma_max]), _rank)
-            if _sigmas is not None and _rank == 0:
+            if not _append and _sigmas is not None and _rank == 0:
                 _step_dir = os.path.join(_training_debug_dir, f"step_{timestep_idx:03d}")
                 _sched_path = os.path.join(_step_dir, "sigmas_schedule.pt")
                 if not os.path.exists(_sched_path):

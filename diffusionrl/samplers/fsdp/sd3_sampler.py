@@ -33,14 +33,31 @@ from diffusionrl.utils.dtypes import parse_torch_dtype
 logger = logging.getLogger(__name__)
 
 
-def _save_debug_tensor(base_dir: str, step_idx: int, name: str, tensor: torch.Tensor, rank: int = 0) -> None:
-    """Save a debug tensor to disk. Only rank 0 saves to avoid conflicts."""
+def _save_debug_tensor(
+    base_dir: str, step_idx: int, name: str, tensor: torch.Tensor,
+    rank: int = 0, *, append: bool = False,
+) -> None:
+    """Save a debug tensor to disk. Only rank 0 saves to avoid conflicts.
+
+    When *append=True* and a file already exists for this step+name, the new
+    tensor is concatenated along dim-0 (batch) with the existing one.  This
+    allows multiple sub-batch ``sample()`` calls within the same rollout to
+    accumulate into a single file that covers the full local batch.
+    """
     if rank != 0:
         return
     step_dir = os.path.join(base_dir, f"step_{step_idx:03d}")
     os.makedirs(step_dir, exist_ok=True)
     path = os.path.join(step_dir, f"{name}.pt")
-    torch.save(tensor.detach().cpu().float(), path)
+    new_tensor = tensor.detach().cpu().float()
+    if append and os.path.exists(path):
+        try:
+            existing = torch.load(path, map_location="cpu", weights_only=True)
+            if existing.ndim >= 1 and new_tensor.ndim >= 1 and existing.shape[1:] == new_tensor.shape[1:]:
+                new_tensor = torch.cat([existing, new_tensor], dim=0)
+        except Exception:
+            pass
+    torch.save(new_tensor, path)
 
 
 def calculate_shift(
@@ -134,7 +151,8 @@ class SD3Sampler(BaseSampler):
         self.autocast_dtype = parse_torch_dtype(autocast_precision, field_name="autocast_precision")
         self.trajectory_dtype = parse_torch_dtype(trajectory_precision, field_name="trajectory_precision")
         self.logprob_dtype = parse_torch_dtype(logprob_precision, field_name="logprob_precision")
-        # 防止多个sub-batch覆盖同一step的debug tensor（只保留第一个sub-batch的数据）
+        # Track which steps have been dumped so subsequent sub-batch calls
+        # use append mode to concatenate tensors along the batch dimension.
         self._debug_dumped_steps: set = set()
 
     def _predict_noise_with_cfg(
@@ -360,6 +378,14 @@ class SD3Sampler(BaseSampler):
             else nullcontext()
         )
         rank = int(os.environ.get("RANK", 0))
+        _resolved_debug_dir_pre = debug_output_dir or os.environ.get("DIFFUSIONRL_DEBUG_OUTPUT_DIR")
+        if _resolved_debug_dir_pre and rank == 0:
+            logger.info(
+                "Debug sampling: rank=%d batch_size=%d latents=%s sde_indices=%s "
+                "already_dumped_steps=%s",
+                rank, batch_size, list(latents.shape), sorted(sde_indices),
+                sorted(self._debug_dumped_steps),
+            )
         for i in range(num_inference_steps):
             sigma = sigmas[i].to(device)
             sigma_next = sigmas[i + 1].to(device)
@@ -410,17 +436,18 @@ class SD3Sampler(BaseSampler):
             if log_prob is not None:
                 log_probs_dict[i] = log_prob.to(dtype=self.logprob_dtype)
 
-                if _sampling_debug_dir is not None and i not in self._debug_dumped_steps:
+                if _sampling_debug_dir is not None:
+                    _append = i in self._debug_dumped_steps
                     self._debug_dumped_steps.add(i)
-                    _save_debug_tensor(_sampling_debug_dir, i, "noise_pred", noise_pred, rank)
-                    _save_debug_tensor(_sampling_debug_dir, i, "latents_input", _pre_step_latents, rank)
-                    _save_debug_tensor(_sampling_debug_dir, i, "latents_output", latents, rank)
-                    _save_debug_tensor(_sampling_debug_dir, i, "prev_sample_mean", prev_sample_mean, rank)
-                    _save_debug_tensor(_sampling_debug_dir, i, "log_prob", log_prob, rank)
+                    _save_debug_tensor(_sampling_debug_dir, i, "noise_pred", noise_pred, rank, append=_append)
+                    _save_debug_tensor(_sampling_debug_dir, i, "latents_input", _pre_step_latents, rank, append=_append)
+                    _save_debug_tensor(_sampling_debug_dir, i, "latents_output", latents, rank, append=_append)
+                    _save_debug_tensor(_sampling_debug_dir, i, "prev_sample_mean", prev_sample_mean, rank, append=_append)
+                    _save_debug_tensor(_sampling_debug_dir, i, "log_prob", log_prob, rank, append=_append)
                     _save_debug_tensor(_sampling_debug_dir, i, "sigma", sigma.unsqueeze(0) if sigma.dim() == 0 else sigma, rank)
                     _save_debug_tensor(_sampling_debug_dir, i, "sigma_next", sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next, rank)
                     _save_debug_tensor(_sampling_debug_dir, i, "timestep", timestep, rank)
-                    if i == min(sde_indices):
+                    if not _append and i == min(sde_indices):
                         _save_debug_tensor(_sampling_debug_dir, i, "sigmas_schedule", sigmas, rank)
                         if rank == 0:
                             import json
