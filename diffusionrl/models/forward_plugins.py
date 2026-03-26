@@ -88,14 +88,14 @@ class BaseForwardPlugin(ABC):
 
     Subclasses may set ``autocast_dtype`` (e.g. ``torch.bfloat16``) so that
     ``forward()`` wraps the model call in ``torch.autocast``, matching the
-    precision used during sampling.  When ``None`` (default) no autocast is
-    applied and the model runs in its native parameter dtype.
+    precision configured for the current runtime path. When ``None`` (default)
+    no autocast is applied and the model runs in its native parameter dtype.
     """
 
     autocast_dtype: Optional[torch.dtype] = None
 
     def _build_autocast_ctx(self, device: torch.device):
-        """Return an autocast context matching the sampling path."""
+        """Return an autocast context matching the configured runtime path."""
         if (
             self.autocast_dtype is not None
             and device.type == "cuda"

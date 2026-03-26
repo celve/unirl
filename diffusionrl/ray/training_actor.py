@@ -433,18 +433,6 @@ class TrainingActor(BaseTrainRayActor):
         self._timestep_fraction = SDEScheduleConfig.from_mapping(
             sampling_config.get("sde_schedule_config")
         ).timestep_fraction
-
-        _fw_plugin = getattr(self.algorithm, "_forward_plugin", None)
-        if _fw_plugin is not None and hasattr(_fw_plugin, "autocast_dtype"):
-            _autocast_prec = sampling_config.get("autocast_precision", "bf16")
-            from diffusionrl.utils.dtypes import parse_torch_dtype as _parse_dt
-            _fw_plugin.autocast_dtype = _parse_dt(
-                _autocast_prec, field_name="forward_plugin.autocast_dtype"
-            )
-            logger.info(
-                "Rank %s: forward_plugin.autocast_dtype set to %s",
-                self.rank, _fw_plugin.autocast_dtype,
-            )
         reward_config = self._require_dict_config(config, "reward_config")
         self._reward_config = reward_config
         self._reward_schema = RewardSchema(**reward_config)
@@ -692,6 +680,21 @@ class TrainingActor(BaseTrainRayActor):
                     "returned None; expected a forward plugin instance."
                 )
             self.algorithm._forward_plugin = forward_plugin
+            if hasattr(forward_plugin, "autocast_dtype"):
+                training_autocast_precision = algorithm_config.get(
+                    "training_autocast_precision", "bf16"
+                )
+                forward_plugin.autocast_dtype = parse_torch_dtype(
+                    training_autocast_precision,
+                    field_name="algorithm_config.training_autocast_precision",
+                )
+                logger.info(
+                    "Rank %s: forward_plugin.autocast_dtype set from "
+                    "algorithm_config.training_autocast_precision=%s -> %s",
+                    self.rank,
+                    training_autocast_precision,
+                    forward_plugin.autocast_dtype,
+                )
 
         debug_output_dir = algorithm_config.get("debug_output_dir")
         if debug_output_dir and hasattr(self.algorithm, "_debug_output_dir"):
