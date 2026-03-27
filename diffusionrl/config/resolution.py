@@ -3,7 +3,7 @@
 This module owns config semantics only:
 
 - derive canonical config-facing values from ``TrainingArguments``
-- share one cached ``ResolvedConfig`` across validation and launch assembly
+- share one cached ``ConfigBundle`` across validation and launch assembly
 - avoid validate-time rewrites of the user-facing config object
 
 Launch payload assembly, placement planning, and actor init config construction
@@ -37,28 +37,25 @@ from diffusionrl.models import list_model_types, resolve_model_bundle_path
 from diffusionrl.samplers.engine import get_engine_class_path
 from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.training.backends import (
-    ResolvedTrainBackendConfig,
+    TrainBackendConfig,
     TrainBackendCapabilities,
+    TrainTopology,
     resolve_train_backend_capabilities_from_config,
     resolve_train_backend_config_from_args,
 )
 from diffusionrl.types.engine import normalize_engine_type
-from diffusionrl.types.sampling import ResolvedSamplingSpec, SamplingRequirements
+from diffusionrl.types.sampling import SamplingSpec, SamplingRequirements
 from diffusionrl.utils.misc import load_function
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_PATH = "diffusionrl.models.hunyuan.HunyuanModelBundle"
 DEFAULT_SAMPLER_PATH = "diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler"
-DIRECT_ROLLOUT_MODE = "direct_rollout"
-SEPARATE_ROLLOUT_MODE = "separate_rollout"
-COLOCATE_ROLLOUT_MODE = "colocate_rollout"
+DIRECT_ROLLOUT_MODE = "direct_sampling"
+SEPARATE_ROLLOUT_MODE = "separate"
+COLOCATE_ROLLOUT_MODE = "colocate"
 
-ROLLOUT_MODES = {
-    DIRECT_ROLLOUT_MODE,
-    SEPARATE_ROLLOUT_MODE,
-    COLOCATE_ROLLOUT_MODE,
-}
+ROLLOUT_MODES = {DIRECT_ROLLOUT_MODE, SEPARATE_ROLLOUT_MODE, COLOCATE_ROLLOUT_MODE}
 ROLLOUT_ENGINE_TYPES = {
     "fsdp",
     "sglang",
@@ -92,14 +89,6 @@ def rollout_mode_is_colocated(mode: str) -> bool:
     return mode == COLOCATE_ROLLOUT_MODE
 
 
-def rollout_mode_label(mode: str) -> str:
-    if mode == DIRECT_ROLLOUT_MODE:
-        return "direct_sampling"
-    if mode == COLOCATE_ROLLOUT_MODE:
-        return "colocate"
-    return "separate"
-
-
 def collect_sampling_requirements(*, algorithm: Any) -> SamplingRequirements:
     """Resolve final sampling requirements from algorithm.get_sampling_requirements()."""
     requirements = algorithm.get_sampling_requirements()
@@ -127,7 +116,7 @@ def load_engine_capabilities(engine_type: str) -> Dict[str, bool]:
 
 
 @dataclass(frozen=True)
-class ResolvedModelSpec:
+class ModelSpec:
     """Resolved model/sampler selection without mutating args."""
 
     model_path: str
@@ -138,7 +127,7 @@ class ResolvedModelSpec:
 
 
 @dataclass(frozen=True)
-class ResolvedRolloutTopology:
+class RolloutTopology:
     """Resolved rollout topology without mutating args."""
 
     mode: str
@@ -154,10 +143,10 @@ class ResolvedRolloutTopology:
 
 
 @dataclass(frozen=True)
-class ResolvedRolloutModeInfo:
+class RolloutModeInfo:
     """Resolved rollout mode state shared by validation and entrypoints."""
 
-    rollout_topology: ResolvedRolloutTopology
+    rollout_topology: RolloutTopology
     training_actor_sampling_mode: bool
     is_sglang_engine: bool
     logprob_source: str
@@ -169,48 +158,9 @@ class ResolvedRolloutModeInfo:
     effective_engine_capabilities: Optional[Dict[str, bool]] = None
 
 
-@dataclass(frozen=True)
-class ResolvedTrainTopology:
-    """Authoritative training topology derived from explicit config only.
-
-    actor_count is the size of the launched training actor group.
-    world_size is the distributed training rank count.
-    dp_size is the data-parallel consumer count used for training batch geometry.
-
-    These values often coincide in the current FSDP mainline, but they should
-    not be treated as interchangeable concepts.
-    """
-
-    actor_count: int
-    world_size: int
-    dp_size: int
-    dp_replicate_size: int = 1
-    dp_shard_size: int = 1
-    tp_size: int = 1
-    pp_size: int = 1
-    sp_size: int = 1
-    ep_size: int = 1
-    data_partition_axis: str = "dp"
-    partition_mode: str = "data_parallel"
-
-    def as_dict(self) -> Dict[str, Any]:
-        return {
-            "actor_count": self.actor_count,
-            "world_size": self.world_size,
-            "dp_size": self.dp_size,
-            "dp_replicate_size": self.dp_replicate_size,
-            "dp_shard_size": self.dp_shard_size,
-            "tp_size": self.tp_size,
-            "pp_size": self.pp_size,
-            "sp_size": self.sp_size,
-            "ep_size": self.ep_size,
-            "data_partition_axis": self.data_partition_axis,
-            "partition_mode": self.partition_mode,
-        }
-
 
 @dataclass(frozen=True)
-class ResolvedTrainingPlan:
+class TrainingPlan:
     """Authoritative training batch/update plan derived from explicit config."""
 
     global_batch_size: int
@@ -240,23 +190,23 @@ class ResolvedTrainingPlan:
 
 
 @dataclass(frozen=True)
-class ResolvedConfig:
+class ConfigBundle:
     """Canonical resolved config state shared by validation and launch assembly."""
 
-    model_spec: ResolvedModelSpec
-    rollout_mode_info: ResolvedRolloutModeInfo
-    sampling_spec: ResolvedSamplingSpec
-    train_backend_config: ResolvedTrainBackendConfig
+    model_spec: ModelSpec
+    rollout_mode_info: RolloutModeInfo
+    sampling_spec: SamplingSpec
+    train_backend_config: TrainBackendConfig
     train_backend_capabilities: TrainBackendCapabilities
-    training_topology: ResolvedTrainTopology
-    training_plan: Optional[ResolvedTrainingPlan] = None
+    training_topology: TrainTopology
+    training_plan: Optional[TrainingPlan] = None
 
 
 def derive_sampling_spec(
     args: Any,
     *,
-    model_spec: Optional[ResolvedModelSpec] = None,
-) -> ResolvedSamplingSpec:
+    model_spec: Optional[ModelSpec] = None,
+) -> SamplingSpec:
     """Resolve the canonical sampling spec from SamplingConfig once."""
     resolved_model = model_spec if model_spec is not None else derive_model_spec(args)
     return resolve_sampling_spec(
@@ -296,7 +246,7 @@ def normalize_logprob_source(args: Any) -> str:
 
 def derive_model_spec(
     args: Any,
-) -> ResolvedModelSpec:
+) -> ModelSpec:
     raw_model_path = str(args.model.model_path or "").strip()
     if not raw_model_path or raw_model_path == DEFAULT_MODEL_PATH:
         resolved_model_path = resolve_model_bundle_path(args.model.model_type)
@@ -348,7 +298,7 @@ def derive_model_spec(
     if not resolved_sampler_path:
         resolved_sampler_path = DEFAULT_SAMPLER_PATH
 
-    return ResolvedModelSpec(
+    return ModelSpec(
         model_path=resolved_model_path,
         model_cls=model_cls,
         model_type=resolved_model_type,
@@ -376,7 +326,7 @@ def _resolve_rollout_mode_value(value: Any) -> str:
     return normalized
 
 
-def derive_rollout_topology(args: Any) -> ResolvedRolloutTopology:
+def derive_rollout_topology(args: Any) -> RolloutTopology:
     rollout_topology_config = args.rollout.topology
     rollout_mode = _resolve_rollout_mode_value(rollout_topology_config.mode)
     rollout_service_engine = normalize_rollout_service_engine(
@@ -387,18 +337,18 @@ def derive_rollout_topology(args: Any) -> ResolvedRolloutTopology:
             "direct_rollout is the only public direct-sampling selector. "
             "Leave rollout.topology.service_engine unset in direct_rollout mode."
         )
-    return ResolvedRolloutTopology(
+    return RolloutTopology(
         mode=rollout_mode,
         service_engine=rollout_service_engine,
     )
 
 
-def derive_rollout_mode_info(args: Any) -> ResolvedRolloutModeInfo:
+def derive_rollout_mode_info(args: Any) -> RolloutModeInfo:
     """Derive shared rollout mode state without mutating args."""
     rollout_topology = derive_rollout_topology(args)
     training_actor_sampling_mode = bool(rollout_topology.training_actor_sampling_mode)
     algorithm_type = str(args.algorithm.algorithm_type or "grpo").strip().lower()
-    return ResolvedRolloutModeInfo(
+    return RolloutModeInfo(
         rollout_topology=rollout_topology,
         training_actor_sampling_mode=training_actor_sampling_mode,
         is_sglang_engine=bool(rollout_topology.is_sglang_engine),
@@ -413,7 +363,7 @@ def derive_rollout_mode_info(args: Any) -> ResolvedRolloutModeInfo:
 
 def resolve_effective_engine_capabilities(
     *,
-    rollout_mode_info: ResolvedRolloutModeInfo,
+    rollout_mode_info: RolloutModeInfo,
 ) -> Optional[Dict[str, bool]]:
     """Resolve adjusted engine capabilities accounting for replay and logprob modes.
 
@@ -457,7 +407,7 @@ def resolve_effective_engine_capabilities(
 def derive_sampling_host_engine_type(
     args: Any,
     *,
-    rollout_mode_info: Optional[ResolvedRolloutModeInfo] = None,
+    rollout_mode_info: Optional[RolloutModeInfo] = None,
 ) -> str:
     """Resolve the internal sampler host type from strict rollout topology."""
     resolved_mode_info = (
@@ -504,7 +454,7 @@ def require_rollout_service_num_gpus(args: Any) -> int:
 def derive_rollout_actor_gpu_count(
     args: Any,
     *,
-    topology: Optional[ResolvedRolloutTopology] = None,
+    topology: Optional[RolloutTopology] = None,
 ) -> int:
     """Derive GPUs per rollout actor from explicit rollout topology."""
     resolved_topology = topology if topology is not None else derive_rollout_topology(args)
@@ -521,7 +471,7 @@ def derive_rollout_actor_gpu_count(
 def derive_rollout_gpu_pool_size(
     args: Any,
     *,
-    topology: Optional[ResolvedRolloutTopology] = None,
+    topology: Optional[RolloutTopology] = None,
 ) -> int:
     """Resolve placement GPU capacity available to rollout actors."""
     rollout_total_gpus = int(args.ray.rollout_num_nodes) * int(args.ray.rollout_num_gpus_per_node)
@@ -558,7 +508,7 @@ def _build_relative_slices(
 def _derive_local_batch_from_rollout_geometry(
     args: Any,
     *,
-    training_topology: Optional[ResolvedTrainTopology] = None,
+    training_topology: Optional[TrainTopology] = None,
 ) -> int:
     prompts_per_rollout = args.algorithm.prompts_per_rollout
     if prompts_per_rollout is None:
@@ -596,7 +546,7 @@ def derive_training_topology(
     *,
     backend_name: Optional[str] = None,
     backend_kwargs: Optional[Mapping[str, Any]] = None,
-) -> ResolvedTrainTopology:
+) -> TrainTopology:
     actor_count = max(
         1,
         int(args.ray.training_num_nodes) * int(args.ray.training_num_gpus_per_node),
@@ -615,7 +565,7 @@ def derive_training_topology(
         dp_shard_size = resolved_backend_kwargs.get("dp_shard_size")
         if dp_shard_size is None:
             dp_shard_size = max(1, dp_size // max(1, dp_replicate_size))
-        return ResolvedTrainTopology(
+        return TrainTopology(
             actor_count=actor_count,
             world_size=actor_count,
             dp_size=dp_size,
@@ -639,7 +589,7 @@ def derive_training_topology(
             if hinted_dp_size is not None
             else max(1, actor_count // denom)
         )
-        return ResolvedTrainTopology(
+        return TrainTopology(
             actor_count=actor_count,
             world_size=actor_count,
             dp_size=dp_size,
@@ -651,7 +601,7 @@ def derive_training_topology(
             ep_size=ep_size,
         )
 
-    return ResolvedTrainTopology(
+    return TrainTopology(
         actor_count=actor_count,
         world_size=actor_count,
         dp_size=actor_count,
@@ -696,8 +646,8 @@ def require_prompts_per_rollout(args: Any) -> int:
 def derive_training_plan(
     args: Any,
     *,
-    training_topology: Optional[ResolvedTrainTopology] = None,
-) -> ResolvedTrainingPlan:
+    training_topology: Optional[TrainTopology] = None,
+) -> TrainingPlan:
     """Derive the resolved local/update/micro execution plan from validated args."""
     # Expects args that already passed validate_args(); this helper only derives
     # the resolved execution plan and does not repeat user-facing geometry
@@ -727,7 +677,7 @@ def derive_training_plan(
         for _ in range(num_updates_per_local_batch)
     )
 
-    return ResolvedTrainingPlan(
+    return TrainingPlan(
         global_batch_size=global_batch_size,
         local_batch_size=local_batch_size,
         local_update_batch_size=update_batch_size,
@@ -742,10 +692,10 @@ def resolve_config(
     args: Any,
     *,
     include_training_plan: bool = False,
-) -> ResolvedConfig:
+) -> ConfigBundle:
     """Resolve and cache canonical config-derived state for one args object."""
     cached = getattr(args, _RESOLVED_CONFIG_CACHE_ATTR, None)
-    if isinstance(cached, ResolvedConfig):
+    if isinstance(cached, ConfigBundle):
         if include_training_plan and cached.training_plan is None:
             cached = replace(
                 cached,
@@ -783,7 +733,7 @@ def resolve_config(
             args,
             training_topology=training_topology,
         )
-    resolved = ResolvedConfig(
+    resolved = ConfigBundle(
         model_spec=model_spec,
         rollout_mode_info=rollout_mode_info,
         sampling_spec=sampling_spec,
@@ -797,12 +747,12 @@ def resolve_config(
 
 
 __all__ = [
-    "ResolvedConfig",
-    "ResolvedModelSpec",
-    "ResolvedRolloutModeInfo",
-    "ResolvedRolloutTopology",
-    "ResolvedTrainingPlan",
-    "ResolvedTrainTopology",
+    "ConfigBundle",
+    "ModelSpec",
+    "RolloutModeInfo",
+    "RolloutTopology",
+    "TrainingPlan",
+    "TrainTopology",
     "COLOCATE_ROLLOUT_MODE",
     "DEFAULT_MODEL_PATH",
     "DEFAULT_SAMPLER_PATH",

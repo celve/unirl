@@ -5,15 +5,15 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any, Dict
 from diffusionrl.config.resolution import (
-    ResolvedModelSpec,
-    ResolvedTrainingPlan,
-    ResolvedTrainTopology,
+    ModelSpec,
+    TrainingPlan,
+    TrainTopology,
     normalize_rollout_service_engine,
     normalize_lora_target_modules,
 )
 from diffusionrl.reward.schema import RewardSchema
-from diffusionrl.training.backends import ResolvedTrainBackendConfig
-from diffusionrl.types.sampling import ResolvedSamplingSpec
+from diffusionrl.training.backends import TrainBackendConfig
+from diffusionrl.types.sampling import SamplingSpec
 
 # ---------------------------------------------------------------------------
 # Model domain
@@ -21,7 +21,7 @@ from diffusionrl.types.sampling import ResolvedSamplingSpec
 
 def build_model_config(
     *,
-    model_spec: ResolvedModelSpec,
+    model_spec: ModelSpec,
     model_settings,
     training_settings,
     precision_settings,
@@ -63,7 +63,7 @@ def build_reward_config(
 # Sampling / rollout domain
 # ---------------------------------------------------------------------------
 
-def _build_shared_sampling_payload(sampling_spec: ResolvedSamplingSpec) -> Dict[str, Any]:
+def _build_shared_sampling_payload(sampling_spec: SamplingSpec) -> Dict[str, Any]:
     return {
         "sampler_path": sampling_spec.sampler_path,
         "num_inference_steps": int(sampling_spec.num_inference_steps),
@@ -78,7 +78,7 @@ def _build_shared_sampling_payload(sampling_spec: ResolvedSamplingSpec) -> Dict[
 def build_training_sampling_config(
     *,
     precision_settings,
-    sampling_spec: ResolvedSamplingSpec,
+    sampling_spec: SamplingSpec,
     sampler_engine_type: str,
 ) -> Dict[str, Any]:
     """Build training-actor sampling config from the canonical resolved sampling spec."""
@@ -156,7 +156,7 @@ def build_rollout_engine_config(
     logprob_source: str,
     sampler_engine_type: str,
     model_config: Dict[str, Any],
-    sampling_spec: ResolvedSamplingSpec,
+    sampling_spec: SamplingSpec,
     offload_rollout: bool = False,
 ) -> Dict[str, Any]:
     """Build final dedicated rollout engine runtime config."""
@@ -251,17 +251,17 @@ def _build_training_execution_config(
     }
 
 
-def _build_training_topology_config(topology: ResolvedTrainTopology) -> Dict[str, Any]:
+def _build_training_topology_config(topology: TrainTopology) -> Dict[str, Any]:
     return topology.as_dict()
 
 
-def _build_training_plan_config(training_plan: ResolvedTrainingPlan) -> Dict[str, Any]:
+def _build_training_plan_config(training_plan: TrainingPlan) -> Dict[str, Any]:
     return training_plan.as_dict()
 
 
 def build_train_backend_config(
     *,
-    resolved_backend_config: ResolvedTrainBackendConfig,
+    resolved_backend_config: TrainBackendConfig,
 ) -> Dict[str, Any]:
     """Build canonical backend config payload for TrainingActor.init."""
     return resolved_backend_config.as_dict()
@@ -272,8 +272,8 @@ def build_training_actor_init_config(
     training_settings,
     rollout_control_settings,
     replay_log_probs: bool,
-    topology: ResolvedTrainTopology,
-    training_plan: ResolvedTrainingPlan,
+    topology: TrainTopology,
+    training_plan: TrainingPlan,
     algorithm_config: Dict[str, Any],
     model_config: Dict[str, Any],
     reward_config: Dict[str, Any],

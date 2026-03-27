@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 
 from diffusionrl.algorithms.construction import instantiate_algorithm_from_config
-from diffusionrl.config.launch_resolution import ResolvedLaunchConfig
+from diffusionrl.config.launch_resolution import LaunchConfig
 from diffusionrl.config.resolution import collect_sampling_requirements, derive_rollout_topology
 from diffusionrl.reward.factory import create_driver_reward_executor
 from diffusionrl.reward.schema import RewardSchema
-from diffusionrl.rollout.service_interface import RolloutServices, compute_dataset_step_info
+from diffusionrl.rollout.service_interface import RolloutServices
 from diffusionrl.utils import load_function
 
 DEFAULT_ROLLOUT_FUNCTION_PATH = "diffusionrl.rollout.default_rollout.generate_rollout"
@@ -20,13 +20,13 @@ DEFAULT_REWARD_HOOK_PATH = "diffusionrl.rollout.default_rollout.score_rewards_ho
 def create_rollout_services(
     args,
     *,
-    reward_pg_result: Optional[Any] = None,
-    launch_config: ResolvedLaunchConfig,
+    reward_pgs: Optional[Any] = None,
+    launch_config: LaunchConfig,
 ) -> Tuple[RolloutServices, Dict[str, Any]]:
     """Create rollout services and return dataset-step info for the driver."""
-    if not isinstance(launch_config, ResolvedLaunchConfig):
+    if not isinstance(launch_config, LaunchConfig):
         raise ValueError(
-            "create_rollout_services requires ResolvedLaunchConfig to be built by the driver."
+            "create_rollout_services requires LaunchConfig to be built by the driver."
         )
 
     algorithm = instantiate_algorithm_from_config(dict(launch_config.algorithm_config))
@@ -36,7 +36,7 @@ def create_rollout_services(
     reward_schema = RewardSchema.from_args(args)
     reward_service = create_driver_reward_executor(
         reward_schema,
-        reward_pg_result=reward_pg_result,
+        reward_pgs=reward_pgs,
     )
     if reward_service is None and not reward_schema.uses_sampling_actor_execution:
         raise RuntimeError("Driver failed to initialize driver-side reward service.")
@@ -75,11 +75,8 @@ def create_rollout_services(
         debug_mode=str(args.debug.debug_mode or "none"),
         debug_output_dir=getattr(args.debug, "debug_output_dir", None),
     )
-    dataset_step_info = compute_dataset_step_info(
-        data_source=services.data_source,
-        prompts_per_rollout=services.prompt_batch_size,
-    )
-    return services, dataset_step_info
+   
+    return services
 
 
 __all__ = [

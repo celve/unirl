@@ -14,9 +14,7 @@ from diffusionrl.config import (
     parse_args,
 )
 from diffusionrl.config.launch_resolution import resolve_launch_config
-from diffusionrl.config.resolution import (
-    rollout_mode_label,
-)
+from diffusionrl.rollout.service_interface import compute_dataset_step_info
 from diffusionrl.utils.train_utils import (
     RolloutSDEController,
     build_control_algorithm,
@@ -30,10 +28,12 @@ from diffusionrl.utils.train_utils import (
 
 logger = logging.getLogger(__name__)
 
-# Main control-plane path (sync mode):
-# parse_args -> create_placement_groups_from_args -> create_rollout_services
-# -> create_training_actor_group -> prepare RolloutRequest(s) -> execute sampling
-# -> rollout_buffer.push/pop -> training_group.train -> weight_sync.sync
+"""
+Main control-plane path (sync mode):
+    parse_args -> create_placement_groups_from_args -> create_rollout_services
+    -> create_training_actor_group -> prepare RolloutRequest(s) -> execute sampling
+    -> rollout_buffer.push/pop -> training_group.train -> weight_sync.sync
+"""
 
 def _offload_train_phase(*, args, training_runtime) -> None:
     """Offload or clear train-side memory after one update phase."""
@@ -189,11 +189,13 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
     rollout_topology = rollout_mode_info.rollout_topology
     training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
     sync_mode = rollout_mode_info.sync_protocol
-    rollout_mode_name = rollout_mode_label(rollout_topology.mode)
+    rollout_mode_name = rollout_topology.mode
+
     rollout_sde_controller = RolloutSDEController(
         algorithm=control_algorithm,
         timestep_scheduler=create_rollout_timestep_scheduler(args, algorithm=control_algorithm),
     )
+
     rollout_control = args.rollout.control
     rollout_artifacts = args.rollout.artifacts
     rollout_evaluation = args.rollout.evaluation
@@ -241,12 +243,12 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
     try:
         if rollout_logging.report_to_wandb and rollout_logging.project_name:
-            wandb_tags_str = rollout_logging.wandb_tags
             wandb_tags = (
-                [t.strip() for t in wandb_tags_str.split(",") if t.strip()]
-                if wandb_tags_str
+                [t.strip() for t in rollout_logging.wandb_tags.split(",") if t.strip()]
+                if rollout_logging.wandb_tags
                 else None
             )
+
             wandb_entity = rollout_logging.wandb_entity or None
             wandb_logger = init_logger(
                 project=rollout_logging.project_name,
@@ -258,6 +260,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
                 entity=wandb_entity,
                 require_success=True,
             )
+
             if wandb_logger.initialized:
                 logger.info(
                     "WandB initialized: project=%s, run=%s",
@@ -280,16 +283,24 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
         )
         from diffusionrl.utils import load_function
 
-        rollout_services, dataset_step_info = create_rollout_services(
+        rollout_services = create_rollout_services(
             args,
-            reward_pg_result=pgs.get("reward"),
+            reward_pgs=pgs.get("reward"),
             launch_config=launch_config,
         )
-        rollout_function_path = str(args.rollout_function_path or DEFAULT_ROLLOUT_FUNCTION_PATH)
+
+        dataset_step_info = compute_dataset_step_info(
+            data_source=rollout_services.data_source,
+            prompts_per_rollout=services.prompt_batch_size,
+        )
+
+        rollout_function_path = args.rollout_function_path or DEFAULT_ROLLOUT_FUNCTION_PATH
         rollout_function = load_function(rollout_function_path)
-        eval_function = load_function(str(args.eval_function_path or DEFAULT_EVAL_FUNCTION_PATH))
-        reward_hook = load_function(str(args.reward_hook_path or DEFAULT_REWARD_HOOK_PATH))
+
+        eval_function = load_function(args.eval_function_path or DEFAULT_EVAL_FUNCTION_PATH)
+        reward_hook = load_function(args.reward_hook_path or DEFAULT_REWARD_HOOK_PATH)
         logger.info("Rollout services created")
+
         if dataset_step_info.get("num_prompts", 0) > 0:
             logger.info(
                 "Dataset step info: num_prompts=%s prompts_per_rollout=%s "
@@ -301,19 +312,17 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             )
             if not dataset_step_info.get("exact_dataset_pass_per_cycle", False):
                 logger.warning(
-                    "Dataset pass is not exact under current data-source batching: "
-                    "drop_last=%s remainder_prompts=%s. "
-                    "The data source will drop trailing prompts rather than emit a short rollout batch, "
-                    "so one reset cycle will not cover the full dataset exactly once.",
-                    dataset_step_info.get("drop_last"),
+                    "Inexact dataset pass: %s prompts will be dropped per cycle "
+                    "(drop_last=%s).",
                     dataset_step_info.get("remainder_prompts"),
+                    dataset_step_info.get("drop_last"),
                 )
 
         if not training_actor_sampling_mode:
-            rollout_pg_result = pgs.get("rollout")
-            if rollout_pg_result is None:
+            rollout_pgs = pgs.get("rollout")
+            if rollout_pgs is None:
                 raise ValueError("Missing rollout placement-group allocation.")
-            rollout_group = create_rollout_actor_group(launch_config, rollout_pg_result)
+            rollout_group = create_rollout_actor_group(launch_config, rollout_pgs)
             rollout_runtime = RolloutGroupRuntime.from_group(rollout_group)
             rollout_services.attach_sampling_group(rollout_group)
             logger.info("Rollout actor group created and attached to rollout services")
@@ -324,12 +333,12 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             rollout_on_gpu = False
 
         # 4. Create training actors.
-        training_pg_result = pgs.get("training")
-        if training_pg_result is None:
+        training_pgs = pgs.get("training")
+        if training_pgs is None:
             raise ValueError("Missing training placement-group allocation.")
         training_group = create_training_actor_group(
             launch_config,
-            training_pg_result,
+            training_pgs,
         )
         training_runtime = TrainingGroupRuntime.from_group(training_group)
         resume_from_checkpoint = rollout_artifacts.resume_from_checkpoint
@@ -361,11 +370,9 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
         logger.info("Initial weights synchronized")
 
         # 7. Restore rollout side and offload train side as needed after initial sync.
-        if args.ray.offload_rollout and args.ray.offload_train and rollout_runtime is not None:
-            training_runtime.offload()
-            rollout_runtime.wake_up()
-            rollout_on_gpu = True
-        elif args.ray.offload_rollout and rollout_runtime is not None:
+        if args.ray.offload_rollout and rollout_runtime is not None:
+            if args.ray.offload_train:
+                training_runtime.offload()
             rollout_runtime.wake_up()
             rollout_on_gpu = True
 
@@ -387,10 +394,9 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             rollout_runtime=rollout_runtime,
         )
 
-        debug_save_intermediates = bool(args.debug.debug_save_intermediates)
+        debug_save_intermediates = args.debug.debug_save_intermediates
 
         # 10. Core synchronous training loop
-        rollout_control = args.rollout.control
         enforce_rollout_alignment = not bool(rollout_buffer_settings.reassemble_by_group)
         save_rollout_debug_payload = None
         if debug_save_intermediates:

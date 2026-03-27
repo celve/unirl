@@ -10,7 +10,7 @@ from .base import (
     TrainTopology,
 )
 from .factory import (
-    ResolvedTrainBackendConfig,
+    TrainBackendConfig,
     create_train_backend,
     create_train_backend_from_config,
     resolve_train_backend_capabilities,
@@ -31,7 +31,7 @@ __all__ = [
     "TrainBackendCapabilities",
     "TrainBackendLaunchSpec",
     "TrainTopology",
-    "ResolvedTrainBackendConfig",
+    "TrainBackendConfig",
     "create_train_backend",
     "create_train_backend_from_config",
     "resolve_train_backend_capabilities",

@@ -792,11 +792,7 @@ class TrainingActor(BaseTrainRayActor):
                 "training_plan": dict(self._resolved_training_plan),
             }
         info = dict(self._train_backend.backend_info(self))
-        backend_topology = info.get("topology")
-        resolved_topology = dict(self._resolved_train_topology)
-        if isinstance(backend_topology, dict) and backend_topology != resolved_topology:
-            info["backend_reported_topology"] = dict(backend_topology)
-        info["topology"] = resolved_topology
+        info["topology"] = dict(self._resolved_train_topology)
         info["training_plan"] = dict(self._resolved_training_plan)
         return info
 
