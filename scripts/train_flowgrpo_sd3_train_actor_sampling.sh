@@ -35,7 +35,7 @@
 # - timestep_fraction=0.99
 # - training.num_updates_per_local_batch (+ optional training.local_micro_batch_size when tuning memory)
 # - reward_location=sampling_actor
-# - reward_model_name defaults to pickscore
+# - reward_components defaults to pickscore
 # - prompts_per_rollout=16, samples_per_prompt=8 on 8 GPUs
 # - sampling.max_samples_per_request only controls OOM-safe request splitting;
 #   rollout_total_samples still equals prompts_per_rollout * samples_per_prompt

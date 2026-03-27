@@ -20,11 +20,16 @@ class ReplayLogProbPatch:
 
     def __init__(self) -> None:
         self._replay_sampler = None
-        self._replay_sampler_path: str | None = None
+        self._replay_sampler_dotpath: str | None = None
 
     @staticmethod
-    def _resolve_model_default_replay_sampler_path(model_bundle: Any) -> str | None:
-        for attr in ("default_replay_sampler_path", "default_sampler_path"):
+    def _resolve_model_default_replay_sampler_dotpath(model_bundle: Any) -> str | None:
+        for attr in (
+            "default_replay_sampler_dotpath",
+            "default_sampler_dotpath",
+            "default_replay_sampler_path",
+            "default_sampler_path",
+        ):
             fn = getattr(model_bundle, attr, None)
             if callable(fn):
                 try:
@@ -36,32 +41,32 @@ class ReplayLogProbPatch:
                     return resolved.strip()
         return None
 
-    def _resolve_replay_sampler_path(self, *, sampling_config: Dict[str, Any], model_bundle: Any) -> str:
-        replay_path = sampling_config.get("replay_sampler_path")
+    def _resolve_replay_sampler_dotpath(self, *, sampling_config: Dict[str, Any], model_bundle: Any) -> str:
+        replay_path = sampling_config.get("replay_sampler_dotpath")
         if replay_path:
             return replay_path
 
         sampler_engine_type = str(
             sampling_config.get("sampler_engine_type", "") or ""
         ).strip().lower()
-        sampler_path = sampling_config.get("sampler_path")
-        model_default_path = self._resolve_model_default_replay_sampler_path(model_bundle)
+        sampler_dotpath = sampling_config.get("sampler_dotpath")
+        model_default_path = self._resolve_model_default_replay_sampler_dotpath(model_bundle)
 
-        # For sglang rollout engines, sampler_path may still point to a legacy/default
+        # For sglang rollout engines, sampler_dotpath may still point to a legacy/default
         # FSDP sampler. Prefer model-declared replay sampler in this case.
         if sampler_engine_type == "sglang":
             if model_default_path and "sglang" not in model_default_path.lower():
                 return model_default_path
         else:
-            if sampler_path and "sglang" not in sampler_path.lower():
-                return sampler_path
+            if sampler_dotpath and "sglang" not in sampler_dotpath.lower():
+                return sampler_dotpath
             if model_default_path and "sglang" not in model_default_path.lower():
                 return model_default_path
 
         model_type = str(getattr(model_bundle, "model_type", "") or "").lower()
         raise RuntimeError(
-            "replay_log_probs requires a non-sglang replay sampler path. Provide "
-            "--replay-sampler-path explicitly, or implement default_replay_sampler_path() "
+            "logprob_source='replay' requires a non-sglang replay sampler dotpath. Provide "
+            "--replay-sampler-dotpath explicitly, or implement default_replay_sampler_dotpath() "
             f"in model bundle '{type(model_bundle).__name__}' (model_type={model_type!r}, "
             f"sampler_engine_type={sampler_engine_type!r})."
         )
@@ -81,11 +86,11 @@ class ReplayLogProbPatch:
         if model is None:
             raise RuntimeError("Model not initialized for replay sampler")
 
-        sampler_path = self._resolve_replay_sampler_path(
+        sampler_dotpath = self._resolve_replay_sampler_dotpath(
             sampling_config=sampling_config,
             model_bundle=model_bundle,
         )
-        sampler_cls = load_function(sampler_path)
+        sampler_cls = load_function(sampler_dotpath)
         init_sig = inspect.signature(sampler_cls.__init__)
         accepts_kwargs = any(
             p.kind == inspect.Parameter.VAR_KEYWORD for p in init_sig.parameters.values()
@@ -114,8 +119,10 @@ class ReplayLogProbPatch:
                 filtered_kwargs[key] = value
 
         self._replay_sampler = sampler_cls(**filtered_kwargs)
-        self._replay_sampler_path = sampler_path
-        logger.warning("Enabled experimental replay sampler for old log_probs: %s", sampler_path)
+        self._replay_sampler_dotpath = sampler_dotpath
+        logger.warning(
+            "Enabled experimental replay sampler for old log_probs: %s", sampler_dotpath
+        )
 
     def maybe_replay_old_log_probs(
         self,
@@ -148,14 +155,14 @@ class ReplayLogProbPatch:
         if replay_fn is None:
             raise RuntimeError(
                 "Replay sampler does not implement compute_log_prob_for_training; "
-                f"sampler_path={self._replay_sampler_path}"
+                f"sampler_dotpath={self._replay_sampler_dotpath}"
             )
 
         allowed_steps = set(int(v) for v in batch.resolved_step_indices[:-1].tolist())
         target_steps = sorted(int(i) for i in batch.sde_indices if int(i) in allowed_steps)
         if not target_steps:
             raise RuntimeError(
-                "replay_log_probs enabled but no target SDE steps were provided in batch."
+                "logprob_source='replay' requested but no target SDE steps were provided in batch."
             )
 
         replay_sig = inspect.signature(replay_fn)
@@ -202,7 +209,7 @@ class ReplayLogProbPatch:
             if missing_required:
                 raise RuntimeError(
                     f"Replay sampler missing required args {missing_required} for step={step_idx}. "
-                    f"sampler_path={self._replay_sampler_path}"
+                    f"sampler_dotpath={self._replay_sampler_dotpath}"
                 )
             critical_non_null = {"text_ids", "image_ids"}
             missing_non_null = [
@@ -225,7 +232,7 @@ class ReplayLogProbPatch:
                 raise RuntimeError(
                     "Replay sampler requires non-null args "
                     f"{missing_non_null} for step={step_idx}. "
-                    f"sampler_path={self._replay_sampler_path}"
+                    f"sampler_dotpath={self._replay_sampler_dotpath}"
                 )
             with torch.no_grad():
                 old_log_prob = replay_fn(**call_kwargs)

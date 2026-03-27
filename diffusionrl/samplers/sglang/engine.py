@@ -264,7 +264,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             self._target_modules = [str(m) for m in target_modules]
 
         reserved_keys = {
-            "sampler_path",
+            "sampler_dotpath",
             "base_gpu_id",
             "force_set_cuda_visible_devices",
             "local_mode",
@@ -290,9 +290,11 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             if normalized in allowed_keys and normalized not in server_kwargs:
                 server_kwargs[normalized] = value
 
-        model_path = self.config.pretrained_model_saved_path or self.config.model_path
+        model_path = self.config.pretrained_model_ckpt_path or self.config.model_dotpath
         if not model_path:
-            raise ValueError("SGLang engine requires pretrained_model_saved_path/model_path")
+            raise ValueError(
+                "SGLang engine requires pretrained_model_ckpt_path or model_dotpath"
+            )
 
         server_kwargs.setdefault("model_path", model_path)
         server_kwargs.setdefault("num_gpus", int(raw.get("num_gpus", 1)))
@@ -345,8 +347,8 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
     def _infer_model_type(self) -> str:
         value = (
             str(self.config.engine_kwargs.get("model_type", ""))
-            or str(self.config.model_path or "")
-            or str(self.config.pretrained_model_saved_path or "")
+            or str(self.config.model_dotpath or "")
+            or str(self.config.pretrained_model_ckpt_path or "")
         ).lower()
         if "hunyuan" in value:
             return "hunyuan"
@@ -557,9 +559,12 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 f"SGLang latent fallback currently supports sd3/flux, got model_type={model_type}."
             )
 
-        model_path = self.config.pretrained_model_saved_path or self.config.model_path
+        model_path = self.config.pretrained_model_ckpt_path or self.config.model_dotpath
         if not model_path:
-            raise RuntimeError("Missing model_path while initializing latent fallback VAE.")
+            raise RuntimeError(
+                "Missing pretrained_model_ckpt_path or model_dotpath while initializing "
+                "latent fallback VAE."
+            )
 
         from diffusers import AutoencoderKL
 

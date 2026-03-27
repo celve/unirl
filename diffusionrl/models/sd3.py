@@ -274,7 +274,7 @@ class SD3ModelBundle(ModelBundle):
         return "image"
 
     @classmethod
-    def default_sampler_path(cls) -> Optional[str]:
+    def default_sampler_dotpath(cls) -> Optional[str]:
         return "diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler"
 
     @classmethod

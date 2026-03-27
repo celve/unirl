@@ -181,7 +181,7 @@ class MinSamplesGuardPlugin(BufferPlugin):
         }
 
 
-def _parse_plugin_paths(raw: Any) -> List[str]:
+def _parse_plugin_dotpaths(raw: Any) -> List[str]:
     if raw is None:
         return []
     if isinstance(raw, str):
@@ -222,7 +222,7 @@ def build_buffer_plugins(args: Any) -> List[BufferPlugin]:
         )
     )
 
-    for path in _parse_plugin_paths(rollout_buffer.plugin_paths):
+    for path in _parse_plugin_dotpaths(rollout_buffer.plugin_dotpaths):
         target = load_function(path)
         if inspect.isclass(target):
             if hasattr(target, "from_args") and callable(getattr(target, "from_args")):

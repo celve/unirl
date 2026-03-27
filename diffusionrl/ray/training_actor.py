@@ -210,7 +210,7 @@ class TrainingActor(BaseTrainRayActor):
         # EMA runtime ----------------------------------------------------------
         self._ema_manager = None
         self._algorithm_type = "grpo"
-        self._algorithm_path = None
+        self._algorithm_dotpath = None
         self._guidance_scale: Optional[float] = None
         # Sample-level shuffle before training (analogous to Flow-Factory inner-epoch shuffle)
         self._shuffle_samples = True
@@ -221,7 +221,7 @@ class TrainingActor(BaseTrainRayActor):
         self._local_micro_batch_size = 1
         self._local_update_batch_size = 1
         self._num_updates_per_local_batch = 1
-        self._replay_log_probs = False
+        self._replay_enabled = False
 
         # Sampling support (training-actor sampling mode)
         self._sampling_config: Dict[str, Any] = {}
@@ -309,14 +309,14 @@ class TrainingActor(BaseTrainRayActor):
 
         Args:
             config: Configuration dictionary containing:
-                - model_config: dict with model_path, pretrained_model_saved_path
+                - model_config: dict with model_dotpath, pretrained_model_ckpt_path
                 - optimizer_config: dict with lr, betas, weight_decay
                 - scheduler_config: dict with scheduler type and params
-                - algorithm_config: dict with algorithm_type, algorithm_path, algorithm_kwargs, guidance_scale
+                - algorithm_config: dict with algorithm_type, algorithm_dotpath, algorithm_kwargs, guidance_scale
                 - training_config: dict with max_grad_norm and replay/runtime-only knobs
                 - topology_config: dict with actor_count/world_size/dp_size
                 - training_plan_config: dict with explicit local/update/micro batch execution plan
-                - train_backend_config: dict(name/backend_path/kwargs)
+                - train_backend_config: dict(name/backend_dotpath/kwargs)
 
         Note:
             The driver-side rollout runtime and TrainingActor each instantiate
@@ -334,7 +334,7 @@ class TrainingActor(BaseTrainRayActor):
         backend_name = str(backend_config.get("name", "") or "").strip().lower()
         if not backend_name:
             raise ValueError("train_backend_config.name is required.")
-        backend_path = backend_config.get("backend_path")
+        backend_dotpath = backend_config.get("backend_dotpath")
         backend_kwargs = backend_config.get("kwargs")
         if not isinstance(backend_kwargs, dict):
             raise ValueError(
@@ -344,7 +344,7 @@ class TrainingActor(BaseTrainRayActor):
 
         self._train_backend = create_train_backend(
             backend_name,
-            backend_path=backend_path,
+            backend_dotpath=backend_dotpath,
             backend_kwargs=backend_kwargs,
         )
         self._train_backend_name = self._train_backend.name
@@ -424,7 +424,7 @@ class TrainingActor(BaseTrainRayActor):
         self._num_updates_per_local_batch = int(
             self._resolved_training_plan["num_updates_per_local_batch"]
         )
-        self._replay_log_probs = bool(training_config["replay_log_probs"])
+        self._replay_enabled = bool(training_config["replay_enabled"])
 
         # Sampling config (used when training actors perform sampling)
         sampling_config = self._require_dict_config(config, "sampling_config")
@@ -487,17 +487,17 @@ class TrainingActor(BaseTrainRayActor):
 
     def _load_model(self, model_config: dict) -> None:
         """Load the model for training."""
-        if "model_path" not in model_config:
-            raise ValueError("model_config must contain model_path")
+        if "model_dotpath" not in model_config:
+            raise ValueError("model_config must contain model_dotpath")
 
-        model_cls = load_function(model_config["model_path"])
+        model_cls = load_function(model_config["model_dotpath"])
 
         # Build kwargs for model constructor
         # Pass through LoRA configuration for models that support it
         model_kwargs = {
-            "pretrained_path": model_config["pretrained_model_saved_path"],
-            "vae_saved_path": model_config["vae_saved_path"],
-            "text_encoder_path": model_config["text_encoder_path"],
+            "pretrained_path": model_config["pretrained_model_ckpt_path"],
+            "vae_ckpt_path": model_config["vae_ckpt_path"],
+            "text_encoder_ckpt_path": model_config["text_encoder_ckpt_path"],
             "device": self._device,
             # Training only needs transformer, skip VAE/text_encoders to save memory
             "training_only": True,
@@ -643,21 +643,23 @@ class TrainingActor(BaseTrainRayActor):
     def _load_algorithm(self, algorithm_config: dict) -> None:
         """Load the train-side Algorithm instance."""
         self._algorithm_type = str(algorithm_config["algorithm_type"])
-        self._algorithm_path = str(algorithm_config["algorithm_path"])
+        self._algorithm_dotpath = str(algorithm_config.get("algorithm_dotpath") or "")
         self._guidance_scale = float(algorithm_config["guidance_scale"])
 
         self._shuffle_samples = bool(algorithm_config.get("shuffle_samples", True))
         raw_shuffle_seed = algorithm_config.get("shuffle_seed", None)
         self._shuffle_seed = int(raw_shuffle_seed) if raw_shuffle_seed is not None else None
 
-        if not self._algorithm_path:
-            raise ValueError("algorithm_config.algorithm_path must be set before TrainingActor.init.")
+        if not self._algorithm_dotpath:
+            raise ValueError(
+                "algorithm_config.algorithm_dotpath must be set before TrainingActor.init."
+            )
 
         self.algorithm = instantiate_algorithm_from_config(algorithm_config)
 
         logger.info(
             "Rank %s: Train-side algorithm loaded from %s (type=%s)",
-            self.rank, self._algorithm_path, type(self.algorithm).__name__,
+            self.rank, self._algorithm_dotpath, type(self.algorithm).__name__,
         )
 
         if hasattr(self.algorithm, "model_type"):
@@ -701,7 +703,7 @@ class TrainingActor(BaseTrainRayActor):
             "Rank %s: Algorithm loaded (type=%s, path=%s)",
             self.rank,
             self._algorithm_type,
-            self._algorithm_path,
+            self._algorithm_dotpath,
         )
 
         from diffusionrl.utils.ema import EMAManager
@@ -741,7 +743,7 @@ class TrainingActor(BaseTrainRayActor):
             )
         return self._replay_logprob_patch.maybe_replay_old_log_probs(
             batch=batch,
-            enabled=self._replay_log_probs,
+            enabled=self._replay_enabled,
             algorithm_type=self._algorithm_type,
             sampling_config=self._sampling_config,
             model_bundle=self.model_bundle,

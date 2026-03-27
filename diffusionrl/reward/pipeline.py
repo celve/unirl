@@ -78,9 +78,9 @@ def _read_precomputed_reward_payload(
     if raw_rewards is None:
         return None
     rewards = [float(v) for v in list(raw_rewards)]
-    reward_components = dict(metadata.get("precomputed_reward_components") or {})
+    raw_component_rewards = metadata.get("precomputed_component_rewards")
     normalized_components: Dict[str, List[float]] = {}
-    for name, values in reward_components.items():
+    for name, values in dict(raw_component_rewards or {}).items():
         normalized_components[str(name)] = [float(v) for v in list(values or [])]
     return rewards, normalized_components
 
@@ -96,7 +96,7 @@ def collect_precomputed_rewards(
     saw_precomputed = False
     saw_missing = False
     all_rewards: List[float] = []
-    reward_components: Dict[str, List[float]] = {}
+    component_rewards: Dict[str, List[float]] = {}
 
     for output in sampler_outputs:
         payload = _read_precomputed_reward_payload(output)
@@ -117,7 +117,7 @@ def collect_precomputed_rewards(
                     "Precomputed reward component length must match reward length. "
                     f"Got component={name} len={len(values)} rewards={len(rewards)}."
                 )
-            reward_components.setdefault(name, []).extend(values)
+            component_rewards.setdefault(name, []).extend(values)
 
     if saw_precomputed and saw_missing:
         raise ValueError(
@@ -126,7 +126,7 @@ def collect_precomputed_rewards(
         )
     if not saw_precomputed:
         return None
-    return torch.tensor(all_rewards, dtype=torch.float32), reward_components
+    return torch.tensor(all_rewards, dtype=torch.float32), component_rewards
 
 
 def normalize_prompt_metadata(
@@ -311,7 +311,7 @@ def score_from_rollout_outputs(
     response = reward_service.compute_rewards(request)
     return (
         torch.tensor(response.rewards, dtype=torch.float32),
-        response.reward_components,
+        response.component_rewards,
     )
 
 

@@ -317,10 +317,9 @@ class GRPOAlgorithm(BaseAlgorithm):
             )
         return set(self.rollout_indices_scheduler.get_sde_indices(current_step))
 
-    def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:
-        allow_replay = bool(getattr(args.sampling, "replay_log_probs", False))
+    def get_sampler_validation_config(self, *, allow_replay: bool) -> Dict[str, Any]:
         return {
-            "allow_replay": allow_replay,
+            "allow_replay": bool(allow_replay),
             "assert_step_alignment": True,
             "mode_label": "trajectory",
         }

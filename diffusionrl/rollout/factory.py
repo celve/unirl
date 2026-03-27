@@ -42,7 +42,7 @@ def create_rollout_services(
         raise RuntimeError("Driver failed to initialize driver-side reward service.")
 
     try:
-        data_source_cls = load_function(args.data_source_path)
+        data_source_cls = load_function(args.data_source_dotpath)
         data_source = data_source_cls(args)
     except Exception as exc:
         raise RuntimeError(f"Failed to load data source: {exc}") from exc
@@ -55,7 +55,9 @@ def create_rollout_services(
     prompt_batch_size = int(
         getattr(algorithm, "prompts_per_rollout", args.algorithm.prompts_per_rollout)
     )
-    sampler_validation_config = algorithm.get_sampler_validation_config(args=args)
+    sampler_validation_config = algorithm.get_sampler_validation_config(
+        allow_replay=bool(launch_config.rollout_mode_info.replay_enabled)
+    )
     if not isinstance(sampler_validation_config, dict):
         sampler_validation_config = {}
 

@@ -117,10 +117,10 @@ def load_engine_capabilities(engine_type: str) -> Dict[str, bool]:
 class ModelSpec:
     """Resolved model/sampler selection without mutating args."""
 
-    model_path: str
+    model_dotpath: str
     model_cls: Any
     model_type: str
-    sampler_path: str
+    sampler_dotpath: str
     model_default_engine_type: Optional[str]
 
 
@@ -209,7 +209,7 @@ def derive_sampling_spec(
     resolved_model = model_spec if model_spec is not None else derive_model_spec(args)
     return resolve_sampling_spec(
         sampling=args.sampling,
-        sampler_path=resolved_model.sampler_path,
+        sampler_dotpath=resolved_model.sampler_dotpath,
         height=args.height,
         width=args.width,
         num_frames=args.num_frames,
@@ -242,22 +242,26 @@ def normalize_logprob_source(args: Any) -> str:
     return str(args.sampling.logprob_source).strip().lower()
 
 
+def derive_replay_enabled(args: Any) -> bool:
+    return normalize_logprob_source(args) == "replay"
+
+
 def derive_model_spec(
     args: Any,
 ) -> ModelSpec:
-    raw_model_path = str(args.model.model_path or "").strip()
-    if not raw_model_path or raw_model_path == DEFAULT_MODEL_PATH:
-        resolved_model_path = resolve_model_bundle_path(args.model.model_type)
-        if not resolved_model_path:
+    raw_model_dotpath = str(args.model.model_dotpath or "").strip()
+    if not raw_model_dotpath or raw_model_dotpath == DEFAULT_MODEL_PATH:
+        resolved_model_dotpath = resolve_model_bundle_path(args.model.model_type)
+        if not resolved_model_dotpath:
             raise ValueError(
                 f"Unknown model_type={args.model.model_type!r}. "
                 f"Discovered model types: {list_model_types()}. "
-                "Provide --model.model-path explicitly for custom models."
+                "Provide --model.model-dotpath explicitly for custom models."
             )
     else:
-        resolved_model_path = raw_model_path
+        resolved_model_dotpath = raw_model_dotpath
 
-    model_cls = load_function(resolved_model_path)
+    model_cls = load_function(resolved_model_dotpath)
 
     resolved_model_type = str(args.model.model_type or "").strip().lower()
     declared_model_type_fn = getattr(model_cls, "declared_model_type", None)
@@ -267,40 +271,40 @@ def derive_model_spec(
             declared_model_type = declared_model_type.strip().lower()
             if (
                 resolved_model_type
-                and raw_model_path
-                and raw_model_path != DEFAULT_MODEL_PATH
+                and raw_model_dotpath
+                and raw_model_dotpath != DEFAULT_MODEL_PATH
                 and resolved_model_type != declared_model_type
             ):
                 raise ValueError(
-                    "Configured model_type does not match the declared model type from model_path. "
+                    "Configured model_type does not match the declared model type from model_dotpath. "
                     f"Got model_type={resolved_model_type!r}, "
                     f"declared_model_type={declared_model_type!r}, "
-                    f"model_path={resolved_model_path!r}."
+                    f"model_dotpath={resolved_model_dotpath!r}."
                 )
             resolved_model_type = declared_model_type
 
-    model_default_sampler_path = None
-    sampler_path_fn = getattr(model_cls, "default_sampler_path", None)
-    if callable(sampler_path_fn):
-        model_default_sampler_path = sampler_path_fn()
+    model_default_sampler_dotpath = None
+    sampler_dotpath_fn = getattr(model_cls, "default_sampler_dotpath", None)
+    if callable(sampler_dotpath_fn):
+        model_default_sampler_dotpath = sampler_dotpath_fn()
 
     model_default_engine_type = None
     engine_type_fn = getattr(model_cls, "default_sampler_engine", None)
     if callable(engine_type_fn):
         model_default_engine_type = engine_type_fn()
 
-    raw_sampler_path = str(args.sampling.sampler_path or "").strip()
-    resolved_sampler_path = raw_sampler_path
-    if not resolved_sampler_path and model_default_sampler_path:
-        resolved_sampler_path = str(model_default_sampler_path).strip()
-    if not resolved_sampler_path:
-        resolved_sampler_path = DEFAULT_SAMPLER_PATH
+    raw_sampler_dotpath = str(args.sampling.sampler_dotpath or "").strip()
+    resolved_sampler_dotpath = raw_sampler_dotpath
+    if not resolved_sampler_dotpath and model_default_sampler_dotpath:
+        resolved_sampler_dotpath = str(model_default_sampler_dotpath).strip()
+    if not resolved_sampler_dotpath:
+        resolved_sampler_dotpath = DEFAULT_SAMPLER_PATH
 
     return ModelSpec(
-        model_path=resolved_model_path,
+        model_dotpath=resolved_model_dotpath,
         model_cls=model_cls,
         model_type=resolved_model_type,
-        sampler_path=resolved_sampler_path,
+        sampler_dotpath=resolved_sampler_dotpath,
         model_default_engine_type=(
             str(model_default_engine_type).strip().lower()
             if isinstance(model_default_engine_type, str) and model_default_engine_type.strip()
@@ -346,13 +350,15 @@ def derive_rollout_mode_info(args: Any) -> RolloutModeInfo:
     rollout_topology = derive_rollout_topology(args)
     training_actor_sampling_mode = bool(rollout_topology.training_actor_sampling_mode)
     algorithm_type = str(args.algorithm.algorithm_type or "grpo").strip().lower()
+    logprob_source = normalize_logprob_source(args)
+    replay_enabled = derive_replay_enabled(args)
     return RolloutModeInfo(
         rollout_topology=rollout_topology,
         training_actor_sampling_mode=training_actor_sampling_mode,
         is_sglang_engine=bool(rollout_topology.is_sglang_engine),
-        logprob_source=normalize_logprob_source(args),
+        logprob_source=logprob_source,
         replay_guard=(not training_actor_sampling_mode) and algorithm_type == "grpo",
-        replay_enabled=bool(args.sampling.replay_log_probs),
+        replay_enabled=replay_enabled,
         sync_protocol=str(args.sync.protocol or "").strip().lower(),
         algorithm_type=algorithm_type,
         max_samples_per_request=args.sampling.max_samples_per_request,
@@ -386,7 +392,7 @@ def resolve_effective_engine_capabilities(
     if allow_replay:
         engine_caps = dict(engine_caps, requires_log_prob=True, requires_embeddings=True)
         logger.warning(
-            "replay_log_probs=true enabled: allowing %s+GRPO with "
+            "logprob_source='replay' enabled: allowing %s+GRPO with "
             "training-side old-log-prob replay (experimental path).",
             service_engine,
         )
@@ -769,6 +775,7 @@ __all__ = [
     "derive_sampling_host_engine_type",
     "derive_rollout_mode_info",
     "derive_rollout_topology",
+    "derive_replay_enabled",
     "derive_sampling_spec",
     "derive_training_plan",
     "derive_training_topology",

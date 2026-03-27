@@ -72,13 +72,13 @@ _MEGATRON_ALLOWED_KEYS = {
 @dataclass(frozen=True)
 class TrainBackendConfig:
     name: str
-    backend_path: Optional[str] = None
+    backend_dotpath: Optional[str] = None
     kwargs: Dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "name": str(self.name),
-            "backend_path": self.backend_path,
+            "backend_dotpath": self.backend_dotpath,
             "kwargs": dict(self.kwargs),
         }
 
@@ -91,14 +91,14 @@ def supported_train_backends() -> tuple[str, ...]:
 def _resolve_backend_cls(
     name: str,
     *,
-    backend_path: Optional[str] = None,
+    backend_dotpath: Optional[str] = None,
 ) -> type[TrainBackend]:
     """Resolve a backend class from a built-in name or custom dotpath."""
-    if backend_path:
-        backend_cls = load_function(backend_path)
+    if backend_dotpath:
+        backend_cls = load_function(backend_dotpath)
         if not isinstance(backend_cls, type) or not issubclass(backend_cls, TrainBackend):
             raise TypeError(
-                f"train_backend_path must resolve to a TrainBackend subclass, got: {backend_cls}"
+                f"train_backend_dotpath must resolve to a TrainBackend subclass, got: {backend_cls}"
             )
         return backend_cls
 
@@ -107,7 +107,7 @@ def _resolve_backend_cls(
     if backend_cls is None:
         raise ValueError(
             f"Unsupported train_backend={name!r}. "
-            f"Expected one of {list(_BUILTIN_BACKENDS)} or provide train_backend_path."
+            f"Expected one of {list(_BUILTIN_BACKENDS)} or provide train_backend_dotpath."
         )
     return backend_cls
 
@@ -116,9 +116,9 @@ def _resolve_backend_name_from_args(args: Any) -> str:
     return str(args.training.train_backend or "fsdp").strip().lower()
 
 
-def _resolve_backend_path_from_args(args: Any) -> Optional[str]:
-    backend_path = str(args.training.train_backend_path or "").strip()
-    return backend_path or None
+def _resolve_backend_dotpath_from_args(args: Any) -> Optional[str]:
+    backend_dotpath = str(args.training.train_backend_dotpath or "").strip()
+    return backend_dotpath or None
 
 
 def _parse_backend_kwargs_from_args(args: Any) -> Dict[str, Any]:
@@ -328,14 +328,14 @@ def _resolve_megatron_backend_kwargs(
 def resolve_train_backend_config_from_args(args: Any) -> TrainBackendConfig:
     """Canonicalize backend selection and kwargs exactly once from args."""
     backend_name = _resolve_backend_name_from_args(args)
-    backend_path = _resolve_backend_path_from_args(args)
+    backend_dotpath = _resolve_backend_dotpath_from_args(args)
     raw_kwargs = _parse_backend_kwargs_from_args(args)
-    strict_unknowns = backend_path is None
+    strict_unknowns = backend_dotpath is None
 
-    if backend_path is None and backend_name not in _BUILTIN_BACKENDS:
+    if backend_dotpath is None and backend_name not in _BUILTIN_BACKENDS:
         raise ValueError(
             f"Unsupported train_backend={backend_name!r}. "
-            f"Expected one of {sorted(_BUILTIN_BACKENDS)} or provide training.train_backend_path."
+            f"Expected one of {sorted(_BUILTIN_BACKENDS)} or provide training.train_backend_dotpath."
         )
 
     actor_count = max(
@@ -367,7 +367,7 @@ def resolve_train_backend_config_from_args(args: Any) -> TrainBackendConfig:
 
     return TrainBackendConfig(
         name=backend_name,
-        backend_path=backend_path,
+        backend_dotpath=backend_dotpath,
         kwargs=resolved_kwargs,
     )
 
@@ -375,13 +375,13 @@ def resolve_train_backend_config_from_args(args: Any) -> TrainBackendConfig:
 def create_train_backend(
     name: str,
     *,
-    backend_path: Optional[str] = None,
+    backend_dotpath: Optional[str] = None,
     backend_kwargs: Optional[Mapping[str, Any]] = None,
 ) -> TrainBackend:
     """Create backend instance from an explicit built-in branch or a custom dotpath."""
     backend_cls = _resolve_backend_cls(
         name,
-        backend_path=backend_path,
+        backend_dotpath=backend_dotpath,
     )
     return backend_cls(backend_kwargs=dict(backend_kwargs or {}))
 
@@ -391,7 +391,7 @@ def create_train_backend_from_config(
 ) -> TrainBackend:
     return create_train_backend(
         config.name,
-        backend_path=config.backend_path,
+        backend_dotpath=config.backend_dotpath,
         backend_kwargs=config.kwargs,
     )
 
@@ -399,12 +399,12 @@ def create_train_backend_from_config(
 def resolve_train_backend_capabilities(
     name: str,
     *,
-    backend_path: Optional[str] = None,
+    backend_dotpath: Optional[str] = None,
 ) -> TrainBackendCapabilities:
     """Resolve backend capabilities without instantiating runtime objects."""
     backend_cls = _resolve_backend_cls(
         name,
-        backend_path=backend_path,
+        backend_dotpath=backend_dotpath,
     )
     return backend_cls.declared_capabilities()
 
@@ -414,7 +414,7 @@ def resolve_train_backend_capabilities_from_config(
 ) -> TrainBackendCapabilities:
     return resolve_train_backend_capabilities(
         config.name,
-        backend_path=config.backend_path,
+        backend_dotpath=config.backend_dotpath,
     )
 
 
@@ -426,7 +426,7 @@ def resolve_train_backend_launch_spec(
 ) -> TrainBackendLaunchSpec:
     backend_cls = _resolve_backend_cls(
         config.name,
-        backend_path=config.backend_path,
+        backend_dotpath=config.backend_dotpath,
     )
     if backend_cls.launch_spec is TrainBackend.launch_spec:
         return backend_cls.declared_launch_spec(

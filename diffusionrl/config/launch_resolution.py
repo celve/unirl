@@ -193,7 +193,7 @@ def resolve_launch_config(
     training_actor_init_config = build_training_actor_init_config(
         training_settings=args.training,
         rollout_control_settings=args.rollout.control,
-        replay_log_probs=bool(args.sampling.replay_log_probs),
+        replay_enabled=bool(rollout_mode_info.replay_enabled),
         topology=training_topology,
         training_plan=training_plan,
         algorithm_config=algorithm_config,

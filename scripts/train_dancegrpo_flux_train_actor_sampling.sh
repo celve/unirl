@@ -38,7 +38,7 @@
 # - max_grad_norm=1.0 (not 2.0)
 #
 # NOTE: DanceGRPO originally supports multi-reward weighting (hps/clip/image_reward/pick_score).
-#       diffusionrl now supports multi-reward through reward_models/reward_weights.
+#       diffusionrl now supports multi-reward through reward_components/reward_weights.
 #       Use a custom reward scorer only when the built-in scorer set is not enough.
 #
 # Training-actor sampling now reuses the main driver rollout pipeline -> rollout_buffer -> train path.

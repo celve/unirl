@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 def create_sampler(
     *,
-    sampler_path: str,
+    sampler_dotpath: str,
     model: nn.Module,
     text_encoder: Any,
     vae: Any,
@@ -44,7 +44,7 @@ def create_sampler(
     """Instantiate a sampler from a dotpath, merging model_bundle extra kwargs.
 
     Args:
-        sampler_path: Fully-qualified dotpath to the sampler class.
+        sampler_dotpath: Fully-qualified dotpath to the sampler class.
         model: Transformer / denoiser module.
         text_encoder: Text encoder (may be None for embedding-only mode).
         vae: VAE decoder (may be None if decoding is not needed).
@@ -57,7 +57,7 @@ def create_sampler(
     Returns:
         A ``BaseSampler`` instance ready for ``sampler.sample()``.
     """
-    sampler_cls = load_function(sampler_path)
+    sampler_cls = load_function(sampler_dotpath)
     if model_bundle is not None and hasattr(model_bundle, "get_sampler_extra_kwargs"):
         extra_kwargs = model_bundle.get_sampler_extra_kwargs() or {}
         for key, value in extra_kwargs.items():

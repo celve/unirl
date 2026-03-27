@@ -17,7 +17,7 @@ class MinimalRewardScorer(BaseRewardScorer):
         rewards = [0.0] * batch_size
         return RewardResponse(
             rewards=rewards,
-            reward_components={"constant": rewards},
+            component_rewards={"constant": rewards},
             successes=[True] * batch_size,
             errors=[None] * batch_size,
             compute_time=time.time() - start,

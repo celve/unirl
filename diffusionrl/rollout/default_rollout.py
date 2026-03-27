@@ -88,14 +88,14 @@ def score_rewards_hook(
     rollout_id: int,
 ) -> RewardHookResult:
     """Default reward hook backed by the configured reward service/pipeline."""
-    rewards, reward_components = services.score_rewards(
+    rewards, component_rewards = services.score_rewards(
         request=request,
         sampler_outputs=samples,
         samples_per_prompt_override=max(1, int(request.sampling.get("samples_per_prompt", 1))),
     )
     return RewardHookResult(
         rewards=rewards,
-        reward_components=reward_components,
+        component_rewards=component_rewards,
     )
 
 
@@ -169,7 +169,7 @@ def finalize_default_rollout(
                 "sde_indices": sorted(int(v) for v in (context.sde_indices or [])),
                 "sampler_outputs": sampler_outputs,
                 "rewards": reward_result.rewards,
-                "reward_components": reward_result.reward_components,
+                "component_rewards": reward_result.component_rewards,
             }
         )
 
@@ -177,7 +177,7 @@ def finalize_default_rollout(
         request=request,
         sampler_outputs=list(sampler_outputs),
         rewards=reward_result.rewards,
-        reward_components=dict(reward_result.reward_components or {}),
+        component_rewards=dict(reward_result.component_rewards or {}),
         metadata=metadata,
     )
 

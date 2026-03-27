@@ -45,7 +45,6 @@ BATCH_SIZE=${BATCH_SIZE:-6}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-24}
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
-REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
 
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
@@ -88,7 +87,6 @@ python -m diffusionrl.train \
     --rollout.topology.service-num-gpus ${TP_SIZE} \
     --rollout.topology.engine-tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
-    --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --algorithm.algorithm-path diffusionrl.algorithms.nft.NFTAlgorithm \
     --reward.reward-model-name ocr \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \

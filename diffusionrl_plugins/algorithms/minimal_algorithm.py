@@ -101,9 +101,9 @@ class MinimalAlgorithm(BaseAlgorithm):
             )
         return set(range(self.num_inference_steps))
 
-    def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:
+    def get_sampler_validation_config(self, *, allow_replay: bool) -> Dict[str, Any]:
         return {
-            "allow_replay": bool(getattr(args.sampling, "replay_log_probs", False)),
+            "allow_replay": bool(allow_replay),
             "assert_step_alignment": True,
             "mode_label": "trajectory",
         }

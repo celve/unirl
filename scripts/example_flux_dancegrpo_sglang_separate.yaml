@@ -3,7 +3,7 @@
 
 model:
   model_type: flux
-  pretrained_model_saved_path: models/local/flux.1-dev
+  pretrained_model_ckpt_path: models/local/flux.1-dev
 
 sampling:
   sde_type: dance
@@ -13,10 +13,9 @@ sampling:
   guidance_scale: 3.5
   timestep_fraction: 0.6
   logprob_source: replay
-  replay_log_probs: true
 
 reward:
-  reward_model_name: ocr
+  reward_components: ocr
 
 algorithm:
   algorithm_type: grpo
@@ -73,10 +72,10 @@ rollout:
 sync:
   protocol: tensor_payload
 
-data_source_path: diffusionrl.data.data_source.ImageRLDataSource
-rollout_function_path: diffusionrl.rollout.default_rollout.generate_rollout
-eval_function_path: diffusionrl.rollout.default_rollout.evaluate_rollout
-reward_hook_path: diffusionrl.rollout.default_rollout.score_rewards_hook
+data_source_dotpath: diffusionrl.data.data_source.ImageRLDataSource
+rollout_function_dotpath: diffusionrl.rollout.default_rollout.generate_rollout
+eval_function_dotpath: diffusionrl.rollout.default_rollout.evaluate_rollout
+reward_hook_dotpath: diffusionrl.rollout.default_rollout.score_rewards_hook
 data_path: data/samples/ocr_prompts_toy.json
 height: 256
 width: 256

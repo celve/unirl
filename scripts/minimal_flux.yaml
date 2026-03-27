@@ -12,7 +12,7 @@
 
 model:
   model_type: flux
-  pretrained_model_saved_path: models/local/flux.1-dev
+  pretrained_model_ckpt_path: models/local/flux.1-dev
 
 sampling:
   sde_type: dance
@@ -23,7 +23,7 @@ sampling:
   timestep_fraction: 0.6
 
 reward:
-  reward_model_name: ocr
+  reward_components: ocr
 
 algorithm:
   algorithm_type: grpo
@@ -65,7 +65,7 @@ rollout:
 sync:
   protocol: disabled
 
-data_source_path: diffusionrl.data.data_source.ImageRLDataSource
+data_source_dotpath: diffusionrl.data.data_source.ImageRLDataSource
 data_path: data/samples/prompts_toy.json
 height: 256
 width: 256

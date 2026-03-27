@@ -58,7 +58,6 @@ LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-32}
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
-REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 # Eval EMA settings (smoothed weights for stable evaluation)
@@ -84,7 +83,6 @@ python -m diffusionrl.train \
     --rollout.topology.service-engine sglang \
     --rollout.topology.service-num-gpus ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
-    --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --rollout.topology.engine-tp-size ${TP_SIZE} \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-model-name ocr \

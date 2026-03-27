@@ -9,7 +9,7 @@ import os
 from enum import Enum
 from typing import Any, Dict, Optional
 
-from diffusionrl.algorithms.construction import build_algorithm_kwargs, resolve_algorithm_path
+from diffusionrl.algorithms.construction import build_algorithm_kwargs, resolve_algorithm_dotpath
 from diffusionrl.config.resolution import (
     ModelSpec,
     RolloutModeInfo,
@@ -130,32 +130,32 @@ def validate_dynamic_dotpaths(
     """Validate configured dynamic extension dotpaths."""
     if resolved_model is None:
         resolved_model = derive_model_spec(args)
-    validate_dotpath(resolved_model.model_path, label="model")
-    validate_dotpath(resolved_model.sampler_path, label="sampler")
+    validate_dotpath(resolved_model.model_dotpath, label="model")
+    validate_dotpath(resolved_model.sampler_dotpath, label="sampler")
     validate_dotpath(
-        resolve_algorithm_path(
+        resolve_algorithm_dotpath(
             algorithm_type=args.algorithm.algorithm_type,
-            algorithm_path=args.algorithm.algorithm_path,
+            algorithm_dotpath=args.algorithm.algorithm_dotpath,
         ),
         label="algorithm",
     )
     if include_data_source:
-        validate_dotpath(args.data_source_path, label="data_source")
-    if getattr(args, "rollout_function_path", None):
-        validate_dotpath(args.rollout_function_path, label="rollout_function")
-    if getattr(args, "eval_function_path", None):
-        validate_dotpath(args.eval_function_path, label="eval_function")
-    if getattr(args, "reward_hook_path", None):
-        validate_dotpath(args.reward_hook_path, label="reward_hook")
-    if args.training.train_backend_path:
-        validate_dotpath(args.training.train_backend_path, label="train_backend")
-    if args.sampling.replay_sampler_path:
-        validate_dotpath(args.sampling.replay_sampler_path, label="replay_sampler")
+        validate_dotpath(args.data_source_dotpath, label="data_source")
+    if getattr(args, "rollout_function_dotpath", None):
+        validate_dotpath(args.rollout_function_dotpath, label="rollout_function")
+    if getattr(args, "eval_function_dotpath", None):
+        validate_dotpath(args.eval_function_dotpath, label="eval_function")
+    if getattr(args, "reward_hook_dotpath", None):
+        validate_dotpath(args.reward_hook_dotpath, label="reward_hook")
+    if args.training.train_backend_dotpath:
+        validate_dotpath(args.training.train_backend_dotpath, label="train_backend")
+    if args.sampling.replay_sampler_dotpath:
+        validate_dotpath(args.sampling.replay_sampler_dotpath, label="replay_sampler")
     if include_rollout_buffer_plugins:
-        rollout_buffer_plugin_paths = args.rollout.buffer.plugin_paths or ""
-        if isinstance(rollout_buffer_plugin_paths, str):
-            for plugin_path in [part.strip() for part in rollout_buffer_plugin_paths.split(",") if part.strip()]:
-                validate_dotpath(plugin_path, label="rollout_buffer_plugin")
+        rollout_buffer_plugin_dotpaths = args.rollout.buffer.plugin_dotpaths or ""
+        if isinstance(rollout_buffer_plugin_dotpaths, str):
+            for plugin_dotpath in [part.strip() for part in rollout_buffer_plugin_dotpaths.split(",") if part.strip()]:
+                validate_dotpath(plugin_dotpath, label="rollout_buffer_plugin")
 
 
 def validate_colocate_fractions(args: Any) -> None:
@@ -353,7 +353,7 @@ def _format_rollout_mode_state(
             f"  training_actor_sampling_mode = {training_actor_sampling_mode}",
             f"  is_sglang_engine = {bool(is_sglang_engine)}",
             f"  sampling.logprob_source = {logprob_source!r}",
-            f"  sampling.replay_log_probs = {replay_enabled}",
+            f"  derived.replay_enabled = {replay_enabled}",
             f"  replay_guard = {bool(replay_guard)}",
             f"  sampling.max_samples_per_request = {max_samples_per_request!r}",
             f"  sync.protocol = {sync_protocol!r}",
@@ -461,11 +461,11 @@ def validate_algorithm_kwargs_payload(args: Any) -> None:
         )
 
 
-def validate_algorithm_path(args: Any) -> None:
-    """Validate algorithm path resolution without mutating args."""
-    resolve_algorithm_path(
+def validate_algorithm_dotpath(args: Any) -> None:
+    """Validate algorithm dotpath resolution without mutating args."""
+    resolve_algorithm_dotpath(
         algorithm_type=args.algorithm.algorithm_type,
-        algorithm_path=args.algorithm.algorithm_path,
+        algorithm_dotpath=args.algorithm.algorithm_dotpath,
     )
 
 
@@ -496,24 +496,13 @@ def validate_training_actor_sampling_mode(
 
 
 def validate_replay_mode(*, rollout_mode_info: RolloutModeInfo) -> None:
-    """Validate replay/log-prob flags against the resolved rollout-mode context."""
-    if rollout_mode_info.is_sglang_engine and rollout_mode_info.replay_guard:
-        if rollout_mode_info.logprob_source == "replay" and not rollout_mode_info.replay_enabled:
-            raise ValueError(
-                "rollout.topology.service_engine='sglang' with logprob_source='replay' requires "
-                "--sampling.replay-log-probs=true. Set it explicitly."
-            )
-        if rollout_mode_info.logprob_source == "native" and rollout_mode_info.replay_enabled:
-            raise ValueError(
-                "logprob_source='native' is incompatible with replay_log_probs=true. "
-                "Set --sampling.replay-log-probs=false when using native log_prob mode."
-            )
-
-    if rollout_mode_info.replay_enabled and not rollout_mode_info.replay_guard:
+    """Validate internal replay/log-prob derivation from the public config surface."""
+    expected_replay_enabled = rollout_mode_info.logprob_source == "replay"
+    if bool(rollout_mode_info.replay_enabled) != bool(expected_replay_enabled):
         raise ValueError(
-            "replay_log_probs=true is only valid for "
-            "dedicated rollout services + algorithm_type='grpo'. "
-            "Either disable replay_log_probs or adjust your config."
+            "Internal config mismatch: replay_enabled must be derived from "
+            f"logprob_source. Got logprob_source={rollout_mode_info.logprob_source!r}, "
+            f"replay_enabled={rollout_mode_info.replay_enabled!r}."
         )
 
 
@@ -763,13 +752,17 @@ def validate_reward_config(args: Any) -> None:
     has_http_reward_urls = reward_config.has_http_reward_urls
     has_http_reward = reward_config.has_http_reward
     local_reward_device = str(reward_config.local_reward_device or "cpu").strip().lower()
+    reward_backend = str(reward_config.reward_backend or "local").strip().lower()
     requested_reward_location = str(reward_config.reward_location or "auto").strip().lower()
     reward_location = str(execution_plan.location or "driver").strip().lower()
-    allow_local_reward_cuda_contention = bool(reward_config.allow_local_reward_cuda_contention)
 
-    if reward_config.use_http_reward and not has_http_reward_urls:
+    if has_http_reward and not has_http_reward_urls:
         raise ValueError(
-            "use_http_reward=true requires reward_service_url or reward_service_urls."
+            "reward_backend='http' requires reward_service_urls."
+        )
+    if reward_backend != "http" and has_http_reward_urls:
+        raise ValueError(
+            "reward_service_urls is only valid when reward_backend='http'."
         )
 
     if reward_location == "sampling_actor":
@@ -787,12 +780,11 @@ def validate_reward_config(args: Any) -> None:
     if (
         uses_local_same_process_reward
         and local_reward_device == "cuda"
-        and not allow_local_reward_cuda_contention
     ):
         raise ValueError(
             "local_reward_device='cuda' in driver-local reward mode can contend with "
-            "rollout/training GPUs. Use dedicated reward actors (reward_dedicated_*), "
-            "use_http_reward, or set allow_local_reward_cuda_contention=true to force."
+            "rollout/training GPUs. Use dedicated reward actors (reward_dedicated_*) "
+            "or set reward_backend='http'."
         )
 
     if requested_reward_location == "auto":
@@ -872,17 +864,17 @@ def validate_train_backend_config(
     *,
     backend_name: str,
     backend_kwargs: Mapping[str, Any],
-    backend_path: Optional[str],
+    backend_dotpath: Optional[str],
 ) -> None:
     """Validate cross-domain backend constraints after canonicalization."""
     backend = backend_name
     supported = supported_train_backends()
-    if backend not in supported and not backend_path:
+    if backend not in supported and not backend_dotpath:
         raise ValueError(
             f"Unsupported train_backend={backend!r}. "
-            f"Expected one of {sorted(supported)} or provide --training.train-backend-path."
+            f"Expected one of {sorted(supported)} or provide --training.train-backend-dotpath."
         )
-    if backend == "megatron" and not backend_path:
+    if backend == "megatron" and not backend_dotpath:
         logger.warning(
             "train_backend=%s is currently a scaffold backend: launch/topology interfaces are wired, "
             "but the training execution path is not fully implemented yet. "
@@ -890,7 +882,7 @@ def validate_train_backend_config(
             backend,
         )
 
-    if backend == "megatron" and not backend_path and not str(
+    if backend == "megatron" and not backend_dotpath and not str(
         dict(backend_kwargs).get("actor_class_path", "") or ""
     ).strip():
         logger.warning(
@@ -1070,10 +1062,10 @@ def validate_rollout_actor_init_config(config: Dict[str, Any]) -> None:
 
     validate_rollout_engine_config(engine_runtime_config)
 
-    sampler_path = str(engine_runtime_config.get("sampler_path", "") or "").strip()
-    if not sampler_path:
+    sampler_dotpath = str(engine_runtime_config.get("sampler_dotpath", "") or "").strip()
+    if not sampler_dotpath:
         raise ValueError(
-            "rollout_actor_init_config.engine_runtime_config.sampler_path is required."
+            "rollout_actor_init_config.engine_runtime_config.sampler_dotpath is required."
         )
     sampler_engine_type = str(
         engine_runtime_config.get("sampler_engine_type", "") or ""
@@ -1169,7 +1161,7 @@ __all__ = [
     "is_probably_local_weight_sync_dir",
     "repo_root",
     "validate_algorithm_kwargs_payload",
-    "validate_algorithm_path",
+    "validate_algorithm_dotpath",
     "validate_async_training_runner",
     "validate_colocate_fractions",
     "validate_direct_sampling_batch_geometry",

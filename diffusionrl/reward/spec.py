@@ -39,7 +39,7 @@ class RewardComponentSpec:
 class RewardDefinition:
     """Semantic reward definition: what to compute and how to aggregate it."""
 
-    component_aggregation: str
+    reward_aggregation_method: str
     components: Tuple[RewardComponentSpec, ...]
 
     @property
@@ -53,16 +53,26 @@ class RewardDefinition:
         return str(self.components[0].model_name)
 
     @property
-    def reward_models(self) -> Optional[list[str]]:
+    def component_names(self) -> Optional[list[str]]:
         if not self.is_multi_component:
             return None
         return [str(component.model_name) for component in self.components]
 
     @property
-    def reward_weights(self) -> Optional[list[float]]:
+    def component_weights_list(self) -> Optional[list[float]]:
         if not self.is_multi_component:
             return None
         return [float(component.weight) for component in self.components]
+
+    @property
+    def reward_models(self) -> Optional[list[str]]:
+        """Backward-compatible alias for ``component_names``."""
+        return self.component_names
+
+    @property
+    def reward_weights(self) -> Optional[list[float]]:
+        """Backward-compatible alias for ``component_weights_list``."""
+        return self.component_weights_list
 
     def component_weights(self) -> Dict[str, float]:
         return {
@@ -75,8 +85,8 @@ class RewardDefinition:
 class RewardProviderConfig:
     """Provider/scorer configuration: which scorer to load and with what limits."""
 
-    reward_path: Optional[str]
-    reward_model_saved_path: Optional[str]
+    reward_dotpath: Optional[str]
+    reward_model_ckpt_path: Optional[str]
     batch_size: int
     timeout: float
 
@@ -88,7 +98,6 @@ class RewardExecutionPlan:
     location: str
     backend: str
     local_device: str
-    reward_service_url: Optional[str]
     reward_service_urls: Tuple[str, ...]
     dedicated_num_gpus: int
     dedicated_num_nodes: int

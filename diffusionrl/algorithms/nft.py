@@ -309,8 +309,8 @@ class NFTAlgorithm(BaseAlgorithm):
 
         return set(range(self.num_inference_steps))
 
-    def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:
-        del args
+    def get_sampler_validation_config(self, *, allow_replay: bool) -> Dict[str, Any]:
+        del allow_replay
         return {
             "allow_replay": False,
             "assert_step_alignment": False,

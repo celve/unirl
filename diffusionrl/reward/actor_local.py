@@ -57,7 +57,7 @@ class ActorLocalRewardPrecompute:
         keep_reward_media_for_driver: bool,
         samples_per_prompt: int,
     ) -> RolloutSamples:
-        rewards, reward_components = score_from_rollout_outputs(
+        rewards, component_rewards = score_from_rollout_outputs(
             reward_scoring_mode="service",
             reward_service=self.executor,
             samples_per_prompt=max(1, int(samples_per_prompt)),
@@ -71,9 +71,9 @@ class ActorLocalRewardPrecompute:
         raw_meta = output.aux.get("metadata")
         meta = dict(raw_meta or {})
         meta["precomputed_rewards"] = [float(v) for v in rewards.tolist()]
-        meta["precomputed_reward_components"] = {
+        meta["precomputed_component_rewards"] = {
             str(name): [float(v) for v in list(values or [])]
-            for name, values in dict(reward_components or {}).items()
+            for name, values in dict(component_rewards or {}).items()
         }
         output.aux["metadata"] = meta
         if not keep_reward_media_for_driver:

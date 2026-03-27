@@ -84,7 +84,9 @@ class RewardService:
         self.execution_plan = reward_schema.to_execution_plan()
         self.reward_pg = reward_pgs
         self.executors = []
-        self.aggregation = self.reward_definition.component_aggregation
+        self.reward_aggregation_method = (
+            self.reward_definition.reward_aggregation_method
+        )
 
     def __init__(
         self,
@@ -102,7 +104,7 @@ class RewardService:
         logger.info(
             "RewardService initialized with %d executor(s), aggregation=%s",
             len(self.executors),
-            self.aggregation,
+            self.reward_aggregation_method,
         )
 
     def _init_executors(self) -> None:
@@ -130,17 +132,15 @@ class RewardService:
         from .http import HTTPRewardExecutor
 
         urls = list(self.execution_plan.reward_service_urls or ())
-        if not urls and self.execution_plan.reward_service_url:
-            urls = [self.execution_plan.reward_service_url]
-        reward_weights = self.reward_definition.reward_weights
+        component_weights = self.reward_definition.component_weights_list
 
         for i, url in enumerate(urls):
             if url is None:
                 continue
 
             weight = 1.0
-            if reward_weights and i < len(reward_weights):
-                weight = reward_weights[i]
+            if component_weights and i < len(component_weights):
+                weight = component_weights[i]
 
             executor = HTTPRewardExecutor(
                 base_url=url,
@@ -158,13 +158,13 @@ class RewardService:
 
         pg, bundle_indices, gpu_ids = self.reward_pg
         gpus_per_actor = self.execution_plan.dedicated_gpus_per_actor
-        reward_models = self.reward_definition.reward_models
-        reward_weights = self.reward_definition.reward_weights
+        component_names = self.reward_definition.component_names
+        component_weights = self.reward_definition.component_weights_list
 
-        if reward_models:
-            weights = reward_weights or [1.0] * len(reward_models)
+        if component_names:
+            weights = component_weights or [1.0] * len(component_names)
 
-            for i, model in enumerate(reward_models):
+            for i, model in enumerate(component_names):
                 weight = weights[i] if i < len(weights) else 1.0
 
                 actor_start = i * gpus_per_actor
@@ -184,7 +184,7 @@ class RewardService:
                     pg=pg,
                     bundle_indices=bundle_indices[actor_start:actor_end],
                     gpu_ids=gpu_ids[actor_start:actor_end],
-                    reward_path=self.reward_provider.reward_path,
+                    reward_dotpath=self.reward_provider.reward_dotpath,
                     model_path=self.reward_provider.reward_model_saved_path,
                     num_actors=1,
                     gpus_per_actor=gpus_per_actor,
@@ -204,7 +204,7 @@ class RewardService:
                 pg=pg,
                 bundle_indices=bundle_indices,
                 gpu_ids=gpu_ids,
-                reward_path=self.reward_provider.reward_path,
+                reward_dotpath=self.reward_provider.reward_dotpath,
                 model_path=self.reward_provider.reward_model_saved_path,
                 num_actors=num_actors,
                 gpus_per_actor=gpus_per_actor,
@@ -254,11 +254,11 @@ class RewardService:
                 "you need strict resource isolation."
             )
 
-        reward_path = getattr(self.reward_provider, "reward_path", None)
+        reward_dotpath = getattr(self.reward_provider, "reward_dotpath", None)
 
         def _create_executor(model_name: str, weight: float) -> BaseRewardExecutor:
-            if reward_path:
-                scorer_cls = load_function(reward_path)
+            if reward_dotpath:
+                scorer_cls = load_function(reward_dotpath)
             else:
                 scorer_cls = resolve_builtin_reward_scorer_class(model_name)
 
@@ -266,7 +266,7 @@ class RewardService:
                 logger.warning(
                     "Local reward scorer %s does not inherit BaseRewardScorer; "
                     "treating it as a scorer via duck typing.",
-                    reward_path or scorer_cls,
+                    reward_dotpath or scorer_cls,
                 )
 
             ctor_params = inspect.signature(scorer_cls.__init__).parameters
@@ -287,13 +287,13 @@ class RewardService:
                 weight=weight,
             )
 
-        reward_models = self.reward_definition.reward_models
-        reward_weights = self.reward_definition.reward_weights
+        component_names = self.reward_definition.component_names
+        component_weights = self.reward_definition.component_weights_list
 
-        if reward_models:
-            weights = reward_weights or [1.0] * len(reward_models)
+        if component_names:
+            weights = component_weights or [1.0] * len(component_names)
 
-            for i, model in enumerate(reward_models):
+            for i, model in enumerate(component_names):
                 weight = weights[i] if i < len(weights) else 1.0
                 executor = _create_executor(model_name=model, weight=weight)
                 self.executors.append(executor)
@@ -364,18 +364,21 @@ class RewardService:
 
         batch_size = responses[0][0].batch_size
 
-        if self.aggregation == "weighted_sum":
+        if self.reward_aggregation_method == "weighted_sum":
             return self._aggregate_weighted_sum(responses, batch_size, total_time)
-        if self.aggregation == "mean":
+        if self.reward_aggregation_method == "mean":
             return self._aggregate_mean(responses, batch_size, total_time)
-        if self.aggregation == "min":
+        if self.reward_aggregation_method == "min":
             return self._aggregate_min(responses, batch_size, total_time)
-        if self.aggregation == "max":
+        if self.reward_aggregation_method == "max":
             return self._aggregate_max(responses, batch_size, total_time)
-        if self.aggregation == "concat":
+        if self.reward_aggregation_method == "concat":
             return self._aggregate_concat(responses, batch_size, total_time)
 
-        logger.warning("Unknown aggregation '%s', using weighted_sum", self.aggregation)
+        logger.warning(
+            "Unknown aggregation '%s', using weighted_sum",
+            self.reward_aggregation_method,
+        )
         return self._aggregate_weighted_sum(responses, batch_size, total_time)
 
     def _aggregate_weighted_sum(
@@ -386,14 +389,14 @@ class RewardService:
     ) -> RewardResponse:
         total = torch.zeros(batch_size)
         total_weight = 0.0
-        reward_components = {}
+        component_rewards = {}
 
         for resp, executor in responses:
             weight = executor.get_weight()
             rewards_tensor = torch.tensor(resp.rewards)
             total += rewards_tensor * weight
             total_weight += weight
-            reward_components[executor.get_model_name()] = resp.rewards
+            component_rewards[executor.get_model_name()] = resp.rewards
 
         final_rewards = (total / total_weight).tolist() if total_weight > 0 else total.tolist()
 
@@ -407,7 +410,7 @@ class RewardService:
 
         return RewardResponse(
             rewards=final_rewards,
-            reward_components=reward_components,
+            component_rewards=component_rewards,
             successes=all_successes,
             errors=all_errors,
             compute_time=total_time,
@@ -420,12 +423,12 @@ class RewardService:
         total_time: float,
     ) -> RewardResponse:
         total = torch.zeros(batch_size)
-        reward_components = {}
+        component_rewards = {}
 
         for resp, executor in responses:
             rewards_tensor = torch.tensor(resp.rewards)
             total += rewards_tensor
-            reward_components[executor.get_model_name()] = resp.rewards
+            component_rewards[executor.get_model_name()] = resp.rewards
 
         final_rewards = (total / len(responses)).tolist()
 
@@ -439,7 +442,7 @@ class RewardService:
 
         return RewardResponse(
             rewards=final_rewards,
-            reward_components=reward_components,
+            component_rewards=component_rewards,
             successes=all_successes,
             errors=all_errors,
             compute_time=total_time,
@@ -455,7 +458,7 @@ class RewardService:
             [torch.tensor(resp.rewards) for resp, _ in responses]
         )
         final_rewards = all_rewards.min(dim=0)[0].tolist()
-        reward_components = {
+        component_rewards = {
             executor.get_model_name(): resp.rewards
             for resp, executor in responses
         }
@@ -470,7 +473,7 @@ class RewardService:
 
         return RewardResponse(
             rewards=final_rewards,
-            reward_components=reward_components,
+            component_rewards=component_rewards,
             successes=all_successes,
             errors=all_errors,
             compute_time=total_time,
@@ -486,7 +489,7 @@ class RewardService:
             [torch.tensor(resp.rewards) for resp, _ in responses]
         )
         final_rewards = all_rewards.max(dim=0)[0].tolist()
-        reward_components = {
+        component_rewards = {
             executor.get_model_name(): resp.rewards
             for resp, executor in responses
         }
@@ -501,7 +504,7 @@ class RewardService:
 
         return RewardResponse(
             rewards=final_rewards,
-            reward_components=reward_components,
+            component_rewards=component_rewards,
             successes=all_successes,
             errors=all_errors,
             compute_time=total_time,
@@ -513,7 +516,7 @@ class RewardService:
         batch_size: int,
         total_time: float,
     ) -> RewardResponse:
-        reward_components = {
+        component_rewards = {
             executor.get_model_name(): resp.rewards
             for resp, executor in responses
         }
@@ -529,7 +532,7 @@ class RewardService:
 
         return RewardResponse(
             rewards=final_rewards,
-            reward_components=reward_components,
+            component_rewards=component_rewards,
             successes=all_successes,
             errors=all_errors,
             compute_time=total_time,

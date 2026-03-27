@@ -49,19 +49,36 @@ class RewardRequest:
         return self.videos is not None
 
 
-@dataclass
+@dataclass(init=False)
 class RewardResponse:
     """
     Response from reward computation.
 
-    Contains both aggregated rewards and optional per-component breakdowns.
+    Contains both aggregated rewards and optional per-component reward breakdowns.
     """
 
     rewards: List[float]
-    reward_components: Dict[str, List[float]] = field(default_factory=dict)
+    component_rewards: Dict[str, List[float]] = field(default_factory=dict)
     successes: List[bool] = field(default_factory=list)
     errors: List[Optional[str]] = field(default_factory=list)
     compute_time: float = 0.0
+
+    def __init__(
+        self,
+        rewards: List[float],
+        component_rewards: Optional[Dict[str, List[float]]] = None,
+        successes: Optional[List[bool]] = None,
+        errors: Optional[List[Optional[str]]] = None,
+        compute_time: float = 0.0,
+    ) -> None:
+        self.rewards = list(rewards) if rewards is not None else []
+        self.component_rewards = {
+            str(name): list(values or [])
+            for name, values in dict(component_rewards or {}).items()
+        }
+        self.successes = list(successes) if successes is not None else []
+        self.errors = list(errors) if errors is not None else []
+        self.compute_time = float(compute_time)
 
     @property
     def batch_size(self) -> int:

@@ -67,10 +67,10 @@ class ActorSamplingExecutor:
         actor.vae = getattr(actor.model_bundle, "vae", None)
         actor.scheduler = getattr(actor.model_bundle, "scheduler", None)
 
-        sampler_path = actor._sampling_config.get("sampler_path")
-        if not sampler_path:
+        sampler_dotpath = actor._sampling_config.get("sampler_dotpath")
+        if not sampler_dotpath:
             raise ValueError(
-                "sampling_config must provide sampler_path for training-actor sampling"
+                "sampling_config must provide sampler_dotpath for training-actor sampling"
             )
 
         sampler_kwargs = dict(actor._sampling_config.get("sampler_kwargs", {}))
@@ -78,7 +78,7 @@ class ActorSamplingExecutor:
             sampler_kwargs.pop(_reserved, None)
         sde_config = SDEConfig.from_mapping(actor._sampling_config.get("sde_config"))
         actor._sampler = sampler_runner.create_sampler(
-            sampler_path=sampler_path,
+            sampler_dotpath=sampler_dotpath,
             model=actor.model,
             text_encoder=actor.text_encoder,
             vae=actor.vae,

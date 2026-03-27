@@ -718,11 +718,11 @@ class RolloutActor:
                 "Instantiate this sampler on TrainingActor instead."
             )
 
-        sampler_path = engine_runtime_config.get("sampler_path")
-        if sampler_path is None:
+        sampler_dotpath = engine_runtime_config.get("sampler_dotpath")
+        if sampler_dotpath is None:
             raise ValueError(
-                "sampler_path must be provided in engine_runtime_config. "
-                "This should be resolved from sampling.sampler_path before actor init."
+                "sampler_dotpath must be provided in engine_runtime_config. "
+                "This should be resolved from sampling.sampler_dotpath before actor init."
             )
 
         reward_config = config.get("reward_config", {})
@@ -737,8 +737,8 @@ class RolloutActor:
         engine_kwargs = dict(engine_runtime_config.get("engine_kwargs", {}))
         self._configure_transport_options(engine_kwargs)
 
-        # Add sampler_path to engine_kwargs
-        engine_kwargs["sampler_path"] = sampler_path
+        # Add sampler_dotpath to engine_kwargs
+        engine_kwargs["sampler_dotpath"] = sampler_dotpath
 
         # Pass base_gpu_id to engine for NOSET pattern
         engine_kwargs["base_gpu_id"] = self.base_gpu_id
@@ -748,8 +748,8 @@ class RolloutActor:
             engine_kwargs = self._configure_sglang_ports(engine_kwargs)
 
         resolved_engine_config = EngineConfig(
-            model_path=engine_runtime_config.get("model_path", ""),
-            pretrained_model_saved_path=engine_runtime_config.get("pretrained_model_saved_path", ""),
+            model_dotpath=engine_runtime_config.get("model_dotpath", ""),
+            pretrained_model_ckpt_path=engine_runtime_config.get("pretrained_model_ckpt_path", ""),
             num_inference_steps=int(engine_runtime_config.get("num_inference_steps", 50)),
             eta=float(engine_runtime_config.get("eta", 1.0)),
             sde_type=str(engine_runtime_config.get("sde_type", "flow")),

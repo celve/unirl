@@ -429,8 +429,9 @@ class BaseAlgorithm(ABC):
 
     @abstractmethod
     def get_sampler_validation_config(
-        self, *, args: Any
+        self, *, allow_replay: bool
     ) -> Dict[str, Any]:  # [PUBLIC-API → driver rollout pipeline] rollout side
+
         """Get sampler-output validation flags for rollout orchestration."""
         ...
 

@@ -311,7 +311,7 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
         advantages = services.compute_advantages(
             rewards=rollout_result.rewards,
             group_ids=rollout_result.request.meta.get("group_ids"),
-            reward_components=rollout_result.reward_components,
+            component_rewards=rollout_result.component_rewards,
         )
         training_batch = services.assemble_training_batch(
             request=rollout_result.request,
@@ -494,8 +494,8 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
         )
 
     logger.info("Starting diffusionRL async training...")
-    logger.info("Model: %s", args.model.pretrained_model_saved_path)
-    logger.info("Algorithm: %s", algorithm_config["algorithm_path"])
+    logger.info("Model: %s", args.model.pretrained_model_ckpt_path)
+    logger.info("Algorithm: %s", algorithm_config["algorithm_dotpath"])
     logger.info("Mode: %s", rollout_mode_name)
     logger.info("Weight sync mode: %s", sync_mode)
     logger.info(
@@ -524,7 +524,7 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
 
     wandb_logger = None
     rollout_services = None
-    rollout_function_path = ""
+    rollout_function_dotpath = ""
     rollout_eval_function = None
     rollout_reward_hook = None
     rollout_buffer = None
@@ -572,16 +572,16 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
             data_source=rollout_services.data_source,
             prompts_per_rollout=rollout_services.prompt_batch_size,
         )
-        rollout_function_path = args.rollout_function_path or DEFAULT_ROLLOUT_FUNCTION_PATH
-        rollout_eval_function = load_function(args.eval_function_path or DEFAULT_EVAL_FUNCTION_PATH)
-        rollout_reward_hook = load_function(args.reward_hook_path or DEFAULT_REWARD_HOOK_PATH)
+        rollout_function_dotpath = args.rollout_function_dotpath or DEFAULT_ROLLOUT_FUNCTION_PATH
+        rollout_eval_function = load_function(args.eval_function_dotpath or DEFAULT_EVAL_FUNCTION_PATH)
+        rollout_reward_hook = load_function(args.reward_hook_dotpath or DEFAULT_REWARD_HOOK_PATH)
         logger.info("Rollout services created")
         
-        if rollout_function_path != DEFAULT_ROLLOUT_FUNCTION_PATH:
+        if rollout_function_dotpath != DEFAULT_ROLLOUT_FUNCTION_PATH:
             raise ValueError(
                 "train_async.py currently requires the default request-centric rollout function "
                 "so the driver can overlap request launch and training. "
-                f"Got custom rollout_function_path={rollout_function_path!r}."
+                f"Got custom rollout_function_dotpath={rollout_function_dotpath!r}."
             )
         if dataset_step_info.get("num_prompts", 0) > 0:
             logger.info(

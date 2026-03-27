@@ -20,12 +20,12 @@ logger = logging.getLogger(__name__)
 
 def _resolve_scorer_path_and_class(
     *,
-    reward_path: Optional[str],
+    reward_dotpath: Optional[str],
     model_name: str,
 ) -> tuple[str, type]:
     """Resolve scorer path/class from explicit path or built-in model name."""
-    if reward_path:
-        scorer_path = str(reward_path)
+    if reward_dotpath:
+        scorer_path = str(reward_dotpath)
         scorer_cls = load_function(scorer_path)
     else:
         scorer_path = resolve_builtin_reward_scorer_path(model_name)
@@ -49,7 +49,7 @@ class _RewardActor:
 
     def __init__(
         self,
-        reward_path: str,
+        reward_dotpath: str,
         model_name: str,
         device_id: int = 0,
         gpus_per_actor: int = 1,
@@ -62,7 +62,7 @@ class _RewardActor:
         Initialize reward actor.
 
         Args:
-            reward_path: Python path to reward scorer class
+            reward_dotpath: Python path to reward scorer class
             model_name: Name of the reward model
             device_id: GPU device ID to use
             gpus_per_actor: Number of GPUs for this actor (for large models)
@@ -83,7 +83,7 @@ class _RewardActor:
             logger.info(f"_RewardActor using GPU {device_id}")
 
         # Load the reward scorer.
-        scorer_cls = load_function(reward_path)
+        scorer_cls = load_function(reward_dotpath)
 
         init_kwargs = {
             "model_name": model_name,
@@ -174,7 +174,7 @@ class RayRewardExecutor(BaseRewardExecutor):
         pg,  # PlacementGroup
         bundle_indices: List[int],
         gpu_ids: List[int],
-        reward_path: Optional[str] = None,
+        reward_dotpath: Optional[str] = None,
         model_path: Optional[str] = None,
         num_actors: int = 1,
         gpus_per_actor: int = 1,
@@ -192,7 +192,7 @@ class RayRewardExecutor(BaseRewardExecutor):
             pg: Ray placement group for resource allocation
             bundle_indices: Placement group bundle indices for each actor
             gpu_ids: GPU IDs for each actor
-            reward_path: Optional Python path to a custom reward scorer class.
+            reward_dotpath: Optional Python path to a custom reward scorer class.
                 When omitted, built-in scorers are resolved from model_name.
             model_path: Optional path to model weights
             num_actors: Number of reward worker actors to create
@@ -213,9 +213,9 @@ class RayRewardExecutor(BaseRewardExecutor):
         self.pg = pg
         self.bundle_indices = bundle_indices
         self.gpu_ids = gpu_ids
-        self.reward_path = reward_path
+        self.reward_dotpath = reward_dotpath
         self.scorer_path, scorer_cls = _resolve_scorer_path_and_class(
-            reward_path=reward_path,
+            reward_dotpath=reward_dotpath,
             model_name=model_name,
         )
         self.model_path = model_path
@@ -246,7 +246,7 @@ class RayRewardExecutor(BaseRewardExecutor):
         if input_kind not in {"image", "video"}:
             raise ValueError(
                 "Reward scorer class must declare input_kind as 'image' or 'video'. "
-                f"Got {input_kind!r} for reward_path={scorer_path!r}."
+                f"Got {input_kind!r} for reward_dotpath={scorer_path!r}."
             )
         return input_kind
 
@@ -276,7 +276,7 @@ class RayRewardExecutor(BaseRewardExecutor):
                 num_gpus_per_actor=float(self.gpus_per_actor),
                 num_gpus_per_engine=self.gpus_per_actor,
                 per_actor_kwargs=per_actor_kwargs,
-                reward_path=self.scorer_path,
+                reward_dotpath=self.scorer_path,
                 model_name=self.model_name,
                 model_path=self.model_path,
                 batch_size=self.batch_size,
@@ -386,14 +386,14 @@ class RayRewardExecutor(BaseRewardExecutor):
             max_compute_time = max(max_compute_time, resp.compute_time)
 
             # Merge reward components
-            for key, values in resp.reward_components.items():
+            for key, values in resp.component_rewards.items():
                 if key not in merged_components:
                     merged_components[key] = []
                 merged_components[key].extend(values)
 
         return RewardResponse(
             rewards=all_rewards,
-            reward_components=merged_components,
+            component_rewards=merged_components,
             successes=all_successes,
             errors=all_errors,
             compute_time=max_compute_time,

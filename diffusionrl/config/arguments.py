@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from diffusionrl.algorithms.construction import (
     instantiate_algorithm_from_config,
-    resolve_algorithm_path,
+    resolve_algorithm_dotpath,
     build_algorithm_config,
 )
 from diffusionrl.config.argument_parsing import (
@@ -47,7 +47,7 @@ from diffusionrl.config.resolution import (
 from diffusionrl.config.validation import (
     apply_model_config_hook,
     validate_algorithm_kwargs_payload,
-    validate_algorithm_path,
+    validate_algorithm_dotpath,
     validate_dynamic_dotpaths,
     validate_grouped_configs,
     validate_model_sampling_contract,
@@ -71,21 +71,21 @@ class ModelConfig:
 
     model_type: str = field(default="hunyuan",
         metadata={"help": "Model architecture type (hunyuan, flux, sd3, mochi, wan2.1, bagel)"})
-    model_path: str = field(default=DEFAULT_MODEL_PATH,
+    model_dotpath: str = field(default=DEFAULT_MODEL_PATH,
         metadata={"help": "Python dotpath to ModelBundle class. Auto-resolved from model_type"})
-    pretrained_model_saved_path: str = field(default="",
+    pretrained_model_ckpt_path: str = field(default="",
         metadata={"help": "Path to pretrained model weights (local path or HuggingFace ID)"})
-    vae_saved_path: Optional[str] = field(default=None,
+    vae_ckpt_path: Optional[str] = field(default=None,
         metadata={"help": "Path to separate VAE checkpoint, if not bundled with the model"})
-    text_encoder_path: Optional[str] = field(default=None,
+    text_encoder_ckpt_path: Optional[str] = field(default=None,
         metadata={"help": "Path to separate text encoder checkpoint, if not bundled"})
 
     def validate(self) -> None:
-        if not self.model_path:
+        if not self.model_dotpath:
             raise ValueError(
-                "model_path must be set. It is usually auto-resolved from model_type. "
+                "model_dotpath must be set. It is usually auto-resolved from model_type. "
                 "Set --model.model-type (hunyuan, flux, sd3, mochi) or provide "
-                "--model.model-path explicitly."
+                "--model.model-dotpath explicitly."
             )
 
 
@@ -93,16 +93,14 @@ class ModelConfig:
 class SamplingConfig:
     """Sampling engine, sampler, and denoising controls."""
 
-    sampler_path: str = field(default="",
+    sampler_dotpath: str = field(default="",
         metadata={"help": "Optional Python dotpath to Sampler class; omit to auto-resolve from model_type"})
-    max_samples_per_request: Optional[int] = field(default=None,
-        metadata={"help": "Generated-sample cap per training-actor direct-sampling request; rollout_total_samples stays prompts_per_rollout*samples_per_prompt"})
     logprob_source: str = field(default="replay",
-        metadata={"help": "SGLang log-prob mode: replay (training-side) or native (engine-side)"})
-    replay_log_probs: bool = field(default=False,
-        metadata={"help": "Replay old log-probs on training actor (for SGLang replay mode)"})
-    replay_sampler_path: Optional[str] = field(default=None,
-        metadata={"help": "Python dotpath to replay sampler, if different from sampler_path"})
+        metadata={"help": "SGLang log-prob mode: replay (training-side replay path) or native (engine-side log_probs)"},
+        choices=["replay", "native"],
+    )
+    replay_sampler_dotpath: Optional[str] = field(default=None,
+        metadata={"help": "Python dotpath to replay sampler, if different from sampler_dotpath"})
     sampler_kwargs: Dict[str, Any] = field(default_factory=dict,
         metadata={"help": "Explicit sampler constructor kwargs for direct sampling and replay sampler instantiation."})
     num_inference_steps: int = field(default=50,
@@ -110,7 +108,11 @@ class SamplingConfig:
     eta: float = field(default=1.0,
         metadata={"help": "SDE noise coefficient (eta=0 is ODE, eta=1 is full SDE)"})
     sde_type: str = field(default="flow",
-        metadata={"help": "Transition rule. Supported: flow, cps, dance, dpm2"})
+        metadata={"help": "Transition rule. Supported: flow, cps, dance, dpm2"},
+        choices=["flow", "cps", "dance", "dpm2"],
+    )
+    max_samples_per_request: Optional[int] = field(default=None,
+        metadata={"help": "Generated-sample cap per training-actor direct-sampling request; rollout_total_samples stays prompts_per_rollout*samples_per_prompt"})
     shift: float = field(default=3.0,
         metadata={"help": "Shift parameter for the sampling timestep schedule (model-specific)"})
     guidance_scale: float = field(default=7.5,
@@ -121,15 +123,13 @@ class SamplingConfig:
         metadata={"help": "Use identical initial noise for all samples of the same prompt"})
 
     def validate(self) -> None:
-        mode = self.logprob_source
-        if mode not in ("replay", "native"):
-            raise ValueError(
-                f"logprob_source must be one of replay/native, got: {self.logprob_source}"
-            )
-        if self.max_samples_per_request is not None and int(self.max_samples_per_request) < 1:
+        if self.logprob_source not in ("replay", "native"):
+            raise ValueError(f"logprob_source must be one of replay/native, got: {self.logprob_source}")
+        if self.max_samples_per_request is not None and self.max_samples_per_request < 1:
             raise ValueError("max_samples_per_request must be >= 1 when set.")
         if not isinstance(self.sampler_kwargs, dict):
             raise ValueError("sampling.sampler_kwargs must be a dict.")
+
         _precision_keys = {"autocast_precision", "trajectory_precision", "logprob_precision"}
         _leaked = _precision_keys & set(self.sampler_kwargs)
         if _leaked:
@@ -141,59 +141,63 @@ class SamplingConfig:
 
 @dataclass
 class RewardConfig:
-    """Reward path, reward model, and reward pool controls."""
+    """Reward dotpath, reward model, and reward pool controls."""
 
-    reward_path: Optional[str] = field(default=None,
-        metadata={"help": "Optional Python dotpath to a custom reward scorer class; omit to use built-in reward_model_name/reward_models"})
-    reward_model_saved_path: Optional[str] = field(default=None,
+    reward_backend: str = field(default="local",
+        metadata={"help": "Reward backend: local, http, ray_pool"},
+        choices=["local", "http", "ray_pool"],
+    )
+
+    # http reward service related fields
+    reward_service_urls: Optional[List[str]] = field(default=None,
+        metadata={"help": "HTTP reward service URL(s). Accepts a single URL or a list/comma-separated list for load balancing"})
+
+    # local reward model related fields
+    reward_dotpath: Optional[str] = field(default=None,
+        metadata={"help": "Optional Python dotpath to a custom reward scorer class; omit to use built-in reward_components"})
+    reward_model_ckpt_path: Optional[str] = field(default=None,
         metadata={"help": "Path to reward model weights (local path or HuggingFace ID)"})
-    reward_model_name: str = field(default="hpsv2",
-        metadata={"help": "Reward model name: hpsv2, pickscore, clip, ocr, etc."})
+    reward_components: Optional[List[str]] = field(default_factory=lambda: ["hpsv2"],
+        metadata={"help": "Reward component name(s). Accepts a single built-in scorer name or a list/comma-separated list such as hpsv2, pickscore, clip, ocr"})
     reward_batch_size: int = field(default=8,
         metadata={"help": "Batch size for reward model inference"})
-    reward_timeout: float = field(default=60.0,
-        metadata={"help": "Timeout in seconds for reward computation per batch"})
-    use_http_reward: bool = field(default=False,
-        metadata={"help": "Use external HTTP reward service instead of local model"})
-    reward_service_url: Optional[str] = field(default=None,
-        metadata={"help": "URL of HTTP reward service (when use_http_reward=true)"})
-    reward_models: Optional[List[str]] = field(default=None,
-        metadata={"help": "List of reward model names for multi-reward setup"})
-    reward_weights: Optional[List[float]] = field(default=None,
-        metadata={"help": "Weights for each reward model in multi-reward aggregation"})
-    component_aggregation: str = field(default="weighted_sum",
-        metadata={"help": "Multi-reward aggregation method: weighted_sum"})
-    reward_dedicated_num_gpus: int = field(default=0,
-        metadata={"help": "Total GPUs for dedicated reward actors (0 = CPU reward)"})
+    local_reward_device: str = field(default="cpu",
+        metadata={"help": "Device for local in-process reward scorers: cpu, auto, or cuda"})
+
+    # ray_pool reward pool related fields    
     reward_dedicated_num_nodes: int = field(default=0,
         metadata={"help": "Number of nodes for dedicated reward actors (mutually exclusive with num_gpus)"})
+    reward_dedicated_num_gpus: int = field(default=0,
+        metadata={"help": "Total GPUs for dedicated reward actors (0 = CPU reward)"})
     reward_dedicated_num_gpus_per_node: int = field(default=0,
         metadata={"help": "GPUs per node for dedicated reward actors"})
     reward_dedicated_gpus_per_actor: int = field(default=1,
         metadata={"help": "GPUs per individual reward actor"})
-    reward_service_urls: Optional[List[str]] = field(default=None,
-        metadata={"help": "List of HTTP reward service URLs for load balancing"})
     reward_location: str = field(default="auto",
         metadata={"help": "Where default reward scoring runs: auto, driver, or sampling_actor"})
-    local_reward_device: str = field(default="cpu",
-        metadata={"help": "Device for local in-process reward scorers: cpu, auto, or cuda"})
-    allow_local_reward_cuda_contention: bool = field(default=False,
-        metadata={"help": "Allow local_reward_device=cuda without dedicated reward GPUs (may contend with rollout/training GPUs)"})
+
+   
+    # multi-reward related fields
+    reward_weights: Optional[List[float]] = field(default=None,
+        metadata={"help": "Weights for each reward component in multi-reward aggregation"})
+    reward_aggregation_method: str = field(default="weighted_sum",
+        metadata={"help": "Multi-reward aggregation method: weighted_sum, mean, min, max, concat"})
 
     @property
     def has_http_reward_urls(self) -> bool:
-        return bool(self.reward_service_url or self.reward_service_urls)
+        return bool(self.reward_service_urls)
 
     @property
     def has_http_reward(self) -> bool:
-        return bool(self.use_http_reward or self.has_http_reward_urls)
+        return str(self.reward_backend or "local").strip().lower() == "http"
 
     @property
     def has_builtin_reward(self) -> bool:
-        return bool(
-            str(self.reward_model_name or "").strip()
-            or (isinstance(self.reward_models, list) and len(self.reward_models) > 0)
-        )
+        if isinstance(self.reward_components, str):
+            return bool(str(self.reward_components).strip())
+        if not isinstance(self.reward_components, list):
+            return False
+        return any(str(name or "").strip() for name in self.reward_components)
 
     @property
     def has_dedicated_reward_pool(self) -> bool:
@@ -202,6 +206,12 @@ class RewardConfig:
         )
 
     def validate(self) -> None:
+        reward_backend = str(self.reward_backend or "local").strip().lower()
+        if reward_backend not in ("local", "http", "ray_pool"):
+            raise ValueError(
+                "reward_backend must be one of local/http/ray_pool, "
+                f"got: {self.reward_backend}"
+            )
         reward_location = str(self.reward_location or "auto").strip().lower()
         if reward_location not in ("driver", "sampling_actor", "auto"):
             raise ValueError(
@@ -214,10 +224,27 @@ class RewardConfig:
                 "local_reward_device must be one of cpu/auto/cuda, "
                 f"got: {self.local_reward_device}"
             )
-        if not self.has_http_reward and not self.reward_path and not self.has_builtin_reward:
+        if reward_backend == "http" and not self.has_http_reward_urls:
+            raise ValueError("reward_backend='http' requires reward_service_urls.")
+
+        if reward_backend != "http" and self.has_http_reward_urls:
             raise ValueError(
-                "Reward scoring requires either reward_model_name/reward_models for built-ins, "
-                "or reward_path for a custom scorer."
+                "reward_service_urls is only valid when reward_backend='http'."
+            )
+        if reward_backend == "ray_pool" and not self.has_dedicated_reward_pool:
+            raise ValueError(
+                "reward_backend='ray_pool' requires reward_dedicated_num_gpus "
+                "or reward_dedicated_num_nodes."
+            )
+        if reward_backend != "ray_pool" and self.has_dedicated_reward_pool:
+            raise ValueError(
+                "reward_dedicated_* settings are only valid when "
+                "reward_backend='ray_pool'."
+            )
+        if not self.has_http_reward and not self.reward_dotpath and not self.has_builtin_reward:
+            raise ValueError(
+                "Reward scoring requires either reward_components for built-ins, "
+                "or reward_dotpath for a custom scorer."
             )
 
 
@@ -372,7 +399,7 @@ class AlgorithmConfig:
     """Algorithm selection, rollout geometry, and raw algorithm kwargs.
 
     Public/common surface:
-    - algorithm_type / algorithm_path
+    - algorithm_type / algorithm_dotpath
     - algorithm_kwargs
     - samples_per_prompt / prompts_per_rollout
     - rollout/training scheduler sub-configs
@@ -381,7 +408,7 @@ class AlgorithmConfig:
     # Algorithm selection
     algorithm_type: str = field(default="grpo",
         metadata={"help": "Built-in algorithm family: grpo, nft, or mix_grpo"})
-    algorithm_path: Optional[str] = field(default=None,
+    algorithm_dotpath: Optional[str] = field(default=None,
         metadata={"help": "Python dotpath to Algorithm class (auto-resolved from algorithm_type when omitted)"})
     algorithm_kwargs: Dict[str, Any] = field(default_factory=dict,
         metadata={"help": "YAML-only extension surface for algorithm-specific kwargs. Shared framework fields have dedicated algorithm.* entries. On CLI, use repeated --algorithm.kwarg KEY=VALUE only for true algorithm-specific extension keys."})
@@ -457,9 +484,9 @@ class AlgorithmConfig:
         return self.rollout_scheduler
 
     def validate(self) -> None:
-        if not self.algorithm_type and not self.algorithm_path:
+        if not self.algorithm_type and not self.algorithm_dotpath:
             raise ValueError(
-                "algorithm_type or algorithm_path must be set. "
+                "algorithm_type or algorithm_dotpath must be set. "
                 "Available built-ins: grpo, nft, mix_grpo."
             )
         if self.samples_per_prompt < 1:
@@ -535,8 +562,8 @@ class TrainingConfig:
 
     # Train backend
     train_backend: str = field(default="fsdp",
-        metadata={"help": "Training backend name (fsdp/veomni built-in; megatron scaffold requires actor_class_path in train_backend_kwargs); or custom via train_backend_path"})
-    train_backend_path: Optional[str] = field(default=None,
+        metadata={"help": "Training backend name (fsdp/veomni built-in; megatron scaffold requires actor_class_path in train_backend_kwargs); or custom via train_backend_dotpath"})
+    train_backend_dotpath: Optional[str] = field(default=None,
         metadata={"help": "Python dotpath to custom TrainBackend class (overrides built-in backend selection)"})
     train_backend_kwargs: Dict[str, Any] = field(default_factory=dict,
         metadata={"help": "Extra kwargs for selected train backend; accepts JSON string (CLI) or mapping (YAML)"})
@@ -750,7 +777,7 @@ class RolloutBufferSettings:
         metadata={"help": "Time-to-live for incomplete groups in seconds (0 = no timeout)"})
     max_pending_samples: int = field(default=0,
         metadata={"help": "Max pending samples in buffer before blocking rollout (0 = unbounded)"})
-    plugin_paths: str = field(default="",
+    plugin_dotpaths: str = field(default="",
         metadata={"help": "Comma-separated dotpaths to rollout buffer filter plugins"})
 
     def validate(self) -> None:
@@ -978,16 +1005,16 @@ class DebugConfig:
 
 @dataclass
 class TrainingArguments:
-    """All configuration parameters for GRPO training."""
+    """All configuration parameters for DiffusionRL training."""
 
-    # ========== Paths (Dynamic Loading) ==========
-    data_source_path: str = field(default="diffusionrl.data.DefaultDataSource",
+    # ========== Dotpaths For Custom Modules (Dynamic Loading) ==========
+    data_source_dotpath: str = field(default="diffusionrl.data.DefaultDataSource",
         metadata={"help": "Python dotpath to DataSource class for loading training/eval prompt streams"})
-    rollout_function_path: str = field(default="diffusionrl.rollout.default_rollout.generate_rollout",
+    rollout_function_dotpath: str = field(default="diffusionrl.rollout.default_rollout.generate_rollout",
         metadata={"help": "Python dotpath to the rollout function invoked by the rollout service. This is the main rollout extension seam."})
-    eval_function_path: str = field(default="diffusionrl.rollout.default_rollout.evaluate_rollout",
+    eval_function_dotpath: str = field(default="diffusionrl.rollout.default_rollout.evaluate_rollout",
         metadata={"help": "Python dotpath to the evaluation function invoked by the rollout service."})
-    reward_hook_path: str = field(default="diffusionrl.rollout.default_rollout.score_rewards_hook",
+    reward_hook_dotpath: str = field(default="diffusionrl.rollout.default_rollout.score_rewards_hook",
         metadata={"help": "Python dotpath to the reward hook used by rollout/eval functions. This makes reward a first-class rollout hook."})
 
     # ========== Grouped Configuration ==========
@@ -1007,6 +1034,7 @@ class TrainingArguments:
         metadata={"help": "Path to training prompt data file (JSON, JSONL, or TXT). JSON items should provide text via 'prompt' or 'caption'."})
     eval_data_path: Optional[str] = field(default=None,
         metadata={"help": "Optional path to evaluation prompt data file. If unset, eval uses data_path with deterministic ordering."})
+    
     # ========== Video/Image Configuration ==========
     height: int = field(default=256,
         metadata={"help": "Generated image/video height in pixels"})
@@ -1140,12 +1168,12 @@ def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
     resolved["sync.protocol"] = str(args.sync.protocol).strip().lower()
 
     try:
-        resolved["algorithm.algorithm_path"] = resolve_algorithm_path(
+        resolved["algorithm.algorithm_dotpath"] = resolve_algorithm_dotpath(
             algorithm_type=args.algorithm.algorithm_type,
-            algorithm_path=args.algorithm.algorithm_path,
+            algorithm_dotpath=args.algorithm.algorithm_dotpath,
         )
     except Exception as exc:
-        _record_resolution_error(resolved, scope="algorithm_path", exc=exc)
+        _record_resolution_error(resolved, scope="algorithm_dotpath", exc=exc)
 
     try:
         resolved_config = resolve_config(args, include_training_plan=True)
@@ -1158,9 +1186,9 @@ def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
     train_topology = resolved_config.training_topology
     train_plan = resolved_config.training_plan
 
-    resolved["model.model_path"] = model_spec.model_path
+    resolved["model.model_dotpath"] = model_spec.model_dotpath
     resolved["model.model_type"] = model_spec.model_type
-    resolved["sampling.sampler_path"] = model_spec.sampler_path
+    resolved["sampling.sampler_dotpath"] = model_spec.sampler_dotpath
     resolved["training.train_backend"] = resolved_config.train_backend_config.name
     resolved["rollout.topology.mode"] = rollout_topology.mode
     resolved["rollout.topology.service_engine"] = rollout_topology.service_engine
@@ -1373,11 +1401,11 @@ def validate_args(
     backend_name = backend_config.name
     rollout_mode_info = resolved_config.rollout_mode_info
     validate_algorithm_kwargs_payload(args)
-    validate_algorithm_path(args)
+    validate_algorithm_dotpath(args)
     validate_train_backend_config(
         backend_name=backend_name,
         backend_kwargs=backend_config.kwargs,
-        backend_path=backend_config.backend_path,
+        backend_dotpath=backend_config.backend_dotpath,
     )
     backend_capabilities = resolved_config.train_backend_capabilities.as_dict()
     validate_rollout_mode(

@@ -52,7 +52,6 @@ REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-"hpsv2"}
 
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
-REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 # Eval EMA settings (smoothed weights for stable evaluation)
@@ -90,7 +89,6 @@ python -m diffusionrl.train \
     --rollout.topology.service-num-gpus ${TP_SIZE} \
     --rollout.topology.engine-tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
-    --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \

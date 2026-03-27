@@ -36,8 +36,8 @@ class FluxModelBundle(ModelBundle):
         pretrained_path: str,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.bfloat16,
-        vae_saved_path: Optional[str] = None,
-        text_encoder_path: Optional[str] = None,
+        vae_ckpt_path: Optional[str] = None,
+        text_encoder_ckpt_path: Optional[str] = None,
         text_encoder_2_path: Optional[str] = None,
         variant: str = "dev",  # "dev" or "schnell"
         load_on_init: bool = True,
@@ -56,8 +56,8 @@ class FluxModelBundle(ModelBundle):
             pretrained_path: Path to pretrained transformer weights
             device: Device to load models on
             dtype: Data type for transformer weights
-            vae_saved_path: Optional separate path for VAE
-            text_encoder_path: Optional separate path for CLIP encoder
+            vae_ckpt_path: Optional separate path for VAE
+            text_encoder_ckpt_path: Optional separate path for CLIP encoder
             text_encoder_2_path: Optional separate path for T5 encoder
             variant: FLUX variant ("dev" or "schnell")
             load_on_init: Whether to load models immediately
@@ -73,8 +73,8 @@ class FluxModelBundle(ModelBundle):
         """
         super().__init__(pretrained_path, device, dtype, **kwargs)
 
-        self.vae_saved_path = vae_saved_path or pretrained_path
-        self.text_encoder_path = text_encoder_path or pretrained_path
+        self.vae_ckpt_path = vae_ckpt_path or pretrained_path
+        self.text_encoder_ckpt_path = text_encoder_ckpt_path or pretrained_path
         self.text_encoder_2_path = text_encoder_2_path or pretrained_path
         self.variant = variant
         self.use_lora = use_lora
@@ -102,7 +102,7 @@ class FluxModelBundle(ModelBundle):
         return "image"
 
     @classmethod
-    def default_sampler_path(cls) -> Optional[str]:
+    def default_sampler_dotpath(cls) -> Optional[str]:
         return "diffusionrl.samplers.fsdp.flux_sampler.FluxSampler"
 
     @classmethod
@@ -198,13 +198,13 @@ class FluxModelBundle(ModelBundle):
             from diffusers import AutoencoderKL
 
             self._vae = AutoencoderKL.from_pretrained(
-                self.vae_saved_path,
+                self.vae_ckpt_path,
                 subfolder="vae",
                 torch_dtype=self.dtype,
             )
             self._vae.to(self.device)
             self._vae.eval()
-            logger.info(f"Loaded FLUX VAE from {self.vae_saved_path}")
+            logger.info(f"Loaded FLUX VAE from {self.vae_ckpt_path}")
 
         except ImportError:
             logger.warning("Could not import AutoencoderKL from diffusers.")
@@ -226,7 +226,7 @@ class FluxModelBundle(ModelBundle):
 
             # Load CLIP encoder
             self._clip_encoder = CLIPTextModel.from_pretrained(
-                self.text_encoder_path,
+                self.text_encoder_ckpt_path,
                 subfolder="text_encoder",
                 torch_dtype=self.dtype,
             )
@@ -234,7 +234,7 @@ class FluxModelBundle(ModelBundle):
             self._clip_encoder.eval()
 
             self._clip_tokenizer = CLIPTokenizer.from_pretrained(
-                self.text_encoder_path,
+                self.text_encoder_ckpt_path,
                 subfolder="tokenizer",
             )
 

@@ -59,13 +59,14 @@ def _push_rollout_training_batch(*, ray_module, rollout_buffer, rollout_id: int,
             f"Rollout buffer rejected rollout_id={rollout_id}: {push_result.get('error')}"
         )
 
+
 def _produce_and_push_rollout(
     *,
     ray_module,
     args,
     rollout_services,
     rollout_function,
-    rollout_function_path: str,
+    rollout_function_dotpath: str,
     reward_hook,
     rollout_buffer,
     rollout_id: int,
@@ -89,10 +90,10 @@ def _produce_and_push_rollout(
         media_max_items=int(media_max_items),
         debug_trace={} if debug_save_intermediates else None,
     )
-    if debug_save_intermediates and str(rollout_function_path).strip() != DEFAULT_ROLLOUT_FUNCTION_PATH:
+    if debug_save_intermediates and str(rollout_function_dotpath).strip() != DEFAULT_ROLLOUT_FUNCTION_PATH:
         raise ValueError(
             "debug_save_intermediates currently requires the default request-centric rollout pipeline. "
-            f"Got custom rollout_function_path={rollout_function_path!r}."
+            f"Got custom rollout_function_dotpath={rollout_function_dotpath!r}."
         )
 
     rollout_result = rollout_function(
@@ -108,7 +109,7 @@ def _produce_and_push_rollout(
     advantages = rollout_services.compute_advantages(
         rewards=rollout_result.rewards,
         group_ids=rollout_result.request.meta.get("group_ids"),
-        reward_components=rollout_result.reward_components,
+        component_rewards=rollout_result.component_rewards,
     )
     training_batch = rollout_services.assemble_training_batch(
         request=rollout_result.request,
@@ -127,8 +128,8 @@ def _produce_and_push_rollout(
         debug_payload.setdefault("rewards", rollout_result.rewards)
         debug_payload.setdefault("advantages", advantages)
         debug_payload.setdefault(
-            "reward_components",
-            dict(rollout_result.reward_components or {}),
+            "component_rewards",
+            dict(rollout_result.component_rewards or {}),
         )
         _push_rollout_training_batch(
             ray_module=ray_module,
@@ -154,7 +155,11 @@ def _produce_and_push_rollout(
     )
 
 
+<<<<<<< HEAD
 def train(args):  # [PUBLIC-API → main()] sync entrypoint
+=======
+def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步训练循环
+>>>>>>> a15271a (refactor configs)
     """Synchronous training entrypoint."""
     debug_mode = str(args.debug.debug_mode or "none").strip().lower()
     if debug_mode == "train_only":
@@ -193,8 +198,8 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
     rollout_buffer_settings = args.rollout.buffer
 
     logger.info("Starting diffusionRL training...")
-    logger.info(f"Model: {args.model.pretrained_model_saved_path}")
-    logger.info(f"Algorithm: {algorithm_config['algorithm_path']}")
+    logger.info(f"Model: {args.model.pretrained_model_ckpt_path}")
+    logger.info(f"Algorithm: {algorithm_config['algorithm_dotpath']}")
     logger.info(f"Mode: {rollout_mode_name}")
     logger.info(f"Offload train: {args.ray.offload_train}, Offload rollout: {args.ray.offload_rollout}")
     logger.info("Weight sync mode: %s", sync_mode)
@@ -221,7 +226,7 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
     wandb_logger = None
     rollout_services = None
     rollout_function = None
-    rollout_function_path = ""
+    rollout_function_dotpath = ""
     eval_function = None
     reward_hook = None
     rollout_buffer = None
@@ -284,11 +289,11 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
             prompts_per_rollout=rollout_services.prompt_batch_size,
         )
 
-        rollout_function_path = args.rollout_function_path or DEFAULT_ROLLOUT_FUNCTION_PATH
-        rollout_function = load_function(rollout_function_path)
+        rollout_function_dotpath = args.rollout_function_dotpath or DEFAULT_ROLLOUT_FUNCTION_PATH
+        rollout_function = load_function(rollout_function_dotpath)
 
-        eval_function = load_function(args.eval_function_path or DEFAULT_EVAL_FUNCTION_PATH)
-        reward_hook = load_function(args.reward_hook_path or DEFAULT_REWARD_HOOK_PATH)
+        eval_function = load_function(args.eval_function_dotpath or DEFAULT_EVAL_FUNCTION_PATH)
+        reward_hook = load_function(args.reward_hook_dotpath or DEFAULT_REWARD_HOOK_PATH)
         logger.info("Rollout services created")
 
         if dataset_step_info.get("num_prompts", 0) > 0:
@@ -450,7 +455,7 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
                 args=args,
                 rollout_services=rollout_services,
                 rollout_function=rollout_function,
-                rollout_function_path=rollout_function_path,
+                rollout_function_dotpath=rollout_function_dotpath,
                 reward_hook=reward_hook,
                 rollout_buffer=rollout_buffer,
                 rollout_id=rollout_id,

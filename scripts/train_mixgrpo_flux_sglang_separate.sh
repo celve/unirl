@@ -55,7 +55,6 @@ ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 # Rollout (sglang engine)
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
-REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
 REPLAY_SAMPLER_PATH=${REPLAY_SAMPLER_PATH:-diffusionrl.samplers.fsdp.flux_sampler.FluxSampler}
 
 # Reward
@@ -91,7 +90,6 @@ python -m diffusionrl.train \
     --rollout.topology.service-num-gpus ${TP_SIZE} \
     --rollout.topology.engine-tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
-    --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --sampling.replay-sampler-path "${REPLAY_SAMPLER_PATH}" \
     --algorithm.algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
