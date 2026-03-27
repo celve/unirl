@@ -158,7 +158,7 @@ python -m diffusionrl.train \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
-    --rollout.topology.mode direct_rollout \
+    --rollout.topology.mode direct_sampling \
 --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     "${RAY_ADDRESS_ARGS[@]}" \
     --ray.rollout-num-nodes 0 \

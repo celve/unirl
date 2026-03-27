@@ -105,10 +105,10 @@ bash scripts/train_plugin_demo.sh --rollout.control.num-rollout 1
 
 ## Engine note
 
-For training-actor direct sampling, set `rollout.topology.mode=direct_rollout`
+For training-actor direct sampling, set `rollout.topology.mode=direct_sampling`
 and `sync.protocol=disabled`.
 Leave `rollout.topology.service_engine` unset in direct mode.
-For SGLang, use `rollout.topology.mode=separate_rollout` or `rollout.topology.mode=colocate_rollout`
+For SGLang, use `rollout.topology.mode=separate` or `rollout.topology.mode=colocate`
 with `rollout.topology.service_engine=sglang`, and set an explicit dedicated-rollout
 weight-sync mode such as `tensor_payload`, `nccl_broadcast`, or
 `checkpoint_path`.
@@ -122,7 +122,7 @@ through `rollout.topology.sglang_kwargs`:
 ```yaml
 rollout:
   topology:
-    mode: separate_rollout
+    mode: separate
     service_engine: sglang
     service_num_gpus: 4
     engine_tp_size: 4

@@ -25,7 +25,6 @@ Training geometry is rollout-driven only:
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Mapping, Optional, Tuple
@@ -35,7 +34,6 @@ from diffusionrl.algorithms.construction import (
 )
 from diffusionrl.models import list_model_types, resolve_model_bundle_path
 from diffusionrl.samplers.engine import get_engine_class_path
-from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.training.backends import (
     TrainBackendConfig,
     TrainBackendCapabilities,
@@ -334,8 +332,8 @@ def derive_rollout_topology(args: Any) -> RolloutTopology:
     )
     if rollout_mode == DIRECT_ROLLOUT_MODE and rollout_service_engine is not None:
         raise ValueError(
-            "direct_rollout is the only public direct-sampling selector. "
-            "Leave rollout.topology.service_engine unset in direct_rollout mode."
+            "direct_sampling is the only public direct-sampling selector. "
+            "Leave rollout.topology.service_engine unset in direct_sampling mode."
         )
     return RolloutTopology(
         mode=rollout_mode,
@@ -784,5 +782,4 @@ __all__ = [
     "resolve_config",
     "rollout_mode_is_colocated",
     "rollout_mode_uses_service",
-    "rollout_mode_label",
 ]

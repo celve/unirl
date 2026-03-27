@@ -22,9 +22,6 @@ from diffusionrl.config import (
     parse_args,
 )
 from diffusionrl.config.launch_resolution import resolve_launch_config
-from diffusionrl.config.resolution import (
-    rollout_mode_label,
-)
 from diffusionrl.config.validation import (
     validate_async_training_runner,
 )
@@ -492,7 +489,7 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
     rollout_topology = rollout_mode_info.rollout_topology
     training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
     sync_mode = rollout_mode_info.sync_protocol
-    rollout_mode_name = rollout_mode_label(rollout_topology.mode)
+    rollout_mode_name = rollout_topology.mode
     rollout_sde_controller = RolloutSDEController(
         algorithm=control_algorithm,
         timestep_scheduler=create_rollout_timestep_scheduler(args, algorithm=control_algorithm),
@@ -584,7 +581,7 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
         )
         dataset_step_info = compute_dataset_step_info(
             data_source=rollout_services.data_source,
-            prompts_per_rollout=services.prompt_batch_size,
+            prompts_per_rollout=rollout_services.prompt_batch_size,
         )
         rollout_function_path = args.rollout_function_path or DEFAULT_ROLLOUT_FUNCTION_PATH
         rollout_eval_function = load_function(args.eval_function_path or DEFAULT_EVAL_FUNCTION_PATH)

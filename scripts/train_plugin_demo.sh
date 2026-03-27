@@ -60,7 +60,7 @@ python -m diffusionrl.train \
     --training.local-micro-batch-size 1 \
     --algorithm.samples-per-prompt 2 \
     \
-    --rollout.topology.mode direct_rollout \
+    --rollout.topology.mode direct_sampling \
 --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node "${NUM_GPUS}" \

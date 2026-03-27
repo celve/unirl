@@ -23,14 +23,6 @@ import logging
 from diffusionrl.config.launch_resolution import LaunchConfig
 logger = logging.getLogger(__name__)
 
-
-_BUILTIN_COORDINATORS: Dict[str, Type[WeightSyncCoordinator]] = {
-    "disabled": DisabledWeightSync,
-    "tensor_payload": TensorPayloadWeightSync,
-    "nccl_broadcast": NCCLBroadcastWeightSync,
-    "checkpoint_path": CheckpointWeightSync,
-}
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -413,6 +405,14 @@ class CheckpointWeightSync(WeightSyncCoordinator):
 
     def _do_teardown(self) -> None:
         self._training_runtime.teardown_weight_sync()
+
+
+_BUILTIN_COORDINATORS: Dict[str, Type[WeightSyncCoordinator]] = {
+    "disabled": DisabledWeightSync,
+    "tensor_payload": TensorPayloadWeightSync,
+    "nccl_broadcast": NCCLBroadcastWeightSync,
+    "checkpoint_path": CheckpointWeightSync,
+}
 
 
 

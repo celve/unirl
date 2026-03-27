@@ -48,7 +48,6 @@ from diffusionrl.config.validation import (
     apply_model_config_hook,
     validate_algorithm_kwargs_payload,
     validate_algorithm_path,
-    validate_dotpath,
     validate_dynamic_dotpaths,
     validate_grouped_configs,
     validate_model_sampling_contract,
@@ -581,11 +580,11 @@ class RolloutTopologySettings:
     """Rollout topology and dedicated-engine knobs."""
 
     mode: Optional[str] = field(default=None,
-        metadata={"help": "Canonical rollout topology: direct_rollout, separate_rollout, or colocate_rollout"})
+        metadata={"help": "Canonical rollout topology: direct_sampling, separate, or colocate"})
     service_engine: Optional[str] = field(default=None,
-        metadata={"help": "Dedicated rollout engine selector for separate_rollout or colocate_rollout. Must be unset in direct_rollout."})
+        metadata={"help": "Dedicated rollout engine selector for separate or colocate. Must be unset in direct_sampling."})
     service_num_gpus: Optional[int] = field(default=None,
-        metadata={"help": "Dedicated rollout service GPUs per actor/engine. Required for separate_rollout and colocate_rollout."})
+        metadata={"help": "Dedicated rollout service GPUs per actor/engine. Required for separate and colocate."})
     engine_tp_size: Optional[int] = field(default=None,
         metadata={"help": "Dedicated rollout service tensor parallel hint. Does not determine actor GPU ownership."})
     engine_sp_size: Optional[int] = field(default=None,

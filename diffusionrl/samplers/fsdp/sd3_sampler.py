@@ -1,5 +1,5 @@
 """
-SD3 Image Sampler for GRPO Training (native direct rollout).
+SD3 Image Sampler for GRPO Training (native direct sampling).
 
 This sampler implements SDE sampling with log probability computation
 for Stable Diffusion 3 image models using native PyTorch (FSDP-compatible).
@@ -76,7 +76,7 @@ def calculate_shift(
 
 class SD3Sampler(BaseSampler):
     """
-    SD3 image sampler with log probability computation for native direct rollout.
+    SD3 image sampler with log probability computation for native direct sampling.
 
     This sampler is designed for Stable Diffusion 3 models and implements:
     - Standard SDE formulation

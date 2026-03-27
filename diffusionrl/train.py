@@ -7,7 +7,6 @@ Usage:
 """
 import logging
 import time
-from typing import Any, Dict
 
 from diffusionrl.config import (
     build_resolved_config_view,
@@ -291,7 +290,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
         dataset_step_info = compute_dataset_step_info(
             data_source=rollout_services.data_source,
-            prompts_per_rollout=services.prompt_batch_size,
+            prompts_per_rollout=rollout_services.prompt_batch_size,
         )
 
         rollout_function_path = args.rollout_function_path or DEFAULT_ROLLOUT_FUNCTION_PATH
