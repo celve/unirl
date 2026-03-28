@@ -219,7 +219,7 @@ run_training() {
         --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}" \
         --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}" \
         \
-        --rollout.topology.mode direct_rollout \
+        --rollout.topology.mode direct_sampling \
         --sync.protocol disabled \
         --ray.rollout-num-nodes 0 \
         --ray.rollout-num-gpus-per-node 0 \

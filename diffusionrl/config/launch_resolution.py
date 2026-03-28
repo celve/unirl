@@ -1,6 +1,6 @@
 """Launch-side config assembly built once on the driver.
 
-This module consumes ``ResolvedConfig`` from ``resolution.py`` and builds the
+This module consumes ``ConfigBundle`` from ``resolution.py`` and builds the
 driver-facing launch payloads used by placement, group creation, and rollout /
 training actor initialization. It does not own config semantics.
 """
@@ -21,11 +21,11 @@ from diffusionrl.config.build_domain_args import (
     build_training_actor_init_config,
 )
 from diffusionrl.config.resolution import (
-    ResolvedConfig,
-    ResolvedModelSpec,
-    ResolvedRolloutModeInfo,
-    ResolvedTrainingPlan,
-    ResolvedTrainTopology,
+    ConfigBundle,
+    ModelSpec,
+    RolloutModeInfo,
+    TrainingPlan,
+    TrainTopology,
     derive_sampling_host_engine_type,
     derive_training_plan,
     require_rollout_service_num_gpus,
@@ -37,11 +37,11 @@ from diffusionrl.training.backends import (
     resolve_train_backend_launch_spec,
 )
 from diffusionrl.training.backends.base import TrainBackendLaunchSpec
-from diffusionrl.types.sampling import ResolvedSamplingSpec
+from diffusionrl.types.sampling import SamplingSpec
 
 
 @dataclass(frozen=True)
-class ResolvedPlacementSpec:
+class PlacementSpec:
     rollout_num_nodes: int
     rollout_num_gpus_per_node: int
     training_num_nodes: int
@@ -55,7 +55,7 @@ class ResolvedPlacementSpec:
 
 
 @dataclass(frozen=True)
-class ResolvedRolloutLaunch:
+class RolloutLaunch:
     mode: str
     service_engine: str
     actor_gpu_requirement: int
@@ -67,9 +67,9 @@ class ResolvedRolloutLaunch:
 
 
 @dataclass(frozen=True)
-class ResolvedTrainingLaunch:
-    topology: ResolvedTrainTopology
-    training_plan: ResolvedTrainingPlan
+class TrainingLaunch:
+    topology: TrainTopology
+    training_plan: TrainingPlan
     backend_name: str
     backend_capabilities: Dict[str, Any]
     launch_spec: TrainBackendLaunchSpec
@@ -80,22 +80,22 @@ class ResolvedTrainingLaunch:
 
 
 @dataclass(frozen=True)
-class ResolvedLaunchConfig:
+class LaunchConfig:
     algorithm_config: Dict[str, Any]
-    model_spec: ResolvedModelSpec
-    sampling_spec: ResolvedSamplingSpec
+    model_spec: ModelSpec
+    sampling_spec: SamplingSpec
     training_sampling_config: Dict[str, Any]
-    rollout_mode_info: ResolvedRolloutModeInfo
-    placement: ResolvedPlacementSpec
-    rollout: Optional[ResolvedRolloutLaunch]
-    training: ResolvedTrainingLaunch
+    rollout_mode_info: RolloutModeInfo
+    placement: PlacementSpec
+    rollout: Optional[RolloutLaunch]
+    training: TrainingLaunch
 
 
 def resolve_launch_placement_spec(
     args: Any,
     *,
-    rollout_mode_info: Optional[ResolvedRolloutModeInfo] = None,
-) -> ResolvedPlacementSpec:
+    rollout_mode_info: Optional[RolloutModeInfo] = None,
+) -> PlacementSpec:
     resolved_mode_info = (
         rollout_mode_info
         if rollout_mode_info is not None
@@ -120,7 +120,7 @@ def resolve_launch_placement_spec(
         rollout_num_nodes = 0
         rollout_num_gpus_per_node = 0
 
-    return ResolvedPlacementSpec(
+    return PlacementSpec(
         rollout_num_nodes=rollout_num_nodes,
         rollout_num_gpus_per_node=rollout_num_gpus_per_node,
         training_num_nodes=training_num_nodes,
@@ -139,8 +139,8 @@ def resolve_launch_placement_spec(
 def resolve_launch_config(
     args: Any,
     *,
-    resolved: Optional[ResolvedConfig] = None,
-) -> ResolvedLaunchConfig:
+    resolved: Optional[ConfigBundle] = None,
+) -> LaunchConfig:
     resolved_config = (
         resolved
         if resolved is not None
@@ -202,7 +202,7 @@ def resolve_launch_config(
         sampling_config=training_sampling_config,
         train_backend_config=train_backend_payload,
     )
-    training = ResolvedTrainingLaunch(
+    training = TrainingLaunch(
         topology=training_topology,
         training_plan=training_plan,
         backend_name=train_backend_config.name,
@@ -214,7 +214,7 @@ def resolve_launch_config(
         actor_init_config=training_actor_init_config,
     )
 
-    rollout: Optional[ResolvedRolloutLaunch] = None
+    rollout: Optional[RolloutLaunch] = None
     if placement.rollout_num_nodes > 0 and placement.rollout_num_gpus_per_node > 0:
         service_engine = rollout_mode_info.rollout_topology.service_engine
         if not service_engine:
@@ -236,7 +236,7 @@ def resolve_launch_config(
             engine_runtime_config=rollout_engine_runtime_config,
             reward_config=reward_config,
         )
-        rollout = ResolvedRolloutLaunch(
+        rollout = RolloutLaunch(
             mode=rollout_mode_info.rollout_topology.mode,
             service_engine=service_engine,
             actor_gpu_requirement=require_rollout_service_num_gpus(args),
@@ -247,7 +247,7 @@ def resolve_launch_config(
             actor_init_config=rollout_actor_init_config,
         )
 
-    return ResolvedLaunchConfig(
+    return LaunchConfig(
         algorithm_config=algorithm_config,
         model_spec=model_spec,
         sampling_spec=sampling_spec,
@@ -260,10 +260,10 @@ def resolve_launch_config(
 
 
 __all__ = [
-    "ResolvedPlacementSpec",
-    "ResolvedRolloutLaunch",
-    "ResolvedLaunchConfig",
-    "ResolvedTrainingLaunch",
+    "PlacementSpec",
+    "RolloutLaunch",
+    "LaunchConfig",
+    "TrainingLaunch",
     "resolve_launch_config",
     "resolve_launch_placement_spec",
 ]

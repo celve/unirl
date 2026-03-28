@@ -7,14 +7,14 @@ from dataclasses import MISSING, fields as dataclass_fields
 import logging
 import os
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from diffusionrl.algorithms.construction import build_algorithm_kwargs, resolve_algorithm_path
 from diffusionrl.config.resolution import (
-    ResolvedModelSpec,
-    ResolvedRolloutModeInfo,
-    ResolvedRolloutTopology,
-    ResolvedTrainTopology,
+    ModelSpec,
+    RolloutModeInfo,
+    RolloutTopology,
+    TrainTopology,
     derive_global_rollout_batch_size,
     derive_model_spec,
     derive_rollout_actor_gpu_count,
@@ -123,7 +123,7 @@ def validate_grouped_configs(args: Any) -> None:
 def validate_dynamic_dotpaths(
     args: Any,
     *,
-    resolved_model: Optional[ResolvedModelSpec] = None,
+    resolved_model: Optional[ModelSpec] = None,
     include_data_source: bool = True,
     include_rollout_buffer_plugins: bool = True,
 ) -> None:
@@ -242,7 +242,7 @@ def validate_nft_sampling_contract(args: Any) -> None:
 def validate_resolved_engine_algorithm_contract(
     args: Any,
     *,
-    rollout_mode_info: ResolvedRolloutModeInfo,
+    rollout_mode_info: RolloutModeInfo,
     sampling_requirements: SamplingRequirements,
 ) -> None:
     """Validate engine/algorithm compatibility using pre-resolved capabilities."""
@@ -287,7 +287,7 @@ def validate_rollout_mode_constraints(
     *,
     training_actor_sampling_mode: bool,
     model_cls: Any,
-    rollout_topology: ResolvedRolloutTopology,
+    rollout_topology: RolloutTopology,
 ) -> None:
     """Validate rollout-mode constraints and mutually-exclusive switches."""
     model_label = f"{model_cls.__module__}.{model_cls.__qualname__}"
@@ -313,7 +313,7 @@ def validate_rollout_mode_constraints(
 # ============================================================================
 
 
-def _collect_direct_rollout_incompatible_fields(rollout_topology_config: Any) -> list[str]:
+def _collect_direct_sampling_incompatible_fields(rollout_topology_config: Any) -> list[str]:
     incompatible: list[str] = []
     for field_info in dataclass_fields(type(rollout_topology_config)):
         if field_info.name in {"mode", "service_engine"}:
@@ -333,14 +333,13 @@ def _collect_direct_rollout_incompatible_fields(rollout_topology_config: Any) ->
 def _format_rollout_mode_state(
     args: Any,
     *,
-    rollout_mode_info: ResolvedRolloutModeInfo,
+    rollout_mode_info: RolloutModeInfo,
 ) -> str:
     rollout_topology = rollout_mode_info.rollout_topology
     training_actor_sampling_mode = bool(rollout_mode_info.training_actor_sampling_mode)
     replay_enabled = bool(rollout_mode_info.replay_enabled)
     sync_protocol = str(rollout_mode_info.sync_protocol)
     max_samples_per_request = rollout_mode_info.max_samples_per_request
-    algorithm_type = str(rollout_mode_info.algorithm_type)
     logprob_source = str(rollout_mode_info.logprob_source)
     is_sglang_engine = rollout_mode_info.is_sglang_engine
     replay_guard = rollout_mode_info.replay_guard
@@ -381,7 +380,7 @@ def validate_async_training_runner(args: Any) -> None:
 
     rollout_topology = derive_rollout_topology(args)
     if rollout_mode_is_colocated(rollout_topology.mode):
-        raise ValueError("train_async.py requires rollout.topology.mode='separate_rollout'.")
+        raise ValueError("train_async.py requires rollout.topology.mode='separate'.")
     if rollout_topology.training_actor_sampling_mode:
         raise ValueError(
             "train_async.py requires a dedicated rollout engine "
@@ -397,8 +396,8 @@ def validate_async_training_runner(args: Any) -> None:
 def validate_rollout_topology_contract(
     args: Any,
     *,
-    rollout_topology: ResolvedRolloutTopology,
-) -> ResolvedRolloutTopology:
+    rollout_topology: RolloutTopology,
+) -> RolloutTopology:
     """Validate rollout topology contract after strict topology resolution."""
     topology = rollout_topology
     rollout_topology_config = args.rollout.topology
@@ -410,7 +409,7 @@ def validate_rollout_topology_contract(
             )
         if not uses_dedicated_rollout_engine(topology.service_engine):
             raise ValueError(
-                "rollout.topology.mode in {separate_rollout,colocate_rollout} requires a dedicated rollout "
+                "rollout.topology.mode in {separate,colocate} requires a dedicated rollout "
                 f"service engine. Got rollout.topology.service_engine={topology.service_engine!r}."
             )
         if rollout_topology_config.service_num_gpus is None:
@@ -419,12 +418,12 @@ def validate_rollout_topology_contract(
             )
         return topology
 
-    configured_direct_incompatible_fields = _collect_direct_rollout_incompatible_fields(
+    configured_direct_incompatible_fields = _collect_direct_sampling_incompatible_fields(
         rollout_topology_config
     )
     if configured_direct_incompatible_fields:
         raise ValueError(
-            "direct_rollout runs sampling on training actors, so dedicated rollout-service fields "
+            "direct_sampling runs sampling on training actors, so dedicated rollout-service fields "
             f"must be unset. Remove: {', '.join(sorted(configured_direct_incompatible_fields))}."
         )
 
@@ -472,7 +471,7 @@ def validate_algorithm_path(args: Any) -> None:
 
 def validate_training_actor_sampling_mode(
     *,
-    rollout_mode_info: ResolvedRolloutModeInfo,
+    rollout_mode_info: RolloutModeInfo,
     backend_capabilities: Mapping[str, Any],
     backend_name: str,
 ) -> None:
@@ -483,7 +482,7 @@ def validate_training_actor_sampling_mode(
     resolved_topology = rollout_mode_info.rollout_topology
     if rollout_mode_uses_service(resolved_topology.mode) or uses_dedicated_rollout_engine(resolved_topology.service_engine):
         raise ValueError(
-            "Dedicated rollout service engines cannot use direct_rollout mode. "
+            "Dedicated rollout service engines cannot use direct_sampling mode. "
             f"Got rollout.topology.mode={resolved_topology.mode!r}, "
             f"rollout.topology.service_engine={resolved_topology.service_engine!r}."
         )
@@ -496,7 +495,7 @@ def validate_training_actor_sampling_mode(
         )
 
 
-def validate_replay_mode(*, rollout_mode_info: ResolvedRolloutModeInfo) -> None:
+def validate_replay_mode(*, rollout_mode_info: RolloutModeInfo) -> None:
     """Validate replay/log-prob flags against the resolved rollout-mode context."""
     if rollout_mode_info.is_sglang_engine and rollout_mode_info.replay_guard:
         if rollout_mode_info.logprob_source == "replay" and not rollout_mode_info.replay_enabled:
@@ -521,13 +520,13 @@ def validate_replay_mode(*, rollout_mode_info: ResolvedRolloutModeInfo) -> None:
 def validate_offload_and_colocate_config(
     args: Any,
     *,
-    rollout_mode_info: ResolvedRolloutModeInfo,
+    rollout_mode_info: RolloutModeInfo,
 ) -> None:
     """Validate offload switches and colocate fractions."""
     if rollout_mode_info.training_actor_sampling_mode:
         if bool(args.ray.offload_train) or bool(args.ray.offload_rollout):
             raise ValueError(
-                "direct_rollout uses training actors for sampling and cannot be combined with "
+                "direct_sampling uses training actors for sampling and cannot be combined with "
                 "ray.offload_train / ray.offload_rollout."
             )
         return
@@ -539,7 +538,7 @@ def validate_offload_and_colocate_config(
 def validate_rollout_mode(
     args: Any,
     *,
-    rollout_mode_info: ResolvedRolloutModeInfo,
+    rollout_mode_info: RolloutModeInfo,
     backend_capabilities: Mapping[str, Any],
     backend_name: str,
 ) -> None:
@@ -598,7 +597,7 @@ def validate_rollout_mode(
 def validate_direct_sampling_batch_geometry(
     args: Any,
     *,
-    rollout_mode_info: ResolvedRolloutModeInfo,
+    rollout_mode_info: RolloutModeInfo,
 ) -> None:
     """Validate prompt-batch splitting for training-actor direct sampling."""
     max_samples_per_request = rollout_mode_info.max_samples_per_request
@@ -619,7 +618,7 @@ def validate_direct_sampling_batch_geometry(
 def validate_weight_sync(
     args: Any,
     *,
-    rollout_mode_info: ResolvedRolloutModeInfo,
+    rollout_mode_info: RolloutModeInfo,
 ) -> None:
     """Validate explicit weight-sync protocol against rollout topology."""
     rollout_service_engine = rollout_mode_info.rollout_topology.service_engine
@@ -666,7 +665,7 @@ def validate_weight_sync(
 def validate_rollout_layout(
     args: Any,
     *,
-    rollout_mode_info: ResolvedRolloutModeInfo,
+    rollout_mode_info: RolloutModeInfo,
 ) -> None:
     """Validate rollout actor GPU layout and colocate constraints."""
     if rollout_mode_info.training_actor_sampling_mode:
@@ -704,7 +703,7 @@ def validate_rollout_layout(
     is_sglang_engine = rollout_mode_info.is_sglang_engine
     if rollout_gpus > 1 and rollout_mode_is_colocated(rollout_topology.mode) and not is_sglang_engine:
         raise ValueError(
-            "colocate_rollout with multi-GPU rollout actors is only supported "
+            "colocate with multi-GPU rollout actors is only supported "
             "for rollout.topology.service_engine='sglang'."
         )
     if rollout_gpus > 1:
@@ -904,7 +903,7 @@ def validate_train_backend_config(
 def validate_training_batch_geometry(
     args: Any,
     *,
-    topology: Optional[ResolvedTrainTopology] = None,
+    topology: Optional[TrainTopology] = None,
 ) -> None:
     """Validate batch-geometry invariants using resolved training geometry."""
     prompts_per_rollout = int(require_prompts_per_rollout(args))

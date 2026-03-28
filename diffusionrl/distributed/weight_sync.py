@@ -20,9 +20,8 @@ from typing import Any, Dict, Optional, Type
 
 import logging
 
-from diffusionrl.config.launch_resolution import ResolvedLaunchConfig
+from diffusionrl.config.launch_resolution import LaunchConfig
 logger = logging.getLogger(__name__)
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -46,7 +45,7 @@ def _resolve_flush_cache(args: Any) -> bool:
     return bool(args.sync.flush_cache)
 
 
-def _validate_tensor_sync_topology(launch_config: ResolvedLaunchConfig) -> None:
+def _validate_tensor_sync_topology(launch_config: LaunchConfig) -> None:
     """Guard invalid topology values for tensor/distributed sync paths."""
     rollout = launch_config.rollout
     if rollout is None:
@@ -102,7 +101,7 @@ class SyncResult:
 class WeightSyncCoordinator(ABC):
     """Two-phase weight sync coordinator: setup() -> sync() x N -> teardown()."""
 
-    def __init__(self, args: Any, launch_config: ResolvedLaunchConfig) -> None:
+    def __init__(self, args: Any, launch_config: LaunchConfig) -> None:
         self.args = args
         self.launch_config = launch_config
         self._version = 0
@@ -416,9 +415,10 @@ _BUILTIN_COORDINATORS: Dict[str, Type[WeightSyncCoordinator]] = {
 }
 
 
+
 def create_weight_sync(
     args: Any,
-    launch_config: ResolvedLaunchConfig,
+    launch_config: LaunchConfig,
     *,
     mode: Optional[str] = None,
 ) -> WeightSyncCoordinator:

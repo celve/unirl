@@ -70,7 +70,7 @@ _MEGATRON_ALLOWED_KEYS = {
 
 
 @dataclass(frozen=True)
-class ResolvedTrainBackendConfig:
+class TrainBackendConfig:
     name: str
     backend_path: Optional[str] = None
     kwargs: Dict[str, Any] = field(default_factory=dict)
@@ -325,7 +325,7 @@ def _resolve_megatron_backend_kwargs(
     return merged
 
 
-def resolve_train_backend_config_from_args(args: Any) -> ResolvedTrainBackendConfig:
+def resolve_train_backend_config_from_args(args: Any) -> TrainBackendConfig:
     """Canonicalize backend selection and kwargs exactly once from args."""
     backend_name = _resolve_backend_name_from_args(args)
     backend_path = _resolve_backend_path_from_args(args)
@@ -365,7 +365,7 @@ def resolve_train_backend_config_from_args(args: Any) -> ResolvedTrainBackendCon
     else:
         resolved_kwargs = dict(raw_kwargs)
 
-    return ResolvedTrainBackendConfig(
+    return TrainBackendConfig(
         name=backend_name,
         backend_path=backend_path,
         kwargs=resolved_kwargs,
@@ -387,7 +387,7 @@ def create_train_backend(
 
 
 def create_train_backend_from_config(
-    config: ResolvedTrainBackendConfig,
+    config: TrainBackendConfig,
 ) -> TrainBackend:
     return create_train_backend(
         config.name,
@@ -410,7 +410,7 @@ def resolve_train_backend_capabilities(
 
 
 def resolve_train_backend_capabilities_from_config(
-    config: ResolvedTrainBackendConfig,
+    config: TrainBackendConfig,
 ) -> TrainBackendCapabilities:
     return resolve_train_backend_capabilities(
         config.name,
@@ -419,7 +419,7 @@ def resolve_train_backend_capabilities_from_config(
 
 
 def resolve_train_backend_launch_spec(
-    config: ResolvedTrainBackendConfig,
+    config: TrainBackendConfig,
     *,
     args: Any,
     topology: Any,
@@ -446,7 +446,7 @@ def resolve_train_backend_capabilities_from_args(args: Any) -> Dict[str, Any]:
 
 
 __all__ = [
-    "ResolvedTrainBackendConfig",
+    "TrainBackendConfig",
     "create_train_backend",
     "create_train_backend_from_config",
     "resolve_train_backend_capabilities",

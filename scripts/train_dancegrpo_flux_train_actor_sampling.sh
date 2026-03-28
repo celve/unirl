@@ -130,7 +130,7 @@ python -m diffusionrl.train \
     --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
-    --rollout.topology.mode direct_rollout \
+    --rollout.topology.mode direct_sampling \
 --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \

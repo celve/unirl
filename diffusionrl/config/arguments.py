@@ -39,7 +39,7 @@ from diffusionrl.config.argument_parsing import (
 from diffusionrl.config.resolution import (
     DEFAULT_MODEL_PATH,
     ROLLOUT_MODES,
-    ResolvedConfig,
+    ConfigBundle,
     collect_sampling_requirements,
     normalize_train_backend_name,
     resolve_config,
@@ -48,7 +48,6 @@ from diffusionrl.config.validation import (
     apply_model_config_hook,
     validate_algorithm_kwargs_payload,
     validate_algorithm_path,
-    validate_dotpath,
     validate_dynamic_dotpaths,
     validate_grouped_configs,
     validate_model_sampling_contract,
@@ -639,11 +638,11 @@ class RolloutTopologySettings:
     """Rollout topology and dedicated-engine knobs."""
 
     mode: Optional[str] = field(default=None,
-        metadata={"help": "Canonical rollout topology: direct_rollout, separate_rollout, or colocate_rollout"})
+        metadata={"help": "Canonical rollout topology: direct_sampling, separate, or colocate"})
     service_engine: Optional[str] = field(default=None,
-        metadata={"help": "Dedicated rollout engine selector for separate_rollout or colocate_rollout. Must be unset in direct_rollout."})
+        metadata={"help": "Dedicated rollout engine selector for separate or colocate. Must be unset in direct_sampling."})
     service_num_gpus: Optional[int] = field(default=None,
-        metadata={"help": "Dedicated rollout service GPUs per actor/engine. Required for separate_rollout and colocate_rollout."})
+        metadata={"help": "Dedicated rollout service GPUs per actor/engine. Required for separate and colocate."})
     engine_tp_size: Optional[int] = field(default=None,
         metadata={"help": "Dedicated rollout service tensor parallel hint. Does not determine actor GPU ownership."})
     engine_sp_size: Optional[int] = field(default=None,
@@ -1360,7 +1359,7 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
 def validate_args(
     args: TrainingArguments,
     *,
-    resolved: Optional[ResolvedConfig] = None,
+    resolved: Optional[ConfigBundle] = None,
 ) -> TrainingArguments:
     """Validate arguments without mutating the original config values."""
     validate_grouped_configs(args)

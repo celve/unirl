@@ -96,7 +96,16 @@ class TrainBackendCapabilities:
 
 @dataclass(frozen=True)
 class TrainTopology:
-    """Runtime topology view declared by train backend."""
+    """Unified training topology used by both config resolution and backend runtime.
+
+    actor_count is the size of the launched training actor group (set during
+    config resolution; backends may leave it as ``None``).
+    world_size is the distributed training rank count.
+    dp_size is the data-parallel consumer count used for training batch geometry.
+
+    These values often coincide in the current FSDP mainline, but they should
+    not be treated as interchangeable concepts.
+    """
 
     world_size: int
     dp_size: int
@@ -107,9 +116,11 @@ class TrainTopology:
     sp_size: int = 1
     ep_size: int = 1
     data_partition_axis: str = "dp"
+    actor_count: Optional[int] = None
+    partition_mode: str = "data_parallel"
 
     def as_dict(self) -> Dict[str, Any]:
-        return {
+        d: Dict[str, Any] = {
             "world_size": int(self.world_size),
             "dp_size": int(self.dp_size),
             "dp_replicate_size": int(self.dp_replicate_size),
@@ -119,7 +130,11 @@ class TrainTopology:
             "sp_size": int(self.sp_size),
             "ep_size": int(self.ep_size),
             "data_partition_axis": str(self.data_partition_axis),
+            "partition_mode": str(self.partition_mode),
         }
+        if self.actor_count is not None:
+            d["actor_count"] = int(self.actor_count)
+        return d
 
 
 @dataclass(frozen=True)

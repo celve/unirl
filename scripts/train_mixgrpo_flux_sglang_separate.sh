@@ -87,7 +87,7 @@ LOCAL_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / TRAINING_GPUS ))
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type flux \
-    --rollout.topology.mode separate_rollout \
+    --rollout.topology.mode separate \
     --rollout.topology.service-engine sglang \
     --rollout.topology.service-num-gpus ${TP_SIZE} \
     --rollout.topology.engine-tp-size ${TP_SIZE} \

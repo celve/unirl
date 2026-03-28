@@ -1,5 +1,5 @@
 """
-FLUX Image Sampler for GRPO Training (native direct rollout).
+FLUX Image Sampler for GRPO Training (native direct sampling).
 
 This sampler implements SDE sampling with log probability computation
 for FLUX image models using native PyTorch (FSDP-compatible). It is
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 class FluxSampler(BaseSampler):
     """
-    FLUX image sampler with log probability computation for native direct rollout.
+    FLUX image sampler with log probability computation for native direct sampling.
 
     Fully aligned with DanceGRPO's train_grpo_flux.py implementation.
 

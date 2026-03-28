@@ -140,7 +140,7 @@ python -m diffusionrl.train \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
-    --rollout.topology.mode direct_rollout \
+    --rollout.topology.mode direct_sampling \
 --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \

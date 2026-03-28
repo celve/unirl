@@ -8,7 +8,7 @@
 # memory between inference and training phases.
 #
 # Key differences from the separate mode:
-#   - --rollout.topology.mode colocate_rollout
+#   - --rollout.topology.mode colocate
 #   - --ray.offload-rollout true  (offload inference weights during training)
 #   - GPU allocation: all GPUs shared (no separate inference/training groups)
 #
@@ -79,7 +79,7 @@ PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( NUM_GPUS * BATCH_SIZE / NUM_SAMPLES_P
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type flux \
-    --rollout.topology.mode colocate_rollout \
+    --rollout.topology.mode colocate \
     --rollout.topology.service-engine sglang \
     --rollout.topology.service-num-gpus ${TP_SIZE} \
     --rollout.topology.engine-tp-size ${TP_SIZE} \
@@ -104,7 +104,7 @@ python -m diffusionrl.train \
     --training.local-micro-batch-size ${BATCH_SIZE} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
-    --rollout.topology.mode colocate_rollout \
+    --rollout.topology.mode colocate \
     --ray.offload-rollout true \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
     --ray.rollout-num-gpus-per-node ${NUM_GPUS} \

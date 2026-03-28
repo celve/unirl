@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from diffusionrl.config import build_resolved_config_view, parse_args
 from diffusionrl.config.launch_resolution import resolve_launch_config
-from diffusionrl.config.resolution import rollout_mode_label
 from diffusionrl.config.validation import validate_async_training_runner
 from diffusionrl.utils.train_utils import (
     build_control_algorithm,
@@ -31,6 +30,8 @@ from diffusionrl.utils.train_utils import (
 )
 from diffusionrl.utils.wandb_logger import aggregate_metrics
 from diffusionrl.utils.wandb_metrics import build_buffer_metrics, build_sync_metrics
+from diffusionrl.rollout.service_interface import compute_dataset_step_info
+
 
 if TYPE_CHECKING:
     from diffusionrl.distributed.weight_sync import WeightSyncCoordinator
@@ -38,10 +39,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Main control-plane path (async mode):
-# parse_args -> create_placement_groups_from_args -> create_rollout_services
-# -> create_training_actor_group -> prepare RolloutRequest(s) -> async_generate
-# -> resolve requests -> rollout_buffer.push/pop -> training_group.train -> weight_sync.sync
+"""
+Main control-plane path (async mode):
+parse_args -> create_placement_groups_from_args -> create_rollout_services
+-> create_training_actor_group -> prepare RolloutRequest(s) -> async_generate
+-> resolve requests -> rollout_buffer.push/pop -> training_group.train -> weight_sync.sync
+"""
 
 @dataclass(frozen=True)
 class InflightRollout:
@@ -52,7 +55,7 @@ class InflightRollout:
 
 
 @dataclass(frozen=True)
-class ResolvedRollout:
+class Rollout:
     """A rollout-scoped future result resolved from an inflight future."""
 
     rollout_id: int
@@ -115,14 +118,14 @@ class AsyncPipelineRuntime:
         self._inflight[rid] = inflight
         return inflight
 
-    def resolve_next_rollout(self, resolver: Callable[[Any], Any]) -> ResolvedRollout:
+    def resolve_next_rollout(self, resolver: Callable[[Any], Any]) -> Rollout:
         if not self._inflight:
             raise RuntimeError("No inflight rollout to resolve")
 
         rid = min(self._inflight.keys())
         inflight = self._inflight.pop(rid)
         result = resolver(inflight.future)
-        return ResolvedRollout(
+        return Rollout(
             rollout_id=inflight.rollout_id,
             result=result,
         )
@@ -479,7 +482,7 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
     rollout_topology = rollout_mode_info.rollout_topology
     training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
     sync_mode = rollout_mode_info.sync_protocol
-    rollout_mode_name = rollout_mode_label(rollout_topology.mode)
+    rollout_mode_name = rollout_topology.mode
     rollout_control = args.rollout.control
     rollout_artifacts = args.rollout.artifacts
     rollout_evaluation = args.rollout.evaluation
@@ -560,19 +563,20 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
         pgs = create_placement_groups_from_launch(launch_config)
         logger.info("Placement groups created")
 
-        rollout_services, dataset_step_info = create_rollout_services(
+        rollout_services = create_rollout_services(
             args,
-            reward_pg_result=pgs.get("reward"),
+            reward_pgs=pgs.get("reward"),
             launch_config=launch_config,
         )
-        rollout_function_path = str(args.rollout_function_path or DEFAULT_ROLLOUT_FUNCTION_PATH)
-        rollout_eval_function = load_function(
-            str(args.eval_function_path or DEFAULT_EVAL_FUNCTION_PATH)
+        dataset_step_info = compute_dataset_step_info(
+            data_source=rollout_services.data_source,
+            prompts_per_rollout=rollout_services.prompt_batch_size,
         )
-        rollout_reward_hook = load_function(
-            str(args.reward_hook_path or DEFAULT_REWARD_HOOK_PATH)
-        )
+        rollout_function_path = args.rollout_function_path or DEFAULT_ROLLOUT_FUNCTION_PATH
+        rollout_eval_function = load_function(args.eval_function_path or DEFAULT_EVAL_FUNCTION_PATH)
+        rollout_reward_hook = load_function(args.reward_hook_path or DEFAULT_REWARD_HOOK_PATH)
         logger.info("Rollout services created")
+        
         if rollout_function_path != DEFAULT_ROLLOUT_FUNCTION_PATH:
             raise ValueError(
                 "train_async.py currently requires the default request-centric rollout function "
@@ -590,28 +594,26 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
             )
             if not dataset_step_info.get("exact_dataset_pass_per_cycle", False):
                 logger.warning(
-                    "Dataset pass is not exact under current data-source batching: "
-                    "drop_last=%s remainder_prompts=%s. "
-                    "The data source will drop trailing prompts rather than emit a short rollout batch, "
-                    "so one reset cycle will not cover the full dataset exactly once.",
-                    dataset_step_info.get("drop_last"),
+                    "Inexact dataset pass: %s prompts will be dropped per cycle "
+                    "(drop_last=%s).",
                     dataset_step_info.get("remainder_prompts"),
+                    dataset_step_info.get("drop_last"),
                 )
 
-        rollout_pg_result = pgs.get("rollout")
-        if rollout_pg_result is None:
+        rollout_pgs = pgs.get("rollout")
+        if rollout_pgs is None:
             raise ValueError("Missing rollout placement-group allocation.")
-        rollout_group = create_rollout_actor_group(launch_config, rollout_pg_result)
+        rollout_group = create_rollout_actor_group(launch_config, rollout_pgs)
         rollout_runtime = RolloutGroupRuntime.from_group(rollout_group)
         rollout_services.attach_sampling_group(rollout_group)
         logger.info("Rollout actor group created and attached to rollout services")
 
-        training_pg_result = pgs.get("training")
-        if training_pg_result is None:
+        training_pgs = pgs.get("training")
+        if training_pgs is None:
             raise ValueError("Missing training placement-group allocation.")
         training_group = create_training_actor_group(
             launch_config,
-            training_pg_result,
+            training_pgs,
         )
         training_runtime = TrainingGroupRuntime.from_group(training_group)
         resume_from_checkpoint = rollout_artifacts.resume_from_checkpoint

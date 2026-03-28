@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # NOTE:
-#   direct sampling now uses rollout.topology.mode='direct_rollout' with direct_rollout only.
+#   direct sampling now uses rollout.topology.mode='direct_sampling' with direct_sampling only.
 #   This script is the SGLang equivalent in separate rollout/training mode.
 #
 # Usage:
@@ -83,7 +83,7 @@ NFT_ALGO_KWARG_ARGS=(
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
-    --rollout.topology.mode separate_rollout \
+    --rollout.topology.mode separate \
     --rollout.topology.service-engine sglang \
     --rollout.topology.service-num-gpus ${TP_SIZE} \
     --rollout.topology.engine-tp-size ${TP_SIZE} \

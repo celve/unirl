@@ -192,7 +192,7 @@ python -m diffusionrl.train \
     --precision.rollout.autocast-precision bf16 \
     --precision.rollout.trajectory-precision fp16 \
     --precision.rollout.logprob-precision fp32 \
-    --rollout.topology.mode direct_rollout \
+    --rollout.topology.mode direct_sampling \
     --rollout.control.num-rollout 300 \
     --rollout.artifacts.output-dir outputs/my_experiment \
     --sync.protocol disabled
@@ -241,11 +241,11 @@ prompt-encoder dtype under `rollout.topology`.
 not a `precision.*` field.
 CLI options always override YAML. Unknown YAML keys fail fast by default; use
 `--allow-unknown-config-keys` only when you intentionally want to ignore unknown keys.
-`sync.protocol` must now be set explicitly: use `disabled` for `direct_rollout`,
+`sync.protocol` must now be set explicitly: use `disabled` for `direct_sampling`,
 and a dedicated-rollout sync mode (`tensor_payload`, `nccl_broadcast`, or
 `checkpoint_path`) when rollout runs outside training actors.
-In `direct_rollout`, leave `rollout.topology.service_engine` unset.
-Direct sampling is selected only by `rollout.topology.mode=direct_rollout`;
+In `direct_sampling`, leave `rollout.topology.service_engine` unset.
+Direct sampling is selected only by `rollout.topology.mode=direct_sampling`;
 dedicated rollout-only fields must remain unset there.
 When `rollout.buffer.reassemble_by_group=true`,
 `rollout.buffer.group_size` must be set explicitly.

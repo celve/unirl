@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class ResolvedSamplingSpec:
+class SamplingSpec:
     """Canonical resolved sampling view built once from SamplingConfig."""
 
     sampler_path: str
@@ -679,6 +679,6 @@ __all__ = [
     "RolloutRequest",
     "LogProbData",
     "PromptEmbeddings",
-    "ResolvedSamplingSpec",
+    "SamplingSpec",
     "SamplingRequirements",
 ]
