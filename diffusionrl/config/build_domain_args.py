@@ -88,7 +88,6 @@ def build_training_sampling_config(
         "sampler_engine_type": normalize_rollout_service_engine(sampler_engine_type)
         or str(sampler_engine_type).strip().lower(),
         "replay_sampler_path": sampling_spec.replay_sampler_path,
-        "sde_schedule_config": sampling_spec.sde_schedule_config.to_dict(),
         "seed": int(sampling_spec.seed),
         "sampling_adapter": sampling_spec.sampling_adapter,
         "init_same_noise": bool(sampling_spec.init_same_noise),
@@ -324,19 +323,6 @@ def resolve_sde_config(payload=None, *, default=None):
         return fallback
     return SDEConfig.from_mapping(raw, **fallback.to_dict())
 
-
-def resolve_sde_schedule_config(payload=None, *, default=None):
-    """Resolve canonical nested ``sde_schedule_config`` from a domain-config dict."""
-    from diffusionrl.types.sde import SDEScheduleConfig
-    fallback = default or SDEScheduleConfig()
-    if payload is None:
-        return fallback
-    raw = payload.get("sde_schedule_config") if isinstance(payload, dict) else None
-    if not isinstance(raw, dict):
-        return fallback
-    return SDEScheduleConfig.from_mapping(raw, **fallback.to_dict())
-
-
 __all__ = [
     "build_model_config",
     "build_reward_config",
@@ -346,5 +332,4 @@ __all__ = [
     "build_train_backend_config",
     "build_training_actor_init_config",
     "resolve_sde_config",
-    "resolve_sde_schedule_config",
 ]

@@ -77,6 +77,7 @@ class BaseAlgorithm(ABC):
         component_mix_stage: str = "reward",
         adv_normalization: str = "group",
         samples_per_prompt: int = 1,
+        num_inference_steps: int = 0,
         eval_ema_decay: float = 0.9,
         eval_ema_update_interval: int = 1,
         epsilon: float = 1e-8,
@@ -93,6 +94,7 @@ class BaseAlgorithm(ABC):
             component_mix_stage: Multi-component reward mixing stage ("reward" or "advantage")
             adv_normalization: Type of advantage normalization ("global" or "group")
             samples_per_prompt: Number of rollout samples to generate per prompt
+            num_inference_steps: Rollout denoising horizon shared by algorithm logic
             eval_ema_decay: Eval-time EMA decay
             eval_ema_update_interval: Eval-time EMA update interval in optimizer steps
             epsilon: Small value for numerical stability in advantage normalization
@@ -105,6 +107,7 @@ class BaseAlgorithm(ABC):
         self.component_mix_stage = str(component_mix_stage)
         self.adv_normalization = adv_normalization
         self.samples_per_prompt = max(1, int(samples_per_prompt))
+        self.num_inference_steps = max(0, int(num_inference_steps))
         self.eval_ema_decay = float(eval_ema_decay)
         self.eval_ema_update_interval = max(1, int(eval_ema_update_interval))
         self.epsilon = epsilon
@@ -145,7 +148,11 @@ class BaseAlgorithm(ABC):
         )
 
     @abstractmethod
-    def get_sampling_requirements(self) -> SamplingRequirements:  # [PUBLIC-API → driver rollout runtime] 推理侧: 声明采样需求
+    def get_sampling_requirements(
+        self,
+    ) -> (
+        SamplingRequirements
+    ):  # [PUBLIC-API → driver rollout runtime] rollout requirements
         """
         Return the sampling requirements for this algorithm.
 
@@ -154,7 +161,7 @@ class BaseAlgorithm(ABC):
         """
         ...
 
-    def compute_advantages(  # [PUBLIC-API → rollout pipeline via compute_advantages_with_components()] 推理侧
+    def compute_advantages(  # [PUBLIC-API → rollout pipeline via compute_advantages_with_components()] rollout side
         self,
         rewards: torch.Tensor,
         group_ids: Optional[List[str]] = None,
@@ -271,7 +278,7 @@ class BaseAlgorithm(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def compute_advantages_with_components(  # [PUBLIC-API → rollout.primitives.compute_advantages()] 推理侧
+    def compute_advantages_with_components(  # [PUBLIC-API → rollout.primitives.compute_advantages()] rollout side
         self,
         *,
         rewards: torch.Tensor,
@@ -295,11 +302,13 @@ class BaseAlgorithm(ABC):
         ...
 
     @abstractmethod
-    def get_ema_spec(self) -> EMASpec:  # [PUBLIC-API → training_actor.init()] 训练侧
+    def get_ema_spec(
+        self,
+    ) -> EMASpec:  # [PUBLIC-API → training_actor.init()] training side
         """Declare EMA policy for this algorithm."""
         ...
 
-    def prepare_loss_advantages(  # [PUBLIC-API → train_executor] 训练侧: loss 前 advantage 变换
+    def prepare_loss_advantages(  # [PUBLIC-API → train_executor] training side advantage transform
         self,
         advantages: torch.Tensor,
     ) -> torch.Tensor:
@@ -361,47 +370,67 @@ class BaseAlgorithm(ABC):
             embeddings=embeddings,
         )
 
-    def compute_loss_and_backward(  # [PUBLIC-API → train_executor._train_update_chunk()] 训练侧: 核心 loss+backward
+    def compute_loss_and_backward(  # [PUBLIC-API → train_executor._train_update_chunk()] training loss/backward
         self,
         *,
         model: nn.Module,
         batch: Any,
-        mini_batch_slices: Tuple[Tuple[int, int], ...],
         guidance_scale: float = 3.5,
+        timesteps: Optional[Any] = None,
+        loss_scale: float = 1.0,
         **kwargs: Any,
     ) -> tuple:
-        """Compute loss and call backward for a single update chunk."""
-        del model, batch, mini_batch_slices, guidance_scale, kwargs
+        """Compute loss/backward for one micro-batch.
+
+        ``timesteps`` is the executor-resolved, algorithm-defined training
+        timestep specification for the current update. ``loss_scale`` lets
+        the executor normalize gradients across accumulation micro-batches.
+        """
+        del model, batch, guidance_scale, timesteps, loss_scale, kwargs
         raise NotImplementedError(
             f"{type(self).__name__} must implement compute_loss_and_backward()."
         )
 
-    def is_forward_process(self) -> bool:  # [PUBLIC-API → training_actor] 训练侧: 判断算法类型
+    def resolve_training_timesteps(
+        self,
+        *,
+        batch: Any,
+        current_step: int,
+        **kwargs: Any,
+    ) -> Any:
+        """Resolve algorithm-defined training timesteps once per update chunk."""
+        del batch, current_step, kwargs
+        return None
+
+    def is_forward_process(
+        self,
+    ) -> bool:  # [PUBLIC-API → training_actor] training side algorithm type
         """Whether this algorithm trains via forward process (NFT-style)."""
         return bool(self.get_sampling_requirements().is_forward_process)
 
     @abstractmethod
-    def resolve_rollout_sde_indices(  # [PUBLIC-API → train.py RolloutSDEController] 推理侧
+    def resolve_rollout_sde_indices(  # [PUBLIC-API → train.py rollout orchestration] rollout side
         self,
         *,
-        timestep_scheduler: Optional[Any],
         current_step: int,
-    ) -> Optional[Set[int]]:
+    ) -> Set[int]:
         """Resolve rollout-time SDE indices for the current step.
 
         Default behavior:
         - Forward-process algorithms do not use rollout SDE indices.
-        - Trajectory algorithms read indices from the caller-provided scheduler.
+        - Trajectory algorithms implement their own current-step-driven policy.
         """
         ...
 
     @abstractmethod
-    def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:  # [PUBLIC-API → driver rollout pipeline] 推理侧
+    def get_sampler_validation_config(
+        self, *, args: Any
+    ) -> Dict[str, Any]:  # [PUBLIC-API → driver rollout pipeline] rollout side
         """Get sampler-output validation flags for rollout orchestration."""
         ...
 
     @abstractmethod
-    def assemble_training_batch(  # [PUBLIC-API → driver rollout pipeline] 推理侧: 组装 TrainingBatch
+    def assemble_training_batch(  # [PUBLIC-API → driver rollout pipeline] build TrainingBatch
         self,
         *,
         request: RolloutRequest,
@@ -413,22 +442,8 @@ class BaseAlgorithm(ABC):
         """Assemble the typed training batch for this algorithm."""
         ...
 
-    def resolve_training_indices(
-        self,
-        *,
-        num_steps: int,
-        sde_indices: Optional[Set[int]] = None,
-    ) -> Set[int]:
-        """Resolve the timestep indices that should contribute to training.
-
-        This is the explicit counterpart to rollout-time ``sde_indices``.
-        """
-        if sde_indices is not None:
-            return set(int(i) for i in sde_indices)
-        return set(range(num_steps))
-
     @abstractmethod
-    def get_filtered_training_indices(  # [PUBLIC-API → assemble_training_batch() 内部] 推理侧: 过滤训练 timestep
+    def get_filtered_training_indices(  # [PUBLIC-API → assemble_training_batch() internals] rollout side timestep filter
         self,
         sde_indices: Set[int],
         num_steps: int,
@@ -451,7 +466,7 @@ class BaseAlgorithm(ABC):
         """
         ...
 
-    def get_config(self) -> Dict[str, Any]:  # [PUBLIC-API → 序列化/日志]
+    def get_config(self) -> Dict[str, Any]:  # [PUBLIC-API → serialization/logging]
         """Get algorithm configuration as dictionary."""
         return {
             "algorithm_type": self.__class__.__name__,

@@ -22,6 +22,7 @@ from diffusionrl.training.update_schedule import (
     TrainingUpdateSchedule,
     create_training_update_schedule,
 )
+from diffusionrl.utils.misc import aggregate_numeric_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -42,39 +43,9 @@ class TrainExecutorConfig:
     num_updates_per_local_batch: int
     training_plan: Dict[str, Any]
     ema_manager: Optional[Any]
-    timestep_fraction: Any = 1.0
     shuffle_samples: bool = True
     shuffle_seed: Optional[int] = None
     clip_grad_norm_fn: Optional[Callable[..., Any]] = None
-
-
-def aggregate_numeric_metrics(metrics_list: List[Dict[str, Any]]) -> Dict[str, float]:
-    """Aggregate numeric metrics from repeated update chunks."""
-    aggregated: Dict[str, float] = {}
-    if not metrics_list:
-        return aggregated
-
-    all_keys = set()
-    for metrics in metrics_list:
-        all_keys.update(metrics.keys())
-
-    for key in all_keys:
-        values: List[float] = []
-        for metrics in metrics_list:
-            if key not in metrics:
-                continue
-            value = metrics[key]
-            if isinstance(value, torch.Tensor):
-                value = value.item() if value.numel() == 1 else value.mean().item()
-            if isinstance(value, bool):
-                values.append(float(value))
-            elif isinstance(value, (int, float)):
-                values.append(float(value))
-        if values:
-            aggregated[key] = sum(values) / len(values)
-
-    return aggregated
-
 
 class TrainExecutor:
     """Execution-layer trainer used by RPC actors."""
@@ -234,15 +205,54 @@ class TrainExecutor:
             disable=(rank != 0),
         ):
             self.optimizer.zero_grad()
+
+            mini_batches = tuple(
+                (int(start), int(end)) for start, end in update_chunk.mini_batch_slices
+            )
+            if not mini_batches:
+                raise ValueError(
+                    "TrainExecutor requires non-empty mini_batch_slices per update."
+                )
+
+            loss_scale = 1.0 / len(mini_batches)
+            training_timesteps = self.algorithm.resolve_training_timesteps(
+                batch=update_chunk.batch,
+                current_step=rollout_id,
+            )
+            total_loss = 0.0
+            update_num_timesteps = 0
+            total_mini_batches_this_update = len(mini_batches)
+            has_backward = False
+            micro_batch_metrics: List[Dict[str, Any]] = []
+
             # Mixed precision for model forwards is handled inside forward plugins
             # (see forward_plugin.autocast_dtype / plugin.forward), not here.
-            total_loss, all_metrics, num_timesteps, actual_mini_batches, has_backward = self.algorithm.compute_loss_and_backward(
-                model=self.model,
-                batch=update_chunk.batch,
-                mini_batch_slices=update_chunk.mini_batch_slices,
-                guidance_scale=self.config.guidance_scale,
-                timestep_fraction=getattr(self.config, "timestep_fraction", 1.0),
-            )
+            for start, end in mini_batches:
+                micro_batch = update_chunk.batch.slice(start, end)
+                (
+                    micro_loss,
+                    micro_metrics,
+                    num_timesteps,
+                    micro_has_backward,
+                ) = self.algorithm.compute_loss_and_backward(
+                    model=self.model,
+                    batch=micro_batch,
+                    guidance_scale=self.config.guidance_scale,
+                    timesteps=training_timesteps,
+                    loss_scale=loss_scale,
+                )
+                total_loss += (
+                    micro_loss.item()
+                    if isinstance(micro_loss, torch.Tensor)
+                    else micro_loss
+                )
+                if num_timesteps > 0:
+                    update_num_timesteps = max(update_num_timesteps, num_timesteps)
+                has_backward = has_backward or micro_has_backward
+                if micro_metrics:
+                    micro_batch_metrics.append(micro_metrics)
+
+            all_metrics = aggregate_numeric_metrics(micro_batch_metrics)
 
             if has_backward:
                 grad_norm = self._clip_grad_norm()
@@ -256,23 +266,24 @@ class TrainExecutor:
                     training_schedule,
                 )
 
-            last_mini_batches_per_update = actual_mini_batches
+            last_mini_batches_per_update = total_mini_batches_this_update
             last_effective_update_batch_size = int(update_chunk.update_batch_size)
-            total_mini_batches_consumed += actual_mini_batches
-            total_timesteps += num_timesteps
+            total_mini_batches_consumed += total_mini_batches_this_update
+            total_timesteps += update_num_timesteps
 
             step_metrics = {
-                "loss": total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss,
+                "loss": total_loss,
                 "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                 "lr": self._current_lr(),
-                "num_timesteps_trained": num_timesteps,
-                "mini_batches_per_update": actual_mini_batches,
+                "num_timesteps_trained": update_num_timesteps,
+                "mini_batches_per_update": total_mini_batches_this_update,
                 "has_backward": has_backward,
                 **all_metrics,
             }
             inner_metrics.append(step_metrics)
 
         metrics = aggregate_numeric_metrics(inner_metrics)
+
         # Filter out per-timestep metrics (t{N}_...) from aggregated output;
         # these are exposed only via _per_optimizer_step_metrics for train/ namespace.
         metrics = {k: v for k, v in metrics.items() if not re.match(r"^t\d+_", k)}

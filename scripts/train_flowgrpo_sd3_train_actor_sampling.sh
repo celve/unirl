@@ -139,7 +139,7 @@ python -m diffusionrl.train \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
     --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 1.0 \
-    --sampling.timestep-fraction 0.99 \
+    --algorithm.rollout-scheduler.timestep-fraction 0.99 \
     \
     "${FLOWGRPO_ALGO_KWARG_ARGS[@]}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \

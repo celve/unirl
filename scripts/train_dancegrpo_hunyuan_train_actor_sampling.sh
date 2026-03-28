@@ -199,7 +199,9 @@ python -m diffusionrl.train \
     --sampling.shift 5.0 \
     --sampling.num-inference-steps 16 \
     --sampling.guidance-scale 6018.0 \
-    --sampling.timestep-fraction 0.6 \
+    --algorithm.training-share-rollout-indices false \
+    --algorithm.rollout-scheduler.timestep-fraction 0.99 \
+    --algorithm.training-scheduler.timestep-fraction 0.6 \
     --sampling.init-same-noise true \
     \
     "${DANCEGRPO_ALGO_KWARG_ARGS[@]}" \

@@ -12,37 +12,25 @@ This overlaps rollout and training with explicit synchronization boundaries:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
-from diffusionrl.config import (
-    build_resolved_config_view,
-    parse_args,
-)
+from diffusionrl.config import build_resolved_config_view, parse_args
 from diffusionrl.config.launch_resolution import resolve_launch_config
-from diffusionrl.config.resolution import (
-    rollout_mode_label,
-)
-from diffusionrl.config.validation import (
-    validate_async_training_runner,
-)
+from diffusionrl.config.resolution import rollout_mode_label
+from diffusionrl.config.validation import validate_async_training_runner
 from diffusionrl.utils.train_utils import (
-    RolloutSDEController,
     build_control_algorithm,
     collect_rollout_batch_metrics,
-    create_rollout_timestep_scheduler,
     maybe_restore_start_rollout_id_from_checkpoint,
     should_eval,
     should_log,
     should_save,
 )
 from diffusionrl.utils.wandb_logger import aggregate_metrics
-from diffusionrl.utils.wandb_metrics import (
-    build_buffer_metrics,
-    build_sync_metrics,
-)
+from diffusionrl.utils.wandb_metrics import build_buffer_metrics, build_sync_metrics
 
 if TYPE_CHECKING:
     from diffusionrl.distributed.weight_sync import WeightSyncCoordinator
@@ -148,7 +136,7 @@ class AsyncPipelineRuntime:
             )
 
 
-def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
+def train_async_loop(  # [PUBLIC-API → train()] async core loop
     *,
     args,
     rollout_services,
@@ -158,7 +146,7 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
     training_group,
     training_runtime,
     rollout_runtime,
-    rollout_sde_controller,
+    control_algorithm,
     wandb_logger: Optional[Any],
     should_save_fn: Callable[[int, Any], bool],
     should_eval_fn: Callable[[int, Any], bool],
@@ -168,6 +156,8 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
 ) -> None:
     """Asynchronous train loop with rollout/train overlap."""
     import ray
+
+    from diffusionrl.rollout.base_types import RolloutContext, RolloutFunctionResult
     from diffusionrl.rollout.default_rollout import (
         finalize_default_rollout,
         prepare_default_rollout_plan,
@@ -177,7 +167,6 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
         launch_request_batches_async,
         resolve_request_batches_async,
     )
-    from diffusionrl.rollout.base_types import RolloutContext, RolloutFunctionResult
 
     logger.info("Starting async pipeline loop (separate mode)")
     rollout_control = args.rollout.control
@@ -209,7 +198,9 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
         services = rollout_services
         context = RolloutContext(
             rollout_id=int(rollout_id),
-            sde_indices=rollout_sde_controller.next_sde_indices(),
+            sde_indices=control_algorithm.resolve_rollout_sde_indices(
+                current_step=int(rollout_id),
+            ),
             collect_media_preview=bool(should_log_rollout and wandb_media_enabled),
             media_max_items=wandb_media_max_items,
         )
@@ -324,7 +315,6 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
             sampler_outputs=rollout_result.sampler_outputs,
             rewards=rollout_result.rewards,
             advantages=advantages,
-            sde_indices=plan.context.sde_indices,
         )
         push_result = ray.get(
             rollout_buffer.push.remote(
@@ -458,17 +448,17 @@ def train_async_loop(  # [PUBLIC-API → train()] async 核心循环
                         )
 
 
-def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步训练循环
+def train(args):  # [PUBLIC-API → main()] async entrypoint
     """Asynchronous training entrypoint."""
     validate_async_training_runner(args)
 
     import ray
 
+    from diffusionrl.distributed.weight_sync import create_weight_sync
     from diffusionrl.ray.buffer_actor import create_buffer_actor
     from diffusionrl.ray.group_factory import create_rollout_actor_group, create_training_actor_group
     from diffusionrl.ray.group_runtime import RolloutGroupRuntime, TrainingGroupRuntime
     from diffusionrl.ray.placement_group import create_placement_groups_from_launch
-    from diffusionrl.distributed.weight_sync import create_weight_sync
     from diffusionrl.rollout.factory import (
         DEFAULT_EVAL_FUNCTION_PATH,
         DEFAULT_REWARD_HOOK_PATH,
@@ -490,10 +480,6 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
     training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
     sync_mode = rollout_mode_info.sync_protocol
     rollout_mode_name = rollout_mode_label(rollout_topology.mode)
-    rollout_sde_controller = RolloutSDEController(
-        algorithm=control_algorithm,
-        timestep_scheduler=create_rollout_timestep_scheduler(args, algorithm=control_algorithm),
-    )
     rollout_control = args.rollout.control
     rollout_artifacts = args.rollout.artifacts
     rollout_evaluation = args.rollout.evaluation
@@ -676,7 +662,7 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
             training_group=training_group,
             training_runtime=training_runtime,
             rollout_runtime=rollout_runtime,
-            rollout_sde_controller=rollout_sde_controller,
+            control_algorithm=control_algorithm,
             wandb_logger=wandb_logger,
             should_save_fn=should_save,
             should_eval_fn=should_eval,
@@ -707,7 +693,7 @@ def train(args):  # [PUBLIC-API → main()] async 入口：资源创建 + 异步
     logger.info("Async training complete!")
 
 
-def main(argv=None):  # [PUBLIC-API → __main__] async CLI 入口
+def main(argv=None):  # [PUBLIC-API → __main__] async CLI entrypoint
     args = parse_args(argv)
     train(args)
 

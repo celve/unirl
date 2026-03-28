@@ -97,7 +97,7 @@ python -m diffusionrl.train \
     --sampling.shift 3.0 \
     --sampling.sde-type dpm2 \
     --sampling.num-inference-steps 10 \
-    --sampling.timestep-fraction 0.99 \
+    --algorithm.training-scheduler.timestep-fraction 0.99 \
     --sampling.guidance-scale 1.0 \
     --sampling.sampling-adapter old \
     "${NFT_ALGO_KWARG_ARGS[@]}" \

@@ -106,15 +106,14 @@ python -m diffusionrl.train \
     --sampling.guidance-scale 3.5 \
     \
     "${MIXGRPO_ALGO_KWARG_ARGS[@]}" \
-    --sampling.sde-ratio 0.16 \
-    --algorithm.window.timestep-strategy window \
-    --algorithm.window.window-strategy progressive \
-    --algorithm.window.window-group-size 4 \
-    --algorithm.window.window-iters-per-group 25 \
-    --algorithm.window.window-max-iters-per-group ${WINDOW_MAX_ITERS_PER_GROUP:-10} \
-    --algorithm.window.window-min-iters-per-group ${WINDOW_MIN_ITERS_PER_GROUP:-1} \
-    --algorithm.window.window-overlap true \
-    --algorithm.window.window-roll-back true \
+    --algorithm.rollout-scheduler.timestep-strategy window \
+    --algorithm.rollout-scheduler.window-strategy progressive \
+    --algorithm.rollout-scheduler.window-group-size 4 \
+    --algorithm.rollout-scheduler.window-iters-per-group 25 \
+    --algorithm.rollout-scheduler.window-max-iters-per-group ${WINDOW_MAX_ITERS_PER_GROUP:-10} \
+    --algorithm.rollout-scheduler.window-min-iters-per-group ${WINDOW_MIN_ITERS_PER_GROUP:-1} \
+    --algorithm.rollout-scheduler.window-overlap true \
+    --algorithm.rollout-scheduler.window-roll-back true \
     \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \

@@ -17,7 +17,6 @@ import torch.nn as nn
 from diffusionrl.algorithms.construction import instantiate_algorithm_from_config
 from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
 from diffusionrl.reward.schema import RewardSchema
-from diffusionrl.types.sde import SDEScheduleConfig
 from diffusionrl.types.sampling import LogProbData, PromptEmbeddings, RolloutRequest, RolloutSamples
 from diffusionrl.types.training_batch import (
     BackwardTrainingBatch,
@@ -430,9 +429,6 @@ class TrainingActor(BaseTrainRayActor):
         # Sampling config (used when training actors perform sampling)
         sampling_config = self._require_dict_config(config, "sampling_config")
         self._sampling_config = sampling_config
-        self._timestep_fraction = SDEScheduleConfig.from_mapping(
-            sampling_config.get("sde_schedule_config")
-        ).timestep_fraction
         reward_config = self._require_dict_config(config, "reward_config")
         self._reward_config = reward_config
         self._reward_schema = RewardSchema(**reward_config)
@@ -818,7 +814,6 @@ class TrainingActor(BaseTrainRayActor):
             num_updates_per_local_batch=self._num_updates_per_local_batch,
             training_plan=dict(self._resolved_training_plan),
             ema_manager=self._ema_manager,
-            timestep_fraction=getattr(self, "_timestep_fraction", 1.0),
             shuffle_samples=self._shuffle_samples,
             shuffle_seed=self._shuffle_seed,
             clip_grad_norm_fn=(

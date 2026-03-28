@@ -136,13 +136,16 @@ def denoising_step(
     )
 
     if isinstance(strategy, SDEStrategy):
-        prev_sample = prev_sample.to(dtype=_input_dtype).float()
-        log_prob = strategy.compute_log_prob(
-            prev_sample=prev_sample,
-            prev_sample_mean=prev_sample_mean,
-            std_var=std_var,
-        )
-        log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
+        if eta < 1e-7:
+            log_prob = None
+        else:
+            prev_sample = prev_sample.to(dtype=_input_dtype).float()
+            log_prob = strategy.compute_log_prob(
+                prev_sample=prev_sample,
+                prev_sample_mean=prev_sample_mean,
+                std_var=std_var,
+            )
+            log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
     else:
         log_prob = None
 

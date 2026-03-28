@@ -16,7 +16,10 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "AllSDEScheduler": ("diffusionrl.samplers.schedulers", "AllSDEScheduler"),
     "WindowScheduler": ("diffusionrl.samplers.schedulers", "WindowScheduler"),
     "WindowConfig": ("diffusionrl.samplers.schedulers", "WindowConfig"),
-    "get_scheduler": ("diffusionrl.samplers.schedulers", "get_scheduler"),
+    "create_indices_scheduler": (
+        "diffusionrl.samplers.schedulers",
+        "create_indices_scheduler",
+    ),
     "BaseRolloutEngine": ("diffusionrl.samplers.engine", "BaseRolloutEngine"),
     "ENGINE_REGISTRY": ("diffusionrl.samplers.engine", "ENGINE_REGISTRY"),
     "register_engine": ("diffusionrl.samplers.engine", "register_engine"),

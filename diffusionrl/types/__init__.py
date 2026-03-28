@@ -27,7 +27,6 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "SamplingRequirements": ("diffusionrl.types.sampling", "SamplingRequirements"),
     "ResolvedSamplingSpec": ("diffusionrl.types.sampling", "ResolvedSamplingSpec"),
     "SDEConfig": ("diffusionrl.types.sde", "SDEConfig"),
-    "SDEScheduleConfig": ("diffusionrl.types.sde", "SDEScheduleConfig"),
     "BackwardTrainingBatch": (
         "diffusionrl.types.training_batch",
         "BackwardTrainingBatch",

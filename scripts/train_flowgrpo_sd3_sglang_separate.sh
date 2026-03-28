@@ -84,7 +84,7 @@ python -m diffusionrl.train \
     --sampling.shift 3.0 \
     --sampling.num-inference-steps 10 \
     --sampling.guidance-scale 4.5 \
-    --sampling.timestep-fraction 0.99 \
+    --algorithm.rollout-scheduler.timestep-fraction 0.99 \
     \
     "${FLOWGRPO_ALGO_KWARG_ARGS[@]}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \

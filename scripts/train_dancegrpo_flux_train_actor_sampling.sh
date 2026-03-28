@@ -120,7 +120,9 @@ python -m diffusionrl.train \
     --sampling.num-inference-steps 25 \
     --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 3.5 \
-    --sampling.timestep-fraction 0.6 \
+    --algorithm.training-share-rollout-indices false \
+    --algorithm.rollout-scheduler.timestep-fraction 0.99 \
+    --algorithm.training-scheduler.timestep-fraction 0.6 \
     \
     "${DANCEGRPO_ALGO_KWARG_ARGS[@]}" \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
