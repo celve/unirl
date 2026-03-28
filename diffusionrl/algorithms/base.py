@@ -375,8 +375,8 @@ class BaseAlgorithm(ABC):
         *,
         model: nn.Module,
         batch: Any,
+        timesteps: Any,
         guidance_scale: float = 3.5,
-        timesteps: Optional[Any] = None,
         loss_scale: float = 1.0,
         **kwargs: Any,
     ) -> tuple:
@@ -386,7 +386,7 @@ class BaseAlgorithm(ABC):
         timestep specification for the current update. ``loss_scale`` lets
         the executor normalize gradients across accumulation micro-batches.
         """
-        del model, batch, guidance_scale, timesteps, loss_scale, kwargs
+        del model, batch, timesteps, guidance_scale, loss_scale, kwargs
         raise NotImplementedError(
             f"{type(self).__name__} must implement compute_loss_and_backward()."
         )
@@ -398,7 +398,12 @@ class BaseAlgorithm(ABC):
         current_step: int,
         **kwargs: Any,
     ) -> Any:
-        """Resolve algorithm-defined training timesteps once per update chunk."""
+        """Resolve algorithm-defined training timesteps once per update chunk.
+
+        The returned object should represent actual training timesteps for the
+        update. Algorithms that internally train by logical step index may map
+        those timesteps back to indices inside ``compute_loss_and_backward``.
+        """
         del batch, current_step, kwargs
         return None
 

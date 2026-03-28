@@ -646,8 +646,8 @@ class NFTAlgorithm(BaseAlgorithm):
         *,
         model: nn.Module,
         batch: Any,
+        timesteps: Optional[Any],
         guidance_scale: float = 3.5,
-        timesteps: Optional[Any] = None,
         loss_scale: float = 1.0,
         **kwargs: Any,
     ) -> tuple:

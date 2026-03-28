@@ -352,7 +352,8 @@ class GRPOAlgorithm(BaseAlgorithm):
                 f"{type(self).__name__} expects BackwardTrainingBatch, got {type(batch).__name__}"
             )
 
-        step_labels = set(int(v) for v in batch.resolved_step_indices[:-1].tolist())
+        step_indices = batch.resolved_step_indices[:-1]
+        step_labels = set(int(v) for v in step_indices.tolist())
         if not step_labels:
             return tuple()
 
@@ -375,7 +376,12 @@ class GRPOAlgorithm(BaseAlgorithm):
             )
         if not filtered_steps:
             return tuple()
-        return tuple(sorted(int(i) for i in filtered_steps))
+        selected_positions = [
+            pos
+            for pos, step_label in enumerate(step_indices.tolist())
+            if int(step_label) in filtered_steps
+        ]
+        return batch.timesteps[selected_positions]
 
     def assemble_training_batch(
         self,
@@ -798,18 +804,16 @@ class GRPOAlgorithm(BaseAlgorithm):
         *,
         model: nn.Module,
         batch: Any,
+        timesteps: Any,
         guidance_scale: float = 3.5,
-        timesteps: Optional[Any] = None,
         loss_scale: float = 1.0,
         **kwargs: Any,
     ) -> tuple:
         """GRPO training step over one micro-batch.
 
-        Here ``timesteps`` means the logical reverse-process step labels to
-        optimize for this update chunk, for example ``(0, 1, 2, ...)`` after
-        any algorithm-specific filtering. These are not continuous forward
-        diffusion times; the algorithm maps each label back to the matching
-        trajectory position via ``batch.get_timestep_data_by_step(...)``.
+        Here ``timesteps`` means the selected trajectory timesteps for this
+        update chunk. GRPO converts them back to logical reverse-process step
+        labels before fetching per-step trajectory data.
 
         Returns:
             ``(scaled_loss, metrics_dict, num_timesteps, has_backward)``
@@ -823,17 +827,15 @@ class GRPOAlgorithm(BaseAlgorithm):
 
         model.train()
 
-        available_steps = set(int(s) for s in batch.resolved_step_indices[:-1].tolist())
-        if timesteps is None:
-            timesteps = self.resolve_training_timesteps(batch=batch, current_step=0)
         if torch.is_tensor(timesteps):
-            candidate_steps = [int(i) for i in timesteps.detach().flatten().tolist()]
+            candidate_timesteps = timesteps.detach().flatten()
         else:
-            candidate_steps = [int(i) for i in timesteps]
-        valid_step_indices = [
-            step for step in candidate_steps if step in available_steps
-        ]
-        num_timesteps_per_sample = len(valid_step_indices)
+            candidate_timesteps = torch.as_tensor(
+                list(timesteps),
+                device=batch.timesteps.device,
+                dtype=batch.timesteps.dtype,
+            )
+        num_timesteps_per_sample = int(candidate_timesteps.numel())
         if num_timesteps_per_sample == 0:
             return 0.0, {}, 0, False
 
@@ -844,8 +846,9 @@ class GRPOAlgorithm(BaseAlgorithm):
         all_metrics: Dict[str, Any] = {}
         timestep_metrics: List[Dict[str, Any]] = []
 
-        for t_idx in valid_step_indices:
-            timestep_data = batch.get_timestep_data_by_step(t_idx)
+        for timestep_value in candidate_timesteps:
+            step_idx = batch.get_step_for_timestep(timestep_value)
+            timestep_data = batch.get_timestep_data_by_step(step_idx)
             loss_t, metrics_t = self.compute_loss(
                 model=model,
                 timestep_data=timestep_data,
@@ -860,7 +863,7 @@ class GRPOAlgorithm(BaseAlgorithm):
 
             for key, value in metrics_t.items():
                 val = value.item() if isinstance(value, torch.Tensor) else value
-                metric_key = f"t{t_idx}_{key}"
+                metric_key = f"t{step_idx}_{key}"
                 if metric_key not in all_metrics:
                     all_metrics[metric_key] = val
 

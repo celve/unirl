@@ -30,7 +30,7 @@
 # - num_inference_steps=25
 # - guidance_scale=4.5 (SD3 benefits from CFG, unlike FLUX)
 # - mixed_sampling=true with sde_ratio=0.16 (16% SDE, 84% ODE)
-# - Window scheduler: progressive with group_size=4, iters_per_group=25
+# - Window scheduler: progressive with window_size=4, iters_per_window=25
 # - NO KL penalty (same as MixGRPO)
 #
 # NOTE:
@@ -107,7 +107,6 @@ MIXGRPO_ALGO_KWARG_ARGS=(
 # Training
 NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-4}
 LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE:-4}
-LOCAL_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / NUM_GPUS ))
 
 
 python -m diffusionrl.train \
@@ -130,10 +129,10 @@ python -m diffusionrl.train \
     "${MIXGRPO_ALGO_KWARG_ARGS[@]}" \
     --algorithm.rollout-scheduler.timestep-strategy window \
     --algorithm.rollout-scheduler.window-strategy progressive \
-    --algorithm.rollout-scheduler.window-group-size 4 \
-    --algorithm.rollout-scheduler.window-iters-per-group 25 \
-    --algorithm.rollout-scheduler.window-max-iters-per-group ${WINDOW_MAX_ITERS_PER_GROUP:-10} \
-    --algorithm.rollout-scheduler.window-min-iters-per-group ${WINDOW_MIN_ITERS_PER_GROUP:-1} \
+    --algorithm.rollout-scheduler.window-size 4 \
+    --algorithm.rollout-scheduler.window-iters-per-window 25 \
+    --algorithm.rollout-scheduler.window-max-iters-per-window ${WINDOW_MAX_ITERS_PER_GROUP:-10} \
+    --algorithm.rollout-scheduler.window-min-iters-per-window ${WINDOW_MIN_ITERS_PER_GROUP:-1} \
     --algorithm.rollout-scheduler.window-overlap true \
     --algorithm.rollout-scheduler.window-roll-back true \
     \

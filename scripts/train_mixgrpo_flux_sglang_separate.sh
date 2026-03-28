@@ -81,7 +81,6 @@ MIXGRPO_ALGO_KWARG_ARGS=(
 
 # Training
 LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE-4}
-LOCAL_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / TRAINING_GPUS ))
 
 
 python -m diffusionrl.train \
@@ -108,10 +107,10 @@ python -m diffusionrl.train \
     "${MIXGRPO_ALGO_KWARG_ARGS[@]}" \
     --algorithm.rollout-scheduler.timestep-strategy window \
     --algorithm.rollout-scheduler.window-strategy progressive \
-    --algorithm.rollout-scheduler.window-group-size 4 \
-    --algorithm.rollout-scheduler.window-iters-per-group 25 \
-    --algorithm.rollout-scheduler.window-max-iters-per-group ${WINDOW_MAX_ITERS_PER_GROUP:-10} \
-    --algorithm.rollout-scheduler.window-min-iters-per-group ${WINDOW_MIN_ITERS_PER_GROUP:-1} \
+    --algorithm.rollout-scheduler.window-size 4 \
+    --algorithm.rollout-scheduler.window-iters-per-window 25 \
+    --algorithm.rollout-scheduler.window-max-iters-per-window ${WINDOW_MAX_ITERS_PER_GROUP:-10} \
+    --algorithm.rollout-scheduler.window-min-iters-per-window ${WINDOW_MIN_ITERS_PER_GROUP:-1} \
     --algorithm.rollout-scheduler.window-overlap true \
     --algorithm.rollout-scheduler.window-roll-back true \
     \

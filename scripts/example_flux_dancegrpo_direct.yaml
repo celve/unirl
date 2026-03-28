@@ -29,7 +29,7 @@ algorithm:
   window:
     window_training: true
     timestep_strategy: window
-    window_group_size: 6
+    window_size: 6
     window_strategy: progressive
   algorithm_kwargs:
     clip_range: 0.0001

@@ -335,20 +335,20 @@ class SchedulerConfig:
         default="progressive",
         metadata={"help": "Window progression: progressive or random"},
     )
-    window_group_size: int = field(
-        default=4, metadata={"help": "Number of timestep indices in each window group"}
+    window_size: int = field(
+        default=4, metadata={"help": "Number of timestep indices in each window"}
     )
-    window_iters_per_group: int = field(
+    window_iters_per_window: int = field(
         default=25,
         metadata={"help": "Number of training steps before advancing the window"},
     )
     window_init_timestep: int = field(
         default=0, metadata={"help": "Initial left boundary for the window scheduler"}
     )
-    window_max_iters_per_group: Optional[int] = field(
+    window_max_iters_per_window: Optional[int] = field(
         default=10, metadata={"help": "Reserved for decay-style window schedulers"}
     )
-    window_min_iters_per_group: Optional[int] = field(
+    window_min_iters_per_window: Optional[int] = field(
         default=1, metadata={"help": "Reserved for decay-style window schedulers"}
     )
     window_overlap: bool = field(
@@ -497,12 +497,13 @@ class AlgorithmConfig:
             raise ValueError("algorithm.eval_ema_update_interval must be >= 1.")
         window_cfg = self.window
         if (
-            window_cfg.window_max_iters_per_group is not None
-            and window_cfg.window_min_iters_per_group is not None
-            and window_cfg.window_min_iters_per_group > window_cfg.window_max_iters_per_group
+            window_cfg.window_max_iters_per_window is not None
+            and window_cfg.window_min_iters_per_window is not None
+            and window_cfg.window_min_iters_per_window
+            > window_cfg.window_max_iters_per_window
         ):
             raise ValueError(
-                "window_min_iters_per_group must be <= window_max_iters_per_group."
+                "window_min_iters_per_window must be <= window_max_iters_per_window."
             )
 
 

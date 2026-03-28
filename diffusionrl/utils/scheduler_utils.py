@@ -14,23 +14,23 @@ class WindowConfig:
     """Configuration for stateless window-based index scheduling."""
 
     strategy: Strategy = "all"
-    group_size: int = 4
-    iters_per_group: int = 25
+    window_size: int = 4
+    iters_per_window: int = 25
     init_timestep: int = 0
     overlap: bool = False
     overlap_step: int = 1
     roll_back: bool = False
-    max_iters_per_group: Optional[int] = None
-    min_iters_per_group: Optional[int] = None
+    max_iters_per_window: Optional[int] = None
+    min_iters_per_window: Optional[int] = None
     exp_decay_threshold: int = 13
     exp_decay_k: float = 0.1
 
     def __post_init__(self) -> None:
         if self.strategy == "decay":
-            if self.max_iters_per_group is None:
-                self.max_iters_per_group = self.iters_per_group
-            if self.min_iters_per_group is None:
-                self.min_iters_per_group = max(1, self.iters_per_group // 4)
+            if self.max_iters_per_window is None:
+                self.max_iters_per_window = self.iters_per_window
+            if self.min_iters_per_window is None:
+                self.min_iters_per_window = max(1, self.iters_per_window // 4)
 
 
 class TimestepScheduler(ABC):
@@ -131,27 +131,27 @@ class WindowScheduler(TimestepScheduler):
         return resolve_method(0 if step is None else int(step))
 
     def _resolve_progressive(self, step: int) -> Set[int]:
-        group_step = step // self.config.iters_per_group
+        window_step = step // self.config.iters_per_window
         stride = (
-            self.config.overlap_step if self.config.overlap else self.config.group_size
+            self.config.overlap_step if self.config.overlap else self.config.window_size
         )
         remaining = (
-            self.num_timesteps - self.config.init_timestep - self.config.group_size
+            self.num_timesteps - self.config.init_timestep - self.config.window_size
         )
-        num_one_round_group_steps = max(1, remaining // stride + 1)
-        if group_step >= num_one_round_group_steps and not self.config.roll_back:
-            group_step = num_one_round_group_steps - 1
-            return self._resolve_progressive(group_step * self.config.iters_per_group)
+        num_one_round_window_steps = max(1, remaining // stride + 1)
+        if window_step >= num_one_round_window_steps and not self.config.roll_back:
+            window_step = num_one_round_window_steps - 1
+            return self._resolve_progressive(window_step * self.config.iters_per_window)
 
-        group_step = group_step % num_one_round_group_steps
-        cur_timestep = self.config.init_timestep + group_step * stride
-        return set(range(cur_timestep, cur_timestep + self.config.group_size))
+        window_step = window_step % num_one_round_window_steps
+        cur_timestep = self.config.init_timestep + window_step * stride
+        return set(range(cur_timestep, cur_timestep + self.config.window_size))
 
     def _resolve_random(self, step: int) -> Set[int]:
         rng = np.random.default_rng(step)
-        max_start = max(0, self.num_timesteps - self.config.group_size)
+        max_start = max(0, self.num_timesteps - self.config.window_size)
         cur_timestep = int(rng.integers(0, max_start + 1))
-        return set(range(cur_timestep, cur_timestep + self.config.group_size))
+        return set(range(cur_timestep, cur_timestep + self.config.window_size))
 
 
 SCHEDULER_REGISTRY: Dict[str, Type[TimestepScheduler]] = {
@@ -189,14 +189,14 @@ def create_indices_scheduler(
             int(num_timesteps),
             WindowConfig(
                 strategy=_read("window_strategy", "progressive"),
-                group_size=int(_read("window_group_size", 4)),
-                iters_per_group=int(_read("window_iters_per_group", 25)),
+                window_size=int(_read("window_size", 4)),
+                iters_per_window=int(_read("window_iters_per_window", 25)),
                 init_timestep=int(_read("window_init_timestep", 0)),
                 overlap=bool(_read("window_overlap", False)),
                 overlap_step=int(_read("window_overlap_step", 1)),
                 roll_back=bool(_read("window_roll_back", False)),
-                max_iters_per_group=_read("window_max_iters_per_group", None),
-                min_iters_per_group=_read("window_min_iters_per_group", None),
+                max_iters_per_window=_read("window_max_iters_per_window", None),
+                min_iters_per_window=_read("window_min_iters_per_window", None),
             ),
         )
     raise ValueError(

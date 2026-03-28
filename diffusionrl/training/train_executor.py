@@ -237,8 +237,8 @@ class TrainExecutor:
                 ) = self.algorithm.compute_loss_and_backward(
                     model=self.model,
                     batch=micro_batch,
-                    guidance_scale=self.config.guidance_scale,
                     timesteps=training_timesteps,
+                    guidance_scale=self.config.guidance_scale,
                     loss_scale=loss_scale,
                 )
                 total_loss += (
