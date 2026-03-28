@@ -19,9 +19,9 @@ import torch
 import torch.nn as nn
 
 from diffusionrl.config.build_domain_args import resolve_sde_config
-from diffusionrl.samplers.schedulers import create_indices_scheduler
 from diffusionrl.types import PromptEmbeddings, SDEConfig, TimestepData
 from diffusionrl.utils.misc import aggregate_numeric_metrics
+from diffusionrl.utils.scheduler_utils import create_indices_scheduler
 
 from .base import BaseAlgorithm, EMASpec, SamplingRequirements
 from .forward_context import ForwardContext

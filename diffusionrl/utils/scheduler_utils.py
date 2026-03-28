@@ -44,7 +44,7 @@ class TimestepScheduler(ABC):
         """Return the selected indices for the given step."""
 
 
-def _normalize_timestep_fraction(
+def normalize_timestep_fraction(
     timestep_fraction: Union[float, Tuple[float, float], List[float]],
 ) -> Tuple[float, float]:
     """Normalize timestep_fraction to a ``(start, end)`` tuple."""
@@ -61,9 +61,7 @@ def _normalize_timestep_fraction(
             f"timestep_fraction values must be in [0.0, 1.0], got ({start}, {end})"
         )
     if start > end:
-        raise ValueError(
-            f"timestep_fraction start ({start}) must be <= end ({end})"
-        )
+        raise ValueError(f"timestep_fraction start ({start}) must be <= end ({end})")
     return (start, end)
 
 
@@ -79,7 +77,7 @@ class AllSDEScheduler(TimestepScheduler):
         super().__init__(num_timesteps)
         self.timestep_fraction = timestep_fraction
         self.num_sde_steps = num_sde_steps
-        self._fraction_start, self._fraction_end = _normalize_timestep_fraction(
+        self._fraction_start, self._fraction_end = normalize_timestep_fraction(
             timestep_fraction
         )
         self._effective_start = int(num_timesteps * self._fraction_start)

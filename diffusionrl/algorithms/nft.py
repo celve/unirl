@@ -367,11 +367,9 @@ class NFTAlgorithm(BaseAlgorithm):
             and timestep_fraction is not None
             and timestep_fraction != 1.0
         ):
-            from diffusionrl.samplers.schedulers.timestep_window import (
-                _normalize_timestep_fraction,
-            )
+            from diffusionrl.utils.scheduler_utils import normalize_timestep_fraction
 
-            frac_start, frac_end = _normalize_timestep_fraction(timestep_fraction)
+            frac_start, frac_end = normalize_timestep_fraction(timestep_fraction)
             n = timesteps.numel()
             effective_start = int(n * frac_start)
             effective_end = min(int(n * frac_end), n)
