@@ -446,7 +446,6 @@ def validate_algorithm_kwargs_payload(args: Any) -> None:
         "eval_ema_update_interval": "algorithm.eval_ema_update_interval",
         "shuffle_samples": "algorithm.shuffle_samples",
         "shuffle_seed": "algorithm.shuffle_seed",
-        "window_training": "algorithm.window.window_training",
         "autocast_precision": "precision.training.autocast_precision",
     }
     collisions = [

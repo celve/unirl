@@ -6,12 +6,11 @@ the single source of truth for rollout requirements, loss creation, and the
 backward training step.
 """
 
-import math
 import logging
+import math
 import os
 import time as _time
-
-from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:
     from diffusionrl.types.sampling import RolloutRequest
@@ -21,6 +20,9 @@ import torch.nn as nn
 
 from diffusionrl.config.build_domain_args import resolve_sde_config
 from diffusionrl.types import PromptEmbeddings, SDEConfig, TimestepData
+from diffusionrl.utils.misc import aggregate_numeric_metrics
+from diffusionrl.utils.scheduler_utils import create_indices_scheduler
+
 from .base import BaseAlgorithm, EMASpec, SamplingRequirements
 from .forward_context import ForwardContext
 
@@ -99,8 +101,10 @@ class GRPOAlgorithm(BaseAlgorithm):
         }
         unknown = sorted(key for key in extra.keys() if key not in known_keys)
         if unknown:
+            algorithm_label = str(config.get("algorithm_type", "grpo"))
             raise ValueError(
-                "algorithm.algorithm_kwargs contains unsupported keys for algorithm_type='grpo': "
+                "algorithm.algorithm_kwargs contains unsupported keys for "
+                f"algorithm_type={algorithm_label!r}: "
                 f"{unknown}."
             )
 
@@ -111,10 +115,16 @@ class GRPOAlgorithm(BaseAlgorithm):
             kl_coef=float(extra.get("kl_coef", 0.01)),
             component_mix_stage=str(config.get("component_mix_stage", "reward")),
             samples_per_prompt=int(config.get("samples_per_prompt", 1)),
+            num_inference_steps=int(config.get("num_inference_steps", 0)),
             eval_ema_decay=float(config.get("eval_ema_decay", 0.9)),
             eval_ema_update_interval=int(config.get("eval_ema_update_interval", 1)),
             ratio_reg_coef=float(extra.get("ratio_reg_coef", 0.0)),
             sde_config=sde_config,
+            training_share_rollout_indices=bool(
+                config.get("training_share_rollout_indices", True)
+            ),
+            rollout_scheduler_config=dict(config.get("rollout_scheduler") or {}),
+            training_scheduler_config=dict(config.get("training_scheduler") or {}),
             skip_last_timestep=bool(extra.get("skip_last_timestep", False)),
             skip_initial_timesteps=int(extra.get("skip_initial_timesteps", 0)),
             model_type=str(extra.get("model_type", "default")),
@@ -134,12 +144,16 @@ class GRPOAlgorithm(BaseAlgorithm):
         component_mix_stage: str = "reward",
         ratio_reg_coef: float = 0.0,
         sde_config: Optional[SDEConfig] = None,
+        training_share_rollout_indices: bool = True,
+        rollout_scheduler_config: Optional[Dict[str, Any]] = None,
+        training_scheduler_config: Optional[Dict[str, Any]] = None,
         skip_last_timestep: bool = False,
         skip_initial_timesteps: int = 0,
         model_type: str = "default",
         # BaseAlgorithm params
         adv_normalization: str = "group",
         samples_per_prompt: int = 1,
+        num_inference_steps: int = 0,
         eval_ema_decay: float = 0.9,
         eval_ema_update_interval: int = 1,
         epsilon: float = 1e-8,
@@ -179,6 +193,7 @@ class GRPOAlgorithm(BaseAlgorithm):
             component_mix_stage=component_mix_stage,
             adv_normalization=adv_normalization,
             samples_per_prompt=samples_per_prompt,
+            num_inference_steps=num_inference_steps,
             eval_ema_decay=eval_ema_decay,
             eval_ema_update_interval=eval_ema_update_interval,
             epsilon=epsilon,
@@ -193,6 +208,22 @@ class GRPOAlgorithm(BaseAlgorithm):
         self.ratio_reg_coef = ratio_reg_coef
         self.sde_config = sde_config or SDEConfig()
         self.model_type = model_type
+        self.training_share_rollout_indices = bool(training_share_rollout_indices)
+        self.rollout_scheduler_config = dict(rollout_scheduler_config or {})
+        self.training_scheduler_config = dict(
+            training_scheduler_config or self.rollout_scheduler_config
+        )
+        self.rollout_indices_scheduler = create_indices_scheduler(
+            scheduler_config=self.rollout_scheduler_config,
+            num_timesteps=self.num_inference_steps,
+        )
+        if self.training_share_rollout_indices:
+            self.training_indices_scheduler = self.rollout_indices_scheduler
+        else:
+            self.training_indices_scheduler = create_indices_scheduler(
+                scheduler_config=self.training_scheduler_config,
+                num_timesteps=self.num_inference_steps,
+            )
 
         # MixGRPO stability controls
         self.skip_last_timestep = skip_last_timestep
@@ -277,12 +308,14 @@ class GRPOAlgorithm(BaseAlgorithm):
     def resolve_rollout_sde_indices(
         self,
         *,
-        timestep_scheduler: Optional[Any],
         current_step: int,
     ) -> Optional[Set[int]]:
-        if timestep_scheduler is None:
-            return None
-        return set(int(i) for i in timestep_scheduler.get_sde_indices(current_step))
+        if self.num_inference_steps < 1:
+            raise ValueError(
+                f"{type(self).__name__}.resolve_rollout_sde_indices requires "
+                f"num_inference_steps >= 1, got {self.num_inference_steps}."
+            )
+        return set(self.rollout_indices_scheduler.get_sde_indices(current_step))
 
     def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:
         allow_replay = bool(getattr(args.sampling, "replay_log_probs", False))
@@ -303,6 +336,52 @@ class GRPOAlgorithm(BaseAlgorithm):
         if self.skip_initial_timesteps > 0:
             result = {i for i in result if i >= self.skip_initial_timesteps}
         return result
+
+    def resolve_training_timesteps(
+        self,
+        *,
+        batch: Any,
+        current_step: int,
+        **kwargs: Any,
+    ) -> Any:
+        from diffusionrl.types.training_batch import BackwardTrainingBatch
+
+        del kwargs
+        if not isinstance(batch, BackwardTrainingBatch):
+            raise TypeError(
+                f"{type(self).__name__} expects BackwardTrainingBatch, got {type(batch).__name__}"
+            )
+
+        step_indices = batch.resolved_step_indices[:-1]
+        step_labels = set(int(v) for v in step_indices.tolist())
+        if not step_labels:
+            return tuple()
+
+        requested_steps = set(
+            int(i)
+            for i in self.training_indices_scheduler.get_sde_indices(current_step)
+        )
+        filtered_steps = self.get_filtered_training_indices(
+            requested_steps,
+            len(step_labels),
+        )
+        missing_steps = sorted(
+            int(i) for i in filtered_steps if int(i) not in step_labels
+        )
+        if missing_steps:
+            raise ValueError(
+                f"{type(self).__name__}.resolve_training_timesteps selected steps "
+                f"not present in batch: missing={missing_steps}, "
+                f"available={sorted(step_labels)}"
+            )
+        if not filtered_steps:
+            return tuple()
+        selected_positions = [
+            pos
+            for pos, step_label in enumerate(step_indices.tolist())
+            if int(step_label) in filtered_steps
+        ]
+        return batch.timesteps[selected_positions]
 
     def assemble_training_batch(
         self,
@@ -332,16 +411,21 @@ class GRPOAlgorithm(BaseAlgorithm):
         prompts: List[str],
         sde_indices: Optional[Set[int]] = None,
     ) -> Any:
-        from diffusionrl.types.sampling import RolloutSamples, LogProbData, PromptEmbeddings
+        from diffusionrl.types.sampling import (
+            LogProbData,
+            PromptEmbeddings,
+            RolloutSamples,
+        )
         from diffusionrl.types.training_batch import BackwardTrainingBatch
 
         trajectories = []
         log_probs_dicts = []
         timesteps = None
         step_indices = None
-        scheduler_was_provided = sde_indices is not None
-        raw_scheduler_indices = {int(i) for i in sde_indices} if sde_indices is not None else None
-        final_sde_indices: Set[int] = set(raw_scheduler_indices or set())
+        explicit_sde_indices = (
+            {int(i) for i in sde_indices} if sde_indices is not None else None
+        )
+        collected_sde_indices: Set[int] = set()
         all_prompt_embeds = []
         all_pooled_prompt_embeds = []
         all_encoder_attention_mask = []
@@ -381,8 +465,17 @@ class GRPOAlgorithm(BaseAlgorithm):
                         "Mismatched step_indices across sampler outputs: "
                         f"expected={step_indices.tolist()} got={steps.tolist()}"
                     )
-            if sde_indices is None:
-                final_sde_indices.update(int(i) for i in sde_idx)
+            sample_sde_indices = set(int(i) for i in sde_idx)
+            if explicit_sde_indices is not None and not explicit_sde_indices.issubset(
+                sample_sde_indices
+            ):
+                missing = sorted(explicit_sde_indices - sample_sde_indices)
+                raise ValueError(
+                    "assemble_training_batch received explicit sde_indices that are missing "
+                    f"from sampler output index={idx}: missing={missing}, "
+                    f"available={sorted(sample_sde_indices)}"
+                )
+            collected_sde_indices.update(sample_sde_indices)
 
             emb = _embeddings
             all_prompt_embeds.append(emb.prompt_embeds)
@@ -431,32 +524,14 @@ class GRPOAlgorithm(BaseAlgorithm):
             )
             return set()
 
-        if final_sde_indices:
-            final_sde_indices = _normalize_to_step_labels(
-                set(int(i) for i in final_sde_indices), source="Scheduler/Sampler SDE"
-            )
-
-        raw_train_indices = self.resolve_training_indices(
-            num_steps=len(step_labels),
-            sde_indices=set(final_sde_indices) if scheduler_was_provided else None,
+        final_sde_indices = (
+            explicit_sde_indices
+            if explicit_sde_indices is not None
+            else collected_sde_indices
         )
-        train_indices = _normalize_to_step_labels(
-            set(int(i) for i in raw_train_indices),
-            source=f"{type(self).__name__}.resolve_training_indices",
+        final_sde_indices = _normalize_to_step_labels(
+            set(int(i) for i in final_sde_indices), source="Assemble SDE"
         )
-        if not train_indices:
-            train_indices = step_label_set
-        if not scheduler_was_provided:
-            final_sde_indices = train_indices
-        else:
-            final_sde_indices = final_sde_indices & train_indices if final_sde_indices else train_indices
-        if not final_sde_indices:
-            final_sde_indices = train_indices if train_indices else set(step_labels)
-
-        num_steps = len(step_labels)
-        final_sde_indices = self.get_filtered_training_indices(final_sde_indices, num_steps)
-        if not final_sde_indices:
-            final_sde_indices = set(step_labels)
 
         merged_log_probs: Dict[int, torch.Tensor] = {}
         if log_probs_dicts:
@@ -729,16 +804,19 @@ class GRPOAlgorithm(BaseAlgorithm):
         *,
         model: nn.Module,
         batch: Any,
-        mini_batch_slices: Tuple[Tuple[int, int], ...],
+        timesteps: Any,
         guidance_scale: float = 3.5,
+        loss_scale: float = 1.0,
         **kwargs: Any,
     ) -> tuple:
-        """GRPO training step: iterate over SDE timesteps with gradient accumulation.
+        """GRPO training step over one micro-batch.
 
-        The algorithm itself decides which timesteps to train on and how to accumulate.
+        Here ``timesteps`` means the selected trajectory timesteps for this
+        update chunk. GRPO converts them back to logical reverse-process step
+        labels before fetching per-step trajectory data.
 
         Returns:
-            ``(avg_loss, metrics_dict, num_timesteps, actual_mini_batches, has_backward)``
+            ``(scaled_loss, metrics_dict, num_timesteps, has_backward)``
         """
         from diffusionrl.types.training_batch import BackwardTrainingBatch
 
@@ -747,75 +825,51 @@ class GRPOAlgorithm(BaseAlgorithm):
                 f"{type(self).__name__} expects BackwardTrainingBatch, got {type(batch).__name__}"
             )
 
-        # Ensure model is in training mode (dropout / batchnorm behave
-        # differently at train vs eval time).
         model.train()
 
-        mini_batches = tuple((int(start), int(end)) for start, end in mini_batch_slices)
-        if not mini_batches:
-            raise ValueError(f"{type(self).__name__} requires non-empty mini_batch_slices.")
-        actual_mini_batches = len(mini_batches)
-        num_mini_batches = len(mini_batches)
-
-        available_steps = set(int(s) for s in batch.resolved_step_indices[:-1].tolist())
-        valid_step_indices = sorted(int(i) for i in batch.sde_indices if int(i) in available_steps)
-        num_timesteps_per_sample = len(valid_step_indices)
+        if torch.is_tensor(timesteps):
+            candidate_timesteps = timesteps.detach().flatten()
+        else:
+            candidate_timesteps = torch.as_tensor(
+                list(timesteps),
+                device=batch.timesteps.device,
+                dtype=batch.timesteps.dtype,
+            )
+        num_timesteps_per_sample = int(candidate_timesteps.numel())
         if num_timesteps_per_sample == 0:
-            return 0.0, {}, 0, actual_mini_batches, False
+            return 0.0, {}, 0, False
+
+        ctx = self._make_forward_context(model, batch.embeddings, guidance_scale)
 
         total_loss_accum = 0.0
         has_backward = False
-        mini_batch_metrics_list = []
-
-        for start, end in mini_batches:
-            mini_batch = batch.slice(start, end)
-            mini_ctx = self._make_forward_context(model, mini_batch.embeddings, guidance_scale)
-            mini_loss_sum = 0.0
-            mini_metrics: Dict[str, Any] = {}
-            metric_sums: Dict[str, float] = {}
-            metric_counts: Dict[str, int] = {}
-
-            for t_idx in valid_step_indices:
-                timestep_data = mini_batch.get_timestep_data_by_step(t_idx)
-                loss_t, metrics_t = self.compute_loss(
-                    model=model,
-                    timestep_data=timestep_data,
-                    advantages=mini_batch.advantages,
-                    ctx=mini_ctx,
-                )
-                scaled_loss = loss_t / (num_mini_batches * num_timesteps_per_sample)
-                scaled_loss.backward()
-                has_backward = True
-                mini_loss_sum += scaled_loss.detach().item()
-
-                for key, value in metrics_t.items():
-                    val = value.item() if isinstance(value, torch.Tensor) else value
-                    metric_key = f"t{t_idx}_{key}"
-                    if metric_key not in mini_metrics:
-                        mini_metrics[metric_key] = val
-                    if isinstance(val, (int, float)):
-                        metric_sums[key] = metric_sums.get(key, 0.0) + float(val)
-                        metric_counts[key] = metric_counts.get(key, 0) + 1
-
-            for key, total in metric_sums.items():
-                count = metric_counts.get(key, 0)
-                if count > 0:
-                    mini_metrics[key] = total / count
-
-            mini_batch_metrics_list.append(mini_metrics)
-            total_loss_accum += mini_loss_sum
-
         all_metrics: Dict[str, Any] = {}
-        if mini_batch_metrics_list:
-            keys = mini_batch_metrics_list[0].keys()
-            for key in keys:
-                values = [m.get(key) for m in mini_batch_metrics_list if m.get(key) is not None]
-                if values and isinstance(values[0], (int, float)):
-                    all_metrics[key] = sum(values) / len(values)
-                else:
-                    all_metrics[key] = mini_batch_metrics_list[-1].get(key)
+        timestep_metrics: List[Dict[str, Any]] = []
 
-        return total_loss_accum, all_metrics, num_timesteps_per_sample, actual_mini_batches, has_backward
+        for timestep_value in candidate_timesteps:
+            step_idx = batch.get_step_for_timestep(timestep_value)
+            timestep_data = batch.get_timestep_data_by_step(step_idx)
+            loss_t, metrics_t = self.compute_loss(
+                model=model,
+                timestep_data=timestep_data,
+                advantages=batch.advantages,
+                ctx=ctx,
+            )
+            scaled_loss = loss_t * (loss_scale / num_timesteps_per_sample)
+            scaled_loss.backward()
+            has_backward = True
+            total_loss_accum += scaled_loss.detach().item()
+            timestep_metrics.append(metrics_t)
+
+            for key, value in metrics_t.items():
+                val = value.item() if isinstance(value, torch.Tensor) else value
+                metric_key = f"t{step_idx}_{key}"
+                if metric_key not in all_metrics:
+                    all_metrics[metric_key] = val
+
+        all_metrics.update(aggregate_numeric_metrics(timestep_metrics))
+
+        return total_loss_accum, all_metrics, num_timesteps_per_sample, has_backward
 
     # ------------------------------------------------------------------
     # Forward plugin

@@ -22,7 +22,6 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "get_sigma_schedule": ("diffusionrl.sde", "get_sigma_schedule"),
     "sde_step_with_log_prob": ("diffusionrl.sde", "sde_step_with_log_prob"),
     "SDEConfig": ("diffusionrl.types", "SDEConfig"),
-    "SDEScheduleConfig": ("diffusionrl.types", "SDEScheduleConfig"),
     # reward scorers
     "BaseRewardScorer": ("diffusionrl.reward", "BaseRewardScorer"),
     "RewardRequest": ("diffusionrl.types", "RewardRequest"),

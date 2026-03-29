@@ -7,13 +7,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
 import torch
-from diffusionrl.types.sde import SDEConfig, SDEScheduleConfig
+
 from diffusionrl.types.batch_ops import (
     concat_columnar_values,
     copy_columnar_mapping,
     pad_columnar_value,
     slice_columnar_value,
 )
+from diffusionrl.types.sde import SDEConfig
 
 if TYPE_CHECKING:
     from torch import device as TorchDevice
@@ -35,7 +36,6 @@ class SamplingSpec:
     init_same_noise: bool = False
     sampler_kwargs: Dict[str, Any] = field(default_factory=dict)
     sde_config: SDEConfig = field(default_factory=SDEConfig)
-    sde_schedule_config: SDEScheduleConfig = field(default_factory=SDEScheduleConfig)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sampler_kwargs", dict(self.sampler_kwargs or {}))
@@ -54,7 +54,6 @@ class SamplingSpec:
             "init_same_noise": bool(self.init_same_noise),
             "sampler_kwargs": dict(self.sampler_kwargs),
             "sde_config": self.sde_config.to_dict(),
-            "sde_schedule_config": self.sde_schedule_config.to_dict(),
         }
 
 

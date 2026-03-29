@@ -8,17 +8,12 @@ Usage:
 import logging
 import time
 
-from diffusionrl.config import (
-    build_resolved_config_view,
-    parse_args,
-)
+from diffusionrl.config import build_resolved_config_view, parse_args
 from diffusionrl.config.launch_resolution import resolve_launch_config
 from diffusionrl.rollout.service_interface import compute_dataset_step_info
 from diffusionrl.utils.train_utils import (
-    RolloutSDEController,
     build_control_algorithm,
     collect_rollout_batch_metrics,
-    create_rollout_timestep_scheduler,
     maybe_restore_start_rollout_id_from_checkpoint,
     should_eval,
     should_log,
@@ -74,7 +69,7 @@ def _produce_and_push_rollout(
     reward_hook,
     rollout_buffer,
     rollout_id: int,
-    rollout_sde_controller,
+    control_algorithm,
     debug_save_intermediates: bool,
     collect_media_preview: bool,
     media_max_items: int,
@@ -84,7 +79,9 @@ def _produce_and_push_rollout(
     from diffusionrl.rollout.base_types import RolloutContext, RolloutFunctionResult
     from diffusionrl.rollout.factory import DEFAULT_ROLLOUT_FUNCTION_PATH
 
-    rollout_sde_indices = rollout_sde_controller.next_sde_indices()
+    rollout_sde_indices = control_algorithm.resolve_rollout_sde_indices(
+        current_step=int(rollout_id),
+    )
     context = RolloutContext(
         rollout_id=int(rollout_id),
         sde_indices=rollout_sde_indices,
@@ -118,7 +115,6 @@ def _produce_and_push_rollout(
         sampler_outputs=rollout_result.sampler_outputs,
         rewards=rollout_result.rewards,
         advantages=advantages,
-        sde_indices=context.sde_indices,
     )
     metadata = dict(rollout_result.metadata or {})
 
@@ -157,7 +153,8 @@ def _produce_and_push_rollout(
         metadata=dict(metadata or {}),
     )
 
-def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步训练循环
+
+def train(args):  # [PUBLIC-API → main()] sync entrypoint
     """Synchronous training entrypoint."""
     debug_mode = str(args.debug.debug_mode or "none").strip().lower()
     if debug_mode == "train_only":
@@ -167,18 +164,18 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
     import ray
 
+    from diffusionrl.distributed.weight_sync import create_weight_sync
+    from diffusionrl.ray.buffer_actor import create_buffer_actor
     from diffusionrl.ray.group_factory import create_rollout_actor_group, create_training_actor_group
     from diffusionrl.ray.group_runtime import RolloutGroupRuntime, TrainingGroupRuntime
     from diffusionrl.ray.placement_group import create_placement_groups_from_launch
-    from diffusionrl.ray.buffer_actor import create_buffer_actor
     from diffusionrl.utils import configure_logger, set_seed
+    from diffusionrl.utils.wandb_logger import aggregate_metrics, init_logger
     from diffusionrl.utils.wandb_metrics import (
         build_buffer_metrics,
         build_sync_metrics,
         compute_rollout_batch_metrics,
     )
-    from diffusionrl.distributed.weight_sync import create_weight_sync
-    from diffusionrl.utils.wandb_logger import aggregate_metrics, init_logger
 
     configure_logger()
     set_seed(args.seed)
@@ -189,12 +186,6 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
     training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
     sync_mode = rollout_mode_info.sync_protocol
     rollout_mode_name = rollout_topology.mode
-
-    rollout_sde_controller = RolloutSDEController(
-        algorithm=control_algorithm,
-        timestep_scheduler=create_rollout_timestep_scheduler(args, algorithm=control_algorithm),
-    )
-
     rollout_control = args.rollout.control
     rollout_artifacts = args.rollout.artifacts
     rollout_evaluation = args.rollout.evaluation
@@ -463,7 +454,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
                 reward_hook=reward_hook,
                 rollout_buffer=rollout_buffer,
                 rollout_id=rollout_id,
-                rollout_sde_controller=rollout_sde_controller,
+                control_algorithm=control_algorithm,
                 debug_save_intermediates=debug_save_intermediates,
                 collect_media_preview=collect_media_preview,
                 media_max_items=wandb_media_max_items,
@@ -607,7 +598,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
     logger.info("Training complete!")
 
 
-def main(argv=None):  # [PUBLIC-API → __main__] sync CLI 入口
+def main(argv=None):  # [PUBLIC-API → __main__] sync CLI entrypoint
     args = parse_args(argv)
     train(args)
 

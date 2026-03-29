@@ -303,6 +303,26 @@ class BackwardTrainingBatch:
             sigmas=self.timesteps,
         )
 
+    def get_timestep_data_by_timestep(self, timestep: Any) -> TimestepData:
+        """Extract data for a timestep value from the batch timestep schedule."""
+        step_idx = self.get_step_for_timestep(timestep)
+        return self.get_timestep_data_by_step(step_idx)
+
+    def get_step_for_timestep(self, timestep: Any) -> int:
+        """Resolve the logical step label corresponding to a timestep value."""
+        timestep_tensor = torch.as_tensor(
+            timestep,
+            device=self.timesteps.device,
+            dtype=self.timesteps.dtype,
+        )
+        hits = (self.timesteps[:-1] == timestep_tensor).nonzero(as_tuple=False)
+        if hits.numel() == 0:
+            raise ValueError(
+                f"timestep={timestep_tensor.item()!r} not present in timesteps={self.timesteps[:-1].tolist()}"
+            )
+        pos = int(hits[0].item())
+        return int(self.resolved_step_indices[pos].item())
+
     def slice(self, start: int, end: int) -> "BackwardTrainingBatch":
         """
         Slice batch along sample dimension for micro-batch gradient accumulation.

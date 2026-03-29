@@ -115,14 +115,6 @@ class SamplingConfig:
         metadata={"help": "Shift parameter for the sampling timestep schedule (model-specific)"})
     guidance_scale: float = field(default=7.5,
         metadata={"help": "Classifier-free guidance scale (0.0 = no guidance)"})
-    sde_ratio: float = field(default=1.0,
-        metadata={"help": "Fraction of steps that use SDE (0.0 = all ODE, 1.0 = all SDE)"})
-    timestep_fraction: Any = field(default=1.0,
-        metadata={"help": "Fraction of total timesteps to train on. "
-                          "Single float x means [0, x) range; "
-                          "tuple (x, y) means [x, y) range (e.g. (0.2, 0.8) = timesteps 20%%-80%%)"})
-    num_sde_steps: Optional[int] = field(default=None,
-        metadata={"help": "If set, randomly sample this many SDE timesteps from the timestep_fraction range each rollout."})
     sampling_adapter: Optional[str] = field(default=None,
         metadata={"help": "Sampling adapter type for special modes (e.g. 'old' for NFT)"})
     init_same_noise: bool = field(default=False,
@@ -136,8 +128,6 @@ class SamplingConfig:
             )
         if self.max_samples_per_request is not None and int(self.max_samples_per_request) < 1:
             raise ValueError("max_samples_per_request must be >= 1 when set.")
-        if self.num_sde_steps is not None and int(self.num_sde_steps) < 1:
-            raise ValueError("sampling.num_sde_steps must be >= 1 when set.")
         if not isinstance(self.sampler_kwargs, dict):
             raise ValueError("sampling.sampler_kwargs must be a dict.")
         _precision_keys = {"autocast_precision", "trajectory_precision", "logprob_precision"}
@@ -323,29 +313,58 @@ class SyncConfig:
 
 
 @dataclass
-class WindowSchedulerConfig:
-    """MixGRPO timestep/window scheduler."""
+class SchedulerConfig:
+    """Stateless index-scheduler config for rollout or training timestep selection."""
 
-    timestep_strategy: str = field(default="all",
-        metadata={"help": "Timestep selection strategy: all (use all) or window (sliding window)"})
-    window_strategy: str = field(default="progressive",
-        metadata={"help": "Window progression: progressive, random, decay, exp_decay"})
-    window_group_size: int = field(default=4,
-        metadata={"help": "Number of timesteps per window group"})
-    window_iters_per_group: int = field(default=25,
-        metadata={"help": "Training iterations before advancing the window"})
-    window_max_iters_per_group: Optional[int] = field(default=10,
-        metadata={"help": "Maximum iters per group for decay strategy (MixGRPO default: 10)"})
-    window_min_iters_per_group: Optional[int] = field(default=1,
-        metadata={"help": "Minimum iters per group for decay strategy (MixGRPO default: 1)"})
-    window_overlap: bool = field(default=False,
-        metadata={"help": "Allow overlap between adjacent window groups"})
-    window_overlap_step: int = field(default=1,
-        metadata={"help": "Number of overlapping timesteps between adjacent windows"})
-    window_roll_back: bool = field(default=False,
-        metadata={"help": "Roll back to earlier windows after reaching the end"})
-    window_training: bool = field(default=False,
-        metadata={"help": "Train only on SDE (stochastic) timestep steps"})
+    timestep_strategy: str = field(
+        default="all", metadata={"help": "Index scheduler type: all or window"}
+    )
+    timestep_fraction: Any = field(
+        default=1.0,
+        metadata={
+            "help": "Fraction of total timesteps to select. Single float x means [0, x); tuple (x, y) means [x, y)."
+        },
+    )
+    num_sde_steps: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "If set, randomly sample this many indices from the timestep_fraction range each step."
+        },
+    )
+    window_strategy: str = field(
+        default="progressive",
+        metadata={"help": "Window progression: progressive or random"},
+    )
+    window_size: int = field(
+        default=4, metadata={"help": "Number of timestep indices in each window"}
+    )
+    window_iters_per_window: int = field(
+        default=25,
+        metadata={"help": "Number of training steps before advancing the window"},
+    )
+    window_init_timestep: int = field(
+        default=0, metadata={"help": "Initial left boundary for the window scheduler"}
+    )
+    window_max_iters_per_window: Optional[int] = field(
+        default=10, metadata={"help": "Reserved for decay-style window schedulers"}
+    )
+    window_min_iters_per_window: Optional[int] = field(
+        default=1, metadata={"help": "Reserved for decay-style window schedulers"}
+    )
+    window_overlap: bool = field(
+        default=False, metadata={"help": "Allow overlap between adjacent window groups"}
+    )
+    window_overlap_step: int = field(
+        default=1, metadata={"help": "Stride between overlapping window groups"}
+    )
+    window_roll_back: bool = field(
+        default=False,
+        metadata={"help": "Wrap back to the beginning after reaching the last window"},
+    )
+
+
+# Backward-compatible alias for older imports.
+WindowSchedulerConfig = SchedulerConfig
 
 
 @dataclass
@@ -356,7 +375,7 @@ class AlgorithmConfig:
     - algorithm_type / algorithm_path
     - algorithm_kwargs
     - samples_per_prompt / prompts_per_rollout
-    - window scheduler sub-config
+    - rollout/training scheduler sub-configs
     """
 
     # Algorithm selection
@@ -374,29 +393,68 @@ class AlgorithmConfig:
         metadata={"help": "Number of unique prompts per rollout step. Required because rollout geometry is defined by prompts_per_rollout * samples_per_prompt."})
 
     # Shared algorithm surface
-    component_mix_stage: str = field(default="reward",
-        metadata={"help": "Stage that applies multi-component reward mixing: reward or advantage"})
-    adv_normalization: str = field(default="group",
-        metadata={"help": "Advantage normalization scope: group or global"})
-    adv_norm_eps: float = field(default=1e-8,
-        metadata={"help": "Numerical epsilon for advantage normalization"})
-    adv_clip_abs: Optional[float] = field(default=5.0,
-        metadata={"help": "Optional absolute clip for normalized advantages (null disables clipping)"})
-    use_global_std: bool = field(default=False,
-        metadata={"help": "Use global std instead of per-group std during grouped normalization"})
-    trimmed_ratio: float = field(default=0.0,
-        metadata={"help": "Fraction of outliers to trim from each side for grouped reward normalization"})
-    eval_ema_decay: float = field(default=0.9,
-        metadata={"help": "Eval EMA decay shared by built-in algorithms"})
-    eval_ema_update_interval: int = field(default=1,
-        metadata={"help": "Eval EMA update interval in optimizer steps"})
-    shuffle_samples: bool = field(default=True,
-        metadata={"help": "Shuffle training samples before local update execution"})
-    shuffle_seed: Optional[int] = field(default=None,
-        metadata={"help": "Optional deterministic shuffle seed for training sample order"})
+    component_mix_stage: str = field(
+        default="reward",
+        metadata={
+            "help": "Stage that applies multi-component reward mixing: reward or advantage"
+        },
+    )
+    adv_normalization: str = field(
+        default="group",
+        metadata={"help": "Advantage normalization scope: group or global"},
+    )
+    adv_norm_eps: float = field(
+        default=1e-8, metadata={"help": "Numerical epsilon for advantage normalization"}
+    )
+    adv_clip_abs: Optional[float] = field(
+        default=5.0,
+        metadata={
+            "help": "Optional absolute clip for normalized advantages (null disables clipping)"
+        },
+    )
+    use_global_std: bool = field(
+        default=False,
+        metadata={
+            "help": "Use global std instead of per-group std during grouped normalization"
+        },
+    )
+    trimmed_ratio: float = field(
+        default=0.0,
+        metadata={
+            "help": "Fraction of outliers to trim from each side for grouped reward normalization"
+        },
+    )
+    eval_ema_decay: float = field(
+        default=0.9, metadata={"help": "Eval EMA decay shared by built-in algorithms"}
+    )
+    eval_ema_update_interval: int = field(
+        default=1, metadata={"help": "Eval EMA update interval in optimizer steps"}
+    )
+    shuffle_samples: bool = field(
+        default=True,
+        metadata={"help": "Shuffle training samples before local update execution"},
+    )
+    shuffle_seed: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Optional deterministic shuffle seed for training sample order"
+        },
+    )
+    training_share_rollout_indices: bool = field(
+        default=True,
+        metadata={
+            "help": "Reuse rollout index scheduler for training timestep selection unless disabled"
+        },
+    )
 
     # Sub-configuration
-    window: WindowSchedulerConfig = field(default_factory=WindowSchedulerConfig)
+    rollout_scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    training_scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+
+    @property
+    def window(self) -> SchedulerConfig:
+        """Deprecated alias for older internal callers."""
+        return self.rollout_scheduler
 
     def validate(self) -> None:
         if not self.algorithm_type and not self.algorithm_path:
@@ -439,12 +497,13 @@ class AlgorithmConfig:
             raise ValueError("algorithm.eval_ema_update_interval must be >= 1.")
         window_cfg = self.window
         if (
-            window_cfg.window_max_iters_per_group is not None
-            and window_cfg.window_min_iters_per_group is not None
-            and window_cfg.window_min_iters_per_group > window_cfg.window_max_iters_per_group
+            window_cfg.window_max_iters_per_window is not None
+            and window_cfg.window_min_iters_per_window is not None
+            and window_cfg.window_min_iters_per_window
+            > window_cfg.window_max_iters_per_window
         ):
             raise ValueError(
-                "window_min_iters_per_group must be <= window_max_iters_per_group."
+                "window_min_iters_per_window must be <= window_max_iters_per_window."
             )
 
 

@@ -6,7 +6,7 @@ This module owns the canonical algorithm_config surface consumed by
 - algorithm selection (`algorithm_type`, `algorithm_path`)
 - canonical `algorithm_kwargs` (user-provided values plus framework-injected defaults)
 - a small set of framework-owned shared fields algorithms may read
-  (`samples_per_prompt`, `window_training`, SDE configs)
+  (`samples_per_prompt`, scheduler configs, SDE math config)
 
 Keeping that construction logic close to the algorithms package avoids
 hard-coding built-in algorithm details under the generic config module.
@@ -14,14 +14,15 @@ hard-coding built-in algorithm details under the generic config module.
 
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional
-
-from diffusionrl.utils.misc import load_function
 
 from diffusionrl.algorithms.registry import DEFAULT_ALGORITHM_PATHS
 from diffusionrl.sde.rules import normalize_sde_type
+
 from diffusionrl.types.sampling import SamplingSpec
-from diffusionrl.types.sde import SDEConfig, SDEScheduleConfig
+from diffusionrl.types.sde import SDEConfig
+from diffusionrl.utils.misc import load_function
 
 
 def resolve_algorithm_path(
@@ -83,10 +84,6 @@ def resolve_sampling_spec(
             sde_type=normalize_sde_type(getattr(sampling, "sde_type")),
             shift=float(getattr(sampling, "shift")),
         ),
-        sde_schedule_config=SDEScheduleConfig(
-            sde_ratio=float(getattr(sampling, "sde_ratio")),
-            timestep_fraction=getattr(sampling, "timestep_fraction", 1.0),
-        ),
     )
 
 
@@ -129,6 +126,11 @@ def build_algorithm_config(
 
     algorithm_kwargs = build_algorithm_kwargs(args)
 
+    def _scheduler_payload(raw_cfg: Any) -> Dict[str, Any]:
+        if is_dataclass(raw_cfg):
+            return asdict(raw_cfg)
+        return dict(raw_cfg or {})
+
     return {
         "algorithm_type": str(ac.algorithm_type),
         "algorithm_path": resolve_algorithm_path(
@@ -148,13 +150,15 @@ def build_algorithm_config(
         "eval_ema_update_interval": int(ac.eval_ema_update_interval),
         "shuffle_samples": bool(ac.shuffle_samples),
         "shuffle_seed": ac.shuffle_seed,
-        "window_training": bool(ac.window.window_training),
+        "training_share_rollout_indices": bool(ac.training_share_rollout_indices),
+        "rollout_scheduler": _scheduler_payload(ac.rollout_scheduler),
+        "training_scheduler": _scheduler_payload(ac.training_scheduler),
         # Training compute precision is framework-owned and must not travel
         # through algorithm_kwargs, otherwise researchers get two competing
         # config entrypoints for the same runtime contract.
         "training_autocast_precision": str(pc.training.autocast_precision),
         "sde_config": resolved_sampling_spec.sde_config.to_dict(),
-        "sde_schedule_config": resolved_sampling_spec.sde_schedule_config.to_dict(),
+        "num_inference_steps": int(resolved_sampling_spec.num_inference_steps),
         "guidance_scale": float(resolved_sampling_spec.guidance_scale),
         "debug_output_dir": args.debug.debug_output_dir,
     }

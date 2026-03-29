@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Mapping, Optional
+from typing import Dict, Mapping, Optional
 
 from diffusionrl.sde.rules import normalize_sde_type
 
@@ -33,31 +33,6 @@ class SDEConfig:
             eta=float(payload.get("eta", eta)),
             sde_type=str(payload.get("sde_type", sde_type)),
             shift=float(payload.get("shift", shift)),
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class SDEScheduleConfig:
-    """Rollout policy for selecting which steps use SDE."""
-
-    sde_ratio: float = 1.0
-    timestep_fraction: Any = 1.0
-
-    @classmethod
-    def from_mapping(
-        cls,
-        raw: Optional[Mapping[str, Any]] = None,
-        *,
-        sde_ratio: float = 1.0,
-        timestep_fraction: Any = 1.0,
-    ) -> "SDEScheduleConfig":
-        payload = dict(raw or {})
-        return cls(
-            sde_ratio=float(payload.get("sde_ratio", sde_ratio)),
-            timestep_fraction=payload.get("timestep_fraction", timestep_fraction),
         )
 
     def to_dict(self) -> Dict[str, Any]:

@@ -6,9 +6,8 @@ requirements, advantage processing, and the forward-process loss entrypoint.
 """
 
 import logging
-
 from contextlib import nullcontext
-from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:
     from diffusionrl.types.sampling import RolloutRequest
@@ -20,6 +19,8 @@ from diffusers.utils.torch_utils import randn_tensor
 from diffusionrl.config.build_domain_args import resolve_sde_config
 from diffusionrl.types import ForwardTrainingBatch, SDEConfig
 from diffusionrl.utils.adapter_utils import switch_adapter
+from diffusionrl.utils.misc import aggregate_numeric_metrics
+
 from .base import BaseAlgorithm, EMASpec, SamplingRequirements
 from .forward_context import ForwardContext
 
@@ -70,6 +71,12 @@ class NFTAlgorithm(BaseAlgorithm):
         """
         extra = cls.resolve_config_kwargs(config)
         sde_config = _resolve_algorithm_sde_config(config)
+        training_scheduler_config = dict(config.get("training_scheduler") or {})
+        logger.info(
+            "%s uses training_scheduler.timestep_fraction for training timestep "
+            "filtering and ignores rollout_scheduler configuration.",
+            cls.__name__,
+        )
         known_keys = {
             "beta",
             "adv_clip_max",
@@ -118,7 +125,9 @@ class NFTAlgorithm(BaseAlgorithm):
             train_timestep_mode=str(extra.get("train_timestep_mode", "random")),
             shuffle_train_timesteps=bool(extra.get("shuffle_train_timesteps", True)),
             apply_time_shift_in_loss=bool(extra.get("apply_time_shift_in_loss", False)),
+            training_scheduler_config=training_scheduler_config,
             samples_per_prompt=int(config.get("samples_per_prompt", 1)),
+            num_inference_steps=int(config.get("num_inference_steps", 0)),
             eval_ema_decay=float(config.get("eval_ema_decay", 0.9)),
             eval_ema_update_interval=int(config.get("eval_ema_update_interval", 1)),
             kl_coef=float(extra.get("kl_coef", 0.0)),
@@ -150,9 +159,11 @@ class NFTAlgorithm(BaseAlgorithm):
         train_timestep_mode: str = "random",
         shuffle_train_timesteps: bool = True,
         apply_time_shift_in_loss: bool = False,
+        training_scheduler_config: Optional[Dict[str, Any]] = None,
         # BaseAlgorithm params
         adv_normalization: str = "group",
         samples_per_prompt: int = 1,
+        num_inference_steps: int = 0,
         eval_ema_decay: float = 0.9,
         eval_ema_update_interval: int = 1,
         epsilon: float = 1e-8,
@@ -165,6 +176,7 @@ class NFTAlgorithm(BaseAlgorithm):
             component_mix_stage=component_mix_stage,
             adv_normalization=adv_normalization,
             samples_per_prompt=samples_per_prompt,
+            num_inference_steps=num_inference_steps,
             eval_ema_decay=eval_ema_decay,
             eval_ema_update_interval=eval_ema_update_interval,
             epsilon=epsilon,
@@ -189,6 +201,11 @@ class NFTAlgorithm(BaseAlgorithm):
         self.train_timestep_mode = str(train_timestep_mode)
         self.shuffle_train_timesteps = bool(shuffle_train_timesteps)
         self.apply_time_shift_in_loss = bool(apply_time_shift_in_loss)
+        self.training_scheduler_config = dict(training_scheduler_config or {})
+        self.training_timestep_fraction = self.training_scheduler_config.get(
+            "timestep_fraction",
+            1.0,
+        )
 
     @property
     def eta(self) -> float:
@@ -279,11 +296,18 @@ class NFTAlgorithm(BaseAlgorithm):
     def resolve_rollout_sde_indices(
         self,
         *,
-        timestep_scheduler: Optional[Any],
         current_step: int,
-    ) -> Optional[Set[int]]:
-        del timestep_scheduler, current_step
-        return None
+    ) -> Set[int]:
+        del current_step
+        if self.sde_config is None:
+            return set()
+
+        if self.num_inference_steps < 1:
+            raise ValueError(
+                "Algorithm.num_inference_steps must be set to a positive integer to resolve SDE indices for rollout."
+            )
+
+        return set(range(self.num_inference_steps))
 
     def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:
         del args
@@ -300,6 +324,68 @@ class NFTAlgorithm(BaseAlgorithm):
     ) -> Set[int]:
         del num_steps
         return set(sde_indices)
+
+    def resolve_training_timesteps(
+        self,
+        *,
+        batch: Any,
+        current_step: int,
+        **kwargs: Any,
+    ) -> Any:
+        if not isinstance(batch, ForwardTrainingBatch):
+            raise TypeError(
+                f"{type(self).__name__} expects ForwardTrainingBatch, got {type(batch).__name__}"
+            )
+        del current_step
+
+        timestep_mode = kwargs.get("timestep_mode", self.train_timestep_mode)
+        shuffle_timesteps = kwargs.get(
+            "shuffle_timesteps", self.shuffle_train_timesteps
+        )
+        timestep_fraction = kwargs.get(
+            "timestep_fraction",
+            self.training_timestep_fraction,
+        )
+
+        if timestep_mode == "all" and batch.timesteps is not None:
+            timesteps = batch.timesteps.detach().flatten()
+        else:
+            timesteps = torch.rand(batch.batch_size, device=batch.advantages.device)
+
+        if (
+            timesteps.numel() > 1
+            and torch.isclose(
+                timesteps[-1],
+                torch.zeros((), device=timesteps.device, dtype=timesteps.dtype),
+                atol=1e-8,
+            ).item()
+        ):
+            timesteps = timesteps[:-1]
+
+        if (
+            timesteps.numel() > 0
+            and timestep_fraction is not None
+            and timestep_fraction != 1.0
+        ):
+            from diffusionrl.utils.scheduler_utils import normalize_timestep_fraction
+
+            frac_start, frac_end = normalize_timestep_fraction(timestep_fraction)
+            n = timesteps.numel()
+            effective_start = int(n * frac_start)
+            effective_end = min(int(n * frac_end), n)
+            if effective_start < effective_end:
+                timesteps = timesteps[effective_start:effective_end]
+            else:
+                timesteps = timesteps[:0]
+
+        if timesteps.numel() == 0:
+            timesteps = torch.rand(batch.batch_size, device=batch.advantages.device)
+
+        if shuffle_timesteps:
+            perm = torch.randperm(timesteps.numel(), device=timesteps.device)
+            timesteps = timesteps[perm]
+
+        return timesteps
 
     # ------------------------------------------------------------------
     # Rollout geometry / request planning
@@ -329,7 +415,7 @@ class NFTAlgorithm(BaseAlgorithm):
         advantages: torch.Tensor,
         prompts: List[str],
     ) -> Any:
-        from diffusionrl.types.sampling import RolloutSamples, PromptEmbeddings
+        from diffusionrl.types.sampling import PromptEmbeddings, RolloutSamples
         from diffusionrl.types.training_batch import ForwardTrainingBatch
 
         clean_latents = []
@@ -560,16 +646,20 @@ class NFTAlgorithm(BaseAlgorithm):
         *,
         model: nn.Module,
         batch: Any,
-        mini_batch_slices: Tuple[Tuple[int, int], ...],
+        timesteps: Optional[Any],
         guidance_scale: float = 3.5,
+        loss_scale: float = 1.0,
         **kwargs: Any,
     ) -> tuple:
-        """NFT training step: forward diffusion at sampled/scheduled timesteps.
+        """NFT training step over one micro-batch.
 
-        The algorithm decides timestep mode, shuffling, and accumulation.
+        Here ``timesteps`` means the forward diffusion times to apply for
+        this update chunk. The executor resolves them once and reuses the
+        same sequence across all accumulation micro-batches so NFT keeps the
+        original update-level timestep semantics.
 
         Returns:
-            ``(avg_loss, metrics_dict, num_timesteps, actual_mini_batches, has_backward)``
+            ``(scaled_loss, metrics_dict, num_timesteps, has_backward)``
         """
         if not isinstance(batch, ForwardTrainingBatch):
             raise TypeError(
@@ -579,104 +669,40 @@ class NFTAlgorithm(BaseAlgorithm):
         timestep_mode = kwargs.get("timestep_mode", self.train_timestep_mode)
         shuffle_timesteps = kwargs.get("shuffle_timesteps", self.shuffle_train_timesteps)
         apply_shift = kwargs.get("apply_shift", self.apply_time_shift_in_loss)
-        timestep_fraction = kwargs.get("timestep_fraction", 1.0)
+        timestep_fraction = kwargs.get(
+            "timestep_fraction",
+            self.training_timestep_fraction,
+        )
+        if timesteps is None:
+            timesteps = self.resolve_training_timesteps(
+                batch=batch,
+                timestep_mode=timestep_mode,
+                shuffle_timesteps=shuffle_timesteps,
+                timestep_fraction=timestep_fraction,
+            )
 
-        mini_batches = tuple((int(start), int(end)) for start, end in mini_batch_slices)
-        if not mini_batches:
-            raise ValueError(f"{type(self).__name__} requires non-empty mini_batch_slices.")
-        actual_mini_batches = len(mini_batches)
-        num_mini_batches = len(mini_batches)
-
-        if timestep_mode == "all" and batch.timesteps is not None:
-            timesteps = batch.timesteps.detach().flatten()
-        else:
-            timesteps = torch.rand(batch.batch_size, device=batch.advantages.device)
-
-        # Filter trailing zero
-        if timesteps.numel() > 1 and torch.isclose(
-            timesteps[-1],
-            torch.zeros((), device=timesteps.device, dtype=timesteps.dtype),
-            atol=1e-8,
-        ).item():
-            timesteps = timesteps[:-1]
-
-        # Apply timestep_fraction
-        if timesteps.numel() > 0 and timestep_fraction is not None and timestep_fraction != 1.0:
-            from diffusionrl.samplers.schedulers.timestep_window import _normalize_timestep_fraction
-            frac_start, frac_end = _normalize_timestep_fraction(timestep_fraction)
-            n = timesteps.numel()
-            effective_start = int(n * frac_start)
-            effective_end = min(int(n * frac_end), n)
-            if effective_start < effective_end:
-                timesteps = timesteps[effective_start:effective_end]
-            else:
-                timesteps = timesteps[:0]
-
-        if timesteps.numel() == 0:
-            # Fall back to random
-            timesteps = torch.rand(batch.batch_size, device=batch.advantages.device)
-
-        if shuffle_timesteps:
-            perm = torch.randperm(timesteps.numel(), device=timesteps.device)
-            timesteps = timesteps[perm]
-
-        effective_mini_batches = actual_mini_batches * timesteps.numel()
+        ctx = self._make_forward_context(model, batch.embeddings, guidance_scale)
         total_loss_accum = 0.0
         has_backward = False
-        mini_batch_metrics_list = []
+        timestep_metrics: List[Dict[str, Any]] = []
 
-        for start, end in mini_batches:
-            mini_batch = batch.slice(start, end)
-            mini_ctx = self._make_forward_context(model, mini_batch.embeddings, guidance_scale)
-            mini_loss_sum = 0.0
-            metric_sums: Dict[str, float] = {}
-            metric_counts: Dict[str, int] = {}
-            mini_metrics: Dict[str, Any] = {}
+        per_timestep_scale = loss_scale / timesteps.numel()
+        for t in timesteps:
+            loss, metrics = self.compute_loss(
+                model=model,
+                batch=batch,
+                ctx=ctx,
+                timestep_values=t,
+            )
+            scaled_loss = loss * per_timestep_scale
+            scaled_loss.backward()
+            has_backward = True
+            total_loss_accum += scaled_loss.detach().item()
+            timestep_metrics.append(metrics)
 
-            for t in timesteps:
-                loss, metrics = self.compute_loss(
-                    model=model,
-                    batch=mini_batch,
-                    ctx=mini_ctx,
-                    timestep_values=t,
-                )
-                scaled_loss = loss / effective_mini_batches
-                scaled_loss.backward()
-                has_backward = True
-                mini_loss_sum += scaled_loss.detach().item()
+        all_metrics = aggregate_numeric_metrics(timestep_metrics)
 
-                for key, value in metrics.items():
-                    metric_val = value.item() if isinstance(value, torch.Tensor) else float(value)
-                    metric_sums[key] = metric_sums.get(key, 0.0) + metric_val
-                    metric_counts[key] = metric_counts.get(key, 0) + 1
-                    if key not in mini_metrics:
-                        mini_metrics[key] = metric_val
-
-            for key, total in metric_sums.items():
-                count = metric_counts.get(key, 0)
-                if count > 0:
-                    mini_metrics[key] = total / count
-
-            mini_batch_metrics_list.append(mini_metrics)
-            total_loss_accum += mini_loss_sum
-
-        all_metrics: Dict[str, Any] = {}
-        if mini_batch_metrics_list:
-            keys = mini_batch_metrics_list[0].keys()
-            for key in keys:
-                values = [m.get(key) for m in mini_batch_metrics_list if m.get(key) is not None]
-                if values and isinstance(values[0], (int, float)):
-                    all_metrics[key] = sum(values) / len(values)
-                else:
-                    all_metrics[key] = mini_batch_metrics_list[-1].get(key)
-
-        return (
-            total_loss_accum,
-            all_metrics,
-            timesteps.numel(),
-            effective_mini_batches,
-            has_backward,
-        )
+        return total_loss_accum, all_metrics, timesteps.numel(), has_backward
 
     # ------------------------------------------------------------------
     # Forward plugin
