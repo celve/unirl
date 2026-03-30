@@ -663,10 +663,6 @@ class RolloutTopologySettings:
         metadata={"help": "Whether SGLang rollout uses in-actor local generator mode."})
     sglang_verify_weight_checksum: Optional[bool] = field(default=None,
         metadata={"help": "Whether SGLang verifies weight checksum after rollout-side updates."})
-    sglang_prompt_encoder_device: Optional[str] = field(default=None,
-        metadata={"help": "Device for SGLang-side prompt encoder construction."})
-    sglang_prompt_encoder_max_length: Optional[int] = field(default=None,
-        metadata={"help": "Prompt encoder max sequence length for SGLang rollout."})
     sglang_disable_autocast: Optional[bool] = field(default=None,
         metadata={"help": "Disable torch.autocast inside SGLang rollout engine."})
     sglang_kwargs: Dict[str, Any] = field(default_factory=dict,
@@ -682,7 +678,6 @@ class RolloutTopologySettings:
             "num_gpus_per_actor",
             "tp_size",
             "sp_size",
-            "sglang_prompt_encoder_max_length",
             "rollout_batch_size",
         ):
             value = getattr(self, attr_name)

@@ -129,8 +129,6 @@ def _build_rollout_engine_base_kwargs(
     sglang_field_map = {
         "sglang_local_mode": "local_mode",
         "sglang_verify_weight_checksum": "verify_weight_checksum",
-        "sglang_prompt_encoder_device": "prompt_encoder_device",
-        "sglang_prompt_encoder_max_length": "prompt_encoder_max_length",
         "sglang_disable_autocast": "disable_autocast",
     }
     for attr_name, engine_key in sglang_field_map.items():
