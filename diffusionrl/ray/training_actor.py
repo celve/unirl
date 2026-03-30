@@ -469,7 +469,7 @@ class TrainingActor(BaseTrainRayActor):
         sample_ids: Optional[List[str]],
         group_ids: Optional[List[str]],
         prompt_metadata: Optional[List[Optional[Dict[str, Any]]]],
-        keep_reward_media_for_driver: bool,
+        collect_media_preview: bool,
         samples_per_prompt: int,
     ) -> RolloutSamples:
         if not self._uses_rollout_local_reward():
@@ -481,7 +481,7 @@ class TrainingActor(BaseTrainRayActor):
             sample_ids=sample_ids,
             group_ids=group_ids,
             prompt_metadata=prompt_metadata,
-            keep_reward_media_for_driver=keep_reward_media_for_driver,
+            collect_media_preview=collect_media_preview,
             samples_per_prompt=int(samples_per_prompt),
         )
 
@@ -770,8 +770,8 @@ class TrainingActor(BaseTrainRayActor):
                     sample_ids=request.meta.get("sample_ids"),
                     group_ids=request.meta.get("group_ids"),
                     prompt_metadata=request.meta.get("prompt_metadata"),
-                    keep_reward_media_for_driver=bool(
-                        request.sampling.get("keep_reward_media_for_driver", False)
+                    collect_media_preview=bool(
+                        request.sampling.get("collect_media_preview", False)
                     ),
                     samples_per_prompt=max(
                         1, int(request.sampling.get("samples_per_prompt", 1))

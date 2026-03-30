@@ -335,8 +335,8 @@ class RolloutServices:
         merged_sampling = dict(request.sampling)
         merged_sampling["sde_indices"] = sde_indices
         merged_sampling["decode_for_reward"] = True
-        merged_sampling["keep_reward_media_for_driver"] = bool(
-            overrides.pop("_keep_reward_media_for_driver", False)
+        merged_sampling["collect_media_preview"] = bool(
+            overrides.pop("collect_media_preview", False)
         )
         merged_sampling["init_same_noise"] = bool(request.sampling.get("init_same_noise", False))
         merged_sampling["samples_per_prompt"] = max(

@@ -8,7 +8,7 @@ from diffusionrl.config.resolution import (
     ModelSpec,
     TrainingPlan,
     TrainTopology,
-    normalize_rollout_service_engine,
+    normalize_rollout_engine,
     normalize_lora_target_modules,
 )
 from diffusionrl.reward.schema import RewardSchema
@@ -83,7 +83,7 @@ def build_training_sampling_config(
     """Build training-actor sampling config from the canonical resolved sampling spec."""
     payload = _build_shared_sampling_payload(sampling_spec)
     payload.update({
-        "sampler_engine_type": normalize_rollout_service_engine(sampler_engine_type)
+        "sampler_engine_type": normalize_rollout_engine(sampler_engine_type)
         or str(sampler_engine_type).strip().lower(),
         "replay_sampler_dotpath": sampling_spec.replay_sampler_dotpath,
         "seed": int(sampling_spec.seed),
@@ -103,23 +103,28 @@ def build_training_sampling_config(
 def _build_rollout_engine_base_kwargs(
     *,
     rollout_topology_settings,
+    rollout_logging_settings=None,
 ) -> Dict[str, Any]:
     """Build dedicated rollout-engine kwargs from canonical rollout fields."""
     resolved: Dict[str, Any] = {}
 
-    field_map = {
-        "service_num_gpus": "num_gpus",
-        "engine_tp_size": "tp_size",
-        "engine_sp_size": "sp_size",
-        "service_transport_dtype": "transport_dtype",
-        "service_transport_drop_decoded_videos": "transport_drop_decoded_videos",
-        "service_transport_log_payload_bytes": "transport_log_payload_bytes",
-        "service_require_memory_api": "require_memory_api",
-    }
-    for attr_name, engine_key in field_map.items():
+    if rollout_topology_settings.num_gpus_per_actor is not None:
+        resolved["num_gpus"] = rollout_topology_settings.num_gpus_per_actor
+
+    for attr_name in (
+        "tp_size",
+        "sp_size",
+        "transport_dtype",
+        "transport_drop_decoded_videos",
+    ):
         value = getattr(rollout_topology_settings, attr_name)
         if value is not None:
-            resolved[engine_key] = value
+            resolved[attr_name] = value
+
+    if rollout_logging_settings is not None:
+        log_bytes = getattr(rollout_logging_settings, "transport_log_payload_bytes", None)
+        if log_bytes is not None:
+            resolved["transport_log_payload_bytes"] = log_bytes
 
     sglang_field_map = {
         "sglang_local_mode": "local_mode",
@@ -147,6 +152,7 @@ def _build_rollout_engine_base_kwargs(
 def build_rollout_engine_config(
     *,
     rollout_topology_settings,
+    rollout_logging_settings=None,
     precision_settings,
     sync_settings,
     fps: int,
@@ -159,6 +165,7 @@ def build_rollout_engine_config(
     """Build final dedicated rollout engine runtime config."""
     merged_engine_kwargs = _build_rollout_engine_base_kwargs(
         rollout_topology_settings=rollout_topology_settings,
+        rollout_logging_settings=rollout_logging_settings,
     )
     merged_engine_kwargs.setdefault("use_lora", model_config["use_lora"])
     merged_engine_kwargs.setdefault("lora_rank", model_config["lora_rank"])

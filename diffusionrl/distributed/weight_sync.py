@@ -377,10 +377,10 @@ class CheckpointWeightSync(WeightSyncCoordinator):
             raise ValueError(
                 "Checkpoint weight sync requires a dedicated rollout runtime config."
             )
-        engine_type = str(rollout.service_engine or "").strip().lower()
+        engine_type = str(rollout.rollout_engine or "").strip().lower()
         if not engine_type:
             raise ValueError(
-                "Checkpoint weight sync requires rollout.topology.service_engine to be normalized. "
+                "Checkpoint weight sync requires rollout.topology.rollout_engine to be normalized. "
                 "Validate args before selecting dedicated rollout checkpoint export format."
             )
         backend_caps = dict(self.launch_config.training.backend_capabilities or {})

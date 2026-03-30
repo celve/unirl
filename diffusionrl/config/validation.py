@@ -250,10 +250,10 @@ def validate_resolved_engine_algorithm_contract(
         return
 
     rollout_topology = rollout_mode_info.rollout_topology
-    service_engine = rollout_topology.service_engine
-    if not service_engine:
+    rollout_engine = rollout_topology.rollout_engine
+    if not rollout_engine:
         raise ValueError(
-            "Dedicated rollout validation requires rollout.topology.service_engine to be set explicitly. "
+            "Dedicated rollout validation requires rollout.topology.rollout_engine to be set explicitly. "
             "Run validate_args() before resolving dedicated rollout engine capabilities."
         )
 
@@ -275,7 +275,7 @@ def validate_resolved_engine_algorithm_contract(
     if missing:
         raise ValueError(
             f"Engine capability mismatch for algorithm_type={args.algorithm.algorithm_type}: "
-            f"rollout.topology.service_engine={service_engine} lacks {missing}. "
+            f"rollout.topology.rollout_engine={rollout_engine} lacks {missing}. "
             f"engine_capabilities={engine_caps}, required={required_dict}. "
             "Use a compatible dedicated rollout engine, or fall back to direct "
             "training-actor sampling for trajectory/log-prob-heavy algorithms."
@@ -293,17 +293,17 @@ def validate_rollout_mode_constraints(
     model_label = f"{model_cls.__module__}.{model_cls.__qualname__}"
     if (
         not training_actor_sampling_mode
-        and rollout_topology.service_engine == "sglang"
+        and rollout_topology.rollout_engine == "sglang"
     ):
         supports_sglang = getattr(model_cls, "supports_sglang_prompt_mode", None)
         if not callable(supports_sglang):
             raise ValueError(
-                f"rollout.topology.service_engine='sglang' requires model {model_label!r} "
+                f"rollout.topology.rollout_engine='sglang' requires model {model_label!r} "
                 "to define classmethod supports_sglang_prompt_mode()."
             )
         if not supports_sglang():
             raise ValueError(
-                f"rollout.topology.service_engine='sglang' is not supported by model {model_label!r}. "
+                f"rollout.topology.rollout_engine='sglang' is not supported by model {model_label!r}. "
                 "The model must implement classmethod supports_sglang_prompt_mode() returning True."
             )
 
@@ -316,7 +316,7 @@ def validate_rollout_mode_constraints(
 def _collect_direct_sampling_incompatible_fields(rollout_topology_config: Any) -> list[str]:
     incompatible: list[str] = []
     for field_info in dataclass_fields(type(rollout_topology_config)):
-        if field_info.name in {"mode", "service_engine"}:
+        if field_info.name in {"mode", "rollout_engine"}:
             continue
         field_value = getattr(rollout_topology_config, field_info.name)
         field_default = resolve_dataclass_field_default(field_info, missing=MISSING)
@@ -344,12 +344,12 @@ def _format_rollout_mode_state(
     is_sglang_engine = rollout_mode_info.is_sglang_engine
     replay_guard = rollout_mode_info.replay_guard
 
-    service_engine = rollout_topology.service_engine
+    rollout_engine = rollout_topology.rollout_engine
     return "\n".join(
         [
             "Resolved rollout mode:",
             f"  rollout.topology.mode = {rollout_topology.mode!r}",
-            f"  rollout.topology.service_engine = {service_engine!r}",
+            f"  rollout.topology.rollout_engine = {rollout_engine!r}",
             f"  training_actor_sampling_mode = {training_actor_sampling_mode}",
             f"  is_sglang_engine = {bool(is_sglang_engine)}",
             f"  sampling.logprob_source = {logprob_source!r}",
@@ -384,7 +384,7 @@ def validate_async_training_runner(args: Any) -> None:
     if rollout_topology.training_actor_sampling_mode:
         raise ValueError(
             "train_async.py requires a dedicated rollout engine "
-            "(for example rollout.topology.service_engine='sglang')."
+            "(for example rollout.topology.rollout_engine='sglang')."
         )
     if args.ray.offload_train or args.ray.offload_rollout:
         raise ValueError(
@@ -403,18 +403,18 @@ def validate_rollout_topology_contract(
     rollout_topology_config = args.rollout.topology
 
     if rollout_mode_uses_service(topology.mode):
-        if topology.service_engine is None:
+        if topology.rollout_engine is None:
             raise ValueError(
-                "Dedicated rollout modes require rollout.topology.service_engine to be set explicitly."
+                "Dedicated rollout modes require rollout.topology.rollout_engine to be set explicitly."
             )
-        if not uses_dedicated_rollout_engine(topology.service_engine):
+        if not uses_dedicated_rollout_engine(topology.rollout_engine):
             raise ValueError(
                 "rollout.topology.mode in {separate,colocate} requires a dedicated rollout "
-                f"service engine. Got rollout.topology.service_engine={topology.service_engine!r}."
+                f"engine. Got rollout.topology.rollout_engine={topology.rollout_engine!r}."
             )
-        if rollout_topology_config.service_num_gpus is None:
+        if rollout_topology_config.num_gpus_per_actor is None:
             raise ValueError(
-                "Dedicated rollout services require rollout.topology.service_num_gpus to be set explicitly."
+                "Dedicated rollout services require rollout.topology.num_gpus_per_actor to be set explicitly."
             )
         return topology
 
@@ -480,11 +480,11 @@ def validate_training_actor_sampling_mode(
         return
 
     resolved_topology = rollout_mode_info.rollout_topology
-    if rollout_mode_uses_service(resolved_topology.mode) or uses_dedicated_rollout_engine(resolved_topology.service_engine):
+    if rollout_mode_uses_service(resolved_topology.mode) or uses_dedicated_rollout_engine(resolved_topology.rollout_engine):
         raise ValueError(
             "Dedicated rollout service engines cannot use direct_sampling mode. "
             f"Got rollout.topology.mode={resolved_topology.mode!r}, "
-            f"rollout.topology.service_engine={resolved_topology.service_engine!r}."
+            f"rollout.topology.rollout_engine={resolved_topology.rollout_engine!r}."
         )
 
     if not bool(backend_capabilities.get("supports_training_actor_sampling", False)):
@@ -610,7 +610,7 @@ def validate_weight_sync(
     rollout_mode_info: RolloutModeInfo,
 ) -> None:
     """Validate explicit weight-sync protocol against rollout topology."""
-    rollout_service_engine = rollout_mode_info.rollout_topology.service_engine
+    rollout_engine = rollout_mode_info.rollout_topology.rollout_engine
     resolved_mode = rollout_mode_info.sync_protocol
     if rollout_mode_info.training_actor_sampling_mode:
         if resolved_mode != "disabled":
@@ -622,18 +622,18 @@ def validate_weight_sync(
     if resolved_mode == "disabled":
         raise ValueError(
             "sync.protocol='disabled' is only valid when sampling runs directly on training actors. "
-            f"Got rollout.topology.service_engine={rollout_service_engine!r}."
+            f"Got rollout.topology.rollout_engine={rollout_engine!r}."
         )
     is_multi_node = (
         int(args.ray.rollout_num_nodes) > 1
         or int(args.ray.training_num_nodes) > 1
         or int(args.reward.reward_dedicated_num_nodes) > 1
     )
-    if resolved_mode in {"tensor_payload", "nccl_broadcast"} and rollout_service_engine != "sglang":
+    if resolved_mode in {"tensor_payload", "nccl_broadcast"} and rollout_engine != "sglang":
         raise ValueError(
             "sync.protocol in {tensor_payload,nccl_broadcast} currently requires "
-            "rollout.topology.service_engine='sglang'. "
-            f"Got rollout.topology.service_engine={rollout_service_engine!r}."
+            "rollout.topology.rollout_engine='sglang'. "
+            f"Got rollout.topology.rollout_engine={rollout_engine!r}."
         )
 
     if (
@@ -680,20 +680,20 @@ def validate_rollout_layout(
         raise ValueError(
             "Dedicated rollout placement does not have enough GPUs for one rollout actor. "
             f"Available rollout GPU pool={rollout_gpu_pool_size}, "
-            f"rollout.topology.service_num_gpus={rollout_gpus}."
+            f"rollout.topology.num_gpus_per_actor={rollout_gpus}."
         )
     if rollout_gpus > 1 and rollout_gpu_pool_size % rollout_gpus != 0:
         raise ValueError(
-            "Dedicated rollout GPU pool must be divisible by rollout.topology.service_num_gpus "
+            "Dedicated rollout GPU pool must be divisible by rollout.topology.num_gpus_per_actor "
             "for multi-GPU rollout actors. "
             f"Available rollout GPU pool={rollout_gpu_pool_size}, "
-            f"rollout.topology.service_num_gpus={rollout_gpus}."
+            f"rollout.topology.num_gpus_per_actor={rollout_gpus}."
         )
     is_sglang_engine = rollout_mode_info.is_sglang_engine
     if rollout_gpus > 1 and rollout_mode_is_colocated(rollout_topology.mode) and not is_sglang_engine:
         raise ValueError(
             "colocate with multi-GPU rollout actors is only supported "
-            "for rollout.topology.service_engine='sglang'."
+            "for rollout.topology.rollout_engine='sglang'."
         )
     if rollout_gpus > 1:
         allow_noset_multi_gpu_inference = bool(args.ray.allow_noset_multi_gpu_inference)

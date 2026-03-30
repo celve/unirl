@@ -223,7 +223,7 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
                 sde_indices=plan.context.sde_indices,
                 requirements=services.sampling_requirements,
                 sampling_overrides={
-                    "_keep_reward_media_for_driver": bool(plan.context.collect_media_preview),
+                    "collect_media_preview": bool(plan.context.collect_media_preview),
                 },
             )
             return launched.request, launched

@@ -710,7 +710,7 @@ class RolloutActor:
         if not sampler_engine_type:
             raise ValueError(
                 "sampler_engine_type must be provided in engine_runtime_config. "
-                "This should be resolved from rollout.topology.service_engine before actor init."
+                "This should be resolved from rollout.topology.rollout_engine before actor init."
             )
         if not uses_dedicated_rollout_engine(sampler_engine_type):
             raise ValueError(
@@ -843,8 +843,8 @@ class RolloutActor:
                     sample_ids=request.meta.get("sample_ids"),
                     group_ids=request.meta.get("group_ids"),
                     prompt_metadata=request.meta.get("prompt_metadata"),
-                    keep_reward_media_for_driver=bool(
-                        request.sampling.get("keep_reward_media_for_driver", False)
+                    collect_media_preview=bool(
+                        request.sampling.get("collect_media_preview", False)
                     ),
                     samples_per_prompt=max(
                         1, int(request.sampling.get("samples_per_prompt", 1))

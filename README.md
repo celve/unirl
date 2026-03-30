@@ -237,14 +237,14 @@ autocast plus trajectory/logprob storage precision.
 For dedicated SGLang rollout, the rollout-side prompt encoder also follows
 `precision.rollout.autocast_precision`; do not configure a separate
 prompt-encoder dtype under `rollout.topology`.
-`rollout.topology.service_transport_dtype` remains a rollout transport setting,
+`rollout.topology.transport_dtype` remains a rollout transport setting,
 not a `precision.*` field.
 CLI options always override YAML. Unknown YAML keys fail fast by default; use
 `--allow-unknown-config-keys` only when you intentionally want to ignore unknown keys.
 `sync.protocol` must now be set explicitly: use `disabled` for `direct_sampling`,
 and a dedicated-rollout sync mode (`tensor_payload`, `nccl_broadcast`, or
 `checkpoint_path`) when rollout runs outside training actors.
-In `direct_sampling`, leave `rollout.topology.service_engine` unset.
+In `direct_sampling`, leave `rollout.topology.rollout_engine` unset.
 Direct sampling is selected only by `rollout.topology.mode=direct_sampling`;
 dedicated rollout-only fields must remain unset there.
 When `rollout.buffer.reassemble_by_group=true`,

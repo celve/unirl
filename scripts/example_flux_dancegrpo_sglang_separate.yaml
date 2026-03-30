@@ -56,9 +56,9 @@ ray:
 rollout:
   topology:
     mode: separate
-    service_engine: sglang
-    service_num_gpus: 1
-    engine_tp_size: 1
+    rollout_engine: sglang
+    num_gpus_per_actor: 1
+    tp_size: 1
   control:
     num_rollout: 300
   artifacts:

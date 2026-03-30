@@ -54,7 +54,7 @@ class ActorLocalRewardPrecompute:
         sample_ids: Optional[List[str]],
         group_ids: Optional[List[str]],
         prompt_metadata: Optional[List[Optional[Dict[str, Any]]]],
-        keep_reward_media_for_driver: bool,
+        collect_media_preview: bool,
         samples_per_prompt: int,
     ) -> RolloutSamples:
         rewards, component_rewards = score_from_rollout_outputs(
@@ -76,7 +76,7 @@ class ActorLocalRewardPrecompute:
             for name, values in dict(component_rewards or {}).items()
         }
         output.aux["metadata"] = meta
-        if not keep_reward_media_for_driver:
+        if not collect_media_preview:
             output.aux.pop("decoded_images", None)
             if isinstance(output.aux.get("metadata"), dict):
                 output.aux["metadata"].pop("decoded_videos", None)

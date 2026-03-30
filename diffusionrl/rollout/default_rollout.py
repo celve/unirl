@@ -206,7 +206,7 @@ def generate_rollout(
             sde_indices=context.sde_indices,
             requirements=services.sampling_requirements,
             sampling_overrides={
-                "_keep_reward_media_for_driver": bool(context.collect_media_preview),
+                "collect_media_preview": bool(context.collect_media_preview),
             },
         ),
         validate_sampler_outputs=build_sampler_output_validator(

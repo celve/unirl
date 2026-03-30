@@ -528,9 +528,9 @@ class TrainingConfig:
 
     # Local Batch Size -> Mini Batch Size (per update) -> Micro Batch Size (per forward/backward pass)
     micro_batch_size: Optional[int] = field(default=None,
-        metadata={"help": "Micro-batch size per GPU for one forward/backward pass. Defaults to the resolved local_mini_batch_size when omitted and must evenly divide it."})
+        metadata={"help": "Micro-batch size per GPU for one forward/backward pass."})
     num_updates_per_batch: Optional[int] = field(default=None,
-        metadata={"help": "Number of optimizer updates performed from one resolved local batch. Defaults to 1. local_batch_size must be divisible by this value, and local_mini_batch_size is derived from the quotient."})
+        metadata={"help": "Number of optimizer updates performed from one local batch. literally equals local_batch_size / mini_batch_size"})
     learning_rate: float = field(default=1e-6,
         metadata={"help": "Peak learning rate for the optimizer"})
     adam_beta1: float = field(default=0.9,
@@ -643,22 +643,22 @@ class RolloutTopologySettings:
         metadata={"help": "Canonical rollout topology: direct_sampling, separate, or colocate"},
         choices=["direct_sampling", "separate", "colocate"],
         )
-    service_engine: Optional[str] = field(default=None,
+    rollout_engine: Optional[str] = field(default=None,
         metadata={"help": "Dedicated rollout engine selector for separate or colocate. Must be unset in direct_sampling."})
-    service_num_gpus: Optional[int] = field(default=None,
+    rollout_batch_size: int = field(default=1,
+        metadata={"help": "Max prompts per rollout-engine generate() call before actor-side sub-batching."})
+    num_gpus_per_actor: Optional[int] = field(default=None,
         metadata={"help": "Dedicated rollout service GPUs per actor/engine. Required for separate and colocate."})
-    engine_tp_size: Optional[int] = field(default=None,
+    tp_size: Optional[int] = field(default=None,
         metadata={"help": "Dedicated rollout service tensor parallel hint. Does not determine actor GPU ownership."})
-    engine_sp_size: Optional[int] = field(default=None,
+    sp_size: Optional[int] = field(default=None,
         metadata={"help": "Dedicated rollout service sequence/spatial parallel hint. Does not determine actor GPU ownership."})
-    service_require_memory_api: Optional[bool] = field(default=None,
-        metadata={"help": "Whether dedicated rollout service requires concrete memory API handlers."})
-    service_transport_dtype: Optional[str] = field(default=None,
-        metadata={"help": "Dedicated rollout transport payload dtype override."})
-    service_transport_drop_decoded_videos: Optional[bool] = field(default=None,
-        metadata={"help": "Whether rollout transport drops decoded video payloads after reward handling."})
-    service_transport_log_payload_bytes: Optional[bool] = field(default=None,
-        metadata={"help": "Whether rollout transport logs serialized payload sizes for debugging."})
+    transport_dtype: Optional[str] = field(default=None,
+        metadata={"help": "Cast rollout transport payloads to this dtype (fp16/bf16) to reduce transfer size. "
+                          "This affects numerical precision of latents/log_probs received by the trainer."})
+    transport_drop_decoded_videos: bool = field(default=True,
+        metadata={"help": "Drop decoded video tensors from rollout transport payloads after reward handling. "
+                          "Reduces transfer size but makes decoded videos unavailable on the trainer side."})
     sglang_local_mode: Optional[bool] = field(default=None,
         metadata={"help": "Whether SGLang rollout uses in-actor local generator mode."})
     sglang_verify_weight_checksum: Optional[bool] = field(default=None,
@@ -669,8 +669,6 @@ class RolloutTopologySettings:
         metadata={"help": "Prompt encoder max sequence length for SGLang rollout."})
     sglang_disable_autocast: Optional[bool] = field(default=None,
         metadata={"help": "Disable torch.autocast inside SGLang rollout engine."})
-    rollout_batch_size: Optional[int] = field(default=None,
-        metadata={"help": "Max prompts per rollout-engine generate() call before actor-side sub-batching."})
     sglang_kwargs: Dict[str, Any] = field(default_factory=dict,
         metadata={"help": "Engine-scoped SGLang rollout kwargs. ServerArgs-compatible keys are forwarded to the SGLang rollout engine."})
 
@@ -681,17 +679,17 @@ class RolloutTopologySettings:
                 f"{sorted(ROLLOUT_MODES)}, got: {self.mode!r}"
             )
         for attr_name in (
-            "service_num_gpus",
-            "engine_tp_size",
-            "engine_sp_size",
+            "num_gpus_per_actor",
+            "tp_size",
+            "sp_size",
             "sglang_prompt_encoder_max_length",
             "rollout_batch_size",
         ):
             value = getattr(self, attr_name)
             if value is not None and int(value) < 1:
                 raise ValueError(f"rollout.topology.{attr_name} must be >= 1 when set.")
-        if self.service_transport_dtype is not None:
-            transport_dtype = str(self.service_transport_dtype).strip().lower()
+        if self.transport_dtype is not None:
+            transport_dtype = self.transport_dtype.strip().lower()
             if transport_dtype not in {
                 "",
                 "none",
@@ -707,9 +705,9 @@ class RolloutTopologySettings:
                 "bfloat16",
             }:
                 raise ValueError(
-                    "rollout.topology.service_transport_dtype must be one of "
+                    "rollout.topology.transport_dtype must be one of "
                     "fp32/fp16/bf16/none, "
-                    f"got: {self.service_transport_dtype!r}"
+                    f"got: {self.transport_dtype!r}"
                 )
         if not isinstance(self.sglang_kwargs, dict):
             raise ValueError("rollout.topology.sglang_kwargs must be a dict.")
@@ -885,6 +883,8 @@ class RolloutLoggingSettings:
         metadata={"help": "Comma-separated tags for WandB run (e.g. 'exp1,baseline'). Defaults to 'diffusionrl-reproduce' if not set."})
     wandb_entity: Optional[str] = field(default=None,
         metadata={"help": "WandB entity (team or username). If not set, uses the default entity of the logged-in user."})
+    transport_log_payload_bytes: Optional[bool] = field(default=None,
+        metadata={"help": "Whether rollout transport logs serialized payload sizes for debugging."})
 
     def validate(self) -> None:
         if int(self.logging_steps) < 0:
@@ -1140,7 +1140,7 @@ def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
 
     resolved["training.train_backend"] = normalize_train_backend_name(args)
     resolved["rollout.topology.mode"] = args.rollout.topology.mode
-    resolved["rollout.topology.service_engine"] = args.rollout.topology.service_engine
+    resolved["rollout.topology.rollout_engine"] = args.rollout.topology.rollout_engine
     resolved["sync.protocol"] = str(args.sync.protocol).strip().lower()
 
     try:
@@ -1167,7 +1167,7 @@ def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
     resolved["sampling.sampler_dotpath"] = model_spec.sampler_dotpath
     resolved["training.train_backend"] = resolved_config.train_backend_config.name
     resolved["rollout.topology.mode"] = rollout_topology.mode
-    resolved["rollout.topology.service_engine"] = rollout_topology.service_engine
+    resolved["rollout.topology.rollout_engine"] = rollout_topology.rollout_engine
     resolved["sync.protocol"] = resolved_config.rollout_mode_info.sync_protocol
     resolved["resolved.training.actor_count"] = train_topology.actor_count
     resolved["resolved.training.world_size"] = train_topology.world_size

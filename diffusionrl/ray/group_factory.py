@@ -36,14 +36,14 @@ def create_rollout_actor_group(
             "Resolved runtime config does not include a dedicated rollout bootstrap payload."
         )
     pg, bundle_indices, gpu_ids = pgs
-    rollout_service_engine = rollout.service_engine
+    rollout_engine = rollout.rollout_engine
 
     actor_init_config = copy.deepcopy(rollout.actor_init_config)
     engine_runtime_config = dict(rollout.engine_runtime_config)
     engine_kwargs = dict(engine_runtime_config.get("engine_kwargs") or {})
     num_gpus_per_actor = int(rollout.actor_gpu_requirement)
 
-    if rollout_service_engine == "sglang":
+    if rollout_engine == "sglang":
         logger.info(
             "SGLang engine: num_gpus_per_actor=%s, tp_size=%s, sp_degree=%s",
             num_gpus_per_actor,
@@ -52,7 +52,7 @@ def create_rollout_actor_group(
         )
     else:
         raise ValueError(
-            f"Unsupported dedicated rollout engine: {rollout_service_engine!r}. "
+            f"Unsupported dedicated rollout engine: {rollout_engine!r}. "
             "Expected: sglang."
         )
 
@@ -87,10 +87,10 @@ def create_rollout_actor_group(
         ray_num_gpus = 0.5  # Fractional claim to satisfy Ray scheduler
         if available_rollout_bundles % actual_gpus_per_engine != 0:
             raise ValueError(
-                "Placement-group rollout bundle count must be divisible by rollout.topology.service_num_gpus "
+                "Placement-group rollout bundle count must be divisible by rollout.topology.num_gpus_per_actor "
                 "for multi-GPU rollout actors. "
                 f"Available rollout bundles: {available_rollout_bundles}, "
-                f"rollout.topology.service_num_gpus: {actual_gpus_per_engine}."
+                f"rollout.topology.num_gpus_per_actor: {actual_gpus_per_engine}."
             )
         num_actors = available_rollout_bundles // actual_gpus_per_engine
 
@@ -117,7 +117,7 @@ def create_rollout_actor_group(
             num_gpus_per_engine=actual_gpus_per_engine,
             capture_child_tasks=True,
             runtime_env={"env_vars": noset_env},
-            sampler_engine_type=rollout_service_engine,
+            sampler_engine_type=rollout_engine,
             num_gpus_allocated=actual_gpus_per_engine,
             force_set_cuda_visible_devices=True,
         )
@@ -144,7 +144,7 @@ def create_rollout_actor_group(
             pg=pg,
             bundle_indices=bundle_indices,
             num_gpus_per_actor=num_gpus_per_actor,
-            sampler_engine_type=rollout_service_engine,
+            sampler_engine_type=rollout_engine,
         )
 
     # Initialize actors with domain-split runtime/model schema.

@@ -66,11 +66,11 @@ def normalize_rollout_mode(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def normalize_rollout_service_engine(value: Any) -> Optional[str]:
+def normalize_rollout_engine(value: Any) -> Optional[str]:
     normalized = normalize_engine_type(value)
     if normalized and normalized not in ROLLOUT_ENGINE_TYPES:
         raise ValueError(
-            "rollout.topology.service_engine must be one of "
+            "rollout.topology.rollout_engine must be one of "
             f"{sorted(ROLLOUT_ENGINE_TYPES)}, got: {value!r}"
         )
     return normalized or None
@@ -129,7 +129,7 @@ class RolloutTopology:
     """Resolved rollout topology without mutating args."""
 
     mode: str
-    service_engine: Optional[str]
+    rollout_engine: Optional[str]
 
     @property
     def training_actor_sampling_mode(self) -> bool:
@@ -137,7 +137,7 @@ class RolloutTopology:
 
     @property
     def is_sglang_engine(self) -> bool:
-        return self.service_engine == "sglang"
+        return self.rollout_engine == "sglang"
 
 
 @dataclass(frozen=True)
@@ -331,17 +331,17 @@ def _resolve_rollout_mode_value(value: Any) -> str:
 def derive_rollout_topology(args: Any) -> RolloutTopology:
     rollout_topology_config = args.rollout.topology
     rollout_mode = _resolve_rollout_mode_value(rollout_topology_config.mode)
-    rollout_service_engine = normalize_rollout_service_engine(
-        rollout_topology_config.service_engine
+    rollout_engine = normalize_rollout_engine(
+        rollout_topology_config.rollout_engine
     )
-    if rollout_mode == DIRECT_ROLLOUT_MODE and rollout_service_engine is not None:
+    if rollout_mode == DIRECT_ROLLOUT_MODE and rollout_engine is not None:
         raise ValueError(
             "direct_sampling is the only public direct-sampling selector. "
-            "Leave rollout.topology.service_engine unset in direct_sampling mode."
+            "Leave rollout.topology.rollout_engine unset in direct_sampling mode."
         )
     return RolloutTopology(
         mode=rollout_mode,
-        service_engine=rollout_service_engine,
+        rollout_engine=rollout_engine,
     )
 
 
@@ -377,11 +377,11 @@ def resolve_effective_engine_capabilities(
     """
     if rollout_mode_info.training_actor_sampling_mode:
         return None
-    service_engine = rollout_mode_info.rollout_topology.service_engine
-    if not service_engine:
+    rollout_engine = rollout_mode_info.rollout_topology.rollout_engine
+    if not rollout_engine:
         return None
 
-    engine_caps = load_engine_capabilities(service_engine)
+    engine_caps = load_engine_capabilities(rollout_engine)
 
     # Replay mode: training-side replay provides log_prob and embeddings,
     # so the engine does not need to supply them natively.
@@ -394,7 +394,7 @@ def resolve_effective_engine_capabilities(
         logger.warning(
             "logprob_source='replay' enabled: allowing %s+GRPO with "
             "training-side old-log-prob replay (experimental path).",
-            service_engine,
+            rollout_engine,
         )
 
     # Native logprob with replay guard: engine provides log_prob natively.
@@ -419,37 +419,37 @@ def derive_sampling_host_engine_type(
     )
     if resolved_mode_info.training_actor_sampling_mode:
         return "fsdp"
-    service_engine = resolved_mode_info.rollout_topology.service_engine
-    if not service_engine:
+    rollout_engine = resolved_mode_info.rollout_topology.rollout_engine
+    if not rollout_engine:
         raise ValueError(
-            "Dedicated rollout sampling requires rollout.topology.service_engine to be set."
+            "Dedicated rollout sampling requires rollout.topology.rollout_engine to be set."
         )
-    return service_engine
+    return rollout_engine
 
 
-def require_rollout_service_num_gpus(args: Any) -> int:
+def require_rollout_num_gpus_per_actor(args: Any) -> int:
     """Require explicit dedicated rollout GPU ownership when a service is used."""
     rollout_topology_config = args.rollout.topology
     rollout_mode = _resolve_rollout_mode_value(rollout_topology_config.mode)
     if not rollout_mode_uses_service(rollout_mode):
         return 0
 
-    raw_num_gpus = rollout_topology_config.service_num_gpus
+    raw_num_gpus = rollout_topology_config.num_gpus_per_actor
     if raw_num_gpus is None:
         raise ValueError(
-            "Dedicated rollout services require rollout.topology.service_num_gpus to be set explicitly. "
+            "Dedicated rollout services require rollout.topology.num_gpus_per_actor to be set explicitly. "
             "Do not infer actor GPU ownership from tp/sp parallel hints."
         )
     try:
         resolved = int(raw_num_gpus)
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            "rollout.topology.service_num_gpus must be an integer >= 1, "
+            "rollout.topology.num_gpus_per_actor must be an integer >= 1, "
             f"got: {raw_num_gpus!r}"
         ) from exc
     if resolved < 1:
         raise ValueError(
-            "rollout.topology.service_num_gpus must be >= 1 for dedicated rollout services, "
+            "rollout.topology.num_gpus_per_actor must be >= 1 for dedicated rollout services, "
             f"got: {resolved}"
         )
     return resolved
@@ -464,12 +464,12 @@ def derive_rollout_actor_gpu_count(
     resolved_topology = topology if topology is not None else derive_rollout_topology(args)
     if not rollout_mode_uses_service(resolved_topology.mode):
         return 0
-    if not resolved_topology.service_engine:
+    if not resolved_topology.rollout_engine:
         raise ValueError(
             "rollout.topology.mode requires a dedicated rollout service, but "
-            "rollout.topology.service_engine is unset."
+            "rollout.topology.rollout_engine is unset."
         )
-    return require_rollout_service_num_gpus(args)
+    return require_rollout_num_gpus_per_actor(args)
 
 
 def derive_rollout_gpu_pool_size(
@@ -765,7 +765,7 @@ __all__ = [
     "ROLLOUT_MODES",
     "SEPARATE_ROLLOUT_MODE",
     "normalize_rollout_mode",
-    "normalize_rollout_service_engine",
+    "normalize_rollout_engine",
     "collect_sampling_requirements",
     "derive_global_rollout_batch_size",
     "derive_model_spec",
@@ -784,7 +784,7 @@ __all__ = [
     "normalize_lora_target_modules",
     "normalize_train_backend_name",
     "require_prompts_per_rollout",
-    "require_rollout_service_num_gpus",
+    "require_rollout_num_gpus_per_actor",
     "resolve_effective_engine_capabilities",
     "resolve_config",
     "rollout_mode_is_colocated",

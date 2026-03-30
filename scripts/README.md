@@ -31,7 +31,7 @@ Precision config:
 - Use `precision.training.*` for training model load precision, FSDP param precision, and train-side autocast.
 - Use `precision.rollout.*` for sampler/replay autocast plus trajectory/logprob storage precision.
 - In dedicated SGLang rollout, prompt encoder precision also follows `precision.rollout.autocast_precision`.
-- Keep `rollout.topology.service_transport_dtype` under `rollout.topology`; it is a transport setting, not part of `precision.*`.
+- Keep `rollout.topology.transport_dtype` under `rollout.topology`; it is a transport setting, not part of `precision.*`.
 
 Terminology:
 
@@ -107,12 +107,12 @@ bash scripts/train_plugin_demo.sh --rollout.control.num-rollout 1
 
 For training-actor direct sampling, set `rollout.topology.mode=direct_sampling`
 and `sync.protocol=disabled`.
-Leave `rollout.topology.service_engine` unset in direct mode.
+Leave `rollout.topology.rollout_engine` unset in direct mode.
 For SGLang, use `rollout.topology.mode=separate` or `rollout.topology.mode=colocate`
-with `rollout.topology.service_engine=sglang`, and set an explicit dedicated-rollout
+with `rollout.topology.rollout_engine=sglang`, and set an explicit dedicated-rollout
 weight-sync mode such as `tensor_payload`, `nccl_broadcast`, or
 `checkpoint_path`.
-Dedicated rollout modes also require `rollout.topology.service_num_gpus` to be set explicitly.
+Dedicated rollout modes also require `rollout.topology.num_gpus_per_actor` to be set explicitly.
 
 ### SGLang remote scheduler mode (TCP, non-HTTP data plane)
 
@@ -123,17 +123,18 @@ through `rollout.topology.sglang_kwargs`:
 rollout:
   topology:
     mode: separate
-    service_engine: sglang
-    service_num_gpus: 4
-    engine_tp_size: 4
-    service_transport_dtype: bf16
-    service_transport_drop_decoded_videos: true
-    service_transport_log_payload_bytes: true
+    rollout_engine: sglang
+    num_gpus_per_actor: 4
+    tp_size: 4
+    transport_dtype: bf16
+    transport_drop_decoded_videos: true
     sglang_local_mode: false
     sglang_kwargs:
       remote_scheduler_endpoints:
         - tcp://10.0.0.11:35555
         - tcp://10.0.0.12:35555
+  logging:
+    transport_log_payload_bytes: true
 ```
 
 Notes:
