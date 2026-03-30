@@ -29,11 +29,11 @@
 # - num_inference_steps=10
 # - guidance_scale=1.0
 # - kl_coef=0.04
-# - adv_normalization=group
+# - adv_normalization_scope=group
 # - learning_rate=3e-4
 # - LoRA: rank=32, alpha=64
 # - timestep_fraction=0.99
-# - training.num_updates_per_local_batch (+ optional training.local_micro_batch_size when tuning memory)
+# - training.num_updates_per_batch (+ optional training.micro_batch_size when tuning memory)
 # - reward_location=sampling_actor
 # - reward_components defaults to pickscore
 # - prompts_per_rollout=16, samples_per_prompt=8 on 8 GPUs
@@ -73,12 +73,12 @@ PROMPTS_PER_BATCH=16 # number of prompts per epoch
 DIRECT_SAMPLING_BATCH_SIZE=8 # Lower peak sampling batch size to reduce OOM risk.
 
 # Training settings
-LOCAL_MICRO_BATCH_SIZE=2 # Lower local forward/backward batch size during optimization.
+MICRO_BATCH_SIZE=2 # Lower forward/backward batch size during optimization.
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 
 LOCAL_MICRO_BATCH_ARGS=()
-if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
-    LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
+if [ -n "${MICRO_BATCH_SIZE}" ]; then
+    LOCAL_MICRO_BATCH_ARGS+=(--training.micro-batch-size "${MICRO_BATCH_SIZE}")
 fi
 NUM_INFERENCE_STEPS_OVERRIDE=""
 prev=""

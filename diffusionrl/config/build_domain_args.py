@@ -29,9 +29,8 @@ def build_model_config(
     """Build model config consumed by training and rollout actors.
 
     Pulls from: ModelConfig (identity/paths) + TrainingConfig (LoRA/checkpointing)
-    + precision.training (model load dtype).
+    + precision (model load dtype).
     """
-    training_precision = precision_settings.training
     return {
         "model_dotpath": model_spec.model_dotpath,
         "pretrained_model_ckpt_path": model_settings.pretrained_model_ckpt_path,
@@ -42,7 +41,7 @@ def build_model_config(
         "lora_alpha": training_settings.lora_alpha,
         "lora_target_modules": normalize_lora_target_modules(training_settings.lora_target_modules),
         "use_gradient_checkpointing": training_settings.use_gradient_checkpointing,
-        "model_precision": training_precision.model_precision,
+        "model_precision": precision_settings.model_precision,
     }
 
 
@@ -83,7 +82,6 @@ def build_training_sampling_config(
 ) -> Dict[str, Any]:
     """Build training-actor sampling config from the canonical resolved sampling spec."""
     payload = _build_shared_sampling_payload(sampling_spec)
-    rollout_precision = precision_settings.rollout
     payload.update({
         "sampler_engine_type": normalize_rollout_service_engine(sampler_engine_type)
         or str(sampler_engine_type).strip().lower(),
@@ -95,9 +93,9 @@ def build_training_sampling_config(
         # Rollout precision lives at sampling_config top-level, not inside
         # sampler_kwargs, because it is a framework contract — not a sampler
         # constructor parameter.
-        "autocast_precision": rollout_precision.autocast_precision,
-        "trajectory_precision": rollout_precision.trajectory_precision,
-        "logprob_precision": rollout_precision.logprob_precision,
+        "autocast_precision": precision_settings.rollout_autocast_precision,
+        "trajectory_precision": precision_settings.trajectory_precision,
+        "logprob_precision": precision_settings.logprob_precision,
     })
     return payload
 
@@ -162,7 +160,6 @@ def build_rollout_engine_config(
     merged_engine_kwargs = _build_rollout_engine_base_kwargs(
         rollout_topology_settings=rollout_topology_settings,
     )
-    rollout_precision = precision_settings.rollout
     merged_engine_kwargs.setdefault("use_lora", model_config["use_lora"])
     merged_engine_kwargs.setdefault("lora_rank", model_config["lora_rank"])
     merged_engine_kwargs.setdefault("lora_alpha", model_config["lora_alpha"])
@@ -175,7 +172,7 @@ def build_rollout_engine_config(
         merged_engine_kwargs.setdefault("lora_merge_mode", "online")
     # Keep SGLang prompt-encoder precision on the canonical rollout precision
     # surface so rollout compute settings do not split across config namespaces.
-    merged_engine_kwargs["prompt_encoder_dtype"] = rollout_precision.autocast_precision
+    merged_engine_kwargs["prompt_encoder_dtype"] = precision_settings.rollout_autocast_precision
     # Wire top-level fps into engine_kwargs so SGLang engine can consume it
     # without requiring users to duplicate rollout-topology config.
     merged_engine_kwargs.setdefault("fps", fps)

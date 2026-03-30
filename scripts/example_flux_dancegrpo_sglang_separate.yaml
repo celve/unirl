@@ -23,8 +23,8 @@ algorithm:
   samples_per_prompt: 4
   shuffle_seed: 42
   shuffle_samples: true
-  adv_normalization: group
-  adv_clip_abs: 5.0
+  adv_normalization_scope: group
+  clip_max: 5.0
   eval_ema_decay: 0.9
   eval_ema_update_interval: 1
   algorithm_kwargs:
@@ -32,7 +32,7 @@ algorithm:
     use_kl_penalty: false
 
 training:
-  local_micro_batch_size: 1
+  micro_batch_size: 1
   learning_rate: 0.00001
   max_grad_norm: 1.0
   weight_decay: 0.0001
@@ -41,14 +41,12 @@ training:
   lora_alpha: 32
 
 precision:
-  training:
-    model_precision: bf16
-    fsdp_precision: fp32
-    autocast_precision: bf16
-  rollout:
-    autocast_precision: bf16
-    trajectory_precision: fp16
-    logprob_precision: fp32
+  model_precision: bf16
+  fsdp_precision: fp32
+  training_autocast_precision: bf16
+  rollout_autocast_precision: bf16
+  trajectory_precision: fp16
+  logprob_precision: fp32
 
 ray:
   rollout_num_gpus_per_node: 4

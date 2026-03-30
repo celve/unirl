@@ -67,7 +67,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ModelConfig:
-    """Model identity and checkpoint paths."""
+    """
+    Model Configuration:
+    contains model type and checkpoint paths.
+    """
 
     model_type: str = field(default="hunyuan",
         metadata={"help": "Model architecture type (hunyuan, flux, sd3, mochi, wan2.1, bagel)"})
@@ -91,7 +94,10 @@ class ModelConfig:
 
 @dataclass
 class SamplingConfig:
-    """Sampling engine, sampler, and denoising controls."""
+    """
+    Sampling Engine Configuration:
+    contains sampler type, logprob source, and denoising controls.
+    """
 
     sampler_dotpath: str = field(default="",
         metadata={"help": "Optional Python dotpath to Sampler class; omit to auto-resolve from model_type"})
@@ -135,13 +141,16 @@ class SamplingConfig:
         if _leaked:
             raise ValueError(
                 f"sampling.sampler_kwargs must not contain precision keys {sorted(_leaked)}; "
-                "use precision.rollout.* instead."
+                "use precision.* instead."
             )
 
 
 @dataclass
 class RewardConfig:
-    """Reward dotpath, reward model, and reward pool controls."""
+    """
+    Reward Configuration:
+    contains reward backend, reward provider configs and multi-reward related fields.
+    """
 
     reward_backend: str = field(default="local",
         metadata={"help": "Reward backend: local, http, ray_pool"},
@@ -263,7 +272,9 @@ class RayConfig:
     training_num_gpus_per_node: int = field(default=4,
         metadata={"help": "GPUs per node for training actors"})
     placement_strategy: str = field(default="PACK",
-        metadata={"help": "Ray placement group strategy: PACK or SPREAD"})
+        metadata={"help": "Ray placement group strategy: PACK or SPREAD"}，
+        choices=["PACK", "SPREAD","STRICT_PACK", "STRICT_SPREAD"],
+        )
     colocate_training_gpu_fraction: float = field(default=0.4,
         metadata={"help": "GPU memory fraction for training when colocated"})
     colocate_rollout_gpu_fraction: float = field(default=0.4,
@@ -287,27 +298,30 @@ class RayConfig:
             "training_num_nodes",
             "training_num_gpus_per_node",
         ):
-            if int(getattr(self, attr_name)) < 0:
+            if getattr(self, attr_name) < 0:
                 raise ValueError(f"ray.{attr_name} must be >= 0.")
 
-        strategy = str(self.placement_strategy or "PACK").strip().upper()
-        valid_strategies = {"PACK", "SPREAD", "STRICT_PACK", "STRICT_SPREAD"}
-        if strategy not in valid_strategies:
+        strategy = self.placement_strategy.strip().upper()
+        if strategy not in self.placement_strategy.choices:
             raise ValueError(
                 "ray.placement_strategy must be one of "
-                f"{sorted(valid_strategies)}, got: {self.placement_strategy!r}"
+                f"{sorted(self.placement_strategy.choices)}, got: {self.placement_strategy!r}"
             )
-
 
 @dataclass
 class SyncConfig:
-    """Train->rollout weight synchronization controls."""
+    """
+    Train->rollout weight synchronization Configuration:
+    contains weight sync protocol, directory, bucket size, flush cache, and target modules.
+    """
 
-    protocol: Optional[str] = field(default=None,
-        metadata={"help": "Explicit weight sync mode. Must be one of: disabled, tensor_payload, nccl_broadcast, checkpoint_path"})
+    protocol: str = field(default=None,
+        metadata={"help": "Explicit weight sync mode. Must be one of: disabled, tensor_payload, nccl_broadcast, checkpoint_path"},
+        choices=["disabled", "tensor_payload", "nccl_broadcast", "checkpoint_path"],
+        )
     dir: str = field(default="outputs/weight_sync",
         metadata={"help": "Directory for checkpoint-based weight sync (use shared FS for multi-node)"})
-    bucket_mb: int = field(default=256,
+    bucket_size: int = field(default=256,
         metadata={"help": "Weight sync tensor bucket size (MB) for tensor/distributed strategies"})
     flush_cache: bool = field(default=True,
         metadata={"help": "Whether the rollout side flushes inference-engine caches after each weight sync bucket"})
@@ -315,29 +329,25 @@ class SyncConfig:
         metadata={"help": "Rollout-side modules that receive weight updates (defaults to ['transformer'])."})
 
     def validate(self) -> None:
-        _valid_modes = (
-            "disabled", "tensor_payload", "nccl_broadcast", "checkpoint_path",
-        )
-        normalized_protocol = str(self.protocol or "").strip().lower()
+        normalized_protocol = self.protocol.strip().lower()
         if not normalized_protocol:
             raise ValueError(
                 "sync.protocol must be set explicitly. "
                 "Choose one of disabled/tensor_payload/nccl_broadcast/checkpoint_path."
             )
-        if normalized_protocol not in _valid_modes:
+        if normalized_protocol not in self.protocol.choices:
             raise ValueError(
-                f"sync.protocol must be one of {'/'.join(_valid_modes)}, "
+                f"sync.protocol must be one of {'/'.join(self.protocol.choices)}, "
                 f"got: {self.protocol!r}."
             )
-        if int(self.bucket_mb) < 1:
-            raise ValueError("sync.bucket_mb must be >= 1.")
+        if self.bucket_size < 1:
+            raise ValueError("sync.bucket_size must be >= 1.")
         if self.target_modules is not None:
             if not isinstance(self.target_modules, list):
                 raise ValueError("sync.target_modules must be a list of module names.")
             for module_name in self.target_modules:
                 if not str(module_name).strip():
                     raise ValueError("sync.target_modules cannot contain empty names.")
-
 
 @dataclass
 class SchedulerConfig:
@@ -390,13 +400,11 @@ class SchedulerConfig:
     )
 
 
-# Backward-compatible alias for older imports.
-WindowSchedulerConfig = SchedulerConfig
-
 
 @dataclass
 class AlgorithmConfig:
-    """Algorithm selection, rollout geometry, and raw algorithm kwargs.
+    """Algorithm Configuration:
+    contains algorithm type, dotpath, kwargs, rollout geometry and window scheduler configuration.
 
     Public/common surface:
     - algorithm_type / algorithm_dotpath
@@ -416,63 +424,36 @@ class AlgorithmConfig:
     # Framework-owned rollout geometry
     samples_per_prompt: int = field(default=4,
         metadata={"help": "Number of generated samples per prompt. This remains framework-owned because rollout geometry depends on it."})
-    prompts_per_rollout: Optional[int] = field(default=None,
-        metadata={"help": "Number of unique prompts per rollout step. Required because rollout geometry is defined by prompts_per_rollout * samples_per_prompt."})
+    prompts_per_rollout: int = field(default=1,
+        metadata={"help": "Number of unique prompts per rollout step. Rollout geometry is defined by prompts_per_rollout * samples_per_prompt."})
 
     # Shared algorithm surface
-    component_mix_stage: str = field(
-        default="reward",
-        metadata={
-            "help": "Stage that applies multi-component reward mixing: reward or advantage"
-        },
-    )
-    adv_normalization: str = field(
-        default="group",
+    component_mix_stage: str = field(default="reward",
+        metadata={"help": "Stage that applies multi-component reward mixing: reward or advantage"},
+        choices=["reward", "advantage"],
+        )
+    adv_normalization_scope: str = field(default="group",
         metadata={"help": "Advantage normalization scope: group or global"},
-    )
-    adv_norm_eps: float = field(
-        default=1e-8, metadata={"help": "Numerical epsilon for advantage normalization"}
-    )
-    adv_clip_abs: Optional[float] = field(
-        default=5.0,
-        metadata={
-            "help": "Optional absolute clip for normalized advantages (null disables clipping)"
-        },
-    )
-    use_global_std: bool = field(
-        default=False,
-        metadata={
-            "help": "Use global std instead of per-group std during grouped normalization"
-        },
-    )
-    trimmed_ratio: float = field(
-        default=0.0,
-        metadata={
-            "help": "Fraction of outliers to trim from each side for grouped reward normalization"
-        },
-    )
-    eval_ema_decay: float = field(
-        default=0.9, metadata={"help": "Eval EMA decay shared by built-in algorithms"}
-    )
-    eval_ema_update_interval: int = field(
-        default=1, metadata={"help": "Eval EMA update interval in optimizer steps"}
-    )
-    shuffle_samples: bool = field(
-        default=True,
-        metadata={"help": "Shuffle training samples before local update execution"},
-    )
-    shuffle_seed: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": "Optional deterministic shuffle seed for training sample order"
-        },
-    )
-    training_share_rollout_indices: bool = field(
-        default=True,
-        metadata={
-            "help": "Reuse rollout index scheduler for training timestep selection unless disabled"
-        },
-    )
+        choices=["group", "global"],
+        )
+    adv_norm_eps: float = field(default=1e-8,
+        metadata={"help": "Numerical epsilon for advantage normalization"})
+    clip_max: Optional[float] = field(default=None,
+        metadata={"help": "Optional absolute clip for normalized advantages (None means no clipping)"})
+    use_global_std: bool = field(default=False,
+        metadata={"help": "Use global std instead of per-group std during grouped normalization"})
+    trim_outliers_ratio: float = field(default=0.0,
+        metadata={"help": "Fraction of outliers to trim from each side for grouped reward normalization"})
+    eval_ema_decay: float = field(default=0.9,
+        metadata={"help": "Eval EMA decay shared by built-in algorithms"})
+    eval_ema_update_interval: int = field(default=1,
+        metadata={"help": "Eval EMA update interval in optimizer steps"})
+    shuffle_samples: bool = field(default=True,
+        metadata={"help": "Shuffle training samples before local update execution"})
+    shuffle_seed: Optional[int] = field(default=None,
+        metadata={"help": "Optional deterministic shuffle seed for training sample order"})
+    training_share_rollout_indices: bool = field(default=True,
+        metadata={"help": "Reuse rollout index scheduler for training timestep selection unless disabled"})
 
     # Sub-configuration
     rollout_scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
@@ -491,32 +472,34 @@ class AlgorithmConfig:
             )
         if self.samples_per_prompt < 1:
             raise ValueError("samples_per_prompt must be >= 1.")
-        if self.prompts_per_rollout is None:
-            raise ValueError("prompts_per_rollout is required.")
         if self.prompts_per_rollout < 1:
             raise ValueError("prompts_per_rollout must be >= 1.")
         if not isinstance(self.algorithm_kwargs, dict):
             raise ValueError("algorithm.algorithm_kwargs must be a dict.")
-        component_mix_stage = str(self.component_mix_stage or "").strip().lower()
-        if component_mix_stage not in {"reward", "advantage"}:
+        component_mix_stage = self.component_mix_stage.strip().lower()
+        if component_mix_stage not in self.component_mix_stage.choices:
             raise ValueError(
-                "algorithm.component_mix_stage must be 'reward' or 'advantage'. "
-                f"Got: {self.component_mix_stage!r}."
+                "algorithm.component_mix_stage must be one of "
+                f"{sorted(self.component_mix_stage.choices)}, "
+                f"Got: {self.component_mix_stage!r}"
             )
-        adv_normalization = str(self.adv_normalization or "").strip().lower()
-        if adv_normalization not in {"global", "group"}:
+        adv_normalization_scope = self.adv_normalization_scope.strip().lower()
+        if adv_normalization_scope not in self.adv_normalization_scope.choices:
             raise ValueError(
-                "algorithm.adv_normalization must be 'global' or 'group'. "
-                f"Got: {self.adv_normalization!r}."
+                "algorithm.adv_normalization_scope must be one of "
+                f"{sorted(self.adv_normalization_scope.choices)}, "
+                f"Got: {self.adv_normalization_scope!r}"
             )
         if float(self.adv_norm_eps) <= 0:
-            raise ValueError("algorithm.adv_norm_eps must be > 0.")
-        if self.adv_clip_abs is not None and float(self.adv_clip_abs) <= 0:
-            raise ValueError("algorithm.adv_clip_abs must be > 0 when set.")
-        if not (0.0 <= float(self.trimmed_ratio) < 0.5):
+            raise ValueError("algorithm.adv_norm_eps must be > 0., 
+            f"Got: {self.adv_norm_eps!r}")
+        if self.clip_max is not None and float(self.clip_max) <= 0:
+            raise ValueError("algorithm.clip_max must be > 0 when set., "
+            f"Got: {self.clip_max!r}")
+        if not (0.0 <= float(self.trim_outliers_ratio) < 0.5):
             raise ValueError(
-                "algorithm.trimmed_ratio must be in [0.0, 0.5). "
-                f"Got: {self.trimmed_ratio}."
+                "algorithm.trim_outliers_ratio must be in [0.0, 0.5). "
+                f"Got: {self.trim_outliers_ratio!r}"
             )
         if float(self.eval_ema_decay) < 0:
             raise ValueError("algorithm.eval_ema_decay must be >= 0.")
@@ -536,13 +519,18 @@ class AlgorithmConfig:
 
 @dataclass
 class TrainingConfig:
-    """Optimizer, LoRA/FSDP, and core training controls."""
+    """
+    Training Configuration:
+    contains optimizer, update schedule, train backend, LoRA, and core training controls.
+    """
 
     # Optimizer and update schedule
-    local_micro_batch_size: Optional[int] = field(default=None,
-        metadata={"help": "Local micro-batch size for one forward/backward pass. Defaults to the resolved local_update_batch_size when omitted and must evenly divide it."})
-    num_updates_per_local_batch: Optional[int] = field(default=None,
-        metadata={"help": "Number of optimizer updates performed from one resolved local batch. Defaults to 1. local_batch_size must be divisible by this value, and local_update_batch_size is derived from the quotient."})
+
+    # Local Batch Size -> Mini Batch Size (per update) -> Micro Batch Size (per forward/backward pass)
+    micro_batch_size: Optional[int] = field(default=None,
+        metadata={"help": "Micro-batch size per GPU for one forward/backward pass. Defaults to the resolved local_mini_batch_size when omitted and must evenly divide it."})
+    num_updates_per_batch: Optional[int] = field(default=None,
+        metadata={"help": "Number of optimizer updates performed from one resolved local batch. Defaults to 1. local_batch_size must be divisible by this value, and local_mini_batch_size is derived from the quotient."})
     learning_rate: float = field(default=1e-6,
         metadata={"help": "Peak learning rate for the optimizer"})
     adam_beta1: float = field(default=0.9,
@@ -558,7 +546,9 @@ class TrainingConfig:
     warmup_steps: int = field(default=0,
         metadata={"help": "Number of learning rate warmup steps"})
     lr_scheduler_type: str = field(default="constant",
-        metadata={"help": "LR scheduler type: constant, linear, cosine"})
+        metadata={"help": "LR scheduler type: constant, linear, cosine"},
+        choices=["constant", "linear", "cosine"],
+        )
 
     # Train backend
     train_backend: str = field(default="fsdp",
@@ -578,6 +568,7 @@ class TrainingConfig:
     lora_target_modules: Optional[str] = field(default=None,
         metadata={"help": "Comma-separated LoRA target modules (e.g. 'to_q,to_k,to_v')"})
 
+    #Offload
     fsdp_cpu_offload: bool = field(default=False,
         metadata={"help": "Offload FSDP parameters and gradients to CPU"})
 
@@ -587,9 +578,8 @@ class TrainingConfig:
 
     def validate(self) -> None:
         explicit_geometry_fields = {
-            "local_micro_batch_size": self.local_micro_batch_size,
-            "num_updates_per_local_batch": self.num_updates_per_local_batch,
-        }
+            "micro_batch_size": self.micro_batch_size,
+            "num_updates_per_batch": self.num_updates_per_batch,        }
         for field_name, value in explicit_geometry_fields.items():
             if value is not None and int(value) < 1:
                 raise ValueError(f"{field_name} must be >= 1 when set.")
@@ -598,36 +588,20 @@ class TrainingConfig:
 
 
 @dataclass
-class TrainingPrecisionConfig:
-    """Training-side precision controls."""
+class PrecisionConfig:
+    """Precision controls for training and rollout."""
 
     model_precision: str = field(default="bf16",
         metadata={"help": "Training model/component load precision (default: bf16)"})
     fsdp_precision: str = field(default="fp32",
         metadata={"help": "Training-side FSDP param precision (default: fp32)"})
-    autocast_precision: str = field(default="bf16",
+
+    # Training Precision
+    training_autocast_precision: str = field(default="bf16",
         metadata={"help": "Training-side autocast precision for loss/model forwards (default: bf16)"})
-
-    def validate(self) -> None:
-        validate_precision_name(
-            self.model_precision,
-            field_name="precision.training.model_precision",
-        )
-        validate_precision_name(
-            self.fsdp_precision,
-            field_name="precision.training.fsdp_precision",
-        )
-        validate_precision_name(
-            self.autocast_precision,
-            field_name="precision.training.autocast_precision",
-        )
-
-
-@dataclass
-class RolloutPrecisionConfig:
-    """Rollout/replay-side precision controls."""
-
-    autocast_precision: str = field(default="bf16",
+        
+    # Rollout Precision
+    rollout_autocast_precision: str = field(default="bf16",
         metadata={"help": "Rollout-side autocast precision for sampler/replay forwards (default: bf16)"})
     trajectory_precision: str = field(default="fp16",
         metadata={"help": "Precision used to store rollout trajectory latents (default: fp16)"})
@@ -636,29 +610,29 @@ class RolloutPrecisionConfig:
 
     def validate(self) -> None:
         validate_precision_name(
-            self.autocast_precision,
-            field_name="precision.rollout.autocast_precision",
+            self.model_precision,
+            field_name="precision.model_precision",
+        )
+        validate_precision_name(
+            self.fsdp_precision,
+            field_name="precision.fsdp_precision",
+        )
+        validate_precision_name(
+            self.training_autocast_precision,
+            field_name="precision.training_autocast_precision",
+        )
+        validate_precision_name(
+            self.rollout_autocast_precision,
+            field_name="precision.rollout_autocast_precision",
         )
         validate_precision_name(
             self.trajectory_precision,
-            field_name="precision.rollout.trajectory_precision",
+            field_name="precision.trajectory_precision",
         )
         validate_precision_name(
             self.logprob_precision,
-            field_name="precision.rollout.logprob_precision",
+            field_name="precision.logprob_precision",
         )
-
-
-@dataclass
-class PrecisionConfig:
-    """Precision controls grouped by runtime owner."""
-
-    training: TrainingPrecisionConfig = field(default_factory=TrainingPrecisionConfig)
-    rollout: RolloutPrecisionConfig = field(default_factory=RolloutPrecisionConfig)
-
-    def validate(self) -> None:
-        self.training.validate()
-        self.rollout.validate()
 
 
 @dataclass(frozen=True)
@@ -666,7 +640,9 @@ class RolloutTopologySettings:
     """Rollout topology and dedicated-engine knobs."""
 
     mode: Optional[str] = field(default=None,
-        metadata={"help": "Canonical rollout topology: direct_sampling, separate, or colocate"})
+        metadata={"help": "Canonical rollout topology: direct_sampling, separate, or colocate"},
+        choices=["direct_sampling", "separate", "colocate"],
+        )
     service_engine: Optional[str] = field(default=None,
         metadata={"help": "Dedicated rollout engine selector for separate or colocate. Must be unset in direct_sampling."})
     service_num_gpus: Optional[int] = field(default=None,
@@ -749,7 +725,7 @@ class RolloutTopologySettings:
         if precision_override_keys:
             raise ValueError(
                 "SGLang prompt-encoder precision is controlled by "
-                "precision.rollout.autocast_precision; remove the following "
+                "precision.rollout_autocast_precision; remove the following "
                 "engine-specific override(s) from rollout.topology.sglang_kwargs: "
                 f"{precision_override_keys}"
             )
@@ -1156,9 +1132,9 @@ def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
         "resolved.rollout.prompts_per_rollout",
         "resolved.training.global_batch_size",
         "resolved.training.local_batch_size",
-        "resolved.training.local_update_batch_size",
-        "resolved.training.local_micro_batch_size",
-        "resolved.training.num_updates_per_local_batch",
+        "resolved.training.local_mini_batch_size",
+        "resolved.training.micro_batch_size",
+        "resolved.training.num_updates_per_batch",
     ):
         resolved.setdefault(key, None)
 
@@ -1204,10 +1180,10 @@ def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
     if train_plan is not None:
         resolved["resolved.training.global_batch_size"] = train_plan.global_batch_size
         resolved["resolved.training.local_batch_size"] = train_plan.local_batch_size
-        resolved["resolved.training.local_update_batch_size"] = train_plan.local_update_batch_size
-        resolved["resolved.training.local_micro_batch_size"] = train_plan.local_micro_batch_size
-        resolved["resolved.training.num_updates_per_local_batch"] = (
-            train_plan.num_updates_per_local_batch
+        resolved["resolved.training.local_mini_batch_size"] = train_plan.local_mini_batch_size
+        resolved["resolved.training.micro_batch_size"] = train_plan.micro_batch_size
+        resolved["resolved.training.num_updates_per_batch"] = (
+            train_plan.num_updates_per_batch
         )
     return resolved
 

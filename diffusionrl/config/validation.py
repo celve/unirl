@@ -20,7 +20,7 @@ from diffusionrl.config.resolution import (
     derive_rollout_actor_gpu_count,
     derive_rollout_gpu_pool_size,
     derive_rollout_topology,
-    derive_num_updates_per_local_batch,
+    derive_num_updates_per_batch,
     derive_training_topology,
     normalize_lora_target_modules,
     require_prompts_per_rollout,
@@ -437,11 +437,11 @@ def validate_algorithm_kwargs_payload(args: Any) -> None:
         "samples_per_prompt": "algorithm.samples_per_prompt",
         "prompts_per_rollout": "algorithm.prompts_per_rollout",
         "component_mix_stage": "algorithm.component_mix_stage",
-        "adv_normalization": "algorithm.adv_normalization",
+        "adv_normalization_scope": "algorithm.adv_normalization_scope",
         "adv_norm_eps": "algorithm.adv_norm_eps",
-        "adv_clip_abs": "algorithm.adv_clip_abs",
+        "clip_max": "algorithm.clip_max",
         "use_global_std": "algorithm.use_global_std",
-        "trimmed_ratio": "algorithm.trimmed_ratio",
+        "trim_outliers_ratio": "algorithm.trim_outliers_ratio",
         "eval_ema_decay": "algorithm.eval_ema_decay",
         "eval_ema_update_interval": "algorithm.eval_ema_update_interval",
         "shuffle_samples": "algorithm.shuffle_samples",
@@ -903,12 +903,12 @@ def validate_training_batch_geometry(
     if samples_per_prompt < 1:
         raise ValueError(f"algorithm.samples_per_prompt must be >= 1. Got {samples_per_prompt}.")
 
-    num_updates_per_local_batch = derive_num_updates_per_local_batch(args)
+    num_updates_per_batch = derive_num_updates_per_batch(args)
     global_batch_size = derive_global_rollout_batch_size(args)
     topology = topology if topology is not None else derive_training_topology(args)
     dp_size = int(topology.dp_size)
     dp_replicate_size = int(topology.dp_replicate_size)
-    raw_micro_batch_size = args.training.local_micro_batch_size
+    raw_micro_batch_size = args.training.micro_batch_size
 
     def _format_geometry(
         *,
@@ -920,7 +920,7 @@ def validate_training_batch_geometry(
         update_text = (
             str(update_batch_size)
             if update_batch_size is not None
-            else "<not divisible by num_updates_per_local_batch>"
+            else "<not divisible by num_updates_per_batch>"
         )
         if raw_micro_batch_size is None:
             micro_text = "auto"
@@ -934,9 +934,9 @@ def validate_training_batch_geometry(
                 f"  global_batch_size = prompts_per_rollout({prompts_per_rollout}) * "
                 f"samples_per_prompt({samples_per_prompt}) = {global_batch_size}",
                 f"  local_batch_size = global_batch_size / dp_size({dp_size}) = {local_text}",
-                f"  local_update_batch_size = local_batch_size / "
-                f"num_updates_per_local_batch({num_updates_per_local_batch}) = {update_text}",
-                f"  local_micro_batch_size = {micro_text}",
+                f"  local_mini_batch_size = local_batch_size / "
+                f"num_updates_per_batch({num_updates_per_batch}) = {update_text}",
+                f"  micro_batch_size = {micro_text}",
                 f"  dp_replicate_size = {dp_replicate_size}",
             ]
         )
@@ -986,17 +986,17 @@ def validate_training_batch_geometry(
             micro_batch_size=None,
         )
 
-    if local_batch_size % num_updates_per_local_batch != 0:
+    if local_batch_size % num_updates_per_batch != 0:
         _raise_geometry_error(
             reason="local batch cannot be split evenly into optimizer updates "
-            "(local_batch_size % num_updates_per_local_batch != 0).",
-            fix_hint="Choose a training.num_updates_per_local_batch that evenly divides "
+            "(local_batch_size % num_updates_per_batch != 0).",
+            fix_hint="Choose a training.num_updates_per_batch that evenly divides "
             "the resolved local_batch_size.",
             local_batch_size=local_batch_size,
             update_batch_size=None,
             micro_batch_size=None,
         )
-    update_batch_size = int(local_batch_size // num_updates_per_local_batch)
+    update_batch_size = int(local_batch_size // num_updates_per_batch)
 
     if raw_micro_batch_size is None:
         micro_batch_size = int(update_batch_size)
@@ -1004,9 +1004,9 @@ def validate_training_batch_geometry(
         micro_batch_size = int(raw_micro_batch_size)
         if micro_batch_size < 1:
             _raise_geometry_error(
-                reason="training.local_micro_batch_size must be >= 1.",
-                fix_hint="Set training.local_micro_batch_size to a positive integer, "
-                "or omit it to use the resolved local_update_batch_size.",
+                reason="training.micro_batch_size must be >= 1.",
+                fix_hint="Set training.micro_batch_size to a positive integer, "
+                "or omit it to use the resolved local_mini_batch_size.",
                 local_batch_size=local_batch_size,
                 update_batch_size=update_batch_size,
                 micro_batch_size=micro_batch_size,
@@ -1014,10 +1014,10 @@ def validate_training_batch_geometry(
 
     if update_batch_size % micro_batch_size != 0:
         _raise_geometry_error(
-            reason="local update batch cannot be split evenly into micro-batches "
-            "(local_update_batch_size % local_micro_batch_size != 0).",
-            fix_hint="Choose a training.local_micro_batch_size that evenly divides "
-            "the resolved local_update_batch_size.",
+            reason="local mini-batch cannot be split evenly into micro-batches "
+            "(local_mini_batch_size % micro_batch_size != 0).",
+            fix_hint="Choose a training.micro_batch_size that evenly divides "
+            "the resolved local_mini_batch_size.",
             local_batch_size=local_batch_size,
             update_batch_size=update_batch_size,
             micro_batch_size=micro_batch_size,

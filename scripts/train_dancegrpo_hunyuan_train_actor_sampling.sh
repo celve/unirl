@@ -117,7 +117,7 @@ NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-8}
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-${TOTAL_GPUS}}
 
 # Training geometry
-LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE-2}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE-2}
 
 # Resolution (DanceGRPO: 480×480, 53 frames)
 HEIGHT=${HEIGHT:-480}
@@ -164,8 +164,8 @@ TOTAL_SAMPLES=$((PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT))
 LOCAL_BATCH_SIZE=$((TOTAL_SAMPLES / TOTAL_GPUS))
 DIRECT_SAMPLING_BATCH_SIZE=${DIRECT_SAMPLING_BATCH_SIZE:-${TOTAL_SAMPLES}}
 LOCAL_MICRO_BATCH_ARGS=()
-if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
-    LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
+if [ -n "${MICRO_BATCH_SIZE}" ]; then
+    LOCAL_MICRO_BATCH_ARGS+=(--training.micro-batch-size "${MICRO_BATCH_SIZE}")
 fi
 
 echo "======================================================"
@@ -176,7 +176,7 @@ echo " Prompts per batch:      ${PROMPTS_PER_BATCH}"
 echo " Samples per prompt (K): ${NUM_SAMPLES_PER_PROMPT}"
 echo " Total samples/rollout:  ${TOTAL_SAMPLES}"
 echo " Per-rank local batch:   ${LOCAL_BATCH_SIZE}"
-echo " Gradient accum batch:   ${LOCAL_MICRO_BATCH_SIZE:-disabled}"
+echo " Gradient accum batch:   ${MICRO_BATCH_SIZE:-disabled}"
 echo " Resolution:             ${HEIGHT}×${WIDTH}×${NUM_FRAMES}f"
 echo " Reward:                 ${REWARD_MODEL_NAME}"
 echo " FSDP CPU offload:       ${FSDP_CPU_OFFLOAD}"

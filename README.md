@@ -256,9 +256,9 @@ Training geometry is rollout-driven only:
 
 - `algorithm.prompts_per_rollout * algorithm.samples_per_prompt` defines the global rollout batch.
 - The resolved local training batch is derived from the training topology.
-- `training.num_updates_per_local_batch` controls how one resolved local batch is split across optimizer updates.
-- `training.local_update_batch_size` is a derived value, computed as `local_batch_size / num_updates_per_local_batch`.
-- `training.local_micro_batch_size` only controls micro-step slicing inside one local update batch and must evenly divide the resolved `local_update_batch_size`.
+- `training.num_updates_per_batch` controls how one resolved local batch is split across optimizer updates.
+- `training.local_mini_batch_size` is a derived value, computed as `local_batch_size / num_updates_per_batch`.
+- `training.micro_batch_size` only controls micro-step slicing inside one local mini-batch and must evenly divide the resolved `local_mini_batch_size`.
 
 ### Training Backend Selection
 
@@ -318,7 +318,7 @@ Arguments in DiffusionRL are organized into the following categories:
 2.  **Sampling arguments**: `--sampling.sde-type`, `--sampling.eta`, `--sampling.num-inference-steps`, `--sampling.guidance-scale`, `--sampling.shift`, `--sampling.timestep-fraction`, etc.
 3.  **Algorithm arguments**: `--algorithm.algorithm-path`, `--algorithm.prompts-per-rollout`, `--algorithm.samples-per-prompt`, plus shared typed fields such as `--algorithm.adv-normalization`, `--algorithm.eval-ema-decay`, and `--algorithm.shuffle-samples`. Use repeated `--algorithm.kwarg key=value` only for true algorithm-specific extension keys. In YAML, put those extension keys under `algorithm.algorithm_kwargs`.
 4.  **Reward arguments**: `--reward.reward-model-name` / `--reward.reward-models` for built-in scorers, `--reward.reward-path` for custom scorer dotpaths, `--reward.reward-location` for driver vs sampling-actor execution (`auto` resolves the default path), `--reward.use-http-reward` + `--reward.reward-service-url` for HTTP-backed scoring, etc.
-5.  **Training arguments**: `--training.learning-rate`, `--training.num-updates-per-local-batch`, `--training.local-micro-batch-size`, `--training.max-grad-norm`, etc.
+5.  **Training arguments**: `--training.learning-rate`, `--training.num-updates-per-batch`, `--training.micro-batch-size`, `--training.max-grad-norm`, etc.
 6.  **Runtime arguments**: `--ray.rollout-num-gpus-per-node`, `--ray.training-num-gpus-per-node`, `--ray.colocate-training-gpu-fraction`, `--ray.colocate-rollout-gpu-fraction`, `--ray.placement-strategy`, `--ray.offload-train`, `--ray.offload-rollout`, etc.
 
 For config mechanics and current conventions, read

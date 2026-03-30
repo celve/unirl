@@ -141,11 +141,11 @@ def build_algorithm_config(
         "samples_per_prompt": int(ac.samples_per_prompt),
         "prompts_per_rollout": int(prompts_per_rollout),
         "component_mix_stage": str(ac.component_mix_stage),
-        "adv_normalization": str(ac.adv_normalization),
+        "adv_normalization_scope": str(ac.adv_normalization_scope),
         "adv_norm_eps": float(ac.adv_norm_eps),
-        "adv_clip_abs": ac.adv_clip_abs,
+        "clip_max": ac.clip_max,
         "use_global_std": bool(ac.use_global_std),
-        "trimmed_ratio": float(ac.trimmed_ratio),
+        "trim_outliers_ratio": float(ac.trim_outliers_ratio),
         "eval_ema_decay": float(ac.eval_ema_decay),
         "eval_ema_update_interval": int(ac.eval_ema_update_interval),
         "shuffle_samples": bool(ac.shuffle_samples),
@@ -156,7 +156,7 @@ def build_algorithm_config(
         # Training compute precision is framework-owned and must not travel
         # through algorithm_kwargs, otherwise researchers get two competing
         # config entrypoints for the same runtime contract.
-        "training_autocast_precision": str(pc.training.autocast_precision),
+        "training_autocast_precision": str(pc.training_autocast_precision),
         "sde_config": resolved_sampling_spec.sde_config.to_dict(),
         "num_inference_steps": int(resolved_sampling_spec.num_inference_steps),
         "guidance_scale": float(resolved_sampling_spec.guidance_scale),

@@ -99,7 +99,7 @@ python -m diffusionrl.train \
     \
     "${DANCEGRPO_ALGO_KWARG_ARGS[@]}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
-    --training.local-micro-batch-size ${BATCH_SIZE} \
+    --training.micro-batch-size ${BATCH_SIZE} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
     --rollout.topology.mode colocate \

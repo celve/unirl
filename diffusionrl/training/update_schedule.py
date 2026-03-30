@@ -13,9 +13,9 @@ class TrainingExecutionPlan:
     """Runtime plan for one local training consumer batch."""
 
     local_batch_size: int
-    local_update_batch_size: int
-    local_micro_batch_size: int
-    num_updates_per_local_batch: int
+    local_mini_batch_size: int
+    micro_batch_size: int
+    num_updates_per_batch: int
     update_slices: Tuple[Tuple[int, int], ...]
     mini_batch_slices_per_update: Tuple[Tuple[Tuple[int, int], ...], ...]
 
@@ -76,13 +76,13 @@ def _coerce_per_update_mini_batch_slices(
     raw: Any,
     *,
     update_slices: Sequence[Tuple[int, int]],
-    local_micro_batch_size: int,
+    micro_batch_size: int,
 ) -> Tuple[Tuple[Tuple[int, int], ...], ...]:
     if raw is None:
         return tuple(
             _build_micro_batch_slices(
                 total_size=int(end) - int(start),
-                micro_batch_size=int(local_micro_batch_size),
+                micro_batch_size=int(micro_batch_size),
             )
             for start, end in update_slices
         )
@@ -141,45 +141,45 @@ def coerce_training_execution_plan(raw: Any) -> TrainingExecutionPlan:
         name="training_plan.local_batch_size",
         value=raw["local_batch_size"],
     )
-    local_update_batch_size = _positive_int(
-        name="training_plan.local_update_batch_size",
-        value=raw["local_update_batch_size"],
+    local_mini_batch_size = _positive_int(
+        name="training_plan.local_mini_batch_size",
+        value=raw["local_mini_batch_size"],
     )
-    local_micro_batch_size = _positive_int(
-        name="training_plan.local_micro_batch_size",
-        value=raw["local_micro_batch_size"],
+    micro_batch_size = _positive_int(
+        name="training_plan.micro_batch_size",
+        value=raw["micro_batch_size"],
     )
-    num_updates_per_local_batch = _positive_int(
-        name="training_plan.num_updates_per_local_batch",
-        value=raw["num_updates_per_local_batch"],
+    num_updates_per_batch = _positive_int(
+        name="training_plan.num_updates_per_batch",
+        value=raw["num_updates_per_batch"],
     )
-    if local_batch_size != local_update_batch_size * num_updates_per_local_batch:
+    if local_batch_size != local_mini_batch_size * num_updates_per_batch:
         raise ValueError(
             "training_plan.local_batch_size must equal "
-            "training_plan.local_update_batch_size * training_plan.num_updates_per_local_batch. "
+            "training_plan.local_mini_batch_size * training_plan.num_updates_per_batch. "
             f"Got local_batch_size={local_batch_size}, "
-            f"local_update_batch_size={local_update_batch_size}, "
-            f"num_updates_per_local_batch={num_updates_per_local_batch}."
+            f"local_mini_batch_size={local_mini_batch_size}, "
+            f"num_updates_per_batch={num_updates_per_batch}."
         )
-    if local_update_batch_size % local_micro_batch_size != 0:
+    if local_mini_batch_size % micro_batch_size != 0:
         raise ValueError(
-            "training_plan.local_micro_batch_size must evenly divide "
-            "training_plan.local_update_batch_size. "
-            f"Got local_micro_batch_size={local_micro_batch_size}, "
-            f"local_update_batch_size={local_update_batch_size}."
+            "training_plan.micro_batch_size must evenly divide "
+            "training_plan.local_mini_batch_size. "
+            f"Got micro_batch_size={micro_batch_size}, "
+            f"local_mini_batch_size={local_mini_batch_size}."
         )
     update_slices = _coerce_update_slices(raw.get("update_slices"), local_batch_size=local_batch_size)
     mini_batch_slices_per_update = _coerce_per_update_mini_batch_slices(
         raw.get("mini_batch_slices_per_update"),
         update_slices=update_slices,
-        local_micro_batch_size=local_micro_batch_size,
+        micro_batch_size=micro_batch_size,
     )
 
     return TrainingExecutionPlan(
         local_batch_size=local_batch_size,
-        local_update_batch_size=local_update_batch_size,
-        local_micro_batch_size=local_micro_batch_size,
-        num_updates_per_local_batch=num_updates_per_local_batch,
+        local_mini_batch_size=local_mini_batch_size,
+        micro_batch_size=micro_batch_size,
+        num_updates_per_batch=num_updates_per_batch,
         update_slices=update_slices,
         mini_batch_slices_per_update=mini_batch_slices_per_update,
     )
@@ -217,7 +217,7 @@ class TrainingUpdateSchedule:
         self.plan = coerce_training_execution_plan(plan)
         self.name = (
             "single_update"
-            if int(self.plan.num_updates_per_local_batch) <= 1
+            if int(self.plan.num_updates_per_batch) <= 1
             else "multi_update"
         )
 
@@ -246,7 +246,7 @@ class SingleUpdateSchedule(TrainingUpdateSchedule):
         update_start, update_end = self.plan.update_slices[0]
         yield TrainingUpdateChunk(
             batch=batch.slice(int(update_start), int(update_end)),
-            update_batch_size=int(self.plan.local_update_batch_size),
+            update_batch_size=int(self.plan.local_mini_batch_size),
             update_index=0,
             mini_batch_slices=tuple(
                 (int(start), int(end))
@@ -281,7 +281,7 @@ class MultiUpdateSchedule(TrainingUpdateSchedule):
 def create_training_update_schedule(plan: Any) -> TrainingUpdateSchedule:
     """Create a training update schedule from an explicit execution plan."""
     resolved_plan = coerce_training_execution_plan(plan)
-    if int(resolved_plan.num_updates_per_local_batch) <= 1:
+    if int(resolved_plan.num_updates_per_batch) <= 1:
         return SingleUpdateSchedule(resolved_plan)
     return MultiUpdateSchedule(resolved_plan)
 

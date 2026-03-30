@@ -46,7 +46,7 @@
 #
 # Usage:
 #   bash train_dancegrpo_flux_train_actor_sampling.sh
-#   bash train_dancegrpo_flux_train_actor_sampling.sh --rollout.control.num-rollout 100 --training.local-micro-batch-size 2 --training.num-updates-per-local-batch 2
+#   bash train_dancegrpo_flux_train_actor_sampling.sh --rollout.control.num-rollout 100 --training.micro-batch-size 2 --training.num-updates-per-batch 2
 #
 # =============================================================================
 
@@ -69,8 +69,8 @@ PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/flux.1-dev"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/outputs/dancegrpo_flux_train_sampling"}
 DATA_PATH=${DATA_PATH:-"${REPO_ROOT}/data/samples/ocr_prompts_toy_16.json"}
 NUM_GPUS=${NUM_GPUS:-8}
-LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE-1}
-NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-1}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE-1}
+NUM_UPDATES_PER_BATCH=${NUM_UPDATES_PER_BATCH:-1}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-4}
 LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-32}
@@ -99,8 +99,8 @@ DANCEGRPO_ALGO_KWARG_ARGS=(
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 DIRECT_SAMPLING_BATCH_SIZE=${DIRECT_SAMPLING_BATCH_SIZE:-${ROLLOUT_TOTAL_SAMPLES}}
 LOCAL_MICRO_BATCH_ARGS=()
-if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
-    LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
+if [ -n "${MICRO_BATCH_SIZE}" ]; then
+    LOCAL_MICRO_BATCH_ARGS+=(--training.micro-batch-size "${MICRO_BATCH_SIZE}")
 fi
 
 python -m diffusionrl.train \
@@ -127,7 +127,7 @@ python -m diffusionrl.train \
     "${DANCEGRPO_ALGO_KWARG_ARGS[@]}" \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
-    --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
+    --training.num-updates-per-batch ${NUM_UPDATES_PER_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
     --rollout.topology.mode direct_sampling \

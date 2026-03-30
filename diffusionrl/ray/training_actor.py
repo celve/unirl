@@ -200,9 +200,9 @@ class TrainingActor(BaseTrainRayActor):
         self._resolved_training_plan: Dict[str, Any] = {
             "global_batch_size": int(world_size),
             "local_batch_size": 1,
-            "local_update_batch_size": 1,
-            "local_micro_batch_size": 1,
-            "num_updates_per_local_batch": 1,
+            "local_mini_batch_size": 1,
+            "micro_batch_size": 1,
+            "num_updates_per_batch": 1,
             "update_slices": [[0, 1]],
             "mini_batch_slices_per_update": [[[0, 1]]],
         }
@@ -218,9 +218,9 @@ class TrainingActor(BaseTrainRayActor):
 
         # Training config (read from config in init)
         self._max_grad_norm = 1.0
-        self._local_micro_batch_size = 1
-        self._local_update_batch_size = 1
-        self._num_updates_per_local_batch = 1
+        self._micro_batch_size = 1
+        self._local_mini_batch_size = 1
+        self._num_updates_per_batch = 1
         self._replay_enabled = False
 
         # Sampling support (training-actor sampling mode)
@@ -380,9 +380,9 @@ class TrainingActor(BaseTrainRayActor):
             in {
                 "global_batch_size",
                 "local_batch_size",
-                "local_update_batch_size",
-                "local_micro_batch_size",
-                "num_updates_per_local_batch",
+                "local_mini_batch_size",
+                "micro_batch_size",
+                "num_updates_per_batch",
             }
             else value
             for key, value in dict(self._require_dict_config(config, "training_plan_config")).items()
@@ -415,14 +415,14 @@ class TrainingActor(BaseTrainRayActor):
         # Load training config
         training_config = self._require_dict_config(config, "training_config")
         self._max_grad_norm = float(training_config["max_grad_norm"])
-        self._local_micro_batch_size = int(
-            self._resolved_training_plan["local_micro_batch_size"]
+        self._micro_batch_size = int(
+            self._resolved_training_plan["micro_batch_size"]
         )
-        self._local_update_batch_size = int(
-            self._resolved_training_plan["local_update_batch_size"]
+        self._local_mini_batch_size = int(
+            self._resolved_training_plan["local_mini_batch_size"]
         )
-        self._num_updates_per_local_batch = int(
-            self._resolved_training_plan["num_updates_per_local_batch"]
+        self._num_updates_per_batch = int(
+            self._resolved_training_plan["num_updates_per_batch"]
         )
         self._replay_enabled = bool(training_config["replay_enabled"])
 
@@ -438,9 +438,9 @@ class TrainingActor(BaseTrainRayActor):
             f"Rank {self.rank}: Training actor initialized "
             f"(backend={self._train_backend_name}, "
             f"max_grad_norm={self._max_grad_norm}, "
-            f"local_micro_batch_size={self._local_micro_batch_size}, "
-            f"local_update_batch_size={self._local_update_batch_size}, "
-            f"num_updates_per_local_batch={self._num_updates_per_local_batch}, "
+            f"micro_batch_size={self._micro_batch_size}, "
+            f"local_mini_batch_size={self._local_mini_batch_size}, "
+            f"num_updates_per_batch={self._num_updates_per_batch}, "
             f"training_plan={self._resolved_training_plan})"
         )
         self._log_resource_ids("training_init")
@@ -807,9 +807,9 @@ class TrainingActor(BaseTrainRayActor):
             algorithm_type=self._algorithm_type,
             guidance_scale=self._guidance_scale,
             max_grad_norm=self._max_grad_norm,
-            local_micro_batch_size=self._local_micro_batch_size,
-            local_update_batch_size=self._local_update_batch_size,
-            num_updates_per_local_batch=self._num_updates_per_local_batch,
+            micro_batch_size=self._micro_batch_size,
+            local_mini_batch_size=self._local_mini_batch_size,
+            num_updates_per_batch=self._num_updates_per_batch,
             training_plan=dict(self._resolved_training_plan),
             ema_manager=self._ema_manager,
             shuffle_samples=self._shuffle_samples,

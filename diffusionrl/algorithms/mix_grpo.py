@@ -9,5 +9,4 @@ class MixGRPOAlgorithm(GRPOAlgorithm):
     MixGRPO behavior is now expressed through GRPO's separate
     ``rollout_scheduler`` and ``training_scheduler`` configs.
     """
-
     pass

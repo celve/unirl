@@ -106,8 +106,8 @@ python -m diffusionrl.train \
     --algorithm.shuffle-seed 42 \
     --algorithm.shuffle-samples false \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
-    --training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}" \
-    --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
+    --training.micro-batch-size "${MICRO_BATCH_SIZE}" \
+    --training.num-updates-per-batch ${NUM_UPDATES_PER_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.kwarg clip_range=1e-4 \
     --algorithm.kwarg use_kl_penalty=true \

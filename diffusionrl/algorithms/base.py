@@ -31,8 +31,8 @@ class EMASpec:
     """
 
     enable_eval_ema: bool = True
-    eval_decay: float = 0.9
-    eval_update_interval: int = 1
+    eval_ema_decay: float = 0.9
+    eval_ema_update_interval: int = 1
     reference_mode: str = "none"
     reference_decay: float = 0.0
     reference_decay_type: str = "constant"
@@ -75,7 +75,7 @@ class BaseAlgorithm(ABC):
         self,
         kl_coef: float = 0.01,
         component_mix_stage: str = "reward",
-        adv_normalization: str = "group",
+        adv_normalization_scope: str = "group",
         samples_per_prompt: int = 1,
         num_inference_steps: int = 0,
         eval_ema_decay: float = 0.9,
@@ -83,7 +83,7 @@ class BaseAlgorithm(ABC):
         epsilon: float = 1e-8,
         clip_max: Optional[float] = 5.0,
         use_global_std: bool = False,
-        trimmed_ratio: float = 0.0,
+        trim_outliers_ratio: float = 0.0,
         **kwargs,
     ):
         """
@@ -92,7 +92,7 @@ class BaseAlgorithm(ABC):
         Args:
             kl_coef: KL penalty coefficient
             component_mix_stage: Multi-component reward mixing stage ("reward" or "advantage")
-            adv_normalization: Type of advantage normalization ("global" or "group")
+            adv_normalization_scope: Scope of advantage normalization ("global" or "group")
             samples_per_prompt: Number of rollout samples to generate per prompt
             num_inference_steps: Rollout denoising horizon shared by algorithm logic
             eval_ema_decay: Eval-time EMA decay
@@ -100,12 +100,12 @@ class BaseAlgorithm(ABC):
             epsilon: Small value for numerical stability in advantage normalization
             clip_max: Maximum advantage value for clipping (None to disable)
             use_global_std: Use global std instead of per-group std
-            trimmed_ratio: Ratio of outliers trimmed from each side for grouped stats
+            trim_outliers_ratio: Ratio of outliers trimmed from each side for grouped stats
             **kwargs: Additional algorithm-specific arguments
         """
         self.kl_coef = kl_coef
         self.component_mix_stage = str(component_mix_stage)
-        self.adv_normalization = adv_normalization
+        self.adv_normalization_scope = adv_normalization_scope
         self.samples_per_prompt = max(1, int(samples_per_prompt))
         self.num_inference_steps = max(0, int(num_inference_steps))
         self.eval_ema_decay = float(eval_ema_decay)
@@ -113,7 +113,7 @@ class BaseAlgorithm(ABC):
         self.epsilon = epsilon
         self.clip_max = clip_max
         self.use_global_std = use_global_std
-        self.trimmed_ratio = max(0.0, min(float(trimmed_ratio), 0.49))
+        self.trim_outliers_ratio = max(0.0, min(float(trim_outliers_ratio), 0.49))
         self._extra_kwargs = kwargs
 
     # ------------------------------------------------------------------
@@ -170,7 +170,7 @@ class BaseAlgorithm(ABC):
         Compute advantages from rewards.
 
         Dispatches to the appropriate normalization method based on
-        ``self.adv_normalization`` ("global" or "group").
+        ``self.adv_normalization_scope`` ("global" or "group").
 
         Args:
             rewards: Reward tensor [batch_size]
@@ -179,15 +179,13 @@ class BaseAlgorithm(ABC):
         Returns:
             Advantage tensor [batch_size]
         """
-        if self.adv_normalization == "global":
+        if self.adv_normalization_scope == "global":
             return self._normalize_global(rewards)
-        elif self.adv_normalization == "group":
+        else: 
             return self._normalize_group(
                 rewards,
                 group_ids=group_ids,
             )
-        else:
-            raise ValueError(f"Unknown adv_normalization: {self.adv_normalization}")
 
     @staticmethod
     def _normalize_group_id(group_id: Any) -> Optional[str]:  # [HELPER]
@@ -202,7 +200,7 @@ class BaseAlgorithm(ABC):
             group_id = self._normalize_group_id(raw_group_id)
             if group_id is None:
                 raise ValueError(
-                    "adv_normalization='group' requires a non-empty group_id for every sample. "
+                    "adv_normalization_scope='group' requires a non-empty group_id for every sample. "
                     f"Found invalid group_id at sample_idx={sample_idx}."
                 )
             normalized.append(group_id)
@@ -235,7 +233,7 @@ class BaseAlgorithm(ABC):
             if len(invalid_groups) > 5:
                 formatted = f"{formatted}, ..."
             raise ValueError(
-                "adv_normalization='group' requires every sample group to contain exactly "
+                "adv_normalization_scope='group' requires every sample group to contain exactly "
                 "algorithm.samples_per_prompt samples. "
                 f"Got algorithm.samples_per_prompt={expected_group_size}; "
                 f"invalid group sizes: {formatted}."
@@ -263,12 +261,12 @@ class BaseAlgorithm(ABC):
                     groups,
                     epsilon=self.epsilon,
                     clip_max=self.clip_max,
-                    trimmed_ratio=self.trimmed_ratio,
+                    trim_outliers_ratio=self.trim_outliers_ratio,
                     use_global_std=self.use_global_std,
                 )
 
         raise ValueError(
-            "adv_normalization='group' requires explicit group_ids aligned to the reward batch. "
+            "adv_normalization_scope='group' requires explicit group_ids aligned to the reward batch. "
             f"Got batch_size={batch_size}, "
             f"group_ids_len={len(group_ids) if group_ids is not None else None}."
         )
@@ -478,7 +476,7 @@ class BaseAlgorithm(ABC):
             "algorithm_type": self.__class__.__name__,
             "kl_coef": self.kl_coef,
             "component_mix_stage": self.component_mix_stage,
-            "adv_normalization": self.adv_normalization,
+            "adv_normalization_scope": self.adv_normalization_scope,
             **self._extra_kwargs,
         }
 
@@ -487,5 +485,5 @@ class BaseAlgorithm(ABC):
             f"{self.__class__.__name__}("
             f"kl_coef={self.kl_coef}, "
             f"component_mix_stage={self.component_mix_stage}, "
-            f"adv_normalization={self.adv_normalization})"
+            f"adv_normalization_scope={self.adv_normalization_scope})"
         )

@@ -38,9 +38,9 @@ class TrainExecutorConfig:
     algorithm_type: str
     guidance_scale: float
     max_grad_norm: float
-    local_micro_batch_size: int
-    local_update_batch_size: int
-    num_updates_per_local_batch: int
+    micro_batch_size: int
+    local_mini_batch_size: int
+    num_updates_per_batch: int
     training_plan: Dict[str, Any]
     ema_manager: Optional[Any]
     shuffle_samples: bool = True
@@ -189,9 +189,9 @@ class TrainExecutor:
         last_mini_batches_per_update = 1
         total_mini_batches_consumed = 0
         optimizer_steps = 0
-        last_effective_update_batch_size = int(self.config.local_update_batch_size)
-        last_effective_local_micro_batch_size = int(
-            self.config.local_micro_batch_size
+        last_effective_mini_batch_size = int(self.config.local_mini_batch_size)
+        last_effective_micro_batch_size = int(
+            self.config.micro_batch_size
         )
         training_schedule = self.update_schedule.name
 
@@ -267,10 +267,9 @@ class TrainExecutor:
                 )
 
             last_mini_batches_per_update = total_mini_batches_this_update
-            last_effective_update_batch_size = int(update_chunk.update_batch_size)
+            last_effective_mini_batch_size = int(update_chunk.update_batch_size)
             total_mini_batches_consumed += total_mini_batches_this_update
             total_timesteps += update_num_timesteps
-
             step_metrics = {
                 "loss": total_loss,
                 "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
@@ -294,11 +293,11 @@ class TrainExecutor:
                 "rollout_id": rollout_id,
                 "algorithm_type": self.config.algorithm_type,
                 "training_schedule": training_schedule,
-                "configured_local_micro_batch_size": self.config.local_micro_batch_size,
-                "configured_local_update_batch_size": self.config.local_update_batch_size,
-                "configured_num_updates_per_local_batch": self.config.num_updates_per_local_batch,
-                "effective_local_micro_batch_size": last_effective_local_micro_batch_size,
-                "effective_local_update_batch_size": last_effective_update_batch_size,
+                "configured_micro_batch_size": self.config.micro_batch_size,
+                "configured_local_mini_batch_size": self.config.local_mini_batch_size,
+                "configured_num_updates_per_batch": self.config.num_updates_per_batch,
+                "effective_micro_batch_size": last_effective_micro_batch_size,
+                "effective_local_mini_batch_size": last_effective_mini_batch_size,
                 "num_timesteps_trained": total_timesteps,
                 "mini_batches_per_update": last_mini_batches_per_update,
                 "mini_batches_consumed": total_mini_batches_consumed,

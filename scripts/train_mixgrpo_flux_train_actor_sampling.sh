@@ -39,7 +39,7 @@
 #
 # NOTE:
 # - Core MixGRPO knobs used here are implemented in diffusionrl
-#   (window scheduler / sde_ratio / trimmed_ratio / skip_last_timestep / skip_initial_timesteps).
+#   (window scheduler / sde_ratio / trim_outliers_ratio / skip_last_timestep / skip_initial_timesteps).
 # - This script remains an approximate reproduction because reward stack,
 #   dataset, and model initialization may differ from the upstream project.
 #
@@ -48,7 +48,7 @@
 #
 # Usage:
 #   bash train_mixgrpo_flux_train_actor_sampling.sh
-#   bash train_mixgrpo_flux_train_actor_sampling.sh --rollout.control.num-rollout 100 --training.local-micro-batch-size 2 --training.num-updates-per-local-batch 2
+#   bash train_mixgrpo_flux_train_actor_sampling.sh --rollout.control.num-rollout 100 --training.micro-batch-size 2 --training.num-updates-per-batch 2
 #
 # =============================================================================
 
@@ -110,8 +110,8 @@ MIXGRPO_ALGO_KWARG_ARGS=(
 )
 
 # Training
-NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-4}
-LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE:-4}
+NUM_UPDATES_PER_BATCH=${NUM_UPDATES_PER_BATCH:-4}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-4}
 
 
 python -m diffusionrl.train \
@@ -152,17 +152,17 @@ python -m diffusionrl.train \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
     \
     --training.learning-rate 1e-4 \
-    --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
-    --training.local-micro-batch-size ${LOCAL_MICRO_BATCH_SIZE} \
+    --training.num-updates-per-batch ${NUM_UPDATES_PER_BATCH} \
+    --training.micro-batch-size ${MICRO_BATCH_SIZE} \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.lora-rank 64 \
     --training.lora-alpha 128 \
     --training.use-lora true \
     \
-    --precision.training.model-precision fp32 \
-    --precision.training.autocast-precision bf16 \
-    --precision.rollout.autocast-precision bf16 \
+    --precision.model-precision fp32 \
+    --precision.training-autocast-precision bf16 \
+    --precision.rollout-autocast-precision bf16 \
     \
     --height 720 \
     --width 720 \

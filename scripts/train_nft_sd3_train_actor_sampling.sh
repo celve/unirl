@@ -28,7 +28,7 @@
 # - num_inference_steps=10 (training steps, NOT 40)
 # - guidance_scale=1.0 (no CFG during training)
 # - periodic eval: 40 steps, default adapter, deterministic flow solver
-# - adv_normalization=group
+# - adv_normalization_scope=group
 # - algorithm_kwargs.train_timestep_mode=all (DiffusionNFT uses full timestep schedule)
 # - adv_mode=raw
 # - EMA decay: warmup curve (decay_type=2 in original)
@@ -47,7 +47,7 @@
 #
 # Usage:
 #   bash train_nft_sd3_train_actor_sampling.sh
-#   bash train_nft_sd3_train_actor_sampling.sh --rollout.control.num-rollout 100 --training.local-micro-batch-size 2
+#   bash train_nft_sd3_train_actor_sampling.sh --rollout.control.num-rollout 100 --training.micro-batch-size 2
 #
 # =============================================================================
 
@@ -75,7 +75,7 @@ TOTAL_GPUS=$(( TRAINING_NUM_NODES * TRAINING_GPUS_PER_NODE ))
 RAY_ADDRESS=${RAY_ADDRESS:-}
 RAY_PLACEMENT_STRATEGY=${RAY_PLACEMENT_STRATEGY:-SPREAD}
 WEIGHT_SYNC_DIR=${WEIGHT_SYNC_DIR:-}
-LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE-3}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE-3}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-24}
 REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
 WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
@@ -119,8 +119,8 @@ NFT_ALGO_KWARG_ARGS=(
 )
 
 LOCAL_MICRO_BATCH_ARGS=()
-if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
-    LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
+if [ -n "${MICRO_BATCH_SIZE}" ]; then
+    LOCAL_MICRO_BATCH_ARGS+=(--training.micro-batch-size "${MICRO_BATCH_SIZE}")
 fi
 
 if [ ! -d "${PRETRAINED_MODEL}" ] && [ -d "${REPO_ROOT}/${PRETRAINED_MODEL}" ]; then

@@ -14,13 +14,13 @@ Training geometry is rollout-driven only:
 - ``algorithm.prompts_per_rollout`` and ``algorithm.samples_per_prompt`` define
   the global rollout batch.
 - local training batch size is derived from the resolved training topology.
-- ``training.num_updates_per_local_batch`` shapes how one resolved local batch
+- ``training.num_updates_per_batch`` shapes how one resolved local batch
   is split into optimizer updates.
-- ``training.local_update_batch_size`` is always derived as
-  ``local_batch_size / num_updates_per_local_batch``.
-- ``training.local_micro_batch_size`` only controls micro-step slicing inside
-  one local update batch and must evenly divide the resolved
-  ``training.local_update_batch_size``.
+- ``training.local_mini_batch_size`` is always derived as
+  ``local_batch_size / num_updates_per_batch``.
+- ``training.micro_batch_size`` only controls micro-step slicing inside
+  one local mini-batch and must evenly divide the resolved
+  ``training.local_mini_batch_size``.
 """
 
 from __future__ import annotations
@@ -163,9 +163,9 @@ class TrainingPlan:
 
     global_batch_size: int
     local_batch_size: int
-    local_update_batch_size: int
-    local_micro_batch_size: int
-    num_updates_per_local_batch: int
+    local_mini_batch_size: int
+    micro_batch_size: int
+    num_updates_per_batch: int
     update_slices: Tuple[Tuple[int, int], ...]
     mini_batch_slices_per_update: Tuple[Tuple[Tuple[int, int], ...], ...]
 
@@ -173,9 +173,9 @@ class TrainingPlan:
         return {
             "global_batch_size": self.global_batch_size,
             "local_batch_size": self.local_batch_size,
-            "local_update_batch_size": self.local_update_batch_size,
-            "local_micro_batch_size": self.local_micro_batch_size,
-            "num_updates_per_local_batch": self.num_updates_per_local_batch,
+            "local_mini_batch_size": self.local_mini_batch_size,
+            "micro_batch_size": self.micro_batch_size,
+            "num_updates_per_batch": self.num_updates_per_batch,
             "update_slices": [
                 [start, end]
                 for start, end in self.update_slices
@@ -613,12 +613,12 @@ def derive_training_topology(
         dp_shard_size=actor_count,
     )
 
-def derive_num_updates_per_local_batch(args: Any) -> int:
-    raw = args.training.num_updates_per_local_batch
+def derive_num_updates_per_batch(args: Any) -> int:
+    raw = args.training.num_updates_per_batch
     if raw is None:
         return 1
     return _require_positive_int(
-        name="training.num_updates_per_local_batch",
+        name="training.num_updates_per_batch",
         value=raw,
     )
 
@@ -661,32 +661,32 @@ def derive_training_plan(
         args,
         training_topology=training_topology,
     )
-    num_updates_per_local_batch = derive_num_updates_per_local_batch(args)
-    update_batch_size = local_batch_size // num_updates_per_local_batch
-    raw_micro_batch_size = args.training.local_micro_batch_size
+    num_updates_per_batch = derive_num_updates_per_batch(args)
+    mini_batch_size = local_batch_size // num_updates_per_batch
+    raw_micro_batch_size = args.training.micro_batch_size
     micro_batch_size = (
-        update_batch_size
+        mini_batch_size
         if raw_micro_batch_size is None
         else int(raw_micro_batch_size)
     )
     update_slices = tuple(
-        (update_index * update_batch_size, (update_index + 1) * update_batch_size)
-        for update_index in range(num_updates_per_local_batch)
+        (update_index * mini_batch_size, (update_index + 1) * mini_batch_size)
+        for update_index in range(num_updates_per_batch)
     )
     mini_batch_slices_per_update = tuple(
         _build_relative_slices(
-            total_size=update_batch_size,
+            total_size=mini_batch_size,
             chunk_size=micro_batch_size,
         )
-        for _ in range(num_updates_per_local_batch)
+        for _ in range(num_updates_per_batch)
     )
 
     return TrainingPlan(
         global_batch_size=global_batch_size,
         local_batch_size=local_batch_size,
-        local_update_batch_size=update_batch_size,
-        local_micro_batch_size=micro_batch_size,
-        num_updates_per_local_batch=num_updates_per_local_batch,
+        local_mini_batch_size=mini_batch_size,
+        micro_batch_size=micro_batch_size,
+        num_updates_per_batch=num_updates_per_batch,
         update_slices=update_slices,
         mini_batch_slices_per_update=mini_batch_slices_per_update,
     )
@@ -769,7 +769,7 @@ __all__ = [
     "collect_sampling_requirements",
     "derive_global_rollout_batch_size",
     "derive_model_spec",
-    "derive_num_updates_per_local_batch",
+    "derive_num_updates_per_batch",
     "derive_rollout_actor_gpu_count",
     "derive_rollout_gpu_pool_size",
     "derive_sampling_host_engine_type",

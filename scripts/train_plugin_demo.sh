@@ -57,7 +57,7 @@ python -m diffusionrl.train \
     \
     "${PLUGIN_ALGO_KWARG_ARGS[@]}" \
     --algorithm.prompts-per-rollout 1 \
-    --training.local-micro-batch-size 1 \
+    --training.micro-batch-size 1 \
     --algorithm.samples-per-prompt 2 \
     \
     --rollout.topology.mode direct_sampling \

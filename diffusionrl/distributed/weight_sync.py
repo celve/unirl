@@ -35,9 +35,9 @@ def _resolve_target_modules(args: Any) -> list[str]:
 
 
 def _resolve_bucket_size_mb(args: Any) -> int:
-    bucket_size_mb = int(args.sync.bucket_mb)
+    bucket_size_mb = int(args.sync.bucket_size)
     if bucket_size_mb < 1:
-        raise ValueError(f"sync.bucket_mb must be >= 1, got {bucket_size_mb}.")
+        raise ValueError(f"sync.bucket_size must be >= 1, got {bucket_size_mb}.")
     return bucket_size_mb
 
 

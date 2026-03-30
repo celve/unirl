@@ -20,11 +20,11 @@
 #
 #   # Pass through extra diffusionrl CLI overrides:
 #   bash reproduce_scripts/train_nft_sd3_multinode.sh auto \
-#       --rollout.control.num-rollout 100 --training.local-micro-batch-size 6
+#       --rollout.control.num-rollout 100 --training.micro-batch-size 6
 #
 # Key alignment with original DiffusionNFT:
 #   algorithm_type=nft, beta=1.0, kl_coef=0.0001, sde_type=dpm2,
-#   num_inference_steps=10, guidance_scale=1.0, adv_normalization=group,
+#   num_inference_steps=10, guidance_scale=1.0, adv_normalization_scope=group,
 #   train_timestep_mode=all, sampling_adapter=old, LoRA rank=32 alpha=64
 #
 # =============================================================================
@@ -155,8 +155,8 @@ wait_for_workers() {
 run_training() {
 
     local micro_batch_args=()
-    if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
-        micro_batch_args+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
+    if [ -n "${MICRO_BATCH_SIZE}" ]; then
+        micro_batch_args+=(--training.micro-batch-size "${MICRO_BATCH_SIZE}")
     fi
 
     local wandb_entity_args=()
@@ -209,7 +209,7 @@ run_training() {
         \
         --algorithm.prompts-per-rollout "${PROMPTS_PER_BATCH}" \
         "${micro_batch_args[@]}" \
-        --training.num-updates-per-local-batch "${NUM_UPDATES_PER_LOCAL_BATCH}" \
+        --training.num-updates-per-batch "${NUM_UPDATES_PER_BATCH}" \
         --algorithm.samples-per-prompt "${NUM_SAMPLES_PER_PROMPT}" \
         --algorithm.kwarg clip_range=1e-4 \
         --algorithm.kwarg kl_coef=0.0 \

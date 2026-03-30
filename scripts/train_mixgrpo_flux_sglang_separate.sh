@@ -49,7 +49,7 @@ TRAINING_GPUS=${TRAINING_GPUS:-4}
 # Rollout
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-32}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-12}
-NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-4}
+NUM_UPDATES_PER_BATCH=${NUM_UPDATES_PER_BATCH:-4}
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 
 # Rollout (sglang engine)
@@ -79,7 +79,7 @@ MIXGRPO_ALGO_KWARG_ARGS=(
 )
 
 # Training
-LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE-4}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE-4}
 
 
 python -m diffusionrl.train \
@@ -120,8 +120,8 @@ python -m diffusionrl.train \
     --ray.placement-strategy SPREAD \
     \
     --training.learning-rate 1e-5 \
-    --training.local-micro-batch-size ${LOCAL_MICRO_BATCH_SIZE} \
-    --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
+    --training.micro-batch-size ${MICRO_BATCH_SIZE} \
+    --training.num-updates-per-batch ${NUM_UPDATES_PER_BATCH} \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.lora-rank 64 \

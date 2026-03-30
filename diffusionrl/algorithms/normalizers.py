@@ -10,7 +10,7 @@ def normalize_grouped(
     group_indices: List[List[int]],
     epsilon: float = 1e-8,
     clip_max: Optional[float] = None,
-    trimmed_ratio: float = 0.0,
+    trim_outliers_ratio: float = 0.0,
     use_global_std: bool = False,
 ) -> torch.Tensor:
     """Unified grouped normalization - single implementation for all group-based strategies.
@@ -23,7 +23,7 @@ def normalize_grouped(
         group_indices: List of index lists, each defining a group
         epsilon: Small value for numerical stability
         clip_max: If set, clip advantages to [-clip_max, clip_max]
-        trimmed_ratio: Ratio of samples to trim from each end when computing stats
+        trim_outliers_ratio: Ratio of samples to trim from each end when computing stats
         use_global_std: If True, use global std for all groups
 
     Returns:
@@ -38,9 +38,9 @@ def normalize_grouped(
 
         group_rewards = rewards[indices]
 
-        if trimmed_ratio > 0 and len(indices) > 2:
+        if trim_outliers_ratio > 0 and len(indices) > 2:
             sorted_rewards, _ = torch.sort(group_rewards)
-            trim_size = int(len(sorted_rewards) * trimmed_ratio)
+            trim_size = int(len(sorted_rewards) * trim_outliers_ratio)
             if trim_size > 0 and trim_size * 2 < len(sorted_rewards):
                 trimmed = sorted_rewards[trim_size:-trim_size]
             else:
