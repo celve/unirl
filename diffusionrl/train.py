@@ -119,6 +119,8 @@ def _produce_and_push_rollout(
         advantages=advantages,
     )
     metadata = dict(rollout_result.metadata or {})
+    if rollout_result.reward_components:
+        metadata["reward_components"] = dict(rollout_result.reward_components)
 
     if debug_save_intermediates:
         debug_payload = dict(context.debug_trace or {})
@@ -137,6 +139,7 @@ def _produce_and_push_rollout(
             rollout_buffer=rollout_buffer,
             rollout_id=rollout_id,
             training_batch=debug_payload["training_batch"],
+            metadata=dict(metadata or {}),
         )
         if save_rollout_debug_payload is not None:
             save_rollout_debug_payload(

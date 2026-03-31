@@ -310,6 +310,8 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
                 f"Got type={type(rollout_result)}"
             )
         rollout_metadata = dict(rollout_result.metadata or {})
+        if rollout_result.reward_components:
+            rollout_metadata["reward_components"] = dict(rollout_result.reward_components)
         advantages = services.compute_advantages(
             rewards=rollout_result.rewards,
             group_ids=rollout_result.request.meta.get("group_ids"),

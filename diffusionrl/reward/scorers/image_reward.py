@@ -52,12 +52,7 @@ class ImageRewardScorer(BaseLocalRewardScorer):
                 pil_img = Image.fromarray(img).convert("RGB")
 
             with torch.no_grad():
-                # inference_rank returns (ranking_list, reward_list)
-                _, reward = self.model.inference_rank(prompt, [pil_img])
-                if isinstance(reward, list):
-                    score = float(reward[0])
-                else:
-                    score = float(reward)
+                score = float(self.model.score(prompt, pil_img))
                 # Normalize to ~[0, 1]: raw scores typically in [-2, +2]
                 score = (score + 2.0) / 4.0
                 all_rewards.append(score)
