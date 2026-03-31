@@ -54,18 +54,16 @@ ray:
   placement_strategy: SPREAD
 
 rollout:
-  topology:
-    mode: separate
-    rollout_engine: sglang
-    num_gpus_per_actor: 1
-    tp_size: 1
-  control:
-    num_rollout: 300
-  artifacts:
-    save_steps: 40
-    output_dir: outputs/scripts_example_flux_dancegrpo_sglang_separate
-  logging:
-    logging_steps: 10
+  mode: separate
+  rollout_engine: sglang
+  num_gpus_per_actor: 1
+  tp_size: 1
+  num_rollout: 300
+  save_steps: 40
+  output_dir: outputs/scripts_example_flux_dancegrpo_sglang_separate
+
+logging:
+  logging_steps: 10
 
 sync:
   protocol: tensor_payload

@@ -87,10 +87,10 @@ def create_rollout_actor_group(
         ray_num_gpus = 0.5  # Fractional claim to satisfy Ray scheduler
         if available_rollout_bundles % actual_gpus_per_engine != 0:
             raise ValueError(
-                "Placement-group rollout bundle count must be divisible by rollout.topology.num_gpus_per_actor "
+                "Placement-group rollout bundle count must be divisible by rollout.num_gpus_per_actor "
                 "for multi-GPU rollout actors. "
                 f"Available rollout bundles: {available_rollout_bundles}, "
-                f"rollout.topology.num_gpus_per_actor: {actual_gpus_per_engine}."
+                f"rollout.num_gpus_per_actor: {actual_gpus_per_engine}."
             )
         num_actors = available_rollout_bundles // actual_gpus_per_engine
 

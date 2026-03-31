@@ -70,7 +70,7 @@ def normalize_rollout_engine(value: Any) -> Optional[str]:
     normalized = normalize_engine_type(value)
     if normalized and normalized not in ROLLOUT_ENGINE_TYPES:
         raise ValueError(
-            "rollout.topology.rollout_engine must be one of "
+            "rollout.rollout_engine must be one of "
             f"{sorted(ROLLOUT_ENGINE_TYPES)}, got: {value!r}"
         )
     return normalized or None
@@ -317,27 +317,27 @@ def _resolve_rollout_mode_value(value: Any) -> str:
     normalized = normalize_rollout_mode(value)
     if not normalized:
         raise ValueError(
-            "rollout.topology.mode must be set explicitly. "
+            "rollout.mode must be set explicitly. "
             "Implicit rollout topology derivation has been removed."
         )
     if normalized not in ROLLOUT_MODES:
         raise ValueError(
-            "rollout.topology.mode must be one of "
+            "rollout.mode must be one of "
             f"{sorted(ROLLOUT_MODES)}, got: {value!r}"
         )
     return normalized
 
 
 def derive_rollout_topology(args: Any) -> RolloutTopology:
-    rollout_topology_config = args.rollout.topology
-    rollout_mode = _resolve_rollout_mode_value(rollout_topology_config.mode)
+    rollout_config = args.rollout
+    rollout_mode = _resolve_rollout_mode_value(rollout_config.mode)
     rollout_engine = normalize_rollout_engine(
-        rollout_topology_config.rollout_engine
+        rollout_config.rollout_engine
     )
     if rollout_mode == DIRECT_ROLLOUT_MODE and rollout_engine is not None:
         raise ValueError(
             "direct_sampling is the only public direct-sampling selector. "
-            "Leave rollout.topology.rollout_engine unset in direct_sampling mode."
+            "Leave rollout.rollout_engine unset in direct_sampling mode."
         )
     return RolloutTopology(
         mode=rollout_mode,
@@ -422,34 +422,34 @@ def derive_sampling_host_engine_type(
     rollout_engine = resolved_mode_info.rollout_topology.rollout_engine
     if not rollout_engine:
         raise ValueError(
-            "Dedicated rollout sampling requires rollout.topology.rollout_engine to be set."
+            "Dedicated rollout sampling requires rollout.rollout_engine to be set."
         )
     return rollout_engine
 
 
 def require_rollout_num_gpus_per_actor(args: Any) -> int:
     """Require explicit dedicated rollout GPU ownership when a service is used."""
-    rollout_topology_config = args.rollout.topology
-    rollout_mode = _resolve_rollout_mode_value(rollout_topology_config.mode)
+    rollout_config = args.rollout
+    rollout_mode = _resolve_rollout_mode_value(rollout_config.mode)
     if not rollout_mode_uses_service(rollout_mode):
         return 0
 
-    raw_num_gpus = rollout_topology_config.num_gpus_per_actor
+    raw_num_gpus = rollout_config.num_gpus_per_actor
     if raw_num_gpus is None:
         raise ValueError(
-            "Dedicated rollout services require rollout.topology.num_gpus_per_actor to be set explicitly. "
+            "Dedicated rollout services require rollout.num_gpus_per_actor to be set explicitly. "
             "Do not infer actor GPU ownership from tp/sp parallel hints."
         )
     try:
         resolved = int(raw_num_gpus)
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            "rollout.topology.num_gpus_per_actor must be an integer >= 1, "
+            "rollout.num_gpus_per_actor must be an integer >= 1, "
             f"got: {raw_num_gpus!r}"
         ) from exc
     if resolved < 1:
         raise ValueError(
-            "rollout.topology.num_gpus_per_actor must be >= 1 for dedicated rollout services, "
+            "rollout.num_gpus_per_actor must be >= 1 for dedicated rollout services, "
             f"got: {resolved}"
         )
     return resolved
@@ -466,8 +466,8 @@ def derive_rollout_actor_gpu_count(
         return 0
     if not resolved_topology.rollout_engine:
         raise ValueError(
-            "rollout.topology.mode requires a dedicated rollout service, but "
-            "rollout.topology.rollout_engine is unset."
+            "rollout.mode requires a dedicated rollout service, but "
+            "rollout.rollout_engine is unset."
         )
     return require_rollout_num_gpus_per_actor(args)
 

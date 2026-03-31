@@ -47,7 +47,7 @@
 #
 # Usage:
 #   bash train_nft_sd3_train_actor_sampling.sh
-#   bash train_nft_sd3_train_actor_sampling.sh --rollout.control.num-rollout 100 --training.micro-batch-size 2
+#   bash train_nft_sd3_train_actor_sampling.sh --rollout.num-rollout 100 --training.micro-batch-size 2
 #
 # =============================================================================
 
@@ -158,7 +158,7 @@ python -m diffusionrl.train \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
-    --rollout.topology.mode direct_sampling \
+    --rollout.mode direct_sampling \
 --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     "${RAY_ADDRESS_ARGS[@]}" \
     --ray.rollout-num-nodes 0 \
@@ -178,17 +178,17 @@ python -m diffusionrl.train \
     --height 512 \
     --width 512 \
     \
-    --rollout.control.num-rollout 1000 \
-    --rollout.artifacts.save-steps 60 \
-    --rollout.evaluation.eval-steps 60 \
-    --rollout.evaluation.num-inference-steps 40 \
-    --rollout.evaluation.sampling-adapter default \
-    --rollout.evaluation.sde-type flow \
-    --rollout.evaluation.eta 0.0 \
-    --rollout.logging.logging-steps 10 \
-    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
-    --rollout.logging.report-to-wandb ${REPORT_TO_WANDB} \
-    --rollout.logging.project-name "${WANDB_PROJECT_NAME}" \
-    --rollout.logging.run-name "${WANDB_RUN_NAME}" \
+    --rollout.num-rollout 1000 \
+    --rollout.save-steps 60 \
+    --evaluation.eval-steps 60 \
+    --evaluation.num-inference-steps 40 \
+    --evaluation.sampling-adapter default \
+    --evaluation.sde-type flow \
+    --evaluation.eta 0.0 \
+    --logging.logging-steps 10 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
+    --logging.report-to-wandb ${REPORT_TO_WANDB} \
+    --logging.project-name "${WANDB_PROJECT_NAME}" \
+    --logging.run-name "${WANDB_RUN_NAME}" \
     --sync.protocol disabled \
     "$@"

@@ -51,15 +51,13 @@ ray:
   placement_strategy: PACK
 
 rollout:
-  topology:
-    mode: direct_sampling
-  control:
-    num_rollout: 202
-  artifacts:
-    save_steps: 50
-    output_dir: outputs/dancegrpo_hunyuan_direct
-  logging:
-    logging_steps: 1
+  mode: direct_sampling
+  num_rollout: 202
+  save_steps: 50
+  output_dir: outputs/dancegrpo_hunyuan_direct
+
+logging:
+  logging_steps: 1
 
 sync:
   protocol: disabled

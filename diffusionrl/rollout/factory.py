@@ -70,7 +70,7 @@ def create_rollout_services(
         max_samples_per_request=args.sampling.max_samples_per_request,
         reward_component_weights=reward_schema.component_weights(),
         prompt_batch_size=prompt_batch_size,
-        evaluation_settings=args.rollout.evaluation,
+        evaluation_settings=args.evaluation,
         sampler_validation_config=sampler_validation_config,
         sampling_config=sampling_config,
         sampling_requirements=sampling_requirements,

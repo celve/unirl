@@ -192,7 +192,7 @@ class RolloutActor:
         if value is None:
             return None
         text = str(value).strip().lower()
-        if text in {"", "none", "off", "disable", "disabled", "fp32", "float32"}:
+        if text in {"", "none", "off", "disable", "disabled", "fp32", "float32", "float"}:
             return None
         if text in {"fp16", "float16", "half"}:
             return torch.float16
@@ -710,7 +710,7 @@ class RolloutActor:
         if not sampler_engine_type:
             raise ValueError(
                 "sampler_engine_type must be provided in engine_runtime_config. "
-                "This should be resolved from rollout.topology.rollout_engine before actor init."
+                "This should be resolved from rollout.rollout_engine before actor init."
             )
         if not uses_dedicated_rollout_engine(sampler_engine_type):
             raise ValueError(

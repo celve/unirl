@@ -20,7 +20,7 @@
 #
 #   # Pass through extra diffusionrl CLI overrides:
 #   bash reproduce_scripts/train_nft_sd3_multinode.sh auto \
-#       --rollout.control.num-rollout 100 --training.micro-batch-size 6
+#       --rollout.num-rollout 100 --training.micro-batch-size 6
 #
 # Key alignment with original DiffusionNFT:
 #   algorithm_type=nft, beta=1.0, kl_coef=0.0001, sde_type=dpm2,
@@ -161,7 +161,7 @@ run_training() {
 
     local wandb_entity_args=()
     if [ -n "${WANDB_ENTITY}" ]; then
-        wandb_entity_args+=(--rollout.logging.wandb-entity "${WANDB_ENTITY}")
+        wandb_entity_args+=(--logging.entity "${WANDB_ENTITY}")
     fi
 
     mkdir -p "${OUTPUT_DIR}"
@@ -219,7 +219,7 @@ run_training() {
         --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}" \
         --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}" \
         \
-        --rollout.topology.mode direct_sampling \
+        --rollout.mode direct_sampling \
         --sync.protocol disabled \
         --ray.rollout-num-nodes 0 \
         --ray.rollout-num-gpus-per-node 0 \
@@ -240,17 +240,17 @@ run_training() {
         --height 512 \
         --width 512 \
         \
-        --rollout.control.num-rollout 10000 \
-        --rollout.artifacts.save-steps 0 \
-        --rollout.evaluation.eval-steps ${EVAL_STEPS} \
-        --rollout.logging.logging-steps "${LOGGING_STEPS}" \
-        --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
-        --rollout.logging.report-to-wandb "${REPORT_TO_WANDB}" \
-        --rollout.logging.project-name "${WANDB_PROJECT_NAME}" \
-        --rollout.logging.run-name "${WANDB_RUN_NAME}" \
-        --rollout.logging.wandb-log-media "${WANDB_LOG_MEDIA}" \
-        --rollout.logging.wandb-media-max-items "${WANDB_MEDIA_MAX_ITEMS}" \
-        --rollout.logging.wandb-tags "${WANDB_TAGS}" \
+        --rollout.num-rollout 10000 \
+        --rollout.save-steps 0 \
+        --evaluation.eval-steps ${EVAL_STEPS} \
+        --logging.logging-steps "${LOGGING_STEPS}" \
+        --rollout.output-dir "${OUTPUT_DIR}" \
+        --logging.report-to-wandb "${REPORT_TO_WANDB}" \
+        --logging.project-name "${WANDB_PROJECT_NAME}" \
+        --logging.run-name "${WANDB_RUN_NAME}" \
+        --logging.log-media "${WANDB_LOG_MEDIA}" \
+        --logging.media-max-items "${WANDB_MEDIA_MAX_ITEMS}" \
+        --logging.tags "${WANDB_TAGS}" \
         "${wandb_entity_args[@]}" \
         "$@"
 }

@@ -155,11 +155,7 @@ def _produce_and_push_rollout(
     )
 
 
-<<<<<<< HEAD
 def train(args):  # [PUBLIC-API → main()] sync entrypoint
-=======
-def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步训练循环
->>>>>>> a15271a (refactor configs)
     """Synchronous training entrypoint."""
     debug_mode = str(args.debug.debug_mode or "none").strip().lower()
     if debug_mode == "train_only":
@@ -205,9 +201,9 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
     logger.info("Weight sync mode: %s", sync_mode)
     logger.info(
         "Periodic controls: save_steps=%s eval_steps=%s logging_steps=%s",
-        rollout_artifacts.save_steps,
-        rollout_evaluation.eval_steps,
-        rollout_logging.logging_steps,
+        args.rollout.save_steps,
+        args.evaluation.eval_steps,
+        args.logging.logging_steps,
     )
     logger.info(
         "Debug flags: mode=%s save_intermediates=%s save_dir=%s",
@@ -237,30 +233,28 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
     weight_sync = create_weight_sync(args, launch_config, mode=sync_mode)
 
     try:
-        if rollout_logging.report_to_wandb and rollout_logging.project_name:
+        if args.logging.report_to_wandb and args.logging.project_name:
             wandb_tags = (
-                [t.strip() for t in rollout_logging.wandb_tags.split(",") if t.strip()]
-                if rollout_logging.wandb_tags
+                [t.strip() for t in args.logging.tags.split(",") if t.strip()]
+                if args.logging.tags
                 else None
             )
-
-            wandb_entity = rollout_logging.wandb_entity or None
             wandb_logger = init_logger(
-                project=rollout_logging.project_name,
-                run_name=rollout_logging.run_name,
+                project=args.logging.project_name,
+                run_name=args.logging.run_name,
                 config=build_resolved_config_view(args),
-                log_dir=rollout_logging.logging_dir,
+                log_dir=args.logging.logging_dir,
                 rank=0,
                 tags=wandb_tags,
-                entity=wandb_entity,
+                entity=args.logging.entity or None,
                 require_success=True,
             )
 
             if wandb_logger.initialized:
                 logger.info(
                     "WandB initialized: project=%s, run=%s",
-                    rollout_logging.project_name,
-                    rollout_logging.run_name,
+                    args.logging.project_name,
+                    args.logging.run_name,
                 )
 
         # 1. Resource allocation
@@ -336,7 +330,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
             training_pgs,
         )
         training_runtime = TrainingGroupRuntime.from_group(training_group)
-        resume_from_checkpoint = rollout_artifacts.resume_from_checkpoint
+        resume_from_checkpoint = args.training.resume_from_checkpoint
         if resume_from_checkpoint:
             training_runtime.load_checkpoint(resume_from_checkpoint)
             logger.info("Checkpoint loaded: %s", resume_from_checkpoint)
@@ -392,27 +386,27 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
         debug_save_intermediates = args.debug.debug_save_intermediates
 
         # 10. Core synchronous training loop
-        enforce_rollout_alignment = not bool(rollout_buffer_settings.reassemble_by_group)
+        enforce_rollout_alignment = args.rollout.group_size is None
         save_rollout_debug_payload = None
         if debug_save_intermediates:
             from diffusionrl.debug.runner import save_rollout_debug_payload as _save_rollout_debug_payload
 
             save_rollout_debug_payload = _save_rollout_debug_payload
 
-        wandb_media_enabled = bool(wandb_logger is not None and bool(rollout_logging.wandb_log_media))
-        wandb_media_max_items = max(1, int(rollout_logging.wandb_media_max_items))
+        wandb_media_enabled = wandb_logger is not None and args.logging.log_media
+        wandb_media_max_items = max(1, int(args.logging.media_max_items))
 
         # rollout_id is the outer rollout-train loop step; it behaves similarly to
         # a framework-level global step, but may differ from optimizer step count.
         # global_optimizer_step tracks real optimizer step for wandb logging
         global_optimizer_step = 0
-        for rollout_id in range(rollout_control.start_rollout_id, rollout_control.num_rollout):
+        for rollout_id in range(args.rollout.start_rollout_id, args.rollout.num_rollout):
             step_start_t = time.perf_counter()
             sync_result = None
             sync_phase_s = 0.0
             eval_phase_s = 0.0
             should_log_step = should_log(rollout_id, args)
-            collect_media_preview = bool(should_log_step and wandb_media_enabled)
+            collect_media_preview = should_log_step and wandb_media_enabled
             training_data_handle = None
             rollout_metadata = {}
             sample_count = 0
@@ -489,7 +483,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
             # Periodic: save (before offload to ensure model is on GPU)
             if should_save(rollout_id, args):
-                save_path = f"{rollout_artifacts.output_dir}/checkpoint-{rollout_id}"
+                save_path = f"{args.rollout.output_dir}/checkpoint-{rollout_id}"
                 training_runtime.save_model(save_path)
                 logger.info(f"Checkpoint saved: {save_path}")
 
@@ -498,7 +492,7 @@ def train(args):  # [PUBLIC-API → main()] sync 入口：资源创建 + 同步�
 
             if (
                 not training_actor_sampling_mode
-                and (rollout_id + 1) % rollout_control.update_weights_interval == 0
+                and (rollout_id + 1) % args.sync.rollout_update_interval == 0
             ):
                 sync_phase_start_t = time.perf_counter()
                 sync_result = weight_sync.sync(rollout_id=rollout_id)

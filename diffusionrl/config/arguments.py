@@ -57,7 +57,7 @@ from diffusionrl.config.validation import (
     validate_rollout_layout,
     validate_rollout_mode,
     validate_rollout_mode_constraints,
-    validate_precision_name,
+    validate_precision_type,
     validate_train_backend_config,
     validate_training_batch_geometry,
     validate_training_misc,
@@ -272,8 +272,8 @@ class RayConfig:
     training_num_gpus_per_node: int = field(default=4,
         metadata={"help": "GPUs per node for training actors"})
     placement_strategy: str = field(default="PACK",
-        metadata={"help": "Ray placement group strategy: PACK or SPREAD"}，
-        choices=["PACK", "SPREAD","STRICT_PACK", "STRICT_SPREAD"],
+        metadata={"help": "Ray placement group strategy: PACK or SPREAD"},
+        choices=["PACK", "SPREAD", "STRICT_PACK", "STRICT_SPREAD"],
         )
     colocate_training_gpu_fraction: float = field(default=0.4,
         metadata={"help": "GPU memory fraction for training when colocated"})
@@ -312,9 +312,18 @@ class RayConfig:
 class SyncConfig:
     """
     Train->rollout weight synchronization Configuration:
-    contains weight sync protocol, directory, bucket size, flush cache, and target modules.
+    contains cadence, protocol, directory, bucket size, flush cache, and target modules.
     """
 
+    rollout_update_interval: int = field(
+        default=1,
+        metadata={
+            "help": (
+                "Run train→rollout weight sync every N outer rollout steps (rollout_id); "
+                "used by separate/async training loops."
+            )
+        },
+    )
     protocol: str = field(default=None,
         metadata={"help": "Explicit weight sync mode. Must be one of: disabled, tensor_payload, nccl_broadcast, checkpoint_path"},
         choices=["disabled", "tensor_payload", "nccl_broadcast", "checkpoint_path"],
@@ -339,6 +348,10 @@ class SyncConfig:
             raise ValueError(
                 f"sync.protocol must be one of {'/'.join(self.protocol.choices)}, "
                 f"got: {self.protocol!r}."
+            )
+        if int(self.rollout_update_interval) < 1:
+            raise ValueError(
+                f"sync.rollout_update_interval must be >= 1, got: {self.rollout_update_interval}"
             )
         if self.bucket_size < 1:
             raise ValueError("sync.bucket_size must be >= 1.")
@@ -491,11 +504,15 @@ class AlgorithmConfig:
                 f"Got: {self.adv_normalization_scope!r}"
             )
         if float(self.adv_norm_eps) <= 0:
-            raise ValueError("algorithm.adv_norm_eps must be > 0., 
-            f"Got: {self.adv_norm_eps!r}")
+            raise ValueError(
+                "algorithm.adv_norm_eps must be > 0. "
+                f"Got: {self.adv_norm_eps!r}"
+            )
         if self.clip_max is not None and float(self.clip_max) <= 0:
-            raise ValueError("algorithm.clip_max must be > 0 when set., "
-            f"Got: {self.clip_max!r}")
+            raise ValueError(
+                "algorithm.clip_max must be > 0 when set. "
+                f"Got: {self.clip_max!r}"
+            )
         if not (0.0 <= float(self.trim_outliers_ratio) < 0.5):
             raise ValueError(
                 "algorithm.trim_outliers_ratio must be in [0.0, 0.5). "
@@ -557,6 +574,10 @@ class TrainingConfig:
         metadata={"help": "Python dotpath to custom TrainBackend class (overrides built-in backend selection)"})
     train_backend_kwargs: Dict[str, Any] = field(default_factory=dict,
         metadata={"help": "Extra kwargs for selected train backend; accepts JSON string (CLI) or mapping (YAML)"})
+    resume_from_checkpoint: Optional[str] = field(
+        default=None,
+        metadata={"help": "Directory containing training checkpoint.pt to resume from (after actors init)"},
+    )
 
     # LoRA
     use_lora: bool = field(default=False,
@@ -609,37 +630,38 @@ class PrecisionConfig:
         metadata={"help": "Precision used to store rollout log-prob tensors (default: fp32)"})
 
     def validate(self) -> None:
-        validate_precision_name(
+        validate_precision_type(
             self.model_precision,
             field_name="precision.model_precision",
         )
-        validate_precision_name(
+        validate_precision_type(
             self.fsdp_precision,
             field_name="precision.fsdp_precision",
         )
-        validate_precision_name(
+        validate_precision_type(
             self.training_autocast_precision,
             field_name="precision.training_autocast_precision",
         )
-        validate_precision_name(
+        validate_precision_type(
             self.rollout_autocast_precision,
             field_name="precision.rollout_autocast_precision",
         )
-        validate_precision_name(
+        validate_precision_type(
             self.trajectory_precision,
             field_name="precision.trajectory_precision",
         )
-        validate_precision_name(
+        validate_precision_type(
             self.logprob_precision,
             field_name="precision.logprob_precision",
         )
 
 
-@dataclass(frozen=True)
-class RolloutTopologySettings:
-    """Rollout topology and dedicated-engine knobs."""
+@dataclass
+class RolloutConfig:
+    """Rollout topology, buffer, control, and artifact configuration."""
 
-    mode: Optional[str] = field(default=None,
+    # --- Topology ---
+    mode: str = field(default=None,
         metadata={"help": "Canonical rollout topology: direct_sampling, separate, or colocate"},
         choices=["direct_sampling", "separate", "colocate"],
         )
@@ -650,15 +672,13 @@ class RolloutTopologySettings:
     num_gpus_per_actor: Optional[int] = field(default=None,
         metadata={"help": "Dedicated rollout service GPUs per actor/engine. Required for separate and colocate."})
     tp_size: Optional[int] = field(default=None,
-        metadata={"help": "Dedicated rollout service tensor parallel hint. Does not determine actor GPU ownership."})
+        metadata={"help": "Dedicated rollout service tensor parallel hint."})
     sp_size: Optional[int] = field(default=None,
-        metadata={"help": "Dedicated rollout service sequence/spatial parallel hint. Does not determine actor GPU ownership."})
+        metadata={"help": "Dedicated rollout service sequence/spatial parallel hint."})
     transport_dtype: Optional[str] = field(default=None,
-        metadata={"help": "Cast rollout transport payloads to this dtype (fp16/bf16) to reduce transfer size. "
-                          "This affects numerical precision of latents/log_probs received by the trainer."})
+        metadata={"help": "Cast rollout transport payloads to this dtype (fp16/bf16) to reduce transfer size."})
     transport_drop_decoded_videos: bool = field(default=True,
-        metadata={"help": "Drop decoded video tensors from rollout transport payloads after reward handling. "
-                          "Reduces transfer size but makes decoded videos unavailable on the trainer side."})
+        metadata={"help": "Drop decoded video tensors from rollout transport payloads after reward handling."})
     sglang_local_mode: Optional[bool] = field(default=None,
         metadata={"help": "Whether SGLang rollout uses in-actor local generator mode."})
     sglang_verify_weight_checksum: Optional[bool] = field(default=None,
@@ -666,68 +686,9 @@ class RolloutTopologySettings:
     sglang_disable_autocast: Optional[bool] = field(default=None,
         metadata={"help": "Disable torch.autocast inside SGLang rollout engine."})
     sglang_kwargs: Dict[str, Any] = field(default_factory=dict,
-        metadata={"help": "Engine-scoped SGLang rollout kwargs. ServerArgs-compatible keys are forwarded to the SGLang rollout engine."})
+        metadata={"help": "Engine-scoped SGLang rollout kwargs."})
 
-    def validate(self) -> None:
-        if self.mode is not None and self.mode not in ROLLOUT_MODES:
-            raise ValueError(
-                "rollout.topology.mode must be one of "
-                f"{sorted(ROLLOUT_MODES)}, got: {self.mode!r}"
-            )
-        for attr_name in (
-            "num_gpus_per_actor",
-            "tp_size",
-            "sp_size",
-            "rollout_batch_size",
-        ):
-            value = getattr(self, attr_name)
-            if value is not None and int(value) < 1:
-                raise ValueError(f"rollout.topology.{attr_name} must be >= 1 when set.")
-        if self.transport_dtype is not None:
-            transport_dtype = self.transport_dtype.strip().lower()
-            if transport_dtype not in {
-                "",
-                "none",
-                "off",
-                "disable",
-                "disabled",
-                "fp32",
-                "float32",
-                "fp16",
-                "float16",
-                "half",
-                "bf16",
-                "bfloat16",
-            }:
-                raise ValueError(
-                    "rollout.topology.transport_dtype must be one of "
-                    "fp32/fp16/bf16/none, "
-                    f"got: {self.transport_dtype!r}"
-                )
-        if not isinstance(self.sglang_kwargs, dict):
-            raise ValueError("rollout.topology.sglang_kwargs must be a dict.")
-        forbidden_sglang_precision_keys = {
-            "prompt_encoder_dtype",
-            "sglang_prompt_encoder_dtype",
-        }
-        precision_override_keys = sorted(
-            key
-            for key in self.sglang_kwargs.keys()
-            if str(key) in forbidden_sglang_precision_keys
-        )
-        if precision_override_keys:
-            raise ValueError(
-                "SGLang prompt-encoder precision is controlled by "
-                "precision.rollout_autocast_precision; remove the following "
-                "engine-specific override(s) from rollout.topology.sglang_kwargs: "
-                f"{precision_override_keys}"
-            )
-
-
-@dataclass(frozen=True)
-class RolloutBufferSettings:
-    """Rollout-buffer queueing, filtering, and reassembly knobs."""
-
+    # --- Buffer ---
     max_queue_size: int = field(default=0,
         metadata={"help": "Max rollout buffer queue size (0 = unbounded)"})
     drop_invalid: bool = field(default=True,
@@ -738,99 +699,96 @@ class RolloutBufferSettings:
         metadata={"help": "Maximum reward threshold for sample filtering (None = no filter)"})
     min_samples: int = field(default=1,
         metadata={"help": "Minimum samples required before dispatching a batch"})
-    reassemble_by_group: bool = field(default=False,
-        metadata={"help": "Reassemble outgoing training batches in the rollout buffer by explicit group_ids"})
     group_size: Optional[int] = field(default=None,
-        metadata={"help": "Explicit samples per logical group. Required when reassemble_by_group=true"})
+        metadata={"help": "Reassemble outgoing training batches by explicit group_ids (None = passthrough)"})
     group_ttl_seconds: float = field(default=0.0,
         metadata={"help": "Time-to-live for incomplete groups in seconds (0 = no timeout)"})
     max_pending_samples: int = field(default=0,
         metadata={"help": "Max pending samples in buffer before blocking rollout (0 = unbounded)"})
-    plugin_dotpaths: str = field(default="",
-        metadata={"help": "Comma-separated dotpaths to rollout buffer filter plugins"})
+    plugin_dotpaths: List[str] = field(default_factory=list,
+        metadata={"help": "Rollout buffer filter plugin class dotpath(s)."})
 
-    def validate(self) -> None:
-        if int(self.max_queue_size) < 0:
-            raise ValueError(
-                f"rollout.buffer.max_queue_size must be >= 0, got: {self.max_queue_size}"
-            )
-        if int(self.min_samples) < 1:
-            raise ValueError(
-                f"rollout.buffer.min_samples must be >= 1, got: {self.min_samples}"
-            )
-        if (
-            self.reward_min is not None
-            and self.reward_max is not None
-            and float(self.reward_min) > float(self.reward_max)
-        ):
-            raise ValueError(
-                "rollout.buffer.reward_min must be <= rollout.buffer.reward_max, "
-                f"got min={self.reward_min}, max={self.reward_max}"
-            )
-        if self.group_size is not None and int(self.group_size) < 1:
-            raise ValueError(
-                f"rollout.buffer.group_size must be >= 1 when provided, got: {self.group_size}"
-            )
-        if bool(self.reassemble_by_group) and self.group_size is None:
-            raise ValueError(
-                "rollout.buffer.reassemble_by_group=true requires rollout.buffer.group_size "
-                "to be set explicitly. Implicit binding to algorithm.samples_per_prompt was removed."
-            )
-        if float(self.group_ttl_seconds) < 0:
-            raise ValueError(
-                "rollout.buffer.group_ttl_seconds must be >= 0, "
-                f"got: {self.group_ttl_seconds}"
-            )
-        if int(self.max_pending_samples) < 0:
-            raise ValueError(
-                "rollout.buffer.max_pending_samples must be >= 0, "
-                f"got: {self.max_pending_samples}"
-            )
-
-
-@dataclass(frozen=True)
-class RolloutControlSettings:
-    """Outer-loop rollout scheduling and async control knobs."""
-
+    # --- Control ---
     num_rollout: int = field(default=1000,
-        metadata={"help": "Total number of rollout iterations (outer-loop steps; analogous to global step)"})
+        metadata={"help": "Total number of rollout iterations (outer-loop steps)"})
     start_rollout_id: int = field(default=0,
-        metadata={"help": "Starting rollout step/ID for resuming training (acts like an outer-loop global step)"})
-    async_max_inflight: int = field(default=1,
-        metadata={"help": "Max in-flight rollout futures for the async training runner"})
-    update_weights_interval: int = field(default=1,
-        metadata={"help": "Sync weights from training to rollout every N steps in async/separate training"})
+        metadata={"help": "Starting rollout step/ID for resuming training"})
+    max_inflight_rollouts: int = field(default=1,
+        metadata={"help": "Max concurrent in-flight rollouts for the async training runner"})
 
-    def validate(self) -> None:
-        if int(self.num_rollout) < 1:
-            raise ValueError("num_rollout must be >= 1.")
-        if int(self.start_rollout_id) < 0:
-            raise ValueError("start_rollout_id must be >= 0.")
-        if int(self.async_max_inflight) < 1:
-            raise ValueError("async_max_inflight must be >= 1.")
-        if int(self.update_weights_interval) < 1:
-            raise ValueError("update_weights_interval must be >= 1.")
-
-
-@dataclass(frozen=True)
-class RolloutArtifactSettings:
-    """Checkpoint/artifact root and save policy knobs."""
-
+    # --- Artifacts ---
     output_dir: str = field(default="outputs",
         metadata={"help": "Output directory for checkpoints, logs, and generated samples"})
     save_steps: int = field(default=100,
         metadata={"help": "Save a checkpoint every N training steps (0 disables periodic saves)"})
-    resume_from_checkpoint: Optional[str] = field(default=None,
-        metadata={"help": "Path to checkpoint directory to resume training from"})
+
+    def set_start_rollout_id(self, rollout_id: int) -> None:
+        """Update the rollout control cursor on the canonical config owner."""
+        rollout_id = int(rollout_id)
+        if rollout_id < 0:
+            raise ValueError("start_rollout_id must be >= 0.")
+        self.start_rollout_id = rollout_id
 
     def validate(self) -> None:
+        if self.mode is not None and self.mode not in ROLLOUT_MODES:
+            raise ValueError(
+                f"rollout.mode must be one of {sorted(ROLLOUT_MODES)}, got: {self.mode!r}"
+            )
+        for attr_name in ("num_gpus_per_actor", "tp_size", "sp_size", "rollout_batch_size"):
+            value = getattr(self, attr_name)
+            if value is not None and int(value) < 1:
+                raise ValueError(f"rollout.{attr_name} must be >= 1 when set.")
+        if self.transport_dtype is not None:
+            validate_precision_type(
+                self.transport_dtype,
+                field_name="rollout.transport_dtype",
+                allow_disable_aliases=True,
+            )
+        if not isinstance(self.sglang_kwargs, dict):
+            raise ValueError("rollout.sglang_kwargs must be a dict.")
+        forbidden_sglang_precision_keys = {"prompt_encoder_dtype", "sglang_prompt_encoder_dtype"}
+        precision_override_keys = sorted(
+            key for key in self.sglang_kwargs.keys()
+            if str(key) in forbidden_sglang_precision_keys
+        )
+        if precision_override_keys:
+            raise ValueError(
+                "SGLang prompt-encoder precision is controlled by "
+                "precision.rollout_autocast_precision; remove the following "
+                f"engine-specific override(s) from rollout.sglang_kwargs: "
+                f"{precision_override_keys}"
+            )
+        if self.max_queue_size < 0:
+            raise ValueError(f"rollout.max_queue_size must be >= 0, got: {self.max_queue_size}")
+        if self.min_samples < 1:
+            raise ValueError(f"rollout.min_samples must be >= 1, got: {self.min_samples}")
+        if self.reward_min is not None and self.reward_max is not None and self.reward_min > self.reward_max:
+            raise ValueError(
+                f"rollout.reward_min must be <= rollout.reward_max, "
+                f"got min={self.reward_min}, max={self.reward_max}"
+            )
+        if self.group_size is not None and self.group_size < 1:
+            raise ValueError(f"rollout.group_size must be >= 1 when provided, got: {self.group_size}")
+        if float(self.group_ttl_seconds) < 0:
+            raise ValueError(f"rollout.group_ttl_seconds must be >= 0, got: {self.group_ttl_seconds}")
+        if int(self.max_pending_samples) < 0:
+            raise ValueError(f"rollout.max_pending_samples must be >= 0, got: {self.max_pending_samples}")
+        for i, path in enumerate(self.plugin_dotpaths):
+            if not str(path).strip():
+                raise ValueError(f"rollout.plugin_dotpaths[{i}] must be a non-empty string")
+        if self.num_rollout < 1:
+            raise ValueError("num_rollout must be >= 1.")
+        if self.start_rollout_id < 0:
+            raise ValueError("start_rollout_id must be >= 0.")
+        if self.max_inflight_rollouts < 1:
+            raise ValueError("max_inflight_rollouts must be >= 1.")
         if int(self.save_steps) < 0:
             raise ValueError("save_steps must be >= 0 (0 disables periodic saves).")
 
 
-@dataclass(frozen=True)
-class RolloutEvaluationSettings:
-    """Evaluation cadence and batch sizing knobs."""
+@dataclass
+class EvaluationConfig:
+    """Evaluation cadence and batch sizing configuration."""
 
     eval_steps: int = field(default=100,
         metadata={"help": "Run evaluation every N training steps (0 disables periodic eval)"})
@@ -839,11 +797,11 @@ class RolloutEvaluationSettings:
     num_inference_steps: Optional[int] = field(default=None,
         metadata={"help": "Optional eval-only denoising step override. If unset, eval reuses sampling.num_inference_steps."})
     sampling_adapter: Optional[str] = field(default=None,
-        metadata={"help": "Optional eval-only LoRA adapter override. Useful when rollout sampling uses a different adapter than evaluation."})
+        metadata={"help": "Optional eval-only LoRA adapter override."})
     sde_type: Optional[str] = field(default=None,
-        metadata={"help": "Optional eval-only sampler transition override (direct/native sampler hosts only). If unset, eval reuses sampling.sde_type."})
+        metadata={"help": "Optional eval-only sampler transition override. If unset, eval reuses sampling.sde_type."})
     eta: Optional[float] = field(default=None,
-        metadata={"help": "Optional eval-only eta override (direct/native sampler hosts only). If unset, eval reuses sampling.eta."})
+        metadata={"help": "Optional eval-only eta override. If unset, eval reuses sampling.eta."})
 
     def validate(self) -> None:
         if int(self.eval_steps) < 0:
@@ -851,94 +809,41 @@ class RolloutEvaluationSettings:
         if int(self.eval_batch_size) < 1:
             raise ValueError("eval_batch_size must be >= 1.")
         if self.num_inference_steps is not None and int(self.num_inference_steps) < 1:
-            raise ValueError("rollout.evaluation.num_inference_steps must be >= 1 when set.")
+            raise ValueError("evaluation.num_inference_steps must be >= 1 when set.")
         if self.eta is not None and float(self.eta) < 0:
-            raise ValueError("rollout.evaluation.eta must be >= 0 when set.")
+            raise ValueError("evaluation.eta must be >= 0 when set.")
 
 
-@dataclass(frozen=True)
-class RolloutLoggingSettings:
-    """Experiment-logging and reporting knobs."""
+@dataclass
+class LoggingConfig:
+    """Experiment-logging and reporting configuration."""
 
     logging_steps: int = field(default=10,
         metadata={"help": "Log metrics every N training steps (0 disables periodic step logging)"})
     logging_dir: Optional[str] = field(default=None,
         metadata={"help": "Directory for WandB logs/artifacts (defaults to output_dir/logs)"})
     report_to_wandb: bool = field(default=False,
-        metadata={"help": "Enable WandB reporting (true/false)"})
+        metadata={"help": "Enable WandB reporting (True/False)"})
     project_name: str = field(default="diffusionrl",
         metadata={"help": "Project name for WandB"})
     run_name: Optional[str] = field(default=None,
         metadata={"help": "Run name for WandB (auto-generated if None)"})
-    wandb_log_media: bool = field(default=False,
+    log_media: bool = field(default=False,
         metadata={"help": "Log generated media previews to WandB (true/false)"})
-    wandb_media_max_items: int = field(default=8,
-        metadata={"help": "Maximum generated media items to log per rollout when wandb_log_media=true"})
-    wandb_tags: Optional[str] = field(default=None,
-        metadata={"help": "Comma-separated tags for WandB run (e.g. 'exp1,baseline'). Defaults to 'diffusionrl-reproduce' if not set."})
-    wandb_entity: Optional[str] = field(default=None,
-        metadata={"help": "WandB entity (team or username). If not set, uses the default entity of the logged-in user."})
+    media_max_items: int = field(default=8,
+        metadata={"help": "Maximum generated media items to log per rollout when log_media=true"})
+    tags: Optional[str] = field(default=None,
+        metadata={"help": "Comma-separated tags for WandB run (e.g. 'exp1,baseline')."})
+    entity: Optional[str] = field(default=None,
+        metadata={"help": "WandB entity (team or username)."})
     transport_log_payload_bytes: Optional[bool] = field(default=None,
         metadata={"help": "Whether rollout transport logs serialized payload sizes for debugging."})
 
     def validate(self) -> None:
-        if int(self.logging_steps) < 0:
+        if self.logging_steps < 0:
             raise ValueError("logging_steps must be >= 0 (0 disables periodic step logging).")
-        if not isinstance(self.report_to_wandb, bool):
-            raise ValueError(
-                "report_to_wandb must be a boolean (true/false). "
-                f"Got: {self.report_to_wandb!r}"
-            )
-        if int(self.wandb_media_max_items) < 1:
-            raise ValueError("wandb_media_max_items must be >= 1.")
-
-
-_ROLLOUT_SECTION_NAMES = frozenset({
-    "topology",
-    "buffer",
-    "control",
-    "artifacts",
-    "evaluation",
-    "logging",
-})
-
-
-@dataclass
-class RolloutConfig:
-    """Aggregated rollout topology, buffer, control, artifact, and logging config."""
-
-    topology: RolloutTopologySettings = field(default_factory=RolloutTopologySettings)
-    buffer: RolloutBufferSettings = field(default_factory=RolloutBufferSettings)
-    control: RolloutControlSettings = field(default_factory=RolloutControlSettings)
-    artifacts: RolloutArtifactSettings = field(default_factory=RolloutArtifactSettings)
-    evaluation: RolloutEvaluationSettings = field(default_factory=RolloutEvaluationSettings)
-    logging: RolloutLoggingSettings = field(default_factory=RolloutLoggingSettings)
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name.startswith("_") or name in _ROLLOUT_SECTION_NAMES:
-            object.__setattr__(self, name, value)
-            return
-
-        raise AttributeError(
-            f"Unknown rollout config field {name!r}. "
-            "Use rollout.topology / rollout.buffer / rollout.control / "
-            "rollout.artifacts / rollout.evaluation / rollout.logging."
-        )
-
-    def set_start_rollout_id(self, rollout_id: int) -> None:
-        """Update the rollout control cursor on the canonical config owner."""
-        rollout_id = int(rollout_id)
-        if rollout_id < 0:
-            raise ValueError("start_rollout_id must be >= 0.")
-        self.control = replace(self.control, start_rollout_id=rollout_id)
-
-    def validate(self) -> None:
-        self.topology.validate()
-        self.buffer.validate()
-        self.control.validate()
-        self.artifacts.validate()
-        self.evaluation.validate()
-        self.logging.validate()
+        if self.media_max_items < 1:
+            raise ValueError("media_max_items must be >= 1.")
 
 
 @dataclass
@@ -998,6 +903,8 @@ class TrainingArguments:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     precision: PrecisionConfig = field(default_factory=PrecisionConfig)
     rollout: RolloutConfig = field(default_factory=RolloutConfig)
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
 
     # ========== Data Configuration ==========
@@ -1134,8 +1041,8 @@ def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
         resolved.setdefault(key, None)
 
     resolved["training.train_backend"] = normalize_train_backend_name(args)
-    resolved["rollout.topology.mode"] = args.rollout.topology.mode
-    resolved["rollout.topology.rollout_engine"] = args.rollout.topology.rollout_engine
+    resolved["rollout.mode"] = args.rollout.mode
+    resolved["rollout.rollout_engine"] = args.rollout.rollout_engine
     resolved["sync.protocol"] = str(args.sync.protocol).strip().lower()
 
     try:
@@ -1161,8 +1068,8 @@ def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
     resolved["model.model_type"] = model_spec.model_type
     resolved["sampling.sampler_dotpath"] = model_spec.sampler_dotpath
     resolved["training.train_backend"] = resolved_config.train_backend_config.name
-    resolved["rollout.topology.mode"] = rollout_topology.mode
-    resolved["rollout.topology.rollout_engine"] = rollout_topology.rollout_engine
+    resolved["rollout.mode"] = rollout_topology.mode
+    resolved["rollout.rollout_engine"] = rollout_topology.rollout_engine
     resolved["sync.protocol"] = resolved_config.rollout_mode_info.sync_protocol
     resolved["resolved.training.actor_count"] = train_topology.actor_count
     resolved["resolved.training.world_size"] = train_topology.world_size
@@ -1356,12 +1263,13 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
     print_config_views(args=args, print_resolved_config=print_resolved_config)
     return args
 
+
 def validate_args(
     args: TrainingArguments,
     *,
     resolved: Optional[ConfigBundle] = None,
 ) -> TrainingArguments:
-    """Validate arguments without mutating the original config values."""
+    """Validate arguments. Grouped validation may normalize fields such as ``rollout.plugin_dotpaths``."""
     validate_grouped_configs(args)
     debug_mode = args.debug.debug_mode
 

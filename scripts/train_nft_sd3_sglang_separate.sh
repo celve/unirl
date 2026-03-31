@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # NOTE:
-#   direct sampling now uses rollout.topology.mode='direct_sampling' with direct_sampling only.
+#   direct sampling now uses rollout.mode='direct_sampling' with direct_sampling only.
 #   This script is the SGLang equivalent in separate rollout/training mode.
 #
 # Usage:
@@ -82,10 +82,10 @@ NFT_ALGO_KWARG_ARGS=(
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
-    --rollout.topology.mode separate \
-    --rollout.topology.service-engine sglang \
-    --rollout.topology.service-num-gpus ${TP_SIZE} \
-    --rollout.topology.engine-tp-size ${TP_SIZE} \
+    --rollout.mode separate \
+    --rollout.rollout-engine sglang \
+    --rollout.num-gpus-per-actor ${TP_SIZE} \
+    --rollout.tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --algorithm.algorithm-path diffusionrl.algorithms.nft.NFTAlgorithm \
     --reward.reward-model-name ocr \
@@ -117,10 +117,10 @@ python -m diffusionrl.train \
     --height 512 \
     --width 512 \
     \
-    --rollout.control.num-rollout 1000 \
-    --rollout.artifacts.save-steps 60 \
-    --rollout.evaluation.eval-steps 60 \
-    --rollout.logging.logging-steps 10 \
-    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
+    --rollout.num-rollout 1000 \
+    --rollout.save-steps 60 \
+    --evaluation.eval-steps 60 \
+    --logging.logging-steps 10 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
     --sync.protocol tensor_payload \
     "$@"

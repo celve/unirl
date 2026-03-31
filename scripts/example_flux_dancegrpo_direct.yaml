@@ -60,21 +60,20 @@ ray:
   placement_strategy: SPREAD
 
 rollout:
-  topology:
-    mode: direct_sampling
-  control:
-    num_rollout: 300
-  artifacts:
-    save_steps: 40
-    output_dir: outputs/scripts_example_flux_dancegrpo_direct
-  evaluation:
-    eval_steps: 50
-    eval_batch_size: 2
-    num_inference_steps: 30
-    eta: 0.2
-  logging:
-    logging_steps: 10
-    wandb_tags: example,flux,direct
+  mode: direct_sampling
+  num_rollout: 300
+  save_steps: 40
+  output_dir: outputs/scripts_example_flux_dancegrpo_direct
+
+evaluation:
+  eval_steps: 50
+  eval_batch_size: 2
+  num_inference_steps: 30
+  eta: 0.2
+
+logging:
+  logging_steps: 10
+  tags: example,flux,direct
 
 sync:
   protocol: disabled

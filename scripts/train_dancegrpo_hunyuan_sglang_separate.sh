@@ -84,10 +84,10 @@ fi
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type hunyuan \
-    --rollout.topology.mode separate \
-    --rollout.topology.service-engine sglang \
-    --rollout.topology.service-num-gpus ${TP_SIZE} \
-    --rollout.topology.engine-tp-size ${TP_SIZE} \
+    --rollout.mode separate \
+    --rollout.rollout-engine sglang \
+    --rollout.num-gpus-per-actor ${TP_SIZE} \
+    --rollout.tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
@@ -123,9 +123,9 @@ python -m diffusionrl.train \
     --num-frames ${NUM_FRAMES} \
     --fps ${FPS} \
     \
-    --rollout.control.num-rollout 202 \
-    --rollout.artifacts.save-steps 50 \
-    --rollout.logging.logging-steps 1 \
-    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
+    --rollout.num-rollout 202 \
+    --rollout.save-steps 50 \
+    --logging.logging-steps 1 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
     --sync.protocol tensor_payload \
     "$@"

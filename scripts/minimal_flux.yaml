@@ -7,7 +7,7 @@
 # Usage: python -m diffusionrl.train --config scripts/minimal_flux.yaml
 #
 # Override via dotted CLI:
-#   python -m diffusionrl.train --config scripts/minimal_flux.yaml --rollout.control.num-rollout 100
+#   python -m diffusionrl.train --config scripts/minimal_flux.yaml --rollout.num-rollout 100
 # =============================================================================
 
 model:
@@ -52,15 +52,13 @@ ray:
   placement_strategy: SPREAD
 
 rollout:
-  topology:
-    mode: direct_sampling
-  control:
-    num_rollout: 300
-  artifacts:
-    save_steps: 40
-    output_dir: outputs/dancegrpo_flux_direct
-  logging:
-    logging_steps: 10
+  mode: direct_sampling
+  num_rollout: 300
+  save_steps: 40
+  output_dir: outputs/dancegrpo_flux_direct
+
+logging:
+  logging_steps: 10
 
 sync:
   protocol: disabled

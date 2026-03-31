@@ -31,7 +31,7 @@
 #
 # Usage:
 #   bash train_dancegrpo_sd3_train_actor_sampling.sh
-#   bash train_dancegrpo_sd3_train_actor_sampling.sh --rollout.control.num-rollout 100 --training.micro-batch-size 2 --training.num-updates-per-batch 2
+#   bash train_dancegrpo_sd3_train_actor_sampling.sh --rollout.num-rollout 100 --training.micro-batch-size 2 --training.num-updates-per-batch 2
 #
 # =============================================================================
 
@@ -115,7 +115,7 @@ python -m diffusionrl.train \
     --training.num-updates-per-batch ${NUM_UPDATES_PER_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
-    --rollout.topology.mode direct_sampling \
+    --rollout.mode direct_sampling \
 --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
@@ -130,12 +130,12 @@ python -m diffusionrl.train \
     --height 512 \
     --width 512 \
     \
-    --rollout.control.num-rollout 300 \
-    --rollout.artifacts.save-steps 40 \
-    --rollout.logging.logging-steps 10 \
-    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
-    --rollout.logging.report-to-wandb ${REPORT_TO_WANDB} \
-    --rollout.logging.project-name "${WANDB_PROJECT_NAME}" \
-    --rollout.logging.run-name "${WANDB_RUN_NAME}" \
+    --rollout.num-rollout 300 \
+    --rollout.save-steps 40 \
+    --logging.logging-steps 10 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
+    --logging.report-to-wandb ${REPORT_TO_WANDB} \
+    --logging.project-name "${WANDB_PROJECT_NAME}" \
+    --logging.run-name "${WANDB_RUN_NAME}" \
     --sync.protocol disabled \
     "$@"

@@ -49,7 +49,6 @@ class BufferRuntime:
         *,
         batch_store: BatchStore,
         max_queue_size: int,
-        reassemble_by_group: bool,
         group_size: Optional[int],
         expected_global_batch_size: Optional[int],
         group_ttl_seconds: float,
@@ -58,8 +57,10 @@ class BufferRuntime:
     ) -> None:
         self.batch_store = batch_store
         self.max_queue_size = int(max_queue_size)
-        self.reassemble_by_group = bool(reassemble_by_group)
         self.group_size = None if group_size is None else int(group_size)
+        self.reassemble_by_group = (
+            self.group_size is not None and int(self.group_size) >= 1
+        )
         self.expected_global_batch_size = (
             None
             if expected_global_batch_size is None
@@ -92,19 +93,11 @@ class BufferRuntime:
         *,
         batch_store: BatchStore,
     ) -> "BufferRuntime":
-        rollout_buffer = args.rollout.buffer
-        reassemble_by_group = bool(rollout_buffer.reassemble_by_group)
-        raw_group_size = rollout_buffer.group_size
-        if reassemble_by_group and raw_group_size is None:
-            raise ValueError(
-                "rollout.buffer.reassemble_by_group requires rollout.buffer.group_size to be "
-                "validated before BufferRuntime initialization."
-            )
+        rollout_buffer = args.rollout
         return cls(
             batch_store=batch_store,
             max_queue_size=int(rollout_buffer.max_queue_size),
-            reassemble_by_group=reassemble_by_group,
-            group_size=raw_group_size,
+            group_size=rollout_buffer.group_size,
             expected_global_batch_size=None,
             group_ttl_seconds=float(rollout_buffer.group_ttl_seconds),
             max_pending_samples=int(rollout_buffer.max_pending_samples),
@@ -169,7 +162,7 @@ class BufferRuntime:
         if group_id is not None:
             return f"rollout:{int(rollout_id)}:group:{group_id}"
         raise ValueError(
-            "rollout.buffer.reassemble_by_group requires explicit group_ids; "
+            "rollout.group_size (group reassembly) requires explicit group_ids; "
             "fallback grouping is removed. "
             f"Got rollout_id={rollout_id}, sample_idx={sample_idx}."
         )
@@ -400,7 +393,7 @@ class BufferRuntime:
         group_ids = current.group_ids
         if group_ids is None or len(group_ids) != sample_count:
             raise ValueError(
-                "rollout.buffer.reassemble_by_group requires explicit sample-aligned group_ids. "
+                "rollout.group_size (group reassembly) requires explicit sample-aligned group_ids. "
                 f"Got batch_size={sample_count}, group_ids_len={len(group_ids) if group_ids is not None else None}."
             )
 
@@ -410,7 +403,7 @@ class BufferRuntime:
             group_id = self._normalize_group_id(raw_group_id)
             if group_id is None:
                 raise ValueError(
-                    "rollout.buffer.reassemble_by_group requires non-empty group_ids for every sample. "
+                    "rollout.group_size (group reassembly) requires non-empty group_ids for every sample. "
                     f"Found invalid group_id at sample_idx={sample_idx}."
                 )
             group_key = self._group_key_for_sample(
@@ -426,24 +419,24 @@ class BufferRuntime:
             required_group_size = self._required_group_size(group_key)
             if pending_count > 0:
                 raise ValueError(
-                    "rollout.buffer.reassemble_by_group encountered a duplicate pending group key. "
+                    "rollout.group_size (group reassembly) encountered a duplicate pending group key. "
                     f"Got group_key={group_key}, pending={pending_count}. "
                     "Each rollout must provide one complete logical group per group_id."
                 )
             if int(count) != required_group_size:
                 raise ValueError(
-                    "rollout.buffer.reassemble_by_group requires each incoming group "
+                    "rollout.group_size (group reassembly) requires each incoming group "
                     "to remain complete after buffer plugins. "
                     f"Got group_key={group_key}, incoming={int(count)}, "
                     f"required_group_size={required_group_size}. "
-                    "Disable sample-dropping filters or keep this mode off."
+                    "Disable sample-dropping filters or clear rollout.group_size."
                 )
             if pending_count + int(count) > required_group_size:
                 raise ValueError(
-                    "rollout.buffer.reassemble_by_group received more samples than the configured group size "
+                    "rollout.group_size (group reassembly) received more samples than the configured group size "
                     f"for {group_key}: pending={pending_count}, incoming={int(count)}, "
                     f"group_size={required_group_size}. "
-                    "Set rollout.buffer.group_size explicitly to match the producer contract."
+                    "Set rollout.group_size to match the producer contract."
                 )
 
         rewards_tensor = current.rewards
@@ -623,7 +616,7 @@ class BufferRuntime:
                 raise RuntimeError(
                     "Rollout/training payload mismatch: "
                     f"expected rollout_id={expected_rollout_id}, got {got}. "
-                    "Disable strict alignment when using rollout.buffer.reassemble_by_group."
+                    "Disable strict alignment when rollout.group_size is set (group reassembly)."
                 )
         return payload
 

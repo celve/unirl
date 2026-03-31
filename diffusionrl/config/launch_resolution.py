@@ -192,7 +192,7 @@ def resolve_launch_config(
     )
     training_actor_init_config = build_training_actor_init_config(
         training_settings=args.training,
-        rollout_control_settings=args.rollout.control,
+        rollout_control_settings=args.rollout,
         replay_enabled=bool(rollout_mode_info.replay_enabled),
         topology=training_topology,
         training_plan=training_plan,
@@ -219,11 +219,11 @@ def resolve_launch_config(
         rollout_engine = rollout_mode_info.rollout_topology.rollout_engine
         if not rollout_engine:
             raise ValueError(
-                "Resolved rollout launch requires rollout.topology.rollout_engine to be set."
+                "Resolved rollout launch requires rollout.rollout_engine to be set."
             )
         rollout_engine_runtime_config = build_rollout_engine_config(
-            rollout_topology_settings=args.rollout.topology,
-            rollout_logging_settings=args.rollout.logging,
+            rollout_topology_settings=args.rollout,
+            rollout_logging_settings=args.logging,
             precision_settings=args.precision,
             sync_settings=args.sync,
             fps=int(args.fps),

@@ -140,7 +140,7 @@ def _build_rollout_engine_base_kwargs(
     if sglang_kwargs:
         if not isinstance(sglang_kwargs, dict):
             raise ValueError(
-                "rollout.topology.sglang_kwargs must be a dict after normalization."
+                "rollout.sglang_kwargs must be a dict after normalization."
             )
         resolved["server_kwargs"] = dict(sglang_kwargs)
 
