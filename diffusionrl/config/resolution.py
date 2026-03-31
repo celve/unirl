@@ -210,9 +210,9 @@ def derive_sampling_spec(
     return resolve_sampling_spec(
         sampling=args.sampling,
         sampler_dotpath=resolved_model.sampler_dotpath,
-        height=args.height,
-        width=args.width,
-        num_frames=args.num_frames,
+        height=args.sampling.height,
+        width=args.sampling.width,
+        num_frames=args.sampling.num_frames,
         seed=args.seed,
     )
 

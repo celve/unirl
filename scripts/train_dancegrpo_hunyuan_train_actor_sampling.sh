@@ -224,10 +224,10 @@ python -m diffusionrl.train \
     --training.use-gradient-checkpointing true \
     \
     `# ===== Video Resolution =====` \
-    --height ${HEIGHT} \
-    --width ${WIDTH} \
-    --num-frames ${NUM_FRAMES} \
-    --fps ${FPS} \
+    --sampling.height ${HEIGHT} \
+    --sampling.width ${WIDTH} \
+    --sampling.num-frames ${NUM_FRAMES} \
+    --sampling.fps ${FPS} \
     \
     `# ===== Rollout / Checkpoint =====` \
     --rollout.num-rollout 202 \

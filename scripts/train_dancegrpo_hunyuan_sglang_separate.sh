@@ -118,10 +118,10 @@ python -m diffusionrl.train \
     --training.weight-decay 0.0001 \
     --training.use-gradient-checkpointing true \
     \
-    --height ${HEIGHT} \
-    --width ${WIDTH} \
-    --num-frames ${NUM_FRAMES} \
-    --fps ${FPS} \
+    --sampling.height ${HEIGHT} \
+    --sampling.width ${WIDTH} \
+    --sampling.num-frames ${NUM_FRAMES} \
+    --sampling.fps ${FPS} \
     \
     --rollout.num-rollout 202 \
     --rollout.save-steps 50 \

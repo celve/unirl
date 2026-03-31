@@ -21,6 +21,8 @@ sampling:
   num_inference_steps: 25
   guidance_scale: 3.5
   timestep_fraction: 0.6
+  height: 256
+  width: 256
 
 reward:
   reward_components: ocr
@@ -65,5 +67,3 @@ sync:
 
 data_source_dotpath: diffusionrl.data.data_source.ImageRLDataSource
 data_path: data/samples/prompts_toy.json
-height: 256
-width: 256

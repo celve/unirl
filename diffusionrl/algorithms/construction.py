@@ -111,9 +111,9 @@ def build_algorithm_config(
             else resolve_sampling_spec(
                 sampling=args.sampling,
                 sampler_dotpath=args.sampling.sampler_dotpath,
-                height=args.height,
-                width=args.width,
-                num_frames=args.num_frames,
+                height=args.sampling.height,
+                width=args.sampling.width,
+                num_frames=args.sampling.num_frames,
                 seed=args.seed,
             )
         )

@@ -22,6 +22,10 @@ sampling:
   guidance_scale: 6018.0
   timestep_fraction: 0.6
   init_same_noise: true
+  height: 480
+  width: 480
+  num_frames: 53
+  fps: 8
 
 reward:
   reward_components: hpsv2
@@ -64,7 +68,3 @@ sync:
 
 data_source_dotpath: diffusionrl.data.data_source.ImageRLDataSource
 data_path: data/samples/video_prompts_toy.txt
-height: 480
-width: 480
-num_frames: 53
-fps: 8

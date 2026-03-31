@@ -114,8 +114,8 @@ python -m diffusionrl.train \
     --training.lora-alpha ${LORA_ALPHA} \
     --training.use-lora true \
     \
-    --height 256 \
-    --width 256 \
+    --sampling.height 256 \
+    --sampling.width 256 \
     \
     --rollout.num-rollout 300 \
     --rollout.save-steps 40 \

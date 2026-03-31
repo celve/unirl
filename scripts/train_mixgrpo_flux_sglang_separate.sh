@@ -128,8 +128,8 @@ python -m diffusionrl.train \
     --training.lora-alpha 128 \
     --training.use-lora true \
     \
-    --height 720 \
-    --width 720 \
+    --sampling.height 720 \
+    --sampling.width 720 \
     \
     --rollout.num-rollout 300 \
     --rollout.save-steps 50 \

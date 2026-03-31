@@ -16,6 +16,8 @@ sampling:
   num_inference_steps: 25
   guidance_scale: 3.5
   timestep_fraction: 0.6
+  height: 256
+  width: 256
 
 reward:
   reward_components: ocr
@@ -84,5 +86,3 @@ eval_function_dotpath: diffusionrl.rollout.default_rollout.evaluate_rollout
 reward_hook_dotpath: diffusionrl.rollout.default_rollout.score_rewards_hook
 data_path: data/samples/prompts_toy.json
 eval_data_path: data/samples/prompts_toy.json
-height: 256
-width: 256

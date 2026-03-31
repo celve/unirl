@@ -164,8 +164,8 @@ python -m diffusionrl.train \
     --precision.training-autocast-precision bf16 \
     --precision.rollout-autocast-precision bf16 \
     \
-    --height 720 \
-    --width 720 \
+    --sampling.height 720 \
+    --sampling.width 720 \
     \
     --rollout.num-rollout 300 \
     --rollout.save-steps 50 \

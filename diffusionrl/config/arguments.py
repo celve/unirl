@@ -91,7 +91,6 @@ class ModelConfig:
                 "--model.model-dotpath explicitly."
             )
 
-
 @dataclass
 class SamplingConfig:
     """
@@ -128,6 +127,16 @@ class SamplingConfig:
     init_same_noise: bool = field(default=False,
         metadata={"help": "Use identical initial noise for all samples of the same prompt"})
 
+    # Generated media dimensions and frame rate
+    height: int = field(default=256,
+        metadata={"help": "Generated image/video height in pixels"})
+    width: int = field(default=256,
+        metadata={"help": "Generated image/video width in pixels"})
+    num_frames: int = field(default=16,
+        metadata={"help": "Number of video frames to generate (video models only)"})
+    fps: int = field(default=8,
+        metadata={"help": "Video frame rate (video models only)"})
+
     def validate(self) -> None:
         if self.logprob_source not in ("replay", "native"):
             raise ValueError(f"logprob_source must be one of replay/native, got: {self.logprob_source}")
@@ -143,7 +152,6 @@ class SamplingConfig:
                 f"sampling.sampler_kwargs must not contain precision keys {sorted(_leaked)}; "
                 "use precision.* instead."
             )
-
 
 @dataclass
 class RewardConfig:
@@ -255,7 +263,6 @@ class RewardConfig:
                 "Reward scoring requires either reward_components for built-ins, "
                 "or reward_dotpath for a custom scorer."
             )
-
 
 @dataclass
 class RayConfig:
@@ -533,7 +540,6 @@ class AlgorithmConfig:
                 "window_min_iters_per_window must be <= window_max_iters_per_window."
             )
 
-
 @dataclass
 class TrainingConfig:
     """
@@ -607,7 +613,6 @@ class TrainingConfig:
         if not isinstance(self.train_backend_kwargs, dict):
             raise ValueError("training.train_backend_kwargs must be a dict.")
 
-
 @dataclass
 class PrecisionConfig:
     """Precision controls for training and rollout."""
@@ -654,7 +659,6 @@ class PrecisionConfig:
             self.logprob_precision,
             field_name="precision.logprob_precision",
         )
-
 
 @dataclass
 class RolloutConfig:
@@ -785,7 +789,6 @@ class RolloutConfig:
         if int(self.save_steps) < 0:
             raise ValueError("save_steps must be >= 0 (0 disables periodic saves).")
 
-
 @dataclass
 class EvaluationConfig:
     """Evaluation cadence and batch sizing configuration."""
@@ -812,7 +815,6 @@ class EvaluationConfig:
             raise ValueError("evaluation.num_inference_steps must be >= 1 when set.")
         if self.eta is not None and float(self.eta) < 0:
             raise ValueError("evaluation.eta must be >= 0 when set.")
-
 
 @dataclass
 class LoggingConfig:
@@ -844,7 +846,6 @@ class LoggingConfig:
             raise ValueError("logging_steps must be >= 0 (0 disables periodic step logging).")
         if self.media_max_items < 1:
             raise ValueError("media_max_items must be >= 1.")
-
 
 @dataclass
 class DebugConfig:
@@ -912,16 +913,6 @@ class TrainingArguments:
         metadata={"help": "Path to training prompt data file (JSON, JSONL, or TXT). JSON items should provide text via 'prompt' or 'caption'."})
     eval_data_path: Optional[str] = field(default=None,
         metadata={"help": "Optional path to evaluation prompt data file. If unset, eval uses data_path with deterministic ordering."})
-    
-    # ========== Video/Image Configuration ==========
-    height: int = field(default=256,
-        metadata={"help": "Generated image/video height in pixels"})
-    width: int = field(default=256,
-        metadata={"help": "Generated image/video width in pixels"})
-    num_frames: int = field(default=16,
-        metadata={"help": "Number of video frames to generate (video models only)"})
-    fps: int = field(default=8,
-        metadata={"help": "Video frame rate (video models only)"})
 
     # ========== Seed ==========
     seed: int = field(default=42,

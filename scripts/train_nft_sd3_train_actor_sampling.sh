@@ -175,8 +175,8 @@ python -m diffusionrl.train \
     --training.use-lora true \
     --training.use-gradient-checkpointing false \
     \
-    --height 512 \
-    --width 512 \
+    --sampling.height 512 \
+    --sampling.width 512 \
     \
     --rollout.num-rollout 1000 \
     --rollout.save-steps 60 \

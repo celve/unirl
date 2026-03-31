@@ -226,7 +226,7 @@ def resolve_launch_config(
             rollout_logging_settings=args.logging,
             precision_settings=args.precision,
             sync_settings=args.sync,
-            fps=int(args.fps),
+            fps=int(args.sampling.fps),
             logprob_source=rollout_mode_info.logprob_source,
             sampler_engine_type=rollout_engine,
             model_config=model_config,

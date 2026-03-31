@@ -143,8 +143,8 @@ python -m diffusionrl.train \
     --training.use-lora true \
     --training.fsdp-cpu-offload false \
     \
-    --height 256 \
-    --width 256 \
+    --sampling.height 256 \
+    --sampling.width 256 \
     \
     --rollout.num-rollout 300 \
     --rollout.save-steps 40 \

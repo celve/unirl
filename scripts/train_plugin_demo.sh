@@ -71,8 +71,8 @@ python -m diffusionrl.train \
     --training.lora-rank 8 \
     --training.lora-alpha 16 \
     \
-    --height 256 \
-    --width 256 \
+    --sampling.height 256 \
+    --sampling.width 256 \
     \
     --rollout.num-rollout 5 \
     --rollout.save-steps 1000 \

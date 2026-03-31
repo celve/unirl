@@ -13,6 +13,8 @@ sampling:
   guidance_scale: 3.5
   timestep_fraction: 0.6
   logprob_source: replay
+  height: 256
+  width: 256
 
 reward:
   reward_components: ocr
@@ -73,5 +75,3 @@ rollout_function_dotpath: diffusionrl.rollout.default_rollout.generate_rollout
 eval_function_dotpath: diffusionrl.rollout.default_rollout.evaluate_rollout
 reward_hook_dotpath: diffusionrl.rollout.default_rollout.score_rewards_hook
 data_path: data/samples/ocr_prompts_toy.json
-height: 256
-width: 256
