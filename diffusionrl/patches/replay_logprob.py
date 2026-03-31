@@ -27,7 +27,6 @@ class ReplayLogProbPatch:
         for attr in (
             "default_replay_sampler_dotpath",
             "default_sampler_dotpath",
-            "default_replay_sampler_path",
             "default_sampler_path",
         ):
             fn = getattr(model_bundle, attr, None)
