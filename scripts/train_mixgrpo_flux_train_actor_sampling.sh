@@ -136,11 +136,11 @@ python -m diffusionrl.train \
     --algorithm.rollout-scheduler.timestep-strategy window \
     --algorithm.rollout-scheduler.window-strategy progressive \
     --algorithm.rollout-scheduler.window-size 4 \
-    --algorithm.rollout-scheduler.window-iters-per-window 25 \
-    --algorithm.rollout-scheduler.window-max-iters-per-window ${WINDOW_MAX_ITERS_PER_GROUP:-10} \
-    --algorithm.rollout-scheduler.window-min-iters-per-window ${WINDOW_MIN_ITERS_PER_GROUP:-1} \
-    --algorithm.rollout-scheduler.window-overlap true \
-    --algorithm.rollout-scheduler.window-roll-back true \
+    --algorithm.rollout-scheduler.iters-per-window 25 \
+    --algorithm.rollout-scheduler.max-iters-per-window ${WINDOW_MAX_ITERS_PER_GROUP:-10} \
+    --algorithm.rollout-scheduler.min-iters-per-window ${WINDOW_MIN_ITERS_PER_GROUP:-1} \
+    --algorithm.rollout-scheduler.overlap-size 3 \
+    --algorithm.rollout-scheduler.roll-back true \
     \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \

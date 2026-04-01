@@ -374,7 +374,8 @@ class SchedulerConfig:
     """Stateless index-scheduler config for rollout or training timestep selection."""
 
     timestep_strategy: str = field(
-        default="all", metadata={"help": "Index scheduler type: all or window"}
+        default="all", metadata={"help": "Index scheduler type: all or window"},
+        choices=["all", "window"],
     )
     timestep_fraction: Any = field(
         default=1.0,
@@ -382,39 +383,32 @@ class SchedulerConfig:
             "help": "Fraction of total timesteps to select. Single float x means [0, x); tuple (x, y) means [x, y)."
         },
     )
-    num_sde_steps: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": "If set, randomly sample this many indices from the timestep_fraction range each step."
-        },
-    )
+    num_sde_steps: Optional[int] = field(default=None,
+        metadata={"help": "Randomly sample this many SDE timestep indices from the timestep_fraction range per step. None means use all indices in range."})
     window_strategy: str = field(
         default="progressive",
         metadata={"help": "Window progression: progressive or random"},
+        choices=["progressive", "random"],
     )
     window_size: int = field(
         default=4, metadata={"help": "Number of timestep indices in each window"}
     )
-    window_iters_per_window: int = field(
+    iters_per_window: int = field(
         default=25,
         metadata={"help": "Number of training steps before advancing the window"},
     )
     window_init_timestep: int = field(
         default=0, metadata={"help": "Initial left boundary for the window scheduler"}
     )
-    window_max_iters_per_window: Optional[int] = field(
+    max_iters_per_window: Optional[int] = field(
         default=10, metadata={"help": "Reserved for decay-style window schedulers"}
     )
-    window_min_iters_per_window: Optional[int] = field(
+    min_iters_per_window: Optional[int] = field(
         default=1, metadata={"help": "Reserved for decay-style window schedulers"}
     )
-    window_overlap: bool = field(
-        default=False, metadata={"help": "Allow overlap between adjacent window groups"}
-    )
-    window_overlap_step: int = field(
-        default=1, metadata={"help": "Stride between overlapping window groups"}
-    )
-    window_roll_back: bool = field(
+    overlap_size: int = field(default=0,
+        metadata={"help": "Number of overlapping timesteps between adjacent windows (0 = no overlap)"})
+    roll_back: bool = field(
         default=False,
         metadata={"help": "Wrap back to the beginning after reaching the last window"},
     )
@@ -531,13 +525,13 @@ class AlgorithmConfig:
             raise ValueError("algorithm.eval_ema_update_interval must be >= 1.")
         window_cfg = self.window
         if (
-            window_cfg.window_max_iters_per_window is not None
-            and window_cfg.window_min_iters_per_window is not None
-            and window_cfg.window_min_iters_per_window
-            > window_cfg.window_max_iters_per_window
+            window_cfg.max_iters_per_window is not None
+            and window_cfg.min_iters_per_window is not None
+            and window_cfg.min_iters_per_window
+            > window_cfg.max_iters_per_window
         ):
             raise ValueError(
-                "window_min_iters_per_window must be <= window_max_iters_per_window."
+                "min_iters_per_window must be <= max_iters_per_window."
             )
 
 @dataclass
