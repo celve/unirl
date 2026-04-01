@@ -101,8 +101,10 @@ class SamplingConfig:
     sampler_dotpath: str = field(default="",
         metadata={"help": "Optional Python dotpath to Sampler class; omit to auto-resolve from model_type"})
     logprob_source: str = field(default="replay",
-        metadata={"help": "SGLang log-prob mode: replay (training-side replay path) or native (engine-side log_probs)"},
-        choices=["replay", "native"],
+        metadata={
+            "help": "SGLang log-prob mode: replay (training-side replay path) or native (engine-side log_probs)",
+            "choices": ["replay", "native"],
+        },
     )
     replay_sampler_dotpath: Optional[str] = field(default=None,
         metadata={"help": "Python dotpath to replay sampler, if different from sampler_dotpath"})
@@ -113,8 +115,10 @@ class SamplingConfig:
     eta: float = field(default=1.0,
         metadata={"help": "SDE noise coefficient (eta=0 is ODE, eta=1 is full SDE)"})
     sde_type: str = field(default="flow",
-        metadata={"help": "Transition rule. Supported: flow, cps, dance, dpm2"},
-        choices=["flow", "cps", "dance", "dpm2"],
+        metadata={
+            "help": "Transition rule. Supported: flow, cps, dance, dpm2",
+            "choices": ["flow", "cps", "dance", "dpm2"],
+        },
     )
     max_samples_per_request: Optional[int] = field(default=None,
         metadata={"help": "Generated-sample cap per training-actor direct-sampling request; rollout_total_samples stays prompts_per_rollout*samples_per_prompt"})
@@ -161,8 +165,10 @@ class RewardConfig:
     """
 
     reward_backend: str = field(default="local",
-        metadata={"help": "Reward backend: local, http, ray_pool"},
-        choices=["local", "http", "ray_pool"],
+        metadata={
+            "help": "Reward backend: local, http, ray_pool",
+            "choices": ["local", "http", "ray_pool"],
+        },
     )
 
     # http reward service related fields
@@ -279,9 +285,11 @@ class RayConfig:
     training_num_gpus_per_node: int = field(default=4,
         metadata={"help": "GPUs per node for training actors"})
     placement_strategy: str = field(default="PACK",
-        metadata={"help": "Ray placement group strategy: PACK or SPREAD"},
-        choices=["PACK", "SPREAD", "STRICT_PACK", "STRICT_SPREAD"],
-        )
+        metadata={
+            "help": "Ray placement group strategy: PACK or SPREAD",
+            "choices": ["PACK", "SPREAD", "STRICT_PACK", "STRICT_SPREAD"],
+        },
+    )
     colocate_training_gpu_fraction: float = field(default=0.4,
         metadata={"help": "GPU memory fraction for training when colocated"})
     colocate_rollout_gpu_fraction: float = field(default=0.4,
@@ -308,11 +316,12 @@ class RayConfig:
             if getattr(self, attr_name) < 0:
                 raise ValueError(f"ray.{attr_name} must be >= 0.")
 
+        _valid_strategies = ("PACK", "SPREAD", "STRICT_PACK", "STRICT_SPREAD")
         strategy = self.placement_strategy.strip().upper()
-        if strategy not in self.placement_strategy.choices:
+        if strategy not in _valid_strategies:
             raise ValueError(
                 "ray.placement_strategy must be one of "
-                f"{sorted(self.placement_strategy.choices)}, got: {self.placement_strategy!r}"
+                f"{sorted(_valid_strategies)}, got: {self.placement_strategy!r}"
             )
 
 @dataclass
@@ -332,9 +341,11 @@ class SyncConfig:
         },
     )
     protocol: str = field(default=None,
-        metadata={"help": "Explicit weight sync mode. Must be one of: disabled, tensor_payload, nccl_broadcast, checkpoint_path"},
-        choices=["disabled", "tensor_payload", "nccl_broadcast", "checkpoint_path"],
-        )
+        metadata={
+            "help": "Explicit weight sync mode. Must be one of: disabled, tensor_payload, nccl_broadcast, checkpoint_path",
+            "choices": ["disabled", "tensor_payload", "nccl_broadcast", "checkpoint_path"],
+        },
+    )
     dir: str = field(default="outputs/weight_sync",
         metadata={"help": "Directory for checkpoint-based weight sync (use shared FS for multi-node)"})
     bucket_size: int = field(default=256,
@@ -345,15 +356,16 @@ class SyncConfig:
         metadata={"help": "Rollout-side modules that receive weight updates (defaults to ['transformer'])."})
 
     def validate(self) -> None:
+        _valid_protocols = ("disabled", "tensor_payload", "nccl_broadcast", "checkpoint_path")
         normalized_protocol = self.protocol.strip().lower()
         if not normalized_protocol:
             raise ValueError(
                 "sync.protocol must be set explicitly. "
                 "Choose one of disabled/tensor_payload/nccl_broadcast/checkpoint_path."
             )
-        if normalized_protocol not in self.protocol.choices:
+        if normalized_protocol not in _valid_protocols:
             raise ValueError(
-                f"sync.protocol must be one of {'/'.join(self.protocol.choices)}, "
+                f"sync.protocol must be one of {'/'.join(_valid_protocols)}, "
                 f"got: {self.protocol!r}."
             )
         if int(self.rollout_update_interval) < 1:
@@ -374,8 +386,11 @@ class SchedulerConfig:
     """Stateless index-scheduler config for rollout or training timestep selection."""
 
     timestep_strategy: str = field(
-        default="all", metadata={"help": "Index scheduler type: all or window"},
-        choices=["all", "window"],
+        default="all",
+        metadata={
+            "help": "Index scheduler type: all or window",
+            "choices": ["all", "window"],
+        },
     )
     timestep_fraction: Any = field(
         default=1.0,
@@ -387,8 +402,10 @@ class SchedulerConfig:
         metadata={"help": "Randomly sample this many SDE timestep indices from the timestep_fraction range per step. None means use all indices in range."})
     window_strategy: str = field(
         default="progressive",
-        metadata={"help": "Window progression: progressive or random"},
-        choices=["progressive", "random"],
+        metadata={
+            "help": "Window progression: progressive or random",
+            "choices": ["progressive", "random"],
+        },
     )
     window_size: int = field(
         default=4, metadata={"help": "Number of timestep indices in each window"}
@@ -443,13 +460,17 @@ class AlgorithmConfig:
 
     # Shared algorithm surface
     component_mix_stage: str = field(default="reward",
-        metadata={"help": "Stage that applies multi-component reward mixing: reward or advantage"},
-        choices=["reward", "advantage"],
-        )
+        metadata={
+            "help": "Stage that applies multi-component reward mixing: reward or advantage",
+            "choices": ["reward", "advantage"],
+        },
+    )
     adv_normalization_scope: str = field(default="group",
-        metadata={"help": "Advantage normalization scope: group or global"},
-        choices=["group", "global"],
-        )
+        metadata={
+            "help": "Advantage normalization scope: group or global",
+            "choices": ["group", "global"],
+        },
+    )
     adv_norm_eps: float = field(default=1e-8,
         metadata={"help": "Numerical epsilon for advantage normalization"})
     clip_max: Optional[float] = field(default=None,
@@ -490,18 +511,20 @@ class AlgorithmConfig:
             raise ValueError("prompts_per_rollout must be >= 1.")
         if not isinstance(self.algorithm_kwargs, dict):
             raise ValueError("algorithm.algorithm_kwargs must be a dict.")
+        _valid_mix_stages = ("reward", "advantage")
         component_mix_stage = self.component_mix_stage.strip().lower()
-        if component_mix_stage not in self.component_mix_stage.choices:
+        if component_mix_stage not in _valid_mix_stages:
             raise ValueError(
                 "algorithm.component_mix_stage must be one of "
-                f"{sorted(self.component_mix_stage.choices)}, "
+                f"{sorted(_valid_mix_stages)}, "
                 f"Got: {self.component_mix_stage!r}"
             )
+        _valid_adv_scopes = ("group", "global")
         adv_normalization_scope = self.adv_normalization_scope.strip().lower()
-        if adv_normalization_scope not in self.adv_normalization_scope.choices:
+        if adv_normalization_scope not in _valid_adv_scopes:
             raise ValueError(
                 "algorithm.adv_normalization_scope must be one of "
-                f"{sorted(self.adv_normalization_scope.choices)}, "
+                f"{sorted(_valid_adv_scopes)}, "
                 f"Got: {self.adv_normalization_scope!r}"
             )
         if float(self.adv_norm_eps) <= 0:
@@ -563,9 +586,11 @@ class TrainingConfig:
     warmup_steps: int = field(default=0,
         metadata={"help": "Number of learning rate warmup steps"})
     lr_scheduler_type: str = field(default="constant",
-        metadata={"help": "LR scheduler type: constant, linear, cosine"},
-        choices=["constant", "linear", "cosine"],
-        )
+        metadata={
+            "help": "LR scheduler type: constant, linear, cosine",
+            "choices": ["constant", "linear", "cosine"],
+        },
+    )
 
     # Train backend
     train_backend: str = field(default="fsdp",
@@ -660,9 +685,11 @@ class RolloutConfig:
 
     # --- Topology ---
     mode: str = field(default=None,
-        metadata={"help": "Canonical rollout topology: direct_sampling, separate, or colocate"},
-        choices=["direct_sampling", "separate", "colocate"],
-        )
+        metadata={
+            "help": "Canonical rollout topology: direct_sampling, separate, or colocate",
+            "choices": ["direct_sampling", "separate", "colocate"],
+        },
+    )
     rollout_engine: Optional[str] = field(default=None,
         metadata={"help": "Dedicated rollout engine selector for separate or colocate. Must be unset in direct_sampling."})
     rollout_batch_size: int = field(default=1,

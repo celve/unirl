@@ -484,10 +484,6 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
     training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
     sync_mode = rollout_mode_info.sync_protocol
     rollout_mode_name = rollout_topology.mode
-    rollout_control = args.rollout.control
-    rollout_artifacts = args.rollout.artifacts
-    rollout_evaluation = args.rollout.evaluation
-    rollout_logging = args.rollout.logging
 
     if training_actor_sampling_mode:
         raise ValueError(
