@@ -68,7 +68,7 @@ logging:
   logging_steps: 10
 
 sync:
-  protocol: tensor_payload
+  protocol: nccl_broadcast
 
 data_source_dotpath: diffusionrl.data.data_source.ImageRLDataSource
 rollout_function_dotpath: diffusionrl.rollout.default_rollout.generate_rollout

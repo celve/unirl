@@ -286,7 +286,7 @@ class NCCLBroadcastWeightSync(WeightSyncCoordinator):
         world_size = int(total_rollout_gpus + 1)
         self._group_name = f"diffusionrl_wsync_{int(time.time_ns())}"
 
-        self._rollout_runtime.init_weights_update_group(
+        rollout_refs = self._rollout_runtime.async_init_weights_update_group(
             master_address=master_address,
             master_port=master_port,
             world_size=world_size,
@@ -305,7 +305,7 @@ class NCCLBroadcastWeightSync(WeightSyncCoordinator):
             # coordination handshakes, but actor/group ownership stays in ray/.
             import ray
 
-            ray.get(train_ref)
+            ray.get(rollout_refs + [train_ref])
         except Exception:
             logger.exception("NCCL group init failed: %s", self._group_name)
             self._destroy_group_best_effort()

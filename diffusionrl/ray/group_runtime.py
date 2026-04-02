@@ -344,7 +344,7 @@ class RolloutGroupRuntime:
             flush_cache=flush_cache,
         )
 
-    def init_weights_update_group(
+    def async_init_weights_update_group(
         self,
         *,
         master_address: str,
@@ -352,7 +352,7 @@ class RolloutGroupRuntime:
         world_size: int,
         group_name: str,
         backend: str = "nccl",
-    ) -> None:
+    ) -> list:
         self._ensure_weight_update_targets()
         per_actor_args: List[Optional[tuple[Any, ...]]] = [None] * self._handle.num_actors
         per_actor_kwargs: List[Optional[Dict[str, Any]]] = [None] * self._handle.num_actors
@@ -367,7 +367,7 @@ class RolloutGroupRuntime:
                 "group_name": str(group_name),
                 "backend": str(backend),
             }
-        self._handle.call_per_actor(
+        return self._handle.call_per_actor_async(
             "init_weights_update_group",
             per_actor_args=per_actor_args,
             per_actor_kwargs=per_actor_kwargs,

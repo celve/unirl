@@ -110,5 +110,5 @@ python -m diffusionrl.train \
     --rollout.save-steps 40 \
     --logging.logging-steps 10 \
     --rollout.output-dir "${OUTPUT_DIR}" \
-    --sync.protocol tensor_payload \
+    --sync.protocol nccl_broadcast \
     "$@"
