@@ -35,9 +35,9 @@ def _resolve_target_modules(args: Any) -> list[str]:
 
 
 def _resolve_bucket_size_mb(args: Any) -> int:
-    bucket_size_mb = int(args.sync.bucket_mb)
+    bucket_size_mb = int(args.sync.bucket_size)
     if bucket_size_mb < 1:
-        raise ValueError(f"sync.bucket_mb must be >= 1, got {bucket_size_mb}.")
+        raise ValueError(f"sync.bucket_size must be >= 1, got {bucket_size_mb}.")
     return bucket_size_mb
 
 
@@ -377,10 +377,10 @@ class CheckpointWeightSync(WeightSyncCoordinator):
             raise ValueError(
                 "Checkpoint weight sync requires a dedicated rollout runtime config."
             )
-        engine_type = str(rollout.service_engine or "").strip().lower()
+        engine_type = str(rollout.rollout_engine or "").strip().lower()
         if not engine_type:
             raise ValueError(
-                "Checkpoint weight sync requires rollout.topology.service_engine to be normalized. "
+                "Checkpoint weight sync requires rollout.rollout_engine to be normalized. "
                 "Validate args before selecting dedicated rollout checkpoint export format."
             )
         backend_caps = dict(self.launch_config.training.backend_capabilities or {})

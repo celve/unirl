@@ -29,13 +29,13 @@
 # - num_inference_steps=10
 # - guidance_scale=1.0
 # - kl_coef=0.04
-# - adv_normalization=group
+# - adv_normalization_scope=group
 # - learning_rate=3e-4
 # - LoRA: rank=32, alpha=64
 # - timestep_fraction=0.99
-# - training.num_updates_per_local_batch (+ optional training.local_micro_batch_size when tuning memory)
+# - training.num_updates_per_batch (+ optional training.micro_batch_size when tuning memory)
 # - reward_location=sampling_actor
-# - reward_model_name defaults to pickscore
+# - reward_components defaults to pickscore
 # - prompts_per_rollout=16, samples_per_prompt=8 on 8 GPUs
 # - sampling.max_samples_per_request only controls OOM-safe request splitting;
 #   rollout_total_samples still equals prompts_per_rollout * samples_per_prompt
@@ -73,12 +73,12 @@ PROMPTS_PER_BATCH=16 # number of prompts per epoch
 DIRECT_SAMPLING_BATCH_SIZE=8 # Lower peak sampling batch size to reduce OOM risk.
 
 # Training settings
-LOCAL_MICRO_BATCH_SIZE=2 # Lower local forward/backward batch size during optimization.
+MICRO_BATCH_SIZE=2 # Lower forward/backward batch size during optimization.
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 
 LOCAL_MICRO_BATCH_ARGS=()
-if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
-    LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
+if [ -n "${MICRO_BATCH_SIZE}" ]; then
+    LOCAL_MICRO_BATCH_ARGS+=(--training.micro-batch-size "${MICRO_BATCH_SIZE}")
 fi
 NUM_INFERENCE_STEPS_OVERRIDE=""
 prev=""
@@ -146,7 +146,7 @@ python -m diffusionrl.train \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
-    --rollout.topology.mode direct_sampling \
+    --rollout.mode direct_sampling \
 --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
@@ -157,18 +157,18 @@ python -m diffusionrl.train \
     --training.lora-alpha 64 \
     --training.use-lora true \
     \
-    --height 512 \
-    --width 512 \
+    --sampling.height 512 \
+    --sampling.width 512 \
     \
-    --rollout.control.num-rollout 1000 \
-    --rollout.artifacts.save-steps 60 \
-    --rollout.evaluation.eval-steps 60 \
-    --rollout.logging.logging-steps ${LOGGING_STEPS} \
-    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
-    --rollout.logging.report-to-wandb ${REPORT_TO_WANDB} \
-    --rollout.logging.project-name "${WANDB_PROJECT_NAME}" \
-    --rollout.logging.run-name "${WANDB_RUN_NAME}" \
-    --rollout.logging.wandb-log-media ${WANDB_LOG_MEDIA} \
-    --rollout.logging.wandb-media-max-items ${WANDB_MEDIA_MAX_ITEMS} \
+    --rollout.num-rollout 1000 \
+    --rollout.save-steps 60 \
+    --evaluation.eval-steps 60 \
+    --logging.logging-steps ${LOGGING_STEPS} \
+    --rollout.output-dir "${OUTPUT_DIR}" \
+    --logging.report-to-wandb ${REPORT_TO_WANDB} \
+    --logging.project-name "${WANDB_PROJECT_NAME}" \
+    --logging.run-name "${WANDB_RUN_NAME}" \
+    --logging.log-media ${WANDB_LOG_MEDIA} \
+    --logging.media-max-items ${WANDB_MEDIA_MAX_ITEMS} \
     --sync.protocol disabled \
     "$@"

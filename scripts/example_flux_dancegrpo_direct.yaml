@@ -7,7 +7,7 @@
 
 model:
   model_type: flux
-  pretrained_model_saved_path: models/local/flux.1-dev
+  pretrained_model_ckpt_path: models/local/flux.1-dev
 
 sampling:
   sde_type: dance
@@ -16,18 +16,19 @@ sampling:
   num_inference_steps: 25
   guidance_scale: 3.5
   timestep_fraction: 0.6
+  height: 256
+  width: 256
 
 reward:
-  reward_model_name: ocr
+  reward_components: ocr
 
 algorithm:
   algorithm_type: grpo
   prompts_per_rollout: 1
   samples_per_prompt: 4
-  adv_normalization: group
-  adv_clip_abs: 5.0
-  window:
-    window_training: true
+  adv_normalization_scope: group
+  clip_max: 5.0
+  rollout_scheduler:
     timestep_strategy: window
     window_size: 6
     window_strategy: progressive
@@ -36,8 +37,8 @@ algorithm:
     use_kl_penalty: false
 
 training:
-  local_micro_batch_size: 1
-  num_updates_per_local_batch: 1
+  micro_batch_size: 1
+  num_updates_per_batch: 1
   learning_rate: 0.00001
   max_grad_norm: 1.0
   weight_decay: 0.0001
@@ -47,14 +48,12 @@ training:
   lora_target_modules: to_q,to_k,to_v,to_out.0
 
 precision:
-  training:
-    model_precision: bf16
-    fsdp_precision: fp32
-    autocast_precision: bf16
-  rollout:
-    autocast_precision: bf16
-    trajectory_precision: fp16
-    logprob_precision: fp32
+  model_precision: bf16
+  fsdp_precision: fp32
+  training_autocast_precision: bf16
+  rollout_autocast_precision: bf16
+  trajectory_precision: fp16
+  logprob_precision: fp32
 
 ray:
   rollout_num_nodes: 0
@@ -63,30 +62,27 @@ ray:
   placement_strategy: SPREAD
 
 rollout:
-  topology:
-    mode: direct_sampling
-  control:
-    num_rollout: 300
-  artifacts:
-    save_steps: 40
-    output_dir: outputs/scripts_example_flux_dancegrpo_direct
-  evaluation:
-    eval_steps: 50
-    eval_batch_size: 2
-    num_inference_steps: 30
-    eta: 0.2
-  logging:
-    logging_steps: 10
-    wandb_tags: example,flux,direct
+  mode: direct_sampling
+  num_rollout: 300
+  save_steps: 40
+  output_dir: outputs/scripts_example_flux_dancegrpo_direct
+
+evaluation:
+  eval_steps: 50
+  eval_batch_size: 2
+  num_inference_steps: 30
+  eta: 0.2
+
+logging:
+  logging_steps: 10
+  tags: example,flux,direct
 
 sync:
   protocol: disabled
 
-data_source_path: diffusionrl.data.data_source.ImageRLDataSource
-rollout_function_path: diffusionrl.rollout.default_rollout.generate_rollout
-eval_function_path: diffusionrl.rollout.default_rollout.evaluate_rollout
-reward_hook_path: diffusionrl.rollout.default_rollout.score_rewards_hook
+data_source_dotpath: diffusionrl.data.data_source.ImageRLDataSource
+rollout_function_dotpath: diffusionrl.rollout.default_rollout.generate_rollout
+eval_function_dotpath: diffusionrl.rollout.default_rollout.evaluate_rollout
+reward_hook_dotpath: diffusionrl.rollout.default_rollout.score_rewards_hook
 data_path: data/samples/prompts_toy.json
 eval_data_path: data/samples/prompts_toy.json
-height: 256
-width: 256

@@ -57,10 +57,10 @@ python -m diffusionrl.train \
     \
     "${PLUGIN_ALGO_KWARG_ARGS[@]}" \
     --algorithm.prompts-per-rollout 1 \
-    --training.local-micro-batch-size 1 \
+    --training.micro-batch-size 1 \
     --algorithm.samples-per-prompt 2 \
     \
-    --rollout.topology.mode direct_sampling \
+    --rollout.mode direct_sampling \
 --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node "${NUM_GPUS}" \
@@ -71,12 +71,12 @@ python -m diffusionrl.train \
     --training.lora-rank 8 \
     --training.lora-alpha 16 \
     \
-    --height 256 \
-    --width 256 \
+    --sampling.height 256 \
+    --sampling.width 256 \
     \
-    --rollout.control.num-rollout 5 \
-    --rollout.artifacts.save-steps 1000 \
-    --rollout.logging.logging-steps 1 \
-    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
+    --rollout.num-rollout 5 \
+    --rollout.save-steps 1000 \
+    --logging.logging-steps 1 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
     --sync.protocol disabled \
     "$@"

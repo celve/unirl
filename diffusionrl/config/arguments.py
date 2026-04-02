@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from diffusionrl.algorithms.construction import (
     instantiate_algorithm_from_config,
-    resolve_algorithm_path,
+    resolve_algorithm_dotpath,
     build_algorithm_config,
 )
 from diffusionrl.config.argument_parsing import (
@@ -47,7 +47,7 @@ from diffusionrl.config.resolution import (
 from diffusionrl.config.validation import (
     apply_model_config_hook,
     validate_algorithm_kwargs_payload,
-    validate_algorithm_path,
+    validate_algorithm_dotpath,
     validate_dynamic_dotpaths,
     validate_grouped_configs,
     validate_model_sampling_contract,
@@ -57,7 +57,7 @@ from diffusionrl.config.validation import (
     validate_rollout_layout,
     validate_rollout_mode,
     validate_rollout_mode_constraints,
-    validate_precision_name,
+    validate_precision_type,
     validate_train_backend_config,
     validate_training_batch_geometry,
     validate_training_misc,
@@ -67,42 +67,47 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ModelConfig:
-    """Model identity and checkpoint paths."""
+    """
+    Model Configuration:
+    contains model type and checkpoint paths.
+    """
 
     model_type: str = field(default="hunyuan",
         metadata={"help": "Model architecture type (hunyuan, flux, sd3, mochi, wan2.1, bagel)"})
-    model_path: str = field(default=DEFAULT_MODEL_PATH,
+    model_dotpath: str = field(default=DEFAULT_MODEL_PATH,
         metadata={"help": "Python dotpath to ModelBundle class. Auto-resolved from model_type"})
-    pretrained_model_saved_path: str = field(default="",
+    pretrained_model_ckpt_path: str = field(default="",
         metadata={"help": "Path to pretrained model weights (local path or HuggingFace ID)"})
-    vae_saved_path: Optional[str] = field(default=None,
+    vae_ckpt_path: Optional[str] = field(default=None,
         metadata={"help": "Path to separate VAE checkpoint, if not bundled with the model"})
-    text_encoder_path: Optional[str] = field(default=None,
+    text_encoder_ckpt_path: Optional[str] = field(default=None,
         metadata={"help": "Path to separate text encoder checkpoint, if not bundled"})
 
     def validate(self) -> None:
-        if not self.model_path:
+        if not self.model_dotpath:
             raise ValueError(
-                "model_path must be set. It is usually auto-resolved from model_type. "
+                "model_dotpath must be set. It is usually auto-resolved from model_type. "
                 "Set --model.model-type (hunyuan, flux, sd3, mochi) or provide "
-                "--model.model-path explicitly."
+                "--model.model-dotpath explicitly."
             )
-
 
 @dataclass
 class SamplingConfig:
-    """Sampling engine, sampler, and denoising controls."""
+    """
+    Sampling Engine Configuration:
+    contains sampler type, logprob source, and denoising controls.
+    """
 
-    sampler_path: str = field(default="",
+    sampler_dotpath: str = field(default="",
         metadata={"help": "Optional Python dotpath to Sampler class; omit to auto-resolve from model_type"})
-    max_samples_per_request: Optional[int] = field(default=None,
-        metadata={"help": "Generated-sample cap per training-actor direct-sampling request; rollout_total_samples stays prompts_per_rollout*samples_per_prompt"})
     logprob_source: str = field(default="replay",
-        metadata={"help": "SGLang log-prob mode: replay (training-side) or native (engine-side)"})
-    replay_log_probs: bool = field(default=False,
-        metadata={"help": "Replay old log-probs on training actor (for SGLang replay mode)"})
-    replay_sampler_path: Optional[str] = field(default=None,
-        metadata={"help": "Python dotpath to replay sampler, if different from sampler_path"})
+        metadata={
+            "help": "SGLang log-prob mode: replay (training-side replay path) or native (engine-side log_probs)",
+            "choices": ["replay", "native"],
+        },
+    )
+    replay_sampler_dotpath: Optional[str] = field(default=None,
+        metadata={"help": "Python dotpath to replay sampler, if different from sampler_dotpath"})
     sampler_kwargs: Dict[str, Any] = field(default_factory=dict,
         metadata={"help": "Explicit sampler constructor kwargs for direct sampling and replay sampler instantiation."})
     num_inference_steps: int = field(default=50,
@@ -110,7 +115,13 @@ class SamplingConfig:
     eta: float = field(default=1.0,
         metadata={"help": "SDE noise coefficient (eta=0 is ODE, eta=1 is full SDE)"})
     sde_type: str = field(default="flow",
-        metadata={"help": "Transition rule. Supported: flow, cps, dance, dpm2"})
+        metadata={
+            "help": "Transition rule. Supported: flow, cps, dance, dpm2",
+            "choices": ["flow", "cps", "dance", "dpm2"],
+        },
+    )
+    max_samples_per_request: Optional[int] = field(default=None,
+        metadata={"help": "Generated-sample cap per training-actor direct-sampling request; rollout_total_samples stays prompts_per_rollout*samples_per_prompt"})
     shift: float = field(default=3.0,
         metadata={"help": "Shift parameter for the sampling timestep schedule (model-specific)"})
     guidance_scale: float = field(default=7.5,
@@ -120,80 +131,96 @@ class SamplingConfig:
     init_same_noise: bool = field(default=False,
         metadata={"help": "Use identical initial noise for all samples of the same prompt"})
 
+    # Generated media dimensions and frame rate
+    height: int = field(default=256,
+        metadata={"help": "Generated image/video height in pixels"})
+    width: int = field(default=256,
+        metadata={"help": "Generated image/video width in pixels"})
+    num_frames: int = field(default=16,
+        metadata={"help": "Number of video frames to generate (video models only)"})
+    fps: int = field(default=8,
+        metadata={"help": "Video frame rate (video models only)"})
+
     def validate(self) -> None:
-        mode = self.logprob_source
-        if mode not in ("replay", "native"):
-            raise ValueError(
-                f"logprob_source must be one of replay/native, got: {self.logprob_source}"
-            )
-        if self.max_samples_per_request is not None and int(self.max_samples_per_request) < 1:
+        if self.logprob_source not in ("replay", "native"):
+            raise ValueError(f"logprob_source must be one of replay/native, got: {self.logprob_source}")
+        if self.max_samples_per_request is not None and self.max_samples_per_request < 1:
             raise ValueError("max_samples_per_request must be >= 1 when set.")
         if not isinstance(self.sampler_kwargs, dict):
             raise ValueError("sampling.sampler_kwargs must be a dict.")
+
         _precision_keys = {"autocast_precision", "trajectory_precision", "logprob_precision"}
         _leaked = _precision_keys & set(self.sampler_kwargs)
         if _leaked:
             raise ValueError(
                 f"sampling.sampler_kwargs must not contain precision keys {sorted(_leaked)}; "
-                "use precision.rollout.* instead."
+                "use precision.* instead."
             )
-
 
 @dataclass
 class RewardConfig:
-    """Reward path, reward model, and reward pool controls."""
+    """
+    Reward Configuration:
+    contains reward backend, reward provider configs and multi-reward related fields.
+    """
 
-    reward_path: Optional[str] = field(default=None,
-        metadata={"help": "Optional Python dotpath to a custom reward scorer class; omit to use built-in reward_model_name/reward_models"})
-    reward_model_saved_path: Optional[str] = field(default=None,
+    reward_backend: str = field(default="local",
+        metadata={
+            "help": "Reward backend: local, http, ray_pool",
+            "choices": ["local", "http", "ray_pool"],
+        },
+    )
+
+    # http reward service related fields
+    reward_service_urls: Optional[List[str]] = field(default=None,
+        metadata={"help": "HTTP reward service URL(s). Accepts a single URL or a list/comma-separated list for load balancing"})
+
+    # local reward model related fields
+    reward_dotpath: Optional[str] = field(default=None,
+        metadata={"help": "Optional Python dotpath to a custom reward scorer class; omit to use built-in reward_components"})
+    reward_model_ckpt_path: Optional[str] = field(default=None,
         metadata={"help": "Path to reward model weights (local path or HuggingFace ID)"})
-    reward_model_name: str = field(default="hpsv2",
-        metadata={"help": "Reward model name: hpsv2, pickscore, clip, ocr, etc."})
+    reward_components: Optional[List[str]] = field(default_factory=lambda: ["hpsv2"],
+        metadata={"help": "Reward component name(s). Accepts a single built-in scorer name or a list/comma-separated list such as hpsv2, pickscore, clip, ocr"})
     reward_batch_size: int = field(default=8,
         metadata={"help": "Batch size for reward model inference"})
-    reward_timeout: float = field(default=60.0,
-        metadata={"help": "Timeout in seconds for reward computation per batch"})
-    use_http_reward: bool = field(default=False,
-        metadata={"help": "Use external HTTP reward service instead of local model"})
-    reward_service_url: Optional[str] = field(default=None,
-        metadata={"help": "URL of HTTP reward service (when use_http_reward=true)"})
-    reward_models: Optional[List[str]] = field(default=None,
-        metadata={"help": "List of reward model names for multi-reward setup"})
-    reward_weights: Optional[List[float]] = field(default=None,
-        metadata={"help": "Weights for each reward model in multi-reward aggregation"})
-    component_aggregation: str = field(default="weighted_sum",
-        metadata={"help": "Multi-reward aggregation method: weighted_sum"})
-    reward_dedicated_num_gpus: int = field(default=0,
-        metadata={"help": "Total GPUs for dedicated reward actors (0 = CPU reward)"})
+    local_reward_device: str = field(default="cpu",
+        metadata={"help": "Device for local in-process reward scorers: cpu, auto, or cuda"})
+
+    # ray_pool reward pool related fields    
     reward_dedicated_num_nodes: int = field(default=0,
         metadata={"help": "Number of nodes for dedicated reward actors (mutually exclusive with num_gpus)"})
+    reward_dedicated_num_gpus: int = field(default=0,
+        metadata={"help": "Total GPUs for dedicated reward actors (0 = CPU reward)"})
     reward_dedicated_num_gpus_per_node: int = field(default=0,
         metadata={"help": "GPUs per node for dedicated reward actors"})
     reward_dedicated_gpus_per_actor: int = field(default=1,
         metadata={"help": "GPUs per individual reward actor"})
-    reward_service_urls: Optional[List[str]] = field(default=None,
-        metadata={"help": "List of HTTP reward service URLs for load balancing"})
     reward_location: str = field(default="auto",
         metadata={"help": "Where default reward scoring runs: auto, driver, or sampling_actor"})
-    local_reward_device: str = field(default="cpu",
-        metadata={"help": "Device for local in-process reward scorers: cpu, auto, or cuda"})
-    allow_local_reward_cuda_contention: bool = field(default=False,
-        metadata={"help": "Allow local_reward_device=cuda without dedicated reward GPUs (may contend with rollout/training GPUs)"})
+
+   
+    # multi-reward related fields
+    reward_weights: Optional[List[float]] = field(default=None,
+        metadata={"help": "Weights for each reward component in multi-reward aggregation"})
+    reward_aggregation_method: str = field(default="weighted_sum",
+        metadata={"help": "Multi-reward aggregation method: weighted_sum, mean, min, max, concat"})
 
     @property
     def has_http_reward_urls(self) -> bool:
-        return bool(self.reward_service_url or self.reward_service_urls)
+        return bool(self.reward_service_urls)
 
     @property
     def has_http_reward(self) -> bool:
-        return bool(self.use_http_reward or self.has_http_reward_urls)
+        return str(self.reward_backend or "local").strip().lower() == "http"
 
     @property
     def has_builtin_reward(self) -> bool:
-        return bool(
-            str(self.reward_model_name or "").strip()
-            or (isinstance(self.reward_models, list) and len(self.reward_models) > 0)
-        )
+        if isinstance(self.reward_components, str):
+            return bool(str(self.reward_components).strip())
+        if not isinstance(self.reward_components, list):
+            return False
+        return any(str(name or "").strip() for name in self.reward_components)
 
     @property
     def has_dedicated_reward_pool(self) -> bool:
@@ -202,6 +229,12 @@ class RewardConfig:
         )
 
     def validate(self) -> None:
+        reward_backend = str(self.reward_backend or "local").strip().lower()
+        if reward_backend not in ("local", "http", "ray_pool"):
+            raise ValueError(
+                "reward_backend must be one of local/http/ray_pool, "
+                f"got: {self.reward_backend}"
+            )
         reward_location = str(self.reward_location or "auto").strip().lower()
         if reward_location not in ("driver", "sampling_actor", "auto"):
             raise ValueError(
@@ -214,12 +247,28 @@ class RewardConfig:
                 "local_reward_device must be one of cpu/auto/cuda, "
                 f"got: {self.local_reward_device}"
             )
-        if not self.has_http_reward and not self.reward_path and not self.has_builtin_reward:
-            raise ValueError(
-                "Reward scoring requires either reward_model_name/reward_models for built-ins, "
-                "or reward_path for a custom scorer."
-            )
+        if reward_backend == "http" and not self.has_http_reward_urls:
+            raise ValueError("reward_backend='http' requires reward_service_urls.")
 
+        if reward_backend != "http" and self.has_http_reward_urls:
+            raise ValueError(
+                "reward_service_urls is only valid when reward_backend='http'."
+            )
+        if reward_backend == "ray_pool" and not self.has_dedicated_reward_pool:
+            raise ValueError(
+                "reward_backend='ray_pool' requires reward_dedicated_num_gpus "
+                "or reward_dedicated_num_nodes."
+            )
+        if reward_backend != "ray_pool" and self.has_dedicated_reward_pool:
+            raise ValueError(
+                "reward_dedicated_* settings are only valid when "
+                "reward_backend='ray_pool'."
+            )
+        if not self.has_http_reward and not self.reward_dotpath and not self.has_builtin_reward:
+            raise ValueError(
+                "Reward scoring requires either reward_components for built-ins, "
+                "or reward_dotpath for a custom scorer."
+            )
 
 @dataclass
 class RayConfig:
@@ -236,7 +285,11 @@ class RayConfig:
     training_num_gpus_per_node: int = field(default=4,
         metadata={"help": "GPUs per node for training actors"})
     placement_strategy: str = field(default="PACK",
-        metadata={"help": "Ray placement group strategy: PACK or SPREAD"})
+        metadata={
+            "help": "Ray placement group strategy: PACK or SPREAD",
+            "choices": ["PACK", "SPREAD", "STRICT_PACK", "STRICT_SPREAD"],
+        },
+    )
     colocate_training_gpu_fraction: float = field(default=0.4,
         metadata={"help": "GPU memory fraction for training when colocated"})
     colocate_rollout_gpu_fraction: float = field(default=0.4,
@@ -260,27 +313,42 @@ class RayConfig:
             "training_num_nodes",
             "training_num_gpus_per_node",
         ):
-            if int(getattr(self, attr_name)) < 0:
+            if getattr(self, attr_name) < 0:
                 raise ValueError(f"ray.{attr_name} must be >= 0.")
 
-        strategy = str(self.placement_strategy or "PACK").strip().upper()
-        valid_strategies = {"PACK", "SPREAD", "STRICT_PACK", "STRICT_SPREAD"}
-        if strategy not in valid_strategies:
+        _valid_strategies = ("PACK", "SPREAD", "STRICT_PACK", "STRICT_SPREAD")
+        strategy = self.placement_strategy.strip().upper()
+        if strategy not in _valid_strategies:
             raise ValueError(
                 "ray.placement_strategy must be one of "
-                f"{sorted(valid_strategies)}, got: {self.placement_strategy!r}"
+                f"{sorted(_valid_strategies)}, got: {self.placement_strategy!r}"
             )
-
 
 @dataclass
 class SyncConfig:
-    """Train->rollout weight synchronization controls."""
+    """
+    Train->rollout weight synchronization Configuration:
+    contains cadence, protocol, directory, bucket size, flush cache, and target modules.
+    """
 
-    protocol: Optional[str] = field(default=None,
-        metadata={"help": "Explicit weight sync mode. Must be one of: disabled, tensor_payload, nccl_broadcast, checkpoint_path"})
+    rollout_update_interval: int = field(
+        default=1,
+        metadata={
+            "help": (
+                "Run train→rollout weight sync every N outer rollout steps (rollout_id); "
+                "used by separate/async training loops."
+            )
+        },
+    )
+    protocol: str = field(default=None,
+        metadata={
+            "help": "Explicit weight sync mode. Must be one of: disabled, tensor_payload, nccl_broadcast, checkpoint_path",
+            "choices": ["disabled", "tensor_payload", "nccl_broadcast", "checkpoint_path"],
+        },
+    )
     dir: str = field(default="outputs/weight_sync",
         metadata={"help": "Directory for checkpoint-based weight sync (use shared FS for multi-node)"})
-    bucket_mb: int = field(default=256,
+    bucket_size: int = field(default=256,
         metadata={"help": "Weight sync tensor bucket size (MB) for tensor/distributed strategies"})
     flush_cache: bool = field(default=True,
         metadata={"help": "Whether the rollout side flushes inference-engine caches after each weight sync bucket"})
@@ -288,22 +356,24 @@ class SyncConfig:
         metadata={"help": "Rollout-side modules that receive weight updates (defaults to ['transformer'])."})
 
     def validate(self) -> None:
-        _valid_modes = (
-            "disabled", "tensor_payload", "nccl_broadcast", "checkpoint_path",
-        )
-        normalized_protocol = str(self.protocol or "").strip().lower()
+        _valid_protocols = ("disabled", "tensor_payload", "nccl_broadcast", "checkpoint_path")
+        normalized_protocol = self.protocol.strip().lower()
         if not normalized_protocol:
             raise ValueError(
                 "sync.protocol must be set explicitly. "
                 "Choose one of disabled/tensor_payload/nccl_broadcast/checkpoint_path."
             )
-        if normalized_protocol not in _valid_modes:
+        if normalized_protocol not in _valid_protocols:
             raise ValueError(
-                f"sync.protocol must be one of {'/'.join(_valid_modes)}, "
+                f"sync.protocol must be one of {'/'.join(_valid_protocols)}, "
                 f"got: {self.protocol!r}."
             )
-        if int(self.bucket_mb) < 1:
-            raise ValueError("sync.bucket_mb must be >= 1.")
+        if int(self.rollout_update_interval) < 1:
+            raise ValueError(
+                f"sync.rollout_update_interval must be >= 1, got: {self.rollout_update_interval}"
+            )
+        if self.bucket_size < 1:
+            raise ValueError("sync.bucket_size must be >= 1.")
         if self.target_modules is not None:
             if not isinstance(self.target_modules, list):
                 raise ValueError("sync.target_modules must be a list of module names.")
@@ -311,13 +381,16 @@ class SyncConfig:
                 if not str(module_name).strip():
                     raise ValueError("sync.target_modules cannot contain empty names.")
 
-
 @dataclass
 class SchedulerConfig:
     """Stateless index-scheduler config for rollout or training timestep selection."""
 
     timestep_strategy: str = field(
-        default="all", metadata={"help": "Index scheduler type: all or window"}
+        default="all",
+        metadata={
+            "help": "Index scheduler type: all or window",
+            "choices": ["all", "window"],
+        },
     )
     timestep_fraction: Any = field(
         default=1.0,
@@ -325,54 +398,47 @@ class SchedulerConfig:
             "help": "Fraction of total timesteps to select. Single float x means [0, x); tuple (x, y) means [x, y)."
         },
     )
-    num_sde_steps: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": "If set, randomly sample this many indices from the timestep_fraction range each step."
-        },
-    )
+    num_sde_steps: Optional[int] = field(default=None,
+        metadata={"help": "Randomly sample this many SDE timestep indices from the timestep_fraction range per step. None means use all indices in range."})
     window_strategy: str = field(
         default="progressive",
-        metadata={"help": "Window progression: progressive or random"},
+        metadata={
+            "help": "Window progression: progressive or random",
+            "choices": ["progressive", "random"],
+        },
     )
     window_size: int = field(
         default=4, metadata={"help": "Number of timestep indices in each window"}
     )
-    window_iters_per_window: int = field(
+    iters_per_window: int = field(
         default=25,
         metadata={"help": "Number of training steps before advancing the window"},
     )
     window_init_timestep: int = field(
         default=0, metadata={"help": "Initial left boundary for the window scheduler"}
     )
-    window_max_iters_per_window: Optional[int] = field(
+    max_iters_per_window: Optional[int] = field(
         default=10, metadata={"help": "Reserved for decay-style window schedulers"}
     )
-    window_min_iters_per_window: Optional[int] = field(
+    min_iters_per_window: Optional[int] = field(
         default=1, metadata={"help": "Reserved for decay-style window schedulers"}
     )
-    window_overlap: bool = field(
-        default=False, metadata={"help": "Allow overlap between adjacent window groups"}
-    )
-    window_overlap_step: int = field(
-        default=1, metadata={"help": "Stride between overlapping window groups"}
-    )
-    window_roll_back: bool = field(
+    overlap_size: int = field(default=0,
+        metadata={"help": "Number of overlapping timesteps between adjacent windows (0 = no overlap)"})
+    roll_back: bool = field(
         default=False,
         metadata={"help": "Wrap back to the beginning after reaching the last window"},
     )
 
 
-# Backward-compatible alias for older imports.
-WindowSchedulerConfig = SchedulerConfig
-
 
 @dataclass
 class AlgorithmConfig:
-    """Algorithm selection, rollout geometry, and raw algorithm kwargs.
+    """Algorithm Configuration:
+    contains algorithm type, dotpath, kwargs, rollout geometry and window scheduler configuration.
 
     Public/common surface:
-    - algorithm_type / algorithm_path
+    - algorithm_type / algorithm_dotpath
     - algorithm_kwargs
     - samples_per_prompt / prompts_per_rollout
     - rollout/training scheduler sub-configs
@@ -381,7 +447,7 @@ class AlgorithmConfig:
     # Algorithm selection
     algorithm_type: str = field(default="grpo",
         metadata={"help": "Built-in algorithm family: grpo, nft, or mix_grpo"})
-    algorithm_path: Optional[str] = field(default=None,
+    algorithm_dotpath: Optional[str] = field(default=None,
         metadata={"help": "Python dotpath to Algorithm class (auto-resolved from algorithm_type when omitted)"})
     algorithm_kwargs: Dict[str, Any] = field(default_factory=dict,
         metadata={"help": "YAML-only extension surface for algorithm-specific kwargs. Shared framework fields have dedicated algorithm.* entries. On CLI, use repeated --algorithm.kwarg KEY=VALUE only for true algorithm-specific extension keys."})
@@ -389,63 +455,40 @@ class AlgorithmConfig:
     # Framework-owned rollout geometry
     samples_per_prompt: int = field(default=4,
         metadata={"help": "Number of generated samples per prompt. This remains framework-owned because rollout geometry depends on it."})
-    prompts_per_rollout: Optional[int] = field(default=None,
-        metadata={"help": "Number of unique prompts per rollout step. Required because rollout geometry is defined by prompts_per_rollout * samples_per_prompt."})
+    prompts_per_rollout: int = field(default=1,
+        metadata={"help": "Number of unique prompts per rollout step. Rollout geometry is defined by prompts_per_rollout * samples_per_prompt."})
 
     # Shared algorithm surface
-    component_mix_stage: str = field(
-        default="reward",
+    component_mix_stage: str = field(default="reward",
         metadata={
-            "help": "Stage that applies multi-component reward mixing: reward or advantage"
+            "help": "Stage that applies multi-component reward mixing: reward or advantage",
+            "choices": ["reward", "advantage"],
         },
     )
-    adv_normalization: str = field(
-        default="group",
-        metadata={"help": "Advantage normalization scope: group or global"},
-    )
-    adv_norm_eps: float = field(
-        default=1e-8, metadata={"help": "Numerical epsilon for advantage normalization"}
-    )
-    adv_clip_abs: Optional[float] = field(
-        default=5.0,
+    adv_normalization_scope: str = field(default="group",
         metadata={
-            "help": "Optional absolute clip for normalized advantages (null disables clipping)"
+            "help": "Advantage normalization scope: group or global",
+            "choices": ["group", "global"],
         },
     )
-    use_global_std: bool = field(
-        default=False,
-        metadata={
-            "help": "Use global std instead of per-group std during grouped normalization"
-        },
-    )
-    trimmed_ratio: float = field(
-        default=0.0,
-        metadata={
-            "help": "Fraction of outliers to trim from each side for grouped reward normalization"
-        },
-    )
-    eval_ema_decay: float = field(
-        default=0.9, metadata={"help": "Eval EMA decay shared by built-in algorithms"}
-    )
-    eval_ema_update_interval: int = field(
-        default=1, metadata={"help": "Eval EMA update interval in optimizer steps"}
-    )
-    shuffle_samples: bool = field(
-        default=True,
-        metadata={"help": "Shuffle training samples before local update execution"},
-    )
-    shuffle_seed: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": "Optional deterministic shuffle seed for training sample order"
-        },
-    )
-    training_share_rollout_indices: bool = field(
-        default=True,
-        metadata={
-            "help": "Reuse rollout index scheduler for training timestep selection unless disabled"
-        },
-    )
+    adv_norm_eps: float = field(default=1e-8,
+        metadata={"help": "Numerical epsilon for advantage normalization"})
+    clip_max: Optional[float] = field(default=None,
+        metadata={"help": "Optional absolute clip for normalized advantages (None means no clipping)"})
+    use_global_std: bool = field(default=False,
+        metadata={"help": "Use global std instead of per-group std during grouped normalization"})
+    trim_outliers_ratio: float = field(default=0.0,
+        metadata={"help": "Fraction of outliers to trim from each side for grouped reward normalization"})
+    eval_ema_decay: float = field(default=0.9,
+        metadata={"help": "Eval EMA decay shared by built-in algorithms"})
+    eval_ema_update_interval: int = field(default=1,
+        metadata={"help": "Eval EMA update interval in optimizer steps"})
+    shuffle_samples: bool = field(default=True,
+        metadata={"help": "Shuffle training samples before local update execution"})
+    shuffle_seed: Optional[int] = field(default=None,
+        metadata={"help": "Optional deterministic shuffle seed for training sample order"})
+    training_share_rollout_indices: bool = field(default=True,
+        metadata={"help": "Reuse rollout index scheduler for training timestep selection unless disabled"})
 
     # Sub-configuration
     rollout_scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
@@ -457,39 +500,47 @@ class AlgorithmConfig:
         return self.rollout_scheduler
 
     def validate(self) -> None:
-        if not self.algorithm_type and not self.algorithm_path:
+        if not self.algorithm_type and not self.algorithm_dotpath:
             raise ValueError(
-                "algorithm_type or algorithm_path must be set. "
+                "algorithm_type or algorithm_dotpath must be set. "
                 "Available built-ins: grpo, nft, mix_grpo."
             )
         if self.samples_per_prompt < 1:
             raise ValueError("samples_per_prompt must be >= 1.")
-        if self.prompts_per_rollout is None:
-            raise ValueError("prompts_per_rollout is required.")
         if self.prompts_per_rollout < 1:
             raise ValueError("prompts_per_rollout must be >= 1.")
         if not isinstance(self.algorithm_kwargs, dict):
             raise ValueError("algorithm.algorithm_kwargs must be a dict.")
-        component_mix_stage = str(self.component_mix_stage or "").strip().lower()
-        if component_mix_stage not in {"reward", "advantage"}:
+        _valid_mix_stages = ("reward", "advantage")
+        component_mix_stage = self.component_mix_stage.strip().lower()
+        if component_mix_stage not in _valid_mix_stages:
             raise ValueError(
-                "algorithm.component_mix_stage must be 'reward' or 'advantage'. "
-                f"Got: {self.component_mix_stage!r}."
+                "algorithm.component_mix_stage must be one of "
+                f"{sorted(_valid_mix_stages)}, "
+                f"Got: {self.component_mix_stage!r}"
             )
-        adv_normalization = str(self.adv_normalization or "").strip().lower()
-        if adv_normalization not in {"global", "group"}:
+        _valid_adv_scopes = ("group", "global")
+        adv_normalization_scope = self.adv_normalization_scope.strip().lower()
+        if adv_normalization_scope not in _valid_adv_scopes:
             raise ValueError(
-                "algorithm.adv_normalization must be 'global' or 'group'. "
-                f"Got: {self.adv_normalization!r}."
+                "algorithm.adv_normalization_scope must be one of "
+                f"{sorted(_valid_adv_scopes)}, "
+                f"Got: {self.adv_normalization_scope!r}"
             )
         if float(self.adv_norm_eps) <= 0:
-            raise ValueError("algorithm.adv_norm_eps must be > 0.")
-        if self.adv_clip_abs is not None and float(self.adv_clip_abs) <= 0:
-            raise ValueError("algorithm.adv_clip_abs must be > 0 when set.")
-        if not (0.0 <= float(self.trimmed_ratio) < 0.5):
             raise ValueError(
-                "algorithm.trimmed_ratio must be in [0.0, 0.5). "
-                f"Got: {self.trimmed_ratio}."
+                "algorithm.adv_norm_eps must be > 0. "
+                f"Got: {self.adv_norm_eps!r}"
+            )
+        if self.clip_max is not None and float(self.clip_max) <= 0:
+            raise ValueError(
+                "algorithm.clip_max must be > 0 when set. "
+                f"Got: {self.clip_max!r}"
+            )
+        if not (0.0 <= float(self.trim_outliers_ratio) < 0.5):
+            raise ValueError(
+                "algorithm.trim_outliers_ratio must be in [0.0, 0.5). "
+                f"Got: {self.trim_outliers_ratio!r}"
             )
         if float(self.eval_ema_decay) < 0:
             raise ValueError("algorithm.eval_ema_decay must be >= 0.")
@@ -497,25 +548,29 @@ class AlgorithmConfig:
             raise ValueError("algorithm.eval_ema_update_interval must be >= 1.")
         window_cfg = self.window
         if (
-            window_cfg.window_max_iters_per_window is not None
-            and window_cfg.window_min_iters_per_window is not None
-            and window_cfg.window_min_iters_per_window
-            > window_cfg.window_max_iters_per_window
+            window_cfg.max_iters_per_window is not None
+            and window_cfg.min_iters_per_window is not None
+            and window_cfg.min_iters_per_window
+            > window_cfg.max_iters_per_window
         ):
             raise ValueError(
-                "window_min_iters_per_window must be <= window_max_iters_per_window."
+                "min_iters_per_window must be <= max_iters_per_window."
             )
-
 
 @dataclass
 class TrainingConfig:
-    """Optimizer, LoRA/FSDP, and core training controls."""
+    """
+    Training Configuration:
+    contains optimizer, update schedule, train backend, LoRA, and core training controls.
+    """
 
     # Optimizer and update schedule
-    local_micro_batch_size: Optional[int] = field(default=None,
-        metadata={"help": "Local micro-batch size for one forward/backward pass. Defaults to the resolved local_update_batch_size when omitted and must evenly divide it."})
-    num_updates_per_local_batch: Optional[int] = field(default=None,
-        metadata={"help": "Number of optimizer updates performed from one resolved local batch. Defaults to 1. local_batch_size must be divisible by this value, and local_update_batch_size is derived from the quotient."})
+
+    # Local Batch Size -> Mini Batch Size (per update) -> Micro Batch Size (per forward/backward pass)
+    micro_batch_size: Optional[int] = field(default=None,
+        metadata={"help": "Micro-batch size per GPU for one forward/backward pass."})
+    num_updates_per_batch: Optional[int] = field(default=None,
+        metadata={"help": "Number of optimizer updates performed from one local batch. literally equals local_batch_size / mini_batch_size"})
     learning_rate: float = field(default=1e-6,
         metadata={"help": "Peak learning rate for the optimizer"})
     adam_beta1: float = field(default=0.9,
@@ -531,15 +586,23 @@ class TrainingConfig:
     warmup_steps: int = field(default=0,
         metadata={"help": "Number of learning rate warmup steps"})
     lr_scheduler_type: str = field(default="constant",
-        metadata={"help": "LR scheduler type: constant, linear, cosine"})
+        metadata={
+            "help": "LR scheduler type: constant, linear, cosine",
+            "choices": ["constant", "linear", "cosine"],
+        },
+    )
 
     # Train backend
     train_backend: str = field(default="fsdp",
-        metadata={"help": "Training backend name (fsdp/veomni built-in; megatron scaffold requires actor_class_path in train_backend_kwargs); or custom via train_backend_path"})
-    train_backend_path: Optional[str] = field(default=None,
+        metadata={"help": "Training backend name (fsdp/veomni built-in; megatron scaffold requires actor_class_path in train_backend_kwargs); or custom via train_backend_dotpath"})
+    train_backend_dotpath: Optional[str] = field(default=None,
         metadata={"help": "Python dotpath to custom TrainBackend class (overrides built-in backend selection)"})
     train_backend_kwargs: Dict[str, Any] = field(default_factory=dict,
         metadata={"help": "Extra kwargs for selected train backend; accepts JSON string (CLI) or mapping (YAML)"})
+    resume_from_checkpoint: Optional[str] = field(
+        default=None,
+        metadata={"help": "Directory containing training checkpoint.pt to resume from (after actors init)"},
+    )
 
     # LoRA
     use_lora: bool = field(default=False,
@@ -551,6 +614,7 @@ class TrainingConfig:
     lora_target_modules: Optional[str] = field(default=None,
         metadata={"help": "Comma-separated LoRA target modules (e.g. 'to_q,to_k,to_v')"})
 
+    #Offload
     fsdp_cpu_offload: bool = field(default=False,
         metadata={"help": "Offload FSDP parameters and gradients to CPU"})
 
@@ -560,47 +624,29 @@ class TrainingConfig:
 
     def validate(self) -> None:
         explicit_geometry_fields = {
-            "local_micro_batch_size": self.local_micro_batch_size,
-            "num_updates_per_local_batch": self.num_updates_per_local_batch,
-        }
+            "micro_batch_size": self.micro_batch_size,
+            "num_updates_per_batch": self.num_updates_per_batch,        }
         for field_name, value in explicit_geometry_fields.items():
             if value is not None and int(value) < 1:
                 raise ValueError(f"{field_name} must be >= 1 when set.")
         if not isinstance(self.train_backend_kwargs, dict):
             raise ValueError("training.train_backend_kwargs must be a dict.")
 
-
 @dataclass
-class TrainingPrecisionConfig:
-    """Training-side precision controls."""
+class PrecisionConfig:
+    """Precision controls for training and rollout."""
 
     model_precision: str = field(default="bf16",
         metadata={"help": "Training model/component load precision (default: bf16)"})
     fsdp_precision: str = field(default="fp32",
         metadata={"help": "Training-side FSDP param precision (default: fp32)"})
-    autocast_precision: str = field(default="bf16",
+
+    # Training Precision
+    training_autocast_precision: str = field(default="bf16",
         metadata={"help": "Training-side autocast precision for loss/model forwards (default: bf16)"})
-
-    def validate(self) -> None:
-        validate_precision_name(
-            self.model_precision,
-            field_name="precision.training.model_precision",
-        )
-        validate_precision_name(
-            self.fsdp_precision,
-            field_name="precision.training.fsdp_precision",
-        )
-        validate_precision_name(
-            self.autocast_precision,
-            field_name="precision.training.autocast_precision",
-        )
-
-
-@dataclass
-class RolloutPrecisionConfig:
-    """Rollout/replay-side precision controls."""
-
-    autocast_precision: str = field(default="bf16",
+        
+    # Rollout Precision
+    rollout_autocast_precision: str = field(default="bf16",
         metadata={"help": "Rollout-side autocast precision for sampler/replay forwards (default: bf16)"})
     trajectory_precision: str = field(default="fp16",
         metadata={"help": "Precision used to store rollout trajectory latents (default: fp16)"})
@@ -608,130 +654,66 @@ class RolloutPrecisionConfig:
         metadata={"help": "Precision used to store rollout log-prob tensors (default: fp32)"})
 
     def validate(self) -> None:
-        validate_precision_name(
-            self.autocast_precision,
-            field_name="precision.rollout.autocast_precision",
+        validate_precision_type(
+            self.model_precision,
+            field_name="precision.model_precision",
         )
-        validate_precision_name(
+        validate_precision_type(
+            self.fsdp_precision,
+            field_name="precision.fsdp_precision",
+        )
+        validate_precision_type(
+            self.training_autocast_precision,
+            field_name="precision.training_autocast_precision",
+        )
+        validate_precision_type(
+            self.rollout_autocast_precision,
+            field_name="precision.rollout_autocast_precision",
+        )
+        validate_precision_type(
             self.trajectory_precision,
-            field_name="precision.rollout.trajectory_precision",
+            field_name="precision.trajectory_precision",
         )
-        validate_precision_name(
+        validate_precision_type(
             self.logprob_precision,
-            field_name="precision.rollout.logprob_precision",
+            field_name="precision.logprob_precision",
         )
-
 
 @dataclass
-class PrecisionConfig:
-    """Precision controls grouped by runtime owner."""
+class RolloutConfig:
+    """Rollout topology, buffer, control, and artifact configuration."""
 
-    training: TrainingPrecisionConfig = field(default_factory=TrainingPrecisionConfig)
-    rollout: RolloutPrecisionConfig = field(default_factory=RolloutPrecisionConfig)
-
-    def validate(self) -> None:
-        self.training.validate()
-        self.rollout.validate()
-
-
-@dataclass(frozen=True)
-class RolloutTopologySettings:
-    """Rollout topology and dedicated-engine knobs."""
-
-    mode: Optional[str] = field(default=None,
-        metadata={"help": "Canonical rollout topology: direct_sampling, separate, or colocate"})
-    service_engine: Optional[str] = field(default=None,
+    # --- Topology ---
+    mode: str = field(default=None,
+        metadata={
+            "help": "Canonical rollout topology: direct_sampling, separate, or colocate",
+            "choices": ["direct_sampling", "separate", "colocate"],
+        },
+    )
+    rollout_engine: Optional[str] = field(default=None,
         metadata={"help": "Dedicated rollout engine selector for separate or colocate. Must be unset in direct_sampling."})
-    service_num_gpus: Optional[int] = field(default=None,
+    rollout_batch_size: int = field(default=1,
+        metadata={"help": "Max prompts per rollout-engine generate() call before actor-side sub-batching."})
+    num_gpus_per_actor: Optional[int] = field(default=None,
         metadata={"help": "Dedicated rollout service GPUs per actor/engine. Required for separate and colocate."})
-    engine_tp_size: Optional[int] = field(default=None,
-        metadata={"help": "Dedicated rollout service tensor parallel hint. Does not determine actor GPU ownership."})
-    engine_sp_size: Optional[int] = field(default=None,
-        metadata={"help": "Dedicated rollout service sequence/spatial parallel hint. Does not determine actor GPU ownership."})
-    service_require_memory_api: Optional[bool] = field(default=None,
-        metadata={"help": "Whether dedicated rollout service requires concrete memory API handlers."})
-    service_transport_dtype: Optional[str] = field(default=None,
-        metadata={"help": "Dedicated rollout transport payload dtype override."})
-    service_transport_drop_decoded_videos: Optional[bool] = field(default=None,
-        metadata={"help": "Whether rollout transport drops decoded video payloads after reward handling."})
-    service_transport_log_payload_bytes: Optional[bool] = field(default=None,
-        metadata={"help": "Whether rollout transport logs serialized payload sizes for debugging."})
+    tp_size: Optional[int] = field(default=None,
+        metadata={"help": "Dedicated rollout service tensor parallel hint."})
+    sp_size: Optional[int] = field(default=None,
+        metadata={"help": "Dedicated rollout service sequence/spatial parallel hint."})
+    transport_dtype: Optional[str] = field(default=None,
+        metadata={"help": "Cast rollout transport payloads to this dtype (fp16/bf16) to reduce transfer size."})
+    transport_drop_decoded_videos: bool = field(default=True,
+        metadata={"help": "Drop decoded video tensors from rollout transport payloads after reward handling."})
     sglang_local_mode: Optional[bool] = field(default=None,
         metadata={"help": "Whether SGLang rollout uses in-actor local generator mode."})
     sglang_verify_weight_checksum: Optional[bool] = field(default=None,
         metadata={"help": "Whether SGLang verifies weight checksum after rollout-side updates."})
-    sglang_prompt_encoder_device: Optional[str] = field(default=None,
-        metadata={"help": "Device for SGLang-side prompt encoder construction."})
-    sglang_prompt_encoder_max_length: Optional[int] = field(default=None,
-        metadata={"help": "Prompt encoder max sequence length for SGLang rollout."})
     sglang_disable_autocast: Optional[bool] = field(default=None,
         metadata={"help": "Disable torch.autocast inside SGLang rollout engine."})
-    rollout_batch_size: Optional[int] = field(default=None,
-        metadata={"help": "Max prompts per rollout-engine generate() call before actor-side sub-batching."})
     sglang_kwargs: Dict[str, Any] = field(default_factory=dict,
-        metadata={"help": "Engine-scoped SGLang rollout kwargs. ServerArgs-compatible keys are forwarded to the SGLang rollout engine."})
+        metadata={"help": "Engine-scoped SGLang rollout kwargs."})
 
-    def validate(self) -> None:
-        if self.mode is not None and self.mode not in ROLLOUT_MODES:
-            raise ValueError(
-                "rollout.topology.mode must be one of "
-                f"{sorted(ROLLOUT_MODES)}, got: {self.mode!r}"
-            )
-        for attr_name in (
-            "service_num_gpus",
-            "engine_tp_size",
-            "engine_sp_size",
-            "sglang_prompt_encoder_max_length",
-            "rollout_batch_size",
-        ):
-            value = getattr(self, attr_name)
-            if value is not None and int(value) < 1:
-                raise ValueError(f"rollout.topology.{attr_name} must be >= 1 when set.")
-        if self.service_transport_dtype is not None:
-            transport_dtype = str(self.service_transport_dtype).strip().lower()
-            if transport_dtype not in {
-                "",
-                "none",
-                "off",
-                "disable",
-                "disabled",
-                "fp32",
-                "float32",
-                "fp16",
-                "float16",
-                "half",
-                "bf16",
-                "bfloat16",
-            }:
-                raise ValueError(
-                    "rollout.topology.service_transport_dtype must be one of "
-                    "fp32/fp16/bf16/none, "
-                    f"got: {self.service_transport_dtype!r}"
-                )
-        if not isinstance(self.sglang_kwargs, dict):
-            raise ValueError("rollout.topology.sglang_kwargs must be a dict.")
-        forbidden_sglang_precision_keys = {
-            "prompt_encoder_dtype",
-            "sglang_prompt_encoder_dtype",
-        }
-        precision_override_keys = sorted(
-            key
-            for key in self.sglang_kwargs.keys()
-            if str(key) in forbidden_sglang_precision_keys
-        )
-        if precision_override_keys:
-            raise ValueError(
-                "SGLang prompt-encoder precision is controlled by "
-                "precision.rollout.autocast_precision; remove the following "
-                "engine-specific override(s) from rollout.topology.sglang_kwargs: "
-                f"{precision_override_keys}"
-            )
-
-
-@dataclass(frozen=True)
-class RolloutBufferSettings:
-    """Rollout-buffer queueing, filtering, and reassembly knobs."""
-
+    # --- Buffer ---
     max_queue_size: int = field(default=0,
         metadata={"help": "Max rollout buffer queue size (0 = unbounded)"})
     drop_invalid: bool = field(default=True,
@@ -742,99 +724,95 @@ class RolloutBufferSettings:
         metadata={"help": "Maximum reward threshold for sample filtering (None = no filter)"})
     min_samples: int = field(default=1,
         metadata={"help": "Minimum samples required before dispatching a batch"})
-    reassemble_by_group: bool = field(default=False,
-        metadata={"help": "Reassemble outgoing training batches in the rollout buffer by explicit group_ids"})
     group_size: Optional[int] = field(default=None,
-        metadata={"help": "Explicit samples per logical group. Required when reassemble_by_group=true"})
+        metadata={"help": "Reassemble outgoing training batches by explicit group_ids (None = passthrough)"})
     group_ttl_seconds: float = field(default=0.0,
         metadata={"help": "Time-to-live for incomplete groups in seconds (0 = no timeout)"})
     max_pending_samples: int = field(default=0,
         metadata={"help": "Max pending samples in buffer before blocking rollout (0 = unbounded)"})
-    plugin_paths: str = field(default="",
-        metadata={"help": "Comma-separated dotpaths to rollout buffer filter plugins"})
+    plugin_dotpaths: List[str] = field(default_factory=list,
+        metadata={"help": "Rollout buffer filter plugin class dotpath(s)."})
 
-    def validate(self) -> None:
-        if int(self.max_queue_size) < 0:
-            raise ValueError(
-                f"rollout.buffer.max_queue_size must be >= 0, got: {self.max_queue_size}"
-            )
-        if int(self.min_samples) < 1:
-            raise ValueError(
-                f"rollout.buffer.min_samples must be >= 1, got: {self.min_samples}"
-            )
-        if (
-            self.reward_min is not None
-            and self.reward_max is not None
-            and float(self.reward_min) > float(self.reward_max)
-        ):
-            raise ValueError(
-                "rollout.buffer.reward_min must be <= rollout.buffer.reward_max, "
-                f"got min={self.reward_min}, max={self.reward_max}"
-            )
-        if self.group_size is not None and int(self.group_size) < 1:
-            raise ValueError(
-                f"rollout.buffer.group_size must be >= 1 when provided, got: {self.group_size}"
-            )
-        if bool(self.reassemble_by_group) and self.group_size is None:
-            raise ValueError(
-                "rollout.buffer.reassemble_by_group=true requires rollout.buffer.group_size "
-                "to be set explicitly. Implicit binding to algorithm.samples_per_prompt was removed."
-            )
-        if float(self.group_ttl_seconds) < 0:
-            raise ValueError(
-                "rollout.buffer.group_ttl_seconds must be >= 0, "
-                f"got: {self.group_ttl_seconds}"
-            )
-        if int(self.max_pending_samples) < 0:
-            raise ValueError(
-                "rollout.buffer.max_pending_samples must be >= 0, "
-                f"got: {self.max_pending_samples}"
-            )
-
-
-@dataclass(frozen=True)
-class RolloutControlSettings:
-    """Outer-loop rollout scheduling and async control knobs."""
-
+    # --- Control ---
     num_rollout: int = field(default=1000,
-        metadata={"help": "Total number of rollout iterations (outer-loop steps; analogous to global step)"})
+        metadata={"help": "Total number of rollout iterations (outer-loop steps)"})
     start_rollout_id: int = field(default=0,
-        metadata={"help": "Starting rollout step/ID for resuming training (acts like an outer-loop global step)"})
-    async_max_inflight: int = field(default=1,
-        metadata={"help": "Max in-flight rollout futures for the async training runner"})
-    update_weights_interval: int = field(default=1,
-        metadata={"help": "Sync weights from training to rollout every N steps in async/separate training"})
+        metadata={"help": "Starting rollout step/ID for resuming training"})
+    max_inflight_rollouts: int = field(default=1,
+        metadata={"help": "Max concurrent in-flight rollouts for the async training runner"})
 
-    def validate(self) -> None:
-        if int(self.num_rollout) < 1:
-            raise ValueError("num_rollout must be >= 1.")
-        if int(self.start_rollout_id) < 0:
-            raise ValueError("start_rollout_id must be >= 0.")
-        if int(self.async_max_inflight) < 1:
-            raise ValueError("async_max_inflight must be >= 1.")
-        if int(self.update_weights_interval) < 1:
-            raise ValueError("update_weights_interval must be >= 1.")
-
-
-@dataclass(frozen=True)
-class RolloutArtifactSettings:
-    """Checkpoint/artifact root and save policy knobs."""
-
+    # --- Artifacts ---
     output_dir: str = field(default="outputs",
         metadata={"help": "Output directory for checkpoints, logs, and generated samples"})
     save_steps: int = field(default=100,
         metadata={"help": "Save a checkpoint every N training steps (0 disables periodic saves)"})
-    resume_from_checkpoint: Optional[str] = field(default=None,
-        metadata={"help": "Path to checkpoint directory to resume training from"})
+
+    def set_start_rollout_id(self, rollout_id: int) -> None:
+        """Update the rollout control cursor on the canonical config owner."""
+        rollout_id = int(rollout_id)
+        if rollout_id < 0:
+            raise ValueError("start_rollout_id must be >= 0.")
+        self.start_rollout_id = rollout_id
 
     def validate(self) -> None:
+        if self.mode is not None and self.mode not in ROLLOUT_MODES:
+            raise ValueError(
+                f"rollout.mode must be one of {sorted(ROLLOUT_MODES)}, got: {self.mode!r}"
+            )
+        for attr_name in ("num_gpus_per_actor", "tp_size", "sp_size", "rollout_batch_size"):
+            value = getattr(self, attr_name)
+            if value is not None and int(value) < 1:
+                raise ValueError(f"rollout.{attr_name} must be >= 1 when set.")
+        if self.transport_dtype is not None:
+            validate_precision_type(
+                self.transport_dtype,
+                field_name="rollout.transport_dtype",
+                allow_disable_aliases=True,
+            )
+        if not isinstance(self.sglang_kwargs, dict):
+            raise ValueError("rollout.sglang_kwargs must be a dict.")
+        forbidden_sglang_precision_keys = {"prompt_encoder_dtype", "sglang_prompt_encoder_dtype"}
+        precision_override_keys = sorted(
+            key for key in self.sglang_kwargs.keys()
+            if str(key) in forbidden_sglang_precision_keys
+        )
+        if precision_override_keys:
+            raise ValueError(
+                "SGLang prompt-encoder precision is controlled by "
+                "precision.rollout_autocast_precision; remove the following "
+                f"engine-specific override(s) from rollout.sglang_kwargs: "
+                f"{precision_override_keys}"
+            )
+        if self.max_queue_size < 0:
+            raise ValueError(f"rollout.max_queue_size must be >= 0, got: {self.max_queue_size}")
+        if self.min_samples < 1:
+            raise ValueError(f"rollout.min_samples must be >= 1, got: {self.min_samples}")
+        if self.reward_min is not None and self.reward_max is not None and self.reward_min > self.reward_max:
+            raise ValueError(
+                f"rollout.reward_min must be <= rollout.reward_max, "
+                f"got min={self.reward_min}, max={self.reward_max}"
+            )
+        if self.group_size is not None and self.group_size < 1:
+            raise ValueError(f"rollout.group_size must be >= 1 when provided, got: {self.group_size}")
+        if float(self.group_ttl_seconds) < 0:
+            raise ValueError(f"rollout.group_ttl_seconds must be >= 0, got: {self.group_ttl_seconds}")
+        if int(self.max_pending_samples) < 0:
+            raise ValueError(f"rollout.max_pending_samples must be >= 0, got: {self.max_pending_samples}")
+        for i, path in enumerate(self.plugin_dotpaths):
+            if not str(path).strip():
+                raise ValueError(f"rollout.plugin_dotpaths[{i}] must be a non-empty string")
+        if self.num_rollout < 1:
+            raise ValueError("num_rollout must be >= 1.")
+        if self.start_rollout_id < 0:
+            raise ValueError("start_rollout_id must be >= 0.")
+        if self.max_inflight_rollouts < 1:
+            raise ValueError("max_inflight_rollouts must be >= 1.")
         if int(self.save_steps) < 0:
             raise ValueError("save_steps must be >= 0 (0 disables periodic saves).")
 
-
-@dataclass(frozen=True)
-class RolloutEvaluationSettings:
-    """Evaluation cadence and batch sizing knobs."""
+@dataclass
+class EvaluationConfig:
+    """Evaluation cadence and batch sizing configuration."""
 
     eval_steps: int = field(default=100,
         metadata={"help": "Run evaluation every N training steps (0 disables periodic eval)"})
@@ -843,11 +821,11 @@ class RolloutEvaluationSettings:
     num_inference_steps: Optional[int] = field(default=None,
         metadata={"help": "Optional eval-only denoising step override. If unset, eval reuses sampling.num_inference_steps."})
     sampling_adapter: Optional[str] = field(default=None,
-        metadata={"help": "Optional eval-only LoRA adapter override. Useful when rollout sampling uses a different adapter than evaluation."})
+        metadata={"help": "Optional eval-only LoRA adapter override."})
     sde_type: Optional[str] = field(default=None,
-        metadata={"help": "Optional eval-only sampler transition override (direct/native sampler hosts only). If unset, eval reuses sampling.sde_type."})
+        metadata={"help": "Optional eval-only sampler transition override. If unset, eval reuses sampling.sde_type."})
     eta: Optional[float] = field(default=None,
-        metadata={"help": "Optional eval-only eta override (direct/native sampler hosts only). If unset, eval reuses sampling.eta."})
+        metadata={"help": "Optional eval-only eta override. If unset, eval reuses sampling.eta."})
 
     def validate(self) -> None:
         if int(self.eval_steps) < 0:
@@ -855,93 +833,40 @@ class RolloutEvaluationSettings:
         if int(self.eval_batch_size) < 1:
             raise ValueError("eval_batch_size must be >= 1.")
         if self.num_inference_steps is not None and int(self.num_inference_steps) < 1:
-            raise ValueError("rollout.evaluation.num_inference_steps must be >= 1 when set.")
+            raise ValueError("evaluation.num_inference_steps must be >= 1 when set.")
         if self.eta is not None and float(self.eta) < 0:
-            raise ValueError("rollout.evaluation.eta must be >= 0 when set.")
+            raise ValueError("evaluation.eta must be >= 0 when set.")
 
-
-@dataclass(frozen=True)
-class RolloutLoggingSettings:
-    """Experiment-logging and reporting knobs."""
+@dataclass
+class LoggingConfig:
+    """Experiment-logging and reporting configuration."""
 
     logging_steps: int = field(default=10,
         metadata={"help": "Log metrics every N training steps (0 disables periodic step logging)"})
     logging_dir: Optional[str] = field(default=None,
         metadata={"help": "Directory for WandB logs/artifacts (defaults to output_dir/logs)"})
     report_to_wandb: bool = field(default=False,
-        metadata={"help": "Enable WandB reporting (true/false)"})
+        metadata={"help": "Enable WandB reporting (True/False)"})
     project_name: str = field(default="diffusionrl",
         metadata={"help": "Project name for WandB"})
     run_name: Optional[str] = field(default=None,
         metadata={"help": "Run name for WandB (auto-generated if None)"})
-    wandb_log_media: bool = field(default=False,
+    log_media: bool = field(default=False,
         metadata={"help": "Log generated media previews to WandB (true/false)"})
-    wandb_media_max_items: int = field(default=8,
-        metadata={"help": "Maximum generated media items to log per rollout when wandb_log_media=true"})
-    wandb_tags: Optional[str] = field(default=None,
-        metadata={"help": "Comma-separated tags for WandB run (e.g. 'exp1,baseline'). Defaults to 'diffusionrl-reproduce' if not set."})
-    wandb_entity: Optional[str] = field(default=None,
-        metadata={"help": "WandB entity (team or username). If not set, uses the default entity of the logged-in user."})
+    media_max_items: int = field(default=8,
+        metadata={"help": "Maximum generated media items to log per rollout when log_media=true"})
+    tags: Optional[str] = field(default=None,
+        metadata={"help": "Comma-separated tags for WandB run (e.g. 'exp1,baseline')."})
+    entity: Optional[str] = field(default=None,
+        metadata={"help": "WandB entity (team or username)."})
+    transport_log_payload_bytes: Optional[bool] = field(default=None,
+        metadata={"help": "Whether rollout transport logs serialized payload sizes for debugging."})
 
     def validate(self) -> None:
-        if int(self.logging_steps) < 0:
+        if self.logging_steps < 0:
             raise ValueError("logging_steps must be >= 0 (0 disables periodic step logging).")
-        if not isinstance(self.report_to_wandb, bool):
-            raise ValueError(
-                "report_to_wandb must be a boolean (true/false). "
-                f"Got: {self.report_to_wandb!r}"
-            )
-        if int(self.wandb_media_max_items) < 1:
-            raise ValueError("wandb_media_max_items must be >= 1.")
-
-
-_ROLLOUT_SECTION_NAMES = frozenset({
-    "topology",
-    "buffer",
-    "control",
-    "artifacts",
-    "evaluation",
-    "logging",
-})
-
-
-@dataclass
-class RolloutConfig:
-    """Aggregated rollout topology, buffer, control, artifact, and logging config."""
-
-    topology: RolloutTopologySettings = field(default_factory=RolloutTopologySettings)
-    buffer: RolloutBufferSettings = field(default_factory=RolloutBufferSettings)
-    control: RolloutControlSettings = field(default_factory=RolloutControlSettings)
-    artifacts: RolloutArtifactSettings = field(default_factory=RolloutArtifactSettings)
-    evaluation: RolloutEvaluationSettings = field(default_factory=RolloutEvaluationSettings)
-    logging: RolloutLoggingSettings = field(default_factory=RolloutLoggingSettings)
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name.startswith("_") or name in _ROLLOUT_SECTION_NAMES:
-            object.__setattr__(self, name, value)
-            return
-
-        raise AttributeError(
-            f"Unknown rollout config field {name!r}. "
-            "Use rollout.topology / rollout.buffer / rollout.control / "
-            "rollout.artifacts / rollout.evaluation / rollout.logging."
-        )
-
-    def set_start_rollout_id(self, rollout_id: int) -> None:
-        """Update the rollout control cursor on the canonical config owner."""
-        rollout_id = int(rollout_id)
-        if rollout_id < 0:
-            raise ValueError("start_rollout_id must be >= 0.")
-        self.control = replace(self.control, start_rollout_id=rollout_id)
-
-    def validate(self) -> None:
-        self.topology.validate()
-        self.buffer.validate()
-        self.control.validate()
-        self.artifacts.validate()
-        self.evaluation.validate()
-        self.logging.validate()
-
+        if self.media_max_items < 1:
+            raise ValueError("media_max_items must be >= 1.")
 
 @dataclass
 class DebugConfig:
@@ -978,16 +903,16 @@ class DebugConfig:
 
 @dataclass
 class TrainingArguments:
-    """All configuration parameters for GRPO training."""
+    """All configuration parameters for DiffusionRL training."""
 
-    # ========== Paths (Dynamic Loading) ==========
-    data_source_path: str = field(default="diffusionrl.data.DefaultDataSource",
+    # ========== Dotpaths For Custom Modules (Dynamic Loading) ==========
+    data_source_dotpath: str = field(default="diffusionrl.data.DefaultDataSource",
         metadata={"help": "Python dotpath to DataSource class for loading training/eval prompt streams"})
-    rollout_function_path: str = field(default="diffusionrl.rollout.default_rollout.generate_rollout",
+    rollout_function_dotpath: str = field(default="diffusionrl.rollout.default_rollout.generate_rollout",
         metadata={"help": "Python dotpath to the rollout function invoked by the rollout service. This is the main rollout extension seam."})
-    eval_function_path: str = field(default="diffusionrl.rollout.default_rollout.evaluate_rollout",
+    eval_function_dotpath: str = field(default="diffusionrl.rollout.default_rollout.evaluate_rollout",
         metadata={"help": "Python dotpath to the evaluation function invoked by the rollout service."})
-    reward_hook_path: str = field(default="diffusionrl.rollout.default_rollout.score_rewards_hook",
+    reward_hook_dotpath: str = field(default="diffusionrl.rollout.default_rollout.score_rewards_hook",
         metadata={"help": "Python dotpath to the reward hook used by rollout/eval functions. This makes reward a first-class rollout hook."})
 
     # ========== Grouped Configuration ==========
@@ -1000,6 +925,8 @@ class TrainingArguments:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     precision: PrecisionConfig = field(default_factory=PrecisionConfig)
     rollout: RolloutConfig = field(default_factory=RolloutConfig)
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
 
     # ========== Data Configuration ==========
@@ -1007,15 +934,6 @@ class TrainingArguments:
         metadata={"help": "Path to training prompt data file (JSON, JSONL, or TXT). JSON items should provide text via 'prompt' or 'caption'."})
     eval_data_path: Optional[str] = field(default=None,
         metadata={"help": "Optional path to evaluation prompt data file. If unset, eval uses data_path with deterministic ordering."})
-    # ========== Video/Image Configuration ==========
-    height: int = field(default=256,
-        metadata={"help": "Generated image/video height in pixels"})
-    width: int = field(default=256,
-        metadata={"help": "Generated image/video width in pixels"})
-    num_frames: int = field(default=16,
-        metadata={"help": "Number of video frames to generate (video models only)"})
-    fps: int = field(default=8,
-        metadata={"help": "Video frame rate (video models only)"})
 
     # ========== Seed ==========
     seed: int = field(default=42,
@@ -1128,24 +1046,24 @@ def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
         "resolved.rollout.prompts_per_rollout",
         "resolved.training.global_batch_size",
         "resolved.training.local_batch_size",
-        "resolved.training.local_update_batch_size",
-        "resolved.training.local_micro_batch_size",
-        "resolved.training.num_updates_per_local_batch",
+        "resolved.training.local_mini_batch_size",
+        "resolved.training.micro_batch_size",
+        "resolved.training.num_updates_per_batch",
     ):
         resolved.setdefault(key, None)
 
     resolved["training.train_backend"] = normalize_train_backend_name(args)
-    resolved["rollout.topology.mode"] = args.rollout.topology.mode
-    resolved["rollout.topology.service_engine"] = args.rollout.topology.service_engine
+    resolved["rollout.mode"] = args.rollout.mode
+    resolved["rollout.rollout_engine"] = args.rollout.rollout_engine
     resolved["sync.protocol"] = str(args.sync.protocol).strip().lower()
 
     try:
-        resolved["algorithm.algorithm_path"] = resolve_algorithm_path(
+        resolved["algorithm.algorithm_dotpath"] = resolve_algorithm_dotpath(
             algorithm_type=args.algorithm.algorithm_type,
-            algorithm_path=args.algorithm.algorithm_path,
+            algorithm_dotpath=args.algorithm.algorithm_dotpath,
         )
     except Exception as exc:
-        _record_resolution_error(resolved, scope="algorithm_path", exc=exc)
+        _record_resolution_error(resolved, scope="algorithm_dotpath", exc=exc)
 
     try:
         resolved_config = resolve_config(args, include_training_plan=True)
@@ -1158,12 +1076,12 @@ def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
     train_topology = resolved_config.training_topology
     train_plan = resolved_config.training_plan
 
-    resolved["model.model_path"] = model_spec.model_path
+    resolved["model.model_dotpath"] = model_spec.model_dotpath
     resolved["model.model_type"] = model_spec.model_type
-    resolved["sampling.sampler_path"] = model_spec.sampler_path
+    resolved["sampling.sampler_dotpath"] = model_spec.sampler_dotpath
     resolved["training.train_backend"] = resolved_config.train_backend_config.name
-    resolved["rollout.topology.mode"] = rollout_topology.mode
-    resolved["rollout.topology.service_engine"] = rollout_topology.service_engine
+    resolved["rollout.mode"] = rollout_topology.mode
+    resolved["rollout.rollout_engine"] = rollout_topology.rollout_engine
     resolved["sync.protocol"] = resolved_config.rollout_mode_info.sync_protocol
     resolved["resolved.training.actor_count"] = train_topology.actor_count
     resolved["resolved.training.world_size"] = train_topology.world_size
@@ -1176,10 +1094,10 @@ def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
     if train_plan is not None:
         resolved["resolved.training.global_batch_size"] = train_plan.global_batch_size
         resolved["resolved.training.local_batch_size"] = train_plan.local_batch_size
-        resolved["resolved.training.local_update_batch_size"] = train_plan.local_update_batch_size
-        resolved["resolved.training.local_micro_batch_size"] = train_plan.local_micro_batch_size
-        resolved["resolved.training.num_updates_per_local_batch"] = (
-            train_plan.num_updates_per_local_batch
+        resolved["resolved.training.local_mini_batch_size"] = train_plan.local_mini_batch_size
+        resolved["resolved.training.micro_batch_size"] = train_plan.micro_batch_size
+        resolved["resolved.training.num_updates_per_batch"] = (
+            train_plan.num_updates_per_batch
         )
     return resolved
 
@@ -1357,12 +1275,13 @@ def parse_args(argv: Optional[List[str]] = None) -> TrainingArguments:
     print_config_views(args=args, print_resolved_config=print_resolved_config)
     return args
 
+
 def validate_args(
     args: TrainingArguments,
     *,
     resolved: Optional[ConfigBundle] = None,
 ) -> TrainingArguments:
-    """Validate arguments without mutating the original config values."""
+    """Validate arguments. Grouped validation may normalize fields such as ``rollout.plugin_dotpaths``."""
     validate_grouped_configs(args)
     debug_mode = args.debug.debug_mode
 
@@ -1373,11 +1292,11 @@ def validate_args(
     backend_name = backend_config.name
     rollout_mode_info = resolved_config.rollout_mode_info
     validate_algorithm_kwargs_payload(args)
-    validate_algorithm_path(args)
+    validate_algorithm_dotpath(args)
     validate_train_backend_config(
         backend_name=backend_name,
         backend_kwargs=backend_config.kwargs,
-        backend_path=backend_config.backend_path,
+        backend_dotpath=backend_config.backend_dotpath,
     )
     backend_capabilities = resolved_config.train_backend_capabilities.as_dict()
     validate_rollout_mode(

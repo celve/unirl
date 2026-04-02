@@ -335,8 +335,8 @@ class RolloutServices:
         merged_sampling = dict(request.sampling)
         merged_sampling["sde_indices"] = sde_indices
         merged_sampling["decode_for_reward"] = True
-        merged_sampling["keep_reward_media_for_driver"] = bool(
-            overrides.pop("_keep_reward_media_for_driver", False)
+        merged_sampling["collect_media_preview"] = bool(
+            overrides.pop("collect_media_preview", False)
         )
         merged_sampling["init_same_noise"] = bool(request.sampling.get("init_same_noise", False))
         merged_sampling["samples_per_prompt"] = max(
@@ -424,13 +424,21 @@ class RolloutServices:
         *,
         rewards: torch.Tensor,
         group_ids: Optional[List[str]] = None,
+        component_rewards: Optional[Dict[str, List[float]]] = None,
         reward_components: Optional[Dict[str, List[float]]] = None,
     ) -> torch.Tensor:
+        if component_rewards is not None and reward_components is not None:
+            raise ValueError(
+                "compute_advantages accepts either component_rewards or reward_components, not both."
+            )
+        resolved_component_rewards = (
+            component_rewards if component_rewards is not None else reward_components
+        )
         return compute_advantages_stage(
             algorithm=self.algorithm,
             rewards=rewards,
             group_ids=group_ids,
-            reward_components=reward_components,
+            component_rewards=resolved_component_rewards,
             reward_component_weights=self.reward_component_weights,
         )
 

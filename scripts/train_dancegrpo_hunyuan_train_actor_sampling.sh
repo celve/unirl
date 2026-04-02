@@ -17,7 +17,7 @@
 #   - Disadvantage: no async overlap between sampling and training
 #
 # ENGINE: FSDP (via training actors)
-#   When rollout.topology.mode='direct_sampling', the TrainingActor lazy-loads VAE and
+#   When rollout.mode='direct_sampling', the TrainingActor lazy-loads VAE and
 #   text encoder, then uses the FSDP-wrapped transformer to sample.
 #   Log_prob is computed during sampling (needed for GRPO).
 #
@@ -27,7 +27,7 @@
 #               → compute advantage → GRPO train → sync weights
 #
 #   This script: Ray actors, each training actor does the same loop.
-#               rollout.topology.mode='direct_sampling' → training actors call generate()
+#               rollout.mode='direct_sampling' → training actors call generate()
 #               with the same FSDP model they use for training.
 #
 # ALIGNMENT with DanceGRPO:
@@ -117,7 +117,7 @@ NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-8}
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-${TOTAL_GPUS}}
 
 # Training geometry
-LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE-2}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE-2}
 
 # Resolution (DanceGRPO: 480×480, 53 frames)
 HEIGHT=${HEIGHT:-480}
@@ -164,8 +164,8 @@ TOTAL_SAMPLES=$((PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT))
 LOCAL_BATCH_SIZE=$((TOTAL_SAMPLES / TOTAL_GPUS))
 DIRECT_SAMPLING_BATCH_SIZE=${DIRECT_SAMPLING_BATCH_SIZE:-${TOTAL_SAMPLES}}
 LOCAL_MICRO_BATCH_ARGS=()
-if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
-    LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
+if [ -n "${MICRO_BATCH_SIZE}" ]; then
+    LOCAL_MICRO_BATCH_ARGS+=(--training.micro-batch-size "${MICRO_BATCH_SIZE}")
 fi
 
 echo "======================================================"
@@ -176,7 +176,7 @@ echo " Prompts per batch:      ${PROMPTS_PER_BATCH}"
 echo " Samples per prompt (K): ${NUM_SAMPLES_PER_PROMPT}"
 echo " Total samples/rollout:  ${TOTAL_SAMPLES}"
 echo " Per-rank local batch:   ${LOCAL_BATCH_SIZE}"
-echo " Gradient accum batch:   ${LOCAL_MICRO_BATCH_SIZE:-disabled}"
+echo " Gradient accum batch:   ${MICRO_BATCH_SIZE:-disabled}"
 echo " Resolution:             ${HEIGHT}×${WIDTH}×${NUM_FRAMES}f"
 echo " Reward:                 ${REWARD_MODEL_NAME}"
 echo " FSDP CPU offload:       ${FSDP_CPU_OFFLOAD}"
@@ -209,7 +209,7 @@ python -m diffusionrl.train \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
-    --rollout.topology.mode direct_sampling \
+    --rollout.mode direct_sampling \
 --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
@@ -224,18 +224,18 @@ python -m diffusionrl.train \
     --training.use-gradient-checkpointing true \
     \
     `# ===== Video Resolution =====` \
-    --height ${HEIGHT} \
-    --width ${WIDTH} \
-    --num-frames ${NUM_FRAMES} \
-    --fps ${FPS} \
+    --sampling.height ${HEIGHT} \
+    --sampling.width ${WIDTH} \
+    --sampling.num-frames ${NUM_FRAMES} \
+    --sampling.fps ${FPS} \
     \
     `# ===== Rollout / Checkpoint =====` \
-    --rollout.control.num-rollout 202 \
-    --rollout.artifacts.save-steps 50 \
-    --rollout.logging.logging-steps 1 \
-    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
-    --rollout.logging.report-to-wandb ${REPORT_TO_WANDB} \
-    --rollout.logging.project-name "${WANDB_PROJECT_NAME}" \
-    --rollout.logging.run-name "${WANDB_RUN_NAME}" \
+    --rollout.num-rollout 202 \
+    --rollout.save-steps 50 \
+    --logging.logging-steps 1 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
+    --logging.report-to-wandb ${REPORT_TO_WANDB} \
+    --logging.project-name "${WANDB_PROJECT_NAME}" \
+    --logging.run-name "${WANDB_RUN_NAME}" \
     --sync.protocol disabled \
     "$@"

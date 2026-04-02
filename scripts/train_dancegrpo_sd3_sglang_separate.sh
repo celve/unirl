@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # NOTE:
-#   direct sampling now uses rollout.topology.mode='direct_sampling' with direct_sampling only.
+#   direct sampling now uses rollout.mode='direct_sampling' with direct_sampling only.
 #   This script is the SGLang equivalent in separate rollout/training mode.
 #
 # Usage:
@@ -47,7 +47,6 @@ LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-32}
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
-REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 # Eval EMA settings (smoothed weights for stable evaluation)
@@ -69,12 +68,11 @@ PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMP
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
-    --rollout.topology.mode separate \
-    --rollout.topology.service-engine sglang \
-    --rollout.topology.service-num-gpus ${TP_SIZE} \
-    --rollout.topology.engine-tp-size ${TP_SIZE} \
+    --rollout.mode separate \
+    --rollout.rollout-engine sglang \
+    --rollout.num-gpus-per-actor ${TP_SIZE} \
+    --rollout.tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
-    --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-model-name ocr \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
@@ -91,7 +89,7 @@ python -m diffusionrl.train \
     \
     "${DANCEGRPO_ALGO_KWARG_ARGS[@]}" \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
-    --training.local-micro-batch-size ${BATCH_SIZE} \
+    --training.micro-batch-size ${BATCH_SIZE} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
     --ray.rollout-num-gpus-per-node ${ROLLOUT_GPUS} \
@@ -105,12 +103,12 @@ python -m diffusionrl.train \
     --training.lora-alpha ${LORA_ALPHA} \
     --training.use-lora true \
     \
-    --height 512 \
-    --width 512 \
+    --sampling.height 512 \
+    --sampling.width 512 \
     \
-    --rollout.control.num-rollout 300 \
-    --rollout.artifacts.save-steps 40 \
-    --rollout.logging.logging-steps 10 \
-    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
+    --rollout.num-rollout 300 \
+    --rollout.save-steps 40 \
+    --logging.logging-steps 10 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
     --sync.protocol tensor_payload \
     "$@"

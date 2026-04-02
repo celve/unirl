@@ -34,8 +34,8 @@ class MochiModelBundle(ModelBundle):
         pretrained_path: str,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.bfloat16,
-        vae_saved_path: Optional[str] = None,
-        text_encoder_path: Optional[str] = None,
+        vae_ckpt_path: Optional[str] = None,
+        text_encoder_ckpt_path: Optional[str] = None,
         text_encoder_dtype: torch.dtype = torch.float16,
         load_on_init: bool = True,
         **kwargs,
@@ -47,16 +47,16 @@ class MochiModelBundle(ModelBundle):
             pretrained_path: Path to pretrained transformer weights
             device: Device to load models on
             dtype: Data type for transformer weights
-            vae_saved_path: Optional separate path for VAE
-            text_encoder_path: Optional separate path for T5 encoder
+            vae_ckpt_path: Optional separate path for VAE
+            text_encoder_ckpt_path: Optional separate path for T5 encoder
             text_encoder_dtype: Data type for text encoder (typically float16)
             load_on_init: Whether to load models immediately
             **kwargs: Additional arguments
         """
         super().__init__(pretrained_path, device, dtype, **kwargs)
 
-        self.vae_saved_path = vae_saved_path or pretrained_path
-        self.text_encoder_path = text_encoder_path or pretrained_path
+        self.vae_ckpt_path = vae_ckpt_path or pretrained_path
+        self.text_encoder_ckpt_path = text_encoder_ckpt_path or pretrained_path
         self.text_encoder_dtype = text_encoder_dtype
 
         # Text encoder components
@@ -75,7 +75,7 @@ class MochiModelBundle(ModelBundle):
         return "video"
 
     @classmethod
-    def default_sampler_path(cls) -> Optional[str]:
+    def default_sampler_dotpath(cls) -> Optional[str]:
         # Mochi rollout is served by the dedicated SGLang engine in the current runtime.
         return "diffusionrl.samplers.sglang.engine.SGLangRolloutEngine"
 
@@ -139,13 +139,13 @@ class MochiModelBundle(ModelBundle):
             from diffusers import AutoencoderKLMochi
 
             self._vae = AutoencoderKLMochi.from_pretrained(
-                self.vae_saved_path,
+                self.vae_ckpt_path,
                 subfolder="vae",
                 torch_dtype=self.dtype,
             )
             self._vae.to(self.device)
             self._vae.eval()  # VAE is always in eval mode
-            logger.info(f"Loaded Mochi VAE from {self.vae_saved_path}")
+            logger.info(f"Loaded Mochi VAE from {self.vae_ckpt_path}")
 
         except ImportError:
             logger.warning("Could not import AutoencoderKLMochi from diffusers.")
@@ -162,7 +162,7 @@ class MochiModelBundle(ModelBundle):
 
             # Load T5 encoder
             self._t5_encoder = T5EncoderModel.from_pretrained(
-                self.text_encoder_path,
+                self.text_encoder_ckpt_path,
                 subfolder="text_encoder",
                 torch_dtype=self.text_encoder_dtype,
             )
@@ -171,7 +171,7 @@ class MochiModelBundle(ModelBundle):
 
             # Load tokenizer
             self._t5_tokenizer = T5Tokenizer.from_pretrained(
-                self.text_encoder_path,
+                self.text_encoder_ckpt_path,
                 subfolder="tokenizer",
             )
 
@@ -183,7 +183,7 @@ class MochiModelBundle(ModelBundle):
                 dtype=self.text_encoder_dtype,
             )
 
-            logger.info(f"Loaded T5 text encoder from {self.text_encoder_path}")
+            logger.info(f"Loaded T5 text encoder from {self.text_encoder_ckpt_path}")
 
         except Exception as e:
             logger.warning(f"Could not load T5 text encoder: {e}")

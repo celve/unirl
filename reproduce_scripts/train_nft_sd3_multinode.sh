@@ -20,11 +20,11 @@
 #
 #   # Pass through extra diffusionrl CLI overrides:
 #   bash reproduce_scripts/train_nft_sd3_multinode.sh auto \
-#       --rollout.control.num-rollout 100 --training.local-micro-batch-size 6
+#       --rollout.num-rollout 100 --training.micro-batch-size 6
 #
 # Key alignment with original DiffusionNFT:
 #   algorithm_type=nft, beta=1.0, kl_coef=0.0001, sde_type=dpm2,
-#   num_inference_steps=10, guidance_scale=1.0, adv_normalization=group,
+#   num_inference_steps=10, guidance_scale=1.0, adv_normalization_scope=group,
 #   train_timestep_mode=all, sampling_adapter=old, LoRA rank=32 alpha=64
 #
 # =============================================================================
@@ -155,13 +155,13 @@ wait_for_workers() {
 run_training() {
 
     local micro_batch_args=()
-    if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
-        micro_batch_args+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
+    if [ -n "${MICRO_BATCH_SIZE}" ]; then
+        micro_batch_args+=(--training.micro-batch-size "${MICRO_BATCH_SIZE}")
     fi
 
     local wandb_entity_args=()
     if [ -n "${WANDB_ENTITY}" ]; then
-        wandb_entity_args+=(--rollout.logging.wandb-entity "${WANDB_ENTITY}")
+        wandb_entity_args+=(--logging.entity "${WANDB_ENTITY}")
     fi
 
     mkdir -p "${OUTPUT_DIR}"
@@ -209,7 +209,7 @@ run_training() {
         \
         --algorithm.prompts-per-rollout "${PROMPTS_PER_BATCH}" \
         "${micro_batch_args[@]}" \
-        --training.num-updates-per-local-batch "${NUM_UPDATES_PER_LOCAL_BATCH}" \
+        --training.num-updates-per-batch "${NUM_UPDATES_PER_BATCH}" \
         --algorithm.samples-per-prompt "${NUM_SAMPLES_PER_PROMPT}" \
         --algorithm.kwarg clip_range=1e-4 \
         --algorithm.kwarg kl_coef=0.0 \
@@ -219,7 +219,7 @@ run_training() {
         --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}" \
         --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}" \
         \
-        --rollout.topology.mode direct_sampling \
+        --rollout.mode direct_sampling \
         --sync.protocol disabled \
         --ray.rollout-num-nodes 0 \
         --ray.rollout-num-gpus-per-node 0 \
@@ -237,20 +237,20 @@ run_training() {
         --training.use-lora true \
         --training.use-gradient-checkpointing false \
         \
-        --height 512 \
-        --width 512 \
+        --sampling.height 512 \
+        --sampling.width 512 \
         \
-        --rollout.control.num-rollout 10000 \
-        --rollout.artifacts.save-steps 0 \
-        --rollout.evaluation.eval-steps ${EVAL_STEPS} \
-        --rollout.logging.logging-steps "${LOGGING_STEPS}" \
-        --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
-        --rollout.logging.report-to-wandb "${REPORT_TO_WANDB}" \
-        --rollout.logging.project-name "${WANDB_PROJECT_NAME}" \
-        --rollout.logging.run-name "${WANDB_RUN_NAME}" \
-        --rollout.logging.wandb-log-media "${WANDB_LOG_MEDIA}" \
-        --rollout.logging.wandb-media-max-items "${WANDB_MEDIA_MAX_ITEMS}" \
-        --rollout.logging.wandb-tags "${WANDB_TAGS}" \
+        --rollout.num-rollout 10000 \
+        --rollout.save-steps 0 \
+        --evaluation.eval-steps ${EVAL_STEPS} \
+        --logging.logging-steps "${LOGGING_STEPS}" \
+        --rollout.output-dir "${OUTPUT_DIR}" \
+        --logging.report-to-wandb "${REPORT_TO_WANDB}" \
+        --logging.project-name "${WANDB_PROJECT_NAME}" \
+        --logging.run-name "${WANDB_RUN_NAME}" \
+        --logging.log-media "${WANDB_LOG_MEDIA}" \
+        --logging.media-max-items "${WANDB_MEDIA_MAX_ITEMS}" \
+        --logging.tags "${WANDB_TAGS}" \
         "${wandb_entity_args[@]}" \
         "$@"
 }

@@ -192,7 +192,7 @@ class RolloutActor:
         if value is None:
             return None
         text = str(value).strip().lower()
-        if text in {"", "none", "off", "disable", "disabled", "fp32", "float32"}:
+        if text in {"", "none", "off", "disable", "disabled", "fp32", "float32", "float"}:
             return None
         if text in {"fp16", "float16", "half"}:
             return torch.float16
@@ -710,7 +710,7 @@ class RolloutActor:
         if not sampler_engine_type:
             raise ValueError(
                 "sampler_engine_type must be provided in engine_runtime_config. "
-                "This should be resolved from rollout.topology.service_engine before actor init."
+                "This should be resolved from rollout.rollout_engine before actor init."
             )
         if not uses_dedicated_rollout_engine(sampler_engine_type):
             raise ValueError(
@@ -718,11 +718,11 @@ class RolloutActor:
                 "Instantiate this sampler on TrainingActor instead."
             )
 
-        sampler_path = engine_runtime_config.get("sampler_path")
-        if sampler_path is None:
+        sampler_dotpath = engine_runtime_config.get("sampler_dotpath")
+        if sampler_dotpath is None:
             raise ValueError(
-                "sampler_path must be provided in engine_runtime_config. "
-                "This should be resolved from sampling.sampler_path before actor init."
+                "sampler_dotpath must be provided in engine_runtime_config. "
+                "This should be resolved from sampling.sampler_dotpath before actor init."
             )
 
         reward_config = config.get("reward_config", {})
@@ -737,8 +737,8 @@ class RolloutActor:
         engine_kwargs = dict(engine_runtime_config.get("engine_kwargs", {}))
         self._configure_transport_options(engine_kwargs)
 
-        # Add sampler_path to engine_kwargs
-        engine_kwargs["sampler_path"] = sampler_path
+        # Add sampler_dotpath to engine_kwargs
+        engine_kwargs["sampler_dotpath"] = sampler_dotpath
 
         # Pass base_gpu_id to engine for NOSET pattern
         engine_kwargs["base_gpu_id"] = self.base_gpu_id
@@ -748,8 +748,8 @@ class RolloutActor:
             engine_kwargs = self._configure_sglang_ports(engine_kwargs)
 
         resolved_engine_config = EngineConfig(
-            model_path=engine_runtime_config.get("model_path", ""),
-            pretrained_model_saved_path=engine_runtime_config.get("pretrained_model_saved_path", ""),
+            model_dotpath=engine_runtime_config.get("model_dotpath", ""),
+            pretrained_model_ckpt_path=engine_runtime_config.get("pretrained_model_ckpt_path", ""),
             num_inference_steps=int(engine_runtime_config.get("num_inference_steps", 50)),
             eta=float(engine_runtime_config.get("eta", 1.0)),
             sde_type=str(engine_runtime_config.get("sde_type", "flow")),
@@ -843,8 +843,8 @@ class RolloutActor:
                     sample_ids=request.meta.get("sample_ids"),
                     group_ids=request.meta.get("group_ids"),
                     prompt_metadata=request.meta.get("prompt_metadata"),
-                    keep_reward_media_for_driver=bool(
-                        request.sampling.get("keep_reward_media_for_driver", False)
+                    collect_media_preview=bool(
+                        request.sampling.get("collect_media_preview", False)
                     ),
                     samples_per_prompt=max(
                         1, int(request.sampling.get("samples_per_prompt", 1))

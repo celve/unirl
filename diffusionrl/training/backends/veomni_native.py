@@ -1,10 +1,10 @@
-"""Native VeOmni training backend (opt-in via train_backend_path).
+"""Native VeOmni training backend (opt-in via train_backend_dotpath).
 
 This backend intentionally does not replace the built-in ``veomni`` backend.
 Use it explicitly with:
 
     --train-backend veomni \
-    --train-backend-path diffusionrl.training.backends.veomni_native.VeOmniNativeTrainBackend
+    --train-backend-dotpath diffusionrl.training.backends.veomni_native.VeOmniNativeTrainBackend
 
 Design goals:
 - Keep default diffusionRL mainline behavior unchanged.
@@ -130,7 +130,7 @@ class VeOmniNativeTrainBackend(TrainBackend):
             supported_weight_export_formats=("state_dict",),
             notes=(
                 "Experimental native VeOmni integration path. "
-                "Use only via explicit train_backend_path to avoid affecting default mainline."
+                "Use only via explicit train_backend_dotpath to avoid affecting default mainline."
             ),
         )
 

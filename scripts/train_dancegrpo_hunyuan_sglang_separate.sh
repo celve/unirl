@@ -41,7 +41,7 @@ TRAINING_GPUS=${TRAINING_GPUS:-4}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-8}
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-${ROLLOUT_GPUS}}
 
-LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE-2}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE-2}
 
 HEIGHT=${HEIGHT:-480}
 WIDTH=${WIDTH:-480}
@@ -52,7 +52,6 @@ REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-"hpsv2"}
 
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
-REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 # Eval EMA settings (smoothed weights for stable evaluation)
@@ -78,19 +77,18 @@ fi
 TOTAL_SAMPLES=$((PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT))
 LOCAL_BATCH_SIZE=$((TOTAL_SAMPLES / TRAINING_GPUS))
 LOCAL_MICRO_BATCH_ARGS=()
-if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
-    LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
+if [ -n "${MICRO_BATCH_SIZE}" ]; then
+    LOCAL_MICRO_BATCH_ARGS+=(--training.micro-batch-size "${MICRO_BATCH_SIZE}")
 fi
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type hunyuan \
-    --rollout.topology.mode separate \
-    --rollout.topology.service-engine sglang \
-    --rollout.topology.service-num-gpus ${TP_SIZE} \
-    --rollout.topology.engine-tp-size ${TP_SIZE} \
+    --rollout.mode separate \
+    --rollout.rollout-engine sglang \
+    --rollout.num-gpus-per-actor ${TP_SIZE} \
+    --rollout.tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
-    --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
     --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
@@ -120,14 +118,14 @@ python -m diffusionrl.train \
     --training.weight-decay 0.0001 \
     --training.use-gradient-checkpointing true \
     \
-    --height ${HEIGHT} \
-    --width ${WIDTH} \
-    --num-frames ${NUM_FRAMES} \
-    --fps ${FPS} \
+    --sampling.height ${HEIGHT} \
+    --sampling.width ${WIDTH} \
+    --sampling.num-frames ${NUM_FRAMES} \
+    --sampling.fps ${FPS} \
     \
-    --rollout.control.num-rollout 202 \
-    --rollout.artifacts.save-steps 50 \
-    --rollout.logging.logging-steps 1 \
-    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
+    --rollout.num-rollout 202 \
+    --rollout.save-steps 50 \
+    --logging.logging-steps 1 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
     --sync.protocol tensor_payload \
     "$@"

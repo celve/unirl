@@ -50,7 +50,7 @@ class HTTPRewardExecutor(BaseRewardExecutor):
         Response:
         {
             "rewards": [0.8, 0.7, ...],
-            "reward_components": {...},  # optional
+            "component_rewards": {...},  # optional
             "successes": [true, true, ...],
             "errors": [null, null, ...]
         }
@@ -254,7 +254,7 @@ class HTTPRewardExecutor(BaseRewardExecutor):
         """Parse API response into RewardResponse."""
         return RewardResponse(
             rewards=response.get("rewards", []),
-            reward_components=response.get("reward_components", {}),
+            component_rewards=response.get("component_rewards", {}),
             successes=response.get("successes", [True] * len(response.get("rewards", []))),
             errors=response.get("errors", [None] * len(response.get("rewards", []))),
             compute_time=compute_time,

@@ -28,7 +28,7 @@ from diffusionrl.config.resolution import (
     TrainTopology,
     derive_sampling_host_engine_type,
     derive_training_plan,
-    require_rollout_service_num_gpus,
+    require_rollout_num_gpus_per_actor,
     resolve_config,
     rollout_mode_is_colocated,
 )
@@ -57,7 +57,7 @@ class PlacementSpec:
 @dataclass(frozen=True)
 class RolloutLaunch:
     mode: str
-    service_engine: str
+    rollout_engine: str
     actor_gpu_requirement: int
     colocate: bool
     colocate_gpu_fraction: float
@@ -192,8 +192,8 @@ def resolve_launch_config(
     )
     training_actor_init_config = build_training_actor_init_config(
         training_settings=args.training,
-        rollout_control_settings=args.rollout.control,
-        replay_log_probs=bool(args.sampling.replay_log_probs),
+        rollout_control_settings=args.rollout,
+        replay_enabled=bool(rollout_mode_info.replay_enabled),
         topology=training_topology,
         training_plan=training_plan,
         algorithm_config=algorithm_config,
@@ -216,18 +216,19 @@ def resolve_launch_config(
 
     rollout: Optional[RolloutLaunch] = None
     if placement.rollout_num_nodes > 0 and placement.rollout_num_gpus_per_node > 0:
-        service_engine = rollout_mode_info.rollout_topology.service_engine
-        if not service_engine:
+        rollout_engine = rollout_mode_info.rollout_topology.rollout_engine
+        if not rollout_engine:
             raise ValueError(
-                "Resolved rollout launch requires rollout.topology.service_engine to be set."
+                "Resolved rollout launch requires rollout.rollout_engine to be set."
             )
         rollout_engine_runtime_config = build_rollout_engine_config(
-            rollout_topology_settings=args.rollout.topology,
+            rollout_topology_settings=args.rollout,
+            rollout_logging_settings=args.logging,
             precision_settings=args.precision,
             sync_settings=args.sync,
-            fps=int(args.fps),
+            fps=int(args.sampling.fps),
             logprob_source=rollout_mode_info.logprob_source,
-            sampler_engine_type=service_engine,
+            sampler_engine_type=rollout_engine,
             model_config=model_config,
             sampling_spec=sampling_spec,
             offload_rollout=bool(args.ray.offload_rollout),
@@ -238,8 +239,8 @@ def resolve_launch_config(
         )
         rollout = RolloutLaunch(
             mode=rollout_mode_info.rollout_topology.mode,
-            service_engine=service_engine,
-            actor_gpu_requirement=require_rollout_service_num_gpus(args),
+            rollout_engine=rollout_engine,
+            actor_gpu_requirement=require_rollout_num_gpus_per_actor(args),
             colocate=placement.colocate_rollout,
             colocate_gpu_fraction=float(args.ray.colocate_rollout_gpu_fraction),
             allow_noset_multi_gpu_inference=bool(args.ray.allow_noset_multi_gpu_inference),

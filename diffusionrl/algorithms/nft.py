@@ -131,11 +131,11 @@ class NFTAlgorithm(BaseAlgorithm):
             eval_ema_decay=float(config.get("eval_ema_decay", 0.9)),
             eval_ema_update_interval=int(config.get("eval_ema_update_interval", 1)),
             kl_coef=float(extra.get("kl_coef", 0.0)),
-            adv_normalization=str(config.get("adv_normalization", "group")),
+            adv_normalization_scope=str(config.get("adv_normalization_scope", "group")),
             epsilon=float(config.get("adv_norm_eps", 1e-8)),
-            clip_max=config.get("adv_clip_abs", 5.0),
+            clip_max=config.get("clip_max", 5.0),
             use_global_std=bool(config.get("use_global_std", False)),
-            trimmed_ratio=float(config.get("trimmed_ratio", 0.0)),
+            trim_outliers_ratio=float(config.get("trim_outliers_ratio", 0.0)),
         )
 
     def __init__(
@@ -161,7 +161,7 @@ class NFTAlgorithm(BaseAlgorithm):
         apply_time_shift_in_loss: bool = False,
         training_scheduler_config: Optional[Dict[str, Any]] = None,
         # BaseAlgorithm params
-        adv_normalization: str = "group",
+        adv_normalization_scope: str = "group",
         samples_per_prompt: int = 1,
         num_inference_steps: int = 0,
         eval_ema_decay: float = 0.9,
@@ -174,7 +174,7 @@ class NFTAlgorithm(BaseAlgorithm):
         super().__init__(
             kl_coef=kl_coef,
             component_mix_stage=component_mix_stage,
-            adv_normalization=adv_normalization,
+            adv_normalization_scope=adv_normalization_scope,
             samples_per_prompt=samples_per_prompt,
             num_inference_steps=num_inference_steps,
             eval_ema_decay=eval_ema_decay,
@@ -280,8 +280,8 @@ class NFTAlgorithm(BaseAlgorithm):
     def get_ema_spec(self) -> EMASpec:
         return EMASpec(
             enable_eval_ema=True,
-            eval_decay=self.eval_ema_decay,
-            eval_update_interval=self.eval_ema_update_interval,
+            eval_ema_decay=self.eval_ema_decay,
+            eval_ema_update_interval=self.eval_ema_update_interval,
             reference_mode=("nft_old_policy" if self.use_reference_ema else "none"),
             reference_decay=self.ema_decay,
             reference_decay_type=self.ema_decay_type,
@@ -309,8 +309,8 @@ class NFTAlgorithm(BaseAlgorithm):
 
         return set(range(self.num_inference_steps))
 
-    def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:
-        del args
+    def get_sampler_validation_config(self, *, allow_replay: bool) -> Dict[str, Any]:
+        del allow_replay
         return {
             "allow_replay": False,
             "assert_step_alignment": False,

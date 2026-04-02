@@ -64,7 +64,7 @@ class VideoRewardScorer(BaseRewardScorer):
 
         try:
             rewards = []
-            reward_components = {
+            component_rewards = {
                 "alignment": [],
                 "temporal": [],
             }
@@ -86,12 +86,12 @@ class VideoRewardScorer(BaseRewardScorer):
                 )
 
                 rewards.append(total_reward)
-                reward_components["alignment"].append(alignment_reward)
-                reward_components["temporal"].append(temporal_reward)
+                component_rewards["alignment"].append(alignment_reward)
+                component_rewards["temporal"].append(temporal_reward)
 
             return RewardResponse(
                 rewards=rewards,
-                reward_components=reward_components,
+                component_rewards=component_rewards,
                 successes=[True] * len(rewards),
                 errors=[None] * len(rewards),
                 compute_time=time.time() - start,

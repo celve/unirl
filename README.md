@@ -123,7 +123,7 @@ For real datasets, symlink into `data/datasets/` and override `DATA_PATH`:
 
 ```bash
 DATA_PATH=data/datasets/hpdv2/train.json \
-  bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh --rollout.control.num-rollout 1
+  bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh --rollout.num-rollout 1
 ```
 
 The user-facing dataset contract is prompt-only:
@@ -148,7 +148,7 @@ For external data / model directories, pass absolute paths directly (or create s
 ```bash
 DATA_PATH=/path/to/external/data/train.json \
 PRETRAINED_MODEL=/path/to/external/shared_models/flux \
-bash scripts/train_dancegrpo_flux_train_actor_sampling.sh --rollout.control.num-rollout 1
+bash scripts/train_dancegrpo_flux_train_actor_sampling.sh --rollout.num-rollout 1
 ```
 
 ### Training
@@ -192,9 +192,9 @@ python -m diffusionrl.train \
     --precision.rollout.autocast-precision bf16 \
     --precision.rollout.trajectory-precision fp16 \
     --precision.rollout.logprob-precision fp32 \
-    --rollout.topology.mode direct_sampling \
-    --rollout.control.num-rollout 300 \
-    --rollout.artifacts.output-dir outputs/my_experiment \
+    --rollout.mode direct_sampling \
+    --rollout.num-rollout 300 \
+    --rollout.output-dir outputs/my_experiment \
     --sync.protocol disabled
 ```
 
@@ -217,7 +217,7 @@ Optional YAML-driven entry examples:
 ```bash
 python -m diffusionrl.train --config scripts/example_flux_dancegrpo_direct.yaml
 python -m diffusionrl.train_async --config scripts/example_flux_dancegrpo_sglang_separate.yaml
-python -m diffusionrl.train --config scripts/example_hunyuan_dancegrpo_direct.yaml --rollout.control.num-rollout 100
+python -m diffusionrl.train --config scripts/example_hunyuan_dancegrpo_direct.yaml --rollout.num-rollout 100
 ```
 
 Terminology:
@@ -227,8 +227,8 @@ Terminology:
 - It is not strictly the same as optimizer update count when gradient accumulation or inner epochs are enabled.
 
 `--config` supports grouped YAML mappings (for example `algorithm: { ... }`, `training: { ... }`).
-For rollout, use nested sections such as `rollout.topology`, `rollout.control`,
-and `rollout.logging` so the file shape matches the config sections in code.
+For rollout, use a grouped `rollout` YAML mapping (`rollout.mode`, `rollout.transport_dtype`,
+`rollout.control`, `rollout.logging`, etc.) so the file shape matches the config sections in code.
 Grouped YAML is now the only supported style for grouped fields.
 Grouped CLI options also use dotted names (for example `--training.train-backend`).
 Precision is grouped by runtime owner: use `precision.training.*` for training
@@ -236,19 +236,19 @@ model/FSDP/loss-forward precision, and `precision.rollout.*` for sampler/replay
 autocast plus trajectory/logprob storage precision.
 For dedicated SGLang rollout, the rollout-side prompt encoder also follows
 `precision.rollout.autocast_precision`; do not configure a separate
-prompt-encoder dtype under `rollout.topology`.
-`rollout.topology.service_transport_dtype` remains a rollout transport setting,
+prompt-encoder dtype under `rollout`.
+`rollout.transport_dtype` remains a rollout transport setting,
 not a `precision.*` field.
 CLI options always override YAML. Unknown YAML keys fail fast by default; use
 `--allow-unknown-config-keys` only when you intentionally want to ignore unknown keys.
 `sync.protocol` must now be set explicitly: use `disabled` for `direct_sampling`,
 and a dedicated-rollout sync mode (`tensor_payload`, `nccl_broadcast`, or
 `checkpoint_path`) when rollout runs outside training actors.
-In `direct_sampling`, leave `rollout.topology.service_engine` unset.
-Direct sampling is selected only by `rollout.topology.mode=direct_sampling`;
+In `direct_sampling`, leave `rollout.rollout_engine` unset.
+Direct sampling is selected only by `rollout.mode=direct_sampling`;
 dedicated rollout-only fields must remain unset there.
-When `rollout.buffer.reassemble_by_group=true`,
-`rollout.buffer.group_size` must be set explicitly.
+When `rollout.group_size` is set, the rollout buffer reassembles outgoing
+training batches by `group_id` with that many samples per logical group.
 Config docs are descriptive rather than normative: current behavior lives under
 `diffusionrl/config/*`, and docs/examples should be updated alongside config refactors.
 
@@ -256,9 +256,9 @@ Training geometry is rollout-driven only:
 
 - `algorithm.prompts_per_rollout * algorithm.samples_per_prompt` defines the global rollout batch.
 - The resolved local training batch is derived from the training topology.
-- `training.num_updates_per_local_batch` controls how one resolved local batch is split across optimizer updates.
-- `training.local_update_batch_size` is a derived value, computed as `local_batch_size / num_updates_per_local_batch`.
-- `training.local_micro_batch_size` only controls micro-step slicing inside one local update batch and must evenly divide the resolved `local_update_batch_size`.
+- `training.num_updates_per_batch` controls how one resolved local batch is split across optimizer updates.
+- `training.local_mini_batch_size` is a derived value, computed as `local_batch_size / num_updates_per_batch`.
+- `training.micro_batch_size` only controls micro-step slicing inside one local mini-batch and must evenly divide the resolved `local_mini_batch_size`.
 
 ### Training Backend Selection
 
@@ -318,7 +318,7 @@ Arguments in DiffusionRL are organized into the following categories:
 2.  **Sampling arguments**: `--sampling.sde-type`, `--sampling.eta`, `--sampling.num-inference-steps`, `--sampling.guidance-scale`, `--sampling.shift`, `--sampling.timestep-fraction`, etc.
 3.  **Algorithm arguments**: `--algorithm.algorithm-path`, `--algorithm.prompts-per-rollout`, `--algorithm.samples-per-prompt`, plus shared typed fields such as `--algorithm.adv-normalization`, `--algorithm.eval-ema-decay`, and `--algorithm.shuffle-samples`. Use repeated `--algorithm.kwarg key=value` only for true algorithm-specific extension keys. In YAML, put those extension keys under `algorithm.algorithm_kwargs`.
 4.  **Reward arguments**: `--reward.reward-model-name` / `--reward.reward-models` for built-in scorers, `--reward.reward-path` for custom scorer dotpaths, `--reward.reward-location` for driver vs sampling-actor execution (`auto` resolves the default path), `--reward.use-http-reward` + `--reward.reward-service-url` for HTTP-backed scoring, etc.
-5.  **Training arguments**: `--training.learning-rate`, `--training.num-updates-per-local-batch`, `--training.local-micro-batch-size`, `--training.max-grad-norm`, etc.
+5.  **Training arguments**: `--training.learning-rate`, `--training.num-updates-per-batch`, `--training.micro-batch-size`, `--training.max-grad-norm`, etc.
 6.  **Runtime arguments**: `--ray.rollout-num-gpus-per-node`, `--ray.training-num-gpus-per-node`, `--ray.colocate-training-gpu-fraction`, `--ray.colocate-rollout-gpu-fraction`, `--ray.placement-strategy`, `--ray.offload-train`, `--ray.offload-rollout`, etc.
 
 For config mechanics and current conventions, read

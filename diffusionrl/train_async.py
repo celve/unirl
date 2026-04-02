@@ -84,14 +84,16 @@ class AsyncPipelineRuntime:
     def __init__(
         self,
         *,
-        max_inflight: int = 1,
+        max_inflight_rollouts: int = 1,
         initial_rollout_id: int = 0,
     ) -> None:
         del initial_rollout_id
-        if max_inflight < 1:
-            raise ValueError(f"max_inflight must be >= 1, got {max_inflight}")
+        if max_inflight_rollouts < 1:
+            raise ValueError(
+                f"max_inflight_rollouts must be >= 1, got {max_inflight_rollouts}"
+            )
 
-        self.max_inflight = int(max_inflight)
+        self.max_inflight_rollouts = int(max_inflight_rollouts)
         self._inflight: Dict[int, InflightRollout] = {}
 
     @property
@@ -99,7 +101,7 @@ class AsyncPipelineRuntime:
         return len(self._inflight)
 
     def can_launch(self) -> bool:
-        return self.inflight_count < self.max_inflight
+        return self.inflight_count < self.max_inflight_rollouts
 
     def launch_rollout(
         self,
@@ -109,7 +111,8 @@ class AsyncPipelineRuntime:
         rid = int(rollout_id)
         if not self.can_launch():
             raise RuntimeError(
-                f"Async inflight queue full: inflight={self.inflight_count}, max_inflight={self.max_inflight}"
+                "Async inflight queue full: "
+                f"inflight={self.inflight_count}, max_inflight_rollouts={self.max_inflight_rollouts}"
             )
         if rid in self._inflight:
             raise RuntimeError(f"Rollout {rid} is already inflight")
@@ -172,30 +175,28 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
     )
 
     logger.info("Starting async pipeline loop (separate mode)")
-    rollout_control = args.rollout.control
-    rollout_buffer_config = args.rollout.buffer
-    rollout_logging = args.rollout.logging
-    rollout_artifacts = args.rollout.artifacts
-    max_inflight = int(rollout_control.async_max_inflight)
-    update_interval = max(1, int(rollout_control.update_weights_interval))
-    enforce_rollout_alignment = not bool(rollout_buffer_config.reassemble_by_group)
+    rollout_update_interval =  args.sync.rollout_update_interval
+    enforce_rollout_alignment = args.rollout.group_size is None
     rollout_on_gpu = True
     runtime = AsyncPipelineRuntime(
-        max_inflight=max_inflight,
-        initial_rollout_id=rollout_control.start_rollout_id,
+        max_inflight_rollouts=args.rollout.max_inflight_rollouts,
+        initial_rollout_id=args.rollout.start_rollout_id,
     )
-    next_rollout_to_launch = int(rollout_control.start_rollout_id)
+    next_rollout_to_launch = args.rollout.start_rollout_id
 
     def _sync_boundary_for(rollout_id: int) -> int:
         """Largest rollout id allowed before next weight sync boundary."""
-        boundary = ((int(rollout_id) // update_interval) + 1) * update_interval - 1
-        return min(boundary, int(rollout_control.num_rollout) - 1)
+        boundary = (
+            (int(rollout_id) // rollout_update_interval) + 1
+        ) * rollout_update_interval - 1
+        return min(boundary, int(args.rollout.num_rollout) - 1)
 
     def _launch_rollout(rollout_id: int) -> None:
         if not runtime.can_launch():
             raise RuntimeError(
                 f"Cannot launch rollout {rollout_id}: inflight queue is full "
-                f"(inflight={runtime.inflight_count}, max_inflight={runtime.max_inflight})"
+                f"(inflight={runtime.inflight_count}, "
+                f"max_inflight_rollouts={runtime.max_inflight_rollouts})"
             )
         should_log_rollout = should_log_fn(rollout_id, args)
         services = rollout_services
@@ -223,7 +224,7 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
                 sde_indices=plan.context.sde_indices,
                 requirements=services.sampling_requirements,
                 sampling_overrides={
-                    "_keep_reward_media_for_driver": bool(plan.context.collect_media_preview),
+                    "collect_media_preview": bool(plan.context.collect_media_preview),
                 },
             )
             return launched.request, launched
@@ -243,7 +244,7 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
 
     def _fill_inflight_window(current_rollout: int) -> None:
         nonlocal next_rollout_to_launch
-        if next_rollout_to_launch >= int(rollout_control.num_rollout):
+        if next_rollout_to_launch >= int(args.rollout.num_rollout):
             return
 
         launch_limit = _sync_boundary_for(current_rollout)
@@ -261,11 +262,11 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
             rollout_runtime.wake_up()
             rollout_on_gpu = True
 
-    wandb_media_enabled = bool(wandb_logger is not None and bool(rollout_logging.wandb_log_media))
-    wandb_media_max_items = max(1, int(rollout_logging.wandb_media_max_items))
+    wandb_media_enabled = wandb_logger is not None and args.logging.log_media
+    wandb_media_max_items = max(1, int(args.logging.media_max_items))
 
     global_optimizer_step = 0
-    for rollout_id in range(rollout_control.start_rollout_id, rollout_control.num_rollout):
+    for rollout_id in range(args.rollout.start_rollout_id, args.rollout.num_rollout):
         step_start_t = time.perf_counter()
         sync_result = None
         sync_phase_s = 0.0
@@ -311,7 +312,7 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
         advantages = services.compute_advantages(
             rewards=rollout_result.rewards,
             group_ids=rollout_result.request.meta.get("group_ids"),
-            reward_components=rollout_result.reward_components,
+            component_rewards=rollout_result.component_rewards,
         )
         training_batch = services.assemble_training_batch(
             request=rollout_result.request,
@@ -340,14 +341,14 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
         sample_count = int(rollout_payload.sample_count or 0)
         rollout_phase_s = time.perf_counter() - rollout_phase_start_t
 
-        should_sync = (rollout_id + 1) % update_interval == 0
+        should_sync = (rollout_id + 1) % rollout_update_interval == 0
 
         train_phase_start_t = time.perf_counter()
         metrics = training_group.train(rollout_id, training_data_handle)
         train_phase_s = time.perf_counter() - train_phase_start_t
 
         if should_save_fn(rollout_id, args):
-            save_path = f"{rollout_artifacts.output_dir}/checkpoint-{rollout_id}"
+            save_path = f"{args.rollout.output_dir}/checkpoint-{rollout_id}"
             training_runtime.save_model(save_path)
             logger.info("[async] Checkpoint saved: %s", save_path)
 
@@ -483,10 +484,6 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
     training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
     sync_mode = rollout_mode_info.sync_protocol
     rollout_mode_name = rollout_topology.mode
-    rollout_control = args.rollout.control
-    rollout_artifacts = args.rollout.artifacts
-    rollout_evaluation = args.rollout.evaluation
-    rollout_logging = args.rollout.logging
 
     if training_actor_sampling_mode:
         raise ValueError(
@@ -494,20 +491,20 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
         )
 
     logger.info("Starting diffusionRL async training...")
-    logger.info("Model: %s", args.model.pretrained_model_saved_path)
-    logger.info("Algorithm: %s", algorithm_config["algorithm_path"])
+    logger.info("Model: %s", args.model.pretrained_model_ckpt_path)
+    logger.info("Algorithm: %s", algorithm_config["algorithm_dotpath"])
     logger.info("Mode: %s", rollout_mode_name)
     logger.info("Weight sync mode: %s", sync_mode)
     logger.info(
-        "Async controls: async_max_inflight=%s update_weights_interval=%s",
-        rollout_control.async_max_inflight,
-        rollout_control.update_weights_interval,
+        "Async controls: max_inflight_rollouts=%s rollout_update_interval=%s",
+        args.rollout.max_inflight_rollouts,
+        args.sync.rollout_update_interval,
     )
     logger.info(
         "Periodic controls: save_steps=%s eval_steps=%s logging_steps=%s",
-        rollout_artifacts.save_steps,
-        rollout_evaluation.eval_steps,
-        rollout_logging.logging_steps,
+        args.rollout.save_steps,
+        args.evaluation.eval_steps,
+        args.logging.logging_steps,
     )
     logger.info(
         "Debug flags: mode=%s save_intermediates=%s save_dir=%s",
@@ -524,7 +521,7 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
 
     wandb_logger = None
     rollout_services = None
-    rollout_function_path = ""
+    rollout_function_dotpath = ""
     rollout_eval_function = None
     rollout_reward_hook = None
     rollout_buffer = None
@@ -535,29 +532,27 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
     weight_sync = create_weight_sync(args, launch_config, mode=sync_mode)
 
     try:
-        if rollout_logging.report_to_wandb and rollout_logging.project_name:
-            wandb_tags_str = rollout_logging.wandb_tags
+        if args.logging.report_to_wandb and args.logging.project_name:
             wandb_tags = (
-                [t.strip() for t in wandb_tags_str.split(",") if t.strip()]
-                if wandb_tags_str
+                [t.strip() for t in args.logging.tags.split(",") if t.strip()]
+                if args.logging.tags
                 else None
             )
-            wandb_entity = rollout_logging.wandb_entity or None
             wandb_logger = init_logger(
-                project=rollout_logging.project_name,
-                run_name=rollout_logging.run_name,
+                project=args.logging.project_name,
+                run_name=args.logging.run_name,
                 config=build_resolved_config_view(args),
-                log_dir=rollout_logging.logging_dir,
+                log_dir=args.logging.logging_dir,
                 rank=0,
                 tags=wandb_tags,
-                entity=wandb_entity,
+                entity=args.logging.entity or None,
                 require_success=True,
             )
             if wandb_logger.initialized:
                 logger.info(
                     "WandB initialized: project=%s, run=%s",
-                    rollout_logging.project_name,
-                    rollout_logging.run_name,
+                    args.logging.project_name,
+                    args.logging.run_name,
                 )
 
         pgs = create_placement_groups_from_launch(launch_config)
@@ -572,16 +567,16 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
             data_source=rollout_services.data_source,
             prompts_per_rollout=rollout_services.prompt_batch_size,
         )
-        rollout_function_path = args.rollout_function_path or DEFAULT_ROLLOUT_FUNCTION_PATH
-        rollout_eval_function = load_function(args.eval_function_path or DEFAULT_EVAL_FUNCTION_PATH)
-        rollout_reward_hook = load_function(args.reward_hook_path or DEFAULT_REWARD_HOOK_PATH)
+        rollout_function_dotpath = args.rollout_function_dotpath or DEFAULT_ROLLOUT_FUNCTION_PATH
+        rollout_eval_function = load_function(args.eval_function_dotpath or DEFAULT_EVAL_FUNCTION_PATH)
+        rollout_reward_hook = load_function(args.reward_hook_dotpath or DEFAULT_REWARD_HOOK_PATH)
         logger.info("Rollout services created")
         
-        if rollout_function_path != DEFAULT_ROLLOUT_FUNCTION_PATH:
+        if rollout_function_dotpath != DEFAULT_ROLLOUT_FUNCTION_PATH:
             raise ValueError(
                 "train_async.py currently requires the default request-centric rollout function "
                 "so the driver can overlap request launch and training. "
-                f"Got custom rollout_function_path={rollout_function_path!r}."
+                f"Got custom rollout_function_dotpath={rollout_function_dotpath!r}."
             )
         if dataset_step_info.get("num_prompts", 0) > 0:
             logger.info(
@@ -616,7 +611,7 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
             training_pgs,
         )
         training_runtime = TrainingGroupRuntime.from_group(training_group)
-        resume_from_checkpoint = rollout_artifacts.resume_from_checkpoint
+        resume_from_checkpoint = args.training.resume_from_checkpoint
         if resume_from_checkpoint:
             training_runtime.load_checkpoint(resume_from_checkpoint)
             logger.info("Checkpoint loaded: %s", resume_from_checkpoint)
@@ -653,7 +648,6 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
             training_runtime=training_runtime,
             rollout_runtime=rollout_runtime,
         )
-        rollout_control = args.rollout.control
 
         train_async_loop(
             args=args,

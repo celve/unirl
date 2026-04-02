@@ -28,8 +28,8 @@ def uses_dedicated_rollout_engine(name: Any) -> bool:
 class EngineConfig:
     """Configuration for rollout-side inference engines."""
 
-    model_path: str = ""
-    pretrained_model_saved_path: str = ""
+    model_dotpath: str = ""
+    pretrained_model_ckpt_path: str = ""
 
     num_inference_steps: int = 50
     eta: float = 1.0

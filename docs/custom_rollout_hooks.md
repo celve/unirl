@@ -40,7 +40,7 @@ The driver (train.py) calls these hooks in the following order:
                           .request           ← RolloutRequest
                           .sampler_outputs   ← List[RolloutSamples]
                           .rewards           ← Tensor
-                          .reward_components ← Dict
+                         .component_rewards ← Dict
                            │
   ┌────────────────────────┤  (driver does these explicitly)
   │                        │
@@ -104,7 +104,7 @@ def combined_reward_hook(*, services, request, samples, rollout_id):
     combined = 0.7 * clip_rewards + 0.3 * torch.tensor(gemini_scores)
     return RewardHookResult(
         rewards=combined,
-        reward_components={
+        component_rewards={
             **clip_components,
             "gemini": gemini_scores,
         },
@@ -269,7 +269,7 @@ RolloutFunctionResult(
     request=request,                    # The resolved RolloutRequest
     sampler_outputs=sampler_outputs,    # List[RolloutSamples] from actors
     rewards=rewards_tensor,             # [B] scalar rewards
-    reward_components={"clip": [...], "aesthetic": [...]},  # optional breakdown
+    component_rewards={"clip": [...], "aesthetic": [...]},  # optional breakdown
     metadata={"wandb_media_preview": ...},  # optional metadata
 )
 ```
@@ -278,7 +278,7 @@ RolloutFunctionResult(
 ```python
 RewardHookResult(
     rewards=torch.tensor([0.8, 0.6, 0.9, ...]),
-    reward_components={"my_metric": [0.8, 0.6, 0.9, ...]},  # optional
+    component_rewards={"my_metric": [0.8, 0.6, 0.9, ...]},  # optional
 )
 ```
 

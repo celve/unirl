@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import MISSING, fields as dataclass_fields
+from dataclasses import MISSING, fields as dataclass_fields, replace
 import logging
 import os
 from enum import Enum
 from typing import Any, Dict, Optional
 
-from diffusionrl.algorithms.construction import build_algorithm_kwargs, resolve_algorithm_path
+from diffusionrl.algorithms.construction import build_algorithm_kwargs, resolve_algorithm_dotpath
+from diffusionrl.buffer.buffer_plugins import normalize_plugin_dotpaths
 from diffusionrl.config.resolution import (
     ModelSpec,
     RolloutModeInfo,
@@ -20,7 +21,7 @@ from diffusionrl.config.resolution import (
     derive_rollout_actor_gpu_count,
     derive_rollout_gpu_pool_size,
     derive_rollout_topology,
-    derive_num_updates_per_local_batch,
+    derive_num_updates_per_batch,
     derive_training_topology,
     normalize_lora_target_modules,
     require_prompts_per_rollout,
@@ -62,6 +63,12 @@ class PrecisionName(str, Enum):
     FLOAT = "float"
 
 
+# Aliases accepted for optional dtype fields (e.g. rollout transport cast-off).
+_PRECISION_DISABLE_ALIASES = frozenset(
+    {"", "none", "off", "disable", "disabled"}
+)
+
+
 def repo_root(*, env_repo_root: str) -> str:
     """Resolve repository root from environment override or package-relative path."""
     env_root = os.getenv(env_repo_root)
@@ -95,12 +102,25 @@ def validate_dotpath(path: str, *, label: str) -> None:
         ) from exc
 
 
-def validate_precision_name(value: Any, *, field_name: str) -> None:
+def validate_precision_type(
+    value: Any,
+    *,
+    field_name: str,
+    allow_disable_aliases: bool = False,
+) -> None:
     """Validate precision aliases used by config-facing precision fields."""
     key = str(value or "").strip().lower()
+    if allow_disable_aliases and key in _PRECISION_DISABLE_ALIASES:
+        return
     try:
         PrecisionName(key)
     except ValueError as exc:
+        if allow_disable_aliases:
+            raise ValueError(
+                f"{field_name} must be one of "
+                "fp32/fp16/bf16 or none/off (disable), "
+                f"got: {value!r}"
+            ) from exc
         raise ValueError(
             f"{field_name} must be one of bf16/fp16/fp32, got: {value!r}"
         ) from exc
@@ -108,6 +128,9 @@ def validate_precision_name(value: Any, *, field_name: str) -> None:
 
 def validate_grouped_configs(args: Any) -> None:
     """Run per-group config dataclass validators."""
+    normalized_plugins = normalize_plugin_dotpaths(args.rollout.plugin_dotpaths)
+    if not (isinstance(args.rollout.plugin_dotpaths, list) and args.rollout.plugin_dotpaths == normalized_plugins):
+        args.rollout.plugin_dotpaths = normalized_plugins
     args.model.validate()
     args.sampling.validate()
     args.reward.validate()
@@ -117,6 +140,8 @@ def validate_grouped_configs(args: Any) -> None:
     args.training.validate()
     args.precision.validate()
     args.rollout.validate()
+    args.evaluation.validate()
+    args.logging.validate()
     args.debug.validate()
 
 
@@ -130,32 +155,30 @@ def validate_dynamic_dotpaths(
     """Validate configured dynamic extension dotpaths."""
     if resolved_model is None:
         resolved_model = derive_model_spec(args)
-    validate_dotpath(resolved_model.model_path, label="model")
-    validate_dotpath(resolved_model.sampler_path, label="sampler")
+    validate_dotpath(resolved_model.model_dotpath, label="model")
+    validate_dotpath(resolved_model.sampler_dotpath, label="sampler")
     validate_dotpath(
-        resolve_algorithm_path(
+        resolve_algorithm_dotpath(
             algorithm_type=args.algorithm.algorithm_type,
-            algorithm_path=args.algorithm.algorithm_path,
+            algorithm_dotpath=args.algorithm.algorithm_dotpath,
         ),
         label="algorithm",
     )
     if include_data_source:
-        validate_dotpath(args.data_source_path, label="data_source")
-    if getattr(args, "rollout_function_path", None):
-        validate_dotpath(args.rollout_function_path, label="rollout_function")
-    if getattr(args, "eval_function_path", None):
-        validate_dotpath(args.eval_function_path, label="eval_function")
-    if getattr(args, "reward_hook_path", None):
-        validate_dotpath(args.reward_hook_path, label="reward_hook")
-    if args.training.train_backend_path:
-        validate_dotpath(args.training.train_backend_path, label="train_backend")
-    if args.sampling.replay_sampler_path:
-        validate_dotpath(args.sampling.replay_sampler_path, label="replay_sampler")
+        validate_dotpath(args.data_source_dotpath, label="data_source")
+    if getattr(args, "rollout_function_dotpath", None):
+        validate_dotpath(args.rollout_function_dotpath, label="rollout_function")
+    if getattr(args, "eval_function_dotpath", None):
+        validate_dotpath(args.eval_function_dotpath, label="eval_function")
+    if getattr(args, "reward_hook_dotpath", None):
+        validate_dotpath(args.reward_hook_dotpath, label="reward_hook")
+    if args.training.train_backend_dotpath:
+        validate_dotpath(args.training.train_backend_dotpath, label="train_backend")
+    if args.sampling.replay_sampler_dotpath:
+        validate_dotpath(args.sampling.replay_sampler_dotpath, label="replay_sampler")
     if include_rollout_buffer_plugins:
-        rollout_buffer_plugin_paths = args.rollout.buffer.plugin_paths or ""
-        if isinstance(rollout_buffer_plugin_paths, str):
-            for plugin_path in [part.strip() for part in rollout_buffer_plugin_paths.split(",") if part.strip()]:
-                validate_dotpath(plugin_path, label="rollout_buffer_plugin")
+        for plugin_dotpath in normalize_plugin_dotpaths(args.rollout.plugin_dotpaths):
+            validate_dotpath(plugin_dotpath, label="rollout_buffer_plugin")
 
 
 def validate_colocate_fractions(args: Any) -> None:
@@ -250,10 +273,10 @@ def validate_resolved_engine_algorithm_contract(
         return
 
     rollout_topology = rollout_mode_info.rollout_topology
-    service_engine = rollout_topology.service_engine
-    if not service_engine:
+    rollout_engine = rollout_topology.rollout_engine
+    if not rollout_engine:
         raise ValueError(
-            "Dedicated rollout validation requires rollout.topology.service_engine to be set explicitly. "
+            "Dedicated rollout validation requires rollout.rollout_engine to be set explicitly. "
             "Run validate_args() before resolving dedicated rollout engine capabilities."
         )
 
@@ -275,7 +298,7 @@ def validate_resolved_engine_algorithm_contract(
     if missing:
         raise ValueError(
             f"Engine capability mismatch for algorithm_type={args.algorithm.algorithm_type}: "
-            f"rollout.topology.service_engine={service_engine} lacks {missing}. "
+            f"rollout.rollout_engine={rollout_engine} lacks {missing}. "
             f"engine_capabilities={engine_caps}, required={required_dict}. "
             "Use a compatible dedicated rollout engine, or fall back to direct "
             "training-actor sampling for trajectory/log-prob-heavy algorithms."
@@ -293,17 +316,17 @@ def validate_rollout_mode_constraints(
     model_label = f"{model_cls.__module__}.{model_cls.__qualname__}"
     if (
         not training_actor_sampling_mode
-        and rollout_topology.service_engine == "sglang"
+        and rollout_topology.rollout_engine == "sglang"
     ):
         supports_sglang = getattr(model_cls, "supports_sglang_prompt_mode", None)
         if not callable(supports_sglang):
             raise ValueError(
-                f"rollout.topology.service_engine='sglang' requires model {model_label!r} "
+                f"rollout.rollout_engine='sglang' requires model {model_label!r} "
                 "to define classmethod supports_sglang_prompt_mode()."
             )
         if not supports_sglang():
             raise ValueError(
-                f"rollout.topology.service_engine='sglang' is not supported by model {model_label!r}. "
+                f"rollout.rollout_engine='sglang' is not supported by model {model_label!r}. "
                 "The model must implement classmethod supports_sglang_prompt_mode() returning True."
             )
 
@@ -313,12 +336,22 @@ def validate_rollout_mode_constraints(
 # ============================================================================
 
 
-def _collect_direct_sampling_incompatible_fields(rollout_topology_config: Any) -> list[str]:
+_ROLLOUT_TOPOLOGY_FIELD_NAMES = frozenset({
+    "mode", "rollout_engine", "rollout_batch_size", "num_gpus_per_actor",
+    "tp_size", "sp_size", "transport_dtype", "transport_drop_decoded_videos",
+    "sglang_local_mode", "sglang_verify_weight_checksum",
+    "sglang_disable_autocast", "sglang_kwargs",
+})
+
+
+def _collect_direct_sampling_incompatible_fields(rollout_config: Any) -> list[str]:
     incompatible: list[str] = []
-    for field_info in dataclass_fields(type(rollout_topology_config)):
-        if field_info.name in {"mode", "service_engine"}:
+    for field_info in dataclass_fields(type(rollout_config)):
+        if field_info.name not in _ROLLOUT_TOPOLOGY_FIELD_NAMES:
             continue
-        field_value = getattr(rollout_topology_config, field_info.name)
+        if field_info.name in {"mode", "rollout_engine"}:
+            continue
+        field_value = getattr(rollout_config, field_info.name)
         field_default = resolve_dataclass_field_default(field_info, missing=MISSING)
         if field_default is not MISSING and field_value == field_default:
             continue
@@ -326,7 +359,7 @@ def _collect_direct_sampling_incompatible_fields(rollout_topology_config: Any) -
             continue
         if isinstance(field_value, dict) and not field_value:
             continue
-        incompatible.append(f"rollout.topology.{field_info.name}")
+        incompatible.append(f"rollout.{field_info.name}")
     return incompatible
 
 
@@ -344,16 +377,16 @@ def _format_rollout_mode_state(
     is_sglang_engine = rollout_mode_info.is_sglang_engine
     replay_guard = rollout_mode_info.replay_guard
 
-    service_engine = rollout_topology.service_engine
+    rollout_engine = rollout_topology.rollout_engine
     return "\n".join(
         [
             "Resolved rollout mode:",
-            f"  rollout.topology.mode = {rollout_topology.mode!r}",
-            f"  rollout.topology.service_engine = {service_engine!r}",
+            f"  rollout.mode = {rollout_topology.mode!r}",
+            f"  rollout.rollout_engine = {rollout_engine!r}",
             f"  training_actor_sampling_mode = {training_actor_sampling_mode}",
             f"  is_sglang_engine = {bool(is_sglang_engine)}",
             f"  sampling.logprob_source = {logprob_source!r}",
-            f"  sampling.replay_log_probs = {replay_enabled}",
+            f"  derived.replay_enabled = {replay_enabled}",
             f"  replay_guard = {bool(replay_guard)}",
             f"  sampling.max_samples_per_request = {max_samples_per_request!r}",
             f"  sync.protocol = {sync_protocol!r}",
@@ -380,11 +413,11 @@ def validate_async_training_runner(args: Any) -> None:
 
     rollout_topology = derive_rollout_topology(args)
     if rollout_mode_is_colocated(rollout_topology.mode):
-        raise ValueError("train_async.py requires rollout.topology.mode='separate'.")
+        raise ValueError("train_async.py requires rollout.mode='separate'.")
     if rollout_topology.training_actor_sampling_mode:
         raise ValueError(
             "train_async.py requires a dedicated rollout engine "
-            "(for example rollout.topology.service_engine='sglang')."
+            "(for example rollout.rollout_engine='sglang')."
         )
     if args.ray.offload_train or args.ray.offload_rollout:
         raise ValueError(
@@ -400,26 +433,26 @@ def validate_rollout_topology_contract(
 ) -> RolloutTopology:
     """Validate rollout topology contract after strict topology resolution."""
     topology = rollout_topology
-    rollout_topology_config = args.rollout.topology
+    rollout_config = args.rollout
 
     if rollout_mode_uses_service(topology.mode):
-        if topology.service_engine is None:
+        if topology.rollout_engine is None:
             raise ValueError(
-                "Dedicated rollout modes require rollout.topology.service_engine to be set explicitly."
+                "Dedicated rollout modes require rollout.rollout_engine to be set explicitly."
             )
-        if not uses_dedicated_rollout_engine(topology.service_engine):
+        if not uses_dedicated_rollout_engine(topology.rollout_engine):
             raise ValueError(
-                "rollout.topology.mode in {separate,colocate} requires a dedicated rollout "
-                f"service engine. Got rollout.topology.service_engine={topology.service_engine!r}."
+                "rollout.mode in {separate,colocate} requires a dedicated rollout "
+                f"engine. Got rollout.rollout_engine={topology.rollout_engine!r}."
             )
-        if rollout_topology_config.service_num_gpus is None:
+        if rollout_config.num_gpus_per_actor is None:
             raise ValueError(
-                "Dedicated rollout services require rollout.topology.service_num_gpus to be set explicitly."
+                "Dedicated rollout services require rollout.num_gpus_per_actor to be set explicitly."
             )
         return topology
 
     configured_direct_incompatible_fields = _collect_direct_sampling_incompatible_fields(
-        rollout_topology_config
+        rollout_config
     )
     if configured_direct_incompatible_fields:
         raise ValueError(
@@ -437,11 +470,11 @@ def validate_algorithm_kwargs_payload(args: Any) -> None:
         "samples_per_prompt": "algorithm.samples_per_prompt",
         "prompts_per_rollout": "algorithm.prompts_per_rollout",
         "component_mix_stage": "algorithm.component_mix_stage",
-        "adv_normalization": "algorithm.adv_normalization",
+        "adv_normalization_scope": "algorithm.adv_normalization_scope",
         "adv_norm_eps": "algorithm.adv_norm_eps",
-        "adv_clip_abs": "algorithm.adv_clip_abs",
+        "clip_max": "algorithm.clip_max",
         "use_global_std": "algorithm.use_global_std",
-        "trimmed_ratio": "algorithm.trimmed_ratio",
+        "trim_outliers_ratio": "algorithm.trim_outliers_ratio",
         "eval_ema_decay": "algorithm.eval_ema_decay",
         "eval_ema_update_interval": "algorithm.eval_ema_update_interval",
         "shuffle_samples": "algorithm.shuffle_samples",
@@ -461,11 +494,11 @@ def validate_algorithm_kwargs_payload(args: Any) -> None:
         )
 
 
-def validate_algorithm_path(args: Any) -> None:
-    """Validate algorithm path resolution without mutating args."""
-    resolve_algorithm_path(
+def validate_algorithm_dotpath(args: Any) -> None:
+    """Validate algorithm dotpath resolution without mutating args."""
+    resolve_algorithm_dotpath(
         algorithm_type=args.algorithm.algorithm_type,
-        algorithm_path=args.algorithm.algorithm_path,
+        algorithm_dotpath=args.algorithm.algorithm_dotpath,
     )
 
 
@@ -480,40 +513,29 @@ def validate_training_actor_sampling_mode(
         return
 
     resolved_topology = rollout_mode_info.rollout_topology
-    if rollout_mode_uses_service(resolved_topology.mode) or uses_dedicated_rollout_engine(resolved_topology.service_engine):
+    if rollout_mode_uses_service(resolved_topology.mode) or uses_dedicated_rollout_engine(resolved_topology.rollout_engine):
         raise ValueError(
             "Dedicated rollout service engines cannot use direct_sampling mode. "
-            f"Got rollout.topology.mode={resolved_topology.mode!r}, "
-            f"rollout.topology.service_engine={resolved_topology.service_engine!r}."
+            f"Got rollout.mode={resolved_topology.mode!r}, "
+            f"rollout.rollout_engine={resolved_topology.rollout_engine!r}."
         )
 
     if not bool(backend_capabilities.get("supports_training_actor_sampling", False)):
         raise ValueError(
-            "rollout.topology.mode=%r resolves to direct training-actor sampling, "
+            "rollout.mode=%r resolves to direct training-actor sampling, "
             "but train_backend=%r does not declare supports_training_actor_sampling=true."
             % (resolved_topology.mode, backend_name)
         )
 
 
 def validate_replay_mode(*, rollout_mode_info: RolloutModeInfo) -> None:
-    """Validate replay/log-prob flags against the resolved rollout-mode context."""
-    if rollout_mode_info.is_sglang_engine and rollout_mode_info.replay_guard:
-        if rollout_mode_info.logprob_source == "replay" and not rollout_mode_info.replay_enabled:
-            raise ValueError(
-                "rollout.topology.service_engine='sglang' with logprob_source='replay' requires "
-                "--sampling.replay-log-probs=true. Set it explicitly."
-            )
-        if rollout_mode_info.logprob_source == "native" and rollout_mode_info.replay_enabled:
-            raise ValueError(
-                "logprob_source='native' is incompatible with replay_log_probs=true. "
-                "Set --sampling.replay-log-probs=false when using native log_prob mode."
-            )
-
-    if rollout_mode_info.replay_enabled and not rollout_mode_info.replay_guard:
+    """Validate internal replay/log-prob derivation from the public config surface."""
+    expected_replay_enabled = rollout_mode_info.logprob_source == "replay"
+    if bool(rollout_mode_info.replay_enabled) != bool(expected_replay_enabled):
         raise ValueError(
-            "replay_log_probs=true is only valid for "
-            "dedicated rollout services + algorithm_type='grpo'. "
-            "Either disable replay_log_probs or adjust your config."
+            "Internal config mismatch: replay_enabled must be derived from "
+            f"logprob_source. Got logprob_source={rollout_mode_info.logprob_source!r}, "
+            f"replay_enabled={rollout_mode_info.replay_enabled!r}."
         )
 
 
@@ -621,7 +643,7 @@ def validate_weight_sync(
     rollout_mode_info: RolloutModeInfo,
 ) -> None:
     """Validate explicit weight-sync protocol against rollout topology."""
-    rollout_service_engine = rollout_mode_info.rollout_topology.service_engine
+    rollout_engine = rollout_mode_info.rollout_topology.rollout_engine
     resolved_mode = rollout_mode_info.sync_protocol
     if rollout_mode_info.training_actor_sampling_mode:
         if resolved_mode != "disabled":
@@ -633,18 +655,18 @@ def validate_weight_sync(
     if resolved_mode == "disabled":
         raise ValueError(
             "sync.protocol='disabled' is only valid when sampling runs directly on training actors. "
-            f"Got rollout.topology.service_engine={rollout_service_engine!r}."
+            f"Got rollout.rollout_engine={rollout_engine!r}."
         )
     is_multi_node = (
         int(args.ray.rollout_num_nodes) > 1
         or int(args.ray.training_num_nodes) > 1
         or int(args.reward.reward_dedicated_num_nodes) > 1
     )
-    if resolved_mode in {"tensor_payload", "nccl_broadcast"} and rollout_service_engine != "sglang":
+    if resolved_mode in {"tensor_payload", "nccl_broadcast"} and rollout_engine != "sglang":
         raise ValueError(
             "sync.protocol in {tensor_payload,nccl_broadcast} currently requires "
-            "rollout.topology.service_engine='sglang'. "
-            f"Got rollout.topology.service_engine={rollout_service_engine!r}."
+            "rollout.rollout_engine='sglang'. "
+            f"Got rollout.rollout_engine={rollout_engine!r}."
         )
 
     if (
@@ -677,7 +699,7 @@ def validate_rollout_layout(
     if not rollout_mode_uses_service(rollout_topology.mode):
         raise ValueError(
             "Dedicated rollout actor layout validation only applies to dedicated rollout engines. "
-            f"Got rollout.topology.mode={rollout_topology.mode!r}."
+            f"Got rollout.mode={rollout_topology.mode!r}."
         )
     if rollout_gpu_pool_size < 1:
         raise ValueError(
@@ -691,20 +713,20 @@ def validate_rollout_layout(
         raise ValueError(
             "Dedicated rollout placement does not have enough GPUs for one rollout actor. "
             f"Available rollout GPU pool={rollout_gpu_pool_size}, "
-            f"rollout.topology.service_num_gpus={rollout_gpus}."
+            f"rollout.num_gpus_per_actor={rollout_gpus}."
         )
     if rollout_gpus > 1 and rollout_gpu_pool_size % rollout_gpus != 0:
         raise ValueError(
-            "Dedicated rollout GPU pool must be divisible by rollout.topology.service_num_gpus "
+            "Dedicated rollout GPU pool must be divisible by rollout.num_gpus_per_actor "
             "for multi-GPU rollout actors. "
             f"Available rollout GPU pool={rollout_gpu_pool_size}, "
-            f"rollout.topology.service_num_gpus={rollout_gpus}."
+            f"rollout.num_gpus_per_actor={rollout_gpus}."
         )
     is_sglang_engine = rollout_mode_info.is_sglang_engine
     if rollout_gpus > 1 and rollout_mode_is_colocated(rollout_topology.mode) and not is_sglang_engine:
         raise ValueError(
             "colocate with multi-GPU rollout actors is only supported "
-            "for rollout.topology.service_engine='sglang'."
+            "for rollout.rollout_engine='sglang'."
         )
     if rollout_gpus > 1:
         allow_noset_multi_gpu_inference = bool(args.ray.allow_noset_multi_gpu_inference)
@@ -763,13 +785,17 @@ def validate_reward_config(args: Any) -> None:
     has_http_reward_urls = reward_config.has_http_reward_urls
     has_http_reward = reward_config.has_http_reward
     local_reward_device = str(reward_config.local_reward_device or "cpu").strip().lower()
+    reward_backend = str(reward_config.reward_backend or "local").strip().lower()
     requested_reward_location = str(reward_config.reward_location or "auto").strip().lower()
     reward_location = str(execution_plan.location or "driver").strip().lower()
-    allow_local_reward_cuda_contention = bool(reward_config.allow_local_reward_cuda_contention)
 
-    if reward_config.use_http_reward and not has_http_reward_urls:
+    if has_http_reward and not has_http_reward_urls:
         raise ValueError(
-            "use_http_reward=true requires reward_service_url or reward_service_urls."
+            "reward_backend='http' requires reward_service_urls."
+        )
+    if reward_backend != "http" and has_http_reward_urls:
+        raise ValueError(
+            "reward_service_urls is only valid when reward_backend='http'."
         )
 
     if reward_location == "sampling_actor":
@@ -787,12 +813,11 @@ def validate_reward_config(args: Any) -> None:
     if (
         uses_local_same_process_reward
         and local_reward_device == "cuda"
-        and not allow_local_reward_cuda_contention
     ):
         raise ValueError(
             "local_reward_device='cuda' in driver-local reward mode can contend with "
-            "rollout/training GPUs. Use dedicated reward actors (reward_dedicated_*), "
-            "use_http_reward, or set allow_local_reward_cuda_contention=true to force."
+            "rollout/training GPUs. Use dedicated reward actors (reward_dedicated_*) "
+            "or set reward_backend='http'."
         )
 
     if requested_reward_location == "auto":
@@ -833,33 +858,33 @@ def validate_reward_config(args: Any) -> None:
 def validate_reward_and_rollout_buffer_config(args: Any) -> None:
     """Validate reward pool config and rollout-buffer controls."""
     validate_reward_config(args)
-    rollout_buffer = args.rollout.buffer
+    rollout = args.rollout
 
-    if bool(rollout_buffer.reassemble_by_group) and rollout_buffer.group_size is not None:
-        if bool(rollout_buffer.drop_invalid):
+    if rollout.group_size is not None:
+        if bool(rollout.drop_invalid):
             raise ValueError(
-                "rollout.buffer.reassemble_by_group is incompatible with "
-                "rollout.buffer.drop_invalid=true. Sample-dropping finite-value "
+                "Setting rollout.group_size (group reassembly) is incompatible with "
+                "rollout.drop_invalid=true. Sample-dropping finite-value "
                 "filtering can leave incomplete groups pending forever. Set "
-                "rollout.buffer.drop_invalid=false so invalid batches fail fast."
+                "rollout.drop_invalid=false so invalid batches fail fast."
             )
-        if rollout_buffer.reward_min is not None or rollout_buffer.reward_max is not None:
+        if rollout.reward_min is not None or rollout.reward_max is not None:
             raise ValueError(
-                "rollout.buffer.reassemble_by_group is incompatible with "
-                "rollout.buffer.reward_min/max. Reward-range filtering drops "
+                "Setting rollout.group_size (group reassembly) is incompatible with "
+                "rollout.reward_min/max. Reward-range filtering drops "
                 "samples and breaks the complete-group producer contract."
             )
         target_batch_size = int(derive_global_rollout_batch_size(args))
-        if int(rollout_buffer.group_size) > target_batch_size:
+        if int(rollout.group_size) > target_batch_size:
             raise ValueError(
-                "rollout.buffer.group_size cannot exceed the resolved training batch size. "
-                f"Got group_size={rollout_buffer.group_size}, target_batch_size={target_batch_size}."
+                "rollout.group_size cannot exceed the resolved training batch size. "
+                f"Got group_size={rollout.group_size}, target_batch_size={target_batch_size}."
             )
-        if target_batch_size % int(rollout_buffer.group_size) != 0:
+        if target_batch_size % int(rollout.group_size) != 0:
             raise ValueError(
-                "rollout.buffer.reassemble_by_group requires the resolved training batch size "
-                "to be divisible by rollout.buffer.group_size. "
-                f"Got target_batch_size={target_batch_size}, group_size={rollout_buffer.group_size}."
+                "rollout.group_size (group reassembly) requires the resolved training batch size "
+                "to be divisible by rollout.group_size. "
+                f"Got target_batch_size={target_batch_size}, group_size={rollout.group_size}."
             )
 
 
@@ -872,17 +897,17 @@ def validate_train_backend_config(
     *,
     backend_name: str,
     backend_kwargs: Mapping[str, Any],
-    backend_path: Optional[str],
+    backend_dotpath: Optional[str],
 ) -> None:
     """Validate cross-domain backend constraints after canonicalization."""
     backend = backend_name
     supported = supported_train_backends()
-    if backend not in supported and not backend_path:
+    if backend not in supported and not backend_dotpath:
         raise ValueError(
             f"Unsupported train_backend={backend!r}. "
-            f"Expected one of {sorted(supported)} or provide --training.train-backend-path."
+            f"Expected one of {sorted(supported)} or provide --training.train-backend-dotpath."
         )
-    if backend == "megatron" and not backend_path:
+    if backend == "megatron" and not backend_dotpath:
         logger.warning(
             "train_backend=%s is currently a scaffold backend: launch/topology interfaces are wired, "
             "but the training execution path is not fully implemented yet. "
@@ -890,7 +915,7 @@ def validate_train_backend_config(
             backend,
         )
 
-    if backend == "megatron" and not backend_path and not str(
+    if backend == "megatron" and not backend_dotpath and not str(
         dict(backend_kwargs).get("actor_class_path", "") or ""
     ).strip():
         logger.warning(
@@ -911,12 +936,12 @@ def validate_training_batch_geometry(
     if samples_per_prompt < 1:
         raise ValueError(f"algorithm.samples_per_prompt must be >= 1. Got {samples_per_prompt}.")
 
-    num_updates_per_local_batch = derive_num_updates_per_local_batch(args)
+    num_updates_per_batch = derive_num_updates_per_batch(args)
     global_batch_size = derive_global_rollout_batch_size(args)
     topology = topology if topology is not None else derive_training_topology(args)
     dp_size = int(topology.dp_size)
     dp_replicate_size = int(topology.dp_replicate_size)
-    raw_micro_batch_size = args.training.local_micro_batch_size
+    raw_micro_batch_size = args.training.micro_batch_size
 
     def _format_geometry(
         *,
@@ -928,7 +953,7 @@ def validate_training_batch_geometry(
         update_text = (
             str(update_batch_size)
             if update_batch_size is not None
-            else "<not divisible by num_updates_per_local_batch>"
+            else "<not divisible by num_updates_per_batch>"
         )
         if raw_micro_batch_size is None:
             micro_text = "auto"
@@ -942,9 +967,9 @@ def validate_training_batch_geometry(
                 f"  global_batch_size = prompts_per_rollout({prompts_per_rollout}) * "
                 f"samples_per_prompt({samples_per_prompt}) = {global_batch_size}",
                 f"  local_batch_size = global_batch_size / dp_size({dp_size}) = {local_text}",
-                f"  local_update_batch_size = local_batch_size / "
-                f"num_updates_per_local_batch({num_updates_per_local_batch}) = {update_text}",
-                f"  local_micro_batch_size = {micro_text}",
+                f"  local_mini_batch_size = local_batch_size / "
+                f"num_updates_per_batch({num_updates_per_batch}) = {update_text}",
+                f"  micro_batch_size = {micro_text}",
                 f"  dp_replicate_size = {dp_replicate_size}",
             ]
         )
@@ -994,17 +1019,17 @@ def validate_training_batch_geometry(
             micro_batch_size=None,
         )
 
-    if local_batch_size % num_updates_per_local_batch != 0:
+    if local_batch_size % num_updates_per_batch != 0:
         _raise_geometry_error(
             reason="local batch cannot be split evenly into optimizer updates "
-            "(local_batch_size % num_updates_per_local_batch != 0).",
-            fix_hint="Choose a training.num_updates_per_local_batch that evenly divides "
+            "(local_batch_size % num_updates_per_batch != 0).",
+            fix_hint="Choose a training.num_updates_per_batch that evenly divides "
             "the resolved local_batch_size.",
             local_batch_size=local_batch_size,
             update_batch_size=None,
             micro_batch_size=None,
         )
-    update_batch_size = int(local_batch_size // num_updates_per_local_batch)
+    update_batch_size = int(local_batch_size // num_updates_per_batch)
 
     if raw_micro_batch_size is None:
         micro_batch_size = int(update_batch_size)
@@ -1012,9 +1037,9 @@ def validate_training_batch_geometry(
         micro_batch_size = int(raw_micro_batch_size)
         if micro_batch_size < 1:
             _raise_geometry_error(
-                reason="training.local_micro_batch_size must be >= 1.",
-                fix_hint="Set training.local_micro_batch_size to a positive integer, "
-                "or omit it to use the resolved local_update_batch_size.",
+                reason="training.micro_batch_size must be >= 1.",
+                fix_hint="Set training.micro_batch_size to a positive integer, "
+                "or omit it to use the resolved local_mini_batch_size.",
                 local_batch_size=local_batch_size,
                 update_batch_size=update_batch_size,
                 micro_batch_size=micro_batch_size,
@@ -1022,10 +1047,10 @@ def validate_training_batch_geometry(
 
     if update_batch_size % micro_batch_size != 0:
         _raise_geometry_error(
-            reason="local update batch cannot be split evenly into micro-batches "
-            "(local_update_batch_size % local_micro_batch_size != 0).",
-            fix_hint="Choose a training.local_micro_batch_size that evenly divides "
-            "the resolved local_update_batch_size.",
+            reason="local mini-batch cannot be split evenly into micro-batches "
+            "(local_mini_batch_size % micro_batch_size != 0).",
+            fix_hint="Choose a training.micro_batch_size that evenly divides "
+            "the resolved local_mini_batch_size.",
             local_batch_size=local_batch_size,
             update_batch_size=update_batch_size,
             micro_batch_size=micro_batch_size,
@@ -1070,10 +1095,10 @@ def validate_rollout_actor_init_config(config: Dict[str, Any]) -> None:
 
     validate_rollout_engine_config(engine_runtime_config)
 
-    sampler_path = str(engine_runtime_config.get("sampler_path", "") or "").strip()
-    if not sampler_path:
+    sampler_dotpath = str(engine_runtime_config.get("sampler_dotpath", "") or "").strip()
+    if not sampler_dotpath:
         raise ValueError(
-            "rollout_actor_init_config.engine_runtime_config.sampler_path is required."
+            "rollout_actor_init_config.engine_runtime_config.sampler_dotpath is required."
         )
     sampler_engine_type = str(
         engine_runtime_config.get("sampler_engine_type", "") or ""
@@ -1169,7 +1194,7 @@ __all__ = [
     "is_probably_local_weight_sync_dir",
     "repo_root",
     "validate_algorithm_kwargs_payload",
-    "validate_algorithm_path",
+    "validate_algorithm_dotpath",
     "validate_async_training_runner",
     "validate_colocate_fractions",
     "validate_direct_sampling_batch_geometry",
@@ -1179,7 +1204,7 @@ __all__ = [
     "validate_model_sampling_contract",
     "validate_nft_sampling_contract",
     "validate_offload_and_colocate_config",
-    "validate_precision_name",
+    "validate_precision_type",
     "validate_replay_mode",
     "validate_resolved_engine_algorithm_contract",
     "validate_reward_and_rollout_buffer_config",

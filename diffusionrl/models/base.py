@@ -82,18 +82,18 @@ class ModelBundle(ABC):
         ...
 
     @classmethod
-    def default_sampler_path(cls) -> Optional[str]:
+    def default_sampler_dotpath(cls) -> Optional[str]:
         """Default sampler implementation for this model bundle."""
         return None
 
     @classmethod
-    def default_replay_sampler_path(cls) -> Optional[str]:
-        """Default sampler path used to replay old log-probs on training actors.
+    def default_replay_sampler_dotpath(cls) -> Optional[str]:
+        """Default sampler dotpath used to replay old log-probs on training actors.
 
-        By default this matches ``default_sampler_path``. Models can override when
+        By default this matches ``default_sampler_dotpath``. Models can override when
         rollout sampler and replay sampler should differ.
         """
-        return cls.default_sampler_path()
+        return cls.default_sampler_dotpath()
 
     @classmethod
     def declared_model_type(cls) -> Optional[str]:

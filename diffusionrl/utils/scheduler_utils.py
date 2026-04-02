@@ -17,8 +17,7 @@ class WindowConfig:
     window_size: int = 4
     iters_per_window: int = 25
     init_timestep: int = 0
-    overlap: bool = False
-    overlap_step: int = 1
+    overlap_size: int = 0
     roll_back: bool = False
     max_iters_per_window: Optional[int] = None
     min_iters_per_window: Optional[int] = None
@@ -132,9 +131,7 @@ class WindowScheduler(TimestepScheduler):
 
     def _resolve_progressive(self, step: int) -> Set[int]:
         window_step = step // self.config.iters_per_window
-        stride = (
-            self.config.overlap_step if self.config.overlap else self.config.window_size
-        )
+        stride = self.config.window_size - self.config.overlap_size
         remaining = (
             self.num_timesteps - self.config.init_timestep - self.config.window_size
         )
@@ -190,13 +187,12 @@ def create_indices_scheduler(
             WindowConfig(
                 strategy=_read("window_strategy", "progressive"),
                 window_size=int(_read("window_size", 4)),
-                iters_per_window=int(_read("window_iters_per_window", 25)),
+                iters_per_window=int(_read("iters_per_window", 25)),
                 init_timestep=int(_read("window_init_timestep", 0)),
-                overlap=bool(_read("window_overlap", False)),
-                overlap_step=int(_read("window_overlap_step", 1)),
-                roll_back=bool(_read("window_roll_back", False)),
-                max_iters_per_window=_read("window_max_iters_per_window", None),
-                min_iters_per_window=_read("window_min_iters_per_window", None),
+                overlap_size=int(_read("overlap_size", 0)),
+                roll_back=bool(_read("roll_back", False)),
+                max_iters_per_window=_read("max_iters_per_window", None),
+                min_iters_per_window=_read("min_iters_per_window", None),
             ),
         )
     raise ValueError(

@@ -35,7 +35,7 @@
 #
 # NOTE:
 # - Core MixGRPO knobs used here are implemented in diffusionrl
-#   (window scheduler / sde_ratio / trimmed_ratio / skip_last_timestep / skip_initial_timesteps).
+#   (window scheduler / sde_ratio / trim_outliers_ratio / skip_last_timestep / skip_initial_timesteps).
 # - This script is still an adapted SD3 variant (not a bit-for-bit upstream run).
 #
 # Training-actor sampling now reuses the main driver rollout pipeline -> rollout_buffer -> train path.
@@ -43,7 +43,7 @@
 #
 # Usage:
 #   bash train_mixgrpo_sd3_train_actor_sampling.sh
-#   bash train_mixgrpo_sd3_train_actor_sampling.sh --rollout.control.num-rollout 100 --training.local-micro-batch-size 2 --training.num-updates-per-local-batch 2
+#   bash train_mixgrpo_sd3_train_actor_sampling.sh --rollout.num-rollout 100 --training.micro-batch-size 2 --training.num-updates-per-batch 2
 #
 # =============================================================================
 
@@ -105,8 +105,8 @@ MIXGRPO_ALGO_KWARG_ARGS=(
 )
 
 # Training
-NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-4}
-LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE:-4}
+NUM_UPDATES_PER_BATCH=${NUM_UPDATES_PER_BATCH:-4}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-4}
 
 
 python -m diffusionrl.train \
@@ -130,39 +130,39 @@ python -m diffusionrl.train \
     --algorithm.rollout-scheduler.timestep-strategy window \
     --algorithm.rollout-scheduler.window-strategy progressive \
     --algorithm.rollout-scheduler.window-size 4 \
-    --algorithm.rollout-scheduler.window-iters-per-window 25 \
-    --algorithm.rollout-scheduler.window-max-iters-per-window ${WINDOW_MAX_ITERS_PER_GROUP:-10} \
-    --algorithm.rollout-scheduler.window-min-iters-per-window ${WINDOW_MIN_ITERS_PER_GROUP:-1} \
-    --algorithm.rollout-scheduler.window-overlap true \
-    --algorithm.rollout-scheduler.window-roll-back true \
+    --algorithm.rollout-scheduler.iters-per-window 25 \
+    --algorithm.rollout-scheduler.max-iters-per-window ${WINDOW_MAX_ITERS_PER_GROUP:-10} \
+    --algorithm.rollout-scheduler.min-iters-per-window ${WINDOW_MIN_ITERS_PER_GROUP:-1} \
+    --algorithm.rollout-scheduler.overlap-size 3 \
+    --algorithm.rollout-scheduler.roll-back true \
     \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
-    --rollout.topology.mode direct_sampling \
+    --rollout.mode direct_sampling \
 --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
     --ray.training-num-gpus-per-node ${NUM_GPUS} \
     \
     --training.learning-rate 1e-5 \
-    --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
-    --training.local-micro-batch-size ${LOCAL_MICRO_BATCH_SIZE} \
+    --training.num-updates-per-batch ${NUM_UPDATES_PER_BATCH} \
+    --training.micro-batch-size ${MICRO_BATCH_SIZE} \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.lora-rank 32 \
     --training.lora-alpha 64 \
     --training.use-lora true \
     \
-    --height 512 \
-    --width 512 \
+    --sampling.height 512 \
+    --sampling.width 512 \
     \
-    --rollout.control.num-rollout 300 \
-    --rollout.artifacts.save-steps 50 \
-    --rollout.logging.logging-steps 1 \
-    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
-    --rollout.logging.report-to-wandb ${REPORT_TO_WANDB} \
-    --rollout.logging.project-name "${WANDB_PROJECT_NAME}" \
-    --rollout.logging.run-name "${WANDB_RUN_NAME}" \
+    --rollout.num-rollout 300 \
+    --rollout.save-steps 50 \
+    --logging.logging-steps 1 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
+    --logging.report-to-wandb ${REPORT_TO_WANDB} \
+    --logging.project-name "${WANDB_PROJECT_NAME}" \
+    --logging.run-name "${WANDB_RUN_NAME}" \
     --sync.protocol disabled \
     "$@"

@@ -14,19 +14,19 @@ logger = logging.getLogger(__name__)
 
 def should_save(rollout_id: int, args) -> bool:
     """Check if we should save a checkpoint at this rollout."""
-    interval = int(args.rollout.artifacts.save_steps)
+    interval = int(args.rollout.save_steps)
     return interval > 0 and (rollout_id + 1) % interval == 0
 
 
 def should_eval(rollout_id: int, args) -> bool:
     """Check if we should run evaluation at this rollout."""
-    interval = int(args.rollout.evaluation.eval_steps)
+    interval = int(args.evaluation.eval_steps)
     return interval > 0 and rollout_id % interval == 0
 
 
 def should_log(rollout_id: int, args) -> bool:
     """Check if we should emit periodic rollout logs at this rollout."""
-    interval = int(args.rollout.logging.logging_steps)
+    interval = int(args.logging.logging_steps)
     return interval > 0 and rollout_id % interval == 0
 
 
@@ -35,8 +35,7 @@ def maybe_restore_start_rollout_id_from_checkpoint(args, checkpoint_path: Option
     if not checkpoint_path:
         return None
 
-    rollout_control = args.rollout.control
-    if int(rollout_control.start_rollout_id) != 0:
+    if int(args.rollout.start_rollout_id) != 0:
         return None
 
     match = re.search(r"checkpoint-(\d+)$", os.path.basename(os.path.normpath(checkpoint_path)))

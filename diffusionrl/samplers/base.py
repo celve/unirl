@@ -15,7 +15,7 @@ from diffusionrl.types import RolloutSamples
 
 class BaseSampler(ABC):
     """
-    Abstract base class for GRPO samplers.
+    Abstract base class for all samplers.
 
     All samplers must implement the sample() method which generates
     trajectories and log probabilities for policy gradient training.
@@ -60,7 +60,6 @@ class BaseSampler(ABC):
     @property
     def uses_deterministic_solver(self) -> bool:
         """Whether rollout should bypass stochastic SDE steps."""
-
         return is_deterministic_sde_type(self.sde_type, eta=self.eta)
 
     @abstractmethod

@@ -7,12 +7,12 @@
 # Usage: python -m diffusionrl.train --config scripts/minimal_flux.yaml
 #
 # Override via dotted CLI:
-#   python -m diffusionrl.train --config scripts/minimal_flux.yaml --rollout.control.num-rollout 100
+#   python -m diffusionrl.train --config scripts/minimal_flux.yaml --rollout.num-rollout 100
 # =============================================================================
 
 model:
   model_type: flux
-  pretrained_model_saved_path: models/local/flux.1-dev
+  pretrained_model_ckpt_path: models/local/flux.1-dev
 
 sampling:
   sde_type: dance
@@ -21,23 +21,25 @@ sampling:
   num_inference_steps: 25
   guidance_scale: 3.5
   timestep_fraction: 0.6
+  height: 256
+  width: 256
 
 reward:
-  reward_model_name: ocr
+  reward_components: ocr
 
 algorithm:
   algorithm_type: grpo
   prompts_per_rollout: 1
   samples_per_prompt: 4
-  adv_normalization: group
-  adv_clip_abs: 5.0
+  adv_normalization_scope: group
+  clip_max: 5.0
   algorithm_kwargs:
     clip_range: 0.0001
     use_kl_penalty: false
 
 training:
-  local_micro_batch_size: 1
-  num_updates_per_local_batch: 1
+  micro_batch_size: 1
+  num_updates_per_batch: 1
   learning_rate: 0.00001
   max_grad_norm: 1.0
   weight_decay: 0.0001
@@ -52,20 +54,16 @@ ray:
   placement_strategy: SPREAD
 
 rollout:
-  topology:
-    mode: direct_sampling
-  control:
-    num_rollout: 300
-  artifacts:
-    save_steps: 40
-    output_dir: outputs/dancegrpo_flux_direct
-  logging:
-    logging_steps: 10
+  mode: direct_sampling
+  num_rollout: 300
+  save_steps: 40
+  output_dir: outputs/dancegrpo_flux_direct
+
+logging:
+  logging_steps: 10
 
 sync:
   protocol: disabled
 
-data_source_path: diffusionrl.data.data_source.ImageRLDataSource
+data_source_dotpath: diffusionrl.data.data_source.ImageRLDataSource
 data_path: data/samples/prompts_toy.json
-height: 256
-width: 256

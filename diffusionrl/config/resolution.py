@@ -14,13 +14,13 @@ Training geometry is rollout-driven only:
 - ``algorithm.prompts_per_rollout`` and ``algorithm.samples_per_prompt`` define
   the global rollout batch.
 - local training batch size is derived from the resolved training topology.
-- ``training.num_updates_per_local_batch`` shapes how one resolved local batch
+- ``training.num_updates_per_batch`` shapes how one resolved local batch
   is split into optimizer updates.
-- ``training.local_update_batch_size`` is always derived as
-  ``local_batch_size / num_updates_per_local_batch``.
-- ``training.local_micro_batch_size`` only controls micro-step slicing inside
-  one local update batch and must evenly divide the resolved
-  ``training.local_update_batch_size``.
+- ``training.local_mini_batch_size`` is always derived as
+  ``local_batch_size / num_updates_per_batch``.
+- ``training.micro_batch_size`` only controls micro-step slicing inside
+  one local mini-batch and must evenly divide the resolved
+  ``training.local_mini_batch_size``.
 """
 
 from __future__ import annotations
@@ -66,11 +66,11 @@ def normalize_rollout_mode(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def normalize_rollout_service_engine(value: Any) -> Optional[str]:
+def normalize_rollout_engine(value: Any) -> Optional[str]:
     normalized = normalize_engine_type(value)
     if normalized and normalized not in ROLLOUT_ENGINE_TYPES:
         raise ValueError(
-            "rollout.topology.service_engine must be one of "
+            "rollout.rollout_engine must be one of "
             f"{sorted(ROLLOUT_ENGINE_TYPES)}, got: {value!r}"
         )
     return normalized or None
@@ -117,10 +117,10 @@ def load_engine_capabilities(engine_type: str) -> Dict[str, bool]:
 class ModelSpec:
     """Resolved model/sampler selection without mutating args."""
 
-    model_path: str
+    model_dotpath: str
     model_cls: Any
     model_type: str
-    sampler_path: str
+    sampler_dotpath: str
     model_default_engine_type: Optional[str]
 
 
@@ -129,7 +129,7 @@ class RolloutTopology:
     """Resolved rollout topology without mutating args."""
 
     mode: str
-    service_engine: Optional[str]
+    rollout_engine: Optional[str]
 
     @property
     def training_actor_sampling_mode(self) -> bool:
@@ -137,7 +137,7 @@ class RolloutTopology:
 
     @property
     def is_sglang_engine(self) -> bool:
-        return self.service_engine == "sglang"
+        return self.rollout_engine == "sglang"
 
 
 @dataclass(frozen=True)
@@ -163,9 +163,9 @@ class TrainingPlan:
 
     global_batch_size: int
     local_batch_size: int
-    local_update_batch_size: int
-    local_micro_batch_size: int
-    num_updates_per_local_batch: int
+    local_mini_batch_size: int
+    micro_batch_size: int
+    num_updates_per_batch: int
     update_slices: Tuple[Tuple[int, int], ...]
     mini_batch_slices_per_update: Tuple[Tuple[Tuple[int, int], ...], ...]
 
@@ -173,9 +173,9 @@ class TrainingPlan:
         return {
             "global_batch_size": self.global_batch_size,
             "local_batch_size": self.local_batch_size,
-            "local_update_batch_size": self.local_update_batch_size,
-            "local_micro_batch_size": self.local_micro_batch_size,
-            "num_updates_per_local_batch": self.num_updates_per_local_batch,
+            "local_mini_batch_size": self.local_mini_batch_size,
+            "micro_batch_size": self.micro_batch_size,
+            "num_updates_per_batch": self.num_updates_per_batch,
             "update_slices": [
                 [start, end]
                 for start, end in self.update_slices
@@ -209,10 +209,10 @@ def derive_sampling_spec(
     resolved_model = model_spec if model_spec is not None else derive_model_spec(args)
     return resolve_sampling_spec(
         sampling=args.sampling,
-        sampler_path=resolved_model.sampler_path,
-        height=args.height,
-        width=args.width,
-        num_frames=args.num_frames,
+        sampler_dotpath=resolved_model.sampler_dotpath,
+        height=args.sampling.height,
+        width=args.sampling.width,
+        num_frames=args.sampling.num_frames,
         seed=args.seed,
     )
 
@@ -242,22 +242,26 @@ def normalize_logprob_source(args: Any) -> str:
     return str(args.sampling.logprob_source).strip().lower()
 
 
+def derive_replay_enabled(args: Any) -> bool:
+    return normalize_logprob_source(args) == "replay"
+
+
 def derive_model_spec(
     args: Any,
 ) -> ModelSpec:
-    raw_model_path = str(args.model.model_path or "").strip()
-    if not raw_model_path or raw_model_path == DEFAULT_MODEL_PATH:
-        resolved_model_path = resolve_model_bundle_path(args.model.model_type)
-        if not resolved_model_path:
+    raw_model_dotpath = str(args.model.model_dotpath or "").strip()
+    if not raw_model_dotpath or raw_model_dotpath == DEFAULT_MODEL_PATH:
+        resolved_model_dotpath = resolve_model_bundle_path(args.model.model_type)
+        if not resolved_model_dotpath:
             raise ValueError(
                 f"Unknown model_type={args.model.model_type!r}. "
                 f"Discovered model types: {list_model_types()}. "
-                "Provide --model.model-path explicitly for custom models."
+                "Provide --model.model-dotpath explicitly for custom models."
             )
     else:
-        resolved_model_path = raw_model_path
+        resolved_model_dotpath = raw_model_dotpath
 
-    model_cls = load_function(resolved_model_path)
+    model_cls = load_function(resolved_model_dotpath)
 
     resolved_model_type = str(args.model.model_type or "").strip().lower()
     declared_model_type_fn = getattr(model_cls, "declared_model_type", None)
@@ -267,40 +271,40 @@ def derive_model_spec(
             declared_model_type = declared_model_type.strip().lower()
             if (
                 resolved_model_type
-                and raw_model_path
-                and raw_model_path != DEFAULT_MODEL_PATH
+                and raw_model_dotpath
+                and raw_model_dotpath != DEFAULT_MODEL_PATH
                 and resolved_model_type != declared_model_type
             ):
                 raise ValueError(
-                    "Configured model_type does not match the declared model type from model_path. "
+                    "Configured model_type does not match the declared model type from model_dotpath. "
                     f"Got model_type={resolved_model_type!r}, "
                     f"declared_model_type={declared_model_type!r}, "
-                    f"model_path={resolved_model_path!r}."
+                    f"model_dotpath={resolved_model_dotpath!r}."
                 )
             resolved_model_type = declared_model_type
 
-    model_default_sampler_path = None
-    sampler_path_fn = getattr(model_cls, "default_sampler_path", None)
-    if callable(sampler_path_fn):
-        model_default_sampler_path = sampler_path_fn()
+    model_default_sampler_dotpath = None
+    sampler_dotpath_fn = getattr(model_cls, "default_sampler_dotpath", None)
+    if callable(sampler_dotpath_fn):
+        model_default_sampler_dotpath = sampler_dotpath_fn()
 
     model_default_engine_type = None
     engine_type_fn = getattr(model_cls, "default_sampler_engine", None)
     if callable(engine_type_fn):
         model_default_engine_type = engine_type_fn()
 
-    raw_sampler_path = str(args.sampling.sampler_path or "").strip()
-    resolved_sampler_path = raw_sampler_path
-    if not resolved_sampler_path and model_default_sampler_path:
-        resolved_sampler_path = str(model_default_sampler_path).strip()
-    if not resolved_sampler_path:
-        resolved_sampler_path = DEFAULT_SAMPLER_PATH
+    raw_sampler_dotpath = str(args.sampling.sampler_dotpath or "").strip()
+    resolved_sampler_dotpath = raw_sampler_dotpath
+    if not resolved_sampler_dotpath and model_default_sampler_dotpath:
+        resolved_sampler_dotpath = str(model_default_sampler_dotpath).strip()
+    if not resolved_sampler_dotpath:
+        resolved_sampler_dotpath = DEFAULT_SAMPLER_PATH
 
     return ModelSpec(
-        model_path=resolved_model_path,
+        model_dotpath=resolved_model_dotpath,
         model_cls=model_cls,
         model_type=resolved_model_type,
-        sampler_path=resolved_sampler_path,
+        sampler_dotpath=resolved_sampler_dotpath,
         model_default_engine_type=(
             str(model_default_engine_type).strip().lower()
             if isinstance(model_default_engine_type, str) and model_default_engine_type.strip()
@@ -313,31 +317,31 @@ def _resolve_rollout_mode_value(value: Any) -> str:
     normalized = normalize_rollout_mode(value)
     if not normalized:
         raise ValueError(
-            "rollout.topology.mode must be set explicitly. "
+            "rollout.mode must be set explicitly. "
             "Implicit rollout topology derivation has been removed."
         )
     if normalized not in ROLLOUT_MODES:
         raise ValueError(
-            "rollout.topology.mode must be one of "
+            "rollout.mode must be one of "
             f"{sorted(ROLLOUT_MODES)}, got: {value!r}"
         )
     return normalized
 
 
 def derive_rollout_topology(args: Any) -> RolloutTopology:
-    rollout_topology_config = args.rollout.topology
-    rollout_mode = _resolve_rollout_mode_value(rollout_topology_config.mode)
-    rollout_service_engine = normalize_rollout_service_engine(
-        rollout_topology_config.service_engine
+    rollout_config = args.rollout
+    rollout_mode = _resolve_rollout_mode_value(rollout_config.mode)
+    rollout_engine = normalize_rollout_engine(
+        rollout_config.rollout_engine
     )
-    if rollout_mode == DIRECT_ROLLOUT_MODE and rollout_service_engine is not None:
+    if rollout_mode == DIRECT_ROLLOUT_MODE and rollout_engine is not None:
         raise ValueError(
             "direct_sampling is the only public direct-sampling selector. "
-            "Leave rollout.topology.service_engine unset in direct_sampling mode."
+            "Leave rollout.rollout_engine unset in direct_sampling mode."
         )
     return RolloutTopology(
         mode=rollout_mode,
-        service_engine=rollout_service_engine,
+        rollout_engine=rollout_engine,
     )
 
 
@@ -346,13 +350,15 @@ def derive_rollout_mode_info(args: Any) -> RolloutModeInfo:
     rollout_topology = derive_rollout_topology(args)
     training_actor_sampling_mode = bool(rollout_topology.training_actor_sampling_mode)
     algorithm_type = str(args.algorithm.algorithm_type or "grpo").strip().lower()
+    logprob_source = normalize_logprob_source(args)
+    replay_enabled = derive_replay_enabled(args)
     return RolloutModeInfo(
         rollout_topology=rollout_topology,
         training_actor_sampling_mode=training_actor_sampling_mode,
         is_sglang_engine=bool(rollout_topology.is_sglang_engine),
-        logprob_source=normalize_logprob_source(args),
+        logprob_source=logprob_source,
         replay_guard=(not training_actor_sampling_mode) and algorithm_type == "grpo",
-        replay_enabled=bool(args.sampling.replay_log_probs),
+        replay_enabled=replay_enabled,
         sync_protocol=str(args.sync.protocol or "").strip().lower(),
         algorithm_type=algorithm_type,
         max_samples_per_request=args.sampling.max_samples_per_request,
@@ -371,11 +377,11 @@ def resolve_effective_engine_capabilities(
     """
     if rollout_mode_info.training_actor_sampling_mode:
         return None
-    service_engine = rollout_mode_info.rollout_topology.service_engine
-    if not service_engine:
+    rollout_engine = rollout_mode_info.rollout_topology.rollout_engine
+    if not rollout_engine:
         return None
 
-    engine_caps = load_engine_capabilities(service_engine)
+    engine_caps = load_engine_capabilities(rollout_engine)
 
     # Replay mode: training-side replay provides log_prob and embeddings,
     # so the engine does not need to supply them natively.
@@ -386,9 +392,9 @@ def resolve_effective_engine_capabilities(
     if allow_replay:
         engine_caps = dict(engine_caps, requires_log_prob=True, requires_embeddings=True)
         logger.warning(
-            "replay_log_probs=true enabled: allowing %s+GRPO with "
+            "logprob_source='replay' enabled: allowing %s+GRPO with "
             "training-side old-log-prob replay (experimental path).",
-            service_engine,
+            rollout_engine,
         )
 
     # Native logprob with replay guard: engine provides log_prob natively.
@@ -413,37 +419,37 @@ def derive_sampling_host_engine_type(
     )
     if resolved_mode_info.training_actor_sampling_mode:
         return "fsdp"
-    service_engine = resolved_mode_info.rollout_topology.service_engine
-    if not service_engine:
+    rollout_engine = resolved_mode_info.rollout_topology.rollout_engine
+    if not rollout_engine:
         raise ValueError(
-            "Dedicated rollout sampling requires rollout.topology.service_engine to be set."
+            "Dedicated rollout sampling requires rollout.rollout_engine to be set."
         )
-    return service_engine
+    return rollout_engine
 
 
-def require_rollout_service_num_gpus(args: Any) -> int:
+def require_rollout_num_gpus_per_actor(args: Any) -> int:
     """Require explicit dedicated rollout GPU ownership when a service is used."""
-    rollout_topology_config = args.rollout.topology
-    rollout_mode = _resolve_rollout_mode_value(rollout_topology_config.mode)
+    rollout_config = args.rollout
+    rollout_mode = _resolve_rollout_mode_value(rollout_config.mode)
     if not rollout_mode_uses_service(rollout_mode):
         return 0
 
-    raw_num_gpus = rollout_topology_config.service_num_gpus
+    raw_num_gpus = rollout_config.num_gpus_per_actor
     if raw_num_gpus is None:
         raise ValueError(
-            "Dedicated rollout services require rollout.topology.service_num_gpus to be set explicitly. "
+            "Dedicated rollout services require rollout.num_gpus_per_actor to be set explicitly. "
             "Do not infer actor GPU ownership from tp/sp parallel hints."
         )
     try:
         resolved = int(raw_num_gpus)
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            "rollout.topology.service_num_gpus must be an integer >= 1, "
+            "rollout.num_gpus_per_actor must be an integer >= 1, "
             f"got: {raw_num_gpus!r}"
         ) from exc
     if resolved < 1:
         raise ValueError(
-            "rollout.topology.service_num_gpus must be >= 1 for dedicated rollout services, "
+            "rollout.num_gpus_per_actor must be >= 1 for dedicated rollout services, "
             f"got: {resolved}"
         )
     return resolved
@@ -458,12 +464,12 @@ def derive_rollout_actor_gpu_count(
     resolved_topology = topology if topology is not None else derive_rollout_topology(args)
     if not rollout_mode_uses_service(resolved_topology.mode):
         return 0
-    if not resolved_topology.service_engine:
+    if not resolved_topology.rollout_engine:
         raise ValueError(
-            "rollout.topology.mode requires a dedicated rollout service, but "
-            "rollout.topology.service_engine is unset."
+            "rollout.mode requires a dedicated rollout service, but "
+            "rollout.rollout_engine is unset."
         )
-    return require_rollout_service_num_gpus(args)
+    return require_rollout_num_gpus_per_actor(args)
 
 
 def derive_rollout_gpu_pool_size(
@@ -607,12 +613,12 @@ def derive_training_topology(
         dp_shard_size=actor_count,
     )
 
-def derive_num_updates_per_local_batch(args: Any) -> int:
-    raw = args.training.num_updates_per_local_batch
+def derive_num_updates_per_batch(args: Any) -> int:
+    raw = args.training.num_updates_per_batch
     if raw is None:
         return 1
     return _require_positive_int(
-        name="training.num_updates_per_local_batch",
+        name="training.num_updates_per_batch",
         value=raw,
     )
 
@@ -655,32 +661,32 @@ def derive_training_plan(
         args,
         training_topology=training_topology,
     )
-    num_updates_per_local_batch = derive_num_updates_per_local_batch(args)
-    update_batch_size = local_batch_size // num_updates_per_local_batch
-    raw_micro_batch_size = args.training.local_micro_batch_size
+    num_updates_per_batch = derive_num_updates_per_batch(args)
+    mini_batch_size = local_batch_size // num_updates_per_batch
+    raw_micro_batch_size = args.training.micro_batch_size
     micro_batch_size = (
-        update_batch_size
+        mini_batch_size
         if raw_micro_batch_size is None
         else int(raw_micro_batch_size)
     )
     update_slices = tuple(
-        (update_index * update_batch_size, (update_index + 1) * update_batch_size)
-        for update_index in range(num_updates_per_local_batch)
+        (update_index * mini_batch_size, (update_index + 1) * mini_batch_size)
+        for update_index in range(num_updates_per_batch)
     )
     mini_batch_slices_per_update = tuple(
         _build_relative_slices(
-            total_size=update_batch_size,
+            total_size=mini_batch_size,
             chunk_size=micro_batch_size,
         )
-        for _ in range(num_updates_per_local_batch)
+        for _ in range(num_updates_per_batch)
     )
 
     return TrainingPlan(
         global_batch_size=global_batch_size,
         local_batch_size=local_batch_size,
-        local_update_batch_size=update_batch_size,
-        local_micro_batch_size=micro_batch_size,
-        num_updates_per_local_batch=num_updates_per_local_batch,
+        local_mini_batch_size=mini_batch_size,
+        micro_batch_size=micro_batch_size,
+        num_updates_per_batch=num_updates_per_batch,
         update_slices=update_slices,
         mini_batch_slices_per_update=mini_batch_slices_per_update,
     )
@@ -759,16 +765,17 @@ __all__ = [
     "ROLLOUT_MODES",
     "SEPARATE_ROLLOUT_MODE",
     "normalize_rollout_mode",
-    "normalize_rollout_service_engine",
+    "normalize_rollout_engine",
     "collect_sampling_requirements",
     "derive_global_rollout_batch_size",
     "derive_model_spec",
-    "derive_num_updates_per_local_batch",
+    "derive_num_updates_per_batch",
     "derive_rollout_actor_gpu_count",
     "derive_rollout_gpu_pool_size",
     "derive_sampling_host_engine_type",
     "derive_rollout_mode_info",
     "derive_rollout_topology",
+    "derive_replay_enabled",
     "derive_sampling_spec",
     "derive_training_plan",
     "derive_training_topology",
@@ -777,7 +784,7 @@ __all__ = [
     "normalize_lora_target_modules",
     "normalize_train_backend_name",
     "require_prompts_per_rollout",
-    "require_rollout_service_num_gpus",
+    "require_rollout_num_gpus_per_actor",
     "resolve_effective_engine_capabilities",
     "resolve_config",
     "rollout_mode_is_colocated",

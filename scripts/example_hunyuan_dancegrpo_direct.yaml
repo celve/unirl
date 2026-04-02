@@ -3,7 +3,7 @@
 
 model:
   model_type: hunyuan
-  pretrained_model_saved_path: models/local/hunyuan-video
+  pretrained_model_ckpt_path: models/local/hunyuan-video
 
 sampling:
   sde_type: dance
@@ -13,37 +13,39 @@ sampling:
   guidance_scale: 6018.0
   timestep_fraction: 0.6
   init_same_noise: true
+  height: 480
+  width: 480
+  num_frames: 53
+  fps: 8
 
 reward:
-  reward_model_name: hpsv2
+  reward_components: hpsv2
 
 algorithm:
   algorithm_type: grpo
   prompts_per_rollout: 8
   samples_per_prompt: 8
-  adv_normalization: group
-  adv_clip_abs: 5.0
+  adv_normalization_scope: group
+  clip_max: 5.0
   algorithm_kwargs:
     clip_range: 0.0001
     use_kl_penalty: false
 
 training:
-  local_micro_batch_size: 1
-  num_updates_per_local_batch: 1
+  micro_batch_size: 1
+  num_updates_per_batch: 1
   learning_rate: 0.00001
   max_grad_norm: 1.0
   weight_decay: 0.0001
   use_gradient_checkpointing: true
 
 precision:
-  training:
-    model_precision: bf16
-    fsdp_precision: fp32
-    autocast_precision: bf16
-  rollout:
-    autocast_precision: bf16
-    trajectory_precision: fp16
-    logprob_precision: fp32
+  model_precision: bf16
+  fsdp_precision: fp32
+  training_autocast_precision: bf16
+  rollout_autocast_precision: bf16
+  trajectory_precision: fp16
+  logprob_precision: fp32
 
 ray:
   rollout_num_nodes: 0
@@ -52,22 +54,16 @@ ray:
   placement_strategy: PACK
 
 rollout:
-  topology:
-    mode: direct_sampling
-  control:
-    num_rollout: 202
-  artifacts:
-    save_steps: 50
-    output_dir: outputs/scripts_example_hunyuan_dancegrpo_direct
-  logging:
-    logging_steps: 1
+  mode: direct_sampling
+  num_rollout: 202
+  save_steps: 50
+  output_dir: outputs/scripts_example_hunyuan_dancegrpo_direct
+
+logging:
+  logging_steps: 1
 
 sync:
   protocol: disabled
 
-data_source_path: diffusionrl.data.data_source.ImageRLDataSource
+data_source_dotpath: diffusionrl.data.data_source.ImageRLDataSource
 data_path: data/samples/video_prompts_toy.txt
-height: 480
-width: 480
-num_frames: 53
-fps: 8

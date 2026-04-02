@@ -22,8 +22,8 @@ All scripts now resolve paths relative to repository root:
 ```bash
 DATA_PATH=data/samples/ocr_prompts_toy.json \
   bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh \
-  --rollout.control.num-rollout 1 \
-  --rollout.artifacts.save-steps 1000
+  --rollout.num-rollout 1 \
+  --rollout.save-steps 1000
 ```
 
 Precision config:
@@ -31,7 +31,7 @@ Precision config:
 - Use `precision.training.*` for training model load precision, FSDP param precision, and train-side autocast.
 - Use `precision.rollout.*` for sampler/replay autocast plus trajectory/logprob storage precision.
 - In dedicated SGLang rollout, prompt encoder precision also follows `precision.rollout.autocast_precision`.
-- Keep `rollout.topology.service_transport_dtype` under `rollout.topology`; it is a transport setting, not part of `precision.*`.
+- Keep `rollout.transport_dtype` under `rollout`; it is a transport setting, not part of `precision.*`.
 
 Terminology:
 
@@ -49,12 +49,12 @@ Eval data:
 
 Group-reassembly rollout buffer:
 
-- When `rollout.buffer.reassemble_by_group=true`,
-  `rollout.buffer.group_size` must be set explicitly.
+- Set `rollout.group_size` to enable: explicit samples per logical group
+  (omit or leave unset for passthrough batches).
 - This mode decomposes incoming rollout batches to sample locators and
   reassembles outgoing training batches by `group_id`.
 - This mode is incompatible with sample-dropping built-in buffer filters
-  (`rollout.buffer.drop_invalid=true` or reward-range filtering), because the
+  (`rollout.drop_invalid=true` or reward-range filtering), because the
   producer contract requires complete groups.
 
 ## Typical usage
@@ -100,40 +100,40 @@ python -m diffusionrl.train_async --config scripts/example_flux_dancegrpo_sglang
 
 ```bash
 # End-to-end plugin wiring example (algorithm/reward)
-bash scripts/train_plugin_demo.sh --rollout.control.num-rollout 1
+bash scripts/train_plugin_demo.sh --rollout.num-rollout 1
 ```
 
 ## Engine note
 
-For training-actor direct sampling, set `rollout.topology.mode=direct_sampling`
+For training-actor direct sampling, set `rollout.mode=direct_sampling`
 and `sync.protocol=disabled`.
-Leave `rollout.topology.service_engine` unset in direct mode.
-For SGLang, use `rollout.topology.mode=separate` or `rollout.topology.mode=colocate`
-with `rollout.topology.service_engine=sglang`, and set an explicit dedicated-rollout
+Leave `rollout.rollout_engine` unset in direct mode.
+For SGLang, use `rollout.mode=separate` or `rollout.mode=colocate`
+with `rollout.rollout_engine=sglang`, and set an explicit dedicated-rollout
 weight-sync mode such as `tensor_payload`, `nccl_broadcast`, or
 `checkpoint_path`.
-Dedicated rollout modes also require `rollout.topology.service_num_gpus` to be set explicitly.
+Dedicated rollout modes also require `rollout.num_gpus_per_actor` to be set explicitly.
 
 ### SGLang remote scheduler mode (TCP, non-HTTP data plane)
 
-Use `rollout.topology.sglang_local_mode=false` and pass explicit scheduler endpoint(s)
-through `rollout.topology.sglang_kwargs`:
+Use `rollout.sglang_local_mode=false` and pass explicit scheduler endpoint(s)
+through `rollout.sglang_kwargs`:
 
 ```yaml
 rollout:
-  topology:
-    mode: separate
-    service_engine: sglang
-    service_num_gpus: 4
-    engine_tp_size: 4
-    service_transport_dtype: bf16
-    service_transport_drop_decoded_videos: true
-    service_transport_log_payload_bytes: true
-    sglang_local_mode: false
-    sglang_kwargs:
-      remote_scheduler_endpoints:
-        - tcp://10.0.0.11:35555
-        - tcp://10.0.0.12:35555
+  mode: separate
+  rollout_engine: sglang
+  num_gpus_per_actor: 4
+  tp_size: 4
+  transport_dtype: bf16
+  transport_drop_decoded_videos: true
+  sglang_local_mode: false
+  sglang_kwargs:
+    remote_scheduler_endpoints:
+      - tcp://10.0.0.11:35555
+      - tcp://10.0.0.12:35555
+  logging:
+    transport_log_payload_bytes: true
 ```
 
 Notes:

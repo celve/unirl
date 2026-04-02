@@ -171,7 +171,7 @@ def estimate_request_batches(
     prompt_count: int,
     samples_per_prompt: int,
     is_direct_sampling_mode: bool,
-    max_samples_per_request: Optional[int],
+    max_samples_per_request: int = 0,
 ) -> int:
     resolved_prompt_count = int(prompt_count)
     resolved_samples_per_prompt = int(samples_per_prompt)
@@ -185,12 +185,11 @@ def estimate_request_batches(
     total_samples = resolved_prompt_count * resolved_samples_per_prompt
     if (
         not is_direct_sampling_mode
-        or max_samples_per_request is None
-        or int(max_samples_per_request) >= total_samples
+        or max_samples_per_request == 0
+        or max_samples_per_request >= total_samples
     ):
         return 1
-    max_per_request = int(max_samples_per_request)
-    return (total_samples + max_per_request - 1) // max_per_request
+    return (total_samples + max_samples_per_request - 1) // max_samples_per_request
 
 
 def plan_request_batches(
@@ -523,7 +522,7 @@ def validate_sampler_outputs_against_contract(
             if generator_type == "sglang":
                 hint = (
                     f" {generator_type} currently may omit rollout log_probs; "
-                    "enable replay_log_probs and ensure prompt text inputs are present."
+                    "set sampling.logprob_source='replay' and ensure prompt text inputs are present."
                 )
             raise RuntimeError(
                 f"Sampler output contract validation failed in {mode_label} path at index={idx}: {exc}.{hint} "
@@ -553,14 +552,22 @@ def compute_advantages(
     algorithm: Any,
     rewards: torch.Tensor,
     group_ids: Optional[List[str]] = None,
+    component_rewards: Optional[Dict[str, List[float]]] = None,
     reward_components: Optional[Dict[str, List[float]]] = None,
     reward_component_weights: Optional[Dict[str, float]] = None,
 ) -> torch.Tensor:
     """Delegate reward-component-aware advantage semantics to the algorithm."""
+    if component_rewards is not None and reward_components is not None:
+        raise ValueError(
+            "compute_advantages accepts either component_rewards or reward_components, not both."
+        )
+    resolved_component_rewards = (
+        component_rewards if component_rewards is not None else reward_components
+    )
     return algorithm.compute_advantages_with_components(
         rewards=rewards,
         group_ids=group_ids,
-        reward_components=reward_components,
+        reward_components=resolved_component_rewards,
         reward_component_weights=reward_component_weights,
     )
 

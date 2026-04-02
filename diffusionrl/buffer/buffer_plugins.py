@@ -5,11 +5,12 @@ from __future__ import annotations
 import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 
 from diffusionrl.buffer.buffer_batch_ops import index_training_batch
+from diffusionrl.config.argument_parsing import parse_cli_list
 from diffusionrl.types.training_batch import BackwardTrainingBatch, TrainingBatch
 from diffusionrl.utils import load_function
 
@@ -181,25 +182,27 @@ class MinSamplesGuardPlugin(BufferPlugin):
         }
 
 
-def _parse_plugin_paths(raw: Any) -> List[str]:
+def normalize_plugin_dotpaths(raw: Any) -> List[str]:
+    """Normalize rollout buffer plugin dotpaths to a list of non-empty strings.
+
+    Accepts ``None``, a ``list``/``tuple`` of paths, or a single ``str`` (including
+    comma-separated or JSON list forms, via :func:`parse_cli_list`).
+    """
     if raw is None:
         return []
     if isinstance(raw, str):
-        return [part.strip() for part in raw.split(",") if part.strip()]
-    if isinstance(raw, Iterable):
-        paths = []
-        for item in raw:
-            text = str(item).strip()
-            if text:
-                paths.append(text)
-        return paths
-    text = str(raw).strip()
-    return [text] if text else []
+        return parse_cli_list(raw, item_type=str)
+    if isinstance(raw, (list, tuple)):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    raise TypeError(
+        "rollout.plugin_dotpaths must be a list of strings or a single "
+        f"string; got {type(raw).__name__}"
+    )
 
 
 def build_buffer_plugins(args: Any) -> List[BufferPlugin]:
     """Build built-in and custom rollout-buffer plugins from args."""
-    rollout_buffer = args.rollout.buffer
+    rollout_buffer = args.rollout
     plugins: List[BufferPlugin] = [
         FiniteTensorFilterPlugin(
             drop_invalid=bool(rollout_buffer.drop_invalid)
@@ -222,7 +225,7 @@ def build_buffer_plugins(args: Any) -> List[BufferPlugin]:
         )
     )
 
-    for path in _parse_plugin_paths(rollout_buffer.plugin_paths):
+    for path in normalize_plugin_dotpaths(rollout_buffer.plugin_dotpaths):
         target = load_function(path)
         if inspect.isclass(target):
             if hasattr(target, "from_args") and callable(getattr(target, "from_args")):
@@ -258,4 +261,5 @@ __all__ = [
     "MinSamplesGuardPlugin",
     "RewardRangeFilterPlugin",
     "build_buffer_plugins",
+    "normalize_plugin_dotpaths",
 ]

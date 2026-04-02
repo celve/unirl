@@ -128,11 +128,11 @@ class GRPOAlgorithm(BaseAlgorithm):
             skip_last_timestep=bool(extra.get("skip_last_timestep", False)),
             skip_initial_timesteps=int(extra.get("skip_initial_timesteps", 0)),
             model_type=str(extra.get("model_type", "default")),
-            adv_normalization=str(config.get("adv_normalization", "group")),
+            adv_normalization_scope=str(config.get("adv_normalization_scope", "group")),
             epsilon=float(config.get("adv_norm_eps", 1e-8)),
-            clip_max=config.get("adv_clip_abs", 5.0),
+            clip_max=config.get("clip_max", 5.0),
             use_global_std=bool(config.get("use_global_std", False)),
-            trimmed_ratio=float(config.get("trimmed_ratio", 0.0)),
+            trim_outliers_ratio=float(config.get("trim_outliers_ratio", 0.0)),
         )
 
     def __init__(
@@ -151,7 +151,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         skip_initial_timesteps: int = 0,
         model_type: str = "default",
         # BaseAlgorithm params
-        adv_normalization: str = "group",
+        adv_normalization_scope: str = "group",
         samples_per_prompt: int = 1,
         num_inference_steps: int = 0,
         eval_ema_decay: float = 0.9,
@@ -159,7 +159,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         epsilon: float = 1e-8,
         clip_max: float = 5.0,
         use_global_std: bool = False,
-        trimmed_ratio: float = 0.0,
+        trim_outliers_ratio: float = 0.0,
         **kwargs,
     ):
         """
@@ -179,7 +179,7 @@ class GRPOAlgorithm(BaseAlgorithm):
                 Early timesteps may have high variance.
             model_type: Model type for forward plugin selection ("flux", "sd3", "hunyuan", "default").
                 If not specified, model type will be auto-detected from the model class name.
-            adv_normalization: Advantage normalization type ("global" or "group")
+            adv_normalization_scope: Advantage normalization type ("global" or "group")
             samples_per_prompt: Number of rollout samples to generate per prompt
             eval_ema_decay: Eval-time EMA decay
             eval_ema_update_interval: Eval-time EMA update interval
@@ -191,7 +191,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         super().__init__(
             kl_coef=kl_coef,
             component_mix_stage=component_mix_stage,
-            adv_normalization=adv_normalization,
+            adv_normalization_scope=adv_normalization_scope,
             samples_per_prompt=samples_per_prompt,
             num_inference_steps=num_inference_steps,
             eval_ema_decay=eval_ema_decay,
@@ -199,7 +199,7 @@ class GRPOAlgorithm(BaseAlgorithm):
             epsilon=epsilon,
             clip_max=clip_max,
             use_global_std=use_global_std,
-            trimmed_ratio=trimmed_ratio,
+            trim_outliers_ratio=trim_outliers_ratio,
             **kwargs,
         )
         self.clip_range = clip_range
@@ -301,8 +301,8 @@ class GRPOAlgorithm(BaseAlgorithm):
     def get_ema_spec(self) -> EMASpec:
         return EMASpec(
             enable_eval_ema=True,
-            eval_decay=self.eval_ema_decay,
-            eval_update_interval=self.eval_ema_update_interval,
+            eval_ema_decay=self.eval_ema_decay,
+            eval_ema_update_interval=self.eval_ema_update_interval,
         )
 
     def resolve_rollout_sde_indices(
@@ -317,10 +317,9 @@ class GRPOAlgorithm(BaseAlgorithm):
             )
         return set(self.rollout_indices_scheduler.get_sde_indices(current_step))
 
-    def get_sampler_validation_config(self, *, args: Any) -> Dict[str, Any]:
-        allow_replay = bool(getattr(args.sampling, "replay_log_probs", False))
+    def get_sampler_validation_config(self, *, allow_replay: bool) -> Dict[str, Any]:
         return {
-            "allow_replay": allow_replay,
+            "allow_replay": bool(allow_replay),
             "assert_step_alignment": True,
             "mode_label": "trajectory",
         }

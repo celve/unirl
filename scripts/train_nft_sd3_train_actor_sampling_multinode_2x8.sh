@@ -25,7 +25,7 @@
 #   # Pass through extra diffusionrl CLI overrides
 #   HEAD_IP=10.0.0.1 WEIGHT_SYNC_DIR=/mnt/shared/diffusionrl_weight_sync \
 #     bash scripts/train_nft_sd3_train_actor_sampling_multinode_2x8.sh train \
-#       --rollout.control.num-rollout 100 --training.local-micro-batch-size 2
+#       --rollout.num-rollout 100 --training.micro-batch-size 2
 #
 # =============================================================================
 

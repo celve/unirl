@@ -28,14 +28,10 @@ GROUP_DISPLAY_NAMES: Dict[str, str] = {
     "algorithm.rollout_scheduler": "Rollout Index Scheduler",
     "algorithm.training_scheduler": "Training Index Scheduler",
     "training": "Training & Optimization",
-    "precision.training": "Precision / Training",
-    "precision.rollout": "Precision / Rollout",
-    "rollout.topology": "Rollout Topology",
-    "rollout.buffer": "Rollout Buffer",
-    "rollout.control": "Rollout Control",
-    "rollout.artifacts": "Rollout Artifacts",
-    "rollout.evaluation": "Rollout Evaluation",
-    "rollout.logging": "Rollout Logging",
+    "precision": "Precision",
+    "rollout": "Rollout Configuration",
+    "evaluation": "Evaluation",
+    "logging": "Logging & Reporting",
     "debug": "Debug Mode & Artifact Saving",
 }
 

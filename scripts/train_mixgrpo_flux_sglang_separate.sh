@@ -49,13 +49,12 @@ TRAINING_GPUS=${TRAINING_GPUS:-4}
 # Rollout
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-32}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-12}
-NUM_UPDATES_PER_LOCAL_BATCH=${NUM_UPDATES_PER_LOCAL_BATCH:-4}
+NUM_UPDATES_PER_BATCH=${NUM_UPDATES_PER_BATCH:-4}
 ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
 
 # Rollout (sglang engine)
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
-REPLAY_LOG_PROBS=${REPLAY_LOG_PROBS:-true}
 REPLAY_SAMPLER_PATH=${REPLAY_SAMPLER_PATH:-diffusionrl.samplers.fsdp.flux_sampler.FluxSampler}
 
 # Reward
@@ -80,18 +79,17 @@ MIXGRPO_ALGO_KWARG_ARGS=(
 )
 
 # Training
-LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE-4}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE-4}
 
 
 python -m diffusionrl.train \
     --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
     --model.model-type flux \
-    --rollout.topology.mode separate \
-    --rollout.topology.service-engine sglang \
-    --rollout.topology.service-num-gpus ${TP_SIZE} \
-    --rollout.topology.engine-tp-size ${TP_SIZE} \
+    --rollout.mode separate \
+    --rollout.rollout-engine sglang \
+    --rollout.num-gpus-per-actor ${TP_SIZE} \
+    --rollout.tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
-    --sampling.replay-log-probs "${REPLAY_LOG_PROBS}" \
     --sampling.replay-sampler-path "${REPLAY_SAMPLER_PATH}" \
     --algorithm.algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
     --reward.reward-model-name "${REWARD_MODEL_NAME}" \
@@ -108,11 +106,11 @@ python -m diffusionrl.train \
     --algorithm.rollout-scheduler.timestep-strategy window \
     --algorithm.rollout-scheduler.window-strategy progressive \
     --algorithm.rollout-scheduler.window-size 4 \
-    --algorithm.rollout-scheduler.window-iters-per-window 25 \
-    --algorithm.rollout-scheduler.window-max-iters-per-window ${WINDOW_MAX_ITERS_PER_GROUP:-10} \
-    --algorithm.rollout-scheduler.window-min-iters-per-window ${WINDOW_MIN_ITERS_PER_GROUP:-1} \
-    --algorithm.rollout-scheduler.window-overlap true \
-    --algorithm.rollout-scheduler.window-roll-back true \
+    --algorithm.rollout-scheduler.iters-per-window 25 \
+    --algorithm.rollout-scheduler.max-iters-per-window ${WINDOW_MAX_ITERS_PER_GROUP:-10} \
+    --algorithm.rollout-scheduler.min-iters-per-window ${WINDOW_MIN_ITERS_PER_GROUP:-1} \
+    --algorithm.rollout-scheduler.overlap-size 3 \
+    --algorithm.rollout-scheduler.roll-back true \
     \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
@@ -122,20 +120,20 @@ python -m diffusionrl.train \
     --ray.placement-strategy SPREAD \
     \
     --training.learning-rate 1e-5 \
-    --training.local-micro-batch-size ${LOCAL_MICRO_BATCH_SIZE} \
-    --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
+    --training.micro-batch-size ${MICRO_BATCH_SIZE} \
+    --training.num-updates-per-batch ${NUM_UPDATES_PER_BATCH} \
     --training.max-grad-norm 1.0 \
     --training.weight-decay 0.0001 \
     --training.lora-rank 64 \
     --training.lora-alpha 128 \
     --training.use-lora true \
     \
-    --height 720 \
-    --width 720 \
+    --sampling.height 720 \
+    --sampling.width 720 \
     \
-    --rollout.control.num-rollout 300 \
-    --rollout.artifacts.save-steps 50 \
-    --rollout.logging.logging-steps 1 \
-    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
+    --rollout.num-rollout 300 \
+    --rollout.save-steps 50 \
+    --logging.logging-steps 1 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
     --sync.protocol tensor_payload \
     "$@"

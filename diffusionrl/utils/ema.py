@@ -399,8 +399,8 @@ class EMAManager:
         if bool(getattr(spec, "enable_eval_ema", True)):
             eval_ema = EMAModuleWrapper(
                 trainable_params,
-                decay=float(getattr(spec, "eval_decay", 0.9)),
-                update_step_interval=max(1, int(getattr(spec, "eval_update_interval", 1))),
+                decay=float(getattr(spec, "eval_ema_decay", 0.9)),
+                update_step_interval=max(1, int(getattr(spec, "eval_ema_update_interval", 1))),
                 device=ema_device,
             )
 

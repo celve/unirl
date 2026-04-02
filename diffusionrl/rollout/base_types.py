@@ -21,20 +21,58 @@ class RolloutContext:
     debug_trace: Optional[Dict[str, Any]] = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class RewardHookResult:
     """Reward hook output consumed by the default rollout pipeline."""
 
     rewards: torch.Tensor
-    reward_components: Dict[str, List[float]] = field(default_factory=dict)
+    component_rewards: Dict[str, List[float]] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        *,
+        rewards: torch.Tensor,
+        component_rewards: Optional[Dict[str, List[float]]] = None,
+    ) -> None:
+        object.__setattr__(self, "rewards", rewards)
+        object.__setattr__(
+            self,
+            "component_rewards",
+            {
+                str(name): list(values or [])
+                for name, values in dict(component_rewards or {}).items()
+            },
+        )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class RolloutFunctionResult:
     """Normalized rollout-stage output before driver-side advantage/assembly."""
 
     request: RolloutRequest
     sampler_outputs: List[RolloutSamples]
     rewards: torch.Tensor
-    reward_components: Dict[str, List[float]] = field(default_factory=dict)
+    component_rewards: Dict[str, List[float]] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        *,
+        request: RolloutRequest,
+        sampler_outputs: List[RolloutSamples],
+        rewards: torch.Tensor,
+        component_rewards: Optional[Dict[str, List[float]]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        object.__setattr__(self, "request", request)
+        object.__setattr__(self, "sampler_outputs", list(sampler_outputs or []))
+        object.__setattr__(self, "rewards", rewards)
+        object.__setattr__(
+            self,
+            "component_rewards",
+            {
+                str(name): list(values or [])
+                for name, values in dict(component_rewards or {}).items()
+            },
+        )
+        object.__setattr__(self, "metadata", dict(metadata or {}))

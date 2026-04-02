@@ -28,7 +28,7 @@
 # - num_inference_steps=10 (training steps, NOT 40)
 # - guidance_scale=1.0 (no CFG during training)
 # - periodic eval: 40 steps, default adapter, deterministic flow solver
-# - adv_normalization=group
+# - adv_normalization_scope=group
 # - algorithm_kwargs.train_timestep_mode=all (DiffusionNFT uses full timestep schedule)
 # - adv_mode=raw
 # - EMA decay: warmup curve (decay_type=2 in original)
@@ -47,7 +47,7 @@
 #
 # Usage:
 #   bash train_nft_sd3_train_actor_sampling.sh
-#   bash train_nft_sd3_train_actor_sampling.sh --rollout.control.num-rollout 100 --training.local-micro-batch-size 2
+#   bash train_nft_sd3_train_actor_sampling.sh --rollout.num-rollout 100 --training.micro-batch-size 2
 #
 # =============================================================================
 
@@ -75,7 +75,7 @@ TOTAL_GPUS=$(( TRAINING_NUM_NODES * TRAINING_GPUS_PER_NODE ))
 RAY_ADDRESS=${RAY_ADDRESS:-}
 RAY_PLACEMENT_STRATEGY=${RAY_PLACEMENT_STRATEGY:-SPREAD}
 WEIGHT_SYNC_DIR=${WEIGHT_SYNC_DIR:-}
-LOCAL_MICRO_BATCH_SIZE=${LOCAL_MICRO_BATCH_SIZE-3}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE-3}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-24}
 REPORT_TO_WANDB=${REPORT_TO_WANDB:-true}
 WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-diffusionrl}
@@ -119,8 +119,8 @@ NFT_ALGO_KWARG_ARGS=(
 )
 
 LOCAL_MICRO_BATCH_ARGS=()
-if [ -n "${LOCAL_MICRO_BATCH_SIZE}" ]; then
-    LOCAL_MICRO_BATCH_ARGS+=(--training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}")
+if [ -n "${MICRO_BATCH_SIZE}" ]; then
+    LOCAL_MICRO_BATCH_ARGS+=(--training.micro-batch-size "${MICRO_BATCH_SIZE}")
 fi
 
 if [ ! -d "${PRETRAINED_MODEL}" ] && [ -d "${REPO_ROOT}/${PRETRAINED_MODEL}" ]; then
@@ -158,7 +158,7 @@ python -m diffusionrl.train \
     "${LOCAL_MICRO_BATCH_ARGS[@]}" \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     \
-    --rollout.topology.mode direct_sampling \
+    --rollout.mode direct_sampling \
 --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     "${RAY_ADDRESS_ARGS[@]}" \
     --ray.rollout-num-nodes 0 \
@@ -175,20 +175,20 @@ python -m diffusionrl.train \
     --training.use-lora true \
     --training.use-gradient-checkpointing false \
     \
-    --height 512 \
-    --width 512 \
+    --sampling.height 512 \
+    --sampling.width 512 \
     \
-    --rollout.control.num-rollout 1000 \
-    --rollout.artifacts.save-steps 60 \
-    --rollout.evaluation.eval-steps 60 \
-    --rollout.evaluation.num-inference-steps 40 \
-    --rollout.evaluation.sampling-adapter default \
-    --rollout.evaluation.sde-type flow \
-    --rollout.evaluation.eta 0.0 \
-    --rollout.logging.logging-steps 10 \
-    --rollout.artifacts.output-dir "${OUTPUT_DIR}" \
-    --rollout.logging.report-to-wandb ${REPORT_TO_WANDB} \
-    --rollout.logging.project-name "${WANDB_PROJECT_NAME}" \
-    --rollout.logging.run-name "${WANDB_RUN_NAME}" \
+    --rollout.num-rollout 1000 \
+    --rollout.save-steps 60 \
+    --evaluation.eval-steps 60 \
+    --evaluation.num-inference-steps 40 \
+    --evaluation.sampling-adapter default \
+    --evaluation.sde-type flow \
+    --evaluation.eta 0.0 \
+    --logging.logging-steps 10 \
+    --rollout.output-dir "${OUTPUT_DIR}" \
+    --logging.report-to-wandb ${REPORT_TO_WANDB} \
+    --logging.project-name "${WANDB_PROJECT_NAME}" \
+    --logging.run-name "${WANDB_RUN_NAME}" \
     --sync.protocol disabled \
     "$@"

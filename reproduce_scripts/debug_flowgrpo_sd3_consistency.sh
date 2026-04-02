@@ -106,8 +106,8 @@ python -m diffusionrl.train \
     --algorithm.shuffle-seed 42 \
     --algorithm.shuffle-samples false \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
-    --training.local-micro-batch-size "${LOCAL_MICRO_BATCH_SIZE}" \
-    --training.num-updates-per-local-batch ${NUM_UPDATES_PER_LOCAL_BATCH} \
+    --training.micro-batch-size "${MICRO_BATCH_SIZE}" \
+    --training.num-updates-per-batch ${NUM_UPDATES_PER_BATCH} \
     --algorithm.samples-per-prompt ${NUM_SAMPLES_PER_PROMPT} \
     --algorithm.kwarg clip_range=1e-4 \
     --algorithm.kwarg use_kl_penalty=true \
@@ -117,7 +117,7 @@ python -m diffusionrl.train \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \
     \
-    --rollout.topology.mode direct_sampling \
+    --rollout.mode direct_sampling \
         --sync.protocol disabled \
     --ray.rollout-num-nodes 0 \
     --ray.rollout-num-gpus-per-node 0 \
@@ -130,15 +130,15 @@ python -m diffusionrl.train \
     --training.lora-alpha 64 \
     --training.use-lora true \
     \
-    --height 512 \
-    --width 512 \
+    --sampling.height 512 \
+    --sampling.width 512 \
     \
-    --rollout.control.num-rollout 1 \
-    --rollout.artifacts.save-steps 0 \
-    --rollout.evaluation.eval-steps 0 \
-    --rollout.logging.logging-steps 1 \
-    --rollout.artifacts.output-dir "${DEBUG_OUTPUT_DIR}/train_output" \
-    --rollout.logging.report-to-wandb false \
+    --rollout.num-rollout 1 \
+    --rollout.save-steps 0 \
+    --evaluation.eval-steps 0 \
+    --logging.logging-steps 1 \
+    --rollout.output-dir "${DEBUG_OUTPUT_DIR}/train_output" \
+    --logging.report-to-wandb false \
     \
     --debug.debug-output-dir "${DEBUG_OUTPUT_DIR}" \
     \

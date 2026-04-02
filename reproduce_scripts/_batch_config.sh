@@ -19,10 +19,10 @@
 #   ROLLOUT_TOTAL_SAMPLES           = PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT
 #   TOTAL_GPUS                      = NUM_NODES * GPUS_PER_NODE  (multinode)
 #                                   = NUM_GPUS                    (single-node)
-#   LOCAL_UPDATE_BATCH_SIZE         = ROLLOUT_TOTAL_SAMPLES / TOTAL_GPUS / NUM_UPDATES
+#   LOCAL_MINI_BATCH_SIZE           = ROLLOUT_TOTAL_SAMPLES / TOTAL_GPUS / NUM_UPDATES
 #   DIRECT_SAMPLING_BATCH_SIZE      = SAMPLING_FORWARD_BATCH
-#   LOCAL_MICRO_BATCH_SIZE          = TRAINING_FORWARD_BATCH
-#   NUM_UPDATES_PER_LOCAL_BATCH     = NUM_UPDATES
+#   MICRO_BATCH_SIZE                = TRAINING_FORWARD_BATCH
+#   NUM_UPDATES_PER_BATCH           = NUM_UPDATES
 # =============================================================================
 
 resolve_batch_params() {
@@ -40,12 +40,12 @@ resolve_batch_params() {
 
     # ── Derived params ──
     ROLLOUT_TOTAL_SAMPLES=$(( PROMPTS_PER_BATCH * NUM_SAMPLES_PER_PROMPT ))
-    LOCAL_UPDATE_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / TOTAL_GPUS / NUM_UPDATES ))
+    LOCAL_MINI_BATCH_SIZE=$(( ROLLOUT_TOTAL_SAMPLES / TOTAL_GPUS / NUM_UPDATES ))
 
     # ── Map core knobs to CLI param names ──
     DIRECT_SAMPLING_BATCH_SIZE="${SAMPLING_FORWARD_BATCH}"
-    LOCAL_MICRO_BATCH_SIZE="${TRAINING_FORWARD_BATCH}"
-    NUM_UPDATES_PER_LOCAL_BATCH="${NUM_UPDATES}"
+    MICRO_BATCH_SIZE="${TRAINING_FORWARD_BATCH}"
+    NUM_UPDATES_PER_BATCH="${NUM_UPDATES}"
 }
 
 validate_batch_params() {
@@ -64,8 +64,8 @@ validate_batch_params() {
     fi
 
     # 3. Update batch must split into whole micro-batches
-    if [ $(( LOCAL_UPDATE_BATCH_SIZE % LOCAL_MICRO_BATCH_SIZE )) -ne 0 ]; then
-        echo "ERROR: LOCAL_UPDATE_BATCH_SIZE (${LOCAL_UPDATE_BATCH_SIZE}) must be divisible by TRAINING_FORWARD_BATCH (${LOCAL_MICRO_BATCH_SIZE})" >&2
+    if [ $(( LOCAL_MINI_BATCH_SIZE % MICRO_BATCH_SIZE )) -ne 0 ]; then
+        echo "ERROR: LOCAL_MINI_BATCH_SIZE (${LOCAL_MINI_BATCH_SIZE}) must be divisible by TRAINING_FORWARD_BATCH (${MICRO_BATCH_SIZE})" >&2
         errors=$(( errors + 1 ))
     fi
 
@@ -83,8 +83,8 @@ validate_batch_params() {
 }
 
 print_batch_params() {
-    local local_batch=$(( LOCAL_UPDATE_BATCH_SIZE * NUM_UPDATES ))
-    local num_micro=$(( LOCAL_UPDATE_BATCH_SIZE / LOCAL_MICRO_BATCH_SIZE ))
+    local local_batch=$(( LOCAL_MINI_BATCH_SIZE * NUM_UPDATES ))
+    local num_micro=$(( LOCAL_MINI_BATCH_SIZE / MICRO_BATCH_SIZE ))
     echo "┌─────────────────────────────────────────────────────────┐"
     echo "│                  Batch Geometry Summary                  │"
     echo "├──────────────────────────────┬──────────────────────────┤"
@@ -97,7 +97,7 @@ print_batch_params() {
     echo "├──────────────────────────────┼──────────────────────────┤"
     printf "│ %-28s │ %24s │\n" "Local batch (per GPU)"    "${local_batch}"
     printf "│ %-28s │ %24s │\n" "  ├─ Gradient updates"    "${NUM_UPDATES}"
-    printf "│ %-28s │ %24s │\n" "  ├─ Update batch size"   "${LOCAL_UPDATE_BATCH_SIZE}"
-    printf "│ %-28s │ %24s │\n" "  └─ Micro-batches/update" "${num_micro} × ${LOCAL_MICRO_BATCH_SIZE}"
+    printf "│ %-28s │ %24s │\n" "  ├─ Mini-batch size"     "${LOCAL_MINI_BATCH_SIZE}"
+    printf "│ %-28s │ %24s │\n" "  └─ Micro-batches/update" "${num_micro} × ${MICRO_BATCH_SIZE}"
     echo "└──────────────────────────────┴──────────────────────────┘"
 }

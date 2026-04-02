@@ -22,7 +22,6 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "AlgorithmConfig": ("diffusionrl.config.arguments", "AlgorithmConfig"),
     "DebugConfig": ("diffusionrl.config.arguments", "DebugConfig"),
     "SchedulerConfig": ("diffusionrl.config.arguments", "SchedulerConfig"),
-    "WindowSchedulerConfig": ("diffusionrl.config.arguments", "WindowSchedulerConfig"),
     "ModelConfig": ("diffusionrl.config.arguments", "ModelConfig"),
     "TrainingConfig": ("diffusionrl.config.arguments", "TrainingConfig"),
     "RolloutConfig": ("diffusionrl.config.arguments", "RolloutConfig"),

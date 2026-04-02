@@ -59,13 +59,14 @@ def _push_rollout_training_batch(*, ray_module, rollout_buffer, rollout_id: int,
             f"Rollout buffer rejected rollout_id={rollout_id}: {push_result.get('error')}"
         )
 
+
 def _produce_and_push_rollout(
     *,
     ray_module,
     args,
     rollout_services,
     rollout_function,
-    rollout_function_path: str,
+    rollout_function_dotpath: str,
     reward_hook,
     rollout_buffer,
     rollout_id: int,
@@ -89,10 +90,10 @@ def _produce_and_push_rollout(
         media_max_items=int(media_max_items),
         debug_trace={} if debug_save_intermediates else None,
     )
-    if debug_save_intermediates and str(rollout_function_path).strip() != DEFAULT_ROLLOUT_FUNCTION_PATH:
+    if debug_save_intermediates and str(rollout_function_dotpath).strip() != DEFAULT_ROLLOUT_FUNCTION_PATH:
         raise ValueError(
             "debug_save_intermediates currently requires the default request-centric rollout pipeline. "
-            f"Got custom rollout_function_path={rollout_function_path!r}."
+            f"Got custom rollout_function_dotpath={rollout_function_dotpath!r}."
         )
 
     rollout_result = rollout_function(
@@ -108,7 +109,7 @@ def _produce_and_push_rollout(
     advantages = rollout_services.compute_advantages(
         rewards=rollout_result.rewards,
         group_ids=rollout_result.request.meta.get("group_ids"),
-        reward_components=rollout_result.reward_components,
+        component_rewards=rollout_result.component_rewards,
     )
     training_batch = rollout_services.assemble_training_batch(
         request=rollout_result.request,
@@ -127,8 +128,8 @@ def _produce_and_push_rollout(
         debug_payload.setdefault("rewards", rollout_result.rewards)
         debug_payload.setdefault("advantages", advantages)
         debug_payload.setdefault(
-            "reward_components",
-            dict(rollout_result.reward_components or {}),
+            "component_rewards",
+            dict(rollout_result.component_rewards or {}),
         )
         _push_rollout_training_batch(
             ray_module=ray_module,
@@ -186,23 +187,18 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
     training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
     sync_mode = rollout_mode_info.sync_protocol
     rollout_mode_name = rollout_topology.mode
-    rollout_control = args.rollout.control
-    rollout_artifacts = args.rollout.artifacts
-    rollout_evaluation = args.rollout.evaluation
-    rollout_logging = args.rollout.logging
-    rollout_buffer_settings = args.rollout.buffer
 
     logger.info("Starting diffusionRL training...")
-    logger.info(f"Model: {args.model.pretrained_model_saved_path}")
-    logger.info(f"Algorithm: {algorithm_config['algorithm_path']}")
+    logger.info(f"Model: {args.model.pretrained_model_ckpt_path}")
+    logger.info(f"Algorithm: {algorithm_config['algorithm_dotpath']}")
     logger.info(f"Mode: {rollout_mode_name}")
     logger.info(f"Offload train: {args.ray.offload_train}, Offload rollout: {args.ray.offload_rollout}")
     logger.info("Weight sync mode: %s", sync_mode)
     logger.info(
         "Periodic controls: save_steps=%s eval_steps=%s logging_steps=%s",
-        rollout_artifacts.save_steps,
-        rollout_evaluation.eval_steps,
-        rollout_logging.logging_steps,
+        args.rollout.save_steps,
+        args.evaluation.eval_steps,
+        args.logging.logging_steps,
     )
     logger.info(
         "Debug flags: mode=%s save_intermediates=%s save_dir=%s",
@@ -221,7 +217,7 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
     wandb_logger = None
     rollout_services = None
     rollout_function = None
-    rollout_function_path = ""
+    rollout_function_dotpath = ""
     eval_function = None
     reward_hook = None
     rollout_buffer = None
@@ -232,30 +228,28 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
     weight_sync = create_weight_sync(args, launch_config, mode=sync_mode)
 
     try:
-        if rollout_logging.report_to_wandb and rollout_logging.project_name:
+        if args.logging.report_to_wandb and args.logging.project_name:
             wandb_tags = (
-                [t.strip() for t in rollout_logging.wandb_tags.split(",") if t.strip()]
-                if rollout_logging.wandb_tags
+                [t.strip() for t in args.logging.tags.split(",") if t.strip()]
+                if args.logging.tags
                 else None
             )
-
-            wandb_entity = rollout_logging.wandb_entity or None
             wandb_logger = init_logger(
-                project=rollout_logging.project_name,
-                run_name=rollout_logging.run_name,
+                project=args.logging.project_name,
+                run_name=args.logging.run_name,
                 config=build_resolved_config_view(args),
-                log_dir=rollout_logging.logging_dir,
+                log_dir=args.logging.logging_dir,
                 rank=0,
                 tags=wandb_tags,
-                entity=wandb_entity,
+                entity=args.logging.entity or None,
                 require_success=True,
             )
 
             if wandb_logger.initialized:
                 logger.info(
                     "WandB initialized: project=%s, run=%s",
-                    rollout_logging.project_name,
-                    rollout_logging.run_name,
+                    args.logging.project_name,
+                    args.logging.run_name,
                 )
 
         # 1. Resource allocation
@@ -284,11 +278,11 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
             prompts_per_rollout=rollout_services.prompt_batch_size,
         )
 
-        rollout_function_path = args.rollout_function_path or DEFAULT_ROLLOUT_FUNCTION_PATH
-        rollout_function = load_function(rollout_function_path)
+        rollout_function_dotpath = args.rollout_function_dotpath or DEFAULT_ROLLOUT_FUNCTION_PATH
+        rollout_function = load_function(rollout_function_dotpath)
 
-        eval_function = load_function(args.eval_function_path or DEFAULT_EVAL_FUNCTION_PATH)
-        reward_hook = load_function(args.reward_hook_path or DEFAULT_REWARD_HOOK_PATH)
+        eval_function = load_function(args.eval_function_dotpath or DEFAULT_EVAL_FUNCTION_PATH)
+        reward_hook = load_function(args.reward_hook_dotpath or DEFAULT_REWARD_HOOK_PATH)
         logger.info("Rollout services created")
 
         if dataset_step_info.get("num_prompts", 0) > 0:
@@ -331,7 +325,7 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
             training_pgs,
         )
         training_runtime = TrainingGroupRuntime.from_group(training_group)
-        resume_from_checkpoint = rollout_artifacts.resume_from_checkpoint
+        resume_from_checkpoint = args.training.resume_from_checkpoint
         if resume_from_checkpoint:
             training_runtime.load_checkpoint(resume_from_checkpoint)
             logger.info("Checkpoint loaded: %s", resume_from_checkpoint)
@@ -387,27 +381,27 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
         debug_save_intermediates = args.debug.debug_save_intermediates
 
         # 10. Core synchronous training loop
-        enforce_rollout_alignment = not bool(rollout_buffer_settings.reassemble_by_group)
+        enforce_rollout_alignment = args.rollout.group_size is None
         save_rollout_debug_payload = None
         if debug_save_intermediates:
             from diffusionrl.debug.runner import save_rollout_debug_payload as _save_rollout_debug_payload
 
             save_rollout_debug_payload = _save_rollout_debug_payload
 
-        wandb_media_enabled = bool(wandb_logger is not None and bool(rollout_logging.wandb_log_media))
-        wandb_media_max_items = max(1, int(rollout_logging.wandb_media_max_items))
+        wandb_media_enabled = wandb_logger is not None and args.logging.log_media
+        wandb_media_max_items = max(1, int(args.logging.media_max_items))
 
         # rollout_id is the outer rollout-train loop step; it behaves similarly to
         # a framework-level global step, but may differ from optimizer step count.
         # global_optimizer_step tracks real optimizer step for wandb logging
         global_optimizer_step = 0
-        for rollout_id in range(rollout_control.start_rollout_id, rollout_control.num_rollout):
+        for rollout_id in range(args.rollout.start_rollout_id, args.rollout.num_rollout):
             step_start_t = time.perf_counter()
             sync_result = None
             sync_phase_s = 0.0
             eval_phase_s = 0.0
             should_log_step = should_log(rollout_id, args)
-            collect_media_preview = bool(should_log_step and wandb_media_enabled)
+            collect_media_preview = should_log_step and wandb_media_enabled
             training_data_handle = None
             rollout_metadata = {}
             sample_count = 0
@@ -450,7 +444,7 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
                 args=args,
                 rollout_services=rollout_services,
                 rollout_function=rollout_function,
-                rollout_function_path=rollout_function_path,
+                rollout_function_dotpath=rollout_function_dotpath,
                 reward_hook=reward_hook,
                 rollout_buffer=rollout_buffer,
                 rollout_id=rollout_id,
@@ -484,7 +478,7 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
 
             # Periodic: save (before offload to ensure model is on GPU)
             if should_save(rollout_id, args):
-                save_path = f"{rollout_artifacts.output_dir}/checkpoint-{rollout_id}"
+                save_path = f"{args.rollout.output_dir}/checkpoint-{rollout_id}"
                 training_runtime.save_model(save_path)
                 logger.info(f"Checkpoint saved: {save_path}")
 
@@ -493,7 +487,7 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
 
             if (
                 not training_actor_sampling_mode
-                and (rollout_id + 1) % rollout_control.update_weights_interval == 0
+                and (rollout_id + 1) % args.sync.rollout_update_interval == 0
             ):
                 sync_phase_start_t = time.perf_counter()
                 sync_result = weight_sync.sync(rollout_id=rollout_id)
