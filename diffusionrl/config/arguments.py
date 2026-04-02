@@ -357,7 +357,7 @@ class SyncConfig:
 
     def validate(self) -> None:
         _valid_protocols = ("disabled", "tensor_payload", "nccl_broadcast", "checkpoint_path")
-        normalized_protocol = self.protocol.strip().lower()
+        normalized_protocol = str(self.protocol or "").strip().lower()
         if not normalized_protocol:
             raise ValueError(
                 "sync.protocol must be set explicitly. "

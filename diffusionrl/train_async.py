@@ -175,7 +175,7 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
     )
 
     logger.info("Starting async pipeline loop (separate mode)")
-    rollout_update_interval =  args.sync.rollout_update_interval
+    rollout_update_interval = args.sync.rollout_update_interval
     enforce_rollout_alignment = args.rollout.group_size is None
     rollout_on_gpu = True
     runtime = AsyncPipelineRuntime(

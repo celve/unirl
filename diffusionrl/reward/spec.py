@@ -88,7 +88,7 @@ class RewardProviderConfig:
     reward_dotpath: Optional[str]
     reward_model_ckpt_path: Optional[str]
     batch_size: int
-    timeout: float
+    timeout: float = 60.0
 
 
 @dataclass(frozen=True)
