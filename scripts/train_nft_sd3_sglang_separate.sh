@@ -80,16 +80,16 @@ NFT_ALGO_KWARG_ARGS=(
 )
 
 python -m diffusionrl.train \
-    --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
+    --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
     --rollout.mode separate \
     --rollout.rollout-engine sglang \
     --rollout.num-gpus-per-actor ${TP_SIZE} \
     --rollout.tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
-    --algorithm.algorithm-path diffusionrl.algorithms.nft.NFTAlgorithm \
-    --reward.reward-model-name ocr \
-    --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
+    --algorithm.algorithm-dotpath diffusionrl.algorithms.nft.NFTAlgorithm \
+    --reward.reward-components ocr \
+    --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
     --sampling.shift 3.0 \

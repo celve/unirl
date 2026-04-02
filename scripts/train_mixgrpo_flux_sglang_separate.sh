@@ -83,7 +83,7 @@ MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE-4}
 
 
 python -m diffusionrl.train \
-    --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
+    --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \
     --model.model-type flux \
     --rollout.mode separate \
     --rollout.rollout-engine sglang \
@@ -91,9 +91,9 @@ python -m diffusionrl.train \
     --rollout.tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --sampling.replay-sampler-path "${REPLAY_SAMPLER_PATH}" \
-    --algorithm.algorithm-path diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
-    --reward.reward-model-name "${REWARD_MODEL_NAME}" \
-    --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
+    --algorithm.algorithm-dotpath diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
+    --reward.reward-components "${REWARD_MODEL_NAME}" \
+    --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
     --sampling.sde-type flow \

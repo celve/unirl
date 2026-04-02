@@ -82,16 +82,16 @@ if [ -n "${MICRO_BATCH_SIZE}" ]; then
 fi
 
 python -m diffusionrl.train \
-    --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
+    --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \
     --model.model-type hunyuan \
     --rollout.mode separate \
     --rollout.rollout-engine sglang \
     --rollout.num-gpus-per-actor ${TP_SIZE} \
     --rollout.tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
-    --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward.reward-model-name "${REWARD_MODEL_NAME}" \
-    --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
+    --algorithm.algorithm-dotpath diffusionrl.algorithms.grpo.GRPOAlgorithm \
+    --reward.reward-components "${REWARD_MODEL_NAME}" \
+    --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
     --sampling.sde-type dance \

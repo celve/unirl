@@ -172,14 +172,14 @@ run_training() {
     echo "Output dir: ${OUTPUT_DIR}"
 
     python -m diffusionrl.train \
-        --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
+        --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \
         --model.model-type sd3 \
-        --sampling.sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
-        --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-        --reward.reward-model-name "${REWARD_NAME}" \
+        --sampling.sampler-dotpath diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
+        --algorithm.algorithm-dotpath diffusionrl.algorithms.grpo.GRPOAlgorithm \
+        --reward.reward-components "${REWARD_NAME}" \
         --reward.reward-location "${REWARD_LOCATION}" \
         --reward.local-reward-device "${REWARD_DEVICE}" \
-        --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
+        --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \
         --data-path "${DATA_PATH}" \
         --eval-data-path "${EVAL_DATA_PATH}" \
         \

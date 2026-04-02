@@ -104,14 +104,14 @@ if [ -n "${MICRO_BATCH_SIZE}" ]; then
 fi
 
 python -m diffusionrl.train \
-    --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
+    --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \
     --model.model-type flux \
-    --sampling.sampler-path diffusionrl.samplers.fsdp.flux_sampler.FluxSampler \
-    --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward.reward-model-name "${REWARD_MODEL_NAME}" \
+    --sampling.sampler-dotpath diffusionrl.samplers.fsdp.flux_sampler.FluxSampler \
+    --algorithm.algorithm-dotpath diffusionrl.algorithms.grpo.GRPOAlgorithm \
+    --reward.reward-components "${REWARD_MODEL_NAME}" \
     --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
-    --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
+    --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
     --sampling.sde-type dance \

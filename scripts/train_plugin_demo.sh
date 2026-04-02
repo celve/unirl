@@ -39,14 +39,14 @@ PLUGIN_ALGO_KWARG_ARGS=(
 )
 
 python -m diffusionrl.train \
-    --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
+    --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
-    --sampling.sampler-path diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
+    --sampling.sampler-dotpath diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
     \
-    --algorithm.algorithm-path diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm \
+    --algorithm.algorithm-dotpath diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm \
     --reward.reward-path diffusionrl_plugins.rewards.minimal_reward.MinimalRewardScorer \
     \
-    --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
+    --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
     --sampling.sde-type flow \

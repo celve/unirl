@@ -7,7 +7,7 @@
 # diffusion engine instead of the FSDP sampler.
 #
 # Key differences from the FSDP version:
-#   - --rollout.rollout-engine sglang   (instead of --sampling.sampler-path)
+#   - --rollout.rollout-engine sglang   (instead of --sampling.sampler-dotpath)
 #   - Optional local debug override via SGLANG_PYTHON_PATH/PYTHONPATH
 #   - --rollout.tp-size controls tensor-parallelism inside the SGLang engine
 #   - Weight sync uses checkpoint_path (automatic for sglang engine)
@@ -77,16 +77,16 @@ DANCEGRPO_ALGO_KWARG_ARGS=(
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
 
 python -m diffusionrl.train \
-    --model.pretrained-model-saved-path "${PRETRAINED_MODEL}" \
+    --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \
     --model.model-type flux \
     --rollout.mode separate \
     --rollout.rollout-engine sglang \
     --rollout.num-gpus-per-actor ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --rollout.tp-size ${TP_SIZE} \
-    --algorithm.algorithm-path diffusionrl.algorithms.grpo.GRPOAlgorithm \
-    --reward.reward-model-name ocr \
-    --data-source-path diffusionrl.data.data_source.ImageRLDataSource \
+    --algorithm.algorithm-dotpath diffusionrl.algorithms.grpo.GRPOAlgorithm \
+    --reward.reward-components ocr \
+    --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \
     --sampling.sde-type dance \
