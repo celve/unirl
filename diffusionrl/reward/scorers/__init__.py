@@ -3,7 +3,6 @@
 from .aesthetic import AestheticRewardScorer
 from .base_local import BaseLocalRewardScorer
 from .clip import ClipRewardScorer
-from .diversity import DiversityRewardScorer
 from .hpsv2 import HPSv2RewardScorer
 from .hpsv3 import HPSv3RewardScorer
 from .image_reward import ImageRewardScorer
@@ -16,7 +15,6 @@ __all__ = [
     "AestheticRewardScorer",
     "BaseLocalRewardScorer",
     "ClipRewardScorer",
-    "DiversityRewardScorer",
     "HPSv2RewardScorer",
     "HPSv3RewardScorer",
     "ImageRewardScorer",

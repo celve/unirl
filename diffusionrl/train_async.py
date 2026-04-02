@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import logging
 import time
-
-import torch
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
@@ -310,8 +308,6 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
                 f"Got type={type(rollout_result)}"
             )
         rollout_metadata = dict(rollout_result.metadata or {})
-        if rollout_result.reward_components:
-            rollout_metadata["reward_components"] = dict(rollout_result.reward_components)
         advantages = services.compute_advantages(
             rewards=rollout_result.rewards,
             group_ids=rollout_result.request.meta.get("group_ids"),
@@ -416,15 +412,6 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
                 media_preview = rollout_metadata.get("wandb_media_preview")
                 if media_preview:
                     wandb_logger.log_generated_media(rollout_id, media_preview)
-
-                # Per-component reward metrics (e.g. hpsv3_mean, diversity_mean)
-                reward_components = rollout_metadata.get("reward_components", {})
-                for comp_name, comp_rewards in reward_components.items():
-                    t = torch.tensor(comp_rewards, dtype=torch.float32)
-                    wandb_logger.log_rollout(rollout_id, {
-                        f"rollout/{comp_name}_mean": t.mean().item(),
-                        f"rollout/{comp_name}_std": t.std(unbiased=False).item(),
-                    })
 
                 perf_metrics = {
                     "rollout_phase_s": rollout_phase_s,

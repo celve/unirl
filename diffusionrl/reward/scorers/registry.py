@@ -15,7 +15,6 @@ _BUILTIN_SCORERS: Dict[str, Tuple[str, str]] = {
     "pickscore": ("diffusionrl.reward.scorers.pickscore", "PickScoreRewardScorer"),
     "hpsv3": ("diffusionrl.reward.scorers.hpsv3", "HPSv3RewardScorer"),
     "image_reward": ("diffusionrl.reward.scorers.image_reward", "ImageRewardScorer"),
-    "diversity": ("diffusionrl.reward.scorers.diversity", "DiversityRewardScorer"),
 }
 
 

@@ -8,8 +8,6 @@ Usage:
 import logging
 import time
 
-import torch
-
 from diffusionrl.config import build_resolved_config_view, parse_args
 from diffusionrl.config.launch_resolution import resolve_launch_config
 from diffusionrl.rollout.service_interface import compute_dataset_step_info
@@ -119,8 +117,6 @@ def _produce_and_push_rollout(
         advantages=advantages,
     )
     metadata = dict(rollout_result.metadata or {})
-    if rollout_result.reward_components:
-        metadata["reward_components"] = dict(rollout_result.reward_components)
 
     if debug_save_intermediates:
         debug_payload = dict(context.debug_trace or {})
@@ -139,7 +135,6 @@ def _produce_and_push_rollout(
             rollout_buffer=rollout_buffer,
             rollout_id=rollout_id,
             training_batch=debug_payload["training_batch"],
-            metadata=dict(metadata or {}),
         )
         if save_rollout_debug_payload is not None:
             save_rollout_debug_payload(
@@ -546,15 +541,6 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
                     media_preview = rollout_metadata.get("wandb_media_preview")
                     if media_preview:
                         wandb_logger.log_generated_media(rollout_id, media_preview)
-
-                    # Per-component reward metrics (e.g. hpsv3_mean, diversity_mean)
-                    reward_components = rollout_metadata.get("reward_components", {})
-                    for comp_name, comp_rewards in reward_components.items():
-                        t = torch.tensor(comp_rewards, dtype=torch.float32)
-                        wandb_logger.log_rollout(rollout_id, {
-                            f"rollout/{comp_name}_mean": t.mean().item(),
-                            f"rollout/{comp_name}_std": t.std(unbiased=False).item(),
-                        })
 
                     perf_metrics = {
                         "rollout_phase_s": rollout_phase_s,
