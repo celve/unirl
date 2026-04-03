@@ -63,7 +63,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "check_actor_health": ("diffusionrl.ray.ray_utils", "check_actor_health"),
     "wait_for_actors_ready": ("diffusionrl.ray.ray_utils", "wait_for_actors_ready"),
     # Utils - Actor sampling
-    "ActorSamplingExecutor": ("diffusionrl.ray.actor_sampling", "ActorSamplingExecutor"),
+    "ActorSamplingExecutor": ("diffusionrl.ray.training_actor_sampling", "ActorSamplingExecutor"),
 }
 
 __all__ = list(_LAZY_ATTRS.keys())

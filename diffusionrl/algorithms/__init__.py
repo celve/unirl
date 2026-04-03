@@ -9,8 +9,6 @@ from __future__ import annotations
 import importlib
 from typing import Any, Dict, Optional, Tuple
 
-from diffusionrl.types.sampling import SamplingRequirements
-
 from .construction import (
     build_algorithm_config,
     build_algorithm_kwargs,
@@ -64,7 +62,6 @@ def get_algorithm(
 
 __all__ = [
     "BaseAlgorithm",
-    "SamplingRequirements",
     "GRPOAlgorithm",
     "MixGRPOAlgorithm",
     "NFTAlgorithm",

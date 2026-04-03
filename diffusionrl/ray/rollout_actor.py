@@ -27,7 +27,7 @@ from diffusionrl.samplers.engine import (
 from diffusionrl.distributed.weight_sync_checkpoint import wait_for_published_checkpoint
 
 from .actor_base import log_gpu_state, log_resource_ids
-from .sampling_runtime import finalize_sampling_output
+from diffusionrl.samplers.fsdp.sampler_runner import finalize_sampling_output
 
 logger = logging.getLogger(__name__)
 

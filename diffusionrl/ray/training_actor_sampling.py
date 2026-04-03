@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from typing import Any, List, Set, Tuple
+from typing import Any, List, Tuple, Set
 
 import torch
 import torch.nn as nn
@@ -14,27 +14,6 @@ from diffusionrl.types.sde import SDEConfig
 from diffusionrl.types.sampling import RolloutSamples, RolloutRequest
 
 logger = logging.getLogger(__name__)
-
-
-@contextmanager
-def sampling_eval_context(modules: List[nn.Module]):
-    """Temporarily switch modules to eval/no-grad and restore training flags."""
-    original_modes = [
-        (module, bool(module.training))
-        for module in modules
-        if isinstance(module, nn.Module)
-    ]
-    for module, _ in original_modes:
-        module.eval()
-
-    try:
-        # Use no_grad instead of inference_mode to avoid FSDP grad_fn/AccumulateGrad
-        # assertion failures when returning to training.
-        with torch.no_grad():
-            yield
-    finally:
-        for module, was_training in original_modes:
-            module.train(was_training)
 
 
 class ActorSamplingExecutor:
@@ -95,37 +74,39 @@ class ActorSamplingExecutor:
         actor._sampling_ready = True
 
     def decode_latents(self, actor: Any, latents: torch.Tensor) -> torch.Tensor:
-        self.ensure_sampling_components(actor)
         return sampler_runner.decode_latents(actor.vae, latents)
-
-    def _iter_sampling_mode_modules(self, actor: Any) -> List[nn.Module]:
-        modules: List[nn.Module] = []
-        seen: Set[int] = set()
-        for component in (actor.model, actor.text_encoder, actor.vae):
-            if isinstance(component, nn.Module):
-                ident = id(component)
-                if ident not in seen:
-                    modules.append(component)
-                    seen.add(ident)
-
-        if actor.model_bundle is not None and hasattr(
-            actor.model_bundle, "iter_offloadable_modules"
-        ):
-            for _name, component in actor.model_bundle.iter_offloadable_modules(
-                include_transformer=True
-            ):
-                if isinstance(component, nn.Module):
-                    ident = id(component)
-                    if ident not in seen:
-                        modules.append(component)
-                        seen.add(ident)
-        return modules
 
     @contextmanager
     def _sampling_eval_context(self, actor: Any):
-        modules = self._iter_sampling_mode_modules(actor)
-        with sampling_eval_context(modules):
-            yield
+        """Temporarily switch all sampling-relevant modules to eval/no-grad."""
+        modules: List[nn.Module] = []
+        seen: Set[int] = set()
+
+        # model_bundle.iter_offloadable_modules covers text_encoder*, vae,
+        # transformer, image_encoder — the main source of truth.
+        if actor.model_bundle is not None and hasattr(
+            actor.model_bundle, "iter_offloadable_modules"
+        ):
+            for _name, m in actor.model_bundle.iter_offloadable_modules(
+                include_transformer=True
+            ):
+                modules.append(m)
+                seen.add(id(m))
+
+        # actor.model may be a standalone reference not in model_bundle.
+        if isinstance(actor.model, nn.Module) and id(actor.model) not in seen:
+            modules.append(actor.model)
+
+        was_training = [m.training for m in modules]
+        for m in modules:
+            m.eval()
+        try:
+            # no_grad (not inference_mode) to avoid FSDP AccumulateGrad assertions.
+            with torch.no_grad():
+                yield
+        finally:
+            for m, was in zip(modules, was_training):
+                m.train(was)
 
     def generate_raw(
         self,
@@ -153,6 +134,5 @@ class ActorSamplingExecutor:
 
 
 __all__ = [
-    "sampling_eval_context",
     "ActorSamplingExecutor",
 ]

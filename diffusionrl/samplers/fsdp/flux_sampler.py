@@ -312,10 +312,8 @@ class FluxSampler(BaseSampler):
             else:
                 sde_indices = set(range(num_inference_steps))
 
-        # Obtain a strategy instance once (important for stateful strategies like DPM2)
         strategy = get_sde_strategy(self.sde_type)
-        if strategy.is_stateful:
-            strategy.init_schedule(sigma_schedule)
+        strategy.init_schedule(sigma_schedule)
 
         # Storage for trajectory and log probs (DanceGRPO line 226-227)
         latents = packed_latents.to(dtype=trajectory_dtype)

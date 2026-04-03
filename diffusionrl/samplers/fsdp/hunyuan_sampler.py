@@ -253,10 +253,8 @@ class FSDPHunyuanSampler(BaseSampler):
             else float(self.default_guidance_scale)
         )
 
-        # Obtain a strategy instance once (important for stateful strategies like DPM2)
         strategy = get_sde_strategy(self.sde_type)
-        if strategy.is_stateful:
-            strategy.init_schedule(sigma_schedule)
+        strategy.init_schedule(sigma_schedule)
 
         # Storage for trajectory and log probs (DanceGRPO line 115-116)
         # Selective collection: only store positions needed for SDE step pairs

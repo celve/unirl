@@ -20,8 +20,8 @@ from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.types.sampling import LogProbData, RolloutRequest, RolloutSamples
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.patches.replay_logprob import ReplayLogProbPatch
-from diffusionrl.ray.actor_sampling import ActorSamplingExecutor
-from diffusionrl.ray.sampling_runtime import finalize_sampling_output
+from diffusionrl.ray.training_actor_sampling import ActorSamplingExecutor
+from diffusionrl.samplers.fsdp.sampler_runner import finalize_sampling_output
 from diffusionrl.utils.dtypes import inject_model_dtype_kwarg, parse_torch_dtype
 from diffusionrl.utils import clear_memory as _clear_gpu_memory
 from diffusionrl.distributed.weight_sync_checkpoint import (

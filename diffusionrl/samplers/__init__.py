@@ -6,20 +6,8 @@ import importlib
 from typing import Dict, Tuple
 
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
-    "sde_step": ("diffusionrl.sde.runtime", "sde_step"),
-    "compute_sde_log_prob": ("diffusionrl.sde.runtime", "compute_sde_log_prob"),
-    "get_sigma_schedule": ("diffusionrl.sde.runtime", "get_sigma_schedule"),
-    "sde_step_with_log_prob": ("diffusionrl.sde.runtime", "sde_step_with_log_prob"),
     "BaseSampler": ("diffusionrl.samplers.base", "BaseSampler"),
     "RolloutSamples": ("diffusionrl.samplers.base", "RolloutSamples"),
-    "TimestepScheduler": ("diffusionrl.utils.scheduler_utils", "TimestepScheduler"),
-    "AllSDEScheduler": ("diffusionrl.utils.scheduler_utils", "AllSDEScheduler"),
-    "WindowScheduler": ("diffusionrl.utils.scheduler_utils", "WindowScheduler"),
-    "WindowConfig": ("diffusionrl.utils.scheduler_utils", "WindowConfig"),
-    "create_indices_scheduler": (
-        "diffusionrl.utils.scheduler_utils",
-        "create_indices_scheduler",
-    ),
     "BaseRolloutEngine": ("diffusionrl.samplers.engine", "BaseRolloutEngine"),
     "ENGINE_REGISTRY": ("diffusionrl.samplers.engine", "ENGINE_REGISTRY"),
     "register_engine": ("diffusionrl.samplers.engine", "register_engine"),

@@ -39,13 +39,8 @@ class StepStrategy(ABC):
         pass
 
     def init_schedule(self, sigmas: torch.Tensor) -> None:
-        """Set full sigma schedule (required for stateful strategies like DPM2)."""
+        """Set full sigma schedule (no-op for stateless strategies)."""
         pass
-
-    @property
-    def is_stateful(self) -> bool:
-        """Whether this strategy carries state across steps."""
-        return False
 
 
 class SDEStrategy(StepStrategy, ABC):
@@ -416,10 +411,6 @@ class DPM2Strategy(StepStrategy):
     def __init__(self) -> None:
         self._state = _DPMState(order=2)
         self._sigmas: Optional[torch.Tensor] = None
-
-    @property
-    def is_stateful(self) -> bool:
-        return True
 
     def reset(self) -> None:
         self._state = _DPMState(order=2)

@@ -9,27 +9,23 @@ __version__ = "0.1.0"
 
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     # shared types
-    "RolloutSamplesType": ("diffusionrl.types", "RolloutSamples"),
     "RolloutRequest": ("diffusionrl.types", "RolloutRequest"),
-    "RewardRequestType": ("diffusionrl.types", "RewardRequest"),
-    "RewardResponseType": ("diffusionrl.types", "RewardResponse"),
-    "TrainingBatch": ("diffusionrl.types", "TrainingBatch"),
-    # samplers
-    "BaseSampler": ("diffusionrl.samplers", "BaseSampler"),
-    "RolloutSamples": ("diffusionrl.samplers", "RolloutSamples"),
-    "sde_step": ("diffusionrl.sde", "sde_step"),
-    "compute_sde_log_prob": ("diffusionrl.sde", "compute_sde_log_prob"),
-    "get_sigma_schedule": ("diffusionrl.sde", "get_sigma_schedule"),
-    "sde_step_with_log_prob": ("diffusionrl.sde", "sde_step_with_log_prob"),
-    "SDEConfig": ("diffusionrl.types", "SDEConfig"),
-    # reward scorers
-    "BaseRewardScorer": ("diffusionrl.reward", "BaseRewardScorer"),
+    "RolloutSamples": ("diffusionrl.types", "RolloutSamples"),
     "RewardRequest": ("diffusionrl.types", "RewardRequest"),
     "RewardResponse": ("diffusionrl.types", "RewardResponse"),
     "RewardType": ("diffusionrl.types", "RewardType"),
-    # algorithms / advantages
-    "BaseAlgorithm": ("diffusionrl.algorithms", "BaseAlgorithm"),
+    "TrainingBatch": ("diffusionrl.types", "TrainingBatch"),
     "SamplingRequirements": ("diffusionrl.types", "SamplingRequirements"),
+    "SDEConfig": ("diffusionrl.types", "SDEConfig"),
+    # samplers
+    "BaseSampler": ("diffusionrl.samplers", "BaseSampler"),
+    # sde
+    "denoising_step": ("diffusionrl.sde", "denoising_step"),
+    "get_sigma_schedule": ("diffusionrl.sde", "get_sigma_schedule"),
+    # reward
+    "BaseRewardScorer": ("diffusionrl.reward", "BaseRewardScorer"),
+    # algorithms
+    "BaseAlgorithm": ("diffusionrl.algorithms", "BaseAlgorithm"),
     "GRPOAlgorithm": ("diffusionrl.algorithms", "GRPOAlgorithm"),
     "NFTAlgorithm": ("diffusionrl.algorithms", "NFTAlgorithm"),
     # config / utils / models

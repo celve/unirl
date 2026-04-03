@@ -372,10 +372,8 @@ class SD3Sampler(BaseSampler):
             else:
                 sde_indices = set(range(num_inference_steps))
 
-        # Obtain a strategy instance once (important for stateful strategies like DPM2)
         strategy = get_sde_strategy(self.sde_type)
-        if strategy.is_stateful:
-            strategy.init_schedule(sigmas)
+        strategy.init_schedule(sigmas)
 
         # Storage for trajectory and log probs
         latents = latents.to(self.trajectory_dtype)

@@ -1,26 +1,25 @@
 """Shared sampling execution core for FSDP-based samplers.
 
-This module extracts the common logic used by training-actor direct sampling
-and any future native in-process rollout hosts.
-
-These paths ultimately do the same thing: create a sampler, call
-sampler.sample() with optional adapter switching, encode prompts,
-and decode latents. This module owns the shared core.
+This module owns the full sampling lifecycle: sampler creation, prompt
+encoding, sample generation with optional adapter switching, latent
+decoding, and output post-processing (metadata defaults, decode-for-reward,
+transport optimisation, CPU offload).
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
 from diffusionrl.sde.rules import normalize_sde_type
-from diffusionrl.types import RolloutRequest
+from diffusionrl.types import RolloutRequest, RolloutSamples
 from diffusionrl.utils import load_function
 from diffusionrl.utils.adapter_utils import switch_adapter
+from diffusionrl.utils.media import tensor_to_pil
 
 logger = logging.getLogger(__name__)
 
@@ -290,3 +289,99 @@ def iter_offloadable_modules(
         ):
             results.append((name, value))
     return results
+
+
+# ---------------------------------------------------------------------------
+# Output post-processing
+# ---------------------------------------------------------------------------
+
+def _attach_metadata_defaults(
+    output: RolloutSamples,
+    metadata_defaults: Optional[Dict[str, Any]],
+) -> RolloutSamples:
+    """Fill missing keys in ``aux['metadata']`` from *metadata_defaults*."""
+    if not metadata_defaults:
+        return output
+    raw_metadata = output.aux.get("metadata")
+    metadata = dict(raw_metadata or {})
+    changed = False
+    for key, value in metadata_defaults.items():
+        if key not in metadata:
+            metadata[key] = value
+            changed = True
+    if changed:
+        output.aux["metadata"] = metadata
+    return output
+
+
+def _decode_for_reward_if_needed(
+    output: RolloutSamples,
+    request: RolloutRequest,
+    decode_latents_fn: Optional[Callable[[torch.Tensor], torch.Tensor]],
+    host_label: str,
+) -> RolloutSamples:
+    """VAE-decode final latents when the request asks for reward-ready pixels."""
+    if not bool(request.sampling.get("decode_for_reward", False)):
+        return output
+    raw_metadata = output.aux.get("metadata")
+    has_decoded_videos = bool(
+        isinstance(raw_metadata, dict) and torch.is_tensor(raw_metadata.get("decoded_videos"))
+    )
+    if has_decoded_videos or output.aux.get("decoded_images"):
+        return output
+    if decode_latents_fn is None:
+        raise RuntimeError(
+            f"decode_for_reward requested but {host_label} does not provide latent decoding."
+        )
+    try:
+        decoded = decode_latents_fn(output.latents)
+        decoded_images = tensor_to_pil(decoded)
+    except Exception as exc:
+        raise RuntimeError(
+            f"decode_for_reward requested but {host_label} produced no decoded media "
+            f"and latent decoding failed: {exc}"
+        ) from exc
+    return RolloutSamples(
+        latents=output.latents,
+        timesteps=output.timesteps,
+        aux={**dict(output.aux), "decoded_images": list(decoded_images)},
+        meta=output.meta,
+    )
+
+
+def finalize_sampling_output(
+    *,
+    output: RolloutSamples,
+    request: RolloutRequest,
+    host_label: str,
+    decode_latents_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    metadata_defaults: Optional[Dict[str, Any]] = None,
+    local_reward_attach_fn: Optional[Callable[[RolloutSamples], RolloutSamples]] = None,
+    transport_optimize_fn: Optional[Callable[[RolloutSamples], RolloutSamples]] = None,
+    move_output_to_cpu: bool = True,
+) -> RolloutSamples:
+    """Apply shared sampling-output post-processing after raw generation.
+
+    Pipeline: metadata defaults → decode-for-reward → local reward →
+    transport optimisation → move to CPU.
+    """
+    output = _attach_metadata_defaults(output, metadata_defaults)
+    output = _decode_for_reward_if_needed(output, request, decode_latents_fn, host_label)
+    if bool(request.sampling.get("decode_for_reward", False)) and local_reward_attach_fn is not None:
+        output = local_reward_attach_fn(output)
+    if transport_optimize_fn is not None:
+        output = transport_optimize_fn(output)
+    if move_output_to_cpu:
+        output = output.to_device("cpu")
+    return output
+
+
+__all__ = [
+    "create_sampler",
+    "run_sample",
+    "generate_prompt_only_rollout",
+    "encode_prompt",
+    "decode_latents",
+    "iter_offloadable_modules",
+    "finalize_sampling_output",
+]
