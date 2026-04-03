@@ -27,7 +27,9 @@ import torch.nn as nn
 from ..base import BaseSampler, RolloutSamples
 from diffusionrl.sde.kernels import get_sde_strategy
 from diffusionrl.sde.runtime import sd3_time_shift, denoising_step
-from diffusionrl.types import LogProbData, PromptEmbeddings
+from diffusionrl.types import LogProbData
+from diffusionrl.types.forward_context import HunyuanForwardContext
+from diffusionrl.types.trajectory_store import TrajectoryStore
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 logger = logging.getLogger(__name__)
@@ -257,7 +259,9 @@ class FSDPHunyuanSampler(BaseSampler):
             strategy.init_schedule(sigma_schedule)
 
         # Storage for trajectory and log probs (DanceGRPO line 115-116)
-        all_latents = [latents.clone().to(dtype=trajectory_dtype)]
+        # Selective collection: only store positions needed for SDE step pairs
+        trajectory_store = TrajectoryStore.for_sde_steps(sde_indices, num_inference_steps)
+        trajectory_store.add(0, latents.clone().to(dtype=trajectory_dtype))
         all_log_probs: Dict[int, torch.Tensor] = {}
 
         autocast_ctx = (
@@ -305,7 +309,7 @@ class FSDPHunyuanSampler(BaseSampler):
                 step_index=i,
             )
             latents = latents.to(dtype=self.trajectory_dtype)
-            all_latents.append(latents)
+            trajectory_store.add(i + 1, latents)
 
             if log_prob is not None:
                 all_log_probs[i] = log_prob.to(dtype=self.logprob_dtype)
@@ -313,11 +317,10 @@ class FSDPHunyuanSampler(BaseSampler):
         # Final latent normalization (DanceGRPO line 140)
         final_latents = latents.to(torch.float32) / self.LATENT_SCALE
 
-        # Stack trajectory (DanceGRPO line 141)
-        trajectories = torch.stack(all_latents, dim=1)  # [B, T+1, C, t, H, W]
+        trajectory_store.finalize()
 
-        # Create embeddings bundle
-        embeddings = PromptEmbeddings(
+        forward_context = HunyuanForwardContext(
+            guidance_scale=float(actual_guidance),
             prompt_embeds=prompt_embeds,
             encoder_attention_mask=encoder_attention_mask,
         )
@@ -326,11 +329,10 @@ class FSDPHunyuanSampler(BaseSampler):
             latents=final_latents,
             timesteps=sigma_schedule,
             aux={
-                "trajectories": trajectories,
+                "trajectory_store": trajectory_store,
                 "log_probs": LogProbData.from_dict(all_log_probs),
-                "embeddings": embeddings,
+                "forward_context": forward_context,
                 "metadata": {
-                    "sde_indices": sde_indices,
                     "engine_capabilities": {
                         "supports_logprob": True,
                         "supports_trajectory": True,

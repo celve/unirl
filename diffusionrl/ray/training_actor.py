@@ -17,11 +17,8 @@ import torch.nn as nn
 from diffusionrl.algorithms.construction import instantiate_algorithm_from_config
 from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
 from diffusionrl.reward.schema import RewardSchema
-from diffusionrl.types.sampling import LogProbData, PromptEmbeddings, RolloutRequest, RolloutSamples
-from diffusionrl.types.training_batch import (
-    BackwardTrainingBatch,
-    TrainingBatch,
-)
+from diffusionrl.types.sampling import LogProbData, RolloutRequest, RolloutSamples
+from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.patches.replay_logprob import ReplayLogProbPatch
 from diffusionrl.ray.actor_sampling import ActorSamplingExecutor
 from diffusionrl.ray.sampling_runtime import finalize_sampling_output
@@ -64,7 +61,8 @@ def _build_synthetic_debug_training_batch(
     (for example video layouts or FLUX-specific packed inputs), so train_only
     should use ``--debug.debug-load-path`` there rather than guessing.
     """
-    from diffusionrl.types.training_batch import BackwardTrainingBatch, ForwardTrainingBatch
+    from diffusionrl.types.training_batch import TrainingBatch
+    from diffusionrl.types.trajectory_store import TrajectoryStore
 
     normalized_model_type = str(model_type or "").strip().lower()
     if normalized_model_type != "sd3":
@@ -89,31 +87,42 @@ def _build_synthetic_debug_training_batch(
     latent_h = height // vae_scale_factor
     latent_w = width // vae_scale_factor
 
+    from diffusionrl.types.forward_context import get_forward_context_cls
+
     prompt_embeds = torch.randn(batch_size, max_sequence_length, joint_dim, dtype=dtype)
     pooled_prompt_embeds = torch.randn(batch_size, pooled_dim, dtype=dtype)
     negative_prompt_embeds = torch.zeros_like(prompt_embeds)
     negative_pooled_prompt_embeds = torch.zeros_like(pooled_prompt_embeds)
-    embeddings = PromptEmbeddings(
-        prompt_embeds=prompt_embeds,
-        pooled_prompt_embeds=pooled_prompt_embeds,
-        negative_prompt_embeds=negative_prompt_embeds,
-        negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-    )
+
+    try:
+        ctx_cls = get_forward_context_cls(normalized_model_type)
+    except KeyError:
+        ctx_cls = get_forward_context_cls("default")
+    from dataclasses import fields as _dc_fields
+    valid_fields = {f.name for f in _dc_fields(ctx_cls)}
+    ctx_kwargs = {
+        "guidance_scale": 7.0,
+        "prompt_embeds": prompt_embeds,
+        "pooled_prompt_embeds": pooled_prompt_embeds,
+        "negative_prompt_embeds": negative_prompt_embeds,
+        "negative_pooled_prompt_embeds": negative_pooled_prompt_embeds,
+    }
+    fwd_ctx = ctx_cls(**{k: v for k, v in ctx_kwargs.items() if k in valid_fields})
+
     advantages = torch.randn(batch_size, dtype=torch.float32)
     rewards = torch.randn(batch_size, dtype=torch.float32)
     prompts = [f"debug_prompt_{i}" for i in range(batch_size)]
 
     if bool(getattr(algorithm, "is_forward_process", lambda: False)()):
-        batch = ForwardTrainingBatch(
-            clean_latents=torch.randn(
-                batch_size,
-                latent_channels,
-                latent_h,
-                latent_w,
-                dtype=dtype,
+        timesteps = torch.linspace(1.0, 0.0, steps=num_inference_steps + 1, dtype=torch.float32)
+        batch = TrainingBatch(
+            trajectory_store=TrajectoryStore.from_clean_latents(
+                torch.randn(batch_size, latent_channels, latent_h, latent_w, dtype=dtype),
+                total_positions=num_inference_steps + 1,
             ),
+            timesteps=timesteps,
             advantages=advantages,
-            embeddings=embeddings,
+            forward_context=fwd_ctx,
             rewards=rewards,
             prompts=prompts,
         )
@@ -122,14 +131,16 @@ def _build_synthetic_debug_training_batch(
 
     step_indices = torch.arange(num_inference_steps + 1, dtype=torch.long)
     timesteps = torch.linspace(1.0, 0.0, steps=num_inference_steps + 1, dtype=torch.float32)
-    batch = BackwardTrainingBatch(
-        trajectories=torch.randn(
-            batch_size,
-            num_inference_steps + 1,
-            latent_channels,
-            latent_h,
-            latent_w,
-            dtype=dtype,
+    batch = TrainingBatch(
+        trajectory_store=TrajectoryStore.from_full(
+            torch.randn(
+                batch_size,
+                num_inference_steps + 1,
+                latent_channels,
+                latent_h,
+                latent_w,
+                dtype=dtype,
+            ),
         ),
         log_probs=LogProbData.from_dict(
             {
@@ -139,7 +150,7 @@ def _build_synthetic_debug_training_batch(
         ),
         timesteps=timesteps,
         advantages=advantages,
-        embeddings=embeddings,
+        forward_context=fwd_ctx,
         rewards=rewards,
         prompts=prompts,
         step_indices=step_indices,
@@ -211,7 +222,6 @@ class TrainingActor(BaseTrainRayActor):
         self._ema_manager = None
         self._algorithm_type = "grpo"
         self._algorithm_dotpath = None
-        self._guidance_scale: Optional[float] = None
         # Sample-level shuffle before training (analogous to Flow-Factory inner-epoch shuffle)
         self._shuffle_samples = True
         self._shuffle_seed: Optional[int] = None
@@ -644,7 +654,6 @@ class TrainingActor(BaseTrainRayActor):
         """Load the train-side Algorithm instance."""
         self._algorithm_type = str(algorithm_config["algorithm_type"])
         self._algorithm_dotpath = str(algorithm_config.get("algorithm_dotpath") or "")
-        self._guidance_scale = float(algorithm_config["guidance_scale"])
 
         self._shuffle_samples = bool(algorithm_config.get("shuffle_samples", True))
         raw_shuffle_seed = algorithm_config.get("shuffle_seed", None)
@@ -735,12 +744,7 @@ class TrainingActor(BaseTrainRayActor):
             logger.debug("Rank %s: Training weights restored after eval", self.rank)
         return restored
 
-    def _maybe_replay_old_log_probs(self, batch: BackwardTrainingBatch) -> BackwardTrainingBatch:
-        if self._guidance_scale is None:
-            raise RuntimeError(
-                "TrainingActor guidance_scale is not initialized. "
-                "Ensure algorithm_config.guidance_scale is provided before replay."
-            )
+    def _maybe_replay_old_log_probs(self, batch: TrainingBatch) -> TrainingBatch:
         return self._replay_logprob_patch.maybe_replay_old_log_probs(
             batch=batch,
             enabled=self._replay_enabled,
@@ -751,7 +755,6 @@ class TrainingActor(BaseTrainRayActor):
             text_encoder=self.text_encoder,
             vae=self.vae,
             scheduler=self.scheduler,
-            guidance_scale=self._guidance_scale,
         )
 
     def generate(self, request: RolloutRequest) -> RolloutSamples:
@@ -805,7 +808,6 @@ class TrainingActor(BaseTrainRayActor):
             device=self._device,
             use_fsdp=bool(self._train_backend and self._train_backend.uses_sharded_model()),
             algorithm_type=self._algorithm_type,
-            guidance_scale=self._guidance_scale,
             max_grad_norm=self._max_grad_norm,
             micro_batch_size=self._micro_batch_size,
             local_mini_batch_size=self._local_mini_batch_size,

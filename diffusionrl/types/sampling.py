@@ -15,6 +15,7 @@ from diffusionrl.types.batch_ops import (
     slice_columnar_value,
 )
 from diffusionrl.types.sde import SDEConfig
+from diffusionrl.types.trajectory_store import TrajectoryStore
 
 if TYPE_CHECKING:
     from torch import device as TorchDevice
@@ -211,150 +212,6 @@ class LogProbData:
 
 
 @dataclass
-class PromptEmbeddings:
-    """
-    Bundled embeddings for different model architectures.
-
-    This provides a unified container for all embedding types needed
-    across Flux, SD3, and other models.
-
-    Attributes:
-        prompt_embeds: Text encoder hidden states [B, seq, hidden]
-        pooled_prompt_embeds: Pooled text embeddings [B, hidden] (optional)
-        encoder_attention_mask: Attention mask for encoder tokens (optional)
-        negative_prompt_embeds: Negative prompt hidden states [B, seq, hidden] (optional)
-        negative_pooled_prompt_embeds: Negative pooled text embeddings [B, hidden] (optional)
-        text_ids: Text position IDs for Flux (optional)
-        image_ids: Image position IDs for Flux (optional)
-    """
-
-    prompt_embeds: torch.Tensor
-    pooled_prompt_embeds: Optional[torch.Tensor] = None
-    encoder_attention_mask: Optional[torch.Tensor] = None
-    negative_prompt_embeds: Optional[torch.Tensor] = None
-    negative_pooled_prompt_embeds: Optional[torch.Tensor] = None
-    text_ids: Optional[torch.Tensor] = None
-    image_ids: Optional[torch.Tensor] = None
-
-    def to_device(self, device: Union[str, "TorchDevice"]) -> "PromptEmbeddings":
-        """Move all tensors to specified device."""
-        return PromptEmbeddings(
-            prompt_embeds=self.prompt_embeds.to(device),
-            pooled_prompt_embeds=(
-                self.pooled_prompt_embeds.to(device)
-                if self.pooled_prompt_embeds is not None
-                else None
-            ),
-            encoder_attention_mask=(
-                self.encoder_attention_mask.to(device)
-                if self.encoder_attention_mask is not None
-                else None
-            ),
-            negative_prompt_embeds=(
-                self.negative_prompt_embeds.to(device)
-                if self.negative_prompt_embeds is not None
-                else None
-            ),
-            negative_pooled_prompt_embeds=(
-                self.negative_pooled_prompt_embeds.to(device)
-                if self.negative_pooled_prompt_embeds is not None
-                else None
-            ),
-            text_ids=self.text_ids.to(device) if self.text_ids is not None else None,
-            image_ids=self.image_ids.to(device) if self.image_ids is not None else None,
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary format for downstream consumers."""
-        result = {"prompt_embeds": self.prompt_embeds}
-        if self.pooled_prompt_embeds is not None:
-            result["pooled_prompt_embeds"] = self.pooled_prompt_embeds
-        if self.encoder_attention_mask is not None:
-            result["encoder_attention_mask"] = self.encoder_attention_mask
-        if self.negative_prompt_embeds is not None:
-            result["negative_prompt_embeds"] = self.negative_prompt_embeds
-        if self.negative_pooled_prompt_embeds is not None:
-            result["negative_pooled_prompt_embeds"] = self.negative_pooled_prompt_embeds
-        if self.text_ids is not None:
-            result["text_ids"] = self.text_ids
-        if self.image_ids is not None:
-            result["image_ids"] = self.image_ids
-        return result
-
-    def slice(self, start: int, end: int) -> "PromptEmbeddings":
-        """
-        Slice embeddings along batch dimension.
-
-        Args:
-            start: Start index (inclusive)
-            end: End index (exclusive)
-
-        Returns:
-            New PromptEmbeddings with sliced tensors
-
-        Note:
-            For FLUX models, image_ids are NOT batched (shape [H*W, 3], shared
-            across batch). This method detects unbatched tensors by comparing
-            their first dimension with prompt_embeds batch size and keeps them
-            as-is (shared) instead of slicing.
-        """
-        batch_size = self.prompt_embeds.shape[0]
-
-        def _slice_if_batched(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-            if tensor is None:
-                return None
-            if tensor.shape[0] == batch_size:
-                return tensor[start:end].clone()
-            return tensor
-
-        return PromptEmbeddings(
-            prompt_embeds=self.prompt_embeds[start:end].clone(),
-            pooled_prompt_embeds=_slice_if_batched(self.pooled_prompt_embeds),
-            encoder_attention_mask=_slice_if_batched(self.encoder_attention_mask),
-            negative_prompt_embeds=_slice_if_batched(self.negative_prompt_embeds),
-            negative_pooled_prompt_embeds=_slice_if_batched(
-                self.negative_pooled_prompt_embeds
-            ),
-            text_ids=_slice_if_batched(self.text_ids),
-            image_ids=_slice_if_batched(self.image_ids),
-        )
-
-    def reindex(self, indices: torch.Tensor) -> "PromptEmbeddings":
-        """
-        Reindex embeddings along batch dimension using a permutation tensor.
-
-        For FLUX models, image_ids are NOT batched (shared across batch)
-        and are kept as-is.
-
-        Args:
-            indices: 1-D LongTensor of sample indices (e.g. from torch.randperm)
-
-        Returns:
-            New PromptEmbeddings with reindexed tensors
-        """
-        batch_size = self.prompt_embeds.shape[0]
-
-        def _reindex_if_batched(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-            if tensor is None:
-                return None
-            if tensor.shape[0] == batch_size:
-                return tensor[indices]
-            return tensor
-
-        return PromptEmbeddings(
-            prompt_embeds=self.prompt_embeds[indices],
-            pooled_prompt_embeds=_reindex_if_batched(self.pooled_prompt_embeds),
-            encoder_attention_mask=_reindex_if_batched(self.encoder_attention_mask),
-            negative_prompt_embeds=_reindex_if_batched(self.negative_prompt_embeds),
-            negative_pooled_prompt_embeds=_reindex_if_batched(
-                self.negative_pooled_prompt_embeds
-            ),
-            text_ids=_reindex_if_batched(self.text_ids),
-            image_ids=_reindex_if_batched(self.image_ids),
-        )
-
-
-@dataclass
 class RolloutSamples:
     """Lightweight sampler output contract shared across rollout stages."""
 
@@ -366,12 +223,18 @@ class RolloutSamples:
     def __post_init__(self) -> None:
         self.aux = dict(self.aux or {})
         self.meta = copy_columnar_mapping(self.meta)
+        # Auto-promote legacy aux["trajectories"] tensor to TrajectoryStore.
+        # After this, all downstream code only needs to look at "trajectory_store".
+        if "trajectory_store" not in self.aux and "trajectories" in self.aux:
+            raw = self.aux.pop("trajectories")
+            if raw is not None:
+                self.aux["trajectory_store"] = TrajectoryStore.from_full(raw)
 
     @property
     def num_steps(self) -> int:
-        trajectories = self.aux.get("trajectories")
-        if trajectories is not None:
-            return int(trajectories.shape[1]) - 1
+        trajectory_store = self.aux.get("trajectory_store")
+        if trajectory_store is not None:
+            return trajectory_store.total_positions - 1
         return int(self.timesteps.shape[0]) - 1
 
     @property
@@ -418,16 +281,16 @@ class RolloutSamples:
 
     def to_device(self, device: Union[str, "TorchDevice"]) -> "RolloutSamples":
         moved_aux: Dict[str, Any] = dict(self.aux)
-        trajectories = self.aux.get("trajectories")
+        trajectory_store = self.aux.get("trajectory_store")
         log_probs = self.aux.get("log_probs")
-        embeddings = self.aux.get("embeddings")
+        fwd_ctx = self.aux.get("forward_context")
         step_indices = self.aux.get("step_indices")
-        if trajectories is not None:
-            moved_aux["trajectories"] = trajectories.to(device)
+        if trajectory_store is not None:
+            moved_aux["trajectory_store"] = trajectory_store.to_device(device)
         if log_probs is not None:
             moved_aux["log_probs"] = log_probs.to_device(device)
-        if embeddings is not None:
-            moved_aux["embeddings"] = embeddings.to_device(device)
+        if fwd_ctx is not None:
+            moved_aux["forward_context"] = fwd_ctx.to_device(device)
         if step_indices is not None:
             moved_aux["step_indices"] = step_indices.to(device)
         return RolloutSamples(
@@ -460,9 +323,9 @@ class RolloutSamples:
             step_indices = torch.arange(
                 self.timesteps.shape[0], device=self.timesteps.device, dtype=torch.long
             )
-        trajectories = self.aux.get("trajectories")
+        trajectory_store = self.aux.get("trajectory_store")
         log_probs = self.aux.get("log_probs")
-        embeddings = self.aux.get("embeddings")
+        fwd_ctx = self.aux.get("forward_context")
         raw_metadata = self.aux.get("metadata")
         metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
         if step_indices.shape[0] != t_plus_1:
@@ -476,19 +339,20 @@ class RolloutSamples:
                 f"RolloutSamples step_indices must be strictly increasing, got {step_indices.tolist()}"
             )
 
-        if requires_trajectory and trajectories is None:
+        if requires_trajectory and trajectory_store is None:
             raise ValueError(
                 "RolloutSamples contract violation: trajectories required but missing."
             )
 
-        if trajectories is not None:
-            if int(trajectories.shape[0]) != batch_size:
+        if trajectory_store is not None:
+            if trajectory_store.batch_size != batch_size:
                 raise ValueError(
-                    f"RolloutSamples trajectories batch {trajectories.shape[0]} != latents batch {batch_size}"
+                    f"RolloutSamples trajectory_store batch {trajectory_store.batch_size} != latents batch {batch_size}"
                 )
-            if int(trajectories.shape[1]) != t_plus_1:
+            if trajectory_store.is_full and trajectory_store.total_positions != t_plus_1:
                 raise ValueError(
-                    f"RolloutSamples trajectories T+1 {trajectories.shape[1]} != timesteps length {t_plus_1}"
+                    f"RolloutSamples trajectory_store total_positions {trajectory_store.total_positions} "
+                    f"!= timesteps length {t_plus_1}"
                 )
 
         if requires_log_probs and not (log_probs is not None and len(log_probs) > 0):
@@ -517,14 +381,14 @@ class RolloutSamples:
                     "RolloutSamples contract violation: sde_indices must exactly match log_probs keys"
                 )
 
-        if requires_embeddings and embeddings is None:
+        if requires_embeddings and fwd_ctx is None:
             raise ValueError(
                 "RolloutSamples contract violation: embeddings required but missing."
             )
 
-        if embeddings is not None and int(embeddings.prompt_embeds.shape[0]) != batch_size:
+        if fwd_ctx is not None and fwd_ctx.batch_size > 0 and fwd_ctx.batch_size != batch_size:
             raise ValueError(
-                f"RolloutSamples contract violation: embeddings batch {embeddings.prompt_embeds.shape[0]} != {batch_size}"
+                f"RolloutSamples contract violation: forward_context batch {fwd_ctx.batch_size} != {batch_size}"
             )
 
         if metadata:
@@ -678,7 +542,6 @@ __all__ = [
     "RolloutSamples",
     "RolloutRequest",
     "LogProbData",
-    "PromptEmbeddings",
     "SamplingSpec",
     "SamplingRequirements",
 ]

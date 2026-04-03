@@ -11,7 +11,7 @@ import torch
 
 from diffusionrl.buffer.buffer_batch_ops import index_training_batch
 from diffusionrl.config.argument_parsing import parse_cli_list
-from diffusionrl.types.training_batch import BackwardTrainingBatch, TrainingBatch
+from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils import load_function
 
 
@@ -63,27 +63,19 @@ class FiniteTensorFilterPlugin(BufferPlugin):
 
         mask = torch.ones(sample_count, dtype=torch.bool)
 
-        if isinstance(batch, BackwardTrainingBatch):
-            mask &= _sample_finite_mask(batch.trajectories).cpu()
-            mask &= _sample_finite_mask(batch.advantages).cpu()
-            if batch.rewards is not None:
-                mask &= _sample_finite_mask(batch.rewards).cpu()
-            mask &= _sample_finite_mask(batch.embeddings.prompt_embeds).cpu()
+        mask &= _sample_finite_mask(batch.trajectory_store.data).cpu()
+        mask &= _sample_finite_mask(batch.advantages).cpu()
+        if batch.rewards is not None:
+            mask &= _sample_finite_mask(batch.rewards).cpu()
+        for val in batch.forward_context.to_dict().values():
+            if torch.is_tensor(val) and val.dim() > 0 and val.shape[0] == sample_count:
+                mask &= _sample_finite_mask(val).cpu()
+        if batch.log_probs is not None:
             for value in batch.log_probs.to_dict().values():
                 mask &= _sample_finite_mask(value).cpu()
-
-            if not torch.isfinite(batch.timesteps).all():
-                self.rejected_batches += 1
-                raise ValueError("Non-finite timesteps detected in BackwardTrainingBatch.")
-        else:
-            mask &= _sample_finite_mask(batch.clean_latents).cpu()
-            mask &= _sample_finite_mask(batch.advantages).cpu()
-            if batch.rewards is not None:
-                mask &= _sample_finite_mask(batch.rewards).cpu()
-            mask &= _sample_finite_mask(batch.embeddings.prompt_embeds).cpu()
-            if batch.timesteps is not None and not torch.isfinite(batch.timesteps).all():
-                self.rejected_batches += 1
-                raise ValueError("Non-finite timesteps detected in ForwardTrainingBatch.")
+        if batch.timesteps is not None and not torch.isfinite(batch.timesteps).all():
+            self.rejected_batches += 1
+            raise ValueError("Non-finite timesteps detected in TrainingBatch.")
 
         valid_indices = mask.nonzero(as_tuple=False).flatten().tolist()
         if len(valid_indices) == sample_count:

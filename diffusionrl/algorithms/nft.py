@@ -17,12 +17,13 @@ import torch.nn as nn
 from diffusers.utils.torch_utils import randn_tensor
 
 from diffusionrl.config.build_domain_args import resolve_sde_config
-from diffusionrl.types import ForwardTrainingBatch, SDEConfig
+from diffusionrl.types import SDEConfig
+from diffusionrl.types.training_batch import TrainingBatch as _TrainingBatch
 from diffusionrl.utils.adapter_utils import switch_adapter
 from diffusionrl.utils.misc import aggregate_numeric_metrics
 
 from .base import BaseAlgorithm, EMASpec, SamplingRequirements
-from .forward_context import ForwardContext
+from diffusionrl.types.forward_context import ForwardContext
 
 logger = logging.getLogger(__name__)
 
@@ -332,9 +333,9 @@ class NFTAlgorithm(BaseAlgorithm):
         current_step: int,
         **kwargs: Any,
     ) -> Any:
-        if not isinstance(batch, ForwardTrainingBatch):
+        if not isinstance(batch, _TrainingBatch):
             raise TypeError(
-                f"{type(self).__name__} expects ForwardTrainingBatch, got {type(batch).__name__}"
+                f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
             )
         del current_step
 
@@ -390,105 +391,6 @@ class NFTAlgorithm(BaseAlgorithm):
     # ------------------------------------------------------------------
     # Rollout geometry / request planning
     # ------------------------------------------------------------------
-
-    def assemble_training_batch(
-        self,
-        *,
-        request: "RolloutRequest",
-        sampler_outputs: List[Any],
-        rewards: torch.Tensor,
-        advantages: torch.Tensor,
-        sde_indices: Optional[Set[int]] = None,
-    ) -> Any:
-        return self._assemble_forward_batch(
-            sampler_outputs=sampler_outputs,
-            rewards=rewards,
-            advantages=advantages,
-            prompts=request.prompts,
-        )
-
-    def _assemble_forward_batch(
-        self,
-        *,
-        sampler_outputs: List[Any],
-        rewards: torch.Tensor,
-        advantages: torch.Tensor,
-        prompts: List[str],
-    ) -> Any:
-        from diffusionrl.types.sampling import PromptEmbeddings, RolloutSamples
-        from diffusionrl.types.training_batch import ForwardTrainingBatch
-
-        clean_latents = []
-        all_prompt_embeds = []
-        all_pooled_prompt_embeds = []
-        all_encoder_attention_mask = []
-        all_negative_prompt_embeds = []
-        all_negative_pooled_prompt_embeds = []
-        all_text_ids = []
-        all_image_ids = []
-        timesteps: Optional[torch.Tensor] = None
-
-        for idx, output in enumerate(sampler_outputs):
-            if not isinstance(output, RolloutSamples):
-                raise TypeError(
-                    f"Assemble stage expects RolloutSamples, got {type(output).__name__} at index={idx}."
-                )
-            _embeddings = output.aux.get("embeddings")
-            if _embeddings is None:
-                raise ValueError(f"RolloutSamples at index={idx} missing embeddings in forward path.")
-
-            clean_latents.append(output.latents)
-            emb = _embeddings
-            all_prompt_embeds.append(emb.prompt_embeds)
-            if emb.pooled_prompt_embeds is not None:
-                all_pooled_prompt_embeds.append(emb.pooled_prompt_embeds)
-            if emb.encoder_attention_mask is not None:
-                all_encoder_attention_mask.append(emb.encoder_attention_mask)
-            if emb.negative_prompt_embeds is not None:
-                all_negative_prompt_embeds.append(emb.negative_prompt_embeds)
-            if emb.negative_pooled_prompt_embeds is not None:
-                all_negative_pooled_prompt_embeds.append(emb.negative_pooled_prompt_embeds)
-            if emb.text_ids is not None:
-                all_text_ids.append(emb.text_ids)
-            if emb.image_ids is not None:
-                all_image_ids.append(emb.image_ids)
-            if timesteps is None:
-                timesteps = output.timesteps
-            elif output.timesteps is None:
-                raise ValueError(
-                    f"RolloutSamples at index={idx} missing timesteps while earlier outputs provided them."
-                )
-            elif not torch.equal(timesteps.to(output.timesteps.device), output.timesteps):
-                raise ValueError("Mismatched timesteps across sampler outputs")
-
-        if not clean_latents:
-            raise ValueError("No clean latents found in sampler outputs")
-        if timesteps is None:
-            raise ValueError("No timesteps found in sampler outputs")
-        prompt_embeds = torch.cat(all_prompt_embeds, dim=0) if all_prompt_embeds else None
-        if prompt_embeds is None:
-            raise ValueError("No prompt embeddings found in sampler outputs")
-
-        embeddings = PromptEmbeddings(
-            prompt_embeds=prompt_embeds,
-            pooled_prompt_embeds=torch.cat(all_pooled_prompt_embeds, dim=0) if all_pooled_prompt_embeds else None,
-            encoder_attention_mask=torch.cat(all_encoder_attention_mask, dim=0) if all_encoder_attention_mask else None,
-            negative_prompt_embeds=torch.cat(all_negative_prompt_embeds, dim=0) if all_negative_prompt_embeds else None,
-            negative_pooled_prompt_embeds=torch.cat(all_negative_pooled_prompt_embeds, dim=0) if all_negative_pooled_prompt_embeds else None,
-            text_ids=torch.cat(all_text_ids, dim=0) if all_text_ids else None,
-            image_ids=all_image_ids[0] if all_image_ids else None,
-        )
-
-        batch = ForwardTrainingBatch(
-            clean_latents=torch.cat(clean_latents, dim=0),
-            advantages=advantages,
-            embeddings=embeddings,
-            rewards=rewards,
-            prompts=prompts,
-            timesteps=timesteps,
-        )
-        batch.validate()
-        return batch
 
     # ==================================================================
     # Objective computation
@@ -586,14 +488,16 @@ class NFTAlgorithm(BaseAlgorithm):
         adapter switching fails. Falling back to the base model or current
         model would silently change the NFT objective semantics.
         """
+        plugin = self._get_forward_plugin(model)
+        ctx_kwargs = ctx.to_dict()
         if old_model is not None:
-            return ctx.forward(old_model, latents=latents, sigma=sigma)
+            return plugin.forward(model=old_model, latents=latents, sigma=sigma, **ctx_kwargs)
 
         adapter_model = model.module if hasattr(model, "module") else model
         if hasattr(adapter_model, "set_adapter"):
             try:
                 with switch_adapter(adapter_model, self.old_adapter_name):
-                    return ctx.forward(model, latents=latents, sigma=sigma)
+                    return plugin.forward(model=model, latents=latents, sigma=sigma, **ctx_kwargs)
             except Exception as exc:
                 raise RuntimeError(
                     "NFT old-policy prediction failed while switching adapters. "
@@ -619,11 +523,13 @@ class NFTAlgorithm(BaseAlgorithm):
         ref_model: Optional[nn.Module] = None,
     ) -> torch.Tensor:
         """Get reference prediction for KL regularization (base model)."""
+        plugin = self._get_forward_plugin(model)
+        ctx_kwargs = ctx.to_dict()
         adapter_model = model.module if hasattr(model, "module") else model
         if hasattr(adapter_model, "disable_adapter"):
             try:
                 with adapter_model.disable_adapter():
-                    return ctx.forward(model, latents=latents, sigma=sigma)
+                    return plugin.forward(model=model, latents=latents, sigma=sigma, **ctx_kwargs)
             except Exception as exc:
                 raise RuntimeError(
                     "NFT reference prediction failed while disabling adapters. "
@@ -631,7 +537,7 @@ class NFTAlgorithm(BaseAlgorithm):
                     "the KL term toward zero."
                 ) from exc
         if ref_model is not None:
-            return ctx.forward(ref_model, latents=latents, sigma=sigma)
+            return plugin.forward(model=ref_model, latents=latents, sigma=sigma, **ctx_kwargs)
         raise RuntimeError(
             "NFT reference prediction requires either disable_adapter() support "
             "or an explicit ref_model. No valid base-model reference path was available."
@@ -646,47 +552,32 @@ class NFTAlgorithm(BaseAlgorithm):
         *,
         model: nn.Module,
         batch: Any,
-        timesteps: Optional[Any],
-        guidance_scale: float = 3.5,
+        timesteps: Any = None,
         loss_scale: float = 1.0,
         **kwargs: Any,
     ) -> tuple:
-        """NFT training step over one micro-batch.
-
-        Here ``timesteps`` means the forward diffusion times to apply for
-        this update chunk. The executor resolves them once and reuses the
-        same sequence across all accumulation micro-batches so NFT keeps the
-        original update-level timestep semantics.
+        """NFT loss + backward for a single micro-batch.
 
         Returns:
-            ``(scaled_loss, metrics_dict, num_timesteps, has_backward)``
+            ``(loss, metrics, num_timesteps, has_backward)``
         """
-        if not isinstance(batch, ForwardTrainingBatch):
+        from diffusionrl.types.training_batch import TrainingBatch
+        if not isinstance(batch, TrainingBatch):
             raise TypeError(
-                f"{type(self).__name__} expects ForwardTrainingBatch, got {type(batch).__name__}"
+                f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
             )
 
-        timestep_mode = kwargs.get("timestep_mode", self.train_timestep_mode)
-        shuffle_timesteps = kwargs.get("shuffle_timesteps", self.shuffle_train_timesteps)
-        apply_shift = kwargs.get("apply_shift", self.apply_time_shift_in_loss)
-        timestep_fraction = kwargs.get(
-            "timestep_fraction",
-            self.training_timestep_fraction,
-        )
         if timesteps is None:
             timesteps = self.resolve_training_timesteps(
-                batch=batch,
-                timestep_mode=timestep_mode,
-                shuffle_timesteps=shuffle_timesteps,
-                timestep_fraction=timestep_fraction,
+                batch=batch, current_step=0, **kwargs,
             )
 
-        ctx = self._make_forward_context(model, batch.embeddings, guidance_scale)
-        total_loss_accum = 0.0
+        ctx = batch.forward_context
+        total_loss = 0.0
         has_backward = False
         timestep_metrics: List[Dict[str, Any]] = []
 
-        per_timestep_scale = loss_scale / timesteps.numel()
+        num_timesteps = timesteps.numel()
         for t in timesteps:
             loss, metrics = self.compute_loss(
                 model=model,
@@ -694,15 +585,15 @@ class NFTAlgorithm(BaseAlgorithm):
                 ctx=ctx,
                 timestep_values=t,
             )
-            scaled_loss = loss * per_timestep_scale
+            scaled_loss = loss * loss_scale / num_timesteps
             scaled_loss.backward()
             has_backward = True
-            total_loss_accum += scaled_loss.detach().item()
+            total_loss += scaled_loss.detach().item()
             timestep_metrics.append(metrics)
 
         all_metrics = aggregate_numeric_metrics(timestep_metrics)
 
-        return total_loss_accum, all_metrics, timesteps.numel(), has_backward
+        return total_loss, all_metrics, num_timesteps, has_backward
 
     # ------------------------------------------------------------------
     # Forward plugin
@@ -741,10 +632,12 @@ class NFTAlgorithm(BaseAlgorithm):
         assert hasattr(adapter_model, "set_adapter"), "adapter_model must have set_adapter method"
         adapter_model.set_adapter(self.new_adapter_name)
 
+        plugin = self._get_forward_plugin(model)
+        ctx_kwargs = ctx.to_dict()
         grad_context = torch.enable_grad() if not torch.is_grad_enabled() else nullcontext()
 
         with grad_context:
-            forward_prediction = ctx.forward(model, latents=xt, sigma=t)
+            forward_prediction = plugin.forward(model=model, latents=xt, sigma=t, **ctx_kwargs)
 
         old_prediction = self.get_old_prediction(
             model, ctx, latents=xt, sigma=t, old_model=old_model,
@@ -828,7 +721,7 @@ class NFTAlgorithm(BaseAlgorithm):
     def compute_loss(
         self,
         model: nn.Module,
-        batch: ForwardTrainingBatch,
+        batch: _TrainingBatch,
         *,
         ctx: ForwardContext,
         ref_model: Optional[nn.Module] = None,

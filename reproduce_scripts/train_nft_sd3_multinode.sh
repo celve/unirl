@@ -185,7 +185,7 @@ run_training() {
         --sampling.shift 3.0 \
         --sampling.eta 0.0 \
         --sampling.sde-type "${SDE_TYPE}" \
-        --sampling.timestep-fraction "${TIMESTEP_FRACTION}" \
+        --algorithm.training-scheduler.timestep-fraction "${TIMESTEP_FRACTION}" \
         --sampling.num-inference-steps "${NUM_INFERENCE_STEPS}" \
         --sampling.guidance-scale 1.0 \
         --sampling.sampling-adapter old \

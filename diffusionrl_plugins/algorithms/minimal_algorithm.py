@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from diffusionrl.algorithms.base import BaseAlgorithm, EMASpec, SamplingRequirements
 from diffusionrl.algorithms.grpo import GRPOAlgorithm
-from diffusionrl.types import PromptEmbeddings, TimestepData
+from diffusionrl.types import TimestepData
 from diffusionrl.types.sampling import RolloutRequest
 
 
@@ -108,23 +108,59 @@ class MinimalAlgorithm(BaseAlgorithm):
             "mode_label": "trajectory",
         }
 
-    def assemble_training_batch(
+    def compute_loss(
+        self,
+        model: nn.Module,
+        timestep_data: TimestepData,
+        advantages: torch.Tensor,
+        forward_context: Any = None,
+        **kwargs: Any,
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """Single loss entrypoint for debugging and training."""
+        del model, advantages, forward_context, kwargs
+        loss = timestep_data.latents.float().sum() * 0.0
+        return loss, {"placeholder": True}
+
+    def compute_loss_and_backward(
         self,
         *,
-        request: RolloutRequest,
-        sampler_outputs: list[Any],
-        rewards: torch.Tensor,
-        advantages: torch.Tensor,
-        sde_indices: Optional[Set[int]] = None,
-    ) -> Any:
-        return GRPOAlgorithm.assemble_training_batch(
-            self,
-            request=request,
-            sampler_outputs=sampler_outputs,
-            rewards=rewards,
-            advantages=advantages,
-            sde_indices=sde_indices,
-        )
+        model: nn.Module,
+        batch: Any,
+        timesteps: Any = None,
+        loss_scale: float = 1.0,
+        **kwargs: Any,
+    ) -> tuple:
+        del kwargs
+        from diffusionrl.types.training_batch import TrainingBatch
+
+        if not isinstance(batch, TrainingBatch):
+            raise TypeError(
+                f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
+            )
+
+        available_steps = set(int(s) for s in batch.resolved_step_indices[:-1].tolist())
+        valid_step_indices = sorted(int(i) for i in batch.sde_indices if int(i) in available_steps)
+        if not valid_step_indices:
+            return 0.0, {}, 0, False
+
+        total_loss = 0.0
+        has_backward = False
+        num_timesteps = len(valid_step_indices)
+
+        for t_idx in valid_step_indices:
+            timestep_data = batch.get_timestep_data_by_step(t_idx)
+            loss, _ = self.compute_loss(
+                model=model,
+                timestep_data=timestep_data,
+                advantages=batch.advantages,
+                forward_context=batch.forward_context,
+            )
+            scaled_loss = loss * loss_scale / num_timesteps
+            scaled_loss.backward()
+            total_loss += scaled_loss.detach().item()
+            has_backward = True
+
+        return total_loss, {"placeholder": 1.0}, num_timesteps, has_backward
 
     def get_filtered_training_indices(
         self,
@@ -146,12 +182,12 @@ class MinimalAlgorithm(BaseAlgorithm):
         current_step: int,
         **kwargs: Any,
     ) -> Any:
-        from diffusionrl.types.training_batch import BackwardTrainingBatch
+        from diffusionrl.types.training_batch import TrainingBatch
 
         del current_step, kwargs
-        if not isinstance(batch, BackwardTrainingBatch):
+        if not isinstance(batch, TrainingBatch):
             raise TypeError(
-                f"{type(self).__name__} expects BackwardTrainingBatch, got {type(batch).__name__}"
+                f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
             )
 
         step_indices = batch.resolved_step_indices[:-1]
@@ -181,70 +217,3 @@ class MinimalAlgorithm(BaseAlgorithm):
             if int(step_label) in filtered_steps
         ]
         return batch.timesteps[selected_positions]
-
-    def compute_loss(
-        self,
-        model: nn.Module,
-        timestep_data: TimestepData,
-        advantages: torch.Tensor,
-        embeddings: PromptEmbeddings,
-        **kwargs: Any,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """Placeholder single-timestep loss for custom plugin experiments."""
-        del model, advantages, embeddings, kwargs
-        loss = timestep_data.latents.float().sum() * 0.0
-        return loss, {"placeholder_loss": loss.detach()}
-
-    def compute_loss_and_backward(
-        self,
-        *,
-        model: nn.Module,
-        batch: Any,
-        timesteps: Any,
-        guidance_scale: float = 3.5,
-        loss_scale: float = 1.0,
-        **kwargs: Any,
-    ) -> tuple:
-        del kwargs
-        from diffusionrl.types.training_batch import BackwardTrainingBatch
-
-        if not isinstance(batch, BackwardTrainingBatch):
-            raise TypeError(
-                f"{type(self).__name__} expects BackwardTrainingBatch, got {type(batch).__name__}"
-            )
-
-        model.train()
-        if torch.is_tensor(timesteps):
-            candidate_timesteps = timesteps.detach().flatten()
-        else:
-            candidate_timesteps = torch.as_tensor(
-                list(timesteps),
-                device=batch.timesteps.device,
-                dtype=batch.timesteps.dtype,
-            )
-        num_timesteps_per_sample = int(candidate_timesteps.numel())
-        if num_timesteps_per_sample == 0:
-            return 0.0, {}, 0, False
-
-        total_loss_accum = 0.0
-        has_backward = False
-
-        for timestep_value in candidate_timesteps:
-            timestep_data = batch.get_timestep_data_by_timestep(timestep_value)
-            loss, _ = self.compute_loss(
-                model=model,
-                timestep_data=timestep_data,
-                advantages=batch.advantages,
-                embeddings=batch.embeddings,
-            )
-            scaled_loss = loss * (loss_scale / num_timesteps_per_sample)
-            scaled_loss.backward()
-            total_loss_accum += scaled_loss.detach().item()
-            has_backward = True
-
-        return (
-            total_loss_accum,
-            {"placeholder": 1.0},
-            num_timesteps_per_sample,
-            has_backward,
-        )

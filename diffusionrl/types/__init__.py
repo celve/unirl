@@ -22,26 +22,21 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "RolloutSamples": ("diffusionrl.types.sampling", "RolloutSamples"),
     "RolloutRequest": ("diffusionrl.types.sampling", "RolloutRequest"),
     "LogProbData": ("diffusionrl.types.sampling", "LogProbData"),
-    "PromptEmbeddings": ("diffusionrl.types.sampling", "PromptEmbeddings"),
+    "ForwardContext": ("diffusionrl.types.forward_context", "ForwardContext"),
+    "FluxForwardContext": ("diffusionrl.types.forward_context", "FluxForwardContext"),
+    "SD3ForwardContext": ("diffusionrl.types.forward_context", "SD3ForwardContext"),
+    "HunyuanForwardContext": ("diffusionrl.types.forward_context", "HunyuanForwardContext"),
+    "MochiForwardContext": ("diffusionrl.types.forward_context", "MochiForwardContext"),
+    "DefaultForwardContext": ("diffusionrl.types.forward_context", "DefaultForwardContext"),
+    "get_forward_context_cls": ("diffusionrl.types.forward_context", "get_forward_context_cls"),
+    "register_forward_context": ("diffusionrl.types.forward_context", "register_forward_context"),
     "RolloutPayload": ("diffusionrl.types.buffer_contracts", "RolloutPayload"),
     "SamplingRequirements": ("diffusionrl.types.sampling", "SamplingRequirements"),
     "SamplingSpec": ("diffusionrl.types.sampling", "SamplingSpec"),
     "SDEConfig": ("diffusionrl.types.sde", "SDEConfig"),
-    "BackwardTrainingBatch": (
-        "diffusionrl.types.training_batch",
-        "BackwardTrainingBatch",
-    ),
-    "ForwardTrainingBatch": (
-        "diffusionrl.types.training_batch",
-        "ForwardTrainingBatch",
-    ),
+    "TrajectoryStore": ("diffusionrl.types.trajectory_store", "TrajectoryStore"),
     "TimestepData": ("diffusionrl.types.training_batch", "TimestepData"),
     "TrainingBatch": ("diffusionrl.types.training_batch", "TrainingBatch"),
-    "is_backward_batch": (
-        "diffusionrl.types.training_batch",
-        "is_backward_batch",
-    ),
-    "is_forward_batch": ("diffusionrl.types.training_batch", "is_forward_batch"),
 }
 
 __all__ = list(_LAZY_ATTRS.keys())

@@ -6,7 +6,7 @@ Defines algorithm responsibilities in rollout/advantage pipeline.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import logging
-from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -14,10 +14,6 @@ import torch.nn as nn
 from diffusionrl.types.sampling import RolloutRequest, SamplingRequirements
 
 from .normalizers import normalize_global, normalize_grouped
-
-if TYPE_CHECKING:
-    from diffusionrl.types import PromptEmbeddings
-    from .forward_context import ForwardContext
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +56,12 @@ class BaseAlgorithm(ABC):
 
     Training-side forward dispatch
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    Subclasses that call the model during loss computation should use a
-    :class:`~diffusionrl.algorithms.forward_context.ForwardContext` instead
-    of threading ``prompt_embeds``, ``guidance_scale``, etc. through every
-    helper.  The base class provides :meth:`_get_forward_plugin` (lazy
-    plugin resolution) and :meth:`_make_forward_context` (context factory)
-    so that subclasses do not have to duplicate that boilerplate.
+    The ``ForwardContext`` (pure data container with model-specific fields)
+    is carried on ``TrainingBatch.forward_context``.  Subclasses read it
+    directly from the batch and pair it with a ``ModelForwardPlugin``
+    for execution: ``plugin.forward(model, latents, sigma, **ctx.to_dict())``.
+    The base class provides :meth:`_get_forward_plugin` (lazy plugin
+    resolution) so that subclasses do not need to duplicate that setup.
     """
 
     _forward_plugin: object = None  # type: ignore[assignment]
@@ -349,42 +345,31 @@ class BaseAlgorithm(ABC):
             )
         return self._forward_plugin
 
-    def _make_forward_context(
-        self,
-        model: nn.Module,
-        embeddings: "PromptEmbeddings",
-        guidance_scale: float,
-    ) -> "ForwardContext":
-        """Create a :class:`ForwardContext` using the current plugin.
-
-        Convenience wrapper so subclasses don't need to import
-        ``ForwardContext`` themselves.
-        """
-        from .forward_context import ForwardContext
-
-        return ForwardContext(
-            plugin=self._get_forward_plugin(model),
-            guidance_scale=guidance_scale,
-            embeddings=embeddings,
-        )
-
-    def compute_loss_and_backward(  # [PUBLIC-API → train_executor._train_update_chunk()] training loss/backward
+    def compute_loss_and_backward(  # [PUBLIC-API → train_executor] training side: core loss+backward
         self,
         *,
         model: nn.Module,
         batch: Any,
-        timesteps: Any,
-        guidance_scale: float = 3.5,
+        timesteps: Any = None,
         loss_scale: float = 1.0,
         **kwargs: Any,
     ) -> tuple:
-        """Compute loss/backward for one micro-batch.
+        """Compute loss and call backward for a single micro-batch.
 
-        ``timesteps`` is the executor-resolved, algorithm-defined training
-        timestep specification for the current update. ``loss_scale`` lets
-        the executor normalize gradients across accumulation micro-batches.
+        The micro-batch loop is owned by ``train_executor``; each algorithm
+        only needs to handle one already-sliced micro-batch here.
+
+        Args:
+            model: The model to compute loss on.
+            batch: A single micro-batch (already sliced by train_executor).
+            timesteps: Pre-resolved training timesteps from
+                ``resolve_training_timesteps()``.
+            loss_scale: Gradient accumulation scale (1 / num_mini_batches).
+
+        Returns:
+            ``(loss, metrics, num_timesteps, has_backward)``
         """
-        del model, batch, timesteps, guidance_scale, loss_scale, kwargs
+        del model, batch, timesteps, loss_scale, kwargs
         raise NotImplementedError(
             f"{type(self).__name__} must implement compute_loss_and_backward()."
         )
@@ -433,8 +418,7 @@ class BaseAlgorithm(ABC):
         """Get sampler-output validation flags for rollout orchestration."""
         ...
 
-    @abstractmethod
-    def assemble_training_batch(  # [PUBLIC-API → driver rollout pipeline] build TrainingBatch
+    def assemble_training_batch(  # [PUBLIC-API → driver rollout pipeline] rollout side: assemble TrainingBatch
         self,
         *,
         request: RolloutRequest,
@@ -443,11 +427,306 @@ class BaseAlgorithm(ABC):
         advantages: torch.Tensor,
         sde_indices: Optional[Set[int]] = None,
     ) -> Any:
-        """Assemble the typed training batch for this algorithm."""
-        ...
+        """Assemble a unified TrainingBatch from sampler outputs.
 
-    @abstractmethod
-    def get_filtered_training_indices(  # [PUBLIC-API → assemble_training_batch() internals] rollout side timestep filter
+        Branches on ``self.get_sampling_requirements()``:
+
+        - ``requires_trajectory=True``: collects ``aux["trajectory_store"]`` and
+          ``aux["log_probs"]``, resolves SDE training indices via
+          ``resolve_training_indices`` / ``get_filtered_training_indices``,
+          and builds ``TrajectoryStore.from_full()``.
+        - ``requires_trajectory=False`` (NFT-style): collects
+          ``output.latents`` (clean x0) and builds
+          ``TrajectoryStore.from_clean_latents()``.
+
+        Subclasses normally do **not** need to override this method.
+        Customize training-index selection by overriding
+        ``resolve_training_indices`` or ``get_filtered_training_indices``.
+        """
+        import time as _time
+        from diffusionrl.types.sampling import RolloutSamples, LogProbData
+        from diffusionrl.types.training_batch import TrainingBatch
+        from diffusionrl.types.trajectory_store import TrajectoryStore
+
+        reqs = self.get_sampling_requirements()
+        prompts = request.prompts
+
+        # -- shared collection across all outputs --------------------------
+        all_forward_contexts = []
+        timesteps = None
+        trajectory_stores = []
+        clean_latents = []
+        log_probs_dicts = []
+        step_indices = None
+        scheduler_was_provided = sde_indices is not None
+        raw_scheduler_indices = (
+            {int(i) for i in sde_indices} if sde_indices is not None else None
+        )
+        final_sde_indices: Set[int] = set(raw_scheduler_indices or set())
+
+        for idx, output in enumerate(sampler_outputs):
+            if not isinstance(output, RolloutSamples):
+                raise TypeError(
+                    f"Assemble expects RolloutSamples, got "
+                    f"{type(output).__name__} at index={idx}."
+                )
+
+            _fwd_ctx = output.aux.get("forward_context")
+            if _fwd_ctx is None:
+                raise ValueError(
+                    f"RolloutSamples at index={idx} missing forward_context."
+                )
+            all_forward_contexts.append(_fwd_ctx)
+
+            ts = output.timesteps
+            if ts is not None and timesteps is None:
+                timesteps = ts
+            elif (
+                ts is not None
+                and timesteps is not None
+                and not torch.equal(timesteps.to(ts.device), ts)
+            ):
+                raise ValueError("Mismatched timesteps across sampler outputs")
+
+            if reqs.requires_trajectory:
+                _traj_store = output.aux.get("trajectory_store")
+                if _traj_store is None:
+                    raise ValueError(
+                        f"RolloutSamples at index={idx} missing trajectory_store."
+                    )
+                trajectory_stores.append(_traj_store)
+
+                _log_probs = output.aux.get("log_probs")
+                log_probs_dicts.append(
+                    _log_probs.to_dict() if _log_probs is not None else {}
+                )
+
+                steps = output.aux.get("step_indices")
+                if steps is not None:
+                    if step_indices is None:
+                        step_indices = steps
+                    elif not torch.equal(
+                        step_indices.to(steps.device), steps
+                    ):
+                        raise ValueError(
+                            "Mismatched step_indices across sampler outputs: "
+                            f"expected={step_indices.tolist()} "
+                            f"got={steps.tolist()}"
+                        )
+
+                if sde_indices is None:
+                    final_sde_indices.update(
+                        int(i) for i in output.sde_indices
+                    )
+            else:
+                clean_latents.append(output.latents)
+
+        if timesteps is None:
+            raise ValueError("No timesteps found in sampler outputs")
+
+        # -- merge forward contexts ----------------------------------------
+        merged_forward_context = type(all_forward_contexts[0]).cat(
+            all_forward_contexts
+        )
+
+        # -- trajectory path (GRPO / MixGRPO) -----------------------------
+        if reqs.requires_trajectory:
+            if not trajectory_stores:
+                raise ValueError("No trajectory stores found in sampler outputs")
+
+            if step_indices is None:
+                step_indices = torch.arange(
+                    timesteps.shape[0],
+                    device=timesteps.device,
+                    dtype=torch.long,
+                )
+
+            step_labels = [int(v) for v in step_indices[:-1].tolist()]
+            step_label_set = set(step_labels)
+
+            def _normalize_to_step_labels(
+                indices: Set[int], *, source: str
+            ) -> Set[int]:
+                if not indices:
+                    return set()
+                if indices.issubset(step_label_set):
+                    return set(indices)
+                mapped = {
+                    step_labels[i]
+                    for i in indices
+                    if 0 <= int(i) < len(step_labels)
+                }
+                if mapped:
+                    logger.debug(
+                        "%s indices look positional; mapped to step "
+                        "labels raw=%s mapped=%s",
+                        source,
+                        sorted(indices),
+                        sorted(mapped),
+                    )
+                    return mapped
+                logger.warning(
+                    "%s indices do not match sampled step labels and "
+                    "could not be mapped: raw=%s available=%s",
+                    source,
+                    sorted(indices),
+                    sorted(step_labels),
+                )
+                return set()
+
+            if final_sde_indices:
+                final_sde_indices = _normalize_to_step_labels(
+                    set(int(i) for i in final_sde_indices),
+                    source="Scheduler/Sampler SDE",
+                )
+
+            raw_train_indices = self.resolve_training_indices(
+                num_steps=len(step_labels),
+                sde_indices=(
+                    set(final_sde_indices) if scheduler_was_provided else None
+                ),
+            )
+            train_indices = _normalize_to_step_labels(
+                set(int(i) for i in raw_train_indices),
+                source=f"{type(self).__name__}.resolve_training_indices",
+            )
+            if not train_indices:
+                train_indices = step_label_set
+            if not scheduler_was_provided:
+                final_sde_indices = train_indices
+            else:
+                final_sde_indices = (
+                    final_sde_indices & train_indices
+                    if final_sde_indices
+                    else train_indices
+                )
+            if not final_sde_indices:
+                final_sde_indices = (
+                    train_indices if train_indices else set(step_labels)
+                )
+
+            num_steps = len(step_labels)
+            final_sde_indices = self.get_filtered_training_indices(
+                final_sde_indices, num_steps
+            )
+            if not final_sde_indices:
+                final_sde_indices = set(step_labels)
+
+            merged_log_probs: Dict[int, torch.Tensor] = {}
+            if log_probs_dicts:
+                all_lp_indices: Set[int] = set()
+                for lpd in log_probs_dicts:
+                    all_lp_indices.update(lpd.keys())
+                for idx_key in all_lp_indices:
+                    values = [
+                        lpd[idx_key]
+                        for lpd in log_probs_dicts
+                        if idx_key in lpd
+                    ]
+                    if values:
+                        merged_log_probs[idx_key] = torch.cat(values, dim=0)
+            if final_sde_indices:
+                merged_log_probs = {
+                    int(k): v
+                    for k, v in merged_log_probs.items()
+                    if int(k) in set(int(i) for i in final_sde_indices)
+                }
+
+            assemble_t0 = _time.perf_counter()
+
+            traj_store = TrajectoryStore.concat(trajectory_stores)
+
+            assemble_t1 = _time.perf_counter()
+
+            # Clamp target_sde_indices to positions actually stored in the
+            # trajectory.  Selective stores only keep SDE-boundary positions,
+            # so training indices that fall outside (e.g. ODE-only steps)
+            # must be dropped to avoid validation failures.
+            if traj_store.is_selective and final_sde_indices:
+                available = set(
+                    idx for idx in final_sde_indices
+                    if traj_store.has_position(idx) and traj_store.has_position(idx + 1)
+                )
+                if available != final_sde_indices:
+                    logger.debug(
+                        "Clamped target_sde_indices to trajectory store: "
+                        "requested=%s available=%s stored=%s",
+                        sorted(final_sde_indices),
+                        sorted(available),
+                        traj_store.stored_positions,
+                    )
+                    final_sde_indices = available
+                if not final_sde_indices:
+                    raise ValueError(
+                        "No target_sde_indices remain after clamping to "
+                        f"stored trajectory positions {traj_store.stored_positions}"
+                    )
+
+            batch = TrainingBatch(
+                trajectory_store=traj_store,
+                log_probs=LogProbData.from_dict(merged_log_probs),
+                timesteps=timesteps,
+                advantages=advantages,
+                forward_context=merged_forward_context,
+                rewards=rewards,
+                prompts=prompts,
+                step_indices=step_indices,
+                target_sde_indices=set(
+                    int(i) for i in final_sde_indices
+                ),
+            )
+            batch.validate()
+
+            traj_data = traj_store.data
+            traj_gb = (
+                traj_data.nelement()
+                * traj_data.element_size()
+                / 1e9
+            )
+            logger.debug(
+                "[TIMING] assemble_training_batch(trajectory): "
+                "cat=%.2fs total=%.2fs n=%d traj_gb=%.2f",
+                assemble_t1 - assemble_t0,
+                _time.perf_counter() - assemble_t0,
+                len(trajectory_stores),
+                traj_gb,
+            )
+            return batch
+
+        # -- clean-latents path (NFT) --------------------------------------
+        if not clean_latents:
+            raise ValueError("No clean latents found in sampler outputs")
+
+        clean_latents_tensor = torch.cat(clean_latents, dim=0)
+        total_positions = int(timesteps.shape[0])
+        batch = TrainingBatch(
+            trajectory_store=TrajectoryStore.from_clean_latents(
+                clean_latents_tensor, total_positions=total_positions,
+            ),
+            timesteps=timesteps,
+            advantages=advantages,
+            forward_context=merged_forward_context,
+            rewards=rewards,
+            prompts=prompts,
+        )
+        batch.validate()
+        return batch
+
+    def resolve_training_indices(
+        self,
+        *,
+        num_steps: int,
+        sde_indices: Optional[Set[int]] = None,
+    ) -> Set[int]:
+        """Resolve the timestep indices that should contribute to training.
+
+        This is the explicit counterpart to rollout-time ``sde_indices``.
+        """
+        if sde_indices is not None:
+            return set(int(i) for i in sde_indices)
+        return set(range(num_steps))
+
+    def get_filtered_training_indices(  # [PUBLIC-API → assemble_training_batch() internal] rollout side: filter training timesteps
         self,
         sde_indices: Set[int],
         num_steps: int,
@@ -460,6 +739,7 @@ class BaseAlgorithm(ABC):
         - skip_initial_timesteps: Skip early timesteps with high variance
 
         Subclasses can override to add algorithm-specific filtering.
+        Default returns *sde_indices* unchanged.
 
         Args:
             sde_indices: Set of SDE timestep indices from scheduler
@@ -468,7 +748,7 @@ class BaseAlgorithm(ABC):
         Returns:
             Filtered set of timestep indices for training
         """
-        ...
+        return sde_indices
 
     def get_config(self) -> Dict[str, Any]:  # [PUBLIC-API → serialization/logging]
         """Get algorithm configuration as dictionary."""

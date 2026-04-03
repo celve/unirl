@@ -27,37 +27,49 @@ from diffusionrl.sde.runtime import (
     get_sigma_schedule,
     denoising_step,
 )
-from diffusionrl.types import LogProbData, PromptEmbeddings
+from diffusionrl.types import LogProbData
+from diffusionrl.types.forward_context import SD3ForwardContext
+from diffusionrl.types.trajectory_store import TrajectoryStore
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 logger = logging.getLogger(__name__)
 
 
-def _save_debug_tensor(
-    base_dir: str, step_idx: int, name: str, tensor: torch.Tensor,
-    rank: int = 0, *, append: bool = False,
+def _save_debug_tensors(
+    base_dir: str, step_idx: int, append: bool, *name_tensor_pairs: Any,
+    rank: int = 0,
 ) -> None:
-    """Save a debug tensor to disk. Only rank 0 saves to avoid conflicts.
+    """Save multiple debug tensors to disk in one call.
 
-    When *append=True* and a file already exists for this step+name, the new
-    tensor is concatenated along dim-0 (batch) with the existing one.  This
-    allows multiple sub-batch ``sample()`` calls within the same rollout to
-    accumulate into a single file that covers the full local batch.
+    Args:
+        base_dir: Root debug directory.
+        step_idx: Denoising step index (used for sub-directory naming).
+        append: When *True* and a file already exists for this step+name,
+            the new tensor is concatenated along dim-0 (batch).  This allows
+            multiple sub-batch ``sample()`` calls within the same rollout to
+            accumulate into a single file that covers the full local batch.
+        *name_tensor_pairs: Alternating ``(name, tensor, name, tensor, ...)``
+            pairs to save.
+        rank: Distributed rank; only rank 0 writes.
     """
     if rank != 0:
         return
+    if len(name_tensor_pairs) % 2 != 0:
+        raise ValueError("name_tensor_pairs must contain alternating name, tensor pairs")
     step_dir = os.path.join(base_dir, f"step_{step_idx:03d}")
     os.makedirs(step_dir, exist_ok=True)
-    path = os.path.join(step_dir, f"{name}.pt")
-    new_tensor = tensor.detach().cpu().float()
-    if append and os.path.exists(path):
-        try:
-            existing = torch.load(path, map_location="cpu", weights_only=True)
-            if existing.ndim >= 1 and new_tensor.ndim >= 1 and existing.shape[1:] == new_tensor.shape[1:]:
-                new_tensor = torch.cat([existing, new_tensor], dim=0)
-        except Exception:
-            pass
-    torch.save(new_tensor, path)
+    for i in range(0, len(name_tensor_pairs), 2):
+        name, tensor = name_tensor_pairs[i], name_tensor_pairs[i + 1]
+        path = os.path.join(step_dir, f"{name}.pt")
+        new_tensor = tensor.detach().cpu().float()
+        if append and os.path.exists(path):
+            try:
+                existing = torch.load(path, map_location="cpu", weights_only=True)
+                if existing.ndim >= 1 and new_tensor.ndim >= 1 and existing.shape[1:] == new_tensor.shape[1:]:
+                    new_tensor = torch.cat([existing, new_tensor], dim=0)
+            except Exception:
+                pass
+        torch.save(new_tensor, path)
 
 
 def calculate_shift(
@@ -367,7 +379,9 @@ class SD3Sampler(BaseSampler):
 
         # Storage for trajectory and log probs
         latents = latents.to(self.trajectory_dtype)
-        trajectory: List[torch.Tensor] = [latents]
+        # Selective collection: only store positions needed for SDE step pairs
+        trajectory_store = TrajectoryStore.for_sde_steps(sde_indices, num_inference_steps)
+        trajectory_store.add(0, latents)
         log_probs_dict: Dict[int, torch.Tensor] = {}
 
         # Denoising loop
@@ -429,7 +443,7 @@ class SD3Sampler(BaseSampler):
                 step_index=i,
             )
             latents = latents.to(dtype=self.trajectory_dtype)
-            trajectory.append(latents)
+            trajectory_store.add(i + 1, latents)
 
             if log_prob is not None:
                 log_probs_dict[i] = log_prob.to(dtype=self.logprob_dtype)
@@ -437,16 +451,24 @@ class SD3Sampler(BaseSampler):
                 if _sampling_debug_dir is not None:
                     _append = i in self._debug_dumped_steps
                     self._debug_dumped_steps.add(i)
-                    _save_debug_tensor(_sampling_debug_dir, i, "noise_pred", noise_pred, rank, append=_append)
-                    _save_debug_tensor(_sampling_debug_dir, i, "latents_input", _pre_step_latents, rank, append=_append)
-                    _save_debug_tensor(_sampling_debug_dir, i, "latents_output", latents, rank, append=_append)
-                    _save_debug_tensor(_sampling_debug_dir, i, "prev_sample_mean", prev_sample_mean, rank, append=_append)
-                    _save_debug_tensor(_sampling_debug_dir, i, "log_prob", log_prob, rank, append=_append)
-                    _save_debug_tensor(_sampling_debug_dir, i, "sigma", sigma.unsqueeze(0) if sigma.dim() == 0 else sigma, rank)
-                    _save_debug_tensor(_sampling_debug_dir, i, "sigma_next", sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next, rank)
-                    _save_debug_tensor(_sampling_debug_dir, i, "timestep", timestep, rank)
+                    _save_debug_tensors(
+                        _sampling_debug_dir, i, _append,
+                        "noise_pred", noise_pred,
+                        "latents_input", _pre_step_latents,
+                        "latents_output", latents,
+                        "prev_sample_mean", prev_sample_mean,
+                        "log_prob", log_prob,
+                        rank=rank,
+                    )
+                    _save_debug_tensors(
+                        _sampling_debug_dir, i, False,
+                        "sigma", sigma.unsqueeze(0) if sigma.dim() == 0 else sigma,
+                        "sigma_next", sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next,
+                        "timestep", timestep,
+                        rank=rank,
+                    )
                     if not _append and i == min(sde_indices):
-                        _save_debug_tensor(_sampling_debug_dir, i, "sigmas_schedule", sigmas, rank)
+                        _save_debug_tensors(_sampling_debug_dir, i, False, "sigmas_schedule", sigmas, rank=rank)
                         if rank == 0:
                             import json
                             cfg_path = os.path.join(_sampling_debug_dir, "config.json")
@@ -463,11 +485,10 @@ class SD3Sampler(BaseSampler):
                                     "width": width,
                                 }, f, indent=2)
 
-        # Stack trajectory
-        trajectories = torch.stack(trajectory, dim=1)  # [B, T+1, C, H, W]
+        trajectory_store.finalize()
 
-        # Create embeddings bundle
-        embeddings = PromptEmbeddings(
+        forward_context = SD3ForwardContext(
+            guidance_scale=guidance_scale,
             prompt_embeds=prompt_embeds,
             pooled_prompt_embeds=pooled_prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds,
@@ -478,11 +499,10 @@ class SD3Sampler(BaseSampler):
             latents=latents,
             timesteps=sigmas,
             aux={
-                "trajectories": trajectories,
+                "trajectory_store": trajectory_store,
                 "log_probs": LogProbData.from_dict(log_probs_dict),
-                "embeddings": embeddings,
+                "forward_context": forward_context,
                 "metadata": {
-                    "sde_indices": sde_indices,
                     "engine_capabilities": {
                         "supports_logprob": True,
                         "supports_trajectory": True,

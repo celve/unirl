@@ -10,7 +10,7 @@ import logging
 import math
 import os
 import time as _time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from diffusionrl.types.sampling import RolloutRequest
@@ -19,12 +19,12 @@ import torch
 import torch.nn as nn
 
 from diffusionrl.config.build_domain_args import resolve_sde_config
-from diffusionrl.types import PromptEmbeddings, SDEConfig, TimestepData
+from diffusionrl.types import SDEConfig, TimestepData
 from diffusionrl.utils.misc import aggregate_numeric_metrics
 from diffusionrl.utils.scheduler_utils import create_indices_scheduler
 
 from .base import BaseAlgorithm, EMASpec, SamplingRequirements
-from .forward_context import ForwardContext
+from diffusionrl.types.forward_context import ForwardContext
 
 logger = logging.getLogger(__name__)
 
@@ -343,12 +343,12 @@ class GRPOAlgorithm(BaseAlgorithm):
         current_step: int,
         **kwargs: Any,
     ) -> Any:
-        from diffusionrl.types.training_batch import BackwardTrainingBatch
+        from diffusionrl.types.training_batch import TrainingBatch
 
         del kwargs
-        if not isinstance(batch, BackwardTrainingBatch):
+        if not isinstance(batch, TrainingBatch):
             raise TypeError(
-                f"{type(self).__name__} expects BackwardTrainingBatch, got {type(batch).__name__}"
+                f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
             )
 
         step_indices = batch.resolved_step_indices[:-1]
@@ -381,216 +381,6 @@ class GRPOAlgorithm(BaseAlgorithm):
             if int(step_label) in filtered_steps
         ]
         return batch.timesteps[selected_positions]
-
-    def assemble_training_batch(
-        self,
-        *,
-        request: "RolloutRequest",
-        sampler_outputs: List[Any],
-        rewards: torch.Tensor,
-        advantages: torch.Tensor,
-        sde_indices: Optional[Set[int]] = None,
-    ) -> Any:
-        return self._assemble_backward_batch(
-            num_inference_steps=request.num_inference_steps,
-            sampler_outputs=sampler_outputs,
-            rewards=rewards,
-            advantages=advantages,
-            prompts=request.prompts,
-            sde_indices=sde_indices,
-        )
-
-    def _assemble_backward_batch(
-        self,
-        *,
-        num_inference_steps: int,
-        sampler_outputs: List[Any],
-        rewards: torch.Tensor,
-        advantages: torch.Tensor,
-        prompts: List[str],
-        sde_indices: Optional[Set[int]] = None,
-    ) -> Any:
-        from diffusionrl.types.sampling import (
-            LogProbData,
-            PromptEmbeddings,
-            RolloutSamples,
-        )
-        from diffusionrl.types.training_batch import BackwardTrainingBatch
-
-        trajectories = []
-        log_probs_dicts = []
-        timesteps = None
-        step_indices = None
-        explicit_sde_indices = (
-            {int(i) for i in sde_indices} if sde_indices is not None else None
-        )
-        collected_sde_indices: Set[int] = set()
-        all_prompt_embeds = []
-        all_pooled_prompt_embeds = []
-        all_encoder_attention_mask = []
-        all_negative_prompt_embeds = []
-        all_negative_pooled_prompt_embeds = []
-        all_text_ids = []
-        all_image_ids = []
-
-        for idx, output in enumerate(sampler_outputs):
-            if not isinstance(output, RolloutSamples):
-                raise TypeError(
-                    f"Assemble stage expects RolloutSamples, got {type(output).__name__} at index={idx}."
-                )
-            _trajectories = output.aux.get("trajectories")
-            _embeddings = output.aux.get("embeddings")
-            _log_probs = output.aux.get("log_probs")
-            if _trajectories is None:
-                raise ValueError(f"RolloutSamples at index={idx} missing trajectories in backward path.")
-            if _embeddings is None:
-                raise ValueError(f"RolloutSamples at index={idx} missing embeddings in backward path.")
-
-            trajectories.append(_trajectories)
-            log_probs_dicts.append(_log_probs.to_dict() if _log_probs is not None else {})
-            ts = output.timesteps
-            steps = output.aux.get("step_indices")
-            sde_idx = output.sde_indices
-
-            if ts is not None and timesteps is None:
-                timesteps = ts
-            elif ts is not None and timesteps is not None and not torch.equal(timesteps.to(ts.device), ts):
-                raise ValueError("Mismatched timesteps across sampler outputs")
-            if steps is not None:
-                if step_indices is None:
-                    step_indices = steps
-                elif not torch.equal(step_indices.to(steps.device), steps):
-                    raise ValueError(
-                        "Mismatched step_indices across sampler outputs: "
-                        f"expected={step_indices.tolist()} got={steps.tolist()}"
-                    )
-            sample_sde_indices = set(int(i) for i in sde_idx)
-            if explicit_sde_indices is not None and not explicit_sde_indices.issubset(
-                sample_sde_indices
-            ):
-                missing = sorted(explicit_sde_indices - sample_sde_indices)
-                raise ValueError(
-                    "assemble_training_batch received explicit sde_indices that are missing "
-                    f"from sampler output index={idx}: missing={missing}, "
-                    f"available={sorted(sample_sde_indices)}"
-                )
-            collected_sde_indices.update(sample_sde_indices)
-
-            emb = _embeddings
-            all_prompt_embeds.append(emb.prompt_embeds)
-            if emb.pooled_prompt_embeds is not None:
-                all_pooled_prompt_embeds.append(emb.pooled_prompt_embeds)
-            if emb.encoder_attention_mask is not None:
-                all_encoder_attention_mask.append(emb.encoder_attention_mask)
-            if emb.negative_prompt_embeds is not None:
-                all_negative_prompt_embeds.append(emb.negative_prompt_embeds)
-            if emb.negative_pooled_prompt_embeds is not None:
-                all_negative_pooled_prompt_embeds.append(emb.negative_pooled_prompt_embeds)
-            if emb.text_ids is not None:
-                all_text_ids.append(emb.text_ids)
-            if emb.image_ids is not None:
-                all_image_ids.append(emb.image_ids)
-
-        if not trajectories:
-            raise ValueError("No trajectories found in sampler outputs")
-        if timesteps is None:
-            raise ValueError("No timesteps found in sampler outputs")
-        if step_indices is None:
-            step_indices = torch.arange(timesteps.shape[0], device=timesteps.device, dtype=torch.long)
-
-        step_labels = [int(v) for v in step_indices[:-1].tolist()]
-        step_label_set = set(step_labels)
-
-        def _normalize_to_step_labels(indices: Set[int], *, source: str) -> Set[int]:
-            if not indices:
-                return set()
-            if indices.issubset(step_label_set):
-                return set(indices)
-            mapped = {step_labels[i] for i in indices if 0 <= int(i) < len(step_labels)}
-            if mapped:
-                logger.debug(
-                    "%s indices look positional; mapped to step labels raw=%s mapped=%s",
-                    source,
-                    sorted(indices),
-                    sorted(mapped),
-                )
-                return mapped
-            logger.warning(
-                "%s indices do not match sampled step labels and could not be mapped: raw=%s available=%s",
-                source,
-                sorted(indices),
-                sorted(step_labels),
-            )
-            return set()
-
-        final_sde_indices = (
-            explicit_sde_indices
-            if explicit_sde_indices is not None
-            else collected_sde_indices
-        )
-        final_sde_indices = _normalize_to_step_labels(
-            set(int(i) for i in final_sde_indices), source="Assemble SDE"
-        )
-
-        merged_log_probs: Dict[int, torch.Tensor] = {}
-        if log_probs_dicts:
-            all_indices: Set[int] = set()
-            for lpd in log_probs_dicts:
-                all_indices.update(lpd.keys())
-            for idx_key in all_indices:
-                values = [lpd[idx_key] for lpd in log_probs_dicts if idx_key in lpd]
-                if values:
-                    merged_log_probs[idx_key] = torch.cat(values, dim=0)
-        if final_sde_indices:
-            merged_log_probs = {
-                int(k): v for k, v in merged_log_probs.items()
-                if int(k) in set(int(i) for i in final_sde_indices)
-            }
-
-        assemble_t0 = _time.perf_counter()
-        traj_count = len(trajectories)
-        traj_shapes = [tuple(t.shape) for t in trajectories[:3]]
-        trajectories_tensor = torch.cat(trajectories, dim=0)
-        assemble_t1 = _time.perf_counter()
-
-        prompt_embeds = torch.cat(all_prompt_embeds, dim=0) if all_prompt_embeds else None
-        if prompt_embeds is None:
-            raise ValueError("No prompt embeddings found in sampler outputs")
-
-        embeddings = PromptEmbeddings(
-            prompt_embeds=prompt_embeds,
-            pooled_prompt_embeds=torch.cat(all_pooled_prompt_embeds, dim=0) if all_pooled_prompt_embeds else None,
-            encoder_attention_mask=torch.cat(all_encoder_attention_mask, dim=0) if all_encoder_attention_mask else None,
-            negative_prompt_embeds=torch.cat(all_negative_prompt_embeds, dim=0) if all_negative_prompt_embeds else None,
-            negative_pooled_prompt_embeds=torch.cat(all_negative_pooled_prompt_embeds, dim=0) if all_negative_pooled_prompt_embeds else None,
-            text_ids=torch.cat(all_text_ids, dim=0) if all_text_ids else None,
-            image_ids=all_image_ids[0] if all_image_ids else None,
-        )
-
-        batch = BackwardTrainingBatch(
-            trajectories=trajectories_tensor,
-            log_probs=LogProbData.from_dict(merged_log_probs),
-            timesteps=timesteps,
-            advantages=advantages,
-            embeddings=embeddings,
-            rewards=rewards,
-            prompts=prompts,
-            step_indices=step_indices,
-            target_sde_indices=set(int(i) for i in final_sde_indices),
-        )
-
-        batch.validate()
-        assemble_t2 = _time.perf_counter()
-        traj_gb = trajectories_tensor.nelement() * trajectories_tensor.element_size() / 1e9
-        logger.debug(
-            "[TIMING] assemble_backward: cat_traj=%.2fs total=%.2fs n=%d shapes=%s traj_gb=%.2f",
-            assemble_t1 - assemble_t0,
-            assemble_t2 - assemble_t0,
-            traj_count,
-            traj_shapes,
-            traj_gb,
-        )
-        return batch
 
     # ==================================================================
     # Objective computation
@@ -698,7 +488,8 @@ class GRPOAlgorithm(BaseAlgorithm):
         if not isinstance(sigma_next, torch.Tensor):
             sigma_next = torch.tensor(sigma_next, device=device)
 
-        pred = ctx.forward(model, latents=latents, sigma=sigma)
+        plugin = self._get_forward_plugin(model)
+        pred = plugin.forward(model=model, latents=latents, sigma=sigma, **ctx.to_dict())
 
         new_log_prob, prev_sample_mean = self.compute_log_prob(
             pred=pred,
@@ -803,72 +594,57 @@ class GRPOAlgorithm(BaseAlgorithm):
         *,
         model: nn.Module,
         batch: Any,
-        timesteps: Any,
-        guidance_scale: float = 3.5,
+        timesteps: Any = None,
         loss_scale: float = 1.0,
         **kwargs: Any,
     ) -> tuple:
-        """GRPO training step over one micro-batch.
-
-        Here ``timesteps`` means the selected trajectory timesteps for this
-        update chunk. GRPO converts them back to logical reverse-process step
-        labels before fetching per-step trajectory data.
+        """GRPO loss + backward for a single micro-batch.
 
         Returns:
-            ``(scaled_loss, metrics_dict, num_timesteps, has_backward)``
+            ``(loss, metrics, num_timesteps, has_backward)``
         """
-        from diffusionrl.types.training_batch import BackwardTrainingBatch
+        from diffusionrl.types.training_batch import TrainingBatch
 
-        if not isinstance(batch, BackwardTrainingBatch):
+        if not isinstance(batch, TrainingBatch):
             raise TypeError(
-                f"{type(self).__name__} expects BackwardTrainingBatch, got {type(batch).__name__}"
+                f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
             )
 
         model.train()
 
-        if torch.is_tensor(timesteps):
-            candidate_timesteps = timesteps.detach().flatten()
-        else:
-            candidate_timesteps = torch.as_tensor(
-                list(timesteps),
-                device=batch.timesteps.device,
-                dtype=batch.timesteps.dtype,
-            )
-        num_timesteps_per_sample = int(candidate_timesteps.numel())
-        if num_timesteps_per_sample == 0:
+        available_steps = set(int(s) for s in batch.resolved_step_indices[:-1].tolist())
+        valid_step_indices = sorted(int(i) for i in batch.sde_indices if int(i) in available_steps)
+        num_timesteps = len(valid_step_indices)
+        if num_timesteps == 0:
             return 0.0, {}, 0, False
 
-        ctx = self._make_forward_context(model, batch.embeddings, guidance_scale)
-
-        total_loss_accum = 0.0
+        ctx = batch.forward_context
+        total_loss = 0.0
         has_backward = False
         all_metrics: Dict[str, Any] = {}
         timestep_metrics: List[Dict[str, Any]] = []
 
-        for timestep_value in candidate_timesteps:
-            step_idx = batch.get_step_for_timestep(timestep_value)
-            timestep_data = batch.get_timestep_data_by_step(step_idx)
+        for t_idx in valid_step_indices:
+            timestep_data = batch.get_timestep_data_by_step(t_idx)
             loss_t, metrics_t = self.compute_loss(
                 model=model,
                 timestep_data=timestep_data,
                 advantages=batch.advantages,
                 ctx=ctx,
             )
-            scaled_loss = loss_t * (loss_scale / num_timesteps_per_sample)
+            scaled_loss = loss_t * loss_scale / num_timesteps
             scaled_loss.backward()
             has_backward = True
-            total_loss_accum += scaled_loss.detach().item()
-            timestep_metrics.append(metrics_t)
+            total_loss += scaled_loss.detach().item()
 
             for key, value in metrics_t.items():
                 val = value.item() if isinstance(value, torch.Tensor) else value
-                metric_key = f"t{step_idx}_{key}"
-                if metric_key not in all_metrics:
-                    all_metrics[metric_key] = val
+                all_metrics[f"t{t_idx}_{key}"] = val
+            timestep_metrics.append(metrics_t)
 
         all_metrics.update(aggregate_numeric_metrics(timestep_metrics))
 
-        return total_loss_accum, all_metrics, num_timesteps_per_sample, has_backward
+        return total_loss, all_metrics, num_timesteps, has_backward
 
     # ------------------------------------------------------------------
     # Forward plugin
@@ -889,14 +665,15 @@ class GRPOAlgorithm(BaseAlgorithm):
     ) -> Optional[torch.Tensor]:
         """Compute KL penalty between policy and reference."""
         ref_prev_sample_mean = None
+        plugin = self._get_forward_plugin(model)
+        ctx_kwargs = ctx.to_dict()
 
-        # Try LoRA disable_adapter first (flow_grpo style)
         adapter_model = model.module if hasattr(model, 'module') else model
         if hasattr(adapter_model, 'disable_adapter'):
             try:
                 with torch.no_grad():
                     with adapter_model.disable_adapter():
-                        ref_pred = ctx.forward(model, latents=latents, sigma=sigma)
+                        ref_pred = plugin.forward(model=model, latents=latents, sigma=sigma, **ctx_kwargs)
 
                 _, ref_prev_sample_mean = self.compute_log_prob(
                     pred=ref_pred,
@@ -909,10 +686,9 @@ class GRPOAlgorithm(BaseAlgorithm):
             except Exception:
                 pass
 
-        # Fallback to ref_model if provided
         if ref_prev_sample_mean is None and ref_model is not None:
             with torch.no_grad():
-                ref_pred = ctx.forward(ref_model, latents=latents, sigma=sigma)
+                ref_pred = plugin.forward(model=ref_model, latents=latents, sigma=sigma, **ctx_kwargs)
 
             _, ref_prev_sample_mean = self.compute_log_prob(
                 pred=ref_pred,

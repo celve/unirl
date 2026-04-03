@@ -189,8 +189,8 @@ run_training() {
         --sampling.num-inference-steps "${NUM_INFERENCE_STEPS}" \
         --sampling.max-samples-per-request "${DIRECT_SAMPLING_BATCH_SIZE}" \
         --sampling.guidance-scale 1.0 \
-        --sampling.timestep-fraction "${TIMESTEP_FRACTION}" \
-        --sampling.num-sde-steps "${NUM_SDE_STEPS}" \
+        --algorithm.rollout-scheduler.timestep-fraction "${TIMESTEP_FRACTION}" \
+        --algorithm.rollout-scheduler.num-sde-steps "${NUM_SDE_STEPS}" \
         \
         --algorithm.shuffle-seed "${SHUFFLE_SEED}" \
         --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}" \

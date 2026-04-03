@@ -14,8 +14,10 @@ import torch
 
 from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.sde.runtime import get_sigma_schedule_diffusers
-from diffusionrl.types import LogProbData, PromptEmbeddings, RolloutSamples, RolloutRequest
+from diffusionrl.types import LogProbData, RolloutSamples, RolloutRequest
+from diffusionrl.types.forward_context import ForwardContext, get_forward_context_cls
 from diffusionrl.types.engine import EngineCapabilities, EngineConfig
+from diffusionrl.types.trajectory_store import TrajectoryStore, compute_trajectory_positions
 from diffusionrl.utils.media import tensor_frame_to_pil
 
 from ..engine import (
@@ -819,7 +821,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             return None
         return value
 
-    def _build_embeddings_from_results(
+    def _build_forward_context_from_results(
         self,
         *,
         results: Sequence[Any],
@@ -827,7 +829,18 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         batch_size: int,
         height: int,
         width: int,
-    ) -> Optional[PromptEmbeddings]:
+        guidance_scale: float,
+    ) -> Optional["ForwardContext"]:
+        """Build a ForwardContext directly from SGLang results via the registry.
+
+        Instead of hard-coding model-specific branches (e.g. ``if model_type == "flux"``),
+        this method collects raw embedding tensors from results, then uses
+        ``get_forward_context_cls(model_type)`` to instantiate the right subclass.
+        The ForwardContext ClassVar field classification handles model-specific
+        shared vs stackable semantics automatically.
+        """
+        from dataclasses import fields as dataclass_fields
+
         prompt_embeds_list: List[torch.Tensor] = []
         pooled_list: List[torch.Tensor] = []
         mask_list: List[torch.Tensor] = []
@@ -872,51 +885,51 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         if prompt_embeds is None:
             return None
 
-        pooled_prompt_embeds = torch.cat(pooled_list, dim=0) if pooled_list else None
-        encoder_attention_mask = torch.cat(mask_list, dim=0) if mask_list else None
-        negative_prompt_embeds = (
-            torch.cat(negative_prompt_list, dim=0) if negative_prompt_list else None
-        )
-        negative_pooled_prompt_embeds = (
-            torch.cat(negative_pooled_list, dim=0) if negative_pooled_list else None
-        )
+        raw_tensors: Dict[str, Any] = {
+            "prompt_embeds": self._align_embedding_tensor("prompt_embeds", prompt_embeds, batch_size),
+            "pooled_prompt_embeds": self._align_embedding_tensor(
+                "pooled_prompt_embeds",
+                torch.cat(pooled_list, dim=0) if pooled_list else None,
+                batch_size,
+            ),
+            "encoder_attention_mask": self._align_embedding_tensor(
+                "encoder_attention_mask",
+                torch.cat(mask_list, dim=0) if mask_list else None,
+                batch_size,
+            ),
+            "negative_prompt_embeds": self._align_embedding_tensor(
+                "negative_prompt_embeds",
+                torch.cat(negative_prompt_list, dim=0) if negative_prompt_list else None,
+                batch_size,
+            ),
+            "negative_pooled_prompt_embeds": self._align_embedding_tensor(
+                "negative_pooled_prompt_embeds",
+                torch.cat(negative_pooled_list, dim=0) if negative_pooled_list else None,
+                batch_size,
+            ),
+            "guidance_scale": guidance_scale,
+        }
 
-        text_ids = None
-        image_ids = None
-        if model_type == "flux":
-            text_ids = self._build_flux_text_ids(prompt_embeds)
-            image_ids = self._build_flux_image_ids(
+        target_model_type = model_type or "default"
+        try:
+            ctx_cls = get_forward_context_cls(target_model_type)
+        except KeyError:
+            ctx_cls = get_forward_context_cls("default")
+
+        valid_fields = {f.name for f in dataclass_fields(ctx_cls)}
+
+        if "text_ids" in valid_fields and prompt_embeds is not None:
+            raw_tensors["text_ids"] = self._build_flux_text_ids(prompt_embeds)
+        if "image_ids" in valid_fields and prompt_embeds is not None:
+            raw_tensors["image_ids"] = self._build_flux_image_ids(
                 height=height,
                 width=width,
                 device=prompt_embeds.device,
                 dtype=prompt_embeds.dtype,
             )
 
-        return PromptEmbeddings(
-            prompt_embeds=self._align_embedding_tensor("prompt_embeds", prompt_embeds, batch_size),
-            pooled_prompt_embeds=self._align_embedding_tensor(
-                "pooled_prompt_embeds",
-                pooled_prompt_embeds,
-                batch_size,
-            ),
-            encoder_attention_mask=self._align_embedding_tensor(
-                "encoder_attention_mask",
-                encoder_attention_mask,
-                batch_size,
-            ),
-            negative_prompt_embeds=self._align_embedding_tensor(
-                "negative_prompt_embeds",
-                negative_prompt_embeds,
-                batch_size,
-            ),
-            negative_pooled_prompt_embeds=self._align_embedding_tensor(
-                "negative_pooled_prompt_embeds",
-                negative_pooled_prompt_embeds,
-                batch_size,
-            ),
-            text_ids=self._align_embedding_tensor("text_ids", text_ids, batch_size),
-            image_ids=self._align_embedding_tensor("image_ids", image_ids, batch_size),
-        )
+        filtered = {k: v for k, v in raw_tensors.items() if k in valid_fields and v is not None}
+        return ctx_cls(**filtered)
 
     # ---------------------------------------------------------------------
     # Core inference API
@@ -1124,6 +1137,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
 
         trajectories_tensor: Optional[torch.Tensor] = None
         has_initial_noise: Optional[bool] = None
+        trajectory_store: Optional[TrajectoryStore] = None
         if use_trajectory:
             trajectories_tensor = torch.cat(
                 [item for item in trajectory_items if item is not None],
@@ -1133,7 +1147,37 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 trajectories_tensor=trajectories_tensor,
                 num_inference_steps=steps,
             )
-            final_latents = trajectories_tensor[:, -1]
+            final_latents = trajectories_tensor[:, -1].clone()
+
+            # Client-side selective trim: reduce GPU memory on training side
+            traj_len = int(trajectories_tensor.shape[1])
+
+            # Attempt selective trim when only a subset of positions is needed.
+            # Positions use array-index space (column 0 = first stored state),
+            # matching how step_indices map to trajectory columns downstream.
+            trimmed_cols = None
+            if sde_indices is not None and len(sde_indices) < steps:
+                # Map SDE indices to column indices in the trajectory tensor.
+                # When has_initial_noise=True, column i = position i (0-indexed).
+                # When has_initial_noise=False, column i = position i+1, but
+                # step_indices already accounts for this shift, so we still
+                # want the same column indices relative to the tensor.
+                col_offset = 0 if has_initial_noise else 1
+                needed_original = set(compute_trajectory_positions(sde_indices, steps))
+                keep_cols = sorted(
+                    p - col_offset for p in needed_original if 0 <= p - col_offset < traj_len
+                )
+                if keep_cols and len(keep_cols) < traj_len:
+                    trimmed_cols = keep_cols
+
+            if trimmed_cols is not None:
+                trimmed = trajectories_tensor[:, trimmed_cols]
+                trajectory_store = TrajectoryStore.from_selective(
+                    trimmed, trimmed_cols, traj_len
+                )
+            else:
+                trajectory_store = TrajectoryStore.from_full(trajectories_tensor)
+            del trajectories_tensor  # Free raw tensor; trajectory_store owns the data now
         else:
             final_latents = self._extract_final_latents_without_trajectory(
                 results=results,
@@ -1151,7 +1195,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             log_prob_tensor = torch.cat([lp for lp in per_result_log_probs if lp is not None], dim=0)
             expected_steps = int(step_indices.shape[0]) - 1
             if (
-                trajectories_tensor is not None
+                trajectory_store is not None
                 and has_initial_noise is False
                 and int(log_prob_tensor.shape[1]) == expected_steps + 1
             ):
@@ -1190,13 +1234,15 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             if valid_noise_preds:
                 rollout_noise_preds_tensor = torch.cat(valid_noise_preds, dim=0)
 
-        embeddings = self._build_embeddings_from_results(
+        forward_context = self._build_forward_context_from_results(
             results=results,
             model_type=model_type,
             batch_size=int(final_latents.shape[0]),
             height=out_h,
             width=out_w,
+            guidance_scale=float(request.guidance_scale),
         )
+
 
         decoded_images = None
         decoded_video_tensors: List[torch.Tensor] = []
@@ -1222,16 +1268,16 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 self._warned_missing_decoded = True
 
         if model_type == "flux":
-            if trajectories_tensor is not None and trajectories_tensor.dim() == 4:
+            if trajectory_store is not None and trajectory_store.data.dim() == 4:
                 trajectory_format = "packed_seq_c4"
             elif final_latents.dim() == 3:
                 trajectory_format = "packed_seq_c4"
             else:
                 trajectory_format = "dense_latent"
         else:
-            if trajectories_tensor is not None:
+            if trajectory_store is not None:
                 trajectory_format = (
-                    "video_dense_latent" if trajectories_tensor.dim() == 6 else "dense_latent"
+                    "video_dense_latent" if trajectory_store.data.dim() == 6 else "dense_latent"
                 )
             else:
                 trajectory_format = (
@@ -1248,7 +1294,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             "timestep_scale": 1.0,
             "sde_indices": sorted(int(i) for i in sde_indices) if sde_indices is not None else None,
             "has_initial_noise": has_initial_noise,
-            "trajectory_available": bool(trajectories_tensor is not None),
+            "trajectory_available": bool(trajectory_store is not None),
         }
         if rollout_noise_preds_tensor is not None:
             metadata["rollout_noise_preds"] = rollout_noise_preds_tensor
@@ -1261,9 +1307,9 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             latents=final_latents,
             timesteps=timesteps,
             aux={
-                "trajectories": trajectories_tensor if require_trajectory else None,
+                "trajectory_store": trajectory_store,
                 "log_probs": merged_log_probs,
-                "embeddings": embeddings,
+                "forward_context": forward_context,
                 "decoded_images": decoded_images,
                 "metadata": metadata,
                 "step_indices": step_indices,

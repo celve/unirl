@@ -101,7 +101,7 @@ python -m diffusionrl.train \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
     --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 4.5 \
-    --sampling.timestep-fraction 0.1,0.5 \
+    --algorithm.rollout-scheduler.timestep-fraction 0.1,0.5 \
     \
     --algorithm.shuffle-seed 42 \
     --algorithm.shuffle-samples false \

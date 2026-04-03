@@ -509,9 +509,9 @@ def validate_sampler_outputs_against_contract(
             meta = meta or {}
             generator_type = meta.get("generator_type") if isinstance(meta, dict) else None
             capabilities = meta.get("engine_capabilities") if isinstance(meta, dict) else None
-            trajectories = out.aux.get("trajectories") if hasattr(out, "aux") else None
+            trajectories = out.aux.get("trajectory_store") if hasattr(out, "aux") else None
             step_indices = out.aux.get("step_indices") if hasattr(out, "aux") else None
-            traj_shape = tuple(trajectories.shape) if trajectories is not None else None
+            traj_shape = (trajectories.batch_size, trajectories.num_stored) if trajectories is not None else None
             latents_shape = tuple(out.latents.shape) if getattr(out, "latents", None) is not None else None
             if step_indices is None and hasattr(out, "timesteps"):
                 step_indices = torch.arange(

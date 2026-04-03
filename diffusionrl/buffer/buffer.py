@@ -12,7 +12,7 @@ from diffusionrl.buffer.buffer_batch_ops import concat_training_batches, index_t
 from diffusionrl.buffer.buffer_plugins import BufferPlugin, BufferPluginContext, build_buffer_plugins
 from diffusionrl.buffer.buffer_store import BatchStore
 from diffusionrl.types.buffer_contracts import BufferedTrainingPayload
-from diffusionrl.types.training_batch import BackwardTrainingBatch, ForwardTrainingBatch, TrainingBatch
+from diffusionrl.types.training_batch import TrainingBatch
 
 logger = logging.getLogger(__name__)
 
@@ -146,11 +146,7 @@ class BufferRuntime:
         self._group_batch_ref_counts[batch_handle] = remaining
 
     def _detect_modality(self, batch: TrainingBatch) -> str:
-        if isinstance(batch, BackwardTrainingBatch):
-            return "video" if int(batch.trajectories.ndim) >= 6 else "image"
-        if isinstance(batch, ForwardTrainingBatch):
-            return "video" if int(batch.clean_latents.ndim) >= 5 else "image"
-        return "unknown"
+        return batch.detect_modality()
 
     def _normalize_group_id(self, group_id: Any) -> Optional[str]:
         if group_id is None:

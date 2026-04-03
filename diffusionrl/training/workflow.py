@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional
 
-from diffusionrl.types.training_batch import BackwardTrainingBatch, TrainingBatch
+from diffusionrl.types.training_batch import TrainingBatch
 
 
 class TrainingWorkflow:
@@ -28,7 +28,7 @@ class TrainingWorkflow:
         rollout_id: int,
         batch: TrainingBatch,
         build_executor: Callable[[], Any],
-        replay_batch: Optional[Callable[[BackwardTrainingBatch], BackwardTrainingBatch]] = None,
+        replay_batch: Optional[Callable[[TrainingBatch], TrainingBatch]] = None,
         backend_train_step: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
         on_prepared_batch: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
@@ -40,7 +40,7 @@ class TrainingWorkflow:
         if on_prepared_batch is not None:
             on_prepared_batch()
 
-        if isinstance(current_batch, BackwardTrainingBatch) and replay_batch is not None:
+        if current_batch.has_trajectory_rl_data and replay_batch is not None:
             current_batch = replay_batch(current_batch)
 
         if backend_train_step is not None:

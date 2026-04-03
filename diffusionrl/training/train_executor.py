@@ -12,11 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import torch
 
-from diffusionrl.types.training_batch import (
-    BackwardTrainingBatch,
-    ForwardTrainingBatch,
-    TrainingBatch,
-)
+from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.training.batch_partition import shard_training_batch_for_rank
 from diffusionrl.training.update_schedule import (
     TrainingUpdateSchedule,
@@ -36,7 +32,6 @@ class TrainExecutorConfig:
     device: torch.device
     use_fsdp: bool
     algorithm_type: str
-    guidance_scale: float
     max_grad_norm: float
     micro_batch_size: int
     local_mini_batch_size: int
@@ -70,10 +65,10 @@ class TrainExecutor:
 
     def prepare_batch(self, batch: TrainingBatch) -> Optional[TrainingBatch]:
         """Validate, shard, and move training batch to compute device."""
-        if not isinstance(batch, (BackwardTrainingBatch, ForwardTrainingBatch)):
+        if not isinstance(batch, TrainingBatch):
             raise TypeError(
                 f"Unsupported batch type: {type(batch).__name__}. "
-                "Expected BackwardTrainingBatch or ForwardTrainingBatch. "
+                "Expected TrainingBatch. "
                 "Legacy dict format is not supported - use typed batches."
             )
 
@@ -225,8 +220,6 @@ class TrainExecutor:
             has_backward = False
             micro_batch_metrics: List[Dict[str, Any]] = []
 
-            # Mixed precision for model forwards is handled inside forward plugins
-            # (see forward_plugin.autocast_dtype / plugin.forward), not here.
             for start, end in mini_batches:
                 micro_batch = update_chunk.batch.slice(start, end)
                 (
@@ -238,7 +231,6 @@ class TrainExecutor:
                     model=self.model,
                     batch=micro_batch,
                     timesteps=training_timesteps,
-                    guidance_scale=self.config.guidance_scale,
                     loss_scale=loss_scale,
                 )
                 total_loss += (

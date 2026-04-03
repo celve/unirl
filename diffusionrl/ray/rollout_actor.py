@@ -15,10 +15,10 @@ from diffusionrl.types.engine import (
 )
 from diffusionrl.types.sampling import (
     LogProbData,
-    PromptEmbeddings,
     RolloutRequest,
     RolloutSamples,
 )
+from diffusionrl.types.trajectory_store import TrajectoryStore
 from diffusionrl.samplers.engine import (
     BaseRolloutEngine,
     DistributedWeightSyncCapable,
@@ -419,20 +419,23 @@ class RolloutActor:
 
     def _estimate_rollout_output_bytes(self, output: RolloutSamples) -> int:
         total = 0
-        trajectories = output.aux.get("trajectories")
+        trajectory_store = output.aux.get("trajectory_store")
         step_indices = output.aux.get("step_indices")
         log_probs = output.aux.get("log_probs")
-        embeddings = output.aux.get("embeddings")
+        fwd_ctx = output.aux.get("forward_context")
         metadata = output.aux.get("metadata")
-        for tensor in (output.latents, output.timesteps, trajectories, step_indices):
+        for tensor in (output.latents, output.timesteps, step_indices):
             if torch.is_tensor(tensor):
                 total += int(tensor.numel() * tensor.element_size())
+        if trajectory_store is not None:
+            tdata = trajectory_store.data
+            total += int(tdata.numel() * tdata.element_size())
         if log_probs is not None:
             for value in log_probs.data.values():
                 if torch.is_tensor(value):
                     total += int(value.numel() * value.element_size())
-        if embeddings is not None:
-            for value in embeddings.to_dict().values():
+        if fwd_ctx is not None:
+            for value in fwd_ctx.to_dict().values():
                 if torch.is_tensor(value):
                     total += int(value.numel() * value.element_size())
         total += self._estimate_tree_tensor_bytes(metadata)
@@ -488,25 +491,15 @@ class RolloutActor:
                 }
             )
 
-        embeddings = output.aux.get("embeddings")
-        if embeddings is not None and self._transport_dtype is not None:
-            embeddings = PromptEmbeddings(
-                prompt_embeds=self._maybe_cast_tensor_for_transport(embeddings.prompt_embeds),
-                pooled_prompt_embeds=self._maybe_cast_tensor_for_transport(
-                    embeddings.pooled_prompt_embeds
-                ),
-                encoder_attention_mask=self._maybe_cast_tensor_for_transport(
-                    embeddings.encoder_attention_mask
-                ),
-                negative_prompt_embeds=self._maybe_cast_tensor_for_transport(
-                    embeddings.negative_prompt_embeds
-                ),
-                negative_pooled_prompt_embeds=self._maybe_cast_tensor_for_transport(
-                    embeddings.negative_pooled_prompt_embeds
-                ),
-                text_ids=embeddings.text_ids,
-                image_ids=embeddings.image_ids,
-            )
+        fwd_ctx = output.aux.get("forward_context")
+        if fwd_ctx is not None and self._transport_dtype is not None:
+            fwd_ctx = fwd_ctx.cast_dtype(self._transport_dtype)
+
+        # NOTE: trajectory_store is intentionally NOT cast by transport_dtype.
+        # Trajectory latents must preserve their sampler-side storage precision
+        # (trajectory_precision, default fp16) for train-inference consistency:
+        # training-side log-prob replay reads the exact same latent values that
+        # the sampler wrote, so any dtype cast would introduce a bias.
 
         if self._transport_dtype is not None:
             metadata = self._cast_metadata_tensors_for_transport(metadata)
@@ -516,9 +509,8 @@ class RolloutActor:
             timesteps=output.timesteps,
             aux={
                 **dict(output.aux),
-                "trajectories": self._maybe_cast_tensor_for_transport(output.aux.get("trajectories")),
                 "log_probs": log_probs,
-                "embeddings": embeddings,
+                "forward_context": fwd_ctx,
                 "decoded_images": output.aux.get("decoded_images"),
                 "metadata": metadata,
                 "step_indices": output.aux.get("step_indices"),
@@ -871,9 +863,9 @@ class RolloutActor:
 
         aux: Dict[str, Any] = {}
 
-        trajectories = [output.aux.get("trajectories") for output in outputs]
-        if all(value is not None for value in trajectories):
-            aux["trajectories"] = torch.cat(trajectories, dim=0)
+        trajectory_stores = [output.aux.get("trajectory_store") for output in outputs]
+        if all(value is not None for value in trajectory_stores):
+            aux["trajectory_store"] = TrajectoryStore.concat(trajectory_stores)
 
         log_probs = [output.aux.get("log_probs") for output in outputs]
         if all(value is not None for value in log_probs):
@@ -886,23 +878,9 @@ class RolloutActor:
                 )
             aux["log_probs"] = LogProbData.from_dict(merged_log_probs)
 
-        embeddings = [output.aux.get("embeddings") for output in outputs]
-        if all(value is not None for value in embeddings):
-            def _cat_embed(attr: str):
-                values = [getattr(value, attr) for value in embeddings]
-                if all(v is not None for v in values):
-                    return torch.cat(values, dim=0)
-                return None
-
-            aux["embeddings"] = PromptEmbeddings(
-                prompt_embeds=_cat_embed("prompt_embeds"),
-                pooled_prompt_embeds=_cat_embed("pooled_prompt_embeds"),
-                encoder_attention_mask=_cat_embed("encoder_attention_mask"),
-                negative_prompt_embeds=_cat_embed("negative_prompt_embeds"),
-                negative_pooled_prompt_embeds=_cat_embed("negative_pooled_prompt_embeds"),
-                text_ids=_cat_embed("text_ids"),
-                image_ids=_cat_embed("image_ids"),
-            )
+        fwd_ctxs = [output.aux.get("forward_context") for output in outputs]
+        if all(c is not None for c in fwd_ctxs):
+            aux["forward_context"] = type(fwd_ctxs[0]).cat(fwd_ctxs)
 
         decoded_images = [output.aux.get("decoded_images") for output in outputs]
         if any(value is not None for value in decoded_images):
@@ -930,9 +908,9 @@ class RolloutActor:
             aux["step_indices"] = step_indices_values[0]
 
         handled_keys = {
-            "trajectories",
+            "trajectory_store",
             "log_probs",
-            "embeddings",
+            "forward_context",
             "decoded_images",
             "metadata",
             "step_indices",

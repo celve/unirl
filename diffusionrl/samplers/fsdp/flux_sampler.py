@@ -30,7 +30,9 @@ from diffusionrl.sde.runtime import (
     sd3_time_shift,
     denoising_step,
 )
-from diffusionrl.types import LogProbData, PromptEmbeddings
+from diffusionrl.types import LogProbData
+from diffusionrl.types.forward_context import FluxForwardContext
+from diffusionrl.types.trajectory_store import TrajectoryStore
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 logger = logging.getLogger(__name__)
@@ -317,7 +319,9 @@ class FluxSampler(BaseSampler):
 
         # Storage for trajectory and log probs (DanceGRPO line 226-227)
         latents = packed_latents.to(dtype=trajectory_dtype)
-        all_latents = [latents]
+        # Selective collection: only store positions needed for SDE step pairs
+        trajectory_store = TrajectoryStore.for_sde_steps(sde_indices, num_inference_steps)
+        trajectory_store.add(0, latents)
         all_log_probs: Dict[int, torch.Tensor] = {}
 
         autocast_ctx = (
@@ -369,7 +373,7 @@ class FluxSampler(BaseSampler):
                 step_index=i,
             )
             latents = latents.to(dtype=trajectory_dtype)
-            all_latents.append(latents)
+            trajectory_store.add(i + 1, latents)
 
             if log_prob is not None:
                 all_log_probs[i] = log_prob.to(dtype=self.logprob_dtype)
@@ -377,11 +381,10 @@ class FluxSampler(BaseSampler):
         # Unpack final latents for output
         final_latents = self._unpack_latents(latents, latent_h, latent_w)
 
-        # Stack trajectory (DanceGRPO line 255)
-        trajectories = torch.stack(all_latents, dim=1)  # [B, T+1, seq, C*4]
+        trajectory_store.finalize()
 
-        # Create embeddings bundle
-        embeddings = PromptEmbeddings(
+        forward_context = FluxForwardContext(
+            guidance_scale=actual_guidance,
             prompt_embeds=prompt_embeds,
             pooled_prompt_embeds=pooled_prompt_embeds,
             text_ids=text_ids,
@@ -392,11 +395,10 @@ class FluxSampler(BaseSampler):
             latents=final_latents,
             timesteps=sigma_schedule,
             aux={
-                "trajectories": trajectories,
+                "trajectory_store": trajectory_store,
                 "log_probs": LogProbData.from_dict(all_log_probs),
-                "embeddings": embeddings,
+                "forward_context": forward_context,
                 "metadata": {
-                    "sde_indices": sde_indices,
                     "engine_capabilities": {
                         "supports_logprob": True,
                         "supports_trajectory": True,

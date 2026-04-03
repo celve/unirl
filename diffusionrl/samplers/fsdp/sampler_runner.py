@@ -153,21 +153,6 @@ def generate_prompt_only_rollout(
         )
 
     kwargs = dict(request.sampling.get("kwargs") or {})
-    unsupported_embedding_kwargs = [
-        name
-        for name in (
-            "negative_prompt_embeds",
-            "negative_pooled_prompt_embeds",
-            "text_ids",
-            "image_ids",
-        )
-        if kwargs.get(name) is not None
-    ]
-    if unsupported_embedding_kwargs:
-        raise ValueError(
-            f"{host_label} uses prompt-only RolloutRequest input. "
-            f"Unsupported embedding kwargs: {unsupported_embedding_kwargs}."
-        )
 
     seed_raw = request.sampling.get("seed")
     base_seed = None if seed_raw is None else int(seed_raw)
@@ -191,8 +176,7 @@ def generate_prompt_only_rollout(
     sde_indices = None if sde_indices_raw is None else {int(v) for v in sde_indices_raw}
 
     encoded = encode_prompt(model_bundle, prompts)
-    prompt_embeds = encoded.get("prompt_embeds")
-    if prompt_embeds is None:
+    if encoded.get("prompt_embeds") is None:
         raise RuntimeError(f"{host_label} prompt encoder returned no prompt_embeds.")
 
     return run_sample(
@@ -200,11 +184,6 @@ def generate_prompt_only_rollout(
         sampler=sampler,
         sampling_adapter=sampling_adapter,
         prompts=prompts,
-        prompt_embeds=prompt_embeds,
-        pooled_prompt_embeds=encoded.get("pooled_prompt_embeds"),
-        negative_prompt_embeds=encoded.get("negative_prompt_embeds"),
-        negative_pooled_prompt_embeds=encoded.get("negative_pooled_prompt_embeds"),
-        encoder_attention_mask=encoded.get("encoder_attention_mask"),
         num_inference_steps=num_inference_steps,
         guidance_scale=guidance_scale,
         height=height,
@@ -213,11 +192,10 @@ def generate_prompt_only_rollout(
         latents=request.inputs.get("latents"),
         base_seed=base_seed,
         sde_indices=sde_indices,
-        text_ids=encoded.get("text_ids"),
-        image_ids=encoded.get("image_ids"),
         init_same_noise=bool(request.sampling.get("init_same_noise", False)),
         samples_per_prompt=max(1, int(request.sampling.get("samples_per_prompt", 1))),
         noise_group_ids=request.meta.get("noise_group_ids"),
+        **encoded,
         **kwargs,
     )
 

@@ -1,11 +1,26 @@
-"""Training batch data types for algorithms.
+"""Unified training batch data type for all algorithms.
 
-`BackwardTrainingBatch` is for trajectory-based GRPO/MixGRPO optimization.
-`ForwardTrainingBatch` is for NFT optimization on clean latents.
+Replaces the previous ``BackwardTrainingBatch`` / ``ForwardTrainingBatch``
+split with a single ``TrainingBatch`` class that stores:
+
+- ``trajectory_store``: compact latent storage via :class:`TrajectoryStore`
+- ``forward_context``: model forward parameters via :class:`ForwardContext`
+- ``log_probs``, ``advantages``, ``timesteps``, etc.
+
+NFT compatibility:
+
+- ``batch.clean_latents`` returns ``trajectory_store.clean_latents``
+- ``batch.has_trajectory_rl_data`` returns ``False`` when log_probs is empty
+
+GRPO compatibility:
+
+- ``batch.trajectories`` returns ``trajectory_store.data`` (full trajectory)
+- ``batch.get_timestep_data_by_step(step_idx)`` works as before
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
@@ -18,7 +33,9 @@ from .batch_ops import (
     reindex_payload_value,
     slice_payload_value,
 )
-from .sampling import LogProbData, PromptEmbeddings
+from .forward_context import ForwardContext
+from .sampling import LogProbData
+from .trajectory_store import TrajectoryStore
 
 if TYPE_CHECKING:
     from torch import device as TorchDevice
@@ -53,22 +70,7 @@ def build_rollout_extras(*, request: Any, sampler_outputs: List[Any]) -> Dict[st
 
 @dataclass
 class TimestepData:
-    """
-    Single timestep data for GRPO loss computation.
-
-    Contains all data needed to compute loss at a specific timestep.
-
-    Attributes:
-        latents: Current noisy latents x_t [B, C, H, W]
-        next_latents: Next step latents x_{t-1} [B, C, H, W]
-        log_prob: Old log probability [B] (None for ODE steps)
-        sigma: Current sigma value
-        sigma_next: Next sigma value
-        timestep_idx: Index of this timestep
-        sigmas: Full sigma schedule [T+1] for all timesteps.
-            Used to derive sigma_max (sigmas[1]) for log_prob boundary handling,
-            ensuring training-inference consistency.
-    """
+    """Single timestep data for GRPO loss computation."""
 
     latents: torch.Tensor
     next_latents: torch.Tensor
@@ -97,23 +99,20 @@ class TimestepData:
         )
 
 
-# Used by GRPO/MixGRPO: requires full trajectory + old log_probs for IS/PPO-style objectives.
 @dataclass
-class BackwardTrainingBatch:
-    """
-    GRPO/MixGRPO training batch with trajectories and log probabilities.
+class TrainingBatch:
+    """Unified training batch for all algorithms.
 
-    This batch type is used for trajectory-based algorithms that require
-    the full sampling path and importance sampling ratios.
-
-    It always returns trajectories in their original dtype (e.g. float16).
+    Combines what was previously ``BackwardTrainingBatch`` (GRPO)
+    and ``ForwardTrainingBatch`` (NFT) into a single type.
     """
 
-    trajectories: torch.Tensor
-    log_probs: LogProbData
+    trajectory_store: TrajectoryStore
     timesteps: torch.Tensor
     advantages: torch.Tensor
-    embeddings: PromptEmbeddings
+    forward_context: ForwardContext
+
+    log_probs: Optional[LogProbData] = None
     rewards: Optional[torch.Tensor] = None
     prompts: Optional[List[str]] = None
     prompt_ids: Optional[List[str]] = None
@@ -124,28 +123,63 @@ class BackwardTrainingBatch:
     target_sde_indices: Optional[Set[int]] = None
     extras: Dict[str, Any] = field(default_factory=dict)
 
+    # ---- core properties ----------------------------------------------------
+
     @property
     def batch_size(self) -> int:
-        """Get batch size."""
-        return self.trajectories.shape[0]
+        return self.trajectory_store.batch_size
+
+    @property
+    def device(self) -> torch.device:
+        return self.trajectory_store.device
+
+    # ---- trajectory access (GRPO compat) ------------------------------------
+
+    @property
+    def trajectories(self) -> torch.Tensor:
+        """Full trajectory tensor [B, T+1, ...] — GRPO compatibility.
+
+        .. warning:: When ``trajectory_store.is_selective`` is ``True``, the
+           data tensor is **not** a dense ``[B, T+1, ...]`` tensor.  Use
+           ``trajectory_store.get_pair(pos)`` for position-safe access.
+        """
+        if self.trajectory_store.is_selective:
+            warnings.warn(
+                "Accessing batch.trajectories on a selective TrajectoryStore. "
+                "The data tensor has fewer columns than T+1. "
+                "Use trajectory_store.get_pair(pos) for safe access.",
+                stacklevel=2,
+            )
+        return self.trajectory_store.data
+
+    @property
+    def clean_latents(self) -> torch.Tensor:
+        """Final denoised latents — NFT compatibility."""
+        return self.trajectory_store.clean_latents
+
+    @property
+    def has_trajectory_rl_data(self) -> bool:
+        """True when this batch carries trajectory RL data (GRPO-style)."""
+        return (
+            self.log_probs is not None
+            and len(self.log_probs) > 0
+            and not self.trajectory_store.is_clean_latents_only
+        )
+
+    # ---- SDE step indexing --------------------------------------------------
 
     @property
     def sde_indices(self) -> Set[int]:
-        """Get set of timestep indices that used SDE (have log_probs)."""
-        if len(self.log_probs) > 0:
+        """Timestep indices that used SDE (have log_probs)."""
+        if self.log_probs is not None and len(self.log_probs) > 0:
             return self.log_probs.sde_indices
         if self.target_sde_indices is not None:
             return set(int(i) for i in self.target_sde_indices)
         return set()
 
     @property
-    def device(self) -> torch.device:
-        """Get device of the batch tensors."""
-        return self.trajectories.device
-
-    @property
     def resolved_step_indices(self) -> torch.Tensor:
-        """Get explicit step labels aligned with timesteps/trajectory axis."""
+        """Explicit step labels aligned with timesteps/trajectory axis."""
         if self.step_indices is not None:
             return self.step_indices
         return torch.arange(
@@ -166,119 +200,27 @@ class BackwardTrainingBatch:
                 f"step_idx={step_idx} not present in step_indices={steps.tolist()}"
             )
         pos = int(hits[0].item())
-        if pos >= self.trajectories.shape[1] - 1:
+        if not self.trajectory_store.has_position(pos) or not self.trajectory_store.has_position(pos + 1):
             raise ValueError(
-                f"step_idx={step_idx} maps to terminal position {pos} (no t+1 pair available)"
+                f"step_idx={step_idx} maps to position {pos} but the (pos, pos+1) pair "
+                f"is not available in trajectory_store "
+                f"(stored positions: {self.trajectory_store.stored_positions})"
             )
         return pos
 
-    def validate(self) -> None:
-        """
-        Validate batch consistency.
-
-        Raises:
-            ValueError: If batch dimensions are inconsistent
-        """
-        batch_size = self.trajectories.shape[0]
-        steps_count = self.trajectories.shape[1] - 1
-
-        if self.advantages.shape[0] != batch_size:
-            raise ValueError(
-                f"Advantages batch size {self.advantages.shape[0]} != "
-                f"trajectories batch size {batch_size}"
-            )
-
-        if self.timesteps.shape[0] != steps_count + 1:
-            raise ValueError(
-                f"Timesteps length {self.timesteps.shape[0]} != "
-                f"expected {steps_count + 1}"
-            )
-
-        step_indices = self.resolved_step_indices
-        if int(step_indices.shape[0]) != steps_count + 1:
-            raise ValueError(
-                f"Step indices length {step_indices.shape[0]} != expected {steps_count + 1}"
-            )
-        if step_indices.numel() > 1 and not bool(
-            torch.all(step_indices[1:] > step_indices[:-1])
-        ):
-            raise ValueError(
-                f"step_indices must be strictly increasing, got: {step_indices.tolist()}"
-            )
-        if self.target_sde_indices is not None:
-            allowed_steps = set(int(v) for v in step_indices[:-1].tolist())
-            bad = sorted(
-                int(i) for i in self.target_sde_indices if int(i) not in allowed_steps
-            )
-            if bad:
-                raise ValueError(
-                    f"target_sde_indices contain out-of-range steps: {bad}, allowed={sorted(allowed_steps)}"
-                )
-
-        if self.embeddings.prompt_embeds.shape[0] != batch_size:
-            raise ValueError(
-                f"Embeddings batch size {self.embeddings.prompt_embeds.shape[0]} != "
-                f"batch size {batch_size}"
-            )
-        if self.sample_ids is not None and len(self.sample_ids) != batch_size:
-            raise ValueError(
-                f"sample_ids length {len(self.sample_ids)} != batch size {batch_size}"
-            )
-        if self.prompt_ids is not None and len(self.prompt_ids) != batch_size:
-            raise ValueError(
-                f"prompt_ids length {len(self.prompt_ids)} != batch size {batch_size}"
-            )
-        if self.group_ids is not None and len(self.group_ids) != batch_size:
-            raise ValueError(
-                f"group_ids length {len(self.group_ids)} != batch size {batch_size}"
-            )
-
-        for idx, log_prob in self.log_probs.data.items():
-            if log_prob.shape[0] != batch_size:
-                raise ValueError(
-                    f"Log prob at index {idx} has batch size {log_prob.shape[0]} != {batch_size}"
-                )
-
-    def to_device(self, device: Union[str, "TorchDevice"]) -> "BackwardTrainingBatch":
-        """Move all tensors to specified device."""
-        return BackwardTrainingBatch(
-            trajectories=self.trajectories.to(device=device),
-            log_probs=self.log_probs.to_device(device),
-            timesteps=self.timesteps.to(device),
-            advantages=self.advantages.to(device),
-            embeddings=self.embeddings.to_device(device),
-            rewards=self.rewards.to(device) if self.rewards is not None else None,
-            prompts=self.prompts,
-            prompt_ids=self.prompt_ids,
-            sample_ids=self.sample_ids,
-            group_ids=self.group_ids,
-            is_partitioned=self.is_partitioned,
-            step_indices=self.step_indices.to(device)
-            if self.step_indices is not None
-            else None,
-            target_sde_indices=self.target_sde_indices,
-            extras=move_payload_value(self.extras, device),
-        )
-
     def get_timestep_data(self, t_idx: int) -> TimestepData:
-        """
-        Extract data for a specific trajectory position index.
-
-        Args:
-            t_idx: Position index along trajectory axis [0, T-1]
-
-        Returns:
-            TimestepData for the specified timestep
-        """
+        """Extract data for a specific trajectory position index."""
         if not self._is_contiguous_step_index():
             raise ValueError(
                 "Non-contiguous step_indices detected. "
-                "Use get_timestep_data_by_step(step_idx) instead of positional get_timestep_data()."
+                "Use get_timestep_data_by_step(step_idx) instead."
             )
+        log_prob = self.log_probs[t_idx] if self.log_probs is not None else None
+        latents, next_latents = self.trajectory_store.get_pair(t_idx)
         return TimestepData(
-            latents=self.trajectories[:, t_idx],
-            next_latents=self.trajectories[:, t_idx + 1],
-            log_prob=self.log_probs[t_idx],
+            latents=latents,
+            next_latents=next_latents,
+            log_prob=log_prob,
             sigma=self.timesteps[t_idx],
             sigma_next=self.timesteps[t_idx + 1],
             timestep_idx=t_idx,
@@ -286,22 +228,21 @@ class BackwardTrainingBatch:
         )
 
     def get_timestep_data_by_step(self, step_idx: int) -> TimestepData:
-        """
-        Extract data for a logical step label from step_indices.
-
-        Args:
-            step_idx: Logical step label from sampling contract.
-        """
+        """Extract data for a logical step label from step_indices."""
         pos = self.get_position_for_step(step_idx)
+        log_prob = self.log_probs[int(step_idx)] if self.log_probs is not None else None
+        latents, next_latents = self.trajectory_store.get_pair(pos)
         return TimestepData(
-            latents=self.trajectories[:, pos],
-            next_latents=self.trajectories[:, pos + 1],
-            log_prob=self.log_probs[int(step_idx)],
+            latents=latents,
+            next_latents=next_latents,
+            log_prob=log_prob,
             sigma=self.timesteps[pos],
             sigma_next=self.timesteps[pos + 1],
             timestep_idx=int(step_idx),
             sigmas=self.timesteps,
         )
+
+    # ---- timestep lookup by value -------------------------------------------
 
     def get_timestep_data_by_timestep(self, timestep: Any) -> TimestepData:
         """Extract data for a timestep value from the batch timestep schedule."""
@@ -323,212 +264,121 @@ class BackwardTrainingBatch:
         pos = int(hits[0].item())
         return int(self.resolved_step_indices[pos].item())
 
-    def slice(self, start: int, end: int) -> "BackwardTrainingBatch":
-        """
-        Slice batch along sample dimension for micro-batch gradient accumulation.
-
-        This method is dimension-agnostic and supports both image and video:
-        - Image trajectories: [B, T+1, C, H, W]
-        - Video trajectories: [B, T+1, C, T_frames, H, W]
-        """
-        return BackwardTrainingBatch(
-            trajectories=self.trajectories[start:end].clone(),
-            log_probs=self.log_probs.slice(start, end),
-            timesteps=self.timesteps,
-            advantages=self.advantages[start:end].clone(),
-            embeddings=self.embeddings.slice(start, end),
-            rewards=self.rewards[start:end].clone() if self.rewards is not None else None,
-            prompts=self.prompts[start:end] if self.prompts is not None else None,
-            prompt_ids=self.prompt_ids[start:end] if self.prompt_ids is not None else None,
-            sample_ids=self.sample_ids[start:end] if self.sample_ids is not None else None,
-            group_ids=self.group_ids[start:end] if self.group_ids is not None else None,
-            is_partitioned=True,
-            step_indices=self.step_indices,
-            target_sde_indices=self.target_sde_indices,
-            extras=slice_payload_value(
-                self.extras,
-                start=start,
-                end=end,
-                batch_size=int(self.batch_size),
-            ),
-        )
-
-    def shuffle(self, indices: torch.Tensor) -> "BackwardTrainingBatch":
-        """
-        Shuffle (reindex) batch along sample dimension.
-
-        This is analogous to Flow-Factory's per-inner-epoch shuffle before
-        training: it permutes all sample-level tensors (trajectories,
-        log_probs, advantages, embeddings, rewards, prompts) using the
-        given index permutation, while keeping shared fields (timesteps,
-        step_indices, target_sde_indices) unchanged.
-
-        Args:
-            indices: 1-D LongTensor permutation of [0, batch_size)
-                     (e.g. from torch.randperm(batch_size))
-
-        Returns:
-            New BackwardTrainingBatch with shuffled sample order
-        """
-        return BackwardTrainingBatch(
-            trajectories=self.trajectories[indices],
-            log_probs=self.log_probs.reindex(indices),
-            timesteps=self.timesteps,
-            advantages=self.advantages[indices],
-            embeddings=self.embeddings.reindex(indices),
-            rewards=self.rewards[indices] if self.rewards is not None else None,
-            prompts=(
-                [self.prompts[i] for i in indices.tolist()]
-                if self.prompts is not None
-                else None
-            ),
-            prompt_ids=(
-                [self.prompt_ids[i] for i in indices.tolist()]
-                if self.prompt_ids is not None
-                else None
-            ),
-            sample_ids=(
-                [self.sample_ids[i] for i in indices.tolist()]
-                if self.sample_ids is not None
-                else None
-            ),
-            group_ids=(
-                [self.group_ids[i] for i in indices.tolist()]
-                if self.group_ids is not None
-                else None
-            ),
-            is_partitioned=self.is_partitioned,
-            step_indices=self.step_indices,
-            target_sde_indices=self.target_sde_indices,
-            extras=reindex_payload_value(
-                self.extras,
-                indices=indices,
-                batch_size=int(self.batch_size),
-            ),
-        )
-
-    def to_loss_dict(self) -> Dict[str, Any]:
-        """
-        Convert to dictionary format for loss interfaces.
-
-        Returns:
-            Dictionary compatible with GRPOAlgorithm.compute_loss()
-        """
-        return {
-            "trajectories": self.trajectories,
-            "log_probs_dict": self.log_probs.to_dict(),
-            "timesteps": self.timesteps,
-            "sde_indices": self.sde_indices,
-            "target_sde_indices": self.target_sde_indices,
-            "step_indices": self.resolved_step_indices,
-            "extras": self.extras,
-            **self.embeddings.to_dict(),
-        }
-
-
-# Used by NFT: consumes clean latents (x0) and constructs forward diffusion states in loss.
-@dataclass
-class ForwardTrainingBatch:
-    """
-    NFT training batch with clean latents only.
-
-    NFT uses forward diffusion in the loss function, so only clean
-    latents (x0) are needed - no trajectories or log probabilities.
-    """
-
-    clean_latents: torch.Tensor
-    advantages: torch.Tensor
-    embeddings: PromptEmbeddings
-    rewards: Optional[torch.Tensor] = None
-    prompts: Optional[List[str]] = None
-    prompt_ids: Optional[List[str]] = None
-    sample_ids: Optional[List[str]] = None
-    group_ids: Optional[List[str]] = None
-    timesteps: Optional[torch.Tensor] = None
-    is_partitioned: bool = False
-    extras: Dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def batch_size(self) -> int:
-        """Get batch size."""
-        return self.clean_latents.shape[0]
-
-    @property
-    def device(self) -> torch.device:
-        """Get device of the batch tensors."""
-        return self.clean_latents.device
+    # ---- validation ---------------------------------------------------------
 
     def validate(self) -> None:
-        """
-        Validate batch consistency.
+        """Validate batch consistency."""
+        bs = self.batch_size
 
-        Raises:
-            ValueError: If batch dimensions are inconsistent
-        """
-        batch_size = self.clean_latents.shape[0]
-
-        if self.advantages.shape[0] != batch_size:
+        if self.advantages.shape[0] != bs:
             raise ValueError(
                 f"Advantages batch size {self.advantages.shape[0]} != "
-                f"clean_latents batch size {batch_size}"
+                f"trajectory batch size {bs}"
             )
 
-        if self.embeddings.prompt_embeds.shape[0] != batch_size:
-            raise ValueError(
-                f"Embeddings batch size {self.embeddings.prompt_embeds.shape[0]} != "
-                f"batch size {batch_size}"
-            )
-        if self.sample_ids is not None and len(self.sample_ids) != batch_size:
-            raise ValueError(
-                f"sample_ids length {len(self.sample_ids)} != batch size {batch_size}"
-            )
-        if self.prompt_ids is not None and len(self.prompt_ids) != batch_size:
-            raise ValueError(
-                f"prompt_ids length {len(self.prompt_ids)} != batch size {batch_size}"
-            )
-        if self.group_ids is not None and len(self.group_ids) != batch_size:
-            raise ValueError(
-                f"group_ids length {len(self.group_ids)} != batch size {batch_size}"
-            )
+        if self.trajectory_store.is_full:
+            steps_count = self.trajectory_store.num_stored - 1
+            if self.timesteps.shape[0] != steps_count + 1:
+                raise ValueError(
+                    f"Timesteps length {self.timesteps.shape[0]} != "
+                    f"expected {steps_count + 1}"
+                )
 
-    def to_device(self, device: Union[str, "TorchDevice"]) -> "ForwardTrainingBatch":
+            step_indices = self.resolved_step_indices
+            if int(step_indices.shape[0]) != steps_count + 1:
+                raise ValueError(
+                    f"Step indices length {step_indices.shape[0]} != expected {steps_count + 1}"
+                )
+            if step_indices.numel() > 1 and not bool(
+                torch.all(step_indices[1:] > step_indices[:-1])
+            ):
+                raise ValueError(
+                    f"step_indices must be strictly increasing, got: {step_indices.tolist()}"
+                )
+            if self.target_sde_indices is not None:
+                allowed_steps = set(int(v) for v in step_indices[:-1].tolist())
+                bad = sorted(
+                    int(i) for i in self.target_sde_indices if int(i) not in allowed_steps
+                )
+                if bad:
+                    raise ValueError(
+                        f"target_sde_indices contain out-of-range steps: {bad}, "
+                        f"allowed={sorted(allowed_steps)}"
+                    )
+
+        elif self.trajectory_store.is_selective:
+            # Selective store: only validate that target_sde_indices
+            # have both (pos, pos+1) positions stored.
+            if self.target_sde_indices is not None:
+                for idx in sorted(self.target_sde_indices):
+                    if not self.trajectory_store.has_position(idx):
+                        raise ValueError(
+                            f"target_sde_indices step {idx} not stored in "
+                            f"selective trajectory (stored: {self.trajectory_store.stored_positions})"
+                        )
+                    if not self.trajectory_store.has_position(idx + 1):
+                        raise ValueError(
+                            f"target_sde_indices step {idx} requires position {idx + 1} "
+                            f"but it is not stored in selective trajectory "
+                            f"(stored: {self.trajectory_store.stored_positions})"
+                        )
+
+        ctx_bs = self.forward_context.batch_size
+        if ctx_bs > 0 and ctx_bs != bs:
+            raise ValueError(
+                f"ForwardContext batch size {ctx_bs} != "
+                f"trajectory batch size {bs}"
+            )
+        for name in ("sample_ids", "prompt_ids", "group_ids"):
+            ids = getattr(self, name)
+            if ids is not None and len(ids) != bs:
+                raise ValueError(f"{name} length {len(ids)} != batch size {bs}")
+
+        if self.log_probs is not None:
+            for idx, log_prob in self.log_probs.data.items():
+                if log_prob.shape[0] != bs:
+                    raise ValueError(
+                        f"Log prob at index {idx} has batch size "
+                        f"{log_prob.shape[0]} != {bs}"
+                    )
+
+    # ---- batch operations ---------------------------------------------------
+
+    def to_device(self, device: Union[str, "TorchDevice"]) -> "TrainingBatch":
         """Move all tensors to specified device."""
-        return ForwardTrainingBatch(
-            clean_latents=self.clean_latents.to(device),
+        return TrainingBatch(
+            trajectory_store=self.trajectory_store.to_device(device),
+            timesteps=self.timesteps.to(device),
             advantages=self.advantages.to(device),
-            embeddings=self.embeddings.to_device(device),
+            forward_context=self.forward_context.to_device(device),
+            log_probs=self.log_probs.to_device(device) if self.log_probs is not None else None,
             rewards=self.rewards.to(device) if self.rewards is not None else None,
             prompts=self.prompts,
             prompt_ids=self.prompt_ids,
             sample_ids=self.sample_ids,
             group_ids=self.group_ids,
-            timesteps=self.timesteps.to(device) if self.timesteps is not None else None,
             is_partitioned=self.is_partitioned,
+            step_indices=self.step_indices.to(device) if self.step_indices is not None else None,
+            target_sde_indices=self.target_sde_indices,
             extras=move_payload_value(self.extras, device),
         )
 
-    def slice(self, start: int, end: int) -> "ForwardTrainingBatch":
-        """
-        Slice batch along sample dimension.
-
-        Args:
-            start: Start index (inclusive)
-            end: End index (exclusive)
-
-        Returns:
-            New ForwardTrainingBatch with sliced data
-        """
-        return ForwardTrainingBatch(
-            clean_latents=self.clean_latents[start:end].clone(),
+    def slice(self, start: int, end: int) -> "TrainingBatch":
+        """Slice batch along sample dimension for micro-batch gradient accumulation."""
+        return TrainingBatch(
+            trajectory_store=self.trajectory_store.slice_batch(start, end),
+            timesteps=self.timesteps,
             advantages=self.advantages[start:end].clone(),
-            embeddings=self.embeddings.slice(start, end),
+            forward_context=self.forward_context.slice(start, end),
+            log_probs=self.log_probs.slice(start, end) if self.log_probs is not None else None,
             rewards=self.rewards[start:end].clone() if self.rewards is not None else None,
             prompts=self.prompts[start:end] if self.prompts is not None else None,
             prompt_ids=self.prompt_ids[start:end] if self.prompt_ids is not None else None,
             sample_ids=self.sample_ids[start:end] if self.sample_ids is not None else None,
             group_ids=self.group_ids[start:end] if self.group_ids is not None else None,
-            timesteps=self.timesteps if self.timesteps is not None else None,
             is_partitioned=True,
+            step_indices=self.step_indices,
+            target_sde_indices=self.target_sde_indices,
             extras=slice_payload_value(
                 self.extras,
                 start=start,
@@ -537,24 +387,14 @@ class ForwardTrainingBatch:
             ),
         )
 
-    def shuffle(self, indices: torch.Tensor) -> "ForwardTrainingBatch":
-        """
-        Shuffle (reindex) batch along sample dimension.
-
-        Permutes all sample-level tensors using the given index permutation,
-        while keeping shared fields (timesteps) unchanged.
-
-        Args:
-            indices: 1-D LongTensor permutation of [0, batch_size)
-                     (e.g. from torch.randperm(batch_size))
-
-        Returns:
-            New ForwardTrainingBatch with shuffled sample order
-        """
-        return ForwardTrainingBatch(
-            clean_latents=self.clean_latents[indices],
+    def shuffle(self, indices: torch.Tensor) -> "TrainingBatch":
+        """Shuffle (reindex) batch along sample dimension."""
+        return TrainingBatch(
+            trajectory_store=self.trajectory_store.reindex_batch(indices),
+            timesteps=self.timesteps,
             advantages=self.advantages[indices],
-            embeddings=self.embeddings.reindex(indices),
+            forward_context=self.forward_context.reindex(indices),
+            log_probs=self.log_probs.reindex(indices) if self.log_probs is not None else None,
             rewards=self.rewards[indices] if self.rewards is not None else None,
             prompts=(
                 [self.prompts[i] for i in indices.tolist()]
@@ -576,8 +416,9 @@ class ForwardTrainingBatch:
                 if self.group_ids is not None
                 else None
             ),
-            timesteps=self.timesteps,
             is_partitioned=self.is_partitioned,
+            step_indices=self.step_indices,
+            target_sde_indices=self.target_sde_indices,
             extras=reindex_payload_value(
                 self.extras,
                 indices=indices,
@@ -585,39 +426,16 @@ class ForwardTrainingBatch:
             ),
         )
 
-    def to_loss_dict(self) -> Dict[str, Any]:
-        """
-        Convert to dictionary format for loss interfaces.
+    # ---- modality detection -------------------------------------------------
 
-        Returns:
-            Dictionary compatible with NFTAlgorithm.compute_loss()
-        """
-        return {
-            "clean_latents": self.clean_latents,
-            "timesteps": self.timesteps,
-            "extras": self.extras,
-            **self.embeddings.to_dict(),
-        }
+    def detect_modality(self) -> str:
+        """Detect media modality from trajectory data shape."""
+        return self.trajectory_store.detect_modality()
 
-
-TrainingBatch = Union[BackwardTrainingBatch, ForwardTrainingBatch]
-
-
-def is_backward_batch(batch: TrainingBatch) -> bool:
-    """Check if batch is a BackwardTrainingBatch (used by GRPO/MixGRPO)."""
-    return isinstance(batch, BackwardTrainingBatch)
-
-
-def is_forward_batch(batch: TrainingBatch) -> bool:
-    """Check if batch is a ForwardTrainingBatch (used by NFT)."""
-    return isinstance(batch, ForwardTrainingBatch)
 
 __all__ = [
-    "BackwardTrainingBatch",
-    "ForwardTrainingBatch",
     "TimestepData",
     "TrainingBatch",
+    "TrajectoryStore",
     "build_rollout_extras",
-    "is_backward_batch",
-    "is_forward_batch",
 ]

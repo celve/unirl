@@ -182,7 +182,7 @@ run_training() {
         --sampling.shift 3.0 \
         --sampling.eta 0.0 \
         --sampling.sde-type dpm2 \
-        --sampling.timestep-fraction 0.99 \
+        --algorithm.training-scheduler.timestep-fraction 0.99 \
         --sampling.num-inference-steps "${NUM_INFERENCE_STEPS}" \
         --sampling.guidance-scale 4.5 \
         --sampling.sampling-adapter old \

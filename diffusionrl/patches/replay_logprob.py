@@ -9,7 +9,7 @@ from typing import Any, Dict
 import torch
 
 from diffusionrl.types.sde import SDEConfig
-from diffusionrl.types.training_batch import BackwardTrainingBatch
+from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils import load_function
 
 logger = logging.getLogger(__name__)
@@ -126,7 +126,7 @@ class ReplayLogProbPatch:
     def maybe_replay_old_log_probs(
         self,
         *,
-        batch: BackwardTrainingBatch,
+        batch: TrainingBatch,
         enabled: bool,
         algorithm_type: str,
         sampling_config: Dict[str, Any],
@@ -135,9 +135,8 @@ class ReplayLogProbPatch:
         text_encoder: Any,
         vae: Any,
         scheduler: Any,
-        guidance_scale: float,
-    ) -> BackwardTrainingBatch:
-        if not enabled or algorithm_type != "grpo" or len(batch.log_probs) > 0:
+    ) -> TrainingBatch:
+        if not enabled or algorithm_type != "grpo" or (batch.log_probs is not None and len(batch.log_probs) > 0):
             return batch
 
         self._build_replay_sampler(
@@ -173,19 +172,13 @@ class ReplayLogProbPatch:
             # resolved step ids can be shifted (1..T) while sigma_schedule remains local (0..T-1).
             # Use local trajectory position to keep replay indexing in-bounds.
             local_step_index = int(pos)
+            ctx_dict = batch.forward_context.to_dict()
             arg_map: Dict[str, Any] = {
-                "latents": batch.trajectories[:, pos],
-                "prev_latents": batch.trajectories[:, pos + 1],
-                "prompt_embeds": batch.embeddings.prompt_embeds,
-                "pooled_prompt_embeds": batch.embeddings.pooled_prompt_embeds,
-                "encoder_attention_mask": batch.embeddings.encoder_attention_mask,
-                "negative_prompt_embeds": batch.embeddings.negative_prompt_embeds,
-                "negative_pooled_prompt_embeds": batch.embeddings.negative_pooled_prompt_embeds,
-                "text_ids": batch.embeddings.text_ids,
-                "image_ids": batch.embeddings.image_ids,
+                "latents": batch.trajectory_store.get_position(pos),
+                "prev_latents": batch.trajectory_store.get_position(pos + 1),
                 "timestep_index": local_step_index,
                 "sigma_schedule": batch.timesteps,
-                "guidance_scale": guidance_scale,
+                **ctx_dict,
             }
             call_kwargs = {
                 name: value
@@ -210,29 +203,6 @@ class ReplayLogProbPatch:
                     f"Replay sampler missing required args {missing_required} for step={step_idx}. "
                     f"sampler_dotpath={self._replay_sampler_dotpath}"
                 )
-            critical_non_null = {"text_ids", "image_ids"}
-            missing_non_null = [
-                name
-                for name, param in replay_sig.parameters.items()
-                if (
-                    name in critical_non_null
-                    and param.default is inspect.Parameter.empty
-                    and param.kind
-                    in (
-                        inspect.Parameter.POSITIONAL_ONLY,
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        inspect.Parameter.KEYWORD_ONLY,
-                    )
-                    and name in call_kwargs
-                    and call_kwargs[name] is None
-                )
-            ]
-            if missing_non_null:
-                raise RuntimeError(
-                    "Replay sampler requires non-null args "
-                    f"{missing_non_null} for step={step_idx}. "
-                    f"sampler_dotpath={self._replay_sampler_dotpath}"
-                )
             with torch.no_grad():
                 old_log_prob = replay_fn(**call_kwargs)
             if not torch.is_tensor(old_log_prob):
@@ -242,5 +212,6 @@ class ReplayLogProbPatch:
                 )
             replayed[int(step_idx)] = old_log_prob.detach()
 
-        batch.log_probs = type(batch.log_probs).from_dict(replayed)
+        from diffusionrl.types.sampling import LogProbData
+        batch.log_probs = LogProbData.from_dict(replayed)
         return batch

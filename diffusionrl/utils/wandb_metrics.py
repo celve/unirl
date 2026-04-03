@@ -6,11 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import torch
 
-from diffusionrl.types.training_batch import (
-    BackwardTrainingBatch,
-    ForwardTrainingBatch,
-    TrainingBatch,
-)
+from diffusionrl.types.training_batch import TrainingBatch
 
 
 def _coerce_scalar(value: Any) -> Optional[float]:
@@ -55,10 +51,10 @@ def flatten_numeric_metrics(
 def _iter_batches(training_data: Any) -> Iterable[TrainingBatch]:
     if isinstance(training_data, list):
         for item in training_data:
-            if isinstance(item, (BackwardTrainingBatch, ForwardTrainingBatch)):
+            if isinstance(item, TrainingBatch):
                 yield item
         return
-    if isinstance(training_data, (BackwardTrainingBatch, ForwardTrainingBatch)):
+    if isinstance(training_data, TrainingBatch):
         yield training_data
 
 
@@ -134,10 +130,9 @@ def compute_rollout_batch_metrics(
                 advantages.detach().to(dtype=torch.float32).reshape(-1).cpu()
             )
 
-        if isinstance(batch, BackwardTrainingBatch):
+        if batch.has_trajectory_rl_data:
             sde_selected += len(batch.sde_indices)
-            steps_total = max(int(batch.trajectories.shape[1]) - 1, 0)
-            sde_total += steps_total
+            sde_total += max(int(batch.trajectory_store.total_positions) - 1, 0)
 
     metrics["num_samples"] = float(total_samples)
 
