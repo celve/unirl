@@ -437,19 +437,6 @@ class RolloutRequest:
     def batch_size(self) -> int:
         return len(self.prompts)
 
-    def with_seed_offset(self, seed_offset: int) -> "RolloutRequest":
-        seed_raw = self.sampling.get("seed")
-        if seed_raw is None or int(seed_offset) == 0:
-            return self
-        import copy
-
-        req = copy.copy(self)
-        req.sampling = dict(self.sampling)
-        req.sampling["seed"] = int(seed_raw) + int(seed_offset)
-        req.meta = copy_columnar_mapping(self.meta)
-        req.inputs = dict(self.inputs)
-        return req
-
     @classmethod
     def concat(cls, requests: List["RolloutRequest"]) -> "RolloutRequest":
         if not requests:

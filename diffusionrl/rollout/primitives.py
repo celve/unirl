@@ -289,7 +289,6 @@ def execute_request_batches(
 
     requests_per_rollout = len(planned_requests)
     rank = int(os.environ.get("RANK", 0))
-    rollout_seed_offset = 0 if rollout_id is None else int(rollout_id)
     request_results: List[Tuple[RolloutRequest, List[Any]]] = []
 
     for batch_idx, current_request in tqdm(
@@ -300,7 +299,6 @@ def execute_request_batches(
     ):
         if not isinstance(current_request.prompts, list) or len(current_request.prompts) == 0:
             raise ValueError("Rollout request executor requires non-empty request.prompts.")
-        current_request = current_request.with_seed_offset(rollout_seed_offset)
 
         if requests_per_rollout > 1:
             logger.debug(
@@ -346,7 +344,6 @@ def launch_request_batches_async(
     inflight_requests: List[InflightRequestBatch] = []
     requests_per_rollout = len(planned_requests)
     rank = int(os.environ.get("RANK", 0))
-    rollout_seed_offset = 0 if rollout_id is None else int(rollout_id)
 
     for batch_idx, current_request in tqdm(
         planned_requests,
@@ -356,7 +353,6 @@ def launch_request_batches_async(
     ):
         if not isinstance(current_request.prompts, list) or len(current_request.prompts) == 0:
             raise ValueError("Rollout request executor requires non-empty request.prompts.")
-        current_request = current_request.with_seed_offset(rollout_seed_offset)
 
         if requests_per_rollout > 1:
             logger.debug(
