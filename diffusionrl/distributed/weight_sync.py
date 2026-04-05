@@ -13,14 +13,15 @@ Two-phase lifecycle: setup() -> sync() x N -> teardown().
 
 from __future__ import annotations
 
+import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Type
 
-import logging
-
 from diffusionrl.config.launch_resolution import LaunchConfig
+from diffusionrl.types.engine import EngineConfig
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -52,7 +53,13 @@ def _validate_tensor_sync_topology(launch_config: LaunchConfig) -> None:
         raise ValueError(
             "Tensor/distributed weight sync requires a dedicated rollout launch config."
         )
-    engine_kwargs = dict(rollout.engine_runtime_config.get("engine_kwargs") or {})
+    engine_config = rollout.engine_init_payload.component_config
+    if not isinstance(engine_config, EngineConfig):
+        raise ValueError(
+            "Tensor/distributed weight sync requires rollout.engine_init_payload.component_config "
+            f"to be an EngineConfig, got: {type(engine_config).__name__}"
+        )
+    engine_kwargs = dict(engine_config.engine_kwargs or {})
     tp_size_int = int(engine_kwargs.get("tp_size", 1) or 1)
     if tp_size_int < 1:
         raise ValueError(f"Invalid tp_size={tp_size_int}. Expected tp_size >= 1.")

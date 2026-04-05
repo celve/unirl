@@ -3,9 +3,10 @@ diffusionrl Algorithm Base Class.
 
 Defines algorithm responsibilities in rollout/advantage pipeline.
 """
+
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
@@ -40,12 +41,29 @@ class EMASpec:
     new_adapter_name: str = "default"
 
 
+@dataclass(frozen=True)
+class BaseAlgorithmConfig:
+    """Common runtime config shared by current built-in algorithms."""
+
+    kl_coef: float = 0.01
+    component_mix_stage: str = "reward"
+    adv_normalization_scope: str = "group"
+    samples_per_prompt: int = 1
+    num_inference_steps: int = 0
+    eval_ema_decay: float = 0.9
+    eval_ema_update_interval: int = 1
+    epsilon: float = 1e-8
+    clip_max: Optional[float] = 5.0
+    use_global_std: bool = False
+    trim_outliers_ratio: float = 0.0
+
+
 class BaseAlgorithm(ABC):
     """
     Base class for algorithm plugins.
 
     Each algorithm variant implements:
-    - from_config(): Construct from algorithm_config dict (classmethod)
+    - from_config(): Construct from algorithm_config dict or typed runtime config (classmethod)
     - get_sampling_requirements(): What the sampler needs to provide
     - compute_advantages(): How to compute advantages from rewards
     - compute_loss(): Single algorithm-owned loss entrypoint
@@ -66,6 +84,7 @@ class BaseAlgorithm(ABC):
 
     _forward_plugin: object = None  # type: ignore[assignment]
     model_type: str = "default"
+    __CONFIG_CLASS__ = BaseAlgorithmConfig
 
     def __init__(
         self,
@@ -128,13 +147,14 @@ class BaseAlgorithm(ABC):
         return dict(extra)
 
     @classmethod
-    def from_config(cls, config: dict) -> "BaseAlgorithm":  # [PUBLIC-API → rollout runtime init, training_actor.init()]
-        """Construct algorithm from an algorithm_config dictionary.
+    def from_config(
+        cls, config: Any
+    ) -> "BaseAlgorithm":  # [PUBLIC-API → rollout runtime init, training_actor.init()]
+        """Construct algorithm from raw framework config or typed runtime config.
 
-        TrainingActor calls ``algorithm_cls.from_config(algorithm_config)`` to
-        create the train-side algorithm instance.  Subclasses should override
-        to read their specific parameters from framework-owned top-level config
-        fields plus ``cls.resolve_config_kwargs(config)``.
+        TrainingActor currently passes the canonical algorithm_config
+        dictionary. Subclasses may also accept their typed ``__CONFIG_CLASS__`` so
+        future parser-based construction can bypass the untyped dict path.
 
         Default implementation raises NotImplementedError so custom
         plugins fail loudly if they forget to implement this.
@@ -271,7 +291,6 @@ class BaseAlgorithm(ABC):
     # Phase 3: Advantage orchestration with reward components
     # ------------------------------------------------------------------
 
-    @abstractmethod
     def compute_advantages_with_components(  # [PUBLIC-API → rollout.primitives.compute_advantages()] rollout side
         self,
         *,
@@ -293,7 +312,42 @@ class BaseAlgorithm(ABC):
         Returns:
             Advantage tensor [batch_size].
         """
-        ...
+        if self.component_mix_stage != "advantage" or not reward_components:
+            return self.compute_advantages(rewards=rewards, group_ids=group_ids)
+
+        default_weights = {name: 1.0 for name in reward_components}
+        if reward_component_weights:
+            for name, weight in reward_component_weights.items():
+                if name in default_weights:
+                    default_weights[name] = float(weight)
+
+        weighted_advantages = torch.zeros_like(rewards)
+        total_weight = 0.0
+        for component_name, component_rewards in reward_components.items():
+            component_tensor = torch.tensor(
+                component_rewards,
+                dtype=rewards.dtype,
+                device=rewards.device,
+            )
+            if component_tensor.shape != rewards.shape:
+                logger.warning(
+                    "Skipping reward component %s due to shape mismatch: expected=%s got=%s",
+                    component_name,
+                    tuple(rewards.shape),
+                    tuple(component_tensor.shape),
+                )
+                continue
+            component_advantages = self.compute_advantages(
+                rewards=component_tensor,
+                group_ids=group_ids,
+            )
+            weight = float(default_weights.get(component_name, 1.0))
+            weighted_advantages += component_advantages * weight
+            total_weight += weight
+
+        if total_weight <= 0:
+            return self.compute_advantages(rewards=rewards, group_ids=group_ids)
+        return weighted_advantages / total_weight
 
     @abstractmethod
     def get_ema_spec(
@@ -444,7 +498,8 @@ class BaseAlgorithm(ABC):
         ``resolve_training_indices`` or ``get_filtered_training_indices``.
         """
         import time as _time
-        from diffusionrl.types.sampling import RolloutSamples, LogProbData
+
+        from diffusionrl.types.sampling import LogProbData, RolloutSamples
         from diffusionrl.types.training_batch import TrainingBatch
         from diffusionrl.types.trajectory_store import TrajectoryStore
 
@@ -505,9 +560,7 @@ class BaseAlgorithm(ABC):
                 if steps is not None:
                     if step_indices is None:
                         step_indices = steps
-                    elif not torch.equal(
-                        step_indices.to(steps.device), steps
-                    ):
+                    elif not torch.equal(step_indices.to(steps.device), steps):
                         raise ValueError(
                             "Mismatched step_indices across sampler outputs: "
                             f"expected={step_indices.tolist()} "
@@ -515,9 +568,7 @@ class BaseAlgorithm(ABC):
                         )
 
                 if sde_indices is None:
-                    final_sde_indices.update(
-                        int(i) for i in output.sde_indices
-                    )
+                    final_sde_indices.update(int(i) for i in output.sde_indices)
             else:
                 clean_latents.append(output.latents)
 
@@ -525,9 +576,7 @@ class BaseAlgorithm(ABC):
             raise ValueError("No timesteps found in sampler outputs")
 
         # -- merge forward contexts ----------------------------------------
-        merged_forward_context = type(all_forward_contexts[0]).cat(
-            all_forward_contexts
-        )
+        merged_forward_context = type(all_forward_contexts[0]).cat(all_forward_contexts)
 
         # -- trajectory path (GRPO / MixGRPO) -----------------------------
         if reqs.requires_trajectory:
@@ -552,9 +601,7 @@ class BaseAlgorithm(ABC):
                 if indices.issubset(step_label_set):
                     return set(indices)
                 mapped = {
-                    step_labels[i]
-                    for i in indices
-                    if 0 <= int(i) < len(step_labels)
+                    step_labels[i] for i in indices if 0 <= int(i) < len(step_labels)
                 }
                 if mapped:
                     logger.debug(
@@ -601,9 +648,7 @@ class BaseAlgorithm(ABC):
                     else train_indices
                 )
             if not final_sde_indices:
-                final_sde_indices = (
-                    train_indices if train_indices else set(step_labels)
-                )
+                final_sde_indices = train_indices if train_indices else set(step_labels)
 
             num_steps = len(step_labels)
             final_sde_indices = self.get_filtered_training_indices(
@@ -618,11 +663,7 @@ class BaseAlgorithm(ABC):
                 for lpd in log_probs_dicts:
                     all_lp_indices.update(lpd.keys())
                 for idx_key in all_lp_indices:
-                    values = [
-                        lpd[idx_key]
-                        for lpd in log_probs_dicts
-                        if idx_key in lpd
-                    ]
+                    values = [lpd[idx_key] for lpd in log_probs_dicts if idx_key in lpd]
                     if values:
                         merged_log_probs[idx_key] = torch.cat(values, dim=0)
             if final_sde_indices:
@@ -644,7 +685,8 @@ class BaseAlgorithm(ABC):
             # must be dropped to avoid validation failures.
             if traj_store.is_selective and final_sde_indices:
                 available = set(
-                    idx for idx in final_sde_indices
+                    idx
+                    for idx in final_sde_indices
                     if traj_store.has_position(idx) and traj_store.has_position(idx + 1)
                 )
                 if available != final_sde_indices:
@@ -671,18 +713,12 @@ class BaseAlgorithm(ABC):
                 rewards=rewards,
                 prompts=prompts,
                 step_indices=step_indices,
-                target_sde_indices=set(
-                    int(i) for i in final_sde_indices
-                ),
+                target_sde_indices=set(int(i) for i in final_sde_indices),
             )
             batch.validate()
 
             traj_data = traj_store.data
-            traj_gb = (
-                traj_data.nelement()
-                * traj_data.element_size()
-                / 1e9
-            )
+            traj_gb = traj_data.nelement() * traj_data.element_size() / 1e9
             logger.debug(
                 "[TIMING] assemble_training_batch(trajectory): "
                 "cat=%.2fs total=%.2fs n=%d traj_gb=%.2f",
@@ -701,7 +737,8 @@ class BaseAlgorithm(ABC):
         total_positions = int(timesteps.shape[0])
         batch = TrainingBatch(
             trajectory_store=TrajectoryStore.from_clean_latents(
-                clean_latents_tensor, total_positions=total_positions,
+                clean_latents_tensor,
+                total_positions=total_positions,
             ),
             timesteps=timesteps,
             advantages=advantages,

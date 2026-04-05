@@ -29,20 +29,21 @@ import logging
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Mapping, Optional, Tuple
 
-from diffusionrl.algorithms.construction import (
-    resolve_sampling_spec,
-)
+from diffusionrl.cmdline.sampling import build_sampling_spec_from_args
+from diffusionrl.cmdline.train_backend import build_train_backend_init_payload_from_args
+from diffusionrl.config.spec import ModelSpec
 from diffusionrl.models import list_model_types, resolve_model_bundle_path
-from diffusionrl.samplers.engine import get_engine_class_path
+from diffusionrl.samplers import resolve_rollout_engine_class
 from diffusionrl.training.backends import (
-    TrainBackendConfig,
+    BaseTrainBackendConfig,
+    MegatronTrainBackendConfig,
     TrainBackendCapabilities,
     TrainTopology,
+    VeOmniTrainBackendConfig,
     resolve_train_backend_capabilities_from_config,
-    resolve_train_backend_config_from_args,
 )
 from diffusionrl.types.engine import normalize_engine_type
-from diffusionrl.types.sampling import SamplingSpec, SamplingRequirements
+from diffusionrl.types.sampling import SamplingRequirements, SamplingSpec
 from diffusionrl.utils.misc import load_function
 
 logger = logging.getLogger(__name__)
@@ -103,25 +104,13 @@ def collect_sampling_requirements(*, algorithm: Any) -> SamplingRequirements:
 
 def load_engine_capabilities(engine_type: str) -> Dict[str, bool]:
     """Resolve engine capabilities from engine class declaration."""
-    engine_path = get_engine_class_path(engine_type)
-    engine_cls = load_function(engine_path)
+    engine_cls = resolve_rollout_engine_class(engine_type)
     declared = getattr(engine_cls, "declared_capabilities", None)
     if not callable(declared):
         raise ValueError(
-            f"Engine class {engine_path} must define classmethod declared_capabilities()."
+            f"Engine class {engine_cls} must define classmethod declared_capabilities()."
         )
     return dict(declared())
-
-
-@dataclass(frozen=True)
-class ModelSpec:
-    """Resolved model/sampler selection without mutating args."""
-
-    model_dotpath: str
-    model_cls: Any
-    model_type: str
-    sampler_dotpath: str
-    model_default_engine_type: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -194,7 +183,7 @@ class ConfigBundle:
     model_spec: ModelSpec
     rollout_mode_info: RolloutModeInfo
     sampling_spec: SamplingSpec
-    train_backend_config: TrainBackendConfig
+    train_backend_config: BaseTrainBackendConfig
     train_backend_capabilities: TrainBackendCapabilities
     training_topology: TrainTopology
     training_plan: Optional[TrainingPlan] = None
@@ -207,13 +196,9 @@ def derive_sampling_spec(
 ) -> SamplingSpec:
     """Resolve the canonical sampling spec from SamplingConfig once."""
     resolved_model = model_spec if model_spec is not None else derive_model_spec(args)
-    return resolve_sampling_spec(
-        sampling=args.sampling,
+    return build_sampling_spec_from_args(
+        args,
         sampler_dotpath=resolved_model.sampler_dotpath,
-        height=args.sampling.height,
-        width=args.sampling.width,
-        num_frames=args.sampling.num_frames,
-        seed=args.seed,
     )
 
 
@@ -548,25 +533,22 @@ def _derive_local_batch_from_rollout_geometry(
 def derive_training_topology(
     args: Any,
     *,
-    backend_name: Optional[str] = None,
-    backend_kwargs: Optional[Mapping[str, Any]] = None,
+    train_backend_config: Optional[BaseTrainBackendConfig] = None,
 ) -> TrainTopology:
     actor_count = max(
         1,
         int(args.ray.training_num_nodes) * int(args.ray.training_num_gpus_per_node),
     )
-    if backend_name is None or backend_kwargs is None:
-        resolved_backend_config = resolve_train_backend_config_from_args(args)
-        backend = resolved_backend_config.name
-        resolved_backend_kwargs = dict(resolved_backend_config.kwargs)
-    else:
-        backend = str(backend_name).strip().lower()
-        resolved_backend_kwargs = dict(backend_kwargs)
+    config = (
+        train_backend_config
+        if isinstance(train_backend_config, BaseTrainBackendConfig)
+        else build_train_backend_init_payload_from_args(args).component_config
+    )
 
-    if backend == "veomni":
-        dp_size = int(resolved_backend_kwargs.get("dp_size") or actor_count)
-        dp_replicate_size = int(resolved_backend_kwargs.get("dp_replicate_size") or 1)
-        dp_shard_size = resolved_backend_kwargs.get("dp_shard_size")
+    if isinstance(config, VeOmniTrainBackendConfig):
+        dp_size = int(config.dp_size or actor_count)
+        dp_replicate_size = int(config.dp_replicate_size or 1)
+        dp_shard_size = config.dp_shard_size
         if dp_shard_size is None:
             dp_shard_size = max(1, dp_size // max(1, dp_replicate_size))
         return TrainTopology(
@@ -575,18 +557,18 @@ def derive_training_topology(
             dp_size=dp_size,
             dp_replicate_size=dp_replicate_size,
             dp_shard_size=int(dp_shard_size),
-            tp_size=int(resolved_backend_kwargs.get("tp_size") or 1),
-            pp_size=int(resolved_backend_kwargs.get("pp_size") or 1),
-            sp_size=int(resolved_backend_kwargs.get("sp_size") or 1),
-            ep_size=int(resolved_backend_kwargs.get("ep_size") or 1),
+            tp_size=int(config.tp_size or 1),
+            pp_size=int(config.pp_size or 1),
+            sp_size=int(config.sp_size or 1),
+            ep_size=int(config.ep_size or 1),
         )
 
-    if backend == "megatron":
-        hinted_dp_size = resolved_backend_kwargs.get("dp_size")
-        tp_size = int(resolved_backend_kwargs.get("tp_size") or 1)
-        pp_size = int(resolved_backend_kwargs.get("pp_size") or 1)
-        sp_size = int(resolved_backend_kwargs.get("sp_size") or 1)
-        ep_size = int(resolved_backend_kwargs.get("ep_size") or 1)
+    if isinstance(config, MegatronTrainBackendConfig):
+        hinted_dp_size = config.dp_size
+        tp_size = int(config.tp_size or 1)
+        pp_size = int(config.pp_size or 1)
+        sp_size = int(config.sp_size or 1)
+        ep_size = int(config.ep_size or 1)
         denom = max(1, tp_size * pp_size * sp_size)
         dp_size = (
             int(hinted_dp_size)
@@ -722,14 +704,15 @@ def resolve_config(
             effective_engine_capabilities=effective_caps,
         )
     sampling_spec = derive_sampling_spec(args, model_spec=model_spec)
-    train_backend_config = resolve_train_backend_config_from_args(args)
+    train_backend_config = build_train_backend_init_payload_from_args(
+        args
+    ).component_config
     train_backend_capabilities = resolve_train_backend_capabilities_from_config(
         train_backend_config
     )
     training_topology = derive_training_topology(
         args,
-        backend_name=train_backend_config.name,
-        backend_kwargs=train_backend_config.kwargs,
+        train_backend_config=train_backend_config,
     )
     training_plan = None
     if include_training_plan:

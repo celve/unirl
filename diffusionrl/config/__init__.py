@@ -19,6 +19,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "build_resolved_config_view": ("diffusionrl.config.arguments", "build_resolved_config_view"),
     "LaunchConfig": ("diffusionrl.config.launch_resolution", "LaunchConfig"),
     "resolve_launch_config": ("diffusionrl.config.launch_resolution", "resolve_launch_config"),
+    "ModelSpec": ("diffusionrl.config.spec", "ModelSpec"),
     "AlgorithmConfig": ("diffusionrl.config.arguments", "AlgorithmConfig"),
     "DebugConfig": ("diffusionrl.config.arguments", "DebugConfig"),
     "SchedulerConfig": ("diffusionrl.config.arguments", "SchedulerConfig"),
@@ -29,22 +30,21 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "RewardConfig": ("diffusionrl.config.arguments", "RewardConfig"),
     "RayConfig": ("diffusionrl.config.arguments", "RayConfig"),
     # domain builders
-    "build_model_config": ("diffusionrl.config.build_domain_args", "build_model_config"),
-    "build_rollout_actor_init_config": (
+    "build_model_bundle_init_payload_from_args": (
+        "diffusionrl.cmdline.models",
+        "build_model_bundle_init_payload_from_args",
+    ),
+    "build_rollout_actor_init_config_from_args": (
         "diffusionrl.config.build_domain_args",
-        "build_rollout_actor_init_config",
+        "build_rollout_actor_init_config_from_args",
     ),
     "build_training_sampling_config": (
         "diffusionrl.config.build_domain_args",
         "build_training_sampling_config",
     ),
-    "build_rollout_engine_config": (
+    "build_training_actor_init_config_from_args": (
         "diffusionrl.config.build_domain_args",
-        "build_rollout_engine_config",
-    ),
-    "build_training_actor_init_config": (
-        "diffusionrl.config.build_domain_args",
-        "build_training_actor_init_config",
+        "build_training_actor_init_config_from_args",
     ),
 }
 

@@ -1,24 +1,34 @@
 """diffusionrl Models Module."""
 from .base import ModelBundle
-from .registry import (
-    discover_model_bundle_paths,
-    resolve_model_bundle_path,
-    list_model_types,
-)
+from .config import ModelBundleConfig
+from .construction import create_model_bundle_from_init_payload
 from .forward_plugins import (
-    ModelForwardPlugin,
     BaseForwardPlugin,
+    DefaultForwardPlugin,
     FluxForwardPlugin,
-    SD3ForwardPlugin,
     HunyuanForwardPlugin,
     MochiForwardPlugin,
-    DefaultForwardPlugin,
+    ModelForwardPlugin,
+    SD3ForwardPlugin,
+)
+from .registry import (
+    discover_model_bundle_paths,
+    ensure_builtin_model_registration,
+    list_model_types,
+    register_model,
+    resolve_model_bundle_path,
+    resolve_model_class,
 )
 
 __all__ = [
     "ModelBundle",
+    "ModelBundleConfig",
+    "create_model_bundle_from_init_payload",
     "discover_model_bundle_paths",
+    "ensure_builtin_model_registration",
     "resolve_model_bundle_path",
+    "resolve_model_class",
+    "register_model",
     "list_model_types",
     # Forward plugins
     "ModelForwardPlugin",
@@ -34,6 +44,8 @@ __all__ = [
     "get_flux_model_bundle",
     "get_sd3_model_bundle",
 ]
+
+ensure_builtin_model_registration()
 
 
 # Lazy imports for model implementations

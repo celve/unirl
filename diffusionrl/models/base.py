@@ -9,6 +9,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Type, Union
 import torch
 import torch.nn as nn
 
+from .config import ModelBundleConfig
+
 
 class ModelBundle(ABC):
     """
@@ -25,23 +27,32 @@ class ModelBundle(ABC):
 
     def __init__(
         self,
-        pretrained_path: str,
-        device: Optional[Union[str, torch.device]] = None,
-        dtype: torch.dtype = torch.bfloat16,
-        **kwargs,
+        config: ModelBundleConfig,
     ):
         """
         Initialize model bundle.
 
         Args:
-            pretrained_path: Path to pretrained model weights
-            device: Device to load models on
-            dtype: Data type for model weights
-            **kwargs: Additional model-specific arguments
+            config: Typed model-bundle construction config
         """
-        self.pretrained_path = pretrained_path
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.dtype = dtype
+        if not isinstance(config, ModelBundleConfig):
+            raise TypeError(
+                f"{type(self).__name__} expected {ModelBundleConfig.__name__}, got: {config!r}"
+            )
+        self.config = config
+        self.pretrained_path = config.pretrained_model_ckpt_path
+        self.device = config.device or torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+        self.dtype = config.model_precision
+        self.vae_dtype = (
+            config.vae_dtype if config.vae_dtype is not None else config.model_precision
+        )
+        self.text_encoder_dtype = (
+            config.text_encoder_dtype
+            if config.text_encoder_dtype is not None
+            else config.model_precision
+        )
 
         # Components (initialized by subclasses)
         self._transformer: Optional[nn.Module] = None

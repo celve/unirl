@@ -29,7 +29,9 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "RayActor": ("diffusionrl.ray.actor_base", "RayActor"),
     "BaseTrainRayActor": ("diffusionrl.ray.actor_base", "BaseTrainRayActor"),
     "RolloutActor": ("diffusionrl.ray.rollout_actor", "RolloutActor"),
+    "RolloutActorConfig": ("diffusionrl.ray.actor_config", "RolloutActorConfig"),
     "TrainingActor": ("diffusionrl.ray.training_actor", "TrainingActor"),
+    "TrainingActorConfig": ("diffusionrl.ray.actor_config", "TrainingActorConfig"),
     # Utils - NOSET
     "NOSET_VISIBLE_DEVICES_ENV_VARS_LIST": (
         "diffusionrl.ray.ray_utils",
@@ -63,7 +65,10 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "check_actor_health": ("diffusionrl.ray.ray_utils", "check_actor_health"),
     "wait_for_actors_ready": ("diffusionrl.ray.ray_utils", "wait_for_actors_ready"),
     # Utils - Actor sampling
-    "ActorSamplingExecutor": ("diffusionrl.ray.training_actor_sampling", "ActorSamplingExecutor"),
+    "ActorSamplingExecutor": (
+        "diffusionrl.ray.training_actor_sampling",
+        "ActorSamplingExecutor",
+    ),
 }
 
 __all__ = list(_LAZY_ATTRS.keys())

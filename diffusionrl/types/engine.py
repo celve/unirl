@@ -30,6 +30,7 @@ class EngineConfig:
 
     model_dotpath: str = ""
     pretrained_model_ckpt_path: str = ""
+    sampler_dotpath: str = ""
 
     num_inference_steps: int = 50
     eta: float = 1.0

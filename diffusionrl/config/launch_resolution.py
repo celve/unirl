@@ -10,19 +10,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from diffusionrl.algorithms.construction import build_algorithm_config
+from diffusionrl.cmdline.algorithms import build_algorithm_init_payload_from_args
+from diffusionrl.cmdline.models import build_model_bundle_init_payload_from_args
+from diffusionrl.cmdline.rollout_engine import (
+    build_rollout_engine_init_payload_from_args,
+)
+from diffusionrl.cmdline.train_backend import build_train_backend_init_payload_from_args
 from diffusionrl.config.build_domain_args import (
-    build_model_config,
     build_reward_config,
+    build_rollout_actor_init_config_from_args,
+    build_training_actor_init_config_from_args,
     build_training_sampling_config,
-    build_train_backend_config,
-    build_rollout_actor_init_config,
-    build_rollout_engine_config,
-    build_training_actor_init_config,
 )
 from diffusionrl.config.resolution import (
     ConfigBundle,
-    ModelSpec,
     RolloutModeInfo,
     TrainingPlan,
     TrainTopology,
@@ -32,10 +33,11 @@ from diffusionrl.config.resolution import (
     resolve_config,
     rollout_mode_is_colocated,
 )
+from diffusionrl.config.spec import ModelSpec
+from diffusionrl.construction import ComponentInitPayload
+from diffusionrl.ray.actor_config import RolloutActorConfig, TrainingActorConfig
 from diffusionrl.reward.schema import RewardSchema
-from diffusionrl.training.backends import (
-    resolve_train_backend_launch_spec,
-)
+from diffusionrl.training.backends import resolve_train_backend_launch_spec
 from diffusionrl.training.backends.base import TrainBackendLaunchSpec
 from diffusionrl.types.sampling import SamplingSpec
 
@@ -62,8 +64,8 @@ class RolloutLaunch:
     colocate: bool
     colocate_gpu_fraction: float
     allow_noset_multi_gpu_inference: bool
-    engine_runtime_config: Dict[str, Any]
-    actor_init_config: Dict[str, Any]
+    engine_init_payload: ComponentInitPayload
+    actor_init_config: RolloutActorConfig
 
 
 @dataclass(frozen=True)
@@ -75,13 +77,13 @@ class TrainingLaunch:
     launch_spec: TrainBackendLaunchSpec
     colocate: bool
     colocate_gpu_fraction: float
-    backend_config: Dict[str, Any]
-    actor_init_config: Dict[str, Any]
+    backend_init_payload: ComponentInitPayload
+    actor_init_config: TrainingActorConfig
 
 
 @dataclass(frozen=True)
 class LaunchConfig:
-    algorithm_config: Dict[str, Any]
+    algorithm_init_payload: Any
     model_spec: ModelSpec
     sampling_spec: SamplingSpec
     training_sampling_config: Dict[str, Any]
@@ -149,7 +151,10 @@ def resolve_launch_config(
     model_spec = resolved_config.model_spec
     rollout_mode_info = resolved_config.rollout_mode_info
     sampling_spec = resolved_config.sampling_spec
-    algorithm_config = build_algorithm_config(args, sampling_spec=sampling_spec)
+    algorithm_init_payload = build_algorithm_init_payload_from_args(
+        args,
+        sampling_spec=sampling_spec,
+    )
     train_backend_config = resolved_config.train_backend_config
     training_topology = resolved_config.training_topology
     train_backend_capabilities = resolved_config.train_backend_capabilities
@@ -170,11 +175,8 @@ def resolve_launch_config(
     )
     reward_schema = RewardSchema.from_args(args)
 
-    model_config = build_model_config(
-        model_spec=model_spec,
-        model_settings=args.model,
-        training_settings=args.training,
-        precision_settings=args.precision,
+    model_init_payload = build_model_bundle_init_payload_from_args(
+        args, model_spec=model_spec
     )
     reward_config = build_reward_config(
         reward_schema=reward_schema,
@@ -187,20 +189,18 @@ def resolve_launch_config(
             rollout_mode_info=rollout_mode_info,
         ),
     )
-    train_backend_payload = build_train_backend_config(
-        resolved_backend_config=train_backend_config,
-    )
-    training_actor_init_config = build_training_actor_init_config(
-        training_settings=args.training,
-        rollout_control_settings=args.rollout,
+    train_backend_init_payload = build_train_backend_init_payload_from_args(args)
+    training_actor_init_config = build_training_actor_init_config_from_args(
+        args,
+        config_bundle=resolved_config,
         replay_enabled=bool(rollout_mode_info.replay_enabled),
         topology=training_topology,
         training_plan=training_plan,
-        algorithm_config=algorithm_config,
-        model_config=model_config,
+        algorithm_init_payload=algorithm_init_payload,
+        model_init_payload=model_init_payload,
         reward_config=reward_config,
         sampling_config=training_sampling_config,
-        train_backend_config=train_backend_payload,
+        train_backend_init_payload=train_backend_init_payload,
     )
     training = TrainingLaunch(
         topology=training_topology,
@@ -210,7 +210,7 @@ def resolve_launch_config(
         launch_spec=train_backend_launch_spec,
         colocate=placement.colocate_rollout,
         colocate_gpu_fraction=float(args.ray.colocate_training_gpu_fraction),
-        backend_config=train_backend_payload,
+        backend_init_payload=train_backend_init_payload,
         actor_init_config=training_actor_init_config,
     )
 
@@ -221,21 +221,18 @@ def resolve_launch_config(
             raise ValueError(
                 "Resolved rollout launch requires rollout.rollout_engine to be set."
             )
-        rollout_engine_runtime_config = build_rollout_engine_config(
-            rollout_topology_settings=args.rollout,
-            rollout_logging_settings=args.logging,
-            precision_settings=args.precision,
-            sync_settings=args.sync,
-            fps=int(args.sampling.fps),
-            logprob_source=rollout_mode_info.logprob_source,
-            sampler_engine_type=rollout_engine,
-            model_config=model_config,
+        rollout_engine_init_payload = build_rollout_engine_init_payload_from_args(
+            args,
+            model_init_payload=model_init_payload,
             sampling_spec=sampling_spec,
-            offload_rollout=bool(args.ray.offload_rollout),
+            rollout_mode_info=rollout_mode_info,
         )
-        rollout_actor_init_config = build_rollout_actor_init_config(
-            engine_runtime_config=rollout_engine_runtime_config,
+        rollout_actor_init_config = build_rollout_actor_init_config_from_args(
+            args,
+            config_bundle=resolved_config,
+            model_init_payload=model_init_payload,
             reward_config=reward_config,
+            engine_init_payload=rollout_engine_init_payload,
         )
         rollout = RolloutLaunch(
             mode=rollout_mode_info.rollout_topology.mode,
@@ -244,12 +241,12 @@ def resolve_launch_config(
             colocate=placement.colocate_rollout,
             colocate_gpu_fraction=float(args.ray.colocate_rollout_gpu_fraction),
             allow_noset_multi_gpu_inference=bool(args.ray.allow_noset_multi_gpu_inference),
-            engine_runtime_config=rollout_engine_runtime_config,
+            engine_init_payload=rollout_engine_init_payload,
             actor_init_config=rollout_actor_init_config,
         )
 
     return LaunchConfig(
-        algorithm_config=algorithm_config,
+        algorithm_init_payload=algorithm_init_payload,
         model_spec=model_spec,
         sampling_spec=sampling_spec,
         training_sampling_config=training_sampling_config,

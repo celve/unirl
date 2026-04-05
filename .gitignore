@@ -88,7 +88,6 @@ models/**/*.ckpt
 models/**/*.safetensors
 
 # Local/dev tests only (not for open-source push)
-tests/
 docs/*
 !docs/entry_map.md
 !docs/component_refactor_algorithm_centric.md

@@ -21,16 +21,18 @@ Key alignment points with DanceGRPO:
 import logging
 from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Set
+
 import torch
 import torch.nn as nn
 
-from ..base import BaseSampler, RolloutSamples
-from diffusionrl.sde.kernels import get_sde_strategy
-from diffusionrl.sde.runtime import sd3_time_shift, denoising_step
+from diffusionrl.sde.registry import resolve_sde_strategy_class
+from diffusionrl.sde.runtime import denoising_step, sd3_time_shift
 from diffusionrl.types import LogProbData
 from diffusionrl.types.forward_context import HunyuanForwardContext
 from diffusionrl.types.trajectory_store import TrajectoryStore
 from diffusionrl.utils.dtypes import parse_torch_dtype
+
+from ..base import BaseSampler, RolloutSamples
 
 logger = logging.getLogger(__name__)
 
@@ -253,12 +255,14 @@ class FSDPHunyuanSampler(BaseSampler):
             else float(self.default_guidance_scale)
         )
 
-        strategy = get_sde_strategy(self.sde_type)
+        strategy = resolve_sde_strategy_class(self.sde_type)()
         strategy.init_schedule(sigma_schedule)
 
         # Storage for trajectory and log probs (DanceGRPO line 115-116)
         # Selective collection: only store positions needed for SDE step pairs
-        trajectory_store = TrajectoryStore.for_sde_steps(sde_indices, num_inference_steps)
+        trajectory_store = TrajectoryStore.for_sde_steps(
+            sde_indices, num_inference_steps
+        )
         trajectory_store.add(0, latents.clone().to(dtype=trajectory_dtype))
         all_log_probs: Dict[int, torch.Tensor] = {}
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 
-from diffusionrl.algorithms.construction import instantiate_algorithm_from_config
+from diffusionrl.algorithms.construction import create_algorithm_from_init_payload
 from diffusionrl.config.launch_resolution import LaunchConfig
 from diffusionrl.config.resolution import collect_sampling_requirements, derive_rollout_topology
 from diffusionrl.reward.factory import create_driver_reward_executor
@@ -29,7 +29,7 @@ def create_rollout_services(
             "create_rollout_services requires LaunchConfig to be built by the driver."
         )
 
-    algorithm = instantiate_algorithm_from_config(dict(launch_config.algorithm_config))
+    algorithm = create_algorithm_from_init_payload(launch_config.algorithm_init_payload)
     sampling_requirements = collect_sampling_requirements(algorithm=algorithm)
     sampling_config = dict(launch_config.training_sampling_config)
     rollout_topology = derive_rollout_topology(args)

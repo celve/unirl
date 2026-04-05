@@ -2,87 +2,177 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
 
-from diffusionrl.algorithms.base import BaseAlgorithm, EMASpec, SamplingRequirements
-from diffusionrl.algorithms.grpo import GRPOAlgorithm
+from diffusionrl.algorithms.base import (
+    BaseAlgorithm,
+    BaseAlgorithmConfig,
+    EMASpec,
+    SamplingRequirements,
+)
+from diffusionrl.algorithms.registry import register_algorithm
+from diffusionrl.cmdline.algorithms import validate_algorithm_kwargs
+from diffusionrl.cmdline.registry import register_cmdline_config_parser
+from diffusionrl.cmdline.sampling import build_sampling_spec_from_args
 from diffusionrl.types import TimestepData
-from diffusionrl.types.sampling import RolloutRequest
+from diffusionrl.types.sampling import RolloutRequest, SamplingSpec
 
 
+@dataclass(frozen=True)
+class MinimalAlgorithmConfig(BaseAlgorithmConfig):
+    skip_last_timestep: bool = False
+    skip_initial_timesteps: int = 0
+
+
+@register_cmdline_config_parser(MinimalAlgorithmConfig)
+def build_minimal_algorithm_config_from_args(
+    args: Any,
+    *,
+    sampling_spec: SamplingSpec | None = None,
+    **_: Any,
+) -> MinimalAlgorithmConfig:
+    """
+    If one wants to use the framework's cmdline interface (train.py / train_async.py),
+    define a function that build algorithm config from the framework's
+    cmdline arguments. The built config will be passed to instantiate algorithm.
+    """
+
+    if not isinstance(sampling_spec, SamplingSpec):
+        sampling_spec = build_sampling_spec_from_args(args)
+    extra = dict(getattr(args.algorithm, "algorithm_kwargs", {}) or {})
+    validate_algorithm_kwargs(
+        config_class=MinimalAlgorithmConfig,
+        algorithm_kwargs=extra,
+    )
+
+    if extra.get("skip_last_timestep") is not None:
+        extra["skip_last_timestep"] = bool(extra["skip_last_timestep"])
+    if extra.get("skip_initial_timesteps") is not None:
+        extra["skip_initial_timesteps"] = int(extra["skip_initial_timesteps"])
+
+    return MinimalAlgorithmConfig(
+        component_mix_stage=str(args.algorithm.component_mix_stage),
+        adv_normalization_scope=str(args.algorithm.adv_normalization_scope),
+        samples_per_prompt=int(args.algorithm.samples_per_prompt),
+        num_inference_steps=int(sampling_spec.num_inference_steps),
+        eval_ema_decay=float(args.algorithm.eval_ema_decay),
+        eval_ema_update_interval=int(args.algorithm.eval_ema_update_interval),
+        epsilon=float(args.algorithm.adv_norm_eps),
+        clip_max=args.algorithm.clip_max,
+        use_global_std=bool(args.algorithm.use_global_std),
+        trim_outliers_ratio=float(args.algorithm.trim_outliers_ratio),
+        **extra,
+    )
+
+
+@register_algorithm(component_name="minimal", component_cfg=MinimalAlgorithmConfig)
 class MinimalAlgorithm(BaseAlgorithm):
-    """Small GRPO-style plugin example with a placeholder loss."""
+    """
+    Small GRPO-style plugin example with a placeholder loss.
+
+    You can use a custom algorithm in two ways.
+
+    1. Write your own driver script, or modify ``train.py`` / ``train_async.py``.
+       In that case you can instantiate your algorithm config, init payload yourself in the driver,
+       and do not need to integrate with the framework's cmdline parser registry.
+
+    2. Reuse the framework's cmdline interface.
+       In that case the framework needs to turn its cmdline args into your
+       algorithm config object, so you should register a parser for your config:
+
+       ```python
+       @register_cmdline_config_parser(MinimalAlgorithmConfig)
+       def build_minimal_algorithm_config_from_args(args, **_) -> MinimalAlgorithmConfig:
+           ...
+       ```
+
+       Inside that parser you can interpret the framework cmdline args however
+       you want and build your own config object.
+
+    To bind your algorithm type name to both the algorithm class and its config
+    class, register the algorithm with ``component_cfg``:
+
+    ```python
+    @register_algorithm(
+        component_name="minimal",
+        component_cfg=MinimalAlgorithmConfig,
+    )
+    class MinimalAlgorithm(BaseAlgorithm):
+        ...
+    ```
+
+    Then users can select your algorithm through the framework's algorithm
+    registry while still getting your custom cmdline-to-config adaptation.
+    """
 
     @classmethod
-    def from_config(cls, config: dict) -> "MinimalAlgorithm":
+    def _parse_config_from_dict(cls, config: dict) -> MinimalAlgorithmConfig:
         extra = cls.resolve_config_kwargs(config)
-        known_keys = {
-            "skip_last_timestep",
-            "skip_initial_timesteps",
-        }
-        unknown = sorted(key for key in extra.keys() if key not in known_keys)
-        if unknown:
-            raise ValueError(
-                "algorithm.algorithm_kwargs contains unsupported keys for MinimalAlgorithm: "
-                f"{unknown}."
-            )
-
-        return cls(
+        return MinimalAlgorithmConfig(
             skip_last_timestep=bool(extra.get("skip_last_timestep", False)),
             skip_initial_timesteps=int(extra.get("skip_initial_timesteps", 0)),
             component_mix_stage=str(config.get("component_mix_stage", "reward")),
-            adv_normalization=str(config.get("adv_normalization", "group")),
+            adv_normalization_scope=str(config.get("adv_normalization_scope", "group")),
             samples_per_prompt=int(config.get("samples_per_prompt", 1)),
             num_inference_steps=int(config.get("num_inference_steps", 0)),
             eval_ema_decay=float(config.get("eval_ema_decay", 0.9)),
             eval_ema_update_interval=int(config.get("eval_ema_update_interval", 1)),
             epsilon=float(config.get("adv_norm_eps", 1e-8)),
-            clip_max=config.get("adv_clip_abs", 5.0),
+            clip_max=config.get("clip_max", 5.0),
             use_global_std=bool(config.get("use_global_std", False)),
-            trimmed_ratio=float(config.get("trimmed_ratio", 0.0)),
+            trim_outliers_ratio=float(config.get("trim_outliers_ratio", 0.0)),
         )
+
+    @classmethod
+    def from_config(
+        cls,
+        config: dict | MinimalAlgorithmConfig,
+    ) -> "MinimalAlgorithm":
+        if isinstance(config, dict):
+            config = cls._parse_config_from_dict(config)
+        if not isinstance(config, MinimalAlgorithmConfig):
+            raise TypeError(
+                f"{cls.__name__}.from_config expects dict or MinimalAlgorithmConfig, "
+                f"got {type(config).__name__}."
+            )
+        return cls(config=config)
 
     def __init__(
         self,
         *,
-        skip_last_timestep: bool = False,
-        skip_initial_timesteps: int = 0,
+        config: MinimalAlgorithmConfig,
         **kwargs: Any,
     ) -> None:
-        super().__init__(**kwargs)
-        self.skip_last_timestep = bool(skip_last_timestep)
-        self.skip_initial_timesteps = int(skip_initial_timesteps)
-
-    @classmethod
-    def from_args(cls, args: Any) -> "MinimalAlgorithm":
-        from diffusionrl.algorithms.construction import build_algorithm_config
-
-        return cls.from_config(build_algorithm_config(args))
+        if not isinstance(config, MinimalAlgorithmConfig):
+            raise TypeError(
+                f"{type(self).__name__} expects MinimalAlgorithmConfig, got {type(config).__name__}."
+            )
+        super().__init__(
+            component_mix_stage=config.component_mix_stage,
+            adv_normalization_scope=config.adv_normalization_scope,
+            samples_per_prompt=config.samples_per_prompt,
+            num_inference_steps=config.num_inference_steps,
+            eval_ema_decay=config.eval_ema_decay,
+            eval_ema_update_interval=config.eval_ema_update_interval,
+            epsilon=config.epsilon,
+            clip_max=config.clip_max,
+            use_global_std=config.use_global_std,
+            trim_outliers_ratio=config.trim_outliers_ratio,
+            **kwargs,
+        )
+        self.config = config
+        self.skip_last_timestep = bool(config.skip_last_timestep)
+        self.skip_initial_timesteps = int(config.skip_initial_timesteps)
 
     def get_sampling_requirements(self) -> SamplingRequirements:
         return SamplingRequirements(
             requires_trajectory=True,
             requires_log_prob=True,
             requires_embeddings=True,
-        )
-
-    def compute_advantages_with_components(
-        self,
-        *,
-        rewards: torch.Tensor,
-        group_ids: Optional[list[str]] = None,
-        reward_components: Optional[Dict[str, list[float]]] = None,
-        reward_component_weights: Optional[Dict[str, float]] = None,
-    ) -> torch.Tensor:
-        return GRPOAlgorithm.compute_advantages_with_components(
-            self,
-            rewards=rewards,
-            group_ids=group_ids,
-            reward_components=reward_components,
-            reward_component_weights=reward_component_weights,
         )
 
     def get_ema_spec(self) -> EMASpec:
@@ -139,7 +229,9 @@ class MinimalAlgorithm(BaseAlgorithm):
             )
 
         available_steps = set(int(s) for s in batch.resolved_step_indices[:-1].tolist())
-        valid_step_indices = sorted(int(i) for i in batch.sde_indices if int(i) in available_steps)
+        valid_step_indices = sorted(
+            int(i) for i in batch.sde_indices if int(i) in available_steps
+        )
         if not valid_step_indices:
             return 0.0, {}, 0, False
 

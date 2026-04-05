@@ -7,9 +7,14 @@ to diffusionRL's FSDP backend.
 from __future__ import annotations
 
 from .base import TrainBackendCapabilities
-from .veomni_native import VeOmniNativeTrainBackend
+from .registry import register_train_backend
+from .veomni_native import VeOmniNativeTrainBackend, VeOmniTrainBackendConfig
 
 
+@register_train_backend(
+    component_name="veomni",
+    component_cfg=VeOmniTrainBackendConfig,
+)
 class VeOmniTrainBackend(VeOmniNativeTrainBackend):
     """VeOmni-native backend wired to built-in ``train_backend=veomni``."""
 

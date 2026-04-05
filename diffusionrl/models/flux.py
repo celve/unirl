@@ -9,6 +9,7 @@ FLUX is an image generation model from Black Forest Labs with:
 Reference: https://github.com/black-forest-labs/flux
 """
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
@@ -17,10 +18,18 @@ import torch.nn as nn
 from diffusionrl.sde.rules import normalize_sde_type
 
 from .base import ModelBundle
+from .config import ModelBundleConfig
+from .registry import register_model
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class FluxModelBundleConfig(ModelBundleConfig):
+    text_encoder_2_ckpt_path: Optional[str] = None
+
+
+@register_model(component_name="flux", component_cfg=FluxModelBundleConfig)
 class FluxModelBundle(ModelBundle):
     """
     FLUX image model bundle.
@@ -33,56 +42,32 @@ class FluxModelBundle(ModelBundle):
 
     def __init__(
         self,
-        pretrained_path: str,
-        device: Optional[Union[str, torch.device]] = None,
-        dtype: torch.dtype = torch.bfloat16,
-        vae_ckpt_path: Optional[str] = None,
-        text_encoder_ckpt_path: Optional[str] = None,
-        text_encoder_2_path: Optional[str] = None,
-        variant: str = "dev",  # "dev" or "schnell"
-        load_on_init: bool = True,
-        use_lora: bool = False,
-        lora_rank: int = 16,
-        lora_alpha: int = 16,
-        lora_target_modules: Optional[List[str]] = None,
-        training_only: bool = False,
-        skip_device_move: bool = False,
-        **kwargs,
+        config: FluxModelBundleConfig,
     ):
         """
         Initialize FLUX model bundle.
 
         Args:
-            pretrained_path: Path to pretrained transformer weights
-            device: Device to load models on
-            dtype: Data type for transformer weights
-            vae_ckpt_path: Optional separate path for VAE
-            text_encoder_ckpt_path: Optional separate path for CLIP encoder
-            text_encoder_2_path: Optional separate path for T5 encoder
-            variant: FLUX variant ("dev" or "schnell")
-            load_on_init: Whether to load models immediately
-            use_lora: Whether to add LoRA adapters for training
-            lora_rank: LoRA rank
-            lora_alpha: LoRA alpha
-            lora_target_modules: Target modules for LoRA (None uses defaults)
-            training_only: If True, only load transformer (skip VAE, text encoders)
+            config: Typed model-bundle config. If training_only is True, only load transformer (skip VAE, text encoders)
                           This saves significant memory for training actors.
-            skip_device_move: If True, don't move model to device after loading.
+                          If skip_device_move is True, don't move model to device after loading.
                              Required for FSDP CPU offload mode.
-            **kwargs: Additional arguments
         """
-        super().__init__(pretrained_path, device, dtype, **kwargs)
+        super().__init__(config)
 
-        self.vae_ckpt_path = vae_ckpt_path or pretrained_path
-        self.text_encoder_ckpt_path = text_encoder_ckpt_path or pretrained_path
-        self.text_encoder_2_path = text_encoder_2_path or pretrained_path
-        self.variant = variant
-        self.use_lora = use_lora
-        self.lora_rank = lora_rank
-        self.lora_alpha = lora_alpha
-        self.lora_target_modules = lora_target_modules
-        self.training_only = training_only
-        self.skip_device_move = skip_device_move
+        self.vae_ckpt_path = config.vae_ckpt_path or config.pretrained_model_ckpt_path
+        self.text_encoder_ckpt_path = (
+            config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path
+        )
+        self.text_encoder_2_path = (
+            config.text_encoder_2_ckpt_path or config.pretrained_model_ckpt_path
+        )
+        self.use_lora = bool(config.use_lora)
+        self.lora_rank = int(config.lora_rank)
+        self.lora_alpha = int(config.lora_alpha)
+        self.lora_target_modules = config.lora_target_modules
+        self.training_only = bool(config.training_only)
+        self.skip_device_move = bool(config.skip_device_move)
 
         # Text encoder components
         self._clip_encoder = None
@@ -90,8 +75,7 @@ class FluxModelBundle(ModelBundle):
         self._t5_encoder = None
         self._t5_tokenizer = None
 
-        if load_on_init:
-            self.load()
+        self.load()
 
     @property
     def model_type(self) -> str:
@@ -132,9 +116,9 @@ class FluxModelBundle(ModelBundle):
     def load(self) -> None:
         """Load all model components."""
         if self.training_only:
-            logger.info(f"Loading FLUX transformer only (training mode, variant={self.variant})...")
+            logger.info("Loading FLUX transformer only (training mode)...")
         else:
-            logger.info(f"Loading FLUX model bundle (variant={self.variant})...")
+            logger.info("Loading FLUX model bundle...")
 
         # Load transformer - always needed
         self._load_transformer()
@@ -200,7 +184,7 @@ class FluxModelBundle(ModelBundle):
             self._vae = AutoencoderKL.from_pretrained(
                 self.vae_ckpt_path,
                 subfolder="vae",
-                torch_dtype=self.dtype,
+                torch_dtype=self.vae_dtype,
             )
             self._vae.to(self.device)
             self._vae.eval()
@@ -228,7 +212,7 @@ class FluxModelBundle(ModelBundle):
             self._clip_encoder = CLIPTextModel.from_pretrained(
                 self.text_encoder_ckpt_path,
                 subfolder="text_encoder",
-                torch_dtype=self.dtype,
+                torch_dtype=self.text_encoder_dtype,
             )
             self._clip_encoder.to(self.device)
             self._clip_encoder.eval()
@@ -242,7 +226,7 @@ class FluxModelBundle(ModelBundle):
             self._t5_encoder = T5EncoderModel.from_pretrained(
                 self.text_encoder_2_path,
                 subfolder="text_encoder_2",
-                torch_dtype=self.dtype,
+                torch_dtype=self.text_encoder_dtype,
             )
             self._t5_encoder.to(self.device)
             self._t5_encoder.eval()
@@ -259,7 +243,7 @@ class FluxModelBundle(ModelBundle):
                 t5_encoder=self._t5_encoder,
                 t5_tokenizer=self._t5_tokenizer,
                 device=self.device,
-                dtype=self.dtype,
+                dtype=self.text_encoder_dtype,
             )
 
             logger.info("Loaded FLUX text encoders")
@@ -395,6 +379,7 @@ class FluxModelBundle(ModelBundle):
                 FluxSingleTransformerBlock,
                 FluxTransformerBlock,
             )
+
             return (FluxSingleTransformerBlock, FluxTransformerBlock)
         except ImportError:
             return ()

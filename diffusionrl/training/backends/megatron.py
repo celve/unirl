@@ -6,14 +6,17 @@ Training lifecycle integration is staged and not fully implemented yet.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from .base import (
+    BaseTrainBackendConfig,
     TrainBackend,
     TrainBackendCapabilities,
     TrainBackendLaunchSpec,
     TrainTopology,
 )
+from .registry import register_train_backend
 
 
 def _as_optional_int(raw: Any) -> Optional[int]:
@@ -28,42 +31,40 @@ def _as_optional_int(raw: Any) -> Optional[int]:
     return value
 
 
+@dataclass(frozen=True)
+class MegatronTrainBackendConfig(BaseTrainBackendConfig):
+    name: str = "megatron"
+    actor_class_path: Optional[str] = None
+    dp_size: Optional[int] = None
+    tp_size: int = 1
+    pp_size: int = 1
+    sp_size: int = 1
+    ep_size: int = 1
+    num_gpus_per_actor: Optional[float] = None
+    runtime_env: Dict[str, Any] = field(default_factory=dict)
+    actor_kwargs: Dict[str, Any] = field(default_factory=dict)
+
+
+@register_train_backend(
+    component_name="megatron",
+    component_cfg=MegatronTrainBackendConfig,
+)
 class MegatronTrainBackend(TrainBackend):
     """Megatron backend interface scaffold (launcher + topology contract)."""
 
     BACKEND_NAME = "megatron"
 
-    def __init__(self, *, backend_kwargs: Optional[Dict[str, Any]] = None) -> None:
-        super().__init__(backend_kwargs=backend_kwargs)
-        kwargs = dict(self.backend_kwargs)
-
-        self._actor_class_path = kwargs.pop("actor_class_path", None)
-        self._dp_size_hint = _as_optional_int(kwargs.pop("dp_size", None))
-        self._tp_size = _as_optional_int(kwargs.pop("tp_size", None)) or 1
-        self._pp_size = _as_optional_int(kwargs.pop("pp_size", None)) or 1
-        self._sp_size = _as_optional_int(kwargs.pop("sp_size", None)) or 1
-        self._ep_size = _as_optional_int(kwargs.pop("ep_size", None)) or 1
-
-        unsupported_num_actors = kwargs.pop("num_actors", None)
-        if unsupported_num_actors is not None:
-            raise ValueError(
-                "train_backend_kwargs.num_actors is no longer supported. "
-                "Training actor count is owned by ray.training_num_nodes × "
-                "ray.training_num_gpus_per_node."
-            )
-        self._launch_num_gpus_per_actor = kwargs.pop("num_gpus_per_actor", None)
-        runtime_env = kwargs.pop("runtime_env", None)
-        actor_kwargs = kwargs.pop("actor_kwargs", None)
-        self._launch_runtime_env = runtime_env if isinstance(runtime_env, dict) else {}
-        self._launch_actor_kwargs = actor_kwargs if isinstance(actor_kwargs, dict) else {}
-        if kwargs:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "MegatronTrainBackend received unknown train_backend_kwargs keys: %s. "
-                "These keys are currently ignored by the megatron scaffold backend.",
-                sorted(kwargs.keys()),
-            )
+    def __init__(self, config: MegatronTrainBackendConfig) -> None:
+        super().__init__(config)
+        self._actor_class_path = config.actor_class_path
+        self._dp_size_hint = _as_optional_int(config.dp_size)
+        self._tp_size = _as_optional_int(config.tp_size) or 1
+        self._pp_size = _as_optional_int(config.pp_size) or 1
+        self._sp_size = _as_optional_int(config.sp_size) or 1
+        self._ep_size = _as_optional_int(config.ep_size) or 1
+        self._launch_num_gpus_per_actor = config.num_gpus_per_actor
+        self._launch_runtime_env = dict(config.runtime_env or {})
+        self._launch_actor_kwargs = dict(config.actor_kwargs or {})
 
     @classmethod
     def declared_capabilities(cls) -> TrainBackendCapabilities:
@@ -84,7 +85,7 @@ class MegatronTrainBackend(TrainBackend):
             notes=(
                 "Megatron backend scaffold: launch/topology hooks are wired, "
                 "runtime training path is intentionally not implemented yet. "
-                "A Megatron-dedicated actor class must be provided via backend kwargs."
+                "A Megatron-dedicated actor class must be provided via config."
             ),
         )
 
@@ -94,21 +95,16 @@ class MegatronTrainBackend(TrainBackend):
         *,
         args: Any,
         topology: Any,
-        backend_kwargs: Optional[Dict[str, Any]] = None,
+        config: MegatronTrainBackendConfig,
     ) -> TrainBackendLaunchSpec:
         del cls, args, topology
-        kwargs = dict(backend_kwargs or {})
-        actor_class_path = kwargs.get("actor_class_path")
-        num_gpus_per_actor = kwargs.get("num_gpus_per_actor")
-        runtime_env = kwargs.get("runtime_env")
-        actor_kwargs = kwargs.get("actor_kwargs")
         return TrainBackendLaunchSpec(
-            actor_class_path=actor_class_path,
-            actor_kwargs=dict(actor_kwargs or {}) if isinstance(actor_kwargs, dict) else {},
-            num_gpus_per_actor=num_gpus_per_actor,
-            runtime_env=dict(runtime_env or {}) if isinstance(runtime_env, dict) else {},
+            actor_class_path=config.actor_class_path,
+            actor_kwargs=dict(config.actor_kwargs or {}),
+            num_gpus_per_actor=config.num_gpus_per_actor,
+            runtime_env=dict(config.runtime_env or {}),
             notes=(
-                "Use backend_kwargs.actor_class_path to switch to a Megatron-dedicated Ray actor "
+                "Use config.actor_class_path to switch to a Megatron-dedicated Ray actor "
                 "when runtime implementation is ready."
             ),
         )
@@ -167,4 +163,7 @@ class MegatronTrainBackend(TrainBackend):
         self._raise_not_implemented("load_state_dict")
 
 
-__all__ = ["MegatronTrainBackend"]
+__all__ = [
+    "MegatronTrainBackendConfig",
+    "MegatronTrainBackend",
+]

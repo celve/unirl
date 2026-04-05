@@ -3,11 +3,7 @@
 import logging
 import os
 import re
-from typing import Any, Optional
-
-from diffusionrl.algorithms.construction import (
-    instantiate_algorithm_from_config,
-)
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -57,20 +53,7 @@ def collect_rollout_batch_metrics(*, ray_module, batch_ref, compute_rollout_batc
         logger.warning("Failed to materialize training batch for rollout metrics: %s", exc)
         return {}
     return compute_rollout_batch_metrics_fn(training_data=training_data)
-
-
-def build_control_algorithm(algorithm_config: dict) -> tuple[dict, Any]:
-    """Instantiate the driver-local control-plane algorithm."""
-    if not isinstance(algorithm_config, dict):
-        raise ValueError(
-            "build_control_algorithm requires a canonical algorithm_config dict from the driver."
-        )
-    resolved_algorithm_config = dict(algorithm_config)
-    return resolved_algorithm_config, instantiate_algorithm_from_config(resolved_algorithm_config)
-
-
 __all__ = [
-    "build_control_algorithm",
     "collect_rollout_batch_metrics",
     "should_eval",
     "should_log",

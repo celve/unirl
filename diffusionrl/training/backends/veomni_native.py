@@ -17,12 +17,19 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from .base import TrainBackend, TrainBackendCapabilities, TrainTopology
+from .base import (
+    BaseTrainBackendConfig,
+    TrainBackend,
+    TrainBackendCapabilities,
+    TrainTopology,
+)
+from .registry import register_train_backend
 
 logger = logging.getLogger(__name__)
 
@@ -39,16 +46,53 @@ def _as_optional_int(raw: Any) -> Optional[int]:
     return value
 
 
+@dataclass(frozen=True)
+class VeOmniTrainBackendConfig(BaseTrainBackendConfig):
+    name: str = "veomni"
+    data_parallel_mode: str = "fsdp2"
+    dp_size: Optional[int] = None
+    dp_replicate_size: int = 1
+    dp_shard_size: Optional[int] = None
+    tp_size: int = 1
+    pp_size: int = 1
+    sp_size: int = 1
+    ep_size: int = 1
+    cp_size: int = 1
+    enable_full_shard: bool = True
+    enable_reshard_after_forward: bool = True
+    enable_mixed_precision: bool = True
+    enable_gradient_checkpointing: bool = False
+    enable_reentrant: bool = False
+    enable_forward_prefetch: bool = False
+    enable_fsdp_offload: bool = False
+    init_device: str = "meta"
+    broadcast_model_weights_from_rank0: bool = True
+    basic_modules: Optional[list[str]] = None
+    weights_path: Optional[str] = None
+    weights_path_mode: str = "transformer_subdir"
+    optimizer_type: str = "adamw"
+    fused_optimizer: bool = False
+    no_decay_modules: Optional[list[str]] = None
+    no_decay_params: Optional[list[str]] = None
+    lr_decay_ratio: float = 1.0
+    lr_min: float = 1e-7
+    lr_start: float = 0.0
+    veomni_repo_path: Optional[str] = None
+    parallelize_kwargs: Dict[str, Any] = field(default_factory=dict)
+
+
+@register_train_backend(
+    component_name="veomni_native",
+    component_cfg=VeOmniTrainBackendConfig,
+)
 class VeOmniNativeTrainBackend(TrainBackend):
     """VeOmni-native backend (FSDP2-focused, EP/SP capable when model supports it)."""
 
     BACKEND_NAME = "veomni_native"
 
-    def __init__(self, *, backend_kwargs: Optional[Mapping[str, Any]] = None) -> None:
-        super().__init__(backend_kwargs=backend_kwargs)
-        kwargs = dict(self.backend_kwargs)
-
-        self._dp_mode = str(kwargs.pop("data_parallel_mode", "fsdp2") or "fsdp2").strip().lower()
+    def __init__(self, config: VeOmniTrainBackendConfig) -> None:
+        super().__init__(config)
+        self._dp_mode = str(config.data_parallel_mode or "fsdp2").strip().lower()
         if self._dp_mode != "fsdp2":
             raise ValueError(
                 "VeOmniNativeTrainBackend currently supports data_parallel_mode='fsdp2' only. "
@@ -56,60 +100,52 @@ class VeOmniNativeTrainBackend(TrainBackend):
             )
 
         # Parallel topology knobs.
-        self._dp_size_hint = _as_optional_int(kwargs.pop("dp_size", None))
-        self._dp_replicate_size_hint = _as_optional_int(kwargs.pop("dp_replicate_size", None)) or 1
-        self._dp_shard_size_hint = _as_optional_int(kwargs.pop("dp_shard_size", None))
-        self._tp_size = _as_optional_int(kwargs.pop("tp_size", None)) or 1
-        self._pp_size = _as_optional_int(kwargs.pop("pp_size", None)) or 1
-        self._sp_size = _as_optional_int(kwargs.pop("sp_size", None)) or 1
-        self._ep_size = _as_optional_int(kwargs.pop("ep_size", None)) or 1
-        self._cp_size = _as_optional_int(kwargs.pop("cp_size", None)) or 1
+        self._dp_size_hint = _as_optional_int(config.dp_size)
+        self._dp_replicate_size_hint = _as_optional_int(config.dp_replicate_size) or 1
+        self._dp_shard_size_hint = _as_optional_int(config.dp_shard_size)
+        self._tp_size = _as_optional_int(config.tp_size) or 1
+        self._pp_size = _as_optional_int(config.pp_size) or 1
+        self._sp_size = _as_optional_int(config.sp_size) or 1
+        self._ep_size = _as_optional_int(config.ep_size) or 1
+        self._cp_size = _as_optional_int(config.cp_size) or 1
 
         # VeOmni parallelize knobs.
-        self._enable_full_shard = bool(kwargs.pop("enable_full_shard", True))
-        self._enable_reshard_after_forward = bool(kwargs.pop("enable_reshard_after_forward", True))
-        self._enable_mixed_precision = bool(kwargs.pop("enable_mixed_precision", True))
-        self._enable_gradient_checkpointing = bool(kwargs.pop("enable_gradient_checkpointing", False))
-        self._enable_reentrant = bool(kwargs.pop("enable_reentrant", False))
-        self._enable_forward_prefetch = bool(kwargs.pop("enable_forward_prefetch", False))
-        self._enable_fsdp_offload = bool(kwargs.pop("enable_fsdp_offload", False))
-        self._init_device = str(kwargs.pop("init_device", "meta") or "meta").strip().lower()
-        self._broadcast_from_rank0 = bool(kwargs.pop("broadcast_model_weights_from_rank0", True))
-        self._basic_modules = kwargs.pop("basic_modules", None)
+        self._enable_full_shard = bool(config.enable_full_shard)
+        self._enable_reshard_after_forward = bool(config.enable_reshard_after_forward)
+        self._enable_mixed_precision = bool(config.enable_mixed_precision)
+        self._enable_gradient_checkpointing = bool(config.enable_gradient_checkpointing)
+        self._enable_reentrant = bool(config.enable_reentrant)
+        self._enable_forward_prefetch = bool(config.enable_forward_prefetch)
+        self._enable_fsdp_offload = bool(config.enable_fsdp_offload)
+        self._init_device = str(config.init_device or "meta").strip().lower()
+        self._broadcast_from_rank0 = bool(config.broadcast_model_weights_from_rank0)
+        self._basic_modules = config.basic_modules
 
         # Weight path control (important for non-HF diffusion model layouts).
-        self._weights_path_override = kwargs.pop("weights_path", None)
-        self._weights_path_mode = str(
-            kwargs.pop("weights_path_mode", "transformer_subdir") or "transformer_subdir"
-        ).strip().lower()
+        self._weights_path_override = config.weights_path
+        self._weights_path_mode = (
+            str(config.weights_path_mode or "transformer_subdir").strip().lower()
+        )
 
         # Optimizer/lr scheduler knobs.
-        self._optimizer_type = str(kwargs.pop("optimizer_type", "adamw") or "adamw")
-        self._optimizer_fused = bool(kwargs.pop("fused_optimizer", False))
-        self._no_decay_modules = kwargs.pop("no_decay_modules", None)
-        self._no_decay_params = kwargs.pop("no_decay_params", None)
-        self._lr_decay_ratio = float(kwargs.pop("lr_decay_ratio", 1.0))
-        self._lr_min = float(kwargs.pop("lr_min", 1e-7))
-        self._lr_start = float(kwargs.pop("lr_start", 0.0))
+        self._optimizer_type = str(config.optimizer_type or "adamw")
+        self._optimizer_fused = bool(config.fused_optimizer)
+        self._no_decay_modules = config.no_decay_modules
+        self._no_decay_params = config.no_decay_params
+        self._lr_decay_ratio = float(config.lr_decay_ratio)
+        self._lr_min = float(config.lr_min)
+        self._lr_start = float(config.lr_start)
 
         # Import path control for local VeOmni repo.
-        self._veomni_repo_path = kwargs.pop("veomni_repo_path", None)
+        self._veomni_repo_path = config.veomni_repo_path
 
         # Advanced pass-through for build_parallelize_model only.
-        raw_parallelize_kwargs = kwargs.pop("parallelize_kwargs", {})
+        raw_parallelize_kwargs = config.parallelize_kwargs
         if raw_parallelize_kwargs is None:
             raw_parallelize_kwargs = {}
         if not isinstance(raw_parallelize_kwargs, dict):
             raise TypeError("parallelize_kwargs must be a dict when provided.")
         self._parallelize_extra_kwargs = dict(raw_parallelize_kwargs)
-
-        # Keep unknown options explicit for easier debugging.
-        self._unused_kwargs = dict(kwargs)
-        if self._unused_kwargs:
-            logger.warning(
-                "VeOmniNativeTrainBackend received unused backend kwargs: %s",
-                sorted(self._unused_kwargs.keys()),
-            )
 
         self._last_optimizer_lr: Optional[float] = None
         self._runtime_init_device: Optional[str] = None
@@ -478,4 +514,7 @@ class VeOmniNativeTrainBackend(TrainBackend):
         del actor
 
 
-__all__ = ["VeOmniNativeTrainBackend"]
+__all__ = [
+    "VeOmniTrainBackendConfig",
+    "VeOmniNativeTrainBackend",
+]

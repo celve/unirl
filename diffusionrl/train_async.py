@@ -17,11 +17,12 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
+from diffusionrl.algorithms.construction import create_algorithm_from_init_payload
 from diffusionrl.config import build_resolved_config_view, parse_args
 from diffusionrl.config.launch_resolution import resolve_launch_config
 from diffusionrl.config.validation import validate_async_training_runner
+from diffusionrl.rollout.service_interface import compute_dataset_step_info
 from diffusionrl.utils.train_utils import (
-    build_control_algorithm,
     collect_rollout_batch_metrics,
     maybe_restore_start_rollout_id_from_checkpoint,
     should_eval,
@@ -30,8 +31,6 @@ from diffusionrl.utils.train_utils import (
 )
 from diffusionrl.utils.wandb_logger import aggregate_metrics
 from diffusionrl.utils.wandb_metrics import build_buffer_metrics, build_sync_metrics
-from diffusionrl.rollout.service_interface import compute_dataset_step_info
-
 
 if TYPE_CHECKING:
     from diffusionrl.distributed.weight_sync import WeightSyncCoordinator
@@ -478,7 +477,8 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
 
     debug_mode = str(args.debug.debug_mode or "none").strip().lower()
     launch_config = resolve_launch_config(args)
-    algorithm_config, control_algorithm = build_control_algorithm(launch_config.algorithm_config)
+    algorithm_init_payload = launch_config.algorithm_init_payload
+    control_algorithm = create_algorithm_from_init_payload(algorithm_init_payload)
     rollout_mode_info = launch_config.rollout_mode_info
     rollout_topology = rollout_mode_info.rollout_topology
     training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
@@ -492,7 +492,7 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
 
     logger.info("Starting diffusionRL async training...")
     logger.info("Model: %s", args.model.pretrained_model_ckpt_path)
-    logger.info("Algorithm: %s", algorithm_config["algorithm_dotpath"])
+    logger.info("Algorithm: %s", algorithm_init_payload.component_dotpath)
     logger.info("Mode: %s", rollout_mode_name)
     logger.info("Weight sync mode: %s", sync_mode)
     logger.info(

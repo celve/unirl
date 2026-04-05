@@ -6,6 +6,7 @@ import logging
 import os
 import socket
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -14,27 +15,29 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from diffusionrl.algorithms.construction import instantiate_algorithm_from_config
-from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
-from diffusionrl.reward.schema import RewardSchema
-from diffusionrl.types.sampling import LogProbData, RolloutRequest, RolloutSamples
-from diffusionrl.types.training_batch import TrainingBatch
-from diffusionrl.patches.replay_logprob import ReplayLogProbPatch
-from diffusionrl.ray.training_actor_sampling import ActorSamplingExecutor
-from diffusionrl.samplers.fsdp.sampler_runner import finalize_sampling_output
-from diffusionrl.utils.dtypes import inject_model_dtype_kwarg, parse_torch_dtype
-from diffusionrl.utils import clear_memory as _clear_gpu_memory
+from diffusionrl.algorithms.construction import create_algorithm_from_init_payload
+from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.distributed.weight_sync_checkpoint import (
     publish_checkpoint_atomic,
     publish_sglang_transformer_checkpoint_atomic,
 )
+from diffusionrl.models import create_model_bundle_from_init_payload
+from diffusionrl.patches.replay_logprob import ReplayLogProbPatch
+from diffusionrl.ray.actor_config import TrainingActorConfig
+from diffusionrl.ray.training_actor_sampling import ActorSamplingExecutor
+from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
+from diffusionrl.reward.schema import RewardSchema
+from diffusionrl.samplers.fsdp.sampler_runner import finalize_sampling_output
 from diffusionrl.training import (
     TrainExecutor,
     TrainExecutorConfig,
     TrainingWorkflow,
-    create_train_backend,
+    create_train_backend_from_init_payload,
 )
-from diffusionrl.utils import load_function
+from diffusionrl.types.sampling import LogProbData, RolloutRequest, RolloutSamples
+from diffusionrl.types.training_batch import TrainingBatch
+from diffusionrl.utils import clear_memory as _clear_gpu_memory
+from diffusionrl.utils.dtypes import inject_model_dtype_kwarg, parse_torch_dtype
 
 from .actor_base import BaseTrainRayActor, log_gpu_state, log_resource_ids
 
@@ -99,6 +102,7 @@ def _build_synthetic_debug_training_batch(
     except KeyError:
         ctx_cls = get_forward_context_cls("default")
     from dataclasses import fields as _dc_fields
+
     valid_fields = {f.name for f in _dc_fields(ctx_cls)}
     ctx_kwargs = {
         "guidance_scale": 7.0,
@@ -114,10 +118,14 @@ def _build_synthetic_debug_training_batch(
     prompts = [f"debug_prompt_{i}" for i in range(batch_size)]
 
     if bool(getattr(algorithm, "is_forward_process", lambda: False)()):
-        timesteps = torch.linspace(1.0, 0.0, steps=num_inference_steps + 1, dtype=torch.float32)
+        timesteps = torch.linspace(
+            1.0, 0.0, steps=num_inference_steps + 1, dtype=torch.float32
+        )
         batch = TrainingBatch(
             trajectory_store=TrajectoryStore.from_clean_latents(
-                torch.randn(batch_size, latent_channels, latent_h, latent_w, dtype=dtype),
+                torch.randn(
+                    batch_size, latent_channels, latent_h, latent_w, dtype=dtype
+                ),
                 total_positions=num_inference_steps + 1,
             ),
             timesteps=timesteps,
@@ -258,11 +266,11 @@ class TrainingActor(BaseTrainRayActor):
         log_gpu_state(tag, self.rank, device=self._device, offloaded=self._is_offloaded)
 
     @staticmethod
-    def _require_dict_config(config: dict, key: str) -> Dict[str, Any]:
-        value = config.get(key)
+    def _require_dict_config(config: TrainingActorConfig, key: str) -> Dict[str, Any]:
+        value = getattr(config, key)
         if not isinstance(value, dict):
             raise ValueError(
-                f"TrainingActor.init requires config['{key}'] dict, got: {type(value).__name__}"
+                f"TrainingActor.init requires config.{key} dict, got: {type(value).__name__}"
             )
         return value
 
@@ -313,20 +321,13 @@ class TrainingActor(BaseTrainRayActor):
             "Set SGLANG_PYTHON_PATH to sglang/python."
         )
 
-    def init(self, config: dict) -> None:
+    def init(self, config: TrainingActorConfig) -> None:
         """
         Initialize training environment.
 
         Args:
-            config: Configuration dictionary containing:
-                - model_config: dict with model_dotpath, pretrained_model_ckpt_path
-                - optimizer_config: dict with lr, betas, weight_decay
-                - scheduler_config: dict with scheduler type and params
-                - algorithm_config: dict with algorithm_type, algorithm_dotpath, algorithm_kwargs, guidance_scale
-                - training_config: dict with max_grad_norm and replay/runtime-only knobs
-                - topology_config: dict with actor_count/world_size/dp_size
-                - training_plan_config: dict with explicit local/update/micro batch execution plan
-                - train_backend_config: dict(name/backend_dotpath/kwargs)
+            config: Typed TrainingActorConfig containing model/training/backend
+                sub-config dicts plus algorithm_init_payload.
 
         Note:
             The driver-side rollout runtime and TrainingActor each instantiate
@@ -335,27 +336,21 @@ class TrainingActor(BaseTrainRayActor):
         """
         logger.info(f"Rank {self.rank}: Initializing training actor...")
 
-        backend_config = config.get("train_backend_config")
-        if not isinstance(backend_config, dict):
+        if not isinstance(config, TrainingActorConfig):
             raise ValueError(
-                "TrainingActor.init requires config['train_backend_config'] dict."
+                "TrainingActor.init requires TrainingActorConfig, "
+                f"got: {type(config).__name__}"
             )
 
-        backend_name = str(backend_config.get("name", "") or "").strip().lower()
-        if not backend_name:
-            raise ValueError("train_backend_config.name is required.")
-        backend_dotpath = backend_config.get("backend_dotpath")
-        backend_kwargs = backend_config.get("kwargs")
-        if not isinstance(backend_kwargs, dict):
+        train_backend_init_payload = config.train_backend_init_payload
+        if not isinstance(train_backend_init_payload, ComponentInitPayload):
             raise ValueError(
-                "train_backend_config.kwargs must be a dict, "
-                f"got: {type(backend_kwargs).__name__}"
+                "TrainingActor.init requires config.train_backend_init_payload as "
+                "ComponentInitPayload, "
+                f"got: {type(train_backend_init_payload).__name__}"
             )
-
-        self._train_backend = create_train_backend(
-            backend_name,
-            backend_dotpath=backend_dotpath,
-            backend_kwargs=backend_kwargs,
+        self._train_backend = create_train_backend_from_init_payload(
+            train_backend_init_payload
         )
         self._train_backend_name = self._train_backend.name
         self._train_backend_capabilities = self._train_backend.capabilities.as_dict()
@@ -407,8 +402,8 @@ class TrainingActor(BaseTrainRayActor):
         # Backend-specific pre-load hook (e.g. CPU-offload behavior).
         self._train_backend.before_model_load(self)
 
-        model_config = self._require_dict_config(config, "model_config")
-        self._load_model(model_config)
+        model_init_payload = config.model_init_payload
+        self._load_model(model_init_payload)
 
         # Backend model wrapping (FSDP/Megatron/others).
         self._train_backend.wrap_model(self)
@@ -418,9 +413,6 @@ class TrainingActor(BaseTrainRayActor):
 
         scheduler_config = self._require_dict_config(config, "scheduler_config")
         self._create_scheduler(scheduler_config)
-
-        algorithm_config = self._require_dict_config(config, "algorithm_config")
-        self._load_algorithm(algorithm_config)
 
         # Load training config
         training_config = self._require_dict_config(config, "training_config")
@@ -435,6 +427,22 @@ class TrainingActor(BaseTrainRayActor):
             self._resolved_training_plan["num_updates_per_batch"]
         )
         self._replay_enabled = bool(training_config["replay_enabled"])
+        self._algorithm_type = str(training_config["algorithm_type"])
+        self._guidance_scale = float(training_config["guidance_scale"])
+        self._shuffle_samples = bool(training_config.get("shuffle_samples", True))
+        raw_shuffle_seed = training_config.get("shuffle_seed", None)
+        self._shuffle_seed = (
+            int(raw_shuffle_seed) if raw_shuffle_seed is not None else None
+        )
+
+        algorithm_init_payload = config.algorithm_init_payload
+        self._load_algorithm(
+            algorithm_init_payload,
+            training_autocast_precision=str(
+                training_config.get("training_autocast_precision", "bf16")
+            ),
+            debug_output_dir=training_config.get("debug_output_dir"),
+        )
 
         # Sampling config (used when training actors perform sampling)
         sampling_config = self._require_dict_config(config, "sampling_config")
@@ -495,48 +503,34 @@ class TrainingActor(BaseTrainRayActor):
             samples_per_prompt=int(samples_per_prompt),
         )
 
-    def _load_model(self, model_config: dict) -> None:
+    def _load_model(self, model_init_payload: ComponentInitPayload) -> None:
         """Load the model for training."""
-        if "model_dotpath" not in model_config:
-            raise ValueError("model_config must contain model_dotpath")
+        from diffusionrl.models.config import ModelBundleConfig
 
-        model_cls = load_function(model_config["model_dotpath"])
+        model_config = model_init_payload.component_config
+        if not isinstance(model_config, ModelBundleConfig):
+            raise ValueError(
+                "model_init_payload.component_config must be a ModelBundleConfig, "
+                f"got: {type(model_config).__name__}"
+            )
 
-        # Build kwargs for model constructor
-        # Pass through LoRA configuration for models that support it
-        model_kwargs = {
-            "pretrained_path": model_config["pretrained_model_ckpt_path"],
-            "vae_ckpt_path": model_config["vae_ckpt_path"],
-            "text_encoder_ckpt_path": model_config["text_encoder_ckpt_path"],
-            "device": self._device,
-            # Training only needs transformer, skip VAE/text_encoders to save memory
-            "training_only": True,
-            # Skip device move if using FSDP CPU offload (FSDP manages device placement)
-            "skip_device_move": getattr(self, '_fsdp_cpu_offload', False),
-        }
-        model_precision = parse_torch_dtype(
-            model_config.get("model_precision", "bf16"),
-            field_name="model_config.model_precision",
-        )
-        inject_model_dtype_kwarg(
-            model_cls=model_cls,
-            model_kwargs=model_kwargs,
-            dtype=model_precision,
+        runtime_model_config = replace(
+            model_config,
+            device=self._device,
+            training_only=True,
+            skip_device_move=getattr(self, "_fsdp_cpu_offload", False),
         )
 
-        # Pass LoRA parameters only when explicitly enabled
-        use_lora = bool(model_config["use_lora"])
+        use_lora = bool(runtime_model_config.use_lora)
         self._use_lora = use_lora
-        model_kwargs["use_lora"] = use_lora
-        if use_lora:
-            if "lora_rank" in model_config:
-                model_kwargs["lora_rank"] = model_config["lora_rank"]
-            if "lora_alpha" in model_config:
-                model_kwargs["lora_alpha"] = model_config["lora_alpha"]
-            if "lora_target_modules" in model_config:
-                model_kwargs["lora_target_modules"] = model_config["lora_target_modules"]
+        runtime_model_init_payload = replace(
+            model_init_payload,
+            component_config=runtime_model_config,
+        )
 
-        self.model_bundle = model_cls(**model_kwargs)
+        self.model_bundle = create_model_bundle_from_init_payload(
+            runtime_model_init_payload
+        )
 
         # Get the transformer for training
         # Note: Device placement is handled by model bundle based on skip_device_move flag
@@ -545,7 +539,9 @@ class TrainingActor(BaseTrainRayActor):
 
         # Enable gradient checkpointing (activation checkpointing) only when explicitly requested
         # Note: For LoRA models, this should be done in the model bundle before PEFT wrapping
-        use_gradient_checkpointing = bool(model_config["use_gradient_checkpointing"])
+        use_gradient_checkpointing = bool(
+            runtime_model_config.use_gradient_checkpointing
+        )
         logger.info(
             "Rank %s: Gradient checkpointing %s (scope=transformer)",
             self.rank,
@@ -574,7 +570,7 @@ class TrainingActor(BaseTrainRayActor):
         logger.info(
             "Rank %s: Model loaded (lora_rank=%s, training_only=True)",
             self.rank,
-            model_config.get("lora_rank", "N/A") if use_lora else "N/A",
+            runtime_model_config.lora_rank if use_lora else "N/A",
         )
 
     def _create_optimizer(self, optimizer_config: dict) -> None:
@@ -650,21 +646,28 @@ class TrainingActor(BaseTrainRayActor):
         else:
             self.lr_scheduler = None
 
-    def _load_algorithm(self, algorithm_config: dict) -> None:
+    def _load_algorithm(
+        self,
+        algorithm_init_payload: ComponentInitPayload,
+        *,
+        training_autocast_precision: str,
+        debug_output_dir: Optional[str],
+    ) -> None:
         """Load the train-side Algorithm instance."""
-        self._algorithm_type = str(algorithm_config["algorithm_type"])
-        self._algorithm_dotpath = str(algorithm_config.get("algorithm_dotpath") or "")
+        if not isinstance(algorithm_init_payload, ComponentInitPayload):
+            raise ValueError(
+                "TrainingActor.init requires config.algorithm_init_payload as ComponentInitPayload, "
+                f"got: {type(algorithm_init_payload).__name__}"
+            )
 
-        self._shuffle_samples = bool(algorithm_config.get("shuffle_samples", True))
-        raw_shuffle_seed = algorithm_config.get("shuffle_seed", None)
-        self._shuffle_seed = int(raw_shuffle_seed) if raw_shuffle_seed is not None else None
+        self._algorithm_dotpath = str(algorithm_init_payload.component_dotpath or "")
 
         if not self._algorithm_dotpath:
             raise ValueError(
-                "algorithm_config.algorithm_dotpath must be set before TrainingActor.init."
+                "algorithm_init_payload.component_dotpath must be set before TrainingActor.init."
             )
 
-        self.algorithm = instantiate_algorithm_from_config(algorithm_config)
+        self.algorithm = create_algorithm_from_init_payload(algorithm_init_payload)
 
         logger.info(
             "Rank %s: Train-side algorithm loaded from %s (type=%s)",
@@ -688,22 +691,18 @@ class TrainingActor(BaseTrainRayActor):
                 )
             self.algorithm._forward_plugin = forward_plugin
             if hasattr(forward_plugin, "autocast_dtype"):
-                training_autocast_precision = algorithm_config.get(
-                    "training_autocast_precision", "bf16"
-                )
                 forward_plugin.autocast_dtype = parse_torch_dtype(
                     training_autocast_precision,
-                    field_name="algorithm_config.training_autocast_precision",
+                    field_name="training_config.training_autocast_precision",
                 )
                 logger.info(
                     "Rank %s: forward_plugin.autocast_dtype set from "
-                    "algorithm_config.training_autocast_precision=%s -> %s",
+                    "training_config.training_autocast_precision=%s -> %s",
                     self.rank,
                     training_autocast_precision,
                     forward_plugin.autocast_dtype,
                 )
 
-        debug_output_dir = algorithm_config.get("debug_output_dir")
         if debug_output_dir and hasattr(self.algorithm, "_debug_output_dir"):
             self.algorithm._debug_output_dir = debug_output_dir
             logger.info("Rank %s: Debug output dir set on algorithm: %s", self.rank, debug_output_dir)

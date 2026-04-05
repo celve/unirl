@@ -15,10 +15,13 @@ import torch
 import torch.nn as nn
 
 from .base import ModelBundle
+from .config import ModelBundleConfig
+from .registry import register_model
 
 logger = logging.getLogger(__name__)
 
 
+@register_model(component_name="mochi", component_cfg=ModelBundleConfig)
 class MochiModelBundle(ModelBundle):
     """
     Mochi video model bundle.
@@ -31,40 +34,26 @@ class MochiModelBundle(ModelBundle):
 
     def __init__(
         self,
-        pretrained_path: str,
-        device: Optional[Union[str, torch.device]] = None,
-        dtype: torch.dtype = torch.bfloat16,
-        vae_ckpt_path: Optional[str] = None,
-        text_encoder_ckpt_path: Optional[str] = None,
-        text_encoder_dtype: torch.dtype = torch.float16,
-        load_on_init: bool = True,
-        **kwargs,
+        config: ModelBundleConfig,
     ):
         """
         Initialize Mochi model bundle.
 
         Args:
-            pretrained_path: Path to pretrained transformer weights
-            device: Device to load models on
-            dtype: Data type for transformer weights
-            vae_ckpt_path: Optional separate path for VAE
-            text_encoder_ckpt_path: Optional separate path for T5 encoder
-            text_encoder_dtype: Data type for text encoder (typically float16)
-            load_on_init: Whether to load models immediately
-            **kwargs: Additional arguments
+            config: Typed model-bundle config.
         """
-        super().__init__(pretrained_path, device, dtype, **kwargs)
+        super().__init__(config)
 
-        self.vae_ckpt_path = vae_ckpt_path or pretrained_path
-        self.text_encoder_ckpt_path = text_encoder_ckpt_path or pretrained_path
-        self.text_encoder_dtype = text_encoder_dtype
+        self.vae_ckpt_path = config.vae_ckpt_path or config.pretrained_model_ckpt_path
+        self.text_encoder_ckpt_path = (
+            config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path
+        )
 
         # Text encoder components
         self._t5_encoder = None
         self._t5_tokenizer = None
 
-        if load_on_init:
-            self.load()
+        self.load()
 
     @property
     def model_type(self) -> str:
@@ -141,7 +130,7 @@ class MochiModelBundle(ModelBundle):
             self._vae = AutoencoderKLMochi.from_pretrained(
                 self.vae_ckpt_path,
                 subfolder="vae",
-                torch_dtype=self.dtype,
+                torch_dtype=self.vae_dtype,
             )
             self._vae.to(self.device)
             self._vae.eval()  # VAE is always in eval mode

@@ -7,6 +7,7 @@ requirements, advantage processing, and the forward-process loss entrypoint.
 
 import logging
 from contextlib import nullcontext
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:
@@ -16,22 +17,45 @@ import torch
 import torch.nn as nn
 from diffusers.utils.torch_utils import randn_tensor
 
-from diffusionrl.config.build_domain_args import resolve_sde_config
+from diffusionrl.algorithms.base import (
+    BaseAlgorithm,
+    BaseAlgorithmConfig,
+    EMASpec,
+    SamplingRequirements,
+)
+from diffusionrl.algorithms.registry import register_algorithm
 from diffusionrl.types import SDEConfig
+from diffusionrl.types.forward_context import ForwardContext
 from diffusionrl.types.training_batch import TrainingBatch as _TrainingBatch
 from diffusionrl.utils.adapter_utils import switch_adapter
 from diffusionrl.utils.misc import aggregate_numeric_metrics
 
-from .base import BaseAlgorithm, EMASpec, SamplingRequirements
-from diffusionrl.types.forward_context import ForwardContext
-
 logger = logging.getLogger(__name__)
 
 
-def _resolve_algorithm_sde_config(config: Dict[str, Any]) -> SDEConfig:
-    return resolve_sde_config(config)
+@dataclass(frozen=True)
+class NFTAlgorithmConfig(BaseAlgorithmConfig):
+    beta: float = 0.1
+    adv_clip_max: float = 5.0
+    adv_mode: str = "raw"
+    use_adaptive_weight: bool = True
+    sde_config: SDEConfig = field(default_factory=SDEConfig)
+    use_reference_ema: bool = True
+    ema_decay: float = 0.001
+    ema_decay_type: str = "constant"
+    ema_flat_steps: int = 0
+    ema_uprate: float = 0.001
+    ema_uphold: float = 0.5
+    reference_update_timing: str = "optimizer_step"
+    old_adapter_name: str = "old"
+    new_adapter_name: str = "default"
+    train_timestep_mode: str = "random"
+    shuffle_train_timesteps: bool = True
+    apply_time_shift_in_loss: bool = False
+    training_scheduler_config: Dict[str, Any] = field(default_factory=dict)
 
 
+@register_algorithm(component_name="nft", component_cfg=NFTAlgorithmConfig)
 class NFTAlgorithm(BaseAlgorithm):
     """
     NFT (Negative Fine-Tuning) Algorithm — algorithm owns loss and advantages.
@@ -64,50 +88,11 @@ class NFTAlgorithm(BaseAlgorithm):
     """
 
     @classmethod
-    def from_config(cls, config: dict) -> "NFTAlgorithm":
-        """Create NFTAlgorithm from an algorithm_config dictionary.
-
-        Reads NFT-specific extension keys from ``algorithm_kwargs`` and shared
-        framework-owned fields from the top-level algorithm_config surface.
-        """
+    def _parse_config_from_dict(cls, config: dict) -> NFTAlgorithmConfig:
         extra = cls.resolve_config_kwargs(config)
-        sde_config = _resolve_algorithm_sde_config(config)
         training_scheduler_config = dict(config.get("training_scheduler") or {})
-        logger.info(
-            "%s uses training_scheduler.timestep_fraction for training timestep "
-            "filtering and ignores rollout_scheduler configuration.",
-            cls.__name__,
-        )
-        known_keys = {
-            "beta",
-            "adv_clip_max",
-            "adv_mode",
-            "use_adaptive_weight",
-            "clip_range",
-            "skip_last_timestep",
-            "skip_initial_timesteps",
-            "old_adapter_name",
-            "new_adapter_name",
-            "kl_coef",
-            "use_reference_ema",
-            "ema_decay",
-            "decay_type",
-            "ema_flat_steps",
-            "ema_uprate",
-            "ema_uphold",
-            "reference_update_timing",
-            "train_timestep_mode",
-            "shuffle_train_timesteps",
-            "apply_time_shift_in_loss",
-        }
-        unknown = sorted(key for key in extra.keys() if key not in known_keys)
-        if unknown:
-            raise ValueError(
-                "algorithm.algorithm_kwargs contains unsupported keys for algorithm_type='nft': "
-                f"{unknown}."
-            )
-
-        return cls(
+        sde_config = SDEConfig.from_mapping(config.get("sde_config", SDEConfig()))
+        return NFTAlgorithmConfig(
             beta=float(extra.get("beta", 0.1)),
             adv_clip_max=float(extra.get("adv_clip_max", 5.0)),
             adv_mode=str(extra.get("adv_mode", "raw")),
@@ -118,7 +103,7 @@ class NFTAlgorithm(BaseAlgorithm):
             old_adapter_name=str(extra.get("old_adapter_name", "old")),
             new_adapter_name=str(extra.get("new_adapter_name", "default")),
             ema_decay=float(extra.get("ema_decay", 0.001)),
-            ema_decay_type=str(extra.get("decay_type", "constant")),
+            ema_decay_type=str(extra.get("ema_decay_type", "constant")),
             ema_flat_steps=int(extra.get("ema_flat_steps", 0)),
             ema_uprate=float(extra.get("ema_uprate", 0.001)),
             ema_uphold=float(extra.get("ema_uphold", 0.5)),
@@ -139,70 +124,73 @@ class NFTAlgorithm(BaseAlgorithm):
             trim_outliers_ratio=float(config.get("trim_outliers_ratio", 0.0)),
         )
 
+    @classmethod
+    def from_config(
+        cls,
+        config: dict | NFTAlgorithmConfig,
+    ) -> "NFTAlgorithm":
+        """Create NFTAlgorithm from raw framework config or typed config."""
+        if isinstance(config, dict):
+            config = cls._parse_config_from_dict(config)
+        if not isinstance(config, NFTAlgorithmConfig):
+            raise TypeError(
+                f"{cls.__name__}.from_config expects dict or NFTAlgorithmConfig, "
+                f"got {type(config).__name__}."
+            )
+
+        logger.info(
+            "%s uses training_scheduler.timestep_fraction for training timestep "
+            "filtering and ignores rollout_scheduler configuration.",
+            cls.__name__,
+        )
+
+        return cls(config=config)
+
     def __init__(
         self,
-        beta: float = 0.1,
-        adv_clip_max: float = 5.0,
-        adv_mode: str = "raw",
-        use_adaptive_weight: bool = True,
-        component_mix_stage: str = "reward",
-        sde_config: Optional[SDEConfig] = None,
-        use_reference_ema: bool = True,
-        ema_decay: float = 0.001,
-        ema_decay_type: str = "constant",
-        ema_flat_steps: int = 0,
-        ema_uprate: float = 0.001,
-        ema_uphold: float = 0.5,
-        reference_update_timing: str = "optimizer_step",
-        kl_coef: float = 0.0,
-        old_adapter_name: str = "old",
-        new_adapter_name: str = "default",
-        train_timestep_mode: str = "random",
-        shuffle_train_timesteps: bool = True,
-        apply_time_shift_in_loss: bool = False,
-        training_scheduler_config: Optional[Dict[str, Any]] = None,
-        # BaseAlgorithm params
-        adv_normalization_scope: str = "group",
-        samples_per_prompt: int = 1,
-        num_inference_steps: int = 0,
-        eval_ema_decay: float = 0.9,
-        eval_ema_update_interval: int = 1,
-        epsilon: float = 1e-8,
-        clip_max: float = 5.0,
-        use_global_std: bool = False,
+        *,
+        config: NFTAlgorithmConfig,
         **kwargs,
     ):
+        if not isinstance(config, NFTAlgorithmConfig):
+            raise TypeError(
+                f"{type(self).__name__} expects NFTAlgorithmConfig, got {type(config).__name__}."
+            )
         super().__init__(
-            kl_coef=kl_coef,
-            component_mix_stage=component_mix_stage,
-            adv_normalization_scope=adv_normalization_scope,
-            samples_per_prompt=samples_per_prompt,
-            num_inference_steps=num_inference_steps,
-            eval_ema_decay=eval_ema_decay,
-            eval_ema_update_interval=eval_ema_update_interval,
-            epsilon=epsilon,
-            clip_max=clip_max,
-            use_global_std=use_global_std,
+            kl_coef=config.kl_coef,
+            component_mix_stage=config.component_mix_stage,
+            adv_normalization_scope=config.adv_normalization_scope,
+            samples_per_prompt=config.samples_per_prompt,
+            num_inference_steps=config.num_inference_steps,
+            eval_ema_decay=config.eval_ema_decay,
+            eval_ema_update_interval=config.eval_ema_update_interval,
+            epsilon=config.epsilon,
+            clip_max=config.clip_max,
+            use_global_std=config.use_global_std,
+            trim_outliers_ratio=config.trim_outliers_ratio,
             **kwargs,
         )
-        self.beta = beta
-        self.adv_clip_max = adv_clip_max
-        self.adv_mode = adv_mode
-        self.use_adaptive_weight = use_adaptive_weight
-        self.sde_config = sde_config or SDEConfig()
-        self.use_reference_ema = bool(use_reference_ema)
-        self.ema_decay = ema_decay
-        self.ema_decay_type = str(ema_decay_type)
-        self.ema_flat_steps = int(ema_flat_steps)
-        self.ema_uprate = float(ema_uprate)
-        self.ema_uphold = float(ema_uphold)
-        self.reference_update_timing = str(reference_update_timing).strip().lower()
-        self.old_adapter_name = old_adapter_name
-        self.new_adapter_name = new_adapter_name
-        self.train_timestep_mode = str(train_timestep_mode)
-        self.shuffle_train_timesteps = bool(shuffle_train_timesteps)
-        self.apply_time_shift_in_loss = bool(apply_time_shift_in_loss)
-        self.training_scheduler_config = dict(training_scheduler_config or {})
+        self.config = config
+        self.beta = config.beta
+        self.adv_clip_max = config.adv_clip_max
+        self.adv_mode = config.adv_mode
+        self.use_adaptive_weight = config.use_adaptive_weight
+        self.sde_config = config.sde_config
+        self.use_reference_ema = bool(config.use_reference_ema)
+        self.ema_decay = config.ema_decay
+        self.ema_decay_type = str(config.ema_decay_type)
+        self.ema_flat_steps = int(config.ema_flat_steps)
+        self.ema_uprate = float(config.ema_uprate)
+        self.ema_uphold = float(config.ema_uphold)
+        self.reference_update_timing = (
+            str(config.reference_update_timing).strip().lower()
+        )
+        self.old_adapter_name = config.old_adapter_name
+        self.new_adapter_name = config.new_adapter_name
+        self.train_timestep_mode = str(config.train_timestep_mode)
+        self.shuffle_train_timesteps = bool(config.shuffle_train_timesteps)
+        self.apply_time_shift_in_loss = bool(config.apply_time_shift_in_loss)
+        self.training_scheduler_config = dict(config.training_scheduler_config)
         self.training_timestep_fraction = self.training_scheduler_config.get(
             "timestep_fraction",
             1.0,
@@ -232,51 +220,6 @@ class NFTAlgorithm(BaseAlgorithm):
                 "forward_diffusion_in_loss": True,
             },
         )
-
-    def compute_advantages_with_components(
-        self,
-        *,
-        rewards: torch.Tensor,
-        group_ids: Optional[List[str]] = None,
-        reward_components: Optional[Dict[str, List[float]]] = None,
-        reward_component_weights: Optional[Dict[str, float]] = None,
-    ) -> torch.Tensor:
-        if self.component_mix_stage != "advantage" or not reward_components:
-            return self.compute_advantages(rewards=rewards, group_ids=group_ids)
-
-        default_weights = {name: 1.0 for name in reward_components}
-        if reward_component_weights:
-            for name, weight in reward_component_weights.items():
-                if name in default_weights:
-                    default_weights[name] = float(weight)
-
-        weighted_advantages = torch.zeros_like(rewards)
-        total_weight = 0.0
-        for component_name, component_rewards in reward_components.items():
-            component_tensor = torch.tensor(
-                component_rewards,
-                dtype=rewards.dtype,
-                device=rewards.device,
-            )
-            if component_tensor.shape != rewards.shape:
-                logger.warning(
-                    "Skipping reward component %s due to shape mismatch: expected=%s got=%s",
-                    component_name,
-                    tuple(rewards.shape),
-                    tuple(component_tensor.shape),
-                )
-                continue
-            component_advantages = self.compute_advantages(
-                rewards=component_tensor,
-                group_ids=group_ids,
-            )
-            weight = float(default_weights.get(component_name, 1.0))
-            weighted_advantages += component_advantages * weight
-            total_weight += weight
-
-        if total_weight <= 0:
-            return self.compute_advantages(rewards=rewards, group_ids=group_ids)
-        return weighted_advantages / total_weight
 
     def get_ema_spec(self) -> EMASpec:
         return EMASpec(
@@ -491,13 +434,17 @@ class NFTAlgorithm(BaseAlgorithm):
         plugin = self._get_forward_plugin(model)
         ctx_kwargs = ctx.to_dict()
         if old_model is not None:
-            return plugin.forward(model=old_model, latents=latents, sigma=sigma, **ctx_kwargs)
+            return plugin.forward(
+                model=old_model, latents=latents, sigma=sigma, **ctx_kwargs
+            )
 
         adapter_model = model.module if hasattr(model, "module") else model
         if hasattr(adapter_model, "set_adapter"):
             try:
                 with switch_adapter(adapter_model, self.old_adapter_name):
-                    return plugin.forward(model=model, latents=latents, sigma=sigma, **ctx_kwargs)
+                    return plugin.forward(
+                        model=model, latents=latents, sigma=sigma, **ctx_kwargs
+                    )
             except Exception as exc:
                 raise RuntimeError(
                     "NFT old-policy prediction failed while switching adapters. "
@@ -529,7 +476,9 @@ class NFTAlgorithm(BaseAlgorithm):
         if hasattr(adapter_model, "disable_adapter"):
             try:
                 with adapter_model.disable_adapter():
-                    return plugin.forward(model=model, latents=latents, sigma=sigma, **ctx_kwargs)
+                    return plugin.forward(
+                        model=model, latents=latents, sigma=sigma, **ctx_kwargs
+                    )
             except Exception as exc:
                 raise RuntimeError(
                     "NFT reference prediction failed while disabling adapters. "
@@ -537,7 +486,9 @@ class NFTAlgorithm(BaseAlgorithm):
                     "the KL term toward zero."
                 ) from exc
         if ref_model is not None:
-            return plugin.forward(model=ref_model, latents=latents, sigma=sigma, **ctx_kwargs)
+            return plugin.forward(
+                model=ref_model, latents=latents, sigma=sigma, **ctx_kwargs
+            )
         raise RuntimeError(
             "NFT reference prediction requires either disable_adapter() support "
             "or an explicit ref_model. No valid base-model reference path was available."
@@ -562,6 +513,7 @@ class NFTAlgorithm(BaseAlgorithm):
             ``(loss, metrics, num_timesteps, has_backward)``
         """
         from diffusionrl.types.training_batch import TrainingBatch
+
         if not isinstance(batch, TrainingBatch):
             raise TypeError(
                 f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
@@ -569,7 +521,9 @@ class NFTAlgorithm(BaseAlgorithm):
 
         if timesteps is None:
             timesteps = self.resolve_training_timesteps(
-                batch=batch, current_step=0, **kwargs,
+                batch=batch,
+                current_step=0,
+                **kwargs,
             )
 
         ctx = batch.forward_context
@@ -637,7 +591,9 @@ class NFTAlgorithm(BaseAlgorithm):
         grad_context = torch.enable_grad() if not torch.is_grad_enabled() else nullcontext()
 
         with grad_context:
-            forward_prediction = plugin.forward(model=model, latents=xt, sigma=t, **ctx_kwargs)
+            forward_prediction = plugin.forward(
+                model=model, latents=xt, sigma=t, **ctx_kwargs
+            )
 
         old_prediction = self.get_old_prediction(
             model, ctx, latents=xt, sigma=t, old_model=old_model,

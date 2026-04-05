@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 
-from diffusionrl.sde.kernels import get_sde_strategy, SDEStrategy
+from diffusionrl.sde.kernels import SDEStrategy
+from diffusionrl.sde.registry import resolve_sde_strategy_class
 
 if TYPE_CHECKING:
     from diffusionrl.sde.kernels import StepStrategy
@@ -121,7 +122,7 @@ def denoising_step(
         sigma_next = sigma_next.unsqueeze(-1)
 
     if strategy is None:
-        strategy = get_sde_strategy(sde_type)
+        strategy = resolve_sde_strategy_class(sde_type)()
 
     prev_sample, prev_sample_mean, std_var = strategy.step(
         noise_pred=noise_pred,

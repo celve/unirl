@@ -31,7 +31,7 @@
 # - adv_normalization_scope=group
 # - algorithm_kwargs.train_timestep_mode=all (DiffusionNFT uses full timestep schedule)
 # - adv_mode=raw
-# - EMA decay: warmup curve (decay_type=2 in original)
+# - EMA decay: warmup curve (ema_decay_type=2 in original)
 #   - ema_flat_steps=75, ema_uprate=0.0075, ema_uphold=0.999
 #
 # Two beta parameters in DiffusionNFT (IMPORTANT!):
@@ -103,13 +103,12 @@ NFT_ALGO_KWARG_ARGS=(
     --algorithm.kwarg "use_reference_ema=true"
     --algorithm.kwarg "reference_update_timing=rollout_end"
     --algorithm.kwarg "ema_decay=0.001"
-    --algorithm.kwarg "decay_type=warmup"
+    --algorithm.kwarg "ema_decay_type=warmup"
     --algorithm.kwarg "ema_flat_steps=75"
     --algorithm.kwarg "ema_uprate=0.0075"
     --algorithm.kwarg "ema_uphold=0.999"
     --algorithm.shuffle-seed "${SHUFFLE_SEED}"
     --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}"
-    --algorithm.kwarg "clip_range=1e-4"
     --algorithm.kwarg "kl_coef=0.0001"
     --algorithm.adv-normalization "group"
     --algorithm.use-global-std "true"

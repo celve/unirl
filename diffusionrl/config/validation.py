@@ -2,41 +2,50 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import MISSING, fields as dataclass_fields, replace
 import logging
 import os
+from collections.abc import Mapping
+from dataclasses import MISSING
+from dataclasses import fields as dataclass_fields
+from dataclasses import replace
 from enum import Enum
 from typing import Any, Dict, Optional
 
-from diffusionrl.algorithms.construction import build_algorithm_kwargs, resolve_algorithm_dotpath
+from diffusionrl.algorithms.base import BaseAlgorithmConfig
 from diffusionrl.buffer.buffer_plugins import normalize_plugin_dotpaths
+from diffusionrl.cmdline.algorithms import _resolve_algorithm_dotpath_from_args
 from diffusionrl.config.resolution import (
-    ModelSpec,
     RolloutModeInfo,
     RolloutTopology,
     TrainTopology,
     derive_global_rollout_batch_size,
     derive_model_spec,
+    derive_num_updates_per_batch,
     derive_rollout_actor_gpu_count,
     derive_rollout_gpu_pool_size,
     derive_rollout_topology,
-    derive_num_updates_per_batch,
     derive_training_topology,
     normalize_lora_target_modules,
     require_prompts_per_rollout,
     rollout_mode_is_colocated,
     rollout_mode_uses_service,
 )
+from diffusionrl.config.spec import ModelSpec
+from diffusionrl.construction import ComponentInitPayload
+from diffusionrl.ray.actor_config import RolloutActorConfig, TrainingActorConfig
 from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.sde.rules import (
     SUPPORTED_USER_SDE_TYPES,
     is_deterministic_sde_type,
     supported_sde_type_text,
 )
-from diffusionrl.training.backends.factory import supported_train_backends
+from diffusionrl.training.backends import (
+    BaseTrainBackendConfig,
+    MegatronTrainBackendConfig,
+    supported_train_backends,
+)
 from diffusionrl.training.update_schedule import coerce_training_execution_plan
-from diffusionrl.types.engine import uses_dedicated_rollout_engine
+from diffusionrl.types.engine import EngineConfig, uses_dedicated_rollout_engine
 from diffusionrl.types.sampling import SamplingRequirements
 from diffusionrl.utils.misc import load_function
 
@@ -158,10 +167,7 @@ def validate_dynamic_dotpaths(
     validate_dotpath(resolved_model.model_dotpath, label="model")
     validate_dotpath(resolved_model.sampler_dotpath, label="sampler")
     validate_dotpath(
-        resolve_algorithm_dotpath(
-            algorithm_type=args.algorithm.algorithm_type,
-            algorithm_dotpath=args.algorithm.algorithm_dotpath,
-        ),
+        _resolve_algorithm_dotpath_from_args(args),
         label="algorithm",
     )
     if include_data_source:
@@ -236,7 +242,15 @@ def validate_nft_sampling_contract(args: Any) -> None:
     """Validate NFT-specific rollout sampling contract."""
     if args.algorithm.algorithm_type == "nft":
         old_adapter_name = "old"
-        parsed: Dict[str, Any] = build_algorithm_kwargs(args)
+        if args.algorithm.algorithm_kwargs is None:
+            parsed: Dict[str, Any] = {}
+        elif not isinstance(args.algorithm.algorithm_kwargs, dict):
+            raise ValueError(
+                "algorithm.algorithm_kwargs must already be a dict after config parsing. "
+                f"Got: {type(args.algorithm.algorithm_kwargs).__name__}."
+            )
+        else:
+            parsed = dict(args.algorithm.algorithm_kwargs)
         if parsed:
             old_adapter_name = str(parsed.get("old_adapter_name", old_adapter_name) or old_adapter_name)
 
@@ -465,7 +479,15 @@ def validate_rollout_topology_contract(
 
 def validate_algorithm_kwargs_payload(args: Any) -> None:
     """Validate algorithm_kwargs payload without mutating args."""
-    parsed = build_algorithm_kwargs(args)
+    if args.algorithm.algorithm_kwargs is None:
+        parsed = {}
+    elif not isinstance(args.algorithm.algorithm_kwargs, dict):
+        raise ValueError(
+            "algorithm.algorithm_kwargs must already be a dict after config parsing. "
+            f"Got: {type(args.algorithm.algorithm_kwargs).__name__}."
+        )
+    else:
+        parsed = dict(args.algorithm.algorithm_kwargs)
     reserved_paths = {
         "samples_per_prompt": "algorithm.samples_per_prompt",
         "prompts_per_rollout": "algorithm.prompts_per_rollout",
@@ -496,10 +518,7 @@ def validate_algorithm_kwargs_payload(args: Any) -> None:
 
 def validate_algorithm_dotpath(args: Any) -> None:
     """Validate algorithm dotpath resolution without mutating args."""
-    resolve_algorithm_dotpath(
-        algorithm_type=args.algorithm.algorithm_type,
-        algorithm_dotpath=args.algorithm.algorithm_dotpath,
-    )
+    _resolve_algorithm_dotpath_from_args(args)
 
 
 def validate_training_actor_sampling_mode(
@@ -895,12 +914,11 @@ def validate_reward_and_rollout_buffer_config(args: Any) -> None:
 
 def validate_train_backend_config(
     *,
-    backend_name: str,
-    backend_kwargs: Mapping[str, Any],
-    backend_dotpath: Optional[str],
+    train_backend_config: BaseTrainBackendConfig,
 ) -> None:
     """Validate cross-domain backend constraints after canonicalization."""
-    backend = backend_name
+    backend = train_backend_config.name
+    backend_dotpath = train_backend_config.backend_dotpath
     supported = supported_train_backends()
     if backend not in supported and not backend_dotpath:
         raise ValueError(
@@ -915,9 +933,11 @@ def validate_train_backend_config(
             backend,
         )
 
-    if backend == "megatron" and not backend_dotpath and not str(
-        dict(backend_kwargs).get("actor_class_path", "") or ""
-    ).strip():
+    if (
+        isinstance(train_backend_config, MegatronTrainBackendConfig)
+        and not backend_dotpath
+        and not str(train_backend_config.actor_class_path or "").strip()
+    ):
         logger.warning(
             "train_backend=%s requires actor_class_path in train_backend_kwargs "
             "to launch a Megatron-specific training actor.",
@@ -1074,39 +1094,52 @@ def _require_dict_section(config: Dict[str, Any], *, name: str) -> Dict[str, Any
     return value
 
 
-def validate_rollout_engine_config(config: Dict[str, Any]) -> None:
+def validate_rollout_engine_config(config: EngineConfig) -> None:
     """Minimal pre-dispatch validation for dedicated rollout engine config."""
-    if not isinstance(config, dict):
-        raise ValueError(f"rollout_engine_config must be a dict, got: {type(config).__name__}")
-    if not isinstance(config.get("engine_kwargs"), dict):
+    if not isinstance(config, EngineConfig):
+        raise ValueError(
+            f"rollout_engine_config must be an EngineConfig, got: {type(config).__name__}"
+        )
+    if not isinstance(config.engine_kwargs, dict):
         raise ValueError(
             "rollout_engine_config.engine_kwargs must be a dict, "
-            f"got: {type(config.get('engine_kwargs')).__name__}"
+            f"got: {type(config.engine_kwargs).__name__}"
         )
+    if not str(config.sampler_dotpath or "").strip():
+        raise ValueError("rollout_engine_config.sampler_dotpath is required.")
 
 
-def validate_rollout_actor_init_config(config: Dict[str, Any]) -> None:
+def validate_rollout_actor_init_config(config: RolloutActorConfig) -> None:
     """Minimal pre-dispatch validation for rollout actor init config."""
-    if not isinstance(config, dict):
-        raise ValueError(f"rollout_actor_init_config must be a dict, got: {type(config).__name__}")
-
-    engine_runtime_config = _require_dict_section(config, name="engine_runtime_config")
-    reward_config = _require_dict_section(config, name="reward_config")
-
-    validate_rollout_engine_config(engine_runtime_config)
-
-    sampler_dotpath = str(engine_runtime_config.get("sampler_dotpath", "") or "").strip()
-    if not sampler_dotpath:
+    if not isinstance(config, RolloutActorConfig):
         raise ValueError(
-            "rollout_actor_init_config.engine_runtime_config.sampler_dotpath is required."
+            "rollout_actor_init_config must be a RolloutActorConfig, "
+            f"got: {type(config).__name__}"
         )
-    sampler_engine_type = str(
-        engine_runtime_config.get("sampler_engine_type", "") or ""
-    ).strip()
-    if not sampler_engine_type:
+
+    engine_init_payload = config.engine_init_payload
+    if not isinstance(engine_init_payload, ComponentInitPayload):
         raise ValueError(
-            "rollout_actor_init_config.engine_runtime_config.sampler_engine_type is required."
+            "rollout_actor_init_config.engine_init_payload must be a ComponentInitPayload, "
+            f"got: {type(engine_init_payload).__name__}"
         )
+    reward_config = config.reward_config
+    if not isinstance(reward_config, dict):
+        raise ValueError(
+            "rollout_actor_init_config.reward_config must be a dict, "
+            f"got: {type(reward_config).__name__}"
+        )
+
+    engine_config = engine_init_payload.component_config
+    if not isinstance(engine_config, EngineConfig):
+        raise ValueError(
+            "rollout_actor_init_config.engine_init_payload.component_config must be "
+            "an EngineConfig, "
+            f"got: {type(engine_config).__name__}"
+        )
+
+    validate_rollout_engine_config(engine_config)
+
     for required_key in (
         "num_inference_steps",
         "eta",
@@ -1117,54 +1150,83 @@ def validate_rollout_actor_init_config(config: Dict[str, Any]) -> None:
         "width",
         "num_frames",
     ):
-        if engine_runtime_config.get(required_key) is None:
+        if getattr(engine_config, required_key) is None:
             raise ValueError(
-                f"rollout_actor_init_config.engine_runtime_config.{required_key} is required."
+                f"rollout_actor_init_config.engine_init_payload.component_config.{required_key} is required."
             )
-    if not isinstance(reward_config, dict):
+
+def validate_training_actor_init_config(config: TrainingActorConfig) -> None:
+    """Minimal pre-dispatch validation for training actor config."""
+    if not isinstance(config, TrainingActorConfig):
         raise ValueError(
-            "rollout_actor_init_config.reward_config must be a dict, "
-            f"got: {type(reward_config).__name__}"
+            "training_actor_init_config must be a TrainingActorConfig, "
+            f"got: {type(config).__name__}"
         )
 
-
-def validate_training_actor_init_config(config: Dict[str, Any]) -> None:
-    """Minimal pre-dispatch validation for training actor config."""
-    if not isinstance(config, dict):
-        raise ValueError(f"training_actor_init_config must be a dict, got: {type(config).__name__}")
-
-    for section in (
-        "model_config",
+    for section_name in (
         "reward_config",
         "optimizer_config",
         "scheduler_config",
-        "algorithm_config",
         "training_config",
         "topology_config",
         "training_plan_config",
         "sampling_config",
-        "train_backend_config",
     ):
-        _require_dict_section(config, name=section)
+        section_value = getattr(config, section_name)
+        if not isinstance(section_value, dict):
+            raise ValueError(
+                f"training_actor_init_config.{section_name} must be a dict, "
+                f"got: {type(section_value).__name__}"
+            )
 
-    algorithm_config = config["algorithm_config"]
-    if not isinstance(algorithm_config.get("algorithm_kwargs"), dict):
+    from diffusionrl.construction import ComponentInitPayload
+    from diffusionrl.models.config import ModelBundleConfig
+
+    algorithm_init_payload = config.algorithm_init_payload
+    if not isinstance(algorithm_init_payload, ComponentInitPayload):
         raise ValueError(
-            "algorithm_config.algorithm_kwargs must be a dict, "
-            f"got: {type(algorithm_config.get('algorithm_kwargs')).__name__}"
+            "algorithm_init_payload must be a ComponentInitPayload, "
+            f"got: {type(algorithm_init_payload).__name__}"
         )
 
-    backend_config = config["train_backend_config"]
-    if not isinstance(backend_config.get("kwargs"), dict):
+    algorithm_config = algorithm_init_payload.component_config
+    if not isinstance(algorithm_config, BaseAlgorithmConfig):
         raise ValueError(
-            "train_backend_config.kwargs must be a dict, "
-            f"got: {type(backend_config.get('kwargs')).__name__}"
+            "algorithm_init_payload.component_config must be a BaseAlgorithmConfig instance, "
+            f"got: {type(algorithm_config).__name__}"
         )
-    backend_name = str(backend_config.get("name", "") or "").strip().lower()
-    if not backend_name:
-        raise ValueError("train_backend_config.name is required.")
 
-    topology_config = config["topology_config"]
+    model_init_payload = config.model_init_payload
+    if not isinstance(model_init_payload, ComponentInitPayload):
+        raise ValueError(
+            "model_init_payload must be a ComponentInitPayload, "
+            f"got: {type(model_init_payload).__name__}"
+        )
+    model_config = model_init_payload.component_config
+    if not isinstance(model_config, ModelBundleConfig):
+        raise ValueError(
+            "model_init_payload.component_config must be a ModelBundleConfig, "
+            f"got: {type(model_config).__name__}"
+        )
+
+    train_backend_init_payload = config.train_backend_init_payload
+    if not isinstance(train_backend_init_payload, ComponentInitPayload):
+        raise ValueError(
+            "train_backend_init_payload must be a ComponentInitPayload, "
+            f"got: {type(train_backend_init_payload).__name__}"
+        )
+    train_backend_config = train_backend_init_payload.component_config
+    if not isinstance(train_backend_config, BaseTrainBackendConfig):
+        raise ValueError(
+            "train_backend_init_payload.component_config must be a BaseTrainBackendConfig, "
+            f"got: {type(train_backend_config).__name__}"
+        )
+    if not str(train_backend_config.name or "").strip():
+        raise ValueError(
+            "train_backend_init_payload.component_config.name is required."
+        )
+
+    topology_config = config.topology_config
     for required_key in ("actor_count", "world_size", "dp_size"):
         value = topology_config.get(required_key)
         if value is None:
@@ -1174,7 +1236,7 @@ def validate_training_actor_init_config(config: Dict[str, Any]) -> None:
                 f"topology_config.{required_key} must be >= 1, got: {value!r}"
             )
 
-    training_plan_config = config["training_plan_config"]
+    training_plan_config = config.training_plan_config
     try:
         coerce_training_execution_plan(training_plan_config)
     except ValueError as exc:

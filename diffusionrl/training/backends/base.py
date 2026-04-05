@@ -54,6 +54,14 @@ class ActorTrainBackendContext:
 
 
 @dataclass(frozen=True)
+class BaseTrainBackendConfig:
+    """Base typed config shared by train backend implementations."""
+
+    name: str
+    backend_dotpath: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class TrainBackendCapabilities:
     """Capability declaration for a training backend implementation."""
 
@@ -176,8 +184,12 @@ class TrainBackend(abc.ABC):
 
     BACKEND_NAME = "unknown"
 
-    def __init__(self, *, backend_kwargs: Optional[Mapping[str, Any]] = None) -> None:
-        self.backend_kwargs: Dict[str, Any] = dict(backend_kwargs or {})
+    def __init__(self, config: BaseTrainBackendConfig) -> None:
+        if not isinstance(config, BaseTrainBackendConfig):
+            raise TypeError(
+                f"{type(self).__name__} expected {BaseTrainBackendConfig.__name__}, got: {config!r}"
+            )
+        self.config = config
 
     @property
     def name(self) -> str:
@@ -263,17 +275,17 @@ class TrainBackend(abc.ABC):
         *,
         args: Any,
         topology: Any,
-        backend_kwargs: Optional[Mapping[str, Any]] = None,
+        config: BaseTrainBackendConfig,
     ) -> TrainBackendLaunchSpec:
         """Launch-time actor/group hints consumed by group factory."""
-        del cls, args, topology, backend_kwargs
+        del cls, args, topology, config
         return TrainBackendLaunchSpec()
 
     def launch_spec(self, *, args: Any, topology: Any) -> TrainBackendLaunchSpec:
         return type(self).declared_launch_spec(
             args=args,
             topology=topology,
-            backend_kwargs=self.backend_kwargs,
+            config=self.config,
         )
 
     def build_optimizer(self, actor: Any, optimizer_config: Mapping[str, Any]) -> Any:
@@ -336,10 +348,58 @@ class TrainBackend(abc.ABC):
         }
 
 
+def resolve_train_backend_capabilities(
+    identifier: str,
+) -> TrainBackendCapabilities:
+    from .registry import resolve_train_backend_class
+
+    backend_cls = resolve_train_backend_class(identifier)
+    return backend_cls.declared_capabilities()
+
+
+def resolve_train_backend_capabilities_from_config(
+    config: BaseTrainBackendConfig,
+) -> TrainBackendCapabilities:
+    identifier = (
+        str(config.backend_dotpath).strip()
+        if config.backend_dotpath
+        else str(config.name).strip().lower()
+    )
+    return resolve_train_backend_capabilities(identifier)
+
+
+def resolve_train_backend_launch_spec(
+    config: BaseTrainBackendConfig,
+    *,
+    args: Any,
+    topology: Any,
+) -> TrainBackendLaunchSpec:
+    from .registry import resolve_train_backend_class
+
+    identifier = (
+        str(config.backend_dotpath).strip()
+        if config.backend_dotpath
+        else str(config.name).strip().lower()
+    )
+    backend_cls = resolve_train_backend_class(identifier)
+    if backend_cls.launch_spec is TrainBackend.launch_spec:
+        return backend_cls.declared_launch_spec(
+            args=args,
+            topology=topology,
+            config=config,
+        )
+    backend = backend_cls(config=config)
+    return backend.launch_spec(args=args, topology=topology)
+
+
 __all__ = [
     "ActorTrainBackendContext",
+    "BaseTrainBackendConfig",
     "TrainBackendCapabilities",
     "TrainTopology",
     "TrainBackendLaunchSpec",
     "TrainBackend",
+    "resolve_train_backend_capabilities",
+    "resolve_train_backend_capabilities_from_config",
+    "resolve_train_backend_launch_spec",
 ]

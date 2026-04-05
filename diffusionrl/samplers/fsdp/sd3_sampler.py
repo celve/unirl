@@ -12,31 +12,34 @@ Reference:
 - flow_grpo: flow_grpo/diffusers_patch/sd3_sde_with_logprob.py
 - DiffusionNFT: DiffusionNFT SD3 implementation
 """
-import os
+
 import logging
-from dataclasses import dataclass
+import os
 from contextlib import nullcontext
-from typing import Dict, List, Optional, Set, Any, Tuple
-from tqdm import tqdm
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 
-from ..base import BaseSampler, RolloutSamples
-from diffusionrl.sde.kernels import get_sde_strategy
-from diffusionrl.sde.runtime import (
-    get_sigma_schedule,
-    denoising_step,
-)
+from diffusionrl.sde.registry import resolve_sde_strategy_class
+from diffusionrl.sde.runtime import denoising_step, get_sigma_schedule
 from diffusionrl.types import LogProbData
 from diffusionrl.types.forward_context import SD3ForwardContext
 from diffusionrl.types.trajectory_store import TrajectoryStore
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
+from ..base import BaseSampler, RolloutSamples
+
 logger = logging.getLogger(__name__)
 
 
 def _save_debug_tensors(
-    base_dir: str, step_idx: int, append: bool, *name_tensor_pairs: Any,
+    base_dir: str,
+    step_idx: int,
+    append: bool,
+    *name_tensor_pairs: Any,
     rank: int = 0,
 ) -> None:
     """Save multiple debug tensors to disk in one call.
@@ -55,7 +58,9 @@ def _save_debug_tensors(
     if rank != 0:
         return
     if len(name_tensor_pairs) % 2 != 0:
-        raise ValueError("name_tensor_pairs must contain alternating name, tensor pairs")
+        raise ValueError(
+            "name_tensor_pairs must contain alternating name, tensor pairs"
+        )
     step_dir = os.path.join(base_dir, f"step_{step_idx:03d}")
     os.makedirs(step_dir, exist_ok=True)
     for i in range(0, len(name_tensor_pairs), 2):
@@ -65,7 +70,11 @@ def _save_debug_tensors(
         if append and os.path.exists(path):
             try:
                 existing = torch.load(path, map_location="cpu", weights_only=True)
-                if existing.ndim >= 1 and new_tensor.ndim >= 1 and existing.shape[1:] == new_tensor.shape[1:]:
+                if (
+                    existing.ndim >= 1
+                    and new_tensor.ndim >= 1
+                    and existing.shape[1:] == new_tensor.shape[1:]
+                ):
                     new_tensor = torch.cat([existing, new_tensor], dim=0)
             except Exception:
                 pass
@@ -372,13 +381,15 @@ class SD3Sampler(BaseSampler):
             else:
                 sde_indices = set(range(num_inference_steps))
 
-        strategy = get_sde_strategy(self.sde_type)
+        strategy = resolve_sde_strategy_class(self.sde_type)()
         strategy.init_schedule(sigmas)
 
         # Storage for trajectory and log probs
         latents = latents.to(self.trajectory_dtype)
         # Selective collection: only store positions needed for SDE step pairs
-        trajectory_store = TrajectoryStore.for_sde_steps(sde_indices, num_inference_steps)
+        trajectory_store = TrajectoryStore.for_sde_steps(
+            sde_indices, num_inference_steps
+        )
         trajectory_store.add(0, latents)
         log_probs_dict: Dict[int, torch.Tensor] = {}
 
@@ -450,23 +461,46 @@ class SD3Sampler(BaseSampler):
                     _append = i in self._debug_dumped_steps
                     self._debug_dumped_steps.add(i)
                     _save_debug_tensors(
-                        _sampling_debug_dir, i, _append,
-                        "noise_pred", noise_pred,
-                        "latents_input", _pre_step_latents,
-                        "latents_output", latents,
-                        "prev_sample_mean", prev_sample_mean,
-                        "log_prob", log_prob,
+                        _sampling_debug_dir,
+                        i,
+                        _append,
+                        "noise_pred",
+                        noise_pred,
+                        "latents_input",
+                        _pre_step_latents,
+                        "latents_output",
+                        latents,
+                        "prev_sample_mean",
+                        prev_sample_mean,
+                        "log_prob",
+                        log_prob,
                         rank=rank,
                     )
                     _save_debug_tensors(
-                        _sampling_debug_dir, i, False,
-                        "sigma", sigma.unsqueeze(0) if sigma.dim() == 0 else sigma,
-                        "sigma_next", sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next,
-                        "timestep", timestep,
+                        _sampling_debug_dir,
+                        i,
+                        False,
+                        "sigma",
+                        sigma.unsqueeze(0) if sigma.dim() == 0 else sigma,
+                        "sigma_next",
+                        (
+                            sigma_next.unsqueeze(0)
+                            if sigma_next.dim() == 0
+                            else sigma_next
+                        ),
+                        "timestep",
+                        timestep,
                         rank=rank,
                     )
                     if not _append and i == min(sde_indices):
-                        _save_debug_tensors(_sampling_debug_dir, i, False, "sigmas_schedule", sigmas, rank=rank)
+                        _save_debug_tensors(
+                            _sampling_debug_dir,
+                            i,
+                            False,
+                            "sigmas_schedule",
+                            sigmas,
+                            rank=rank,
+                        )
                         if rank == 0:
                             import json
                             cfg_path = os.path.join(_sampling_debug_dir, "config.json")

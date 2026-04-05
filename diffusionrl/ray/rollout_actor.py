@@ -1,33 +1,27 @@
 """diffusionrl Rollout actor implementation (generation side)."""
 import json
 import logging
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple
 
 import ray
 import torch
+
+from diffusionrl.construction import ComponentInitPayload
+from diffusionrl.distributed.weight_sync_checkpoint import wait_for_published_checkpoint
+from diffusionrl.ray.actor_config import RolloutActorConfig
 from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
 from diffusionrl.reward.schema import RewardSchema
+from diffusionrl.samplers.construction import create_rollout_engine_from_init_payload
+from diffusionrl.samplers.engine import BaseRolloutEngine, DistributedWeightSyncCapable
+from diffusionrl.samplers.fsdp.sampler_runner import finalize_sampling_output
+from diffusionrl.samplers.registry import resolve_rollout_engine_class
 from diffusionrl.types.batch_ops import concat_columnar_values
-from diffusionrl.types.engine import (
-    EngineConfig,
-    normalize_engine_type,
-    uses_dedicated_rollout_engine,
-)
-from diffusionrl.types.sampling import (
-    LogProbData,
-    RolloutRequest,
-    RolloutSamples,
-)
+from diffusionrl.types.engine import EngineConfig
+from diffusionrl.types.sampling import LogProbData, RolloutRequest, RolloutSamples
 from diffusionrl.types.trajectory_store import TrajectoryStore
-from diffusionrl.samplers.engine import (
-    BaseRolloutEngine,
-    DistributedWeightSyncCapable,
-    get_engine,
-)
-from diffusionrl.distributed.weight_sync_checkpoint import wait_for_published_checkpoint
 
 from .actor_base import log_gpu_state, log_resource_ids
-from diffusionrl.samplers.fsdp.sampler_runner import finalize_sampling_output
 
 logger = logging.getLogger(__name__)
 
@@ -669,14 +663,13 @@ class RolloutActor:
         )
         return resolved
 
-    def init(self, config: dict) -> None:
+    def init(self, config: RolloutActorConfig) -> None:
         """
         Initialize the rollout actor and underlying engine.
 
         Args:
-            config: Rollout actor init config including:
-                - engine_runtime_config: final rollout-engine runtime payload
-                - reward_config: rollout-side reward execution config
+            config: Typed RolloutActorConfig including engine_init_payload and
+                reward_config.
 
         Raises:
             ValueError: If required sections or fields are not provided
@@ -688,36 +681,38 @@ class RolloutActor:
         # Setup distributed environment for multi-GPU
         self._setup_distributed_env()
 
-        if not isinstance(config, dict):
-            raise ValueError(f"rollout actor init config must be a dict, got: {type(config).__name__}")
-        engine_runtime_config = config.get("engine_runtime_config")
-        if not isinstance(engine_runtime_config, dict):
+        if not isinstance(config, RolloutActorConfig):
             raise ValueError(
-                "rollout actor init config must provide engine_runtime_config as dict. "
-                f"Got: {type(engine_runtime_config).__name__}"
+                "rollout actor init config must be a RolloutActorConfig, "
+                f"got: {type(config).__name__}"
             )
-
-        # Get sampler_engine_type (must be provided by caller, validated in arguments.py)
-        sampler_engine_type = normalize_engine_type(engine_runtime_config.get("sampler_engine_type"))
+        engine_init_payload = config.engine_init_payload
+        if not isinstance(engine_init_payload, ComponentInitPayload):
+            raise ValueError(
+                "rollout actor init config must provide engine_init_payload as ComponentInitPayload. "
+                f"Got: {type(engine_init_payload).__name__}"
+            )
+        base_engine_config = engine_init_payload.component_config
+        if not isinstance(base_engine_config, EngineConfig):
+            raise ValueError(
+                "rollout actor init config must provide EngineConfig inside engine_init_payload. "
+                f"Got: {type(base_engine_config).__name__}"
+            )
+        engine_cls = resolve_rollout_engine_class(engine_init_payload.component_dotpath)
+        sampler_engine_type = (
+            str(
+                getattr(engine_cls, "_component_name", "")
+                or getattr(engine_cls, "__name__", "")
+            )
+            .strip()
+            .lower()
+        )
         if not sampler_engine_type:
             raise ValueError(
-                "sampler_engine_type must be provided in engine_runtime_config. "
-                "This should be resolved from rollout.rollout_engine before actor init."
-            )
-        if not uses_dedicated_rollout_engine(sampler_engine_type):
-            raise ValueError(
-                f"sampler_engine_type={sampler_engine_type!r} does not use rollout actors. "
-                "Instantiate this sampler on TrainingActor instead."
+                "Failed to resolve rollout engine type from engine_init_payload."
             )
 
-        sampler_dotpath = engine_runtime_config.get("sampler_dotpath")
-        if sampler_dotpath is None:
-            raise ValueError(
-                "sampler_dotpath must be provided in engine_runtime_config. "
-                "This should be resolved from sampling.sampler_dotpath before actor init."
-            )
-
-        reward_config = config.get("reward_config", {})
+        reward_config = config.reward_config
         if not isinstance(reward_config, dict):
             raise ValueError(
                 "reward_config must be provided in rollout actor init config as dict. "
@@ -725,12 +720,8 @@ class RolloutActor:
             )
         self._reward_schema = RewardSchema(**reward_config)
 
-        # Build EngineConfig
-        engine_kwargs = dict(engine_runtime_config.get("engine_kwargs", {}))
+        engine_kwargs = dict(base_engine_config.engine_kwargs or {})
         self._configure_transport_options(engine_kwargs)
-
-        # Add sampler_dotpath to engine_kwargs
-        engine_kwargs["sampler_dotpath"] = sampler_dotpath
 
         # Pass base_gpu_id to engine for NOSET pattern
         engine_kwargs["base_gpu_id"] = self.base_gpu_id
@@ -739,28 +730,21 @@ class RolloutActor:
         if sampler_engine_type == "sglang":
             engine_kwargs = self._configure_sglang_ports(engine_kwargs)
 
-        resolved_engine_config = EngineConfig(
-            model_dotpath=engine_runtime_config.get("model_dotpath", ""),
-            pretrained_model_ckpt_path=engine_runtime_config.get("pretrained_model_ckpt_path", ""),
-            num_inference_steps=int(engine_runtime_config.get("num_inference_steps", 50)),
-            eta=float(engine_runtime_config.get("eta", 1.0)),
-            sde_type=str(engine_runtime_config.get("sde_type", "flow")),
-            shift=float(engine_runtime_config.get("shift", 1.0)),
-            guidance_scale=float(engine_runtime_config.get("guidance_scale", 7.5)),
-            height=int(engine_runtime_config.get("height", 256)),
-            width=int(engine_runtime_config.get("width", 256)),
-            num_frames=int(engine_runtime_config.get("num_frames", 16)),
+        resolved_engine_config = replace(
+            base_engine_config,
             engine_kwargs=engine_kwargs,
         )
-        rollout_batch_size = engine_runtime_config.get("rollout_batch_size")
-        self._rollout_batch_size = int(rollout_batch_size) if rollout_batch_size is not None else None
-
-        # Create engine
-        try:
-            engine_cls = get_engine(sampler_engine_type)
-        except ValueError as exc:
-            raise ValueError(f"Unknown sampler_engine_type: {sampler_engine_type}. {exc}") from exc
-        self.engine = engine_cls(resolved_engine_config)
+        self._rollout_batch_size = (
+            int(config.rollout_batch_size)
+            if config.rollout_batch_size is not None
+            else None
+        )
+        self.engine = create_rollout_engine_from_init_payload(
+            ComponentInitPayload(
+                component_dotpath=engine_init_payload.component_dotpath,
+                component_config=resolved_engine_config,
+            )
+        )
 
         # Initialize engine
         self.engine.initialize(self._device)

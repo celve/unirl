@@ -8,11 +8,11 @@ Usage:
 import logging
 import time
 
+from diffusionrl.algorithms.construction import create_algorithm_from_init_payload
 from diffusionrl.config import build_resolved_config_view, parse_args
 from diffusionrl.config.launch_resolution import resolve_launch_config
 from diffusionrl.rollout.service_interface import compute_dataset_step_info
 from diffusionrl.utils.train_utils import (
-    build_control_algorithm,
     collect_rollout_batch_metrics,
     maybe_restore_start_rollout_id_from_checkpoint,
     should_eval,
@@ -181,7 +181,8 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
     configure_logger()
     set_seed(args.seed)
     launch_config = resolve_launch_config(args)
-    algorithm_config, control_algorithm = build_control_algorithm(launch_config.algorithm_config)
+    algorithm_init_payload = launch_config.algorithm_init_payload
+    control_algorithm = create_algorithm_from_init_payload(algorithm_init_payload)
     rollout_mode_info = launch_config.rollout_mode_info
     rollout_topology = rollout_mode_info.rollout_topology
     training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
@@ -190,7 +191,7 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
 
     logger.info("Starting diffusionRL training...")
     logger.info(f"Model: {args.model.pretrained_model_ckpt_path}")
-    logger.info(f"Algorithm: {algorithm_config['algorithm_dotpath']}")
+    logger.info("Algorithm: %s", algorithm_init_payload.component_dotpath)
     logger.info(f"Mode: {rollout_mode_name}")
     logger.info(f"Offload train: {args.ray.offload_train}, Offload rollout: {args.ray.offload_rollout}")
     logger.info("Weight sync mode: %s", sync_mode)

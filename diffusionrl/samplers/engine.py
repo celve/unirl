@@ -1,24 +1,13 @@
-"""
-Inference Engine Interface for GRPO Training.
+"""Inference engine interface for dedicated rollout-side engines."""
 
-This module defines the unified interface for dedicated rollout-side inference engines.
-Dedicated engines implement BaseRolloutEngine to work with RolloutActor and Ray actors.
-
-Engine Responsibilities:
-1. Model loading and initialization
-2. Sample generation with log probabilities
-3. Weight synchronization from training
-4. Memory management (sleep/wake_up)
-"""
-
-import importlib
 from abc import ABC, abstractmethod
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional
+
 import torch
 
-from diffusionrl.types import RolloutSamples, RolloutRequest
-from diffusionrl.types.engine import EngineCapabilities, EngineConfig, normalize_engine_type
+from diffusionrl.types import RolloutRequest, RolloutSamples
+from diffusionrl.types.engine import EngineCapabilities, EngineConfig
 
 
 class BaseRolloutEngine(ABC):
@@ -233,57 +222,3 @@ class DistributedWeightSyncCapable:
     ) -> None:
         """Load LoRA tensors directly into the rollout engine."""
         raise NotImplementedError
-
-
-# Engine registry for dynamic loading
-ENGINE_REGISTRY: Dict[str, type] = {}
-
-# Built-in engine modules for lazy self-registration.
-# Engines register themselves via @register_engine at module import time.
-ENGINE_MODULE_PATHS: Dict[str, str] = {
-    "sglang": "diffusionrl.samplers.sglang.engine",
-}
-
-
-def register_engine(name: str):
-    """Decorator to register an engine class."""
-    def decorator(cls):
-        ENGINE_REGISTRY[str(name).strip().lower()] = cls
-        return cls
-    return decorator
-def ensure_engine_registered(name: str) -> str:
-    """Ensure the target engine is present in ENGINE_REGISTRY."""
-    normalized = normalize_engine_type(name)
-    if not normalized:
-        raise ValueError("Engine name must be a non-empty string.")
-
-    if normalized in ENGINE_REGISTRY:
-        return normalized
-
-    module_path = ENGINE_MODULE_PATHS.get(normalized)
-    if module_path is not None:
-        importlib.import_module(module_path)
-
-    if normalized not in ENGINE_REGISTRY:
-        raise ValueError(
-            f"Unknown engine: {name}. Available: {sorted(set(ENGINE_MODULE_PATHS.keys()) | set(ENGINE_REGISTRY.keys()))}"
-        )
-    return normalized
-
-
-def get_engine(name: str) -> type:
-    """Get engine class by name."""
-    normalized = ensure_engine_registered(name)
-    return ENGINE_REGISTRY[normalized]
-
-
-def get_engine_class_path(name: str) -> str:
-    """Resolve engine type to fully-qualified class dotpath."""
-    engine_cls = get_engine(name)
-    return f"{engine_cls.__module__}.{engine_cls.__name__}"
-
-
-def create_engine(name: str, config: EngineConfig) -> BaseRolloutEngine:
-    """Create engine instance by name."""
-    engine_cls = get_engine(name)
-    return engine_cls(config)

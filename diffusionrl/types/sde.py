@@ -28,6 +28,8 @@ class SDEConfig:
         sde_type: str = "flow",
         shift: float = 3.0,
     ) -> "SDEConfig":
+        if isinstance(raw, cls):
+            return raw
         payload = dict(raw or {})
         return cls(
             eta=float(payload.get("eta", eta)),

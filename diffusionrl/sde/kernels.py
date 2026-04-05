@@ -5,10 +5,11 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
+from typing import List, Optional, Tuple
 
 import torch
 
+from diffusionrl.sde.registry import register_sde_strategy
 from diffusionrl.sde.rules import normalize_sde_type
 
 
@@ -81,39 +82,6 @@ class SDEStrategy(StepStrategy, ABC):
         step_index: int = 0,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Implement StepStrategy.step by delegating to step_with_log_prob or Euler ODE."""
-
-
-SDE_STRATEGY_REGISTRY: Dict[str, Type[StepStrategy]] = {}
-
-
-def register_sde_strategy(*names: str):
-    """Decorator to register a step strategy under one or more names."""
-
-    def decorator(cls: Type[StepStrategy]) -> Type[StepStrategy]:
-        for name in names:
-            SDE_STRATEGY_REGISTRY[name.lower()] = cls
-        return cls
-
-    return decorator
-
-
-def get_sde_strategy(sde_type: str) -> StepStrategy:
-    """Get a strategy instance by SDE type name.
-
-    All canonical SDE types (flow, cps, dance, dpm2) have registered
-    strategies.  Returns a fresh instance each time; for stateful strategies
-    (e.g. DPM2) the caller should cache and reuse the instance.
-    """
-
-    normalized = normalize_sde_type(sde_type)
-    cls = SDE_STRATEGY_REGISTRY.get(normalized)
-    if cls is None:
-        raise ValueError(
-            f"Unknown sde_type: {sde_type!r} (normalized={normalized!r}). "
-            f"Available: {sorted(SDE_STRATEGY_REGISTRY.keys())}"
-        )
-    return cls()
-
 
 # ---------------------------------------------------------------------------
 # SDE strategy implementations
@@ -451,7 +419,6 @@ __all__ = [
     "SDEStrategy",
     "SDE_STRATEGY_REGISTRY",
     "register_sde_strategy",
-    "get_sde_strategy",
     "FlowSDEStrategy",
     "CPSSDEStrategy",
     "DanceSDEStrategy",

@@ -21,10 +21,10 @@ import sys
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from typing import Any, Dict, List, Optional
 
-from diffusionrl.algorithms.construction import (
-    instantiate_algorithm_from_config,
-    resolve_algorithm_dotpath,
-    build_algorithm_config,
+from diffusionrl.algorithms.construction import create_algorithm_from_init_payload
+from diffusionrl.cmdline.algorithms import (
+    _resolve_algorithm_dotpath_from_args,
+    build_algorithm_init_payload_from_args,
 )
 from diffusionrl.config.argument_parsing import (
     GROUP_DISPLAY_NAMES,
@@ -46,22 +46,23 @@ from diffusionrl.config.resolution import (
 )
 from diffusionrl.config.validation import (
     apply_model_config_hook,
-    validate_algorithm_kwargs_payload,
     validate_algorithm_dotpath,
+    validate_algorithm_kwargs_payload,
     validate_dynamic_dotpaths,
     validate_grouped_configs,
     validate_model_sampling_contract,
     validate_nft_sampling_contract,
+    validate_precision_type,
     validate_resolved_engine_algorithm_contract,
     validate_reward_and_rollout_buffer_config,
     validate_rollout_layout,
     validate_rollout_mode,
     validate_rollout_mode_constraints,
-    validate_precision_type,
     validate_train_backend_config,
     validate_training_batch_geometry,
     validate_training_misc,
 )
+
 logger = logging.getLogger(__name__)
 
 
@@ -1058,9 +1059,8 @@ def build_resolved_config_view(args: TrainingArguments) -> Dict[str, Any]:
     resolved["sync.protocol"] = str(args.sync.protocol).strip().lower()
 
     try:
-        resolved["algorithm.algorithm_dotpath"] = resolve_algorithm_dotpath(
-            algorithm_type=args.algorithm.algorithm_type,
-            algorithm_dotpath=args.algorithm.algorithm_dotpath,
+        resolved["algorithm.algorithm_dotpath"] = _resolve_algorithm_dotpath_from_args(
+            args
         )
     except Exception as exc:
         _record_resolution_error(resolved, scope="algorithm_dotpath", exc=exc)
@@ -1294,9 +1294,7 @@ def validate_args(
     validate_algorithm_kwargs_payload(args)
     validate_algorithm_dotpath(args)
     validate_train_backend_config(
-        backend_name=backend_name,
-        backend_kwargs=backend_config.kwargs,
-        backend_dotpath=backend_config.backend_dotpath,
+        train_backend_config=backend_config,
     )
     backend_capabilities = resolved_config.train_backend_capabilities.as_dict()
     validate_rollout_mode(
@@ -1332,8 +1330,8 @@ def validate_args(
     validate_model_sampling_contract(args)
     validate_nft_sampling_contract(args)
     if debug_mode != "train_only":
-        validation_algorithm = instantiate_algorithm_from_config(
-            build_algorithm_config(
+        validation_algorithm = create_algorithm_from_init_payload(
+            build_algorithm_init_payload_from_args(
                 args,
                 sampling_spec=resolved_config.sampling_spec,
             )

@@ -1,4 +1,4 @@
-"""Model bundle discovery helpers."""
+"""Model-bundle family registry and model-type discovery helpers."""
 
 from __future__ import annotations
 
@@ -6,8 +6,14 @@ import importlib
 import inspect
 import logging
 import pkgutil
-from functools import lru_cache
-from typing import Dict, Iterable, List, Optional, Tuple
+from functools import lru_cache, partial
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from diffusionrl.registry import (
+    register_component,
+    require_subclass,
+    resolve_registry_or_dotpath,
+)
 
 from .base import ModelBundle
 
@@ -18,6 +24,30 @@ DEFAULT_MODEL_PACKAGES: Tuple[str, ...] = (
     "diffusionrl.models",
     "diffusionrl_plugins.models",
 )
+
+MODEL_BUNDLE_COMPONENT_FAMILY = "model_bundle"
+
+register_model = partial(
+    register_component,
+    component_family=MODEL_BUNDLE_COMPONENT_FAMILY,
+    class_checker=require_subclass(ModelBundle),
+)
+
+
+def ensure_builtin_model_registration() -> None:
+    """Import built-in model modules so decorator-based registration runs."""
+    importlib.import_module("diffusionrl.models.flux")
+    importlib.import_module("diffusionrl.models.hunyuan")
+    importlib.import_module("diffusionrl.models.mochi")
+    importlib.import_module("diffusionrl.models.sd3")
+
+
+def resolve_model_class(identifier: str) -> Any:
+    return resolve_registry_or_dotpath(
+        component_family=MODEL_BUNDLE_COMPONENT_FAMILY,
+        identifier=identifier,
+        class_checker=require_subclass(ModelBundle),
+    )
 
 
 def _iter_module_names(package_name: str) -> Iterable[str]:
@@ -105,9 +135,12 @@ def list_model_types() -> List[str]:
 
 
 __all__ = [
+    "MODEL_BUNDLE_COMPONENT_FAMILY",
     "discover_model_bundle_paths",
+    "ensure_builtin_model_registration",
     "resolve_model_bundle_path",
+    "resolve_model_class",
+    "register_model",
     "list_model_types",
     "DEFAULT_MODEL_PACKAGES",
 ]
-

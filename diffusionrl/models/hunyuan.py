@@ -10,10 +10,13 @@ import torch
 import torch.nn as nn
 
 from .base import ModelBundle
+from .config import ModelBundleConfig
+from .registry import register_model
 
 logger = logging.getLogger(__name__)
 
 
+@register_model(component_name="hunyuan", component_cfg=ModelBundleConfig)
 class HunyuanModelBundle(ModelBundle):
     """
     HunyuanVideo model bundle.
@@ -26,33 +29,21 @@ class HunyuanModelBundle(ModelBundle):
 
     def __init__(
         self,
-        pretrained_path: str,
-        device: Optional[Union[str, torch.device]] = None,
-        dtype: torch.dtype = torch.bfloat16,
-        vae_ckpt_path: Optional[str] = None,
-        text_encoder_ckpt_path: Optional[str] = None,
-        load_on_init: bool = True,
-        **kwargs,
+        config: ModelBundleConfig,
     ):
         """
         Initialize HunyuanVideo model bundle.
 
         Args:
-            pretrained_path: Path to pretrained transformer weights
-            device: Device to load models on
-            dtype: Data type for model weights
-            vae_ckpt_path: Optional separate path for VAE
-            text_encoder_ckpt_path: Optional separate path for text encoder
-            load_on_init: Whether to load models immediately
-            **kwargs: Additional arguments
+            config: Typed model-bundle config.
         """
-        super().__init__(pretrained_path, device, dtype, **kwargs)
+        super().__init__(config)
 
-        self.vae_ckpt_path = vae_ckpt_path or pretrained_path
-        self.text_encoder_ckpt_path = text_encoder_ckpt_path or pretrained_path
-
-        if load_on_init:
-            self.load()
+        self.vae_ckpt_path = config.vae_ckpt_path or config.pretrained_model_ckpt_path
+        self.text_encoder_ckpt_path = (
+            config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path
+        )
+        self.load()
 
     @property
     def model_type(self) -> str:
@@ -135,7 +126,7 @@ class HunyuanModelBundle(ModelBundle):
             self._vae = AutoencoderKLHunyuanVideo.from_pretrained(
                 self.vae_ckpt_path,
                 subfolder="vae",
-                torch_dtype=self.dtype,
+                torch_dtype=self.vae_dtype,
             )
             self._vae.to(self.device)
             self._vae.eval()  # VAE is always in eval mode
@@ -156,7 +147,7 @@ class HunyuanModelBundle(ModelBundle):
             self._text_encoder = HunyuanTextEncoderWrapper(
                 pretrained_path=self.text_encoder_ckpt_path,
                 device=self.device,
-                dtype=self.dtype,
+                dtype=self.text_encoder_dtype,
             )
             logger.info(f"Loaded text encoder from {self.text_encoder_ckpt_path}")
 
@@ -246,8 +237,8 @@ class HunyuanModelBundle(ModelBundle):
         """
         try:
             from diffusers.models.transformers.transformer_hunyuan_video import (
-                HunyuanVideoTransformerBlock,
                 HunyuanVideoSingleTransformerBlock,
+                HunyuanVideoTransformerBlock,
             )
             return (HunyuanVideoTransformerBlock, HunyuanVideoSingleTransformerBlock)
         except ImportError:
@@ -288,10 +279,10 @@ class HunyuanTextEncoderWrapper:
         """Load the LLAMA and CLIP encoders."""
         try:
             from transformers import (
-                LlamaModel,
-                LlamaTokenizer,
                 CLIPTextModel,
                 CLIPTokenizer,
+                LlamaModel,
+                LlamaTokenizer,
             )
 
             # Load LLAMA

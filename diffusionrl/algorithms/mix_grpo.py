@@ -1,8 +1,11 @@
 """Compatibility alias for GRPO configured with custom index schedulers."""
 
-from .grpo import GRPOAlgorithm
+from diffusionrl.algorithms.registry import register_algorithm
+
+from .grpo import GRPOAlgorithm, GRPOAlgorithmConfig
 
 
+@register_algorithm(component_name="mix_grpo", component_cfg=GRPOAlgorithmConfig)
 class MixGRPOAlgorithm(GRPOAlgorithm):
     """Backward-compatible alias.
 

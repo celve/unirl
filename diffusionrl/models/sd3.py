@@ -11,10 +11,13 @@ import torch
 import torch.nn as nn
 
 from .base import ModelBundle
+from .config import ModelBundleConfig
+from .registry import register_model
 
 logger = logging.getLogger(__name__)
 
 
+@register_model(component_name="sd3", component_cfg=ModelBundleConfig)
 class SD3ModelBundle(ModelBundle):
     """
     Model bundle for Stable Diffusion 3 models.
@@ -26,54 +29,34 @@ class SD3ModelBundle(ModelBundle):
 
     Example:
         bundle = SD3ModelBundle(
-            pretrained_path="stabilityai/stable-diffusion-3-medium",
-            device="cuda",
+            config=ModelBundleConfig(
+                pretrained_model_ckpt_path="stabilityai/stable-diffusion-3-medium",
+            ),
         )
         prompt_embeds, pooled = bundle.encode_prompt(["a cat"])
     """
 
     def __init__(
         self,
-        pretrained_path: str,
-        device: Union[str, torch.device] = "cuda",
-        torch_dtype: Optional[torch.dtype] = None,
-        use_lora: bool = True,
-        lora_rank: int = 16,
-        lora_alpha: int = 16,
-        lora_target_modules: Optional[List[str]] = None,
-        training_only: bool = False,
-        **kwargs,
+        config: ModelBundleConfig,
     ):
         """
         Initialize SD3 model bundle.
 
         Args:
-            pretrained_path: HuggingFace model path or local path
-            device: Device to load models on
-            torch_dtype: Torch dtype for models (default: bfloat16 for CUDA)
-            use_lora: Whether to add LoRA adapters for training
-            lora_rank: LoRA rank
-            lora_alpha: LoRA alpha
-            lora_target_modules: Target modules for LoRA (None uses defaults)
-            training_only: If True, only load transformer (skip VAE, text encoders)
+            config: Typed model-bundle config. If training_only is True, only
+                load transformer (skip VAE, text encoders).
                           This saves significant memory for training actors.
         """
-        super().__init__(
-            pretrained_path=pretrained_path,
-            device=device,
-            dtype=torch_dtype,
-        )
+        super().__init__(config)
 
-        self.pretrained_path = pretrained_path
-        self.device = torch.device(device)
-        self.torch_dtype = torch_dtype or (
-            torch.bfloat16 if self.device.type == "cuda" else torch.float32
-        )
-        self.use_lora = use_lora
-        self.lora_rank = lora_rank
-        self.lora_alpha = lora_alpha
-        self.lora_target_modules = lora_target_modules
-        self.training_only = training_only
+        self.pretrained_path = config.pretrained_model_ckpt_path
+        self.device = torch.device(self.device)
+        self.use_lora = bool(config.use_lora)
+        self.lora_rank = int(config.lora_rank)
+        self.lora_alpha = int(config.lora_alpha)
+        self.lora_target_modules = config.lora_target_modules
+        self.training_only = bool(config.training_only)
 
         self._transformer = None
         self._text_encoder = None
@@ -125,7 +108,7 @@ class SD3ModelBundle(ModelBundle):
         self._transformer = SD3Transformer2DModel.from_pretrained(
             self.pretrained_path,
             subfolder="transformer",
-            torch_dtype=self.torch_dtype,
+            torch_dtype=self.dtype,
         ).to(self.device)
 
     def _load_vae(self) -> None:
@@ -144,7 +127,7 @@ class SD3ModelBundle(ModelBundle):
         self._vae = AutoencoderKL.from_pretrained(
             self.pretrained_path,
             subfolder="vae",
-            torch_dtype=self.torch_dtype,
+            torch_dtype=self.vae_dtype,
         ).to(self.device)
         self._vae.eval()
         self._vae.requires_grad_(False)
@@ -168,19 +151,19 @@ class SD3ModelBundle(ModelBundle):
             self._text_encoder = CLIPTextModelWithProjection.from_pretrained(
                 self.pretrained_path,
                 subfolder="text_encoder",
-                torch_dtype=self.torch_dtype,
+                torch_dtype=self.text_encoder_dtype,
             ).to(self.device)
         if self._text_encoder_2 is None:
             self._text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
                 self.pretrained_path,
                 subfolder="text_encoder_2",
-                torch_dtype=self.torch_dtype,
+                torch_dtype=self.text_encoder_dtype,
             ).to(self.device)
         if self._text_encoder_3 is None:
             self._text_encoder_3 = T5EncoderModel.from_pretrained(
                 self.pretrained_path,
                 subfolder="text_encoder_3",
-                torch_dtype=self.torch_dtype,
+                torch_dtype=self.text_encoder_dtype,
             ).to(self.device)
 
         if self._tokenizer is None:
@@ -260,8 +243,8 @@ class SD3ModelBundle(ModelBundle):
 
         # Ensure LoRA weights have the same dtype as base model (important for FSDP)
         for param in self._transformer.parameters():
-            if param.requires_grad and param.dtype != self.torch_dtype:
-                param.data = param.data.to(self.torch_dtype)
+            if param.requires_grad and param.dtype != self.dtype:
+                param.data = param.data.to(self.dtype)
 
         logger.info(f"LoRA adapters added (rank={self.lora_rank}, alpha={self.lora_alpha})")
 

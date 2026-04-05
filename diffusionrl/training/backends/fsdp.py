@@ -3,24 +3,33 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Mapping, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Tuple
 
 import torch
 
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
-from .base import TrainBackend, TrainBackendCapabilities, TrainTopology
+from .base import (
+    BaseTrainBackendConfig,
+    TrainBackend,
+    TrainBackendCapabilities,
+    TrainTopology,
+)
+from .registry import register_train_backend
 
 logger = logging.getLogger(__name__)
 
+@dataclass(frozen=True)
+class FSDPTrainBackendConfig(BaseTrainBackendConfig):
+    name: str = "fsdp"
+    cpu_offload: bool = False
+    param_dtype: str = "bf16"
+    use_fsdp: bool = True
+    mixed_precision: bool = True
 
-def _safe_dtype(name: str) -> torch.dtype:
-    return parse_torch_dtype(
-        name or "fp32",
-        field_name="train_backend_kwargs.param_dtype",
-    )
 
-
+@register_train_backend(component_name="fsdp", component_cfg=FSDPTrainBackendConfig)
 class FSDPTrainBackend(TrainBackend):
     """FSDP2 backend (composable fully_shard).
 
@@ -32,11 +41,14 @@ class FSDPTrainBackend(TrainBackend):
 
     BACKEND_NAME = "fsdp"
 
-    def __init__(self, *, backend_kwargs: Optional[Mapping[str, Any]] = None) -> None:
-        super().__init__(backend_kwargs=backend_kwargs)
-        merged: Dict[str, Any] = dict(self.backend_kwargs)
-        self._use_fsdp = bool(merged.pop("use_fsdp", True))
-        self._fsdp_config = merged
+    def __init__(self, config: FSDPTrainBackendConfig) -> None:
+        super().__init__(config)
+        self._use_fsdp = bool(config.use_fsdp)
+        self._fsdp_config: Dict[str, Any] = {
+            "cpu_offload": bool(config.cpu_offload),
+            "param_dtype": str(config.param_dtype),
+            "mixed_precision": bool(config.mixed_precision),
+        }
 
     @classmethod
     def declared_capabilities(cls) -> TrainBackendCapabilities:
@@ -70,11 +82,15 @@ class FSDPTrainBackend(TrainBackend):
     def _fsdp2_runtime_apis() -> Tuple[Any, Any, Any, Any, Any, Any]:
         """Resolve FSDP2 runtime symbols lazily to keep import-time compatibility."""
         try:
-            from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
             from torch.distributed.checkpoint.state_dict import (
                 StateDictOptions,
                 get_model_state_dict,
                 set_model_state_dict,
+            )
+            from torch.distributed.fsdp import (
+                CPUOffloadPolicy,
+                MixedPrecisionPolicy,
+                fully_shard,
             )
         except Exception as exc:
             raise RuntimeError(
@@ -175,7 +191,10 @@ class FSDPTrainBackend(TrainBackend):
         fsdp_kwargs: Dict[str, Any] = {"reshard_after_forward": True}
 
         if self._fsdp_config.get("mixed_precision", True):
-            param_dtype = _safe_dtype(self._fsdp_config.get("param_dtype", "bf16"))
+            param_dtype = parse_torch_dtype(
+                self._fsdp_config.get("param_dtype", "bf16") or "fp32",
+                field_name="train_backend_kwargs.param_dtype",
+            )
             fsdp_kwargs["mp_policy"] = MixedPrecisionPolicy(
                 param_dtype=param_dtype,
                 reduce_dtype=torch.float32,
@@ -379,4 +398,7 @@ class FSDPTrainBackend(TrainBackend):
         )
 
 
-__all__ = ["FSDPTrainBackend"]
+__all__ = [
+    "FSDPTrainBackendConfig",
+    "FSDPTrainBackend",
+]

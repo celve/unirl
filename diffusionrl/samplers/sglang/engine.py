@@ -12,19 +12,19 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
+from diffusionrl.samplers.registry import register_rollout_engine
 from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.sde.runtime import get_sigma_schedule_diffusers
-from diffusionrl.types import LogProbData, RolloutSamples, RolloutRequest
-from diffusionrl.types.forward_context import ForwardContext, get_forward_context_cls
+from diffusionrl.types import LogProbData, RolloutRequest, RolloutSamples
 from diffusionrl.types.engine import EngineCapabilities, EngineConfig
-from diffusionrl.types.trajectory_store import TrajectoryStore, compute_trajectory_positions
+from diffusionrl.types.forward_context import ForwardContext, get_forward_context_cls
+from diffusionrl.types.trajectory_store import (
+    TrajectoryStore,
+    compute_trajectory_positions,
+)
 from diffusionrl.utils.media import tensor_frame_to_pil
 
-from ..engine import (
-    BaseRolloutEngine,
-    DistributedWeightSyncCapable,
-    register_engine,
-)
+from ..engine import BaseRolloutEngine, DistributedWeightSyncCapable
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ def _deexpand_prompts(
     return unique_prompts, k
 
 
-@register_engine("sglang")
+@register_rollout_engine(component_name="sglang", component_cfg=EngineConfig)
 class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
     """Inference engine backed by `sglang.multimodal_gen` DiffGenerator."""
 
@@ -886,7 +886,9 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             return None
 
         raw_tensors: Dict[str, Any] = {
-            "prompt_embeds": self._align_embedding_tensor("prompt_embeds", prompt_embeds, batch_size),
+            "prompt_embeds": self._align_embedding_tensor(
+                "prompt_embeds", prompt_embeds, batch_size
+            ),
             "pooled_prompt_embeds": self._align_embedding_tensor(
                 "pooled_prompt_embeds",
                 torch.cat(pooled_list, dim=0) if pooled_list else None,
@@ -899,12 +901,20 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             ),
             "negative_prompt_embeds": self._align_embedding_tensor(
                 "negative_prompt_embeds",
-                torch.cat(negative_prompt_list, dim=0) if negative_prompt_list else None,
+                (
+                    torch.cat(negative_prompt_list, dim=0)
+                    if negative_prompt_list
+                    else None
+                ),
                 batch_size,
             ),
             "negative_pooled_prompt_embeds": self._align_embedding_tensor(
                 "negative_pooled_prompt_embeds",
-                torch.cat(negative_pooled_list, dim=0) if negative_pooled_list else None,
+                (
+                    torch.cat(negative_pooled_list, dim=0)
+                    if negative_pooled_list
+                    else None
+                ),
                 batch_size,
             ),
             "guidance_scale": guidance_scale,
@@ -928,7 +938,9 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 dtype=prompt_embeds.dtype,
             )
 
-        filtered = {k: v for k, v in raw_tensors.items() if k in valid_fields and v is not None}
+        filtered = {
+            k: v for k, v in raw_tensors.items() if k in valid_fields and v is not None
+        }
         return ctx_cls(**filtered)
 
     # ---------------------------------------------------------------------
@@ -1165,7 +1177,9 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 col_offset = 0 if has_initial_noise else 1
                 needed_original = set(compute_trajectory_positions(sde_indices, steps))
                 keep_cols = sorted(
-                    p - col_offset for p in needed_original if 0 <= p - col_offset < traj_len
+                    p - col_offset
+                    for p in needed_original
+                    if 0 <= p - col_offset < traj_len
                 )
                 if keep_cols and len(keep_cols) < traj_len:
                     trimmed_cols = keep_cols
@@ -1243,7 +1257,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             guidance_scale=float(request.guidance_scale),
         )
 
-
         decoded_images = None
         decoded_video_tensors: List[torch.Tensor] = []
         if return_decoded_for_reward:
@@ -1277,7 +1290,9 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         else:
             if trajectory_store is not None:
                 trajectory_format = (
-                    "video_dense_latent" if trajectory_store.data.dim() == 6 else "dense_latent"
+                    "video_dense_latent"
+                    if trajectory_store.data.dim() == 6
+                    else "dense_latent"
                 )
             else:
                 trajectory_format = (

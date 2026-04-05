@@ -1,13 +1,16 @@
 """Training execution helpers and backend integration."""
 
-from diffusionrl.training.train_executor import (
-    TrainExecutor,
-    TrainExecutorConfig,
+from diffusionrl.training.backends import (
+    TrainBackend,
+    TrainBackendCapabilities,
+    TrainBackendLaunchSpec,
+    TrainTopology,
+    create_train_backend_from_init_payload,
+    resolve_train_backend_capabilities,
+    supported_train_backends,
 )
-from diffusionrl.training.workflow import TrainingWorkflow
-from diffusionrl.training.batch_partition import (
-    shard_training_batch_for_rank,
-)
+from diffusionrl.training.batch_partition import shard_training_batch_for_rank
+from diffusionrl.training.train_executor import TrainExecutor, TrainExecutorConfig
 from diffusionrl.training.update_schedule import (
     TrainingExecutionPlan,
     TrainingUpdateChunk,
@@ -16,16 +19,7 @@ from diffusionrl.training.update_schedule import (
     create_training_update_schedule,
     validate_batch_against_plan,
 )
-from diffusionrl.training.backends import (
-    TrainBackend,
-    TrainBackendCapabilities,
-    TrainBackendLaunchSpec,
-    TrainTopology,
-    create_train_backend,
-    resolve_train_backend_capabilities,
-    resolve_train_backend_capabilities_from_args,
-    supported_train_backends,
-)
+from diffusionrl.training.workflow import TrainingWorkflow
 
 __all__ = [
     "TrainExecutor",
@@ -42,8 +36,7 @@ __all__ = [
     "TrainBackendCapabilities",
     "TrainBackendLaunchSpec",
     "TrainTopology",
-    "create_train_backend",
+    "create_train_backend_from_init_payload",
     "resolve_train_backend_capabilities",
-    "resolve_train_backend_capabilities_from_args",
     "supported_train_backends",
 ]

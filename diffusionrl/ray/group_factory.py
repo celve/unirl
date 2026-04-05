@@ -39,8 +39,8 @@ def create_rollout_actor_group(
     rollout_engine = rollout.rollout_engine
 
     actor_init_config = copy.deepcopy(rollout.actor_init_config)
-    engine_runtime_config = dict(rollout.engine_runtime_config)
-    engine_kwargs = dict(engine_runtime_config.get("engine_kwargs") or {})
+    engine_config = rollout.engine_init_payload.component_config
+    engine_kwargs = dict(getattr(engine_config, "engine_kwargs", {}) or {})
     num_gpus_per_actor = int(rollout.actor_gpu_requirement)
 
     if rollout_engine == "sglang":

@@ -10,7 +10,8 @@ import logging
 import math
 import os
 import time as _time
-from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:
     from diffusionrl.types.sampling import RolloutRequest
@@ -18,19 +19,30 @@ if TYPE_CHECKING:
 import torch
 import torch.nn as nn
 
-from diffusionrl.config.build_domain_args import resolve_sde_config
+from diffusionrl.algorithms.registry import register_algorithm
 from diffusionrl.types import SDEConfig, TimestepData
+from diffusionrl.types.forward_context import ForwardContext
 from diffusionrl.utils.misc import aggregate_numeric_metrics
 from diffusionrl.utils.scheduler_utils import create_indices_scheduler
 
-from .base import BaseAlgorithm, EMASpec, SamplingRequirements
-from diffusionrl.types.forward_context import ForwardContext
+from .base import BaseAlgorithm, BaseAlgorithmConfig, EMASpec, SamplingRequirements
 
 logger = logging.getLogger(__name__)
 
 
-def _resolve_algorithm_sde_config(config: Dict[str, Any]) -> SDEConfig:
-    return resolve_sde_config(config)
+@dataclass(frozen=True)
+class GRPOAlgorithmConfig(BaseAlgorithmConfig):
+    clip_range: float = 1e-4
+    clip_schedule: str = "constant"
+    use_kl_penalty: bool = True
+    ratio_reg_coef: float = 0.0
+    sde_config: SDEConfig = field(default_factory=SDEConfig)
+    training_share_rollout_indices: bool = True
+    rollout_scheduler_config: Dict[str, Any] = field(default_factory=dict)
+    training_scheduler_config: Dict[str, Any] = field(default_factory=dict)
+    skip_last_timestep: bool = False
+    skip_initial_timesteps: int = 0
+    model_type: str = "default"
 
 
 def _save_training_debug_tensor(
@@ -59,6 +71,7 @@ def _save_training_debug_tensor(
     torch.save(new_tensor, path)
 
 
+@register_algorithm(component_name="grpo", component_cfg=GRPOAlgorithmConfig)
 class GRPOAlgorithm(BaseAlgorithm):
     """
     Standard GRPO Algorithm — algorithm owns loss and training step.
@@ -79,45 +92,24 @@ class GRPOAlgorithm(BaseAlgorithm):
     """
 
     @classmethod
-    def from_config(cls, config: dict) -> "GRPOAlgorithm":
-        """Create GRPOAlgorithm from an algorithm_config dictionary.
-
-        Reads GRPO-specific extension keys from ``algorithm_kwargs`` and shared
-        framework-owned fields from the top-level algorithm_config surface.
-        Rollout-side and train-side should instantiate from the same
-        algorithm_config surface.
-        """
+    def _parse_config_from_dict(cls, config: dict) -> GRPOAlgorithmConfig:
         extra = cls.resolve_config_kwargs(config)
-        sde_config = _resolve_algorithm_sde_config(config)
-        known_keys = {
-            "clip_range",
-            "clip_schedule",
-            "use_kl_penalty",
-            "kl_coef",
-            "ratio_reg_coef",
-            "skip_last_timestep",
-            "skip_initial_timesteps",
-            "model_type",
-        }
-        unknown = sorted(key for key in extra.keys() if key not in known_keys)
-        if unknown:
-            algorithm_label = str(config.get("algorithm_type", "grpo"))
-            raise ValueError(
-                "algorithm.algorithm_kwargs contains unsupported keys for "
-                f"algorithm_type={algorithm_label!r}: "
-                f"{unknown}."
-            )
-
-        return cls(
+        sde_config = SDEConfig.from_mapping(config.get("sde_config", SDEConfig()))
+        return GRPOAlgorithmConfig(
             clip_range=float(extra.get("clip_range", 1e-4)),
             clip_schedule=str(extra.get("clip_schedule", "constant")),
             use_kl_penalty=bool(extra.get("use_kl_penalty", True)),
             kl_coef=float(extra.get("kl_coef", 0.01)),
             component_mix_stage=str(config.get("component_mix_stage", "reward")),
+            adv_normalization_scope=str(config.get("adv_normalization_scope", "group")),
             samples_per_prompt=int(config.get("samples_per_prompt", 1)),
             num_inference_steps=int(config.get("num_inference_steps", 0)),
             eval_ema_decay=float(config.get("eval_ema_decay", 0.9)),
             eval_ema_update_interval=int(config.get("eval_ema_update_interval", 1)),
+            epsilon=float(config.get("adv_norm_eps", 1e-8)),
+            clip_max=config.get("clip_max", 5.0),
+            use_global_std=bool(config.get("use_global_std", False)),
+            trim_outliers_ratio=float(config.get("trim_outliers_ratio", 0.0)),
             ratio_reg_coef=float(extra.get("ratio_reg_coef", 0.0)),
             sde_config=sde_config,
             training_share_rollout_indices=bool(
@@ -128,90 +120,60 @@ class GRPOAlgorithm(BaseAlgorithm):
             skip_last_timestep=bool(extra.get("skip_last_timestep", False)),
             skip_initial_timesteps=int(extra.get("skip_initial_timesteps", 0)),
             model_type=str(extra.get("model_type", "default")),
-            adv_normalization_scope=str(config.get("adv_normalization_scope", "group")),
-            epsilon=float(config.get("adv_norm_eps", 1e-8)),
-            clip_max=config.get("clip_max", 5.0),
-            use_global_std=bool(config.get("use_global_std", False)),
-            trim_outliers_ratio=float(config.get("trim_outliers_ratio", 0.0)),
         )
+
+    @classmethod
+    def from_config(
+        cls,
+        config: dict | GRPOAlgorithmConfig,
+    ) -> "GRPOAlgorithm":
+        """Create GRPOAlgorithm from raw framework config or typed config."""
+        if isinstance(config, dict):
+            config = cls._parse_config_from_dict(config)
+        if not isinstance(config, GRPOAlgorithmConfig):
+            raise TypeError(
+                f"{cls.__name__}.from_config expects dict or GRPOAlgorithmConfig, "
+                f"got {type(config).__name__}."
+            )
+        return cls(config=config)
 
     def __init__(
         self,
-        clip_range: float = 1e-4,
-        clip_schedule: str = "constant",
-        use_kl_penalty: bool = True,
-        kl_coef: float = 0.01,
-        component_mix_stage: str = "reward",
-        ratio_reg_coef: float = 0.0,
-        sde_config: Optional[SDEConfig] = None,
-        training_share_rollout_indices: bool = True,
-        rollout_scheduler_config: Optional[Dict[str, Any]] = None,
-        training_scheduler_config: Optional[Dict[str, Any]] = None,
-        skip_last_timestep: bool = False,
-        skip_initial_timesteps: int = 0,
-        model_type: str = "default",
-        # BaseAlgorithm params
-        adv_normalization_scope: str = "group",
-        samples_per_prompt: int = 1,
-        num_inference_steps: int = 0,
-        eval_ema_decay: float = 0.9,
-        eval_ema_update_interval: int = 1,
-        epsilon: float = 1e-8,
-        clip_max: float = 5.0,
-        use_global_std: bool = False,
-        trim_outliers_ratio: float = 0.0,
+        *,
+        config: GRPOAlgorithmConfig,
         **kwargs,
     ):
-        """
-        Initialize GRPO algorithm.
-
-        Args:
-            clip_range: PPO clip range (epsilon)
-            clip_schedule: Clip range schedule ("constant", "linear_decay", "cosine_decay")
-            use_kl_penalty: Whether to add KL penalty
-            kl_coef: KL penalty coefficient
-            component_mix_stage: Multi-component reward mixing stage
-            ratio_reg_coef: Coefficient for ratio regularization
-            sde_config: Shared SDE config consumed by rollout and training math
-            skip_last_timestep: Skip the last timestep (t->0) in loss computation (MixGRPO).
-                The last step has very low noise level, causing unstable log_prob.
-            skip_initial_timesteps: Skip the first N timesteps in loss computation (MixGRPO).
-                Early timesteps may have high variance.
-            model_type: Model type for forward plugin selection ("flux", "sd3", "hunyuan", "default").
-                If not specified, model type will be auto-detected from the model class name.
-            adv_normalization_scope: Advantage normalization type ("global" or "group")
-            samples_per_prompt: Number of rollout samples to generate per prompt
-            eval_ema_decay: Eval-time EMA decay
-            eval_ema_update_interval: Eval-time EMA update interval
-            epsilon: Small value for numerical stability
-            clip_max: Maximum advantage clip value (optional)
-            use_global_std: Use global std instead of per-group std
-            **kwargs: Additional arguments
-        """
+        if not isinstance(config, GRPOAlgorithmConfig):
+            raise TypeError(
+                f"{type(self).__name__} expects GRPOAlgorithmConfig, got {type(config).__name__}."
+            )
         super().__init__(
-            kl_coef=kl_coef,
-            component_mix_stage=component_mix_stage,
-            adv_normalization_scope=adv_normalization_scope,
-            samples_per_prompt=samples_per_prompt,
-            num_inference_steps=num_inference_steps,
-            eval_ema_decay=eval_ema_decay,
-            eval_ema_update_interval=eval_ema_update_interval,
-            epsilon=epsilon,
-            clip_max=clip_max,
-            use_global_std=use_global_std,
-            trim_outliers_ratio=trim_outliers_ratio,
+            kl_coef=config.kl_coef,
+            component_mix_stage=config.component_mix_stage,
+            adv_normalization_scope=config.adv_normalization_scope,
+            samples_per_prompt=config.samples_per_prompt,
+            num_inference_steps=config.num_inference_steps,
+            eval_ema_decay=config.eval_ema_decay,
+            eval_ema_update_interval=config.eval_ema_update_interval,
+            epsilon=config.epsilon,
+            clip_max=config.clip_max,
+            use_global_std=config.use_global_std,
+            trim_outliers_ratio=config.trim_outliers_ratio,
             **kwargs,
         )
-        self.clip_range = clip_range
-        self.clip_schedule = clip_schedule
-        self.use_kl_penalty = use_kl_penalty
-        self.ratio_reg_coef = ratio_reg_coef
-        self.sde_config = sde_config or SDEConfig()
-        self.model_type = model_type
-        self.training_share_rollout_indices = bool(training_share_rollout_indices)
-        self.rollout_scheduler_config = dict(rollout_scheduler_config or {})
+        self.config = config
+        self.clip_range = config.clip_range
+        self.clip_schedule = config.clip_schedule
+        self.use_kl_penalty = config.use_kl_penalty
+        self.ratio_reg_coef = config.ratio_reg_coef
+        self.sde_config = config.sde_config
+        self.model_type = config.model_type
+        self.training_share_rollout_indices = bool(
+            config.training_share_rollout_indices
+        )
+        self.rollout_scheduler_config = dict(config.rollout_scheduler_config)
         self.training_scheduler_config = dict(
-            training_scheduler_config or self.rollout_scheduler_config
+            config.training_scheduler_config or self.rollout_scheduler_config
         )
         self.rollout_indices_scheduler = create_indices_scheduler(
             scheduler_config=self.rollout_scheduler_config,
@@ -226,8 +188,8 @@ class GRPOAlgorithm(BaseAlgorithm):
             )
 
         # MixGRPO stability controls
-        self.skip_last_timestep = skip_last_timestep
-        self.skip_initial_timesteps = skip_initial_timesteps
+        self.skip_last_timestep = config.skip_last_timestep
+        self.skip_initial_timesteps = config.skip_initial_timesteps
 
         # Train-side objective state
         self._debug_output_dir = None  # Set externally for train-inference consistency debugging
@@ -252,51 +214,6 @@ class GRPOAlgorithm(BaseAlgorithm):
             requires_log_prob=True,
             requires_embeddings=True,
         )
-
-    def compute_advantages_with_components(
-        self,
-        *,
-        rewards: torch.Tensor,
-        group_ids: Optional[List[str]] = None,
-        reward_components: Optional[Dict[str, List[float]]] = None,
-        reward_component_weights: Optional[Dict[str, float]] = None,
-    ) -> torch.Tensor:
-        if self.component_mix_stage != "advantage" or not reward_components:
-            return self.compute_advantages(rewards=rewards, group_ids=group_ids)
-
-        default_weights = {name: 1.0 for name in reward_components}
-        if reward_component_weights:
-            for name, weight in reward_component_weights.items():
-                if name in default_weights:
-                    default_weights[name] = float(weight)
-
-        weighted_advantages = torch.zeros_like(rewards)
-        total_weight = 0.0
-        for component_name, component_rewards in reward_components.items():
-            component_tensor = torch.tensor(
-                component_rewards,
-                dtype=rewards.dtype,
-                device=rewards.device,
-            )
-            if component_tensor.shape != rewards.shape:
-                logger.warning(
-                    "Skipping reward component %s due to shape mismatch: expected=%s got=%s",
-                    component_name,
-                    tuple(rewards.shape),
-                    tuple(component_tensor.shape),
-                )
-                continue
-            component_advantages = self.compute_advantages(
-                rewards=component_tensor,
-                group_ids=group_ids,
-            )
-            weight = float(default_weights.get(component_name, 1.0))
-            weighted_advantages += component_advantages * weight
-            total_weight += weight
-
-        if total_weight <= 0:
-            return self.compute_advantages(rewards=rewards, group_ids=group_ids)
-        return weighted_advantages / total_weight
 
     def get_ema_spec(self) -> EMASpec:
         return EMASpec(
@@ -489,7 +406,9 @@ class GRPOAlgorithm(BaseAlgorithm):
             sigma_next = torch.tensor(sigma_next, device=device)
 
         plugin = self._get_forward_plugin(model)
-        pred = plugin.forward(model=model, latents=latents, sigma=sigma, **ctx.to_dict())
+        pred = plugin.forward(
+            model=model, latents=latents, sigma=sigma, **ctx.to_dict()
+        )
 
         new_log_prob, prev_sample_mean = self.compute_log_prob(
             pred=pred,
@@ -613,7 +532,9 @@ class GRPOAlgorithm(BaseAlgorithm):
         model.train()
 
         available_steps = set(int(s) for s in batch.resolved_step_indices[:-1].tolist())
-        valid_step_indices = sorted(int(i) for i in batch.sde_indices if int(i) in available_steps)
+        valid_step_indices = sorted(
+            int(i) for i in batch.sde_indices if int(i) in available_steps
+        )
         num_timesteps = len(valid_step_indices)
         if num_timesteps == 0:
             return 0.0, {}, 0, False
@@ -673,7 +594,9 @@ class GRPOAlgorithm(BaseAlgorithm):
             try:
                 with torch.no_grad():
                     with adapter_model.disable_adapter():
-                        ref_pred = plugin.forward(model=model, latents=latents, sigma=sigma, **ctx_kwargs)
+                        ref_pred = plugin.forward(
+                            model=model, latents=latents, sigma=sigma, **ctx_kwargs
+                        )
 
                 _, ref_prev_sample_mean = self.compute_log_prob(
                     pred=ref_pred,
@@ -688,7 +611,9 @@ class GRPOAlgorithm(BaseAlgorithm):
 
         if ref_prev_sample_mean is None and ref_model is not None:
             with torch.no_grad():
-                ref_pred = plugin.forward(model=ref_model, latents=latents, sigma=sigma, **ctx_kwargs)
+                ref_pred = plugin.forward(
+                    model=ref_model, latents=latents, sigma=sigma, **ctx_kwargs
+                )
 
             _, ref_prev_sample_mean = self.compute_log_prob(
                 pred=ref_pred,

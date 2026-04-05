@@ -7,15 +7,12 @@ requirements (sampling, advantages) and training-side gradient computation.
 from __future__ import annotations
 
 import importlib
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Tuple
+from diffusionrl.types.sampling import SamplingRequirements
 
-from .construction import (
-    build_algorithm_config,
-    build_algorithm_kwargs,
-    resolve_algorithm_dotpath,
-)
 from .base import BaseAlgorithm
-from .registry import DEFAULT_ALGORITHM_PATHS
+from .construction import create_algorithm_from_init_payload
+from .registry import ensure_builtin_algorithm_registration
 
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "GRPOAlgorithm": ("diffusionrl.algorithms.grpo", "GRPOAlgorithm"),
@@ -23,41 +20,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "NFTAlgorithm": ("diffusionrl.algorithms.nft", "NFTAlgorithm"),
 }
 
-
-def get_algorithm(
-    algorithm_type: str = "grpo",
-    algorithm_dotpath: Optional[str] = None,
-    **kwargs: Any,
-) -> Any:
-    """
-    Create an algorithm instance by dotpath or built-in type name.
-
-    For normal training, the algorithm is created via
-    ``load_function(algorithm_dotpath) + cls.from_config(algorithm_config)``
-    inside TrainingActor.  This factory is a convenience for
-    standalone / testing use.
-
-    Args:
-        algorithm_type: Built-in type name ("grpo", "nft", "mix_grpo").
-            Ignored when *algorithm_dotpath* is provided.
-        algorithm_dotpath: Explicit Python dotpath to an algorithm class.
-            Overrides *algorithm_type*.
-        **kwargs: Forwarded to the algorithm constructor.
-
-    Returns:
-        Algorithm instance.
-    """
-    from diffusionrl.utils import load_function
-
-    path = algorithm_dotpath or DEFAULT_ALGORITHM_PATHS.get(algorithm_type)
-    if path is None:
-        raise ValueError(
-            f"Unknown algorithm_type: {algorithm_type!r}. "
-            f"Available: {sorted(DEFAULT_ALGORITHM_PATHS)}. "
-            f"Or provide an algorithm_dotpath for custom algorithms."
-        )
-    algorithm_cls = load_function(path)
-    return algorithm_cls(**kwargs)
+ensure_builtin_algorithm_registration()
 
 
 __all__ = [
@@ -65,11 +28,7 @@ __all__ = [
     "GRPOAlgorithm",
     "MixGRPOAlgorithm",
     "NFTAlgorithm",
-    "DEFAULT_ALGORITHM_PATHS",
-    "build_algorithm_config",
-    "build_algorithm_kwargs",
-    "get_algorithm",
-    "resolve_algorithm_dotpath",
+    "create_algorithm_from_init_payload",
 ]
 
 
