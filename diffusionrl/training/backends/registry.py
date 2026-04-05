@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
+from typing import Any
 
 from diffusionrl.registry import (
     list_registered_component_names,

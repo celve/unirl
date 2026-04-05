@@ -140,11 +140,13 @@ def _resolve_train_backend_identifier_from_args(args: Any) -> str:
 def _coerce_simple_dataclass_fields(
     config_class: type, raw: Dict[str, Any]
 ) -> Dict[str, Any]:
+    import typing
+
     simple_types = {int, float, bool, str}
+    hints = typing.get_type_hints(config_class)
     field_name_to_type = {
-        field.name: field.type
-        for field in dataclass_fields(config_class)
-        if field.type in simple_types
+        name: hint for name, hint in hints.items()
+        if hint in simple_types
     }
     coerced: Dict[str, Any] = {}
     for key, value in raw.items():

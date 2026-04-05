@@ -210,11 +210,13 @@ def _coerce_dict_field_type(
     # TODO: If algorithm_kwargs later needs list-typed fields, handle JSON-string
     # parsing here in the cmdline layer instead of growing a generic
     # complex-type coercion system.
+    import typing
+
     simple_types = {int, float, bool, str}
+    hints = typing.get_type_hints(config_class)
     field_name_to_type = {
-        field.name: field.type
-        for field in dataclass_fields(config_class)
-        if field.type in simple_types
+        name: hint for name, hint in hints.items()
+        if hint in simple_types
     }
     coerced: Dict[str, Any] = {}
     for key, value in raw.items():

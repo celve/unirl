@@ -417,8 +417,6 @@ class DPM2Strategy(StepStrategy):
 __all__ = [
     "StepStrategy",
     "SDEStrategy",
-    "SDE_STRATEGY_REGISTRY",
-    "register_sde_strategy",
     "FlowSDEStrategy",
     "CPSSDEStrategy",
     "DanceSDEStrategy",

@@ -90,6 +90,12 @@ class NFTAlgorithm(BaseAlgorithm):
     @classmethod
     def _parse_config_from_dict(cls, config: dict) -> NFTAlgorithmConfig:
         extra = cls.resolve_config_kwargs(config)
+        # Backward compat: decay_type was renamed to ema_decay_type.
+        if "decay_type" in extra and "ema_decay_type" not in extra:
+            logger.warning(
+                "algorithm_kwargs key 'decay_type' is deprecated, use 'ema_decay_type' instead."
+            )
+            extra["ema_decay_type"] = extra.pop("decay_type")
         training_scheduler_config = dict(config.get("training_scheduler") or {})
         sde_config = SDEConfig.from_mapping(config.get("sde_config", SDEConfig()))
         return NFTAlgorithmConfig(

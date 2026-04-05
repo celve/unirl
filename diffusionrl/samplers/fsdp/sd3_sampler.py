@@ -76,8 +76,8 @@ def _save_debug_tensors(
                     and existing.shape[1:] == new_tensor.shape[1:]
                 ):
                     new_tensor = torch.cat([existing, new_tensor], dim=0)
-            except Exception:
-                pass
+            except (FileNotFoundError, RuntimeError) as exc:
+                logger.debug("Could not load existing debug tensor at %s: %s", path, exc)
         torch.save(new_tensor, path)
 
 
