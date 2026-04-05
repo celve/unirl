@@ -51,6 +51,7 @@ export NCCL_PXN_DISABLE="${NCCL_PXN_DISABLE:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${REPO_ROOT}/scripts/_check_wandb.sh"
 
 # ── Role handling ──
 ROLE="${1:-}"
@@ -88,7 +89,7 @@ SAMPLING_FORWARD_BATCH=${SAMPLING_FORWARD_BATCH:-$(( NUM_SAMPLES_PER_PROMPT * NU
 TRAINING_FORWARD_BATCH=${TRAINING_FORWARD_BATCH:-8}     # per-device peak forward batch during training
 NUM_UPDATES=${NUM_UPDATES:-1}                           # gradient update steps per local batch
 
-source "${SCRIPT_DIR}/_batch_config.sh"
+source "${REPO_ROOT}/scripts/_batch_config.sh"
 resolve_batch_params
 validate_batch_params
 print_batch_params
@@ -166,6 +167,8 @@ run_training() {
     echo "Topology: ${NUM_NODES} nodes x ${GPUS_PER_NODE} GPUs"
     echo "Weight sync dir: ${WEIGHT_SYNC_DIR}"
     echo "Output dir: ${OUTPUT_DIR}"
+
+    check_wandb_auth
 
     python -m diffusionrl.train \
         --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \

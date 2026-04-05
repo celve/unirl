@@ -24,6 +24,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${REPO_ROOT}/scripts/_check_wandb.sh"
 
 # Default values
 PRETRAINED_MODEL="stabilityai/stable-diffusion-3.5-medium"
@@ -42,7 +43,7 @@ SAMPLING_FORWARD_BATCH=${SAMPLING_FORWARD_BATCH:-64}    # per-device peak forwar
 TRAINING_FORWARD_BATCH=${TRAINING_FORWARD_BATCH:-8}     # per-device peak forward batch during training
 NUM_UPDATES=${NUM_UPDATES:-1}                           # gradient update steps per local batch
 
-source "${SCRIPT_DIR}/_batch_config.sh"
+source "${REPO_ROOT}/scripts/_batch_config.sh"
 resolve_batch_params
 validate_batch_params
 print_batch_params
@@ -83,6 +84,8 @@ REWARD_LOCATION="sampling_actor"
 # Eval EMA settings (smoothed weights for stable evaluation)
 EVAL_EMA_DECAY=${EVAL_EMA_DECAY:-0.9}
 EVAL_EMA_UPDATE_INTERVAL=${EVAL_EMA_UPDATE_INTERVAL:-1}
+
+check_wandb_auth
 
 python -m diffusionrl.train \
     --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \
@@ -147,6 +150,4 @@ python -m diffusionrl.train \
 echo ""
 echo "============================================"
 echo " Debug tensors saved to: ${DEBUG_OUTPUT_DIR}"
-echo " Run analysis:"
-echo "   python scripts/analyze_debug_tensors.py ${DEBUG_OUTPUT_DIR}"
 echo "============================================"

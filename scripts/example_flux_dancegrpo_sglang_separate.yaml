@@ -1,5 +1,5 @@
 # Auxiliary committed example for grouped-YAML editing.
-# Primary researcher entrypoint remains scripts/train_dancegrpo_flux_sglang_separate.sh.
+# Run with: python -m diffusionrl.train_async --config scripts/example_flux_dancegrpo_sglang_separate.yaml
 
 model:
   model_type: flux

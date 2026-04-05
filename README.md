@@ -123,7 +123,7 @@ For real datasets, symlink into `data/datasets/` and override `DATA_PATH`:
 
 ```bash
 DATA_PATH=data/datasets/hpdv2/train.json \
-  bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh --rollout.num-rollout 1
+  bash scripts/train_flowgrpo_sd3_train_actor_sampling.sh --rollout.num-rollout 1
 ```
 
 The user-facing dataset contract is prompt-only:
@@ -147,8 +147,8 @@ For external data / model directories, pass absolute paths directly (or create s
 
 ```bash
 DATA_PATH=/path/to/external/data/train.json \
-PRETRAINED_MODEL=/path/to/external/shared_models/flux \
-bash scripts/train_dancegrpo_flux_train_actor_sampling.sh --rollout.num-rollout 1
+PRETRAINED_MODEL=/path/to/external/shared_models/sd3 \
+bash scripts/train_flowgrpo_sd3_train_actor_sampling.sh --rollout.num-rollout 1
 ```
 
 ### Training
@@ -156,18 +156,23 @@ bash scripts/train_dancegrpo_flux_train_actor_sampling.sh --rollout.num-rollout 
 We provide pre-configured training scripts for various algorithm + model combinations:
 
 ```bash
-# DanceGRPO with FLUX (SGLang separate mode, rollout/training split)
-bash scripts/train_dancegrpo_flux_sglang_separate.sh
+# FlowGRPO with SD3 (training-actor direct sampling)
+bash scripts/train_flowgrpo_sd3_train_actor_sampling.sh
 
-# MixGRPO with SD3 (SGLang separate mode)
+# MixGRPO with SD3 (SGLang separate mode, rollout/training split)
 bash scripts/train_mixgrpo_sd3_sglang_separate.sh
+
+# DanceGRPO with FLUX (SGLang colocate mode)
+bash scripts/train_dancegrpo_flux_sglang_colocate.sh
 
 # NFT with SD3 (training-actor sampling mode)
 bash scripts/train_nft_sd3_train_actor_sampling.sh
 
 # Override default parameters via environment variables
-NUM_ROLLOUT=100 BATCH_SIZE=2 ROLLOUT_GPUS=4 TRAINING_GPUS=4 \
-    bash scripts/train_dancegrpo_flux_sglang_separate.sh
+PRETRAINED_MODEL=/path/to/shared_models/sd3 \
+DATA_PATH=/path/to/prompts.json \
+ROLLOUT_GPUS=2 TRAINING_GPUS=2 BATCH_SIZE=2 \
+    bash scripts/train_mixgrpo_sd3_sglang_separate.sh
 ```
 
 Or use the CLI directly:
@@ -198,10 +203,10 @@ python -m diffusionrl.train \
     --sync.protocol disabled
 ```
 
-For asynchronous separate rollout/training overlap, use the dedicated async entry:
+For asynchronous separate rollout/training overlap, use a dedicated async entry such as:
 
 ```bash
-bash scripts/train_dancegrpo_flux_sglang_separate.sh
+bash scripts/train_mixgrpo_sd3_sglang_separate.sh
 ```
 
 For researcher work, start from `scripts/*.sh`.
@@ -209,15 +214,14 @@ Those shell templates are the primary maintained entry surface in this repo.
 If you prefer grouped YAML editing, use `scripts/example_*.yaml` as auxiliary examples.
 The local `configs/recipes/` directory may exist in some working trees, but it is
 gitignored and is not the public repo interface.
-The `scripts/minimal_*.yaml` files remain the smallest sanity-check configs.
-Public config tests cover the committed YAMLs in `scripts/`.
+The committed `scripts/example_*.yaml` files are the smallest public sanity-check configs.
+Public config tests cover those committed YAMLs in `scripts/`.
 
 Optional YAML-driven entry examples:
 
 ```bash
 python -m diffusionrl.train --config scripts/example_flux_dancegrpo_direct.yaml
 python -m diffusionrl.train_async --config scripts/example_flux_dancegrpo_sglang_separate.yaml
-python -m diffusionrl.train --config scripts/example_hunyuan_dancegrpo_direct.yaml --rollout.num-rollout 100
 ```
 
 Terminology:
@@ -293,10 +297,11 @@ Notes:
 
 | Script | Algorithm | Model | Mode |
 |--------|-----------|-------|------|
-| `train_*_sglang_separate.sh` | DanceGRPO / MixGRPO / FlowGRPO / NFT | FLUX / SD3 / Hunyuan | Separate (dedicated rollout actors, SGLang engine) |
+| `train_mixgrpo_sd3_sglang_separate.sh` | MixGRPO | SD3 | Separate (dedicated rollout actors, SGLang engine) |
+| `train_nft_sd3_sglang_separate.sh` | NFT | SD3 | Separate (dedicated rollout actors, SGLang engine) |
 | `train_dancegrpo_flux_sglang_colocate.sh` | DanceGRPO | FLUX | Colocate (SGLang engine) |
-| `train_*_train_actor_sampling.sh` | DanceGRPO / MixGRPO / FlowGRPO / NFT | FLUX / SD3 / Hunyuan | Training-actor direct sampling (FSDP engine) |
-| `train_plugin_demo.sh` | Plugin demo | FLUX | Training-actor sampling |
+| `train_flowgrpo_sd3_train_actor_sampling.sh` | FlowGRPO | SD3 | Training-actor direct sampling (FSDP engine) |
+| `train_nft_sd3_train_actor_sampling.sh` | NFT | SD3 | Training-actor direct sampling (FSDP engine) |
 
 See [scripts/README.md](scripts/README.md) for exact per-script defaults.
 

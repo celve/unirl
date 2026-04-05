@@ -1,6 +1,6 @@
 # Auxiliary grouped-YAML example with nested subgroup overrides.
-# Primary researcher entrypoint remains scripts/train_dancegrpo_flux_train_actor_sampling.sh.
-# Unlike minimal_flux.yaml, this example demonstrates:
+# Run with: python -m diffusionrl.train --config scripts/example_flux_dancegrpo_direct.yaml
+# This example demonstrates:
 # - algorithm.rollout_scheduler / algorithm.training_scheduler nested config
 # - explicit LoRA target modules
 # - eval-only rollout overrides

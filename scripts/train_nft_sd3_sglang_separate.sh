@@ -17,13 +17,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${REPO_ROOT}/scripts/_check_wandb.sh"
 
-# Load environment variables (.env)
-if [ -f "${REPO_ROOT}/.env" ]; then
-    set -a
-    source "${REPO_ROOT}/.env"
-    set +a
-fi
 
 # Prefer local sibling sglang checkout when available; otherwise use installed package.
 SGLANG_PYTHON_PATH="${SGLANG_PYTHON_PATH:-${REPO_ROOT}/../sglang/python}"
@@ -77,6 +72,8 @@ NFT_ALGO_KWARG_ARGS=(
     --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}"
     --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}"
 )
+
+check_wandb_auth
 
 python -m diffusionrl.train \
     --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \

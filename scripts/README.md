@@ -21,7 +21,7 @@ All scripts now resolve paths relative to repository root:
 
 ```bash
 DATA_PATH=data/samples/ocr_prompts_toy.json \
-  bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh \
+  bash scripts/train_flowgrpo_sd3_train_actor_sampling.sh \
   --rollout.num-rollout 1 \
   --rollout.save-steps 1000
 ```
@@ -60,23 +60,20 @@ Group-reassembly rollout buffer:
 ## Typical usage
 
 ```bash
-# SD3 / DanceGRPO
-bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh
+# SD3 / FlowGRPO (training-actor direct sampling)
+bash scripts/train_flowgrpo_sd3_train_actor_sampling.sh
 
-# SD3 / DanceGRPO (SGLang, separate mode)
-bash scripts/train_dancegrpo_sd3_sglang_separate.sh
+# SD3 / MixGRPO (SGLang, separate mode)
+bash scripts/train_mixgrpo_sd3_sglang_separate.sh
 
-# FLUX / MixGRPO
-bash scripts/train_mixgrpo_flux_train_actor_sampling.sh
+# FLUX / DanceGRPO (SGLang, colocate mode)
+bash scripts/train_dancegrpo_flux_sglang_colocate.sh
 
-# FLUX / MixGRPO (SGLang, separate mode)
-bash scripts/train_mixgrpo_flux_sglang_separate.sh
+# SD3 / NFT (training-actor direct sampling)
+bash scripts/train_nft_sd3_train_actor_sampling.sh
 
-# Hunyuan / DanceGRPO
-bash scripts/train_dancegrpo_hunyuan_train_actor_sampling.sh
-
-# Hunyuan / DanceGRPO (SGLang, separate mode)
-bash scripts/train_dancegrpo_hunyuan_sglang_separate.sh
+# SD3 / NFT (SGLang, separate mode)
+bash scripts/train_nft_sd3_sglang_separate.sh
 ```
 
 ## Auxiliary YAML examples
@@ -87,20 +84,12 @@ schema:
 
 - `scripts/example_flux_dancegrpo_direct.yaml`
 - `scripts/example_flux_dancegrpo_sglang_separate.yaml`
-- `scripts/example_hunyuan_dancegrpo_direct.yaml`
 
 Use them like this:
 
 ```bash
 python -m diffusionrl.train --config scripts/example_flux_dancegrpo_direct.yaml
 python -m diffusionrl.train_async --config scripts/example_flux_dancegrpo_sglang_separate.yaml
-```
-
-## Plugin demo
-
-```bash
-# End-to-end plugin wiring example (algorithm/reward)
-bash scripts/train_plugin_demo.sh --rollout.num-rollout 1
 ```
 
 ## Engine note
@@ -150,7 +139,7 @@ downloads (configured in `diffusionrl/config/arguments.py`).
 Override default paths by environment variables per script:
 
 ```bash
-DATA_PATH=/path/to/prompts.json PRETRAINED_MODEL=/path/to/model bash scripts/train_dancegrpo_sd3_train_actor_sampling.sh
+DATA_PATH=/path/to/prompts.json PRETRAINED_MODEL=/path/to/model bash scripts/train_flowgrpo_sd3_train_actor_sampling.sh
 ```
 
 All commands invoke canonical package entrypoint:

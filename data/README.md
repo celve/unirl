@@ -13,5 +13,5 @@
 Override `DATA_PATH` to point to a real dataset:
 
 ```bash
-DATA_PATH=data/datasets/hpdv2/train.json bash scripts/train_dancegrpo_sd3_separate.sh
+DATA_PATH=data/datasets/hpdv2/train.json bash scripts/train_flowgrpo_sd3_train_actor_sampling.sh
 ```

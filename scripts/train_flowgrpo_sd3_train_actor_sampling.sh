@@ -52,13 +52,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${REPO_ROOT}/scripts/_check_wandb.sh"
 
-# Load environment variables (.env)
-if [ -f "${REPO_ROOT}/.env" ]; then
-    set -a
-    source "${REPO_ROOT}/.env"
-    set +a
-fi
 
 # Default values (can be overridden via env or command line)
 PRETRAINED_MODEL=${PRETRAINED_MODEL:-"${REPO_ROOT}/models/local/sd3.5-medium"}
@@ -121,6 +116,8 @@ FLOWGRPO_ALGO_KWARG_ARGS=(
 )
 
 LOGGING_STEPS=1
+
+check_wandb_auth
 
 python -m diffusionrl.train \
     --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \
