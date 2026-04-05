@@ -879,32 +879,6 @@ def validate_reward_and_rollout_buffer_config(args: Any) -> None:
     validate_reward_config(args)
     rollout = args.rollout
 
-    if rollout.group_size is not None:
-        if bool(rollout.drop_invalid):
-            raise ValueError(
-                "Setting rollout.group_size (group reassembly) is incompatible with "
-                "rollout.drop_invalid=true. Sample-dropping finite-value "
-                "filtering can leave incomplete groups pending forever. Set "
-                "rollout.drop_invalid=false so invalid batches fail fast."
-            )
-        if rollout.reward_min is not None or rollout.reward_max is not None:
-            raise ValueError(
-                "Setting rollout.group_size (group reassembly) is incompatible with "
-                "rollout.reward_min/max. Reward-range filtering drops "
-                "samples and breaks the complete-group producer contract."
-            )
-        target_batch_size = int(derive_global_rollout_batch_size(args))
-        if int(rollout.group_size) > target_batch_size:
-            raise ValueError(
-                "rollout.group_size cannot exceed the resolved training batch size. "
-                f"Got group_size={rollout.group_size}, target_batch_size={target_batch_size}."
-            )
-        if target_batch_size % int(rollout.group_size) != 0:
-            raise ValueError(
-                "rollout.group_size (group reassembly) requires the resolved training batch size "
-                "to be divisible by rollout.group_size. "
-                f"Got target_batch_size={target_batch_size}, group_size={rollout.group_size}."
-            )
 
 
 # ============================================================================

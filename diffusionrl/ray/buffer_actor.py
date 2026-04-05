@@ -33,15 +33,6 @@ class BufferActor:
             batch_store=RayBatchStore(),
         )
 
-    def configure_expected_global_batch_size(
-        self,
-        *,
-        expected_global_batch_size: int,
-    ) -> int:
-        return self.runtime.configure_expected_global_batch_size(
-            expected_global_batch_size=expected_global_batch_size,
-        )
-
     def size(self) -> int:
         return self.runtime.size()
 
@@ -66,12 +57,7 @@ class BufferActor:
         *,
         payload_ref: Any,
     ) -> Dict[str, Any]:
-        """Admit a rollout payload ref into the buffer.
-
-        Resolving this call means the payload has been admitted or rejected by
-        the buffer. It does not imply a training handle is already ready for
-        consumption.
-        """
+        """Admit a rollout payload ref into the buffer."""
         payload = ray.get(payload_ref) if isinstance(payload_ref, ray.ObjectRef) else payload_ref
         if not isinstance(payload, RolloutPayload):
             raise TypeError(

@@ -163,16 +163,9 @@ _BUFFER_CORE_KEYS = (
     "popped_batches",
     "pushed_samples",
     "popped_samples",
-    "assembled_batches",
     "dropped_queue_items",
     "dropped_batches",
     "dropped_samples",
-    "expired_samples",
-    "pending_overflow_drops",
-    "pending_group_count",
-    "ready_group_count",
-    "pending_sample_count",
-    "avg_pending_reward",
 )
 
 
@@ -189,13 +182,6 @@ def build_buffer_metrics(
         scalar = _coerce_scalar(stats.get(key))
         if scalar is not None:
             metrics[f"{prefix}{key}"] = scalar
-
-    pending_modalities = stats.get("pending_modality_counts")
-    if isinstance(pending_modalities, dict):
-        for modality, count in pending_modalities.items():
-            scalar = _coerce_scalar(count)
-            if scalar is not None:
-                metrics[f"{prefix}pending_modality/{modality}"] = scalar
 
     plugins = stats.get("plugins")
     if isinstance(plugins, dict):

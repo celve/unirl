@@ -48,16 +48,6 @@ Eval data:
 - Prompt datasets should provide text via `prompt` or `caption`; legacy embedding fields are no longer supported.
 - Prompt datasets should ideally provide `prompt_id`; when omitted, the prompt loaders now synthesize deterministic IDs.
 
-Group-reassembly rollout buffer:
-
-- Set `rollout.group_size` to enable: explicit samples per logical group
-  (omit or leave unset for passthrough batches).
-- This mode decomposes incoming rollout batches to sample locators and
-  reassembles outgoing training batches by `group_id`.
-- This mode is incompatible with sample-dropping built-in buffer filters
-  (`rollout.drop_invalid=true` or reward-range filtering), because the
-  producer contract requires complete groups.
-
 ## Typical usage
 
 ```bash

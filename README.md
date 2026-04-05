@@ -248,8 +248,6 @@ and a dedicated-rollout sync mode (`tensor_payload`, `nccl_broadcast`, or
 In `direct_sampling`, leave `rollout.rollout_engine` unset.
 Direct sampling is selected only by `rollout.mode=direct_sampling`;
 dedicated rollout-only fields must remain unset there.
-When `rollout.group_size` is set, the rollout buffer reassembles outgoing
-training batches by `group_id` with that many samples per logical group.
 Config docs are descriptive rather than normative: current behavior lives under
 `diffusionrl/config/*`, and docs/examples should be updated alongside config refactors.
 
@@ -358,7 +356,7 @@ diffusionrl/
 ├── data/                           # Data loading and datasets
 ├── rollout/                        # Driver rollout runtime, request planning/execution, default hooks
 ├── training/                       # Training workflow, executor, update schedule, train backends
-├── buffer/                         # Buffer subsystem (queue/filter/reassembly/store)
+├── buffer/                         # Buffer subsystem (queue/filter/store)
 ├── distributed/                    # Distributed coordination (for example weight sync)
 ├── ray/                            # Ray distributed orchestration
 │   ├── rollout_actor.py / training_actor.py

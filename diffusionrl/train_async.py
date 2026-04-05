@@ -175,7 +175,6 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
 
     logger.info("Starting async pipeline loop (separate mode)")
     rollout_update_interval = args.sync.rollout_update_interval
-    enforce_rollout_alignment = args.rollout.group_size is None
     rollout_on_gpu = True
     runtime = AsyncPipelineRuntime(
         max_inflight_rollouts=args.rollout.max_inflight_rollouts,
@@ -332,7 +331,7 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
             )
         rollout_payload = ray.get(
             rollout_buffer.pop_training_data.remote(
-                expected_rollout_id=rollout_id if enforce_rollout_alignment else None,
+                expected_rollout_id=rollout_id,
             )
         )
         training_data_handle = rollout_payload.training_data
@@ -625,7 +624,6 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
                     restored_rollout_id,
                 )
         train_backend_info = training_runtime.get_train_backend_info()
-        expected_global_batch_size = training_runtime.get_expected_global_batch_size()
         logger.info("Training actor group created")
         if train_backend_info:
             logger.info("Training backend: %s", train_backend_info)
@@ -634,15 +632,7 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
         logger.info("Initial weights synchronized")
 
         rollout_buffer = create_buffer_actor(args)
-        ray.get(
-            rollout_buffer.configure_expected_global_batch_size.remote(
-                expected_global_batch_size=expected_global_batch_size,
-            )
-        )
-        logger.info(
-            "Rollout buffer actor created and configured with expected_global_batch_size=%s",
-            expected_global_batch_size,
-        )
+        logger.info("Rollout buffer actor created")
 
         weight_sync.setup(
             training_runtime=training_runtime,

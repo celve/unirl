@@ -340,7 +340,6 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
                     restored_rollout_id,
                 )
         train_backend_info = training_runtime.get_train_backend_info()
-        expected_global_batch_size = training_runtime.get_expected_global_batch_size()
         logger.info("Training actor group created")
         if train_backend_info:
             logger.info("Training backend: %s", train_backend_info)
@@ -363,15 +362,7 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
 
         # 8. Build rollout buffer.
         rollout_buffer = create_buffer_actor(args)
-        ray.get(
-            rollout_buffer.configure_expected_global_batch_size.remote(
-                expected_global_batch_size=expected_global_batch_size,
-            )
-        )
-        logger.info(
-            "Rollout buffer actor created and configured with expected_global_batch_size=%s",
-            expected_global_batch_size,
-        )
+        logger.info("Rollout buffer actor created")
 
         # 9. Setup weight-sync coordinator (binds training/rollout runtime facades).
         weight_sync.setup(
@@ -382,7 +373,6 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
         debug_save_intermediates = args.debug.debug_save_intermediates
 
         # 10. Core synchronous training loop
-        enforce_rollout_alignment = args.rollout.group_size is None
         save_rollout_debug_payload = None
         if debug_save_intermediates:
             from diffusionrl.debug.runner import save_rollout_debug_payload as _save_rollout_debug_payload
@@ -457,7 +447,7 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
             )
             rollout_payload = ray.get(
                 rollout_buffer.pop_training_data.remote(
-                    expected_rollout_id=rollout_id if enforce_rollout_alignment else None,
+                    expected_rollout_id=rollout_id,
                 )
             )
             training_data_handle = rollout_payload.training_data

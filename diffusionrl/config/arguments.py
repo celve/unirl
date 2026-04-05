@@ -725,12 +725,6 @@ class RolloutConfig:
         metadata={"help": "Maximum reward threshold for sample filtering (None = no filter)"})
     min_samples: int = field(default=1,
         metadata={"help": "Minimum samples required before dispatching a batch"})
-    group_size: Optional[int] = field(default=None,
-        metadata={"help": "Reassemble outgoing training batches by explicit group_ids (None = passthrough)"})
-    group_ttl_seconds: float = field(default=0.0,
-        metadata={"help": "Time-to-live for incomplete groups in seconds (0 = no timeout)"})
-    max_pending_samples: int = field(default=0,
-        metadata={"help": "Max pending samples in buffer before blocking rollout (0 = unbounded)"})
     plugin_dotpaths: List[str] = field(default_factory=list,
         metadata={"help": "Rollout buffer filter plugin class dotpath(s)."})
 
@@ -793,12 +787,6 @@ class RolloutConfig:
                 f"rollout.reward_min must be <= rollout.reward_max, "
                 f"got min={self.reward_min}, max={self.reward_max}"
             )
-        if self.group_size is not None and self.group_size < 1:
-            raise ValueError(f"rollout.group_size must be >= 1 when provided, got: {self.group_size}")
-        if float(self.group_ttl_seconds) < 0:
-            raise ValueError(f"rollout.group_ttl_seconds must be >= 0, got: {self.group_ttl_seconds}")
-        if int(self.max_pending_samples) < 0:
-            raise ValueError(f"rollout.max_pending_samples must be >= 0, got: {self.max_pending_samples}")
         for i, path in enumerate(self.plugin_dotpaths):
             if not str(path).strip():
                 raise ValueError(f"rollout.plugin_dotpaths[{i}] must be a non-empty string")
