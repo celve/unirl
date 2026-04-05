@@ -1,4 +1,4 @@
-# Auxiliary committed example for grouped-YAML editing.
+# Single committed grouped-YAML example.
 # Run with: python -m diffusionrl.train_async --config scripts/example_flux_dancegrpo_sglang_separate.yaml
 
 model:

@@ -3,7 +3,7 @@
 diffusionrl Training Entry Point.
 
 Usage:
-    python -m diffusionrl.train --config scripts/example_flux_dancegrpo_direct.yaml
+    python -m diffusionrl.train --config path/to/config.yaml
 """
 import logging
 import time

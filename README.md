@@ -162,11 +162,8 @@ bash scripts/train_flowgrpo_sd3_train_actor_sampling.sh
 # MixGRPO with SD3 (SGLang separate mode, rollout/training split)
 bash scripts/train_mixgrpo_sd3_sglang_separate.sh
 
-# DanceGRPO with FLUX (SGLang colocate mode)
-bash scripts/train_dancegrpo_flux_sglang_colocate.sh
-
-# NFT with SD3 (training-actor sampling mode)
-bash scripts/train_nft_sd3_train_actor_sampling.sh
+# NFT with SD3 (SGLang separate mode)
+bash scripts/train_nft_sd3_sglang_separate.sh
 
 # Override default parameters via environment variables
 PRETRAINED_MODEL=/path/to/shared_models/sd3 \
@@ -211,16 +208,16 @@ bash scripts/train_mixgrpo_sd3_sglang_separate.sh
 
 For researcher work, start from `scripts/*.sh`.
 Those shell templates are the primary maintained entry surface in this repo.
-If you prefer grouped YAML editing, use `scripts/example_*.yaml` as auxiliary examples.
+If you prefer grouped YAML editing, start from `scripts/example_flux_dancegrpo_sglang_separate.yaml`.
 The local `configs/recipes/` directory may exist in some working trees, but it is
 gitignored and is not the public repo interface.
-The committed `scripts/example_*.yaml` files are the smallest public sanity-check configs.
-Public config tests cover those committed YAMLs in `scripts/`.
+The committed `scripts/example_flux_dancegrpo_sglang_separate.yaml` file is the
+smallest public sanity-check config.
+Public config tests cover that committed YAML in `scripts/`.
 
 Optional YAML-driven entry examples:
 
 ```bash
-python -m diffusionrl.train --config scripts/example_flux_dancegrpo_direct.yaml
 python -m diffusionrl.train_async --config scripts/example_flux_dancegrpo_sglang_separate.yaml
 ```
 
@@ -299,9 +296,7 @@ Notes:
 |--------|-----------|-------|------|
 | `train_mixgrpo_sd3_sglang_separate.sh` | MixGRPO | SD3 | Separate (dedicated rollout actors, SGLang engine) |
 | `train_nft_sd3_sglang_separate.sh` | NFT | SD3 | Separate (dedicated rollout actors, SGLang engine) |
-| `train_dancegrpo_flux_sglang_colocate.sh` | DanceGRPO | FLUX | Colocate (SGLang engine) |
 | `train_flowgrpo_sd3_train_actor_sampling.sh` | FlowGRPO | SD3 | Training-actor direct sampling (FSDP engine) |
-| `train_nft_sd3_train_actor_sampling.sh` | NFT | SD3 | Training-actor direct sampling (FSDP engine) |
 
 See [scripts/README.md](scripts/README.md) for exact per-script defaults.
 

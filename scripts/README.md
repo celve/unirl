@@ -3,11 +3,12 @@
 These shell scripts are the primary researcher entrypoints in this repo.
 
 Use `scripts/*.sh` as the maintained experiment templates.
-If you prefer editing grouped YAML directly, use `scripts/example_*.yaml` as
-auxiliary examples. A local `configs/recipes/` directory may exist in some
+If you prefer editing grouped YAML directly, use
+`scripts/example_flux_dancegrpo_sglang_separate.yaml` as the committed
+example. A local `configs/recipes/` directory may exist in some
 working trees, but it is gitignored and should not be treated as the public
 repo interface.
-Public config tests cover the committed YAMLs in this directory.
+Public config tests cover the committed YAML in this directory.
 
 All scripts now resolve paths relative to repository root:
 
@@ -66,29 +67,21 @@ bash scripts/train_flowgrpo_sd3_train_actor_sampling.sh
 # SD3 / MixGRPO (SGLang, separate mode)
 bash scripts/train_mixgrpo_sd3_sglang_separate.sh
 
-# FLUX / DanceGRPO (SGLang, colocate mode)
-bash scripts/train_dancegrpo_flux_sglang_colocate.sh
-
-# SD3 / NFT (training-actor direct sampling)
-bash scripts/train_nft_sd3_train_actor_sampling.sh
-
 # SD3 / NFT (SGLang, separate mode)
 bash scripts/train_nft_sd3_sglang_separate.sh
 ```
 
-## Auxiliary YAML examples
+## Auxiliary YAML example
 
-These committed YAMLs are small, reviewable snapshots mirrored from selected
-local recipes and include the nested `precision.training` / `precision.rollout`
+This committed YAML is a small, reviewable snapshot mirrored from a selected
+local recipe and includes the nested `precision.training` / `precision.rollout`
 schema:
 
-- `scripts/example_flux_dancegrpo_direct.yaml`
 - `scripts/example_flux_dancegrpo_sglang_separate.yaml`
 
-Use them like this:
+Use it like this:
 
 ```bash
-python -m diffusionrl.train --config scripts/example_flux_dancegrpo_direct.yaml
 python -m diffusionrl.train_async --config scripts/example_flux_dancegrpo_sglang_separate.yaml
 ```
 
