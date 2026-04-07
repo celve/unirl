@@ -110,7 +110,7 @@ SAMPLING_FORWARD_BATCH=${SAMPLING_FORWARD_BATCH:-${NUM_SAMPLES_PER_PROMPT}}  # p
 TRAINING_FORWARD_BATCH=${TRAINING_FORWARD_BATCH:-8}     # per-device peak forward batch during training
 NUM_UPDATES=${NUM_UPDATES:-2}                           # gradient update steps per local batch
 
-source "${SCRIPT_DIR}/_batch_config.sh"
+source "${REPO_ROOT}/scripts/_batch_config.sh"
 resolve_batch_params
 validate_batch_params
 print_batch_params
