@@ -78,7 +78,7 @@ models/local/*
 models/local/reward_models/*
 !models/local/reward_models/.gitkeep
 data/datasets/*
-!data/datasets/.gitkeep
+!data/datasets/pickscore
 
 # Large model artifacts (defense-in-depth)
 models/**/*.bin
