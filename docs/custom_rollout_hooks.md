@@ -4,23 +4,30 @@ diffusionRL provides three pluggable hooks that control the rollout pipeline:
 
 | Hook | Config key | Default | Signature |
 |------|-----------|---------|-----------|
-| **rollout function** | `rollout_function_path` | `diffusionrl.rollout.default_rollout.generate_rollout` | `(*, services, reward_hook, context) -> RolloutFunctionResult` |
-| **eval function** | `eval_function_path` | `diffusionrl.rollout.default_rollout.evaluate_rollout` | `(*, services, reward_hook, rollout_id) -> Dict[str, Any]` |
-| **reward hook** | `reward_hook_path` | `diffusionrl.rollout.default_rollout.score_rewards_hook` | `(*, services, request, samples, rollout_id) -> RewardHookResult` |
+| **rollout function** | `rollout_function_dotpath` | `diffusionrl.rollout.default_rollout.generate_rollout` | `(*, services, reward_hook, context) -> RolloutFunctionResult` |
+| **eval function** | `eval_function_dotpath` | `diffusionrl.rollout.default_rollout.evaluate_rollout` | `(*, services, reward_hook, rollout_id) -> Dict[str, Any]` |
+| **reward hook** | `reward_hook_dotpath` | `diffusionrl.rollout.default_rollout.score_rewards_hook` | `(*, services, request, samples, rollout_id) -> RewardHookResult` |
 
 These are set via YAML config or CLI:
 
 ```yaml
-rollout_function_path: "my_project.rollout.generate_rollout"
-eval_function_path: "my_project.rollout.evaluate_rollout"
-reward_hook_path: "my_project.rewards.my_reward_hook"
+rollout_function_dotpath: "my_project.rollout.generate_rollout"
+eval_function_dotpath: "my_project.rollout.evaluate_rollout"
+reward_hook_dotpath: "my_project.rewards.my_reward_hook"
 ```
 
 ```bash
 python -m diffusionrl.train \
     --config scripts/my_config.yaml \
-    --reward_hook_path my_project.rewards.gemini_reward
+    --reward-hook-dotpath my_project.rewards.gemini_reward
 ```
+
+By default, the active sampling actor precomputes scalar rewards and drops decoded
+media unless the rollout explicitly asks to keep previews. Driver-side reward hooks
+should therefore prefer `read_rewards(...)` when they only need scalar rewards.
+If a hook needs raw images or videos, pair it with a custom rollout function that
+forces `collect_media_preview=True`, or move the scorer into actor-side
+`--reward.reward-dotpath`.
 
 ## Architecture overview
 
@@ -45,7 +52,7 @@ The driver (train.py) calls these hooks in the following order:
   ┌────────────────────────┤  (driver does these explicitly)
   │                        │
   ▼                        ▼
-services.compute_advantages()    services.assemble_training_batch()
+services.compute_advantages()    algorithm.assemble_training_batch()
                                           │
                                           ▼
                                     TrainingBatch → buffer → training actors
@@ -60,21 +67,99 @@ about training batch types.
 
 | I want to... | Customize |
 |---|---|
-| Change how rewards are computed (e.g., use Gemini API, combine multiple scorers) | `reward_hook_path` |
-| Change how prompts are loaded or how requests are built (e.g., curriculum learning) | `rollout_function_path` |
-| Change evaluation logic (e.g., FID computation, different eval dataset) | `eval_function_path` |
+| Change how rewards are computed (e.g., reshape precomputed rewards, or score preserved media on the driver) | `reward_hook_dotpath` |
+| Change how prompts are loaded or how requests are built (e.g., curriculum learning, force media retention) | `rollout_function_dotpath` |
+| Change evaluation logic (e.g., FID computation, different eval dataset) | `eval_function_dotpath` |
 
-## Example 1: Custom reward hook
+## Example 1: Custom reward hook (scalar post-processing)
 
-The simplest extension point. You only need to return `RewardHookResult`:
+The simplest extension point. Read the precomputed actor-side rewards and reshape
+them — no decoded images needed:
 
 ```python
 # my_project/rewards.py
 import torch
+from diffusionrl.reward.pipeline import read_rewards
 from diffusionrl.rollout.base_types import RewardHookResult
 
+def clipped_reward_hook(*, services, request, samples, rollout_id):
+    """Read precomputed rewards, apply clipping and a length bonus."""
+    rewards, component_rewards = read_rewards(sampler_outputs=samples)
+    # Clip outliers and add a small bonus for longer prompts
+    rewards = rewards.clamp(-1.0, 1.0)
+    for i, prompt in enumerate(request.prompts):
+        if len(prompt.split()) > 20:
+            rewards[i] += 0.1
+    return RewardHookResult(
+        rewards=rewards,
+        component_rewards=component_rewards,
+    )
+```
+
+```yaml
+reward_hook_dotpath: "my_project.rewards.clipped_reward_hook"
+```
+
+## Example 2: Custom rollout function with driver-side scoring
+
+If your reward hook needs decoded images (e.g., calling an external API), you must
+pair it with a custom rollout function that forces `collect_media_preview=True` so
+the actor keeps media instead of dropping it after actor-side scoring.
+
+The default pipeline is built from three composable building blocks:
+
+- `prepare_default_rollout_plan(services)` - load prompts, plan request batches
+- `execute_request_batches(...)` - dispatch typed requests and aggregate outputs
+- `finalize_default_rollout(services, reward_hook, context, ...)` - score rewards, build result
+
+You can replace any piece while reusing the rest:
+
+```python
+# my_project/rollout.py
+import torch
+from diffusionrl.rollout.base_types import RewardHookResult
+from diffusionrl.rollout.default_rollout import finalize_default_rollout
+from diffusionrl.rollout.primitives import (
+    build_sampler_output_validator,
+    execute_request_batches,
+)
+
+def media_preserving_rollout(*, services, reward_hook, context):
+    """Custom rollout that keeps decoded media for driver-side reward hooks."""
+    batch = services.load_prompt_batch()
+    request_batches = services.plan_request_batches(
+        batch=batch,
+        samples_per_prompt=services.samples_per_prompt,
+    )
+    request, sampler_outputs = execute_request_batches(
+        request_batches=request_batches,
+        rollout_id=context.rollout_id,
+        execute_sampling_request=lambda request: services.execute_sampling_request(
+            request=request,
+            sde_indices=context.sde_indices,
+            requirements=services.sampling_requirements,
+            sampling_overrides={
+                "collect_media_preview": True,  # keep decoded images
+            },
+        ),
+        validate_sampler_outputs=build_sampler_output_validator(
+            requirements=services.sampling_requirements,
+            validation_config=services.sampler_validation_config,
+        ),
+    )
+    return finalize_default_rollout(
+        services=services,
+        reward_hook=reward_hook,
+        context=context,
+        batch=batch,
+        request_batches=request_batches,
+        request=request,
+        sampler_outputs=sampler_outputs,
+    )
+
+
 def gemini_reward_hook(*, services, request, samples, rollout_id):
-    """Score generated images using Gemini API."""
+    """Score generated images using Gemini API (requires media_preserving_rollout)."""
     rewards = []
     for output in samples:
         decoded_images = output.aux.get("decoded_images", [])
@@ -87,81 +172,8 @@ def gemini_reward_hook(*, services, request, samples, rollout_id):
 ```
 
 ```yaml
-reward_hook_path: "my_project.rewards.gemini_reward_hook"
-```
-
-The default reward pipeline (`services.score_rewards()`) is still available inside a custom
-reward hook. You can combine it with your own logic:
-
-```python
-def combined_reward_hook(*, services, request, samples, rollout_id):
-    """Combine framework CLIP reward with custom Gemini reward."""
-    clip_rewards, clip_components = services.score_rewards(
-        request=request,
-        sampler_outputs=samples,
-    )
-    gemini_scores = compute_gemini_scores(samples, request.prompts)
-    combined = 0.7 * clip_rewards + 0.3 * torch.tensor(gemini_scores)
-    return RewardHookResult(
-        rewards=combined,
-        component_rewards={
-            **clip_components,
-            "gemini": gemini_scores,
-        },
-    )
-```
-
-## Example 2: Custom rollout function
-
-For deeper customization. The default pipeline is built from three composable
-building blocks in `default_rollout.py`:
-
-- `prepare_default_rollout_plan(services)` - load prompts, plan request batches
-- `execute_default_sampling(services, context, request_batches)` - dispatch to actors
-- `finalize_default_rollout(services, reward_hook, context, ...)` - score rewards, build result
-
-You can replace any piece while reusing the rest:
-
-```python
-# my_project/rollout.py
-from diffusionrl.rollout.base_types import RolloutFunctionResult, RolloutContext
-from diffusionrl.rollout.default_rollout import (
-    execute_default_sampling,
-    finalize_default_rollout,
-)
-
-def curriculum_rollout(*, services, reward_hook, context):
-    """Increase inference steps as training progresses."""
-    batch = services.load_prompt_batch()
-
-    # Custom: scale num_inference_steps with rollout_id
-    base_steps = 20
-    extra = min(context.rollout_id // 50, 30)
-    batch["num_inference_steps"] = base_steps + extra
-
-    # Reuse standard building blocks for everything else
-    request_batches = services.plan_request_batches(
-        batch=batch,
-        samples_per_prompt=services.samples_per_prompt,
-    )
-    request, sampler_outputs = execute_default_sampling(
-        services=services,
-        context=context,
-        request_batches=request_batches,
-    )
-    return finalize_default_rollout(
-        services=services,
-        reward_hook=reward_hook,
-        context=context,
-        batch=batch,
-        request_batches=request_batches,
-        request=request,
-        sampler_outputs=sampler_outputs,
-    )
-```
-
-```yaml
-rollout_function_path: "my_project.rollout.curriculum_rollout"
+rollout_function_dotpath: "my_project.rollout.media_preserving_rollout"
+reward_hook_dotpath: "my_project.rollout.gemini_reward_hook"
 ```
 
 ## Example 3: Custom eval function
@@ -195,7 +207,7 @@ def fid_evaluation(*, services, reward_hook, rollout_id):
 ```
 
 ```yaml
-eval_function_path: "my_project.eval.fid_evaluation"
+eval_function_dotpath: "my_project.eval.fid_evaluation"
 ```
 
 ## Available objects inside hooks
@@ -212,9 +224,7 @@ The service facade provides these methods:
 | `services.execute_sampling_request(request=..., sde_indices=..., ...)` | Run distributed sampling (sync) |
 | `services.launch_sampling_request(request=..., ...)` | Launch sampling (async, returns future) |
 | `services.resolve_launched_sampling_request(launched_request=...)` | Resolve async sampling future |
-| `services.score_rewards(request=..., sampler_outputs=...)` | Run the configured reward pipeline |
 | `services.compute_advantages(rewards=..., group_ids=..., ...)` | Compute advantages via algorithm |
-| `services.assemble_training_batch(request=..., sampler_outputs=..., ...)` | Assemble typed TrainingBatch |
 
 Useful attributes:
 
@@ -256,7 +266,7 @@ Each `RolloutSamples` has:
 |---|---|---|
 | `sample.latents` | `Tensor [B, C, H, W]` | Generated latents |
 | `sample.timesteps` | `Tensor [T+1]` | Sigma schedule |
-| `sample.aux.get("decoded_images")` | `Optional[List[PIL.Image]]` | Decoded images for reward |
+| `sample.aux.get("decoded_images")` | `Optional[List[PIL.Image]]` | Decoded images (dropped by default after actor-side scoring; only present when `collect_media_preview=True`) |
 | `sample.aux.get("trajectories")` | `Optional[Tensor]` | Full denoising trajectory |
 | `sample.aux.get("log_probs")` | `Optional[LogProbData]` | Per-step log probabilities |
 | `sample.batch_size` | `int` | Number of samples in this shard |
@@ -284,9 +294,9 @@ RewardHookResult(
 
 ## Async training note
 
-`train_async.py` currently requires the default `rollout_function_path`. Custom rollout
-functions are only supported in synchronous training (`train.py`). Custom `eval_function_path`
-and `reward_hook_path` work in both sync and async modes.
+`train_async.py` currently requires the default `rollout_function_dotpath`. Custom rollout
+functions are only supported in synchronous training (`train.py`). Custom `eval_function_dotpath`
+and `reward_hook_dotpath` work in both sync and async modes.
 
 This is because the async pipeline splits sampling into launch/resolve phases for
 overlap with training, which requires direct access to the default pipeline's building

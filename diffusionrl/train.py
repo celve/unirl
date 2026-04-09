@@ -111,7 +111,7 @@ def _produce_and_push_rollout(
         group_ids=rollout_result.request.meta.get("group_ids"),
         component_rewards=rollout_result.component_rewards,
     )
-    training_batch = rollout_services.assemble_training_batch(
+    training_batch = rollout_services.algorithm.assemble_training_batch(
         request=rollout_result.request,
         sampler_outputs=rollout_result.sampler_outputs,
         rewards=rollout_result.rewards,
@@ -213,7 +213,11 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
         if args.ray.ray_address:
             ray.init(address=args.ray.ray_address, ignore_reinit_error=True)
         else:
-            ray.init()
+            # Cap num_cpus to avoid slow startup on high-core machines (e.g. 384 cores)
+            # where Ray pre-starts one worker per CPU, causing connect timeouts.
+            import os
+            _max_cpus = min(os.cpu_count() or 64, 64)
+            ray.init(num_cpus=_max_cpus)
 
     wandb_logger = None
     rollout_services = None
@@ -270,7 +274,6 @@ def train(args):  # [PUBLIC-API → main()] sync entrypoint
 
         rollout_services = create_rollout_services(
             args,
-            reward_pgs=pgs.get("reward"),
             launch_config=launch_config,
         )
 

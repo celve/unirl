@@ -10,8 +10,9 @@ import torch
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.distributed.weight_sync_checkpoint import wait_for_published_checkpoint
 from diffusionrl.ray.actor_config import RolloutActorConfig
-from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
+from diffusionrl.reward.pipeline import score_and_attach_rewards
 from diffusionrl.reward.schema import RewardSchema
+from diffusionrl.reward.service import RewardService
 from diffusionrl.samplers.construction import create_rollout_engine_from_init_payload
 from diffusionrl.samplers.engine import BaseRolloutEngine, DistributedWeightSyncCapable
 from diffusionrl.samplers.fsdp.sampler_runner import finalize_sampling_output
@@ -92,7 +93,7 @@ class RolloutActor:
         self._scheduler_endpoint: Optional[str] = None
         self._weight_update_target: str = f"actor_rank:{self.rank}"
         self._reward_schema: Optional[RewardSchema] = None
-        self._local_reward_runtime: Optional[ActorLocalRewardPrecompute] = None
+        self._reward_service: Optional[RewardService] = None
 
     def _log_resource_ids(self, tag: str) -> None:
         log_resource_ids(tag, self.rank)
@@ -171,15 +172,14 @@ class RolloutActor:
             return
         self.engine.wake_up()
 
-    def _uses_rollout_local_reward(self) -> bool:
-        return bool(self._reward_schema is not None and self._reward_schema.uses_sampling_actor_execution)
-
-    def _ensure_local_reward_runtime(self) -> ActorLocalRewardPrecompute:
-        if not self._uses_rollout_local_reward():
-            raise RuntimeError("Local reward runtime requested but reward_location!='sampling_actor'.")
-        if self._local_reward_runtime is None:
-            self._local_reward_runtime = ActorLocalRewardPrecompute(self._reward_schema)
-        return self._local_reward_runtime
+    def _ensure_reward_service(self) -> RewardService:
+        if self._reward_schema is None:
+            raise RuntimeError(
+                "Reward service requested before reward schema initialization."
+            )
+        if self._reward_service is None:
+            self._reward_service = RewardService(self._reward_schema)
+        return self._reward_service
 
     @staticmethod
     def _parse_transport_dtype(value: Any) -> Optional[torch.dtype]:
@@ -812,7 +812,8 @@ class RolloutActor:
                 "engine_capabilities": engine_caps,
             },
             local_reward_attach_fn=(
-                lambda current_output: self._ensure_local_reward_runtime().attach_to_output(
+                lambda current_output: score_and_attach_rewards(
+                    reward_service=self._ensure_reward_service(),
                     output=current_output,
                     prompts=list(request.prompts),
                     prompt_ids=request.meta.get("prompt_ids"),
@@ -826,7 +827,7 @@ class RolloutActor:
                         1, int(request.sampling.get("samples_per_prompt", 1))
                     ),
                 )
-            ) if self._uses_rollout_local_reward() else None,
+            ),
             transport_optimize_fn=self._optimize_output_for_transport,
             move_output_to_cpu=True,
         )
@@ -1094,8 +1095,8 @@ class RolloutActor:
         """Put engine into sleep mode to release runtime resources."""
         if self.engine is not None:
             self.engine.sleep()
-        if self._local_reward_runtime is not None:
-            self._local_reward_runtime.offload()
+        if self._reward_service is not None:
+            self._reward_service.offload()
         logger.info(f"Rank {self.rank}: Engine entered sleep mode")
         self._log_gpu_state("inference_sleep")
 
@@ -1103,8 +1104,8 @@ class RolloutActor:
         """Wake engine up for generation or weight update."""
         if self.engine is not None:
             self.engine.wake_up()
-        if self._local_reward_runtime is not None:
-            self._local_reward_runtime.onload()
+        if self._reward_service is not None:
+            self._reward_service.onload()
         logger.info(f"Rank {self.rank}: Engine wake_up complete")
         self._log_gpu_state("inference_wake_up")
 

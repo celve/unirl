@@ -167,8 +167,8 @@ class RewardConfig:
 
     reward_backend: str = field(default="local",
         metadata={
-            "help": "Reward backend: local, http, ray_pool",
-            "choices": ["local", "http", "ray_pool"],
+            "help": "Reward backend: local or http",
+            "choices": ["local", "http"],
         },
     )
 
@@ -188,19 +188,6 @@ class RewardConfig:
     local_reward_device: str = field(default="cpu",
         metadata={"help": "Device for local in-process reward scorers: cpu, auto, or cuda"})
 
-    # ray_pool reward pool related fields    
-    reward_dedicated_num_nodes: int = field(default=0,
-        metadata={"help": "Number of nodes for dedicated reward actors (mutually exclusive with num_gpus)"})
-    reward_dedicated_num_gpus: int = field(default=0,
-        metadata={"help": "Total GPUs for dedicated reward actors (0 = CPU reward)"})
-    reward_dedicated_num_gpus_per_node: int = field(default=0,
-        metadata={"help": "GPUs per node for dedicated reward actors"})
-    reward_dedicated_gpus_per_actor: int = field(default=1,
-        metadata={"help": "GPUs per individual reward actor"})
-    reward_location: str = field(default="auto",
-        metadata={"help": "Where default reward scoring runs: auto, driver, or sampling_actor"})
-
-   
     # multi-reward related fields
     reward_weights: Optional[List[float]] = field(default=None,
         metadata={"help": "Weights for each reward component in multi-reward aggregation"})
@@ -223,24 +210,12 @@ class RewardConfig:
             return False
         return any(str(name or "").strip() for name in self.reward_components)
 
-    @property
-    def has_dedicated_reward_pool(self) -> bool:
-        return bool(
-            self.reward_dedicated_num_gpus > 0 or self.reward_dedicated_num_nodes > 0
-        )
-
     def validate(self) -> None:
         reward_backend = str(self.reward_backend or "local").strip().lower()
-        if reward_backend not in ("local", "http", "ray_pool"):
+        if reward_backend not in ("local", "http"):
             raise ValueError(
-                "reward_backend must be one of local/http/ray_pool, "
+                "reward_backend must be one of local/http, "
                 f"got: {self.reward_backend}"
-            )
-        reward_location = str(self.reward_location or "auto").strip().lower()
-        if reward_location not in ("driver", "sampling_actor", "auto"):
-            raise ValueError(
-                "reward_location must be one of driver/sampling_actor/auto, "
-                f"got: {self.reward_location}"
             )
         local_reward_device = str(self.local_reward_device or "cpu").strip().lower()
         if local_reward_device not in ("cpu", "auto", "cuda"):
@@ -250,20 +225,9 @@ class RewardConfig:
             )
         if reward_backend == "http" and not self.has_http_reward_urls:
             raise ValueError("reward_backend='http' requires reward_service_urls.")
-
         if reward_backend != "http" and self.has_http_reward_urls:
             raise ValueError(
                 "reward_service_urls is only valid when reward_backend='http'."
-            )
-        if reward_backend == "ray_pool" and not self.has_dedicated_reward_pool:
-            raise ValueError(
-                "reward_backend='ray_pool' requires reward_dedicated_num_gpus "
-                "or reward_dedicated_num_nodes."
-            )
-        if reward_backend != "ray_pool" and self.has_dedicated_reward_pool:
-            raise ValueError(
-                "reward_dedicated_* settings are only valid when "
-                "reward_backend='ray_pool'."
             )
         if not self.has_http_reward and not self.reward_dotpath and not self.has_builtin_reward:
             raise ValueError(

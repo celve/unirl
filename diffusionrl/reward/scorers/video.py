@@ -8,7 +8,8 @@ from typing import List, Optional
 import torch
 from PIL import Image
 
-from diffusionrl.reward.base import BaseRewardScorer, RewardRequest, RewardResponse
+from diffusionrl.reward.base import BaseRewardScorer
+from diffusionrl.types.reward import RewardRequest, RewardResponse
 
 from .registry import resolve_builtin_reward_scorer_class
 

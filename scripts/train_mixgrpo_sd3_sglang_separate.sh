@@ -65,6 +65,7 @@ PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMP
 # Reward
 REWARD_MIX_MODE=${REWARD_MIX_MODE:-reward}
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-hpsv2}
+LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cuda}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
 
@@ -99,6 +100,7 @@ python -m diffusionrl.train \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --algorithm.algorithm-dotpath diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
     --reward.reward-components "${REWARD_MODEL_NAME}" \
+    --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
     --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \

@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import torch
 
+from diffusionrl.reward.pipeline import read_rewards
 from diffusionrl.rollout.base_types import (
     RewardHookResult,
     RolloutContext,
@@ -87,11 +88,9 @@ def score_rewards_hook(
     samples: List[Any],
     rollout_id: int,
 ) -> RewardHookResult:
-    """Default reward hook backed by the configured reward service/pipeline."""
-    rewards, component_rewards = services.score_rewards(
-        request=request,
+    """Default reward hook: read precomputed rewards from sampler output metadata."""
+    rewards, component_rewards = read_rewards(
         sampler_outputs=samples,
-        samples_per_prompt_override=max(1, int(request.sampling.get("samples_per_prompt", 1))),
     )
     return RewardHookResult(
         rewards=rewards,

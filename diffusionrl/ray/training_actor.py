@@ -25,8 +25,9 @@ from diffusionrl.models import create_model_bundle_from_init_payload
 from diffusionrl.patches.replay_logprob import ReplayLogProbPatch
 from diffusionrl.ray.actor_config import TrainingActorConfig
 from diffusionrl.ray.training_actor_sampling import ActorSamplingExecutor
-from diffusionrl.reward.actor_local import ActorLocalRewardPrecompute
+from diffusionrl.reward.pipeline import score_and_attach_rewards
 from diffusionrl.reward.schema import RewardSchema
+from diffusionrl.reward.service import RewardService
 from diffusionrl.samplers.fsdp.sampler_runner import finalize_sampling_output
 from diffusionrl.training import (
     TrainExecutor,
@@ -256,7 +257,7 @@ class TrainingActor(BaseTrainRayActor):
         self._lora_initialized_on_rollout = False
         self._reward_config: Dict[str, Any] = {}
         self._reward_schema: Optional[RewardSchema] = None
-        self._local_reward_runtime: Optional[ActorLocalRewardPrecompute] = None
+        self._reward_service: Optional[RewardService] = None
         self._training_workflow = TrainingWorkflow()
 
     def _log_resource_ids(self, tag: str) -> None:
@@ -464,21 +465,20 @@ class TrainingActor(BaseTrainRayActor):
         self._log_resource_ids("training_init")
         self._log_gpu_state("training_init")
 
-    def _uses_rollout_local_reward(self) -> bool:
-        # Local reward follows the active sampling host rather than the
+    def _ensure_reward_service(self) -> RewardService:
+        # Reward execution follows the active sampling host rather than the
         # training/update path itself. In direct actor-sampling mode the
-        # TrainingActor temporarily acts as that host, so it needs the same
-        # actor-local reward attach step that dedicated rollout actors use.
-        return bool(self._reward_schema is not None and self._reward_schema.uses_sampling_actor_execution)
+        # TrainingActor temporarily acts as that host, so it owns the same
+        # actor-side reward attach step as dedicated rollout actors.
+        if self._reward_schema is None:
+            raise RuntimeError(
+                "Reward service requested before reward schema initialization."
+            )
+        if self._reward_service is None:
+            self._reward_service = RewardService(self._reward_schema)
+        return self._reward_service
 
-    def _ensure_local_reward_runtime(self) -> ActorLocalRewardPrecompute:
-        if not self._uses_rollout_local_reward():
-            raise RuntimeError("Local reward runtime requested but reward_location!='sampling_actor'.")
-        if self._local_reward_runtime is None:
-            self._local_reward_runtime = ActorLocalRewardPrecompute(self._reward_schema)
-        return self._local_reward_runtime
-
-    def _attach_local_reward_to_output(
+    def _attach_reward_to_output(
         self,
         *,
         output: RolloutSamples,
@@ -490,9 +490,8 @@ class TrainingActor(BaseTrainRayActor):
         collect_media_preview: bool,
         samples_per_prompt: int,
     ) -> RolloutSamples:
-        if not self._uses_rollout_local_reward():
-            return output
-        return self._ensure_local_reward_runtime().attach_to_output(
+        return score_and_attach_rewards(
+            reward_service=self._ensure_reward_service(),
             output=output,
             prompts=list(prompts),
             prompt_ids=prompt_ids,
@@ -765,7 +764,7 @@ class TrainingActor(BaseTrainRayActor):
             host_label="training-actor sampling",
             decode_latents_fn=lambda latents: self._actor_sampling_executor.decode_latents(self, latents),
             local_reward_attach_fn=(
-                lambda current_output: self._attach_local_reward_to_output(
+                lambda current_output: self._attach_reward_to_output(
                     output=current_output,
                     prompts=prompts,
                     prompt_ids=request.meta.get("prompt_ids"),
@@ -1468,8 +1467,8 @@ class TrainingActor(BaseTrainRayActor):
 
     def offload(self) -> None:
         """Offload model and optimizer to CPU."""
-        if self._local_reward_runtime is not None:
-            self._local_reward_runtime.offload()
+        if self._reward_service is not None:
+            self._reward_service.offload()
         backend = getattr(self, "_train_backend", None)
         if backend is not None:
             if backend.offload(self):
@@ -1504,8 +1503,8 @@ class TrainingActor(BaseTrainRayActor):
 
     def onload(self) -> None:
         """Load model and optimizer back to GPU."""
-        if self._local_reward_runtime is not None:
-            self._local_reward_runtime.onload()
+        if self._reward_service is not None:
+            self._reward_service.onload()
         backend = getattr(self, "_train_backend", None)
         if backend is not None:
             if backend.onload(self):

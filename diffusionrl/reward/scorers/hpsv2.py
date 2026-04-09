@@ -7,7 +7,7 @@ from typing import List
 import torch
 from PIL import Image
 
-from diffusionrl.reward.base import RewardRequest, RewardType
+from diffusionrl.types.reward import RewardRequest, RewardType
 
 from .base_local import BaseLocalRewardScorer
 

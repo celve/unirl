@@ -34,7 +34,6 @@
 # - LoRA: rank=32, alpha=64
 # - timestep_fraction=0.99
 # - training.num_updates_per_batch (+ optional training.micro_batch_size when tuning memory)
-# - reward_location=sampling_actor
 # - reward_components defaults to pickscore
 # - prompts_per_rollout=16, samples_per_prompt=8 on 8 GPUs
 # - sampling.max_samples_per_request only controls OOM-safe request splitting;
@@ -96,7 +95,6 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-flowgrpo_sd3_train_actor_sampling}
 WANDB_LOG_MEDIA=${WANDB_LOG_MEDIA:-true}
 WANDB_MEDIA_MAX_ITEMS=${WANDB_MEDIA_MAX_ITEMS:-16}
 REWARD_MODEL_NAME=${REWARD_MODEL_NAME:-pickscore}
-REWARD_LOCATION=${REWARD_LOCATION:-sampling_actor}
 LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cuda}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 SHUFFLE_SAMPLES=${SHUFFLE_SAMPLES:-true}
@@ -125,7 +123,6 @@ python -m diffusionrl.train \
     --sampling.sampler-dotpath diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
     --algorithm.algorithm-dotpath diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-components "${REWARD_MODEL_NAME}" \
-    --reward.reward-location "${REWARD_LOCATION}" \
     --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
     --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \

@@ -31,17 +31,9 @@ class RuntimePlacementConfig:
     training_num_nodes: int = 1
     training_num_gpus_per_node: int = 4
 
-    # Dedicated reward computation resources (optional)
-    reward_dedicated_num_gpus: int = 0  # 0 means no dedicated reward GPU pool
-
     # Deployment strategy
     colocate_rollout: bool = False
     strategy: str = "PACK"  # "PACK" or "SPREAD"
-
-    # Node-level dedicated reward configuration
-    reward_dedicated_num_nodes: int = 0  # Dedicated reward nodes (0 = use reward_dedicated_num_gpus directly)
-    reward_dedicated_num_gpus_per_node: int = 0  # GPUs per dedicated reward node
-    reward_dedicated_gpus_per_actor: int = 1  # GPUs per dedicated reward actor
 
 
 @ray.remote(num_cpus=1)
@@ -197,7 +189,7 @@ def create_placement_groups(
     Create placement groups for diffusionRL training (unified single_pg mode).
 
     Creates one placement group with uniform {"GPU": 1} bundles, then
-    slices bundles by linear offsets for rollout / training / reward roles.
+    slices bundles by linear offsets for rollout / training roles.
 
     Args:
         config: Placement configuration
@@ -206,7 +198,6 @@ def create_placement_groups(
         Dictionary with keys:
             - "rollout": (pg, bundle_indices, gpu_ids) or None
             - "training": (pg, bundle_indices, gpu_ids) or None
-            - "reward": (pg, bundle_indices, gpu_ids) or None
     """
     return _create_single_pg(config)
 
@@ -220,23 +211,15 @@ def _create_single_pg(
     result: Dict[str, Optional[PlacementGroupResult]] = {
         "rollout": None,
         "training": None,
-        "reward": None,
     }
 
     # Calculate total GPUs needed
     rollout_total_gpus = config.rollout_num_nodes * config.rollout_num_gpus_per_node
     training_total_gpus = config.training_num_nodes * config.training_num_gpus_per_node
 
-    # Calculate total reward GPUs
-    if config.reward_dedicated_num_nodes > 0:
-        reward_total_gpus = config.reward_dedicated_num_nodes * config.reward_dedicated_num_gpus_per_node
-    else:
-        reward_total_gpus = config.reward_dedicated_num_gpus
-
     if config.colocate_rollout:
         # Colocate: rollout and training share same GPU bundles
-        shared_gpus = max(rollout_total_gpus, training_total_gpus)
-        total_gpus = shared_gpus + reward_total_gpus
+        total_gpus = max(rollout_total_gpus, training_total_gpus)
 
         if total_gpus <= 0:
             return result
@@ -248,19 +231,13 @@ def _create_single_pg(
         )
 
         # Shared bundles for rollout/training
-        result["rollout"] = (pg, bundle_indices[:shared_gpus], gpu_ids[:shared_gpus])
-        result["training"] = (pg, bundle_indices[:shared_gpus], gpu_ids[:shared_gpus])
-
-        # Reward bundles (if any) are allocated after shared bundles
-        if reward_total_gpus > 0:
-            reward_start = shared_gpus
-            reward_end = shared_gpus + reward_total_gpus
-            result["reward"] = (pg, bundle_indices[reward_start:reward_end], gpu_ids[reward_start:reward_end])
+        result["rollout"] = (pg, bundle_indices[:total_gpus], gpu_ids[:total_gpus])
+        result["training"] = (pg, bundle_indices[:total_gpus], gpu_ids[:total_gpus])
 
         return result
 
-    # Non-colocate: single PG sliced by linear offsets for rollout/training/reward.
-    total_gpus = rollout_total_gpus + training_total_gpus + reward_total_gpus
+    # Non-colocate: single PG sliced by linear offsets for rollout/training.
+    total_gpus = rollout_total_gpus + training_total_gpus
     if total_gpus <= 0:
         return result
 
@@ -282,16 +259,6 @@ def _create_single_pg(
     if training_total_gpus > 0:
         train_end = cursor + training_total_gpus
         result["training"] = (pg, bundle_indices[cursor:train_end], gpu_ids[cursor:train_end])
-        cursor = train_end
-
-    if reward_total_gpus > 0:
-        reward_end = cursor + reward_total_gpus
-        if reward_end > len(bundle_indices):
-            raise ValueError(
-                f"Not enough GPUs for reward allocation: requested {reward_total_gpus}, "
-                f"available {len(bundle_indices) - cursor}"
-            )
-        result["reward"] = (pg, bundle_indices[cursor:reward_end], gpu_ids[cursor:reward_end])
 
     return result
 
@@ -321,12 +288,8 @@ def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroup
         rollout_num_gpus_per_node=placement.rollout_num_gpus_per_node,
         training_num_nodes=placement.training_num_nodes,
         training_num_gpus_per_node=placement.training_num_gpus_per_node,
-        reward_dedicated_num_gpus=placement.reward_dedicated_num_gpus,
         colocate_rollout=placement.colocate_rollout,
         strategy=placement.strategy,
-        reward_dedicated_num_nodes=placement.reward_dedicated_num_nodes,
-        reward_dedicated_num_gpus_per_node=placement.reward_dedicated_num_gpus_per_node,
-        reward_dedicated_gpus_per_actor=placement.reward_dedicated_gpus_per_actor,
     )
     return create_placement_groups(config)
 
@@ -340,12 +303,8 @@ def create_placement_groups_from_launch(
         rollout_num_gpus_per_node=placement.rollout_num_gpus_per_node,
         training_num_nodes=placement.training_num_nodes,
         training_num_gpus_per_node=placement.training_num_gpus_per_node,
-        reward_dedicated_num_gpus=placement.reward_dedicated_num_gpus,
         colocate_rollout=placement.colocate_rollout,
         strategy=placement.strategy,
-        reward_dedicated_num_nodes=placement.reward_dedicated_num_nodes,
-        reward_dedicated_num_gpus_per_node=placement.reward_dedicated_num_gpus_per_node,
-        reward_dedicated_gpus_per_actor=placement.reward_dedicated_gpus_per_actor,
     )
     return create_placement_groups(config)
 

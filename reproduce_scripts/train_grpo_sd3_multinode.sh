@@ -114,7 +114,6 @@ WANDB_ENTITY="${WANDB_ENTITY:-diffusionrl-reproduce}"
 LOGGING_STEPS=1
 
 REWARD_DEVICE="cuda"
-REWARD_LOCATION="sampling_actor"
 
 # ── Helpers ──
 print_usage() {
@@ -180,7 +179,6 @@ run_training() {
         --sampling.sampler-dotpath diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
         --algorithm.algorithm-dotpath diffusionrl.algorithms.grpo.GRPOAlgorithm \
         --reward.reward-components "${REWARD_NAME}" \
-        --reward.reward-location "${REWARD_LOCATION}" \
         --reward.local-reward-device "${REWARD_DEVICE}" \
         --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \
         --data-path "${DATA_PATH}" \

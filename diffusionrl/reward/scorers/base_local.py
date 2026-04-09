@@ -8,7 +8,8 @@ from typing import List, Optional
 
 import torch
 
-from diffusionrl.reward.base import BaseRewardScorer, RewardRequest, RewardResponse
+from diffusionrl.reward.base import BaseRewardScorer
+from diffusionrl.types.reward import RewardRequest, RewardResponse
 
 
 class BaseLocalRewardScorer(BaseRewardScorer):

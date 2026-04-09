@@ -8,7 +8,7 @@ from typing import List
 from PIL import Image
 from tqdm import tqdm
 
-from diffusionrl.reward.base import RewardRequest, RewardType
+from diffusionrl.types.reward import RewardRequest, RewardType
 
 from .base_local import BaseLocalRewardScorer
 

@@ -40,6 +40,7 @@ BATCH_SIZE=${BATCH_SIZE:-6}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-24}
 TP_SIZE=${TP_SIZE:-1}
 SGLANG_LOGPROB_MODE=${SGLANG_LOGPROB_MODE:-replay}
+LOCAL_REWARD_DEVICE=${LOCAL_REWARD_DEVICE:-cpu}
 
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-$(( TRAINING_GPUS * BATCH_SIZE / NUM_SAMPLES_PER_PROMPT ))}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
@@ -85,6 +86,7 @@ python -m diffusionrl.train \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     --algorithm.algorithm-dotpath diffusionrl.algorithms.nft.NFTAlgorithm \
     --reward.reward-components ocr \
+    --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
     --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \
     --data-path "${DATA_PATH}" \
     \

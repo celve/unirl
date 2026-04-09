@@ -312,7 +312,7 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
             group_ids=rollout_result.request.meta.get("group_ids"),
             component_rewards=rollout_result.component_rewards,
         )
-        training_batch = services.assemble_training_batch(
+        training_batch = services.algorithm.assemble_training_batch(
             request=rollout_result.request,
             sampler_outputs=rollout_result.sampler_outputs,
             rewards=rollout_result.rewards,
@@ -559,7 +559,6 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
 
         rollout_services = create_rollout_services(
             args,
-            reward_pgs=pgs.get("reward"),
             launch_config=launch_config,
         )
         dataset_step_info = compute_dataset_step_info(

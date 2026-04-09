@@ -1,18 +1,17 @@
-"""Reward-side request assembly and rollout-output scoring helpers."""
+"""Reward scoring pipeline: actor-side computation and driver-side reading."""
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
 from diffusionrl.types.reward import RewardRequest
 from diffusionrl.types.sampling import RolloutSamples
 
-logger = logging.getLogger(__name__)
 
-RewardScoringMode = Literal["service", "precomputed"]
+logger = logging.getLogger(__name__)
 
 
 def extract_images_from_output(output: RolloutSamples) -> List[Any]:
@@ -69,63 +68,56 @@ def resolve_reward_input_kind(*, reward_service: Any) -> str:
     )
 
 
-def _read_precomputed_reward_payload(
+def _read_reward_payload(
     output: RolloutSamples,
 ) -> Optional[Tuple[List[float], Dict[str, List[float]]]]:
     raw_metadata = output.aux.get("metadata")
     metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
-    raw_rewards = metadata.get("precomputed_rewards")
+    raw_rewards = metadata.get("rewards")
     if raw_rewards is None:
         return None
     rewards = [float(v) for v in list(raw_rewards)]
-    raw_component_rewards = metadata.get("precomputed_component_rewards")
+    raw_components = metadata.get("component_rewards")
     normalized_components: Dict[str, List[float]] = {}
-    for name, values in dict(raw_component_rewards or {}).items():
+    for name, values in dict(raw_components or {}).items():
         normalized_components[str(name)] = [float(v) for v in list(values or [])]
     return rewards, normalized_components
 
 
-def collect_precomputed_rewards(
+def read_rewards(
     *,
     sampler_outputs: List[RolloutSamples],
-) -> Optional[Tuple[torch.Tensor, Dict[str, List[float]]]]:
-    """Collect precomputed rewards from rollout outputs when available."""
+) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
+    """Read rewards from sampler output metadata (written by score_and_attach_rewards)."""
     if not sampler_outputs:
-        return None
+        raise RuntimeError(
+            "Reward read requires at least one rollout output with scored rewards."
+        )
 
-    saw_precomputed = False
-    saw_missing = False
     all_rewards: List[float] = []
     component_rewards: Dict[str, List[float]] = {}
 
     for output in sampler_outputs:
-        payload = _read_precomputed_reward_payload(output)
+        payload = _read_reward_payload(output)
         if payload is None:
-            saw_missing = True
-            continue
-        saw_precomputed = True
+            raise RuntimeError(
+                "Reward read requires scored rewards on all sampler outputs."
+            )
         rewards, components = payload
         if len(rewards) != int(output.latents.shape[0]):
             raise ValueError(
-                "Precomputed rewards length must match rollout output batch_size. "
+                "Rewards length must match rollout output batch_size. "
                 f"Got rewards={len(rewards)} batch_size={int(output.latents.shape[0])}."
             )
         all_rewards.extend(rewards)
         for name, values in components.items():
             if len(values) != len(rewards):
                 raise ValueError(
-                    "Precomputed reward component length must match reward length. "
+                    "Reward component length must match reward length. "
                     f"Got component={name} len={len(values)} rewards={len(rewards)}."
                 )
             component_rewards.setdefault(name, []).extend(values)
 
-    if saw_precomputed and saw_missing:
-        raise ValueError(
-            "Mixed rollout reward execution is not supported: some sampler outputs contain "
-            "precomputed rewards while others do not."
-        )
-    if not saw_precomputed:
-        return None
     return torch.tensor(all_rewards, dtype=torch.float32), component_rewards
 
 
@@ -260,9 +252,8 @@ def build_request_from_rollout_outputs(
     return RewardRequest(**request_kwargs)
 
 
-def score_from_rollout_outputs(
+def compute_rewards_from_rollout_outputs(
     *,
-    reward_scoring_mode: RewardScoringMode,
     reward_service: Any,
     samples_per_prompt: int,
     sampler_outputs: List[RolloutSamples],
@@ -272,30 +263,16 @@ def score_from_rollout_outputs(
     group_ids: Optional[List[str]] = None,
     prompt_metadata: Optional[List[Optional[Dict[str, Any]]]] = None,
 ) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
-    """Score rollout outputs through the reward subsystem."""
-    mode = str(reward_scoring_mode or "").strip().lower()
-    if mode not in {"service", "precomputed"}:
-        raise ValueError(
-            "Reward scoring mode must be one of service/precomputed. "
-            f"Got: {reward_scoring_mode!r}."
-        )
-
-    precomputed = collect_precomputed_rewards(sampler_outputs=sampler_outputs)
-    if mode == "precomputed":
-        if precomputed is None:
-            raise RuntimeError(
-                "Reward scoring mode='precomputed' requires precomputed rewards on all "
-                "sampler outputs."
-            )
-        return precomputed
-    if precomputed is not None:
-        raise RuntimeError(
-            "Reward scoring mode='service' does not accept precomputed rewards on sampler "
-            "outputs."
-        )
+    """Compute rewards from decoded rollout outputs on the sampling actor."""
     if reward_service is None:
+        raise RuntimeError("Reward executor is not initialized for actor-side reward compute.")
+    if any(
+        _read_reward_payload(output) is not None
+        for output in sampler_outputs
+    ):
         raise RuntimeError(
-            "Reward executor is not initialized for reward scoring mode='service'."
+            "Actor-side reward compute does not accept precomputed rewards on sampler "
+            "outputs."
         )
 
     request = build_request_from_rollout_outputs(
@@ -315,13 +292,55 @@ def score_from_rollout_outputs(
     )
 
 
+def score_and_attach_rewards(
+    *,
+    reward_service: Any,
+    output: RolloutSamples,
+    prompts: List[str],
+    prompt_ids: Optional[List[str]],
+    sample_ids: Optional[List[str]],
+    group_ids: Optional[List[str]],
+    prompt_metadata: Optional[List[Optional[Dict[str, Any]]]],
+    collect_media_preview: bool,
+    samples_per_prompt: int,
+) -> RolloutSamples:
+    """Score one sampler output and write rewards into its metadata.
+
+    After scoring, decoded media is dropped unless ``collect_media_preview``
+    is set, so that only scalar rewards travel back to the driver.
+    """
+    rewards, component_rewards = compute_rewards_from_rollout_outputs(
+        reward_service=reward_service,
+        samples_per_prompt=max(1, int(samples_per_prompt)),
+        sampler_outputs=[output],
+        prompts=list(prompts),
+        prompt_ids=prompt_ids,
+        sample_ids=sample_ids,
+        group_ids=group_ids,
+        prompt_metadata=prompt_metadata,
+    )
+    raw_meta = output.aux.get("metadata")
+    meta = dict(raw_meta or {})
+    meta["rewards"] = [float(v) for v in rewards.tolist()]
+    meta["component_rewards"] = {
+        str(name): [float(v) for v in list(values or [])]
+        for name, values in dict(component_rewards or {}).items()
+    }
+    output.aux["metadata"] = meta
+    if not collect_media_preview:
+        output.aux.pop("decoded_images", None)
+        if isinstance(output.aux.get("metadata"), dict):
+            output.aux["metadata"].pop("decoded_videos", None)
+    return output
+
+
 __all__ = [
-    "RewardScoringMode",
+    "compute_rewards_from_rollout_outputs",
     "extract_images_from_output",
     "extract_videos_from_output",
+    "read_rewards",
     "resolve_reward_input_kind",
-    "collect_precomputed_rewards",
     "normalize_prompt_metadata",
     "build_request_from_rollout_outputs",
-    "score_from_rollout_outputs",
+    "score_and_attach_rewards",
 ]

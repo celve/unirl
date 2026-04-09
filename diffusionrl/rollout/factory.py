@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
-
 from diffusionrl.algorithms.construction import create_algorithm_from_init_payload
 from diffusionrl.config.launch_resolution import LaunchConfig
 from diffusionrl.config.resolution import collect_sampling_requirements, derive_rollout_topology
-from diffusionrl.reward.factory import create_driver_reward_executor
 from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.rollout.service_interface import RolloutServices
 from diffusionrl.utils import load_function
@@ -20,9 +17,8 @@ DEFAULT_REWARD_HOOK_PATH = "diffusionrl.rollout.default_rollout.score_rewards_ho
 def create_rollout_services(
     args,
     *,
-    reward_pgs: Optional[Any] = None,
     launch_config: LaunchConfig,
-) -> Tuple[RolloutServices, Dict[str, Any]]:
+) -> RolloutServices:
     """Create rollout services and return dataset-step info for the driver."""
     if not isinstance(launch_config, LaunchConfig):
         raise ValueError(
@@ -34,12 +30,6 @@ def create_rollout_services(
     sampling_config = dict(launch_config.training_sampling_config)
     rollout_topology = derive_rollout_topology(args)
     reward_schema = RewardSchema.from_args(args)
-    reward_service = create_driver_reward_executor(
-        reward_schema,
-        reward_pgs=reward_pgs,
-    )
-    if reward_service is None and not reward_schema.uses_sampling_actor_execution:
-        raise RuntimeError("Driver failed to initialize driver-side reward service.")
 
     try:
         data_source_cls = load_function(args.data_source_dotpath)
@@ -47,11 +37,6 @@ def create_rollout_services(
     except Exception as exc:
         raise RuntimeError(f"Failed to load data source: {exc}") from exc
 
-    reward_scoring_mode = (
-        "precomputed"
-        if reward_schema.uses_sampling_actor_execution
-        else "service"
-    )
     prompt_batch_size = int(
         getattr(algorithm, "prompts_per_rollout", args.algorithm.prompts_per_rollout)
     )
@@ -63,8 +48,6 @@ def create_rollout_services(
 
     services = RolloutServices(
         algorithm=algorithm,
-        reward_scoring_mode=reward_scoring_mode,
-        reward_service=reward_service,
         data_source=data_source,
         is_direct_sampling_mode=rollout_topology.training_actor_sampling_mode,
         max_samples_per_request=args.sampling.max_samples_per_request,
@@ -77,7 +60,7 @@ def create_rollout_services(
         debug_mode=str(args.debug.debug_mode or "none"),
         debug_output_dir=getattr(args.debug, "debug_output_dir", None),
     )
-   
+
     return services
 
 

@@ -1,17 +1,96 @@
-"""Typed reward config contract shared by config and runtime layers."""
+"""Typed reward config contract: spec types and schema shared by config and runtime layers."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from diffusionrl.reward.spec import (
-    RewardComponentSpec,
-    RewardDefinition,
-    RewardExecutionPlan,
-    RewardProviderConfig,
-    resolve_reward_location,
-)
+
+# ---------------------------------------------------------------------------
+# Spec types (reward semantics, provider config, execution plan)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RewardComponentSpec:
+    """One semantic reward component."""
+
+    model_name: str
+    weight: float = 1.0
+
+
+@dataclass(frozen=True)
+class RewardDefinition:
+    """Semantic reward definition: what to compute and how to aggregate it."""
+
+    reward_aggregation_method: str
+    components: Tuple[RewardComponentSpec, ...]
+
+    @property
+    def is_multi_component(self) -> bool:
+        return len(self.components) > 1
+
+    @property
+    def default_model_name(self) -> str:
+        if not self.components:
+            return ""
+        return str(self.components[0].model_name)
+
+    @property
+    def component_names(self) -> Optional[list[str]]:
+        if not self.is_multi_component:
+            return None
+        return [str(component.model_name) for component in self.components]
+
+    @property
+    def component_weights_list(self) -> Optional[list[float]]:
+        if not self.is_multi_component:
+            return None
+        return [float(component.weight) for component in self.components]
+
+    @property
+    def reward_models(self) -> Optional[list[str]]:
+        """Backward-compatible alias for ``component_names``."""
+        return self.component_names
+
+    @property
+    def reward_weights(self) -> Optional[list[float]]:
+        """Backward-compatible alias for ``component_weights_list``."""
+        return self.component_weights_list
+
+    def component_weights(self) -> Dict[str, float]:
+        return {
+            str(component.model_name): float(component.weight)
+            for component in self.components
+        }
+
+
+@dataclass(frozen=True)
+class RewardProviderConfig:
+    """Provider/scorer configuration: which scorer to load and with what limits."""
+
+    reward_dotpath: Optional[str]
+    reward_model_ckpt_path: Optional[str]
+    batch_size: int
+    timeout: float = 60.0
+
+
+@dataclass(frozen=True)
+class RewardExecutionPlan:
+    """Runtime deployment plan: where and with what backend rewards execute."""
+
+    backend: str
+    local_device: str
+    reward_service_urls: Tuple[str, ...]
+
+    @property
+    def uses_http_backend(self) -> bool:
+        return str(self.backend or "local").strip().lower() == "http"
+
+
+# ---------------------------------------------------------------------------
+# RewardSchema (config → typed view)
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -27,11 +106,6 @@ class RewardSchema:
     reward_components: Optional[List[str]]
     reward_weights: Optional[List[float]]
     reward_aggregation_method: str
-    reward_dedicated_gpus_per_actor: int
-    reward_dedicated_num_gpus: int
-    reward_dedicated_num_nodes: int
-    reward_dedicated_num_gpus_per_node: int
-    reward_location: str
 
     @classmethod
     def from_args(cls, args) -> "RewardSchema":
@@ -47,20 +121,7 @@ class RewardSchema:
             reward_components=rc.reward_components,
             reward_weights=rc.reward_weights,
             reward_aggregation_method=rc.reward_aggregation_method,
-            reward_dedicated_gpus_per_actor=int(rc.reward_dedicated_gpus_per_actor),
-            reward_dedicated_num_gpus=int(rc.reward_dedicated_num_gpus),
-            reward_dedicated_num_nodes=int(rc.reward_dedicated_num_nodes),
-            reward_dedicated_num_gpus_per_node=int(rc.reward_dedicated_num_gpus_per_node),
-            reward_location=str(rc.reward_location),
         )
-
-    @property
-    def uses_sampling_actor_execution(self) -> bool:
-        return self.to_execution_plan().uses_sampling_actor_execution
-
-    @property
-    def uses_driver_execution(self) -> bool:
-        return self.to_execution_plan().uses_driver_execution
 
     def to_definition(self) -> RewardDefinition:
         raw_components = self.reward_components
@@ -93,9 +154,9 @@ class RewardSchema:
 
     def to_execution_plan(self) -> RewardExecutionPlan:
         backend = str(self.reward_backend or "local").strip().lower()
-        if backend not in {"local", "http", "ray_pool"}:
+        if backend not in {"local", "http"}:
             raise ValueError(
-                "reward_backend must be one of local/http/ray_pool, "
+                "reward_backend must be one of local/http, "
                 f"got: {self.reward_backend!r}."
             )
         service_urls = tuple(
@@ -104,21 +165,19 @@ class RewardSchema:
             if str(url or "").strip()
         )
         return RewardExecutionPlan(
-            location=resolve_reward_location(
-                location=str(self.reward_location or "auto"),
-                backend=backend,
-            ),
             backend=backend,
             local_device=str(self.local_reward_device or "cpu"),
             reward_service_urls=service_urls,
-            dedicated_num_gpus=int(self.reward_dedicated_num_gpus),
-            dedicated_num_nodes=int(self.reward_dedicated_num_nodes),
-            dedicated_num_gpus_per_node=int(self.reward_dedicated_num_gpus_per_node),
-            dedicated_gpus_per_actor=int(self.reward_dedicated_gpus_per_actor),
         )
 
     def component_weights(self) -> dict[str, float]:
         return self.to_definition().component_weights()
 
 
-__all__ = ["RewardSchema"]
+__all__ = [
+    "RewardComponentSpec",
+    "RewardDefinition",
+    "RewardExecutionPlan",
+    "RewardProviderConfig",
+    "RewardSchema",
+]

@@ -22,9 +22,6 @@ from .scorers.registry import resolve_builtin_reward_scorer_class
 
 logger = logging.getLogger(__name__)
 
-# Type alias for placement group result
-PlacementGroupResult = Tuple[Any, List[int], List[int]]  # (pg, bundle_indices, gpu_ids)
-
 
 class InProcessRewardExecutor(BaseRewardExecutor):
     """Thin executor wrapper around one in-process reward scorer."""
@@ -66,37 +63,22 @@ class InProcessRewardExecutor(BaseRewardExecutor):
 class RewardService:
     """Reward service that owns per-component executors for one runtime host."""
 
-    def _bind_reward_schema(
+    def __init__(
         self,
         reward_schema: RewardSchema,
-        *,
-        reward_pgs: Optional[PlacementGroupResult],
-        owner_name: str,
     ) -> None:
         if not isinstance(reward_schema, RewardSchema):
             raise TypeError(
-                f"{owner_name} requires RewardSchema, "
+                f"RewardService requires RewardSchema, "
                 f"got: {type(reward_schema).__name__}"
             )
         self.reward_schema = reward_schema
         self.reward_definition = reward_schema.to_definition()
         self.reward_provider = reward_schema.to_provider_config()
         self.execution_plan = reward_schema.to_execution_plan()
-        self.reward_pg = reward_pgs
         self.executors = []
         self.reward_aggregation_method = (
             self.reward_definition.reward_aggregation_method
-        )
-
-    def __init__(
-        self,
-        reward_schema: RewardSchema,
-        reward_pgs: Optional[PlacementGroupResult] = None,
-    ) -> None:
-        self._bind_reward_schema(
-            reward_schema,
-            reward_pgs=reward_pgs,
-            owner_name="RewardService",
         )
 
         self._init_executors()
@@ -111,27 +93,15 @@ class RewardService:
         """Initialize executors based on execution plan."""
         if self.execution_plan.uses_http_backend:
             self._init_http_executors()
-        elif self._should_use_ray_executors():
-            self._init_ray_executors()
         else:
             self._init_local_executors()
-
-    def _should_use_ray_executors(self) -> bool:
-        has_gpu_config = (
-            self.execution_plan.uses_ray_backend
-            and (
-                self.execution_plan.dedicated_num_gpus > 0
-                or self.execution_plan.dedicated_num_nodes > 0
-            )
-        )
-        has_pg = self.reward_pg is not None
-        return has_gpu_config and has_pg
 
     def _init_http_executors(self) -> None:
         """Initialize HTTP reward executors."""
         from .http import HTTPRewardExecutor
 
         urls = list(self.execution_plan.reward_service_urls or ())
+        component_names = self.reward_definition.component_names
         component_weights = self.reward_definition.component_weights_list
 
         for i, url in enumerate(urls):
@@ -142,83 +112,17 @@ class RewardService:
             if component_weights and i < len(component_weights):
                 weight = component_weights[i]
 
+            name = component_names[i] if component_names and i < len(component_names) else f"http_{i}"
+
             executor = HTTPRewardExecutor(
                 base_url=url,
-                model_name=f"http_{i}",
+                model_name=name,
                 weight=weight,
                 timeout=self.reward_provider.timeout,
                 batch_size=self.reward_provider.batch_size,
             )
             self.executors.append(executor)
-            logger.info("Added HTTPRewardExecutor: %s", url)
-
-    def _init_ray_executors(self) -> None:
-        """Initialize Ray reward executors for GPU-isolated rewards."""
-        from .ray_executor import RayRewardExecutor
-
-        pg, bundle_indices, gpu_ids = self.reward_pg
-        gpus_per_actor = self.execution_plan.dedicated_gpus_per_actor
-        component_names = self.reward_definition.component_names
-        component_weights = self.reward_definition.component_weights_list
-
-        if component_names:
-            weights = component_weights or [1.0] * len(component_names)
-
-            for i, model in enumerate(component_names):
-                weight = weights[i] if i < len(weights) else 1.0
-
-                actor_start = i * gpus_per_actor
-                actor_end = actor_start + gpus_per_actor
-
-                if actor_end > len(bundle_indices):
-                    logger.warning(
-                        "Not enough GPUs for model %s. Required %s, available %s",
-                        model,
-                        gpus_per_actor,
-                        len(bundle_indices) - actor_start,
-                    )
-                    break
-
-                executor = RayRewardExecutor(
-                    model_name=model,
-                    pg=pg,
-                    bundle_indices=bundle_indices[actor_start:actor_end],
-                    gpu_ids=gpu_ids[actor_start:actor_end],
-                    reward_dotpath=self.reward_provider.reward_dotpath,
-                    model_path=self.reward_provider.reward_model_ckpt_path,
-                    num_actors=1,
-                    gpus_per_actor=gpus_per_actor,
-                    batch_size=self.reward_provider.batch_size,
-                    timeout=self.reward_provider.timeout,
-                    parallel_mode=False,
-                    weight=weight,
-                )
-                self.executors.append(executor)
-                logger.info("Added RayRewardExecutor: %s (weight=%s)", model, weight)
-
-        else:
-            num_actors = len(gpu_ids) // gpus_per_actor
-
-            executor = RayRewardExecutor(
-                model_name=self.reward_definition.default_model_name,
-                pg=pg,
-                bundle_indices=bundle_indices,
-                gpu_ids=gpu_ids,
-                reward_dotpath=self.reward_provider.reward_dotpath,
-                model_path=self.reward_provider.reward_model_ckpt_path,
-                num_actors=num_actors,
-                gpus_per_actor=gpus_per_actor,
-                batch_size=self.reward_provider.batch_size,
-                timeout=self.reward_provider.timeout,
-                parallel_mode=True,
-                weight=1.0,
-            )
-            self.executors.append(executor)
-            logger.info(
-                "Added RayRewardExecutor: %s (%s parallel actors)",
-                self.reward_definition.default_model_name,
-                num_actors,
-            )
+            logger.info("Added HTTPRewardExecutor: %s (name=%s)", url, name)
 
     def _init_local_executors(self) -> None:
         """Initialize in-process executors backed by local scorers."""
@@ -249,9 +153,8 @@ class RewardService:
         if device == "cuda":
             logger.warning(
                 "Local reward scorer is running on CUDA in-process. "
-                "This can contend with rollout/training GPUs. Prefer dedicated reward "
-                "actors (reward_dedicated_*) or HTTP reward service for isolation when "
-                "you need strict resource isolation."
+                "This can contend with sampling GPUs. Prefer HTTP reward service "
+                "for isolation when you need strict resource isolation."
             )
 
         reward_dotpath = getattr(self.reward_provider, "reward_dotpath", None)

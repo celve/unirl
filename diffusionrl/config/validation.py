@@ -33,7 +33,6 @@ from diffusionrl.config.resolution import (
 from diffusionrl.config.spec import ModelSpec
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.ray.actor_config import RolloutActorConfig, TrainingActorConfig
-from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.sde.rules import (
     SUPPORTED_USER_SDE_TYPES,
     is_deterministic_sde_type,
@@ -679,7 +678,6 @@ def validate_weight_sync(
     is_multi_node = (
         int(args.ray.rollout_num_nodes) > 1
         or int(args.ray.training_num_nodes) > 1
-        or int(args.reward.reward_dedicated_num_nodes) > 1
     )
     if resolved_mode in {"tensor_payload", "nccl_broadcast"} and rollout_engine != "sglang":
         raise ValueError(
@@ -772,110 +770,22 @@ def validate_rollout_layout(
 
 
 def validate_reward_config(args: Any) -> None:
-    """Validate reward pool/source configuration consistency."""
+    """Validate reward configuration consistency."""
     reward_config = args.reward
-
-    if reward_config.reward_dedicated_gpus_per_actor > 1 and reward_config.reward_dedicated_num_gpus > 0:
-        if reward_config.reward_dedicated_num_gpus < reward_config.reward_dedicated_gpus_per_actor:
-            raise ValueError(
-                f"reward_dedicated_num_gpus ({reward_config.reward_dedicated_num_gpus}) must be >= "
-                f"reward_dedicated_gpus_per_actor ({reward_config.reward_dedicated_gpus_per_actor})"
-            )
-        if reward_config.reward_dedicated_num_gpus % reward_config.reward_dedicated_gpus_per_actor != 0:
-            raise ValueError(
-                f"reward_dedicated_num_gpus ({reward_config.reward_dedicated_num_gpus}) must be divisible by "
-                f"reward_dedicated_gpus_per_actor ({reward_config.reward_dedicated_gpus_per_actor})"
-            )
-
-    if reward_config.reward_dedicated_num_nodes > 0 and reward_config.reward_dedicated_num_gpus_per_node <= 0:
-        raise ValueError(
-            "reward_dedicated_num_gpus_per_node must be > 0 when reward_dedicated_num_nodes > 0"
-        )
-
-    if reward_config.reward_dedicated_num_gpus > 0 and reward_config.reward_dedicated_num_nodes > 0:
-        raise ValueError(
-            "reward_dedicated_num_gpus and reward_dedicated_num_nodes are mutually exclusive. "
-            "Use either total dedicated GPUs, or nodes * gpus_per_node."
-        )
-
-    reward_schema = RewardSchema.from_args(args)
-    execution_plan = reward_schema.to_execution_plan()
-    has_dedicated_reward_pool = reward_config.has_dedicated_reward_pool
-    has_http_reward_urls = reward_config.has_http_reward_urls
     has_http_reward = reward_config.has_http_reward
     local_reward_device = str(reward_config.local_reward_device or "cpu").strip().lower()
-    reward_backend = str(reward_config.reward_backend or "local").strip().lower()
-    requested_reward_location = str(reward_config.reward_location or "auto").strip().lower()
-    reward_location = str(execution_plan.location or "driver").strip().lower()
 
-    if has_http_reward and not has_http_reward_urls:
-        raise ValueError(
-            "reward_backend='http' requires reward_service_urls."
-        )
-    if reward_backend != "http" and has_http_reward_urls:
-        raise ValueError(
-            "reward_service_urls is only valid when reward_backend='http'."
-        )
-
-    if reward_location == "sampling_actor":
-        if has_dedicated_reward_pool:
-            raise ValueError(
-                "reward_location='sampling_actor' cannot be combined with dedicated reward actors. "
-                "Use reward_location='driver' for reward_dedicated_* modes."
-            )
-
-    uses_local_same_process_reward = (
-        reward_location == "driver"
-        and not has_http_reward
-        and not has_dedicated_reward_pool
-    )
-    if (
-        uses_local_same_process_reward
-        and local_reward_device == "cuda"
-    ):
-        raise ValueError(
-            "local_reward_device='cuda' in driver-local reward mode can contend with "
-            "rollout/training GPUs. Use dedicated reward actors (reward_dedicated_*) "
-            "or set reward_backend='http'."
-        )
-
-    if requested_reward_location == "auto":
-        logger.info(
-            "Resolved reward_location='auto' -> %s (backend=%s)",
-            reward_location,
-            execution_plan.backend,
-        )
-
-    if reward_location == "sampling_actor":
-        if has_http_reward:
-            logger.info("Reward mode: sampling-actor HTTP (external service)")
-        else:
-            logger.info(
-                "Reward mode: sampling-actor-local worker (local_reward_device=%s)",
-                local_reward_device,
-            )
-    elif has_http_reward:
-        logger.info("Reward mode: driver HTTP (external service)")
-    elif has_dedicated_reward_pool:
-        total_gpus = reward_config.reward_dedicated_num_gpus
-        if reward_config.reward_dedicated_num_nodes > 0:
-            total_gpus = reward_config.reward_dedicated_num_nodes * reward_config.reward_dedicated_num_gpus_per_node
-        num_actors = total_gpus // reward_config.reward_dedicated_gpus_per_actor
-        logger.info(
-            "Reward mode: Independent GPU (%s GPUs, %s actors, %s GPUs/actor)",
-            total_gpus,
-            num_actors,
-            reward_config.reward_dedicated_gpus_per_actor,
-        )
+    if has_http_reward:
+        logger.info("Reward mode: sampling-actor HTTP (external service)")
     else:
         logger.info(
-            "Reward mode: driver-local same-process worker (local_reward_device=%s)",
+            "Reward mode: sampling-actor-local worker (local_reward_device=%s)",
             local_reward_device,
         )
 
 
 def validate_reward_and_rollout_buffer_config(args: Any) -> None:
-    """Validate reward pool config and rollout-buffer controls."""
+    """Validate reward execution config and rollout-buffer controls."""
     validate_reward_config(args)
     rollout = args.rollout
 

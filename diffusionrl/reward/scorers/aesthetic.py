@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import List
 
-from diffusionrl.reward.base import RewardRequest
+from diffusionrl.types.reward import RewardRequest
 
 from .base_local import BaseLocalRewardScorer
 

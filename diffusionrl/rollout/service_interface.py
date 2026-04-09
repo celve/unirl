@@ -14,9 +14,7 @@ from diffusionrl.rollout.primitives import (
     normalize_rollout_outputs,
     plan_request_batches,
 )
-from diffusionrl.reward.pipeline import score_from_rollout_outputs as score_reward_stage
 from diffusionrl.types.sampling import RolloutRequest
-from diffusionrl.types.training_batch import TrainingBatch
 
 
 @dataclass(frozen=True)
@@ -179,8 +177,6 @@ class RolloutServices:
         *,
         algorithm: Any,
         data_source: Any,
-        reward_scoring_mode: str,
-        reward_service: Any,
         is_direct_sampling_mode: bool,
         max_samples_per_request: Optional[int],
         reward_component_weights: Optional[Dict[str, float]],
@@ -194,8 +190,6 @@ class RolloutServices:
     ) -> None:
         self.algorithm = algorithm
         self.data_source = data_source
-        self.reward_scoring_mode = str(reward_scoring_mode)
-        self.reward_service = reward_service
         self.is_direct_sampling_mode = bool(is_direct_sampling_mode)
         self.max_samples_per_request = (
             None if max_samples_per_request is None else int(max_samples_per_request)
@@ -228,9 +222,6 @@ class RolloutServices:
         return actor_group
 
     def dispose(self) -> None:
-        if self.reward_service is not None:
-            self.reward_service.dispose()
-            self.reward_service = None
         self._sampling_group = None
 
     def load_prompt_batch(self) -> Dict[str, Any]:
@@ -394,31 +385,6 @@ class RolloutServices:
         raw_outputs = ray.get(launched_request.future)
         return normalize_rollout_outputs(raw_outputs)
 
-    def score_rewards(
-        self,
-        *,
-        request: RolloutRequest,
-        sampler_outputs: List[Any],
-        samples_per_prompt_override: Optional[int] = None,
-    ) -> tuple[torch.Tensor, Dict[str, List[float]]]:
-        """Run the default reward stage for sampled rollout outputs."""
-        samples_per_prompt = int(
-            self.samples_per_prompt
-            if samples_per_prompt_override is None
-            else samples_per_prompt_override
-        )
-        return score_reward_stage(
-            reward_scoring_mode=self.reward_scoring_mode,
-            reward_service=self.reward_service,
-            samples_per_prompt=samples_per_prompt,
-            sampler_outputs=sampler_outputs,
-            prompts=list(request.prompts),
-            prompt_ids=request.meta.get("prompt_ids"),
-            sample_ids=request.meta.get("sample_ids"),
-            group_ids=request.meta.get("group_ids"),
-            prompt_metadata=request.meta.get("prompt_metadata"),
-        )
-
     def compute_advantages(
         self,
         *,
@@ -442,22 +408,6 @@ class RolloutServices:
             reward_component_weights=self.reward_component_weights,
         )
 
-    def assemble_training_batch(
-        self,
-        *,
-        request: RolloutRequest,
-        sampler_outputs: List[Any],
-        rewards: torch.Tensor,
-        advantages: torch.Tensor,
-        sde_indices: Optional[Set[int]] = None,
-    ) -> TrainingBatch:
-        return self.algorithm.assemble_training_batch(
-            request=request,
-            sampler_outputs=sampler_outputs,
-            rewards=rewards,
-            advantages=advantages,
-            sde_indices=sde_indices,
-        )
 
 
 __all__ = [

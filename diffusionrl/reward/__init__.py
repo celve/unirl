@@ -7,7 +7,6 @@ from typing import Dict, Tuple
 
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "AestheticRewardScorer": ("diffusionrl.reward.scorers.aesthetic", "AestheticRewardScorer"),
-    "ActorLocalRewardPrecompute": ("diffusionrl.reward.actor_local", "ActorLocalRewardPrecompute"),
     "BaseRewardExecutor": ("diffusionrl.reward.base", "BaseRewardExecutor"),
     "BaseLocalRewardScorer": ("diffusionrl.reward.scorers.base_local", "BaseLocalRewardScorer"),
     "BaseRewardScorer": ("diffusionrl.reward.base", "BaseRewardScorer"),
@@ -16,17 +15,17 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "HTTPRewardExecutor": ("diffusionrl.reward.http", "HTTPRewardExecutor"),
     "OCRRewardScorer": ("diffusionrl.reward.scorers.ocr", "OCRRewardScorer"),
     "PickScoreRewardScorer": ("diffusionrl.reward.scorers.pickscore", "PickScoreRewardScorer"),
-    "RayRewardExecutor": ("diffusionrl.reward.ray_executor", "RayRewardExecutor"),
-    "RewardComponentSpec": ("diffusionrl.reward.spec", "RewardComponentSpec"),
-    "RewardDefinition": ("diffusionrl.reward.spec", "RewardDefinition"),
-    "RewardExecutionPlan": ("diffusionrl.reward.spec", "RewardExecutionPlan"),
-    "RewardProviderConfig": ("diffusionrl.reward.spec", "RewardProviderConfig"),
+    "compute_rewards_from_rollout_outputs": ("diffusionrl.reward.pipeline", "compute_rewards_from_rollout_outputs"),
+    "RewardComponentSpec": ("diffusionrl.reward.schema", "RewardComponentSpec"),
+    "RewardDefinition": ("diffusionrl.reward.schema", "RewardDefinition"),
+    "RewardExecutionPlan": ("diffusionrl.reward.schema", "RewardExecutionPlan"),
+    "RewardProviderConfig": ("diffusionrl.reward.schema", "RewardProviderConfig"),
+    "read_rewards": ("diffusionrl.reward.pipeline", "read_rewards"),
+    "score_and_attach_rewards": ("diffusionrl.reward.pipeline", "score_and_attach_rewards"),
     "RewardSchema": ("diffusionrl.reward.schema", "RewardSchema"),
     "RewardService": ("diffusionrl.reward.service", "RewardService"),
     "VideoRewardScorer": ("diffusionrl.reward.scorers.video", "VideoRewardScorer"),
-    "create_driver_reward_executor": ("diffusionrl.reward.factory", "create_driver_reward_executor"),
     "resolve_reward_input_kind": ("diffusionrl.reward.pipeline", "resolve_reward_input_kind"),
-    "score_from_rollout_outputs": ("diffusionrl.reward.pipeline", "score_from_rollout_outputs"),
 }
 
 __all__ = sorted(_LAZY_ATTRS.keys())

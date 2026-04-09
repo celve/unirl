@@ -48,10 +48,6 @@ class PlacementSpec:
     rollout_num_gpus_per_node: int
     training_num_nodes: int
     training_num_gpus_per_node: int
-    reward_dedicated_num_gpus: int
-    reward_dedicated_num_nodes: int
-    reward_dedicated_num_gpus_per_node: int
-    reward_dedicated_gpus_per_actor: int
     colocate_rollout: bool
     strategy: str
 
@@ -108,16 +104,10 @@ def resolve_launch_placement_spec(
     rollout_num_gpus_per_node = int(args.ray.rollout_num_gpus_per_node)
     training_num_nodes = int(args.ray.training_num_nodes)
     training_num_gpus_per_node = int(args.ray.training_num_gpus_per_node)
-    reward_dedicated_num_gpus = int(args.reward.reward_dedicated_num_gpus)
-    reward_dedicated_num_nodes = int(args.reward.reward_dedicated_num_nodes)
-    reward_dedicated_num_gpus_per_node = int(args.reward.reward_dedicated_num_gpus_per_node)
 
     if debug_mode == "train_only":
         rollout_num_nodes = 0
         rollout_num_gpus_per_node = 0
-        reward_dedicated_num_gpus = 0
-        reward_dedicated_num_nodes = 0
-        reward_dedicated_num_gpus_per_node = 0
     elif resolved_mode_info.training_actor_sampling_mode:
         rollout_num_nodes = 0
         rollout_num_gpus_per_node = 0
@@ -127,10 +117,6 @@ def resolve_launch_placement_spec(
         rollout_num_gpus_per_node=rollout_num_gpus_per_node,
         training_num_nodes=training_num_nodes,
         training_num_gpus_per_node=training_num_gpus_per_node,
-        reward_dedicated_num_gpus=reward_dedicated_num_gpus,
-        reward_dedicated_num_nodes=reward_dedicated_num_nodes,
-        reward_dedicated_num_gpus_per_node=reward_dedicated_num_gpus_per_node,
-        reward_dedicated_gpus_per_actor=int(args.reward.reward_dedicated_gpus_per_actor),
         colocate_rollout=rollout_mode_is_colocated(
             resolved_mode_info.rollout_topology.mode
         ),

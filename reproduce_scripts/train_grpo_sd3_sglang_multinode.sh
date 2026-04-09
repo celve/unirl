@@ -51,6 +51,7 @@ export NCCL_PXN_DISABLE="${NCCL_PXN_DISABLE:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${REPO_ROOT}/scripts/_check_wandb.sh"
 
 # ── Role handling ──
 ROLE="${1:-}"
@@ -130,7 +131,6 @@ WANDB_ENTITY="${WANDB_ENTITY:-diffusionrl-reproduce}"
 LOGGING_STEPS=1
 
 REWARD_DEVICE="cuda"
-REWARD_LOCATION="sampling_actor"
 
 # ── Helpers ──
 print_usage() {
@@ -188,12 +188,13 @@ run_training() {
     echo "Weight sync dir: ${WEIGHT_SYNC_DIR}"
     echo "Output dir: ${OUTPUT_DIR}"
 
+    check_wandb_auth
+
     python -m diffusionrl.train \
         --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \
         --model.model-type sd3 \
         --algorithm.algorithm-dotpath diffusionrl.algorithms.grpo.GRPOAlgorithm \
         --reward.reward-components "${REWARD_NAME}" \
-        --reward.reward-location "${REWARD_LOCATION}" \
         --reward.local-reward-device "${REWARD_DEVICE}" \
         --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \
         --data-path "${DATA_PATH}" \

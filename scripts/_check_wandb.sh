@@ -13,6 +13,11 @@ check_wandb_auth() {
         return 0
     fi
 
+    # Skip credential check in offline mode
+    if [ "${WANDB_MODE:-}" = "offline" ] || [ "${WANDB_MODE:-}" = "disabled" ]; then
+        return 0
+    fi
+
     # 1. WANDB_API_KEY env var
     if [ -n "${WANDB_API_KEY:-}" ]; then
         return 0
