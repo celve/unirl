@@ -25,10 +25,10 @@ class PickScoreRewardScorer(BaseLocalRewardScorer):
             raise ImportError("transformers is required for PickScore")
 
         processor_path = self.model_kwargs.get(
-            "processor_id", "/apdcephfs_hldy2/share_305110755/hunyuan/kmwu/models/CLIP-ViT-H-14-laion2B-s32B-b79K"
+            "processor_id", "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
         )
         model_path = self.model_kwargs.get(
-            "model_id", "/apdcephfs_hldy2/share_305110755/hunyuan/kmwu/models/PickScore_v1"
+            "model_id", "yuvalkirstain/PickScore_v1"
         )
 
         self.processor = CLIPProcessor.from_pretrained(processor_path)

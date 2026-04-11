@@ -24,7 +24,7 @@ DiffusionRL supports the following diffusion models:
 
 - **Training Actors (Ray + TrainBackend)**: Responsible for the main training process through pluggable training backends (FSDP2 / VeOmni native; Megatron scaffold), reads `TrainingBatch` from the rollout buffer, and synchronizes parameters to the inference actors after training.
 - **Inference Actors (FSDP / SGLang)**: Generates denoising trajectories and latent samples using pluggable sampling engines, producing lightweight `RolloutSamples`.
-- **Reward Runtime**: Evaluates generated samples using configurable reward models (HPS, CLIP, PickScore, OCR, EditReward, etc.) through one actor-side precompute path with either local or HTTP-backed scoring.
+- **Reward Runtime**: Evaluates generated samples using configurable reward models (HPS, CLIP, PickScore, OCR, etc.) through one actor-side precompute path with either local or HTTP-backed scoring.
 - **RolloutServices + Rollout Functions**: The driver owns the outer rollout loop and directly holds `RolloutServices` plus the configured rollout/eval/reward hook callables. `RolloutServices` exposes request-level operations such as `build_request`, `plan_request_batches`, `execute_sampling_request`, `launch_sampling_request`, and `compute_advantages`; the configured rollout function (`rollout_function_dotpath`) is a first-class extension point for `prompt batch -> RolloutRequest -> sample -> reward hook`, and the driver entrypoint then computes advantages and assembles the final `TrainingBatch`.
 - **Reward Hook**: Reward is a first-class rollout hook (`reward_hook_dotpath`) rather than a hard-coded workflow stage. The default hook reads scalar rewards that were already attached on the active sampling actor, while custom hooks can post-process or replace that behavior.
 
@@ -132,16 +132,6 @@ The user-facing dataset contract is prompt-only:
 - JSON objects may use either `prompt` or `caption`
 - extra per-sample fields are preserved as metadata for reward/eval
 - precomputed embedding files are not a supported input path; if legacy manifests still contain embedding fields, they are ignored
-
-For editing rewards such as `editreward`, keep the source image in sample metadata so
-the reward scorer can compare `(source image, edited image, prompt)` triplets:
-
-```json
-{"prompt": "Add a green bowl on the branch", "metadata": {"source_image_path": "/path/to/source.png"}}
-```
-
-`editreward` accepts source-image metadata under common keys such as
-`source_image_path`, `source_image`, `image_src`, `input_image_path`, and related aliases.
 
 Default local paths are resolved against the repository root:
 
@@ -325,7 +315,7 @@ Arguments in DiffusionRL are organized into the following categories:
 1.  **Model arguments**: `--model.model-type`, `--model.pretrained-model-ckpt-path`, `--training.use-lora`, `--training.lora-rank`, `--training.lora-alpha`, etc.
 2.  **Sampling arguments**: `--sampling.sde-type`, `--sampling.eta`, `--sampling.num-inference-steps`, `--sampling.guidance-scale`, `--sampling.shift`, `--sampling.timestep-fraction`, etc.
 3.  **Algorithm arguments**: `--algorithm.algorithm-dotpath`, `--algorithm.prompts-per-rollout`, `--algorithm.samples-per-prompt`, plus shared typed fields such as `--algorithm.adv-normalization`, `--algorithm.eval-ema-decay`, and `--algorithm.shuffle-samples`. Use repeated `--algorithm.kwarg key=value` only for true algorithm-specific extension keys. In YAML, put those extension keys under `algorithm.algorithm_kwargs`.
-4.  **Reward arguments**: `--reward.reward-components` for built-in scorers, `--reward.reward-dotpath` for custom scorer dotpaths, `--reward.reward-model-ckpt-path` for scorer checkpoints, `--reward.reward-backend {local,http}`, `--reward.local-reward-device`, and `--reward.reward-service-urls` for HTTP-backed scoring, etc. For the built-in `editreward` scorer, point `--reward.reward-model-ckpt-path` at the EditReward checkpoint directory, make sure each prompt sample carries source-image metadata as described above, and install `EditReward` (or set `EDITREWARD_PYTHON_PATH` to a local checkout).
+4.  **Reward arguments**: `--reward.reward-components` for built-in scorers, `--reward.reward-dotpath` for custom scorer dotpaths, `--reward.reward-model-ckpt-path` for scorer checkpoints, `--reward.reward-backend {local,http}`, `--reward.local-reward-device`, and `--reward.reward-service-urls` for HTTP-backed scoring, etc.
 5.  **Training arguments**: `--training.learning-rate`, `--training.num-updates-per-batch`, `--training.micro-batch-size`, `--training.max-grad-norm`, etc.
 6.  **Runtime arguments**: `--ray.rollout-num-gpus-per-node`, `--ray.training-num-gpus-per-node`, `--ray.colocate-training-gpu-fraction`, `--ray.colocate-rollout-gpu-fraction`, `--ray.placement-strategy`, `--ray.offload-train`, `--ray.offload-rollout`, etc.
 
