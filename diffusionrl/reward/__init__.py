@@ -11,6 +11,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "BaseLocalRewardScorer": ("diffusionrl.reward.scorers.base_local", "BaseLocalRewardScorer"),
     "BaseRewardScorer": ("diffusionrl.reward.base", "BaseRewardScorer"),
     "ClipRewardScorer": ("diffusionrl.reward.scorers.clip", "ClipRewardScorer"),
+    "EditRewardScorer": ("diffusionrl.reward.scorers.editreward", "EditRewardScorer"),
     "HPSv2RewardScorer": ("diffusionrl.reward.scorers.hpsv2", "HPSv2RewardScorer"),
     "HTTPRewardExecutor": ("diffusionrl.reward.http", "HTTPRewardExecutor"),
     "OCRRewardScorer": ("diffusionrl.reward.scorers.ocr", "OCRRewardScorer"),
