@@ -10,7 +10,6 @@ from diffusionrl.reward.base import BaseRewardScorer
 _BUILTIN_SCORERS: Dict[str, Tuple[str, str]] = {
     "aesthetic": ("diffusionrl.reward.scorers.aesthetic", "AestheticRewardScorer"),
     "clip": ("diffusionrl.reward.scorers.clip", "ClipRewardScorer"),
-    "editreward": ("diffusionrl.reward.scorers.editreward", "EditRewardScorer"),
     "hpsv2": ("diffusionrl.reward.scorers.hpsv2", "HPSv2RewardScorer"),
     "ocr": ("diffusionrl.reward.scorers.ocr", "OCRRewardScorer"),
     "pickscore": ("diffusionrl.reward.scorers.pickscore", "PickScoreRewardScorer"),

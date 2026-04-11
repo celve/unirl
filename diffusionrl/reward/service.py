@@ -158,11 +158,6 @@ class RewardService:
             )
 
         reward_dotpath = getattr(self.reward_provider, "reward_dotpath", None)
-        reward_model_ckpt_path = getattr(
-            self.reward_provider,
-            "reward_model_ckpt_path",
-            None,
-        )
 
         def _create_executor(model_name: str, weight: float) -> BaseRewardExecutor:
             if reward_dotpath:
@@ -187,11 +182,6 @@ class RewardService:
                 init_kwargs["model_name"] = model_name
             elif "frame_reward_model" in ctor_params:
                 init_kwargs["frame_reward_model"] = model_name
-            if reward_model_ckpt_path:
-                if "reward_model_ckpt_path" in ctor_params:
-                    init_kwargs["reward_model_ckpt_path"] = reward_model_ckpt_path
-                elif "checkpoint_path" in ctor_params:
-                    init_kwargs["checkpoint_path"] = reward_model_ckpt_path
             if "weight" in ctor_params:
                 init_kwargs["weight"] = weight
             scorer = scorer_cls(**init_kwargs)
