@@ -453,8 +453,17 @@ class SD3ModelBundle(ModelBundle):
         Returns:
             Tuple of module types
         """
+        results: list[type] = []
+        # SD3.5 uses JointTransformerBlock
+        try:
+            from diffusers.models.transformers.transformer_sd3 import JointTransformerBlock
+            results.append(JointTransformerBlock)
+        except ImportError:
+            pass
+        # Older diffusers may use SD3TransformerBlock
         try:
             from diffusers.models.transformers.transformer_sd3 import SD3TransformerBlock
-            return (SD3TransformerBlock,)
+            results.append(SD3TransformerBlock)
         except ImportError:
-            return ()
+            pass
+        return tuple(results)

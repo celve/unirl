@@ -25,10 +25,15 @@ def build_fsdp_train_backend_config_from_args(args: Any) -> FSDPTrainBackendConf
         train_backend_kwargs=extra,
     )
     extra = _coerce_simple_dataclass_fields(FSDPTrainBackendConfig, extra)
+    # Inject fsdp_mode from dedicated CLI arg (--training.fsdp-mode)
+    fsdp_mode = str(getattr(args.training, "fsdp_mode", "full") or "full").strip().lower()
+    reshard_after_forward = bool(getattr(args.training, "reshard_after_forward", True))
     return FSDPTrainBackendConfig(
         backend_dotpath=_resolve_backend_dotpath_from_args(args),
         cpu_offload=bool(args.training.fsdp_cpu_offload),
         param_dtype=str(args.precision.fsdp_precision),
+        fsdp_mode=fsdp_mode,
+        reshard_after_forward=reshard_after_forward,
         **extra,
     )
 

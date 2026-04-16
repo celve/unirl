@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from functools import partial
 import tqdm as tqdm_
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
+from torch.profiler import profile as torch_profile, ProfilerActivity
 
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.training.batch_partition import shard_training_batch_for_rank
@@ -191,6 +193,33 @@ class TrainExecutor:
         training_schedule = self.update_schedule.name
 
         rank = self.config.rank
+
+        # ── Torch Profiler setup ──
+        _profile_enabled = os.environ.get("DIFFUSIONRL_PROFILE", "") == "1"
+        _profile_rollout = int(os.environ.get("DIFFUSIONRL_PROFILE_ROLLOUT", "0"))
+        _should_profile = _profile_enabled and rollout_id == _profile_rollout
+        _save_ranks = os.environ.get("DIFFUSIONRL_PROFILE_SAVE_RANKS", "0").split(",")
+        _should_save = _should_profile and str(rank) in _save_ranks
+
+        if _should_profile:
+            _profile_dir = os.environ.get("DIFFUSIONRL_PROFILE_DIR", "./profiler_output")
+            os.makedirs(_profile_dir, exist_ok=True)
+            _trace_path = os.path.join(_profile_dir, f"trace_rank{rank}.json")
+            _prof = torch_profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True,
+            )
+            _prof.__enter__()
+            logger.info(
+                "Torch profiler enabled: rank=%d, rollout_id=%d, save_trace=%s, output=%s",
+                rank, rollout_id, _should_save,
+                _trace_path if _should_save else "none",
+            )
+        else:
+            _prof = None
+
         for update_chunk in tqdm(
             self.update_schedule.iter_update_chunks(
                 batch=batch,
@@ -272,6 +301,13 @@ class TrainExecutor:
                 **all_metrics,
             }
             inner_metrics.append(step_metrics)
+
+        # ── Profiler cleanup ──
+        if _prof is not None:
+            _prof.__exit__(None, None, None)
+            if _should_save:
+                _prof.export_chrome_trace(_trace_path)
+                logger.info("Torch profiler trace saved: %s", _trace_path)
 
         metrics = aggregate_numeric_metrics(inner_metrics)
 

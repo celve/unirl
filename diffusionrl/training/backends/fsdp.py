@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 
@@ -19,6 +19,7 @@ from .base import (
 from .registry import register_train_backend
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 @dataclass(frozen=True)
 class FSDPTrainBackendConfig(BaseTrainBackendConfig):
@@ -27,6 +28,8 @@ class FSDPTrainBackendConfig(BaseTrainBackendConfig):
     param_dtype: str = "bf16"
     use_fsdp: bool = True
     mixed_precision: bool = True
+    fsdp_mode: str = "full"  # "full" = shard across all ranks; "hybrid" = HSDP, shard within node (8 GPUs)
+    reshard_after_forward: bool = True  # True = free full params after fwd (save mem); False = keep them (save bwd allgather)
 
 
 @register_train_backend(component_name="fsdp", component_cfg=FSDPTrainBackendConfig)
@@ -48,7 +51,10 @@ class FSDPTrainBackend(TrainBackend):
             "cpu_offload": bool(config.cpu_offload),
             "param_dtype": str(config.param_dtype),
             "mixed_precision": bool(config.mixed_precision),
+            "fsdp_mode": str(config.fsdp_mode).strip().lower(),
+            "reshard_after_forward": bool(config.reshard_after_forward),
         }
+        self._device_mesh: Optional[Any] = None  # cached DeviceMesh for HSDP
 
     @classmethod
     def declared_capabilities(cls) -> TrainBackendCapabilities:
@@ -148,19 +154,71 @@ class FSDPTrainBackend(TrainBackend):
         return model.module if hasattr(model, "module") else model
 
     def _iter_target_modules(self, actor: Any) -> Tuple[torch.nn.Module, ...]:
-        if not hasattr(actor, "model_bundle") or actor.model_bundle is None:
-            return tuple()
-        if not hasattr(actor.model_bundle, "get_no_split_modules"):
+        # 1. Try model_bundle.get_no_split_modules() first
+        no_split_modules: Tuple[type, ...] = tuple()
+        if hasattr(actor, "model_bundle") and actor.model_bundle is not None:
+            if hasattr(actor.model_bundle, "get_no_split_modules"):
+                result = actor.model_bundle.get_no_split_modules()
+                if isinstance(result, tuple) and result:
+                    no_split_modules = result
+                    logger.info(
+                        "Rank %s: get_no_split_modules() returned: %s",
+                        getattr(actor, "rank", "?"),
+                        [t.__name__ for t in no_split_modules],
+                    )
+
+        # 2. Fallback: auto-detect common transformer block patterns
+        if not no_split_modules:
+            _fallback_imports = [
+                # SD3 / SD3.5
+                ("diffusers.models.transformers.transformer_sd3", "JointTransformerBlock"),
+                ("diffusers.models.transformers.transformer_sd3", "SD3TransformerBlock"),
+                # Flux
+                ("diffusers.models.transformers.transformer_flux", "FluxTransformerBlock"),
+                ("diffusers.models.transformers.transformer_flux", "FluxSingleTransformerBlock"),
+                # HunyuanVideo
+                ("diffusers.models.transformers.transformer_hunyuan_video", "HunyuanVideoTransformerBlock"),
+                ("diffusers.models.transformers.transformer_hunyuan_video", "HunyuanVideoSingleTransformerBlock"),
+            ]
+            for mod_path, cls_name in _fallback_imports:
+                try:
+                    import importlib
+                    mod = importlib.import_module(mod_path)
+                    cls = getattr(mod, cls_name)
+                    no_split_modules = no_split_modules + (cls,)
+                except (ImportError, AttributeError):
+                    pass
+            if no_split_modules:
+                logger.info(
+                    "Rank %s: Fallback detected no_split_modules: %s",
+                    getattr(actor, "rank", "?"),
+                    [t.__name__ for t in no_split_modules],
+                )
+
+        if not no_split_modules:
+            logger.warning(
+                "Rank %s: Could not determine no_split_modules (both model_bundle and fallback failed)",
+                getattr(actor, "rank", "?"),
+            )
             return tuple()
 
-        no_split_modules = actor.model_bundle.get_no_split_modules()
-        if not isinstance(no_split_modules, tuple) or not no_split_modules:
-            return tuple()
-
+        # 3. Search in model (may be PeftModel wrapping the original transformer)
+        model = actor.model
         targets: list[torch.nn.Module] = []
-        for _name, module in actor.model.named_modules():
+        all_types: set[str] = set()
+        for _name, module in model.named_modules():
+            all_types.add(type(module).__name__)
             if isinstance(module, no_split_modules):
                 targets.append(module)
+
+        if not targets:
+            logger.warning(
+                "Rank %s: no_split_modules=%s but 0 matches in model. "
+                "Model module types found: %s",
+                getattr(actor, "rank", "?"),
+                [t.__name__ for t in no_split_modules],
+                sorted(all_types),
+            )
         return tuple(targets)
 
     def _build_state_dict_options(self, **kwargs: Any) -> Any:
@@ -181,6 +239,47 @@ class FSDPTrainBackend(TrainBackend):
         # Last-resort attempt, let upstream raise a clear exception.
         return StateDictOptions()
 
+    def _create_device_mesh(self, world_size: int) -> Optional[Any]:
+        """Create a 2D DeviceMesh for HSDP (hybrid mode).
+
+        In hybrid mode, ranks are grouped by node (8 GPUs per group).
+        FSDP shards within each group, data-parallel replicates across groups.
+        Returns None for full mode or when world_size <= 8 (no benefit from HSDP).
+        """
+        fsdp_mode = self._fsdp_config.get("fsdp_mode", "full")
+        if fsdp_mode != "hybrid":
+            return None
+
+        # hybrid mode: shard within groups of 8 (one node), replicate across nodes
+        shard_size = 8
+        if world_size <= shard_size:
+            logger.info(
+                "HSDP hybrid mode: world_size=%d <= %d, using pure FSDP (no benefit from HSDP).",
+                world_size, shard_size,
+            )
+            return None
+        if world_size % shard_size != 0:
+            logger.warning(
+                "HSDP hybrid mode: world_size=%d is not divisible by %d; "
+                "falling back to pure FSDP.",
+                world_size, shard_size,
+            )
+            return None
+
+        from torch.distributed.device_mesh import init_device_mesh
+
+        replicate_size = world_size // shard_size
+        mesh = init_device_mesh(
+            "cuda",
+            (replicate_size, shard_size),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
+        )
+        logger.info(
+            "HSDP DeviceMesh created: dp_replicate=%d × dp_shard=%d (world_size=%d)",
+            replicate_size, shard_size, world_size,
+        )
+        return mesh
+
     def wrap_model(self, actor: Any) -> None:
         if not self._use_fsdp:
             logger.info("Rank %s: train_backend=fsdp in no-wrap mode (use_fsdp=false)", actor.rank)
@@ -188,7 +287,7 @@ class FSDPTrainBackend(TrainBackend):
 
         fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy, *_ = self._fsdp2_runtime_apis()
 
-        fsdp_kwargs: Dict[str, Any] = {"reshard_after_forward": True}
+        fsdp_kwargs: Dict[str, Any] = {"reshard_after_forward": bool(self._fsdp_config.get("reshard_after_forward", True))}
 
         if self._fsdp_config.get("mixed_precision", True):
             param_dtype = parse_torch_dtype(
@@ -203,15 +302,34 @@ class FSDPTrainBackend(TrainBackend):
         if self._fsdp_config.get("cpu_offload", False):
             fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
 
+        # Create HSDP mesh if world_size > hsdp_shard_size
+        mesh = self._create_device_mesh(int(getattr(actor, "world_size", 1)))
+        if mesh is not None:
+            fsdp_kwargs["mesh"] = mesh
+            self._device_mesh = mesh
+
         target_modules = self._iter_target_modules(actor)
+        logger.info(
+            "Rank %s: FSDP sub-layer wrapping: model_type=%s, matched_target_modules=%d",
+            actor.rank, type(actor.model).__name__, len(target_modules),
+        )
+        if not target_modules:
+            logger.warning(
+                "Rank %s: No sub-layer target modules found! "
+                "FSDP will only wrap the top-level model — "
+                "allgather/reduce-scatter will be a single large op.",
+                actor.rank,
+            )
         for module in target_modules:
             fully_shard(module, **fsdp_kwargs)
 
         fully_shard(actor.model, **fsdp_kwargs)
+
+        mode = "HSDP" if mesh is not None else "FSDP"
+        reshard = bool(self._fsdp_config.get("reshard_after_forward", True))
         logger.info(
-            "Rank %s: Model wrapped with FSDP2 fully_shard (target_modules=%s)",
-            actor.rank,
-            len(target_modules),
+            "Rank %s: Model wrapped with %s fully_shard (target_modules=%d, reshard_after_forward=%s)",
+            actor.rank, mode, len(target_modules), reshard,
         )
 
     def _get_full_state_dict(self, actor: Any, *, cpu_offload: bool = True) -> Dict[str, Any]:
@@ -374,11 +492,25 @@ class FSDPTrainBackend(TrainBackend):
     def topology(self, actor: Any) -> TrainTopology:
         world_size = int(getattr(actor, "world_size", 1))
         if self._use_fsdp:
+            fsdp_mode = self._fsdp_config.get("fsdp_mode", "full")
+            shard_size = 8
+            if (
+                fsdp_mode == "hybrid"
+                and world_size > shard_size
+                and world_size % shard_size == 0
+            ):
+                # HSDP: shard within groups of 8, replicate across groups
+                dp_shard = shard_size
+                dp_replicate = world_size // shard_size
+            else:
+                # Pure FSDP: shard across all ranks
+                dp_shard = world_size
+                dp_replicate = 1
             return TrainTopology(
                 world_size=world_size,
                 dp_size=world_size,
-                dp_replicate_size=1,
-                dp_shard_size=world_size,
+                dp_replicate_size=dp_replicate,
+                dp_shard_size=dp_shard,
                 tp_size=1,
                 pp_size=1,
                 sp_size=1,

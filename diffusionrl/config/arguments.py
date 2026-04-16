@@ -564,6 +564,10 @@ class TrainingConfig:
         metadata={"help": "Python dotpath to custom TrainBackend class (overrides built-in backend selection)"})
     train_backend_kwargs: Dict[str, Any] = field(default_factory=dict,
         metadata={"help": "Extra kwargs for selected train backend; accepts JSON string (CLI) or mapping (YAML)"})
+    fsdp_mode: str = field(default="full",
+        metadata={"help": "FSDP sharding mode: 'full' = shard across all ranks; 'hybrid' = HSDP, shard within node (8 GPUs), replicate across nodes"})
+    reshard_after_forward: bool = field(default=True,
+        metadata={"help": "Whether FSDP reshards (frees) full params after forward pass. True=save memory, False=save backward allgather (uses more memory)"})
     resume_from_checkpoint: Optional[str] = field(
         default=None,
         metadata={"help": "Directory containing training checkpoint.pt to resume from (after actors init)"},
