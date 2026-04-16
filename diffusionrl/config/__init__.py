@@ -1,9 +1,4 @@
-"""Public config package exports.
-
-Keep this package entry lazy so low-level helper modules such as
-``diffusionrl.config.argument_parsing`` can be imported without pulling in the
-full config stack and creating package-level import cycles.
-"""
+"""Public framework config object exports."""
 
 from __future__ import annotations
 
@@ -11,41 +6,13 @@ import importlib
 from typing import Dict, Tuple
 
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
-    # argument surface
-    "TrainingArguments": ("diffusionrl.config.arguments", "TrainingArguments"),
-    "parse_args": ("diffusionrl.config.arguments", "parse_args"),
-    "get_default_args": ("diffusionrl.config.arguments", "get_default_args"),
-    "validate_args": ("diffusionrl.config.arguments", "validate_args"),
-    "build_resolved_config_view": ("diffusionrl.config.arguments", "build_resolved_config_view"),
-    "LaunchConfig": ("diffusionrl.config.launch_resolution", "LaunchConfig"),
-    "resolve_launch_config": ("diffusionrl.config.launch_resolution", "resolve_launch_config"),
+    "DerivedConfig": ("diffusionrl.config.assembly", "DerivedConfig"),
+    "LaunchConfig": ("diffusionrl.config.assembly", "LaunchConfig"),
+    "RolloutServicesSpec": ("diffusionrl.config.assembly", "RolloutServicesSpec"),
+    "WeightSyncSpec": ("diffusionrl.config.assembly", "WeightSyncSpec"),
+    "SamplingSpec": ("diffusionrl.config.spec", "SamplingSpec"),
     "ModelSpec": ("diffusionrl.config.spec", "ModelSpec"),
-    "AlgorithmConfig": ("diffusionrl.config.arguments", "AlgorithmConfig"),
-    "DebugConfig": ("diffusionrl.config.arguments", "DebugConfig"),
-    "SchedulerConfig": ("diffusionrl.config.arguments", "SchedulerConfig"),
-    "ModelConfig": ("diffusionrl.config.arguments", "ModelConfig"),
-    "TrainingConfig": ("diffusionrl.config.arguments", "TrainingConfig"),
-    "RolloutConfig": ("diffusionrl.config.arguments", "RolloutConfig"),
-    "SamplingConfig": ("diffusionrl.config.arguments", "SamplingConfig"),
-    "RewardConfig": ("diffusionrl.config.arguments", "RewardConfig"),
-    "RayConfig": ("diffusionrl.config.arguments", "RayConfig"),
-    # domain builders
-    "build_model_bundle_init_payload_from_args": (
-        "diffusionrl.cmdline.models",
-        "build_model_bundle_init_payload_from_args",
-    ),
-    "build_rollout_actor_init_config_from_args": (
-        "diffusionrl.config.build_domain_args",
-        "build_rollout_actor_init_config_from_args",
-    ),
-    "build_training_sampling_config": (
-        "diffusionrl.config.build_domain_args",
-        "build_training_sampling_config",
-    ),
-    "build_training_actor_init_config_from_args": (
-        "diffusionrl.config.build_domain_args",
-        "build_training_actor_init_config_from_args",
-    ),
+    "RolloutInfo": ("diffusionrl.config.spec", "RolloutInfo"),
 }
 
 __all__ = list(_LAZY_ATTRS.keys())

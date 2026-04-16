@@ -5,8 +5,8 @@ from diffusionrl.cmdline.algorithms import build_grpo_algorithm_config_from_args
 from diffusionrl.cmdline.registry import (
     CMDLINE_CONFIG_PARSER_REGISTRY,
     register_cmdline_config_parser,
-    resolve_cmdline_config_parser,
-    resolve_component_cmdline_config_parser,
+    derive_cmdline_config_parser,
+    derive_component_cmdline_config_parser,
 )
 
 
@@ -38,7 +38,7 @@ def test_register_cmdline_config_parser_direct_registration(isolated_cmdline_reg
 
     returned = register_cmdline_config_parser(_ConfigA, parse_config)
 
-    assert returned is resolve_cmdline_config_parser(_ConfigA)
+    assert returned is derive_cmdline_config_parser(_ConfigA)
     assert isinstance(returned(object()), _ConfigA)
 
 
@@ -48,7 +48,7 @@ def test_register_cmdline_config_parser_decorator_form(isolated_cmdline_registry
         del args
         return _ConfigA()
 
-    assert resolve_cmdline_config_parser(_ConfigA) is parse_config
+    assert derive_cmdline_config_parser(_ConfigA) is parse_config
 
 
 def test_register_cmdline_config_parser_rejects_duplicate(isolated_cmdline_registry):
@@ -66,7 +66,7 @@ def test_register_cmdline_config_parser_rejects_duplicate(isolated_cmdline_regis
     ):
         register_cmdline_config_parser(_ConfigA, parse_other)
 
-    assert resolve_cmdline_config_parser(_ConfigA) is parse_config
+    assert derive_cmdline_config_parser(_ConfigA) is parse_config
 
 
 def test_register_cmdline_config_parser_subclass_checking_by_default(
@@ -92,7 +92,7 @@ def test_register_cmdline_config_parser_exact_checking(
         parse_config(object())
 
 
-def test_resolve_cmdline_config_parser_error_lists_available_configs(
+def test_derive_cmdline_config_parser_error_lists_available_configs(
     isolated_cmdline_registry,
 ):
     @register_cmdline_config_parser(_ConfigA)
@@ -109,11 +109,11 @@ def test_resolve_cmdline_config_parser_error_lists_available_configs(
         ValueError,
         match=r"Available config classes: \['_ConfigA', '_ConfigB'\]",
     ):
-        resolve_cmdline_config_parser(type("MissingConfig", (), {}))
+        derive_cmdline_config_parser(type("MissingConfig", (), {}))
 
 
-def test_resolve_component_cmdline_config_parser_uses_config_class():
+def test_derive_component_cmdline_config_parser_uses_config_class():
     assert (
-        resolve_component_cmdline_config_parser(GRPOAlgorithm)
+        derive_component_cmdline_config_parser(GRPOAlgorithm)
         is build_grpo_algorithm_config_from_args
     )

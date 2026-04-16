@@ -3,13 +3,14 @@ import pytest
 from diffusionrl.algorithms.grpo import GRPOAlgorithm
 from diffusionrl.algorithms.registry import (
     ensure_builtin_algorithm_registration,
-    resolve_algorithm_class,
+    derive_algorithm_class,
+    derive_algorithm_dotpath,
 )
 from diffusionrl.registry import (
     COMPONENT_REGISTRY,
+    derive_registry_or_dotpath,
     register_component,
     require_subclass,
-    resolve_registry_or_dotpath,
 )
 
 
@@ -68,7 +69,7 @@ def test_register_component_rejects_non_subclass(isolated_test_family):
         decorator(NotASubclass)
 
 
-def test_resolve_registry_or_dotpath_resolves_registered_name(isolated_test_family):
+def test_derive_registry_or_dotpath_resolves_registered_name(isolated_test_family):
     decorator = register_component(
         component_family=isolated_test_family,
         component_name="demo",
@@ -76,7 +77,7 @@ def test_resolve_registry_or_dotpath_resolves_registered_name(isolated_test_fami
     )
     decorator(_TestComponent)
 
-    resolved = resolve_registry_or_dotpath(
+    resolved = derive_registry_or_dotpath(
         component_family=isolated_test_family,
         identifier="demo",
     )
@@ -84,10 +85,10 @@ def test_resolve_registry_or_dotpath_resolves_registered_name(isolated_test_fami
     assert resolved is _TestComponent
 
 
-def test_resolve_registry_or_dotpath_resolves_full_dotpath():
+def test_derive_registry_or_dotpath_resolves_full_dotpath():
     ensure_builtin_algorithm_registration()
 
-    resolved = resolve_registry_or_dotpath(
+    resolved = derive_registry_or_dotpath(
         component_family="algorithm",
         identifier="diffusionrl.algorithms.grpo.GRPOAlgorithm",
     )
@@ -95,7 +96,7 @@ def test_resolve_registry_or_dotpath_resolves_full_dotpath():
     assert resolved is GRPOAlgorithm
 
 
-def test_resolve_registry_or_dotpath_error_lists_available_names(isolated_test_family):
+def test_derive_registry_or_dotpath_error_lists_available_names(isolated_test_family):
     register_component(
         component_family=isolated_test_family,
         component_name="demo",
@@ -110,18 +111,24 @@ def test_resolve_registry_or_dotpath_error_lists_available_names(isolated_test_f
     with pytest.raises(
         ValueError, match="Available registered names: \\['demo', 'other'\\]"
     ):
-        resolve_registry_or_dotpath(
+        derive_registry_or_dotpath(
             component_family=isolated_test_family,
             identifier="missing_component",
         )
 
 
 def test_algorithm_family_resolves_builtin_registered_name():
-    resolved = resolve_algorithm_class("grpo")
+    resolved = derive_algorithm_class("grpo")
 
     assert resolved is GRPOAlgorithm
 
 
-def test_resolve_algorithm_class_rejects_non_algorithm_dotpath():
+def test_algorithm_family_resolves_builtin_registered_dotpath():
+    resolved = derive_algorithm_dotpath("grpo")
+
+    assert resolved == "diffusionrl.algorithms.grpo.GRPOAlgorithm"
+
+
+def test_derive_algorithm_class_rejects_non_algorithm_dotpath():
     with pytest.raises(TypeError, match="must be a subclass"):
-        resolve_algorithm_class("diffusionrl.registry.register_component")
+        derive_algorithm_class("diffusionrl.registry.register_component")

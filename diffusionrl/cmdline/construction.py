@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from diffusionrl.cmdline.registry import resolve_component_cmdline_config_parser
+from diffusionrl.cmdline.registry import derive_component_cmdline_config_parser
 from diffusionrl.construction import (
     ComponentInitPayload,
     create_component_from_init_payload,
 )
-from diffusionrl.registry import resolve_registry_or_dotpath
+from diffusionrl.registry import derive_registry_or_dotpath
 
 
 def build_component_init_payload_from_args(
@@ -20,11 +20,11 @@ def build_component_init_payload_from_args(
     parser_kwargs: Optional[Dict[str, Any]] = None,
 ) -> ComponentInitPayload:
     """Resolve a component class and parse its framework-facing config."""
-    component_cls = resolve_registry_or_dotpath(
+    component_cls = derive_registry_or_dotpath(
         component_family=component_family,
         identifier=identifier,
     )
-    parser_fn = resolve_component_cmdline_config_parser(component_cls)
+    parser_fn = derive_component_cmdline_config_parser(component_cls)
     component_config = parser_fn(args, **dict(parser_kwargs or {}))
     return ComponentInitPayload(
         component_dotpath=f"{component_cls.__module__}.{component_cls.__qualname__}",

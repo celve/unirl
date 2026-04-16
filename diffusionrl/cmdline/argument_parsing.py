@@ -101,49 +101,37 @@ def parse_cli_mapping_object(value: Any) -> Dict[str, Any]:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
-def parse_cli_timestep_fraction(value: Any) -> Any:
-    """Parse timestep_fraction CLI value."""
+def _parse_float_or_float_pair(value: Any) -> Any:
+    """Parse a single float or a ``(float, float)`` range from CLI/YAML."""
     if isinstance(value, (list, tuple)):
-        if len(value) == 2:
-            return (float(value[0]), float(value[1]))
-        raise argparse.ArgumentTypeError(
-            f"timestep_fraction tuple must have exactly 2 elements, got {len(value)}"
-        )
+        if len(value) != 2:
+            raise argparse.ArgumentTypeError(
+                f"Expected exactly 2 elements for a range, got {len(value)}"
+            )
+        return (float(value[0]), float(value[1]))
     if isinstance(value, (int, float)):
         return float(value)
     text = str(value).strip()
     if not text:
         return 1.0
-    if text.startswith("["):
-        try:
-            parsed = json.loads(text)
-        except Exception as exc:
-            raise argparse.ArgumentTypeError(
-                f"Invalid timestep_fraction value: {value!r}. Error: {exc}"
-            ) from exc
-        if isinstance(parsed, list) and len(parsed) == 2:
-            return (float(parsed[0]), float(parsed[1]))
-        raise argparse.ArgumentTypeError(
-            f"timestep_fraction list must have exactly 2 elements, got: {parsed!r}"
-        )
-    if "," in text:
-        parts = [p.strip() for p in text.split(",") if p.strip()]
-        if len(parts) == 2:
-            try:
-                return (float(parts[0]), float(parts[1]))
-            except ValueError as exc:
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        pass
+    else:
+        if isinstance(parsed, list):
+            if len(parsed) != 2:
                 raise argparse.ArgumentTypeError(
-                    f"Invalid timestep_fraction value: {value!r}. Error: {exc}"
-                ) from exc
-        raise argparse.ArgumentTypeError(
-            "timestep_fraction comma-separated value must have exactly 2 "
-            f"elements, got {len(parts)}"
-        )
+                    f"Expected exactly 2 elements for a range, got {len(parsed)}"
+                )
+            return (float(parsed[0]), float(parsed[1]))
+        if isinstance(parsed, (int, float)):
+            return float(parsed)
     try:
         return float(text)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            f"Invalid timestep_fraction value: {value!r}. Error: {exc}"
+            f"Expected a float or [float, float], got: {value!r}"
         ) from exc
 
 
@@ -240,11 +228,15 @@ def _resolve_field_help_text(field_info: Any) -> str:
     return f"{field_info.name} (default: {default})"
 
 
+def _resolve_field_choices(field_info: Any) -> Optional[List[str]]:
+    return (field_info.metadata or {}).get("choices")
+
+
 def _collect_field_specs_from_dataclass(
     config_type: type[Any],
     *,
     group_key: str,
-    specs: list[tuple[str, Any, Any, str, str]],
+    specs: list[tuple[str, Any, Any, str, str, Optional[List[str]]]],
 ) -> None:
     for field_info in fields(config_type):
         field_type = field_info.type
@@ -267,6 +259,7 @@ def _collect_field_specs_from_dataclass(
                 resolve_dataclass_field_default(field_info),
                 _resolve_field_help_text(field_info),
                 group_key,
+                _resolve_field_choices(field_info),
             )
         )
 
@@ -276,9 +269,9 @@ def collect_cli_field_specs(
     training_args_type: type[Any],
     group_config_names: set[str],
     group_config_types: Dict[str, type[Any]],
-) -> List[tuple[str, Any, Any, str, str]]:
-    """Return ``(name, type, default, help, group_key)`` for CLI-exposed fields."""
-    specs: List[tuple[str, Any, Any, str, str]] = []
+) -> List[tuple[str, Any, Any, str, str, Optional[List[str]]]]:
+    """Return ``(name, type, default, help, group_key, choices)`` for CLI-exposed fields."""
+    specs: List[tuple[str, Any, Any, str, str, Optional[List[str]]]] = []
 
     for field_info in fields(training_args_type):
         if field_info.name in group_config_names:
@@ -290,6 +283,7 @@ def collect_cli_field_specs(
                 resolve_dataclass_field_default(field_info),
                 _resolve_field_help_text(field_info),
                 "",
+                _resolve_field_choices(field_info),
             )
         )
 
@@ -320,173 +314,41 @@ def load_yaml_mapping(path: str) -> Dict[str, Any]:
     return data
 
 
-def _is_yaml_container_path(
-    parts: List[str],
-    *,
-    group_config_names: set[str],
-    group_subconfig_names: Dict[str, set[str]],
-) -> bool:
-    if len(parts) == 1 and parts[0] in group_config_names:
-        return True
-    if len(parts) == 2 and parts[0] in group_subconfig_names:
-        return parts[1] in group_subconfig_names[parts[0]]
-    return False
-
-
-def _resolve_yaml_leaf_dest(
-    parts: List[str],
-    *,
-    top_level_field_names: set[str],
-    group_config_names: set[str],
-    group_subconfig_names: Dict[str, set[str]],
-) -> Optional[str]:
-    if not parts:
-        return None
-    if len(parts) == 1:
-        key = parts[0]
-        if key in top_level_field_names:
-            return key
-        return None
-
-    group = parts[0]
-    if group not in group_config_names:
-        return None
-    if len(parts) == 2:
-        if parts[1] in group_subconfig_names.get(group, set()):
-            return None
-        return ".".join(parts)
-    if len(parts) == 3 and parts[1] in group_subconfig_names.get(group, set()):
-        return ".".join(parts)
-    return None
-
-
-def _suggest_grouped_yaml_key(
-    parts: List[str],
-    *,
-    known_destinations: set[str],
-) -> Optional[str]:
-    if not parts:
-        return None
-    if len(parts) == 2:
-        prefix = f"{parts[0]}."
-        suffix = f".{parts[1]}"
-        candidates = sorted(
-            dest
-            for dest in known_destinations
-            if "." in dest and dest.startswith(prefix) and dest.endswith(suffix)
-            and dest != ".".join(parts)
-        )
-    elif len(parts) == 1:
-        suffix = f".{parts[0]}"
-        candidates = sorted(
-            dest for dest in known_destinations
-            if "." in dest and dest.endswith(suffix)
-        )
-    else:
-        return None
-    if not candidates:
-        return None
-    return candidates[0]
-
-
 def _flatten_yaml_mapping(
     yaml_data: Dict[str, Any],
     *,
     top_level_field_names: set[str],
     group_config_names: set[str],
     group_subconfig_names: Dict[str, set[str]],
-    known_destinations: set[str],
 ) -> Dict[str, Any]:
-    """Flatten nested YAML mapping into parser destination keys."""
-    flattened: Dict[str, Any] = {}
-    origins: Dict[str, str] = {}
+    """Flatten nested YAML mapping into parser destination keys.
 
-    def _value_repr(value: Any) -> str:
-        try:
-            return json.dumps(value, ensure_ascii=False, sort_keys=True)
-        except Exception:
-            return repr(value)
+    Only the canonical nested format is supported::
 
-    def _assign(dest_key: str, value: Any, *, source_path: str) -> None:
-        if dest_key in flattened:
-            previous_source = origins[dest_key]
-            if previous_source != source_path:
-                raise ValueError(
-                    "Conflicting YAML keys map to the same argument destination "
-                    f"'{dest_key}': '{previous_source}'={_value_repr(flattened[dest_key])} "
-                    f"and '{source_path}'={_value_repr(value)}. "
-                    "Keep only one style (prefer grouped keys)."
-                )
-        flattened[dest_key] = value
-        origins[dest_key] = source_path
-
-    def _walk(node: Dict[str, Any], prefix: List[str]) -> None:
-        for raw_key, value in node.items():
-            key = str(raw_key).replace("-", "_")
-            key_parts = [part for part in key.split(".") if part]
-            if not key_parts:
-                continue
-            parts = prefix + key_parts
-            source_path = ".".join(parts)
-
-            if len(parts) == 1:
-                suggestion = _suggest_grouped_yaml_key(
-                    parts,
-                    known_destinations=known_destinations,
-                )
-                if suggestion is not None and parts[0] not in top_level_field_names:
-                    raise ValueError(
-                        f"Unsupported flat YAML key '{parts[0]}'. "
-                        f"Use grouped YAML key '{suggestion}' instead."
-                    )
-            elif len(parts) == 2:
-                suggestion = _suggest_grouped_yaml_key(
-                    parts,
-                    known_destinations=known_destinations,
-                )
-                if suggestion is not None:
-                    raise ValueError(
-                        f"Unsupported grouped YAML key '{source_path}'. "
-                        f"Use nested YAML key '{suggestion}' instead."
-                    )
-
-            if isinstance(value, dict):
-                leaf_dest = _resolve_yaml_leaf_dest(
-                    parts,
-                    top_level_field_names=top_level_field_names,
-                    group_config_names=group_config_names,
-                    group_subconfig_names=group_subconfig_names,
-                )
-                if leaf_dest is not None and not _is_yaml_container_path(
-                    parts,
-                    group_config_names=group_config_names,
-                    group_subconfig_names=group_subconfig_names,
-                ):
-                    _assign(leaf_dest, value, source_path=source_path)
-                    continue
-                if _is_yaml_container_path(
-                    parts,
-                    group_config_names=group_config_names,
-                    group_subconfig_names=group_subconfig_names,
-                ):
-                    _walk(value, parts)
-                    continue
-                _assign(".".join(parts), value, source_path=source_path)
-                continue
-
-            leaf_dest = _resolve_yaml_leaf_dest(
-                parts,
-                top_level_field_names=top_level_field_names,
-                group_config_names=group_config_names,
-                group_subconfig_names=group_subconfig_names,
-            )
-            if leaf_dest is not None:
-                _assign(leaf_dest, value, source_path=source_path)
-            else:
-                _assign(".".join(parts), value, source_path=source_path)
-
-    _walk(yaml_data, [])
-    return flattened
+        model:
+          model_type: flux
+        algorithm:
+          rollout_scheduler:
+            timestep_strategy: window
+    """
+    flat: Dict[str, Any] = {}
+    for raw_key, value in yaml_data.items():
+        key = str(raw_key).replace("-", "_")
+        if key in top_level_field_names:
+            flat[key] = value
+            continue
+        if key in group_config_names and isinstance(value, dict):
+            for raw_k2, v2 in value.items():
+                k2 = str(raw_k2).replace("-", "_")
+                if k2 in group_subconfig_names.get(key, set()) and isinstance(v2, dict):
+                    for raw_k3, v3 in v2.items():
+                        k3 = str(raw_k3).replace("-", "_")
+                        flat[f"{key}.{k2}.{k3}"] = v3
+                else:
+                    flat[f"{key}.{k2}"] = v2
+            continue
+        flat[key] = value
+    return flat
 
 
 def _coerce_yaml_value(
@@ -497,15 +359,6 @@ def _coerce_yaml_value(
     action_by_dest: Dict[str, argparse.Action],
 ) -> Any:
     """Coerce YAML value using argparse converter for the destination key."""
-    if cli_key in {
-        "algorithm.algorithm_kwargs",
-        "training.train_backend_kwargs",
-    }:
-        return parse_mapping_object(
-            value,
-            field_name=f"YAML key '{key}'",
-        )
-
     action = action_by_dest.get(cli_key)
     converter = getattr(action, "type", None) if action is not None else None
     if converter is None or value is None:
@@ -538,7 +391,6 @@ def merge_yaml_overrides(
         top_level_field_names=top_level_field_names,
         group_config_names=group_config_names,
         group_subconfig_names=group_subconfig_names,
-        known_destinations=set(defaults.keys()),
     )
     all_known_keys = set(defaults.keys())
     reported_cli_overrides: set[str] = set()
@@ -595,13 +447,14 @@ def build_add_argument_kwargs(
     help_text: str,
     *,
     field_name: str = "",
+    choices: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     kwargs: Dict[str, Any] = {
         "default": default,
         "help": help_text,
     }
     if field_name == "timestep_fraction":
-        kwargs["type"] = parse_cli_timestep_fraction
+        kwargs["type"] = _parse_float_or_float_pair
     elif field_type == bool:
         kwargs["type"] = parse_cli_bool
     elif field_type == int:
@@ -617,6 +470,8 @@ def build_add_argument_kwargs(
         )
     else:
         kwargs["type"] = str
+    if choices:
+        kwargs["choices"] = choices
     return kwargs
 
 

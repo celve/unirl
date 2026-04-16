@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from diffusionrl.registry import resolve_registry_or_dotpath
+from diffusionrl.registry import derive_registry_or_dotpath
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,7 @@ def create_component_from_init_payload(
             f"got: {type(component_init_payload).__name__}"
         )
 
-    component_cls = resolve_registry_or_dotpath(
+    component_cls = derive_registry_or_dotpath(
         component_family=component_family,
         identifier=component_init_payload.component_dotpath,
     )

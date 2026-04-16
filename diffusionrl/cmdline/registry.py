@@ -64,8 +64,8 @@ def register_cmdline_config_parser(
     return _register
 
 
-def resolve_cmdline_config_parser(config_class: type) -> ParserFn:
-    """Resolve the registered cmdline parser for a runtime config class."""
+def derive_cmdline_config_parser(config_class: type) -> ParserFn:
+    """Derive the registered cmdline parser for a runtime config class."""
     if not isinstance(config_class, type):
         raise TypeError(f"config_class must be a class, got {type(config_class)!r}.")
     parser_fn = CMDLINE_CONFIG_PARSER_REGISTRY.get(config_class)
@@ -80,8 +80,8 @@ def resolve_cmdline_config_parser(config_class: type) -> ParserFn:
     return parser_fn
 
 
-def resolve_component_cmdline_config_parser(component_class: type) -> ParserFn:
-    """Resolve a cmdline parser from a component class via its config-class attr."""
+def derive_component_cmdline_config_parser(component_class: type) -> ParserFn:
+    """Derive a cmdline parser from a component class via its config-class attr."""
     if not isinstance(component_class, type):
         raise TypeError(
             f"component_class must be a class, got {type(component_class)!r}."
@@ -91,12 +91,12 @@ def resolve_component_cmdline_config_parser(component_class: type) -> ParserFn:
         raise TypeError(
             f"Component class {component_class!r} must define __CONFIG_CLASS__."
         )
-    return resolve_cmdline_config_parser(config_class)
+    return derive_cmdline_config_parser(config_class)
 
 
 __all__ = [
     "CMDLINE_CONFIG_PARSER_REGISTRY",
     "register_cmdline_config_parser",
-    "resolve_component_cmdline_config_parser",
-    "resolve_cmdline_config_parser",
+    "derive_component_cmdline_config_parser",
+    "derive_cmdline_config_parser",
 ]

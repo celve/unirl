@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 
-from diffusionrl.config.launch_resolution import LaunchConfig
+from diffusionrl.config import LaunchConfig
 from diffusionrl.config.validation import (
     validate_rollout_actor_init_config,
     validate_training_actor_init_config,
@@ -179,7 +179,7 @@ def create_training_actor_group(
     validate_training_actor_init_config(config)
     launch_spec = training.launch_spec
     caps = training.backend_capabilities
-    if bool(caps.get("requires_custom_actor_class", False)) and not launch_spec.actor_class_path:
+    if bool(caps.requires_custom_actor_class) and not launch_spec.actor_class_path:
         raise ValueError(
             f"train_backend={training.backend_name!r} requires a backend-specific actor class. "
             "Provide train_backend_kwargs with `actor_class_path`, "

@@ -4,7 +4,7 @@ HunyuanVideo Model Bundle.
 Reference: DanceGRPO implementation
 """
 import logging
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Dict, List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -69,12 +69,6 @@ class HunyuanModelBundle(ModelBundle):
     @classmethod
     def supports_sglang_prompt_mode(cls) -> bool:
         return True
-
-    @classmethod
-    def validate_config(cls, args: Any) -> None:
-        # Hunyuan guidance scale is controlled by runtime config/scripts.
-        # Keep this hook as a no-op for now.
-        _ = args
 
     def load(self) -> None:
         """Load all model components."""

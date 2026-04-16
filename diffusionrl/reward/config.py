@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-
 # ---------------------------------------------------------------------------
 # Spec types (reward semantics, provider config, execution plan)
 # ---------------------------------------------------------------------------
@@ -89,12 +88,12 @@ class RewardExecutionPlan:
 
 
 # ---------------------------------------------------------------------------
-# RewardSchema (config → typed view)
+# RewardSpec (config → typed view)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class RewardSchema:
+class RewardSpec:
     """Typed view of reward-related CLI/config options."""
 
     reward_dotpath: Optional[str]
@@ -108,7 +107,7 @@ class RewardSchema:
     reward_aggregation_method: str
 
     @classmethod
-    def from_args(cls, args) -> "RewardSchema":
+    def from_args(cls, args) -> "RewardSpec":
         """Construct from TrainingArguments, delegating to the RewardConfig group."""
         rc = args.reward
         return cls(
@@ -125,9 +124,7 @@ class RewardSchema:
 
     def to_definition(self) -> RewardDefinition:
         raw_components = self.reward_components
-        if isinstance(raw_components, str):
-            component_names = [raw_components]
-        elif isinstance(raw_components, list):
+        if isinstance(raw_components, list):
             component_names = list(raw_components)
         else:
             component_names = []
@@ -179,5 +176,5 @@ __all__ = [
     "RewardDefinition",
     "RewardExecutionPlan",
     "RewardProviderConfig",
-    "RewardSchema",
+    "RewardSpec",
 ]

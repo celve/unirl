@@ -6,11 +6,11 @@ from typing import Any, Dict
 
 from diffusionrl.cmdline.construction import build_component_init_payload_from_args
 from diffusionrl.cmdline.registry import register_cmdline_config_parser
+from diffusionrl.config import SamplingSpec
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.models.config import ModelBundleConfig
+from diffusionrl.samplers.engine import EngineConfig
 from diffusionrl.samplers.registry import ROLLOUT_ENGINE_COMPONENT_FAMILY
-from diffusionrl.types.engine import EngineConfig
-from diffusionrl.types.sampling import SamplingSpec
 
 
 @register_cmdline_config_parser(EngineConfig)
@@ -19,7 +19,7 @@ def build_rollout_engine_config_from_args(
     *,
     model_init_payload: ComponentInitPayload,
     sampling_spec: SamplingSpec,
-    rollout_mode_info: Any,
+    rollout_info: Any,
 ) -> EngineConfig:
     """Build typed rollout-engine config from framework args and resolved slices."""
     model_config = model_init_payload.component_config
@@ -29,8 +29,8 @@ def build_rollout_engine_config_from_args(
             f"got: {type(model_config).__name__}"
         )
 
-    rollout_engine = str(rollout_mode_info.rollout_topology.rollout_engine or "")
-    logprob_source = str(rollout_mode_info.logprob_source)
+    rollout_engine = str(rollout_info.rollout_engine or "")
+    logprob_source = str(rollout_info.logprob_source)
 
     merged_engine_kwargs: Dict[str, Any] = {}
 
@@ -72,9 +72,10 @@ def build_rollout_engine_config_from_args(
     merged_engine_kwargs.setdefault("use_lora", model_config.use_lora)
     merged_engine_kwargs.setdefault("lora_rank", model_config.lora_rank)
     merged_engine_kwargs.setdefault("lora_alpha", model_config.lora_alpha)
-    merged_engine_kwargs.setdefault(
-        "lora_target_modules", model_config.lora_target_modules
-    )
+    if model_config.lora_target_modules is not None:
+        merged_engine_kwargs.setdefault(
+            "lora_target_modules", list(model_config.lora_target_modules)
+        )
     if model_config.vae_ckpt_path:
         merged_engine_kwargs.setdefault("vae_ckpt_path", model_config.vae_ckpt_path)
     if model_config.text_encoder_ckpt_path:
@@ -100,15 +101,7 @@ def build_rollout_engine_config_from_args(
     return EngineConfig(
         model_dotpath=model_init_payload.component_dotpath,
         pretrained_model_ckpt_path=model_config.pretrained_model_ckpt_path,
-        sampler_dotpath=sampling_spec.sampler_dotpath,
-        num_inference_steps=int(sampling_spec.num_inference_steps),
-        eta=float(sampling_spec.sde_config.eta),
-        sde_type=str(sampling_spec.sde_config.sde_type),
-        shift=float(sampling_spec.sde_config.shift),
-        guidance_scale=float(sampling_spec.guidance_scale),
-        height=int(sampling_spec.height),
-        width=int(sampling_spec.width),
-        num_frames=int(sampling_spec.num_frames),
+        **sampling_spec.as_shared_payload(),
         engine_kwargs=merged_engine_kwargs,
     )
 
@@ -118,9 +111,9 @@ def build_rollout_engine_init_payload_from_args(
     *,
     model_init_payload: ComponentInitPayload,
     sampling_spec: SamplingSpec,
-    rollout_mode_info: Any,
+    rollout_info: Any,
 ) -> ComponentInitPayload:
-    rollout_engine = str(rollout_mode_info.rollout_topology.rollout_engine or "")
+    rollout_engine = rollout_info.rollout_engine
     return build_component_init_payload_from_args(
         component_family=ROLLOUT_ENGINE_COMPONENT_FAMILY,
         identifier=rollout_engine,
@@ -128,7 +121,7 @@ def build_rollout_engine_init_payload_from_args(
         parser_kwargs={
             "model_init_payload": model_init_payload,
             "sampling_spec": sampling_spec,
-            "rollout_mode_info": rollout_mode_info,
+            "rollout_info": rollout_info,
         },
     )
 

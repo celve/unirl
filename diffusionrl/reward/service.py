@@ -9,15 +9,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from diffusionrl.reward.schema import RewardSchema
+from diffusionrl.reward.config import RewardSpec
 from diffusionrl.utils import load_function
 
-from .base import (
-    BaseRewardExecutor,
-    BaseRewardScorer,
-    RewardRequest,
-    RewardResponse,
-)
+from .base import BaseRewardExecutor, BaseRewardScorer, RewardRequest, RewardResponse
 from .scorers.registry import resolve_builtin_reward_scorer_class
 
 logger = logging.getLogger(__name__)
@@ -65,17 +60,17 @@ class RewardService:
 
     def __init__(
         self,
-        reward_schema: RewardSchema,
+        reward_config: RewardSpec,
     ) -> None:
-        if not isinstance(reward_schema, RewardSchema):
+        if not isinstance(reward_config, RewardSpec):
             raise TypeError(
-                f"RewardService requires RewardSchema, "
-                f"got: {type(reward_schema).__name__}"
+                f"RewardService requires RewardSpec, "
+                f"got: {type(reward_config).__name__}"
             )
-        self.reward_schema = reward_schema
-        self.reward_definition = reward_schema.to_definition()
-        self.reward_provider = reward_schema.to_provider_config()
-        self.execution_plan = reward_schema.to_execution_plan()
+        self.reward_config = reward_config
+        self.reward_definition = reward_config.to_definition()
+        self.reward_provider = reward_config.to_provider_config()
+        self.execution_plan = reward_config.to_execution_plan()
         self.executors = []
         self.reward_aggregation_method = (
             self.reward_definition.reward_aggregation_method

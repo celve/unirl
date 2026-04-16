@@ -298,7 +298,7 @@ class TrajectoryStore:
         )
 
     def slice(self, start: int, end: int) -> TrajectoryStore:
-        """Alias for slice_batch — enables slice_columnar_value protocol."""
+        """Alias for slice_batch — enables batch_slice duck-type protocol."""
         return self.slice_batch(start, end)
 
     def reindex_batch(self, indices: torch.Tensor) -> TrajectoryStore:

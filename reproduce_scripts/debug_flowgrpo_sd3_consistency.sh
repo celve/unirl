@@ -141,7 +141,7 @@ python -m diffusionrl.train \
     --rollout.output-dir "${DEBUG_OUTPUT_DIR}/train_output" \
     --logging.report-to-wandb false \
     \
-    --debug.debug-output-dir "${DEBUG_OUTPUT_DIR}" \
+    --debug.output-dir "${DEBUG_OUTPUT_DIR}" \
     \
     "$@"
 

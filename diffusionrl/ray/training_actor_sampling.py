@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from typing import Any, List, Tuple, Set
+from typing import Any, List, Set, Tuple
 
 import torch
 import torch.nn as nn
 
 from diffusionrl.samplers.fsdp import sampler_runner
-from diffusionrl.types.sde import SDEConfig
-from diffusionrl.types.sampling import RolloutSamples, RolloutRequest
+from diffusionrl.types.sampling import RolloutRequest, RolloutSamples
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +54,14 @@ class ActorSamplingExecutor:
         sampler_kwargs = dict(actor._sampling_config.get("sampler_kwargs", {}))
         for _reserved in ("autocast_precision", "trajectory_precision", "logprob_precision"):
             sampler_kwargs.pop(_reserved, None)
-        sde_config = SDEConfig.from_mapping(actor._sampling_config.get("sde_config"))
         actor._sampler = sampler_runner.create_sampler(
             sampler_dotpath=sampler_dotpath,
             model=actor.model,
             text_encoder=actor.text_encoder,
             vae=actor.vae,
-            eta=sde_config.eta,
-            sde_type=sde_config.sde_type,
-            shift=sde_config.shift,
+            eta=float(actor._sampling_config.get("eta", 1.0)),
+            sde_type=str(actor._sampling_config.get("sde_type", "flow")),
+            shift=float(actor._sampling_config.get("shift", 3.0)),
             model_bundle=actor.model_bundle,
             autocast_precision=actor._sampling_config.get("autocast_precision", "bf16"),
             trajectory_precision=actor._sampling_config.get("trajectory_precision", "fp16"),

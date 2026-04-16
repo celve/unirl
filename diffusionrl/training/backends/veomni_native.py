@@ -383,16 +383,18 @@ class VeOmniNativeTrainBackend(TrainBackend):
         )
         actor.model = model
 
-    def build_optimizer(self, actor: Any, optimizer_config: Dict[str, Any]) -> Any:
+    def build_optimizer(
+        self, actor: Any, optimizer_config: TrainingOptimizerConfig
+    ) -> Any:
         *_a, _b, build_optimizer, _c, _d = self._veomni_apis()
 
-        lr = float(optimizer_config.get("learning_rate", optimizer_config.get("lr", 1e-6)))
+        lr = float(optimizer_config.learning_rate)
         betas = (
-            float(optimizer_config.get("adam_beta1", 0.9)),
-            float(optimizer_config.get("adam_beta2", 0.999)),
+            float(optimizer_config.adam_beta1),
+            float(optimizer_config.adam_beta2),
         )
-        eps = float(optimizer_config.get("adam_epsilon", 1e-8))
-        weight_decay = float(optimizer_config.get("weight_decay", 0.0))
+        eps = float(optimizer_config.adam_epsilon)
+        weight_decay = float(optimizer_config.weight_decay)
 
         self._last_optimizer_lr = lr
         return build_optimizer(
@@ -407,15 +409,21 @@ class VeOmniNativeTrainBackend(TrainBackend):
             no_decay_params=self._no_decay_params,
         )
 
-    def build_scheduler(self, actor: Any, scheduler_config: Dict[str, Any]) -> Any:
+    def build_scheduler(
+        self, actor: Any, scheduler_config: TrainingLrSchedulerConfig
+    ) -> Any:
         *_a, _b, _c, build_lr_scheduler, _d = self._veomni_apis()
 
-        total_steps = max(1, int(scheduler_config.get("total_steps", 1000)))
-        warmup_steps = max(0, int(scheduler_config.get("warmup_steps", 0)))
+        total_steps = max(1, int(scheduler_config.total_steps))
+        warmup_steps = max(0, int(scheduler_config.warmup_steps))
         warmup_ratio = min(1.0, float(warmup_steps) / float(total_steps))
 
-        lr = float(self._last_optimizer_lr or scheduler_config.get("lr", 1e-6))
-        lr_decay_style = str(scheduler_config.get("type", "constant"))
+        if self._last_optimizer_lr is None:
+            raise RuntimeError(
+                "VeOmni scheduler requires optimizer lr to be resolved before scheduler creation."
+            )
+        lr = float(self._last_optimizer_lr)
+        lr_decay_style = str(scheduler_config.type)
         return build_lr_scheduler(
             optimizer=actor.optimizer,
             train_steps=total_steps,

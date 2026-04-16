@@ -63,7 +63,7 @@ class BaseAlgorithm(ABC):
     Base class for algorithm plugins.
 
     Each algorithm variant implements:
-    - from_config(): Construct from algorithm_config dict or typed runtime config (classmethod)
+    - __init__(*, config: TypedConfig): Construct from typed runtime config
     - get_sampling_requirements(): What the sampler needs to provide
     - compute_advantages(): How to compute advantages from rewards
     - compute_loss(): Single algorithm-owned loss entrypoint
@@ -134,34 +134,6 @@ class BaseAlgorithm(ABC):
     # ------------------------------------------------------------------
     # Class-level contracts (override in subclasses)
     # ------------------------------------------------------------------
-
-    @classmethod
-    def resolve_config_kwargs(cls, config: dict) -> Dict[str, Any]:
-        """Return normalized raw algorithm_kwargs from algorithm_config."""
-        extra = config.get("algorithm_kwargs") or {}
-        if not isinstance(extra, dict):
-            raise ValueError(
-                "algorithm_config.algorithm_kwargs must be a dict. "
-                f"Got: {type(extra).__name__}"
-            )
-        return dict(extra)
-
-    @classmethod
-    def from_config(
-        cls, config: Any
-    ) -> "BaseAlgorithm":  # [PUBLIC-API → rollout runtime init, training_actor.init()]
-        """Construct algorithm from raw framework config or typed runtime config.
-
-        TrainingActor currently passes the canonical algorithm_config
-        dictionary. Subclasses may also accept their typed ``__CONFIG_CLASS__`` so
-        future parser-based construction can bypass the untyped dict path.
-
-        Default implementation raises NotImplementedError so custom
-        plugins fail loudly if they forget to implement this.
-        """
-        raise NotImplementedError(
-            f"{cls.__name__} must implement from_config() classmethod."
-        )
 
     @abstractmethod
     def get_sampling_requirements(

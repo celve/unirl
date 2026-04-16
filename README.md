@@ -369,57 +369,10 @@ diffusionrl/
 ### Adding a Custom Algorithm
 
 Subclass `BaseAlgorithm` and implement the current algorithm-centric contract:
-`from_config()`, `get_sampling_requirements()`, reward/advantage handling, and
-the training objective owned by the algorithm (`_loss_cls` / `compute_loss_and_backward()`).
+`__init__(*, config)`, `get_sampling_requirements()`, reward/advantage handling, and
+the training objective owned by the algorithm (`compute_loss_and_backward()`).
 For new code, always import shared data types from `diffusionrl.types` (single entry).
-
-```python
-from typing import Any, Dict, Tuple
-
-import torch
-import torch.nn as nn
-
-from diffusionrl.algorithms.base import BaseAlgorithm, SamplingRequirements
-from diffusionrl.types import PromptEmbeddings, TimestepData
-
-
-class _MyLoss:
-    def __init__(self, algorithm: "MyAlgorithm") -> None:
-        self.algorithm = algorithm
-
-    def compute_loss(
-        self,
-        model: nn.Module,
-        timestep_data: TimestepData,
-        advantages: torch.Tensor,
-        embeddings: PromptEmbeddings,
-        **kwargs: Any,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        del model, advantages, embeddings, kwargs
-        loss = timestep_data.latents.float().sum() * 0.0
-        return loss, {"placeholder": True}
-
-
-class MyAlgorithm(BaseAlgorithm):
-    _loss_cls = _MyLoss
-
-    @classmethod
-    def from_config(cls, config: dict) -> "MyAlgorithm":
-        extra = dict(config.get("algorithm_kwargs") or {})
-        return cls(sde_ratio=float(extra.get("sde_ratio", 1.0)))
-
-    def __init__(self, *, sde_ratio: float = 1.0, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.sde_ratio = float(sde_ratio)
-
-    def get_sampling_requirements(self) -> SamplingRequirements:
-        return SamplingRequirements(
-            requires_trajectory=True,
-            requires_log_prob=True,
-            requires_embeddings=True,
-            extras={"sde_ratio": 1.0},
-        )
-```
+See `diffusionrl_plugins/algorithms/minimal_algorithm.py` for a complete example.
 
 Then pass it via `--algorithm.algorithm-dotpath your_module.MyAlgorithm`.
 See the fully working reference implementation:

@@ -9,9 +9,8 @@ from .base import (
     TrainBackendCapabilities,
     TrainBackendLaunchSpec,
     TrainTopology,
-    resolve_train_backend_capabilities,
-    resolve_train_backend_capabilities_from_config,
-    resolve_train_backend_launch_spec,
+    derive_train_backend_capabilities,
+    derive_train_backend_launch_spec,
 )
 from .construction import create_train_backend_from_init_payload
 from .fsdp import FSDPTrainBackend, FSDPTrainBackendConfig
@@ -35,9 +34,8 @@ __all__ = [
     "TrainBackendLaunchSpec",
     "TrainTopology",
     "create_train_backend_from_init_payload",
-    "resolve_train_backend_capabilities",
-    "resolve_train_backend_capabilities_from_config",
-    "resolve_train_backend_launch_spec",
+    "derive_train_backend_capabilities",
+    "derive_train_backend_launch_spec",
     "register_train_backend",
     "resolve_train_backend_class",
     "supported_train_backends",

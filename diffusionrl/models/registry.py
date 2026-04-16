@@ -10,9 +10,9 @@ from functools import lru_cache, partial
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from diffusionrl.registry import (
+    derive_registry_or_dotpath,
     register_component,
     require_subclass,
-    resolve_registry_or_dotpath,
 )
 
 from .base import ModelBundle
@@ -43,7 +43,7 @@ def ensure_builtin_model_registration() -> None:
 
 
 def resolve_model_class(identifier: str) -> Any:
-    return resolve_registry_or_dotpath(
+    return derive_registry_or_dotpath(
         component_family=MODEL_BUNDLE_COMPONENT_FAMILY,
         identifier=identifier,
         class_checker=require_subclass(ModelBundle),
@@ -122,7 +122,7 @@ def discover_model_bundle_paths() -> Dict[str, str]:
     return discovered
 
 
-def resolve_model_bundle_path(model_type: str) -> Optional[str]:
+def derive_model_bundle_path(model_type: str) -> Optional[str]:
     """Resolve model bundle dotpath by model type."""
     if not isinstance(model_type, str) or not model_type.strip():
         return None
@@ -138,7 +138,7 @@ __all__ = [
     "MODEL_BUNDLE_COMPONENT_FAMILY",
     "discover_model_bundle_paths",
     "ensure_builtin_model_registration",
-    "resolve_model_bundle_path",
+    "derive_model_bundle_path",
     "resolve_model_class",
     "register_model",
     "list_model_types",

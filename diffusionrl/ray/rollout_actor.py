@@ -10,15 +10,18 @@ import torch
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.distributed.weight_sync_checkpoint import wait_for_published_checkpoint
 from diffusionrl.ray.actor_config import RolloutActorConfig
+from diffusionrl.reward.config import RewardSpec
 from diffusionrl.reward.pipeline import score_and_attach_rewards
-from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.reward.service import RewardService
 from diffusionrl.samplers.construction import create_rollout_engine_from_init_payload
-from diffusionrl.samplers.engine import BaseRolloutEngine, DistributedWeightSyncCapable
+from diffusionrl.samplers.engine import (
+    BaseRolloutEngine,
+    DistributedWeightSyncCapable,
+    EngineConfig,
+)
 from diffusionrl.samplers.fsdp.sampler_runner import finalize_sampling_output
-from diffusionrl.samplers.registry import resolve_rollout_engine_class
-from diffusionrl.types.batch_ops import concat_columnar_values
-from diffusionrl.types.engine import EngineConfig
+from diffusionrl.samplers.registry import derive_rollout_engine_class
+from diffusionrl.types.batch_ops import batch_concat
 from diffusionrl.types.sampling import LogProbData, RolloutRequest, RolloutSamples
 from diffusionrl.types.trajectory_store import TrajectoryStore
 
@@ -92,7 +95,7 @@ class RolloutActor:
         self._transport_log_payload_bytes: bool = False
         self._scheduler_endpoint: Optional[str] = None
         self._weight_update_target: str = f"actor_rank:{self.rank}"
-        self._reward_schema: Optional[RewardSchema] = None
+        self._reward_config: Optional[RewardSpec] = None
         self._reward_service: Optional[RewardService] = None
 
     def _log_resource_ids(self, tag: str) -> None:
@@ -173,12 +176,12 @@ class RolloutActor:
         self.engine.wake_up()
 
     def _ensure_reward_service(self) -> RewardService:
-        if self._reward_schema is None:
+        if self._reward_config is None:
             raise RuntimeError(
                 "Reward service requested before reward schema initialization."
             )
         if self._reward_service is None:
-            self._reward_service = RewardService(self._reward_schema)
+            self._reward_service = RewardService(self._reward_config)
         return self._reward_service
 
     @staticmethod
@@ -698,7 +701,7 @@ class RolloutActor:
                 "rollout actor init config must provide EngineConfig inside engine_init_payload. "
                 f"Got: {type(base_engine_config).__name__}"
             )
-        engine_cls = resolve_rollout_engine_class(engine_init_payload.component_dotpath)
+        engine_cls = derive_rollout_engine_class(engine_init_payload.component_dotpath)
         sampler_engine_type = (
             str(
                 getattr(engine_cls, "_component_name", "")
@@ -713,12 +716,12 @@ class RolloutActor:
             )
 
         reward_config = config.reward_config
-        if not isinstance(reward_config, dict):
+        if not isinstance(reward_config, RewardSpec):
             raise ValueError(
-                "reward_config must be provided in rollout actor init config as dict. "
+                "reward_config must be provided in rollout actor init config as RewardSpec. "
                 f"Got: {type(reward_config).__name__}"
             )
-        self._reward_schema = RewardSchema(**reward_config)
+        self._reward_config = reward_config
 
         engine_kwargs = dict(base_engine_config.engine_kwargs or {})
         self._configure_transport_options(engine_kwargs)
@@ -902,14 +905,14 @@ class RolloutActor:
         }
         other_keys = sorted(set().union(*(output.aux.keys() for output in outputs)) - handled_keys)
         for key in other_keys:
-            merged_value = concat_columnar_values(
+            merged_value = batch_concat(
                 [output.aux.get(key) for output in outputs],
                 batch_sizes=batch_sizes,
             )
             if merged_value is not None:
                 aux[key] = merged_value
 
-        merged_meta = concat_columnar_values([output.meta for output in outputs], batch_sizes=batch_sizes) or {}
+        merged_meta = batch_concat([output.meta for output in outputs], batch_sizes=batch_sizes) or {}
         return RolloutSamples(
             latents=latents,
             timesteps=timesteps,

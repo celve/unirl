@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from diffusionrl.buffer.buffer_batch_ops import index_training_batch
-from diffusionrl.config.argument_parsing import parse_cli_list
+from diffusionrl.cmdline.argument_parsing import parse_cli_list
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils import load_function
 

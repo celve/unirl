@@ -10,7 +10,6 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "RuntimePlacementConfig": ("diffusionrl.ray.placement_group", "RuntimePlacementConfig"),
     "PlacementGroupResult": ("diffusionrl.ray.placement_group", "PlacementGroupResult"),
     "create_placement_groups": ("diffusionrl.ray.placement_group", "create_placement_groups"),
-    "create_placement_groups_from_args": ("diffusionrl.ray.placement_group", "create_placement_groups_from_args"),
     "create_placement_groups_from_runtime": ("diffusionrl.ray.placement_group", "create_placement_groups_from_runtime"),
     "remove_placement_group": ("diffusionrl.ray.placement_group", "remove_placement_group"),
     "BufferActor": ("diffusionrl.ray.buffer_actor", "BufferActor"),

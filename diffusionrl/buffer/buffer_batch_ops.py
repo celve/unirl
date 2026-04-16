@@ -6,7 +6,7 @@ from typing import List, Optional, Sequence
 
 import torch
 
-from diffusionrl.types.batch_ops import concat_payload_values, reindex_payload_value
+from diffusionrl.types.batch_ops import batch_concat, batch_reindex
 from diffusionrl.types.forward_context import ForwardContext
 from diffusionrl.types.sampling import LogProbData
 from diffusionrl.types.training_batch import TrainingBatch
@@ -68,10 +68,12 @@ def index_training_batch(batch: TrainingBatch, keep_indices: Sequence[int]) -> T
         is_partitioned=batch.is_partitioned,
         step_indices=batch.step_indices,
         target_sde_indices=batch.target_sde_indices,
-        extras=reindex_payload_value(
+        extras=batch_reindex(
             batch.extras,
             indices=idx,
             batch_size=int(batch.batch_size),
+            recursive=True,
+            deep_clone=True,
         ),
     )
 
@@ -126,9 +128,11 @@ def concat_training_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
     rewards = None
     if all(b.rewards is not None for b in typed):
         rewards = torch.cat([b.rewards for b in typed if b.rewards is not None], dim=0)
-    extras = concat_payload_values(
+    extras = batch_concat(
         [b.extras for b in typed],
         batch_sizes=[int(b.batch_size) for b in typed],
+        deep_clone=True,
+        strict=False,
     ) or {}
 
     merged_ctx = type(first.forward_context).cat([b.forward_context for b in typed])

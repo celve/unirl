@@ -6,9 +6,8 @@ from diffusionrl.algorithms.construction import create_algorithm_from_init_paylo
 from diffusionrl.algorithms.grpo import GRPOAlgorithm, GRPOAlgorithmConfig
 from diffusionrl.algorithms.nft import NFTAlgorithm, NFTAlgorithmConfig
 from diffusionrl.cmdline.algorithms import build_algorithm_init_payload_from_args
+from diffusionrl.config import SamplingSpec
 from diffusionrl.construction import ComponentInitPayload
-from diffusionrl.types.sampling import SamplingSpec
-from diffusionrl.types.sde import SDEConfig
 
 
 def _make_args(*, algorithm_type: str, algorithm_kwargs: dict | None = None):
@@ -51,7 +50,7 @@ def _make_sampling_spec() -> SamplingSpec:
         sampling_adapter=None,
         init_same_noise=False,
         sampler_kwargs={},
-        sde_config=SDEConfig(eta=0.5, sde_type="vp", shift=1.0),
+        eta=0.5, sde_type="vp", shift=1.0,
     )
 
 

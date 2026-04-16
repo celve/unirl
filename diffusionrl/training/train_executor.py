@@ -5,21 +5,24 @@ from __future__ import annotations
 import os
 import re
 from functools import partial
+
 import tqdm as tqdm_
+
 tqdm = partial(tqdm_.tqdm, dynamic_ncols=True)
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, List, Optional
 
 import torch
 from torch.profiler import profile as torch_profile, ProfilerActivity
 
-from diffusionrl.types.training_batch import TrainingBatch
+from diffusionrl.config.spec import TrainingPlan
 from diffusionrl.training.batch_partition import shard_training_batch_for_rank
 from diffusionrl.training.update_schedule import (
     TrainingUpdateSchedule,
     create_training_update_schedule,
 )
+from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils.misc import aggregate_numeric_metrics
 
 logger = logging.getLogger(__name__)
@@ -38,7 +41,7 @@ class TrainExecutorConfig:
     micro_batch_size: int
     local_mini_batch_size: int
     num_updates_per_batch: int
-    training_plan: Dict[str, Any]
+    training_plan: TrainingPlan
     ema_manager: Optional[Any]
     shuffle_samples: bool = True
     shuffle_seed: Optional[int] = None
@@ -78,7 +81,7 @@ class TrainExecutor:
             batch,
             dp_size=int(self.config.dp_size),
             rank=int(self.config.rank),
-            per_rank_batch_size=int(self.config.training_plan.get("local_batch_size", 0) or 0),
+            per_rank_batch_size=int(self.config.training_plan.local_batch_size),
         )
         if sharded is None:
             return None

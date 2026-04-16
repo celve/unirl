@@ -10,7 +10,6 @@ from typing import List, Optional, Tuple
 import torch
 
 from diffusionrl.sde.registry import register_sde_strategy
-from diffusionrl.sde.rules import normalize_sde_type
 
 
 # ---------------------------------------------------------------------------

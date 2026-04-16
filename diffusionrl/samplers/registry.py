@@ -7,9 +7,9 @@ from functools import partial
 from typing import Any
 
 from diffusionrl.registry import (
+    derive_registry_or_dotpath,
     register_component,
     require_subclass,
-    resolve_registry_or_dotpath,
 )
 from diffusionrl.samplers.engine import BaseRolloutEngine
 
@@ -27,8 +27,8 @@ def ensure_builtin_rollout_engine_registration() -> None:
     importlib.import_module("diffusionrl.samplers.sglang.engine")
 
 
-def resolve_rollout_engine_class(identifier: str) -> Any:
-    return resolve_registry_or_dotpath(
+def derive_rollout_engine_class(identifier: str) -> Any:
+    return derive_registry_or_dotpath(
         component_family=ROLLOUT_ENGINE_COMPONENT_FAMILY,
         identifier=identifier,
         class_checker=require_subclass(BaseRolloutEngine),
@@ -36,8 +36,8 @@ def resolve_rollout_engine_class(identifier: str) -> Any:
 
 
 __all__ = [
+    "derive_rollout_engine_class",
     "ROLLOUT_ENGINE_COMPONENT_FAMILY",
     "ensure_builtin_rollout_engine_registration",
     "register_rollout_engine",
-    "resolve_rollout_engine_class",
 ]

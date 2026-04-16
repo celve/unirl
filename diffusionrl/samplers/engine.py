@@ -1,13 +1,39 @@
 """Inference engine interface for dedicated rollout-side engines."""
 
 from abc import ABC, abstractmethod
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 import torch
 
 from diffusionrl.types import RolloutRequest, RolloutSamples
-from diffusionrl.types.engine import EngineCapabilities, EngineConfig
+from diffusionrl.types.engine import EngineCapabilities
+
+
+@dataclass
+class EngineConfig:
+    """Configuration for rollout-side inference engines."""
+
+    model_dotpath: str = ""
+    pretrained_model_ckpt_path: str = ""
+    sampler_dotpath: str = ""
+
+    num_inference_steps: int = 50
+    eta: float = 1.0
+    sde_type: str = "flow"
+    shift: float = 3.0
+    guidance_scale: float = 7.5
+
+    height: int = 256
+    width: int = 256
+    num_frames: int = 16
+
+    engine_kwargs: Optional[Dict[str, Any]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.engine_kwargs is None:
+            self.engine_kwargs = {}
+        self.sde_type = str(self.sde_type or "flow")
 
 
 class BaseRolloutEngine(ABC):

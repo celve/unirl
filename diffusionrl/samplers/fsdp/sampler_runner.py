@@ -15,7 +15,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.types import RolloutRequest, RolloutSamples
 from diffusionrl.utils import load_function
 from diffusionrl.utils.adapter_utils import switch_adapter
@@ -124,7 +123,7 @@ def temporary_sampler_overrides(
             original_values[key] = getattr(sampler, key)
             value = raw_value
             if key == "sde_type":
-                value = normalize_sde_type(str(raw_value))
+                value = str(raw_value).strip().lower()
             else:
                 value = float(raw_value)
             setattr(sampler, key, value)

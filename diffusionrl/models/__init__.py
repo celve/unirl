@@ -16,7 +16,7 @@ from .registry import (
     ensure_builtin_model_registration,
     list_model_types,
     register_model,
-    resolve_model_bundle_path,
+    derive_model_bundle_path,
     resolve_model_class,
 )
 
@@ -26,7 +26,7 @@ __all__ = [
     "create_model_bundle_from_init_payload",
     "discover_model_bundle_paths",
     "ensure_builtin_model_registration",
-    "resolve_model_bundle_path",
+    "derive_model_bundle_path",
     "resolve_model_class",
     "register_model",
     "list_model_types",

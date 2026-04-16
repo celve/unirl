@@ -11,16 +11,11 @@ from diffusionrl.algorithms.grpo import GRPOAlgorithmConfig
 from diffusionrl.algorithms.nft import NFTAlgorithmConfig
 from diffusionrl.algorithms.registry import (
     ALGORITHM_COMPONENT_FAMILY,
-    resolve_algorithm_class,
 )
-from diffusionrl.cmdline.construction import (
-    build_component_init_payload_from_args,
-    create_component_from_args,
-)
+from diffusionrl.cmdline.construction import build_component_init_payload_from_args
 from diffusionrl.cmdline.registry import register_cmdline_config_parser
-from diffusionrl.cmdline.sampling import build_sampling_spec_from_args
+from diffusionrl.config import SamplingSpec
 from diffusionrl.construction import ComponentInitPayload
-from diffusionrl.types.sampling import SamplingSpec
 
 
 def build_algorithm_init_payload_from_args(
@@ -28,32 +23,14 @@ def build_algorithm_init_payload_from_args(
     *,
     sampling_spec: SamplingSpec | None = None,
 ) -> ComponentInitPayload:
-    resolved_sampling_spec = _require_sampling_spec(args, sampling_spec=sampling_spec)
+    from diffusionrl.cmdline.resolution import derive_algorithm_identifier
+
+    sampling_spec = _require_sampling_spec(args, sampling_spec=sampling_spec)
     return build_component_init_payload_from_args(
         component_family=ALGORITHM_COMPONENT_FAMILY,
-        identifier=_resolve_algorithm_identifier_from_args(args),
+        identifier=derive_algorithm_identifier(args),
         args=args,
-        parser_kwargs={"sampling_spec": resolved_sampling_spec},
-    )
-
-
-def create_algorithm_from_args(
-    args: Any,
-    *,
-    sampling_spec: SamplingSpec | None = None,
-    **init_kwargs: Any,
-) -> Any:
-    resolved_sampling_spec = (
-        sampling_spec
-        if sampling_spec is not None
-        else build_sampling_spec_from_args(args)
-    )
-    return create_component_from_args(
-        component_family=ALGORITHM_COMPONENT_FAMILY,
-        identifier=_resolve_algorithm_identifier_from_args(args),
-        args=args,
-        parser_kwargs={"sampling_spec": resolved_sampling_spec},
-        init_kwargs=init_kwargs or None,
+        parser_kwargs={"sampling_spec": sampling_spec},
     )
 
 
@@ -111,7 +88,9 @@ def build_grpo_algorithm_config_from_args(
     )
     return GRPOAlgorithmConfig(
         **_build_base_algorithm_kwargs(args, sampling_spec=sampling_spec),
-        sde_config=sampling_spec.sde_config,
+        eta=sampling_spec.eta,
+        sde_type=sampling_spec.sde_type,
+        shift=sampling_spec.shift,
         training_share_rollout_indices=bool(
             args.algorithm.training_share_rollout_indices
         ),
@@ -139,7 +118,9 @@ def build_nft_algorithm_config_from_args(
     )
     return NFTAlgorithmConfig(
         **_build_base_algorithm_kwargs(args, sampling_spec=sampling_spec),
-        sde_config=sampling_spec.sde_config,
+        eta=sampling_spec.eta,
+        sde_type=sampling_spec.sde_type,
+        shift=sampling_spec.shift,
         training_scheduler_config=_scheduler_payload(args.algorithm.training_scheduler),
         **extra,
     )
@@ -157,30 +138,10 @@ def _require_sampling_spec(
 ) -> SamplingSpec:
     if isinstance(sampling_spec, SamplingSpec):
         return sampling_spec
-    cached_resolved = getattr(args, "_diffusionrl_resolved_config", None)
-    cached_sampling_spec = getattr(cached_resolved, "sampling_spec", None)
-    if isinstance(cached_sampling_spec, SamplingSpec):
-        return cached_sampling_spec
     raise ValueError(
         "Algorithm cmdline config parsing requires SamplingSpec. "
-        "Pass sampling_spec explicitly or cache resolved config on args."
+        "Pass sampling_spec explicitly."
     )
-
-
-def _resolve_algorithm_identifier_from_args(args) -> str:
-    algo_dotpath = args.algorithm.algorithm_dotpath
-    algo_type = args.algorithm.algorithm_type
-    if isinstance(algo_dotpath, str) and algo_dotpath.strip():
-        identifier = algo_dotpath.strip()
-    else:
-        identifier = str(algo_type)
-    return identifier
-
-
-def _resolve_algorithm_dotpath_from_args(args) -> str:
-    identifier = _resolve_algorithm_identifier_from_args(args)
-    algorithm_cls = resolve_algorithm_class(identifier)
-    return f"{algorithm_cls.__module__}.{algorithm_cls.__qualname__}"
 
 
 def _build_base_algorithm_kwargs(
@@ -233,7 +194,6 @@ def _coerce_dict_field_type(
 __all__ = [
     # General build_ and create_ xxx _from_args call
     "build_algorithm_init_payload_from_args",
-    "create_algorithm_from_args",
     # Kwargs validation helper
     "validate_algorithm_kwargs",
 ]

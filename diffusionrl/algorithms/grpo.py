@@ -18,9 +18,8 @@ if TYPE_CHECKING:
 
 import torch
 import torch.nn as nn
-
 from diffusionrl.algorithms.registry import register_algorithm
-from diffusionrl.types import SDEConfig, TimestepData
+from diffusionrl.types import TimestepData
 from diffusionrl.types.forward_context import ForwardContext
 from diffusionrl.utils.misc import aggregate_numeric_metrics
 from diffusionrl.utils.scheduler_utils import create_indices_scheduler
@@ -36,7 +35,9 @@ class GRPOAlgorithmConfig(BaseAlgorithmConfig):
     clip_schedule: str = "constant"
     use_kl_penalty: bool = True
     ratio_reg_coef: float = 0.0
-    sde_config: SDEConfig = field(default_factory=SDEConfig)
+    eta: float = 1.0
+    sde_type: str = "flow"
+    shift: float = 3.0
     training_share_rollout_indices: bool = True
     rollout_scheduler_config: Dict[str, Any] = field(default_factory=dict)
     training_scheduler_config: Dict[str, Any] = field(default_factory=dict)
@@ -91,52 +92,6 @@ class GRPOAlgorithm(BaseAlgorithm):
     Reference: DanceGRPO
     """
 
-    @classmethod
-    def _parse_config_from_dict(cls, config: dict) -> GRPOAlgorithmConfig:
-        extra = cls.resolve_config_kwargs(config)
-        sde_config = SDEConfig.from_mapping(config.get("sde_config", SDEConfig()))
-        return GRPOAlgorithmConfig(
-            clip_range=float(extra.get("clip_range", 1e-4)),
-            clip_schedule=str(extra.get("clip_schedule", "constant")),
-            use_kl_penalty=bool(extra.get("use_kl_penalty", True)),
-            kl_coef=float(extra.get("kl_coef", 0.01)),
-            component_mix_stage=str(config.get("component_mix_stage", "reward")),
-            adv_normalization_scope=str(config.get("adv_normalization_scope", "group")),
-            samples_per_prompt=int(config.get("samples_per_prompt", 1)),
-            num_inference_steps=int(config.get("num_inference_steps", 0)),
-            eval_ema_decay=float(config.get("eval_ema_decay", 0.9)),
-            eval_ema_update_interval=int(config.get("eval_ema_update_interval", 1)),
-            epsilon=float(config.get("adv_norm_eps", 1e-8)),
-            clip_max=config.get("clip_max", 5.0),
-            use_global_std=bool(config.get("use_global_std", False)),
-            trim_outliers_ratio=float(config.get("trim_outliers_ratio", 0.0)),
-            ratio_reg_coef=float(extra.get("ratio_reg_coef", 0.0)),
-            sde_config=sde_config,
-            training_share_rollout_indices=bool(
-                config.get("training_share_rollout_indices", True)
-            ),
-            rollout_scheduler_config=dict(config.get("rollout_scheduler") or {}),
-            training_scheduler_config=dict(config.get("training_scheduler") or {}),
-            skip_last_timestep=bool(extra.get("skip_last_timestep", False)),
-            skip_initial_timesteps=int(extra.get("skip_initial_timesteps", 0)),
-            model_type=str(extra.get("model_type", "default")),
-        )
-
-    @classmethod
-    def from_config(
-        cls,
-        config: dict | GRPOAlgorithmConfig,
-    ) -> "GRPOAlgorithm":
-        """Create GRPOAlgorithm from raw framework config or typed config."""
-        if isinstance(config, dict):
-            config = cls._parse_config_from_dict(config)
-        if not isinstance(config, GRPOAlgorithmConfig):
-            raise TypeError(
-                f"{cls.__name__}.from_config expects dict or GRPOAlgorithmConfig, "
-                f"got {type(config).__name__}."
-            )
-        return cls(config=config)
-
     def __init__(
         self,
         *,
@@ -166,7 +121,9 @@ class GRPOAlgorithm(BaseAlgorithm):
         self.clip_schedule = config.clip_schedule
         self.use_kl_penalty = config.use_kl_penalty
         self.ratio_reg_coef = config.ratio_reg_coef
-        self.sde_config = config.sde_config
+        self._eta = config.eta
+        self._sde_type = config.sde_type
+        self._shift = config.shift
         self.model_type = config.model_type
         self.training_share_rollout_indices = bool(
             config.training_share_rollout_indices
@@ -197,15 +154,15 @@ class GRPOAlgorithm(BaseAlgorithm):
 
     @property
     def eta(self) -> float:
-        return self.sde_config.eta
+        return self._eta
 
     @property
     def sde_type(self) -> str:
-        return self.sde_config.sde_type
+        return self._sde_type
 
     @property
     def time_shift(self) -> float:
-        return self.sde_config.shift
+        return self._shift
 
     def get_sampling_requirements(self) -> SamplingRequirements:
         """Return GRPO sampling requirements."""

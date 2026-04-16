@@ -69,6 +69,43 @@ def test_build_train_backend_init_payload_from_dotpath_uses_component_config_att
     assert payload.component_config.parallelize_kwargs == {"foo": "bar"}
 
 
+def test_build_train_backend_init_payload_with_prebuilt_config_skips_args_parsing():
+    config = FSDPTrainBackendConfig(
+        cpu_offload=False,
+        param_dtype="bf16",
+        use_fsdp=True,
+        mixed_precision=True,
+    )
+    args = SimpleNamespace()
+
+    payload = build_train_backend_init_payload_from_args(
+        args,
+        train_backend_config=config,
+    )
+
+    assert isinstance(payload, ComponentInitPayload)
+    assert payload.component_dotpath.endswith("FSDPTrainBackend")
+    assert payload.component_config is config
+
+
+def test_build_train_backend_init_payload_with_prebuilt_veomni_config():
+    config = VeOmniTrainBackendConfig(
+        backend_dotpath="diffusionrl.training.backends.veomni_native.VeOmniNativeTrainBackend",
+        tp_size=2,
+    )
+    args = SimpleNamespace()
+
+    payload = build_train_backend_init_payload_from_args(
+        args,
+        train_backend_config=config,
+    )
+
+    assert isinstance(payload, ComponentInitPayload)
+    assert payload.component_dotpath.endswith("VeOmniNativeTrainBackend")
+    assert payload.component_config is config
+    assert payload.component_config.tp_size == 2
+
+
 def test_create_train_backend_from_init_payload_constructs_backend():
     payload = ComponentInitPayload(
         component_dotpath="diffusionrl.training.backends.fsdp.FSDPTrainBackend",

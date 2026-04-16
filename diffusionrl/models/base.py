@@ -139,11 +139,6 @@ class ModelBundle(ABC):
         """Whether this model supports SGLang prompt-only rollout mode."""
         return False
 
-    @classmethod
-    def validate_config(cls, args: Any) -> None:
-        """Model-specific argument normalization/validation hook."""
-        return None
-
     @abstractmethod
     def load(self) -> None:
         """Load all model components."""

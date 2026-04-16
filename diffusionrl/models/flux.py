@@ -10,12 +10,10 @@ Reference: https://github.com/black-forest-labs/flux
 """
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Dict, List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
-
-from diffusionrl.sde.rules import normalize_sde_type
 
 from .base import ModelBundle
 from .config import ModelBundleConfig
@@ -101,17 +99,6 @@ class FluxModelBundle(ModelBundle):
     @classmethod
     def supports_sglang_prompt_mode(cls) -> bool:
         return True
-
-    @classmethod
-    def validate_config(cls, args: Any) -> None:
-        sde_type = normalize_sde_type(args.sampling.sde_type or "")
-        valid_sde_types = ("dance", "flow", "dpm2", "")
-        if sde_type in valid_sde_types:
-            return
-        raise ValueError(
-            f"Unknown sde_type='{sde_type}' for model_type='flux'. "
-            f"Valid options: {', '.join(t for t in valid_sde_types if t)}."
-        )
 
     def load(self) -> None:
         """Load all model components."""

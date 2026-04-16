@@ -13,7 +13,6 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from torch.utils.data import DataLoader
 
-from diffusionrl.config.resolution import require_prompts_per_rollout
 
 from .datasets import PromptExampleDataset, TextPromptDataset, normalize_prompt_example
 
@@ -43,7 +42,7 @@ class ImageRLDataSource:
         self.data_path = args.data_path
         self.eval_data_path = args.eval_data_path
         self.seed = args.seed
-        self.prompts_per_rollout = int(require_prompts_per_rollout(args))
+        self.prompts_per_rollout = args.algorithm.prompts_per_rollout
         self.drop_last = True
 
         # Training data and eval data are treated as separate prompt sources.

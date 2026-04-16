@@ -7,13 +7,16 @@ from typing import Any, Dict, Optional
 
 from diffusionrl.cmdline.construction import build_component_init_payload_from_args
 from diffusionrl.cmdline.registry import register_cmdline_config_parser
+from diffusionrl.cmdline.resolution import (
+    derive_train_backend_dotpath,
+    derive_train_backend_identifier,
+)
 from diffusionrl.construction import ComponentInitPayload
+from diffusionrl.registry import derive_registry_or_dotpath
+from diffusionrl.training.backends.base import BaseTrainBackendConfig
 from diffusionrl.training.backends.fsdp import FSDPTrainBackendConfig
 from diffusionrl.training.backends.megatron import MegatronTrainBackendConfig
-from diffusionrl.training.backends.registry import (
-    TRAIN_BACKEND_COMPONENT_FAMILY,
-    supported_train_backends,
-)
+from diffusionrl.training.backends.registry import TRAIN_BACKEND_COMPONENT_FAMILY
 from diffusionrl.training.backends.veomni_native import VeOmniTrainBackendConfig
 
 
@@ -29,7 +32,7 @@ def build_fsdp_train_backend_config_from_args(args: Any) -> FSDPTrainBackendConf
     fsdp_mode = str(getattr(args.training, "fsdp_mode", "full") or "full").strip().lower()
     reshard_after_forward = bool(getattr(args.training, "reshard_after_forward", True))
     return FSDPTrainBackendConfig(
-        backend_dotpath=_resolve_backend_dotpath_from_args(args),
+        backend_dotpath=derive_train_backend_dotpath(args),
         cpu_offload=bool(args.training.fsdp_cpu_offload),
         param_dtype=str(args.precision.fsdp_precision),
         fsdp_mode=fsdp_mode,
@@ -63,7 +66,7 @@ def build_megatron_train_backend_config_from_args(
     if actor_kwargs is not None:
         extra["actor_kwargs"] = dict(actor_kwargs)
     return MegatronTrainBackendConfig(
-        backend_dotpath=_resolve_backend_dotpath_from_args(args),
+        backend_dotpath=derive_train_backend_dotpath(args),
         **extra,
     )
 
@@ -86,13 +89,29 @@ def build_veomni_train_backend_config_from_args(
     if parallelize_kwargs is not None:
         extra["parallelize_kwargs"] = dict(parallelize_kwargs)
     return VeOmniTrainBackendConfig(
-        backend_dotpath=_resolve_backend_dotpath_from_args(args),
+        backend_dotpath=derive_train_backend_dotpath(args),
         **extra,
     )
 
 
-def build_train_backend_init_payload_from_args(args: Any) -> ComponentInitPayload:
-    backend_identifier = _resolve_train_backend_identifier_from_args(args)
+def build_train_backend_init_payload_from_args(
+    args: Any,
+    *,
+    train_backend_config: Optional[BaseTrainBackendConfig] = None,
+) -> ComponentInitPayload:
+    if train_backend_config is not None:
+        identifier = (
+            train_backend_config.backend_dotpath or train_backend_config.name
+        )
+        backend_cls = derive_registry_or_dotpath(
+            component_family=TRAIN_BACKEND_COMPONENT_FAMILY,
+            identifier=identifier,
+        )
+        return ComponentInitPayload(
+            component_dotpath=f"{backend_cls.__module__}.{backend_cls.__qualname__}",
+            component_config=train_backend_config,
+        )
+    backend_identifier = derive_train_backend_identifier(args)
     return build_component_init_payload_from_args(
         component_family=TRAIN_BACKEND_COMPONENT_FAMILY,
         identifier=backend_identifier,
@@ -122,26 +141,6 @@ def validate_train_backend_kwargs(
 
 
 ## -------- Helper functions --------
-def _resolve_backend_name_from_args(args: Any) -> str:
-    return str(args.training.train_backend or "fsdp").strip().lower()
-
-
-def _resolve_backend_dotpath_from_args(args: Any) -> Optional[str]:
-    backend_dotpath = str(args.training.train_backend_dotpath or "").strip()
-    return backend_dotpath or None
-
-
-def _resolve_train_backend_identifier_from_args(args: Any) -> str:
-    backend_dotpath = _resolve_backend_dotpath_from_args(args)
-    backend_name = _resolve_backend_name_from_args(args)
-    if backend_dotpath is None and backend_name not in supported_train_backends():
-        raise ValueError(
-            f"Unsupported train_backend={backend_name!r}. "
-            f"Expected one of {list(supported_train_backends())} or provide training.train_backend_dotpath."
-        )
-    return backend_dotpath or backend_name
-
-
 def _coerce_simple_dataclass_fields(
     config_class: type, raw: Dict[str, Any]
 ) -> Dict[str, Any]:

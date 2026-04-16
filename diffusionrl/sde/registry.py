@@ -5,11 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from diffusionrl.registry import (
+    derive_registry_or_dotpath,
     register_component,
     require_subclass,
-    resolve_registry_or_dotpath,
 )
-from diffusionrl.sde.rules import normalize_sde_type
 
 SDE_STRATEGY_COMPONENT_FAMILY = "sde_strategy"
 
@@ -39,10 +38,10 @@ def register_sde_strategy(*component_names: str):
 def resolve_sde_strategy_class(identifier: str) -> Any:
     """Resolve an SDE strategy class by registered name or full dot path."""
     if "." not in identifier:
-        normalized_identifier = normalize_sde_type(identifier)
+        normalized_identifier = identifier.strip().lower()
     else:
         normalized_identifier = identifier
-    return resolve_registry_or_dotpath(
+    return derive_registry_or_dotpath(
         component_family=SDE_STRATEGY_COMPONENT_FAMILY,
         identifier=normalized_identifier,
         class_checker=_require_sde_strategy_subclass,

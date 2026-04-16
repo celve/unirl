@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
+
+if TYPE_CHECKING:
+    from diffusionrl.ray.actor_config import (
+        TrainingLrSchedulerConfig,
+        TrainingOptimizerConfig,
+    )
 
 
 class ActorTrainBackendContext:
@@ -288,12 +294,16 @@ class TrainBackend(abc.ABC):
             config=self.config,
         )
 
-    def build_optimizer(self, actor: Any, optimizer_config: Mapping[str, Any]) -> Any:
+    def build_optimizer(
+        self, actor: Any, optimizer_config: TrainingOptimizerConfig
+    ) -> Any:
         """Optimizer construction hook; return None to use actor default."""
         del actor, optimizer_config
         return None
 
-    def build_scheduler(self, actor: Any, scheduler_config: Mapping[str, Any]) -> Any:
+    def build_scheduler(
+        self, actor: Any, scheduler_config: TrainingLrSchedulerConfig
+    ) -> Any:
         """Scheduler construction hook; return None to use actor default."""
         del actor, scheduler_config
         return None
@@ -348,27 +358,21 @@ class TrainBackend(abc.ABC):
         }
 
 
-def resolve_train_backend_capabilities(
-    identifier: str,
+def derive_train_backend_capabilities(
+    config: BaseTrainBackendConfig,
 ) -> TrainBackendCapabilities:
     from .registry import resolve_train_backend_class
 
-    backend_cls = resolve_train_backend_class(identifier)
-    return backend_cls.declared_capabilities()
-
-
-def resolve_train_backend_capabilities_from_config(
-    config: BaseTrainBackendConfig,
-) -> TrainBackendCapabilities:
     identifier = (
         str(config.backend_dotpath).strip()
         if config.backend_dotpath
         else str(config.name).strip().lower()
     )
-    return resolve_train_backend_capabilities(identifier)
+    backend_cls = resolve_train_backend_class(identifier)
+    return backend_cls.declared_capabilities()
 
 
-def resolve_train_backend_launch_spec(
+def derive_train_backend_launch_spec(
     config: BaseTrainBackendConfig,
     *,
     args: Any,
@@ -377,9 +381,9 @@ def resolve_train_backend_launch_spec(
     from .registry import resolve_train_backend_class
 
     identifier = (
-        str(config.backend_dotpath).strip()
+        config.backend_dotpath
         if config.backend_dotpath
-        else str(config.name).strip().lower()
+        else config.name
     )
     backend_cls = resolve_train_backend_class(identifier)
     if backend_cls.launch_spec is TrainBackend.launch_spec:
@@ -399,7 +403,6 @@ __all__ = [
     "TrainTopology",
     "TrainBackendLaunchSpec",
     "TrainBackend",
-    "resolve_train_backend_capabilities",
-    "resolve_train_backend_capabilities_from_config",
-    "resolve_train_backend_launch_spec",
+    "derive_train_backend_capabilities",
+    "derive_train_backend_launch_spec",
 ]

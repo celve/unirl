@@ -8,26 +8,16 @@ CANONICAL_SDE_TYPES: Tuple[str, ...] = ("flow", "cps", "dance", "dpm2")
 SUPPORTED_USER_SDE_TYPES: Tuple[str, ...] = CANONICAL_SDE_TYPES
 
 
-def normalize_sde_type(sde_type: Optional[str], *, default: str = "flow") -> str:
-    """Normalize transition rule names to stable canonical lowercase values."""
-
-    raw = str(sde_type or "").strip().lower()
-    fallback = str(default or "flow").strip().lower() or "flow"
-    if not raw:
-        raw = fallback
-    return raw
-
-
 def is_deterministic_sde_type(
-    sde_type: Optional[str],
+    sde_type: str,
     eta: Optional[float] = None,
-    *,
-    default: str = "flow",
 ) -> bool:
-    """Whether the transition is deterministic at runtime."""
+    """Whether the transition is deterministic at runtime.
 
-    normalized = normalize_sde_type(sde_type, default=default)
-    if normalized == "dpm2":
+    Expects *sde_type* to already be canonical lowercase (validated by
+    ``_validate_metadata_choices`` in config validation).
+    """
+    if sde_type == "dpm2":
         return True
     if eta is None:
         return False
@@ -43,7 +33,6 @@ def supported_sde_type_text(values: Tuple[str, ...] = SUPPORTED_USER_SDE_TYPES) 
 __all__ = [
     "CANONICAL_SDE_TYPES",
     "SUPPORTED_USER_SDE_TYPES",
-    "normalize_sde_type",
     "is_deterministic_sde_type",
     "supported_sde_type_text",
 ]

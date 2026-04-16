@@ -7,9 +7,9 @@ from functools import partial
 from typing import Any
 
 from diffusionrl.registry import (
+    derive_registry_or_dotpath,
     register_component,
     require_subclass,
-    resolve_registry_or_dotpath,
 )
 
 from .base import BaseAlgorithm
@@ -31,17 +31,23 @@ def ensure_builtin_algorithm_registration() -> None:
     importlib.import_module("diffusionrl.algorithms.nft")
 
 
-def resolve_algorithm_class(identifier: str) -> Any:
-    return resolve_registry_or_dotpath(
+def derive_algorithm_class(identifier: str) -> Any:
+    return derive_registry_or_dotpath(
         component_family=ALGORITHM_COMPONENT_FAMILY,
         identifier=identifier,
         class_checker=require_subclass(BaseAlgorithm),
     )
 
 
+def derive_algorithm_dotpath(identifier: str) -> str:
+    algorithm_cls = derive_algorithm_class(identifier)
+    return f"{algorithm_cls.__module__}.{algorithm_cls.__qualname__}"
+
+
 __all__ = [
     "ALGORITHM_COMPONENT_FAMILY",
     "ensure_builtin_algorithm_registration",
     "register_algorithm",
-    "resolve_algorithm_class",
+    "derive_algorithm_class",
+    "derive_algorithm_dotpath",
 ]

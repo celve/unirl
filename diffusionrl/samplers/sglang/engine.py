@@ -12,11 +12,11 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
+from diffusionrl.samplers.engine import EngineConfig
 from diffusionrl.samplers.registry import register_rollout_engine
-from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.sde.runtime import get_sigma_schedule_diffusers
 from diffusionrl.types import LogProbData, RolloutRequest, RolloutSamples
-from diffusionrl.types.engine import EngineCapabilities, EngineConfig
+from diffusionrl.types.engine import EngineCapabilities
 from diffusionrl.types.forward_context import ForwardContext, get_forward_context_cls
 from diffusionrl.types.trajectory_store import (
     TrajectoryStore,
@@ -1033,9 +1033,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 self._warned_disabled_native_rollout = True
             rollout_enabled = False
         requested_rollout_sde = str(
-            normalize_sde_type(
-                kwargs.pop("rollout_sde_type", getattr(self.config, "sde_type", "flow"))
-            )
+            kwargs.pop("rollout_sde_type", getattr(self.config, "sde_type", "flow"))
         ).strip().lower()
         # Internal config only uses canonical flow/cps/dance/dpm2 names.
         # The native SGLang backend still expects "sde" as the flow-kernel label,

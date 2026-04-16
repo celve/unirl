@@ -8,10 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import ray
 from ray.util.placement_group import PlacementGroup
 
-from diffusionrl.config.launch_resolution import (
-    LaunchConfig,
-    resolve_launch_placement_spec,
-)
+from diffusionrl.config import LaunchConfig
 
 logger = logging.getLogger(__name__)
 
@@ -261,37 +258,6 @@ def _create_single_pg(
         result["training"] = (pg, bundle_indices[cursor:train_end], gpu_ids[cursor:train_end])
 
     return result
-
-
-def create_placement_groups_from_args(args) -> Dict[str, Optional[PlacementGroupResult]]:
-    """
-    Create placement groups from TrainingArguments.
-
-    Always uses unified single_pg mode with uniform {"GPU": 1} bundles.
-    Multi-GPU engines are handled at the actor level via NOSET + base_gpu_id.
-
-    Args:
-        args: TrainingArguments instance
-
-    Returns:
-        Dictionary of placement group results
-    """
-    placement = resolve_launch_placement_spec(args)
-    if placement.rollout_num_nodes == 0 and placement.rollout_num_gpus_per_node == 0:
-        debug_mode = str(args.debug.debug_mode or "none").strip().lower()
-        if debug_mode == "train_only":
-            logger.info("Debug mode train_only: rollout/reward placement is disabled.")
-        else:
-            logger.info("Direct training-actor sampling active: rollout placement is disabled.")
-    config = RuntimePlacementConfig(
-        rollout_num_nodes=placement.rollout_num_nodes,
-        rollout_num_gpus_per_node=placement.rollout_num_gpus_per_node,
-        training_num_nodes=placement.training_num_nodes,
-        training_num_gpus_per_node=placement.training_num_gpus_per_node,
-        colocate_rollout=placement.colocate_rollout,
-        strategy=placement.strategy,
-    )
-    return create_placement_groups(config)
 
 
 def create_placement_groups_from_launch(

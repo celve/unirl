@@ -27,11 +27,11 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 import torch
 
 from .batch_ops import (
-    clone_payload_value,
-    concat_payload_values,
-    move_payload_value,
-    reindex_payload_value,
-    slice_payload_value,
+    batch_clone,
+    batch_concat,
+    batch_move,
+    batch_reindex,
+    batch_slice,
 )
 from .forward_context import ForwardContext
 from .sampling import LogProbData
@@ -46,7 +46,7 @@ def build_rollout_extras(*, request: Any, sampler_outputs: List[Any]) -> Dict[st
 
     request_meta = getattr(request, "meta", None)
     if isinstance(request_meta, dict) and request_meta:
-        extras["request_meta"] = clone_payload_value(request_meta)
+        extras["request_meta"] = batch_clone(request_meta)
 
     sample_meta_values: List[Any] = []
     sample_meta_batch_sizes: List[int] = []
@@ -60,9 +60,11 @@ def build_rollout_extras(*, request: Any, sampler_outputs: List[Any]) -> Dict[st
         sample_meta_values.append(meta)
         sample_meta_batch_sizes.append(int(latents.shape[0]))
     if sample_meta_values:
-        extras["sample_meta"] = concat_payload_values(
+        extras["sample_meta"] = batch_concat(
             sample_meta_values,
             batch_sizes=sample_meta_batch_sizes,
+            deep_clone=True,
+            strict=False,
         )
 
     return extras
@@ -360,7 +362,7 @@ class TrainingBatch:
             is_partitioned=self.is_partitioned,
             step_indices=self.step_indices.to(device) if self.step_indices is not None else None,
             target_sde_indices=self.target_sde_indices,
-            extras=move_payload_value(self.extras, device),
+            extras=batch_move(self.extras, device),
         )
 
     def slice(self, start: int, end: int) -> "TrainingBatch":
@@ -379,11 +381,13 @@ class TrainingBatch:
             is_partitioned=True,
             step_indices=self.step_indices,
             target_sde_indices=self.target_sde_indices,
-            extras=slice_payload_value(
+            extras=batch_slice(
                 self.extras,
+                batch_size=int(self.batch_size),
                 start=start,
                 end=end,
-                batch_size=int(self.batch_size),
+                recursive=True,
+                deep_clone=True,
             ),
         )
 
@@ -419,10 +423,12 @@ class TrainingBatch:
             is_partitioned=self.is_partitioned,
             step_indices=self.step_indices,
             target_sde_indices=self.target_sde_indices,
-            extras=reindex_payload_value(
+            extras=batch_reindex(
                 self.extras,
                 indices=indices,
                 batch_size=int(self.batch_size),
+                recursive=True,
+                deep_clone=True,
             ),
         )
 

@@ -16,6 +16,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from diffusionrl.algorithms.construction import create_algorithm_from_init_payload
+from diffusionrl.config.spec import TrainingPlan
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.distributed.weight_sync_checkpoint import (
     publish_checkpoint_atomic,
@@ -23,10 +24,15 @@ from diffusionrl.distributed.weight_sync_checkpoint import (
 )
 from diffusionrl.models import create_model_bundle_from_init_payload
 from diffusionrl.patches.replay_logprob import ReplayLogProbPatch
-from diffusionrl.ray.actor_config import TrainingActorConfig
+from diffusionrl.ray.actor_config import (
+    TrainingActorConfig,
+    TrainingExecutionConfig,
+    TrainingLrSchedulerConfig,
+    TrainingOptimizerConfig,
+)
 from diffusionrl.ray.training_actor_sampling import ActorSamplingExecutor
+from diffusionrl.reward.config import RewardSpec
 from diffusionrl.reward.pipeline import score_and_attach_rewards
-from diffusionrl.reward.schema import RewardSchema
 from diffusionrl.reward.service import RewardService
 from diffusionrl.samplers.fsdp.sampler_runner import finalize_sampling_output
 from diffusionrl.training import (
@@ -35,6 +41,7 @@ from diffusionrl.training import (
     TrainingWorkflow,
     create_train_backend_from_init_payload,
 )
+from diffusionrl.training.backends.base import TrainTopology
 from diffusionrl.types.sampling import LogProbData, RolloutRequest, RolloutSamples
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils import clear_memory as _clear_gpu_memory
@@ -63,7 +70,7 @@ def _build_synthetic_debug_training_batch(
     This path is intentionally narrow: only image-style SD3 training batches are
     synthesized. Other model families have materially different latent contracts
     (for example video layouts or FLUX-specific packed inputs), so train_only
-    should use ``--debug.debug-load-path`` there rather than guessing.
+    should use ``--debug.load-path`` there rather than guessing.
     """
     from diffusionrl.types.training_batch import TrainingBatch
     from diffusionrl.types.trajectory_store import TrajectoryStore
@@ -72,7 +79,7 @@ def _build_synthetic_debug_training_batch(
     if normalized_model_type != "sd3":
         raise NotImplementedError(
             "Synthetic train_only batches are only supported for model_type='sd3'. "
-            "Use --debug.debug-load-path with a saved rollout payload for other models."
+            "Use --debug.load-path with a saved rollout payload for other models."
         )
 
     config = getattr(model, "config", None)
@@ -217,15 +224,15 @@ class TrainingActor(BaseTrainRayActor):
             "dp_size": int(world_size),
             "partition_mode": "data_parallel",
         }
-        self._resolved_training_plan: Dict[str, Any] = {
-            "global_batch_size": int(world_size),
-            "local_batch_size": 1,
-            "local_mini_batch_size": 1,
-            "micro_batch_size": 1,
-            "num_updates_per_batch": 1,
-            "update_slices": [[0, 1]],
-            "mini_batch_slices_per_update": [[[0, 1]]],
-        }
+        self._resolved_training_plan = TrainingPlan(
+            global_batch_size=int(world_size),
+            local_batch_size=1,
+            local_mini_batch_size=1,
+            micro_batch_size=1,
+            num_updates_per_batch=1,
+            update_slices=((0, 1),),
+            mini_batch_slices_per_update=(((0, 1),),),
+        )
 
         # EMA runtime ----------------------------------------------------------
         self._ema_manager = None
@@ -255,8 +262,7 @@ class TrainingActor(BaseTrainRayActor):
         self._update_weight_handler = None
         self._rollout_actors: List[Any] = []
         self._lora_initialized_on_rollout = False
-        self._reward_config: Dict[str, Any] = {}
-        self._reward_schema: Optional[RewardSchema] = None
+        self._reward_config: Optional[RewardSpec] = None
         self._reward_service: Optional[RewardService] = None
         self._training_workflow = TrainingWorkflow()
 
@@ -356,43 +362,26 @@ class TrainingActor(BaseTrainRayActor):
         self._train_backend_name = self._train_backend.name
         self._train_backend_capabilities = self._train_backend.capabilities.as_dict()
 
-        topology_config = self._require_dict_config(config, "topology_config")
-        if int(topology_config["world_size"]) != int(self.world_size):
+        topology_config = config.topology_config
+        if not isinstance(topology_config, TrainTopology):
+            raise ValueError(
+                "TrainingActor init requires topology_config to be a TrainTopology. "
+                f"Got: {type(topology_config).__name__}"
+            )
+        if int(topology_config.world_size) != int(self.world_size):
             raise ValueError(
                 "TrainingActor topology_config.world_size must match the actor-group world_size. "
-                f"Got topology_config.world_size={topology_config['world_size']}, "
+                f"Got topology_config.world_size={topology_config.world_size}, "
                 f"actor.world_size={self.world_size}."
             )
-        self._resolved_train_topology = {
-            key: int(value)
-            if key
-            in {
-                "actor_count",
-                "world_size",
-                "dp_size",
-                "dp_replicate_size",
-                "dp_shard_size",
-                "tp_size",
-                "pp_size",
-                "sp_size",
-                "ep_size",
-            }
-            else value
-            for key, value in dict(topology_config).items()
-        }
-        self._resolved_training_plan = {
-            key: int(value)
-            if key
-            in {
-                "global_batch_size",
-                "local_batch_size",
-                "local_mini_batch_size",
-                "micro_batch_size",
-                "num_updates_per_batch",
-            }
-            else value
-            for key, value in dict(self._require_dict_config(config, "training_plan_config")).items()
-        }
+        self._resolved_train_topology = topology_config.as_dict()
+        training_plan = config.training_plan_config
+        if not isinstance(training_plan, TrainingPlan):
+            raise ValueError(
+                "TrainingActor init requires training_plan_config to be a TrainingPlan. "
+                f"Got: {type(training_plan).__name__}"
+            )
+        self._resolved_training_plan = training_plan
 
         # Initialize distributed
         self._init_distributed(backend=self._train_backend.capabilities.distributed_backend)
@@ -409,29 +398,42 @@ class TrainingActor(BaseTrainRayActor):
         # Backend model wrapping (FSDP/Megatron/others).
         self._train_backend.wrap_model(self)
 
-        optimizer_config = self._require_dict_config(config, "optimizer_config")
+        optimizer_config = config.optimizer_config
+        if not isinstance(optimizer_config, TrainingOptimizerConfig):
+            raise ValueError(
+                "TrainingActor init requires optimizer_config to be a TrainingOptimizerConfig. "
+                f"Got: {type(optimizer_config).__name__}"
+            )
         self._create_optimizer(optimizer_config)
 
-        scheduler_config = self._require_dict_config(config, "scheduler_config")
+        scheduler_config = config.scheduler_config
+        if not isinstance(scheduler_config, TrainingLrSchedulerConfig):
+            raise ValueError(
+                "TrainingActor init requires scheduler_config to be a TrainingLrSchedulerConfig. "
+                f"Got: {type(scheduler_config).__name__}"
+            )
         self._create_scheduler(scheduler_config)
 
         # Load training config
-        training_config = self._require_dict_config(config, "training_config")
-        self._max_grad_norm = float(training_config["max_grad_norm"])
-        self._micro_batch_size = int(
-            self._resolved_training_plan["micro_batch_size"]
-        )
+        training_config = config.training_config
+        if not isinstance(training_config, TrainingExecutionConfig):
+            raise ValueError(
+                "TrainingActor init requires training_config to be a TrainingExecutionConfig. "
+                f"Got: {type(training_config).__name__}"
+            )
+        self._max_grad_norm = float(training_config.max_grad_norm)
+        self._micro_batch_size = int(self._resolved_training_plan.micro_batch_size)
         self._local_mini_batch_size = int(
-            self._resolved_training_plan["local_mini_batch_size"]
+            self._resolved_training_plan.local_mini_batch_size
         )
         self._num_updates_per_batch = int(
-            self._resolved_training_plan["num_updates_per_batch"]
+            self._resolved_training_plan.num_updates_per_batch
         )
-        self._replay_enabled = bool(training_config["replay_enabled"])
-        self._algorithm_type = str(training_config["algorithm_type"])
-        self._guidance_scale = float(training_config["guidance_scale"])
-        self._shuffle_samples = bool(training_config.get("shuffle_samples", True))
-        raw_shuffle_seed = training_config.get("shuffle_seed", None)
+        self._replay_enabled = bool(training_config.replay_enabled)
+        self._algorithm_type = str(training_config.algorithm_type)
+        self._guidance_scale = float(training_config.guidance_scale)
+        self._shuffle_samples = bool(training_config.shuffle_samples)
+        raw_shuffle_seed = training_config.shuffle_seed
         self._shuffle_seed = (
             int(raw_shuffle_seed) if raw_shuffle_seed is not None else None
         )
@@ -440,17 +442,21 @@ class TrainingActor(BaseTrainRayActor):
         self._load_algorithm(
             algorithm_init_payload,
             training_autocast_precision=str(
-                training_config.get("training_autocast_precision", "bf16")
+                training_config.training_autocast_precision
             ),
-            debug_output_dir=training_config.get("debug_output_dir"),
+            debug_output_dir=training_config.debug_output_dir,
         )
 
         # Sampling config (used when training actors perform sampling)
         sampling_config = self._require_dict_config(config, "sampling_config")
         self._sampling_config = sampling_config
-        reward_config = self._require_dict_config(config, "reward_config")
+        reward_config = config.reward_config
+        if not isinstance(reward_config, RewardSpec):
+            raise ValueError(
+                "TrainingActor init requires reward_config to be a RewardSpec. "
+                f"Got: {type(reward_config).__name__}"
+            )
         self._reward_config = reward_config
-        self._reward_schema = RewardSchema(**reward_config)
 
         self._is_initialized = True
         logger.info(
@@ -460,7 +466,7 @@ class TrainingActor(BaseTrainRayActor):
             f"micro_batch_size={self._micro_batch_size}, "
             f"local_mini_batch_size={self._local_mini_batch_size}, "
             f"num_updates_per_batch={self._num_updates_per_batch}, "
-            f"training_plan={self._resolved_training_plan})"
+            f"training_plan={self._resolved_training_plan.as_dict()})"
         )
         self._log_resource_ids("training_init")
         self._log_gpu_state("training_init")
@@ -470,12 +476,12 @@ class TrainingActor(BaseTrainRayActor):
         # training/update path itself. In direct actor-sampling mode the
         # TrainingActor temporarily acts as that host, so it owns the same
         # actor-side reward attach step as dedicated rollout actors.
-        if self._reward_schema is None:
+        if self._reward_config is None:
             raise RuntimeError(
                 "Reward service requested before reward schema initialization."
             )
         if self._reward_service is None:
-            self._reward_service = RewardService(self._reward_schema)
+            self._reward_service = RewardService(self._reward_config)
         return self._reward_service
 
     def _attach_reward_to_output(
@@ -572,7 +578,7 @@ class TrainingActor(BaseTrainRayActor):
             runtime_model_config.lora_rank if use_lora else "N/A",
         )
 
-    def _create_optimizer(self, optimizer_config: dict) -> None:
+    def _create_optimizer(self, optimizer_config: TrainingOptimizerConfig) -> None:
         """Create optimizer."""
         if self._train_backend is not None:
             backend_optimizer = self._train_backend.build_optimizer(self, optimizer_config)
@@ -585,26 +591,55 @@ class TrainingActor(BaseTrainRayActor):
                 )
                 return
 
-        lr = float(optimizer_config["learning_rate"])
+        optimizer_type = str(optimizer_config.type).strip().lower()
+        lr = float(optimizer_config.learning_rate)
         betas = (
-            float(optimizer_config["adam_beta1"]),
-            float(optimizer_config["adam_beta2"]),
+            float(optimizer_config.adam_beta1),
+            float(optimizer_config.adam_beta2),
         )
-        eps = float(optimizer_config["adam_epsilon"])
-        weight_decay = float(optimizer_config["weight_decay"])
+        eps = float(optimizer_config.adam_epsilon)
+        weight_decay = float(optimizer_config.weight_decay)
 
         trainable_params = list(filter(lambda p: p.requires_grad, self.model.parameters()))
-        self.optimizer = torch.optim.AdamW(
-            trainable_params,
-            lr=lr,
-            betas=betas,
-            eps=eps,
-            weight_decay=weight_decay,
+        if optimizer_type == "adamw":
+            self.optimizer = torch.optim.AdamW(
+                trainable_params,
+                lr=lr,
+                betas=betas,
+                eps=eps,
+                weight_decay=weight_decay,
+            )
+        elif optimizer_type == "adam":
+            self.optimizer = torch.optim.Adam(
+                trainable_params,
+                lr=lr,
+                betas=betas,
+                eps=eps,
+                weight_decay=weight_decay,
+            )
+        elif optimizer_type == "sgd":
+            self.optimizer = torch.optim.SGD(
+                trainable_params,
+                lr=lr,
+                weight_decay=weight_decay,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported optimizer_config.type={optimizer_config.type!r}. "
+                "Expected one of: ['adam', 'adamw', 'sgd']."
+            )
+
+        logger.info(
+            "Rank %s: Optimizer created (type=%s, lr=%s, betas=%s, eps=%s, weight_decay=%s)",
+            self.rank,
+            optimizer_type,
+            lr,
+            betas,
+            eps,
+            weight_decay,
         )
 
-        logger.info(f"Rank {self.rank}: Optimizer created (lr={lr}, betas={betas}, eps={eps}, weight_decay={weight_decay})")
-
-    def _create_scheduler(self, scheduler_config: dict) -> None:
+    def _create_scheduler(self, scheduler_config: TrainingLrSchedulerConfig) -> None:
         """Create learning rate scheduler."""
         if self._train_backend is not None:
             backend_scheduler = self._train_backend.build_scheduler(self, scheduler_config)
@@ -617,9 +652,9 @@ class TrainingActor(BaseTrainRayActor):
                 )
                 return
 
-        scheduler_type = str(scheduler_config["type"])
-        warmup_steps = int(scheduler_config["warmup_steps"])
-        total_steps = int(scheduler_config["total_steps"])
+        scheduler_type = str(scheduler_config.type)
+        warmup_steps = int(scheduler_config.warmup_steps)
+        total_steps = int(scheduler_config.total_steps)
 
         if scheduler_type == "constant":
             self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -788,15 +823,15 @@ class TrainingActor(BaseTrainRayActor):
                 "name": self._train_backend_name,
                 "capabilities": dict(self._train_backend_capabilities),
                 "topology": dict(self._resolved_train_topology),
-                "training_plan": dict(self._resolved_training_plan),
+                "training_plan": self._resolved_training_plan.as_dict(),
             }
         info = dict(self._train_backend.backend_info(self))
         info["topology"] = dict(self._resolved_train_topology)
-        info["training_plan"] = dict(self._resolved_training_plan)
+        info["training_plan"] = self._resolved_training_plan.as_dict()
         return info
 
     def get_expected_global_batch_size(self) -> int:
-        return int(self._resolved_training_plan["global_batch_size"])
+        return int(self._resolved_training_plan.global_batch_size)
 
     def _build_train_executor(self) -> TrainExecutor:
         dp_size = int(self._resolved_train_topology["dp_size"])
@@ -810,7 +845,7 @@ class TrainingActor(BaseTrainRayActor):
             micro_batch_size=self._micro_batch_size,
             local_mini_batch_size=self._local_mini_batch_size,
             num_updates_per_batch=self._num_updates_per_batch,
-            training_plan=dict(self._resolved_training_plan),
+            training_plan=self._resolved_training_plan,
             ema_manager=self._ema_manager,
             shuffle_samples=self._shuffle_samples,
             shuffle_seed=self._shuffle_seed,

@@ -8,7 +8,6 @@ from typing import Any, Dict
 
 import torch
 
-from diffusionrl.types.sde import SDEConfig
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils import load_function
 
@@ -98,15 +97,14 @@ class ReplayLogProbPatch:
         sampler_kwargs = dict(sampling_config.get("sampler_kwargs", {}) or {})
         for _reserved in ("autocast_precision", "trajectory_precision", "logprob_precision"):
             sampler_kwargs.pop(_reserved, None)
-        sde_config = SDEConfig.from_mapping(sampling_config.get("sde_config"))
         base_kwargs: Dict[str, Any] = {
             "model": model,
             "text_encoder": text_encoder,
             "vae": vae,
             "scheduler": scheduler,
-            "eta": sde_config.eta,
-            "sde_type": sde_config.sde_type,
-            "shift": sde_config.shift,
+            "eta": sampling_config.get("eta", 1.0),
+            "sde_type": sampling_config.get("sde_type", "flow"),
+            "shift": sampling_config.get("shift", 3.0),
             "autocast_precision": sampling_config.get("autocast_precision", "bf16"),
             "trajectory_precision": sampling_config.get("trajectory_precision", "fp16"),
             "logprob_precision": sampling_config.get("logprob_precision", "fp32"),

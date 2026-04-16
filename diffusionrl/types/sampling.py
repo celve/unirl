@@ -9,53 +9,15 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 import torch
 
 from diffusionrl.types.batch_ops import (
-    concat_columnar_values,
-    copy_columnar_mapping,
-    pad_columnar_value,
-    slice_columnar_value,
+    batch_concat,
+    batch_pad,
+    batch_slice,
+    copy_mapping,
 )
-from diffusionrl.types.sde import SDEConfig
 from diffusionrl.types.trajectory_store import TrajectoryStore
 
 if TYPE_CHECKING:
     from torch import device as TorchDevice
-
-
-@dataclass(frozen=True)
-class SamplingSpec:
-    """Canonical resolved sampling view built once from SamplingConfig."""
-
-    sampler_dotpath: str
-    num_inference_steps: int
-    guidance_scale: float
-    height: int
-    width: int
-    num_frames: int
-    seed: int
-    replay_sampler_dotpath: Optional[str] = None
-    sampling_adapter: Optional[str] = None
-    init_same_noise: bool = False
-    sampler_kwargs: Dict[str, Any] = field(default_factory=dict)
-    sde_config: SDEConfig = field(default_factory=SDEConfig)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "sampler_kwargs", dict(self.sampler_kwargs or {}))
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "sampler_dotpath": self.sampler_dotpath,
-            "num_inference_steps": int(self.num_inference_steps),
-            "guidance_scale": float(self.guidance_scale),
-            "height": int(self.height),
-            "width": int(self.width),
-            "num_frames": int(self.num_frames),
-            "seed": int(self.seed),
-            "replay_sampler_dotpath": self.replay_sampler_dotpath,
-            "sampling_adapter": self.sampling_adapter,
-            "init_same_noise": bool(self.init_same_noise),
-            "sampler_kwargs": dict(self.sampler_kwargs),
-            "sde_config": self.sde_config.to_dict(),
-        }
 
 
 @dataclass(frozen=True)
@@ -222,7 +184,7 @@ class RolloutSamples:
 
     def __post_init__(self) -> None:
         self.aux = dict(self.aux or {})
-        self.meta = copy_columnar_mapping(self.meta)
+        self.meta = copy_mapping(self.meta)
         # Auto-promote legacy aux["trajectories"] tensor to TrajectoryStore.
         # After this, all downstream code only needs to look at "trajectory_store".
         if "trajectory_store" not in self.aux and "trajectories" in self.aux:
@@ -265,11 +227,11 @@ class RolloutSamples:
     def slice(self, start: int, end: int) -> "RolloutSamples":
         batch_size = self.batch_size
         sliced_aux = {
-            key: slice_columnar_value(value, batch_size=batch_size, start=start, end=end)
+            key: batch_slice(value, batch_size=batch_size, start=start, end=end)
             for key, value in self.aux.items()
         }
         sliced_meta = {
-            key: slice_columnar_value(value, batch_size=batch_size, start=start, end=end)
+            key: batch_slice(value, batch_size=batch_size, start=start, end=end)
             for key, value in self.meta.items()
         }
         return RolloutSamples(
@@ -430,7 +392,7 @@ class RolloutRequest:
     def __post_init__(self) -> None:
         self.prompts = list(self.prompts or [])
         self.sampling = dict(self.sampling or {})
-        self.meta = copy_columnar_mapping(self.meta)
+        self.meta = copy_mapping(self.meta)
         self.inputs = dict(self.inputs or {})
 
     @property
@@ -463,9 +425,9 @@ class RolloutRequest:
             height=int(first.height),
             width=int(first.width),
             num_frames=int(first.num_frames),
-            sampling=concat_columnar_values([request.sampling for request in requests], batch_sizes=batch_sizes) or {},
-            meta=concat_columnar_values([request.meta for request in requests], batch_sizes=batch_sizes) or {},
-            inputs=concat_columnar_values([request.inputs for request in requests], batch_sizes=batch_sizes) or {},
+            sampling=batch_concat([request.sampling for request in requests], batch_sizes=batch_sizes) or {},
+            meta=batch_concat([request.meta for request in requests], batch_sizes=batch_sizes) or {},
+            inputs=batch_concat([request.inputs for request in requests], batch_sizes=batch_sizes) or {},
         )
 
     def pad_to(self, target_size: int) -> "RolloutRequest":
@@ -476,24 +438,24 @@ class RolloutRequest:
 
         req = copy.copy(self)
         req.prompts = list(
-            pad_columnar_value(list(self.prompts), batch_size=batch_size, target_size=target_size)
+            batch_pad(list(self.prompts), batch_size=batch_size, target_size=target_size)
         )
         req.meta = {
-            key: pad_columnar_value(value, batch_size=batch_size, target_size=target_size)
+            key: batch_pad(value, batch_size=batch_size, target_size=target_size)
             for key, value in self.meta.items()
         }
         req.inputs = {
-            key: pad_columnar_value(value, batch_size=batch_size, target_size=target_size)
+            key: batch_pad(value, batch_size=batch_size, target_size=target_size)
             for key, value in self.inputs.items()
         }
         req.sampling = {
-            key: pad_columnar_value(value, batch_size=batch_size, target_size=target_size)
+            key: batch_pad(value, batch_size=batch_size, target_size=target_size)
             for key, value in self.sampling.items()
             if key != "kwargs"
         }
         kwargs = self.sampling.get("kwargs")
         req.sampling["kwargs"] = {
-            key: pad_columnar_value(value, batch_size=batch_size, target_size=target_size)
+            key: batch_pad(value, batch_size=batch_size, target_size=target_size)
             for key, value in (kwargs.items() if isinstance(kwargs, dict) else [])
         }
         return req
@@ -505,21 +467,21 @@ class RolloutRequest:
         batch_size = self.batch_size
         req.prompts = self.prompts[start:end]
         req.meta = {
-            key: slice_columnar_value(value, batch_size=batch_size, start=start, end=end)
+            key: batch_slice(value, batch_size=batch_size, start=start, end=end)
             for key, value in self.meta.items()
         }
         req.inputs = {
-            key: slice_columnar_value(value, batch_size=batch_size, start=start, end=end)
+            key: batch_slice(value, batch_size=batch_size, start=start, end=end)
             for key, value in self.inputs.items()
         }
         req.sampling = {
-            key: slice_columnar_value(value, batch_size=batch_size, start=start, end=end)
+            key: batch_slice(value, batch_size=batch_size, start=start, end=end)
             for key, value in self.sampling.items()
             if key != "kwargs"
         }
         kwargs = self.sampling.get("kwargs")
         req.sampling["kwargs"] = {
-            key: slice_columnar_value(value, batch_size=batch_size, start=start, end=end)
+            key: batch_slice(value, batch_size=batch_size, start=start, end=end)
             for key, value in (kwargs.items() if isinstance(kwargs, dict) else [])
         }
         return req
@@ -529,6 +491,5 @@ __all__ = [
     "RolloutSamples",
     "RolloutRequest",
     "LogProbData",
-    "SamplingSpec",
     "SamplingRequirements",
 ]

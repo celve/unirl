@@ -6,10 +6,10 @@ from functools import partial
 from typing import Any
 
 from diffusionrl.registry import (
+    derive_registry_or_dotpath,
     list_registered_component_names,
     register_component,
     require_subclass,
-    resolve_registry_or_dotpath,
 )
 from diffusionrl.training.backends.base import TrainBackend
 
@@ -35,7 +35,7 @@ supported_train_backends = partial(
 
 
 def resolve_train_backend_class(identifier: str) -> Any:
-    return resolve_registry_or_dotpath(
+    return derive_registry_or_dotpath(
         component_family=TRAIN_BACKEND_COMPONENT_FAMILY,
         identifier=identifier,
         class_checker=require_subclass(TrainBackend),

@@ -1,13 +1,15 @@
 from types import SimpleNamespace
 
+import pytest
+
 from diffusionrl.cmdline.rollout_engine import (
     build_rollout_engine_init_payload_from_args,
 )
+from diffusionrl.config import SamplingSpec
+from diffusionrl.cmdline.resolution import derive_rollout_info
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.models.config import ModelBundleConfig
-from diffusionrl.types.engine import EngineConfig
-from diffusionrl.types.sampling import SamplingSpec
-from diffusionrl.types.sde import SDEConfig
+from diffusionrl.samplers.engine import EngineConfig
 
 
 def _make_sampling_spec() -> SamplingSpec:
@@ -23,7 +25,7 @@ def _make_sampling_spec() -> SamplingSpec:
         sampling_adapter=None,
         init_same_noise=False,
         sampler_kwargs={},
-        sde_config=SDEConfig(eta=0.5, sde_type="vp", shift=1.0),
+        eta=0.5, sde_type="vp", shift=1.0,
     )
 
 
@@ -60,8 +62,8 @@ def test_build_rollout_engine_init_payload_from_args_returns_typed_payload():
             ),
         ),
         sampling_spec=_make_sampling_spec(),
-        rollout_mode_info=SimpleNamespace(
-            rollout_topology=SimpleNamespace(rollout_engine="sglang"),
+        rollout_info=SimpleNamespace(
+            rollout_engine="sglang",
             logprob_source="engine",
         ),
     )
@@ -83,3 +85,16 @@ def test_build_rollout_engine_init_payload_from_args_returns_typed_payload():
     }
     assert payload.component_config.engine_kwargs["logprob_source"] == "engine"
     assert payload.component_config.engine_kwargs["require_memory_api"] is True
+
+
+def test_derive_rollout_info_rejects_fsdp_service_engine():
+    args = SimpleNamespace(
+        rollout=SimpleNamespace(mode="separate", rollout_engine="fsdp"),
+        algorithm=SimpleNamespace(algorithm_type="grpo"),
+        sampling=SimpleNamespace(logprob_source="engine"),
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"rollout\.rollout_engine must be one of \['sglang'\]",
+    ):
+        derive_rollout_info(args)

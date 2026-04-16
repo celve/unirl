@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 import torch
 import torch.nn as nn
 from diffusers.utils.torch_utils import randn_tensor
-
 from diffusionrl.algorithms.base import (
     BaseAlgorithm,
     BaseAlgorithmConfig,
@@ -24,7 +23,6 @@ from diffusionrl.algorithms.base import (
     SamplingRequirements,
 )
 from diffusionrl.algorithms.registry import register_algorithm
-from diffusionrl.types import SDEConfig
 from diffusionrl.types.forward_context import ForwardContext
 from diffusionrl.types.training_batch import TrainingBatch as _TrainingBatch
 from diffusionrl.utils.adapter_utils import switch_adapter
@@ -39,7 +37,9 @@ class NFTAlgorithmConfig(BaseAlgorithmConfig):
     adv_clip_max: float = 5.0
     adv_mode: str = "raw"
     use_adaptive_weight: bool = True
-    sde_config: SDEConfig = field(default_factory=SDEConfig)
+    eta: float = 1.0
+    sde_type: str = "flow"
+    shift: float = 3.0
     use_reference_ema: bool = True
     ema_decay: float = 0.001
     ema_decay_type: str = "constant"
@@ -87,71 +87,6 @@ class NFTAlgorithm(BaseAlgorithm):
     - where r = normalized_advantage in [0, 1]
     """
 
-    @classmethod
-    def _parse_config_from_dict(cls, config: dict) -> NFTAlgorithmConfig:
-        extra = cls.resolve_config_kwargs(config)
-        # Backward compat: decay_type was renamed to ema_decay_type.
-        if "decay_type" in extra and "ema_decay_type" not in extra:
-            logger.warning(
-                "algorithm_kwargs key 'decay_type' is deprecated, use 'ema_decay_type' instead."
-            )
-            extra["ema_decay_type"] = extra.pop("decay_type")
-        training_scheduler_config = dict(config.get("training_scheduler") or {})
-        sde_config = SDEConfig.from_mapping(config.get("sde_config", SDEConfig()))
-        return NFTAlgorithmConfig(
-            beta=float(extra.get("beta", 0.1)),
-            adv_clip_max=float(extra.get("adv_clip_max", 5.0)),
-            adv_mode=str(extra.get("adv_mode", "raw")),
-            use_adaptive_weight=bool(extra.get("use_adaptive_weight", True)),
-            component_mix_stage=str(config.get("component_mix_stage", "reward")),
-            sde_config=sde_config,
-            use_reference_ema=bool(extra.get("use_reference_ema", True)),
-            old_adapter_name=str(extra.get("old_adapter_name", "old")),
-            new_adapter_name=str(extra.get("new_adapter_name", "default")),
-            ema_decay=float(extra.get("ema_decay", 0.001)),
-            ema_decay_type=str(extra.get("ema_decay_type", "constant")),
-            ema_flat_steps=int(extra.get("ema_flat_steps", 0)),
-            ema_uprate=float(extra.get("ema_uprate", 0.001)),
-            ema_uphold=float(extra.get("ema_uphold", 0.5)),
-            reference_update_timing=str(extra.get("reference_update_timing", "optimizer_step")),
-            train_timestep_mode=str(extra.get("train_timestep_mode", "random")),
-            shuffle_train_timesteps=bool(extra.get("shuffle_train_timesteps", True)),
-            apply_time_shift_in_loss=bool(extra.get("apply_time_shift_in_loss", False)),
-            training_scheduler_config=training_scheduler_config,
-            samples_per_prompt=int(config.get("samples_per_prompt", 1)),
-            num_inference_steps=int(config.get("num_inference_steps", 0)),
-            eval_ema_decay=float(config.get("eval_ema_decay", 0.9)),
-            eval_ema_update_interval=int(config.get("eval_ema_update_interval", 1)),
-            kl_coef=float(extra.get("kl_coef", 0.0)),
-            adv_normalization_scope=str(config.get("adv_normalization_scope", "group")),
-            epsilon=float(config.get("adv_norm_eps", 1e-8)),
-            clip_max=config.get("clip_max", 5.0),
-            use_global_std=bool(config.get("use_global_std", False)),
-            trim_outliers_ratio=float(config.get("trim_outliers_ratio", 0.0)),
-        )
-
-    @classmethod
-    def from_config(
-        cls,
-        config: dict | NFTAlgorithmConfig,
-    ) -> "NFTAlgorithm":
-        """Create NFTAlgorithm from raw framework config or typed config."""
-        if isinstance(config, dict):
-            config = cls._parse_config_from_dict(config)
-        if not isinstance(config, NFTAlgorithmConfig):
-            raise TypeError(
-                f"{cls.__name__}.from_config expects dict or NFTAlgorithmConfig, "
-                f"got {type(config).__name__}."
-            )
-
-        logger.info(
-            "%s uses training_scheduler.timestep_fraction for training timestep "
-            "filtering and ignores rollout_scheduler configuration.",
-            cls.__name__,
-        )
-
-        return cls(config=config)
-
     def __init__(
         self,
         *,
@@ -181,7 +116,9 @@ class NFTAlgorithm(BaseAlgorithm):
         self.adv_clip_max = config.adv_clip_max
         self.adv_mode = config.adv_mode
         self.use_adaptive_weight = config.use_adaptive_weight
-        self.sde_config = config.sde_config
+        self._eta = config.eta
+        self._sde_type = config.sde_type
+        self._shift = config.shift
         self.use_reference_ema = bool(config.use_reference_ema)
         self.ema_decay = config.ema_decay
         self.ema_decay_type = str(config.ema_decay_type)
@@ -204,15 +141,15 @@ class NFTAlgorithm(BaseAlgorithm):
 
     @property
     def eta(self) -> float:
-        return self.sde_config.eta
+        return self._eta
 
     @property
     def sde_type(self) -> str:
-        return self.sde_config.sde_type
+        return self._sde_type
 
     @property
     def time_shift(self) -> float:
-        return self.sde_config.shift
+        return self._shift
 
     def get_sampling_requirements(self) -> SamplingRequirements:
         """Return NFT sampling requirements."""
@@ -221,7 +158,7 @@ class NFTAlgorithm(BaseAlgorithm):
             requires_log_prob=False,
             requires_embeddings=True,
             extras={
-                "sde_ratio": 0.0,
+                "tgr": 0.0,
                 "requires_clean_latents": True,
                 "forward_diffusion_in_loss": True,
             },
@@ -249,8 +186,6 @@ class NFTAlgorithm(BaseAlgorithm):
         current_step: int,
     ) -> Set[int]:
         del current_step
-        if self.sde_config is None:
-            return set()
 
         if self.num_inference_steps < 1:
             raise ValueError(
@@ -714,7 +649,7 @@ class NFTAlgorithm(BaseAlgorithm):
             "adv_clip_max": self.adv_clip_max,
             "adv_mode": self.adv_mode,
             "use_adaptive_weight": self.use_adaptive_weight,
-            "sde_config": self.sde_config.to_dict(),
+            "sde_config": {"eta": self._eta, "sde_type": self._sde_type, "shift": self._shift},
             "time_shift": self.time_shift,
             "ema_decay": self.ema_decay,
             "ema_decay_type": self.ema_decay_type,

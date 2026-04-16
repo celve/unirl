@@ -61,13 +61,13 @@ def register_component(
     return decorator
 
 
-def resolve_registry_or_dotpath(
+def derive_registry_or_dotpath(
     *,
     component_family: str,
     identifier: str,
     class_checker: Optional[Callable[[Any], None]] = None,
 ) -> Any:
-    """Resolve a component class from a family registry or a full dot path."""
+    """Derive a component class from a family registry or a full dot path."""
     normalized_family = str(component_family or "").strip().lower()
     if not normalized_family:
         raise ValueError("component_family must be a non-empty string.")
@@ -116,8 +116,8 @@ def list_registered_component_names(*, component_family: str) -> tuple[str, ...]
 
 __all__ = [
     "COMPONENT_REGISTRY",
+    "derive_registry_or_dotpath",
     "list_registered_component_names",
     "register_component",
     "require_subclass",
-    "resolve_registry_or_dotpath",
 ]

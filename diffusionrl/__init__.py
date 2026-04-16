@@ -16,7 +16,6 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "RewardType": ("diffusionrl.types", "RewardType"),
     "TrainingBatch": ("diffusionrl.types", "TrainingBatch"),
     "SamplingRequirements": ("diffusionrl.types", "SamplingRequirements"),
-    "SDEConfig": ("diffusionrl.types", "SDEConfig"),
     # samplers
     "BaseSampler": ("diffusionrl.samplers", "BaseSampler"),
     # sde
@@ -29,9 +28,9 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "GRPOAlgorithm": ("diffusionrl.algorithms", "GRPOAlgorithm"),
     "NFTAlgorithm": ("diffusionrl.algorithms", "NFTAlgorithm"),
     # config / utils / models
-    "TrainingArguments": ("diffusionrl.config", "TrainingArguments"),
-    "parse_args": ("diffusionrl.config", "parse_args"),
-    "get_default_args": ("diffusionrl.config", "get_default_args"),
+    "TrainingArguments": ("diffusionrl.cmdline.schema", "TrainingArguments"),
+    "parse_args": ("diffusionrl.cmdline.parse_args", "parse_args"),
+    "get_default_args": ("diffusionrl.cmdline.schema", "get_default_args"),
     "load_function": ("diffusionrl.utils", "load_function"),
     "set_seed": ("diffusionrl.utils", "set_seed"),
     "configure_logger": ("diffusionrl.utils", "configure_logger"),

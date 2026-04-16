@@ -15,9 +15,9 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
         "diffusionrl.cmdline.rollout_engine",
         "build_rollout_engine_init_payload_from_args",
     ),
-    "resolve_rollout_engine_class": (
+    "derive_rollout_engine_class": (
         "diffusionrl.samplers.registry",
-        "resolve_rollout_engine_class",
+        "derive_rollout_engine_class",
     ),
     "create_rollout_engine_from_init_payload": (
         "diffusionrl.samplers.construction",

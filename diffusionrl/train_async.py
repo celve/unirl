@@ -18,9 +18,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from diffusionrl.algorithms.construction import create_algorithm_from_init_payload
-from diffusionrl.config import build_resolved_config_view, parse_args
-from diffusionrl.config.launch_resolution import resolve_launch_config
-from diffusionrl.config.validation import validate_async_training_runner
+from diffusionrl.cmdline.parse_args import parse_args_with_derived_config
+from diffusionrl.cmdline.resolution import build_launch_config
+from diffusionrl.cmdline.schema import build_derived_config_view
+from diffusionrl.cmdline.validation import validate_async_training_runner
+from diffusionrl.config import DerivedConfig
 from diffusionrl.rollout.service_interface import compute_dataset_step_info
 from diffusionrl.utils.train_utils import (
     collect_rollout_batch_metrics,
@@ -40,8 +42,9 @@ logger = logging.getLogger(__name__)
 
 """
 Main control-plane path (async mode):
-parse_args -> create_placement_groups_from_args -> create_rollout_services
--> create_training_actor_group -> prepare RolloutRequest(s) -> async_generate
+parse_args -> build_launch_config -> create_placement_groups_from_launch
+-> create_rollout_services -> create_training_actor_group
+-> prepare RolloutRequest(s) -> async_generate
 -> resolve requests -> rollout_buffer.push/pop -> training_group.train -> weight_sync.sync
 """
 
@@ -450,9 +453,12 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
                         )
 
 
-def train(args):  # [PUBLIC-API → main()] async entrypoint
+def train(args, *, derived_config: DerivedConfig):  # [PUBLIC-API → main()] async entrypoint
     """Asynchronous training entrypoint."""
-    validate_async_training_runner(args)
+    validate_async_training_runner(
+        args,
+        rollout_info=derived_config.rollout_info,
+    )
 
     import ray
 
@@ -474,15 +480,17 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
     configure_logger()
     set_seed(args.seed)
 
-    debug_mode = str(args.debug.debug_mode or "none").strip().lower()
-    launch_config = resolve_launch_config(args)
+    debug_mode = args.debug.mode
+    launch_config = build_launch_config(
+        args,
+        derived_config=derived_config,
+    )
     algorithm_init_payload = launch_config.algorithm_init_payload
     control_algorithm = create_algorithm_from_init_payload(algorithm_init_payload)
-    rollout_mode_info = launch_config.rollout_mode_info
-    rollout_topology = rollout_mode_info.rollout_topology
-    training_actor_sampling_mode = rollout_mode_info.training_actor_sampling_mode
-    sync_mode = rollout_mode_info.sync_protocol
-    rollout_mode_name = rollout_topology.mode
+    rollout_info = launch_config.rollout_info
+    training_actor_sampling_mode = rollout_info.training_actor_sampling_mode
+    sync_mode = rollout_info.sync_protocol
+    rollout_mode_name = rollout_info.mode
 
     if training_actor_sampling_mode:
         raise ValueError(
@@ -508,8 +516,8 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
     logger.info(
         "Debug flags: mode=%s save_intermediates=%s save_dir=%s",
         debug_mode,
-        bool(args.debug.debug_save_intermediates),
-        args.debug.debug_save_dir,
+        bool(args.debug.save_intermediates),
+        args.debug.save_dir,
     )
 
     if not ray.is_initialized():
@@ -528,19 +536,18 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
     rollout_runtime = None
     training_group = None
     training_runtime = None
-    weight_sync = create_weight_sync(args, launch_config, mode=sync_mode)
+    weight_sync = create_weight_sync(launch_config, mode=sync_mode)
 
     try:
         if args.logging.report_to_wandb and args.logging.project_name:
-            wandb_tags = (
-                [t.strip() for t in args.logging.tags.split(",") if t.strip()]
-                if args.logging.tags
-                else None
-            )
+            wandb_tags = args.logging.tags
             wandb_logger = init_logger(
                 project=args.logging.project_name,
                 run_name=args.logging.run_name,
-                config=build_resolved_config_view(args),
+                config=build_derived_config_view(
+                    args.to_dotted_dict(),
+                    derived_config=derived_config,
+                ),
                 log_dir=args.logging.logging_dir,
                 rank=0,
                 tags=wandb_tags,
@@ -558,7 +565,6 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
         logger.info("Placement groups created")
 
         rollout_services = create_rollout_services(
-            args,
             launch_config=launch_config,
         )
         dataset_step_info = compute_dataset_step_info(
@@ -679,8 +685,8 @@ def train(args):  # [PUBLIC-API → main()] async entrypoint
 
 
 def main(argv=None):  # [PUBLIC-API → __main__] async CLI entrypoint
-    args = parse_args(argv)
-    train(args)
+    args, derived_config = parse_args_with_derived_config(argv)
+    train(args, derived_config=derived_config)
 
 
 if __name__ == "__main__":
