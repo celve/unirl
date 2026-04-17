@@ -288,10 +288,20 @@ class RewardConfig:
 
     def __post_init__(self):
         if isinstance(self.reward_service_urls, str):
+            if "," in self.reward_service_urls:
+                raise ValueError(
+                    "reward.reward_service_urls: pass a list, not a comma string. "
+                    f"Got: {self.reward_service_urls!r}."
+                )
             self.reward_service_urls = (
                 [self.reward_service_urls] if self.reward_service_urls.strip() else None
             )
         if isinstance(self.reward_components, str):
+            if "," in self.reward_components:
+                raise ValueError(
+                    "reward.reward_components: pass a list, not a comma string. "
+                    f"Got: {self.reward_components!r}."
+                )
             self.reward_components = (
                 [self.reward_components] if self.reward_components.strip() else None
             )
@@ -311,20 +321,12 @@ class RewardConfig:
         return any(str(name or "").strip() for name in self.reward_components)
 
     def validate(self) -> None:
-        reward_backend = self.reward_backend
-        if reward_backend not in ("local", "http"):
-            raise ValueError(
-                "reward_backend must be one of local/http, "
-                f"got: {self.reward_backend}"
-            )
-        if self.local_reward_device not in ("cpu", "auto", "cuda"):
-            raise ValueError(
-                "local_reward_device must be one of cpu/auto/cuda, "
-                f"got: {self.local_reward_device}"
-            )
-        if reward_backend == "http" and not self.has_http_reward_urls:
+        # reward_backend / local_reward_device choices are enforced by
+        # cmdline.validation._validate_metadata_choices (driven by
+        # validate_grouped_configs) via the ``metadata["choices"]`` declarations.
+        if self.has_http_reward and not self.has_http_reward_urls:
             raise ValueError("reward_backend='http' requires reward_service_urls.")
-        if reward_backend != "http" and self.has_http_reward_urls:
+        if not self.has_http_reward and self.has_http_reward_urls:
             raise ValueError(
                 "reward_service_urls is only valid when reward_backend='http'."
             )
@@ -416,7 +418,7 @@ class SyncConfig:
             )
         },
     )
-    protocol: str = field(
+    protocol: Optional[str] = field(
         default=None,
         metadata={
             "help": "Explicit weight sync mode. Must be one of: disabled, tensor_payload, nccl_broadcast, checkpoint_path",
@@ -646,11 +648,6 @@ class AlgorithmConfig:
     def global_batch_size(self) -> int:
         return self.prompts_per_rollout * self.samples_per_prompt
 
-    @property
-    def window(self) -> SchedulerConfig:
-        """Deprecated alias for older internal callers."""
-        return self.rollout_scheduler
-
     def validate(self) -> None:
         if not self.algorithm_type and not self.algorithm_dotpath:
             raise ValueError(
@@ -680,11 +677,11 @@ class AlgorithmConfig:
             raise ValueError("algorithm.eval_ema_decay must be >= 0.")
         if int(self.eval_ema_update_interval) < 1:
             raise ValueError("algorithm.eval_ema_update_interval must be >= 1.")
-        window_cfg = self.window
+        rollout_scheduler = self.rollout_scheduler
         if (
-            window_cfg.max_iters_per_window is not None
-            and window_cfg.min_iters_per_window is not None
-            and window_cfg.min_iters_per_window > window_cfg.max_iters_per_window
+            rollout_scheduler.max_iters_per_window is not None
+            and rollout_scheduler.min_iters_per_window is not None
+            and rollout_scheduler.min_iters_per_window > rollout_scheduler.max_iters_per_window
         ):
             raise ValueError("min_iters_per_window must be <= max_iters_per_window.")
 
@@ -826,10 +823,8 @@ class TrainingConfig:
         if isinstance(self.lora_target_modules, str):
             if "," in self.lora_target_modules:
                 raise ValueError(
-                    "training.lora_target_modules does not accept comma-separated strings. "
-                    "Pass a YAML/JSON list instead, e.g. "
-                    "--training.lora-target-modules '[\"to_q\",\"to_k\",\"to_v\"]' "
-                    f"(got: {self.lora_target_modules!r})."
+                    "training.lora_target_modules: pass a list, not a comma string. "
+                    f"Got: {self.lora_target_modules!r}."
                 )
             self.lora_target_modules = (
                 [self.lora_target_modules] if self.lora_target_modules.strip() else None

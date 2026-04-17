@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
 
 if TYPE_CHECKING:
@@ -83,7 +83,9 @@ class TrainBackendCapabilities:
     supports_custom_train_step: bool = False
     supports_backend_managed_offload: bool = False
     preferred_weight_export_format: Optional[str] = None
-    preferred_weight_export_format_by_rollout_engine: Mapping[str, str] = ()
+    preferred_weight_export_format_by_rollout_engine: Mapping[str, str] = field(
+        default_factory=dict
+    )
     supported_weight_export_formats: tuple[str, ...] = ("state_dict",)
     notes: str = ""
 
@@ -102,7 +104,7 @@ class TrainBackendCapabilities:
             "supports_backend_managed_offload": self.supports_backend_managed_offload,
             "preferred_weight_export_format": self.preferred_weight_export_format,
             "preferred_weight_export_format_by_rollout_engine": dict(
-                self.preferred_weight_export_format_by_rollout_engine or {}
+                self.preferred_weight_export_format_by_rollout_engine
             ),
             "supported_weight_export_formats": list(self.supported_weight_export_formats),
             "notes": self.notes,
@@ -351,7 +353,7 @@ class TrainBackend(abc.ABC):
             "weight_sync": {
                 "preferred_export_format": caps.preferred_weight_export_format,
                 "preferred_export_format_by_rollout_engine": dict(
-                    caps.preferred_weight_export_format_by_rollout_engine or {}
+                    caps.preferred_weight_export_format_by_rollout_engine
                 ),
                 "supported_export_formats": list(caps.supported_weight_export_formats),
             },
