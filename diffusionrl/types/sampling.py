@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
@@ -22,14 +21,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class SamplingRequirements:
-    """
-    Algorithm-declared sampling contract shared with runtime.
-
-    ``extras`` is reserved for genuinely algorithm-specific extension hints that
-    do not justify a dedicated field. It is normalized into an owned snapshot at
-    construction time so callers cannot retain references to the original input
-    mapping.
-    """
+    """Algorithm-declared sampling contract shared with runtime."""
 
     requires_trajectory: bool = True
     """Whether the algorithm needs full denoising trajectories."""
@@ -42,14 +34,6 @@ class SamplingRequirements:
 
     requires_clean_latents: bool = False
     """Whether the algorithm needs clean latents x0 (forward-process algorithms)."""
-
-    extras: Dict[str, Any] = field(default_factory=dict)
-    """Owned algorithm-specific sampler extras snapshot."""
-
-    def __post_init__(self) -> None:
-        raw_extras = self.extras
-        extras_copy = dict(raw_extras) if isinstance(raw_extras, Mapping) else {}
-        object.__setattr__(self, "extras", extras_copy)
 
     @property
     def is_forward_process(self) -> bool:

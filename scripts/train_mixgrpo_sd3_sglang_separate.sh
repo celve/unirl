@@ -98,7 +98,7 @@ python -m diffusionrl.train \
     --rollout.num-gpus-per-actor ${TP_SIZE} \
     --rollout.tp-size ${TP_SIZE} \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
-    --algorithm.algorithm-dotpath diffusionrl.algorithms.mix_grpo.MixGRPOAlgorithm \
+    --algorithm.algorithm-type grpo \
     --reward.reward-components "${REWARD_MODEL_NAME}" \
     --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \
     --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \

@@ -16,7 +16,6 @@ from .registry import ensure_builtin_algorithm_registration
 
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "GRPOAlgorithm": ("diffusionrl.algorithms.grpo", "GRPOAlgorithm"),
-    "MixGRPOAlgorithm": ("diffusionrl.algorithms.mix_grpo", "MixGRPOAlgorithm"),
     "NFTAlgorithm": ("diffusionrl.algorithms.nft", "NFTAlgorithm"),
 }
 
@@ -26,7 +25,6 @@ ensure_builtin_algorithm_registration()
 __all__ = [
     "BaseAlgorithm",
     "GRPOAlgorithm",
-    "MixGRPOAlgorithm",
     "NFTAlgorithm",
     "create_algorithm_from_init_payload",
 ]

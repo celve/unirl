@@ -27,7 +27,6 @@ register_algorithm = partial(
 def ensure_builtin_algorithm_registration() -> None:
     """Import built-in algorithm modules so decorator-based registration runs."""
     importlib.import_module("diffusionrl.algorithms.grpo")
-    importlib.import_module("diffusionrl.algorithms.mix_grpo")
     importlib.import_module("diffusionrl.algorithms.nft")
 
 

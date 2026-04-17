@@ -552,7 +552,7 @@ class AlgorithmConfig:
     # Algorithm selection
     algorithm_type: str = field(
         default="grpo",
-        metadata={"help": "Built-in algorithm family: grpo, nft, or mix_grpo"},
+        metadata={"help": "Built-in algorithm family: grpo or nft"},
     )
     algorithm_dotpath: Optional[str] = field(
         default=None,
@@ -652,7 +652,7 @@ class AlgorithmConfig:
         if not self.algorithm_type and not self.algorithm_dotpath:
             raise ValueError(
                 "algorithm_type or algorithm_dotpath must be set. "
-                "Available built-ins: grpo, nft, mix_grpo."
+                "Available built-ins: grpo, nft."
             )
         if self.samples_per_prompt < 1:
             raise ValueError("samples_per_prompt must be >= 1.")
