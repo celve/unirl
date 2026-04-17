@@ -165,7 +165,7 @@ def train(args, *, derived_config: DerivedConfig):  # [PUBLIC-API → main()] sy
     if debug_mode == "train_only":
         from diffusionrl.debug import run_debug_train_only
 
-        return run_debug_train_only(args)
+        return run_debug_train_only(args, derived_config=derived_config)
 
     import ray
 

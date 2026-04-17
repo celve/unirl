@@ -10,7 +10,10 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from diffusionrl.config.assembly import DerivedConfig
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +22,7 @@ logger = logging.getLogger(__name__)
 # train_only
 # ---------------------------------------------------------------------------
 
-def run_debug_train_only(args: Any) -> None:
+def run_debug_train_only(args: Any, *, derived_config: "DerivedConfig") -> None:
     """Run only the training phase with synthetic or pre-saved data.
 
     Setup path:
@@ -38,8 +41,9 @@ def run_debug_train_only(args: Any) -> None:
     """
     import ray
 
+    from diffusionrl.cmdline.resolution import build_launch_config
     from diffusionrl.ray.group_factory import create_training_actor_group
-    from diffusionrl.ray.placement_group import create_placement_groups_from_args
+    from diffusionrl.ray.placement_group import create_placement_groups_from_launch
     from diffusionrl.utils import configure_logger, set_seed
 
     configure_logger()
@@ -50,7 +54,7 @@ def run_debug_train_only(args: Any) -> None:
     model_type = str(getattr(args.model, "model_type", "") or "").strip().lower()
 
     logger.info("=== DEBUG: train_only mode ===")
-    logger.info("Model: %s", args.model.pretrained_model_saved_path)
+    logger.info("Model: %s", args.model.pretrained_model_ckpt_path)
     logger.info("Num training iterations: %d", num_rollouts)
     if debug_load_path:
         logger.info("Loading training batch from: %s", debug_load_path)
@@ -64,6 +68,8 @@ def run_debug_train_only(args: Any) -> None:
     # Align training-side scheduler horizon with the actual debug loop length.
     args.rollout.num_rollout = num_rollouts
 
+    launch_config = build_launch_config(args, derived_config=derived_config)
+
     # 1. Ray
     if not ray.is_initialized():
         if args.ray.ray_address:
@@ -74,14 +80,13 @@ def run_debug_train_only(args: Any) -> None:
     training_group = None
     try:
         # 2. Placement groups (only training PG is needed)
-        pgs = create_placement_groups_from_args(args)
+        pgs = create_placement_groups_from_launch(launch_config)
         training_pg_result = pgs.get("training")
         if training_pg_result is None:
             raise ValueError("Missing training placement-group allocation.")
 
         # 3. Create training actor group (loads model, LoRA, optimizer, loss)
-        training_group = create_training_actor_group(args, training_pg_result)
-        # training_group.update_weights() # Legacy code. 
+        training_group = create_training_actor_group(launch_config, training_pg_result)
         logger.info("Training actor group created and weights synced")
 
         # 4. Prepare training batch
@@ -91,24 +96,24 @@ def run_debug_train_only(args: Any) -> None:
             logger.info("Loaded training batch: type=%s", type(batch).__name__)
         else:
             batch_size = int(args.algorithm.prompts_per_rollout) * max(
-                1, int(getattr(args.algorithm, "samples_per_prompt", 1))
+                1, int(args.algorithm.samples_per_prompt)
             )
-            height = int(args.height)
-            width = int(args.width)
+            height = int(args.sampling.height)
+            width = int(args.sampling.width)
             logger.info(
                 "Generating synthetic debug batch: batch_size=%d, resolution=%dx%d, "
                 "algorithm=%s",
                 batch_size,
                 height,
                 width,
-                getattr(args.algorithm, "algorithm_type", "unknown"),
+                args.algorithm.algorithm_type,
             )
             batch = ray.get(
                 training_group._actor_handles[0].create_debug_training_batch.remote(
                     batch_size=batch_size,
                     height=height,
                     width=width,
-                    num_inference_steps=int(getattr(args.sampling, "num_inference_steps", 50)),
+                    num_inference_steps=int(args.sampling.num_inference_steps),
                 )
             )
             batch_ref = ray.put(batch)

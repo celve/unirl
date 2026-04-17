@@ -443,7 +443,7 @@ def create_weight_sync(
     return cls(
         sync_spec=spec,
         rollout_launch=launch_config.rollout,
-        backend_capabilities=dict(launch_config.training.backend_capabilities or {}),
+        backend_capabilities=launch_config.training.backend_capabilities.as_dict(),
     )
 
 

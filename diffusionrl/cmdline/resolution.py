@@ -307,12 +307,14 @@ def derive_training_plan(
     mini_batch_size = local_batch_size // num_updates_per_batch
     raw_micro_batch_size = args.training.micro_batch_size
     micro_batch_size = raw_micro_batch_size or mini_batch_size
-    assert micro_batch_size >= 1, (
-        f"micro_batch_size must be >= 1, Got {micro_batch_size}"
-    )
-    assert mini_batch_size >= micro_batch_size, (
-        f"mini_batch_size must be >= micro_batch_size, Got {mini_batch_size}"
-    )
+    if micro_batch_size < 1:
+        raise ValueError(
+            f"micro_batch_size must be >= 1, Got {micro_batch_size}"
+        )
+    if mini_batch_size < micro_batch_size:
+        raise ValueError(
+            f"mini_batch_size must be >= micro_batch_size, Got {mini_batch_size}"
+        )
 
     update_slices = tuple(
         (update_index * mini_batch_size, (update_index + 1) * mini_batch_size)

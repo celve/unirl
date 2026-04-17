@@ -919,7 +919,7 @@ class RolloutConfig:
     """Rollout topology, buffer, control, and artifact configuration."""
 
     # --- Topology ---
-    mode: str = field(
+    mode: Optional[str] = field(
         default=None,
         metadata={
             "help": "Canonical rollout topology: direct_sampling, separate, or colocate",
