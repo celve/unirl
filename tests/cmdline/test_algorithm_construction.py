@@ -33,7 +33,7 @@ def _make_args(*, algorithm_type: str, algorithm_kwargs: dict | None = None):
             training_scheduler={"timestep_strategy": "all", "timestep_fraction": 0.5},
         ),
         precision=SimpleNamespace(training_autocast_precision="bf16"),
-        debug=SimpleNamespace(debug_output_dir=None),
+        debug=SimpleNamespace(output_dir=None),
     )
 
 

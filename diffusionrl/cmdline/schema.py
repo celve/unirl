@@ -824,6 +824,13 @@ class TrainingConfig:
 
     def __post_init__(self):
         if isinstance(self.lora_target_modules, str):
+            if "," in self.lora_target_modules:
+                raise ValueError(
+                    "training.lora_target_modules does not accept comma-separated strings. "
+                    "Pass a YAML/JSON list instead, e.g. "
+                    "--training.lora-target-modules '[\"to_q\",\"to_k\",\"to_v\"]' "
+                    f"(got: {self.lora_target_modules!r})."
+                )
             self.lora_target_modules = (
                 [self.lora_target_modules] if self.lora_target_modules.strip() else None
             )

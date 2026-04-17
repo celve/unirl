@@ -27,13 +27,13 @@ def run_debug_train_only(args: Any) -> None:
         (skips rollout manager, reward service, rollout buffer, weight sync)
 
     Data path (one of):
-        1. ``--debug.debug-load-path <path>`` — load a previously saved
+        1. ``--debug.load-path <path>`` — load a previously saved
            ``ForwardTrainingBatch`` or ``BackwardTrainingBatch`` from disk.
         2. Otherwise — generate a synthetic typed training batch on the
            training actor. The synthetic path is intentionally conservative
            and currently only supported for SD3 train-side debugging.
 
-    The loop runs ``debug_num_rollouts`` training iterations and logs
+    The loop runs ``args.debug.num_rollouts`` training iterations and logs
     basic metrics (loss, grad_norm, timing).
     """
     import ray
@@ -45,8 +45,8 @@ def run_debug_train_only(args: Any) -> None:
     configure_logger()
     set_seed(args.seed)
 
-    num_rollouts = max(1, int(getattr(args.debug, "debug_num_rollouts", 3)))
-    debug_load_path: Optional[str] = getattr(args.debug, "debug_load_path", None)
+    num_rollouts = max(1, int(args.debug.num_rollouts))
+    debug_load_path: Optional[str] = args.debug.load_path
     model_type = str(getattr(args.model, "model_type", "") or "").strip().lower()
 
     logger.info("=== DEBUG: train_only mode ===")
@@ -56,9 +56,9 @@ def run_debug_train_only(args: Any) -> None:
         logger.info("Loading training batch from: %s", debug_load_path)
     elif model_type != "sd3":
         raise ValueError(
-            "debug_mode=train_only synthetic batches are intentionally limited to "
+            "debug.mode=train_only synthetic batches are intentionally limited to "
             "model_type='sd3' for pre-release correctness. Use "
-            "--debug.debug-load-path with a saved rollout payload for other models."
+            "--debug.load-path with a saved rollout payload for other models."
         )
 
     # Align training-side scheduler horizon with the actual debug loop length.
@@ -173,7 +173,7 @@ def _load_debug_batch(path: str) -> Any:
     import torch
 
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"debug_load_path not found: {path}")
+        raise FileNotFoundError(f"debug.load_path not found: {path}")
     data = torch.load(path, map_location="cpu", weights_only=False)
     if hasattr(data, "clean_latents") or hasattr(data, "trajectories"):
         return data
@@ -183,7 +183,7 @@ def _load_debug_batch(path: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# save helper (used by main loop with debug_save_intermediates)
+# save helper (used by main loop with debug.save_intermediates)
 # ---------------------------------------------------------------------------
 
 def save_rollout_debug_payload(
@@ -196,7 +196,7 @@ def save_rollout_debug_payload(
     """Persist a rollout debug payload to disk for later replay."""
     import torch
 
-    save_dir = str(getattr(args.debug, "debug_save_dir", "outputs/debug") or "outputs/debug")
+    save_dir = str(args.debug.save_dir or "outputs/debug")
     os.makedirs(save_dir, exist_ok=True)
     filename = f"rollout_payload_{rollout_id}.pt"
     save_path = os.path.join(save_dir, filename)

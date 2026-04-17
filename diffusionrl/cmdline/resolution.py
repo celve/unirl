@@ -22,17 +22,14 @@ from diffusionrl.config.assembly import (
     WeightSyncSpec,
 )
 from diffusionrl.config.resolution import (
-    COLOCATE_ROLLOUT_MODE,
     DEFAULT_MODEL_PATH,
     DEFAULT_SAMPLER_PATH,
     DIRECT_ROLLOUT_MODE,
     ROLLOUT_MODES,
-    SEPARATE_ROLLOUT_MODE,
     load_engine_capabilities,
     rollout_mode_is_colocated,
 )
 from diffusionrl.config.spec import ModelSpec, RolloutInfo, SamplingSpec, TrainingPlan
-from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.models import derive_model_bundle_path, list_model_types
 from diffusionrl.registry import derive_registry_or_dotpath
 from diffusionrl.training.backends import (

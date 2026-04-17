@@ -29,6 +29,7 @@ from diffusionrl.training.backends import (
 )
 from diffusionrl.training.update_schedule import validate_training_plan
 from diffusionrl.types.engine import uses_dedicated_rollout_engine
+from diffusionrl.types.sampling import SamplingRequirements
 from diffusionrl.utils.misc import load_function
 
 logger = logging.getLogger(__name__)
