@@ -25,11 +25,10 @@ class SamplingRequirements:
     """
     Algorithm-declared sampling contract shared with runtime.
 
-    Algorithm-specific extras (for example ``sde_ratio`` for MixGRPO and
-    ``requires_clean_latents`` for NFT) live in the open ``extras`` mapping so
-    new algorithms can declare sampler requirements without modifying the core
-    contract. The mapping is normalized into an owned snapshot at construction
-    time so callers cannot retain references to the original input mapping.
+    ``extras`` is reserved for genuinely algorithm-specific extension hints that
+    do not justify a dedicated field. It is normalized into an owned snapshot at
+    construction time so callers cannot retain references to the original input
+    mapping.
     """
 
     requires_trajectory: bool = True
@@ -41,6 +40,9 @@ class SamplingRequirements:
     requires_embeddings: bool = True
     """Whether the algorithm needs prompt embeddings in the sampled batch."""
 
+    requires_clean_latents: bool = False
+    """Whether the algorithm needs clean latents x0 (forward-process algorithms)."""
+
     extras: Dict[str, Any] = field(default_factory=dict)
     """Owned algorithm-specific sampler extras snapshot."""
 
@@ -48,31 +50,6 @@ class SamplingRequirements:
         raw_extras = self.extras
         extras_copy = dict(raw_extras) if isinstance(raw_extras, Mapping) else {}
         object.__setattr__(self, "extras", extras_copy)
-
-    @property
-    def sde_ratio(self) -> float:
-        """Ratio of SDE steps (1.0 = all SDE, 0.0 = all ODE)."""
-        return float(self.extras.get("sde_ratio", 1.0))
-
-    @property
-    def requires_clean_latents(self) -> bool:
-        """Whether the algorithm needs clean latents x0."""
-        return bool(self.extras.get("requires_clean_latents", False))
-
-    @property
-    def forward_diffusion_in_loss(self) -> bool:
-        """Whether forward diffusion happens in loss computation."""
-        return bool(self.extras.get("forward_diffusion_in_loss", False))
-
-    @property
-    def is_mixed_sampling(self) -> bool:
-        """Whether this uses mixed SDE/ODE sampling."""
-        return 0.0 < self.sde_ratio < 1.0
-
-    @property
-    def is_trajectory_based(self) -> bool:
-        """Whether this is a trajectory-based algorithm (GRPO, MixGRPO)."""
-        return self.requires_trajectory
 
     @property
     def is_forward_process(self) -> bool:

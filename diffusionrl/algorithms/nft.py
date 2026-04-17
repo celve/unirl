@@ -157,11 +157,7 @@ class NFTAlgorithm(BaseAlgorithm):
             requires_trajectory=False,
             requires_log_prob=False,
             requires_embeddings=True,
-            extras={
-                "tgr": 0.0,
-                "requires_clean_latents": True,
-                "forward_diffusion_in_loss": True,
-            },
+            requires_clean_latents=True,
         )
 
     def get_ema_spec(self) -> EMASpec:
@@ -279,16 +275,6 @@ class NFTAlgorithm(BaseAlgorithm):
     # ==================================================================
     # Objective computation
     # ==================================================================
-
-    @property
-    def requires_trajectory(self) -> bool:
-        """NFT doesn't need trajectories - only clean images."""
-        return False
-
-    @property
-    def requires_log_prob(self) -> bool:
-        """NFT doesn't use importance sampling."""
-        return False
 
     @property
     def name(self) -> str:
@@ -663,7 +649,5 @@ class NFTAlgorithm(BaseAlgorithm):
             "train_timestep_mode": self.train_timestep_mode,
             "shuffle_train_timesteps": self.shuffle_train_timesteps,
             "apply_time_shift_in_loss": self.apply_time_shift_in_loss,
-            "requires_trajectory": self.requires_trajectory,
-            "requires_log_prob": self.requires_log_prob,
         })
         return config

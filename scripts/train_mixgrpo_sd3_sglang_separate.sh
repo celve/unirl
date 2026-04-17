@@ -15,7 +15,7 @@
 # Key parameters (adapted from MixGRPO FLUX for SD3):
 # - sde_type=flow, eta=0.7, shift=3.0
 # - num_inference_steps=25, guidance_scale=4.5
-# - mixed_sampling=true with sde_ratio=0.16 (16% SDE, 84% ODE)
+# - Mixed SDE/ODE via rollout_scheduler window (window_size=4 of 25 inference steps ≈ 16% SDE)
 # - Window scheduler: progressive with window_size=4, iters_per_window=25
 # - NO KL penalty (same as MixGRPO)
 # - LoRA rank=32, alpha=64
