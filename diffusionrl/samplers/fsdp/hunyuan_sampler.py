@@ -350,9 +350,6 @@ class FSDPHunyuanSampler(BaseSampler):
                     "guidance_scale": float(actual_guidance),
                     "latent_scale": self.LATENT_SCALE,
                 },
-                "step_indices": torch.arange(
-                    sigma_schedule.shape[0], device=sigma_schedule.device, dtype=torch.long
-                ),
             },
         )
 

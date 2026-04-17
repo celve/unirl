@@ -66,7 +66,6 @@ def index_training_batch(batch: TrainingBatch, keep_indices: Sequence[int]) -> T
             else None
         ),
         is_partitioned=batch.is_partitioned,
-        step_indices=batch.step_indices,
         target_sde_indices=batch.target_sde_indices,
         extras=batch_reindex(
             batch.extras,
@@ -149,7 +148,6 @@ def concat_training_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
         sample_ids=sample_ids,
         group_ids=group_ids,
         is_partitioned=False,
-        step_indices=first.step_indices,
         target_sde_indices=first.target_sde_indices,
         extras=extras,
     )

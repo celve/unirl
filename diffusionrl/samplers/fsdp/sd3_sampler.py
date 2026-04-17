@@ -547,9 +547,6 @@ class SD3Sampler(BaseSampler):
                     "width": width,
                     "guidance_scale": guidance_scale,
                 },
-                "step_indices": torch.arange(
-                    sigmas.shape[0], device=sigmas.device, dtype=torch.long
-                ),
             },
         )
 

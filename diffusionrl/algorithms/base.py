@@ -455,19 +455,20 @@ class BaseAlgorithm(ABC):
     ) -> Any:
         """Assemble a unified TrainingBatch from sampler outputs.
 
-        Branches on ``self.get_sampling_requirements()``:
+        SSOT contract for the trajectory-RL path:
+          * ``sde_indices`` (from scheduler.resolve_rollout_sde_indices) is the
+            single source of truth for which steps this batch trains on.
+            Callers **must** pass it; omission is a hard error.
+          * Every sampler output must satisfy
+            ``log_probs.keys() == sde_indices`` and must store trajectory
+            positions ``idx`` and ``idx+1`` for every ``idx ∈ sde_indices``.
+            Violations raise.
+          * ``get_filtered_training_indices`` is the only feature-level filter
+            (skip_last_timestep / skip_initial_timesteps); it may shrink
+            ``target_sde_indices`` but must not introduce new indices.
 
-        - ``requires_trajectory=True``: collects ``aux["trajectory_store"]`` and
-          ``aux["log_probs"]``, resolves SDE training indices via
-          ``resolve_training_indices`` / ``get_filtered_training_indices``,
-          and builds ``TrajectoryStore.from_full()``.
-        - ``requires_trajectory=False`` (NFT-style): collects
-          ``output.latents`` (clean x0) and builds
-          ``TrajectoryStore.from_clean_latents()``.
-
-        Subclasses normally do **not** need to override this method.
-        Customize training-index selection by overriding
-        ``resolve_training_indices`` or ``get_filtered_training_indices``.
+        The NFT branch (``requires_trajectory=False``) builds from clean
+        latents and does not use ``sde_indices``.
         """
         import time as _time
 
@@ -483,13 +484,7 @@ class BaseAlgorithm(ABC):
         timesteps = None
         trajectory_stores = []
         clean_latents = []
-        log_probs_dicts = []
-        step_indices = None
-        scheduler_was_provided = sde_indices is not None
-        raw_scheduler_indices = (
-            {int(i) for i in sde_indices} if sde_indices is not None else None
-        )
-        final_sde_indices: Set[int] = set(raw_scheduler_indices or set())
+        log_probs_dicts: List[Dict[int, torch.Tensor]] = []
 
         for idx, output in enumerate(sampler_outputs):
             if not isinstance(output, RolloutSamples):
@@ -524,23 +519,12 @@ class BaseAlgorithm(ABC):
                 trajectory_stores.append(_traj_store)
 
                 _log_probs = output.aux.get("log_probs")
-                log_probs_dicts.append(
-                    _log_probs.to_dict() if _log_probs is not None else {}
-                )
-
-                steps = output.aux.get("step_indices")
-                if steps is not None:
-                    if step_indices is None:
-                        step_indices = steps
-                    elif not torch.equal(step_indices.to(steps.device), steps):
-                        raise ValueError(
-                            "Mismatched step_indices across sampler outputs: "
-                            f"expected={step_indices.tolist()} "
-                            f"got={steps.tolist()}"
-                        )
-
-                if sde_indices is None:
-                    final_sde_indices.update(int(i) for i in output.sde_indices)
+                if _log_probs is None:
+                    raise ValueError(
+                        f"RolloutSamples at index={idx} missing log_probs "
+                        f"(trajectory-RL path requires per-step log_prob)."
+                    )
+                log_probs_dicts.append(_log_probs.to_dict())
             else:
                 clean_latents.append(output.latents)
 
@@ -555,126 +539,74 @@ class BaseAlgorithm(ABC):
             if not trajectory_stores:
                 raise ValueError("No trajectory stores found in sampler outputs")
 
-            if step_indices is None:
-                step_indices = torch.arange(
-                    timesteps.shape[0],
-                    device=timesteps.device,
-                    dtype=torch.long,
+            if sde_indices is None:
+                raise ValueError(
+                    f"{type(self).__name__}.assemble_training_batch requires "
+                    f"sde_indices from the scheduler on the trajectory-RL path. "
+                    f"Callers must pass sde_indices=scheduler.resolve_rollout_sde_indices(...)."
                 )
 
-            step_labels = [int(v) for v in step_indices[:-1].tolist()]
-            step_label_set = set(step_labels)
+            # T is derived from timesteps.shape[0] — the sole source of truth.
+            # step_idx == position is a structural guarantee (no step_indices
+            # mapping needed).
+            T = int(timesteps.shape[0]) - 1
+            step_label_set = set(range(T))
 
-            def _normalize_to_step_labels(
-                indices: Set[int], *, source: str
-            ) -> Set[int]:
-                if not indices:
-                    return set()
-                if indices.issubset(step_label_set):
-                    return set(indices)
-                mapped = {
-                    step_labels[i] for i in indices if 0 <= int(i) < len(step_labels)
-                }
-                if mapped:
-                    logger.debug(
-                        "%s indices look positional; mapped to step "
-                        "labels raw=%s mapped=%s",
-                        source,
-                        sorted(indices),
-                        sorted(mapped),
-                    )
-                    return mapped
-                logger.warning(
-                    "%s indices do not match sampled step labels and "
-                    "could not be mapped: raw=%s available=%s",
-                    source,
-                    sorted(indices),
-                    sorted(step_labels),
-                )
-                return set()
-
-            if final_sde_indices:
-                final_sde_indices = _normalize_to_step_labels(
-                    set(int(i) for i in final_sde_indices),
-                    source="Scheduler/Sampler SDE",
+            requested = set(int(i) for i in sde_indices)
+            bad = sorted(i for i in requested if i not in step_label_set)
+            if bad:
+                raise ValueError(
+                    f"Scheduler sde_indices outside sampled step labels: "
+                    f"bad={bad}, available={sorted(step_label_set)}"
                 )
 
-            raw_train_indices = self.resolve_training_indices(
-                num_steps=len(step_labels),
-                sde_indices=(
-                    set(final_sde_indices) if scheduler_was_provided else None
-                ),
+            target_sde_indices = self.get_filtered_training_indices(
+                requested, len(step_label_set)
             )
-            train_indices = _normalize_to_step_labels(
-                set(int(i) for i in raw_train_indices),
-                source=f"{type(self).__name__}.resolve_training_indices",
-            )
-            if not train_indices:
-                train_indices = step_label_set
-            if not scheduler_was_provided:
-                final_sde_indices = train_indices
-            else:
-                final_sde_indices = (
-                    final_sde_indices & train_indices
-                    if final_sde_indices
-                    else train_indices
+            stray = sorted(i for i in target_sde_indices if i not in requested)
+            if stray:
+                raise ValueError(
+                    f"{type(self).__name__}.get_filtered_training_indices "
+                    f"introduced new indices {stray} outside the requested "
+                    f"{sorted(requested)} — it must only shrink the set."
                 )
-            if not final_sde_indices:
-                final_sde_indices = train_indices if train_indices else set(step_labels)
+            if not target_sde_indices:
+                raise ValueError(
+                    f"{type(self).__name__}.assemble_training_batch produced "
+                    f"an empty training step set from requested={sorted(requested)}. "
+                    f"Check skip_last_timestep / skip_initial_timesteps configuration."
+                )
 
-            num_steps = len(step_labels)
-            final_sde_indices = self.get_filtered_training_indices(
-                final_sde_indices, num_steps
-            )
-            if not final_sde_indices:
-                final_sde_indices = set(step_labels)
-
+            # Merge log_probs by iterating target_sde_indices, enforcing that
+            # every sampler output contributed a log_prob for every step.
             merged_log_probs: Dict[int, torch.Tensor] = {}
-            if log_probs_dicts:
-                all_lp_indices: Set[int] = set()
-                for lpd in log_probs_dicts:
-                    all_lp_indices.update(lpd.keys())
-                for idx_key in all_lp_indices:
-                    values = [lpd[idx_key] for lpd in log_probs_dicts if idx_key in lpd]
-                    if values:
-                        merged_log_probs[idx_key] = torch.cat(values, dim=0)
-            if final_sde_indices:
-                merged_log_probs = {
-                    int(k): v
-                    for k, v in merged_log_probs.items()
-                    if int(k) in set(int(i) for i in final_sde_indices)
-                }
+            for k in sorted(target_sde_indices):
+                parts: List[torch.Tensor] = []
+                for out_idx, lpd in enumerate(log_probs_dicts):
+                    if k not in lpd:
+                        raise ValueError(
+                            f"Sampler output #{out_idx} missing log_prob for "
+                            f"step {k} (target_sde_indices={sorted(target_sde_indices)})."
+                        )
+                    parts.append(lpd[k])
+                merged_log_probs[int(k)] = torch.cat(parts, dim=0)
 
             assemble_t0 = _time.perf_counter()
-
             traj_store = TrajectoryStore.concat(trajectory_stores)
-
             assemble_t1 = _time.perf_counter()
 
-            # Clamp target_sde_indices to positions actually stored in the
-            # trajectory.  Selective stores only keep SDE-boundary positions,
-            # so training indices that fall outside (e.g. ODE-only steps)
-            # must be dropped to avoid validation failures.
-            if traj_store.is_selective and final_sde_indices:
-                available = set(
-                    idx
-                    for idx in final_sde_indices
-                    if traj_store.has_position(idx) and traj_store.has_position(idx + 1)
+            missing_pair = sorted(
+                i for i in target_sde_indices
+                if not (traj_store.has_position(i) and traj_store.has_position(i + 1))
+            )
+            if missing_pair:
+                raise ValueError(
+                    f"Trajectory store missing (idx, idx+1) pairs for steps "
+                    f"{missing_pair}. stored_positions={traj_store.stored_positions}, "
+                    f"target_sde_indices={sorted(target_sde_indices)}. "
+                    f"Sampler contract violation: every requested SDE step must have "
+                    f"both position idx and idx+1 stored."
                 )
-                if available != final_sde_indices:
-                    logger.debug(
-                        "Clamped target_sde_indices to trajectory store: "
-                        "requested=%s available=%s stored=%s",
-                        sorted(final_sde_indices),
-                        sorted(available),
-                        traj_store.stored_positions,
-                    )
-                    final_sde_indices = available
-                if not final_sde_indices:
-                    raise ValueError(
-                        "No target_sde_indices remain after clamping to "
-                        f"stored trajectory positions {traj_store.stored_positions}"
-                    )
 
             batch = TrainingBatch(
                 trajectory_store=traj_store,
@@ -684,8 +616,7 @@ class BaseAlgorithm(ABC):
                 forward_context=merged_forward_context,
                 rewards=rewards,
                 prompts=prompts,
-                step_indices=step_indices,
-                target_sde_indices=set(int(i) for i in final_sde_indices),
+                target_sde_indices=set(int(i) for i in target_sde_indices),
             )
             batch.validate()
 
@@ -720,20 +651,6 @@ class BaseAlgorithm(ABC):
         )
         batch.validate()
         return batch
-
-    def resolve_training_indices(
-        self,
-        *,
-        num_steps: int,
-        sde_indices: Optional[Set[int]] = None,
-    ) -> Set[int]:
-        """Resolve the timestep indices that should contribute to training.
-
-        This is the explicit counterpart to rollout-time ``sde_indices``.
-        """
-        if sde_indices is not None:
-            return set(int(i) for i in sde_indices)
-        return set(range(num_steps))
 
     def get_filtered_training_indices(  # [PUBLIC-API → assemble_training_batch() internal] rollout side: filter training timesteps
         self,

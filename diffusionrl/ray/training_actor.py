@@ -145,7 +145,6 @@ def _build_synthetic_debug_training_batch(
         batch.validate()
         return batch
 
-    step_indices = torch.arange(num_inference_steps + 1, dtype=torch.long)
     timesteps = torch.linspace(1.0, 0.0, steps=num_inference_steps + 1, dtype=torch.float32)
     batch = TrainingBatch(
         trajectory_store=TrajectoryStore.from_full(
@@ -169,7 +168,6 @@ def _build_synthetic_debug_training_batch(
         forward_context=fwd_ctx,
         rewards=rewards,
         prompts=prompts,
-        step_indices=step_indices,
         target_sde_indices=set(range(num_inference_steps)),
     )
     batch.validate()

@@ -417,11 +417,10 @@ class RolloutActor:
     def _estimate_rollout_output_bytes(self, output: RolloutSamples) -> int:
         total = 0
         trajectory_store = output.aux.get("trajectory_store")
-        step_indices = output.aux.get("step_indices")
         log_probs = output.aux.get("log_probs")
         fwd_ctx = output.aux.get("forward_context")
         metadata = output.aux.get("metadata")
-        for tensor in (output.latents, output.timesteps, step_indices):
+        for tensor in (output.latents, output.timesteps):
             if torch.is_tensor(tensor):
                 total += int(tensor.numel() * tensor.element_size())
         if trajectory_store is not None:
@@ -510,7 +509,6 @@ class RolloutActor:
                 "forward_context": fwd_ctx,
                 "decoded_images": output.aux.get("decoded_images"),
                 "metadata": metadata,
-                "step_indices": output.aux.get("step_indices"),
             },
             meta=output.meta,
         )
@@ -891,17 +889,12 @@ class RolloutActor:
                 merged_metadata["decoded_videos"] = torch.cat(decoded_videos, dim=0)
             aux["metadata"] = merged_metadata
 
-        step_indices_values = [output.aux.get("step_indices") for output in outputs]
-        if all(value is not None for value in step_indices_values):
-            aux["step_indices"] = step_indices_values[0]
-
         handled_keys = {
             "trajectory_store",
             "log_probs",
             "forward_context",
             "decoded_images",
             "metadata",
-            "step_indices",
         }
         other_keys = sorted(set().union(*(output.aux.keys() for output in outputs)) - handled_keys)
         for key in other_keys:

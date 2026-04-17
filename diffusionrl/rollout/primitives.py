@@ -490,15 +490,16 @@ def validate_sampler_outputs_against_contract(
             )
 
             if assert_step_alignment:
-                resolved_steps = out.aux.get("step_indices")
-                if resolved_steps is None:
-                    resolved_steps = torch.arange(
-                        out.timesteps.shape[0], device=out.timesteps.device, dtype=torch.long
-                    )
-                if int(resolved_steps.shape[0]) != int(out.timesteps.shape[0]):
+                if int(out.timesteps.shape[0]) < 2:
                     raise ValueError(
-                        f"step/timestep length mismatch: step_indices={resolved_steps.shape[0]}, "
-                        f"timesteps={out.timesteps.shape[0]}"
+                        f"timesteps must have at least 2 positions, "
+                        f"got shape={tuple(out.timesteps.shape)}"
+                    )
+                trajectory_store = out.aux.get("trajectory_store")
+                if trajectory_store is not None and trajectory_store.total_positions != int(out.timesteps.shape[0]):
+                    raise ValueError(
+                        f"trajectory_store.total_positions={trajectory_store.total_positions} "
+                        f"!= timesteps length={int(out.timesteps.shape[0])}"
                     )
         except Exception as exc:
             meta = out.aux.get("metadata") if hasattr(out, "aux") else {}
@@ -506,14 +507,9 @@ def validate_sampler_outputs_against_contract(
             generator_type = meta.get("generator_type") if isinstance(meta, dict) else None
             capabilities = meta.get("engine_capabilities") if isinstance(meta, dict) else None
             trajectories = out.aux.get("trajectory_store") if hasattr(out, "aux") else None
-            step_indices = out.aux.get("step_indices") if hasattr(out, "aux") else None
             traj_shape = (trajectories.batch_size, trajectories.num_stored) if trajectories is not None else None
             latents_shape = tuple(out.latents.shape) if getattr(out, "latents", None) is not None else None
-            if step_indices is None and hasattr(out, "timesteps"):
-                step_indices = torch.arange(
-                    out.timesteps.shape[0], device=out.timesteps.device, dtype=torch.long
-                )
-            steps_shape = tuple(step_indices.shape) if step_indices is not None else None
+            timesteps_shape = tuple(out.timesteps.shape) if getattr(out, "timesteps", None) is not None else None
             hint = ""
             if generator_type == "sglang":
                 hint = (
@@ -523,7 +519,7 @@ def validate_sampler_outputs_against_contract(
             raise RuntimeError(
                 f"Sampler output contract validation failed in {mode_label} path at index={idx}: {exc}.{hint} "
                 f"capabilities={capabilities}, latents_shape={latents_shape}, "
-                f"trajectories_shape={traj_shape}, step_indices_shape={steps_shape}"
+                f"trajectories_shape={traj_shape}, timesteps_shape={timesteps_shape}"
             ) from exc
 
 

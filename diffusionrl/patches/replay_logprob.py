@@ -154,7 +154,7 @@ class ReplayLogProbPatch:
                 f"sampler_dotpath={self._replay_sampler_dotpath}"
             )
 
-        allowed_steps = set(int(v) for v in batch.resolved_step_indices[:-1].tolist())
+        allowed_steps = batch.step_labels
         target_steps = sorted(int(i) for i in batch.sde_indices if int(i) in allowed_steps)
         if not target_steps:
             raise RuntimeError(
@@ -165,10 +165,7 @@ class ReplayLogProbPatch:
         replayed: Dict[int, torch.Tensor] = {}
         for step_idx in target_steps:
             pos = batch.get_position_for_step(step_idx)
-            # Replay samplers index into the provided sigma_schedule by position.
-            # When rollout trajectories miss initial x_T (for example some sglang paths),
-            # resolved step ids can be shifted (1..T) while sigma_schedule remains local (0..T-1).
-            # Use local trajectory position to keep replay indexing in-bounds.
+            # step_idx == position (structural guarantee), so pos == step_idx.
             local_step_index = int(pos)
             ctx_dict = batch.forward_context.to_dict()
             arg_map: Dict[str, Any] = {

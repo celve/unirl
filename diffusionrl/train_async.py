@@ -320,6 +320,7 @@ def train_async_loop(  # [PUBLIC-API → train()] async core loop
             sampler_outputs=rollout_result.sampler_outputs,
             rewards=rollout_result.rewards,
             advantages=advantages,
+            sde_indices=plan.context.sde_indices,
         )
         push_result = ray.get(
             rollout_buffer.push.remote(

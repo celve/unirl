@@ -196,10 +196,7 @@ class MinimalAlgorithm(BaseAlgorithm):
                 f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
             )
 
-        available_steps = set(int(s) for s in batch.resolved_step_indices[:-1].tolist())
-        valid_step_indices = sorted(
-            int(i) for i in batch.sde_indices if int(i) in available_steps
-        )
+        valid_step_indices = sorted(batch.sde_indices)
         if not valid_step_indices:
             return 0.0, {}, 0, False
 
@@ -250,8 +247,7 @@ class MinimalAlgorithm(BaseAlgorithm):
                 f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
             )
 
-        step_indices = batch.resolved_step_indices[:-1]
-        step_labels = set(int(v) for v in step_indices.tolist())
+        step_labels = batch.step_labels
         if not step_labels:
             return tuple()
 
@@ -271,9 +267,7 @@ class MinimalAlgorithm(BaseAlgorithm):
         if not filtered_steps:
             return tuple()
 
-        selected_positions = [
-            pos
-            for pos, step_label in enumerate(step_indices.tolist())
-            if int(step_label) in filtered_steps
-        ]
+        # With step_idx == position, step labels are just range(T),
+        # so we can directly index into batch.timesteps by step label.
+        selected_positions = sorted(filtered_steps)
         return batch.timesteps[selected_positions]

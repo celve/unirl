@@ -205,21 +205,31 @@ class RolloutSamples:
 
     @property
     def sde_indices(self) -> Set[int]:
+        """SDE step indices for this sample.
+
+        Primary source: ``metadata["sde_indices"]`` (explicitly set by the
+        sampler/engine).  Fallback: ``log_probs.data.keys()`` (for samplers
+        that populate log_probs but not metadata sde_indices).
+        """
+        metadata = self.aux.get("metadata")
+        if isinstance(metadata, dict):
+            raw = metadata.get("sde_indices")
+            if raw is not None:
+                return set(int(i) for i in raw)
         log_probs = self.aux.get("log_probs")
-        if log_probs is not None:
+        if log_probs is not None and len(log_probs) > 0:
             return log_probs.sde_indices
-        raw_metadata = self.aux.get("metadata")
-        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
-        meta_indices = metadata.get("sde_indices")
-        if meta_indices is not None:
-            return set(int(i) for i in meta_indices)
         return set()
 
     @property
     def resolved_step_indices(self) -> torch.Tensor:
-        step_indices = self.aux.get("step_indices")
-        if step_indices is not None:
-            return step_indices
+        """Compute canonical step indices from timesteps length.
+
+        .. deprecated::
+            ``step_indices`` is no longer stored in aux.  This property now
+            always returns ``arange(timesteps.shape[0])`` and will be removed
+            in a future release.
+        """
         return torch.arange(
             self.timesteps.shape[0], device=self.timesteps.device, dtype=torch.long
         )
@@ -246,15 +256,12 @@ class RolloutSamples:
         trajectory_store = self.aux.get("trajectory_store")
         log_probs = self.aux.get("log_probs")
         fwd_ctx = self.aux.get("forward_context")
-        step_indices = self.aux.get("step_indices")
         if trajectory_store is not None:
             moved_aux["trajectory_store"] = trajectory_store.to_device(device)
         if log_probs is not None:
             moved_aux["log_probs"] = log_probs.to_device(device)
         if fwd_ctx is not None:
             moved_aux["forward_context"] = fwd_ctx.to_device(device)
-        if step_indices is not None:
-            moved_aux["step_indices"] = step_indices.to(device)
         return RolloutSamples(
             latents=self.latents.to(device),
             timesteps=self.timesteps.to(device),
@@ -280,26 +287,11 @@ class RolloutSamples:
 
         batch_size = int(self.latents.shape[0])
         t_plus_1 = int(self.timesteps.shape[0])
-        step_indices = self.aux.get("step_indices")
-        if step_indices is None:
-            step_indices = torch.arange(
-                self.timesteps.shape[0], device=self.timesteps.device, dtype=torch.long
-            )
         trajectory_store = self.aux.get("trajectory_store")
         log_probs = self.aux.get("log_probs")
         fwd_ctx = self.aux.get("forward_context")
         raw_metadata = self.aux.get("metadata")
         metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
-        if step_indices.shape[0] != t_plus_1:
-            raise ValueError(
-                f"RolloutSamples step_indices length {step_indices.shape[0]} != timesteps length {t_plus_1}"
-            )
-        if step_indices.numel() > 1 and not bool(
-            torch.all(step_indices[1:] > step_indices[:-1])
-        ):
-            raise ValueError(
-                f"RolloutSamples step_indices must be strictly increasing, got {step_indices.tolist()}"
-            )
 
         if requires_trajectory and trajectory_store is None:
             raise ValueError(
@@ -323,11 +315,11 @@ class RolloutSamples:
             )
 
         if log_probs is not None:
-            allowed_steps = set(int(v) for v in step_indices[:-1].tolist())
+            allowed_steps = set(range(t_plus_1 - 1))
             for idx, lp in log_probs.data.items():
                 if idx not in allowed_steps:
                     raise ValueError(
-                        f"RolloutSamples contract violation: log_prob index {idx} not in step_indices[:-1]={sorted(allowed_steps)}"
+                        f"RolloutSamples contract violation: log_prob index {idx} not in allowed steps {sorted(allowed_steps)}"
                     )
                 if int(lp.shape[0]) != batch_size:
                     raise ValueError(

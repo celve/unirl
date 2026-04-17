@@ -119,6 +119,7 @@ def _produce_and_push_rollout(
         sampler_outputs=rollout_result.sampler_outputs,
         rewards=rollout_result.rewards,
         advantages=advantages,
+        sde_indices=rollout_sde_indices,
     )
     metadata = dict(rollout_result.metadata or {})
 
