@@ -6,7 +6,7 @@ TrajectoryBuilder — builder for collecting latents during denoising loops.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Set, Tuple, Union
+from typing import List, Set, Tuple
 
 import torch
 
@@ -80,8 +80,7 @@ class Trajectory(Batched):
         """Selective storage: K positions out of T+1."""
         if int(trajectories.shape[1]) != len(collected_positions):
             raise ValueError(
-                f"trajectories dim-1 ({trajectories.shape[1]}) != "
-                f"len(collected_positions) ({len(collected_positions)})"
+                f"trajectories dim-1 ({trajectories.shape[1]}) != len(collected_positions) ({len(collected_positions)})"
             )
         index_map = torch.full((total_positions,), -1, dtype=torch.long)
         for compact_idx, orig_pos in enumerate(collected_positions):
@@ -133,10 +132,7 @@ class Trajectory(Batched):
             raise IndexError(f"Position {pos} out of range [0, {self.total_positions})")
         compact_idx = int(self.index_map[pos].item())
         if compact_idx < 0:
-            raise IndexError(
-                f"Position {pos} was not collected. "
-                f"Stored positions: {self.stored_positions}"
-            )
+            raise IndexError(f"Position {pos} was not collected. Stored positions: {self.stored_positions}")
         return self.data[:, compact_idx]
 
     def get_pair(self, pos: int) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -144,10 +140,7 @@ class Trajectory(Batched):
 
     @property
     def stored_positions(self) -> List[int]:
-        return sorted(
-            int(i) for i in range(self.total_positions)
-            if int(self.index_map[i].item()) >= 0
-        )
+        return sorted(int(i) for i in range(self.total_positions) if int(self.index_map[i].item()) >= 0)
 
     # ---- batch ops (Batched provides concat/select/slice via fields) --------
 
@@ -232,10 +225,7 @@ class TrajectoryBuilder:
     def finalize(self) -> Trajectory:
         """Freeze collected latents into a Trajectory."""
         if not self._collected:
-            raise ValueError(
-                f"finalize() called with no collected positions. "
-                f"needed={sorted(self._needed)}"
-            )
+            raise ValueError(f"finalize() called with no collected positions. needed={sorted(self._needed)}")
         positions = [p for p, _ in self._collected]
         data = torch.stack([t for _, t in self._collected], dim=1)
         total_positions = self._total_steps + 1

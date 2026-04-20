@@ -1,23 +1,21 @@
 import os
 from dataclasses import replace
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, Optional, Union
 
-import torch
 import ray
+import torch
 
-from diffusionrl.reward.config import RewardSpec
-from diffusionrl.reward.pipeline import RewardPipeline
-from diffusionrl.types.training_batch import TrainingBatch
-from diffusionrl.config.training_sections import LrSchedulerConfig, OptimizerConfig
-from diffusionrl.training import build_lr_scheduler, build_optimizer
 from diffusionrl.algorithms import create_algorithm_from_init_payload
+from diffusionrl.config.training_sections import LrSchedulerConfig, OptimizerConfig
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.models import create_model_bundle_from_init_payload
 from diffusionrl.patches.replay_logprob import ReplayLogProbPatch
 from diffusionrl.ray.actor_base import BaseTrainRayActor
+from diffusionrl.ray.mixins import RolloutPipelineMixin, TrainingWeightSyncMixin
+from diffusionrl.reward.config import RewardSpec
+from diffusionrl.reward.pipeline import RewardPipeline
 from diffusionrl.samplers.fsdp.engine import FSDPSamplingEngine
-from diffusionrl.ray.mixins import TrainingWeightSyncMixin, RolloutPipelineMixin
-from diffusionrl.types.response import RolloutResponse
+from diffusionrl.training import build_lr_scheduler, build_optimizer
 from diffusionrl.training.backends import (
     FSDPBackend,
     FSDPBackendConfig,
@@ -29,14 +27,14 @@ from diffusionrl.training.backends import (
 from diffusionrl.training.stack import TrainStack
 from diffusionrl.transfer.buffer import Buffer, BufferHandle
 from diffusionrl.types.request import RolloutRequest
-from diffusionrl.utils.ema import EMAManager
+from diffusionrl.types.response import RolloutResponse
+from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils import clear_memory as _clear_gpu_memory
 from diffusionrl.utils.dtypes import parse_torch_dtype
+from diffusionrl.utils.ema import EMAManager
 
 
-def _build_backend_from_config(
-    config: TrainBackendConfig, model_bundle: Any
-) -> TrainBackend:
+def _build_backend_from_config(config: TrainBackendConfig, model_bundle: Any) -> TrainBackend:
     if isinstance(config, FSDPBackendConfig):
         return FSDPBackend(config=config, model_bundle=model_bundle)
     if isinstance(config, VeOmniBackendConfig):
@@ -87,6 +85,7 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
         # cuDNN / cuBLAS / deterministic-algorithm flags are in effect for
         # the subsequent model construction, FSDP wrap, and training ops.
         from diffusionrl.utils import set_seed
+
         set_seed(int(seed))
 
         BaseTrainRayActor.__init__(self, world_size, rank, master_addr, master_port)
@@ -179,21 +178,17 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
         self.text_encoder = None
         self.vae = None
         self.scheduler = None
-    
+
     def _ensure_reward_pipeline(self) -> RewardPipeline:
         if self._reward_spec is None:
-            raise RuntimeError(
-                "Reward pipeline requested before reward spec initialization."
-            )
+            raise RuntimeError("Reward pipeline requested before reward spec initialization.")
         if self.reward_pipeline is None:
             self.reward_pipeline = RewardPipeline.from_spec(self._reward_spec)
         return self.reward_pipeline
 
     def generate(self, request: RolloutRequest) -> RolloutResponse:
         if self.engine is None:
-            raise RuntimeError(
-                "TrainActor.generate() requires sampling_config to be set at construction."
-            )
+            raise RuntimeError("TrainActor.generate() requires sampling_config to be set at construction.")
         output = self.engine.generate(request)
         return RolloutResponse(request=request, samples=output)
 
@@ -204,7 +199,7 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
     def restore_from_eval(self) -> None:
         """Restore training weights after evaluation."""
         self.ema_manager.restore_from_eval(self.model)
-    
+
     def train(
         self,
         rollout_step: int,
@@ -225,7 +220,7 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
         """Fetch a TrainingBatch from a remote buffer and train."""
         batch: TrainingBatch = ray.get(handle.actor_handle.pop_buffer.remote(handle))
         return self._train_batch(rollout_step, batch)
-    
+
     def _maybe_replay_old_log_probs(self, batch: TrainingBatch) -> TrainingBatch:
         """Recompute log_prob_old via FSDP when sglang rollout omitted them.
 
@@ -276,7 +271,7 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
             micro_batch_size=self.micro_batch_size,
             rollout_step=rollout_step,
         )
-    
+
     def load_checkpoint(self, path: str) -> None:
         """Load model from checkpoint."""
         checkpoint_path = os.path.join(path, "checkpoint.pt")
@@ -324,7 +319,6 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
                 if isinstance(v, torch.Tensor):
                     state[k] = v.cpu()
         _clear_gpu_memory()
-
 
     def onload(self) -> None:
         if self.reward_pipeline is not None:

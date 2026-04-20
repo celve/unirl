@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
-from functools import partial
-
-import tqdm as tqdm_
-
-tqdm = partial(tqdm_.tqdm, dynamic_ncols=True)
-import logging
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional
+from functools import partial
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
-from torch.profiler import profile as torch_profile, ProfilerActivity
+import tqdm as tqdm_
+from torch.profiler import ProfilerActivity
+from torch.profiler import profile as torch_profile
 
 from diffusionrl.config.spec import TrainingPlan
 from diffusionrl.training.batch_partition import shard_training_batch_for_rank
@@ -24,6 +22,8 @@ from diffusionrl.training.update_schedule import (
 )
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils.misc import aggregate_numeric_metrics
+
+tqdm = partial(tqdm_.tqdm, dynamic_ncols=True)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ class TrainExecutorConfig:
     shuffle_seed: Optional[int] = None
     clip_grad_norm_fn: Optional[Callable[..., Any]] = None
 
+
 class TrainExecutor:
     """Execution-layer trainer used by RPC actors."""
 
@@ -64,9 +65,7 @@ class TrainExecutor:
         self.lr_scheduler = lr_scheduler
         self.algorithm = algorithm
         self.config = config
-        self.update_schedule: TrainingUpdateSchedule = create_training_update_schedule(
-            config.training_plan
-        )
+        self.update_schedule: TrainingUpdateSchedule = create_training_update_schedule(config.training_plan)
 
     def prepare_batch(self, batch: TrainingBatch) -> Optional[TrainingBatch]:
         """Validate, shard, and move training batch to compute device."""
@@ -173,7 +172,9 @@ class TrainExecutor:
 
         logger.info(
             "Shuffling %d samples before training (rollout_id=%d, seed=%d)",
-            batch_size, rollout_id, seed + rollout_id,
+            batch_size,
+            rollout_id,
+            seed + rollout_id,
         )
         return batch.select(perm)
 
@@ -190,9 +191,7 @@ class TrainExecutor:
         total_mini_batches_consumed = 0
         optimizer_steps = 0
         last_effective_mini_batch_size = int(self.config.local_mini_batch_size)
-        last_effective_micro_batch_size = int(
-            self.config.micro_batch_size
-        )
+        last_effective_micro_batch_size = int(self.config.micro_batch_size)
         training_schedule = self.update_schedule.name
 
         rank = self.config.rank
@@ -217,7 +216,9 @@ class TrainExecutor:
             _prof.__enter__()
             logger.info(
                 "Torch profiler enabled: rank=%d, rollout_id=%d, save_trace=%s, output=%s",
-                rank, rollout_id, _should_save,
+                rank,
+                rollout_id,
+                _should_save,
                 _trace_path if _should_save else "none",
             )
         else:
@@ -233,13 +234,9 @@ class TrainExecutor:
         ):
             self.optimizer.zero_grad()
 
-            mini_batches = tuple(
-                (int(start), int(end)) for start, end in update_chunk.mini_batch_slices
-            )
+            mini_batches = tuple((int(start), int(end)) for start, end in update_chunk.mini_batch_slices)
             if not mini_batches:
-                raise ValueError(
-                    "TrainExecutor requires non-empty mini_batch_slices per update."
-                )
+                raise ValueError("TrainExecutor requires non-empty mini_batch_slices per update.")
 
             loss_scale = 1.0 / len(mini_batches)
             training_timesteps = self.algorithm.resolve_training_timesteps(
@@ -265,11 +262,7 @@ class TrainExecutor:
                     timesteps=training_timesteps,
                     loss_scale=loss_scale,
                 )
-                total_loss += (
-                    micro_loss.item()
-                    if isinstance(micro_loss, torch.Tensor)
-                    else micro_loss
-                )
+                total_loss += micro_loss.item() if isinstance(micro_loss, torch.Tensor) else micro_loss
                 if num_timesteps > 0:
                     update_num_timesteps = max(update_num_timesteps, num_timesteps)
                 has_backward = has_backward or micro_has_backward

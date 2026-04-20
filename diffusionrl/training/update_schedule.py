@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Sequence, Tuple
 
 from diffusionrl.types.training_batch import TrainingBatch
 
@@ -60,8 +60,7 @@ def _coerce_update_slices(raw: Any, *, local_batch_size: int) -> Tuple[Tuple[int
         raise ValueError("training_plan.update_slices must be a non-empty sequence.")
 
     slices = tuple(
-        _coerce_slice_pair(name=f"training_plan.update_slices[{index}]", value=item)
-        for index, item in enumerate(raw)
+        _coerce_slice_pair(name=f"training_plan.update_slices[{index}]", value=item) for index, item in enumerate(raw)
     )
     for index, (start, end) in enumerate(slices):
         if end > int(local_batch_size):
@@ -87,9 +86,7 @@ def _coerce_per_update_mini_batch_slices(
             for start, end in update_slices
         )
     if not isinstance(raw, (list, tuple)) or not raw:
-        raise ValueError(
-            "training_plan.mini_batch_slices_per_update must be a non-empty sequence."
-        )
+        raise ValueError("training_plan.mini_batch_slices_per_update must be a non-empty sequence.")
 
     if len(raw) != len(update_slices):
         raise ValueError(
@@ -107,10 +104,7 @@ def _coerce_per_update_mini_batch_slices(
         update_size = int(update_slice[1]) - int(update_slice[0])
         mini_slices = tuple(
             _coerce_slice_pair(
-                name=(
-                    "training_plan.mini_batch_slices_per_update"
-                    f"[{update_index}][{mini_index}]"
-                ),
+                name=(f"training_plan.mini_batch_slices_per_update[{update_index}][{mini_index}]"),
                 value=item,
             )
             for mini_index, item in enumerate(per_update)
@@ -140,8 +134,7 @@ def coerce_training_execution_plan(raw: Any) -> TrainingExecutionPlan:
         raw = raw.as_dict()
     if not isinstance(raw, dict):
         raise ValueError(
-            "training_plan must be a dict, TrainingPlan, or TrainingExecutionPlan. "
-            f"Got: {type(raw).__name__}"
+            f"training_plan must be a dict, TrainingPlan, or TrainingExecutionPlan. Got: {type(raw).__name__}"
         )
 
     local_batch_size = _positive_int(
@@ -191,6 +184,7 @@ def coerce_training_execution_plan(raw: Any) -> TrainingExecutionPlan:
         mini_batch_slices_per_update=mini_batch_slices_per_update,
     )
 
+
 def validate_batch_against_plan(
     *,
     batch_size: int,
@@ -222,11 +216,7 @@ class TrainingUpdateSchedule:
 
     def __init__(self, plan: TrainingExecutionPlan):
         self.plan = coerce_training_execution_plan(plan)
-        self.name = (
-            "single_update"
-            if int(self.plan.num_updates_per_batch) <= 1
-            else "multi_update"
-        )
+        self.name = "single_update" if int(self.plan.num_updates_per_batch) <= 1 else "multi_update"
 
     def iter_update_chunks(
         self,
@@ -247,18 +237,14 @@ class SingleUpdateSchedule(TrainingUpdateSchedule):
         validate_batch_against_plan(batch_size=int(batch.batch_size), plan=self.plan)
         if len(self.plan.update_slices) != 1:
             raise ValueError(
-                "single_update plan must contain exactly one update slice. "
-                f"Got {len(self.plan.update_slices)}."
+                f"single_update plan must contain exactly one update slice. Got {len(self.plan.update_slices)}."
             )
         update_start, update_end = self.plan.update_slices[0]
         yield TrainingUpdateChunk(
             batch=batch.slice(int(update_start), int(update_end)),
             update_batch_size=int(self.plan.local_mini_batch_size),
             update_index=0,
-            mini_batch_slices=tuple(
-                (int(start), int(end))
-                for start, end in self.plan.mini_batch_slices_per_update[0]
-            ),
+            mini_batch_slices=tuple((int(start), int(end)) for start, end in self.plan.mini_batch_slices_per_update[0]),
         )
 
 
@@ -278,10 +264,7 @@ class MultiUpdateSchedule(TrainingUpdateSchedule):
                 batch=batch.slice(int(start), int(end)),
                 update_batch_size=int(end) - int(start),
                 update_index=int(update_index),
-                mini_batch_slices=tuple(
-                    (int(mini_start), int(mini_end))
-                    for mini_start, mini_end in mini_batch_slices
-                ),
+                mini_batch_slices=tuple((int(mini_start), int(mini_end)) for mini_start, mini_end in mini_batch_slices),
             )
 
 

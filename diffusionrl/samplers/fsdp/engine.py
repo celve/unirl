@@ -13,10 +13,10 @@ from typing import Any, Dict, List, Optional, Set
 import torch
 import torch.nn as nn
 
-from diffusionrl.types.request import RolloutRequest
-from diffusionrl.types.sample import RolloutSamples
 from diffusionrl.samplers.engine import BaseRolloutEngine
 from diffusionrl.samplers.fsdp.base_sampler import FSDPBaseSampler
+from diffusionrl.types.request import RolloutRequest
+from diffusionrl.types.sample import RolloutSamples
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +84,7 @@ class FSDPSamplingEngine(BaseRolloutEngine):
         sampler_dotpath = model_bundle.default_sampler_dotpath()
         if not sampler_dotpath:
             raise ValueError(
-                "model_bundle.default_sampler_dotpath() must return a "
-                "non-empty dotpath for direct sampling"
+                "model_bundle.default_sampler_dotpath() must return a non-empty dotpath for direct sampling"
             )
 
         text_encoder = getattr(model_bundle, "text_encoder", None)
@@ -151,10 +150,7 @@ class FSDPSamplingEngine(BaseRolloutEngine):
 
     def _require_ready(self) -> None:
         if self._sampler is None:
-            raise RuntimeError(
-                "FSDPSamplingEngine not ready. "
-                "Call initialize() then bind_model() first."
-            )
+            raise RuntimeError("FSDPSamplingEngine not ready. Call initialize() then bind_model() first.")
 
     @contextmanager
     def _eval_context(self):
@@ -162,9 +158,7 @@ class FSDPSamplingEngine(BaseRolloutEngine):
         modules: List[nn.Module] = []
         seen: Set[int] = set()
 
-        if self._model_bundle is not None and hasattr(
-            self._model_bundle, "iter_offloadable_modules"
-        ):
+        if self._model_bundle is not None and hasattr(self._model_bundle, "iter_offloadable_modules"):
             for _name, m in self._model_bundle.iter_offloadable_modules(
                 include_transformer=True,
             ):

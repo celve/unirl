@@ -39,7 +39,6 @@ from diffusionrl.training.types import (
     TrainTopology,
     resolve_train_backend_capabilities,
     resolve_train_backend_launch_spec,
-    supported_train_backends,
 )
 from diffusionrl.types.engine import ROLLOUT_ENGINE_TYPES, normalize_engine_type
 from diffusionrl.utils.misc import load_function
@@ -66,8 +65,7 @@ def derive_train_backend_config(args: Any) -> BaseTrainBackendConfig:
     config = payload.component_config
     if not isinstance(config, BaseTrainBackendConfig):
         raise TypeError(
-            f"Train backend config parser must return a TrainBackendConfig subclass, "
-            f"got {type(config).__name__}."
+            f"Train backend config parser must return a TrainBackendConfig subclass, got {type(config).__name__}."
         )
     return config
 
@@ -96,12 +94,7 @@ def derive_model_spec(args: Any) -> ModelSpec:
     declared_model_type_fn = getattr(model_cls, "declared_model_type", None)
     if callable(declared_model_type_fn):
         declared_model_type = declared_model_type_fn()
-        if (
-            model_type
-            and model_dotpath
-            and model_dotpath != DEFAULT_MODEL_PATH
-            and model_type != declared_model_type
-        ):
+        if model_type and model_dotpath and model_dotpath != DEFAULT_MODEL_PATH and model_type != declared_model_type:
             raise ValueError(
                 "Configured model_type does not match the declared model type from model_dotpath. "
                 f"Got model_type={model_type!r}, "
@@ -268,13 +261,9 @@ def derive_training_plan(
     raw_micro_batch_size = args.training.micro_batch_size
     micro_batch_size = raw_micro_batch_size or mini_batch_size
     if micro_batch_size < 1:
-        raise ValueError(
-            f"micro_batch_size must be >= 1, Got {micro_batch_size}"
-        )
+        raise ValueError(f"micro_batch_size must be >= 1, Got {micro_batch_size}")
     if mini_batch_size < micro_batch_size:
-        raise ValueError(
-            f"mini_batch_size must be >= micro_batch_size, Got {mini_batch_size}"
-        )
+        raise ValueError(f"mini_batch_size must be >= micro_batch_size, Got {mini_batch_size}")
 
     update_slices = tuple(
         (update_index * mini_batch_size, (update_index + 1) * mini_batch_size)
@@ -323,9 +312,7 @@ def derive_config(
         train_backend_capabilities = None
 
     if include_train_backend_capabilities and train_backend_capabilities is None:
-        train_backend_capabilities = resolve_train_backend_capabilities(
-            derive_train_backend_identifier(args)
-        )
+        train_backend_capabilities = resolve_train_backend_capabilities(derive_train_backend_identifier(args))
 
     return DerivedConfig(
         algorithm_dotpath=algorithm_dotpath,
@@ -461,9 +448,7 @@ def build_launch_config(
     )
     placement = _build_placement_spec(args, rollout_info=rollout_info)
     reward_config = RewardSpec.from_args(args)
-    model_init_payload = build_model_bundle_init_payload_from_args(
-        args, model_spec=model_spec
-    )
+    model_init_payload = build_model_bundle_init_payload_from_args(args, model_spec=model_spec)
     training_sampling_config = build_training_sampling_config_from_args(
         args=args,
         sampling_spec=sampling_spec,
@@ -494,9 +479,7 @@ def build_launch_config(
     if placement.rollout_num_nodes > 0 and placement.rollout_num_gpus_per_node > 0:
         rollout_engine = rollout_info.rollout_engine
         if not rollout_engine:
-            raise ValueError(
-                "Derived rollout launch requires rollout.rollout_engine to be set."
-            )
+            raise ValueError("Derived rollout launch requires rollout.rollout_engine to be set.")
         rollout_engine_init_payload = build_rollout_engine_init_payload_from_args(
             args,
             model_init_payload=model_init_payload,
@@ -516,9 +499,7 @@ def build_launch_config(
             actor_gpu_requirement=int(args.rollout.num_gpus_per_actor or 0),
             colocate=placement.colocate_rollout,
             colocate_gpu_fraction=float(args.ray.colocate_rollout_gpu_fraction),
-            allow_noset_multi_gpu_inference=bool(
-                args.ray.allow_noset_multi_gpu_inference
-            ),
+            allow_noset_multi_gpu_inference=bool(args.ray.allow_noset_multi_gpu_inference),
             engine_init_payload=rollout_engine_init_payload,
             actor_init_config=rollout_actor_init_config,
         )

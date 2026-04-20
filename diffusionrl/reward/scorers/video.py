@@ -73,14 +73,9 @@ class VideoRewardScorer(BaseRewardScorer):
                     prompts=[prompt] * len(frames),
                 )
                 frame_response = self.frame_scorer.compute_rewards(frame_request)
-                alignment_reward = (
-                    sum(frame_response.rewards) / len(frame_response.rewards)
-                )
+                alignment_reward = sum(frame_response.rewards) / len(frame_response.rewards)
                 temporal_reward = self._compute_temporal_consistency(video)
-                total_reward = (
-                    self.alignment_weight * alignment_reward
-                    + self.temporal_weight * temporal_reward
-                )
+                total_reward = self.alignment_weight * alignment_reward + self.temporal_weight * temporal_reward
 
                 rewards.append(total_reward)
                 component_rewards["alignment"].append(alignment_reward)

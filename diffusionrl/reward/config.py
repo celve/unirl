@@ -58,10 +58,7 @@ class RewardDefinition:
         return self.component_weights_list
 
     def component_weights(self) -> Dict[str, float]:
-        return {
-            str(component.model_name): float(component.weight)
-            for component in self.components
-        }
+        return {str(component.model_name): float(component.weight) for component in self.components}
 
 
 @dataclass(frozen=True)
@@ -152,15 +149,8 @@ class RewardSpec:
     def to_execution_plan(self) -> RewardExecutionPlan:
         backend = str(self.reward_backend or "local").strip().lower()
         if backend not in {"local", "http"}:
-            raise ValueError(
-                "reward_backend must be one of local/http, "
-                f"got: {self.reward_backend!r}."
-            )
-        service_urls = tuple(
-            str(url)
-            for url in (self.reward_service_urls or [])
-            if str(url or "").strip()
-        )
+            raise ValueError(f"reward_backend must be one of local/http, got: {self.reward_backend!r}.")
+        service_urls = tuple(str(url) for url in (self.reward_service_urls or []) if str(url or "").strip())
         return RewardExecutionPlan(
             backend=backend,
             local_device=str(self.local_reward_device or "cpu"),

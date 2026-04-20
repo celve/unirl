@@ -111,10 +111,7 @@ class VeOmniBackend:
     ) -> None:
         dp_mode = str(config.data_parallel_mode or "fsdp2").strip().lower()
         if dp_mode != "fsdp2":
-            raise ValueError(
-                "VeOmniBackend currently supports data_parallel_mode='fsdp2' only. "
-                f"Got: {dp_mode!r}"
-            )
+            raise ValueError(f"VeOmniBackend currently supports data_parallel_mode='fsdp2' only. Got: {dp_mode!r}")
 
         self.config = config
         self.model_bundle: ModelBundle = model_bundle
@@ -211,10 +208,7 @@ class VeOmniBackend:
         world_size = self._current_world_size()
         dp_size = int(_as_optional_int(self.config.dp_size) or world_size)
         dp_replicate = int(_as_optional_int(self.config.dp_replicate_size) or 1)
-        dp_shard = int(
-            _as_optional_int(self.config.dp_shard_size)
-            or max(1, dp_size // max(1, dp_replicate))
-        )
+        dp_shard = int(_as_optional_int(self.config.dp_shard_size) or max(1, dp_size // max(1, dp_replicate)))
 
         if dp_replicate * dp_shard != dp_size:
             raise ValueError(
@@ -249,10 +243,7 @@ class VeOmniBackend:
         )
 
     def _resolve_basic_modules(self) -> List[str]:
-        if (
-            isinstance(self.config.basic_modules, (list, tuple))
-            and self.config.basic_modules
-        ):
+        if isinstance(self.config.basic_modules, (list, tuple)) and self.config.basic_modules:
             return [str(name) for name in self.config.basic_modules]
 
         if not hasattr(self.model_bundle, "get_no_split_modules"):
@@ -275,8 +266,7 @@ class VeOmniBackend:
         pretrained_path = getattr(self.model_bundle, "pretrained_path", None)
         if not pretrained_path:
             raise ValueError(
-                "VeOmni backend requires checkpoint path for weight reload. "
-                "Provide backend kwarg `weights_path`."
+                "VeOmni backend requires checkpoint path for weight reload. Provide backend kwarg `weights_path`."
             )
 
         base_path = os.path.abspath(os.path.expanduser(str(pretrained_path)))
@@ -295,8 +285,7 @@ class VeOmniBackend:
         parallelize_extra_kwargs = dict(self.config.parallelize_kwargs or {})
 
         logger.info(
-            "Rank %s: VeOmni wrap start (dp_mode=%s, init_device=%s, "
-            "weights_path=%s, basic_modules=%s)",
+            "Rank %s: VeOmni wrap start (dp_mode=%s, init_device=%s, weights_path=%s, basic_modules=%s)",
             self._current_rank(),
             self._dp_mode,
             init_device,
@@ -313,9 +302,7 @@ class VeOmniBackend:
             enable_gradient_checkpointing=bool(self.config.enable_gradient_checkpointing),
             basic_modules=basic_modules,
             init_device=init_device,
-            broadcast_model_weights_from_rank0=bool(
-                self.config.broadcast_model_weights_from_rank0
-            ),
+            broadcast_model_weights_from_rank0=bool(self.config.broadcast_model_weights_from_rank0),
             enable_reentrant=bool(self.config.enable_reentrant),
             enable_forward_prefetch=bool(self.config.enable_forward_prefetch),
             enable_fsdp_offload=bool(self.config.enable_fsdp_offload),
@@ -336,9 +323,7 @@ class VeOmniBackend:
                 set_model_state_dict,
             )
         except Exception as exc:
-            raise RuntimeError(
-                "VeOmni backend requires torch distributed checkpoint state-dict APIs."
-            ) from exc
+            raise RuntimeError("VeOmni backend requires torch distributed checkpoint state-dict APIs.") from exc
         return StateDictOptions, get_model_state_dict, set_model_state_dict
 
     def _build_state_dict_options(self, **kwargs: Any) -> Any:
@@ -377,8 +362,7 @@ class VeOmniBackend:
             filtered = {k: v for k, v in state_dict.items() if "lora" in str(k).lower()}
             if not filtered:
                 raise ValueError(
-                    "LoRA-only state dict requested but no LoRA parameters "
-                    "were found in the VeOmni state dict."
+                    "LoRA-only state dict requested but no LoRA parameters were found in the VeOmni state dict."
                 )
             return filtered
         return state_dict
@@ -418,9 +402,7 @@ class VeOmniBackend:
     # Protocol: build_optimizer / build_scheduler
     # ------------------------------------------------------------------
 
-    def build_optimizer(
-        self, config: OptimizerConfig
-    ) -> Optional[OptimizerProtocol]:
+    def build_optimizer(self, config: OptimizerConfig) -> Optional[OptimizerProtocol]:
         *_a, _b, build_optimizer, _c, _d = self._veomni_apis()
 
         lr = float(config.learning_rate)

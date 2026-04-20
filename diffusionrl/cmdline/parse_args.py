@@ -23,11 +23,11 @@ from diffusionrl.cmdline.argument_parsing import (
     parse_cli_key_value,
 )
 from diffusionrl.cmdline.schema import (
-    TrainingArguments,
     GROUP_CONFIG_NAMES,
     GROUP_CONFIG_TYPES,
     GROUP_SUBCONFIG_NAMES,
     TOP_LEVEL_FIELD_NAMES,
+    TrainingArguments,
     print_config_views,
     validate_and_derive_config,
 )
@@ -45,8 +45,7 @@ def _merge_algorithm_kwarg_overrides(raw_args: Dict[str, Any]) -> None:
     for item in overrides:
         if not isinstance(item, tuple) or len(item) != 2:
             raise ValueError(
-                "Internal error: parsed --algorithm.kwarg item must be a (key, value) pair. "
-                f"Got: {item!r}"
+                f"Internal error: parsed --algorithm.kwarg item must be a (key, value) pair. Got: {item!r}"
             )
         key, value = item
         merged[str(key)] = value
@@ -62,7 +61,9 @@ def parse_args_with_derived_config(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--config", type=str, default=None,
+        "--config",
+        type=str,
+        default=None,
         help="Path to YAML config file. CLI args override YAML values.",
     )
     parser.add_argument(
@@ -109,9 +110,7 @@ def parse_args_with_derived_config(
 
     algorithm_group = arg_groups.get("algorithm")
     if algorithm_group is None:
-        algorithm_group = parser.add_argument_group(
-            GROUP_DISPLAY_NAMES.get("algorithm", "Algorithm & Advantage")
-        )
+        algorithm_group = parser.add_argument_group(GROUP_DISPLAY_NAMES.get("algorithm", "Algorithm & Advantage"))
         arg_groups["algorithm"] = algorithm_group
     algorithm_group.add_argument(
         "--algorithm.kwarg",
@@ -130,9 +129,7 @@ def parse_args_with_derived_config(
     cli_argv = list(argv) if argv is not None else sys.argv[1:]
     parsed_args = parser.parse_args(cli_argv)
     explicit_cli_keys = collect_explicit_cli_destinations(cli_argv, parser)
-    action_by_dest = {
-        action.dest: action for action in parser._actions if getattr(action, "dest", None)
-    }
+    action_by_dest = {action.dest: action for action in parser._actions if getattr(action, "dest", None)}
 
     raw_args = vars(parsed_args)
     print_derived_config = bool(raw_args.get("print_derived_config", False))

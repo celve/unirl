@@ -1,9 +1,9 @@
 """Noise utilities for GRPO sampling."""
 
 import hashlib
-from typing import Dict, List, Optional, Tuple, Union
-import torch
+from typing import Dict, List, Optional, Tuple
 
+import torch
 
 _MAX_TORCH_SEED = (1 << 63) - 1
 
@@ -118,8 +118,9 @@ def generate_latents(
         Latent tensor [batch_size, *latent_shape]
     """
     if init_same_noise:
-        assert base_seed is not None and noise_group_ids is not None, \
+        assert base_seed is not None and noise_group_ids is not None, (
             "generate_latents requires both base_seed and noise_group_ids when init_same_noise=True."
+        )
         return generate_shared_noise(
             batch_size=batch_size,
             latent_shape=latent_shape,

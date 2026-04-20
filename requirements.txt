@@ -1,3 +1,7 @@
+accelerate>=0.30
+aiohttp>=3.9
+diffusers>=0.30
+easyocr>=1.7
 # Core dependency set aligned with:
 #   pip install -e ".[train,infer,eval]"
 # Includes the SGLang diffusion fork dependency.
@@ -11,18 +15,14 @@
 # Install it separately only when needed:
 #   docs/geneval_mmcv_setup.md
 numpy>=1.24,<3
-torch>=2.1
-ray[default]>=2.9,<3
-sglang[diffusion] @ git+https://github.com/celve/sglang.git@diffusionrl#subdirectory=python
-diffusers>=0.30
-transformers>=4.41
 peft>=0.11
-safetensors>=0.4
 Pillow>=10
-requests>=2.31
 psutil>=5.9
-wandb>=0.16,<0.20
-aiohttp>=3.9
-accelerate>=0.30
+ray[default]>=2.9,<3
+requests>=2.31
+safetensors>=0.4
+sglang[diffusion] @ git+https://github.com/celve/sglang.git@diffusionrl#subdirectory=python
+torch>=2.1
 torchvision>=0.16
-easyocr>=1.7
+transformers>=4.41
+wandb>=0.16,<0.20

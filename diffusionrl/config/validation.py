@@ -26,10 +26,9 @@ from diffusionrl.reward.config import RewardSpec
 from diffusionrl.training.types import (
     BaseTrainBackendConfig,
     TrainTopology,
-    supported_train_backends,
 )
 from diffusionrl.types.engine import EngineConfig, uses_dedicated_rollout_engine
-from diffusionrl.types.sampling import SamplingParams
+from diffusionrl.types.sampling import SamplingParams, SamplingRequirements
 from diffusionrl.utils.misc import load_function
 
 logger = logging.getLogger(__name__)
@@ -54,9 +53,7 @@ class PrecisionName(str, Enum):
 
 
 # Aliases accepted for optional dtype fields (e.g. rollout transport cast-off).
-_PRECISION_DISABLE_ALIASES = frozenset(
-    {"", "none", "off", "disable", "disabled"}
-)
+_PRECISION_DISABLE_ALIASES = frozenset({"", "none", "off", "disable", "disabled"})
 
 
 def repo_root(*, env_repo_root: str) -> str:
@@ -107,13 +104,9 @@ def validate_precision_type(
     except ValueError as exc:
         if allow_disable_aliases:
             raise ValueError(
-                f"{field_name} must be one of "
-                "fp32/fp16/bf16 or none/off (disable), "
-                f"got: {value!r}"
+                f"{field_name} must be one of fp32/fp16/bf16 or none/off (disable), got: {value!r}"
             ) from exc
-        raise ValueError(
-            f"{field_name} must be one of bf16/fp16/fp32, got: {value!r}"
-        ) from exc
+        raise ValueError(f"{field_name} must be one of bf16/fp16/fp32, got: {value!r}") from exc
 
 
 def validate_colocate_fractions(
@@ -123,13 +116,9 @@ def validate_colocate_fractions(
 ) -> None:
     """Validate colocate GPU fraction bounds."""
     if colocate_training_gpu_fraction <= 0 or colocate_rollout_gpu_fraction <= 0:
-        raise ValueError(
-            "colocate_training_gpu_fraction and colocate_rollout_gpu_fraction must be > 0"
-        )
+        raise ValueError("colocate_training_gpu_fraction and colocate_rollout_gpu_fraction must be > 0")
     if colocate_training_gpu_fraction + colocate_rollout_gpu_fraction > 1.0:
-        raise ValueError(
-            "colocate_training_gpu_fraction + colocate_rollout_gpu_fraction must be <= 1.0"
-        )
+        raise ValueError("colocate_training_gpu_fraction + colocate_rollout_gpu_fraction must be <= 1.0")
 
 
 def validate_reward_config(reward_config: RewardSpec) -> None:
@@ -230,8 +219,7 @@ def validate_direct_sampling_batch_geometry(
 
     if not rollout_info.training_actor_sampling_mode:
         raise ValueError(
-            "sampling.max_samples_per_request is only valid when "
-            "sampling runs directly on training actors."
+            "sampling.max_samples_per_request is only valid when sampling runs directly on training actors."
         )
 
     max_samples_per_request = int(max_samples_per_request)
@@ -262,10 +250,7 @@ def validate_weight_sync(
             "sync.protocol='disabled' is only valid when sampling runs directly on training actors. "
             f"Got rollout.rollout_engine={rollout_engine!r}."
         )
-    is_multi_node = (
-        int(rollout_num_nodes) > 1
-        or int(training_num_nodes) > 1
-    )
+    is_multi_node = int(rollout_num_nodes) > 1 or int(training_num_nodes) > 1
     if resolved_mode in {"tensor_payload", "nccl_broadcast"} and rollout_engine != "sglang":
         raise ValueError(
             "sync.protocol in {tensor_payload,nccl_broadcast} currently requires "
@@ -338,8 +323,7 @@ def validate_rollout_layout(
     is_sglang_engine = rollout_info.is_sglang_engine
     if rollout_gpus > 1 and rollout_mode_is_colocated(rollout_info.mode) and not is_sglang_engine:
         raise ValueError(
-            "colocate with multi-GPU rollout actors is only supported "
-            "for rollout.rollout_engine='sglang'."
+            "colocate with multi-GPU rollout actors is only supported for rollout.rollout_engine='sglang'."
         )
     if rollout_gpus > 1:
         if not allow_noset_multi_gpu_inference:
@@ -401,9 +385,7 @@ def validate_training_batch_geometry(
     num_updates_per_batch = int(num_updates_per_batch)
     global_batch_size = int(global_batch_size)
     if topology is None:
-        raise ValueError(
-            "validate_training_batch_geometry requires a resolved TrainTopology."
-        )
+        raise ValueError("validate_training_batch_geometry requires a resolved TrainTopology.")
     dp_size = int(topology.dp_size)
     dp_replicate_size = int(topology.dp_replicate_size)
     raw_micro_batch_size = micro_batch_size
@@ -416,9 +398,7 @@ def validate_training_batch_geometry(
     ) -> str:
         local_text = str(local_batch_size) if local_batch_size is not None else "<not divisible by dp_size>"
         update_text = (
-            str(update_batch_size)
-            if update_batch_size is not None
-            else "<not divisible by num_updates_per_batch>"
+            str(update_batch_size) if update_batch_size is not None else "<not divisible by num_updates_per_batch>"
         )
         if raw_micro_batch_size is None:
             micro_text = "auto"
@@ -488,8 +468,7 @@ def validate_training_batch_geometry(
         _raise_geometry_error(
             reason="local batch cannot be split evenly into optimizer updates "
             "(local_batch_size % num_updates_per_batch != 0).",
-            fix_hint="Choose a training.num_updates_per_batch that evenly divides "
-            "the resolved local_batch_size.",
+            fix_hint="Choose a training.num_updates_per_batch that evenly divides the resolved local_batch_size.",
             local_batch_size=local_batch_size,
             update_batch_size=None,
             micro_batch_size=None,
@@ -514,8 +493,7 @@ def validate_training_batch_geometry(
         _raise_geometry_error(
             reason="local mini-batch cannot be split evenly into micro-batches "
             "(local_mini_batch_size % micro_batch_size != 0).",
-            fix_hint="Choose a training.micro_batch_size that evenly divides "
-            "the resolved local_mini_batch_size.",
+            fix_hint="Choose a training.micro_batch_size that evenly divides the resolved local_mini_batch_size.",
             local_batch_size=local_batch_size,
             update_batch_size=update_batch_size,
             micro_batch_size=micro_batch_size,
@@ -530,13 +508,10 @@ def validate_training_batch_geometry(
 def validate_rollout_engine_config(config: EngineConfig) -> None:
     """Minimal pre-dispatch validation for dedicated rollout engine config."""
     if not isinstance(config, EngineConfig):
-        raise ValueError(
-            f"rollout_engine_config must be an EngineConfig, got: {type(config).__name__}"
-        )
+        raise ValueError(f"rollout_engine_config must be an EngineConfig, got: {type(config).__name__}")
     if not isinstance(config.engine_kwargs, dict):
         raise ValueError(
-            "rollout_engine_config.engine_kwargs must be a dict, "
-            f"got: {type(config.engine_kwargs).__name__}"
+            f"rollout_engine_config.engine_kwargs must be a dict, got: {type(config.engine_kwargs).__name__}"
         )
     if not str(config.sampler_dotpath or "").strip():
         raise ValueError("rollout_engine_config.sampler_dotpath is required.")
@@ -545,10 +520,7 @@ def validate_rollout_engine_config(config: EngineConfig) -> None:
 def validate_rollout_actor_init_config(config: RolloutActorConfig) -> None:
     """Minimal pre-dispatch validation for rollout actor init config."""
     if not isinstance(config, RolloutActorConfig):
-        raise ValueError(
-            "rollout_actor_init_config must be a RolloutActorConfig, "
-            f"got: {type(config).__name__}"
-        )
+        raise ValueError(f"rollout_actor_init_config must be a RolloutActorConfig, got: {type(config).__name__}")
 
     engine_init_payload = config.engine_init_payload
     if not isinstance(engine_init_payload, ComponentInitPayload):
@@ -559,8 +531,7 @@ def validate_rollout_actor_init_config(config: RolloutActorConfig) -> None:
     reward_config = config.reward_config
     if not isinstance(reward_config, RewardSpec):
         raise ValueError(
-            "rollout_actor_init_config.reward_config must be a RewardSpec, "
-            f"got: {type(reward_config).__name__}"
+            f"rollout_actor_init_config.reward_config must be a RewardSpec, got: {type(reward_config).__name__}"
         )
 
     engine_config = engine_init_payload.component_config
@@ -588,13 +559,11 @@ def validate_rollout_actor_init_config(config: RolloutActorConfig) -> None:
                 f"rollout_actor_init_config.engine_init_payload.component_config.{required_key} is required."
             )
 
+
 def validate_training_actor_init_config(config: TrainingActorConfig) -> None:
     """Minimal pre-dispatch validation for training actor config."""
     if not isinstance(config, TrainingActorConfig):
-        raise ValueError(
-            "training_actor_init_config must be a TrainingActorConfig, "
-            f"got: {type(config).__name__}"
-        )
+        raise ValueError(f"training_actor_init_config must be a TrainingActorConfig, got: {type(config).__name__}")
 
     if not isinstance(config.optimizer_config, OptimizerConfig):
         raise ValueError(
@@ -611,17 +580,14 @@ def validate_training_actor_init_config(config: TrainingActorConfig) -> None:
             "training_actor_init_config.training_config must be a TrainingExecutionConfig, "
             f"got: {type(config.training_config).__name__}"
         )
-    if config.sampling_config is not None and not isinstance(
-        config.sampling_config, SamplingParams
-    ):
+    if config.sampling_config is not None and not isinstance(config.sampling_config, SamplingParams):
         raise ValueError(
             "training_actor_init_config.sampling_config must be a SamplingParams or None, "
             f"got: {type(config.sampling_config).__name__}"
         )
     if not isinstance(config.reward_config, RewardSpec):
         raise ValueError(
-            "training_actor_init_config.reward_config must be a RewardSpec, "
-            f"got: {type(config.reward_config).__name__}"
+            f"training_actor_init_config.reward_config must be a RewardSpec, got: {type(config.reward_config).__name__}"
         )
     if not isinstance(config.topology_config, TrainTopology):
         raise ValueError(
@@ -640,8 +606,7 @@ def validate_training_actor_init_config(config: TrainingActorConfig) -> None:
     algorithm_init_payload = config.algorithm_init_payload
     if not isinstance(algorithm_init_payload, ComponentInitPayload):
         raise ValueError(
-            "algorithm_init_payload must be a ComponentInitPayload, "
-            f"got: {type(algorithm_init_payload).__name__}"
+            f"algorithm_init_payload must be a ComponentInitPayload, got: {type(algorithm_init_payload).__name__}"
         )
 
     algorithm_config = algorithm_init_payload.component_config
@@ -653,15 +618,11 @@ def validate_training_actor_init_config(config: TrainingActorConfig) -> None:
 
     model_init_payload = config.model_init_payload
     if not isinstance(model_init_payload, ComponentInitPayload):
-        raise ValueError(
-            "model_init_payload must be a ComponentInitPayload, "
-            f"got: {type(model_init_payload).__name__}"
-        )
+        raise ValueError(f"model_init_payload must be a ComponentInitPayload, got: {type(model_init_payload).__name__}")
     model_config = model_init_payload.component_config
     if not isinstance(model_config, ModelBundleConfig):
         raise ValueError(
-            "model_init_payload.component_config must be a ModelBundleConfig, "
-            f"got: {type(model_config).__name__}"
+            f"model_init_payload.component_config must be a ModelBundleConfig, got: {type(model_config).__name__}"
         )
 
     train_backend_init_payload = config.train_backend_init_payload
@@ -683,9 +644,7 @@ def validate_training_actor_init_config(config: TrainingActorConfig) -> None:
         if value is None:
             raise ValueError(f"topology_config.{required_key} is required.")
         if int(value) < 1:
-            raise ValueError(
-                f"topology_config.{required_key} must be >= 1, got: {value!r}"
-            )
+            raise ValueError(f"topology_config.{required_key} must be >= 1, got: {value!r}")
 
     training_plan_config = config.training_plan_config
     if not isinstance(training_plan_config, TrainingPlan):
@@ -694,8 +653,7 @@ def validate_training_actor_init_config(config: TrainingActorConfig) -> None:
             f"got: {type(training_plan_config).__name__}"
         )
     if training_plan_config.local_batch_size != (
-        training_plan_config.local_mini_batch_size
-        * training_plan_config.num_updates_per_batch
+        training_plan_config.local_mini_batch_size * training_plan_config.num_updates_per_batch
     ):
         raise ValueError(
             "training_plan_config.local_batch_size must equal "
@@ -704,11 +662,7 @@ def validate_training_actor_init_config(config: TrainingActorConfig) -> None:
             f"local_mini_batch_size={training_plan_config.local_mini_batch_size}, "
             f"num_updates_per_batch={training_plan_config.num_updates_per_batch}."
         )
-    if (
-        training_plan_config.local_mini_batch_size
-        % training_plan_config.micro_batch_size
-        != 0
-    ):
+    if training_plan_config.local_mini_batch_size % training_plan_config.micro_batch_size != 0:
         raise ValueError(
             "training_plan_config.micro_batch_size must evenly divide "
             "local_mini_batch_size. "
@@ -725,10 +679,7 @@ def validate_launch_config_for_train(*, launch_config: LaunchConfig) -> None:
     config from CLI args.
     """
     rollout_info = launch_config.rollout_info
-    if (
-        not rollout_info.training_actor_sampling_mode
-        and launch_config.rollout is None
-    ):
+    if not rollout_info.training_actor_sampling_mode and launch_config.rollout is None:
         raise RuntimeError(
             "train.py requires a dedicated rollout launch when not using "
             "training_actor_sampling_mode "

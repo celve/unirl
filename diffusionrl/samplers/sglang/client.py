@@ -54,9 +54,7 @@ class SGLangClient:
         self.request_timeout_s = float(request_timeout_s)
         self.max_retries = int(max_retries)
         self.retry_backoff_s = float(retry_backoff_s)
-        self.queue_timeout_s = (
-            float(queue_timeout_s) if queue_timeout_s is not None else self.request_timeout_s
-        )
+        self.queue_timeout_s = float(queue_timeout_s) if queue_timeout_s is not None else self.request_timeout_s
         self.handshake_paths = handshake_paths or [
             "/capabilities",
             "/handshake",
@@ -101,9 +99,7 @@ class SGLangClient:
 
         acquired = self._semaphore.acquire(timeout=self.queue_timeout_s)
         if not acquired:
-            raise SGLangTimeoutError(
-                f"SGLang request queue wait timeout after {self.queue_timeout_s:.2f}s"
-            )
+            raise SGLangTimeoutError(f"SGLang request queue wait timeout after {self.queue_timeout_s:.2f}s")
 
         try:
             return self._request_with_retries(method=method, url=url, payload=payload, timeout=timeout)
@@ -193,7 +189,9 @@ class SGLangClient:
                 "supports_logprob": False,
                 "supports_prompt_embeddings": False,
                 "supports_guidance_scale": False,
-                "models": [str(item.get("id")) for item in payload["data"] if isinstance(item, dict) and item.get("id")],
+                "models": [
+                    str(item.get("id")) for item in payload["data"] if isinstance(item, dict) and item.get("id")
+                ],
             }
             # Some servers may expose capability hints per model.
             if payload["data"]:

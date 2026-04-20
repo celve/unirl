@@ -77,13 +77,9 @@ def normalize_prompt_metadata(
             ordered_prompt_ids.append(prompt_id)
         if len(prompt_metadata) == len(ordered_prompt_ids):
             metadata_by_prompt_id = {
-                prompt_id: prompt_metadata[idx]
-                for idx, prompt_id in enumerate(ordered_prompt_ids)
+                prompt_id: prompt_metadata[idx] for idx, prompt_id in enumerate(ordered_prompt_ids)
             }
-            return [
-                metadata_by_prompt_id.get(str(raw_prompt_id).strip())
-                for raw_prompt_id in prompt_ids
-            ]
+            return [metadata_by_prompt_id.get(str(raw_prompt_id).strip()) for raw_prompt_id in prompt_ids]
 
     raise ValueError(
         "Prompt metadata must already be sample-aligned or expand via explicit prompt_ids. "
@@ -111,9 +107,7 @@ def read_rewards(
 ) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
     """Read rewards from sampler output typed fields (written by RewardPipeline.score_and_attach)."""
     if not sampler_outputs:
-        raise RuntimeError(
-            "Reward read requires at least one rollout output with scored rewards."
-        )
+        raise RuntimeError("Reward read requires at least one rollout output with scored rewards.")
 
     all_rewards: List[float] = []
     component_rewards: Dict[str, List[float]] = {}
@@ -121,9 +115,7 @@ def read_rewards(
     for output in sampler_outputs:
         payload = _read_reward_payload(output)
         if payload is None:
-            raise RuntimeError(
-                "Reward read requires scored rewards on all sampler outputs."
-            )
+            raise RuntimeError("Reward read requires scored rewards on all sampler outputs.")
         rewards, components = payload
         if len(rewards) != int(output.latents.shape[0]):
             raise ValueError(
@@ -155,9 +147,7 @@ def _build_request_for_samples(
 ) -> RewardRequest:
     """Assemble a RewardRequest from sample-aligned rollout outputs."""
     if not isinstance(prompts, list) or len(prompts) == 0:
-        raise ValueError(
-            "Reward request assembly requires a non-empty sample-aligned prompts list."
-        )
+        raise ValueError("Reward request assembly requires a non-empty sample-aligned prompts list.")
 
     all_images: List[Any] = []
     all_videos: List[torch.Tensor] = []
@@ -192,9 +182,7 @@ def _build_request_for_samples(
             if group_ids is not None and sample_idx < len(group_ids):
                 all_group_ids.append(str(group_ids[sample_idx]))
             all_metadata.append(
-                normalized_prompt_metadata[sample_idx]
-                if normalized_prompt_metadata is not None
-                else None
+                normalized_prompt_metadata[sample_idx] if normalized_prompt_metadata is not None else None
             )
             sample_idx += 1
 
@@ -206,9 +194,7 @@ def _build_request_for_samples(
             _append_media(extract_images_from_output(output), all_images)
 
     if not all_images and not all_videos:
-        raise RuntimeError(
-            "Reward stage could not assemble any decoded media from sampler outputs."
-        )
+        raise RuntimeError("Reward stage could not assemble any decoded media from sampler outputs.")
 
     request_kwargs: Dict[str, Any] = {
         "prompts": all_prompts,
@@ -245,9 +231,7 @@ class RewardPipeline:
     @property
     def preferred_input_kind(self) -> str:
         """Return the decoded media kind required by the underlying executors."""
-        preferred = str(
-            getattr(self.reward_service, "preferred_input_kind", "") or ""
-        ).strip().lower()
+        preferred = str(getattr(self.reward_service, "preferred_input_kind", "") or "").strip().lower()
         if preferred in {"image", "video"}:
             return preferred
         raise ValueError(
@@ -258,9 +242,7 @@ class RewardPipeline:
     def build_request(self, response: "RolloutResponse") -> RewardRequest:
         """Assemble a RewardRequest from a RolloutResponse."""
         prompts = response.request.prompts
-        samples_per_prompt = max(
-            1, int(response.request.sampling_params.num_samples_per_prompt)
-        )
+        samples_per_prompt = max(1, int(response.request.sampling_params.num_samples_per_prompt))
         return _build_request_for_samples(
             reward_input_kind=self.preferred_input_kind,
             samples_per_prompt=samples_per_prompt,
@@ -284,14 +266,10 @@ class RewardPipeline:
         the sampling engine.
         """
         if _read_reward_payload(response.samples) is not None:
-            raise RuntimeError(
-                "Actor-side reward compute does not accept precomputed rewards on sampler outputs."
-            )
+            raise RuntimeError("Actor-side reward compute does not accept precomputed rewards on sampler outputs.")
         request = self.build_request(response)
         reward_response = self.reward_service.compute_rewards(request)
-        response.samples.rewards = torch.tensor(
-            reward_response.rewards, dtype=torch.float32
-        )
+        response.samples.rewards = torch.tensor(reward_response.rewards, dtype=torch.float32)
         response.samples.component_rewards = {
             str(name): torch.tensor(list(values or []), dtype=torch.float32)
             for name, values in dict(reward_response.component_rewards or {}).items()

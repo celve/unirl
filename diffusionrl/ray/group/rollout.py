@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 import logging
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 
 import ray
@@ -12,9 +12,9 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from diffusionrl.ray.generate_sharding import build_generate_shard_plan
 from diffusionrl.ray.group_base import ActorHandleGroup
+from diffusionrl.transfer.buffer import BufferHandle
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.response import RolloutResponse
-from diffusionrl.transfer.buffer import BufferHandle
 
 logger = logging.getLogger(__name__)
 
@@ -113,10 +113,7 @@ class RolloutActorGroup:
         if num_gpus_per_actor_int > 1:
             # Multi-GPU NOSET / Slime pattern (sglang TP)
             if not bool(rollout_launch.allow_noset_multi_gpu_inference):
-                raise ValueError(
-                    "Multi-GPU rollout actor layout requires "
-                    "--allow-noset-multi-gpu-inference=true."
-                )
+                raise ValueError("Multi-GPU rollout actor layout requires --allow-noset-multi-gpu-inference=true.")
             if available % num_gpus_per_actor_int != 0:
                 raise ValueError(
                     f"Rollout bundle count ({available}) must be divisible by "
@@ -131,8 +128,7 @@ class RolloutActorGroup:
                 }
             }
             logger.info(
-                "Creating %d rollout actors (Slime NOSET pattern, colocate=%s), "
-                "%d GPU(s) per engine, ray_num_gpus=%s",
+                "Creating %d rollout actors (Slime NOSET pattern, colocate=%s), %d GPU(s) per engine, ray_num_gpus=%s",
                 num_actors,
                 colocate,
                 num_gpus_per_actor_int,
@@ -140,9 +136,7 @@ class RolloutActorGroup:
             )
             for rank in range(num_actors):
                 bundle_idx = bundle_indices[rank * num_gpus_per_actor_int]
-                base_gpu_id = (
-                    gpu_ids[rank * num_gpus_per_actor_int] if gpu_ids else 0
-                )
+                base_gpu_id = gpu_ids[rank * num_gpus_per_actor_int] if gpu_ids else 0
                 strategy = PlacementGroupSchedulingStrategy(
                     placement_group=pg,
                     placement_group_bundle_index=bundle_idx,
@@ -233,9 +227,7 @@ class RolloutActorGroup:
 
     def generate_buffered(self, request: RolloutRequest) -> List[BufferHandle]:
         plan = self._build_generate_plan(request)
-        nested = ray.get(
-            self._handle.scatter_gather_async("generate_buffered", plan.shards)
-        )
+        nested = ray.get(self._handle.scatter_gather_async("generate_buffered", plan.shards))
         return [handle for actor_handles in nested for handle in actor_handles]
 
     # ------------------------------------------------------------------

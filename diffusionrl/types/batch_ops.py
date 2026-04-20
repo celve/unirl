@@ -177,10 +177,7 @@ def batch_concat(
         keys = sorted({str(k) for v in non_none for k in v.keys()})
         return {
             key: batch_concat(
-                [
-                    dict(v).get(key) if isinstance(v, Mapping) else None
-                    for v in values
-                ],
+                [dict(v).get(key) if isinstance(v, Mapping) else None for v in values],
                 batch_sizes=batch_sizes,
                 deep_clone=deep_clone,
                 strict=strict,
@@ -188,11 +185,7 @@ def batch_concat(
             for key in keys
         }
 
-    if all(
-        isinstance(v, list) and len(v) == bs
-        for v, bs in zip(values, batch_sizes)
-        if v is not None
-    ):
+    if all(isinstance(v, list) and len(v) == bs for v, bs in zip(values, batch_sizes) if v is not None):
         merged: List[Any] = []
         for v in values:
             if v is not None:
@@ -202,11 +195,7 @@ def batch_concat(
                     merged.extend(list(v))
         return merged
 
-    if all(
-        isinstance(v, tuple) and len(v) == bs
-        for v, bs in zip(values, batch_sizes)
-        if v is not None
-    ):
+    if all(isinstance(v, tuple) and len(v) == bs for v, bs in zip(values, batch_sizes) if v is not None):
         merged_t: List[Any] = []
         for v in values:
             if v is not None:
@@ -263,7 +252,11 @@ def batch_reindex(
     if recursive and isinstance(value, dict):
         return {
             str(k): batch_reindex(
-                v, indices=indices, batch_size=batch_size, recursive=True, deep_clone=deep_clone,
+                v,
+                indices=indices,
+                batch_size=batch_size,
+                recursive=True,
+                deep_clone=deep_clone,
             )
             for k, v in value.items()
         }

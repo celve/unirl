@@ -16,7 +16,6 @@ import warnings
 from dataclasses import MISSING, fields, is_dataclass
 from typing import Any, Dict, List, Optional, get_args, get_origin
 
-
 GROUP_DISPLAY_NAMES: Dict[str, str] = {
     "": "General",
     "model": "Model Configuration",
@@ -63,9 +62,7 @@ def parse_cli_bool(value: Any) -> bool:
         return True
     if text in ("0", "false", "no", "n", "off"):
         return False
-    raise argparse.ArgumentTypeError(
-        f"Invalid boolean value: {value!r}. Use true/false (or 1/0, yes/no)."
-    )
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value!r}. Use true/false (or 1/0, yes/no).")
 
 
 def parse_mapping_object(raw: Any, *, field_name: str) -> Dict[str, Any]:
@@ -83,13 +80,10 @@ def parse_mapping_object(raw: Any, *, field_name: str) -> Dict[str, Any]:
         except Exception as exc:
             raise ValueError(f"Invalid {field_name}: {exc}") from exc
         if not isinstance(parsed, dict):
-            raise ValueError(
-                f"{field_name} must decode to a JSON object, got: {type(parsed).__name__}"
-            )
+            raise ValueError(f"{field_name} must decode to a JSON object, got: {type(parsed).__name__}")
         return dict(parsed)
     raise ValueError(
-        f"{field_name} must be a JSON object (YAML mapping) or JSON object string, "
-        f"got: {type(raw).__name__}"
+        f"{field_name} must be a JSON object (YAML mapping) or JSON object string, got: {type(raw).__name__}"
     )
 
 
@@ -105,9 +99,7 @@ def _parse_float_or_float_pair(value: Any) -> Any:
     """Parse a single float or a ``(float, float)`` range from CLI/YAML."""
     if isinstance(value, (list, tuple)):
         if len(value) != 2:
-            raise argparse.ArgumentTypeError(
-                f"Expected exactly 2 elements for a range, got {len(value)}"
-            )
+            raise argparse.ArgumentTypeError(f"Expected exactly 2 elements for a range, got {len(value)}")
         return (float(value[0]), float(value[1]))
     if isinstance(value, (int, float)):
         return float(value)
@@ -121,33 +113,25 @@ def _parse_float_or_float_pair(value: Any) -> Any:
     else:
         if isinstance(parsed, list):
             if len(parsed) != 2:
-                raise argparse.ArgumentTypeError(
-                    f"Expected exactly 2 elements for a range, got {len(parsed)}"
-                )
+                raise argparse.ArgumentTypeError(f"Expected exactly 2 elements for a range, got {len(parsed)}")
             return (float(parsed[0]), float(parsed[1]))
         if isinstance(parsed, (int, float)):
             return float(parsed)
     try:
         return float(text)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            f"Expected a float or [float, float], got: {value!r}"
-        ) from exc
+        raise argparse.ArgumentTypeError(f"Expected a float or [float, float], got: {value!r}") from exc
 
 
 def parse_cli_key_value(value: Any) -> tuple[str, Any]:
     """Parse ``key=value`` CLI overrides with lightweight scalar coercion."""
     text = str(value).strip()
     if not text or "=" not in text:
-        raise argparse.ArgumentTypeError(
-            f"Expected KEY=VALUE, got: {value!r}."
-        )
+        raise argparse.ArgumentTypeError(f"Expected KEY=VALUE, got: {value!r}.")
     key, raw = text.split("=", 1)
     key = key.strip()
     if not key:
-        raise argparse.ArgumentTypeError(
-            f"Expected KEY=VALUE with a non-empty key, got: {value!r}."
-        )
+        raise argparse.ArgumentTypeError(f"Expected KEY=VALUE with a non-empty key, got: {value!r}.")
     raw = raw.strip()
     if raw == "":
         return key, ""
@@ -185,13 +169,9 @@ def parse_cli_list(value: Any, *, item_type: Any = str) -> List[Any]:
             try:
                 parsed = json.loads(text)
             except Exception as exc:
-                raise argparse.ArgumentTypeError(
-                    f"Expected a list value, got: {value!r}. Error: {exc}"
-                ) from exc
+                raise argparse.ArgumentTypeError(f"Expected a list value, got: {value!r}. Error: {exc}") from exc
             if not isinstance(parsed, list):
-                raise argparse.ArgumentTypeError(
-                    f"Expected a list value, got {type(parsed).__name__}."
-                )
+                raise argparse.ArgumentTypeError(f"Expected a list value, got {type(parsed).__name__}.")
             raw_items = list(parsed)
         else:
             raw_items = [part.strip() for part in text.split(",") if part.strip()]
@@ -199,22 +179,18 @@ def parse_cli_list(value: Any, *, item_type: Any = str) -> List[Any]:
     normalized_item_type = resolve_cli_field_type(item_type)
     parsed_items: List[Any] = []
     for raw in raw_items:
-        if normalized_item_type == bool:
+        if normalized_item_type is bool:
             parsed_items.append(parse_cli_bool(raw))
-        elif normalized_item_type == int:
+        elif normalized_item_type is int:
             try:
                 parsed_items.append(int(raw))
             except Exception as exc:
-                raise argparse.ArgumentTypeError(
-                    f"Expected integer list item, got: {raw!r}"
-                ) from exc
-        elif normalized_item_type == float:
+                raise argparse.ArgumentTypeError(f"Expected integer list item, got: {raw!r}") from exc
+        elif normalized_item_type is float:
             try:
                 parsed_items.append(float(raw))
             except Exception as exc:
-                raise argparse.ArgumentTypeError(
-                    f"Expected float list item, got: {raw!r}"
-                ) from exc
+                raise argparse.ArgumentTypeError(f"Expected float list item, got: {raw!r}") from exc
         else:
             parsed_items.append(str(raw))
     return parsed_items
@@ -302,9 +278,7 @@ def load_yaml_mapping(path: str) -> Dict[str, Any]:
     try:
         import yaml
     except ImportError:
-        raise ImportError(
-            "PyYAML is required for --config support. Install it with: pip install pyyaml"
-        )
+        raise ImportError("PyYAML is required for --config support. Install it with: pip install pyyaml")
     with open(path, "r") as f:
         data = yaml.safe_load(f)
     if data is None:
@@ -401,9 +375,7 @@ def merge_yaml_overrides(
             message = f"Unknown key '{key}' in YAML config (no matching CLI argument)."
             if not allow_unknown_config_keys:
                 raise ValueError(
-                    message
-                    + " Remove/fix the key, or pass --allow-unknown-config-keys "
-                    "to ignore unknown YAML keys."
+                    message + " Remove/fix the key, or pass --allow-unknown-config-keys to ignore unknown YAML keys."
                 )
             warnings.warn(
                 message + " Ignoring because --allow-unknown-config-keys is set.",
@@ -455,19 +427,17 @@ def build_add_argument_kwargs(
     }
     if field_name == "timestep_fraction":
         kwargs["type"] = _parse_float_or_float_pair
-    elif field_type == bool:
+    elif field_type is bool:
         kwargs["type"] = parse_cli_bool
-    elif field_type == int:
+    elif field_type is int:
         kwargs["type"] = int
-    elif field_type == float:
+    elif field_type is float:
         kwargs["type"] = float
     elif field_type is dict or get_origin(field_type) is dict:
         kwargs["type"] = parse_cli_mapping_object
     elif get_origin(field_type) is list:
         item_type = get_args(field_type)[0] if get_args(field_type) else str
-        kwargs["type"] = (
-            lambda value, item_type=item_type: parse_cli_list(value, item_type=item_type)
-        )
+        kwargs["type"] = lambda value, item_type=item_type: parse_cli_list(value, item_type=item_type)
     else:
         kwargs["type"] = str
     if choices:

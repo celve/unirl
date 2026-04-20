@@ -7,12 +7,12 @@ The default data-source contract is prompt-only:
 Runtime prompt embeddings are produced inside rollout engines and training
 pipelines, not provided by the external dataset.
 """
+
 import logging
 import os
 from typing import Any, Dict, Iterator, List, Optional
 
 from torch.utils.data import DataLoader
-
 
 from .datasets import PromptExampleDataset, TextPromptDataset, normalize_prompt_example
 
@@ -82,9 +82,7 @@ class ImageRLDataSource:
         """Resolve which path should back evaluation prompt selection."""
         if self.eval_data_path:
             if not os.path.exists(self.eval_data_path):
-                raise FileNotFoundError(
-                    f"Evaluation data path not found: {self.eval_data_path}"
-                )
+                raise FileNotFoundError(f"Evaluation data path not found: {self.eval_data_path}")
             return self.eval_data_path
         return self.data_path
 
@@ -186,9 +184,7 @@ class ImageRLDataSource:
             Dict containing prompt text plus optional metadata.
         """
         if self._iter is None:
-            raise RuntimeError(
-                "ImageRLDataSource is not initialized. Training prompt DataLoader is unavailable."
-            )
+            raise RuntimeError("ImageRLDataSource is not initialized. Training prompt DataLoader is unavailable.")
 
         try:
             batch = next(self._iter)

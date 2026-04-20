@@ -1,7 +1,7 @@
 """Training-side weight synchronization mixin (weight sender/publisher)."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, List
 
 import ray
 import torch
@@ -113,8 +113,7 @@ class TrainingWeightSyncMixin:
         """Synchronize weights through the configured rollout weight-sync handler."""
         if self._update_weight_handler is None:
             raise RuntimeError(
-                "Weight sync handler not configured. "
-                "Call setup_weight_sync() before sync_weights_to_rollout()."
+                "Weight sync handler not configured. Call setup_weight_sync() before sync_weights_to_rollout()."
             )
 
         if self._use_lora and not self._lora_initialized_on_rollout:
@@ -131,10 +130,7 @@ class TrainingWeightSyncMixin:
                 # collective. Firing all remote calls first and then a
                 # single ray.get() waits for the slowest init, not the
                 # sum — and lets all actors work concurrently.
-                refs = [
-                    actor.set_lora_from_tensors.remote("default", lora_tensors)
-                    for actor in self._rollout_actors
-                ]
+                refs = [actor.set_lora_from_tensors.remote("default", lora_tensors) for actor in self._rollout_actors]
                 ray.get(refs)
             # All training ranks MUST wait for rank 0's set_lora to finish
             # on every rollout actor before any of them calls update_weights.

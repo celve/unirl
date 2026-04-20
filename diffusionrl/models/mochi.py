@@ -8,6 +8,7 @@ Mochi is a video generation model from Genmo with:
 
 Reference: https://github.com/genmoai/mochi
 """
+
 import logging
 from typing import List, Optional, Tuple, Type, Union
 
@@ -45,9 +46,7 @@ class MochiModelBundle(ModelBundle):
         super().__init__(config)
 
         self.vae_ckpt_path = config.vae_ckpt_path or config.pretrained_model_ckpt_path
-        self.text_encoder_ckpt_path = (
-            config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path
-        )
+        self.text_encoder_ckpt_path = config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path
 
         # Text encoder components
         self._t5_encoder = None
@@ -76,6 +75,7 @@ class MochiModelBundle(ModelBundle):
     @classmethod
     def forward_plugin(cls):
         from diffusionrl.models.forward_plugins import MochiForwardPlugin
+
         return MochiForwardPlugin()
 
     @classmethod
@@ -263,6 +263,7 @@ class MochiModelBundle(ModelBundle):
             from diffusers.models.transformers.transformer_mochi import (
                 MochiTransformerBlock,
             )
+
             return (MochiTransformerBlock,)
         except ImportError:
             return ()
@@ -278,6 +279,7 @@ class MochiModelBundle(ModelBundle):
         Mochi uses a slightly different shift value by default.
         """
         from diffusionrl.sde.runtime import get_sigma_schedule
+
         return get_sigma_schedule(num_steps, shift, self.device)
 
 
@@ -326,9 +328,7 @@ class MochiTextEncoderWrapper:
             Tuple of (prompt_embeds, attention_mask)
         """
         if self.encoder is None:
-            raise RuntimeError(
-                "MochiTextEncoderWrapper is not initialized: T5 encoder is unavailable."
-            )
+            raise RuntimeError("MochiTextEncoderWrapper is not initialized: T5 encoder is unavailable.")
 
         with torch.no_grad():
             # Tokenize

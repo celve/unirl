@@ -138,9 +138,7 @@ class BaseAlgorithm(ABC):
     @abstractmethod
     def get_sampling_requirements(
         self,
-    ) -> (
-        SamplingRequirements
-    ):  # [PUBLIC-API → driver rollout runtime] rollout requirements
+    ) -> SamplingRequirements:  # [PUBLIC-API → driver rollout runtime] rollout requirements
         """
         Return the sampling requirements for this algorithm.
 
@@ -169,7 +167,7 @@ class BaseAlgorithm(ABC):
         """
         if self.adv_normalization_scope == "global":
             return self._normalize_global(rewards)
-        else: 
+        else:
             return self._normalize_group(
                 rewards,
                 group_ids=group_ids,
@@ -214,10 +212,7 @@ class BaseAlgorithm(ABC):
             if len(indices) != expected_group_size
         ]
         if invalid_groups:
-            formatted = ", ".join(
-                f"{group_id!r}:{group_size}"
-                for group_id, group_size in invalid_groups[:5]
-            )
+            formatted = ", ".join(f"{group_id!r}:{group_size}" for group_id, group_size in invalid_groups[:5])
             if len(invalid_groups) > 5:
                 formatted = f"{formatted}, ..."
             raise ValueError(
@@ -361,6 +356,7 @@ class BaseAlgorithm(ABC):
                     "inject plugin via model_bundle.forward_plugin()."
                 )
             from diffusionrl.models.forward_plugins import DefaultForwardPlugin
+
             self._forward_plugin = DefaultForwardPlugin()
             logger.warning(
                 "No forward_plugin set on %s (model_type=%s). "
@@ -396,9 +392,7 @@ class BaseAlgorithm(ABC):
             ``(loss, metrics, num_timesteps, has_backward)``
         """
         del model, batch, timesteps, loss_scale, kwargs
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement compute_loss_and_backward()."
-        )
+        raise NotImplementedError(f"{type(self).__name__} must implement compute_loss_and_backward().")
 
     def resolve_training_timesteps(
         self,
@@ -440,7 +434,6 @@ class BaseAlgorithm(ABC):
     def get_sampler_validation_config(
         self, *, allow_replay: bool
     ) -> Dict[str, Any]:  # [PUBLIC-API → driver rollout pipeline] rollout side
-
         """Get sampler-output validation flags for rollout orchestration."""
         ...
 

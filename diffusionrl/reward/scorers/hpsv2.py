@@ -23,12 +23,8 @@ class HPSv2RewardScorer(BaseLocalRewardScorer):
         except ImportError:
             raise ImportError("hpsv2 is required for HPSv2 reward")
 
-        open_clip_path = self.model_kwargs.get(
-            "open_clip_path", "./hps_ckpt/open_clip_pytorch_model.bin"
-        )
-        checkpoint_path = self.model_kwargs.get(
-            "checkpoint_path", "./hps_ckpt/HPS_v2.1_compressed.pt"
-        )
+        open_clip_path = self.model_kwargs.get("open_clip_path", "./hps_ckpt/open_clip_pytorch_model.bin")
+        checkpoint_path = self.model_kwargs.get("checkpoint_path", "./hps_ckpt/HPS_v2.1_compressed.pt")
 
         model, _, preprocess_val = create_model_and_transforms(
             "ViT-H-14",
@@ -74,12 +70,10 @@ class HPSv2RewardScorer(BaseLocalRewardScorer):
                     else:
                         img_pil = Image.fromarray(img).convert("RGB")
 
-                    image_input = self._hpsv2_preprocess_val(img_pil).unsqueeze(0).to(
-                        device=self.device, non_blocking=True
+                    image_input = (
+                        self._hpsv2_preprocess_val(img_pil).unsqueeze(0).to(device=self.device, non_blocking=True)
                     )
-                    text_input = self._hpsv2_tokenizer([prompt]).to(
-                        device=self.device, non_blocking=True
-                    )
+                    text_input = self._hpsv2_tokenizer([prompt]).to(device=self.device, non_blocking=True)
 
                     with torch.no_grad():
                         with torch.amp.autocast("cuda"):

@@ -8,14 +8,12 @@ requirements, advantage processing, and the forward-process loss entrypoint.
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
-
-if TYPE_CHECKING:
-    from diffusionrl.types.request import RolloutRequest
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
 from diffusers.utils.torch_utils import randn_tensor
+
 from diffusionrl.algorithms.base import (
     BaseAlgorithm,
     BaseAlgorithmConfig,
@@ -94,9 +92,7 @@ class NFTAlgorithm(BaseAlgorithm):
         **kwargs,
     ):
         if not isinstance(config, NFTAlgorithmConfig):
-            raise TypeError(
-                f"{type(self).__name__} expects NFTAlgorithmConfig, got {type(config).__name__}."
-            )
+            raise TypeError(f"{type(self).__name__} expects NFTAlgorithmConfig, got {type(config).__name__}.")
         super().__init__(
             kl_coef=config.kl_coef,
             component_mix_stage=config.component_mix_stage,
@@ -125,9 +121,7 @@ class NFTAlgorithm(BaseAlgorithm):
         self.ema_flat_steps = int(config.ema_flat_steps)
         self.ema_uprate = float(config.ema_uprate)
         self.ema_uphold = float(config.ema_uphold)
-        self.reference_update_timing = (
-            str(config.reference_update_timing).strip().lower()
-        )
+        self.reference_update_timing = str(config.reference_update_timing).strip().lower()
         self.old_adapter_name = config.old_adapter_name
         self.new_adapter_name = config.new_adapter_name
         self.train_timestep_mode = str(config.train_timestep_mode)
@@ -214,15 +208,11 @@ class NFTAlgorithm(BaseAlgorithm):
         **kwargs: Any,
     ) -> Any:
         if not isinstance(batch, _TrainingBatch):
-            raise TypeError(
-                f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
-            )
+            raise TypeError(f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}")
         del current_step
 
         timestep_mode = kwargs.get("timestep_mode", self.train_timestep_mode)
-        shuffle_timesteps = kwargs.get(
-            "shuffle_timesteps", self.shuffle_train_timesteps
-        )
+        shuffle_timesteps = kwargs.get("shuffle_timesteps", self.shuffle_train_timesteps)
         timestep_fraction = kwargs.get(
             "timestep_fraction",
             self.training_timestep_fraction,
@@ -243,11 +233,7 @@ class NFTAlgorithm(BaseAlgorithm):
         ):
             timesteps = timesteps[:-1]
 
-        if (
-            timesteps.numel() > 0
-            and timestep_fraction is not None
-            and timestep_fraction != 1.0
-        ):
+        if timesteps.numel() > 0 and timestep_fraction is not None and timestep_fraction != 1.0:
             from diffusionrl.utils.scheduler_utils import normalize_timestep_fraction
 
             frac_start, frac_end = normalize_timestep_fraction(timestep_fraction)
@@ -327,9 +313,7 @@ class NFTAlgorithm(BaseAlgorithm):
         Flow matching forward process: xt = (1-t)*x0 + t*noise
         """
         if noise is None:
-            noise = randn_tensor(
-                x0.shape, generator=generator, device=x0.device, dtype=x0.dtype
-            )
+            noise = randn_tensor(x0.shape, generator=generator, device=x0.device, dtype=x0.dtype)
 
         t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
         xt = (1 - t_expanded) * x0 + t_expanded * noise
@@ -361,17 +345,13 @@ class NFTAlgorithm(BaseAlgorithm):
         plugin = self._get_forward_plugin(model)
         ctx_kwargs = ctx.to_dict()
         if old_model is not None:
-            return plugin.forward(
-                model=old_model, latents=latents, sigma=sigma, **ctx_kwargs
-            )
+            return plugin.forward(model=old_model, latents=latents, sigma=sigma, **ctx_kwargs)
 
         adapter_model = model.module if hasattr(model, "module") else model
         if hasattr(adapter_model, "set_adapter"):
             try:
                 with switch_adapter(adapter_model, self.old_adapter_name):
-                    return plugin.forward(
-                        model=model, latents=latents, sigma=sigma, **ctx_kwargs
-                    )
+                    return plugin.forward(model=model, latents=latents, sigma=sigma, **ctx_kwargs)
             except Exception as exc:
                 raise RuntimeError(
                     "NFT old-policy prediction failed while switching adapters. "
@@ -403,9 +383,7 @@ class NFTAlgorithm(BaseAlgorithm):
         if hasattr(adapter_model, "disable_adapter"):
             try:
                 with adapter_model.disable_adapter():
-                    return plugin.forward(
-                        model=model, latents=latents, sigma=sigma, **ctx_kwargs
-                    )
+                    return plugin.forward(model=model, latents=latents, sigma=sigma, **ctx_kwargs)
             except Exception as exc:
                 raise RuntimeError(
                     "NFT reference prediction failed while disabling adapters. "
@@ -413,9 +391,7 @@ class NFTAlgorithm(BaseAlgorithm):
                     "the KL term toward zero."
                 ) from exc
         if ref_model is not None:
-            return plugin.forward(
-                model=ref_model, latents=latents, sigma=sigma, **ctx_kwargs
-            )
+            return plugin.forward(model=ref_model, latents=latents, sigma=sigma, **ctx_kwargs)
         raise RuntimeError(
             "NFT reference prediction requires either disable_adapter() support "
             "or an explicit ref_model. No valid base-model reference path was available."
@@ -442,9 +418,7 @@ class NFTAlgorithm(BaseAlgorithm):
         from diffusionrl.types.training_batch import TrainingBatch
 
         if not isinstance(batch, TrainingBatch):
-            raise TypeError(
-                f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
-            )
+            raise TypeError(f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}")
 
         if timesteps is None:
             timesteps = self.resolve_training_timesteps(
@@ -518,12 +492,14 @@ class NFTAlgorithm(BaseAlgorithm):
         grad_context = torch.enable_grad() if not torch.is_grad_enabled() else nullcontext()
 
         with grad_context:
-            forward_prediction = plugin.forward(
-                model=model, latents=xt, sigma=t, **ctx_kwargs
-            )
+            forward_prediction = plugin.forward(model=model, latents=xt, sigma=t, **ctx_kwargs)
 
         old_prediction = self.get_old_prediction(
-            model, ctx, latents=xt, sigma=t, old_model=old_model,
+            model,
+            ctx,
+            latents=xt,
+            sigma=t,
+            old_model=old_model,
         )
 
         if hasattr(adapter_model, "set_adapter"):
@@ -534,12 +510,8 @@ class NFTAlgorithm(BaseAlgorithm):
         r = (adv_clipped / self.adv_clip_max) / 2.0 + 0.5
         r = torch.clamp(r, 0, 1)
 
-        positive_prediction = (
-            self.beta * forward_prediction + (1 - self.beta) * old_prediction.detach()
-        )
-        negative_prediction = (
-            (1 + self.beta) * old_prediction.detach() - self.beta * forward_prediction
-        )
+        positive_prediction = self.beta * forward_prediction + (1 - self.beta) * old_prediction.detach()
+        negative_prediction = (1 + self.beta) * old_prediction.detach() - self.beta * forward_prediction
 
         x0_positive = xt - t_expanded * positive_prediction
         x0_negative = xt - t_expanded * negative_prediction
@@ -556,30 +528,21 @@ class NFTAlgorithm(BaseAlgorithm):
                     .mean(dim=tuple(range(1, x0.ndim)), keepdim=True)
                     .clip(min=1e-5)
                 )
-            positive_loss = ((x0_positive - x0) ** 2 / weight_positive).mean(
-                dim=tuple(range(1, x0.ndim))
-            )
-            negative_loss = ((x0_negative - x0) ** 2 / weight_negative).mean(
-                dim=tuple(range(1, x0.ndim))
-            )
+            positive_loss = ((x0_positive - x0) ** 2 / weight_positive).mean(dim=tuple(range(1, x0.ndim)))
+            negative_loss = ((x0_negative - x0) ** 2 / weight_negative).mean(dim=tuple(range(1, x0.ndim)))
         else:
             positive_loss = ((x0_positive - x0) ** 2).mean(dim=tuple(range(1, x0.ndim)))
             negative_loss = ((x0_negative - x0) ** 2).mean(dim=tuple(range(1, x0.ndim)))
 
         r_expanded = r.view(-1, *([1] * (positive_loss.ndim - 1)))
-        policy_loss = (
-            r_expanded * positive_loss / self.beta
-            + (1 - r_expanded) * negative_loss / self.beta
-        ).mean()
+        policy_loss = (r_expanded * positive_loss / self.beta + (1 - r_expanded) * negative_loss / self.beta).mean()
 
         loss_terms = {
             "policy_loss": policy_loss.detach(),
             "positive_loss": positive_loss.mean().detach(),
             "negative_loss": negative_loss.mean().detach(),
             "x0_norm": torch.mean(x0**2).detach(),
-            "prediction_deviation": torch.mean(
-                (forward_prediction - old_prediction) ** 2
-            ).detach(),
+            "prediction_deviation": torch.mean((forward_prediction - old_prediction) ** 2).detach(),
             "advantage_mean": advantages.mean().detach(),
             "advantage_std": advantages.std().detach(),
             "r_mean": r.mean().detach(),
@@ -589,11 +552,13 @@ class NFTAlgorithm(BaseAlgorithm):
 
         if self.kl_coef > 0:
             ref_prediction = self.get_ref_prediction(
-                model, ctx, latents=xt, sigma=t, ref_model=ref_model,
+                model,
+                ctx,
+                latents=xt,
+                sigma=t,
+                ref_model=ref_model,
             )
-            kl_div = ((forward_prediction - ref_prediction) ** 2).mean(
-                dim=tuple(range(1, x0.ndim))
-            )
+            kl_div = ((forward_prediction - ref_prediction) ** 2).mean(dim=tuple(range(1, x0.ndim)))
             kl_div = torch.mean(kl_div)
             total_loss = total_loss + self.kl_coef * kl_div
             loss_terms["kl_div"] = kl_div.detach()
@@ -629,25 +594,27 @@ class NFTAlgorithm(BaseAlgorithm):
     def get_config(self) -> Dict[str, Any]:
         """Get algorithm configuration as dictionary."""
         config = super().get_config()
-        config.update({
-            "name": self.name,
-            "beta": self.beta,
-            "adv_clip_max": self.adv_clip_max,
-            "adv_mode": self.adv_mode,
-            "use_adaptive_weight": self.use_adaptive_weight,
-            "sde_config": {"eta": self._eta, "sde_type": self._sde_type, "shift": self._shift},
-            "time_shift": self.time_shift,
-            "ema_decay": self.ema_decay,
-            "ema_decay_type": self.ema_decay_type,
-            "ema_flat_steps": self.ema_flat_steps,
-            "ema_uprate": self.ema_uprate,
-            "ema_uphold": self.ema_uphold,
-            "reference_update_timing": self.reference_update_timing,
-            "use_reference_ema": self.use_reference_ema,
-            "old_adapter_name": self.old_adapter_name,
-            "new_adapter_name": self.new_adapter_name,
-            "train_timestep_mode": self.train_timestep_mode,
-            "shuffle_train_timesteps": self.shuffle_train_timesteps,
-            "apply_time_shift_in_loss": self.apply_time_shift_in_loss,
-        })
+        config.update(
+            {
+                "name": self.name,
+                "beta": self.beta,
+                "adv_clip_max": self.adv_clip_max,
+                "adv_mode": self.adv_mode,
+                "use_adaptive_weight": self.use_adaptive_weight,
+                "sde_config": {"eta": self._eta, "sde_type": self._sde_type, "shift": self._shift},
+                "time_shift": self.time_shift,
+                "ema_decay": self.ema_decay,
+                "ema_decay_type": self.ema_decay_type,
+                "ema_flat_steps": self.ema_flat_steps,
+                "ema_uprate": self.ema_uprate,
+                "ema_uphold": self.ema_uphold,
+                "reference_update_timing": self.reference_update_timing,
+                "use_reference_ema": self.use_reference_ema,
+                "old_adapter_name": self.old_adapter_name,
+                "new_adapter_name": self.new_adapter_name,
+                "train_timestep_mode": self.train_timestep_mode,
+                "shuffle_train_timesteps": self.shuffle_train_timesteps,
+                "apply_time_shift_in_loss": self.apply_time_shift_in_loss,
+            }
+        )
         return config

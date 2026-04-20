@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 import time
+from abc import ABC, abstractmethod
 from typing import Any, Callable, List, Optional, Tuple
 
 from diffusionrl.types.reward import RewardRequest, RewardResponse, RewardType
@@ -121,6 +121,7 @@ class BaseRewardExecutor(_BaseRewardNode):
     @abstractmethod
     def is_available(self) -> bool:
         """Check if the executor backend is available."""
+
 
 __all__ = [
     "BaseRewardScorer",

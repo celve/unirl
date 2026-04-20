@@ -17,7 +17,6 @@ from torch.distributed.distributed_c10d import (
     rendezvous,
 )
 
-
 GLOO_GROUP = None
 
 
@@ -105,7 +104,7 @@ def distributed_masked_whiten(
 ):
     """Whiten tensors using global statistics across the process group."""
     local_sum = (values * mask).sum()
-    local_sum_sq = ((values ** 2) * mask).sum()
+    local_sum_sq = ((values**2) * mask).sum()
     local_mask_sum = mask.sum()
 
     stats_tensor = torch.tensor(
@@ -121,7 +120,7 @@ def distributed_masked_whiten(
 
     global_mean = global_sum / global_mask_sum
     global_mean_sq = global_sum_sq / global_mask_sum
-    global_var = global_mean_sq - global_mean ** 2
+    global_var = global_mean_sq - global_mean**2
 
     if global_mask_sum.item() >= 2:
         bessel_correction = global_mask_sum / (global_mask_sum - 1)

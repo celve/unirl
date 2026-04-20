@@ -132,10 +132,7 @@ class RewardRangeFilterPlugin(BufferPlugin):
 
         if not keep_indices:
             self.rejected_batches += 1
-            raise ValueError(
-                "All samples filtered by reward range "
-                f"[min={self.min_reward}, max={self.max_reward}]"
-            )
+            raise ValueError(f"All samples filtered by reward range [min={self.min_reward}, max={self.max_reward}]")
 
         return index_training_batch(batch, keep_indices)
 
@@ -162,9 +159,7 @@ class MinSamplesGuardPlugin(BufferPlugin):
         del context
         if int(batch.batch_size) < self.min_samples:
             self.rejected_batches += 1
-            raise ValueError(
-                f"Batch size {batch.batch_size} below rollout_buffer_min_samples={self.min_samples}"
-            )
+            raise ValueError(f"Batch size {batch.batch_size} below rollout_buffer_min_samples={self.min_samples}")
         return batch
 
     def stats(self) -> Dict[str, Any]:
@@ -186,20 +181,13 @@ def normalize_plugin_dotpaths(raw: Any) -> List[str]:
         return parse_cli_list(raw, item_type=str)
     if isinstance(raw, (list, tuple)):
         return [str(x).strip() for x in raw if str(x).strip()]
-    raise TypeError(
-        "rollout.plugin_dotpaths must be a list of strings or a single "
-        f"string; got {type(raw).__name__}"
-    )
+    raise TypeError(f"rollout.plugin_dotpaths must be a list of strings or a single string; got {type(raw).__name__}")
 
 
 def build_buffer_plugins(args: Any) -> List[BufferPlugin]:
     """Build built-in and custom rollout-buffer plugins from args."""
     rollout_buffer = args.rollout
-    plugins: List[BufferPlugin] = [
-        FiniteTensorFilterPlugin(
-            drop_invalid=bool(rollout_buffer.drop_invalid)
-        )
-    ]
+    plugins: List[BufferPlugin] = [FiniteTensorFilterPlugin(drop_invalid=bool(rollout_buffer.drop_invalid))]
 
     min_reward = rollout_buffer.reward_min
     max_reward = rollout_buffer.reward_max
@@ -211,11 +199,7 @@ def build_buffer_plugins(args: Any) -> List[BufferPlugin]:
             )
         )
 
-    plugins.append(
-        MinSamplesGuardPlugin(
-            min_samples=int(rollout_buffer.min_samples)
-        )
-    )
+    plugins.append(MinSamplesGuardPlugin(min_samples=int(rollout_buffer.min_samples)))
 
     for path in normalize_plugin_dotpaths(rollout_buffer.plugin_dotpaths):
         target = load_function(path)

@@ -155,11 +155,11 @@ def test_fsdp_backend_filter_lora_state_keeps_only_lora_entries():
 
 
 def test_fsdp_backend_extract_peft_lora_state_without_peft_returns_empty(monkeypatch):
-    from diffusionrl.training.backends.fsdp import FSDPBackend
-
     # Block `from peft.utils import ...` from resolving so the helper hits
     # its except-branch and returns {} gracefully.
     import sys
+
+    from diffusionrl.training.backends.fsdp import FSDPBackend
 
     monkeypatch.setitem(sys.modules, "peft.utils", None)
 
@@ -169,8 +169,9 @@ def test_fsdp_backend_extract_peft_lora_state_without_peft_returns_empty(monkeyp
 
 
 def test_fsdp_backend_build_state_dict_options_retries_on_unknown_kwargs(monkeypatch):
-    from diffusionrl.training.backends.fsdp import FSDPBackend
     import torch.distributed.checkpoint.state_dict as sd_mod
+
+    from diffusionrl.training.backends.fsdp import FSDPBackend
 
     observed: list[dict] = []
 
@@ -202,8 +203,9 @@ def test_fsdp_backend_build_state_dict_options_retries_on_unknown_kwargs(monkeyp
 
 
 def test_fsdp_backend_build_state_dict_options_falls_through_to_empty(monkeypatch):
-    from diffusionrl.training.backends.fsdp import FSDPBackend
     import torch.distributed.checkpoint.state_dict as sd_mod
+
+    from diffusionrl.training.backends.fsdp import FSDPBackend
 
     class AlwaysRejects:
         def __init__(self, **kwargs):

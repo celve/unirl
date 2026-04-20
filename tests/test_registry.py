@@ -2,9 +2,9 @@ import pytest
 
 from diffusionrl.algorithms.grpo import GRPOAlgorithm
 from diffusionrl.algorithms.registry import (
-    ensure_builtin_algorithm_registration,
     derive_algorithm_class,
     derive_algorithm_dotpath,
+    ensure_builtin_algorithm_registration,
 )
 from diffusionrl.registry import (
     COMPONENT_REGISTRY,
@@ -108,9 +108,7 @@ def test_derive_registry_or_dotpath_error_lists_available_names(isolated_test_fa
         class_checker=require_subclass(_TestBase),
     )(_OtherComponent)
 
-    with pytest.raises(
-        ValueError, match="Available registered names: \\['demo', 'other'\\]"
-    ):
+    with pytest.raises(ValueError, match="Available registered names: \\['demo', 'other'\\]"):
         derive_registry_or_dotpath(
             component_family=isolated_test_family,
             identifier="missing_component",

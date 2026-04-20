@@ -113,10 +113,7 @@ def discover_model_bundle_paths() -> Dict[str, str]:
                 duplicates.setdefault(model_type, [existing]).append(dotpath)
 
     if duplicates:
-        pieces = [
-            f"{model_type}: {sorted(set(paths))}"
-            for model_type, paths in sorted(duplicates.items())
-        ]
+        pieces = [f"{model_type}: {sorted(set(paths))}" for model_type, paths in sorted(duplicates.items())]
         raise ValueError("Duplicate model_type declarations detected: " + "; ".join(pieces))
 
     return discovered

@@ -12,11 +12,12 @@ Or standalone: python tests/test_rollout_actor_e2e.py
 from __future__ import annotations
 
 import torch
+
 from diffusionrl.types.prompts import Prompts
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.response import RolloutResponse
-from diffusionrl.types.sample import RolloutSamples, LogProbData
-from diffusionrl.types.sampling import SamplingParams, SDEConfig
+from diffusionrl.types.sample import LogProbData, RolloutSamples
+from diffusionrl.types.sampling import SamplingParams
 from diffusionrl.types.trajectory_store import Trajectory, TrajectoryBuilder
 from diffusionrl.utils.batched import Batched
 

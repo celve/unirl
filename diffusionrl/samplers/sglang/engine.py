@@ -15,10 +15,10 @@ import torch
 from diffusionrl.samplers.registry import register_rollout_engine
 from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.sde.runtime import get_sigma_schedule
-from diffusionrl.types.request import RolloutRequest
-from diffusionrl.types.sample import LogProbData, RolloutSamples
 from diffusionrl.types.engine import EngineConfig
 from diffusionrl.types.forward_context import ForwardContext, get_forward_context_cls
+from diffusionrl.types.request import RolloutRequest
+from diffusionrl.types.sample import LogProbData, RolloutSamples
 from diffusionrl.types.trajectory_store import (
     Trajectory,
     compute_trajectory_positions,
@@ -252,9 +252,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
 
         method = getattr(self._generator, method_name, None)
         if not callable(method):
-            raise RuntimeError(
-                f"SGLang generator missing required memory API: {method_name}."
-            )
+            raise RuntimeError(f"SGLang generator missing required memory API: {method_name}.")
 
         kwargs: Dict[str, Any] = {"tags": list(tags)}
         if cpu_backup_tags is not None:
@@ -266,9 +264,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 raise
             response = method(tags=list(tags))
         if isinstance(response, dict) and not bool(response.get("success", True)):
-            raise RuntimeError(
-                str(response.get("message", f"{method_name} failed"))
-            )
+            raise RuntimeError(str(response.get("message", f"{method_name} failed")))
         return response
 
     def _logprob_source(self) -> str:
@@ -289,9 +285,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
 
         model_path = self.config.pretrained_model_ckpt_path or self.config.model_dotpath
         if not model_path:
-            raise ValueError(
-                "SGLang engine requires pretrained_model_ckpt_path or model_dotpath"
-            )
+            raise ValueError("SGLang engine requires pretrained_model_ckpt_path or model_dotpath")
 
         return self.config.build_server_kwargs(server_args_cls)
 
@@ -448,9 +442,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                     idx = max(0, min(idx, traj.shape[0] - 1))
                     traj = traj[idx : idx + 1]
             else:
-                raise RuntimeError(
-                    f"Unexpected FLUX trajectory shape from SGLang: {tuple(traj.shape)}"
-                )
+                raise RuntimeError(f"Unexpected FLUX trajectory shape from SGLang: {tuple(traj.shape)}")
             return traj.detach().cpu()
 
         if traj.dim() == 4:
@@ -463,9 +455,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 idx = max(0, min(idx, traj.shape[0] - 1))
                 traj = traj[idx : idx + 1]
         else:
-            raise RuntimeError(
-                f"Unexpected trajectory shape from SGLang: {tuple(traj.shape)}"
-            )
+            raise RuntimeError(f"Unexpected trajectory shape from SGLang: {tuple(traj.shape)}")
 
         return traj.detach().cpu()
 
@@ -533,15 +523,12 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         if self._fallback_vae is not None and self._fallback_vae_model_type == model_type:
             return
         if model_type not in {"sd3", "flux"}:
-            raise RuntimeError(
-                f"SGLang latent fallback currently supports sd3/flux, got model_type={model_type}."
-            )
+            raise RuntimeError(f"SGLang latent fallback currently supports sd3/flux, got model_type={model_type}.")
 
         model_path = self.config.pretrained_model_ckpt_path or self.config.model_dotpath
         if not model_path:
             raise RuntimeError(
-                "Missing pretrained_model_ckpt_path or model_dotpath while initializing "
-                "latent fallback VAE."
+                "Missing pretrained_model_ckpt_path or model_dotpath while initializing latent fallback VAE."
             )
 
         from diffusers import AutoencoderKL
@@ -667,8 +654,8 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         # Possible formats:
         # - [C,H,W] image
         # - [C,T,H,W] video
-            # - [T,H,W,C] video
-            # - [H,W,C] image
+        # - [T,H,W,C] video
+        # - [H,W,C] image
         if sample_tensor.dim() == 3:
             if sample_tensor.shape[0] in (1, 3, 4):
                 return tensor_frame_to_pil(sample_tensor[:3]), None
@@ -731,17 +718,13 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         if name == "text_ids" and value.dim() == 2:
             return value.unsqueeze(0).expand(batch_size, -1, -1).detach().cpu()
         if value.shape[0] != batch_size:
-            raise ValueError(
-                f"{name} batch size mismatch: tensor batch={value.shape[0]}, expected={batch_size}"
-            )
+            raise ValueError(f"{name} batch size mismatch: tensor batch={value.shape[0]}, expected={batch_size}")
         return value.detach().cpu()
 
     @staticmethod
     def _build_flux_text_ids(prompt_embeds: torch.Tensor) -> torch.Tensor:
         if prompt_embeds.dim() < 3:
-            raise ValueError(
-                f"FLUX prompt_embeds must be [B, seq, hidden], got shape={tuple(prompt_embeds.shape)}"
-            )
+            raise ValueError(f"FLUX prompt_embeds must be [B, seq, hidden], got shape={tuple(prompt_embeds.shape)}")
         batch_size = int(prompt_embeds.shape[0])
         seq_len = int(prompt_embeds.shape[1])
         return torch.zeros(
@@ -829,21 +812,15 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 return None
             prompt_embeds_list.append(prompt_embeds.detach().cpu())
 
-            pooled_prompt_embeds = self._unwrap_embed_field(
-                getattr(result, "pooled_prompt_embeds", None)
-            )
+            pooled_prompt_embeds = self._unwrap_embed_field(getattr(result, "pooled_prompt_embeds", None))
             if pooled_prompt_embeds is not None:
                 pooled_list.append(pooled_prompt_embeds.detach().cpu())
 
-            encoder_attention_mask = self._unwrap_embed_field(
-                getattr(result, "encoder_attention_mask", None)
-            )
+            encoder_attention_mask = self._unwrap_embed_field(getattr(result, "encoder_attention_mask", None))
             if encoder_attention_mask is not None:
                 mask_list.append(encoder_attention_mask.detach().cpu())
 
-            negative_prompt_embeds = self._unwrap_embed_field(
-                getattr(result, "negative_prompt_embeds", None)
-            )
+            negative_prompt_embeds = self._unwrap_embed_field(getattr(result, "negative_prompt_embeds", None))
             if negative_prompt_embeds is not None:
                 negative_prompt_list.append(negative_prompt_embeds.detach().cpu())
 
@@ -862,9 +839,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             return None
 
         raw_tensors: Dict[str, Any] = {
-            "prompt_embeds": self._align_embedding_tensor(
-                "prompt_embeds", prompt_embeds, batch_size
-            ),
+            "prompt_embeds": self._align_embedding_tensor("prompt_embeds", prompt_embeds, batch_size),
             "pooled_prompt_embeds": self._align_embedding_tensor(
                 "pooled_prompt_embeds",
                 torch.cat(pooled_list, dim=0) if pooled_list else None,
@@ -877,20 +852,12 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             ),
             "negative_prompt_embeds": self._align_embedding_tensor(
                 "negative_prompt_embeds",
-                (
-                    torch.cat(negative_prompt_list, dim=0)
-                    if negative_prompt_list
-                    else None
-                ),
+                (torch.cat(negative_prompt_list, dim=0) if negative_prompt_list else None),
                 batch_size,
             ),
             "negative_pooled_prompt_embeds": self._align_embedding_tensor(
                 "negative_pooled_prompt_embeds",
-                (
-                    torch.cat(negative_pooled_list, dim=0)
-                    if negative_pooled_list
-                    else None
-                ),
+                (torch.cat(negative_pooled_list, dim=0) if negative_pooled_list else None),
                 batch_size,
             ),
             "guidance_scale": guidance_scale,
@@ -914,9 +881,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 dtype=prompt_embeds.dtype,
             )
 
-        filtered = {
-            k: v for k, v in raw_tensors.items() if k in valid_fields and v is not None
-        }
+        filtered = {k: v for k, v in raw_tensors.items() if k in valid_fields and v is not None}
         return ctx_cls(**filtered)
 
     # ---------------------------------------------------------------------
@@ -935,9 +900,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
 
         return self._parse_generate_results(results, ctx, request)
 
-    def _build_generate_kwargs(
-        self, request: RolloutRequest
-    ) -> Tuple[Dict[str, Any], _GenerateContext]:
+    def _build_generate_kwargs(self, request: RolloutRequest) -> Tuple[Dict[str, Any], _GenerateContext]:
         """Build SGLang generator kwargs and derive context for result parsing."""
         sp = request.sampling_params
         prompts = request.prompts.prompts
@@ -947,9 +910,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         out_w = int(sp.width)
         out_f = int(sp.num_frames)
         seed = int(sp.seed) if sp.seed is not None else None
-        sde_indices = (
-            None if sp.sde_indices is None else {int(v) for v in sp.sde_indices}
-        )
+        sde_indices = None if sp.sde_indices is None else {int(v) for v in sp.sde_indices}
         kwargs = dict(sp.sampler_kwargs or {})
 
         if not prompts:
@@ -964,9 +925,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         fps = kwargs.pop("fps", None)
         num_outputs_per_prompt = kwargs.pop("num_outputs_per_prompt", None)
         init_same_noise = bool(sp.init_same_noise)
-        samples_per_prompt = int(
-            kwargs.pop("num_samples_per_prompt", sp.num_samples_per_prompt)
-        )
+        samples_per_prompt = int(kwargs.pop("num_samples_per_prompt", sp.num_samples_per_prompt))
         default_rollout_enabled = bool(
             require_log_probs and sde_indices is not None and self._native_rollout_logprob_enabled()
         )
@@ -980,11 +939,11 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 )
                 self._warned_disabled_native_rollout = True
             rollout_enabled = False
-        requested_rollout_sde = str(
-            normalize_sde_type(
-                kwargs.pop("rollout_sde_type", getattr(self.config, "sde_type", "flow"))
-            )
-        ).strip().lower()
+        requested_rollout_sde = (
+            str(normalize_sde_type(kwargs.pop("rollout_sde_type", getattr(self.config, "sde_type", "flow"))))
+            .strip()
+            .lower()
+        )
         # Internal config only uses canonical flow/cps/dance/dpm2 names.
         # The native SGLang backend still expects "sde" as the flow-kernel label,
         # so translate only at this external boundary.
@@ -1041,9 +1000,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             sampling_params_kwargs["rollout_sde_type"] = rollout_sde_type
             sampling_params_kwargs["rollout_noise_level"] = rollout_noise_level
             if sde_indices is not None:
-                sampling_params_kwargs["rollout_sde_indices"] = sorted(
-                    int(i) for i in sde_indices
-                )
+                sampling_params_kwargs["rollout_sde_indices"] = sorted(int(i) for i in sde_indices)
 
         unique_prompts, validated_k = _deexpand_prompts(list(prompts), samples_per_prompt)
         if num_outputs_per_prompt is not None:
@@ -1053,8 +1010,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
 
         if validated_k > 1:
             logger.info(
-                "SGLang batched generation: %d expanded prompts -> %d unique prompts x K=%d "
-                "(init_same_noise=%s)",
+                "SGLang batched generation: %d expanded prompts -> %d unique prompts x K=%d (init_same_noise=%s)",
                 len(prompts),
                 len(unique_prompts),
                 validated_k,
@@ -1062,9 +1018,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             )
 
         request_kwargs = dict(sampling_params_kwargs)
-        request_kwargs["prompt"] = (
-            unique_prompts if len(unique_prompts) > 1 else unique_prompts[0]
-        )
+        request_kwargs["prompt"] = unique_prompts if len(unique_prompts) > 1 else unique_prompts[0]
         if validated_k > 1:
             request_kwargs["num_outputs_per_prompt"] = validated_k
             request_kwargs["init_same_noise"] = init_same_noise
@@ -1092,8 +1046,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
     ) -> RolloutSamples:
         """Parse raw SGLang results into RolloutSamples."""
         trajectory_items: List[Optional[torch.Tensor]] = [
-            self._extract_trajectory_from_result(result, required=ctx.require_trajectory)
-            for result in results
+            self._extract_trajectory_from_result(result, required=ctx.require_trajectory) for result in results
         ]
         missing_trajectory = sum(item is None for item in trajectory_items)
         use_trajectory = missing_trajectory == 0 and len(trajectory_items) > 0
@@ -1135,19 +1088,13 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 # want the same column indices relative to the tensor.
                 col_offset = 0 if has_initial_noise else 1
                 needed_original = set(compute_trajectory_positions(ctx.sde_indices, ctx.steps))
-                keep_cols = sorted(
-                    p - col_offset
-                    for p in needed_original
-                    if 0 <= p - col_offset < traj_len
-                )
+                keep_cols = sorted(p - col_offset for p in needed_original if 0 <= p - col_offset < traj_len)
                 if keep_cols and len(keep_cols) < traj_len:
                     trimmed_cols = keep_cols
 
             if trimmed_cols is not None:
                 trimmed = trajectories_tensor[:, trimmed_cols]
-                trajectory_store = Trajectory.from_selective(
-                    trimmed, trimmed_cols, traj_len
-                )
+                trajectory_store = Trajectory.from_selective(trimmed, trimmed_cols, traj_len)
             else:
                 trajectory_store = Trajectory.from_full(trajectories_tensor)
             del trajectories_tensor  # Free raw tensor; trajectory_store owns the data now
@@ -1184,10 +1131,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                     )
                     self._warned_trimmed_logprob_prefix = True
             if int(log_prob_tensor.shape[1]) == expected_steps:
-                lp_dict = {
-                    int(step_indices[i].item()): log_prob_tensor[:, i]
-                    for i in range(expected_steps)
-                }
+                lp_dict = {int(step_indices[i].item()): log_prob_tensor[:, i] for i in range(expected_steps)}
                 merged_log_probs = LogProbData.from_dict(lp_dict)
                 if not getattr(self, "_logged_logprob_attach", False):
                     logger.info(
@@ -1207,9 +1151,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 self._warned_logprob_shape = True
 
         rollout_noise_preds_tensor: Optional[torch.Tensor] = None
-        per_result_noise_preds = [
-            getattr(result, "trajectory_noise_preds", None) for result in results
-        ]
+        per_result_noise_preds = [getattr(result, "trajectory_noise_preds", None) for result in results]
         if any(item is not None for item in per_result_noise_preds):
             valid_noise_preds = [item for item in per_result_noise_preds if item is not None]
             if valid_noise_preds:
@@ -1236,11 +1178,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                     decoded_video_tensors.append(video_tensor)
             if not decoded_images:
                 decoded_images = None
-            if (
-                decoded_images is None
-                and not decoded_video_tensors
-                and not self._warned_missing_decoded
-            ):
+            if decoded_images is None and not decoded_video_tensors and not self._warned_missing_decoded:
                 logger.warning(
                     "SGLang generate(return_decoded_for_reward=True) returned no decodable media. "
                     "Reward stage will fail without decoded media."
@@ -1256,15 +1194,9 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 trajectory_format = "dense_latent"
         else:
             if trajectory_store is not None:
-                trajectory_format = (
-                    "video_dense_latent"
-                    if trajectory_store.data.dim() == 6
-                    else "dense_latent"
-                )
+                trajectory_format = "video_dense_latent" if trajectory_store.data.dim() == 6 else "dense_latent"
             else:
-                trajectory_format = (
-                    "video_dense_latent" if final_latents.dim() == 5 else "dense_latent"
-                )
+                trajectory_format = "video_dense_latent" if final_latents.dim() == 5 else "dense_latent"
 
         metadata: Dict[str, Any] = {
             "generator_type": "sglang",
@@ -1322,9 +1254,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         if isinstance(output, dict) and "error" in output:
             raise RuntimeError(f"SGLang encode_prompt failed: {output['error']}")
         if not isinstance(output, dict):
-            raise RuntimeError(
-                f"Unexpected SGLang encode_prompt output type: {type(output).__name__}"
-            )
+            raise RuntimeError(f"Unexpected SGLang encode_prompt output type: {type(output).__name__}")
 
         model_type = self._infer_model_type()
         prompt_embeds = output.get("prompt_embeds")
@@ -1401,9 +1331,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         try:
             from sglang.multimodal_gen.runtime.entrypoints.utils import SetLoraFromTensorsReq
         except Exception as exc:
-            raise RuntimeError(
-                "Installed sglang runtime does not expose SetLoraFromTensorsReq."
-            ) from exc
+            raise RuntimeError("Installed sglang runtime does not expose SetLoraFromTensorsReq.") from exc
 
         request = SetLoraFromTensorsReq(
             lora_nickname=str(adapter_name),
@@ -1443,21 +1371,12 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             checksum_output = getattr(checksum_resp, "output", None)
             if not isinstance(checksum_output, dict) or not checksum_output:
                 raise RuntimeError(
-                    "SGLang checksum query returned invalid payload after weight update: "
-                    f"{checksum_output!r}"
+                    f"SGLang checksum query returned invalid payload after weight update: {checksum_output!r}"
                 )
             normalized = {str(k): str(v) for k, v in checksum_output.items()}
-            bad_values = {
-                k: v
-                for k, v in normalized.items()
-                if not v
-                or v in {"not_found", "error"}
-            }
+            bad_values = {k: v for k, v in normalized.items() if not v or v in {"not_found", "error"}}
             if bad_values:
-                raise RuntimeError(
-                    "SGLang checksum query reported invalid modules after weight update: "
-                    f"{bad_values}"
-                )
+                raise RuntimeError(f"SGLang checksum query reported invalid modules after weight update: {bad_values}")
             self._last_weight_checksum = normalized
             logger.info("SGLang weight checksum: %s", self._last_weight_checksum)
 

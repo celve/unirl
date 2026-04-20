@@ -49,16 +49,12 @@ def normalize_timestep_fraction(
     """Normalize timestep_fraction to a ``(start, end)`` tuple."""
     if isinstance(timestep_fraction, (list, tuple)):
         if len(timestep_fraction) != 2:
-            raise ValueError(
-                f"timestep_fraction tuple must have exactly 2 elements, got {len(timestep_fraction)}"
-            )
+            raise ValueError(f"timestep_fraction tuple must have exactly 2 elements, got {len(timestep_fraction)}")
         start, end = float(timestep_fraction[0]), float(timestep_fraction[1])
     else:
         start, end = 0.0, float(timestep_fraction)
     if not (0.0 <= start <= 1.0) or not (0.0 <= end <= 1.0):
-        raise ValueError(
-            f"timestep_fraction values must be in [0.0, 1.0], got ({start}, {end})"
-        )
+        raise ValueError(f"timestep_fraction values must be in [0.0, 1.0], got ({start}, {end})")
     if start > end:
         raise ValueError(f"timestep_fraction start ({start}) must be <= end ({end})")
     return (start, end)
@@ -76,9 +72,7 @@ class AllSDEScheduler(TimestepScheduler):
         super().__init__(num_timesteps)
         self.timestep_fraction = timestep_fraction
         self.num_sde_steps = num_sde_steps
-        self._fraction_start, self._fraction_end = normalize_timestep_fraction(
-            timestep_fraction
-        )
+        self._fraction_start, self._fraction_end = normalize_timestep_fraction(timestep_fraction)
         self._effective_start = int(num_timesteps * self._fraction_start)
         self._effective_end = int(num_timesteps * self._fraction_end)
         if num_sde_steps is not None:
@@ -132,9 +126,7 @@ class WindowScheduler(TimestepScheduler):
     def _resolve_progressive(self, step: int) -> Set[int]:
         window_step = step // self.config.iters_per_window
         stride = self.config.window_size - self.config.overlap_size
-        remaining = (
-            self.num_timesteps - self.config.init_timestep - self.config.window_size
-        )
+        remaining = self.num_timesteps - self.config.init_timestep - self.config.window_size
         num_one_round_window_steps = max(1, remaining // stride + 1)
         if window_step >= num_one_round_window_steps and not self.config.roll_back:
             window_step = num_one_round_window_steps - 1
@@ -195,6 +187,4 @@ def create_indices_scheduler(
                 min_iters_per_window=_read("min_iters_per_window", None),
             ),
         )
-    raise ValueError(
-        f"Unknown scheduler_type: {scheduler_type}. Available: {list(SCHEDULER_REGISTRY.keys())}"
-    )
+    raise ValueError(f"Unknown scheduler_type: {scheduler_type}. Available: {list(SCHEDULER_REGISTRY.keys())}")

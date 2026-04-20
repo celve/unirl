@@ -5,8 +5,16 @@ from types import SimpleNamespace
 import pytest
 
 from diffusionrl.algorithms.base import BaseAlgorithmConfig
-from diffusionrl.config.spec import RolloutInfo
-from diffusionrl.config.spec import TrainingPlan
+from diffusionrl.config.spec import RolloutInfo, TrainingPlan
+from diffusionrl.config.training_sections import (
+    LrSchedulerConfig as TrainingLrSchedulerConfig,
+)
+from diffusionrl.config.training_sections import (
+    OptimizerConfig as TrainingOptimizerConfig,
+)
+from diffusionrl.config.training_sections import (
+    TrainingExecutionConfig,
+)
 from diffusionrl.config.validation import (
     validate_colocate_fractions,
     validate_direct_sampling_batch_geometry,
@@ -23,11 +31,6 @@ from diffusionrl.config.validation import (
     validate_training_batch_geometry,
     validate_weight_sync,
 )
-from diffusionrl.config.training_sections import (
-    LrSchedulerConfig as TrainingLrSchedulerConfig,
-    OptimizerConfig as TrainingOptimizerConfig,
-    TrainingExecutionConfig,
-)
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.models.config import ModelBundleConfig
 from diffusionrl.ray.actor_config import (
@@ -36,7 +39,7 @@ from diffusionrl.ray.actor_config import (
 )
 from diffusionrl.reward.config import RewardSpec
 from diffusionrl.training.backends import FSDPBackendConfig
-from diffusionrl.training.types import BaseTrainBackendConfig, TrainTopology
+from diffusionrl.training.types import TrainTopology
 from diffusionrl.types.engine import EngineConfig
 from diffusionrl.types.sampling import SamplingRequirements
 

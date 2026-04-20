@@ -1,4 +1,5 @@
 """diffusionrl Models Module."""
+
 from .base import ModelBundle
 from .config import ModelBundleConfig
 from .construction import create_model_bundle_from_init_payload
@@ -12,11 +13,11 @@ from .forward_plugins import (
     SD3ForwardPlugin,
 )
 from .registry import (
+    derive_model_bundle_path,
     discover_model_bundle_paths,
     ensure_builtin_model_registration,
     list_model_types,
     register_model,
-    derive_model_bundle_path,
     resolve_model_class,
 )
 
@@ -52,22 +53,26 @@ ensure_builtin_model_registration()
 def get_hunyuan_model_bundle():
     """Get HunyuanVideo model bundle class."""
     from .hunyuan import HunyuanModelBundle
+
     return HunyuanModelBundle
 
 
 def get_mochi_model_bundle():
     """Get Mochi video model bundle class."""
     from .mochi import MochiModelBundle
+
     return MochiModelBundle
 
 
 def get_flux_model_bundle():
     """Get FLUX image model bundle class."""
     from .flux import FluxModelBundle
+
     return FluxModelBundle
 
 
 def get_sd3_model_bundle():
     """Get SD3 image model bundle class."""
     from .sd3 import SD3ModelBundle
+
     return SD3ModelBundle

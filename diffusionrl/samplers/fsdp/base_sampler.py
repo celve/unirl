@@ -15,10 +15,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from diffusionrl.types.request import RolloutRequest
-from diffusionrl.types.sample import RolloutSamples
 from diffusionrl.samplers.base import BaseSampler
 from diffusionrl.sde.rules import normalize_sde_type
+from diffusionrl.types.request import RolloutRequest
+from diffusionrl.types.sample import RolloutSamples
 from diffusionrl.utils import load_function
 from diffusionrl.utils.adapter_utils import switch_adapter
 from diffusionrl.utils.dtypes import parse_torch_dtype
@@ -103,15 +103,9 @@ class FSDPBaseSampler(BaseSampler):
         self.text_encoder = text_encoder
         self.vae = vae
         self.model_bundle = model_bundle
-        self.autocast_dtype = parse_torch_dtype(
-            autocast_precision, field_name="autocast_precision"
-        )
-        self.trajectory_dtype = parse_torch_dtype(
-            trajectory_precision, field_name="trajectory_precision"
-        )
-        self.logprob_dtype = parse_torch_dtype(
-            logprob_precision, field_name="logprob_precision"
-        )
+        self.autocast_dtype = parse_torch_dtype(autocast_precision, field_name="autocast_precision")
+        self.trajectory_dtype = parse_torch_dtype(trajectory_precision, field_name="trajectory_precision")
+        self.logprob_dtype = parse_torch_dtype(logprob_precision, field_name="logprob_precision")
 
     # ------------------------------------------------------------------
     # Device resolution
@@ -224,9 +218,7 @@ class FSDPBaseSampler(BaseSampler):
             base_name = name.lstrip("_").lower()
             if not include_transformer and "transformer" in base_name:
                 continue
-            if base_name in known_names or any(
-                token in base_name for token in ("encoder", "vae", "transformer")
-            ):
+            if base_name in known_names or any(token in base_name for token in ("encoder", "vae", "transformer")):
                 results.append((name, value))
         return results
 
@@ -278,15 +270,10 @@ class FSDPBaseSampler(BaseSampler):
 
         sp = request.sampling_params
         raw_prompts = request.prompts
-        prompts = (
-            list(raw_prompts.prompts)
-            if isinstance(raw_prompts, _PromptsType)
-            else list(raw_prompts or [])
-        )
+        prompts = list(raw_prompts.prompts) if isinstance(raw_prompts, _PromptsType) else list(raw_prompts or [])
         if not prompts:
             raise ValueError(
-                f"{host_label} requires non-empty text prompts. "
-                "Prompt-embedding-only input is not supported."
+                f"{host_label} requires non-empty text prompts. Prompt-embedding-only input is not supported."
             )
 
         kwargs = dict(sp.sampler_kwargs or {})
@@ -298,11 +285,7 @@ class FSDPBaseSampler(BaseSampler):
         num_frames = int(sp.num_frames)
         sde_indices_raw = sp.sde_indices
         sde_indices = None if sde_indices_raw is None else {int(v) for v in sde_indices_raw}
-        noise_group_ids = (
-            list(raw_prompts.noise_group_ids)
-            if isinstance(raw_prompts, _PromptsType)
-            else None
-        )
+        noise_group_ids = list(raw_prompts.noise_group_ids) if isinstance(raw_prompts, _PromptsType) else None
 
         encoded = self.encode_prompt(prompts)
         if encoded.get("prompt_embeds") is None:
@@ -327,6 +310,7 @@ class FSDPBaseSampler(BaseSampler):
         )
         # Attach request-level metadata the sampler doesn't have access to.
         from dataclasses import replace as _replace
+
         return _replace(output, sampling_params=sp, prompts=raw_prompts)
 
     # ------------------------------------------------------------------
@@ -373,6 +357,7 @@ class FSDPBaseSampler(BaseSampler):
                 f"decoded media and latent decoding failed: {exc}"
             ) from exc
         from dataclasses import replace as _replace
+
         return _replace(output, decoded_images=decoded_images)
 
     def finalize_output(
@@ -393,7 +378,9 @@ class FSDPBaseSampler(BaseSampler):
         """
         output = self._attach_metadata_defaults(output, metadata_defaults)
         output = self._decode_for_reward_if_needed(
-            output, decode_for_reward=decode_for_reward, host_label=host_label,
+            output,
+            decode_for_reward=decode_for_reward,
+            host_label=host_label,
         )
         if decode_for_reward and local_reward_attach_fn is not None:
             output = local_reward_attach_fn(output)

@@ -1,5 +1,6 @@
 """Buffer subsystem for rollout-to-train decoupling."""
 
+from diffusionrl.buffer.buffer import BufferRuntime
 from diffusionrl.buffer.buffer_batch_ops import concat_training_batches, index_training_batch
 from diffusionrl.buffer.buffer_plugins import (
     BufferPlugin,
@@ -9,7 +10,6 @@ from diffusionrl.buffer.buffer_plugins import (
     RewardRangeFilterPlugin,
     build_buffer_plugins,
 )
-from diffusionrl.buffer.buffer import BufferRuntime
 from diffusionrl.buffer.buffer_store import BatchStore, InMemoryBatchStore, RayBatchStore
 
 __all__ = [

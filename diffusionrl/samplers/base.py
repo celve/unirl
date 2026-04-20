@@ -6,6 +6,7 @@ All samplers must inherit from BaseSampler and implement the sample() method.
 
 from abc import ABC, abstractmethod
 from typing import List, Optional, Set
+
 import torch
 
 # Import shared data types from canonical types package
@@ -117,4 +118,5 @@ class BaseSampler(ABC):
             Tensor of sigmas [num_steps + 1]
         """
         from diffusionrl.sde.runtime import get_sigma_schedule
+
         return get_sigma_schedule(num_steps, self.shift, device)

@@ -28,10 +28,7 @@ class ImageRewardScorer(BaseLocalRewardScorer):
         try:
             import ImageReward as RM
         except ImportError:
-            raise ImportError(
-                "image-reward is required for ImageReward reward. "
-                "Install with: pip install image-reward"
-            )
+            raise ImportError("image-reward is required for ImageReward reward. Install with: pip install image-reward")
 
         self.model = RM.load(
             "ImageReward-v1.0",

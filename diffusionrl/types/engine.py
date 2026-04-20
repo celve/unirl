@@ -110,9 +110,7 @@ class EngineConfig:
         2. ``engine_kwargs`` entries whose key is a valid ServerArgs field
            (escape hatch for rare overrides not covered by typed fields).
         """
-        allowed_keys = {
-            f.name for f in dataclasses.fields(server_args_cls)
-        }
+        allowed_keys = {f.name for f in dataclasses.fields(server_args_cls)}
         result: Dict[str, Any] = {}
 
         # Escape-hatch entries (lowest priority) --------------------------
@@ -168,10 +166,7 @@ class EngineConfig:
         stride = max(32, self.sglang_port_stride)
         actor_base = self.sglang_port_base + int(rank) * stride
         if actor_base > 65000:
-            raise ValueError(
-                f"SGLang port range exceeded: base={self.sglang_port_base}, "
-                f"stride={stride}, rank={rank}"
-            )
+            raise ValueError(f"SGLang port range exceeded: base={self.sglang_port_base}, stride={stride}, rank={rank}")
 
         return dataclasses.replace(
             self,
@@ -179,7 +174,6 @@ class EngineConfig:
             scheduler_port=self.scheduler_port if self.scheduler_port is not None else actor_base + 11,
             sglang_master_port=self.sglang_master_port if self.sglang_master_port is not None else actor_base + 23,
         )
-
 
 
 __all__ = [

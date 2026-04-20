@@ -5,6 +5,7 @@ import io
 import json
 import time
 from typing import Any, Dict, Optional, Union
+
 import torch
 from PIL import Image
 
@@ -112,6 +113,7 @@ class HTTPRewardExecutor(BaseRewardExecutor):
         # Check for requests library
         try:
             import requests
+
             self._requests = requests
         except ImportError:
             self._requests = None
@@ -119,6 +121,7 @@ class HTTPRewardExecutor(BaseRewardExecutor):
         # Check for aiohttp for async support
         try:
             import aiohttp
+
             self._aiohttp = aiohttp
         except ImportError:
             self._aiohttp = None
@@ -170,13 +173,9 @@ class HTTPRewardExecutor(BaseRewardExecutor):
         }
 
         if request.is_video:
-            payload["videos"] = [
-                self._encode_video(v) for v in request.videos
-            ]
+            payload["videos"] = [self._encode_video(v) for v in request.videos]
         else:
-            payload["images"] = [
-                self._encode_image(img) for img in request.images
-            ]
+            payload["images"] = [self._encode_image(img) for img in request.images]
 
         if request.metadata:
             payload["metadata"] = request.metadata
@@ -188,6 +187,7 @@ class HTTPRewardExecutor(BaseRewardExecutor):
         if isinstance(image, torch.Tensor):
             # Convert tensor to PIL Image
             from torchvision.transforms.functional import to_pil_image
+
             if image.max() <= 1.0:
                 image = (image * 255).byte()
             image = to_pil_image(image)

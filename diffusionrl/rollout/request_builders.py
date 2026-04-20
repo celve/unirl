@@ -17,8 +17,7 @@ def load_prompt_batch_from_source(
     if isinstance(samples, dict):
         return samples
     raise TypeError(
-        "DataSource.get_samples() must return Dict[str, Any] with at least 'prompts'. "
-        f"Got {type(samples).__name__}."
+        f"DataSource.get_samples() must return Dict[str, Any] with at least 'prompts'. Got {type(samples).__name__}."
     )
 
 
@@ -88,16 +87,12 @@ def build_eval_request_batch(
         eval_overrides["kwargs"] = {"sampler_overrides": sampler_overrides}
 
     if eval_overrides:
-        request_batch.update(
-            {key: value for key, value in eval_overrides.items() if key != "kwargs"}
-        )
+        request_batch.update({key: value for key, value in eval_overrides.items() if key != "kwargs"})
         override_kwargs = eval_overrides.get("kwargs")
         if isinstance(override_kwargs, dict):
             merged_kwargs = dict(request_batch.get("kwargs") or {})
             merged_sampler_overrides = dict(merged_kwargs.get("sampler_overrides") or {})
-            merged_sampler_overrides.update(
-                dict(override_kwargs.get("sampler_overrides") or {})
-            )
+            merged_sampler_overrides.update(dict(override_kwargs.get("sampler_overrides") or {}))
             if merged_sampler_overrides:
                 merged_kwargs["sampler_overrides"] = merged_sampler_overrides
             request_batch["kwargs"] = merged_kwargs

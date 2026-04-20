@@ -1,6 +1,7 @@
 """
 diffusionrl Ray Placement Groups - GPU allocation and resource management.
 """
+
 import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -42,8 +43,9 @@ class InfoActor:
     """
 
     def __init__(self):
-        import socket
         import os
+        import socket
+
         self.ip = socket.gethostbyname(socket.gethostname())
         # Get CUDA_VISIBLE_DEVICES
         cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
@@ -168,9 +170,7 @@ def _create_colocate_pg(
         strategy=strategy,
         name=name,
     )
-    logger.info(
-        f"Waiting for placement group '{name}' with {total_gpus} GPUs (2 CPUs per bundle for colocate)..."
-    )
+    logger.info(f"Waiting for placement group '{name}' with {total_gpus} GPUs (2 CPUs per bundle for colocate)...")
     ray.get(pg.ready())
     logger.info(f"Placement group '{name}' ready")
 
@@ -273,6 +273,7 @@ def create_placement_groups_from_launch(
         strategy=placement.strategy,
     )
     return create_placement_groups(config)
+
 
 def remove_placement_group(pg: PlacementGroup) -> None:
     """Remove a placement group and free its resources."""

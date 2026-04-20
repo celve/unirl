@@ -21,11 +21,9 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import torch
-
 
 # Tensor names that should match between sampling and training
 COMPARISON_TENSORS = [
@@ -39,7 +37,7 @@ COMPARISON_TENSORS = [
 
 # Tensors with per-sample scalar values (1D, [B])
 SCALAR_TENSORS = [
-    "log_prob",      # sampling: old log prob; training: new log prob from replayed model
+    "log_prob",  # sampling: old log prob; training: new log prob from replayed model
 ]
 
 # Training-only tensors for diagnostics
@@ -148,11 +146,7 @@ def compare_tensors(
 
 
 def analyze_step(
-    step_idx: int,
-    sampling_dir: str,
-    training_dir: str,
-    verbose: bool = False,
-    threshold : float = 1e-6
+    step_idx: int, sampling_dir: str, training_dir: str, verbose: bool = False, threshold: float = 1e-6
 ) -> Tuple[Dict[str, float], bool]:
     """Analyze a single step for train-inference consistency.
 
@@ -199,14 +193,19 @@ def analyze_step(
         max_diff_key = "old_log_prob_transport_max_abs_diff"
         if max_diff_key in lp_metrics and lp_metrics[max_diff_key] > threshold:
             has_divergence = True
-        elif "old_log_prob_transport_shape_mismatch" in lp_metrics and "old_log_prob_transport_prefix_compared" not in lp_metrics:
+        elif (
+            "old_log_prob_transport_shape_mismatch" in lp_metrics
+            and "old_log_prob_transport_prefix_compared" not in lp_metrics
+        ):
             has_divergence = True
 
     # Compare sampling log_prob vs training new_log_prob
     # For on-policy step (first step before any gradient update), these should match
     t_new_log_prob = training_tensors.get("new_log_prob")
     if s_log_prob is not None and t_new_log_prob is not None:
-        new_lp_metrics = compare_tensors("log_prob_sampling_vs_training_new", s_log_prob, t_new_log_prob, allow_prefix_match=True)
+        new_lp_metrics = compare_tensors(
+            "log_prob_sampling_vs_training_new", s_log_prob, t_new_log_prob, allow_prefix_match=True
+        )
         metrics.update(new_lp_metrics)
 
     # Report ratio stats from training
@@ -234,16 +233,15 @@ def analyze_step(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Analyze GRPO train-inference consistency debug tensors"
-    )
+    parser = argparse.ArgumentParser(description="Analyze GRPO train-inference consistency debug tensors")
     parser.add_argument(
         "debug_dir",
         type=str,
         help="Root debug output directory (containing sampling/ and training/ subdirs)",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Print detailed per-tensor statistics",
     )
@@ -285,7 +283,7 @@ def main():
         print("  Make sure you ran the debug script first.")
         sys.exit(1)
 
-    print(f"=== Step Discovery ===")
+    print("=== Step Discovery ===")
     print(f"  Sampling steps: {sorted(sampling_steps)}")
     print(f"  Training steps: {sorted(training_steps)}")
     common_steps = sorted(sampling_steps & training_steps)
@@ -303,7 +301,9 @@ def main():
     all_step_metrics = {}
 
     print(f"=== Per-Step Consistency Analysis (threshold={args.threshold:.0e}) ===")
-    print(f"{'Step':>6} | {'noise_pred':>14} | {'latents_in':>14} | {'latents_out':>14} | {'prev_mean':>14} | {'lp_transport':>14} | {'lp_s_vs_t_new':>14} | {'ratio_dev':>14} | {'status'}")
+    print(
+        f"{'Step':>6} | {'noise_pred':>14} | {'latents_in':>14} | {'latents_out':>14} | {'prev_mean':>14} | {'lp_transport':>14} | {'lp_s_vs_t_new':>14} | {'ratio_dev':>14} | {'status'}"
+    )
     print("-" * 140)
 
     for step_idx in common_steps:
@@ -399,7 +399,7 @@ def main():
     if first_divergence_step is not None:
         print(f"  FIRST DIVERGENCE at step {first_divergence_step}")
         m = all_step_metrics[first_divergence_step]
-        print(f"  Metrics at divergence step:")
+        print("  Metrics at divergence step:")
         for key in sorted(m.keys()):
             val = m[key]
             if isinstance(val, float):
@@ -423,7 +423,7 @@ def main():
                 lp_divergences.append((step_idx, lp_diff))
 
         lp_divergences.sort(key=lambda x: x[1], reverse=True)
-        for rank, (step_idx, diff) in enumerate(lp_divergences[:args.top_k], 1):
+        for rank, (step_idx, diff) in enumerate(lp_divergences[: args.top_k], 1):
             m = all_step_metrics[step_idx]
             ratio_dev = m.get("ratio_max_deviation", 0.0)
             print(f"  #{rank} step={step_idx}: log_prob_diff={diff:.8e}, ratio_max_deviation={ratio_dev:.8e}")
@@ -446,12 +446,14 @@ def main():
             # 处理 sampling 和 training 的 batch_size 不同的情况
             min_b = min(s_lp.shape[0], t_new_lp.shape[0])
             if s_lp.shape[0] != t_new_lp.shape[0]:
-                print(f"  NOTE: sampling log_prob shape={list(s_lp.shape)} vs training new_log_prob shape={list(t_new_lp.shape)}")
+                print(
+                    f"  NOTE: sampling log_prob shape={list(s_lp.shape)} vs training new_log_prob shape={list(t_new_lp.shape)}"
+                )
                 print(f"        Comparing first {min_b} samples (prefix match)")
             s_lp_cmp = s_lp[:min_b]
             t_new_lp_cmp = t_new_lp[:min_b]
             per_sample_diff = (s_lp_cmp - t_new_lp_cmp).abs()
-            print(f"  Per-sample |sampling_log_prob - training_new_log_prob|:")
+            print("  Per-sample |sampling_log_prob - training_new_log_prob|:")
             for i in range(min(args.top_k, per_sample_diff.shape[0])):
                 worst_idx = per_sample_diff.argmax().item()
                 print(
@@ -462,7 +464,7 @@ def main():
                 per_sample_diff[worst_idx] = 0  # Mask for next iteration
 
         if t_old_lp is not None and t_new_lp is not None:
-            print(f"\n  Per-sample |old_log_prob - new_log_prob| (should be ~0 for on-policy):")
+            print("\n  Per-sample |old_log_prob - new_log_prob| (should be ~0 for on-policy):")
             on_policy_diff = (t_old_lp - t_new_lp).abs()
             for i in range(min(args.top_k, on_policy_diff.shape[0])):
                 worst_idx = on_policy_diff.argmax().item()
@@ -483,7 +485,9 @@ def main():
             if s_noise.ndim == t_noise.ndim and s_noise.shape[1:] == t_noise.shape[1:]:
                 min_b = min(s_noise.shape[0], t_noise.shape[0])
                 if s_noise.shape[0] != t_noise.shape[0]:
-                    print(f"\n  NOTE: noise_pred sampling shape={list(s_noise.shape)} vs training shape={list(t_noise.shape)}")
+                    print(
+                        f"\n  NOTE: noise_pred sampling shape={list(s_noise.shape)} vs training shape={list(t_noise.shape)}"
+                    )
                     print(f"        Comparing first {min_b} samples")
                 s_noise_cmp = s_noise[:min_b].float()
                 t_noise_cmp = t_noise[:min_b].float()
@@ -492,7 +496,7 @@ def main():
                 spatial_dims = tuple(range(1, per_sample_noise_diff.ndim))
                 per_sample_max = per_sample_noise_diff.amax(dim=spatial_dims)
                 per_sample_mean = per_sample_noise_diff.mean(dim=spatial_dims)
-                print(f"\n  Per-sample noise_pred max_abs_diff:")
+                print("\n  Per-sample noise_pred max_abs_diff:")
                 for i in range(min(args.top_k, per_sample_max.shape[0])):
                     worst_idx = per_sample_max.argmax().item()
                     print(
@@ -501,8 +505,10 @@ def main():
                     )
                     per_sample_max[worst_idx] = 0
             elif s_noise.shape != t_noise.shape:
-                print(f"\n  WARNING: noise_pred shape mismatch: sampling={list(s_noise.shape)} training={list(t_noise.shape)}")
-                print(f"           Cannot compare per-sample noise_pred")
+                print(
+                    f"\n  WARNING: noise_pred shape mismatch: sampling={list(s_noise.shape)} training={list(t_noise.shape)}"
+                )
+                print("           Cannot compare per-sample noise_pred")
 
     print("\nDone.")
 

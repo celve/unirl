@@ -8,6 +8,7 @@ rollout loop via ``RolloutPipeline``.
 Usage:
     python -m diffusionrl.train --config scripts/example_flux_dancegrpo_direct.yaml
 """
+
 import logging
 import time
 
@@ -73,9 +74,7 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
     logger.info(f"Model: {args.model.pretrained_model_ckpt_path}")
     logger.info("Algorithm: %s", algorithm_init_payload.component_dotpath)
     logger.info(f"Mode: {rollout_mode_name}")
-    logger.info(
-        f"Offload train: {args.ray.offload_train}, Offload rollout: {args.ray.offload_rollout}"
-    )
+    logger.info(f"Offload train: {args.ray.offload_train}, Offload rollout: {args.ray.offload_rollout}")
     logger.info("Weight sync mode: %s", sync_mode)
     logger.info(
         "Periodic controls: save_steps=%s eval_steps=%s logging_steps=%s",
@@ -98,6 +97,7 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
             # Cap num_cpus to avoid slow startup on high-core machines (e.g. 384 cores)
             # where Ray pre-starts one worker per CPU, causing connect timeouts.
             import os
+
             _max_cpus = min(os.cpu_count() or 64, 64)
             ray.init(num_cpus=_max_cpus)
 
@@ -140,9 +140,7 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
         # 2. Driver-side data source + sampling defaults
         data_source_cls = load_function(args.data_source_dotpath)
         data_source = data_source_cls(args)
-        prompt_batch_size = int(
-            getattr(control_algorithm, "prompts_per_rollout", args.algorithm.prompts_per_rollout)
-        )
+        prompt_batch_size = int(getattr(control_algorithm, "prompts_per_rollout", args.algorithm.prompts_per_rollout))
         samples_per_prompt = int(getattr(control_algorithm, "samples_per_prompt", 1))
         sampling_spec = launch_config.sampling_spec
         logger.info(
@@ -186,7 +184,8 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
             train_group.load_checkpoint(args.training.resume_from_checkpoint)
             logger.info("Checkpoint loaded: %s", args.training.resume_from_checkpoint)
             restored_rollout_id = maybe_restore_start_rollout_id_from_checkpoint(
-                args, args.training.resume_from_checkpoint,
+                args,
+                args.training.resume_from_checkpoint,
             )
             if restored_rollout_id is not None:
                 logger.info(
@@ -206,9 +205,7 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
         logger.info("Expected global batch size: %s", expected_global_batch_size)
 
         # 6. Initial weight broadcast skipped (FSDP2 deterministic per-rank init)
-        logger.info(
-            "Initial update_weights() skipped — FSDP2 TrainActor inits deterministically per rank"
-        )
+        logger.info("Initial update_weights() skipped — FSDP2 TrainActor inits deterministically per rank")
 
         # 7. Post-init offload dance
         if not training_actor_sampling_mode and args.ray.offload_rollout:
@@ -220,7 +217,10 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
         # 8. Weight sync setup (no central BufferActor)
         if not training_actor_sampling_mode:
             sync_config = build_weight_sync_config(
-                args, launch_config, mode=sync_mode, rollout_runtime=rollout_group,
+                args,
+                launch_config,
+                mode=sync_mode,
+                rollout_runtime=rollout_group,
             )
             if sync_config:
                 train_group.setup_weight_sync(sync_config)
@@ -348,9 +348,7 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
                 for per_step_m in per_step_list:
                     if per_step_m.get("has_backward", False):
                         global_optimizer_step += 1
-                        wandb_step_m = {
-                            k: v for k, v in per_step_m.items() if k != "has_backward"
-                        }
+                        wandb_step_m = {k: v for k, v in per_step_m.items() if k != "has_backward"}
                         wandb_logger.log_step(global_optimizer_step, wandb_step_m)
 
             if should_log_step:
@@ -381,7 +379,8 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
 
                     if wandb_media_enabled:
                         media_preview = build_media_preview(
-                            rollout_response, max_items=wandb_media_max_items,
+                            rollout_response,
+                            max_items=wandb_media_max_items,
                         )
                         if media_preview is not None:
                             wandb_logger.log_generated_media(rollout_id, media_preview)
@@ -395,9 +394,7 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
                         "step_time_s": step_time_s,
                         "samples_per_rollout": float(sample_count),
                         "samples_per_s": (
-                            float(sample_count) / float(step_time_s)
-                            if step_time_s > 0 and sample_count > 0
-                            else 0.0
+                            float(sample_count) / float(step_time_s) if step_time_s > 0 and sample_count > 0 else 0.0
                         ),
                     }
                     wandb_logger.log_perf(rollout_id, perf_metrics)

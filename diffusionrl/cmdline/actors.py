@@ -12,7 +12,11 @@ from diffusionrl.cmdline.rollout_engine import (
 from diffusionrl.config.spec import SamplingSpec, TrainingPlan
 from diffusionrl.config.training_sections import (
     LrSchedulerConfig as TrainingLrSchedulerConfig,
+)
+from diffusionrl.config.training_sections import (
     OptimizerConfig as TrainingOptimizerConfig,
+)
+from diffusionrl.config.training_sections import (
     TrainingExecutionConfig,
 )
 from diffusionrl.construction import ComponentInitPayload
@@ -52,7 +56,8 @@ def build_rollout_actor_init_config_from_args(
     if engine_init_payload is None:
         if model_init_payload is None:
             model_init_payload = build_model_bundle_init_payload_from_args(
-                args, model_spec=derived_config.model_spec,
+                args,
+                model_spec=derived_config.model_spec,
             )
         engine_init_payload = build_rollout_engine_init_payload_from_args(
             args,
@@ -68,9 +73,7 @@ def build_rollout_actor_init_config_from_args(
         )
     return RolloutActorConfig(
         engine_init_payload=engine_init_payload,
-        reward_config=(
-            reward_config if reward_config is not None else RewardSpec.from_args(args)
-        ),
+        reward_config=(reward_config if reward_config is not None else RewardSpec.from_args(args)),
         algorithm_init_payload=algorithm_init_payload,
         rollout_batch_size=(
             int(args.rollout.rollout_batch_size)
@@ -134,11 +137,13 @@ def build_training_actor_init_config_from_args(
 
     if algorithm_init_payload is None:
         algorithm_init_payload = build_algorithm_init_payload_from_args(
-            args, sampling_spec=sampling_spec.to_params(args.precision),
+            args,
+            sampling_spec=sampling_spec.to_params(args.precision),
         )
     if model_init_payload is None:
         model_init_payload = build_model_bundle_init_payload_from_args(
-            args, model_spec=derived_config.model_spec,
+            args,
+            model_spec=derived_config.model_spec,
         )
     if reward_config is None:
         reward_config = RewardSpec.from_args(args)

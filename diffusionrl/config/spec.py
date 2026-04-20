@@ -1,6 +1,7 @@
 """Framework-level shared spec objects."""
 
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -8,6 +9,7 @@ from diffusionrl.types.engine import ROLLOUT_ENGINE_TYPES
 
 if TYPE_CHECKING:
     from diffusionrl.types.sampling import SamplingParams
+
 
 @dataclass(frozen=True)
 class SamplingSpec:
@@ -78,7 +80,7 @@ class SamplingSpec:
         through SamplingParams. ``num_samples_per_prompt`` and ``sde_indices``
         stay at defaults — RolloutPipeline.plan_requests stamps them per step.
         """
-        from diffusionrl.types.sampling import SDEConfig, SamplingParams
+        from diffusionrl.types.sampling import SamplingParams, SDEConfig
 
         return SamplingParams(
             num_inference_steps=int(self.num_inference_steps),
@@ -131,10 +133,10 @@ class TrainingPlan:
             "num_updates_per_batch": self.num_updates_per_batch,
             "update_slices": [[start, end] for start, end in self.update_slices],
             "mini_batch_slices_per_update": [
-                [[start, end] for start, end in per_update]
-                for per_update in self.mini_batch_slices_per_update
+                [[start, end] for start, end in per_update] for per_update in self.mini_batch_slices_per_update
             ],
         }
+
 
 @dataclass(frozen=True)
 class RolloutInfo:
@@ -157,9 +159,7 @@ class RolloutInfo:
             return "fsdp"
         engine = self.rollout_engine
         if not engine:
-            raise ValueError(
-                "Dedicated rollout sampling requires rollout.rollout_engine to be set."
-            )
+            raise ValueError("Dedicated rollout sampling requires rollout.rollout_engine to be set.")
         return engine
 
 

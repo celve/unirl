@@ -120,14 +120,10 @@ class TrainStack:
         total_timesteps = sum(r.num_timesteps_trained for r in mini_results)
         has_backward = any(r.has_backward for r in mini_results)
 
-        aggregated_metrics = aggregate_numeric_metrics(
-            [r.metrics for r in mini_results if r.metrics]
-        )
+        aggregated_metrics = aggregate_numeric_metrics([r.metrics for r in mini_results if r.metrics])
 
         if optimizer_steps > 0:
-            self.ema_manager.post_rollout_end(
-                self.backend.model, aggregated_metrics
-            )
+            self.ema_manager.post_rollout_end(self.backend.model, aggregated_metrics)
 
         return BatchResult(
             rollout_step=rollout_step,
@@ -180,18 +176,14 @@ class TrainStack:
             update_num_timesteps = max(update_num_timesteps, result.num_timesteps)
             has_backward = has_backward or result.has_backward
 
-        aggregated_metrics = aggregate_numeric_metrics(
-            [r.metrics for r in micro_results if r.metrics]
-        )
+        aggregated_metrics = aggregate_numeric_metrics([r.metrics for r in micro_results if r.metrics])
 
         if has_backward:
             clipped = self.backend.clip_grad_norm(self.max_grad_norm)
             self.optimizer.step()
             if self.scheduler is not None:
                 self.scheduler.step()
-            self.ema_manager.post_optimizer_step(
-                self.backend.model, aggregated_metrics
-            )
+            self.ema_manager.post_optimizer_step(self.backend.model, aggregated_metrics)
         else:
             clipped = 0.0
             logger.warning(

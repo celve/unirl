@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from dataclasses import fields as dataclass_fields
-from dataclasses import is_dataclass
 from typing import Any, Dict
 
 from diffusionrl.algorithms.grpo import GRPOAlgorithmConfig
@@ -58,9 +57,7 @@ def validate_algorithm_kwargs(
     }
     config_field_names = {field.name for field in dataclass_fields(config_class)}
     allowed_extension_fields = config_field_names - framework_owned_runtime_fields
-    unknown = sorted(
-        key for key in algorithm_kwargs.keys() if key not in allowed_extension_fields
-    )
+    unknown = sorted(key for key in algorithm_kwargs.keys() if key not in allowed_extension_fields)
     if unknown:
         raise ValueError(
             "algorithm.algorithm_kwargs contains unsupported keys for "
@@ -91,9 +88,7 @@ def build_grpo_algorithm_config_from_args(
         eta=float(sampling_spec.sde_config.eta),
         sde_type=str(sampling_spec.sde_config.sde_type),
         shift=float(sampling_spec.sde_config.shift),
-        training_share_rollout_indices=bool(
-            args.algorithm.training_share_rollout_indices
-        ),
+        training_share_rollout_indices=bool(args.algorithm.training_share_rollout_indices),
         rollout_scheduler_config=_scheduler_payload(args.algorithm.rollout_scheduler),
         training_scheduler_config=_scheduler_payload(args.algorithm.training_scheduler),
         **extra,
@@ -133,9 +128,7 @@ def _scheduler_payload(raw_cfg: Any) -> Dict[str, Any]:
     return dict(raw_cfg or {})
 
 
-def _require_sampling_spec(
-    args: Any, *, sampling_spec: SamplingParams | None
-) -> SamplingParams:
+def _require_sampling_spec(args: Any, *, sampling_spec: SamplingParams | None) -> SamplingParams:
     if isinstance(sampling_spec, SamplingParams):
         return sampling_spec
     cached_resolved = getattr(args, "_diffusionrl_resolved_config", None)
@@ -148,9 +141,7 @@ def _require_sampling_spec(
     )
 
 
-def _build_base_algorithm_kwargs(
-    args: Any, *, sampling_spec: SamplingParams
-) -> Dict[str, Any]:
+def _build_base_algorithm_kwargs(args: Any, *, sampling_spec: SamplingParams) -> Dict[str, Any]:
     """Helper function to build the base algorithm kwargs."""
     ac = args.algorithm
     return {
@@ -179,10 +170,7 @@ def _coerce_dict_field_type(
 
     simple_types = {int, float, bool, str}
     hints = typing.get_type_hints(config_class)
-    field_name_to_type = {
-        name: hint for name, hint in hints.items()
-        if hint in simple_types
-    }
+    field_name_to_type = {name: hint for name, hint in hints.items() if hint in simple_types}
     coerced: Dict[str, Any] = {}
     for key, value in raw.items():
         field_type = field_name_to_type.get(key)

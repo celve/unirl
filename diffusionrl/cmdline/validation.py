@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import MISSING
+from dataclasses import MISSING, is_dataclass
 from dataclasses import fields as dataclass_fields
-from dataclasses import is_dataclass
 from typing import Any, Dict, Optional
 
 from diffusionrl.buffer.buffer_plugins import normalize_plugin_dotpaths
@@ -45,11 +44,7 @@ def _validate_metadata_choices(
         if not choices:
             child = getattr(instance, field_info.name)
             if is_dataclass(child):
-                sub_name = (
-                    f"{config_name}.{field_info.name}"
-                    if config_name
-                    else field_info.name
-                )
+                sub_name = f"{config_name}.{field_info.name}" if config_name else field_info.name
                 _validate_metadata_choices(child, config_name=sub_name)
             continue
 
@@ -62,10 +57,7 @@ def _validate_metadata_choices(
         canonical_map = {str(c).strip().lower(): c for c in choices}
         if normalized not in canonical_map:
             prefix = f"{config_name}." if config_name else ""
-            raise ValueError(
-                f"{prefix}{field_info.name} must be one of "
-                f"{sorted(choices)}, got: {value!r}"
-            )
+            raise ValueError(f"{prefix}{field_info.name} must be one of {sorted(choices)}, got: {value!r}")
         canonical = canonical_map[normalized]
         if value != canonical:
             setattr(instance, field_info.name, canonical)
@@ -74,10 +66,7 @@ def _validate_metadata_choices(
 def validate_grouped_configs(args: Any) -> None:
     """Run per-group config dataclass validators."""
     normalized_plugins = normalize_plugin_dotpaths(args.rollout.plugin_dotpaths)
-    if not (
-        isinstance(args.rollout.plugin_dotpaths, list)
-        and args.rollout.plugin_dotpaths == normalized_plugins
-    ):
+    if not (isinstance(args.rollout.plugin_dotpaths, list) and args.rollout.plugin_dotpaths == normalized_plugins):
         args.rollout.plugin_dotpaths = normalized_plugins
     for field_info in dataclass_fields(type(args)):
         child = getattr(args, field_info.name)
@@ -140,9 +129,7 @@ def validate_nft_sampling_contract(args: Any) -> None:
         else:
             parsed = dict(args.algorithm.algorithm_kwargs)
         if parsed:
-            old_adapter_name = str(
-                parsed.get("old_adapter_name", old_adapter_name) or old_adapter_name
-            )
+            old_adapter_name = str(parsed.get("old_adapter_name", old_adapter_name) or old_adapter_name)
 
         if not args.sampling.sampling_adapter:
             raise ValueError(
@@ -173,10 +160,7 @@ def validate_rollout_mode_constraints(
 ) -> None:
     """Validate rollout-mode constraints that depend on resolved rollout/model info."""
     model_label = f"{model_cls.__module__}.{model_cls.__qualname__}"
-    if (
-        not rollout_info.training_actor_sampling_mode
-        and rollout_info.rollout_engine == "sglang"
-    ):
+    if not rollout_info.training_actor_sampling_mode and rollout_info.rollout_engine == "sglang":
         supports_sglang = getattr(model_cls, "supports_sglang_prompt_mode", None)
         if not callable(supports_sglang):
             raise ValueError(
@@ -264,23 +248,17 @@ def validate_rollout_topology_contract(
 
     if topology.mode != DIRECT_ROLLOUT_MODE:
         if topology.rollout_engine is None:
-            raise ValueError(
-                "Dedicated rollout modes require rollout.rollout_engine to be set explicitly."
-            )
+            raise ValueError("Dedicated rollout modes require rollout.rollout_engine to be set explicitly.")
         if not uses_dedicated_rollout_engine(topology.rollout_engine):
             raise ValueError(
                 "rollout.mode in {separate,colocate} requires a dedicated rollout "
                 f"engine. Got rollout.rollout_engine={topology.rollout_engine!r}."
             )
         if rollout_config.num_gpus_per_actor is None:
-            raise ValueError(
-                "Dedicated rollout modes require rollout.num_gpus_per_actor to be set explicitly."
-            )
+            raise ValueError("Dedicated rollout modes require rollout.num_gpus_per_actor to be set explicitly.")
         return topology
 
-    configured_direct_incompatible_fields = _collect_direct_sampling_incompatible_fields(
-        rollout_config
-    )
+    configured_direct_incompatible_fields = _collect_direct_sampling_incompatible_fields(rollout_config)
     if configured_direct_incompatible_fields:
         raise ValueError(
             "direct_sampling runs sampling on training actors, so dedicated rollout-service fields "
@@ -405,6 +383,8 @@ def validate_offload_and_colocate_config(
             colocate_training_gpu_fraction=float(args.ray.colocate_training_gpu_fraction),
             colocate_rollout_gpu_fraction=float(args.ray.colocate_rollout_gpu_fraction),
         )
+
+
 __all__ = [
     "validate_algorithm_kwargs_payload",
     "validate_dynamic_dotpaths",

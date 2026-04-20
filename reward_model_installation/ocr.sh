@@ -18,4 +18,3 @@ uv pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url ht
 
 yum install -y mesa-libGL glib2
 python -c "from paddleocr import PaddleOCR; ocr = PaddleOCR(use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False, lang='en'); print('PaddleOCR initialized successfully')"
-

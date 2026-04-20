@@ -126,9 +126,7 @@ def compute_rollout_batch_metrics(
 
         advantages = getattr(batch, "advantages", None)
         if torch.is_tensor(advantages) and advantages.numel() > 0:
-            advantage_tensors.append(
-                advantages.detach().to(dtype=torch.float32).reshape(-1).cpu()
-            )
+            advantage_tensors.append(advantages.detach().to(dtype=torch.float32).reshape(-1).cpu())
 
         if batch.has_trajectory_rl_data:
             sde_selected += len(batch.sde_indices)

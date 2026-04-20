@@ -15,7 +15,8 @@ ForwardContext-specific helpers:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields as dataclass_fields
+from dataclasses import dataclass
+from dataclasses import fields as dataclass_fields
 from typing import (
     Any,
     ClassVar,
@@ -31,9 +32,9 @@ import torch
 from diffusionrl.utils.batched import (
     Batched,
     FieldKind,
+    _field_kind,
     concat_field,
     shared_field,
-    _field_kind,
 )
 
 # ---------------------------------------------------------------------------
@@ -98,11 +99,7 @@ class ForwardContext(Batched):
         for f in dataclass_fields(self):
             name = f.name
             val = getattr(self, name)
-            if (
-                _field_kind(f) is FieldKind.CONCAT
-                and isinstance(val, torch.Tensor)
-                and val.is_floating_point()
-            ):
+            if _field_kind(f) is FieldKind.CONCAT and isinstance(val, torch.Tensor) and val.is_floating_point():
                 kwargs[name] = val.to(dtype=dtype)
             else:
                 kwargs[name] = val

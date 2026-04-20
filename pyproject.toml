@@ -62,19 +62,17 @@ include = [
 
 [tool.ruff]
 line-length = 120
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["diffusionrl", "diffusionrl_plugins"]
+
 [tool.ruff.format]
 quote-style = "double"
-
-[tool.isort]
-profile = "black"
-line_length = 120
-known_first_party = ["diffusionrl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -48,10 +48,7 @@ class BaseLocalRewardScorer(BaseRewardScorer):
         expected_name = str(cls.canonical_model_name or "").strip().lower()
         if expected_name:
             if raw_name and raw_name != expected_name:
-                raise ValueError(
-                    f"{cls.__name__} only supports model_name={expected_name!r}, "
-                    f"got {raw_name!r}."
-                )
+                raise ValueError(f"{cls.__name__} only supports model_name={expected_name!r}, got {raw_name!r}.")
             return expected_name
         return raw_name
 

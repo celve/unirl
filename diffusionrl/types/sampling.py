@@ -4,15 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
-
-from diffusionrl.utils.batched import Batched, shared_field, concat_field
-import torch
+from typing import Any, Dict, List, Optional
 
 from diffusionrl.sde.rules import normalize_sde_type
-
-if TYPE_CHECKING:
-    from torch import device as TorchDevice
 
 
 @dataclass(frozen=True)

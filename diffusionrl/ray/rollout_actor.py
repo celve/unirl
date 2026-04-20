@@ -1,27 +1,27 @@
 """diffusionrl Rollout actor implementation (generation side)."""
+
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from diffusionrl.transfer.buffer import Buffer
-from diffusionrl.types.request import RolloutRequest
-from diffusionrl.types.response import RolloutResponse
-from diffusionrl.types.sample import RolloutSamples
 import ray
 import torch
 
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.ray.actor_config import RolloutActorConfig
+from diffusionrl.ray.mixins import RolloutPipelineMixin, RolloutWeightSyncMixin
+from diffusionrl.ray.utils.gpu import log_gpu_state, log_resource_ids
+from diffusionrl.ray.utils.net import get_free_port, get_node_ip
 from diffusionrl.reward.config import RewardSpec
 from diffusionrl.reward.pipeline import RewardPipeline
 from diffusionrl.samplers.construction import create_rollout_engine_from_init_payload
 from diffusionrl.samplers.engine import BaseRolloutEngine
-from diffusionrl.ray.mixins import RolloutWeightSyncMixin, RolloutPipelineMixin
 from diffusionrl.samplers.registry import derive_rollout_engine_class
+from diffusionrl.transfer.buffer import Buffer
 from diffusionrl.types.engine import EngineConfig
-
-from diffusionrl.ray.utils.gpu import log_gpu_state, log_resource_ids
-from diffusionrl.ray.utils.net import get_free_port, get_node_ip
+from diffusionrl.types.request import RolloutRequest
+from diffusionrl.types.response import RolloutResponse
+from diffusionrl.types.sample import RolloutSamples
 
 logger = logging.getLogger(__name__)
 
@@ -117,9 +117,7 @@ class RolloutActor(RolloutWeightSyncMixin, RolloutPipelineMixin, Buffer):
         # When using NOSET mode, manually set CUDA_VISIBLE_DEVICES.
         # base_gpu_id can be 0 when actor is assigned the first physical GPU group.
         if self.force_set_cuda_visible_devices or self.base_gpu_id > 0:
-            gpu_range = ",".join(
-                str(self.base_gpu_id + i) for i in range(self.num_gpus_allocated)
-            )
+            gpu_range = ",".join(str(self.base_gpu_id + i) for i in range(self.num_gpus_allocated))
             os.environ["CUDA_VISIBLE_DEVICES"] = gpu_range
             logger.info(f"Rank {self.rank}: Set CUDA_VISIBLE_DEVICES={gpu_range}")
 
@@ -149,9 +147,7 @@ class RolloutActor(RolloutWeightSyncMixin, RolloutPipelineMixin, Buffer):
 
     def _ensure_reward_pipeline(self) -> RewardPipeline:
         if self._reward_spec is None:
-            raise RuntimeError(
-                "Reward pipeline requested before reward spec initialization."
-            )
+            raise RuntimeError("Reward pipeline requested before reward spec initialization.")
         if self._reward_pipeline is None:
             self._reward_pipeline = RewardPipeline.from_spec(self._reward_spec)
         return self._reward_pipeline
@@ -168,15 +164,13 @@ class RolloutActor(RolloutWeightSyncMixin, RolloutPipelineMixin, Buffer):
             ValueError: If required sections or fields are not provided
         """
         if not isinstance(config, RolloutActorConfig):
-            raise ValueError(
-                "rollout actor init config must be a RolloutActorConfig, "
-                f"got: {type(config).__name__}"
-            )
+            raise ValueError(f"rollout actor init config must be a RolloutActorConfig, got: {type(config).__name__}")
 
         # Per-actor determinism setup: must run BEFORE any CUDA op so that
         # cuDNN / cuBLAS / deterministic-algorithm flags are in effect for
         # the subsequent engine initialization and sampling.
         from diffusionrl.utils import set_seed
+
         set_seed(int(config.seed))
 
         logger.info(f"Rank {self.rank}: Initializing rollout actor (num_gpus={self.num_gpus_allocated})...")
@@ -204,20 +198,14 @@ class RolloutActor(RolloutWeightSyncMixin, RolloutPipelineMixin, Buffer):
                 f"Got: {type(algorithm_init_payload).__name__}"
             )
         from diffusionrl.algorithms import create_algorithm_from_init_payload
+
         self.algorithm = create_algorithm_from_init_payload(algorithm_init_payload)
         engine_cls = derive_rollout_engine_class(engine_init_payload.component_dotpath)
         sampler_engine_type = (
-            str(
-                getattr(engine_cls, "_component_name", "")
-                or getattr(engine_cls, "__name__", "")
-            )
-            .strip()
-            .lower()
+            str(getattr(engine_cls, "_component_name", "") or getattr(engine_cls, "__name__", "")).strip().lower()
         )
         if not sampler_engine_type:
-            raise ValueError(
-                "Failed to resolve rollout engine type from engine_init_payload."
-            )
+            raise ValueError("Failed to resolve rollout engine type from engine_init_payload.")
 
         self._reward_spec = config.reward_config
 
@@ -225,11 +213,7 @@ class RolloutActor(RolloutWeightSyncMixin, RolloutPipelineMixin, Buffer):
         if sampler_engine_type == "sglang":
             resolved_engine_config = resolved_engine_config.with_sglang_ports(self.rank)
 
-        self._rollout_batch_size = (
-            int(config.rollout_batch_size)
-            if config.rollout_batch_size is not None
-            else None
-        )
+        self._rollout_batch_size = int(config.rollout_batch_size) if config.rollout_batch_size is not None else None
         self.engine = create_rollout_engine_from_init_payload(
             ComponentInitPayload(
                 component_dotpath=engine_init_payload.component_dotpath,

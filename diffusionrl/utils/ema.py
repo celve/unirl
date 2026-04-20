@@ -19,12 +19,10 @@ consistently returns DTensors before and after forward passes.
 
 from collections.abc import Iterable
 from contextlib import contextmanager
-from typing import Optional, Callable, Dict, Any
+from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch.nn as nn
-
-
 
 
 class EMAModuleWrapper:
@@ -98,10 +96,7 @@ class EMAModuleWrapper:
                 for p in self.ema_parameters
             ]
         elif dtype is not None:
-            self.ema_parameters = [
-                p.to(dtype=dtype) if p.is_floating_point() else p
-                for p in self.ema_parameters
-            ]
+            self.ema_parameters = [p.to(dtype=dtype) if p.is_floating_point() else p for p in self.ema_parameters]
 
     @torch.no_grad()
     def sync_with_model(self, parameters: Iterable[nn.Parameter]) -> None:
@@ -273,8 +268,7 @@ class DualAdapterEMA:
             }
             if not new_params:
                 raise RuntimeError(
-                    "NFT adapter EMA could not find any parameters for the new adapter "
-                    f"{self.new_adapter_name!r}."
+                    f"NFT adapter EMA could not find any parameters for the new adapter {self.new_adapter_name!r}."
                 )
 
             adapter_model.set_adapter(self.old_adapter_name)
@@ -287,8 +281,7 @@ class DualAdapterEMA:
                 copied += 1
             if copied == 0:
                 raise RuntimeError(
-                    "NFT adapter EMA could not find any parameters for the old adapter "
-                    f"{self.old_adapter_name!r}."
+                    f"NFT adapter EMA could not find any parameters for the old adapter {self.old_adapter_name!r}."
                 )
 
             adapter_model.set_adapter(self.new_adapter_name)
@@ -329,8 +322,7 @@ class DualAdapterEMA:
             }
             if not new_params:
                 raise RuntimeError(
-                    "NFT adapter EMA could not find any parameters for the new adapter "
-                    f"{self.new_adapter_name!r}."
+                    f"NFT adapter EMA could not find any parameters for the new adapter {self.new_adapter_name!r}."
                 )
 
             adapter_model.set_adapter(self.old_adapter_name)
@@ -343,8 +335,7 @@ class DualAdapterEMA:
                 updated += 1
             if updated == 0:
                 raise RuntimeError(
-                    "NFT adapter EMA could not find any parameters for the old adapter "
-                    f"{self.old_adapter_name!r}."
+                    f"NFT adapter EMA could not find any parameters for the old adapter {self.old_adapter_name!r}."
                 )
 
             adapter_model.set_adapter(self.new_adapter_name)
@@ -458,20 +449,12 @@ class EMAManager:
 
     def state_dict(self) -> Dict[str, Any]:
         return {
-            "eval_ema": (
-                self.eval_ema.state_dict()
-                if self.eval_ema is not None
-                else None
-            ),
+            "eval_ema": (self.eval_ema.state_dict() if self.eval_ema is not None else None),
             "reference_param_ema": (
-                self.reference_param_ema.state_dict()
-                if self.reference_param_ema is not None
-                else None
+                self.reference_param_ema.state_dict() if self.reference_param_ema is not None else None
             ),
             "reference_adapter_ema": (
-                self.reference_adapter_ema.state_dict()
-                if self.reference_adapter_ema is not None
-                else None
+                self.reference_adapter_ema.state_dict() if self.reference_adapter_ema is not None else None
             ),
             "reference_update_timing": self.reference_update_timing,
             "optimizer_step": int(self._optimizer_step),
@@ -495,9 +478,9 @@ class EMAManager:
         if self.reference_adapter_ema is not None and isinstance(reference_adapter_state, dict):
             self.reference_adapter_ema.load_state_dict(reference_adapter_state)
 
-        self.reference_update_timing = str(
-            state_dict.get("reference_update_timing", self.reference_update_timing)
-        ).strip().lower()
+        self.reference_update_timing = (
+            str(state_dict.get("reference_update_timing", self.reference_update_timing)).strip().lower()
+        )
         self._optimizer_step = int(state_dict.get("optimizer_step", self._optimizer_step))
         self.bind_algorithm(algorithm)
 

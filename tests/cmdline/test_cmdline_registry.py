@@ -4,9 +4,9 @@ from diffusionrl.algorithms.grpo import GRPOAlgorithm
 from diffusionrl.cmdline.algorithms import build_grpo_algorithm_config_from_args
 from diffusionrl.cmdline.registry import (
     CMDLINE_CONFIG_PARSER_REGISTRY,
-    register_cmdline_config_parser,
     derive_cmdline_config_parser,
     derive_component_cmdline_config_parser,
+    register_cmdline_config_parser,
 )
 
 
@@ -61,9 +61,7 @@ def test_register_cmdline_config_parser_rejects_duplicate(isolated_cmdline_regis
         del args
         return _ConfigA()
 
-    with pytest.raises(
-        ValueError, match="Duplicate cmdline config parser registration"
-    ):
+    with pytest.raises(ValueError, match="Duplicate cmdline config parser registration"):
         register_cmdline_config_parser(_ConfigA, parse_other)
 
     assert derive_cmdline_config_parser(_ConfigA) is parse_config
@@ -113,7 +111,4 @@ def test_derive_cmdline_config_parser_error_lists_available_configs(
 
 
 def test_derive_component_cmdline_config_parser_uses_config_class():
-    assert (
-        derive_component_cmdline_config_parser(GRPOAlgorithm)
-        is build_grpo_algorithm_config_from_args
-    )
+    assert derive_component_cmdline_config_parser(GRPOAlgorithm) is build_grpo_algorithm_config_from_args

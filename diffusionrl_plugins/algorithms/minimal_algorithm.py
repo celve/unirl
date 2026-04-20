@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -18,7 +18,6 @@ from diffusionrl.algorithms.registry import register_algorithm
 from diffusionrl.cmdline.algorithms import validate_algorithm_kwargs
 from diffusionrl.cmdline.registry import register_cmdline_config_parser
 from diffusionrl.types import TimestepData
-from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.sampling import SamplingParams
 
 
@@ -138,8 +137,7 @@ class MinimalAlgorithm(BaseAlgorithm):
             config = cls._parse_config_from_dict(config)
         if not isinstance(config, MinimalAlgorithmConfig):
             raise TypeError(
-                f"{cls.__name__}.from_config expects dict or MinimalAlgorithmConfig, "
-                f"got {type(config).__name__}."
+                f"{cls.__name__}.from_config expects dict or MinimalAlgorithmConfig, got {type(config).__name__}."
             )
         return cls(config=config)
 
@@ -150,9 +148,7 @@ class MinimalAlgorithm(BaseAlgorithm):
         **kwargs: Any,
     ) -> None:
         if not isinstance(config, MinimalAlgorithmConfig):
-            raise TypeError(
-                f"{type(self).__name__} expects MinimalAlgorithmConfig, got {type(config).__name__}."
-            )
+            raise TypeError(f"{type(self).__name__} expects MinimalAlgorithmConfig, got {type(config).__name__}.")
         super().__init__(
             component_mix_stage=config.component_mix_stage,
             adv_normalization_scope=config.adv_normalization_scope,
@@ -226,9 +222,7 @@ class MinimalAlgorithm(BaseAlgorithm):
         from diffusionrl.types.training_batch import TrainingBatch
 
         if not isinstance(batch, TrainingBatch):
-            raise TypeError(
-                f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
-            )
+            raise TypeError(f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}")
 
         valid_step_indices = sorted(batch.sde_indices)
         if not valid_step_indices:
@@ -277,9 +271,7 @@ class MinimalAlgorithm(BaseAlgorithm):
 
         del current_step, kwargs
         if not isinstance(batch, TrainingBatch):
-            raise TypeError(
-                f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
-            )
+            raise TypeError(f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}")
 
         step_indices = batch.resolved_step_indices[:-1]
         step_labels = set(int(v) for v in step_indices.tolist())
@@ -290,9 +282,7 @@ class MinimalAlgorithm(BaseAlgorithm):
             set(int(i) for i in batch.sde_indices),
             len(step_labels),
         )
-        missing_steps = sorted(
-            int(i) for i in filtered_steps if int(i) not in step_labels
-        )
+        missing_steps = sorted(int(i) for i in filtered_steps if int(i) not in step_labels)
         if missing_steps:
             raise ValueError(
                 f"{type(self).__name__}.resolve_training_timesteps selected steps "

@@ -5,7 +5,7 @@ and for ``RewardResponse`` as a ``Batched``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import pytest
 import torch
@@ -74,10 +74,12 @@ def test_reduction_fields_skip_none_entries() -> None:
     out = _MaybeToy.concat([a, b, c])
     assert out.hi == 5.0
 
-    all_none = _MaybeToy.concat([
-        _MaybeToy(rows=[0], hi=None),
-        _MaybeToy(rows=[0], hi=None),
-    ])
+    all_none = _MaybeToy.concat(
+        [
+            _MaybeToy(rows=[0], hi=None),
+            _MaybeToy(rows=[0], hi=None),
+        ]
+    )
     assert all_none.hi is None
 
 

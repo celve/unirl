@@ -24,12 +24,8 @@ class PickScoreRewardScorer(BaseLocalRewardScorer):
         except ImportError:
             raise ImportError("transformers is required for PickScore")
 
-        processor_path = self.model_kwargs.get(
-            "processor_id", "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
-        )
-        model_path = self.model_kwargs.get(
-            "model_id", "yuvalkirstain/PickScore_v1"
-        )
+        processor_path = self.model_kwargs.get("processor_id", "laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
+        model_path = self.model_kwargs.get("model_id", "yuvalkirstain/PickScore_v1")
 
         self.processor = CLIPProcessor.from_pretrained(processor_path)
         self.model = CLIPModel.from_pretrained(model_path).eval().to(self.device)
@@ -68,9 +64,7 @@ class PickScoreRewardScorer(BaseLocalRewardScorer):
                 max_length=77,
                 return_tensors="pt",
             )
-            image_inputs = {
-                k: v.to(device=self.device) for k, v in image_inputs.items()
-            }
+            image_inputs = {k: v.to(device=self.device) for k, v in image_inputs.items()}
 
             text_inputs = self.processor(
                 text=batch_prompts,
@@ -79,9 +73,7 @@ class PickScoreRewardScorer(BaseLocalRewardScorer):
                 max_length=77,
                 return_tensors="pt",
             )
-            text_inputs = {
-                k: v.to(device=self.device) for k, v in text_inputs.items()
-            }
+            text_inputs = {k: v.to(device=self.device) for k, v in text_inputs.items()}
 
             with torch.no_grad():
                 image_embs = self.model.get_image_features(**image_inputs)

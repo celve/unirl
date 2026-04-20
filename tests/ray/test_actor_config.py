@@ -151,9 +151,7 @@ def test_build_training_actor_init_config_from_args_returns_typed_config():
     assert isinstance(config.model_init_payload, ComponentInitPayload)
     assert isinstance(config.model_init_payload.component_config, ModelBundleConfig)
     assert isinstance(config.train_backend_init_payload, ComponentInitPayload)
-    assert isinstance(
-        config.train_backend_init_payload.component_config, BaseTrainBackendConfig
-    )
+    assert isinstance(config.train_backend_init_payload.component_config, BaseTrainBackendConfig)
     assert isinstance(config.reward_config, RewardSpec)
     assert isinstance(config.topology_config, TrainTopology)
     assert isinstance(config.training_plan_config, TrainingPlan)
@@ -200,9 +198,7 @@ def test_build_rollout_actor_init_config_from_args_returns_typed_config():
         args,
         config_bundle=SimpleNamespace(
             sampling_spec=_make_sampling_spec(),
-            model_spec=SimpleNamespace(
-                model_dotpath="diffusionrl.models.sd3.SD3ModelBundle"
-            ),
+            model_spec=SimpleNamespace(model_dotpath="diffusionrl.models.sd3.SD3ModelBundle"),
             rollout=SimpleNamespace(
                 logprob_source="engine",
                 rollout_topology=SimpleNamespace(rollout_engine="sglang"),
@@ -221,9 +217,7 @@ def test_build_rollout_actor_init_config_from_args_returns_typed_config():
     assert isinstance(config, RolloutActorConfig)
     assert isinstance(config.engine_init_payload, ComponentInitPayload)
     assert isinstance(config.engine_init_payload.component_config, EngineConfig)
-    assert config.engine_init_payload.component_config.sampler_dotpath.endswith(
-        "DefaultSampler"
-    )
+    assert config.engine_init_payload.component_config.sampler_dotpath.endswith("DefaultSampler")
     assert isinstance(config.reward_config, RewardSpec)
     assert config.reward_config.reward_components == []
     assert config.rollout_batch_size == 4

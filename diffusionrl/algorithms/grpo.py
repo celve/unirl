@@ -9,15 +9,12 @@ backward training step.
 import logging
 import math
 import os
-import time as _time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
-
-if TYPE_CHECKING:
-    from diffusionrl.types.request import RolloutRequest
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
+
 from diffusionrl.algorithms.registry import register_algorithm
 from diffusionrl.types import TimestepData
 from diffusionrl.types.forward_context import ForwardContext
@@ -47,8 +44,13 @@ class GRPOAlgorithmConfig(BaseAlgorithmConfig):
 
 
 def _save_training_debug_tensor(
-    base_dir: str, step_idx: int, name: str, tensor: torch.Tensor,
-    rank: int = 0, *, append: bool = False,
+    base_dir: str,
+    step_idx: int,
+    name: str,
+    tensor: torch.Tensor,
+    rank: int = 0,
+    *,
+    append: bool = False,
 ) -> None:
     """Save a debug tensor from training path to disk. Only rank 0 saves.
 
@@ -99,9 +101,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         **kwargs,
     ):
         if not isinstance(config, GRPOAlgorithmConfig):
-            raise TypeError(
-                f"{type(self).__name__} expects GRPOAlgorithmConfig, got {type(config).__name__}."
-            )
+            raise TypeError(f"{type(self).__name__} expects GRPOAlgorithmConfig, got {type(config).__name__}.")
         super().__init__(
             kl_coef=config.kl_coef,
             component_mix_stage=config.component_mix_stage,
@@ -125,13 +125,9 @@ class GRPOAlgorithm(BaseAlgorithm):
         self._sde_type = config.sde_type
         self._shift = config.shift
         self.model_type = config.model_type
-        self.training_share_rollout_indices = bool(
-            config.training_share_rollout_indices
-        )
+        self.training_share_rollout_indices = bool(config.training_share_rollout_indices)
         self.rollout_scheduler_config = dict(config.rollout_scheduler_config)
-        self.training_scheduler_config = dict(
-            config.training_scheduler_config or self.rollout_scheduler_config
-        )
+        self.training_scheduler_config = dict(config.training_scheduler_config or self.rollout_scheduler_config)
         self.rollout_indices_scheduler = create_indices_scheduler(
             scheduler_config=self.rollout_scheduler_config,
             num_timesteps=self.num_inference_steps,
@@ -221,26 +217,19 @@ class GRPOAlgorithm(BaseAlgorithm):
 
         del kwargs
         if not isinstance(batch, TrainingBatch):
-            raise TypeError(
-                f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
-            )
+            raise TypeError(f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}")
 
         step_indices = batch.resolved_step_indices[:-1]
         step_labels = set(int(v) for v in step_indices.tolist())
         if not step_labels:
             return tuple()
 
-        requested_steps = set(
-            int(i)
-            for i in self.training_indices_scheduler.get_sde_indices(current_step)
-        )
+        requested_steps = set(int(i) for i in self.training_indices_scheduler.get_sde_indices(current_step))
         filtered_steps = self.get_filtered_training_indices(
             requested_steps,
             len(step_labels),
         )
-        missing_steps = sorted(
-            int(i) for i in filtered_steps if int(i) not in step_labels
-        )
+        missing_steps = sorted(int(i) for i in filtered_steps if int(i) not in step_labels)
         if missing_steps:
             raise ValueError(
                 f"{type(self).__name__}.resolve_training_timesteps selected steps "
@@ -250,9 +239,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         if not filtered_steps:
             return tuple()
         selected_positions = [
-            pos
-            for pos, step_label in enumerate(step_indices.tolist())
-            if int(step_label) in filtered_steps
+            pos for pos, step_label in enumerate(step_indices.tolist()) if int(step_label) in filtered_steps
         ]
         return batch.timesteps[selected_positions]
 
@@ -377,9 +364,7 @@ class GRPOAlgorithm(BaseAlgorithm):
             sigma_next = torch.tensor(sigma_next, device=device)
 
         plugin = self._get_forward_plugin(model)
-        pred = plugin.forward(
-            model=model, latents=latents, sigma=sigma, **ctx.to_dict()
-        )
+        pred = plugin.forward(model=model, latents=latents, sigma=sigma, **ctx.to_dict())
 
         new_log_prob, prev_sample_mean = self.compute_log_prob(
             pred=pred,
@@ -401,20 +386,46 @@ class GRPOAlgorithm(BaseAlgorithm):
             if _rank == 0:
                 logger.info(
                     "Debug training: rank=%d timestep_idx=%d batch_size=%d latents=%s append=%s",
-                    _rank, timestep_idx, latents.shape[0], list(latents.shape), _append,
+                    _rank,
+                    timestep_idx,
+                    latents.shape[0],
+                    list(latents.shape),
+                    _append,
                 )
             _training_debug_dir = os.path.join(_resolved_debug_dir, "training")
             _save_training_debug_tensor(_training_debug_dir, timestep_idx, "noise_pred", pred, _rank, append=_append)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "latents_input", latents, _rank, append=_append)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "latents_output", next_latents, _rank, append=_append)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "prev_sample_mean", prev_sample_mean, _rank, append=_append)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "new_log_prob", new_log_prob, _rank, append=_append)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "old_log_prob", old_log_probs, _rank, append=_append)
+            _save_training_debug_tensor(
+                _training_debug_dir, timestep_idx, "latents_input", latents, _rank, append=_append
+            )
+            _save_training_debug_tensor(
+                _training_debug_dir, timestep_idx, "latents_output", next_latents, _rank, append=_append
+            )
+            _save_training_debug_tensor(
+                _training_debug_dir, timestep_idx, "prev_sample_mean", prev_sample_mean, _rank, append=_append
+            )
+            _save_training_debug_tensor(
+                _training_debug_dir, timestep_idx, "new_log_prob", new_log_prob, _rank, append=_append
+            )
+            _save_training_debug_tensor(
+                _training_debug_dir, timestep_idx, "old_log_prob", old_log_probs, _rank, append=_append
+            )
             _save_training_debug_tensor(_training_debug_dir, timestep_idx, "ratio", ratio, _rank, append=_append)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "advantages", advantages, _rank, append=_append)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma", sigma.unsqueeze(0) if sigma.dim() == 0 else sigma, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma_next", sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next, _rank)
-            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma_max", torch.tensor([sigma_max]), _rank)
+            _save_training_debug_tensor(
+                _training_debug_dir, timestep_idx, "advantages", advantages, _rank, append=_append
+            )
+            _save_training_debug_tensor(
+                _training_debug_dir, timestep_idx, "sigma", sigma.unsqueeze(0) if sigma.dim() == 0 else sigma, _rank
+            )
+            _save_training_debug_tensor(
+                _training_debug_dir,
+                timestep_idx,
+                "sigma_next",
+                sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next,
+                _rank,
+            )
+            _save_training_debug_tensor(
+                _training_debug_dir, timestep_idx, "sigma_max", torch.tensor([sigma_max]), _rank
+            )
             if not _append and _sigmas is not None and _rank == 0:
                 _step_dir = os.path.join(_training_debug_dir, f"step_{timestep_idx:03d}")
                 _sched_path = os.path.join(_step_dir, "sigmas_schedule.pt")
@@ -431,7 +442,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         clip_fraction = ((ratio - 1.0).abs() > clip_range).float().mean()
         clipfrac_gt_one = (ratio - 1.0 > clip_range).float().mean()
         clipfrac_lt_one = (1.0 - ratio > clip_range).float().mean()
-        approx_kl = 0.5 * torch.mean(log_prob_diff ** 2)
+        approx_kl = 0.5 * torch.mean(log_prob_diff**2)
 
         if not getattr(self, "_logged_loss_diag", False):
             logger.warning(
@@ -518,16 +529,12 @@ class GRPOAlgorithm(BaseAlgorithm):
         from diffusionrl.types.training_batch import TrainingBatch
 
         if not isinstance(batch, TrainingBatch):
-            raise TypeError(
-                f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
-            )
+            raise TypeError(f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}")
 
         model.train()
 
         available_steps = set(int(s) for s in batch.resolved_step_indices[:-1].tolist())
-        valid_step_indices = sorted(
-            int(i) for i in batch.sde_indices if int(i) in available_steps
-        )
+        valid_step_indices = sorted(int(i) for i in batch.sde_indices if int(i) in available_steps)
         num_timesteps = len(valid_step_indices)
         if num_timesteps == 0:
             return 0.0, {}, 0, False
@@ -582,14 +589,12 @@ class GRPOAlgorithm(BaseAlgorithm):
         plugin = self._get_forward_plugin(model)
         ctx_kwargs = ctx.to_dict()
 
-        adapter_model = model.module if hasattr(model, 'module') else model
-        if hasattr(adapter_model, 'disable_adapter'):
+        adapter_model = model.module if hasattr(model, "module") else model
+        if hasattr(adapter_model, "disable_adapter"):
             try:
                 with torch.no_grad():
                     with adapter_model.disable_adapter():
-                        ref_pred = plugin.forward(
-                            model=model, latents=latents, sigma=sigma, **ctx_kwargs
-                        )
+                        ref_pred = plugin.forward(model=model, latents=latents, sigma=sigma, **ctx_kwargs)
 
                 _, ref_prev_sample_mean = self.compute_log_prob(
                     pred=ref_pred,
@@ -604,9 +609,7 @@ class GRPOAlgorithm(BaseAlgorithm):
 
         if ref_prev_sample_mean is None and ref_model is not None:
             with torch.no_grad():
-                ref_pred = plugin.forward(
-                    model=ref_model, latents=latents, sigma=sigma, **ctx_kwargs
-                )
+                ref_pred = plugin.forward(model=ref_model, latents=latents, sigma=sigma, **ctx_kwargs)
 
             _, ref_prev_sample_mean = self.compute_log_prob(
                 pred=ref_pred,
@@ -619,13 +622,11 @@ class GRPOAlgorithm(BaseAlgorithm):
 
         if ref_prev_sample_mean is not None:
             # KL loss calculation matching flow_grpo
-            std_dev_t = torch.sqrt(
-                sigma / (1 - torch.where(sigma == 1, sigma_max, sigma))
-            ) * self.eta
+            std_dev_t = torch.sqrt(sigma / (1 - torch.where(sigma == 1, sigma_max, sigma))) * self.eta
 
             kl_loss = ((prev_sample_mean - ref_prev_sample_mean) ** 2).mean(
                 dim=tuple(range(1, prev_sample_mean.ndim))
-            ) / (2 * std_dev_t ** 2 + 1e-12)
+            ) / (2 * std_dev_t**2 + 1e-12)
             kl_loss = kl_loss.mean()
 
             return kl_loss

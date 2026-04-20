@@ -28,11 +28,7 @@ def build_model_bundle_config_from_args(
         use_lora=bool(args.training.use_lora),
         lora_rank=int(args.training.lora_rank),
         lora_alpha=int(args.training.lora_alpha),
-        lora_target_modules=(
-            list(args.training.lora_target_modules)
-            if args.training.lora_target_modules
-            else None
-        ),
+        lora_target_modules=(list(args.training.lora_target_modules) if args.training.lora_target_modules else None),
         use_gradient_checkpointing=bool(args.training.use_gradient_checkpointing),
         model_precision=parse_torch_dtype(
             args.precision.model_precision,
@@ -54,9 +50,7 @@ def build_flux_model_bundle_config_from_args(
             f"Unknown sampling.sde_type={args.sampling.sde_type!r} for model_type='flux'. "
             f"Valid options: {', '.join(t for t in valid_sde_types if t)}."
         )
-    return FluxModelBundleConfig(
-        **build_model_bundle_config_from_args(args, model_spec=model_spec).__dict__
-    )
+    return FluxModelBundleConfig(**build_model_bundle_config_from_args(args, model_spec=model_spec).__dict__)
 
 
 def build_model_bundle_init_payload_from_args(

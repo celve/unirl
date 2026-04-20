@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # train_only
 # ---------------------------------------------------------------------------
 
+
 def run_debug_train_only(args: Any) -> None:
     """Run only the training phase with synthetic or pre-saved data.
 
@@ -140,11 +141,11 @@ def run_debug_train_only(args: Any) -> None:
             )
 
         import math
+
         finite_losses = [v for v in all_losses if math.isfinite(v)]
         if finite_losses:
             logger.info(
-                "=== Summary: %d steps, loss %.6f -> %.6f, "
-                "mean=%.6f, total_time=%.1fs ===",
+                "=== Summary: %d steps, loss %.6f -> %.6f, mean=%.6f, total_time=%.1fs ===",
                 num_rollouts,
                 finite_losses[0],
                 finite_losses[-1],
@@ -182,6 +183,7 @@ def _load_debug_batch(path: str) -> Any:
 # ---------------------------------------------------------------------------
 # save helper (used by main loop with debug.save_intermediates)
 # ---------------------------------------------------------------------------
+
 
 def save_rollout_debug_payload(
     *,

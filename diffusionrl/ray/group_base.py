@@ -39,10 +39,7 @@ class ActorHandleGroup:
         return self._actor_handles[index]
 
     def call_all_async(self, method: str, *args: Any, **kwargs: Any) -> List[ray.ObjectRef]:
-        return [
-            getattr(actor, method).remote(*args, **kwargs)
-            for actor in self._actor_handles
-        ]
+        return [getattr(actor, method).remote(*args, **kwargs) for actor in self._actor_handles]
 
     def call_all(self, method: str, *args: Any, **kwargs: Any) -> List[Any]:
         return ray.get(self.call_all_async(method, *args, **kwargs))
@@ -62,10 +59,7 @@ class ActorHandleGroup:
         *args: Any,
         **kwargs: Any,
     ) -> List[ray.ObjectRef]:
-        return [
-            getattr(self._actor_handles[int(index)], method).remote(*args, **kwargs)
-            for index in indices
-        ]
+        return [getattr(self._actor_handles[int(index)], method).remote(*args, **kwargs) for index in indices]
 
     def call_subset(
         self,
@@ -129,9 +123,7 @@ class ActorHandleGroup:
         **kwargs: Any,
     ) -> List[ray.ObjectRef]:
         if len(shards) != len(self._actor_handles):
-            raise ValueError(
-                f"shards length {len(shards)} does not match actor count {len(self._actor_handles)}"
-            )
+            raise ValueError(f"shards length {len(shards)} does not match actor count {len(self._actor_handles)}")
         refs: List[ray.ObjectRef] = []
         for actor, shard in zip(self._actor_handles, shards):
             if shard is None:
@@ -178,9 +170,7 @@ class PlacementGroupActorPool(ActorHandleGroup):
         self.num_gpus_per_engine = int(num_gpus_per_engine)
 
         if per_actor_kwargs is not None and len(per_actor_kwargs) != int(num_actors):
-            raise ValueError(
-                f"per_actor_kwargs length {len(per_actor_kwargs)} does not match actor count {num_actors}"
-            )
+            raise ValueError(f"per_actor_kwargs length {len(per_actor_kwargs)} does not match actor count {num_actors}")
 
         actor_handles: List[ray.actor.ActorHandle] = []
         for index in range(num_actors):
@@ -215,9 +205,7 @@ class PlacementGroupActorPool(ActorHandleGroup):
             if runtime_env:
                 options["runtime_env"] = runtime_env
 
-            actor_handles.append(
-                actor_class.options(**options).remote(**actor_kwargs_i)
-            )
+            actor_handles.append(actor_class.options(**options).remote(**actor_kwargs_i))
 
         super().__init__(actor_handles, num_actors=num_actors)
         logger.info("Created %d actors of type %s", num_actors, actor_class)

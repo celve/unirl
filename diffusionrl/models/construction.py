@@ -9,6 +9,7 @@ from diffusionrl.construction import (
     create_component_from_init_payload,
 )
 from diffusionrl.models.base import ModelBundle
+
 from .registry import MODEL_BUNDLE_COMPONENT_FAMILY
 
 

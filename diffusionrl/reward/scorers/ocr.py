@@ -22,16 +22,13 @@ class OCRRewardScorer(BaseLocalRewardScorer):
         try:
             from paddleocr import PaddleOCR
         except ImportError:
-            raise ImportError(
-                "paddleocr is required for OCR reward. Install with: pip install paddleocr"
-            )
+            raise ImportError("paddleocr is required for OCR reward. Install with: pip install paddleocr")
 
         try:
             from Levenshtein import distance as levenshtein_distance
         except ImportError:
             raise ImportError(
-                "python-Levenshtein is required for OCR reward. Install with: "
-                "pip install python-Levenshtein"
+                "python-Levenshtein is required for OCR reward. Install with: pip install python-Levenshtein"
             )
 
         import paddle
