@@ -51,10 +51,10 @@ class RolloutResponse(Batched):
         timesteps = samples.timesteps
         log_probs = samples.log_probs
 
-        if samples.trajectories is not None:
-            # Trajectory path (GRPO-style)
+        if sde_indices is not None and samples.trajectories is not None:
+            # Trajectory path (GRPO-style): filter log_probs by sde_indices
             trajectory_store = samples.trajectories
-            if sde_indices is not None and log_probs is not None:
+            if log_probs is not None:
                 sde_int = {int(i) for i in sde_indices}
                 log_probs = LogProbData.from_dict(
                     {k: v for k, v in log_probs.data.items() if k in sde_int}
@@ -63,7 +63,7 @@ class RolloutResponse(Batched):
                 if recorded != sde_int:
                     raise AssertionError(f"log_probs keys {sorted(recorded)} != sde_indices {sorted(sde_int)}")
         else:
-            # Clean-latents path (NFT-style)
+            # Clean-latents path (NFT-style): no SDE indices to train on
             trajectory_store = TrajectoryStore.from_clean_latents(
                 samples.latents,
                 total_positions=int(timesteps.shape[0]),
