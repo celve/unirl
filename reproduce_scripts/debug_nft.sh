@@ -25,7 +25,7 @@
 # Key alignment with original DiffusionNFT:
 #   algorithm_type=nft, beta=1.0, kl_coef=0.0001, sde_type=dpm2,
 #   num_inference_steps=10, guidance_scale=1.0, adv_normalization_scope=group,
-#   train_timestep_mode=all, sampling_adapter=old, LoRA rank=32 alpha=64
+#   train_timestep_mode=all, LoRA rank=32 alpha=64 (sampling_adapter derived from algorithm)
 #
 # =============================================================================
 
@@ -172,7 +172,6 @@ run_training() {
     python -m diffusionrl.train \
         --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \
         --model.model-type sd3 \
-        --sampling.sampler-dotpath diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
         --algorithm.algorithm-dotpath diffusionrl.algorithms.nft.NFTAlgorithm \
         --reward.reward-components "${REWARD_NAME}" \
         --reward.local-reward-device "${REWARD_DEVICE}" \
@@ -186,7 +185,6 @@ run_training() {
         --algorithm.training-scheduler.timestep-fraction 0.99 \
         --sampling.num-inference-steps "${NUM_INFERENCE_STEPS}" \
         --sampling.guidance-scale 4.5 \
-        --sampling.sampling-adapter old \
         --sampling.max-samples-per-request "${DIRECT_SAMPLING_BATCH_SIZE}" \
         --algorithm.shuffle-seed "${SHUFFLE_SEED}" \
         --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}" \

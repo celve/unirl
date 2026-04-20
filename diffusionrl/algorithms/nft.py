@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:
-    from diffusionrl.types.sampling import RolloutRequest
+    from diffusionrl.types.request import RolloutRequest
 
 import torch
 import torch.nn as nn
@@ -157,7 +157,7 @@ class NFTAlgorithm(BaseAlgorithm):
             requires_trajectory=False,
             requires_log_prob=False,
             requires_embeddings=True,
-            requires_clean_latents=True,
+            extras={"requires_clean_latents": True},
         )
 
     def get_ema_spec(self) -> EMASpec:

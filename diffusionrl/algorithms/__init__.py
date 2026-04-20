@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import importlib
 from typing import Dict, Tuple
-from diffusionrl.types.sampling import SamplingRequirements
 
 from .base import BaseAlgorithm
 from .construction import create_algorithm_from_init_payload

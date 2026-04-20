@@ -14,24 +14,10 @@ from diffusionrl.distributed.weight_sync_checkpoint import (
     publish_sglang_transformer_checkpoint_atomic,
     wait_for_published_checkpoint,
 )
-from diffusionrl.distributed.weight_sync import (
-    CheckpointWeightSync,
-    DisabledWeightSync,
-    NCCLBroadcastWeightSync,
-    SyncResult,
-    TensorPayloadWeightSync,
-    WeightSyncCoordinator,
-    create_weight_sync,
-)
+from diffusionrl.distributed.weight_sync import build_weight_sync_config
 
 __all__ = [
-    "WeightSyncCoordinator",
-    "SyncResult",
-    "DisabledWeightSync",
-    "TensorPayloadWeightSync",
-    "NCCLBroadcastWeightSync",
-    "CheckpointWeightSync",
-    "create_weight_sync",
+    "build_weight_sync_config",
     "checkpoint_ready_marker_path",
     "publish_checkpoint_atomic",
     "publish_sglang_transformer_checkpoint_atomic",

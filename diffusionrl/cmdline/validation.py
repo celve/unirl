@@ -14,7 +14,7 @@ from diffusionrl.cmdline.resolution import (
     derive_algorithm_dotpath,
     derive_model_spec,
 )
-from diffusionrl.config.resolution import rollout_mode_is_colocated, rollout_uses_services
+from diffusionrl.config.resolution import DIRECT_ROLLOUT_MODE, rollout_mode_is_colocated
 from diffusionrl.config.spec import RolloutInfo
 from diffusionrl.config.validation import (
     validate_colocate_fractions,
@@ -119,14 +119,6 @@ def validate_dynamic_dotpaths(
     validate_dotpath(algorithm_dotpath, label="algorithm")
     if include_data_source:
         validate_dotpath(args.data_source_dotpath, label="data_source")
-    if getattr(args, "rollout_function_dotpath", None):
-        validate_dotpath(args.rollout_function_dotpath, label="rollout_function")
-    if getattr(args, "eval_function_dotpath", None):
-        validate_dotpath(args.eval_function_dotpath, label="eval_function")
-    if getattr(args, "reward_hook_dotpath", None):
-        validate_dotpath(args.reward_hook_dotpath, label="reward_hook")
-    if args.training.train_backend_dotpath:
-        validate_dotpath(args.training.train_backend_dotpath, label="train_backend")
     if args.sampling.replay_sampler_dotpath:
         validate_dotpath(args.sampling.replay_sampler_dotpath, label="replay_sampler")
     if include_rollout_buffer_plugins:
@@ -198,39 +190,6 @@ def validate_rollout_mode_constraints(
             )
 
 
-def validate_async_training_runner(
-    args: Any,
-    *,
-    rollout_info: RolloutInfo,
-) -> None:
-    """Validate constraints that apply only to the async entrypoint."""
-    debug_mode = args.debug.mode
-    if debug_mode == "train_only":
-        raise ValueError(
-            "train_async.py does not support debug mode=train_only. "
-            "Use python -m diffusionrl.train for train_only debug runs."
-        )
-    if bool(args.debug.save_intermediates):
-        raise ValueError(
-            "train_async.py does not support debug save_intermediates=true. "
-            "Use python -m diffusionrl.train for rollout debug artifact capture."
-        )
-
-    resolved = rollout_info
-    if rollout_mode_is_colocated(resolved.mode):
-        raise ValueError("train_async.py requires rollout.mode='separate'.")
-    if resolved.training_actor_sampling_mode:
-        raise ValueError(
-            "train_async.py requires a dedicated rollout engine "
-            "(for example rollout.rollout_engine='sglang')."
-        )
-    if args.ray.offload_train or args.ray.offload_rollout:
-        raise ValueError(
-            "train_async.py is incompatible with offload_train/offload_rollout. "
-            "Set --ray.offload-train=false --ray.offload-rollout=false."
-        )
-
-
 # ============================================================================
 # Cmdline rollout mode checks
 # ============================================================================
@@ -244,8 +203,6 @@ _ROLLOUT_TOPOLOGY_FIELD_NAMES = frozenset(
         "num_gpus_per_actor",
         "tp_size",
         "sp_size",
-        "transport_dtype",
-        "transport_drop_decoded_videos",
         "sglang_local_mode",
         "sglang_verify_weight_checksum",
         "sglang_disable_autocast",
@@ -305,7 +262,7 @@ def validate_rollout_topology_contract(
     topology = rollout_info
     rollout_config = args.rollout
 
-    if rollout_uses_services(topology.mode):
+    if topology.mode != DIRECT_ROLLOUT_MODE:
         if topology.rollout_engine is None:
             raise ValueError(
                 "Dedicated rollout modes require rollout.rollout_engine to be set explicitly."
@@ -317,7 +274,7 @@ def validate_rollout_topology_contract(
             )
         if rollout_config.num_gpus_per_actor is None:
             raise ValueError(
-                "Dedicated rollout services require rollout.num_gpus_per_actor to be set explicitly."
+                "Dedicated rollout modes require rollout.num_gpus_per_actor to be set explicitly."
             )
         return topology
 
@@ -450,7 +407,6 @@ def validate_offload_and_colocate_config(
         )
 __all__ = [
     "validate_algorithm_kwargs_payload",
-    "validate_async_training_runner",
     "validate_dynamic_dotpaths",
     "validate_grouped_configs",
     "validate_nft_sampling_contract",

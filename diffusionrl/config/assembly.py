@@ -14,9 +14,12 @@ from diffusionrl.config.spec import (
 )
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.ray.actor_config import RolloutActorConfig, TrainingActorConfig
-from diffusionrl.reward.config import RewardSpec
-from diffusionrl.training.backends import TrainBackendCapabilities, TrainTopology
-from diffusionrl.training.backends.base import TrainBackendLaunchSpec
+from diffusionrl.types.sampling import SamplingParams
+from diffusionrl.training.types import (
+    TrainBackendCapabilities,
+    TrainBackendLaunchSpec,
+    TrainTopology,
+)
 
 
 @dataclass(frozen=True)
@@ -85,26 +88,6 @@ class WeightSyncSpec:
 
 
 @dataclass(frozen=True)
-class RolloutServicesSpec:
-    """Typed view of driver-side rollout service construction parameters.
-
-    ``data_source_dotpath`` and ``data_source_args`` are kept separate so that
-    ``create_rollout_services`` can dynamically load the user-provided class
-    without depending on the raw CLI namespace.
-    """
-
-    data_source_dotpath: str
-    data_source_args: Any
-    reward_spec: RewardSpec
-    prompts_per_rollout: int
-    replay_enabled: bool
-    max_samples_per_request: Optional[int]
-    evaluation_settings: Any
-    debug_mode: str
-    debug_output_dir: Optional[str]
-
-
-@dataclass(frozen=True)
 class LaunchConfig:
     algorithm_init_payload: Any
     training_sampling_config: Dict[str, Any]
@@ -113,7 +96,7 @@ class LaunchConfig:
     rollout: Optional[RolloutLaunch]
     training: TrainingLaunch
     weight_sync: WeightSyncSpec
-    rollout_services: RolloutServicesSpec
+    sampling_spec: SamplingParams
 
 
 __all__ = [
@@ -121,7 +104,6 @@ __all__ = [
     "LaunchConfig",
     "PlacementSpec",
     "RolloutLaunch",
-    "RolloutServicesSpec",
     "TrainingLaunch",
     "WeightSyncSpec",
 ]

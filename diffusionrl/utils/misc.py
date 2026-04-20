@@ -57,7 +57,15 @@ def set_seed(seed: int) -> None:
 
     Args:
         seed: Random seed value
+
+    Note:
+        ``CUBLAS_WORKSPACE_CONFIG`` is set via ``setdefault`` as a
+        belt-and-suspenders measure, but the real guarantee must come
+        from setting it in the process environment BEFORE Python imports
+        torch (e.g., via Ray ``runtime_env={"env_vars": ...}``). Once
+        cuBLAS has initialized, changing this env var has no effect.
     """
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -66,6 +74,8 @@ def set_seed(seed: int) -> None:
         # For deterministic behavior (may impact performance)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+    # warn_only lets non-deterministic ops fall back gracefully instead of hard-failing.
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
 
 def configure_logger(

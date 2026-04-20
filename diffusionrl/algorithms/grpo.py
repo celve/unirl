@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:
-    from diffusionrl.types.sampling import RolloutRequest
+    from diffusionrl.types.request import RolloutRequest
 
 import torch
 import torch.nn as nn
@@ -225,8 +225,9 @@ class GRPOAlgorithm(BaseAlgorithm):
                 f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
             )
 
-        all_step_labels = batch.step_labels
-        if not all_step_labels:
+        step_indices = batch.resolved_step_indices[:-1]
+        step_labels = set(int(v) for v in step_indices.tolist())
+        if not step_labels:
             return tuple()
 
         requested_steps = set(
@@ -235,22 +236,24 @@ class GRPOAlgorithm(BaseAlgorithm):
         )
         filtered_steps = self.get_filtered_training_indices(
             requested_steps,
-            len(all_step_labels),
+            len(step_labels),
         )
         missing_steps = sorted(
-            int(i) for i in filtered_steps if int(i) not in all_step_labels
+            int(i) for i in filtered_steps if int(i) not in step_labels
         )
         if missing_steps:
             raise ValueError(
                 f"{type(self).__name__}.resolve_training_timesteps selected steps "
                 f"not present in batch: missing={missing_steps}, "
-                f"available={sorted(all_step_labels)}"
+                f"available={sorted(step_labels)}"
             )
         if not filtered_steps:
             return tuple()
-        # With contiguous step_indices, step label == position, so we can
-        # directly index into batch.timesteps by step label.
-        selected_positions = sorted(filtered_steps)
+        selected_positions = [
+            pos
+            for pos, step_label in enumerate(step_indices.tolist())
+            if int(step_label) in filtered_steps
+        ]
         return batch.timesteps[selected_positions]
 
     # ==================================================================
@@ -339,12 +342,24 @@ class GRPOAlgorithm(BaseAlgorithm):
         timestep_idx = timestep_data.timestep_idx
 
         if old_log_probs is None:
-            raise ValueError(
-                f"log_prob missing for step {timestep_idx} in trajectory-RL path. "
-                f"Every step in batch.sde_indices must have a corresponding log_prob "
-                f"(SSOT contract violation). Check that assemble_training_batch and "
-                f"replay_logprob populate log_probs for all target_sde_indices."
+            if not getattr(self, "_logged_old_log_probs_none", False):
+                logger.info(
+                    "GRPO loss: old_log_probs is None at timestep_idx=%s — skipping as ode_step (will suppress further messages)",
+                    timestep_idx,
+                )
+                self._logged_old_log_probs_none = True
+            return torch.tensor(0.0, device=device, requires_grad=True), {
+                "skip_reason": "ode_step",
+                "timestep_idx": timestep_idx,
+            }
+        if not getattr(self, "_logged_old_log_probs_attached", False):
+            logger.info(
+                "GRPO loss: old_log_probs present at timestep_idx=%s, shape=%s, mean=%.4E",
+                timestep_idx,
+                tuple(old_log_probs.shape),
+                float(old_log_probs.mean().item()),
             )
+            self._logged_old_log_probs_attached = True
 
         _sigmas = sigmas if sigmas is not None else timestep_data.sigmas
         if _sigmas is not None:
@@ -396,6 +411,7 @@ class GRPOAlgorithm(BaseAlgorithm):
             _save_training_debug_tensor(_training_debug_dir, timestep_idx, "new_log_prob", new_log_prob, _rank, append=_append)
             _save_training_debug_tensor(_training_debug_dir, timestep_idx, "old_log_prob", old_log_probs, _rank, append=_append)
             _save_training_debug_tensor(_training_debug_dir, timestep_idx, "ratio", ratio, _rank, append=_append)
+            _save_training_debug_tensor(_training_debug_dir, timestep_idx, "advantages", advantages, _rank, append=_append)
             _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma", sigma.unsqueeze(0) if sigma.dim() == 0 else sigma, _rank)
             _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma_next", sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next, _rank)
             _save_training_debug_tensor(_training_debug_dir, timestep_idx, "sigma_max", torch.tensor([sigma_max]), _rank)
@@ -416,6 +432,27 @@ class GRPOAlgorithm(BaseAlgorithm):
         clipfrac_gt_one = (ratio - 1.0 > clip_range).float().mean()
         clipfrac_lt_one = (1.0 - ratio > clip_range).float().mean()
         approx_kl = 0.5 * torch.mean(log_prob_diff ** 2)
+
+        if not getattr(self, "_logged_loss_diag", False):
+            logger.warning(
+                "GRPO loss diag (one-shot): timestep_idx=%d adv[abs_mean=%.4E std=%.4E min=%.4E max=%.4E nonzero_frac=%.4f shape=%s] "
+                "ratio[mean=%.4E std=%.4E min=%.4E max=%.4E] clip_fraction=%.4f approx_kl=%.4E policy_loss=%.4E",
+                timestep_idx,
+                float(advantages.abs().mean().item()),
+                float(advantages.std().item()) if advantages.numel() > 1 else 0.0,
+                float(advantages.min().item()),
+                float(advantages.max().item()),
+                float((advantages != 0).float().mean().item()),
+                tuple(advantages.shape),
+                float(ratio.mean().item()),
+                float(ratio.std().item()) if ratio.numel() > 1 else 0.0,
+                float(ratio.min().item()),
+                float(ratio.max().item()),
+                float(clip_fraction.item()),
+                float(approx_kl.item()),
+                float(policy_loss.item()),
+            )
+            self._logged_loss_diag = True
 
         loss_terms = {
             "policy_loss": policy_loss.detach(),
@@ -475,15 +512,6 @@ class GRPOAlgorithm(BaseAlgorithm):
     ) -> tuple:
         """GRPO loss + backward for a single micro-batch.
 
-        Step selection follows a two-stage pipeline:
-          1. ``batch.sde_indices`` (rollout-time): steps that have valid
-             log_probs and trajectory data, set by ``assemble_training_batch``
-             from ``resolve_rollout_sde_indices``.
-          2. ``timesteps`` parameter (training-time): sigma values from
-             ``resolve_training_timesteps`` (via ``training_indices_scheduler``),
-             selecting which of those steps to actually train on this update.
-             When ``None``, all steps in ``batch.sde_indices`` are trained.
-
         Returns:
             ``(loss, metrics, num_timesteps, has_backward)``
         """
@@ -496,47 +524,10 @@ class GRPOAlgorithm(BaseAlgorithm):
 
         model.train()
 
-        # ---- step selection (two-stage) -------------------------------------
-        rollout_steps = batch.sde_indices
-
-        if timesteps is not None:
-            # Training-time selection: convert sigma values to step indices.
-            if torch.is_tensor(timesteps):
-                ts_flat = timesteps.detach().flatten()
-            else:
-                ts_flat = torch.as_tensor(
-                    list(timesteps),
-                    device=batch.timesteps.device,
-                    dtype=batch.timesteps.dtype,
-                )
-            if ts_flat.numel() == 0:
-                return 0.0, {}, 0, False
-            training_steps = sorted(set(
-                batch.get_step_for_timestep(t) for t in ts_flat
-            ))
-            # Validate: training steps must be within rollout steps.
-            outside = sorted(s for s in training_steps if s not in rollout_steps)
-            if outside:
-                raise ValueError(
-                    f"resolve_training_timesteps selected steps {outside} that "
-                    f"are outside batch.sde_indices={sorted(rollout_steps)}. "
-                    f"Training can only use steps with log_probs and trajectory "
-                    f"data from rollout."
-                )
-            valid_step_indices = training_steps
-        else:
-            # No training-time selection: train on all rollout steps.
-            # Validate against step_labels for SSOT consistency.
-            all_step_labels = batch.step_labels
-            outside = sorted(s for s in rollout_steps if s not in all_step_labels)
-            if outside:
-                raise ValueError(
-                    f"batch.sde_indices contains steps {outside} outside "
-                    f"batch.step_labels={sorted(all_step_labels)}. "
-                    f"SSOT contract violation."
-                )
-            valid_step_indices = sorted(rollout_steps)
-
+        available_steps = set(int(s) for s in batch.resolved_step_indices[:-1].tolist())
+        valid_step_indices = sorted(
+            int(i) for i in batch.sde_indices if int(i) in available_steps
+        )
         num_timesteps = len(valid_step_indices)
         if num_timesteps == 0:
             return 0.0, {}, 0, False

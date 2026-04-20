@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 from diffusionrl.samplers.base import BaseSampler
-from diffusionrl.types import RolloutSamples
+from diffusionrl.types.sample import RolloutSamples
 
 
 class MinimalSampler(BaseSampler):

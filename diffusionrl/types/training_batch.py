@@ -7,50 +7,10 @@ split with a single ``TrainingBatch`` class that stores:
 - ``forward_context``: model forward parameters via :class:`ForwardContext`
 - ``log_probs``, ``advantages``, ``timesteps``, etc.
 
-Coordinate system
------------------
-
-There is a single index space for denoising steps:
-
-  ``step_idx`` ∈ ``{0, 1, ..., T-1}``
-
-where ``T = timesteps.shape[0] - 1`` (the number of denoising steps).
-``step_idx`` directly indexes into:
-
-- ``timesteps[step_idx]`` → sigma for step ``step_idx``
-- ``timesteps[step_idx + 1]`` → sigma_next
-- ``trajectory_store.get_pair(step_idx)`` → ``(latents, next_latents)``
-- ``log_probs[step_idx]`` → old log_prob
-
-``step_idx`` IS the trajectory position — there is no separate "position"
-coordinate.  This is a structural guarantee, not a runtime assertion.
-
-SSOT contract (trajectory-RL path)
-----------------------------------
-
-For any batch whose trajectory store is **not** clean-latents-only, the
-following invariants hold and are enforced by :meth:`TrainingBatch.validate`:
-
-1. ``target_sde_indices`` is the **single source of truth** for the set of
-   step indices this batch trains on.  It is populated by
-   ``assemble_training_batch`` from the scheduler-provided ``sde_indices``,
-   narrowed only by ``get_filtered_training_indices`` (skip_last_timestep /
-   skip_initial_timesteps).  Any mismatch with ``trajectory_store`` or
-   ``log_probs`` raises — no silent clamping.
-2. When ``log_probs`` is present and non-empty,
-   ``log_probs.data.keys() == target_sde_indices``.  On the normal
-   trajectory-RL path ``assemble_training_batch`` guarantees ``log_probs``
-   is always populated, so this is effectively unconditional in practice.
-3. For every ``idx`` in ``target_sde_indices``, both position ``idx`` and
-   position ``idx + 1`` are stored in ``trajectory_store``.
-4. ``batch.sde_indices`` returns ``target_sde_indices`` directly, so all
-   downstream consumers (GRPO loss, replay, metrics) see the same step set.
-
 NFT compatibility:
 
 - ``batch.clean_latents`` returns ``trajectory_store.clean_latents``
 - ``batch.has_trajectory_rl_data`` returns ``False`` when log_probs is empty
-- NFT batches skip the SSOT invariants above (clean-latents-only path)
 
 GRPO compatibility:
 
@@ -61,53 +21,19 @@ GRPO compatibility:
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
 import torch
 
-from .batch_ops import (
-    batch_clone,
-    batch_concat,
-    batch_move,
-    batch_reindex,
-    batch_slice,
-)
+from diffusionrl.utils.batched import Batched, concat_field, shared_field
+from diffusionrl.types.prompts import Prompts
 from .forward_context import ForwardContext
-from .sampling import LogProbData
+from diffusionrl.types.sample import LogProbData
 from .trajectory_store import TrajectoryStore
 
 if TYPE_CHECKING:
     from torch import device as TorchDevice
-
-
-def build_rollout_extras(*, request: Any, sampler_outputs: List[Any]) -> Dict[str, Any]:
-    extras: Dict[str, Any] = {}
-
-    request_meta = getattr(request, "meta", None)
-    if isinstance(request_meta, dict) and request_meta:
-        extras["request_meta"] = batch_clone(request_meta)
-
-    sample_meta_values: List[Any] = []
-    sample_meta_batch_sizes: List[int] = []
-    for output in sampler_outputs:
-        meta = getattr(output, "meta", None)
-        latents = getattr(output, "latents", None)
-        if not isinstance(meta, dict) or not meta:
-            continue
-        if not torch.is_tensor(latents):
-            continue
-        sample_meta_values.append(meta)
-        sample_meta_batch_sizes.append(int(latents.shape[0]))
-    if sample_meta_values:
-        extras["sample_meta"] = batch_concat(
-            sample_meta_values,
-            batch_sizes=sample_meta_batch_sizes,
-            deep_clone=True,
-            strict=False,
-        )
-
-    return extras
 
 
 @dataclass
@@ -142,27 +68,28 @@ class TimestepData:
 
 
 @dataclass
-class TrainingBatch:
+class TrainingBatch(Batched):
     """Unified training batch for all algorithms.
 
     Combines what was previously ``BackwardTrainingBatch`` (GRPO)
     and ``ForwardTrainingBatch`` (NFT) into a single type.
     """
 
-    trajectory_store: TrajectoryStore
-    timesteps: torch.Tensor
-    advantages: torch.Tensor
-    forward_context: ForwardContext
+    # Required fields (no defaults) — must come first for dataclass
+    trajectory_store: TrajectoryStore = concat_field()
+    timesteps: torch.Tensor = shared_field()
+    advantages: torch.Tensor = concat_field()
+    forward_context: ForwardContext = concat_field()
 
-    log_probs: Optional[LogProbData] = None
-    rewards: Optional[torch.Tensor] = None
-    prompts: Optional[List[str]] = None
-    prompt_ids: Optional[List[str]] = None
-    sample_ids: Optional[List[str]] = None
-    group_ids: Optional[List[str]] = None
-    is_partitioned: bool = False
-    target_sde_indices: Optional[Set[int]] = None
-    extras: Dict[str, Any] = field(default_factory=dict)
+    # Optional per-sample fields
+    log_probs: Optional[LogProbData] = concat_field(default=None)
+    rewards: Optional[torch.Tensor] = concat_field(default=None)
+    prompts: Optional[Prompts] = concat_field(default=None)
+    extras: Dict[str, Any] = concat_field(default_factory=dict)
+
+    # Optional shared fields
+    step_indices: Optional[torch.Tensor] = shared_field(default=None)
+    target_sde_indices: Optional[Set[int]] = shared_field(default=None)
 
     # ---- core properties ----------------------------------------------------
 
@@ -173,6 +100,20 @@ class TrainingBatch:
     @property
     def device(self) -> torch.device:
         return self.trajectory_store.device
+
+    # ---- prompt ID compat properties -----------------------------------------
+
+    @property
+    def prompt_ids(self) -> Optional[List[str]]:
+        return self.prompts.prompt_ids if self.prompts is not None else None
+
+    @property
+    def sample_ids(self) -> Optional[List[str]]:
+        return self.prompts.sample_ids if self.prompts is not None else None
+
+    @property
+    def group_ids(self) -> Optional[List[str]]:
+        return self.prompts.group_ids if self.prompts is not None else None
 
     # ---- trajectory access (GRPO compat) ------------------------------------
 
@@ -203,75 +144,59 @@ class TrainingBatch:
         """True when this batch carries trajectory RL data (GRPO-style)."""
         return (
             self.log_probs is not None
-            and len(self.log_probs) > 0
+            and len(self.log_probs.data) > 0
             and not self.trajectory_store.is_clean_latents_only
         )
 
     # ---- SDE step indexing --------------------------------------------------
 
     @property
-    def num_steps(self) -> int:
-        """Number of denoising steps T.  ``timesteps`` has T+1 elements."""
-        return int(self.timesteps.shape[0]) - 1
-
-    @property
     def sde_indices(self) -> Set[int]:
-        """Step indices this batch trains on (single source of truth).
-
-        Returns ``target_sde_indices`` for the trajectory-RL path (populated
-        by ``assemble_training_batch`` from ``scheduler.resolve_rollout_sde_indices``).
-        Returns an empty set on the NFT / clean-latents-only path, which does
-        not train per step.
-        """
-        if self.target_sde_indices is None:
-            return set()
-        return set(int(i) for i in self.target_sde_indices)
+        """Timestep indices that used SDE (have log_probs)."""
+        if self.log_probs is not None and len(self.log_probs.data) > 0:
+            return set(int(k) for k in self.log_probs.data.keys())
+        if self.target_sde_indices is not None:
+            return set(int(i) for i in self.target_sde_indices)
+        return set()
 
     @property
     def resolved_step_indices(self) -> torch.Tensor:
-        """Compatibility shim — returns ``[0, 1, ..., T]``.
-
-        .. deprecated:: Derived from ``num_steps``.  Prefer ``num_steps``
-           and ``step_labels`` for new code.  Do not extend this property
-           to support non-contiguous indices.
-        """
+        """Explicit step labels aligned with timesteps/trajectory axis."""
+        if self.step_indices is not None:
+            return self.step_indices
         return torch.arange(
-            self.num_steps + 1,
-            device=self.timesteps.device,
-            dtype=torch.long,
+            self.timesteps.shape[0], device=self.timesteps.device, dtype=torch.long
         )
 
-    @property
-    def step_labels(self) -> Set[int]:
-        """Trainable step labels ``{0, 1, ..., T-1}``.
-
-        Each step ``i`` uses trajectory positions ``i`` and ``i+1``.
-        Derived from ``num_steps``.
-        """
-        return set(range(self.num_steps))
+    def _is_contiguous_step_index(self) -> bool:
+        steps = self.resolved_step_indices
+        expected = torch.arange(steps.shape[0], device=steps.device, dtype=steps.dtype)
+        return bool(torch.equal(steps, expected))
 
     def get_position_for_step(self, step_idx: int) -> int:
-        """Validate and return step_idx as a trajectory position.
-
-        ``step_idx`` IS the position (structural guarantee).  This method
-        only does bounds checking and trajectory-pair validation.
-        """
-        pos = int(step_idx)
-        T = self.num_steps
-        if pos < 0 or pos >= T:
+        """Map a logical step label to trajectory position index."""
+        steps = self.resolved_step_indices
+        hits = (steps == int(step_idx)).nonzero(as_tuple=False)
+        if hits.numel() == 0:
             raise ValueError(
-                f"step_idx={step_idx} out of range [0, {T})"
+                f"step_idx={step_idx} not present in step_indices={steps.tolist()}"
             )
+        pos = int(hits[0].item())
         if not self.trajectory_store.has_position(pos) or not self.trajectory_store.has_position(pos + 1):
             raise ValueError(
-                f"step_idx={step_idx} requires positions {pos} and {pos + 1} "
-                f"but trajectory_store only has: "
-                f"{self.trajectory_store.stored_positions}"
+                f"step_idx={step_idx} maps to position {pos} but the (pos, pos+1) pair "
+                f"is not available in trajectory_store "
+                f"(stored positions: {self.trajectory_store.stored_positions})"
             )
         return pos
 
     def get_timestep_data(self, t_idx: int) -> TimestepData:
-        """Extract data for a specific step index."""
+        """Extract data for a specific trajectory position index."""
+        if not self._is_contiguous_step_index():
+            raise ValueError(
+                "Non-contiguous step_indices detected. "
+                "Use get_timestep_data_by_step(step_idx) instead."
+            )
         log_prob = self.log_probs[t_idx] if self.log_probs is not None else None
         latents, next_latents = self.trajectory_store.get_pair(t_idx)
         return TimestepData(
@@ -285,13 +210,19 @@ class TrainingBatch:
         )
 
     def get_timestep_data_by_step(self, step_idx: int) -> TimestepData:
-        """Extract all data needed for loss computation at a given step.
-
-        Validates step_idx bounds and trajectory-pair availability,
-        then delegates to ``get_timestep_data``.
-        """
+        """Extract data for a logical step label from step_indices."""
         pos = self.get_position_for_step(step_idx)
-        return self.get_timestep_data(pos)
+        log_prob = self.log_probs[int(step_idx)] if self.log_probs is not None else None
+        latents, next_latents = self.trajectory_store.get_pair(pos)
+        return TimestepData(
+            latents=latents,
+            next_latents=next_latents,
+            log_prob=log_prob,
+            sigma=self.timesteps[pos],
+            sigma_next=self.timesteps[pos + 1],
+            timestep_idx=int(step_idx),
+            sigmas=self.timesteps,
+        )
 
     # ---- timestep lookup by value -------------------------------------------
 
@@ -301,50 +232,25 @@ class TrainingBatch:
         return self.get_timestep_data_by_step(step_idx)
 
     def get_step_for_timestep(self, timestep: Any) -> int:
-        """Resolve the step label corresponding to a timestep sigma value.
-
-        Searches ``timesteps[:-1]`` (the T denoising sigmas) for a match.
-        Since step_idx == position, the array index IS the step label.
-        """
+        """Resolve the logical step label corresponding to a timestep value."""
         timestep_tensor = torch.as_tensor(
             timestep,
             device=self.timesteps.device,
             dtype=self.timesteps.dtype,
         )
-        if timestep_tensor.ndim > 0:
-            timestep_tensor = timestep_tensor.flatten()[0]
-        matches = (self.timesteps[:-1] - timestep_tensor).abs() < 1e-6
-        hits = matches.nonzero(as_tuple=False)
+        hits = (self.timesteps[:-1] == timestep_tensor).nonzero(as_tuple=False)
         if hits.numel() == 0:
             raise ValueError(
-                f"timestep={timestep_tensor.item()!r} not found in "
-                f"timesteps={self.timesteps[:-1].tolist()}"
+                f"timestep={timestep_tensor.item()!r} not present in timesteps={self.timesteps[:-1].tolist()}"
             )
-        return int(hits[0].item())
+        pos = int(hits[0].item())
+        return int(self.resolved_step_indices[pos].item())
 
     # ---- validation ---------------------------------------------------------
 
     def validate(self) -> None:
-        """Validate batch consistency.
-
-        Structural invariant:
-          ``step_idx == position``.  ``T = timesteps.shape[0] - 1`` is the
-          sole source for the number of denoising steps.
-
-        Trajectory-RL invariants (enforced on non-NFT paths):
-          (I1) ``target_sde_indices`` is set and ``⊆ {0..T-1}``.
-          (I2) When ``log_probs`` is present and non-empty,
-               ``log_probs.data.keys() == target_sde_indices``.
-               (On the normal trajectory-RL path, ``assemble_training_batch``
-               guarantees ``log_probs`` is always populated, so this is
-               effectively unconditional in practice.)
-          (I3) every idx in ``target_sde_indices`` has both position ``idx``
-               and ``idx + 1`` stored in ``trajectory_store``.
-
-        NFT / clean-latents-only batches skip the trajectory-RL invariants.
-        """
+        """Validate batch consistency."""
         bs = self.batch_size
-        T = self.num_steps
 
         if self.advantages.shape[0] != bs:
             raise ValueError(
@@ -352,59 +258,52 @@ class TrainingBatch:
                 f"trajectory batch size {bs}"
             )
 
-        # Structural guard: timesteps length must agree with full trajectory.
         if self.trajectory_store.is_full:
-            if self.trajectory_store.num_stored != T + 1:
+            steps_count = self.trajectory_store.num_stored - 1
+            if self.timesteps.shape[0] != steps_count + 1:
                 raise ValueError(
-                    f"Timesteps imply T={T} (len={T + 1}) but trajectory_store "
-                    f"has {self.trajectory_store.num_stored} positions."
+                    f"Timesteps length {self.timesteps.shape[0]} != "
+                    f"expected {steps_count + 1}"
+                )
+
+            step_indices = self.resolved_step_indices
+            if int(step_indices.shape[0]) != steps_count + 1:
+                raise ValueError(
+                    f"Step indices length {step_indices.shape[0]} != expected {steps_count + 1}"
+                )
+            if step_indices.numel() > 1 and not bool(
+                torch.all(step_indices[1:] > step_indices[:-1])
+            ):
+                raise ValueError(
+                    f"step_indices must be strictly increasing, got: {step_indices.tolist()}"
                 )
             if self.target_sde_indices is not None:
+                allowed_steps = set(int(v) for v in step_indices[:-1].tolist())
                 bad = sorted(
-                    int(i) for i in self.target_sde_indices
-                    if int(i) < 0 or int(i) >= T
+                    int(i) for i in self.target_sde_indices if int(i) not in allowed_steps
                 )
                 if bad:
                     raise ValueError(
                         f"target_sde_indices contain out-of-range steps: {bad}, "
-                        f"allowed=range(0, {T})"
+                        f"allowed={sorted(allowed_steps)}"
                     )
 
-        # Trajectory-RL SSOT invariants. Skip for NFT (clean_latents_only) path.
-        if not self.trajectory_store.is_clean_latents_only:
-            if self.target_sde_indices is None:
-                raise ValueError(
-                    "Trajectory-RL TrainingBatch requires target_sde_indices to be set "
-                    "(it is the single source of truth for trainable step indices)."
-                )
-            target = set(int(i) for i in self.target_sde_indices)
-            if self.log_probs is not None and len(self.log_probs) > 0:
-                lp_keys = set(int(k) for k in self.log_probs.data.keys())
-                extra_keys = sorted(lp_keys - target)
-                if extra_keys:
-                    raise ValueError(
-                        f"log_probs has keys outside target_sde_indices: "
-                        f"extra={extra_keys}, target={sorted(target)}"
-                    )
-                missing_keys = sorted(target - lp_keys)
-                if missing_keys:
-                    raise ValueError(
-                        f"log_probs missing keys required by target_sde_indices: "
-                        f"missing={missing_keys}, target={sorted(target)}, "
-                        f"log_probs_keys={sorted(lp_keys)}"
-                    )
-            for idx in sorted(target):
-                if not self.trajectory_store.has_position(idx):
-                    raise ValueError(
-                        f"target_sde_indices step {idx} not stored in trajectory "
-                        f"(stored: {self.trajectory_store.stored_positions})"
-                    )
-                if not self.trajectory_store.has_position(idx + 1):
-                    raise ValueError(
-                        f"target_sde_indices step {idx} requires position {idx + 1} "
-                        f"but it is not stored in trajectory "
-                        f"(stored: {self.trajectory_store.stored_positions})"
-                    )
+        elif self.trajectory_store.is_selective:
+            # Selective store: only validate that target_sde_indices
+            # have both (pos, pos+1) positions stored.
+            if self.target_sde_indices is not None:
+                for idx in sorted(self.target_sde_indices):
+                    if not self.trajectory_store.has_position(idx):
+                        raise ValueError(
+                            f"target_sde_indices step {idx} not stored in "
+                            f"selective trajectory (stored: {self.trajectory_store.stored_positions})"
+                        )
+                    if not self.trajectory_store.has_position(idx + 1):
+                        raise ValueError(
+                            f"target_sde_indices step {idx} requires position {idx + 1} "
+                            f"but it is not stored in selective trajectory "
+                            f"(stored: {self.trajectory_store.stored_positions})"
+                        )
 
         ctx_bs = self.forward_context.batch_size
         if ctx_bs > 0 and ctx_bs != bs:
@@ -425,91 +324,6 @@ class TrainingBatch:
                         f"{log_prob.shape[0]} != {bs}"
                     )
 
-    # ---- batch operations ---------------------------------------------------
-
-    def to_device(self, device: Union[str, "TorchDevice"]) -> "TrainingBatch":
-        """Move all tensors to specified device."""
-        return TrainingBatch(
-            trajectory_store=self.trajectory_store.to_device(device),
-            timesteps=self.timesteps.to(device),
-            advantages=self.advantages.to(device),
-            forward_context=self.forward_context.to_device(device),
-            log_probs=self.log_probs.to_device(device) if self.log_probs is not None else None,
-            rewards=self.rewards.to(device) if self.rewards is not None else None,
-            prompts=self.prompts,
-            prompt_ids=self.prompt_ids,
-            sample_ids=self.sample_ids,
-            group_ids=self.group_ids,
-            is_partitioned=self.is_partitioned,
-            target_sde_indices=self.target_sde_indices,
-            extras=batch_move(self.extras, device),
-        )
-
-    def slice(self, start: int, end: int) -> "TrainingBatch":
-        """Slice batch along sample dimension for micro-batch gradient accumulation."""
-        return TrainingBatch(
-            trajectory_store=self.trajectory_store.slice_batch(start, end),
-            timesteps=self.timesteps,
-            advantages=self.advantages[start:end].clone(),
-            forward_context=self.forward_context.slice(start, end),
-            log_probs=self.log_probs.slice(start, end) if self.log_probs is not None else None,
-            rewards=self.rewards[start:end].clone() if self.rewards is not None else None,
-            prompts=self.prompts[start:end] if self.prompts is not None else None,
-            prompt_ids=self.prompt_ids[start:end] if self.prompt_ids is not None else None,
-            sample_ids=self.sample_ids[start:end] if self.sample_ids is not None else None,
-            group_ids=self.group_ids[start:end] if self.group_ids is not None else None,
-            is_partitioned=True,
-            target_sde_indices=self.target_sde_indices,
-            extras=batch_slice(
-                self.extras,
-                batch_size=int(self.batch_size),
-                start=start,
-                end=end,
-                recursive=True,
-                deep_clone=True,
-            ),
-        )
-
-    def shuffle(self, indices: torch.Tensor) -> "TrainingBatch":
-        """Shuffle (reindex) batch along sample dimension."""
-        return TrainingBatch(
-            trajectory_store=self.trajectory_store.reindex_batch(indices),
-            timesteps=self.timesteps,
-            advantages=self.advantages[indices],
-            forward_context=self.forward_context.reindex(indices),
-            log_probs=self.log_probs.reindex(indices) if self.log_probs is not None else None,
-            rewards=self.rewards[indices] if self.rewards is not None else None,
-            prompts=(
-                [self.prompts[i] for i in indices.tolist()]
-                if self.prompts is not None
-                else None
-            ),
-            prompt_ids=(
-                [self.prompt_ids[i] for i in indices.tolist()]
-                if self.prompt_ids is not None
-                else None
-            ),
-            sample_ids=(
-                [self.sample_ids[i] for i in indices.tolist()]
-                if self.sample_ids is not None
-                else None
-            ),
-            group_ids=(
-                [self.group_ids[i] for i in indices.tolist()]
-                if self.group_ids is not None
-                else None
-            ),
-            is_partitioned=self.is_partitioned,
-            target_sde_indices=self.target_sde_indices,
-            extras=batch_reindex(
-                self.extras,
-                indices=indices,
-                batch_size=int(self.batch_size),
-                recursive=True,
-                deep_clone=True,
-            ),
-        )
-
     # ---- modality detection -------------------------------------------------
 
     def detect_modality(self) -> str:
@@ -521,5 +335,4 @@ __all__ = [
     "TimestepData",
     "TrainingBatch",
     "TrajectoryStore",
-    "build_rollout_extras",
 ]

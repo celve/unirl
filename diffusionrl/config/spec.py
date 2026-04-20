@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from diffusionrl.types.engine import ROLLOUT_ENGINE_TYPES
+
+if TYPE_CHECKING:
+    from diffusionrl.types.sampling import SamplingParams
 
 @dataclass(frozen=True)
 class SamplingSpec:
@@ -66,6 +69,35 @@ class SamplingSpec:
             }
         )
         return payload
+
+    def to_params(self, precision_settings: Any) -> "SamplingParams":
+        """Project this config-layer view into the runtime SamplingParams contract.
+
+        Drops dotpath fields (sampler_dotpath, replay_sampler_dotpath,
+        sampling_adapter) which flow through engine init payloads, not
+        through SamplingParams. ``num_samples_per_prompt`` and ``sde_indices``
+        stay at defaults — RolloutPipeline.plan_requests stamps them per step.
+        """
+        from diffusionrl.types.sampling import SDEConfig, SamplingParams
+
+        return SamplingParams(
+            num_inference_steps=int(self.num_inference_steps),
+            guidance_scale=float(self.guidance_scale),
+            height=int(self.height),
+            width=int(self.width),
+            num_frames=int(self.num_frames),
+            seed=int(self.seed),
+            init_same_noise=bool(self.init_same_noise),
+            sde_config=SDEConfig(
+                eta=float(self.eta),
+                sde_type=str(self.sde_type),
+                shift=float(self.shift),
+            ),
+            sampler_kwargs=dict(self.sampler_kwargs),
+            autocast_precision=precision_settings.rollout_autocast_precision,
+            trajectory_precision=precision_settings.trajectory_precision,
+            logprob_precision=precision_settings.logprob_precision,
+        )
 
 
 @dataclass(frozen=True)

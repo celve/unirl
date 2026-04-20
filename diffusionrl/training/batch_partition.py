@@ -56,7 +56,7 @@ def shard_training_batch_for_rank(
     resolved_dp_size = int(dp_size)
     if resolved_dp_size <= 0:
         raise ValueError(f"dp_size must be positive, got {dp_size}.")
-    if resolved_dp_size <= 1 or getattr(batch, "is_partitioned", False):
+    if resolved_dp_size <= 1:
         return batch
 
     if rank < 0 or rank >= resolved_dp_size:

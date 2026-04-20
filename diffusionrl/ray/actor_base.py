@@ -4,135 +4,21 @@ diffusionrl Ray Actor Base Classes.
 import abc
 import logging
 import os
-import socket
-from typing import Any, Optional, Tuple
+from typing import Optional
 
 import torch
+
+from diffusionrl.ray.utils.net import get_free_port, get_node_ip
 
 logger = logging.getLogger(__name__)
 
 
-# ============================================================
-# Shared utility functions for all actors (Training & Rollout)
-# ============================================================
-
-
-def _gpu_debug_enabled() -> bool:
-    return os.getenv("DIFFUSIONRL_LOG_GPU", "0").lower() in ("1", "true", "yes")
-
-
-def log_resource_ids(tag: str, rank: int) -> None:
-    """Log Ray resource IDs for GPU debugging.
-
-    Toggle with ``DIFFUSIONRL_LOG_GPU=1``.
-    """
-    if not _gpu_debug_enabled():
-        return
-    try:
-        import ray
-        ctx = ray.get_runtime_context()
-        resources = ctx.get_resource_ids()
-        logger.info(f"[GPU_RES] {tag} rank={rank} resources={resources}")
-    except Exception as e:
-        logger.warning(f"[GPU_RES] {tag} failed: {e}")
-
-
-def log_gpu_state(tag: str, rank: int, device: Any = None, offloaded: Any = None) -> None:
-    """Log GPU memory state for GPU debugging.
-
-    Toggle with ``DIFFUSIONRL_LOG_GPU=1``.
-    """
-    if not _gpu_debug_enabled():
-        return
-    try:
-        pid = os.getpid()
-        cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-        device_str = device if device is not None else "none"
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1e9
-            reserved = torch.cuda.memory_reserved() / 1e9
-        else:
-            allocated = 0.0
-            reserved = 0.0
-        logger.info(
-            "[GPU_STATE] %s rank=%s pid=%s cuda_visible=%s device=%s allocated_gb=%.3f "
-            "reserved_gb=%.3f offloaded=%s",
-            tag, rank, pid, cuda_visible, device_str, allocated, reserved, offloaded,
-        )
-    except Exception as e:
-        logger.warning(f"[GPU_STATE] {tag} failed: {e}")
 class RayActor:
+    """Marker base class for all diffusionrl Ray actors.
+
+    Stateless helpers previously attached here now live in
+    ``diffusionrl.ray.utils`` (``net``, ``gpu``, ``node``).
     """
-    Ray Actor base class - provides infrastructure functionality.
-
-    This class provides common utilities for all Ray actors including:
-    - Network configuration (getting IP and free ports)
-    - Master address/port setup for distributed training
-    """
-
-    @staticmethod
-    def _get_current_node_ip() -> str:
-        """Get the IP address of the current node."""
-        return socket.gethostbyname(socket.gethostname())
-
-    @staticmethod
-    def _get_free_port(start_port: int = 10000, max_attempts: int = 100) -> int:
-        """
-        Find a free port starting from start_port.
-
-        Args:
-            start_port: Port number to start searching from
-            max_attempts: Maximum number of ports to try
-
-        Returns:
-            A free port number
-        """
-        for port in range(start_port, start_port + max_attempts):
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.bind(("", port))
-                sock.close()
-                return port
-            except OSError:
-                continue
-        raise RuntimeError(f"Could not find free port in range {start_port}-{start_port + max_attempts}")
-
-    @staticmethod
-    def _get_current_node_ip_and_free_port(
-        start_port: int = 10000,
-        consecutive: int = 1,
-    ) -> Tuple[str, int]:
-        """
-        Get current node IP and a free port.
-
-        Args:
-            start_port: Port number to start searching from
-            consecutive: Number of consecutive free ports needed
-
-        Returns:
-            Tuple of (ip_address, port)
-        """
-        ip = RayActor._get_current_node_ip()
-
-        if consecutive <= 1:
-            port = RayActor._get_free_port(start_port)
-            return ip, port
-
-        # Find consecutive free ports
-        for port in range(start_port, start_port + 10000):
-            all_free = True
-            for offset in range(consecutive):
-                try:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.bind(("", port + offset))
-                    sock.close()
-                except OSError:
-                    all_free = False
-                    break
-            if all_free:
-                return ip, port
-
-        raise RuntimeError(f"Could not find {consecutive} consecutive free ports")
 
 
 class BaseTrainRayActor(RayActor):
@@ -166,14 +52,10 @@ class BaseTrainRayActor(RayActor):
 
     def get_master_info(self, start_port: int = 10000) -> dict:
         """Return this actor's node IP and a free port for distributed master."""
-        try:
-            import ray._private.services
-
-            master_addr = str(ray._private.services.get_node_ip_address())
-        except Exception:
-            master_addr = self._get_current_node_ip()
-        master_port = self._get_free_port(start_port)
-        return {"master_addr": master_addr, "master_port": int(master_port)}
+        return {
+            "master_addr": get_node_ip(),
+            "master_port": int(get_free_port(start_port)),
+        }
 
     def set_master_info(self, master_addr: str, master_port: int) -> None:
         """Override distributed master endpoint before process-group init."""

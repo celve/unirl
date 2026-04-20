@@ -1,110 +1,394 @@
-"""FSDP2 training backend implementation."""
+"""FSDP2 training backend conforming to the new TrainBackend protocol."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, ClassVar, Dict, Optional, Tuple
 
 import torch
+from torch import nn
 
-from diffusionrl.utils.dtypes import parse_torch_dtype
-
-from .base import (
-    BaseTrainBackendConfig,
-    TrainBackend,
-    TrainBackendCapabilities,
-    TrainTopology,
+from diffusionrl.config.training_sections import LrSchedulerConfig, OptimizerConfig
+from diffusionrl.models.base import ModelBundle
+from diffusionrl.training.backends.base import TrainBackendConfig
+from diffusionrl.training.backends.protocols import (
+    LRSchedulerProtocol,
+    OptimizerProtocol,
 )
-from .registry import register_train_backend
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+
 
 @dataclass(frozen=True)
-class FSDPTrainBackendConfig(BaseTrainBackendConfig):
-    name: str = "fsdp"
-    cpu_offload: bool = False
-    param_dtype: str = "bf16"
-    use_fsdp: bool = True
-    mixed_precision: bool = True
-    fsdp_mode: str = "full"  # "full" = shard across all ranks; "hybrid" = HSDP, shard within node (8 GPUs)
-    reshard_after_forward: bool = True  # True = free full params after fwd (save mem); False = keep them (save bwd allgather)
+class FSDPBackendConfig(TrainBackendConfig):
+    """Config for the FSDP2 training backend.
 
-
-@register_train_backend(component_name="fsdp", component_cfg=FSDPTrainBackendConfig)
-class FSDPTrainBackend(TrainBackend):
-    """FSDP2 backend (composable fully_shard).
-
-    Notes:
-    - Requires a torch build exposing `torch.distributed.fsdp.fully_shard`
-      and distributed checkpoint state-dict helpers.
-    - `use_fsdp=false` still keeps no-wrap debug behavior for local validation.
+    Pure FSDP-specific settings. ``name`` is a ClassVar (not a dataclass
+    field) so validation / schema code that expects ``config.name`` keeps
+    working, without polluting the frozen-dataclass init signature.
     """
 
-    BACKEND_NAME = "fsdp"
+    name: ClassVar[str] = "fsdp"
 
-    def __init__(self, config: FSDPTrainBackendConfig) -> None:
-        super().__init__(config)
-        self._use_fsdp = bool(config.use_fsdp)
-        self._fsdp_config: Dict[str, Any] = {
-            "cpu_offload": bool(config.cpu_offload),
-            "param_dtype": str(config.param_dtype),
-            "mixed_precision": bool(config.mixed_precision),
-            "fsdp_mode": str(config.fsdp_mode).strip().lower(),
-            "reshard_after_forward": bool(config.reshard_after_forward),
-        }
-        self._device_mesh: Optional[Any] = None  # cached DeviceMesh for HSDP
+    cpu_offload: bool = False
+    param_dtype: torch.dtype = torch.bfloat16
+    mixed_precision: bool = True
+    fsdp_mode: str = "full"
+    reshard_after_forward: bool = True
 
-    @classmethod
-    def declared_capabilities(cls) -> TrainBackendCapabilities:
-        return TrainBackendCapabilities(
-            name=cls.BACKEND_NAME,
-            distributed_backend="nccl",
-            supports_training_actor_sampling=True,
-            buffer_partition_mode="data_parallel",
-            supports_state_dict_export=True,
-            supports_custom_optimizer=False,
-            supports_custom_scheduler=False,
-            supports_custom_train_step=False,
-            supports_backend_managed_offload=False,
-            preferred_weight_export_format="state_dict",
-            preferred_weight_export_format_by_rollout_engine={"sglang": "sglang_transformer_safetensors"},
-            supported_weight_export_formats=("state_dict", "sglang_transformer_safetensors"),
-            notes=(
-                "Default backend. Uses FSDP2 fully_shard path. "
-                "Requires torch with composable FSDP2 + distributed checkpoint state-dict APIs "
-                "(recommended torch>=2.6)."
-            ),
+
+class FSDPBackend:
+    def __init__(
+        self,
+        config: FSDPBackendConfig,
+        model_bundle: ModelBundle,
+    ) -> None:
+        self.config = config
+        self.model_bundle: ModelBundle = model_bundle
+        self.model: nn.Module = model_bundle.transformer
+
+        self.last_grad_norm: Optional[torch.Tensor] = None
+
+        # Capture the target device before any offload happens so onload
+        # can restore params to the same place.
+        self._device = self._infer_device(self.model)
+        self._is_offloaded = False
+        self._device_mesh: Optional[Any] = None
+        self._wrap_model()
+
+    # ------------------------------------------------------------------
+    # FSDP2 wrap
+    # ------------------------------------------------------------------
+
+    def _wrap_model(self) -> None:
+        from torch.distributed.fsdp import (
+            CPUOffloadPolicy,
+            MixedPrecisionPolicy,
+            fully_shard,
         )
 
-    def uses_sharded_model(self) -> bool:
-        return bool(self._use_fsdp)
+        fsdp_kwargs: Dict[str, Any] = {
+            "reshard_after_forward": bool(self.config.reshard_after_forward),
+        }
 
-    def before_model_load(self, actor: Any) -> None:
-        actor._fsdp_cpu_offload = bool(self._fsdp_config.get("cpu_offload", False) and self._use_fsdp)
+        if self.config.mixed_precision:
+            fsdp_kwargs["mp_policy"] = MixedPrecisionPolicy(
+                param_dtype=self.config.param_dtype,
+                reduce_dtype=torch.float32,
+            )
+
+        if self.config.cpu_offload:
+            fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
+
+        mesh = self._create_device_mesh()
+        if mesh is not None:
+            fsdp_kwargs["mesh"] = mesh
+            self._device_mesh = mesh
+
+        target_modules = self._iter_target_modules()
+        for module in target_modules:
+            fully_shard(module, **fsdp_kwargs)
+
+        fully_shard(self.model, **fsdp_kwargs)
+        logger.info(
+            "FSDPBackend: model wrapped with %s fully_shard "
+            "(target_modules=%d, cpu_offload=%s, mixed_precision=%s, "
+            "reshard_after_forward=%s)",
+            "HSDP" if mesh is not None else "FSDP2",
+            len(target_modules),
+            self.config.cpu_offload,
+            self.config.mixed_precision,
+            fsdp_kwargs["reshard_after_forward"],
+        )
+
+    def _create_device_mesh(self) -> Optional[Any]:
+        """Create a 2D DeviceMesh for HSDP (hybrid mode).
+
+        Shards within groups of 8 GPUs (one node), replicates across nodes.
+        Returns ``None`` for ``full`` mode, for world_size <= 8 (no benefit),
+        or when world_size is not a multiple of 8 (no safe grouping).
+        """
+        fsdp_mode = str(self.config.fsdp_mode).strip().lower()
+        if fsdp_mode != "hybrid":
+            return None
+
+        import torch.distributed as dist
+
+        if not (dist.is_available() and dist.is_initialized()):
+            return None
+
+        world_size = dist.get_world_size()
+        shard_size = 8
+        if world_size <= shard_size:
+            logger.info(
+                "FSDPBackend: hybrid requested but world_size=%d <= %d; "
+                "falling back to pure FSDP.",
+                world_size, shard_size,
+            )
+            return None
+        if world_size % shard_size != 0:
+            logger.warning(
+                "FSDPBackend: hybrid requested but world_size=%d is not a "
+                "multiple of %d; falling back to pure FSDP.",
+                world_size, shard_size,
+            )
+            return None
+
+        from torch.distributed.device_mesh import init_device_mesh
+
+        replicate_size = world_size // shard_size
+        mesh = init_device_mesh(
+            "cuda",
+            (replicate_size, shard_size),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
+        )
+        logger.info(
+            "FSDPBackend: HSDP mesh dp_replicate=%d × dp_shard=%d",
+            replicate_size, shard_size,
+        )
+        return mesh
+
+    def _iter_target_modules(self) -> Tuple[nn.Module, ...]:
+        if self.model_bundle is None:
+            return tuple()
+        if not hasattr(self.model_bundle, "get_no_split_modules"):
+            return tuple()
+
+        no_split_modules = self.model_bundle.get_no_split_modules()
+        if not isinstance(no_split_modules, tuple) or not no_split_modules:
+            return tuple()
+
+        targets: list[nn.Module] = []
+        for _name, module in self.model.named_modules():
+            if isinstance(module, no_split_modules):
+                targets.append(module)
+        return tuple(targets)
+
+    # ------------------------------------------------------------------
+    # Protocol: state dict
+    # ------------------------------------------------------------------
+
+    def get_state_dict(self, *, lora_only: bool = False) -> Dict[str, Any]:
+        """Return a model state dict on rank 0 (empty dict elsewhere).
+
+        When ``lora_only`` is set, only LoRA adapter parameters are returned.
+        The peft-aware path is preferred; if peft is unavailable or the model
+        has no peft config, fall back to substring-matching ``"lora"`` in
+        parameter keys. If neither yields any LoRA parameters, raise.
+        """
+        from torch.distributed.checkpoint.state_dict import get_model_state_dict
+
+        options = self._build_state_dict_options(
+            full_state_dict=True,
+            cpu_offload=True,
+        )
+        try:
+            full = dict(get_model_state_dict(self.model, options=options))
+        except TypeError:
+            full = dict(get_model_state_dict(self.model))
+
+        if self._current_rank() != 0:
+            return {}
+
+        full = self._to_cpu_state_dict(full)
+
+        if lora_only:
+            peft_state = self._extract_peft_lora_state(self.model)
+            if peft_state:
+                return self._to_cpu_state_dict(peft_state)
+            filtered = self._filter_lora_state(full)
+            if filtered:
+                return filtered
+            raise ValueError(
+                "LoRA-only state dict requested but no LoRA parameters "
+                "were found in the model."
+            )
+
+        return full
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """Load a full state dict, broadcasting from rank 0 across ranks."""
+        from torch.distributed.checkpoint.state_dict import set_model_state_dict
+
+        options = self._build_state_dict_options(
+            full_state_dict=True,
+            broadcast_from_rank0=True,
+            cpu_offload=False,
+        )
+        try:
+            set_model_state_dict(self.model, state_dict, options=options)
+        except TypeError:
+            set_model_state_dict(self.model, state_dict)
 
     @staticmethod
-    def _fsdp2_runtime_apis() -> Tuple[Any, Any, Any, Any, Any, Any]:
-        """Resolve FSDP2 runtime symbols lazily to keep import-time compatibility."""
-        try:
-            from torch.distributed.checkpoint.state_dict import (
-                StateDictOptions,
-                get_model_state_dict,
-                set_model_state_dict,
-            )
-            from torch.distributed.fsdp import (
-                CPUOffloadPolicy,
-                MixedPrecisionPolicy,
-                fully_shard,
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                "train_backend='fsdp' now targets FSDP2, but required runtime APIs are missing. "
-                "Install torch>=2.4 (recommended >=2.6) with distributed checkpoint support."
-            ) from exc
+    def _build_state_dict_options(**kwargs: Any) -> Any:
+        """Build ``StateDictOptions`` tolerating cross-version kwarg drift."""
+        from torch.distributed.checkpoint.state_dict import StateDictOptions
 
-        return fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy, get_model_state_dict, set_model_state_dict, StateDictOptions
+        candidates = [
+            dict(kwargs),
+            {k: v for k, v in kwargs.items() if k != "broadcast_from_rank0"},
+            {k: v for k, v in kwargs.items() if k in {"full_state_dict", "cpu_offload"}},
+            {},
+        ]
+        for candidate in candidates:
+            try:
+                return StateDictOptions(**candidate)
+            except TypeError:
+                continue
+        return StateDictOptions()
+
+    # ------------------------------------------------------------------
+    # Protocol: clip_grad_norm
+    # ------------------------------------------------------------------
+
+    def clip_grad_norm(self, max_grad_norm: float) -> torch.Tensor:
+        """Clip gradient norm and return the pre-clip norm.
+
+        The protocol declares ``-> None`` but Python's structural typing
+        accepts a wider return; the legacy caller logs the norm so this
+        preserves that capability. The norm is also stored on
+        ``self.last_grad_norm``.
+        """
+        grad_norm = self._do_clip_grad_norm(max_grad_norm)
+        self.last_grad_norm = grad_norm
+        return grad_norm
+
+    def _do_clip_grad_norm(self, max_grad_norm: float) -> torch.Tensor:
+        if self.config.cpu_offload:
+            # Use the explicit global-norm clipping path for FSDP2 + CPU
+            # offload. This avoids DTensor CPU collective limitations in
+            # ``clip_grad_norm_``.
+            return self._global_clip_for_sharded_grads(max_grad_norm)
+
+        try:
+            clip_fn = getattr(self.model, "clip_grad_norm_", None)
+            if callable(clip_fn):
+                grad_norm = clip_fn(max_grad_norm)
+            else:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=max_grad_norm,
+                )
+            return self._maybe_dtensor_to_tensor(grad_norm)
+        except RuntimeError as exc:
+            # FSDP2 + CPU offload can surface DTensor CPU collective errors here.
+            if "No backend type associated with device type cpu" not in str(exc):
+                raise
+            logger.warning(
+                "FSDPBackend: grad clipping hit CPU DTensor backend error; "
+                "falling back to explicit global-norm clipping path."
+            )
+            return self._global_clip_for_sharded_grads(max_grad_norm)
+
+    def _global_clip_for_sharded_grads(self, max_grad_norm: float) -> torch.Tensor:
+        import torch.distributed as dist
+
+        grads: list[torch.Tensor] = []
+        local_sq_sum = 0.0
+        for param in self.model.parameters():
+            grad = getattr(param, "grad", None)
+            if grad is None:
+                continue
+
+            local_grad = grad
+            if hasattr(local_grad, "to_local") and callable(getattr(local_grad, "to_local")):
+                try:
+                    local_grad = local_grad.to_local()
+                except Exception:
+                    pass
+
+            if not isinstance(local_grad, torch.Tensor):
+                continue
+
+            local_sq_sum += float(torch.sum(local_grad.detach().float() ** 2).item())
+            grads.append(grad)
+
+        if not grads:
+            return torch.tensor(0.0)
+
+        reduce_device = torch.device("cpu")
+        if torch.cuda.is_available():
+            try:
+                reduce_device = torch.device(f"cuda:{torch.cuda.current_device()}")
+            except Exception:
+                reduce_device = torch.device("cuda")
+
+        total_sq = torch.tensor(local_sq_sum, device=reduce_device, dtype=torch.float32)
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(total_sq, op=dist.ReduceOp.SUM)
+
+        global_norm = float(torch.sqrt(total_sq).item())
+        clip_coef = float(max_grad_norm) / (global_norm + 1e-6)
+        if clip_coef < 1.0:
+            for grad in grads:
+                grad.mul_(clip_coef)
+
+        return torch.tensor(global_norm, device=reduce_device, dtype=torch.float32)
+
+    # ------------------------------------------------------------------
+    # Protocol: offload / onload (model state only)
+    # ------------------------------------------------------------------
+
+    def offload(self) -> None:
+        """Move model params and grads to CPU. Idempotent."""
+        if self._is_offloaded:
+            return
+
+        cpu = torch.device("cpu")
+        for param in self.model.parameters():
+            local = self._local_or_self(param.data)
+            param.data = local.to(cpu, non_blocking=False)
+            if param.grad is not None:
+                local_grad = self._local_or_self(param.grad)
+                param.grad = local_grad.to(cpu, non_blocking=False)
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        self._is_offloaded = True
+        logger.debug("FSDPBackend: offloaded params/grads to CPU")
+
+    def onload(self) -> None:
+        """Move model params and grads back to the recorded GPU device. Idempotent."""
+        if not self._is_offloaded:
+            return
+
+        target = self._device
+        for param in self.model.parameters():
+            local = self._local_or_self(param.data)
+            param.data = local.to(target, non_blocking=False)
+            if param.grad is not None:
+                local_grad = self._local_or_self(param.grad)
+                param.grad = local_grad.to(target, non_blocking=False)
+
+        self._is_offloaded = False
+        logger.debug("FSDPBackend: onloaded params/grads to %s", target)
+
+    # ------------------------------------------------------------------
+    # Protocol: build_optimizer / build_scheduler
+    # ------------------------------------------------------------------
+
+    def build_optimizer(
+        self, config: OptimizerConfig
+    ) -> Optional[OptimizerProtocol]:
+        """Default to the factory-level optimizer (torch AdamW)."""
+        del config
+        return None
+
+    def build_scheduler(
+        self,
+        config: LrSchedulerConfig,
+        optimizer: OptimizerProtocol,
+    ) -> Optional[LRSchedulerProtocol]:
+        """Default to the factory-level LR scheduler."""
+        del config, optimizer
+        return None
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _maybe_dtensor_to_tensor(value: Any) -> Any:
@@ -119,7 +403,7 @@ class FSDPTrainBackend(TrainBackend):
     def _to_cpu_state_dict(state_dict: Dict[str, Any]) -> Dict[str, Any]:
         converted: Dict[str, Any] = {}
         for key, value in state_dict.items():
-            tensor_or_obj = FSDPTrainBackend._maybe_dtensor_to_tensor(value)
+            tensor_or_obj = FSDPBackend._maybe_dtensor_to_tensor(value)
             if isinstance(tensor_or_obj, torch.Tensor):
                 converted[key] = tensor_or_obj.detach().cpu()
             else:
@@ -128,17 +412,25 @@ class FSDPTrainBackend(TrainBackend):
 
     @staticmethod
     def _filter_lora_state(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Return only entries whose key contains ``"lora"`` (case-insensitive)."""
         return {k: v for k, v in state_dict.items() if "lora" in str(k).lower()}
 
     @staticmethod
-    def _extract_peft_lora_state(model: Any) -> Dict[str, Any]:
+    def _extract_peft_lora_state(model: nn.Module) -> Dict[str, Any]:
+        """Return the peft LoRA adapter state dict, or ``{}`` if peft is unavailable.
+
+        Unwraps ``model.module`` once (covers any single-layer wrapper like
+        ``PeftModel.base_model``-style wrappers), iterates every adapter
+        registered in ``peft_config``, and falls through to the active
+        adapter (default ``"default"``) when no adapters are registered.
+        """
         try:
             from peft.utils import get_peft_model_state_dict
         except Exception:
             return {}
 
         base_model = model.module if hasattr(model, "module") else model
-        adapter_names = []
+        adapter_names: list[str] = []
         if hasattr(base_model, "peft_config"):
             adapter_names = list(base_model.peft_config.keys())
         if not adapter_names:
@@ -146,391 +438,39 @@ class FSDPTrainBackend(TrainBackend):
 
         lora_state: Dict[str, Any] = {}
         for adapter_name in adapter_names:
-            lora_state.update(get_peft_model_state_dict(base_model, adapter_name=adapter_name))
+            lora_state.update(
+                get_peft_model_state_dict(base_model, adapter_name=adapter_name)
+            )
         return lora_state
 
     @staticmethod
-    def _unwrap_model(model: Any) -> Any:
-        return model.module if hasattr(model, "module") else model
-
-    def _iter_target_modules(self, actor: Any) -> Tuple[torch.nn.Module, ...]:
-        # 1. Try model_bundle.get_no_split_modules() first
-        no_split_modules: Tuple[type, ...] = tuple()
-        if hasattr(actor, "model_bundle") and actor.model_bundle is not None:
-            if hasattr(actor.model_bundle, "get_no_split_modules"):
-                result = actor.model_bundle.get_no_split_modules()
-                if isinstance(result, tuple) and result:
-                    no_split_modules = result
-                    logger.info(
-                        "Rank %s: get_no_split_modules() returned: %s",
-                        getattr(actor, "rank", "?"),
-                        [t.__name__ for t in no_split_modules],
-                    )
-
-        # 2. Fallback: auto-detect common transformer block patterns
-        if not no_split_modules:
-            _fallback_imports = [
-                # SD3 / SD3.5
-                ("diffusers.models.transformers.transformer_sd3", "JointTransformerBlock"),
-                ("diffusers.models.transformers.transformer_sd3", "SD3TransformerBlock"),
-                # Flux
-                ("diffusers.models.transformers.transformer_flux", "FluxTransformerBlock"),
-                ("diffusers.models.transformers.transformer_flux", "FluxSingleTransformerBlock"),
-                # HunyuanVideo
-                ("diffusers.models.transformers.transformer_hunyuan_video", "HunyuanVideoTransformerBlock"),
-                ("diffusers.models.transformers.transformer_hunyuan_video", "HunyuanVideoSingleTransformerBlock"),
-            ]
-            for mod_path, cls_name in _fallback_imports:
-                try:
-                    import importlib
-                    mod = importlib.import_module(mod_path)
-                    cls = getattr(mod, cls_name)
-                    no_split_modules = no_split_modules + (cls,)
-                except (ImportError, AttributeError):
-                    pass
-            if no_split_modules:
-                logger.info(
-                    "Rank %s: Fallback detected no_split_modules: %s",
-                    getattr(actor, "rank", "?"),
-                    [t.__name__ for t in no_split_modules],
-                )
-
-        if not no_split_modules:
-            logger.warning(
-                "Rank %s: Could not determine no_split_modules (both model_bundle and fallback failed)",
-                getattr(actor, "rank", "?"),
-            )
-            return tuple()
-
-        # 3. Search in model (may be PeftModel wrapping the original transformer)
-        model = actor.model
-        targets: list[torch.nn.Module] = []
-        all_types: set[str] = set()
-        for _name, module in model.named_modules():
-            all_types.add(type(module).__name__)
-            if isinstance(module, no_split_modules):
-                targets.append(module)
-
-        if not targets:
-            logger.warning(
-                "Rank %s: no_split_modules=%s but 0 matches in model. "
-                "Model module types found: %s",
-                getattr(actor, "rank", "?"),
-                [t.__name__ for t in no_split_modules],
-                sorted(all_types),
-            )
-        return tuple(targets)
-
-    def _build_state_dict_options(self, **kwargs: Any) -> Any:
-        *_, StateDictOptions = self._fsdp2_runtime_apis()
-
-        # API surface changed across torch releases, so keep this tolerant.
-        candidate_kwargs = [
-            dict(kwargs),
-            {k: v for k, v in kwargs.items() if k != "broadcast_from_rank0"},
-            {k: v for k, v in kwargs.items() if k in {"full_state_dict", "cpu_offload"}},
-            {},
-        ]
-        for candidate in candidate_kwargs:
+    def _local_or_self(tensor: torch.Tensor) -> torch.Tensor:
+        """Return the local shard for DTensors, else the tensor itself."""
+        if hasattr(tensor, "to_local") and callable(getattr(tensor, "to_local")):
             try:
-                return StateDictOptions(**candidate)
-            except TypeError:
-                continue
-        # Last-resort attempt, let upstream raise a clear exception.
-        return StateDictOptions()
+                return tensor.to_local()
+            except Exception:
+                return tensor
+        return tensor
 
-    def _create_device_mesh(self, world_size: int) -> Optional[Any]:
-        """Create a 2D DeviceMesh for HSDP (hybrid mode).
+    @staticmethod
+    def _infer_device(model: nn.Module) -> torch.device:
+        for param in model.parameters():
+            return param.device
+        if torch.cuda.is_available():
+            return torch.device(f"cuda:{torch.cuda.current_device()}")
+        return torch.device("cpu")
 
-        In hybrid mode, ranks are grouped by node (8 GPUs per group).
-        FSDP shards within each group, data-parallel replicates across groups.
-        Returns None for full mode or when world_size <= 8 (no benefit from HSDP).
-        """
-        fsdp_mode = self._fsdp_config.get("fsdp_mode", "full")
-        if fsdp_mode != "hybrid":
-            return None
-
-        # hybrid mode: shard within groups of 8 (one node), replicate across nodes
-        shard_size = 8
-        if world_size <= shard_size:
-            logger.info(
-                "HSDP hybrid mode: world_size=%d <= %d, using pure FSDP (no benefit from HSDP).",
-                world_size, shard_size,
-            )
-            return None
-        if world_size % shard_size != 0:
-            logger.warning(
-                "HSDP hybrid mode: world_size=%d is not divisible by %d; "
-                "falling back to pure FSDP.",
-                world_size, shard_size,
-            )
-            return None
-
-        from torch.distributed.device_mesh import init_device_mesh
-
-        replicate_size = world_size // shard_size
-        mesh = init_device_mesh(
-            "cuda",
-            (replicate_size, shard_size),
-            mesh_dim_names=("dp_replicate", "dp_shard"),
-        )
-        logger.info(
-            "HSDP DeviceMesh created: dp_replicate=%d × dp_shard=%d (world_size=%d)",
-            replicate_size, shard_size, world_size,
-        )
-        return mesh
-
-    def wrap_model(self, actor: Any) -> None:
-        if not self._use_fsdp:
-            logger.info("Rank %s: train_backend=fsdp in no-wrap mode (use_fsdp=false)", actor.rank)
-            return
-
-        fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy, *_ = self._fsdp2_runtime_apis()
-
-        fsdp_kwargs: Dict[str, Any] = {"reshard_after_forward": bool(self._fsdp_config.get("reshard_after_forward", True))}
-
-        if self._fsdp_config.get("mixed_precision", True):
-            param_dtype = parse_torch_dtype(
-                self._fsdp_config.get("param_dtype", "bf16") or "fp32",
-                field_name="train_backend_kwargs.param_dtype",
-            )
-            fsdp_kwargs["mp_policy"] = MixedPrecisionPolicy(
-                param_dtype=param_dtype,
-                reduce_dtype=torch.float32,
-            )
-
-        if self._fsdp_config.get("cpu_offload", False):
-            fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
-
-        # Create HSDP mesh if world_size > hsdp_shard_size
-        mesh = self._create_device_mesh(int(getattr(actor, "world_size", 1)))
-        if mesh is not None:
-            fsdp_kwargs["mesh"] = mesh
-            self._device_mesh = mesh
-
-        target_modules = self._iter_target_modules(actor)
-        logger.info(
-            "Rank %s: FSDP sub-layer wrapping: model_type=%s, matched_target_modules=%d",
-            actor.rank, type(actor.model).__name__, len(target_modules),
-        )
-        if not target_modules:
-            logger.warning(
-                "Rank %s: No sub-layer target modules found! "
-                "FSDP will only wrap the top-level model — "
-                "allgather/reduce-scatter will be a single large op.",
-                actor.rank,
-            )
-        for module in target_modules:
-            fully_shard(module, **fsdp_kwargs)
-
-        fully_shard(actor.model, **fsdp_kwargs)
-
-        mode = "HSDP" if mesh is not None else "FSDP"
-        reshard = bool(self._fsdp_config.get("reshard_after_forward", True))
-        logger.info(
-            "Rank %s: Model wrapped with %s fully_shard (target_modules=%d, reshard_after_forward=%s)",
-            actor.rank, mode, len(target_modules), reshard,
-        )
-
-    def _get_full_state_dict(self, actor: Any, *, cpu_offload: bool = True) -> Dict[str, Any]:
-        *_a, get_model_state_dict, _b, _c = self._fsdp2_runtime_apis()
-        options = self._build_state_dict_options(
-            full_state_dict=True,
-            cpu_offload=bool(cpu_offload),
-        )
-        try:
-            return dict(get_model_state_dict(actor.model, options=options))
-        except TypeError:
-            return dict(get_model_state_dict(actor.model))
-
-    def get_state_dict(
-        self,
-        actor: Any,
-        *,
-        lora_only: bool = False,
-        rank0_only: bool = True,
-    ) -> Dict[str, Any]:
-        if not self._use_fsdp:
-            if rank0_only and actor.rank != 0:
-                return {}
-            model = self._unwrap_model(actor.model)
-            if lora_only:
-                peft_lora_state = self._extract_peft_lora_state(model)
-                if peft_lora_state:
-                    return self._to_cpu_state_dict(peft_lora_state)
-                lora_state = self._filter_lora_state(model.state_dict())
-                if lora_state:
-                    return self._to_cpu_state_dict(lora_state)
-                raise ValueError(
-                    "LoRA-only sync requested but no LoRA parameters were found in the model state."
-                )
-            return self._to_cpu_state_dict(model.state_dict())
-
-        full_state_dict = self._get_full_state_dict(actor, cpu_offload=True)
-        if rank0_only and actor.rank != 0:
-            return {}
-
-        full_state_dict = self._to_cpu_state_dict(full_state_dict)
-
-        if lora_only:
-            lora_state = self._filter_lora_state(full_state_dict)
-            if lora_state:
-                return lora_state
-            raise ValueError(
-                "LoRA-only sync requested but no LoRA parameters were found in the FSDP state dict."
-            )
-
-        return full_state_dict
-
-    def load_state_dict(self, actor: Any, state_dict: Dict[str, Any]) -> None:
-        if not self._use_fsdp:
-            model = self._unwrap_model(actor.model)
-            model.load_state_dict(state_dict)
-            return
-
-        *_a, _b, _c, _d, set_model_state_dict, _e = self._fsdp2_runtime_apis()
-        options = self._build_state_dict_options(
-            full_state_dict=True,
-            broadcast_from_rank0=True,
-            cpu_offload=False,
-        )
-        try:
-            set_model_state_dict(actor.model, state_dict, options=options)
-        except TypeError:
-            set_model_state_dict(actor.model, state_dict)
-
-    def broadcast_parameters(self, actor: Any) -> None:
-        if self._use_fsdp:
-            # FSDP2 collectives already synchronize shards during optimizer steps.
-            return
+    @staticmethod
+    def _current_rank() -> int:
         import torch.distributed as dist
 
-        model = self._unwrap_model(actor.model)
-        for param in model.parameters():
-            dist.broadcast(param.data, src=0)
-
-    def clip_grad_norm(
-        self,
-        actor: Any,
-        *,
-        model: Any,
-        max_grad_norm: float,
-    ) -> Any:
-        def _global_clip_for_sharded_grads() -> torch.Tensor:
-            import torch.distributed as dist
-
-            grads = []
-            local_sq_sum = 0.0
-            for param in model.parameters():
-                grad = getattr(param, "grad", None)
-                if grad is None:
-                    continue
-
-                local_grad = grad
-                if hasattr(local_grad, "to_local") and callable(getattr(local_grad, "to_local")):
-                    try:
-                        local_grad = local_grad.to_local()
-                    except Exception:
-                        pass
-
-                if not isinstance(local_grad, torch.Tensor):
-                    continue
-
-                local_sq_sum += float(torch.sum(local_grad.detach().float() ** 2).item())
-                grads.append(grad)
-
-            if not grads:
-                return torch.tensor(0.0)
-
-            reduce_device = torch.device("cpu")
-            if torch.cuda.is_available():
-                try:
-                    reduce_device = torch.device(f"cuda:{torch.cuda.current_device()}")
-                except Exception:
-                    reduce_device = torch.device("cuda")
-
-            total_sq = torch.tensor(local_sq_sum, device=reduce_device, dtype=torch.float32)
-            if dist.is_available() and dist.is_initialized():
-                dist.all_reduce(total_sq, op=dist.ReduceOp.SUM)
-
-            global_norm = float(torch.sqrt(total_sq).item())
-            clip_coef = float(max_grad_norm) / (global_norm + 1e-6)
-            if clip_coef < 1.0:
-                for grad in grads:
-                    grad.mul_(clip_coef)
-
-            return torch.tensor(global_norm, device=reduce_device, dtype=torch.float32)
-
-        if self._use_fsdp:
-            cpu_offload = bool(self._fsdp_config.get("cpu_offload", False))
-            if cpu_offload:
-                # Use explicit global-norm clipping path for FSDP2+CPU offload.
-                # This avoids DTensor CPU collective limitations in clip_grad_norm_.
-                return _global_clip_for_sharded_grads()
-            try:
-                clip_fn = getattr(model, "clip_grad_norm_", None)
-                if callable(clip_fn):
-                    grad_norm = clip_fn(max_grad_norm)
-                else:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        model.parameters(),
-                        max_norm=max_grad_norm,
-                    )
-                return self._maybe_dtensor_to_tensor(grad_norm)
-            except RuntimeError as exc:
-                # FSDP2 + CPU offload can surface DTensor CPU collective errors here.
-                if "No backend type associated with device type cpu" not in str(exc):
-                    raise
-                logger.warning(
-                    "Rank %s: FSDP grad clipping hit CPU DTensor backend error; "
-                    "falling back to explicit global-norm clipping path.",
-                    getattr(actor, "rank", "unknown"),
-                )
-                return _global_clip_for_sharded_grads()
-        return torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-
-    def topology(self, actor: Any) -> TrainTopology:
-        world_size = int(getattr(actor, "world_size", 1))
-        if self._use_fsdp:
-            fsdp_mode = self._fsdp_config.get("fsdp_mode", "full")
-            shard_size = 8
-            if (
-                fsdp_mode == "hybrid"
-                and world_size > shard_size
-                and world_size % shard_size == 0
-            ):
-                # HSDP: shard within groups of 8, replicate across groups
-                dp_shard = shard_size
-                dp_replicate = world_size // shard_size
-            else:
-                # Pure FSDP: shard across all ranks
-                dp_shard = world_size
-                dp_replicate = 1
-            return TrainTopology(
-                world_size=world_size,
-                dp_size=world_size,
-                dp_replicate_size=dp_replicate,
-                dp_shard_size=dp_shard,
-                tp_size=1,
-                pp_size=1,
-                sp_size=1,
-                ep_size=1,
-                data_partition_axis="dp",
-            )
-        return TrainTopology(
-            world_size=world_size,
-            dp_size=world_size,
-            dp_replicate_size=world_size,
-            dp_shard_size=1,
-            tp_size=1,
-            pp_size=1,
-            sp_size=1,
-            ep_size=1,
-            data_partition_axis="dp",
-        )
+        if dist.is_available() and dist.is_initialized():
+            return int(dist.get_rank())
+        return 0
 
 
 __all__ = [
-    "FSDPTrainBackendConfig",
-    "FSDPTrainBackend",
+    "FSDPBackendConfig",
+    "FSDPBackend",
 ]

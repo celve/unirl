@@ -23,6 +23,8 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
         "diffusionrl.samplers.construction",
         "create_rollout_engine_from_init_payload",
     ),
+    "FSDPBaseSampler": ("diffusionrl.samplers.fsdp.base_sampler", "FSDPBaseSampler"),
+    "FSDPSamplingEngine": ("diffusionrl.samplers.fsdp.engine", "FSDPSamplingEngine"),
     "FluxSampler": ("diffusionrl.samplers.fsdp.flux_sampler", "FluxSampler"),
     "SD3Sampler": ("diffusionrl.samplers.fsdp.sd3_sampler", "SD3Sampler"),
     "FSDPHunyuanSampler": ("diffusionrl.samplers.fsdp.hunyuan_sampler", "FSDPHunyuanSampler"),

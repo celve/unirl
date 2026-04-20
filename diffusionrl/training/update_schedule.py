@@ -5,8 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence, Tuple
 
-from diffusionrl.config.spec import TrainingPlan
 from diffusionrl.types.training_batch import TrainingBatch
+
+
+@dataclass(frozen=True)
+class TrainingExecutionPlan:
+    """Runtime plan for one local training consumer batch."""
+
+    local_batch_size: int
+    local_mini_batch_size: int
+    micro_batch_size: int
+    num_updates_per_batch: int
+    update_slices: Tuple[Tuple[int, int], ...]
+    mini_batch_slices_per_update: Tuple[Tuple[Tuple[int, int], ...], ...]
 
 
 def _positive_int(*, name: str, value: Any) -> int:
@@ -115,29 +126,39 @@ def _coerce_per_update_mini_batch_slices(
     return tuple(resolved)
 
 
-def validate_training_plan(plan: TrainingPlan) -> TrainingPlan:
-    """Validate and normalize a TrainingPlan for runtime scheduling."""
+def coerce_training_execution_plan(raw: Any) -> TrainingExecutionPlan:
+    """Build a runtime execution plan from a serialized config payload."""
 
-    if not isinstance(plan, TrainingPlan):
+    if isinstance(raw, TrainingExecutionPlan):
+        return raw
+    # Lazy import to avoid the diffusionrl.config <-> diffusionrl.training import
+    # cycle. TrainingPlan is the resolution-time view that carries
+    # global_batch_size; we drop that field here and reuse the dict path.
+    from diffusionrl.config.spec import TrainingPlan
+
+    if isinstance(raw, TrainingPlan):
+        raw = raw.as_dict()
+    if not isinstance(raw, dict):
         raise ValueError(
-            "training_plan must be a TrainingPlan. " f"Got: {type(plan).__name__}"
+            "training_plan must be a dict, TrainingPlan, or TrainingExecutionPlan. "
+            f"Got: {type(raw).__name__}"
         )
 
     local_batch_size = _positive_int(
         name="training_plan.local_batch_size",
-        value=plan.local_batch_size,
+        value=raw["local_batch_size"],
     )
     local_mini_batch_size = _positive_int(
         name="training_plan.local_mini_batch_size",
-        value=plan.local_mini_batch_size,
+        value=raw["local_mini_batch_size"],
     )
     micro_batch_size = _positive_int(
         name="training_plan.micro_batch_size",
-        value=plan.micro_batch_size,
+        value=raw["micro_batch_size"],
     )
     num_updates_per_batch = _positive_int(
         name="training_plan.num_updates_per_batch",
-        value=plan.num_updates_per_batch,
+        value=raw["num_updates_per_batch"],
     )
     if local_batch_size != local_mini_batch_size * num_updates_per_batch:
         raise ValueError(
@@ -154,17 +175,14 @@ def validate_training_plan(plan: TrainingPlan) -> TrainingPlan:
             f"Got micro_batch_size={micro_batch_size}, "
             f"local_mini_batch_size={local_mini_batch_size}."
         )
-    update_slices = _coerce_update_slices(
-        plan.update_slices, local_batch_size=local_batch_size
-    )
+    update_slices = _coerce_update_slices(raw.get("update_slices"), local_batch_size=local_batch_size)
     mini_batch_slices_per_update = _coerce_per_update_mini_batch_slices(
-        plan.mini_batch_slices_per_update,
+        raw.get("mini_batch_slices_per_update"),
         update_slices=update_slices,
         micro_batch_size=micro_batch_size,
     )
 
-    return TrainingPlan(
-        global_batch_size=int(plan.global_batch_size),
+    return TrainingExecutionPlan(
         local_batch_size=local_batch_size,
         local_mini_batch_size=local_mini_batch_size,
         micro_batch_size=micro_batch_size,
@@ -176,7 +194,7 @@ def validate_training_plan(plan: TrainingPlan) -> TrainingPlan:
 def validate_batch_against_plan(
     *,
     batch_size: int,
-    plan: TrainingPlan,
+    plan: TrainingExecutionPlan,
 ) -> None:
     """Ensure runtime payload still matches the validated training plan."""
 
@@ -202,8 +220,8 @@ class TrainingUpdateChunk:
 class TrainingUpdateSchedule:
     """Schedule interface for splitting one rollout batch into optimizer updates."""
 
-    def __init__(self, plan: TrainingPlan):
-        self.plan = validate_training_plan(plan)
+    def __init__(self, plan: TrainingExecutionPlan):
+        self.plan = coerce_training_execution_plan(plan)
         self.name = (
             "single_update"
             if int(self.plan.num_updates_per_batch) <= 1
@@ -267,18 +285,19 @@ class MultiUpdateSchedule(TrainingUpdateSchedule):
             )
 
 
-def create_training_update_schedule(plan: TrainingPlan) -> TrainingUpdateSchedule:
-    """Create a training update schedule from an explicit training plan."""
-    resolved_plan = validate_training_plan(plan)
+def create_training_update_schedule(plan: Any) -> TrainingUpdateSchedule:
+    """Create a training update schedule from an explicit execution plan."""
+    resolved_plan = coerce_training_execution_plan(plan)
     if int(resolved_plan.num_updates_per_batch) <= 1:
         return SingleUpdateSchedule(resolved_plan)
     return MultiUpdateSchedule(resolved_plan)
 
 
 __all__ = [
+    "TrainingExecutionPlan",
     "TrainingUpdateChunk",
     "TrainingUpdateSchedule",
-    "validate_training_plan",
+    "coerce_training_execution_plan",
     "create_training_update_schedule",
     "validate_batch_against_plan",
     "SingleUpdateSchedule",

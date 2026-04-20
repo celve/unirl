@@ -23,18 +23,21 @@ from diffusionrl.config.validation import (
     validate_training_batch_geometry,
     validate_weight_sync,
 )
+from diffusionrl.config.training_sections import (
+    LrSchedulerConfig as TrainingLrSchedulerConfig,
+    OptimizerConfig as TrainingOptimizerConfig,
+    TrainingExecutionConfig,
+)
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.models.config import ModelBundleConfig
 from diffusionrl.ray.actor_config import (
     RolloutActorConfig,
     TrainingActorConfig,
-    TrainingExecutionConfig,
-    TrainingLrSchedulerConfig,
-    TrainingOptimizerConfig,
 )
 from diffusionrl.reward.config import RewardSpec
-from diffusionrl.samplers.engine import EngineConfig
-from diffusionrl.training.backends import BaseTrainBackendConfig, TrainTopology
+from diffusionrl.training.backends import FSDPBackendConfig
+from diffusionrl.training.types import BaseTrainBackendConfig, TrainTopology
+from diffusionrl.types.engine import EngineConfig
 from diffusionrl.types.sampling import SamplingRequirements
 
 
@@ -190,11 +193,10 @@ def test_validate_rollout_layout_rejects_non_dedicated_rollout_mode() -> None:
         )
 
 
-def test_validate_train_backend_config_rejects_unknown_backend_name() -> None:
-    with pytest.raises(ValueError, match="Unsupported train_backend"):
-        validate_train_backend_config(
-            train_backend_config=BaseTrainBackendConfig(name="unknown-backend")
-        )
+def test_validate_train_backend_config_accepts_new_style_configs() -> None:
+    # New-style configs carry no ``name`` field; identifier validation
+    # lives upstream in ``resolve_train_backend_identifier``.
+    validate_train_backend_config(train_backend_config=FSDPBackendConfig())
 
 
 def test_validate_training_actor_init_config_rejects_non_reward_spec() -> None:
@@ -210,8 +212,8 @@ def test_validate_training_actor_init_config_rejects_non_reward_spec() -> None:
             component_config=BaseAlgorithmConfig(),
         ),
         train_backend_init_payload=ComponentInitPayload(
-            component_dotpath="diffusionrl.training.backends.fsdp.FSDPTrainBackend",
-            component_config=BaseTrainBackendConfig(name="fsdp"),
+            component_dotpath="diffusionrl.training.backends.fsdp.FSDPBackend",
+            component_config=FSDPBackendConfig(),
         ),
         sampling_config={},
         reward_config="bad",

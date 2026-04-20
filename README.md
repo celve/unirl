@@ -25,35 +25,19 @@ DiffusionRL supports the following diffusion models:
 - **Training Actors (Ray + TrainBackend)**: Responsible for the main training process through pluggable training backends (FSDP2 / VeOmni native; Megatron scaffold), reads `TrainingBatch` from the rollout buffer, and synchronizes parameters to the inference actors after training.
 - **Inference Actors (FSDP / SGLang)**: Generates denoising trajectories and latent samples using pluggable sampling engines, producing lightweight `RolloutSamples`.
 - **Reward Runtime**: Evaluates generated samples using configurable reward models (HPS, CLIP, PickScore, OCR, etc.) through one actor-side precompute path with either local or HTTP-backed scoring.
-- **RolloutServices + Rollout Functions**: The driver owns the outer rollout loop and directly holds `RolloutServices` plus the configured rollout/eval/reward hook callables. `RolloutServices` exposes request-level operations such as `build_request`, `plan_request_batches`, `execute_sampling_request`, `launch_sampling_request`, and `compute_advantages`; the configured rollout function (`rollout_function_dotpath`) is a first-class extension point for `prompt batch -> RolloutRequest -> sample -> reward hook`, and the driver entrypoint then computes advantages and assembles the final `TrainingBatch`.
-- **Reward Hook**: Reward is a first-class rollout hook (`reward_hook_dotpath`) rather than a hard-coded workflow stage. The default hook reads scalar rewards that were already attached on the active sampling actor, while custom hooks can post-process or replace that behavior.
+- **RolloutPipeline**: The driver owns the outer rollout loop via `RolloutPipeline`, which drives the `load_prompts -> plan_requests -> exec_request -> aggregate -> convert_training_data` phases. Reward scoring and advantage computation run inside the rollout actor through `RolloutActor.run_rollout_pipeline`, and the driver then assembles the final `TrainingBatch`.
 
 ```
  ┌────────────────────┐     ┌────────────────────────────────────────┐
- │   Prompt Source    │────>│ Driver Entrypoint + RolloutServices    │
- └────────────────────┘     │ rollout_function_dotpath / reward_hook_dotpath │
-                            │ plan RolloutRequest(s)                 │
+ │   Prompt Source    │────>│ Driver Entrypoint + RolloutPipeline    │
+ └────────────────────┘     │ plan RolloutRequest(s)                 │
                             └──────────────┬─────────────────────────┘
                                            │ actor_group.generate(request)
                                            v
                               ┌──────────────────────────┐
                               │   Inference ActorGroup   │
-                              └─────────────┬────────────┘
-                                            │ RolloutSamples
-                                            v
-                              ┌──────────────────────────┐
-                              │ reward hook              │
-                              └─────────────┬────────────┘
-                                            │ rewards
-                                            v
-                              ┌──────────────────────────┐
-                              │ driver: advantage +      │
-                              │ assemble TrainingBatch   │
-                              └─────────────┬────────────┘
-                                            │ TrainingBatch
-                                            v
-                              ┌──────────────────────────┐
-                              │      Rollout Buffer      │
+                              │ (sample + reward +       │
+                              │  advantage)              │
                               └─────────────┬────────────┘
                                             │ TrainingBatch
                                             v
@@ -69,9 +53,9 @@ DiffusionRL supports the following diffusion models:
 
 | Mode | Description | Use Case |
 |------|-------------|----------|
+| **Direct Sampling** | Training actors also perform sampling | Simplest topology when one backend can do both |
 | **Separate** | Inference and training on different GPU pools | Maximum throughput with sufficient GPUs |
 | **Colocate** | Shared GPUs with explicit offload/onload | Memory-constrained environments |
-| **Async Pipeline** | Rollout N+1 overlaps with training on N | Reduced idle time in separate mode |
 
 ## Quick Start
 
@@ -208,18 +192,8 @@ bash scripts/train_mixgrpo_sd3_sglang_separate.sh
 
 For researcher work, start from `scripts/*.sh`.
 Those shell templates are the primary maintained entry surface in this repo.
-If you prefer grouped YAML editing, start from `scripts/example_flux_dancegrpo_sglang_separate.yaml`.
 The local `configs/recipes/` directory may exist in some working trees, but it is
 gitignored and is not the public repo interface.
-The committed `scripts/example_flux_dancegrpo_sglang_separate.yaml` file is the
-smallest public sanity-check config.
-Public config tests cover that committed YAML in `scripts/`.
-
-Optional YAML-driven entry examples:
-
-```bash
-python -m diffusionrl.train_async --config scripts/example_flux_dancegrpo_sglang_separate.yaml
-```
 
 Terminology:
 
@@ -228,7 +202,7 @@ Terminology:
 - It is not strictly the same as optimizer update count when gradient accumulation or inner epochs are enabled.
 
 `--config` supports grouped YAML mappings (for example `algorithm: { ... }`, `training: { ... }`).
-For rollout, use a grouped `rollout` YAML mapping (`rollout.mode`, `rollout.transport_dtype`,
+For rollout, use a grouped `rollout` YAML mapping (`rollout.mode`,
 `rollout.control`, `rollout.logging`, etc.) so the file shape matches the config sections in code.
 Grouped YAML is now the only supported style for grouped fields.
 Grouped CLI options also use dotted names (for example `--training.train-backend`).
@@ -238,8 +212,6 @@ autocast plus trajectory/logprob storage precision.
 For dedicated SGLang rollout, the rollout-side prompt encoder also follows
 `precision.rollout.autocast_precision`; do not configure a separate
 prompt-encoder dtype under `rollout`.
-`rollout.transport_dtype` remains a rollout transport setting,
-not a `precision.*` field.
 CLI options always override YAML. Unknown YAML keys fail fast by default; use
 `--allow-unknown-config-keys` only when you intentionally want to ignore unknown keys.
 `sync.protocol` must now be set explicitly: use `disabled` for `direct_sampling`,
@@ -331,10 +303,10 @@ and `diffusionrl/config/resolution.py`. For runnable config examples, start with
 
 The Ray control plane is split into worker implementations and worker-group orchestration:
 
-- `diffusionrl/ray/{rollout_actor.py,training_actor.py}`: single worker implementations
-- `diffusionrl/ray/{rollout_group.py,training_group.py,group_factory.py}`: group orchestration and factories
-- `diffusionrl/ray/ray_utils.py`: Ray distributed utilities + training-actor helper/service modules
-- `diffusionrl/rollout/**`: driver-side rollout runtime, request planning/execution primitives, default rollout hooks
+- `diffusionrl/ray/{rollout_actor.py,train_actor.py}`: single worker implementations
+- `diffusionrl/ray/group/{rollout.py,train.py}`: group orchestration (spawn + dispatch + control plane)
+- `diffusionrl/ray/utils/`: stateless helpers imported by actors (`net`, `gpu`, `node`)
+- `diffusionrl/rollout/**`: driver-side `RolloutPipeline` and request-builder helpers
 - `diffusionrl/training/**`: training execution + train backend logic
 - `diffusionrl/distributed/**`: distributed coordination such as weight sync
 
@@ -344,7 +316,7 @@ The layer summary above is the current authoritative control-plane map.
 
 ```
 diffusionrl/
-├── train.py / train_async.py      # Training entry points
+├── train.py                        # Training entry point
 ├── types/                          # Canonical shared data types (RolloutRequest, RolloutSamples, TrainingBatch, Reward, Engine, SDE)
 ├── config/                         # Configuration system (TrainingArguments)
 ├── algorithms/                     # RL algorithms + advantage normalization helpers
@@ -359,9 +331,10 @@ diffusionrl/
 ├── buffer/                         # Buffer subsystem (queue/filter/store)
 ├── distributed/                    # Distributed coordination (for example weight sync)
 ├── ray/                            # Ray distributed orchestration
-│   ├── rollout_actor.py / training_actor.py
-│   ├── rollout_group.py / training_group.py / group_factory.py
-│   ├── buffer_actor.py / placement_group.py / ray_utils.py
+│   ├── rollout_actor.py / train_actor.py
+│   ├── group/                      #   rollout.py / train.py (group orchestration)
+│   ├── buffer_actor.py / placement_group.py
+│   ├── utils/                      #   net/gpu/node stateless helpers
 ├── patches/                        # Runtime patches (for example replay log-prob support)
 └── utils/                          # Checkpointing, logging, EMA, media helpers
 ```

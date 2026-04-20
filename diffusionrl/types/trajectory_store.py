@@ -1,29 +1,16 @@
 """
-TrajectoryStore — compact trajectory storage with integrated builder lifecycle.
-
-Two creation paths:
-
-1. **Builder** (used inside sampler denoising loops)::
-
-       store = TrajectoryStore.for_sde_steps(sde_indices, num_steps)
-       store.add(0, initial_latents)
-       for i in range(num_steps):
-           ...
-           store.add(i + 1, latents)
-       store.finalize()
-
-2. **Direct** (pre-built data, already finalized)::
-
-       store = TrajectoryStore.from_full(trajectories)
-       store = TrajectoryStore.from_selective(trajectories, positions, T+1)
-       store = TrajectoryStore.from_clean_latents(clean_latents)
+Trajectory — compact trajectory storage as a Batched dataclass.
+TrajectoryBuilder — builder for collecting latents during denoising loops.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple, Union
 
 import torch
+
+from diffusionrl.utils.batched import Batched, concat_field, shared_field
 
 
 def compute_trajectory_positions(sde_indices: Set[int], num_steps: int) -> List[int]:
@@ -44,10 +31,11 @@ def compute_trajectory_positions(sde_indices: Set[int], num_steps: int) -> List[
     return sorted(positions)
 
 
-class TrajectoryStore:
-    """Compact trajectory storage with index map and integrated builder lifecycle.
+@dataclass
+class Trajectory(Batched):
+    """Compact trajectory storage with index map.
 
-    Attributes (available after finalization):
+    Attributes:
         data: Dense trajectory tensor [B, K, ...] where K <= T+1
             (only collected positions).
         index_map: 1-D LongTensor of size ``total_positions`` where
@@ -57,107 +45,14 @@ class TrajectoryStore:
             trajectory (T+1).
     """
 
-    # ---- constructors -------------------------------------------------------
+    data: torch.Tensor = concat_field()
+    index_map: torch.Tensor = shared_field()
+    total_positions: int = shared_field()
 
-    def __init__(
-        self,
-        data: torch.Tensor,
-        index_map: torch.Tensor,
-        total_positions: int,
-    ) -> None:
-        self.data = data
-        self.index_map = index_map
-        self.total_positions = total_positions
-        self._finalized = True
-        self._total_steps: Optional[int] = None
-        self._needed: Optional[Set[int]] = None
-        self._collected: Optional[List[Tuple[int, torch.Tensor]]] = None
+    # ---- direct factories ---------------------------------------------------
 
     @classmethod
-    def _collecting(cls, total_steps: int, needed_positions: Set[int]) -> TrajectoryStore:
-        """Internal: create a store in collecting (not-yet-finalized) state."""
-        obj = object.__new__(cls)
-        obj.data = None  # type: ignore[assignment]
-        obj.index_map = None  # type: ignore[assignment]
-        obj.total_positions = total_steps + 1
-        obj._finalized = False
-        obj._total_steps = total_steps
-        obj._needed = needed_positions
-        obj._collected = []
-        return obj
-
-    def _require_finalized(self) -> None:
-        if not self._finalized:
-            raise RuntimeError(
-                "TrajectoryStore has not been finalized. "
-                "Call finalize() after the denoising loop."
-            )
-
-    # ---- builder classmethods -----------------------------------------------
-
-    @classmethod
-    def for_sde_steps(
-        cls, sde_indices: Set[int], total_steps: int
-    ) -> TrajectoryStore:
-        """Create a collecting store that keeps only positions needed for SDE pairs.
-
-        When *sde_indices* is empty (e.g. NFT with deterministic solver),
-        the store falls back to keeping only the final position so that
-        ``finalize()`` still produces a valid clean-latents store.
-        """
-        needed = set(compute_trajectory_positions(sde_indices, total_steps))
-        if not needed:
-            needed = {total_steps}
-        return cls._collecting(total_steps, needed)
-
-    @classmethod
-    def full(cls, total_steps: int) -> TrajectoryStore:
-        """Create a collecting store that keeps all positions."""
-        return cls._collecting(total_steps, set(range(total_steps + 1)))
-
-    # ---- builder methods ----------------------------------------------------
-
-    def add(self, position: int, latents: torch.Tensor) -> None:
-        """Record latents at *position*.  Silently drops unneeded positions."""
-        if self._finalized:
-            raise RuntimeError("Cannot add() to a finalized TrajectoryStore.")
-        if position in self._needed:  # type: ignore[operator]
-            self._collected.append((position, latents))  # type: ignore[union-attr]
-
-    def finalize(self) -> TrajectoryStore:
-        """Freeze collected latents into a usable trajectory store.
-
-        Returns *self* for convenience chaining.
-        """
-        if self._finalized:
-            raise RuntimeError("TrajectoryStore is already finalized.")
-        if not self._collected:
-            raise ValueError(
-                "finalize() called with no collected positions. "
-                f"needed={sorted(self._needed)}"  # type: ignore[arg-type]
-            )
-        positions = [p for p, _ in self._collected]
-        data = torch.stack([t for _, t in self._collected], dim=1)
-        total_positions = self._total_steps + 1  # type: ignore[operator]
-
-        index_map = torch.full((total_positions,), -1, dtype=torch.long)
-        for compact_idx, orig_pos in enumerate(positions):
-            if 0 <= orig_pos < total_positions:
-                index_map[orig_pos] = compact_idx
-
-        self.data = data
-        self.index_map = index_map
-        self.total_positions = total_positions
-        self._finalized = True
-        self._total_steps = None
-        self._needed = None
-        self._collected = None
-        return self
-
-    # ---- direct factories (produce finalized stores) ------------------------
-
-    @classmethod
-    def from_full(cls, trajectories: torch.Tensor) -> TrajectoryStore:
+    def from_full(cls, trajectories: torch.Tensor) -> Trajectory:
         """Wrap full trajectories [B, T+1, ...] with an identity index map."""
         t_plus_1 = int(trajectories.shape[1])
         index_map = torch.arange(t_plus_1, dtype=torch.long)
@@ -168,12 +63,8 @@ class TrajectoryStore:
         cls,
         clean_latents: torch.Tensor,
         total_positions: int = 1,
-    ) -> TrajectoryStore:
-        """NFT path: store only clean latents as a single-position trajectory.
-
-        The latents are placed at position ``total_positions - 1``
-        (the final denoised state).
-        """
+    ) -> Trajectory:
+        """NFT path: store only clean latents as a single-position trajectory."""
         data = clean_latents.unsqueeze(1)  # [B, 1, ...]
         index_map = torch.full((total_positions,), -1, dtype=torch.long)
         index_map[total_positions - 1] = 0
@@ -185,15 +76,8 @@ class TrajectoryStore:
         trajectories: torch.Tensor,
         collected_positions: List[int],
         total_positions: int,
-    ) -> TrajectoryStore:
-        """Selective storage: K positions out of T+1.
-
-        Args:
-            trajectories: Dense tensor [B, K, ...]
-            collected_positions: Sorted list of original position indices
-                corresponding to each column in *trajectories*.
-            total_positions: Total number of positions (T+1).
-        """
+    ) -> Trajectory:
+        """Selective storage: K positions out of T+1."""
         if int(trajectories.shape[1]) != len(collected_positions):
             raise ValueError(
                 f"trajectories dim-1 ({trajectories.shape[1]}) != "
@@ -209,39 +93,30 @@ class TrajectoryStore:
 
     @property
     def batch_size(self) -> int:
-        self._require_finalized()
         return int(self.data.shape[0])
 
     @property
     def num_stored(self) -> int:
-        """Number of positions actually stored (K)."""
-        self._require_finalized()
         return int(self.data.shape[1])
 
     @property
     def device(self) -> torch.device:
-        self._require_finalized()
         return self.data.device
 
     @property
     def is_full(self) -> bool:
-        """True when all positions are stored (K == T+1)."""
         return self.num_stored == self.total_positions
 
     @property
     def is_clean_latents_only(self) -> bool:
-        """True when only a single position is stored (NFT path)."""
         return self.num_stored == 1
 
     @property
     def is_selective(self) -> bool:
-        """True when storing a subset of positions (not full, not clean-only)."""
         return not self.is_full and not self.is_clean_latents_only
 
     @property
     def clean_latents(self) -> torch.Tensor:
-        """Final denoised latents — last stored position."""
-        self._require_finalized()
         last_stored = int((self.index_map >= 0).nonzero(as_tuple=False)[-1].item())
         compact_idx = int(self.index_map[last_stored].item())
         return self.data[:, compact_idx]
@@ -249,127 +124,135 @@ class TrajectoryStore:
     # ---- position access ----------------------------------------------------
 
     def has_position(self, pos: int) -> bool:
-        """Check whether original position *pos* is stored."""
-        self._require_finalized()
         if pos < 0 or pos >= self.total_positions:
             return False
         return int(self.index_map[pos].item()) >= 0
 
     def get_position(self, pos: int) -> torch.Tensor:
-        """Get latents at original position *pos*.  O(1) via index_map."""
-        self._require_finalized()
         if pos < 0 or pos >= self.total_positions:
-            raise IndexError(
-                f"Position {pos} out of range [0, {self.total_positions})"
-            )
+            raise IndexError(f"Position {pos} out of range [0, {self.total_positions})")
         compact_idx = int(self.index_map[pos].item())
         if compact_idx < 0:
             raise IndexError(
-                f"Position {pos} was not collected (index_map=-1). "
+                f"Position {pos} was not collected. "
                 f"Stored positions: {self.stored_positions}"
             )
         return self.data[:, compact_idx]
 
     def get_pair(self, pos: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Get (x_t, x_{t+1}) latent pair for an SDE training step.
-
-        Both *pos* and *pos+1* must be stored positions.
-        """
         return self.get_position(pos), self.get_position(pos + 1)
 
     @property
     def stored_positions(self) -> List[int]:
-        """Sorted list of original positions that are stored."""
-        self._require_finalized()
         return sorted(
             int(i) for i in range(self.total_positions)
             if int(self.index_map[i].item()) >= 0
         )
 
-    # ---- batch ops ----------------------------------------------------------
+    # ---- batch ops (Batched provides concat/select/slice via fields) --------
 
-    def slice_batch(self, start: int, end: int) -> TrajectoryStore:
-        """Slice along the batch (dim-0) dimension."""
-        self._require_finalized()
-        return TrajectoryStore(
+    def select(self, indices: torch.Tensor) -> Trajectory:
+        """Select samples by index along the batch dimension."""
+        return Trajectory(
+            data=self.data.index_select(0, indices.to(self.data.device)),
+            index_map=self.index_map,
+            total_positions=self.total_positions,
+        )
+
+    def slice_batch(self, start: int, end: int) -> Trajectory:
+        return Trajectory(
             data=self.data[start:end].clone(),
             index_map=self.index_map,
             total_positions=self.total_positions,
         )
 
-    def slice(self, start: int, end: int) -> TrajectoryStore:
-        """Alias for slice_batch — enables batch_slice duck-type protocol."""
-        return self.slice_batch(start, end)
+    def index_select_batch(self, idx: torch.Tensor) -> Trajectory:
+        return self.select(idx)
 
-    def reindex_batch(self, indices: torch.Tensor) -> TrajectoryStore:
-        """Reindex along the batch (dim-0) dimension."""
-        self._require_finalized()
-        return TrajectoryStore(
+    def reindex_batch(self, indices: torch.Tensor) -> Trajectory:
+        return Trajectory(
             data=self.data[indices],
             index_map=self.index_map,
             total_positions=self.total_positions,
         )
 
-    def index_select_batch(self, idx: torch.Tensor) -> TrajectoryStore:
-        """Select samples by index along the batch dimension."""
-        self._require_finalized()
-        return TrajectoryStore(
-            data=self.data.index_select(0, idx.to(self.data.device)),
-            index_map=self.index_map,
-            total_positions=self.total_positions,
-        )
-
-    def to_device(self, device: Union[str, torch.device]) -> TrajectoryStore:
-        """Move data tensor to *device*. index_map stays on CPU."""
-        self._require_finalized()
-        return TrajectoryStore(
-            data=self.data.to(device=device),
-            index_map=self.index_map,
-            total_positions=self.total_positions,
-        )
-
-    def cast_dtype(self, dtype: torch.dtype) -> TrajectoryStore:
-        """Cast data tensor to *dtype* if it is floating-point and differs."""
-        self._require_finalized()
+    def cast_dtype(self, dtype: torch.dtype) -> Trajectory:
         if self.data.is_floating_point() and self.data.dtype != dtype:
-            return TrajectoryStore(
+            return Trajectory(
                 data=self.data.to(dtype=dtype),
                 index_map=self.index_map,
                 total_positions=self.total_positions,
             )
         return self
 
-    @classmethod
-    def concat(cls, stores: List[TrajectoryStore]) -> TrajectoryStore:
-        """Concatenate stores along the batch dimension.
-
-        All stores must have identical index_map and total_positions.
-        """
-        if not stores:
-            raise ValueError("Cannot concat empty store list.")
-        first = stores[0]
-        first._require_finalized()
-        for s in stores[1:]:
-            s._require_finalized()
-            if s.total_positions != first.total_positions:
-                raise ValueError("Inconsistent total_positions across stores.")
-            if not torch.equal(s.index_map, first.index_map):
-                raise ValueError("Inconsistent index_map across stores.")
-        data = torch.cat([s.data for s in stores], dim=0)
-        return cls(
-            data=data,
-            index_map=first.index_map,
-            total_positions=first.total_positions,
-        )
-
     # ---- modality detection -------------------------------------------------
 
     def detect_modality(self) -> str:
-        """Detect media modality from the stored data shape."""
-        self._require_finalized()
         if self.is_full:
             return "video" if int(self.data.ndim) >= 6 else "image"
         return "video" if int(self.data.ndim) >= 5 else "image"
 
 
-__all__ = ["TrajectoryStore", "compute_trajectory_positions"]
+class TrajectoryBuilder:
+    """Builder for collecting latents during denoising loops.
+
+    Usage::
+
+        builder = TrajectoryBuilder.for_sde_steps(sde_indices, num_steps)
+        builder.add(0, initial_latents)
+        for i in range(num_steps):
+            ...
+            builder.add(i + 1, latents)
+        trajectory = builder.finalize()
+    """
+
+    def __init__(self, total_steps: int, needed_positions: Set[int]) -> None:
+        self._total_steps = total_steps
+        self._needed = needed_positions
+        self._collected: List[Tuple[int, torch.Tensor]] = []
+
+    @classmethod
+    def for_sde_steps(cls, sde_indices: Set[int], total_steps: int) -> TrajectoryBuilder:
+        """Create a builder that keeps only positions needed for SDE pairs."""
+        needed = set(compute_trajectory_positions(sde_indices, total_steps))
+        if not needed:
+            needed = {total_steps}
+        return cls(total_steps, needed)
+
+    @classmethod
+    def full(cls, total_steps: int) -> TrajectoryBuilder:
+        """Create a builder that keeps all positions."""
+        return cls(total_steps, set(range(total_steps + 1)))
+
+    def add(self, position: int, latents: torch.Tensor) -> None:
+        """Record latents at *position*. Silently drops unneeded positions."""
+        if position in self._needed:
+            self._collected.append((position, latents))
+
+    def finalize(self) -> Trajectory:
+        """Freeze collected latents into a Trajectory."""
+        if not self._collected:
+            raise ValueError(
+                f"finalize() called with no collected positions. "
+                f"needed={sorted(self._needed)}"
+            )
+        positions = [p for p, _ in self._collected]
+        data = torch.stack([t for _, t in self._collected], dim=1)
+        total_positions = self._total_steps + 1
+
+        index_map = torch.full((total_positions,), -1, dtype=torch.long)
+        for compact_idx, orig_pos in enumerate(positions):
+            if 0 <= orig_pos < total_positions:
+                index_map[orig_pos] = compact_idx
+
+        return Trajectory(
+            data=data,
+            index_map=index_map,
+            total_positions=total_positions,
+        )
+
+
+# Backward compat alias
+TrajectoryStore = Trajectory
+
+__all__ = ["Trajectory", "TrajectoryBuilder", "TrajectoryStore", "compute_trajectory_positions"]

@@ -3,12 +3,8 @@
 These shell scripts are the primary researcher entrypoints in this repo.
 
 Use `scripts/*.sh` as the maintained experiment templates.
-If you prefer editing grouped YAML directly, use
-`scripts/example_flux_dancegrpo_sglang_separate.yaml` as the committed
-example. A local `configs/recipes/` directory may exist in some
-working trees, but it is gitignored and should not be treated as the public
-repo interface.
-Public config tests cover the committed YAML in this directory.
+A local `configs/recipes/` directory may exist in some working trees, but it
+is gitignored and should not be treated as the public repo interface.
 
 All scripts now resolve paths relative to repository root:
 
@@ -32,7 +28,6 @@ Precision config:
 - Use `precision.training.*` for training model load precision, FSDP param precision, and train-side autocast.
 - Use `precision.rollout.*` for sampler/replay autocast plus trajectory/logprob storage precision.
 - In dedicated SGLang rollout, prompt encoder precision also follows `precision.rollout.autocast_precision`.
-- Keep `rollout.transport_dtype` under `rollout`; it is a transport setting, not part of `precision.*`.
 
 Terminology:
 
@@ -61,20 +56,6 @@ bash scripts/train_mixgrpo_sd3_sglang_separate.sh
 bash scripts/train_nft_sd3_sglang_separate.sh
 ```
 
-## Auxiliary YAML example
-
-This committed YAML is a small, reviewable snapshot mirrored from a selected
-local recipe and includes the nested `precision.training` / `precision.rollout`
-schema:
-
-- `scripts/example_flux_dancegrpo_sglang_separate.yaml`
-
-Use it like this:
-
-```bash
-python -m diffusionrl.train_async --config scripts/example_flux_dancegrpo_sglang_separate.yaml
-```
-
 ## Engine note
 
 For training-actor direct sampling, set `rollout.mode=direct_sampling`
@@ -97,15 +78,11 @@ rollout:
   rollout_engine: sglang
   num_gpus_per_actor: 4
   tp_size: 4
-  transport_dtype: bf16
-  transport_drop_decoded_videos: true
   sglang_local_mode: false
   sglang_kwargs:
     remote_scheduler_endpoints:
       - tcp://10.0.0.11:35555
       - tcp://10.0.0.12:35555
-  logging:
-    transport_log_payload_bytes: true
 ```
 
 Notes:

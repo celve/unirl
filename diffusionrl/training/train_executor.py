@@ -175,7 +175,7 @@ class TrainExecutor:
             "Shuffling %d samples before training (rollout_id=%d, seed=%d)",
             batch_size, rollout_id, seed + rollout_id,
         )
-        return batch.shuffle(perm)
+        return batch.select(perm)
 
     def execute_prepared_batch(self, *, rollout_id: int, batch: TrainingBatch) -> Dict[str, Any]:
         """Run optimization on a pre-validated, on-device typed batch."""

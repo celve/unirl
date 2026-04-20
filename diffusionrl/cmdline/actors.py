@@ -10,13 +10,15 @@ from diffusionrl.cmdline.rollout_engine import (
     build_rollout_engine_init_payload_from_args,
 )
 from diffusionrl.config.spec import SamplingSpec, TrainingPlan
+from diffusionrl.config.training_sections import (
+    LrSchedulerConfig as TrainingLrSchedulerConfig,
+    OptimizerConfig as TrainingOptimizerConfig,
+    TrainingExecutionConfig,
+)
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.ray.actor_config import (
     RolloutActorConfig,
     TrainingActorConfig,
-    TrainingExecutionConfig,
-    TrainingLrSchedulerConfig,
-    TrainingOptimizerConfig,
 )
 from diffusionrl.reward.config import RewardSpec
 
@@ -44,6 +46,7 @@ def build_rollout_actor_init_config_from_args(
     model_init_payload: ComponentInitPayload | None = None,
     reward_config: RewardSpec | None = None,
     engine_init_payload: ComponentInitPayload | None = None,
+    algorithm_init_payload: ComponentInitPayload | None = None,
 ) -> RolloutActorConfig:
     """Build RolloutActorConfig from args and derived config."""
     if engine_init_payload is None:
@@ -54,14 +57,21 @@ def build_rollout_actor_init_config_from_args(
         engine_init_payload = build_rollout_engine_init_payload_from_args(
             args,
             model_init_payload=model_init_payload,
-            sampling_spec=derived_config.sampling_spec,
+            sampling_spec=derived_config.sampling_spec.to_params(args.precision),
             rollout_info=derived_config.rollout_info,
+            sampler_dotpath=derived_config.model_spec.sampler_dotpath,
+        )
+    if algorithm_init_payload is None:
+        algorithm_init_payload = build_algorithm_init_payload_from_args(
+            args,
+            sampling_spec=derived_config.sampling_spec.to_params(args.precision),
         )
     return RolloutActorConfig(
         engine_init_payload=engine_init_payload,
         reward_config=(
             reward_config if reward_config is not None else RewardSpec.from_args(args)
         ),
+        algorithm_init_payload=algorithm_init_payload,
         rollout_batch_size=(
             int(args.rollout.rollout_batch_size)
             if getattr(args.rollout, "rollout_batch_size", None) is not None
@@ -72,7 +82,6 @@ def build_rollout_actor_init_config_from_args(
 
 def _build_optimizer_config_from_args(*, args: Any) -> TrainingOptimizerConfig:
     return TrainingOptimizerConfig(
-        type=str(args.training.optimizer_type),
         learning_rate=float(args.training.learning_rate),
         adam_beta1=float(args.training.adam_beta1),
         adam_beta2=float(args.training.adam_beta2),
@@ -125,7 +134,7 @@ def build_training_actor_init_config_from_args(
 
     if algorithm_init_payload is None:
         algorithm_init_payload = build_algorithm_init_payload_from_args(
-            args, sampling_spec=sampling_spec,
+            args, sampling_spec=sampling_spec.to_params(args.precision),
         )
     if model_init_payload is None:
         model_init_payload = build_model_bundle_init_payload_from_args(
@@ -142,6 +151,8 @@ def build_training_actor_init_config_from_args(
     if training_plan is None:
         training_plan = derived_config.require_training_plan()
 
+    sampling_params = sampling_spec.to_params(args.precision)
+
     return TrainingActorConfig(
         algorithm_init_payload=algorithm_init_payload,
         model_init_payload=model_init_payload,
@@ -156,7 +167,7 @@ def build_training_actor_init_config_from_args(
         ),
         topology_config=derived_config.training_topology,
         training_plan_config=training_plan,
-        sampling_config=dict(sampling_config),
+        sampling_config=sampling_params,
         train_backend_init_payload=train_backend_init_payload,
     )
 

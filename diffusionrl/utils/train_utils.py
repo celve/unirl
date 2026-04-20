@@ -17,13 +17,13 @@ def should_save(rollout_id: int, args) -> bool:
 def should_eval(rollout_id: int, args) -> bool:
     """Check if we should run evaluation at this rollout."""
     interval = int(args.evaluation.eval_steps)
-    return interval > 0 and rollout_id % interval == 0
+    return interval > 0 and (rollout_id + 1) % interval == 0
 
 
 def should_log(rollout_id: int, args) -> bool:
     """Check if we should emit periodic rollout logs at this rollout."""
     interval = int(args.logging.logging_steps)
-    return interval > 0 and rollout_id % interval == 0
+    return interval > 0 and (rollout_id + 1) % interval == 0
 
 
 def maybe_restore_start_rollout_id_from_checkpoint(args, checkpoint_path: Optional[str]) -> Optional[int]:

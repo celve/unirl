@@ -10,10 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Dict, Optional, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from diffusionrl.config.assembly import DerivedConfig
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +19,7 @@ logger = logging.getLogger(__name__)
 # train_only
 # ---------------------------------------------------------------------------
 
-def run_debug_train_only(args: Any, *, derived_config: "DerivedConfig") -> None:
+def run_debug_train_only(args: Any) -> None:
     """Run only the training phase with synthetic or pre-saved data.
 
     Setup path:
@@ -42,7 +39,8 @@ def run_debug_train_only(args: Any, *, derived_config: "DerivedConfig") -> None:
     import ray
 
     from diffusionrl.cmdline.resolution import build_launch_config
-    from diffusionrl.ray.group_factory import create_training_actor_group
+    from diffusionrl.cmdline.schema import validate_and_derive_config
+    from diffusionrl.ray.group import TrainActorGroup
     from diffusionrl.ray.placement_group import create_placement_groups_from_launch
     from diffusionrl.utils import configure_logger, set_seed
 
@@ -68,8 +66,6 @@ def run_debug_train_only(args: Any, *, derived_config: "DerivedConfig") -> None:
     # Align training-side scheduler horizon with the actual debug loop length.
     args.rollout.num_rollout = num_rollouts
 
-    launch_config = build_launch_config(args, derived_config=derived_config)
-
     # 1. Ray
     if not ray.is_initialized():
         if args.ray.ray_address:
@@ -79,47 +75,42 @@ def run_debug_train_only(args: Any, *, derived_config: "DerivedConfig") -> None:
 
     training_group = None
     try:
-        # 2. Placement groups (only training PG is needed)
+        # 2. Resolve launch config first (new-style path)
+        args, derived_config = validate_and_derive_config(args)
+        launch_config = build_launch_config(args, derived_config=derived_config)
+
+        # 3. Placement groups (only training PG is needed)
         pgs = create_placement_groups_from_launch(launch_config)
         training_pg_result = pgs.get("training")
         if training_pg_result is None:
             raise ValueError("Missing training placement-group allocation.")
 
-        # 3. Create training actor group (loads model, LoRA, optimizer, loss)
-        training_group = create_training_actor_group(launch_config, training_pg_result)
-        logger.info("Training actor group created and weights synced")
+        # 4. Create training actor group via new-style TrainActorGroup (uses
+        # TrainActor + backends/FSDPBackend, not the legacy abstract class).
+        training_group, master_addr, master_port = TrainActorGroup.bootstrap(
+            launch_config=launch_config,
+            training_pgs=training_pg_result,
+        )
+        logger.info(
+            "TrainActorGroup created (master=%s:%s, num_actors=%d)",
+            master_addr,
+            master_port,
+            training_group.num_actors,
+        )
 
-        # 4. Prepare training batch
-        if debug_load_path:
-            batch = _load_debug_batch(debug_load_path)
-            batch_ref = ray.put(batch)
-            logger.info("Loaded training batch: type=%s", type(batch).__name__)
-        else:
-            batch_size = int(args.algorithm.prompts_per_rollout) * max(
-                1, int(args.algorithm.samples_per_prompt)
+        # 5. Prepare training batch — only debug_load_path path is supported
+        # on the new-actor runner (synthetic batch relied on a legacy actor
+        # helper that does not exist on TrainActor).
+        if not debug_load_path:
+            raise ValueError(
+                "run_debug_train_only requires "
+                "--debug.debug-load-path <path>. The synthetic-batch path is "
+                "not available on TrainActor."
             )
-            height = int(args.sampling.height)
-            width = int(args.sampling.width)
-            logger.info(
-                "Generating synthetic debug batch: batch_size=%d, resolution=%dx%d, "
-                "algorithm=%s",
-                batch_size,
-                height,
-                width,
-                args.algorithm.algorithm_type,
-            )
-            batch = ray.get(
-                training_group._actor_handles[0].create_debug_training_batch.remote(
-                    batch_size=batch_size,
-                    height=height,
-                    width=width,
-                    num_inference_steps=int(args.sampling.num_inference_steps),
-                )
-            )
-            batch_ref = ray.put(batch)
-            logger.info("Synthetic batch created: type=%s", type(batch).__name__)
+        batch = _load_debug_batch(debug_load_path)
+        logger.info("Loaded training batch: type=%s", type(batch).__name__)
 
-        # 5. Training loop — same batch reused for every iteration
+        # 6. Training loop — same batch reused for every iteration
         logger.info(
             "--- Starting debug training loop: %d optimizer steps on the SAME batch ---",
             num_rollouts,
@@ -128,7 +119,8 @@ def run_debug_train_only(args: Any, *, derived_config: "DerivedConfig") -> None:
         total_train_time = 0.0
         for step in range(num_rollouts):
             t0 = time.perf_counter()
-            metrics_list = training_group.train(step, batch_ref)
+            results = training_group.train(step, batch)
+            metrics_list = [r.to_legacy_metric_dict() for r in results]
             elapsed = time.perf_counter() - t0
             total_train_time += elapsed
 

@@ -117,8 +117,6 @@ def wait_for_published_checkpoint(
     while time.time() < deadline:
         if os.path.exists(checkpoint_path) and os.path.exists(ready_marker):
             return
-        if os.path.exists(checkpoint_path) and not os.path.exists(ready_marker):
-            return
         time.sleep(poll_interval_s)
     raise TimeoutError(
         f"Timed out waiting for published checkpoint: path={checkpoint_path}, marker={ready_marker}"

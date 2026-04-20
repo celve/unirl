@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 from PIL import Image
 
+from diffusionrl.utils.batched import Batched, concat_field, max_field
+
 
 class RewardType(Enum):
     """Types of reward computation."""
@@ -49,36 +51,23 @@ class RewardRequest:
         return self.videos is not None
 
 
-@dataclass(init=False)
-class RewardResponse:
+@dataclass
+class RewardResponse(Batched):
     """
     Response from reward computation.
 
     Contains both aggregated rewards and optional per-component reward breakdowns.
+
+    ``compute_time`` is reduced by ``max`` when multiple responses are
+    concatenated — it is a wall-clock measurement, so the max across
+    parallel-produced responses is the meaningful aggregate.
     """
 
-    rewards: List[float]
-    component_rewards: Dict[str, List[float]] = field(default_factory=dict)
-    successes: List[bool] = field(default_factory=list)
-    errors: List[Optional[str]] = field(default_factory=list)
-    compute_time: float = 0.0
-
-    def __init__(
-        self,
-        rewards: List[float],
-        component_rewards: Optional[Dict[str, List[float]]] = None,
-        successes: Optional[List[bool]] = None,
-        errors: Optional[List[Optional[str]]] = None,
-        compute_time: float = 0.0,
-    ) -> None:
-        self.rewards = list(rewards) if rewards is not None else []
-        self.component_rewards = {
-            str(name): list(values or [])
-            for name, values in dict(component_rewards or {}).items()
-        }
-        self.successes = list(successes) if successes is not None else []
-        self.errors = list(errors) if errors is not None else []
-        self.compute_time = float(compute_time)
+    rewards: List[float] = concat_field(default_factory=list)
+    component_rewards: Dict[str, List[float]] = concat_field(default_factory=dict)
+    successes: List[bool] = concat_field(default_factory=list)
+    errors: List[Optional[str]] = concat_field(default_factory=list)
+    compute_time: float = max_field(default=0.0)
 
     @property
     def batch_size(self) -> int:

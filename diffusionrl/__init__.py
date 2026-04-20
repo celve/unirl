@@ -9,13 +9,13 @@ __version__ = "0.1.0"
 
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     # shared types
-    "RolloutRequest": ("diffusionrl.types", "RolloutRequest"),
-    "RolloutSamples": ("diffusionrl.types", "RolloutSamples"),
+    "RolloutRequest": ("diffusionrl.types.request", "RolloutRequest"),
+    "RolloutSamples": ("diffusionrl.types.sample", "RolloutSamples"),
     "RewardRequest": ("diffusionrl.types", "RewardRequest"),
     "RewardResponse": ("diffusionrl.types", "RewardResponse"),
     "RewardType": ("diffusionrl.types", "RewardType"),
     "TrainingBatch": ("diffusionrl.types", "TrainingBatch"),
-    "SamplingRequirements": ("diffusionrl.types", "SamplingRequirements"),
+    "SamplingRequirements": ("diffusionrl.types.sampling", "SamplingRequirements"),
     # samplers
     "BaseSampler": ("diffusionrl.samplers", "BaseSampler"),
     # sde

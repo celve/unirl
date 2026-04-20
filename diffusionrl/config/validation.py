@@ -9,27 +9,27 @@ from enum import Enum
 from typing import Any, Dict, Optional
 
 from diffusionrl.algorithms.base import BaseAlgorithmConfig
-from diffusionrl.config.resolution import rollout_mode_is_colocated, rollout_uses_services
+from diffusionrl.config.assembly import LaunchConfig
+from diffusionrl.config.resolution import DIRECT_ROLLOUT_MODE, rollout_mode_is_colocated
 from diffusionrl.config.spec import RolloutInfo, TrainingPlan
+from diffusionrl.config.training_sections import (
+    LrSchedulerConfig,
+    OptimizerConfig,
+    TrainingExecutionConfig,
+)
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.ray.actor_config import (
     RolloutActorConfig,
     TrainingActorConfig,
-    TrainingExecutionConfig,
-    TrainingLrSchedulerConfig,
-    TrainingOptimizerConfig,
 )
 from diffusionrl.reward.config import RewardSpec
-from diffusionrl.samplers.engine import EngineConfig
-from diffusionrl.training.backends import (
+from diffusionrl.training.types import (
     BaseTrainBackendConfig,
-    MegatronTrainBackendConfig,
     TrainTopology,
     supported_train_backends,
 )
-from diffusionrl.training.update_schedule import validate_training_plan
-from diffusionrl.types.engine import uses_dedicated_rollout_engine
-from diffusionrl.types.sampling import SamplingRequirements
+from diffusionrl.types.engine import EngineConfig, uses_dedicated_rollout_engine
+from diffusionrl.types.sampling import SamplingParams
 from diffusionrl.utils.misc import load_function
 
 logger = logging.getLogger(__name__)
@@ -199,9 +199,9 @@ def validate_training_actor_sampling_mode(
     if not rollout_info.training_actor_sampling_mode:
         return
 
-    if rollout_uses_services(rollout_info.mode) or uses_dedicated_rollout_engine(rollout_info.rollout_engine):
+    if rollout_info.mode != DIRECT_ROLLOUT_MODE or uses_dedicated_rollout_engine(rollout_info.rollout_engine):
         raise ValueError(
-            "Rollout service engines cannot use direct_sampling mode. "
+            "Dedicated rollout engines cannot use direct_sampling mode. "
             f"Got rollout.mode={rollout_info.mode!r}, "
             f"rollout.rollout_engine={rollout_info.rollout_engine!r}."
         )
@@ -302,7 +302,7 @@ def validate_rollout_layout(
     if rollout_info.training_actor_sampling_mode:
         return
 
-    if not rollout_uses_services(rollout_info.mode):
+    if rollout_info.mode == DIRECT_ROLLOUT_MODE:
         raise ValueError(
             "Dedicated rollout actor layout validation only applies to dedicated rollout engines. "
             f"Got rollout.mode={rollout_info.mode!r}."
@@ -316,7 +316,7 @@ def validate_rollout_layout(
         rollout_gpu_pool_size = rollout_total_gpus
     if rollout_gpu_pool_size < 1:
         raise ValueError(
-            "Dedicated rollout services require a positive rollout GPU pool from placement config. "
+            "Dedicated rollout actors require a positive rollout GPU pool from placement config. "
             f"Got rollout_num_nodes={rollout_num_nodes}, "
             f"rollout_num_gpus_per_node={rollout_num_gpus_per_node}, "
             f"training_num_nodes={training_num_nodes}, "
@@ -368,33 +368,14 @@ def validate_train_backend_config(
     *,
     train_backend_config: BaseTrainBackendConfig,
 ) -> None:
-    """Validate cross-domain backend constraints after canonicalization."""
-    backend = train_backend_config.name
-    backend_dotpath = train_backend_config.backend_dotpath
-    supported = supported_train_backends()
-    if backend not in supported and not backend_dotpath:
-        raise ValueError(
-            f"Unsupported train_backend={backend!r}. "
-            f"Expected one of {sorted(supported)} or provide --training.train-backend-dotpath."
-        )
-    if backend == "megatron" and not backend_dotpath:
-        logger.warning(
-            "train_backend=%s is currently a scaffold backend: launch/topology interfaces are wired, "
-            "but the training execution path is not fully implemented yet. "
-            "Use train_backend_kwargs.actor_class_path to provide a Megatron-dedicated actor.",
-            backend,
-        )
+    """Validate cross-domain backend constraints after canonicalization.
 
-    if (
-        isinstance(train_backend_config, MegatronTrainBackendConfig)
-        and not backend_dotpath
-        and not str(train_backend_config.actor_class_path or "").strip()
-    ):
-        logger.warning(
-            "train_backend=%s requires actor_class_path in train_backend_kwargs "
-            "to launch a Megatron-specific training actor.",
-            backend,
-        )
+    New-style configs (``FSDPBackendConfig``, ``VeOmniBackendConfig``) carry
+    no registry metadata; the identifier check runs upstream in
+    ``resolve_train_backend_identifier``. Kept as a placeholder for future
+    cross-domain invariants.
+    """
+    del train_backend_config
 
 
 # ============================================================================
@@ -615,14 +596,14 @@ def validate_training_actor_init_config(config: TrainingActorConfig) -> None:
             f"got: {type(config).__name__}"
         )
 
-    if not isinstance(config.optimizer_config, TrainingOptimizerConfig):
+    if not isinstance(config.optimizer_config, OptimizerConfig):
         raise ValueError(
-            "training_actor_init_config.optimizer_config must be a TrainingOptimizerConfig, "
+            "training_actor_init_config.optimizer_config must be an OptimizerConfig, "
             f"got: {type(config.optimizer_config).__name__}"
         )
-    if not isinstance(config.scheduler_config, TrainingLrSchedulerConfig):
+    if not isinstance(config.scheduler_config, LrSchedulerConfig):
         raise ValueError(
-            "training_actor_init_config.scheduler_config must be a TrainingLrSchedulerConfig, "
+            "training_actor_init_config.scheduler_config must be an LrSchedulerConfig, "
             f"got: {type(config.scheduler_config).__name__}"
         )
     if not isinstance(config.training_config, TrainingExecutionConfig):
@@ -630,9 +611,11 @@ def validate_training_actor_init_config(config: TrainingActorConfig) -> None:
             "training_actor_init_config.training_config must be a TrainingExecutionConfig, "
             f"got: {type(config.training_config).__name__}"
         )
-    if not isinstance(config.sampling_config, dict):
+    if config.sampling_config is not None and not isinstance(
+        config.sampling_config, SamplingParams
+    ):
         raise ValueError(
-            "training_actor_init_config.sampling_config must be a dict, "
+            "training_actor_init_config.sampling_config must be a SamplingParams or None, "
             f"got: {type(config.sampling_config).__name__}"
         )
     if not isinstance(config.reward_config, RewardSpec):
@@ -690,12 +673,8 @@ def validate_training_actor_init_config(config: TrainingActorConfig) -> None:
     train_backend_config = train_backend_init_payload.component_config
     if not isinstance(train_backend_config, BaseTrainBackendConfig):
         raise ValueError(
-            "train_backend_init_payload.component_config must be a BaseTrainBackendConfig, "
+            "train_backend_init_payload.component_config must be a TrainBackendConfig, "
             f"got: {type(train_backend_config).__name__}"
-        )
-    if not str(train_backend_config.name or "").strip():
-        raise ValueError(
-            "train_backend_init_payload.component_config.name is required."
         )
 
     topology_config = config.topology_config
@@ -709,13 +688,58 @@ def validate_training_actor_init_config(config: TrainingActorConfig) -> None:
             )
 
     training_plan_config = config.training_plan_config
-    try:
-        validate_training_plan(training_plan_config)
-    except ValueError as exc:
+    if not isinstance(training_plan_config, TrainingPlan):
         raise ValueError(
-            "Invalid training_plan_config in training actor init payload. "
-            f"{exc}"
-        ) from exc
+            "training_actor_init_config.training_plan_config must be a TrainingPlan, "
+            f"got: {type(training_plan_config).__name__}"
+        )
+    if training_plan_config.local_batch_size != (
+        training_plan_config.local_mini_batch_size
+        * training_plan_config.num_updates_per_batch
+    ):
+        raise ValueError(
+            "training_plan_config.local_batch_size must equal "
+            "local_mini_batch_size * num_updates_per_batch. "
+            f"Got local_batch_size={training_plan_config.local_batch_size}, "
+            f"local_mini_batch_size={training_plan_config.local_mini_batch_size}, "
+            f"num_updates_per_batch={training_plan_config.num_updates_per_batch}."
+        )
+    if (
+        training_plan_config.local_mini_batch_size
+        % training_plan_config.micro_batch_size
+        != 0
+    ):
+        raise ValueError(
+            "training_plan_config.micro_batch_size must evenly divide "
+            "local_mini_batch_size. "
+            f"Got micro_batch_size={training_plan_config.micro_batch_size}, "
+            f"local_mini_batch_size={training_plan_config.local_mini_batch_size}."
+        )
+
+
+def validate_launch_config_for_train(*, launch_config: LaunchConfig) -> None:
+    """Verify a resolved LaunchConfig is compatible with ``diffusionrl.train``.
+
+    Takes resolved framework objects rather than raw args; by design this
+    validator runs after cmdline/schema.py has fully populated the launch
+    config from CLI args.
+    """
+    rollout_info = launch_config.rollout_info
+    if (
+        not rollout_info.training_actor_sampling_mode
+        and launch_config.rollout is None
+    ):
+        raise RuntimeError(
+            "train.py requires a dedicated rollout launch when not using "
+            "training_actor_sampling_mode "
+            "(launch_config.rollout must be set)."
+        )
+    sync_protocol = str(rollout_info.sync_protocol or "").strip()
+    if sync_protocol == "checkpoint_path":
+        raise NotImplementedError(
+            "train.py does not yet support sync_mode='checkpoint_path' "
+            "(would call training_runtime.export_weights_to_path which the new TrainActor lacks)."
+        )
 
 
 # ============================================================================
@@ -729,6 +753,7 @@ __all__ = [
     "validate_colocate_fractions",
     "validate_direct_sampling_batch_geometry",
     "validate_dotpath",
+    "validate_launch_config_for_train",
     "validate_precision_type",
     "validate_engine_algorithm_contract",
     "validate_reward_config",

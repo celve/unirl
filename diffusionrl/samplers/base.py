@@ -9,8 +9,8 @@ from typing import List, Optional, Set
 import torch
 
 # Import shared data types from canonical types package
-from diffusionrl.sde.rules import is_deterministic_sde_type
-from diffusionrl.types import RolloutSamples
+from diffusionrl.sde.rules import is_deterministic_sde_type, normalize_sde_type
+from diffusionrl.types.sample import RolloutSamples
 
 
 class BaseSampler(ABC):
@@ -54,7 +54,7 @@ class BaseSampler(ABC):
             shift: Time shift parameter for sigma schedule
         """
         self.eta = eta
-        self.sde_type = sde_type
+        self.sde_type = normalize_sde_type(sde_type)
         self.shift = shift
 
     @property

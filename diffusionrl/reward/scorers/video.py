@@ -21,8 +21,7 @@ class VideoRewardScorer(BaseRewardScorer):
 
     def __init__(
         self,
-        frame_reward_model: Optional[str] = "pickscore",
-        weight: float = 1.0,
+        model_name: Optional[str] = "pickscore",
         temporal_weight: float = 0.3,
         alignment_weight: float = 0.7,
         sample_frames: int = 8,
@@ -32,9 +31,7 @@ class VideoRewardScorer(BaseRewardScorer):
         timeout: float = 60.0,
         **model_kwargs,
     ) -> None:
-        del weight
-
-        resolved_frame_model = str(frame_reward_model or "pickscore").strip().lower()
+        resolved_frame_model = str(model_name or "pickscore").strip().lower()
         super().__init__(
             model_name=resolved_frame_model,
             batch_size=batch_size,
@@ -43,7 +40,6 @@ class VideoRewardScorer(BaseRewardScorer):
         self.temporal_weight = temporal_weight
         self.alignment_weight = alignment_weight
         self.sample_frames = sample_frames
-        self.frame_reward_model = resolved_frame_model
 
         scorer_cls = resolve_builtin_reward_scorer_class(resolved_frame_model)
         self.frame_scorer = scorer_cls(

@@ -17,9 +17,9 @@ from diffusionrl.algorithms.base import (
 from diffusionrl.algorithms.registry import register_algorithm
 from diffusionrl.cmdline.algorithms import validate_algorithm_kwargs
 from diffusionrl.cmdline.registry import register_cmdline_config_parser
-from diffusionrl.config import SamplingSpec, derive_sampling_spec
 from diffusionrl.types import TimestepData
-from diffusionrl.types.sampling import RolloutRequest
+from diffusionrl.types.request import RolloutRequest
+from diffusionrl.types.sampling import SamplingParams
 
 
 @dataclass(frozen=True)
@@ -32,17 +32,19 @@ class MinimalAlgorithmConfig(BaseAlgorithmConfig):
 def build_minimal_algorithm_config_from_args(
     args: Any,
     *,
-    sampling_spec: SamplingSpec | None = None,
+    sampling_spec: SamplingParams | None = None,
     **_: Any,
 ) -> MinimalAlgorithmConfig:
     """
-    If one wants to use the framework's cmdline interface (train.py / train_async.py),
+    If one wants to use the framework's cmdline interface (train.py),
     define a function that build algorithm config from the framework's
     cmdline arguments. The built config will be passed to instantiate algorithm.
     """
 
-    if not isinstance(sampling_spec, SamplingSpec):
-        sampling_spec = derive_sampling_spec(args)
+    if not isinstance(sampling_spec, SamplingParams):
+        from diffusionrl.cmdline.resolution import derive_sampling_spec
+
+        sampling_spec = derive_sampling_spec(args).to_params(args.precision)
     extra = dict(getattr(args.algorithm, "algorithm_kwargs", {}) or {})
     validate_algorithm_kwargs(
         config_class=MinimalAlgorithmConfig,
@@ -76,7 +78,7 @@ class MinimalAlgorithm(BaseAlgorithm):
 
     You can use a custom algorithm in two ways.
 
-    1. Write your own driver script, or modify ``train.py`` / ``train_async.py``.
+    1. Write your own driver script, or modify ``train.py``.
        In that case you can instantiate your algorithm config, init payload yourself in the driver,
        and do not need to integrate with the framework's cmdline parser registry.
 
@@ -108,6 +110,38 @@ class MinimalAlgorithm(BaseAlgorithm):
     Then users can select your algorithm through the framework's algorithm
     registry while still getting your custom cmdline-to-config adaptation.
     """
+
+    @classmethod
+    def _parse_config_from_dict(cls, config: dict) -> MinimalAlgorithmConfig:
+        extra = cls.resolve_config_kwargs(config)
+        return MinimalAlgorithmConfig(
+            skip_last_timestep=bool(extra.get("skip_last_timestep", False)),
+            skip_initial_timesteps=int(extra.get("skip_initial_timesteps", 0)),
+            component_mix_stage=str(config.get("component_mix_stage", "reward")),
+            adv_normalization_scope=str(config.get("adv_normalization_scope", "group")),
+            samples_per_prompt=int(config.get("samples_per_prompt", 1)),
+            num_inference_steps=int(config.get("num_inference_steps", 0)),
+            eval_ema_decay=float(config.get("eval_ema_decay", 0.9)),
+            eval_ema_update_interval=int(config.get("eval_ema_update_interval", 1)),
+            epsilon=float(config.get("adv_norm_eps", 1e-8)),
+            clip_max=config.get("clip_max", 5.0),
+            use_global_std=bool(config.get("use_global_std", False)),
+            trim_outliers_ratio=float(config.get("trim_outliers_ratio", 0.0)),
+        )
+
+    @classmethod
+    def from_config(
+        cls,
+        config: dict | MinimalAlgorithmConfig,
+    ) -> "MinimalAlgorithm":
+        if isinstance(config, dict):
+            config = cls._parse_config_from_dict(config)
+        if not isinstance(config, MinimalAlgorithmConfig):
+            raise TypeError(
+                f"{cls.__name__}.from_config expects dict or MinimalAlgorithmConfig, "
+                f"got {type(config).__name__}."
+            )
+        return cls(config=config)
 
     def __init__(
         self,
@@ -247,7 +281,8 @@ class MinimalAlgorithm(BaseAlgorithm):
                 f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}"
             )
 
-        step_labels = batch.step_labels
+        step_indices = batch.resolved_step_indices[:-1]
+        step_labels = set(int(v) for v in step_indices.tolist())
         if not step_labels:
             return tuple()
 

@@ -1,26 +1,24 @@
-"""Weight synchronization coordinators for rollout updates.
+"""Weight synchronization config builder for rollout updates.
 
-Package contract for ``diffusionrl.distributed``:
+Replaces the former coordinator class hierarchy with a single config-builder
+function.  The training loop calls the runtime directly:
 
-- owns distributed coordination semantics such as weight-sync strategy,
-  persistent-group lifecycle, and export/publish protocols
-- may bind to the current runtime transport when a coordination step needs it
-  (for example waiting on a Ray async init ref)
-- does not own Ray actor classes, group creation, placement, or workflow logic
-
-Two-phase lifecycle: setup() -> sync() x N -> teardown().
+    config = build_weight_sync_config(args, launch_config, mode=..., rollout_runtime=...)
+    if config:
+        training_runtime.setup_weight_sync(config)
+    ...
+    training_runtime.sync_weights_to_rollout()
+    ...
+    training_runtime.teardown_weight_sync()
 """
 
 from __future__ import annotations
 
 import logging
-import time
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Type
+from typing import Any, Optional
 
-from diffusionrl.config.assembly import RolloutLaunch, WeightSyncSpec
-from diffusionrl.samplers.engine import EngineConfig
+from diffusionrl.config.assembly import LaunchConfig
+from diffusionrl.types.engine import EngineConfig
 
 logger = logging.getLogger(__name__)
 
@@ -28,25 +26,38 @@ logger = logging.getLogger(__name__)
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _validate_weight_sync_spec(spec: WeightSyncSpec) -> None:
-    if spec.bucket_size_mb < 1:
-        raise ValueError(f"sync.bucket_size must be >= 1, got {spec.bucket_size_mb}.")
+def _resolve_target_modules(args: Any) -> list[str]:
+    raw = args.sync.target_modules
+    if isinstance(raw, (list, tuple)) and raw:
+        return [str(name) for name in raw]
+    return ["transformer"]
 
 
-def _validate_tensor_sync_topology(rollout_launch: Optional[RolloutLaunch]) -> None:
+def _resolve_bucket_size_mb(args: Any) -> int:
+    bucket_size_mb = int(args.sync.bucket_size)
+    if bucket_size_mb < 1:
+        raise ValueError(f"sync.bucket_size must be >= 1, got {bucket_size_mb}.")
+    return bucket_size_mb
+
+
+def _resolve_flush_cache(args: Any) -> bool:
+    return bool(args.sync.flush_cache)
+
+
+def _validate_tensor_sync_topology(launch_config: LaunchConfig) -> None:
     """Guard invalid topology values for tensor/distributed sync paths."""
-    if rollout_launch is None:
+    rollout = launch_config.rollout
+    if rollout is None:
         raise ValueError(
             "Tensor/distributed weight sync requires a dedicated rollout launch config."
         )
-    engine_config = rollout_launch.engine_init_payload.component_config
+    engine_config = rollout.engine_init_payload.component_config
     if not isinstance(engine_config, EngineConfig):
         raise ValueError(
             "Tensor/distributed weight sync requires rollout.engine_init_payload.component_config "
             f"to be an EngineConfig, got: {type(engine_config).__name__}"
         )
-    engine_kwargs = dict(engine_config.engine_kwargs or {})
-    tp_size_int = int(engine_kwargs.get("tp_size", 1) or 1)
+    tp_size_int = int(engine_config.tp_size or 1)
     if tp_size_int < 1:
         raise ValueError(f"Invalid tp_size={tp_size_int}. Expected tp_size >= 1.")
 
@@ -73,386 +84,105 @@ def _resolve_rollout_tp_payload_count(rollout_runtime: Any) -> int:
     return payload_count
 
 
-# ---------------------------------------------------------------------------
-# SyncResult
-# ---------------------------------------------------------------------------
-
-@dataclass
-class SyncResult:
-    """Result of a weight sync operation."""
-    version: int
-    mode: str
-    rollout_id: int
-    elapsed_ms: float
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# WeightSyncCoordinator (two-phase base class)
-# ---------------------------------------------------------------------------
-
-class WeightSyncCoordinator(ABC):
-    """Two-phase weight sync coordinator: setup() -> sync() x N -> teardown()."""
-
-    def __init__(
-        self,
-        *,
-        sync_spec: WeightSyncSpec,
-        rollout_launch: Optional[RolloutLaunch],
-        backend_capabilities: Dict[str, Any],
-    ) -> None:
-        self._sync_spec = sync_spec
-        self._rollout_launch = rollout_launch
-        self._backend_capabilities = backend_capabilities
-        self._version = 0
-        self._is_setup = False
-        self._training_runtime = None
-        self._rollout_runtime = None
-
-    def setup(
-        self,
-        *,
-        training_runtime: Any,
-        rollout_runtime: Optional[Any] = None,
-    ) -> None:
-        """Bind runtime handles and perform one-time initialization."""
-        self._training_runtime = training_runtime
-        self._rollout_runtime = rollout_runtime
-        self._do_setup()
-        self._is_setup = True
-
-    def sync(self, *, rollout_id: int) -> SyncResult:
-        """Synchronize latest policy weights to rollout side."""
-        if not self._is_setup:
-            raise RuntimeError(
-                "WeightSyncCoordinator.sync() called before setup(). "
-                "Call setup(training_runtime=..., rollout_runtime=...) first."
-            )
-
-        t0 = time.monotonic()
-        if self._rollout_runtime is not None:
-            self._rollout_runtime.wake_up()
-        extra = self._do_sync(rollout_id=rollout_id) or {}
-        self._version += 1
-        elapsed_ms = (time.monotonic() - t0) * 1000
-        result = SyncResult(
-            version=self._version,
-            mode=self._mode_name,
-            rollout_id=rollout_id,
-            elapsed_ms=elapsed_ms,
-            extra=extra,
+def _select_export_format(launch_config: LaunchConfig) -> str:
+    """Select checkpoint export format based on rollout engine and backend capabilities."""
+    rollout = launch_config.rollout
+    if rollout is None:
+        raise ValueError(
+            "Checkpoint weight sync requires a dedicated rollout runtime config."
         )
-        logger.info(
-            "Weight sync v%d: %s %.1fms (rollout_id=%d)",
-            result.version, result.mode, result.elapsed_ms, result.rollout_id,
+    engine_type = str(rollout.rollout_engine or "").strip().lower()
+    if not engine_type:
+        raise ValueError(
+            "Checkpoint weight sync requires rollout.rollout_engine to be normalized. "
+            "Validate args before selecting dedicated rollout checkpoint export format."
         )
-        return result
-
-    def teardown(self) -> None:
-        """Release resources acquired during setup()."""
-        if self._is_setup:
-            self._do_teardown()
-            self._is_setup = False
-
-    @property
-    @abstractmethod
-    def _mode_name(self) -> str:
-        ...
-
-    def _do_setup(self) -> None:
-        """Override for one-time setup work."""
-
-    @abstractmethod
-    def _do_sync(self, *, rollout_id: int) -> Optional[Dict[str, Any]]:
-        """Core sync logic. Return extra metadata dict or None."""
-
-    def _do_teardown(self) -> None:
-        """Override for teardown work."""
-# ---------------------------------------------------------------------------
-# DisabledWeightSync
-# ---------------------------------------------------------------------------
-
-class DisabledWeightSync(WeightSyncCoordinator):
-    """No-op coordinator used when sampling runs directly on training actors."""
-
-    @property
-    def _mode_name(self) -> str:
-        return "disabled"
-
-    def sync(self, *, rollout_id: int) -> SyncResult:
-        if not self._is_setup:
-            self._is_setup = True
-        self._version += 1
-        return SyncResult(
-            version=self._version,
-            mode=self._mode_name,
-            rollout_id=rollout_id,
-            elapsed_ms=0.0,
-            extra={"skipped": True},
-        )
-
-    def _do_sync(self, *, rollout_id: int) -> Optional[Dict[str, Any]]:
-        return {"skipped": True}
+    backend_caps = (
+        launch_config.training.backend_capabilities.as_dict()
+        if launch_config.training.backend_capabilities
+        else {}
+    )
+    if backend_caps:
+        preferred_by_engine = backend_caps.get("preferred_weight_export_format_by_rollout_engine")
+        preferred_format = None
+        if isinstance(preferred_by_engine, dict):
+            preferred_format = preferred_by_engine.get(engine_type)
+        if not preferred_format:
+            preferred_format = backend_caps.get("preferred_weight_export_format")
+        supported_formats = set(backend_caps.get("supported_weight_export_formats") or ())
+        if preferred_format in supported_formats:
+            return str(preferred_format)
+    if engine_type == "sglang":
+        return "sglang_transformer_safetensors"
+    return "state_dict"
 
 
 # ---------------------------------------------------------------------------
-# TensorPayloadWeightSync (renamed from IPC)
+# Public API
 # ---------------------------------------------------------------------------
 
-class TensorPayloadWeightSync(WeightSyncCoordinator):
-    """Same-node SGLang: serialized tensor via UpdateWeightsFromTensorReqInput."""
+def build_weight_sync_config(
+    args: Any,
+    launch_config: LaunchConfig,
+    *,
+    mode: str,
+    rollout_runtime: Optional[Any] = None,
+) -> dict:
+    """Build config dict for training_runtime.setup_weight_sync().
 
-    @property
-    def _mode_name(self) -> str:
-        return "tensor_payload"
+    Returns empty dict for 'disabled' mode (no sync needed).
+    """
+    if mode == "disabled":
+        return {}
 
-    def _do_setup(self) -> None:
-        _validate_tensor_sync_topology(self._rollout_launch)
-        _validate_weight_sync_spec(self._sync_spec)
-        if self._rollout_runtime is None:
+    if mode == "tensor_payload":
+        _validate_tensor_sync_topology(launch_config)
+        if rollout_runtime is None:
             raise RuntimeError("tensor_payload weight sync requires a rollout runtime.")
-        self._rollout_runtime.refresh_weight_update_targets()
-        self._tp_payload_count = _resolve_rollout_tp_payload_count(self._rollout_runtime)
-        rollout_actors = self._rollout_runtime.get_rollout_actors()
-        self._training_runtime.setup_weight_sync({
+        rollout_actors = rollout_runtime.get_rollout_actors()
+        return {
             "mode": "tensor_payload",
             "rollout_actors": rollout_actors,
-            "target_modules": list(self._sync_spec.target_modules),
-            "bucket_size_mb": self._sync_spec.bucket_size_mb,
-            "flush_cache": self._sync_spec.flush_cache,
-            "rollout_num_gpus_per_engine": self._tp_payload_count,
-        })
+            "target_modules": _resolve_target_modules(args),
+            "bucket_size_mb": _resolve_bucket_size_mb(args),
+            "flush_cache": _resolve_flush_cache(args),
+            "rollout_num_gpus_per_engine": _resolve_rollout_tp_payload_count(rollout_runtime),
+        }
 
-    def _do_sync(self, *, rollout_id: int) -> Dict[str, Any]:
-        del rollout_id
-        self._training_runtime.sync_weights_to_rollout()
-        return {"tp_payload_count": self._tp_payload_count}
-
-    def _do_teardown(self) -> None:
-        self._training_runtime.teardown_weight_sync()
-# ---------------------------------------------------------------------------
-# NCCLBroadcastWeightSync (persistent group)
-# ---------------------------------------------------------------------------
-
-class NCCLBroadcastWeightSync(WeightSyncCoordinator):
-    """Cross-node SGLang: persistent NCCL group, GPU-to-GPU broadcast."""
-
-    @property
-    def _mode_name(self) -> str:
-        return "nccl_broadcast"
-
-    def _do_setup(self) -> None:
-        _validate_tensor_sync_topology(self._rollout_launch)
-        _validate_weight_sync_spec(self._sync_spec)
-        if self._rollout_runtime is None:
+    if mode == "nccl_broadcast":
+        _validate_tensor_sync_topology(launch_config)
+        if rollout_runtime is None:
             raise RuntimeError("nccl_broadcast weight sync requires a rollout runtime.")
-        self._group_name: Optional[str] = None
-        self._rollout_runtime.refresh_weight_update_targets()
-        self._init_persistent_group()
-        self._setup_handler()
-
-    def _setup_handler(self) -> None:
-        rollout_actors = self._rollout_runtime.get_rollout_actors()
-        topology = self._rollout_runtime.get_weight_sync_topology()
+        rollout_actors = rollout_runtime.get_rollout_actors()
+        topology = rollout_runtime.get_weight_sync_topology()
         total_rollout_gpus = int(topology.get("total_gpus", 0)) if isinstance(topology, dict) else 0
-        self._training_runtime.setup_weight_sync({
+        return {
             "mode": "nccl_broadcast",
             "rollout_actors": rollout_actors,
-            "target_modules": list(self._sync_spec.target_modules),
-            "bucket_size_mb": self._sync_spec.bucket_size_mb,
-            "flush_cache": self._sync_spec.flush_cache,
+            "target_modules": _resolve_target_modules(args),
+            "bucket_size_mb": _resolve_bucket_size_mb(args),
+            "flush_cache": _resolve_flush_cache(args),
             "rollout_num_gpus": total_rollout_gpus,
             "rollout_num_gpus_per_engine": int(
                 topology.get("num_gpus_per_actor", 1)
             ) if isinstance(topology, dict) else 1,
-        })
+        }
 
-    def _init_persistent_group(self) -> None:
-        topology = self._rollout_runtime.get_weight_sync_topology()
-        if not isinstance(topology, dict):
-            raise RuntimeError(f"Invalid rollout weight sync topology payload: {topology!r}")
-        total_rollout_gpus = int(topology.get("total_gpus", 0))
-        if total_rollout_gpus <= 0:
-            logger.warning("No rollout GPUs for NCCL group, skipping init.")
-            return
-
-        endpoint = self._training_runtime.get_rank0_ip_and_free_port()
-        master_address = str(endpoint["master_address"])
-        master_port = int(endpoint["master_port"])
-        world_size = int(total_rollout_gpus + 1)
-        self._group_name = f"diffusionrl_wsync_{int(time.time_ns())}"
-
-        rollout_refs = self._rollout_runtime.async_init_weights_update_group(
-            master_address=master_address,
-            master_port=master_port,
-            world_size=world_size,
-            group_name=self._group_name,
-            backend="nccl",
-        )
-        train_ref = self._training_runtime.async_init_weights_update_group(
-            master_address=master_address,
-            master_port=master_port,
-            world_size=world_size,
-            group_name=self._group_name,
-            backend="nccl",
-        )
-        try:
-            # distributed/ is allowed to bind the current transport for
-            # coordination handshakes, but actor/group ownership stays in ray/.
-            import ray
-
-            ray.get(rollout_refs + [train_ref])
-        except Exception:
-            logger.exception("NCCL group init failed: %s", self._group_name)
-            self._destroy_group_best_effort()
-            self._group_name = None
-            raise
-
-    def _destroy_group_best_effort(self) -> None:
-        if not self._group_name:
-            return
-        gn = self._group_name
-        try:
-            self._training_runtime.destroy_weights_update_group(gn)
-        except Exception:
-            logger.debug("Training-side group destroy failed: %s", gn, exc_info=True)
-        try:
-            self._rollout_runtime.destroy_weights_update_group(gn)
-        except Exception:
-            logger.debug("Rollout-side group destroy failed: %s", gn, exc_info=True)
-
-    def _do_sync(self, *, rollout_id: int) -> Dict[str, Any]:
-        del rollout_id
-        if not self._group_name:
-            return {"skipped": True}
-        try:
-            self._training_runtime.sync_weights_to_rollout()
-            return {}
-        except Exception:
-            logger.warning("NCCL sync failed, rebuilding group...", exc_info=True)
-            self._training_runtime.teardown_weight_sync()
-            self._destroy_group_best_effort()
-            self._group_name = None
-            self._init_persistent_group()
-            if not self._group_name:
-                raise
-            self._setup_handler()
-            self._training_runtime.sync_weights_to_rollout()
-            return {"recovered": True}
-
-    def _do_teardown(self) -> None:
-        self._destroy_group_best_effort()
-        self._group_name = None
-        self._training_runtime.teardown_weight_sync()
-# ---------------------------------------------------------------------------
-# CheckpointWeightSync
-# ---------------------------------------------------------------------------
-
-class CheckpointWeightSync(WeightSyncCoordinator):
-    """Filesystem sync for dedicated rollout engines that consume checkpoints."""
-
-    @property
-    def _mode_name(self) -> str:
-        return "checkpoint_path"
-
-    def _do_setup(self) -> None:
-        if self._rollout_runtime is None:
+    if mode == "checkpoint_path":
+        if rollout_runtime is None:
             raise RuntimeError("checkpoint_path weight sync requires a rollout runtime.")
-        self._export_format = self._select_export_format()
-        self._training_runtime.setup_weight_sync({
+        return {
             "mode": "checkpoint_path",
             "rollout_actors": [],
-            "rollout_runtime": self._rollout_runtime,
-            "export_format": self._export_format,
-            "weight_sync_dir": self._sync_spec.sync_dir,
-        })
+            "rollout_runtime": rollout_runtime,
+            "export_format": _select_export_format(launch_config),
+            "weight_sync_dir": str(args.sync.dir),
+        }
 
-    def _select_export_format(self) -> str:
-        rollout = self._rollout_launch
-        if rollout is None:
-            raise ValueError(
-                "Checkpoint weight sync requires a dedicated rollout runtime config."
-            )
-        engine_type = str(rollout.rollout_engine or "").strip().lower()
-        if not engine_type:
-            raise ValueError(
-                "Checkpoint weight sync requires rollout.rollout_engine to be normalized. "
-                "Validate args before selecting dedicated rollout checkpoint export format."
-            )
-        backend_caps = dict(self._backend_capabilities or {})
-        if backend_caps:
-            preferred_by_engine = backend_caps.get("preferred_weight_export_format_by_rollout_engine")
-            preferred_format = None
-            if isinstance(preferred_by_engine, dict):
-                preferred_format = preferred_by_engine.get(engine_type)
-            if not preferred_format:
-                preferred_format = backend_caps.get("preferred_weight_export_format")
-            supported_formats = set(backend_caps.get("supported_weight_export_formats") or ())
-            if preferred_format in supported_formats:
-                return str(preferred_format)
-        if engine_type == "sglang":
-            return "sglang_transformer_safetensors"
-        return "state_dict"
-
-    def _do_sync(self, *, rollout_id: int) -> Dict[str, Any]:
-        del rollout_id
-        self._training_runtime.sync_weights_to_rollout()
-        return {}
-
-    def _do_teardown(self) -> None:
-        self._training_runtime.teardown_weight_sync()
-
-
-_BUILTIN_COORDINATORS: Dict[str, Type[WeightSyncCoordinator]] = {
-    "disabled": DisabledWeightSync,
-    "tensor_payload": TensorPayloadWeightSync,
-    "nccl_broadcast": NCCLBroadcastWeightSync,
-    "checkpoint_path": CheckpointWeightSync,
-}
-
-
-
-def create_weight_sync(
-    launch_config: "LaunchConfig",
-    *,
-    mode: Optional[str] = None,
-) -> WeightSyncCoordinator:
-    """Create a weight-sync coordinator from launch config.
-
-    Extracts the slices needed by coordinators so that the caller can drop
-    the full ``LaunchConfig`` after the launch phase completes.
-    """
-    from diffusionrl.config import LaunchConfig as _LaunchConfig
-
-    if not isinstance(launch_config, _LaunchConfig):
-        raise TypeError(
-            f"create_weight_sync requires a LaunchConfig, got {type(launch_config).__name__}"
-        )
-    spec = launch_config.weight_sync
-    resolved_mode = str(mode if mode is not None else spec.protocol).strip().lower()
-    if not resolved_mode:
-        raise ValueError(
-            "sync.protocol must be set explicitly before create_weight_sync()."
-        )
-    cls = _BUILTIN_COORDINATORS.get(resolved_mode)
-    if cls is None:
-        raise ValueError(
-            f"Unsupported sync.protocol={resolved_mode}. "
-            f"Expected one of: {sorted(_BUILTIN_COORDINATORS.keys())}"
-        )
-    return cls(
-        sync_spec=spec,
-        rollout_launch=launch_config.rollout,
-        backend_capabilities=launch_config.training.backend_capabilities.as_dict(),
+    raise ValueError(
+        f"Unsupported sync.protocol={mode}. "
+        f"Expected one of: disabled, tensor_payload, nccl_broadcast, checkpoint_path"
     )
 
 
-__all__ = [
-    "WeightSyncCoordinator",
-    "SyncResult",
-    "DisabledWeightSync",
-    "TensorPayloadWeightSync",
-    "NCCLBroadcastWeightSync",
-    "CheckpointWeightSync",
-    "create_weight_sync",
-]
+__all__ = ["build_weight_sync_config"]

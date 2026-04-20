@@ -176,7 +176,6 @@ run_training() {
     python -m diffusionrl.train \
         --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \
         --model.model-type sd3 \
-        --sampling.sampler-dotpath diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
         --algorithm.algorithm-dotpath diffusionrl.algorithms.grpo.GRPOAlgorithm \
         --reward.reward-components "${REWARD_NAME}" \
         --reward.local-reward-device "${REWARD_DEVICE}" \
@@ -202,7 +201,7 @@ run_training() {
         --algorithm.kwarg clip_range=1e-4 \
         --algorithm.kwarg use_kl_penalty=true \
         --algorithm.kwarg kl_coef=0.0 \
-        --algorithm.adv-normalization group \
+        --algorithm.adv-normalization-scope group \
         --algorithm.use-global-std true \
         --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}" \
         --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}" \

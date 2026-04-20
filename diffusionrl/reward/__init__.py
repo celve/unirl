@@ -15,17 +15,15 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "HTTPRewardExecutor": ("diffusionrl.reward.http", "HTTPRewardExecutor"),
     "OCRRewardScorer": ("diffusionrl.reward.scorers.ocr", "OCRRewardScorer"),
     "PickScoreRewardScorer": ("diffusionrl.reward.scorers.pickscore", "PickScoreRewardScorer"),
-    "compute_rewards_from_rollout_outputs": ("diffusionrl.reward.pipeline", "compute_rewards_from_rollout_outputs"),
     "RewardComponentSpec": ("diffusionrl.reward.config", "RewardComponentSpec"),
     "RewardDefinition": ("diffusionrl.reward.config", "RewardDefinition"),
     "RewardExecutionPlan": ("diffusionrl.reward.config", "RewardExecutionPlan"),
+    "RewardPipeline": ("diffusionrl.reward.pipeline", "RewardPipeline"),
     "RewardProviderConfig": ("diffusionrl.reward.config", "RewardProviderConfig"),
     "read_rewards": ("diffusionrl.reward.pipeline", "read_rewards"),
-    "score_and_attach_rewards": ("diffusionrl.reward.pipeline", "score_and_attach_rewards"),
     "RewardSpec": ("diffusionrl.reward.config", "RewardSpec"),
     "RewardService": ("diffusionrl.reward.service", "RewardService"),
     "VideoRewardScorer": ("diffusionrl.reward.scorers.video", "VideoRewardScorer"),
-    "resolve_reward_input_kind": ("diffusionrl.reward.pipeline", "resolve_reward_input_kind"),
 }
 
 __all__ = sorted(_LAZY_ATTRS.keys())

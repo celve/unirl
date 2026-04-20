@@ -8,7 +8,6 @@ from typing import Dict, Tuple
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "DerivedConfig": ("diffusionrl.config.assembly", "DerivedConfig"),
     "LaunchConfig": ("diffusionrl.config.assembly", "LaunchConfig"),
-    "RolloutServicesSpec": ("diffusionrl.config.assembly", "RolloutServicesSpec"),
     "WeightSyncSpec": ("diffusionrl.config.assembly", "WeightSyncSpec"),
     "SamplingSpec": ("diffusionrl.config.spec", "SamplingSpec"),
     "ModelSpec": ("diffusionrl.config.spec", "ModelSpec"),

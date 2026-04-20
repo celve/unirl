@@ -11,13 +11,15 @@ from diffusionrl.cmdline.actors import (
     build_training_actor_init_config_from_args,
     build_training_sampling_config_from_args,
 )
-from diffusionrl.cmdline.registry import derive_component_cmdline_config_parser
+from diffusionrl.cmdline.train_backend import (
+    build_train_backend_init_payload_from_args,
+    resolve_train_backend_identifier,
+)
 from diffusionrl.config.assembly import (
     DerivedConfig,
     LaunchConfig,
     PlacementSpec,
     RolloutLaunch,
-    RolloutServicesSpec,
     TrainingLaunch,
     WeightSyncSpec,
 )
@@ -31,17 +33,14 @@ from diffusionrl.config.resolution import (
 )
 from diffusionrl.config.spec import ModelSpec, RolloutInfo, SamplingSpec, TrainingPlan
 from diffusionrl.models import derive_model_bundle_path, list_model_types
-from diffusionrl.registry import derive_registry_or_dotpath
-from diffusionrl.training.backends import (
+from diffusionrl.training.backends import VeOmniBackendConfig
+from diffusionrl.training.types import (
     BaseTrainBackendConfig,
-    MegatronTrainBackendConfig,
     TrainTopology,
-    VeOmniTrainBackendConfig,
-    derive_train_backend_capabilities,
-    derive_train_backend_launch_spec,
+    resolve_train_backend_capabilities,
+    resolve_train_backend_launch_spec,
     supported_train_backends,
 )
-from diffusionrl.training.backends.registry import TRAIN_BACKEND_COMPONENT_FAMILY
 from diffusionrl.types.engine import ROLLOUT_ENGINE_TYPES, normalize_engine_type
 from diffusionrl.utils.misc import load_function
 
@@ -58,34 +57,17 @@ def derive_algorithm_identifier(args: Any) -> str:
     return identifier
 
 
-def derive_train_backend_dotpath(args: Any) -> Optional[str]:
-    backend_dotpath = str(args.training.train_backend_dotpath or "").strip()
-    return backend_dotpath or None
-
-
 def derive_train_backend_identifier(args: Any) -> str:
-    backend_dotpath = derive_train_backend_dotpath(args)
-    backend_name = str(args.training.train_backend or "fsdp").strip().lower()
-    if backend_dotpath is None and backend_name not in supported_train_backends():
-        raise ValueError(
-            f"Unsupported train_backend={backend_name!r}. "
-            f"Expected one of {list(supported_train_backends())} or provide training.train_backend_dotpath."
-        )
-    return backend_dotpath or backend_name
+    return resolve_train_backend_identifier(args)
 
 
 def derive_train_backend_config(args: Any) -> BaseTrainBackendConfig:
-    backend_identifier = derive_train_backend_identifier(args)
-    backend_cls = derive_registry_or_dotpath(
-        component_family=TRAIN_BACKEND_COMPONENT_FAMILY,
-        identifier=backend_identifier,
-    )
-    parser_fn = derive_component_cmdline_config_parser(backend_cls)
-    config = parser_fn(args)
+    payload = build_train_backend_init_payload_from_args(args)
+    config = payload.component_config
     if not isinstance(config, BaseTrainBackendConfig):
         raise TypeError(
-            f"Train backend config parser for {backend_identifier!r} must return a "
-            f"BaseTrainBackendConfig subclass, got {type(config).__name__}."
+            f"Train backend config parser must return a TrainBackendConfig subclass, "
+            f"got {type(config).__name__}."
         )
     return config
 
@@ -239,7 +221,7 @@ def derive_training_topology(
         else derive_train_backend_config(args)
     )
 
-    if isinstance(config, VeOmniTrainBackendConfig):
+    if isinstance(config, VeOmniBackendConfig):
         dp_size = int(config.dp_size or actor_count)
         dp_replicate_size = int(config.dp_replicate_size or 1)
         dp_shard_size = config.dp_shard_size
@@ -255,28 +237,6 @@ def derive_training_topology(
             pp_size=config.pp_size or 1,
             sp_size=config.sp_size or 1,
             ep_size=config.ep_size or 1,
-        )
-
-    if isinstance(config, MegatronTrainBackendConfig):
-        hinted_dp_size = config.dp_size
-        tp_size = config.tp_size or 1
-        pp_size = config.pp_size or 1
-        sp_size = config.sp_size or 1
-        ep_size = config.ep_size or 1
-        denom = max(1, tp_size * pp_size * sp_size)
-        dp_size = (
-            hinted_dp_size if hinted_dp_size is not None else max(1, actor_count // denom)
-        )
-        return TrainTopology(
-            actor_count=actor_count,
-            world_size=actor_count,
-            dp_size=dp_size,
-            dp_replicate_size=dp_size,
-            dp_shard_size=1,
-            tp_size=tp_size,
-            pp_size=pp_size,
-            sp_size=sp_size,
-            ep_size=ep_size,
         )
 
     return TrainTopology(
@@ -363,8 +323,8 @@ def derive_config(
         train_backend_capabilities = None
 
     if include_train_backend_capabilities and train_backend_capabilities is None:
-        train_backend_capabilities = derive_train_backend_capabilities(
-            train_backend_config
+        train_backend_capabilities = resolve_train_backend_capabilities(
+            derive_train_backend_identifier(args)
         )
 
     return DerivedConfig(
@@ -488,15 +448,16 @@ def build_launch_config(
     training_topology = derived.training_topology
     train_backend_capabilities = derived.require_train_backend_capabilities()
     training_plan = derived.require_training_plan()
-    train_backend_launch_spec = derive_train_backend_launch_spec(
+    train_backend_launch_spec = resolve_train_backend_launch_spec(
         train_backend_config,
         args=args,
         topology=training_topology,
     )
 
+    sampling_params = sampling_spec.to_params(args.precision)
     algorithm_init_payload = build_algorithm_init_payload_from_args(
         args,
-        sampling_spec=sampling_spec,
+        sampling_spec=sampling_params,
     )
     placement = _build_placement_spec(args, rollout_info=rollout_info)
     reward_config = RewardSpec.from_args(args)
@@ -508,10 +469,7 @@ def build_launch_config(
         sampling_spec=sampling_spec,
         sampler_engine_type=rollout_info.sampling_engine,
     )
-    train_backend_init_payload = build_train_backend_init_payload_from_args(
-        args,
-        train_backend_config=train_backend_config,
-    )
+    train_backend_init_payload = build_train_backend_init_payload_from_args(args)
     training_actor_init_config = build_training_actor_init_config_from_args(
         args,
         derived_config=derived,
@@ -542,8 +500,9 @@ def build_launch_config(
         rollout_engine_init_payload = build_rollout_engine_init_payload_from_args(
             args,
             model_init_payload=model_init_payload,
-            sampling_spec=sampling_spec,
+            sampling_spec=sampling_params,
             rollout_info=rollout_info,
+            sampler_dotpath=derived.model_spec.sampler_dotpath,
         )
         rollout_actor_init_config = build_rollout_actor_init_config_from_args(
             args,
@@ -578,22 +537,6 @@ def build_launch_config(
         sync_dir=str(args.sync.dir),
     )
 
-    rollout_services = RolloutServicesSpec(
-        data_source_dotpath=str(args.data_source_dotpath),
-        data_source_args=args,
-        reward_spec=reward_config,
-        prompts_per_rollout=int(args.algorithm.prompts_per_rollout),
-        replay_enabled=bool(args.sampling.replay_enabled),
-        max_samples_per_request=(
-            None
-            if args.sampling.max_samples_per_request is None
-            else int(args.sampling.max_samples_per_request)
-        ),
-        evaluation_settings=args.evaluation,
-        debug_mode=str(args.debug.mode or "none"),
-        debug_output_dir=getattr(args.debug, "output_dir", None),
-    )
-
     return LaunchConfig(
         algorithm_init_payload=algorithm_init_payload,
         training_sampling_config=training_sampling_config,
@@ -602,7 +545,7 @@ def build_launch_config(
         rollout=rollout,
         training=training,
         weight_sync=weight_sync,
-        rollout_services=rollout_services,
+        sampling_spec=sampling_params,
     )
 
 
@@ -616,7 +559,6 @@ __all__ = [
     "derive_rollout_info",
     "derive_sampling_spec",
     "derive_train_backend_config",
-    "derive_train_backend_dotpath",
     "derive_train_backend_identifier",
     "derive_training_plan",
     "derive_training_topology",

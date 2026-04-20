@@ -27,17 +27,16 @@ import torch.nn as nn
 
 from diffusionrl.sde.registry import resolve_sde_strategy_class
 from diffusionrl.sde.runtime import denoising_step, sd3_time_shift
-from diffusionrl.types import LogProbData
+from diffusionrl.types.sample import LogProbData
 from diffusionrl.types.forward_context import FluxForwardContext
-from diffusionrl.types.trajectory_store import TrajectoryStore
-from diffusionrl.utils.dtypes import parse_torch_dtype
-
-from ..base import BaseSampler, RolloutSamples
+from diffusionrl.types.trajectory_store import TrajectoryBuilder
+from ..base import RolloutSamples
+from .base_sampler import FSDPBaseSampler
 
 logger = logging.getLogger(__name__)
 
 
-class FluxSampler(BaseSampler):
+class FluxSampler(FSDPBaseSampler):
     """
     FLUX image sampler with log probability computation for native direct sampling.
 
@@ -82,55 +81,21 @@ class FluxSampler(BaseSampler):
         autocast_precision: Any = "bf16",
         trajectory_precision: Any = "fp16",
         logprob_precision: Any = "fp32",
+        **kwargs: Any,
     ):
-        """
-        Initialize FLUX sampler.
-
-        Args:
-            model: FLUX transformer model
-            text_encoder: Text encoder (CLIP + T5 wrapper)
-            vae: VAE for encoding/decoding
-            eta: Noise level for SDE (controls stochasticity)
-            sde_type: Transition rule (dance/flow/dpm2)
-            shift: Time shift parameter (FLUX uses 1.0)
-            guidance_scale: Guidance scale for classifier-free guidance (default: 3.5)
-        """
-        super().__init__(eta=eta, sde_type=sde_type, shift=shift)
-        self.model = model
-        self.text_encoder = text_encoder
-        self.vae = vae
+        super().__init__(
+            model=model,
+            text_encoder=text_encoder,
+            vae=vae,
+            eta=eta,
+            sde_type=sde_type,
+            shift=shift,
+            autocast_precision=autocast_precision,
+            trajectory_precision=trajectory_precision,
+            logprob_precision=logprob_precision,
+            **kwargs,
+        )
         self.guidance_scale = guidance_scale
-        self.autocast_dtype = parse_torch_dtype(autocast_precision, field_name="autocast_precision")
-        self.trajectory_dtype = parse_torch_dtype(trajectory_precision, field_name="trajectory_precision")
-        self.logprob_dtype = parse_torch_dtype(logprob_precision, field_name="logprob_precision")
-
-    def _resolve_runtime_device(
-        self,
-        prompt_embeds: Optional[torch.Tensor],
-        latents: Optional[torch.Tensor],
-    ) -> torch.device:
-        """
-        Resolve sampling compute device robustly under FSDP CPU offload.
-
-        FSDP with cpu_offload can keep parameters on CPU outside forward, so
-        `next(self.model.parameters()).device` is not a reliable runtime signal.
-        Prefer actual runtime tensors and fallback to current CUDA device.
-        """
-        # Prefer already-CUDA runtime tensors when available.
-        if latents is not None and torch.is_tensor(latents) and latents.is_cuda:
-            return latents.device
-        if prompt_embeds is not None and torch.is_tensor(prompt_embeds) and prompt_embeds.is_cuda:
-            return prompt_embeds.device
-        if torch.cuda.is_available():
-            try:
-                return torch.device(f"cuda:{torch.cuda.current_device()}")
-            except Exception:
-                return torch.device("cuda")
-        if latents is not None and torch.is_tensor(latents):
-            return latents.device
-        if prompt_embeds is not None and torch.is_tensor(prompt_embeds):
-            return prompt_embeds.device
-        return next(self.model.parameters()).device
 
     def _pack_latents(
         self,
@@ -317,7 +282,7 @@ class FluxSampler(BaseSampler):
         # Storage for trajectory and log probs (DanceGRPO line 226-227)
         latents = packed_latents.to(dtype=trajectory_dtype)
         # Selective collection: only store positions needed for SDE step pairs
-        trajectory_store = TrajectoryStore.for_sde_steps(
+        trajectory_store = TrajectoryBuilder.for_sde_steps(
             sde_indices, num_inference_steps
         )
         trajectory_store.add(0, latents)
@@ -380,7 +345,7 @@ class FluxSampler(BaseSampler):
         # Unpack final latents for output
         final_latents = self._unpack_latents(latents, latent_h, latent_w)
 
-        trajectory_store.finalize()
+        trajectory = trajectory_store.finalize()
 
         forward_context = FluxForwardContext(
             guidance_scale=actual_guidance,
@@ -393,28 +358,12 @@ class FluxSampler(BaseSampler):
         return RolloutSamples(
             latents=final_latents,
             timesteps=sigma_schedule,
-            aux={
-                "trajectory_store": trajectory_store,
-                "log_probs": LogProbData.from_dict(all_log_probs),
-                "forward_context": forward_context,
-                "metadata": {
-                    "engine_capabilities": {
-                        "supports_logprob": True,
-                        "supports_trajectory": True,
-                        "supports_prompt_embeddings": True,
-                    },
-                    "trajectory_format": "packed_seq_c4",
-                    "timestep_type": "sigma",
-                    "timestep_scale": 1.0,
-                    "height": height,
-                    "width": width,
-                    "latent_h": latent_h,
-                    "latent_w": latent_w,
-                    "guidance_scale": actual_guidance,
-                    "vae_scale": self.VAE_SCALE,
-                    "vae_shift": self.VAE_SHIFT,
-                },
-            },
+            trajectories=trajectory,
+            log_probs=LogProbData.from_dict(all_log_probs),
+            forward_context=forward_context,
+            step_indices=torch.arange(
+                sigma_schedule.shape[0], device=sigma_schedule.device, dtype=torch.long
+            ),
         )
 
     def compute_log_prob_for_training(

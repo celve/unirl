@@ -1,47 +1,21 @@
-"""Inference engine interface for dedicated rollout-side engines."""
+"""Inference engine interface for rollout-side engines."""
 
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 import torch
 
-from diffusionrl.types import RolloutRequest, RolloutSamples
-from diffusionrl.types.engine import EngineCapabilities
-
-
-@dataclass
-class EngineConfig:
-    """Configuration for rollout-side inference engines."""
-
-    model_dotpath: str = ""
-    pretrained_model_ckpt_path: str = ""
-    sampler_dotpath: str = ""
-
-    num_inference_steps: int = 50
-    eta: float = 1.0
-    sde_type: str = "flow"
-    shift: float = 3.0
-    guidance_scale: float = 7.5
-
-    height: int = 256
-    width: int = 256
-    num_frames: int = 16
-
-    engine_kwargs: Optional[Dict[str, Any]] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if self.engine_kwargs is None:
-            self.engine_kwargs = {}
-        self.sde_type = str(self.sde_type or "flow")
+from diffusionrl.types.request import RolloutRequest
+from diffusionrl.types.sample import RolloutSamples
 
 
 class BaseRolloutEngine(ABC):
     """
     Abstract base class for inference engines.
 
-    Dedicated rollout engines (SGLang, future service engines) implement
-    this interface to be compatible with RolloutActor and Ray scheduling.
+    All rollout engines (SGLang service engines, in-process FSDP engines)
+    implement this interface to provide a unified generation contract for
+    both RolloutActor and TrainActor.
 
     Key Design Principles:
     1. Unified interface for all engines
@@ -50,12 +24,13 @@ class BaseRolloutEngine(ABC):
     4. Consistent RolloutSamples format
     """
 
-    def __init__(self, config: EngineConfig):
+    def __init__(self, config: Any):
         """
         Initialize engine with configuration.
 
         Args:
-            config: Engine configuration
+            config: Engine configuration (e.g. EngineConfig for SGLang,
+                SamplingParams for direct FSDP engines).
         """
         self.config = config
         self._is_initialized = False
@@ -118,89 +93,6 @@ class BaseRolloutEngine(ABC):
         """
         pass
 
-    def sleep(self) -> None:
-        """Release runtime resources when rollout side is inactive."""
-        self._is_offloaded = True
-
-    def wake_up(self) -> None:
-        """Restore runtime resources required for generation/update."""
-        self._is_offloaded = False
-
-    def decode_latents(
-        self,
-        latents: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Decode latents to pixel space (optional).
-
-        Args:
-            latents: Latent tensor [B, C, H, W] or [B, C, T, H, W]
-
-        Returns:
-            Decoded tensor [B, C, H, W] or [B, C, T, H, W]
-        """
-        raise NotImplementedError("Engine does not support latent decoding")
-
-    @property
-    def is_initialized(self) -> bool:
-        """Whether engine is initialized."""
-        return self._is_initialized
-
-    @property
-    def is_offloaded(self) -> bool:
-        """Whether engine is offloaded to CPU."""
-        return self._is_offloaded
-
-    @property
-    def supports_distributed(self) -> bool:
-        """Whether engine supports multi-GPU distribution (default: False)."""
-        return False
-
-    @property
-    def requires_external_service(self) -> bool:
-        """Whether engine requires external service (e.g., SGLang server)."""
-        return False
-
-    @classmethod
-    def declared_capabilities(cls) -> Dict[str, bool]:
-        """Config-time capability declaration used by argument validation."""
-        return {
-            "requires_trajectory": True,
-            "requires_log_prob": True,
-            "requires_embeddings": True,
-        }
-
-    def get_memory_info(self) -> Dict[str, float]:
-        """Get GPU memory information."""
-        if not torch.cuda.is_available():
-            return {}
-        return {
-            "allocated_gb": torch.cuda.memory_allocated() / 1e9,
-            "cached_gb": torch.cuda.memory_reserved() / 1e9,
-        }
-
-    def health_check(self) -> bool:
-        """Check if engine is healthy."""
-        if self._is_offloaded:
-            return True  # Offloaded state is healthy
-        return self._is_initialized
-
-    def get_capabilities(self) -> EngineCapabilities:
-        """Get capability snapshot for control-plane scheduling and validation."""
-        return EngineCapabilities()
-
-    def get_capabilities_dict(self) -> Dict[str, Any]:
-        """Serialize capabilities to plain dict for metadata/RPC usage."""
-        return asdict(self.get_capabilities())
-
-
-class DistributedWeightSyncCapable:
-    """Mixin protocol for engines that support advanced weight sync.
-
-    SGLangRolloutEngine implements this for distributed rollout-side weight sync.
-    RolloutActor checks isinstance() instead of hasattr().
-    """
-
     def update_weights_from_path(self, checkpoint_path: str) -> None:
         raise NotImplementedError
 
@@ -248,3 +140,61 @@ class DistributedWeightSyncCapable:
     ) -> None:
         """Load LoRA tensors directly into the rollout engine."""
         raise NotImplementedError
+
+    def sleep(self) -> None:
+        """Release runtime resources when rollout side is inactive."""
+        self._is_offloaded = True
+
+    def wake_up(self) -> None:
+        """Restore runtime resources required for generation/update."""
+        self._is_offloaded = False
+
+    def decode_latents(
+        self,
+        latents: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Decode latents to pixel space (optional).
+
+        Args:
+            latents: Latent tensor [B, C, H, W] or [B, C, T, H, W]
+
+        Returns:
+            Decoded tensor [B, C, H, W] or [B, C, T, H, W]
+        """
+        raise NotImplementedError("Engine does not support latent decoding")
+
+    @property
+    def is_initialized(self) -> bool:
+        """Whether engine is initialized."""
+        return self._is_initialized
+
+    @property
+    def is_offloaded(self) -> bool:
+        """Whether engine is offloaded to CPU."""
+        return self._is_offloaded
+
+    @property
+    def supports_distributed(self) -> bool:
+        """Whether engine supports multi-GPU distribution (default: False)."""
+        return False
+
+    @property
+    def requires_external_service(self) -> bool:
+        """Whether engine requires external service (e.g., SGLang server)."""
+        return False
+
+    def get_memory_info(self) -> Dict[str, float]:
+        """Get GPU memory information."""
+        if not torch.cuda.is_available():
+            return {}
+        return {
+            "allocated_gb": torch.cuda.memory_allocated() / 1e9,
+            "cached_gb": torch.cuda.memory_reserved() / 1e9,
+        }
+
+    def health_check(self) -> bool:
+        """Check if engine is healthy."""
+        if self._is_offloaded:
+            return True  # Offloaded state is healthy
+        return self._is_initialized

@@ -8,7 +8,7 @@ import torch
 
 from diffusionrl.types.batch_ops import batch_concat, batch_reindex
 from diffusionrl.types.forward_context import ForwardContext
-from diffusionrl.types.sampling import LogProbData
+from diffusionrl.types.sample import LogProbData
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.types.trajectory_store import TrajectoryStore
 
@@ -34,38 +34,19 @@ def index_training_batch(batch: TrainingBatch, keep_indices: Sequence[int]) -> T
             }
         )
 
-    prompts = None
-    if batch.prompts is not None:
-        prompts = [batch.prompts[i] for i in keep_indices]
-
     return TrainingBatch(
         trajectory_store=batch.trajectory_store.index_select_batch(idx),
         log_probs=log_probs,
         timesteps=batch.timesteps,
         advantages=batch.advantages.index_select(0, idx.to(batch.advantages.device)),
-        forward_context=batch.forward_context.reindex(idx),
+        forward_context=batch.forward_context.select(idx),
         rewards=(
             batch.rewards.index_select(0, idx.to(batch.rewards.device))
             if batch.rewards is not None
             else None
         ),
-        prompts=prompts,
-        prompt_ids=(
-            [batch.prompt_ids[i] for i in keep_indices]
-            if batch.prompt_ids is not None
-            else None
-        ),
-        sample_ids=(
-            [batch.sample_ids[i] for i in keep_indices]
-            if batch.sample_ids is not None
-            else None
-        ),
-        group_ids=(
-            [batch.group_ids[i] for i in keep_indices]
-            if batch.group_ids is not None
-            else None
-        ),
-        is_partitioned=batch.is_partitioned,
+        prompts=batch.prompts.select(idx) if batch.prompts is not None else None,
+        step_indices=batch.step_indices,
         target_sde_indices=batch.target_sde_indices,
         extras=batch_reindex(
             batch.extras,
@@ -111,18 +92,11 @@ def concat_training_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
             }
         )
 
+    from diffusionrl.types.prompts import Prompts
+
     prompts = None
     if all(b.prompts is not None for b in typed):
-        prompts = [p for b in typed for p in (b.prompts or [])]
-    prompt_ids = None
-    if all(b.prompt_ids is not None for b in typed):
-        prompt_ids = [p for b in typed for p in (b.prompt_ids or [])]
-    sample_ids = None
-    if all(b.sample_ids is not None for b in typed):
-        sample_ids = [s for b in typed for s in (b.sample_ids or [])]
-    group_ids = None
-    if all(b.group_ids is not None for b in typed):
-        group_ids = [g for b in typed for g in (b.group_ids or [])]
+        prompts = Prompts.concat([b.prompts for b in typed])
 
     rewards = None
     if all(b.rewards is not None for b in typed):
@@ -134,7 +108,7 @@ def concat_training_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
         strict=False,
     ) or {}
 
-    merged_ctx = type(first.forward_context).cat([b.forward_context for b in typed])
+    merged_ctx = type(first.forward_context).concat([b.forward_context for b in typed])
 
     return TrainingBatch(
         trajectory_store=TrajectoryStore.concat([b.trajectory_store for b in typed]),
@@ -144,10 +118,7 @@ def concat_training_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
         forward_context=merged_ctx,
         rewards=rewards,
         prompts=prompts,
-        prompt_ids=prompt_ids,
-        sample_ids=sample_ids,
-        group_ids=group_ids,
-        is_partitioned=False,
+        step_indices=first.step_indices,
         target_sde_indices=first.target_sde_indices,
         extras=extras,
     )

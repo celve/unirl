@@ -3,84 +3,55 @@
 from __future__ import annotations
 
 from dataclasses import fields as dataclass_fields
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict
 
-from diffusionrl.cmdline.construction import build_component_init_payload_from_args
 from diffusionrl.cmdline.registry import register_cmdline_config_parser
-from diffusionrl.cmdline.resolution import (
-    derive_train_backend_dotpath,
-    derive_train_backend_identifier,
-)
 from diffusionrl.construction import ComponentInitPayload
-from diffusionrl.registry import derive_registry_or_dotpath
-from diffusionrl.training.backends.base import BaseTrainBackendConfig
-from diffusionrl.training.backends.fsdp import FSDPTrainBackendConfig
-from diffusionrl.training.backends.megatron import MegatronTrainBackendConfig
-from diffusionrl.training.backends.registry import TRAIN_BACKEND_COMPONENT_FAMILY
-from diffusionrl.training.backends.veomni_native import VeOmniTrainBackendConfig
+from diffusionrl.training.backends.fsdp import FSDPBackend, FSDPBackendConfig
+from diffusionrl.training.backends.veomni import VeOmniBackend, VeOmniBackendConfig
+from diffusionrl.utils.dtypes import parse_torch_dtype
 
 
-@register_cmdline_config_parser(FSDPTrainBackendConfig)
-def build_fsdp_train_backend_config_from_args(args: Any) -> FSDPTrainBackendConfig:
+_SUPPORTED_BACKENDS = ("fsdp", "veomni")
+
+
+@register_cmdline_config_parser(FSDPBackendConfig)
+def build_fsdp_train_backend_config_from_args(args: Any) -> FSDPBackendConfig:
     extra = dict(getattr(args.training, "train_backend_kwargs", {}) or {})
     validate_train_backend_kwargs(
-        config_class=FSDPTrainBackendConfig,
+        config_class=FSDPBackendConfig,
         train_backend_kwargs=extra,
     )
-    extra = _coerce_simple_dataclass_fields(FSDPTrainBackendConfig, extra)
-    # Inject fsdp_mode from dedicated CLI arg (--training.fsdp-mode)
+    extra = _coerce_simple_dataclass_fields(FSDPBackendConfig, extra)
+    # param_dtype may arrive as str in train_backend_kwargs; normalize to torch.dtype.
+    extra_param_dtype = extra.pop("param_dtype", None)
+    resolved_param_dtype = parse_torch_dtype(
+        extra_param_dtype
+        if extra_param_dtype is not None
+        else str(args.precision.fsdp_precision),
+        field_name="training.train_backend_kwargs.param_dtype",
+    )
     fsdp_mode = str(getattr(args.training, "fsdp_mode", "full") or "full").strip().lower()
     reshard_after_forward = bool(getattr(args.training, "reshard_after_forward", True))
-    return FSDPTrainBackendConfig(
-        backend_dotpath=derive_train_backend_dotpath(args),
+    return FSDPBackendConfig(
         cpu_offload=bool(args.training.fsdp_cpu_offload),
-        param_dtype=str(args.precision.fsdp_precision),
+        param_dtype=resolved_param_dtype,
         fsdp_mode=fsdp_mode,
         reshard_after_forward=reshard_after_forward,
         **extra,
     )
 
 
-@register_cmdline_config_parser(MegatronTrainBackendConfig)
-def build_megatron_train_backend_config_from_args(
-    args: Any,
-) -> MegatronTrainBackendConfig:
-    extra = dict(getattr(args.training, "train_backend_kwargs", {}) or {})
-    validate_train_backend_kwargs(
-        config_class=MegatronTrainBackendConfig,
-        train_backend_kwargs=extra,
-    )
-    extra = _coerce_simple_dataclass_fields(MegatronTrainBackendConfig, extra)
-    runtime_env = extra.get("runtime_env")
-    actor_kwargs = extra.get("actor_kwargs")
-    if runtime_env is not None and not isinstance(runtime_env, dict):
-        raise TypeError(
-            "training.train_backend_kwargs.runtime_env must be a dict when provided."
-        )
-    if actor_kwargs is not None and not isinstance(actor_kwargs, dict):
-        raise TypeError(
-            "training.train_backend_kwargs.actor_kwargs must be a dict when provided."
-        )
-    if runtime_env is not None:
-        extra["runtime_env"] = dict(runtime_env)
-    if actor_kwargs is not None:
-        extra["actor_kwargs"] = dict(actor_kwargs)
-    return MegatronTrainBackendConfig(
-        backend_dotpath=derive_train_backend_dotpath(args),
-        **extra,
-    )
-
-
-@register_cmdline_config_parser(VeOmniTrainBackendConfig)
+@register_cmdline_config_parser(VeOmniBackendConfig)
 def build_veomni_train_backend_config_from_args(
     args: Any,
-) -> VeOmniTrainBackendConfig:
+) -> VeOmniBackendConfig:
     extra = dict(getattr(args.training, "train_backend_kwargs", {}) or {})
     validate_train_backend_kwargs(
-        config_class=VeOmniTrainBackendConfig,
+        config_class=VeOmniBackendConfig,
         train_backend_kwargs=extra,
     )
-    extra = _coerce_simple_dataclass_fields(VeOmniTrainBackendConfig, extra)
+    extra = _coerce_simple_dataclass_fields(VeOmniBackendConfig, extra)
     parallelize_kwargs = extra.get("parallelize_kwargs")
     if parallelize_kwargs is not None and not isinstance(parallelize_kwargs, dict):
         raise TypeError(
@@ -88,34 +59,33 @@ def build_veomni_train_backend_config_from_args(
         )
     if parallelize_kwargs is not None:
         extra["parallelize_kwargs"] = dict(parallelize_kwargs)
-    return VeOmniTrainBackendConfig(
-        backend_dotpath=derive_train_backend_dotpath(args),
-        **extra,
-    )
+    return VeOmniBackendConfig(**extra)
 
 
-def build_train_backend_init_payload_from_args(
-    args: Any,
-    *,
-    train_backend_config: Optional[BaseTrainBackendConfig] = None,
-) -> ComponentInitPayload:
-    if train_backend_config is not None:
-        identifier = (
-            train_backend_config.backend_dotpath or train_backend_config.name
+_PARSER_DISPATCH: Dict[str, Callable[[Any], Any]] = {
+    "fsdp": build_fsdp_train_backend_config_from_args,
+    "veomni": build_veomni_train_backend_config_from_args,
+}
+
+
+_CLASS_DOTPATH_DISPATCH: Dict[str, str] = {
+    "fsdp": f"{FSDPBackend.__module__}.{FSDPBackend.__qualname__}",
+    "veomni": f"{VeOmniBackend.__module__}.{VeOmniBackend.__qualname__}",
+}
+
+
+def build_train_backend_init_payload_from_args(args: Any) -> ComponentInitPayload:
+    identifier = resolve_train_backend_identifier(args)
+    parser_fn = _PARSER_DISPATCH.get(identifier)
+    if parser_fn is None:
+        raise ValueError(
+            f"Unsupported train_backend={identifier!r}. "
+            f"Supported built-in backends: {list(_SUPPORTED_BACKENDS)}."
         )
-        backend_cls = derive_registry_or_dotpath(
-            component_family=TRAIN_BACKEND_COMPONENT_FAMILY,
-            identifier=identifier,
-        )
-        return ComponentInitPayload(
-            component_dotpath=f"{backend_cls.__module__}.{backend_cls.__qualname__}",
-            component_config=train_backend_config,
-        )
-    backend_identifier = derive_train_backend_identifier(args)
-    return build_component_init_payload_from_args(
-        component_family=TRAIN_BACKEND_COMPONENT_FAMILY,
-        identifier=backend_identifier,
-        args=args,
+    component_config = parser_fn(args)
+    return ComponentInitPayload(
+        component_dotpath=_CLASS_DOTPATH_DISPATCH[identifier],
+        component_config=component_config,
     )
 
 
@@ -124,23 +94,40 @@ def validate_train_backend_kwargs(
     config_class: type,
     train_backend_kwargs: Dict[str, Any],
 ) -> None:
-    reserved_fields = {"name", "backend_dotpath"}
     config_field_names = {field.name for field in dataclass_fields(config_class)}
-    allowed_extension_fields = config_field_names - reserved_fields
     unknown = sorted(
-        key
-        for key in train_backend_kwargs.keys()
-        if key not in allowed_extension_fields
+        key for key in train_backend_kwargs.keys() if key not in config_field_names
     )
     if unknown:
         raise ValueError(
             "training.train_backend_kwargs contains unsupported keys for "
             f"{config_class.__name__}: {unknown}. "
-            f"Allowed backend-specific keys: {sorted(allowed_extension_fields)}."
+            f"Allowed backend-specific keys: {sorted(config_field_names)}."
         )
 
 
-## -------- Helper functions --------
+def _resolve_backend_name_from_args(args: Any) -> str:
+    return str(args.training.train_backend or "fsdp").strip().lower()
+
+
+def resolve_train_backend_identifier(args: Any) -> str:
+    """Return the backend identifier from args (one of the supported names)."""
+    backend_name = _resolve_backend_name_from_args(args)
+    if backend_name == "megatron":
+        raise ValueError(
+            "Megatron backend was removed in the backends migration "
+            "(the old implementation was a scaffold that never had a runtime "
+            "path). If you need Megatron, plug a custom backend via a future "
+            "extension mechanism."
+        )
+    if backend_name not in _SUPPORTED_BACKENDS:
+        raise ValueError(
+            f"Unsupported train_backend={backend_name!r}. "
+            f"Supported: {list(_SUPPORTED_BACKENDS)}."
+        )
+    return backend_name
+
+
 def _coerce_simple_dataclass_fields(
     config_class: type, raw: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -164,5 +151,6 @@ def _coerce_simple_dataclass_fields(
 
 __all__ = [
     "build_train_backend_init_payload_from_args",
+    "resolve_train_backend_identifier",
     "validate_train_backend_kwargs",
 ]

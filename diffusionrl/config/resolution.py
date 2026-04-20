@@ -19,13 +19,6 @@ COLOCATE_ROLLOUT_MODE = "colocate"
 ROLLOUT_MODES = {DIRECT_ROLLOUT_MODE, SEPARATE_ROLLOUT_MODE, COLOCATE_ROLLOUT_MODE}
 
 
-def rollout_uses_services(mode: str) -> bool:
-    return mode in {
-        SEPARATE_ROLLOUT_MODE,
-        COLOCATE_ROLLOUT_MODE,
-    }
-
-
 def rollout_mode_is_colocated(mode: str) -> bool:
     return mode == COLOCATE_ROLLOUT_MODE
 
@@ -51,5 +44,4 @@ __all__ = [
     "SEPARATE_ROLLOUT_MODE",
     "load_engine_capabilities",
     "rollout_mode_is_colocated",
-    "rollout_uses_services",
 ]

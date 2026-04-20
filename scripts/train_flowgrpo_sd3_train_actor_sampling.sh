@@ -120,7 +120,6 @@ check_wandb_auth
 python -m diffusionrl.train \
     --model.pretrained-model-ckpt-path "${PRETRAINED_MODEL}" \
     --model.model-type sd3 \
-    --sampling.sampler-dotpath diffusionrl.samplers.fsdp.sd3_sampler.SD3Sampler \
     --algorithm.algorithm-dotpath diffusionrl.algorithms.grpo.GRPOAlgorithm \
     --reward.reward-components "${REWARD_MODEL_NAME}" \
     --reward.local-reward-device "${LOCAL_REWARD_DEVICE}" \

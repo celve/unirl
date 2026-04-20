@@ -12,19 +12,20 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
-from diffusionrl.samplers.engine import EngineConfig
 from diffusionrl.samplers.registry import register_rollout_engine
-from diffusionrl.sde.runtime import get_sigma_schedule_diffusers
-from diffusionrl.types import LogProbData, RolloutRequest, RolloutSamples
-from diffusionrl.types.engine import EngineCapabilities
+from diffusionrl.sde.rules import normalize_sde_type
+from diffusionrl.sde.runtime import get_sigma_schedule
+from diffusionrl.types.request import RolloutRequest
+from diffusionrl.types.sample import LogProbData, RolloutSamples
+from diffusionrl.types.engine import EngineConfig
 from diffusionrl.types.forward_context import ForwardContext, get_forward_context_cls
 from diffusionrl.types.trajectory_store import (
-    TrajectoryStore,
+    Trajectory,
     compute_trajectory_positions,
 )
 from diffusionrl.utils.media import tensor_frame_to_pil
 
-from ..engine import BaseRolloutEngine, DistributedWeightSyncCapable
+from ..engine import BaseRolloutEngine
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +66,32 @@ def _deexpand_prompts(
     return unique_prompts, k
 
 
+@dataclasses.dataclass
+class _GenerateContext:
+    """Derived parameters passed from request building to result parsing."""
+
+    model_type: str
+    steps: int
+    guidance_scale: float
+    height: int
+    width: int
+    sde_indices: Optional[Set[int]]
+    require_trajectory: bool
+    require_log_probs: bool
+    return_decoded_for_reward: bool
+
+
 @register_rollout_engine(component_name="sglang", component_cfg=EngineConfig)
-class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
+class SGLangRolloutEngine(BaseRolloutEngine):
     """Inference engine backed by `sglang.multimodal_gen` DiffGenerator."""
+
+    @classmethod
+    def declared_capabilities(cls) -> Dict[str, bool]:
+        return {
+            "requires_trajectory": True,
+            "requires_log_prob": True,
+            "requires_embeddings": True,
+        }
 
     def __init__(self, config: EngineConfig):
         super().__init__(config)
@@ -80,21 +104,17 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         self._last_weight_checksum: Dict[str, str] = {}
         self._supports_memory_api: bool = False
         self._require_memory_api: bool = False
+        self._warned_missing_initial_noise: bool = False
         self._warned_missing_decoded: bool = False
+        self._warned_logprob_shape: bool = False
         self._warned_unsupported_rollout_sde: bool = False
+        self._warned_trimmed_logprob_prefix: bool = False
         self._warned_disabled_native_rollout: bool = False
         self._warned_missing_trajectory_with_optional_mode: bool = False
         self._warned_latent_encode_fallback: bool = False
         self._fallback_vae: Any = None
         self._fallback_vae_model_type: Optional[str] = None
-
-    @classmethod
-    def declared_capabilities(cls) -> Dict[str, bool]:
-        return {
-            "requires_trajectory": True,
-            "requires_log_prob": False,
-            "requires_embeddings": True,
-        }
+        self._cached_runtime: Optional[Dict[str, Any]] = None
 
     # ---------------------------------------------------------------------
     # Import/runtime helpers
@@ -183,6 +203,20 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             "sync_scheduler_client": sync_scheduler_client,
         }
 
+    @property
+    def _runtime(self) -> Dict[str, Any]:
+        if self._cached_runtime is None:
+            self._cached_runtime = self._import_sglang_runtime()
+        return self._cached_runtime
+
+    def _send_scheduler_request(self, request: Any, *, operation: str) -> Any:
+        """Forward a request to SGLang scheduler and raise on failure."""
+        response = self._runtime["sync_scheduler_client"].forward(request)
+        success, message = self._extract_update_status(response, operation=operation)
+        if not success:
+            raise RuntimeError(f"{operation} failed: {message}")
+        return response
+
     def _has_memory_handler(self, method_name: str) -> bool:
         method = getattr(self._generator, method_name, None)
         return callable(method)
@@ -238,56 +272,20 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         return response
 
     def _logprob_source(self) -> str:
-        mode = str((self.config.engine_kwargs or {}).get("logprob_source", "replay")).strip().lower()
-        if mode not in {"replay", "native"}:
-            return "replay"
-        return mode
+        return self.config.logprob_source
 
     def _native_rollout_logprob_enabled(self) -> bool:
         return self._logprob_source() == "native"
 
     def _build_server_kwargs(self, server_args_cls: Any) -> Dict[str, Any]:
-        raw = dict(self.config.engine_kwargs or {})
-        self._local_mode = _to_bool(raw.get("local_mode", True), default=True)
-        self._verify_weight_checksum = _to_bool(
-            raw.get("verify_weight_checksum", True),
-            default=True,
-        )
-        self._require_memory_api = _to_bool(
-            raw.get("require_memory_api", False),
-            default=False,
-        )
+        """Build ServerArgs kwargs from typed EngineConfig fields + escape hatch."""
+        self._local_mode = bool(self.config.local_mode)
+        self._verify_weight_checksum = bool(self.config.verify_weight_checksum)
+        self._require_memory_api = bool(self.config.require_memory_api)
 
-        target_modules = raw.get("target_modules")
-        if isinstance(target_modules, (list, tuple)) and target_modules:
+        target_modules = self.config.target_modules
+        if target_modules:
             self._target_modules = [str(m) for m in target_modules]
-
-        reserved_keys = {
-            "sampler_dotpath",
-            "base_gpu_id",
-            "force_set_cuda_visible_devices",
-            "local_mode",
-            "target_modules",
-            "verify_weight_checksum",
-            "require_memory_api",
-            "server_kwargs",
-        }
-
-        allowed_keys = {f.name for f in dataclasses.fields(server_args_cls)}
-        server_kwargs: Dict[str, Any] = {}
-
-        user_server_kwargs = raw.get("server_kwargs")
-        if isinstance(user_server_kwargs, dict):
-            for key, value in user_server_kwargs.items():
-                if key in allowed_keys:
-                    server_kwargs[key] = value
-
-        for key, value in raw.items():
-            if key in reserved_keys:
-                continue
-            normalized = key[7:] if key.startswith("sglang_") else key
-            if normalized in allowed_keys and normalized not in server_kwargs:
-                server_kwargs[normalized] = value
 
         model_path = self.config.pretrained_model_ckpt_path or self.config.model_dotpath
         if not model_path:
@@ -295,25 +293,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 "SGLang engine requires pretrained_model_ckpt_path or model_dotpath"
             )
 
-        server_kwargs.setdefault("model_path", model_path)
-        server_kwargs.setdefault("num_gpus", int(raw.get("num_gpus", 1)))
-        if "disable_autocast" in allowed_keys:
-            server_kwargs.setdefault(
-                "disable_autocast",
-                _to_bool(raw.get("disable_autocast", False), default=False),
-            )
-        if "lora_merge_mode" in allowed_keys:
-            if raw.get("use_lora") or server_kwargs.get("lora_merge_mode") == "online":
-                server_kwargs.setdefault("lora_merge_mode", "online")
-
-        if "tp_size" not in server_kwargs and raw.get("tp_size") is not None:
-            server_kwargs["tp_size"] = int(raw["tp_size"])
-        if "sp_degree" not in server_kwargs:
-            sp_degree = raw.get("sp_degree", raw.get("sp_size"))
-            if sp_degree is not None:
-                server_kwargs["sp_degree"] = int(sp_degree)
-
-        return server_kwargs
+        return self.config.build_server_kwargs(server_args_cls)
 
     # ---------------------------------------------------------------------
     # Engine lifecycle
@@ -321,8 +301,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
     def initialize(self, device: torch.device) -> None:
         self._device = device
 
-        runtime = self._import_sglang_runtime()
-        server_kwargs = self._build_server_kwargs(runtime["ServerArgs"])
+        server_kwargs = self._build_server_kwargs(self._runtime["ServerArgs"])
 
         logger.info(
             "Initializing SGLang-diffusion engine (local_mode=%s, target_modules=%s)",
@@ -330,10 +309,10 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             self._target_modules,
         )
         disable_autocast = server_kwargs.get("disable_autocast")
-        server_args = runtime["ServerArgs"].from_kwargs(**server_kwargs)
+        server_args = self._runtime["ServerArgs"].from_kwargs(**server_kwargs)
         if disable_autocast is not None:
             server_args.disable_autocast = disable_autocast
-        generator = runtime["DiffGenerator"].from_pretrained(
+        generator = self._runtime["DiffGenerator"].from_pretrained(
             server_args=server_args,
             local_mode=self._local_mode,
         )
@@ -648,32 +627,31 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         *,
         trajectories_tensor: torch.Tensor,
         num_inference_steps: int,
-    ) -> torch.Tensor:
-        """Derive sigma schedule and validate trajectory length.
-
-        Returns the timesteps tensor (length T+1).  step_idx == position
-        is a structural guarantee — no step_indices mapping needed.
-        """
+    ) -> Tuple[torch.Tensor, torch.Tensor, bool]:
         traj_len = int(trajectories_tensor.shape[1])
-        if traj_len != int(num_inference_steps) + 1:
-            raise ValueError(
-                f"SGLang trajectory missing initial x_T noise: traj_len={traj_len}, "
-                f"expected num_inference_steps + 1 = {num_inference_steps + 1}. "
-                f"Modern SGLang prepends initial latents at "
-                f"sglang/multimodal_gen/runtime/pipelines_core/stages/denoising.py:1036-1037, "
-                f"so traj_len should always equal T+1. Upgrade SGLang or fix the sampler "
-                f"to emit a T+1 trajectory."
-            )
-        timesteps = get_sigma_schedule_diffusers(
-            int(num_inference_steps),
-            shift=float(self.config.shift),
-        ).cpu()
+        has_initial_noise = traj_len == int(num_inference_steps) + 1
+        if has_initial_noise:
+            timesteps = get_sigma_schedule(
+                int(num_inference_steps),
+                shift=float(self.config.shift),
+            ).cpu()
+            step_indices = torch.arange(timesteps.shape[0], dtype=torch.long)
+        else:
+            full_sigmas = get_sigma_schedule(traj_len, shift=float(self.config.shift)).cpu()
+            timesteps = full_sigmas[1:]
+            step_indices = torch.arange(1, full_sigmas.shape[0], dtype=torch.long)
+            if not self._warned_missing_initial_noise:
+                logger.warning(
+                    "SGLang trajectory is missing initial x_T noise (len=T instead of T+1). "
+                    "DiffusionRL applies step-index offset compatibility mode."
+                )
+                self._warned_missing_initial_noise = True
         if int(timesteps.shape[0]) != traj_len:
             raise RuntimeError(
                 "SGLang timestep/trajectory length mismatch after conversion: "
                 f"timesteps={timesteps.shape[0]}, trajectory_len={traj_len}"
             )
-        return timesteps
+        return timesteps, step_indices, has_initial_noise
 
     def _extract_decoded_media(self, result: Any) -> tuple[Optional[Any], Optional[torch.Tensor]]:
         sample = getattr(result, "samples", None)
@@ -948,74 +926,46 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         if not self._is_initialized or self._generator is None:
             raise RuntimeError("SGLang engine is not initialized")
 
-        # Extract fields from request
-        prompts = request.prompts
-        num_inference_steps = request.num_inference_steps
-        guidance_scale = request.guidance_scale
-        height = request.height
-        width = request.width
-        num_frames = request.num_frames
-        seed_raw = request.sampling.get("seed")
-        seed = None if seed_raw is None else int(seed_raw)
-        sde_indices_raw = request.sampling.get("sde_indices")
+        request_kwargs, ctx = self._build_generate_kwargs(request)
+        raw_results = self._generator.generate(sampling_params_kwargs=request_kwargs)
+
+        if raw_results is None:
+            raise RuntimeError("SGLang generator returned no results for prompt batch")
+        results = list(raw_results) if isinstance(raw_results, list) else [raw_results]
+
+        return self._parse_generate_results(results, ctx, request)
+
+    def _build_generate_kwargs(
+        self, request: RolloutRequest
+    ) -> Tuple[Dict[str, Any], _GenerateContext]:
+        """Build SGLang generator kwargs and derive context for result parsing."""
+        sp = request.sampling_params
+        prompts = request.prompts.prompts
+        steps = int(sp.num_inference_steps)
+        scale = float(sp.guidance_scale)
+        out_h = int(sp.height)
+        out_w = int(sp.width)
+        out_f = int(sp.num_frames)
+        seed = int(sp.seed) if sp.seed is not None else None
         sde_indices = (
-            None if sde_indices_raw is None else {int(v) for v in sde_indices_raw}
+            None if sp.sde_indices is None else {int(v) for v in sp.sde_indices}
         )
-        kwargs = dict(request.sampling.get("kwargs") or {})
+        kwargs = dict(sp.sampler_kwargs or {})
 
-        # SGLang runtime samples noise internally.
-
-        if prompts is None or len(prompts) == 0:
+        if not prompts:
             raise ValueError("SGLang engine requires non-empty prompts")
-
-        unsupported_embedding_kwargs = [
-            name
-            for name in (
-                "negative_prompt_embeds",
-                "negative_pooled_prompt_embeds",
-                "text_ids",
-                "image_ids",
-            )
-            if kwargs.get(name) is not None
-        ]
-        if unsupported_embedding_kwargs:
-            raise ValueError(
-                "SGLang rollout engine uses prompt-only RolloutRequest input. "
-                f"Unsupported embedding kwargs: {unsupported_embedding_kwargs}."
-            )
-
-        if num_inference_steps is None:
-            raise ValueError("SGLang engine requires request.num_inference_steps to be resolved.")
-        if guidance_scale is None:
-            raise ValueError("SGLang engine requires request.guidance_scale to be resolved.")
-        if height is None or width is None or num_frames is None:
-            raise ValueError(
-                "SGLang engine requires request geometry to be resolved "
-                f"(height={height}, width={width}, num_frames={num_frames})."
-            )
-        steps = int(num_inference_steps)
-        scale = float(guidance_scale)
-        out_h = int(height)
-        out_w = int(width)
-        out_f = int(num_frames)
 
         model_type = self._infer_model_type()
 
-        require_trajectory = bool(request.sampling.get("return_trajectories", True))
-        require_log_probs = bool(request.sampling.get("return_log_probs", True))
-        return_decoded_for_reward = bool(
-            bool(request.sampling.get("decode_for_reward", False))
-            or kwargs.pop("return_decoded_for_reward", False)
-        )
+        require_trajectory = True
+        require_log_probs = True
+        return_decoded_for_reward = True
         negative_prompt = kwargs.pop("negative_prompt", None)
         fps = kwargs.pop("fps", None)
         num_outputs_per_prompt = kwargs.pop("num_outputs_per_prompt", None)
-        init_same_noise = _to_bool(request.sampling.get("init_same_noise", False), default=False)
+        init_same_noise = bool(sp.init_same_noise)
         samples_per_prompt = int(
-            kwargs.pop(
-                "num_samples_per_prompt",
-                request.sampling.get("samples_per_prompt", 1),
-            )
+            kwargs.pop("num_samples_per_prompt", sp.num_samples_per_prompt)
         )
         default_rollout_enabled = bool(
             require_log_probs and sde_indices is not None and self._native_rollout_logprob_enabled()
@@ -1031,7 +981,9 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 self._warned_disabled_native_rollout = True
             rollout_enabled = False
         requested_rollout_sde = str(
-            kwargs.pop("rollout_sde_type", getattr(self.config, "sde_type", "flow"))
+            normalize_sde_type(
+                kwargs.pop("rollout_sde_type", getattr(self.config, "sde_type", "flow"))
+            )
         ).strip().lower()
         # Internal config only uses canonical flow/cps/dance/dpm2 names.
         # The native SGLang backend still expects "sde" as the flow-kernel label,
@@ -1080,7 +1032,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             sampling_params_kwargs["fps"] = int(fps)
         if num_outputs_per_prompt is not None:
             sampling_params_kwargs["num_outputs_per_prompt"] = int(num_outputs_per_prompt)
-        sampling_params_kwargs["sigmas"] = get_sigma_schedule_diffusers(
+        sampling_params_kwargs["sigmas"] = get_sigma_schedule(
             steps,
             shift=float(self.config.shift),
         )[:-1].tolist()
@@ -1119,22 +1071,33 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         if seed is not None:
             request_kwargs["seed"] = int(seed)
 
-        raw_results = self._generator.generate(sampling_params_kwargs=request_kwargs)
-        if raw_results is None:
-            raise RuntimeError("SGLang generator returned no results for prompt batch")
-        results: List[Any] = []
-        if isinstance(raw_results, list):
-            results.extend(list(raw_results))
-        else:
-            results.append(raw_results)
+        ctx = _GenerateContext(
+            model_type=model_type,
+            steps=steps,
+            guidance_scale=scale,
+            height=out_h,
+            width=out_w,
+            sde_indices=sde_indices,
+            require_trajectory=require_trajectory,
+            require_log_probs=require_log_probs,
+            return_decoded_for_reward=return_decoded_for_reward,
+        )
+        return request_kwargs, ctx
 
+    def _parse_generate_results(
+        self,
+        results: List[Any],
+        ctx: _GenerateContext,
+        request: RolloutRequest,
+    ) -> RolloutSamples:
+        """Parse raw SGLang results into RolloutSamples."""
         trajectory_items: List[Optional[torch.Tensor]] = [
-            self._extract_trajectory_from_result(result, required=require_trajectory)
+            self._extract_trajectory_from_result(result, required=ctx.require_trajectory)
             for result in results
         ]
         missing_trajectory = sum(item is None for item in trajectory_items)
         use_trajectory = missing_trajectory == 0 and len(trajectory_items) > 0
-        if missing_trajectory and not require_trajectory and missing_trajectory != len(trajectory_items):
+        if missing_trajectory and not ctx.require_trajectory and missing_trajectory != len(trajectory_items):
             logger.warning(
                 "SGLang returned mixed trajectory availability (%s/%s missing); "
                 "falling back to trajectory-free adapter path for batch consistency.",
@@ -1144,70 +1107,104 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             use_trajectory = False
 
         trajectories_tensor: Optional[torch.Tensor] = None
-        trajectory_store: Optional[TrajectoryStore] = None
+        has_initial_noise: Optional[bool] = None
+        trajectory_store: Optional[Trajectory] = None
         if use_trajectory:
             trajectories_tensor = torch.cat(
                 [item for item in trajectory_items if item is not None],
                 dim=0,
             )
-            # _derive_timestep_alignment enforces traj_len == T+1 and returns
-            # the sigma schedule.  step_idx == position (structural guarantee).
-            timesteps = self._derive_timestep_alignment(
+            timesteps, step_indices, has_initial_noise = self._derive_timestep_alignment(
                 trajectories_tensor=trajectories_tensor,
-                num_inference_steps=steps,
+                num_inference_steps=ctx.steps,
             )
             final_latents = trajectories_tensor[:, -1].clone()
 
-            # Client-side selective trim: reduce GPU memory on training side.
+            # Client-side selective trim: reduce GPU memory on training side
             traj_len = int(trajectories_tensor.shape[1])
+
+            # Attempt selective trim when only a subset of positions is needed.
+            # Positions use array-index space (column 0 = first stored state),
+            # matching how step_indices map to trajectory columns downstream.
             trimmed_cols = None
-            if sde_indices is not None and len(sde_indices) < steps:
-                needed_original = set(compute_trajectory_positions(sde_indices, steps))
-                keep_cols = sorted(p for p in needed_original if 0 <= p < traj_len)
+            if ctx.sde_indices is not None and len(ctx.sde_indices) < ctx.steps:
+                # Map SDE indices to column indices in the trajectory tensor.
+                # When has_initial_noise=True, column i = position i (0-indexed).
+                # When has_initial_noise=False, column i = position i+1, but
+                # step_indices already accounts for this shift, so we still
+                # want the same column indices relative to the tensor.
+                col_offset = 0 if has_initial_noise else 1
+                needed_original = set(compute_trajectory_positions(ctx.sde_indices, ctx.steps))
+                keep_cols = sorted(
+                    p - col_offset
+                    for p in needed_original
+                    if 0 <= p - col_offset < traj_len
+                )
                 if keep_cols and len(keep_cols) < traj_len:
                     trimmed_cols = keep_cols
 
             if trimmed_cols is not None:
                 trimmed = trajectories_tensor[:, trimmed_cols]
-                trajectory_store = TrajectoryStore.from_selective(
+                trajectory_store = Trajectory.from_selective(
                     trimmed, trimmed_cols, traj_len
                 )
             else:
-                trajectory_store = TrajectoryStore.from_full(trajectories_tensor)
+                trajectory_store = Trajectory.from_full(trajectories_tensor)
             del trajectories_tensor  # Free raw tensor; trajectory_store owns the data now
         else:
             final_latents = self._extract_final_latents_without_trajectory(
                 results=results,
-                model_type=model_type,
+                model_type=ctx.model_type,
             )
-            timesteps = get_sigma_schedule_diffusers(steps, shift=float(self.config.shift)).cpu()
-
-        # T = number of denoising steps.  step_idx == position, so step i
-        # corresponds to log_prob column i and log_probs key i.
-        T = int(timesteps.shape[0]) - 1
+            timesteps = get_sigma_schedule(ctx.steps, shift=float(self.config.shift)).cpu()
+            step_indices = torch.arange(timesteps.shape[0], dtype=torch.long)
 
         per_result_log_probs: List[Optional[torch.Tensor]] = []
-        if require_log_probs:
+        if ctx.require_log_probs:
             per_result_log_probs = [self._extract_log_probs_from_result(result) for result in results]
 
         merged_log_probs: Optional[LogProbData] = None
-        if require_log_probs and per_result_log_probs and all(lp is not None for lp in per_result_log_probs):
+        if ctx.require_log_probs and per_result_log_probs and all(lp is not None for lp in per_result_log_probs):
             log_prob_tensor = torch.cat([lp for lp in per_result_log_probs if lp is not None], dim=0)
-            if int(log_prob_tensor.shape[1]) == T:
-                # Filter ODE-only steps whose log_prob is zero — only keep SDE steps.
-                lp_dict = {}
-                for i in range(T):
-                    if sde_indices is not None and i not in sde_indices:
-                        continue
-                    lp_dict[i] = log_prob_tensor[:, i]
+            expected_steps = int(step_indices.shape[0]) - 1
+            if (
+                trajectory_store is not None
+                and has_initial_noise is False
+                and int(log_prob_tensor.shape[1]) == expected_steps + 1
+            ):
+                # Upstream rollout log_probs may include the first transition
+                # x_T -> x_{T-1}, while DiffusionRL compatibility mode with
+                # missing x_T can only train on transitions between stored
+                # trajectory states. Drop the prefix to align with step_indices[:-1].
+                log_prob_tensor = log_prob_tensor[:, 1:]
+                if not self._warned_trimmed_logprob_prefix:
+                    logger.warning(
+                        "SGLang trajectory_log_probs includes an extra prefix step while trajectory is missing x_T; "
+                        "dropping the first logprob column for alignment."
+                    )
+                    self._warned_trimmed_logprob_prefix = True
+            if int(log_prob_tensor.shape[1]) == expected_steps:
+                lp_dict = {
+                    int(step_indices[i].item()): log_prob_tensor[:, i]
+                    for i in range(expected_steps)
+                }
                 merged_log_probs = LogProbData.from_dict(lp_dict)
-            else:
-                raise ValueError(
-                    f"SGLang trajectory_log_probs shape mismatch: got {tuple(log_prob_tensor.shape)}, "
-                    f"expected second dim={T}. This indicates a contract violation "
-                    f"between SGLang denoising and DiffusionRL step alignment. "
-                    f"Check num_inference_steps and SGLang server version."
+                if not getattr(self, "_logged_logprob_attach", False):
+                    logger.info(
+                        "SGLang native logprobs attached: tensor_shape=%s, step_keys=%s, require_log_probs=%s",
+                        tuple(log_prob_tensor.shape),
+                        sorted(lp_dict.keys()),
+                        ctx.require_log_probs,
+                    )
+                    self._logged_logprob_attach = True
+            elif not getattr(self, "_warned_logprob_shape", False):
+                logger.warning(
+                    "SGLang trajectory_log_probs shape mismatch: got %s, expected second dim=%s. "
+                    "Ignoring rollout log_probs and keeping replay path enabled.",
+                    tuple(log_prob_tensor.shape),
+                    expected_steps,
                 )
+                self._warned_logprob_shape = True
 
         rollout_noise_preds_tensor: Optional[torch.Tensor] = None
         per_result_noise_preds = [
@@ -1220,16 +1217,16 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
 
         forward_context = self._build_forward_context_from_results(
             results=results,
-            model_type=model_type,
+            model_type=ctx.model_type,
             batch_size=int(final_latents.shape[0]),
-            height=out_h,
-            width=out_w,
-            guidance_scale=float(request.guidance_scale),
+            height=ctx.height,
+            width=ctx.width,
+            guidance_scale=ctx.guidance_scale,
         )
 
         decoded_images = None
         decoded_video_tensors: List[torch.Tensor] = []
-        if return_decoded_for_reward:
+        if ctx.return_decoded_for_reward:
             decoded_images = []
             for result in results:
                 pil_img, video_tensor = self._extract_decoded_media(result)
@@ -1250,7 +1247,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
                 )
                 self._warned_missing_decoded = True
 
-        if model_type == "flux":
+        if ctx.model_type == "flux":
             if trajectory_store is not None and trajectory_store.data.dim() == 4:
                 trajectory_format = "packed_seq_c4"
             elif final_latents.dim() == 3:
@@ -1271,14 +1268,13 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
 
         metadata: Dict[str, Any] = {
             "generator_type": "sglang",
-            "engine_capabilities": self.get_capabilities_dict(),
             "logprob_source": self._logprob_source(),
             "prompt_embeds_source": "sglang",
             "trajectory_format": trajectory_format,
             "timestep_type": "sigma",
             "timestep_scale": 1.0,
-            "sde_indices": sorted(int(i) for i in sde_indices) if sde_indices is not None else None,
-            "has_initial_noise": True if trajectory_store is not None else None,
+            "sde_indices": sorted(int(i) for i in ctx.sde_indices) if ctx.sde_indices is not None else None,
+            "has_initial_noise": has_initial_noise,
             "trajectory_available": bool(trajectory_store is not None),
         }
         if rollout_noise_preds_tensor is not None:
@@ -1288,16 +1284,21 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         if self._last_weight_checksum:
             metadata["weight_checksum"] = dict(self._last_weight_checksum)
 
+        decoded_videos = metadata.pop("decoded_videos", None)
+
         return RolloutSamples(
             latents=final_latents,
             timesteps=timesteps,
-            aux={
-                "trajectory_store": trajectory_store,
-                "log_probs": merged_log_probs,
-                "forward_context": forward_context,
-                "decoded_images": decoded_images,
-                "metadata": metadata,
-            },
+            sampling_params=request.sampling_params,
+            prompts=request.prompts,
+            trajectories=trajectory_store,
+            log_probs=merged_log_probs,
+            forward_context=forward_context,
+            step_indices=step_indices,
+            rewards=None,
+            component_rewards=None,
+            decoded_images=decoded_images,
+            decoded_videos=decoded_videos if isinstance(decoded_videos, torch.Tensor) else None,
         )
 
     def encode_prompt(
@@ -1359,7 +1360,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         if not state_dict:
             raise ValueError("state_dict must be non-empty")
 
-        runtime = self._import_sglang_runtime()
         from sglang.srt.utils import MultiprocessingSerializer
         from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
 
@@ -1374,19 +1374,15 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
 
         serialized = MultiprocessingSerializer.serialize(named_tensors, output_str=True)
         tp_size = max(1, int(getattr(self._server_args, "tp_size", 1) or 1))
-        request = runtime["UpdateWeightsFromTensorReqInput"](
-            serialized_named_tensors=[serialized] * tp_size,
-            target_modules=list(self._target_modules),
-            load_format="direct",
-            flush_cache=True,
+        self._send_scheduler_request(
+            self._runtime["UpdateWeightsFromTensorReqInput"](
+                serialized_named_tensors=[serialized] * tp_size,
+                target_modules=list(self._target_modules),
+                load_format="direct",
+                flush_cache=True,
+            ),
+            operation="update_weights",
         )
-        response = runtime["sync_scheduler_client"].forward(request)
-        success, message = self._extract_update_status(
-            response,
-            operation="update_weights_from_tensor",
-        )
-        if not success:
-            raise RuntimeError(f"SGLang tensor weight update failed: {message}")
 
         logger.info(
             "SGLang weights updated from in-memory tensors (target_modules=%s, tensors=%d)",
@@ -1402,7 +1398,6 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         """Initialize LoRA adapter state on SGLang from in-memory tensors."""
         if not self._is_initialized:
             raise RuntimeError("SGLang engine is not initialized")
-        runtime = self._import_sglang_runtime()
         try:
             from sglang.multimodal_gen.runtime.entrypoints.utils import SetLoraFromTensorsReq
         except Exception as exc:
@@ -1416,7 +1411,7 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             target="all",
             strength=1.0,
         )
-        response = runtime["sync_scheduler_client"].forward(request)
+        response = self._runtime["sync_scheduler_client"].forward(request)
         error = getattr(response, "error", None)
         if error is not None:
             raise RuntimeError(f"set_lora_from_tensors failed: {error}")
@@ -1430,26 +1425,21 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
 
         self._last_weight_checksum = {}
 
-        runtime = self._import_sglang_runtime()
-        request = runtime["UpdateWeightFromDiskReqInput"](
-            model_path=checkpoint_path,
-            flush_cache=True,
-            target_modules=list(self._target_modules),
+        self._send_scheduler_request(
+            self._runtime["UpdateWeightFromDiskReqInput"](
+                model_path=checkpoint_path,
+                flush_cache=True,
+                target_modules=list(self._target_modules),
+            ),
+            operation="update_weights_from_path",
         )
-        response = runtime["sync_scheduler_client"].forward(request)
-
-        success, message = self._extract_update_status(
-            response,
-            operation="update_weights_from_disk",
-        )
-        if not success:
-            raise RuntimeError(f"SGLang weight update failed: {message}")
 
         if self._verify_weight_checksum:
-            checksum_req = runtime["GetWeightsChecksumReqInput"](
-                module_names=list(self._target_modules),
+            checksum_resp = self._runtime["sync_scheduler_client"].forward(
+                self._runtime["GetWeightsChecksumReqInput"](
+                    module_names=list(self._target_modules),
+                )
             )
-            checksum_resp = runtime["sync_scheduler_client"].forward(checksum_req)
             checksum_output = getattr(checksum_resp, "output", None)
             if not isinstance(checksum_output, dict) or not checksum_output:
                 raise RuntimeError(
@@ -1489,21 +1479,15 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
             raise RuntimeError("SGLang engine is not initialized")
         if not serialized_named_tensors:
             raise ValueError("serialized_named_tensors must be non-empty")
-
-        runtime = self._import_sglang_runtime()
-        request = runtime["UpdateWeightsFromTensorReqInput"](
-            serialized_named_tensors=serialized_named_tensors,
-            target_modules=list(target_modules or self._target_modules),
-            load_format=load_format,
-            flush_cache=flush_cache,
-        )
-        response = runtime["sync_scheduler_client"].forward(request)
-        success, message = self._extract_update_status(
-            response,
+        self._send_scheduler_request(
+            self._runtime["UpdateWeightsFromTensorReqInput"](
+                serialized_named_tensors=serialized_named_tensors,
+                target_modules=list(target_modules or self._target_modules),
+                load_format=load_format,
+                flush_cache=flush_cache,
+            ),
             operation="update_weights_from_tensor",
         )
-        if not success:
-            raise RuntimeError(f"SGLang tensor weight update failed: {message}")
 
     def init_weights_update_group(
         self,
@@ -1515,39 +1499,29 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
         group_name: str,
         backend: str = "nccl",
     ) -> None:
-        runtime = self._import_sglang_runtime()
-        request = runtime["InitWeightsUpdateGroupReqInput"](
-            master_address=master_address,
-            master_port=int(master_port),
-            rank_offset=int(rank_offset),
-            world_size=int(world_size),
-            group_name=str(group_name),
-            backend=str(backend),
-        )
-        response = runtime["sync_scheduler_client"].forward(request)
-        success, message = self._extract_update_status(
-            response,
+        self._send_scheduler_request(
+            self._runtime["InitWeightsUpdateGroupReqInput"](
+                master_address=master_address,
+                master_port=int(master_port),
+                rank_offset=int(rank_offset),
+                world_size=int(world_size),
+                group_name=str(group_name),
+                backend=str(backend),
+            ),
             operation="init_weights_update_group",
         )
-        if not success:
-            raise RuntimeError(f"init_weights_update_group failed: {message}")
 
     def destroy_weights_update_group(
         self,
         *,
         group_name: str,
     ) -> None:
-        runtime = self._import_sglang_runtime()
-        request = runtime["DestroyWeightsUpdateGroupReqInput"](
-            group_name=str(group_name),
-        )
-        response = runtime["sync_scheduler_client"].forward(request)
-        success, message = self._extract_update_status(
-            response,
+        self._send_scheduler_request(
+            self._runtime["DestroyWeightsUpdateGroupReqInput"](
+                group_name=str(group_name),
+            ),
             operation="destroy_weights_update_group",
         )
-        if not success:
-            raise RuntimeError(f"destroy_weights_update_group failed: {message}")
 
     def update_weights_from_distributed(
         self,
@@ -1561,22 +1535,17 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
     ) -> None:
         if not names:
             raise ValueError("names must be non-empty for distributed update")
-        runtime = self._import_sglang_runtime()
-        request = runtime["UpdateWeightsFromDistributedReqInput"](
-            names=list(names),
-            dtypes=list(dtypes),
-            shapes=[list(shape) for shape in shapes],
-            group_name=str(group_name),
-            target_modules=list(target_modules or self._target_modules),
-            flush_cache=flush_cache,
-        )
-        response = runtime["sync_scheduler_client"].forward(request)
-        success, message = self._extract_update_status(
-            response,
+        self._send_scheduler_request(
+            self._runtime["UpdateWeightsFromDistributedReqInput"](
+                names=list(names),
+                dtypes=list(dtypes),
+                shapes=[list(shape) for shape in shapes],
+                group_name=str(group_name),
+                target_modules=list(target_modules or self._target_modules),
+                flush_cache=flush_cache,
+            ),
             operation="update_weights_from_distributed",
         )
-        if not success:
-            raise RuntimeError(f"SGLang distributed weight update failed: {message}")
 
     def get_last_weight_checksum(self) -> Dict[str, str]:
         """Return checksum snapshot from the latest successful path sync."""
@@ -1612,22 +1581,11 @@ class SGLangRolloutEngine(BaseRolloutEngine, DistributedWeightSyncCapable):
     def requires_external_service(self) -> bool:
         return not self._local_mode
 
-    def get_capabilities(self) -> EngineCapabilities:
-        supports_native_logprob = self._native_rollout_logprob_enabled()
-        return EngineCapabilities(
-            supports_logprob=supports_native_logprob,
-            supports_trajectory=True,
-            supports_prompt_embeddings=True,
-            supports_guidance_scale=True,
-            weight_load_mode="state_dict",
-        )
-
     def health_check(self) -> bool:
         if not self._is_initialized or self._generator is None:
             return False
         try:
-            runtime = self._import_sglang_runtime()
-            return bool(runtime["sync_scheduler_client"].ping())
+            return bool(self._runtime["sync_scheduler_client"].ping())
         except Exception as exc:
             logger.warning("SGLang health_check ping failed: %s", exc)
             return False

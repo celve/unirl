@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 CANONICAL_SDE_TYPES: Tuple[str, ...] = ("flow", "cps", "dance", "dpm2")
 SUPPORTED_USER_SDE_TYPES: Tuple[str, ...] = CANONICAL_SDE_TYPES
+
+
+def normalize_sde_type(value: Any) -> str:
+    """Normalize an sde_type value to canonical lowercase text."""
+    return str(value or "").strip().lower()
 
 
 def is_deterministic_sde_type(
@@ -34,5 +39,6 @@ __all__ = [
     "CANONICAL_SDE_TYPES",
     "SUPPORTED_USER_SDE_TYPES",
     "is_deterministic_sde_type",
+    "normalize_sde_type",
     "supported_sde_type_text",
 ]

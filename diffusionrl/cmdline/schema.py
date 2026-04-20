@@ -27,6 +27,7 @@ from diffusionrl.cmdline.algorithms import build_algorithm_init_payload_from_arg
 from diffusionrl.cmdline.resolution import (
     attach_training_plan,
     derive_config,
+    derive_train_backend_identifier,
 )
 from diffusionrl.cmdline.validation import (
     validate_algorithm_kwargs_payload,
@@ -747,13 +748,7 @@ class TrainingConfig:
     train_backend: str = field(
         default="fsdp",
         metadata={
-            "help": "Training backend name (fsdp/veomni built-in; megatron scaffold requires actor_class_path in train_backend_kwargs); or custom via train_backend_dotpath"
-        },
-    )
-    train_backend_dotpath: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "Python dotpath to custom TrainBackend class (overrides built-in backend selection)"
+            "help": "Training backend name. Supported: fsdp, veomni."
         },
     )
     train_backend_kwargs: Dict[str, Any] = field(
@@ -952,18 +947,6 @@ class RolloutConfig:
         default=None,
         metadata={"help": "Dedicated rollout service sequence/spatial parallel hint."},
     )
-    transport_dtype: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "Cast rollout transport payloads to this dtype (fp16/bf16) to reduce transfer size."
-        },
-    )
-    transport_drop_decoded_videos: bool = field(
-        default=True,
-        metadata={
-            "help": "Drop decoded video tensors from rollout transport payloads after reward handling."
-        },
-    )
     sglang_local_mode: Optional[bool] = field(
         default=None,
         metadata={"help": "Whether SGLang rollout uses in-actor local generator mode."},
@@ -1066,12 +1049,6 @@ class RolloutConfig:
             value = getattr(self, attr_name)
             if value is not None and int(value) < 1:
                 raise ValueError(f"rollout.{attr_name} must be >= 1 when set.")
-        if self.transport_dtype is not None:
-            validate_precision_type(
-                self.transport_dtype,
-                field_name="rollout.transport_dtype",
-                allow_disable_aliases=True,
-            )
         if not isinstance(self.sglang_kwargs, dict):
             raise ValueError("rollout.sglang_kwargs must be a dict.")
         forbidden_sglang_precision_keys = {
@@ -1209,12 +1186,6 @@ class LoggingConfig:
     entity: Optional[str] = field(
         default=None, metadata={"help": "WandB entity (team or username)."}
     )
-    transport_log_payload_bytes: Optional[bool] = field(
-        default=None,
-        metadata={
-            "help": "Whether rollout transport logs serialized payload sizes for debugging."
-        },
-    )
 
     def __post_init__(self):
         if isinstance(self.tags, str):
@@ -1286,25 +1257,6 @@ class TrainingArguments:
             "help": "Python dotpath to DataSource class for loading training/eval prompt streams"
         },
     )
-    rollout_function_dotpath: str = field(
-        default="diffusionrl.rollout.default_rollout.generate_rollout",
-        metadata={
-            "help": "Python dotpath to the rollout function invoked by the rollout service. This is the main rollout extension seam."
-        },
-    )
-    eval_function_dotpath: str = field(
-        default="diffusionrl.rollout.default_rollout.evaluate_rollout",
-        metadata={
-            "help": "Python dotpath to the evaluation function invoked by the rollout service."
-        },
-    )
-    reward_hook_dotpath: str = field(
-        default="diffusionrl.rollout.default_rollout.score_rewards_hook",
-        metadata={
-            "help": "Python dotpath to the reward hook used by rollout/eval functions. This makes reward a first-class rollout hook."
-        },
-    )
-
     # ========== Grouped Configuration ==========
     model: ModelConfig = field(default_factory=ModelConfig)
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
@@ -1578,7 +1530,7 @@ def validate_args(
     )
     derived_model = derived.model_spec
     backend_config = derived.train_backend_config
-    backend_name = backend_config.name
+    backend_name = getattr(backend_config, "name", None) or derive_train_backend_identifier(args)
     rollout_info = derived.rollout_info
     validate_algorithm_kwargs_payload(args)
     validate_train_backend_config(
@@ -1630,7 +1582,7 @@ def validate_args(
         validation_algorithm = create_algorithm_from_init_payload(
             build_algorithm_init_payload_from_args(
                 args,
-                sampling_spec=derived.sampling_spec,
+                sampling_spec=derived.sampling_spec.to_params(args.precision),
             )
         )
         sampling_requirements = validation_algorithm.get_sampling_requirements()

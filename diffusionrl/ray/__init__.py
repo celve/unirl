@@ -15,58 +15,35 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "BufferActor": ("diffusionrl.ray.buffer_actor", "BufferActor"),
     "create_buffer_actor": ("diffusionrl.ray.buffer_actor", "create_buffer_actor"),
     # Actor groups
-    "ActorGroupHandle": ("diffusionrl.ray.group_base", "ActorGroupHandle"),
+    "ActorHandleGroup": ("diffusionrl.ray.group_base", "ActorHandleGroup"),
     "PlacementGroupActorPool": ("diffusionrl.ray.group_base", "PlacementGroupActorPool"),
     "ActorGroup": ("diffusionrl.ray.group_base", "ActorGroup"),
-    "RolloutActorGroup": ("diffusionrl.ray.rollout_group", "RolloutActorGroup"),
-    "TrainingActorGroup": ("diffusionrl.ray.training_group", "TrainingActorGroup"),
-    "RolloutGroupRuntime": ("diffusionrl.ray.group_runtime", "RolloutGroupRuntime"),
-    "TrainingGroupRuntime": ("diffusionrl.ray.group_runtime", "TrainingGroupRuntime"),
-    "create_rollout_actor_group": ("diffusionrl.ray.group_factory", "create_rollout_actor_group"),
-    "create_training_actor_group": ("diffusionrl.ray.group_factory", "create_training_actor_group"),
     # Actors
     "RayActor": ("diffusionrl.ray.actor_base", "RayActor"),
     "BaseTrainRayActor": ("diffusionrl.ray.actor_base", "BaseTrainRayActor"),
     "RolloutActor": ("diffusionrl.ray.rollout_actor", "RolloutActor"),
     "RolloutActorConfig": ("diffusionrl.ray.actor_config", "RolloutActorConfig"),
-    "TrainingActor": ("diffusionrl.ray.training_actor", "TrainingActor"),
     "TrainingActorConfig": ("diffusionrl.ray.actor_config", "TrainingActorConfig"),
-    # Utils - NOSET
+    # Utils - node-level constants
     "NOSET_VISIBLE_DEVICES_ENV_VARS_LIST": (
-        "diffusionrl.ray.ray_utils",
+        "diffusionrl.ray.utils.node",
         "NOSET_VISIBLE_DEVICES_ENV_VARS_LIST",
     ),
-    # Utils - Lock
-    "DistributedLock": ("diffusionrl.ray.ray_utils", "DistributedLock"),
-    "LockContext": ("diffusionrl.ray.ray_utils", "LockContext"),
-    "create_distributed_lock": ("diffusionrl.ray.ray_utils", "create_distributed_lock"),
-    "get_distributed_lock": ("diffusionrl.ray.ray_utils", "get_distributed_lock"),
-    # Utils - Resource info
-    "GPUInfo": ("diffusionrl.ray.ray_utils", "GPUInfo"),
-    "NodeInfo": ("diffusionrl.ray.ray_utils", "NodeInfo"),
-    "get_node_info": ("diffusionrl.ray.ray_utils", "get_node_info"),
-    "get_node_ip": ("diffusionrl.ray.ray_utils", "get_node_ip"),
-    "get_free_port": ("diffusionrl.ray.ray_utils", "get_free_port"),
-    "get_consecutive_free_ports": ("diffusionrl.ray.ray_utils", "get_consecutive_free_ports"),
-    # Utils - Ray operations
-    "ray_get_with_retry": ("diffusionrl.ray.ray_utils", "ray_get_with_retry"),
-    "ray_wait_with_progress": ("diffusionrl.ray.ray_utils", "ray_wait_with_progress"),
-    "ray_get_async": ("diffusionrl.ray.ray_utils", "ray_get_async"),
-    "batch_ray_get": ("diffusionrl.ray.ray_utils", "batch_ray_get"),
-    "wait_for_placement_group": ("diffusionrl.ray.ray_utils", "wait_for_placement_group"),
-    # Utils - Timing
-    "timed": ("diffusionrl.ray.ray_utils", "timed"),
-    # Utils - Memory
-    "clear_gpu_memory": ("diffusionrl.ray.ray_utils", "clear_gpu_memory"),
-    "get_gpu_memory_usage": ("diffusionrl.ray.ray_utils", "get_gpu_memory_usage"),
-    "log_gpu_memory_usage": ("diffusionrl.ray.ray_utils", "log_gpu_memory_usage"),
-    # Utils - Health check
-    "check_actor_health": ("diffusionrl.ray.ray_utils", "check_actor_health"),
-    "wait_for_actors_ready": ("diffusionrl.ray.ray_utils", "wait_for_actors_ready"),
-    # Utils - Actor sampling
-    "ActorSamplingExecutor": (
-        "diffusionrl.ray.training_actor_sampling",
-        "ActorSamplingExecutor",
+    # Utils - network helpers
+    "get_node_ip": ("diffusionrl.ray.utils.net", "get_node_ip"),
+    "get_free_port": ("diffusionrl.ray.utils.net", "get_free_port"),
+    # Mixins
+    "TrainingWeightSyncMixin": (
+        "diffusionrl.ray.mixins.training_weight_sync",
+        "TrainingWeightSyncMixin",
+    ),
+    "RolloutWeightSyncMixin": (
+        "diffusionrl.ray.mixins.rollout_weight_sync",
+        "RolloutWeightSyncMixin",
+    ),
+    "RolloutPipelineMixin": (
+        "diffusionrl.ray.mixins.rollout_pipeline",
+        "RolloutPipelineMixin",
     ),
 }
 

@@ -12,7 +12,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 logger = logging.getLogger(__name__)
 
 
-class ActorGroupHandle:
+class ActorHandleGroup:
     """Serializable handle set with shared Ray dispatch primitives.
 
     num_actors is the size of this remote actor set for dispatch/scatter logic.
@@ -28,9 +28,9 @@ class ActorGroupHandle:
         self._actor_handles: List[ray.actor.ActorHandle] = list(actor_handles)
         self.num_actors = int(num_actors if num_actors is not None else len(self._actor_handles))
 
-    def snapshot(self) -> "ActorGroupHandle":
+    def snapshot(self) -> "ActorHandleGroup":
         """Return a lightweight copy that keeps only actor handles."""
-        return ActorGroupHandle(self._actor_handles, num_actors=self.num_actors)
+        return ActorHandleGroup(self._actor_handles, num_actors=self.num_actors)
 
     def get_actors(self) -> List[ray.actor.ActorHandle]:
         return list(self._actor_handles)
@@ -149,7 +149,7 @@ class ActorGroupHandle:
         return ray.get(self.scatter_gather_async(method, shards, *args, **kwargs))
 
 
-class PlacementGroupActorPool(ActorGroupHandle):
+class PlacementGroupActorPool(ActorHandleGroup):
     """Generic actor pool launched on placement-group bundles."""
 
     def __init__(
@@ -275,4 +275,4 @@ class ActorGroup(PlacementGroupActorPool):
         return self.call_all("health_check")
 
 
-__all__ = ["ActorGroupHandle", "PlacementGroupActorPool", "ActorGroup"]
+__all__ = ["ActorHandleGroup", "PlacementGroupActorPool", "ActorGroup"]

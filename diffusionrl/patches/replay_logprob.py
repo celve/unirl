@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 
+from diffusionrl.types.sampling import SamplingParams
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils import load_function
 
@@ -39,40 +40,27 @@ class ReplayLogProbPatch:
                     return resolved.strip()
         return None
 
-    def _resolve_replay_sampler_dotpath(self, *, sampling_config: Dict[str, Any], model_bundle: Any) -> str:
-        replay_path = sampling_config.get("replay_sampler_dotpath")
-        if replay_path:
-            return replay_path
-
-        sampler_engine_type = str(
-            sampling_config.get("sampler_engine_type", "") or ""
-        ).strip().lower()
-        sampler_dotpath = sampling_config.get("sampler_dotpath")
+    def _resolve_replay_sampler_dotpath(
+        self,
+        *,
+        model_bundle: Any,
+    ) -> str:
         model_default_path = self._resolve_model_default_replay_sampler_dotpath(model_bundle)
 
-        # For sglang rollout engines, sampler_dotpath may still point to a legacy/default
-        # FSDP sampler. Prefer model-declared replay sampler in this case.
-        if sampler_engine_type == "sglang":
-            if model_default_path and "sglang" not in model_default_path.lower():
-                return model_default_path
-        else:
-            if sampler_dotpath and "sglang" not in sampler_dotpath.lower():
-                return sampler_dotpath
-            if model_default_path and "sglang" not in model_default_path.lower():
-                return model_default_path
+        if model_default_path and "sglang" not in model_default_path.lower():
+            return model_default_path
 
         model_type = str(getattr(model_bundle, "model_type", "") or "").lower()
         raise RuntimeError(
-            "logprob_source='replay' requires a non-sglang replay sampler dotpath. Provide "
-            "--replay-sampler-dotpath explicitly, or implement default_replay_sampler_dotpath() "
-            f"in model bundle '{type(model_bundle).__name__}' (model_type={model_type!r}, "
-            f"sampler_engine_type={sampler_engine_type!r})."
+            "logprob_source='replay' requires a non-sglang replay sampler dotpath. "
+            "Implement default_replay_sampler_dotpath() in model bundle "
+            f"'{type(model_bundle).__name__}' (model_type={model_type!r})."
         )
 
     def _build_replay_sampler(
         self,
         *,
-        sampling_config: Dict[str, Any],
+        sampling_config: SamplingParams,
         model_bundle: Any,
         model: Any,
         text_encoder: Any,
@@ -85,7 +73,6 @@ class ReplayLogProbPatch:
             raise RuntimeError("Model not initialized for replay sampler")
 
         sampler_dotpath = self._resolve_replay_sampler_dotpath(
-            sampling_config=sampling_config,
             model_bundle=model_bundle,
         )
         sampler_cls = load_function(sampler_dotpath)
@@ -94,21 +81,19 @@ class ReplayLogProbPatch:
             p.kind == inspect.Parameter.VAR_KEYWORD for p in init_sig.parameters.values()
         )
 
-        sampler_kwargs = dict(sampling_config.get("sampler_kwargs", {}) or {})
-        for _reserved in ("autocast_precision", "trajectory_precision", "logprob_precision"):
-            sampler_kwargs.pop(_reserved, None)
+        sde_config = sampling_config.sde_config
         base_kwargs: Dict[str, Any] = {
             "model": model,
             "text_encoder": text_encoder,
             "vae": vae,
             "scheduler": scheduler,
-            "eta": sampling_config.get("eta", 1.0),
-            "sde_type": sampling_config.get("sde_type", "flow"),
-            "shift": sampling_config.get("shift", 3.0),
-            "autocast_precision": sampling_config.get("autocast_precision", "bf16"),
-            "trajectory_precision": sampling_config.get("trajectory_precision", "fp16"),
-            "logprob_precision": sampling_config.get("logprob_precision", "fp32"),
-            **sampler_kwargs,
+            "eta": sde_config.eta,
+            "sde_type": sde_config.sde_type,
+            "shift": sde_config.shift,
+            "autocast_precision": sampling_config.autocast_precision,
+            "trajectory_precision": sampling_config.trajectory_precision,
+            "logprob_precision": sampling_config.logprob_precision,
+            **dict(sampling_config.sampler_kwargs),
         }
         filtered_kwargs: Dict[str, Any] = {}
         for key, value in base_kwargs.items():
@@ -127,7 +112,7 @@ class ReplayLogProbPatch:
         batch: TrainingBatch,
         enabled: bool,
         algorithm_type: str,
-        sampling_config: Dict[str, Any],
+        sampling_config: Optional[SamplingParams],
         model_bundle: Any,
         model: Any,
         text_encoder: Any,
@@ -136,6 +121,13 @@ class ReplayLogProbPatch:
     ) -> TrainingBatch:
         if not enabled or algorithm_type != "grpo" or (batch.log_probs is not None and len(batch.log_probs) > 0):
             return batch
+
+        if sampling_config is None:
+            raise RuntimeError(
+                "Replay log-prob patch is enabled but sampling_config is None; "
+                "the training actor requires a populated SamplingParams "
+                "when training_config.replay_enabled=True."
+            )
 
         self._build_replay_sampler(
             sampling_config=sampling_config,
@@ -154,7 +146,7 @@ class ReplayLogProbPatch:
                 f"sampler_dotpath={self._replay_sampler_dotpath}"
             )
 
-        allowed_steps = batch.step_labels
+        allowed_steps = set(int(v) for v in batch.resolved_step_indices.tolist())
         target_steps = sorted(int(i) for i in batch.sde_indices if int(i) in allowed_steps)
         if not target_steps:
             raise RuntimeError(
@@ -207,6 +199,6 @@ class ReplayLogProbPatch:
                 )
             replayed[int(step_idx)] = old_log_prob.detach()
 
-        from diffusionrl.types.sampling import LogProbData
+        from diffusionrl.types.sample import LogProbData
         batch.log_probs = LogProbData.from_dict(replayed)
         return batch

@@ -9,28 +9,28 @@ from typing import Any, Dict
 
 from diffusionrl.algorithms.grpo import GRPOAlgorithmConfig
 from diffusionrl.algorithms.nft import NFTAlgorithmConfig
-from diffusionrl.algorithms.registry import (
-    ALGORITHM_COMPONENT_FAMILY,
-)
+from diffusionrl.algorithms.registry import ALGORITHM_COMPONENT_FAMILY
 from diffusionrl.cmdline.construction import build_component_init_payload_from_args
 from diffusionrl.cmdline.registry import register_cmdline_config_parser
-from diffusionrl.config import SamplingSpec
 from diffusionrl.construction import ComponentInitPayload
+from diffusionrl.types.sampling import SamplingParams
 
 
 def build_algorithm_init_payload_from_args(
     args: Any,
     *,
-    sampling_spec: SamplingSpec | None = None,
+    sampling_spec: SamplingParams | None = None,
 ) -> ComponentInitPayload:
+    # Lazy import to break cmdline.algorithms <-> cmdline.resolution cycle:
+    # resolution.py imports actors.py, which top-imports this module.
     from diffusionrl.cmdline.resolution import derive_algorithm_identifier
 
-    sampling_spec = _require_sampling_spec(args, sampling_spec=sampling_spec)
+    resolved_sampling_spec = _require_sampling_spec(args, sampling_spec=sampling_spec)
     return build_component_init_payload_from_args(
         component_family=ALGORITHM_COMPONENT_FAMILY,
         identifier=derive_algorithm_identifier(args),
         args=args,
-        parser_kwargs={"sampling_spec": sampling_spec},
+        parser_kwargs={"sampling_spec": resolved_sampling_spec},
     )
 
 
@@ -74,7 +74,7 @@ def validate_algorithm_kwargs(
 def build_grpo_algorithm_config_from_args(
     args: Any,
     *,
-    sampling_spec: SamplingSpec | None = None,
+    sampling_spec: SamplingParams | None = None,
 ) -> GRPOAlgorithmConfig:
     sampling_spec = _require_sampling_spec(args, sampling_spec=sampling_spec)
     extra = dict(getattr(args.algorithm, "algorithm_kwargs", {}) or {})
@@ -88,9 +88,9 @@ def build_grpo_algorithm_config_from_args(
     )
     return GRPOAlgorithmConfig(
         **_build_base_algorithm_kwargs(args, sampling_spec=sampling_spec),
-        eta=sampling_spec.eta,
-        sde_type=sampling_spec.sde_type,
-        shift=sampling_spec.shift,
+        eta=float(sampling_spec.sde_config.eta),
+        sde_type=str(sampling_spec.sde_config.sde_type),
+        shift=float(sampling_spec.sde_config.shift),
         training_share_rollout_indices=bool(
             args.algorithm.training_share_rollout_indices
         ),
@@ -104,7 +104,7 @@ def build_grpo_algorithm_config_from_args(
 def build_nft_algorithm_config_from_args(
     args: Any,
     *,
-    sampling_spec: SamplingSpec | None = None,
+    sampling_spec: SamplingParams | None = None,
 ) -> NFTAlgorithmConfig:
     sampling_spec = _require_sampling_spec(args, sampling_spec=sampling_spec)
     extra = dict(getattr(args.algorithm, "algorithm_kwargs", {}) or {})
@@ -118,9 +118,9 @@ def build_nft_algorithm_config_from_args(
     )
     return NFTAlgorithmConfig(
         **_build_base_algorithm_kwargs(args, sampling_spec=sampling_spec),
-        eta=sampling_spec.eta,
-        sde_type=sampling_spec.sde_type,
-        shift=sampling_spec.shift,
+        eta=float(sampling_spec.sde_config.eta),
+        sde_type=str(sampling_spec.sde_config.sde_type),
+        shift=float(sampling_spec.sde_config.shift),
         training_scheduler_config=_scheduler_payload(args.algorithm.training_scheduler),
         **extra,
     )
@@ -134,18 +134,22 @@ def _scheduler_payload(raw_cfg: Any) -> Dict[str, Any]:
 
 
 def _require_sampling_spec(
-    args: Any, *, sampling_spec: SamplingSpec | None
-) -> SamplingSpec:
-    if isinstance(sampling_spec, SamplingSpec):
+    args: Any, *, sampling_spec: SamplingParams | None
+) -> SamplingParams:
+    if isinstance(sampling_spec, SamplingParams):
         return sampling_spec
+    cached_resolved = getattr(args, "_diffusionrl_resolved_config", None)
+    cached_sampling_spec = getattr(cached_resolved, "sampling_spec", None)
+    if isinstance(cached_sampling_spec, SamplingParams):
+        return cached_sampling_spec
     raise ValueError(
-        "Algorithm cmdline config parsing requires SamplingSpec. "
-        "Pass sampling_spec explicitly."
+        "Algorithm cmdline config parsing requires SamplingParams. "
+        "Pass sampling_spec explicitly or cache resolved config on args."
     )
 
 
 def _build_base_algorithm_kwargs(
-    args: Any, *, sampling_spec: SamplingSpec
+    args: Any, *, sampling_spec: SamplingParams
 ) -> Dict[str, Any]:
     """Helper function to build the base algorithm kwargs."""
     ac = args.algorithm
@@ -192,7 +196,7 @@ def _coerce_dict_field_type(
 
 
 __all__ = [
-    # General build_ and create_ xxx _from_args call
+    # General build_ xxx _from_args call
     "build_algorithm_init_payload_from_args",
     # Kwargs validation helper
     "validate_algorithm_kwargs",

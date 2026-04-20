@@ -7,7 +7,6 @@ import pytest
 from diffusionrl.cmdline.schema import get_default_args
 from diffusionrl.cmdline.validation import (
     validate_algorithm_kwargs_payload,
-    validate_async_training_runner,
     validate_dynamic_dotpaths,
     validate_grouped_configs,
     validate_nft_sampling_contract,
@@ -46,10 +45,7 @@ def test_training_config_validate_rejects_non_list_lora_modules() -> None:
 def test_validate_dynamic_dotpaths_rejects_invalid_data_source_path() -> None:
     args = SimpleNamespace(
         data_source_dotpath="bad.module.fn",
-        rollout_function_dotpath=None,
-        eval_function_dotpath=None,
-        reward_hook_dotpath=None,
-        training=SimpleNamespace(train_backend_dotpath=None),
+        training=SimpleNamespace(),
         sampling=SimpleNamespace(replay_sampler_dotpath=None),
         rollout=SimpleNamespace(plugin_dotpaths=[]),
     )
@@ -106,33 +102,11 @@ def test_validate_rollout_mode_constraints_rejects_model_without_sglang_support(
         )
 
 
-def test_validate_async_training_runner_rejects_train_only_debug_mode() -> None:
-    args = SimpleNamespace(
-        debug=SimpleNamespace(mode="train_only", save_intermediates=False),
-        ray=SimpleNamespace(offload_train=False, offload_rollout=False),
-    )
-    rollout_info = RolloutInfo(
-        mode="separate",
-        rollout_engine="sglang",
-        training_actor_sampling_mode=False,
-        is_sglang_engine=True,
-        logprob_source="engine",
-        replay_enabled=False,
-        sync_protocol="tensor_payload",
-        algorithm_type="grpo",
-        max_samples_per_request=None,
-    )
-
-    with pytest.raises(ValueError, match="does not support debug mode=train_only"):
-        validate_async_training_runner(args, rollout_info=rollout_info)
-
-
 def test_validate_rollout_topology_contract_rejects_direct_sampling_with_service_fields() -> None:
     args = get_default_args()
     args.rollout.mode = "direct_sampling"
     args.rollout.rollout_engine = None
     args.rollout.num_gpus_per_actor = 1
-    args.rollout.transport_dtype = "bf16"
     rollout_info = RolloutInfo(
         mode="direct_sampling",
         rollout_engine=None,
@@ -167,8 +141,6 @@ def test_validate_rollout_mode_wraps_underlying_validation_error() -> None:
     args.rollout.num_gpus_per_actor = None
     args.rollout.tp_size = None
     args.rollout.sp_size = None
-    args.rollout.transport_dtype = None
-    args.rollout.transport_drop_decoded_videos = False
     args.rollout.sglang_local_mode = False
     args.rollout.sglang_verify_weight_checksum = False
     args.rollout.sglang_disable_autocast = False

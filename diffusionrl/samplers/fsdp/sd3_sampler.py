@@ -25,12 +25,11 @@ from tqdm import tqdm
 
 from diffusionrl.sde.registry import resolve_sde_strategy_class
 from diffusionrl.sde.runtime import denoising_step, get_sigma_schedule
-from diffusionrl.types import LogProbData
+from diffusionrl.types.sample import LogProbData
 from diffusionrl.types.forward_context import SD3ForwardContext
-from diffusionrl.types.trajectory_store import TrajectoryStore
-from diffusionrl.utils.dtypes import parse_torch_dtype
-
-from ..base import BaseSampler, RolloutSamples
+from diffusionrl.types.trajectory_store import TrajectoryBuilder
+from ..base import RolloutSamples
+from .base_sampler import FSDPBaseSampler
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +94,7 @@ def calculate_shift(
 
 
 
-class SD3Sampler(BaseSampler):
+class SD3Sampler(FSDPBaseSampler):
     """
     SD3 image sampler with log probability computation for native direct sampling.
 
@@ -138,40 +137,28 @@ class SD3Sampler(BaseSampler):
         autocast_precision: Any = "bf16",
         trajectory_precision: Any = "fp16",
         logprob_precision: Any = "fp32",
+        **kwargs: Any,
     ):
-        """
-        Initialize SD3 sampler.
-
-        Args:
-            model: SD3 transformer model
-            text_encoder: CLIP text encoder 1
-            text_encoder_2: CLIP text encoder 2
-            text_encoder_3: T5 text encoder
-            tokenizer: CLIP tokenizer 1
-            tokenizer_2: CLIP tokenizer 2
-            tokenizer_3: T5 tokenizer
-            vae: VAE for encoding/decoding
-            eta: Noise level for SDE (controls stochasticity)
-            sde_type: Transition rule ("flow", "cps", "dpm2")
-            shift: Time shift parameter (SD3 uses 3.0)
-            latent_channels: Number of latent channels (16 for SD3)
-            vae_scale_factor: VAE spatial compression factor
-        """
-        super().__init__(eta=eta, sde_type=sde_type, shift=shift)
-        self.model = model
-        self.text_encoder = text_encoder
+        super().__init__(
+            model=model,
+            text_encoder=text_encoder,
+            vae=vae,
+            eta=eta,
+            sde_type=sde_type,
+            shift=shift,
+            autocast_precision=autocast_precision,
+            trajectory_precision=trajectory_precision,
+            logprob_precision=logprob_precision,
+            **kwargs,
+        )
         self.text_encoder_2 = text_encoder_2
         self.text_encoder_3 = text_encoder_3
         self.tokenizer = tokenizer
         self.tokenizer_2 = tokenizer_2
         self.tokenizer_3 = tokenizer_3
-        self.vae = vae
         self.scheduler = scheduler
         self.latent_channels = latent_channels
         self.vae_scale_factor = vae_scale_factor
-        self.autocast_dtype = parse_torch_dtype(autocast_precision, field_name="autocast_precision")
-        self.trajectory_dtype = parse_torch_dtype(trajectory_precision, field_name="trajectory_precision")
-        self.logprob_dtype = parse_torch_dtype(logprob_precision, field_name="logprob_precision")
         # Track which steps have been dumped so subsequent sub-batch calls
         # use append mode to concatenate tensors along the batch dimension.
         self._debug_dumped_steps: set = set()
@@ -234,32 +221,6 @@ class SD3Sampler(BaseSampler):
             pooled_projections=pooled_prompt_embeds,
             return_dict=False,
         )[0]
-
-    def _resolve_runtime_device(
-        self,
-        prompt_embeds: Optional[torch.Tensor],
-        latents: Optional[torch.Tensor],
-    ) -> torch.device:
-        """
-        Resolve sampling compute device robustly under FSDP CPU offload.
-
-        With FSDP cpu_offload, parameter.device can be CPU outside forward, so
-        use runtime tensors first and fallback to current CUDA device.
-        """
-        if latents is not None and torch.is_tensor(latents) and latents.is_cuda:
-            return latents.device
-        if prompt_embeds is not None and torch.is_tensor(prompt_embeds) and prompt_embeds.is_cuda:
-            return prompt_embeds.device
-        if torch.cuda.is_available():
-            try:
-                return torch.device(f"cuda:{torch.cuda.current_device()}")
-            except Exception:
-                return torch.device("cuda")
-        if latents is not None and torch.is_tensor(latents):
-            return latents.device
-        if prompt_embeds is not None and torch.is_tensor(prompt_embeds):
-            return prompt_embeds.device
-        return next(self.model.parameters()).device
 
     def sample(
         self,
@@ -387,7 +348,7 @@ class SD3Sampler(BaseSampler):
         # Storage for trajectory and log probs
         latents = latents.to(self.trajectory_dtype)
         # Selective collection: only store positions needed for SDE step pairs
-        trajectory_store = TrajectoryStore.for_sde_steps(
+        trajectory_store = TrajectoryBuilder.for_sde_steps(
             sde_indices, num_inference_steps
         )
         trajectory_store.add(0, latents)
@@ -517,7 +478,7 @@ class SD3Sampler(BaseSampler):
                                     "width": width,
                                 }, f, indent=2)
 
-        trajectory_store.finalize()
+        trajectory = trajectory_store.finalize()
 
         forward_context = SD3ForwardContext(
             guidance_scale=guidance_scale,
@@ -530,24 +491,12 @@ class SD3Sampler(BaseSampler):
         return RolloutSamples(
             latents=latents,
             timesteps=sigmas,
-            aux={
-                "trajectory_store": trajectory_store,
-                "log_probs": LogProbData.from_dict(log_probs_dict),
-                "forward_context": forward_context,
-                "metadata": {
-                    "engine_capabilities": {
-                        "supports_logprob": True,
-                        "supports_trajectory": True,
-                        "supports_prompt_embeddings": True,
-                    },
-                    "trajectory_format": "dense_latent",
-                    "timestep_type": "sigma",
-                    "timestep_scale": 1.0,
-                    "height": height,
-                    "width": width,
-                    "guidance_scale": guidance_scale,
-                },
-            },
+            trajectories=trajectory,
+            log_probs=LogProbData.from_dict(log_probs_dict),
+            forward_context=forward_context,
+            step_indices=torch.arange(
+                sigmas.shape[0], device=sigmas.device, dtype=torch.long
+            ),
         )
 
     def compute_log_prob_for_training(

@@ -95,7 +95,6 @@ python -m diffusionrl.train \
     --sampling.num-inference-steps 10 \
     --algorithm.training-scheduler.timestep-fraction 0.99 \
     --sampling.guidance-scale 1.0 \
-    --sampling.sampling-adapter old \
     "${NFT_ALGO_KWARG_ARGS[@]}" \
     \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
