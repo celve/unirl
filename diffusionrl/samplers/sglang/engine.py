@@ -303,6 +303,22 @@ class SGLangRolloutEngine(BaseRolloutEngine):
 
         server_kwargs = self._build_server_kwargs(self._runtime["ServerArgs"])
 
+        # Cross-process LoRA contract check.  Training-side PEFT and rollout-side
+        # SGLang MUST agree on the target-module set; otherwise SGLang defaults
+        # to wrapping every linear layer and emits a wall of ``LoRA adapter
+        # None does not contain the weights for layer '...'`` warnings.
+        if self.config.use_lora and not server_kwargs.get("lora_target_modules"):
+            logger.warning(
+                "SGLang LoRA enabled but lora_target_modules is not provided. "
+                "SGLang will wrap EVERY linear layer in the transformer while "
+                "the training side only ships LoRA weights for a subset, "
+                "leading to 'LoRA adapter None does not contain the weights "
+                "for layer ...' warnings and silently disabled LoRA on those "
+                "layers. Override %s.default_lora_target_modules() on the "
+                "model bundle or pass --training.lora-target-modules.",
+                type(self).__name__,
+            )
+
         logger.info(
             "Initializing SGLang-diffusion engine (local_mode=%s, target_modules=%s)",
             self._local_mode,

@@ -217,17 +217,17 @@ class SD3ModelBundle(ModelBundle):
         # LoRA config for SD3 transformer
         target_modules = self.lora_target_modules
         if target_modules is None:
-            # Default to Flow-GRPO SD3 target modules
-            target_modules = [
-                "attn.add_k_proj",
-                "attn.add_q_proj",
-                "attn.add_v_proj",
-                "attn.to_add_out",
-                "attn.to_k",
-                "attn.to_out.0",
-                "attn.to_q",
-                "attn.to_v",
-            ]
+            # Fallback for non-CLI code paths (direct ModelBundle construction).
+            # The CLI parser materialises this via ``default_lora_target_modules()``
+            # at config-build time; this branch only triggers when someone
+            # bypasses the CLI and constructs a ``ModelBundleConfig`` by hand.
+            target_modules = type(self).default_lora_target_modules()
+            if target_modules is None:
+                raise RuntimeError(
+                    "SD3 LoRA requested but lora_target_modules is unresolved. "
+                    "Pass --training.lora-target-modules or ensure "
+                    f"{type(self).__name__}.default_lora_target_modules() returns a list."
+                )
         lora_config = LoraConfig(
             r=self.lora_rank,
             lora_alpha=self.lora_alpha,
@@ -263,6 +263,29 @@ class SD3ModelBundle(ModelBundle):
     @classmethod
     def default_sampler_engine(cls) -> Optional[str]:
         return "fsdp"
+
+    @classmethod
+    def default_lora_target_modules(cls) -> Optional[List[str]]:
+        """Flow-GRPO canonical LoRA targets for SD3 joint-attention blocks.
+
+        Matches the 8 keys injected by PEFT in ``_add_lora_adapters``.  This
+        list is threaded all the way to SGLang ``ServerArgs.lora_target_modules``
+        so the rollout engine only wraps layers the training side actually
+        updates — otherwise SGLang defaults to wrapping every linear layer,
+        producing a wall of ``LoRA adapter None does not contain the weights
+        for layer '...'`` warnings and ``disable_lora=True`` for the unmatched
+        layers.
+        """
+        return [
+            "attn.add_k_proj",
+            "attn.add_q_proj",
+            "attn.add_v_proj",
+            "attn.to_add_out",
+            "attn.to_k",
+            "attn.to_out.0",
+            "attn.to_q",
+            "attn.to_v",
+        ]
 
     @classmethod
     def forward_plugin(cls):
