@@ -117,7 +117,7 @@ class TrainingPlan:
     """4-level batch geometry for training, derived from CLI sizing knobs.
 
     Hierarchy (each ``÷`` is an integer divide enforced by
-    ``config.validation.validate_training_plan_config``):
+    ``diffusionrl.config.validation``):
 
         global_batch_size = prompts_per_rollout × samples_per_prompt
             ÷ dp_size                → local_batch_size
