@@ -81,6 +81,7 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
         model_init_payload: ComponentInitPayload,
         training_autocast_precision: str = "bf16",
         sampling_config: Any = None,
+        debug_output_dir: Optional[str] = None,
         seed: int = 42,
     ):
         # Per-actor determinism setup: must run BEFORE any CUDA op so that
@@ -131,6 +132,18 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
                 training_autocast_precision,
                 field_name="training_autocast_precision",
             )
+
+        # Wire train-inference consistency debug dump dir through from CLI
+        # (``--debug.output-dir``).  ``GRPOAlgorithm.compute_loss`` gates its
+        # per-step tensor dump on ``self._debug_output_dir or
+        # $DIFFUSIONRL_DEBUG_OUTPUT_DIR``; the env var is also exported from
+        # the driver in ``diffusionrl.train`` so other actors (e.g. sampler
+        # side in direct-sampling mode) see it too.  Assign both so that the
+        # dumps fire regardless of whether a specific Ray worker inherits the
+        # parent process env (some runtime_env configs strip it).
+        if debug_output_dir:
+            self.algorithm._debug_output_dir = str(debug_output_dir)
+            os.environ.setdefault("DIFFUSIONRL_DEBUG_OUTPUT_DIR", str(debug_output_dir))
 
         self.ema_manager = EMAManager.from_model_and_spec(
             model=self.model,

@@ -101,6 +101,7 @@ def build_train_actor_init_kwargs(
         algorithm_init_payload=actor_cfg.algorithm_init_payload,
         model_init_payload=actor_cfg.model_init_payload,
         training_autocast_precision=str(training_exec.training_autocast_precision),
+        debug_output_dir=training_exec.debug_output_dir,
         seed=int(getattr(actor_cfg, "seed", 42)),
     )
     if sampling_config is not None:
