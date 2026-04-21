@@ -5,13 +5,25 @@ from typing import Dict, List, Optional, Tuple, Union
 import torch
 
 
-_MAX_TORCH_SEED = (1 << 63) - 1
+# Inclusive max for torch.Generator.manual_seed and torch initial_seed conventions.
+MAX_TORCH_SEED = (1 << 63) - 1
 
 
 def _derive_group_seed(base_seed: int, group_id: str) -> int:
     payload = f"{int(base_seed)}::{str(group_id)}".encode("utf-8")
     digest = hashlib.blake2b(payload, digest_size=8).digest()
-    return int.from_bytes(digest, byteorder="big", signed=False) % _MAX_TORCH_SEED
+    return int.from_bytes(digest, byteorder="big", signed=False) % MAX_TORCH_SEED
+
+
+def mix_rollout_base_seed(base_seed: int, rollout_id: int) -> int:
+    """Mix a config ``base_seed`` with ``rollout_id`` for per-rollout init-noise variety.
+
+    Same (base_seed, rollout_id) always yields the same int; different rollout_id
+    changes the effective base used with ``_derive_group_seed`` / group IDs.
+    """
+    payload = f"rollout::{int(base_seed)}::{int(rollout_id)}".encode("utf-8")
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=False) % MAX_TORCH_SEED
 
 
 def generate_shared_noise(

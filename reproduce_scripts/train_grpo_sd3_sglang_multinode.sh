@@ -206,6 +206,7 @@ run_training() {
         --rollout.tp-size "${TP_SIZE}" \
         --rollout.rollout-batch-size "${ROLLOUT_BATCH_SIZE}" \
         --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
+        --sampling.init-same-noise true \
         \
         --sampling.sde-type "${SDE_TYPE}" \
         --sampling.eta 0.7 \

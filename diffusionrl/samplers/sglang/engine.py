@@ -8,10 +8,12 @@ import logging
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
+from diffusionrl.samplers.noise_utils import MAX_TORCH_SEED, generate_latents
 from diffusionrl.samplers.registry import register_rollout_engine
 from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.sde.runtime import get_sigma_schedule
@@ -112,6 +114,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         self._warned_disabled_native_rollout: bool = False
         self._warned_missing_trajectory_with_optional_mode: bool = False
         self._warned_latent_encode_fallback: bool = False
+        self._informed_sglang_initial_noise_policy: bool = False
         self._fallback_vae: Any = None
         self._fallback_vae_model_type: Optional[str] = None
         self._cached_runtime: Optional[Dict[str, Any]] = None
@@ -983,19 +986,28 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         samples_per_prompt = int(
             kwargs.pop("num_samples_per_prompt", sp.num_samples_per_prompt)
         )
+        # SGLang MUST run SDE sampling whenever the algorithm wants SDE steps
+        # (i.e. ``sde_indices`` is populated) — otherwise SGLang falls back to
+        # a deterministic ODE step (``scheduler.step(...)`` with eta=0), which
+        # makes every sampled ``x_{t-1}`` equal its mean ``μ_t``. Replay then
+        # computes ``log p(x_{t-1} | x_t)`` on that (near-)zero residual, so
+        # both old_log_prob and new_log_prob are dominated by ``-log std`` and
+        # GRPO's policy gradient collapses after the first optimizer step —
+        # the exact reward-crash symptom observed under
+        # ``--sampling.logprob-source replay``.
+        #
+        # Decouple "SDE vs ODE kernel" (``rollout_enabled``) from "who computes
+        # log_prob" (``logprob_source``):
+        #   • rollout_enabled = True  → SGLang runs SDE step (required for GRPO)
+        #   • logprob_source=native   → also return trajectory_log_probs; use them
+        #   • logprob_source=replay   → recompute log_prob on training side
+        #                                from the SDE trajectory
+        # Returning log_probs on replay is harmless (one elementwise ratio) and
+        # a lot cheaper than silently going ODE and losing a whole training run.
         default_rollout_enabled = bool(
-            require_log_probs and sde_indices is not None and self._native_rollout_logprob_enabled()
+            require_log_probs and sde_indices is not None
         )
         rollout_enabled = bool(kwargs.pop("enable_rollout_logprob", default_rollout_enabled))
-        if rollout_enabled and not self._native_rollout_logprob_enabled():
-            if not self._warned_disabled_native_rollout:
-                logger.warning(
-                    "enable_rollout_logprob requested but logprob_source=%r. "
-                    "Disabling native rollout logprob and using replay path.",
-                    self._logprob_source(),
-                )
-                self._warned_disabled_native_rollout = True
-            rollout_enabled = False
         requested_rollout_sde = str(
             normalize_sde_type(
                 kwargs.pop("rollout_sde_type", getattr(self.config, "sde_type", "flow"))
@@ -1009,15 +1021,25 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         elif requested_rollout_sde == "cps":
             rollout_sde_type = "cps"
         else:
+            # Unknown SDE label — we still want SGLang to run its SDE kernel
+            # (rather than falling back to a deterministic ODE step) but we
+            # can't promise the returned log_probs match DiffusionRL's math,
+            # so suppress the native log_prob transport.  Replay path still
+            # computes log_prob on the training side from the SDE trajectory,
+            # so GRPO keeps working.
             rollout_sde_type = "sde"
-            if rollout_enabled and not self._warned_unsupported_rollout_sde:
+            if (
+                rollout_enabled
+                and self._native_rollout_logprob_enabled()
+                and not self._warned_unsupported_rollout_sde
+            ):
                 logger.warning(
                     "SGLang native rollout logprob currently supports only flow/cps, got sde_type=%r. "
-                    "Disabling native rollout logprob and falling back to replay path.",
+                    "Forcing rollout_sde_type='sde' and suppressing native log_prob transport; "
+                    "training will recompute log_prob via replay.",
                     requested_rollout_sde,
                 )
                 self._warned_unsupported_rollout_sde = True
-            rollout_enabled = False
         rollout_noise_level = float(
             kwargs.pop(
                 "rollout_noise_level",
@@ -1040,8 +1062,6 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             "return_prompt_embeds": True,
             "return_negative_prompt_embeds": bool(negative_prompt is not None),
         }
-        if seed is not None:
-            sampling_params_kwargs["seed"] = int(seed)
         if negative_prompt is not None:
             sampling_params_kwargs["negative_prompt"] = negative_prompt
         if fps is not None:
@@ -1083,9 +1103,79 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         )
         if validated_k > 1:
             request_kwargs["num_outputs_per_prompt"] = validated_k
-            request_kwargs["init_same_noise"] = init_same_noise
-        if seed is not None:
-            request_kwargs["seed"] = int(seed)
+            # Precomputed x_T in DiffusionRL; SGLang must not alias one RNG
+            # stream for all K when init_same was True, or we lose per-sample
+            # independent SDE step noise. Initial sharing is from ``initial_noise``.
+            request_kwargs["init_same_noise"] = False
+
+        # Precompute x_T in DiffusionRL (same blake2 group seeds as FSDP) so SGLang
+        # does not need ``noise_group_ids`` for the denoising loop — forwarding
+        # those IDs also drives deterministic per-step SDE generators in
+        # SGLang, which we avoid (see ``diffusionrl/sde/runtime.py``).
+        if self._server_args is None:
+            raise RuntimeError(
+                "SGLangRolloutEngine._build_generate_kwargs: initialize() must run first "
+                "(server_args is required to prepare_latent_shape / initial_noise)."
+            )
+        n_expanded = len(list(prompts))
+        if n_expanded > 0:
+            batch_stub = SimpleNamespace(
+                height=int(out_h), width=int(out_w), num_frames=int(out_f)
+            )
+            full_shape = self._server_args.pipeline_config.prepare_latent_shape(
+                batch_stub, int(n_expanded), int(out_f)
+            )
+            if int(full_shape[0]) != n_expanded:
+                raise ValueError(
+                    "prepare_latent_shape first dim != expanded prompt count: "
+                    f"full_shape[0]={full_shape[0]}, n_expanded={n_expanded}."
+                )
+            per_sample_shape = tuple(full_shape[1:])
+            device = self._device
+            if device is None:
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            latent_dtype = (
+                torch.bfloat16 if device.type == "cuda" else torch.float32
+            )
+            raw_prompts = request.prompts
+            raw_noise_group_ids = getattr(raw_prompts, "noise_group_ids", None)
+            if init_same_noise:
+                if not isinstance(raw_noise_group_ids, list) or len(
+                    raw_noise_group_ids
+                ) != n_expanded:
+                    raise ValueError(
+                        "SGLang: init_same_noise=True requires request.prompts."
+                        f"noise_group_ids length {len(raw_noise_group_ids) if isinstance(raw_noise_group_ids, list) else 0} "
+                        f"to match expanded batch {n_expanded}."
+                    )
+                ng_for_latents = [str(x) for x in raw_noise_group_ids]
+                base_for_latents = int(seed) if seed is not None else None
+                if base_for_latents is None:
+                    raise ValueError("init_same_noise=True requires sampling_params.seed")
+            else:
+                ng_for_latents = None
+                base_for_latents = None
+            initial = generate_latents(
+                batch_size=n_expanded,
+                latent_shape=per_sample_shape,
+                device=device,
+                dtype=latent_dtype,
+                init_same_noise=init_same_noise,
+                samples_per_prompt=samples_per_prompt,
+                noise_group_ids=ng_for_latents,
+                base_seed=base_for_latents,
+            )
+            request_kwargs["initial_noise"] = initial
+            if not self._informed_sglang_initial_noise_policy:
+                logger.info(
+                    "SGLang: initial latents are precomputed in DiffusionRL; "
+                    "noise_group_ids are not sent to SGLang so per-step SDE noise is not group-seeded."
+                )
+                self._informed_sglang_initial_noise_policy = True
+        # High-entropy batch seed: per-step SDE noise is not tied to the training
+        # config seed (sp.seed is used for init noise in DiffusionRL only after
+        # rollout mix in ``plan_requests``).
+        request_kwargs["seed"] = int.from_bytes(os.urandom(8), "big") % MAX_TORCH_SEED
 
         ctx = _GenerateContext(
             model_type=model_type,
@@ -1176,7 +1266,13 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             step_indices = torch.arange(timesteps.shape[0], dtype=torch.long)
 
         per_result_log_probs: List[Optional[torch.Tensor]] = []
-        if ctx.require_log_probs:
+        # Only consume SGLang-returned log_probs when logprob_source='native'.
+        # Under ``logprob_source='replay'`` we still ask SGLang to run SDE
+        # sampling (so the trajectory has real Gaussian residuals), but the
+        # authoritative log_prob must be recomputed on the training side via
+        # ``ReplayLogProbPatch`` — that path is gated on
+        # ``batch.log_probs is None``, so we intentionally return None here.
+        if ctx.require_log_probs and self._native_rollout_logprob_enabled():
             per_result_log_probs = [self._extract_log_probs_from_result(result) for result in results]
 
         merged_log_probs: Optional[LogProbData] = None
