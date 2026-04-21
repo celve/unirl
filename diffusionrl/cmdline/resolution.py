@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from diffusionrl.cmdline.actors import (
     build_rollout_actor_init_config_from_args,
@@ -265,23 +265,12 @@ def derive_training_plan(
     if mini_batch_size < micro_batch_size:
         raise ValueError(f"mini_batch_size must be >= micro_batch_size, Got {mini_batch_size}")
 
-    update_slices = tuple(
-        (update_index * mini_batch_size, (update_index + 1) * mini_batch_size)
-        for update_index in range(num_updates_per_batch)
-    )
-    mini_batch_slices_per_update = tuple(
-        _build_relative_slices(total_size=mini_batch_size, chunk_size=micro_batch_size)
-        for _ in range(num_updates_per_batch)
-    )
-
     return TrainingPlan(
         global_batch_size=global_batch_size,
         local_batch_size=local_batch_size,
         local_mini_batch_size=mini_batch_size,
         micro_batch_size=micro_batch_size,
         num_updates_per_batch=num_updates_per_batch,
-        update_slices=update_slices,
-        mini_batch_slices_per_update=mini_batch_slices_per_update,
     )
 
 
@@ -368,20 +357,6 @@ def _derive_engine_capabilities(
         engine_caps = dict(engine_caps, requires_log_prob=True, requires_embeddings=True)
 
     return engine_caps
-
-
-def _build_relative_slices(
-    *,
-    total_size: int,
-    chunk_size: int,
-) -> Tuple[Tuple[int, int], ...]:
-    slices = []
-    start = 0
-    while start < total_size:
-        end = min(start + chunk_size, total_size)
-        slices.append((start, end))
-        start = end
-    return tuple(slices)
 
 
 def _build_placement_spec(

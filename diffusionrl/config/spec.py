@@ -114,15 +114,25 @@ class ModelSpec:
 
 @dataclass(frozen=True)
 class TrainingPlan:
-    """Authoritative training batch/update plan derived from explicit config."""
+    """4-level batch geometry for training, derived from CLI sizing knobs.
+
+    Hierarchy (each ``÷`` is an integer divide enforced by
+    ``config.validation.validate_training_plan_config``):
+
+        global_batch_size = prompts_per_rollout × samples_per_prompt
+            ÷ dp_size                → local_batch_size
+            ÷ num_updates_per_batch  → local_mini_batch_size  (per optimizer.step)
+            ÷ grad_accum (implicit)  → micro_batch_size       (per forward/backward)
+
+    ``grad_accum`` is not a stored field; runtime derives it as
+    ``local_mini_batch_size / micro_batch_size`` via ``TrainStack``.
+    """
 
     global_batch_size: int
     local_batch_size: int
     local_mini_batch_size: int
     micro_batch_size: int
     num_updates_per_batch: int
-    update_slices: tuple[tuple[int, int], ...]
-    mini_batch_slices_per_update: tuple[tuple[tuple[int, int], ...], ...]
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -131,10 +141,6 @@ class TrainingPlan:
             "local_mini_batch_size": self.local_mini_batch_size,
             "micro_batch_size": self.micro_batch_size,
             "num_updates_per_batch": self.num_updates_per_batch,
-            "update_slices": [[start, end] for start, end in self.update_slices],
-            "mini_batch_slices_per_update": [
-                [[start, end] for start, end in per_update] for per_update in self.mini_batch_slices_per_update
-            ],
         }
 
 
