@@ -232,7 +232,7 @@ run_training() {
         --sampling.sde-type "${SDE_TYPE}" \
         --algorithm.training-scheduler.timestep-fraction "${TIMESTEP_FRACTION}" \
         --sampling.num-inference-steps "${NUM_INFERENCE_STEPS}" \
-        --sampling.guidance-scale 4.5 \
+        --sampling.guidance-scale 1.0 \
         --algorithm.shuffle-seed "${SHUFFLE_SEED}" \
         --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}" \
         --algorithm.kwarg beta=1 \
