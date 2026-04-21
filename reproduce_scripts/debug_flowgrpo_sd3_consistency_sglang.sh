@@ -165,9 +165,17 @@ echo "============================================"
 rm -rf "${DEBUG_OUTPUT_DIR}"
 mkdir -p "${DEBUG_OUTPUT_DIR}"
 
-# Weight sync dir: local, single-node.  ``tensor_payload`` uses Ray IPC; no
-# shared filesystem required.  We set --sync.dir anyway so the backend has
-# a valid scratch path if it ever needs one.
+# Weight sync dir: local, single-node scratch path.
+#
+# We use ``nccl_broadcast`` (same as the production multinode script) rather
+# than ``tensor_payload``.  ``tensor_payload`` serialises GPU tensors via
+# CUDA IPC and the receiver resolves the source device by matching its UUID
+# in its own ``CUDA_VISIBLE_DEVICES``.  Ray assigns *disjoint* CVDs to the
+# rollout and training actors when ``ROLLOUT_GPUS_PER_NODE + TRAINING_GPUS_PER_NODE == GPUS_PER_NODE``
+# so the sender records a UUID the receiver cannot see, producing:
+#   RuntimeError: update_weights_from_tensor failed: Invalid device_uuid=<...>
+# ``nccl_broadcast`` sidesteps that entirely by opening a NCCL group between
+# the two actors, so inter-GPU weight transfer works even with disjoint CVDs.
 WEIGHT_SYNC_DIR="${WEIGHT_SYNC_DIR:-${DEBUG_OUTPUT_DIR}/weight_sync}"
 mkdir -p "${WEIGHT_SYNC_DIR}"
 
@@ -218,7 +226,7 @@ python -m diffusionrl.train \
     --algorithm.adv-normalization group \
     --algorithm.use-global-std true \
     \
-    --sync.protocol tensor_payload \
+    --sync.protocol nccl_broadcast \
     --sync.dir "${WEIGHT_SYNC_DIR}" \
     --ray.rollout-num-nodes "${NUM_NODES}" \
     --ray.rollout-num-gpus-per-node "${ROLLOUT_GPUS_PER_NODE}" \
