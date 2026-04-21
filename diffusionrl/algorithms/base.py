@@ -323,7 +323,7 @@ class BaseAlgorithm(ABC):
         """Declare EMA policy for this algorithm."""
         ...
 
-    def prepare_loss_advantages(  # [PUBLIC-API → train_executor] training side advantage transform
+    def prepare_loss_advantages(  # [PUBLIC-API → TrainStack] training side advantage transform
         self,
         advantages: torch.Tensor,
     ) -> torch.Tensor:
@@ -367,7 +367,7 @@ class BaseAlgorithm(ABC):
             )
         return self._forward_plugin
 
-    def compute_loss_and_backward(  # [PUBLIC-API → train_executor] training side: core loss+backward
+    def compute_loss_and_backward(  # [PUBLIC-API → TrainStack] training side: core loss+backward
         self,
         *,
         model: nn.Module,
@@ -378,12 +378,12 @@ class BaseAlgorithm(ABC):
     ) -> tuple:
         """Compute loss and call backward for a single micro-batch.
 
-        The micro-batch loop is owned by ``train_executor``; each algorithm
+        The micro-batch loop is owned by ``TrainStack``; each algorithm
         only needs to handle one already-sliced micro-batch here.
 
         Args:
             model: The model to compute loss on.
-            batch: A single micro-batch (already sliced by train_executor).
+            batch: A single micro-batch (already sliced by TrainStack).
             timesteps: Pre-resolved training timesteps from
                 ``resolve_training_timesteps()``.
             loss_scale: Gradient accumulation scale (1 / num_mini_batches).

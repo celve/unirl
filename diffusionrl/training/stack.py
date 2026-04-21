@@ -2,18 +2,40 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import torch
 
 from diffusionrl.algorithms import BaseAlgorithm
 from diffusionrl.training.backends.base import TrainBackend
-from diffusionrl.training.update_schedule import _build_micro_batch_slices
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils.ema import EMAManager
 from diffusionrl.utils.misc import aggregate_numeric_metrics
 
 logger = logging.getLogger(__name__)
+
+
+def _positive_int(*, name: str, value: Any) -> int:
+    resolved = int(value)
+    if resolved < 1:
+        raise ValueError(f"{name} must be >= 1. Got {resolved}.")
+    return resolved
+
+
+def _build_micro_batch_slices(
+    *,
+    total_size: int,
+    micro_batch_size: int,
+) -> Tuple[Tuple[int, int], ...]:
+    resolved_total_size = _positive_int(name="total_size", value=total_size)
+    resolved_micro_batch_size = _positive_int(name="micro_batch_size", value=micro_batch_size)
+    slices: List[Tuple[int, int]] = []
+    start = 0
+    while start < resolved_total_size:
+        end = min(start + resolved_micro_batch_size, resolved_total_size)
+        slices.append((start, end))
+        start = end
+    return tuple(slices)
 
 
 @dataclass(frozen=True)

@@ -8,8 +8,8 @@ return a ``MultiLRScheduler`` that subclasses ``dict``, not
 factory returns with the torch base classes would be a false contract.
 
 These protocols capture the method surface the diffusionrl training code
-actually uses, verified by grep across ``ray/train_actor.py``,
-``training/stack.py``, and ``training/train_executor.py``.
+actually uses, verified by grep across ``ray/train_actor.py`` and
+``training/stack.py``.
 """
 
 from __future__ import annotations

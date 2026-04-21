@@ -257,8 +257,7 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
         """Execute the training stack on a materialized batch."""
         # Batches arrive over Ray (or directly from CPU) and may have any of
         # their tensor fields on the wrong device. Move the whole batch onto
-        # this actor's compute device before forward, mirroring the legacy
-        # TrainExecutor.prepare_batch behavior.
+        # this actor's compute device before forward.
         batch = batch.to_device(self._device)
         # Populate batch.log_probs from FSDP forward when configured for replay
         # mode and sglang did not return native log_probs. Must run after the
