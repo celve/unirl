@@ -21,8 +21,10 @@ Run: python tests/test_rollout_actor_sglang_e2e.py
 
 from __future__ import annotations
 
+import os
 import time
 
+import pytest
 import ray
 import torch
 
@@ -38,14 +40,26 @@ from diffusionrl.types.response import RolloutResponse
 from diffusionrl.types.sampling import SamplingParams, SDEConfig
 from diffusionrl.types.training_batch import TrainingBatch
 
-MODEL_PATH = "/mnt/bj/models/stable-diffusion-3.5-medium"
 NUM_STEPS = 28
 SDE_INDICES = list(range(NUM_STEPS))
 
+pytestmark = [
+    pytest.mark.e2e,
+    pytest.mark.gpu,
+    pytest.mark.slow,
+]
 
-def build_engine_config() -> EngineConfig:
+
+def _require_model_path(model_path: str | None = None) -> str:
+    resolved = model_path or os.environ.get("DIFFUSIONRL_TEST_MODEL_PATH")
+    if not resolved:
+        raise RuntimeError("Set --model-path or DIFFUSIONRL_TEST_MODEL_PATH before running this E2E test.")
+    return resolved
+
+
+def build_engine_config(model_path: str) -> EngineConfig:
     return EngineConfig(
-        pretrained_model_ckpt_path=MODEL_PATH,
+        pretrained_model_ckpt_path=model_path,
         num_inference_steps=NUM_STEPS,
         guidance_scale=7.5,
         sde_type="flow",
@@ -59,11 +73,11 @@ def build_engine_config() -> EngineConfig:
     )
 
 
-def build_actor_config(rollout_batch_size: int | None = None) -> RolloutActorConfig:
+def build_actor_config(model_path: str, rollout_batch_size: int | None = None) -> RolloutActorConfig:
     return RolloutActorConfig(
         engine_init_payload=ComponentInitPayload(
             component_dotpath="sglang",
-            component_config=build_engine_config(),
+            component_config=build_engine_config(model_path),
         ),
         reward_config=RewardSpec(
             reward_dotpath=None,
@@ -115,6 +129,35 @@ def build_request(
 # ---------------------------------------------------------------
 # Test functions
 # ---------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def actor(model_path):
+    ray.init(ignore_reinit_error=True)
+    actor_handle = RolloutActor.options(num_gpus=1).remote(
+        rank=0,
+        world_size=1,
+        num_gpus_allocated=1,
+    )
+    ray.get(actor_handle.init.remote(build_actor_config(model_path)))
+    assert ray.get(actor_handle.health_check.remote())
+    try:
+        yield actor_handle
+    finally:
+        ray.kill(actor_handle)
+        ray.shutdown()
+
+
+@pytest.fixture
+def response(actor) -> RolloutResponse:
+    request = build_request(["a beautiful sunset over the ocean"])
+    return ray.get(actor.generate.remote(request))
+
+
+@pytest.fixture
+def handles(actor):
+    request = build_request(["a red car", "a blue bicycle"])
+    return ray.get(actor.generate_buffered.remote(request))
 
 
 def test_basic_generate(actor):
@@ -421,6 +464,7 @@ def main():
     print("SGLang + RolloutActor E2E Test (Expanded)")
     print("=" * 60)
 
+    model_path = _require_model_path()
     ray.init(ignore_reinit_error=True)
     print(f"Ray resources: {ray.cluster_resources()}")
 
@@ -432,7 +476,7 @@ def main():
         num_gpus_allocated=1,
     )
     t0 = time.time()
-    ray.get(actor.init.remote(build_actor_config()))
+    ray.get(actor.init.remote(build_actor_config(model_path)))
     print(f"Initialized in {time.time() - t0:.1f}s")
     assert ray.get(actor.health_check.remote())
 

@@ -253,14 +253,70 @@ class SD3ModelBundle(ModelBundle):
         return "fsdp"
 
     @classmethod
-    def forward_plugin(cls):
-        from diffusionrl.models.forward_plugins import SD3ForwardPlugin
-
-        return SD3ForwardPlugin()
-
-    @classmethod
     def supports_sglang_prompt_mode(cls) -> bool:
         return True
+
+    def forward_denoiser(
+        self,
+        *,
+        latents: torch.Tensor,
+        sigma: torch.Tensor,
+        ctx,
+    ) -> torch.Tensor:
+        prompt_embeds = ctx.prompt_embeds
+        if prompt_embeds is None:
+            raise ValueError("SD3ModelBundle.forward_denoiser requires ctx.prompt_embeds.")
+        pooled_prompt_embeds = getattr(ctx, "pooled_prompt_embeds", None)
+        negative_prompt_embeds = getattr(ctx, "negative_prompt_embeds", None)
+        negative_pooled_prompt_embeds = getattr(ctx, "negative_pooled_prompt_embeds", None)
+        encoder_attention_mask = getattr(ctx, "encoder_attention_mask", None)
+        guidance_scale = float(getattr(ctx, "guidance_scale", 3.5))
+
+        batch_size = latents.shape[0]
+        device = latents.device
+        timestep = self._prepare_training_timestep(sigma, batch_size, device)
+        timestep_1000 = timestep * 1000
+        model = self.transformer
+
+        with self._build_training_autocast_ctx(device):
+            if guidance_scale > 1.0:
+                if negative_prompt_embeds is None:
+                    negative_prompt_embeds = torch.zeros_like(prompt_embeds)
+                if negative_pooled_prompt_embeds is None:
+                    negative_pooled_prompt_embeds = (
+                        torch.zeros_like(pooled_prompt_embeds) if pooled_prompt_embeds is not None else None
+                    )
+                attn_kw: Dict[str, Any] = {}
+                if encoder_attention_mask is not None:
+                    attn_kw["encoder_attention_mask"] = torch.cat(
+                        [encoder_attention_mask, encoder_attention_mask], dim=0
+                    )
+                noise_pred = model(
+                    hidden_states=torch.cat([latents, latents], dim=0),
+                    encoder_hidden_states=torch.cat([negative_prompt_embeds, prompt_embeds], dim=0),
+                    timestep=torch.cat([timestep_1000, timestep_1000], dim=0),
+                    pooled_projections=(
+                        torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
+                        if pooled_prompt_embeds is not None
+                        else None
+                    ),
+                    return_dict=False,
+                    **attn_kw,
+                )[0]
+                noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
+                return noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+
+            model_kwargs: Dict[str, Any] = {
+                "hidden_states": latents,
+                "encoder_hidden_states": prompt_embeds,
+                "timestep": timestep_1000,
+                "return_dict": False,
+            }
+            if pooled_prompt_embeds is not None:
+                model_kwargs["pooled_projections"] = pooled_prompt_embeds
+            if encoder_attention_mask is not None:
+                model_kwargs["encoder_attention_mask"] = encoder_attention_mask
+            return model(**model_kwargs)[0]
 
     @property
     def transformer(self) -> nn.Module:
@@ -440,14 +496,18 @@ class SD3ModelBundle(ModelBundle):
         results: list[type] = []
         # SD3.5 uses JointTransformerBlock
         try:
-            from diffusers.models.transformers.transformer_sd3 import JointTransformerBlock
+            from diffusers.models.transformers.transformer_sd3 import (
+                JointTransformerBlock,
+            )
 
             results.append(JointTransformerBlock)
         except ImportError:
             pass
         # Older diffusers may use SD3TransformerBlock
         try:
-            from diffusers.models.transformers.transformer_sd3 import SD3TransformerBlock
+            from diffusers.models.transformers.transformer_sd3 import (
+                SD3TransformerBlock,
+            )
 
             results.append(SD3TransformerBlock)
         except ImportError:

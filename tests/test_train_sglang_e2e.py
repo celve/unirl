@@ -16,19 +16,18 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import socket
 import sys
 import time
 from pathlib import Path
 
+import pytest
 import ray
 import torch
 
 from diffusionrl.algorithms.grpo import GRPOAlgorithmConfig
-from diffusionrl.config.training_sections import (
-    LrSchedulerConfig,
-    OptimizerConfig,
-)
+from diffusionrl.config.training_sections import LrSchedulerConfig, OptimizerConfig
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.models.config import ModelBundleConfig
 from diffusionrl.ray.actor_config import RolloutActorConfig
@@ -42,7 +41,6 @@ from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.sampling import SamplingParams, SDEConfig
 from diffusionrl.types.training_batch import TrainingBatch
 
-MODEL_PATH = "/mnt/bj/models/stable-diffusion-3.5-medium"
 NUM_STEPS = 28
 # Skip the very last SDE step — its log_prob is unstable (boundary at t->0)
 # and produces NaN ratios during GRPO training. This matches the
@@ -50,6 +48,19 @@ NUM_STEPS = 28
 SDE_INDICES = list(range(NUM_STEPS - 1))
 NUM_SAMPLES_PER_PROMPT = 4
 OCR_PROMPTS_PATH = Path(__file__).resolve().parents[1] / "data" / "samples" / "ocr_prompts_toy.json"
+
+pytestmark = [
+    pytest.mark.e2e,
+    pytest.mark.gpu,
+    pytest.mark.slow,
+]
+
+
+def _require_model_path(model_path: str | None = None) -> str:
+    resolved = model_path or os.environ.get("DIFFUSIONRL_TEST_MODEL_PATH")
+    if not resolved:
+        raise RuntimeError("Set --model-path or DIFFUSIONRL_TEST_MODEL_PATH before running this E2E test.")
+    return resolved
 
 
 def load_ocr_prompts() -> list[str]:
@@ -87,9 +98,9 @@ def _build_reward_spec(
 # ---------------------------------------------------------------
 
 
-def build_engine_config() -> EngineConfig:
+def build_engine_config(model_path: str) -> EngineConfig:
     return EngineConfig(
-        pretrained_model_ckpt_path=MODEL_PATH,
+        pretrained_model_ckpt_path=model_path,
         num_inference_steps=NUM_STEPS,
         guidance_scale=7.5,
         sde_type="flow",
@@ -103,11 +114,11 @@ def build_engine_config() -> EngineConfig:
     )
 
 
-def build_rollout_actor_config() -> RolloutActorConfig:
+def build_rollout_actor_config(model_path: str) -> RolloutActorConfig:
     return RolloutActorConfig(
         engine_init_payload=ComponentInitPayload(
             component_dotpath="sglang",
-            component_config=build_engine_config(),
+            component_config=build_engine_config(model_path),
         ),
         reward_config=_build_reward_spec(
             reward_components=["ocr"],
@@ -150,6 +161,7 @@ def build_request(prompts: list[str]) -> RolloutRequest:
 
 def build_train_actor_kwargs(
     *,
+    model_path: str,
     rank: int,
     master_addr: str,
     master_port: int,
@@ -191,13 +203,52 @@ def build_train_actor_kwargs(
         model_init_payload=ComponentInitPayload(
             component_dotpath="diffusionrl.models.sd3.SD3ModelBundle",
             component_config=ModelBundleConfig(
-                pretrained_model_ckpt_path=MODEL_PATH,
+                pretrained_model_ckpt_path=model_path,
                 model_precision="bf16",
                 training_only=True,
             ),
         ),
         training_autocast_precision="bf16",
     )
+
+
+@pytest.fixture(scope="module")
+def rollout_actor(model_path):
+    ray.init(ignore_reinit_error=True)
+    actor = RolloutActor.options(num_gpus=1).remote(
+        rank=0,
+        world_size=1,
+        num_gpus_allocated=1,
+    )
+    ray.get(actor.init.remote(build_rollout_actor_config(model_path)))
+    try:
+        yield actor
+    finally:
+        ray.kill(actor)
+        ray.shutdown()
+
+
+@pytest.fixture(scope="module")
+def training_actor(model_path, rollout_actor):
+    del rollout_actor
+    resources = ray.cluster_resources()
+    num_gpus = int(resources.get("GPU", 0))
+    if num_gpus < 2:
+        pytest.skip(f"need 2 GPUs, have {num_gpus}")
+
+    actor = TrainActor.remote(
+        **build_train_actor_kwargs(
+            model_path=model_path,
+            rank=0,
+            master_addr="127.0.0.1",
+            master_port=_pick_free_port(),
+        )
+    )
+    assert ray.get(actor.health_check.remote())
+    try:
+        yield actor
+    finally:
+        ray.kill(actor)
 
 
 # ---------------------------------------------------------------
@@ -326,6 +377,7 @@ def main():
     print("SGLang Rollout + FSDP Training E2E Test")
     print("=" * 60)
 
+    model_path = _require_model_path()
     ray.init(ignore_reinit_error=True)
     resources = ray.cluster_resources()
     num_gpus = int(resources.get("GPU", 0))
@@ -344,7 +396,7 @@ def main():
         num_gpus_allocated=1,
     )
     t0 = time.time()
-    ray.get(rollout_actor.init.remote(build_rollout_actor_config()))
+    ray.get(rollout_actor.init.remote(build_rollout_actor_config(model_path)))
     print(f"Rollout actor initialized in {time.time() - t0:.1f}s")
 
     # --- Create training actor ---
@@ -354,6 +406,7 @@ def main():
     t0 = time.time()
     training_actor = TrainActor.remote(
         **build_train_actor_kwargs(
+            model_path=model_path,
             rank=0,
             master_addr=master_addr,
             master_port=master_port,

@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 
 import torch
-import torch.nn as nn
 
+from diffusionrl.models.base import ModelBundle
 from diffusionrl.types.sampling import SamplingRequirements
 
 from .normalizers import normalize_global, normalize_grouped
@@ -75,14 +75,12 @@ class BaseAlgorithm(ABC):
     Training-side forward dispatch
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     The ``ForwardContext`` (pure data container with model-specific fields)
-    is carried on ``TrainingBatch.forward_context``.  Subclasses read it
-    directly from the batch and pair it with a ``ModelForwardPlugin``
-    for execution: ``plugin.forward(model, latents, sigma, **ctx.to_dict())``.
-    The base class provides :meth:`_get_forward_plugin` (lazy plugin
-    resolution) so that subclasses do not need to duplicate that setup.
+    is carried on ``TrainingBatch.forward_context``. Subclasses read it
+    directly from the batch and dispatch through the explicit
+    ``model_bundle.forward_denoiser(...)`` interface owned by the active
+    model family.
     """
 
-    _forward_plugin: object = None  # type: ignore[assignment]
     model_type: str = "default"
     __CONFIG_CLASS__ = BaseAlgorithmConfig
 
@@ -339,38 +337,10 @@ class BaseAlgorithm(ABC):
     # Phase 2: Algorithm-owned training step
     # ------------------------------------------------------------------
 
-    def _get_forward_plugin(self, model: nn.Module) -> object:
-        """Return the model forward plugin, lazy-loading a default if needed.
-
-        The plugin is normally injected by ``TrainActor`` via
-        ``model_bundle.forward_plugin()``.  If it was never set **and**
-        ``model_type`` is ``"default"`` we fall back to
-        :class:`~diffusionrl.models.forward_plugins.DefaultForwardPlugin`
-        with a warning.
-        """
-        if self._forward_plugin is None:
-            if self.model_type != "default":
-                raise RuntimeError(
-                    f"No forward_plugin set on {type(self).__name__} for "
-                    f"model_type={self.model_type!r}. TrainActor must "
-                    "inject plugin via model_bundle.forward_plugin()."
-                )
-            from diffusionrl.models.forward_plugins import DefaultForwardPlugin
-
-            self._forward_plugin = DefaultForwardPlugin()
-            logger.warning(
-                "No forward_plugin set on %s (model_type=%s). "
-                "Using DefaultForwardPlugin. Set algorithm._forward_plugin "
-                "from model_bundle.forward_plugin() for model-specific behavior.",
-                type(self).__name__,
-                self.model_type,
-            )
-        return self._forward_plugin
-
     def compute_loss_and_backward(  # [PUBLIC-API → TrainStack] training side: core loss+backward
         self,
         *,
-        model: nn.Module,
+        model_bundle: ModelBundle,
         batch: Any,
         timesteps: Any = None,
         loss_scale: float = 1.0,
@@ -391,7 +361,7 @@ class BaseAlgorithm(ABC):
         Returns:
             ``(loss, metrics, num_timesteps, has_backward)``
         """
-        del model, batch, timesteps, loss_scale, kwargs
+        del model_bundle, batch, timesteps, loss_scale, kwargs
         raise NotImplementedError(f"{type(self).__name__} must implement compute_loss_and_backward().")
 
     def resolve_training_timesteps(

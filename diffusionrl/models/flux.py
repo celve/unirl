@@ -89,14 +89,55 @@ class FluxModelBundle(ModelBundle):
         return "fsdp"
 
     @classmethod
-    def forward_plugin(cls):
-        from diffusionrl.models.forward_plugins import FluxForwardPlugin
-
-        return FluxForwardPlugin()
-
-    @classmethod
     def supports_sglang_prompt_mode(cls) -> bool:
         return True
+
+    def forward_denoiser(
+        self,
+        *,
+        latents: torch.Tensor,
+        sigma: torch.Tensor,
+        ctx,
+    ) -> torch.Tensor:
+        prompt_embeds = ctx.prompt_embeds
+        if prompt_embeds is None:
+            raise ValueError("FluxModelBundle.forward_denoiser requires ctx.prompt_embeds.")
+        pooled_prompt_embeds = getattr(ctx, "pooled_prompt_embeds", None)
+        guidance_scale = float(getattr(ctx, "guidance_scale", 3.5))
+        text_ids = getattr(ctx, "text_ids", None)
+        image_ids = getattr(ctx, "image_ids", None)
+
+        batch_size = latents.shape[0]
+        device = latents.device
+        dtype = prompt_embeds.dtype
+        timestep = self._prepare_training_timestep(sigma, batch_size, device)
+        model = self.transformer
+        guidance_tensor = torch.tensor([guidance_scale], device=device, dtype=dtype).expand(batch_size)
+
+        txt_ids = text_ids
+        if txt_ids is not None and txt_ids.dim() == 3:
+            txt_ids = txt_ids[0]
+
+        img_ids = image_ids
+        if img_ids is not None:
+            if img_ids.dim() == 3:
+                img_ids = img_ids[0]
+            elif img_ids.dim() > 3:
+                img_ids = img_ids.squeeze(0)
+                if img_ids.dim() > 2:
+                    img_ids = img_ids[0]
+
+        with self._build_training_autocast_ctx(device):
+            return model(
+                hidden_states=latents.to(dtype),
+                encoder_hidden_states=prompt_embeds,
+                timestep=timestep,
+                guidance=guidance_tensor,
+                txt_ids=txt_ids,
+                img_ids=img_ids,
+                pooled_projections=pooled_prompt_embeds,
+                return_dict=False,
+            )[0]
 
     def load(self) -> None:
         """Load all model components."""
