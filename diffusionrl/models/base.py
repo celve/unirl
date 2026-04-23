@@ -274,6 +274,7 @@ class ModelBundle(ABC):
             sigma_expanded = sigma
         return sigma_expanded.expand(batch_size).to(device, dtype=dtype)
 
+    @abstractmethod
     def forward_denoiser(
         self,
         *,
@@ -282,68 +283,7 @@ class ModelBundle(ABC):
         ctx: ForwardContext,
     ) -> torch.Tensor:
         """Run the model-family-specific denoiser forward for training."""
-        prompt_embeds = ctx.prompt_embeds
-        if prompt_embeds is None:
-            raise ValueError(f"{type(self).__name__}.forward_denoiser requires ctx.prompt_embeds.")
-        pooled_prompt_embeds = getattr(ctx, "pooled_prompt_embeds", None)
-        negative_prompt_embeds = getattr(ctx, "negative_prompt_embeds", None)
-        negative_pooled_prompt_embeds = getattr(ctx, "negative_pooled_prompt_embeds", None)
-        encoder_attention_mask = getattr(ctx, "encoder_attention_mask", None)
-        guidance_scale = float(getattr(ctx, "guidance_scale", 3.5))
-
-        batch_size = latents.shape[0]
-        device = latents.device
-        dtype = prompt_embeds.dtype
-        timestep = self._prepare_training_timestep(sigma, batch_size, device)
-        model = self.transformer
-
-        with self._build_training_autocast_ctx(device):
-            try:
-                timestep_1000 = timestep * 1000
-                if guidance_scale > 1.0:
-                    uncond_embeds = (
-                        negative_prompt_embeds
-                        if negative_prompt_embeds is not None
-                        else torch.zeros_like(prompt_embeds)
-                    )
-                    uncond_pooled = (
-                        negative_pooled_prompt_embeds
-                        if negative_pooled_prompt_embeds is not None
-                        else (torch.zeros_like(pooled_prompt_embeds) if pooled_prompt_embeds is not None else None)
-                    )
-                    model_kwargs: Dict[str, Any] = {
-                        "hidden_states": torch.cat([latents, latents], dim=0).to(dtype),
-                        "encoder_hidden_states": torch.cat([uncond_embeds, prompt_embeds], dim=0),
-                        "timestep": torch.cat([timestep_1000, timestep_1000], dim=0),
-                        "return_dict": False,
-                    }
-                    if pooled_prompt_embeds is not None:
-                        model_kwargs["pooled_projections"] = torch.cat([uncond_pooled, pooled_prompt_embeds], dim=0)
-                    if encoder_attention_mask is not None:
-                        model_kwargs["encoder_attention_mask"] = torch.cat(
-                            [encoder_attention_mask, encoder_attention_mask], dim=0
-                        )
-                    noise_pred = model(**model_kwargs)[0]
-                    noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
-                    return noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
-                model_kwargs = {
-                    "hidden_states": latents.to(dtype),
-                    "encoder_hidden_states": prompt_embeds,
-                    "timestep": timestep_1000,
-                    "return_dict": False,
-                }
-                if pooled_prompt_embeds is not None:
-                    model_kwargs["pooled_projections"] = pooled_prompt_embeds
-                if encoder_attention_mask is not None:
-                    model_kwargs["encoder_attention_mask"] = encoder_attention_mask
-                return model(**model_kwargs)[0]
-            except TypeError:
-                return model(
-                    latents.to(dtype),
-                    timestep,
-                    encoder_hidden_states=prompt_embeds,
-                )[0]
+        ...
 
     def to(self, device: Union[str, torch.device]) -> "ModelBundle":
         """

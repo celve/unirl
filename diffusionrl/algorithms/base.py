@@ -352,7 +352,7 @@ class BaseAlgorithm(ABC):
         only needs to handle one already-sliced micro-batch here.
 
         Args:
-            model: The model to compute loss on.
+            model_bundle: The model bundle to compute loss on.
             batch: A single micro-batch (already sliced by TrainStack).
             timesteps: Pre-resolved training timesteps from
                 ``resolve_training_timesteps()``.
