@@ -35,7 +35,7 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
     if debug_mode == "train_only":
         from diffusionrl.debug import run_debug_train_only
 
-        return run_debug_train_only(args)
+        return run_debug_train_only(args, derived_config=derived_config)
 
     import ray
 

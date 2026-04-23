@@ -66,35 +66,12 @@ class SamplingParams:
 
 @dataclass(frozen=True)
 class SamplingRequirements:
-    """
-    Algorithm-declared sampling contract shared with runtime.
-
-    Algorithm-specific extras (for example ``sde_ratio`` for MixGRPO and
-    ``requires_clean_latents`` for NFT) live in the open ``extras`` mapping so
-    new algorithms can declare sampler requirements without modifying the core
-    contract. The mapping is normalized into an owned snapshot at construction
-    time so callers cannot retain references to the original input mapping.
-    """
+    """Algorithm-declared sampling contract shared with runtime."""
 
     requires_trajectory: bool = True
     requires_log_prob: bool = True
     requires_embeddings: bool = True
-    extras: Dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def requires_clean_latents(self) -> bool:
-        """Whether the algorithm needs clean latents x0."""
-        return bool(self.extras.get("requires_clean_latents", False))
-
-    @property
-    def forward_diffusion_in_loss(self) -> bool:
-        """Whether forward diffusion happens in loss computation."""
-        return bool(self.extras.get("forward_diffusion_in_loss", False))
-
-    @property
-    def is_trajectory_based(self) -> bool:
-        """Whether this is a trajectory-based algorithm (GRPO, MixGRPO)."""
-        return self.requires_trajectory
+    requires_clean_latents: bool = False
 
     @property
     def is_forward_process(self) -> bool:

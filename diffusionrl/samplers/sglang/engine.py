@@ -104,11 +104,9 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         self._last_weight_checksum: Dict[str, str] = {}
         self._supports_memory_api: bool = False
         self._require_memory_api: bool = False
-        self._warned_missing_initial_noise: bool = False
         self._warned_missing_decoded: bool = False
         self._warned_logprob_shape: bool = False
         self._warned_unsupported_rollout_sde: bool = False
-        self._warned_trimmed_logprob_prefix: bool = False
         self._warned_disabled_native_rollout: bool = False
         self._warned_missing_trajectory_with_optional_mode: bool = False
         self._warned_latent_encode_fallback: bool = False
@@ -614,31 +612,28 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         *,
         trajectories_tensor: torch.Tensor,
         num_inference_steps: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, bool]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         traj_len = int(trajectories_tensor.shape[1])
-        has_initial_noise = traj_len == int(num_inference_steps) + 1
-        if has_initial_noise:
-            timesteps = get_sigma_schedule(
-                int(num_inference_steps),
-                shift=float(self.config.shift),
-            ).cpu()
-            step_indices = torch.arange(timesteps.shape[0], dtype=torch.long)
-        else:
-            full_sigmas = get_sigma_schedule(traj_len, shift=float(self.config.shift)).cpu()
-            timesteps = full_sigmas[1:]
-            step_indices = torch.arange(1, full_sigmas.shape[0], dtype=torch.long)
-            if not self._warned_missing_initial_noise:
-                logger.warning(
-                    "SGLang trajectory is missing initial x_T noise (len=T instead of T+1). "
-                    "DiffusionRL applies step-index offset compatibility mode."
-                )
-                self._warned_missing_initial_noise = True
+        if traj_len != int(num_inference_steps) + 1:
+            raise ValueError(
+                f"SGLang trajectory missing initial x_T noise: traj_len={traj_len}, "
+                f"expected num_inference_steps + 1 = {num_inference_steps + 1}. "
+                f"Modern SGLang prepends initial latents at "
+                f"sglang/multimodal_gen/runtime/pipelines_core/stages/denoising.py:1036-1037, "
+                f"so traj_len should always equal T+1. Upgrade SGLang or fix the sampler "
+                f"to emit a T+1 trajectory."
+            )
+        timesteps = get_sigma_schedule(
+            int(num_inference_steps),
+            shift=float(self.config.shift),
+        ).cpu()
+        step_indices = torch.arange(timesteps.shape[0], dtype=torch.long)
         if int(timesteps.shape[0]) != traj_len:
             raise RuntimeError(
                 "SGLang timestep/trajectory length mismatch after conversion: "
                 f"timesteps={timesteps.shape[0]}, trajectory_len={traj_len}"
             )
-        return timesteps, step_indices, has_initial_noise
+        return timesteps, step_indices
 
     def _extract_decoded_media(self, result: Any) -> tuple[Optional[Any], Optional[torch.Tensor]]:
         sample = getattr(result, "samples", None)
@@ -1060,14 +1055,13 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             use_trajectory = False
 
         trajectories_tensor: Optional[torch.Tensor] = None
-        has_initial_noise: Optional[bool] = None
         trajectory_store: Optional[Trajectory] = None
         if use_trajectory:
             trajectories_tensor = torch.cat(
                 [item for item in trajectory_items if item is not None],
                 dim=0,
             )
-            timesteps, step_indices, has_initial_noise = self._derive_timestep_alignment(
+            timesteps, step_indices = self._derive_timestep_alignment(
                 trajectories_tensor=trajectories_tensor,
                 num_inference_steps=ctx.steps,
             )
@@ -1077,18 +1071,12 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             traj_len = int(trajectories_tensor.shape[1])
 
             # Attempt selective trim when only a subset of positions is needed.
-            # Positions use array-index space (column 0 = first stored state),
-            # matching how step_indices map to trajectory columns downstream.
+            # With the T+1 invariant enforced by _derive_timestep_alignment,
+            # column i == trajectory position i (0-indexed).
             trimmed_cols = None
             if ctx.sde_indices is not None and len(ctx.sde_indices) < ctx.steps:
-                # Map SDE indices to column indices in the trajectory tensor.
-                # When has_initial_noise=True, column i = position i (0-indexed).
-                # When has_initial_noise=False, column i = position i+1, but
-                # step_indices already accounts for this shift, so we still
-                # want the same column indices relative to the tensor.
-                col_offset = 0 if has_initial_noise else 1
                 needed_original = set(compute_trajectory_positions(ctx.sde_indices, ctx.steps))
-                keep_cols = sorted(p - col_offset for p in needed_original if 0 <= p - col_offset < traj_len)
+                keep_cols = sorted(p for p in needed_original if 0 <= p < traj_len)
                 if keep_cols and len(keep_cols) < traj_len:
                     trimmed_cols = keep_cols
 
@@ -1114,22 +1102,6 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         if ctx.require_log_probs and per_result_log_probs and all(lp is not None for lp in per_result_log_probs):
             log_prob_tensor = torch.cat([lp for lp in per_result_log_probs if lp is not None], dim=0)
             expected_steps = int(step_indices.shape[0]) - 1
-            if (
-                trajectory_store is not None
-                and has_initial_noise is False
-                and int(log_prob_tensor.shape[1]) == expected_steps + 1
-            ):
-                # Upstream rollout log_probs may include the first transition
-                # x_T -> x_{T-1}, while DiffusionRL compatibility mode with
-                # missing x_T can only train on transitions between stored
-                # trajectory states. Drop the prefix to align with step_indices[:-1].
-                log_prob_tensor = log_prob_tensor[:, 1:]
-                if not self._warned_trimmed_logprob_prefix:
-                    logger.warning(
-                        "SGLang trajectory_log_probs includes an extra prefix step while trajectory is missing x_T; "
-                        "dropping the first logprob column for alignment."
-                    )
-                    self._warned_trimmed_logprob_prefix = True
             if int(log_prob_tensor.shape[1]) == expected_steps:
                 lp_dict = {int(step_indices[i].item()): log_prob_tensor[:, i] for i in range(expected_steps)}
                 merged_log_probs = LogProbData.from_dict(lp_dict)
@@ -1206,7 +1178,6 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             "timestep_type": "sigma",
             "timestep_scale": 1.0,
             "sde_indices": sorted(int(i) for i in ctx.sde_indices) if ctx.sde_indices is not None else None,
-            "has_initial_noise": has_initial_noise,
             "trajectory_available": bool(trajectory_store is not None),
         }
         if rollout_noise_preds_tensor is not None:

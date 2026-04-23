@@ -329,16 +329,11 @@ class GRPOAlgorithm(BaseAlgorithm):
         timestep_idx = timestep_data.timestep_idx
 
         if old_log_probs is None:
-            if not getattr(self, "_logged_old_log_probs_none", False):
-                logger.info(
-                    "GRPO loss: old_log_probs is None at timestep_idx=%s — skipping as ode_step (will suppress further messages)",
-                    timestep_idx,
-                )
-                self._logged_old_log_probs_none = True
-            return torch.tensor(0.0, device=device, requires_grad=True), {
-                "skip_reason": "ode_step",
-                "timestep_idx": timestep_idx,
-            }
+            raise ValueError(
+                f"log_prob missing for step {timestep_idx} in trajectory-RL path. "
+                f"Every step in batch.sde_indices must have a corresponding log_prob. "
+                f"Check assemble_training_batch / replay_logprob / the sampler's lp_dict population."
+            )
         if not getattr(self, "_logged_old_log_probs_attached", False):
             logger.info(
                 "GRPO loss: old_log_probs present at timestep_idx=%s, shape=%s, mean=%.4E",
