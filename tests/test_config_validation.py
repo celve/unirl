@@ -61,8 +61,6 @@ def _make_training_plan() -> TrainingPlan:
         local_mini_batch_size=2,
         micro_batch_size=1,
         num_updates_per_batch=2,
-        update_slices=((0, 2), (2, 4)),
-        mini_batch_slices_per_update=(((0, 1), (1, 2)), ((2, 3), (3, 4))),
     )
 
 

@@ -290,8 +290,6 @@ def validate_algorithm_kwargs_payload(args: Any) -> None:
         "trim_outliers_ratio": "algorithm.trim_outliers_ratio",
         "eval_ema_decay": "algorithm.eval_ema_decay",
         "eval_ema_update_interval": "algorithm.eval_ema_update_interval",
-        "shuffle_samples": "algorithm.shuffle_samples",
-        "shuffle_seed": "algorithm.shuffle_seed",
         "autocast_precision": "precision.training.autocast_precision",
     }
     collisions = [

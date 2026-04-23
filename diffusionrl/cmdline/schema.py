@@ -526,14 +526,6 @@ class AlgorithmConfig:
     )
     eval_ema_decay: float = field(default=0.9, metadata={"help": "Eval EMA decay shared by built-in algorithms"})
     eval_ema_update_interval: int = field(default=1, metadata={"help": "Eval EMA update interval in optimizer steps"})
-    shuffle_samples: bool = field(
-        default=True,
-        metadata={"help": "Shuffle training samples before local update execution"},
-    )
-    shuffle_seed: Optional[int] = field(
-        default=None,
-        metadata={"help": "Optional deterministic shuffle seed for training sample order"},
-    )
     training_share_rollout_indices: bool = field(
         default=True,
         metadata={"help": "Reuse rollout index scheduler for training timestep selection unless disabled"},

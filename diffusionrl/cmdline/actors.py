@@ -111,8 +111,6 @@ def _build_training_execution_config_from_args(
     return TrainingExecutionConfig(
         max_grad_norm=float(args.training.max_grad_norm),
         replay_enabled=bool(replay_enabled),
-        shuffle_samples=bool(args.algorithm.shuffle_samples),
-        shuffle_seed=args.algorithm.shuffle_seed,
         training_autocast_precision=str(args.precision.training_autocast_precision),
         debug_output_dir=args.debug.output_dir,
         guidance_scale=float(guidance_scale),
