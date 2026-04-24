@@ -264,6 +264,8 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
                         sampling_spec=sampling_spec,
                         evaluation_settings=args.evaluation,
                         rollout_id=rollout_id,
+                        collect_media_preview=wandb_media_enabled,
+                        media_max_items=wandb_media_max_items,
                     )
 
                 if training_actor_sampling_mode:
@@ -280,7 +282,17 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
                     eval_phase_s,
                 )
                 if wandb_logger:
+                    # Pop media_preview before log_eval so only scalar metrics
+                    # (mean/std reward, num_samples, rollout_id) go through the
+                    # ``eval/`` numeric panel; images are logged separately.
+                    eval_media_preview = eval_metrics.pop("media_preview", None)
                     wandb_logger.log_eval(rollout_id, eval_metrics)
+                    if eval_media_preview:
+                        wandb_logger.log_generated_media(
+                            rollout_id,
+                            eval_media_preview,
+                            key="eval/generated_media",
+                        )
 
             # === PHASE A: Rollout ===
             rollout_phase_start_t = time.perf_counter()
@@ -289,6 +301,7 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
                     rollout_group.wake_up()
                     rollout_on_gpu = True
 
+            collect_rollout_preview = bool(should_log_step and wandb_media_enabled)
             training_batch, sample_count, rollout_response = rollout_pipeline.run_once(
                 rollout_actors=pipeline_actors,
                 rollout_handle_group=pipeline_handle_group,
@@ -298,12 +311,14 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
                 sampling_spec=sampling_spec,
                 control_algorithm=control_algorithm,
                 rollout_id=rollout_id,
+                collect_media_preview=collect_rollout_preview,
+                media_max_items=wandb_media_max_items,
             )
             rollout_phase_s = time.perf_counter() - rollout_phase_start_t
 
-            # Free decoded images early when media preview is not needed this step.
-            if not (should_log_step and wandb_media_enabled):
-                del rollout_response
+            # Even when no preview was requested, the response is now small
+            # (actors drop decoded_images after scoring), so we keep the
+            # reference for the logging path below. No eager ``del`` needed.
 
             if not training_actor_sampling_mode and args.ray.offload_rollout:
                 rollout_group.sleep()
@@ -378,6 +393,10 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
                         wandb_logger.log_rollout(rollout_id, rollout_metrics)
 
                     if wandb_media_enabled:
+                        # Primary path: actors populated ``samples.media_preview``
+                        # already (capped in ``RolloutPipeline.aggregate``). Fall
+                        # back to ``build_media_preview`` only if a legacy code
+                        # path left it unset.
                         media_preview = build_media_preview(
                             rollout_response,
                             max_items=wandb_media_max_items,

@@ -1,10 +1,10 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import torch
 
 from diffusionrl.types.request import RolloutRequest
-from diffusionrl.types.sample import LogProbData, RolloutSamples
+from diffusionrl.types.sample import LogProbData, MediaPreview, RolloutSamples
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.types.trajectory_store import TrajectoryStore
 from diffusionrl.utils.batched import Batched, concat_field
@@ -32,6 +32,47 @@ class RolloutResponse(Batched):
 
     def to_meta(self) -> "RolloutResponseMeta":
         return RolloutResponseMeta(group_ids=self.request.prompts.group_ids, sample_ids=self.request.prompts.sample_ids)
+
+    def attach_media_preview(self, *, max_items: int) -> None:
+        """Build a ``MediaPreview`` from this (already-scored) response and
+        bind it directly onto ``self.samples.media_preview``.
+
+        Reads up to ``max_items`` PIL images from
+        ``self.samples.decoded_images``, pairs them with the corresponding
+        prompt strings and (already-attached) reward floats, and writes a
+        typed ``MediaPreview`` back onto ``self.samples.media_preview``.
+        Writes ``None`` when no PIL images are available on the samples.
+        Used by the actor-side rollout pipeline right after reward scoring
+        (see ``RolloutPipelineMixin.attach_reward``) and as a fallback on
+        the driver side.
+        """
+        decoded_images = self.samples.decoded_images
+        if not isinstance(decoded_images, list) or not decoded_images:
+            self.samples.media_preview = None
+            return
+
+        limit = max(1, int(max_items))
+        prompt_texts = list(self.request.prompts.prompts or [])
+        rewards_flat: List[float] = []
+        if self.samples.rewards is not None and torch.is_tensor(self.samples.rewards):
+            rewards_flat = [float(v) for v in self.samples.rewards.detach().cpu().reshape(-1).tolist()]
+
+        images: List[Any] = []
+        prompts_out: List[str] = []
+        reward_values: List[float] = []
+        for idx, img in enumerate(decoded_images):
+            if len(images) >= limit:
+                break
+            if not hasattr(img, "save"):
+                continue
+            images.append(img)
+            prompts_out.append(str(prompt_texts[idx]) if idx < len(prompt_texts) else "")
+            reward_values.append(float(rewards_flat[idx]) if idx < len(rewards_flat) else 0.0)
+
+        if not images:
+            self.samples.media_preview = None
+            return
+        self.samples.media_preview = MediaPreview(images=images, prompts=prompts_out, rewards=reward_values)
 
     def to_training_batch(
         self,

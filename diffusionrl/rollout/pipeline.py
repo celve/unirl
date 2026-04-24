@@ -18,7 +18,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import ray
-import torch
 from ray.actor import ActorHandle
 
 from diffusionrl.ray.generate_sharding import build_generate_shard_plan_grouped
@@ -30,6 +29,7 @@ from diffusionrl.rollout.request_builders import (
 from diffusionrl.types.prompts import Prompts
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.response import RolloutResponse
+from diffusionrl.types.sample import MediaPreview
 from diffusionrl.types.sampling import SamplingParams, SDEConfig
 from diffusionrl.types.training_batch import TrainingBatch
 
@@ -41,39 +41,29 @@ def build_media_preview(
     response: RolloutResponse,
     *,
     max_items: int = 8,
-) -> Optional[Dict[str, Any]]:
-    """Build a wandb media preview dict from an aggregated RolloutResponse.
+) -> Optional[MediaPreview]:
+    """Return a ``MediaPreview`` capped at *max_items* from an aggregated response.
 
-    Returns ``{"images": [...], "prompts": [...], "rewards": [...]}`` capped
-    at *max_items*, or ``None`` when no decoded images are available.
+    Primary path: actors build per-shard previews during ``attach_reward``
+    and the result is carried on ``samples.media_preview``, so this driver
+    helper simply slices that typed payload down to *max_items*.
+
+    Fallback path: if ``samples.media_preview`` is unset (e.g. responses
+    from legacy code paths that still carry raw ``decoded_images``), rebuild
+    the preview from ``decoded_images`` via ``RolloutResponse.attach_media_preview``.
+
+    Returns ``None`` when neither source has images.
     """
-    decoded_images = response.samples.decoded_images
-    if decoded_images is None:
-        return None
-
     limit = max(1, int(max_items))
-    prompt_texts = response.request.prompts.prompts
-    rewards_flat: List[float] = []
-    if response.samples.rewards is not None and torch.is_tensor(response.samples.rewards):
-        rewards_flat = [float(v) for v in response.samples.rewards.detach().cpu().reshape(-1).tolist()]
 
-    images: List[Any] = []
-    prompts: List[str] = []
-    reward_values: List[float] = []
+    preview = response.samples.media_preview
+    if isinstance(preview, MediaPreview):
+        if preview.is_empty():
+            return None
+        return preview.slice(0, limit) if len(preview) > limit else preview
 
-    for i, img in enumerate(decoded_images):
-        if len(images) >= limit:
-            break
-        if not hasattr(img, "save"):
-            continue
-        images.append(img)
-        prompts.append(str(prompt_texts[i]) if i < len(prompt_texts) else "")
-        reward_values.append(float(rewards_flat[i]) if i < len(rewards_flat) else 0.0)
-
-    if not images:
-        return None
-
-    return {"images": images, "prompts": prompts, "rewards": reward_values}
+    response.attach_media_preview(max_items=limit)
+    return response.samples.media_preview
 
 
 class RolloutPipeline:
@@ -126,8 +116,16 @@ class RolloutPipeline:
         samples_per_prompt: int,
         control_algorithm: Any,
         rollout_id: int,
+        collect_media_preview: bool = False,
+        media_max_items: int = 8,
     ) -> Tuple[RolloutRequest, Optional[Set[int]]]:
-        """Build a typed RolloutRequest and return ``(request, sde_indices_set)``."""
+        """Build a typed RolloutRequest and return ``(request, sde_indices_set)``.
+
+        ``collect_media_preview`` / ``media_max_items`` are threaded onto
+        the resulting ``RolloutRequest`` so the actor-side rollout pipeline
+        knows whether (and how many) PIL images to retain in
+        ``samples.media_preview`` before dropping the full decoded lists.
+        """
         import dataclasses
 
         sde_indices = control_algorithm.resolve_rollout_sde_indices(
@@ -139,7 +137,12 @@ class RolloutPipeline:
             num_samples_per_prompt=int(samples_per_prompt),
             sde_indices=sde_indices_list,
         )
-        request = RolloutRequest(prompts=prompts, sampling_params=sampling_params)
+        request = RolloutRequest(
+            prompts=prompts,
+            sampling_params=sampling_params,
+            collect_media_preview=bool(collect_media_preview),
+            media_max_items=max(1, int(media_max_items)),
+        )
         sde_indices_set = set(int(i) for i in (sde_indices_list or [])) or None
         return request, sde_indices_set
 
@@ -180,10 +183,20 @@ class RolloutPipeline:
         *,
         responses: List[RolloutResponse],
     ) -> RolloutResponse:
-        """Concat per-actor RolloutResponses into a single merged response."""
+        """Concat per-actor RolloutResponses into a single merged response.
+
+        After concat, the per-shard ``samples.media_preview`` payloads are
+        already merged by ``RolloutSamples.concat`` (lists extended). Cap
+        the final preview list at ``request.media_max_items`` so the driver
+        never holds more PIL images than the caller asked for regardless
+        of how many shards contributed.
+        """
         if not responses:
             raise RuntimeError("Rollout produced no responses.")
-        return RolloutResponse.concat(responses)
+        combined = RolloutResponse.concat(responses)
+        max_items = int(getattr(combined.request, "media_max_items", 8))
+        combined.samples.cap_media_preview(max_items)
+        return combined
 
     def score_samples(self, *args: Any, **kwargs: Any) -> None:
         """Driver-side reward scoring hook.
@@ -251,16 +264,19 @@ class RolloutPipeline:
         sampling_spec: SamplingParams,
         control_algorithm: Any,
         rollout_id: int,
+        collect_media_preview: bool = False,
+        media_max_items: int = 8,
     ) -> Tuple[TrainingBatch, int, RolloutResponse]:
         """Execute one full driver-side rollout step.
 
         Composition of the pipeline sub-methods:
             load_prompts → plan_requests → exec_request → aggregate → convert_training_data
 
-        Returns ``(training_batch, sample_count, combined_response)``.
-        The caller may use the combined response for media preview logging
-        before discarding it.  Called by ``train.py`` inside its
-        PHASE A step-loop block.
+        Returns ``(training_batch, sample_count, combined_response)``. When
+        ``collect_media_preview=True``, the aggregated response carries a
+        capped preview on ``combined.samples.media_preview`` and full
+        decoded images are never returned across Ray.  Called by
+        ``train.py`` inside its PHASE A step-loop block.
         """
         prompts = self.load_prompts(
             data_source=data_source,
@@ -273,6 +289,8 @@ class RolloutPipeline:
             samples_per_prompt=samples_per_prompt,
             control_algorithm=control_algorithm,
             rollout_id=rollout_id,
+            collect_media_preview=collect_media_preview,
+            media_max_items=media_max_items,
         )
         responses = self.exec_request(
             request=request,
@@ -303,6 +321,8 @@ class RolloutPipeline:
         sampling_spec: SamplingParams,
         evaluation_settings: Any,
         rollout_id: int,
+        collect_media_preview: bool = False,
+        media_max_items: int = 8,
     ) -> Dict[str, Any]:
         """Run one evaluation pass and return metrics.
 
@@ -310,8 +330,14 @@ class RolloutPipeline:
         ``run_eval_pipeline`` to actors (generate + reward, no advantages),
         and computes mean/std reward.
 
+        When ``collect_media_preview=True``, the returned dict also
+        includes a ``media_preview`` key carrying up to ``media_max_items``
+        decoded PIL images paired with their prompts and reward scores —
+        ready to hand to ``wandb_logger.log_generated_media(...,
+        key="eval/generated_media")``.
+
         Returns dict with keys ``rollout_id``, ``num_samples``,
-        ``mean_reward``, ``std_reward``.
+        ``mean_reward``, ``std_reward``, and optionally ``media_preview``.
         """
         # 1. Load eval prompts
         request_batch = build_eval_request_batch(
@@ -369,7 +395,12 @@ class RolloutPipeline:
             sde_indices=None,
             sampler_kwargs=dict(sampling_spec.sampler_kwargs or {}),
         )
-        request = RolloutRequest(prompts=prompts, sampling_params=sampling_params)
+        request = RolloutRequest(
+            prompts=prompts,
+            sampling_params=sampling_params,
+            collect_media_preview=bool(collect_media_preview),
+            media_max_items=max(1, int(media_max_items)),
+        )
 
         # 4. Dispatch to actors via run_eval_pipeline
         if not rollout_actors:
@@ -390,19 +421,25 @@ class RolloutPipeline:
         combined = self.aggregate(responses=responses)
         rewards = combined.samples.rewards
         if rewards is None or rewards.numel() == 0:
-            return {
+            result: Dict[str, Any] = {
                 "rollout_id": int(rollout_id),
                 "num_samples": len(raw_prompts),
                 "mean_reward": 0.0,
                 "std_reward": 0.0,
             }
+        else:
+            result = {
+                "rollout_id": int(rollout_id),
+                "num_samples": len(raw_prompts),
+                "mean_reward": float(rewards.mean().item()),
+                "std_reward": float(rewards.std().item()),
+            }
 
-        return {
-            "rollout_id": int(rollout_id),
-            "num_samples": len(raw_prompts),
-            "mean_reward": float(rewards.mean().item()),
-            "std_reward": float(rewards.std().item()),
-        }
+        if collect_media_preview:
+            preview = combined.samples.media_preview
+            if isinstance(preview, MediaPreview) and not preview.is_empty():
+                result["media_preview"] = preview
+        return result
 
 
 __all__ = ["RolloutPipeline", "build_media_preview"]

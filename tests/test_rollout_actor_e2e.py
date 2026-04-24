@@ -16,7 +16,7 @@ import torch
 from diffusionrl.types.prompts import Prompts
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.response import RolloutResponse
-from diffusionrl.types.sample import LogProbData, RolloutSamples
+from diffusionrl.types.sample import LogProbData, MediaPreview, RolloutSamples
 from diffusionrl.types.sampling import SamplingParams
 from diffusionrl.types.trajectory_store import Trajectory, TrajectoryBuilder
 from diffusionrl.utils.batched import Batched
@@ -214,6 +214,190 @@ def test_trajectory_concat():
     print("  [PASS] Trajectory.concat()")
 
 
+# ---------------------------------------------------------------------------
+# Media-preview plumbing (wandb eval + actor-side image drop)
+# ---------------------------------------------------------------------------
+
+
+class _FakePIL:
+    """Minimal PIL-image stand-in that only exposes ``save`` (duck-typed)."""
+
+    def __init__(self, tag: str) -> None:
+        self.tag = tag
+
+    def save(self, *args, **kwargs) -> None:  # pragma: no cover - never called
+        return None
+
+
+def test_request_carries_media_preview_knobs():
+    req = RolloutRequest(
+        prompts=make_prompts(2),
+        sampling_params=make_sampling_params(),
+        collect_media_preview=True,
+        media_max_items=3,
+    )
+    assert req.collect_media_preview is True
+    assert req.media_max_items == 3
+    # Defaults should be off so unrelated callers keep legacy behaviour.
+    default_req = make_request(2)
+    assert default_req.collect_media_preview is False
+    assert default_req.media_max_items == 8
+    # Shared-field semantics should survive a slice.
+    sub = req.slice(0, 1)
+    assert sub.collect_media_preview is True
+    assert sub.media_max_items == 3
+    print("  [PASS] RolloutRequest carries media-preview knobs")
+
+
+def test_samples_media_preview_concat_merges_lists():
+    s1 = make_samples(2)
+    s2 = make_samples(3)
+    s1.media_preview = MediaPreview(
+        images=[_FakePIL("a"), _FakePIL("b")],
+        prompts=["p0", "p1"],
+        rewards=[0.1, 0.2],
+    )
+    s2.media_preview = MediaPreview(
+        images=[_FakePIL("c")],
+        prompts=["p2"],
+        rewards=[0.3],
+    )
+    merged = RolloutSamples.concat([s1, s2])
+    assert merged.media_preview is not None
+    assert [im.tag for im in merged.media_preview.images] == ["a", "b", "c"]
+    assert merged.media_preview.prompts == ["p0", "p1", "p2"]
+    assert merged.media_preview.rewards == [0.1, 0.2, 0.3]
+    print("  [PASS] RolloutSamples.concat() merges media_preview lists")
+
+
+def test_samples_media_preview_concat_all_none():
+    s1 = make_samples(2)
+    s2 = make_samples(2)
+    # Explicit Nones.
+    s1.media_preview = None
+    s2.media_preview = None
+    merged = RolloutSamples.concat([s1, s2])
+    assert merged.media_preview is None
+    print("  [PASS] RolloutSamples.concat() yields None when all previews are None")
+
+
+def test_samples_media_preview_single_item_is_noop():
+    s1 = make_samples(2)
+    original = MediaPreview(
+        images=[_FakePIL("x")],
+        prompts=["only"],
+        rewards=[0.5],
+    )
+    s1.media_preview = original
+    merged = RolloutSamples.concat([s1])
+    # Single-item concat should not allocate or rewrite the preview dataclass.
+    assert merged.media_preview is original
+    print("  [PASS] Single-item RolloutSamples.concat() preserves preview identity")
+
+
+def test_samples_cap_media_preview():
+    s = make_samples(2)
+    s.media_preview = MediaPreview(
+        images=[_FakePIL(f"img{i}") for i in range(5)],
+        prompts=[f"p{i}" for i in range(5)],
+        rewards=[float(i) for i in range(5)],
+    )
+    s.cap_media_preview(2)
+    assert len(s.media_preview.images) == 2
+    assert s.media_preview.prompts == ["p0", "p1"]
+    assert s.media_preview.rewards == [0.0, 1.0]
+    # Capping below the current length is idempotent at the new cap.
+    s.cap_media_preview(2)
+    assert len(s.media_preview.images) == 2
+    # Capping above the current length is a no-op.
+    s.cap_media_preview(10)
+    assert len(s.media_preview.images) == 2
+    print("  [PASS] RolloutSamples.cap_media_preview() truncates lists")
+
+
+def test_attach_reward_builds_preview_and_drops_images():
+    """Exercise the mixin's attach_reward logic end-to-end without Ray.
+
+    Uses stub host/engine/reward objects so the test only covers the new
+    preview-build + image-drop branch that this change added.
+    """
+    from diffusionrl.ray.mixins.rollout_pipeline import RolloutPipelineMixin
+
+    class _StubEngine:
+        def decode_latents(self, latents):  # pragma: no cover - not exercised
+            raise AssertionError("decode_latents should not be called; images are pre-set")
+
+    class _StubRewardPipeline:
+        def score_and_attach(self, response):
+            n = response.samples.latents.shape[0]
+            response.samples.rewards = torch.arange(n, dtype=torch.float32)
+            return response
+
+    class _Host(RolloutPipelineMixin):
+        def __init__(self, response):
+            self.engine = _StubEngine()
+            self._reward = _StubRewardPipeline()
+            self._stored = response
+            # Short-circuit the one-shot decode-diag block in attach_reward —
+            # it numpy-casts decoded images, which our _FakePIL can't support.
+            self._logged_decode_diag = True
+
+        def _ensure_reward_pipeline(self):
+            return self._reward
+
+        def get_buffer(self, handle):
+            return self._stored
+
+    # --- Case A: collect_media_preview=True ---
+    req_on = RolloutRequest(
+        prompts=make_prompts(3),
+        sampling_params=make_sampling_params(),
+        collect_media_preview=True,
+        media_max_items=2,
+    )
+    samples_on = make_samples(3)
+    samples_on.decoded_images = [_FakePIL(f"img{i}") for i in range(3)]
+    response_on = RolloutResponse(request=req_on, samples=samples_on)
+
+    host_on = _Host(response_on)
+    host_on.attach_reward(handle=object())
+
+    assert response_on.samples.rewards is not None
+    assert response_on.samples.rewards.tolist() == [0.0, 1.0, 2.0]
+    assert isinstance(response_on.samples.media_preview, MediaPreview)
+    assert len(response_on.samples.media_preview.images) == 2
+    assert [im.tag for im in response_on.samples.media_preview.images] == ["img0", "img1"]
+    assert response_on.samples.media_preview.prompts[:2] == [
+        req_on.prompts.prompts[0],
+        req_on.prompts.prompts[1],
+    ]
+    assert response_on.samples.media_preview.rewards == [0.0, 1.0]
+    # Actor-side drop: decoded media must be gone even though scoring kept
+    # a reference inside the preview.
+    assert response_on.samples.decoded_images is None
+    assert response_on.samples.decoded_videos is None
+
+    # --- Case B: collect_media_preview=False ---
+    req_off = RolloutRequest(
+        prompts=make_prompts(3),
+        sampling_params=make_sampling_params(),
+        collect_media_preview=False,
+        media_max_items=2,
+    )
+    samples_off = make_samples(3)
+    samples_off.decoded_images = [_FakePIL(f"off{i}") for i in range(3)]
+    response_off = RolloutResponse(request=req_off, samples=samples_off)
+
+    host_off = _Host(response_off)
+    host_off.attach_reward(handle=object())
+
+    assert response_off.samples.media_preview is None
+    # Still drop decoded images — the actor should never return them.
+    assert response_off.samples.decoded_images is None
+    assert response_off.samples.decoded_videos is None
+    print("  [PASS] attach_reward: builds preview + drops decoded images")
+
+
 if __name__ == "__main__":
     print("Testing new rollout types...")
     test_request_creation()
@@ -229,4 +413,10 @@ if __name__ == "__main__":
     test_trajectory_builder()
     test_trajectory_select()
     test_trajectory_concat()
+    test_request_carries_media_preview_knobs()
+    test_samples_media_preview_concat_merges_lists()
+    test_samples_media_preview_concat_all_none()
+    test_samples_media_preview_single_item_is_noop()
+    test_samples_cap_media_preview()
+    test_attach_reward_builds_preview_and_drops_images()
     print("\nAll tests passed!")
