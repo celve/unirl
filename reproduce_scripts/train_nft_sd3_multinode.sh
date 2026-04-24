@@ -201,7 +201,7 @@ run_training() {
         --algorithm.kwarg use_reference_ema=true \
         --algorithm.kwarg reference_update_timing=rollout_end \
         --algorithm.kwarg ema_decay=0.001 \
-        --algorithm.kwarg decay_type=warmup \
+        --algorithm.kwarg ema_decay_type=warmup \
         --algorithm.kwarg ema_flat_steps=0 \
         --algorithm.kwarg ema_uprate=0.001 \
         --algorithm.kwarg ema_uphold=0.5 \
@@ -210,9 +210,8 @@ run_training() {
         "${micro_batch_args[@]}" \
         --training.num-updates-per-batch "${NUM_UPDATES_PER_BATCH}" \
         --algorithm.samples-per-prompt "${NUM_SAMPLES_PER_PROMPT}" \
-        --algorithm.kwarg clip_range=1e-4 \
         --algorithm.kwarg kl_coef=0.0 \
-        --algorithm.adv-normalization group \
+        --algorithm.adv-normalization-scope group \
         --algorithm.use-global-std true \
         --algorithm.adv-norm-eps 1e-4 \
         --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}" \
