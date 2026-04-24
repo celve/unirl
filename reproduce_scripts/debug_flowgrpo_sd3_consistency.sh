@@ -101,7 +101,7 @@ python -m diffusionrl.train \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
     --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 4.5 \
-    --algorithm.rollout-scheduler.timestep-fraction 0.1,0.5 \
+    --algorithm.rollout-scheduler.timestep-fraction "[0.1,0.5]" \
     \
     --algorithm.shuffle-seed 42 \
     --algorithm.shuffle-samples false \
@@ -112,7 +112,7 @@ python -m diffusionrl.train \
     --algorithm.kwarg clip_range=1e-4 \
     --algorithm.kwarg use_kl_penalty=true \
     --algorithm.kwarg kl_coef=0.04 \
-    --algorithm.adv-normalization group \
+    --algorithm.adv-normalization-scope group \
     --algorithm.use-global-std true \
     --algorithm.eval-ema-decay ${EVAL_EMA_DECAY} \
     --algorithm.eval-ema-update-interval ${EVAL_EMA_UPDATE_INTERVAL} \

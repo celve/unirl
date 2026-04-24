@@ -151,7 +151,7 @@ class NFTAlgorithm(BaseAlgorithm):
             requires_trajectory=False,
             requires_log_prob=False,
             requires_embeddings=True,
-            extras={"requires_clean_latents": True},
+            requires_clean_latents=True,
         )
 
     def get_ema_spec(self) -> EMASpec:
