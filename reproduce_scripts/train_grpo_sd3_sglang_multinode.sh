@@ -96,7 +96,7 @@ fi
 PRETRAINED_MODEL="${PRETRAINED_MODEL:-stabilityai/stable-diffusion-3.5-medium}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/grpo_sd3_sglang_multinode}"
 SDE_TYPE="${SDE_TYPE:-flow}"
-TIMESTEP_FRACTION="${TIMESTEP_FRACTION:-0.0,0.5}"
+TIMESTEP_FRACTION="${TIMESTEP_FRACTION:-[0.0,0.5]}"
 NUM_SDE_STEPS="${NUM_SDE_STEPS:-3}"
 REWARD_NAME="${REWARD_NAME:-pickscore}"
 DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/${REWARD_NAME}/train.txt}"
