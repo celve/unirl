@@ -118,8 +118,6 @@ python -m diffusionrl.train \
     --sampling.guidance-scale 4.5 \
     --algorithm.rollout-scheduler.timestep-fraction "[0.1,0.5]" \
     \
-    --algorithm.shuffle-seed 42 \
-    --algorithm.shuffle-samples false \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --training.micro-batch-size "${MICRO_BATCH_SIZE}" \
     --training.num-updates-per-batch ${NUM_UPDATES_PER_BATCH} \
