@@ -25,7 +25,7 @@
 # Key alignment with original flow_grpo (fast variant):
 #   sde_type=flow, eta=0.7, shift=3.0, num_inference_steps=10,
 #   guidance_scale=4.5, kl_coef=0.04, adv_normalization_scope=group,
-#   learning_rate=3e-4, LoRA rank=32 alpha=64, timestep_fraction=0.1,0.3
+#   learning_rate=3e-4, LoRA rank=32 alpha=64, timestep_fraction=[0.1,0.3]
 #
 # =============================================================================
 
@@ -79,7 +79,7 @@ WORKER_WAIT_TIMEOUT="${WORKER_WAIT_TIMEOUT:-600}"
 PRETRAINED_MODEL="${PRETRAINED_MODEL:-stabilityai/stable-diffusion-3.5-medium}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/flowgrpo_fast_sd3_multinode}"
 SDE_TYPE="${SDE_TYPE:-flow}"
-TIMESTEP_FRACTION="${TIMESTEP_FRACTION:-[0.0, 0.5]}"
+TIMESTEP_FRACTION="${TIMESTEP_FRACTION:-[0.0,0.5]}"
 NUM_SDE_STEPS="${NUM_SDE_STEPS:-3}"
 REWARD_NAME="${REWARD_NAME:-pickscore}"
 DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/${REWARD_NAME}/train.txt}"

@@ -24,11 +24,12 @@ Usage:
 import os
 from typing import Any, Dict, List, Optional, Union
 
-from PIL import Image
 import torch
+from PIL import Image
 
 try:
     import wandb
+
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
@@ -90,9 +91,7 @@ class DiffusionRLWandBLogger:
 
         if self.enabled and project:
             if not WANDB_AVAILABLE:
-                self._handle_init_failure(
-                    "wandb package is not installed but WandB reporting was requested"
-                )
+                self._handle_init_failure("wandb package is not installed but WandB reporting was requested")
                 return
             self._init_wandb(config)
 
@@ -116,9 +115,7 @@ class DiffusionRLWandBLogger:
     def _init_wandb(self, config: Optional[Any] = None):
         """Initialize wandb run."""
         if not WANDB_AVAILABLE:
-            self._handle_init_failure(
-                "wandb package is not installed but WandB reporting was requested"
-            )
+            self._handle_init_failure("wandb package is not installed but WandB reporting was requested")
             return
 
         try:
@@ -401,6 +398,7 @@ class DiffusionRLWandBLogger:
                 wandb.finish()
             except Exception:
                 pass
+
 
 # Global logger instance
 _global_logger: Optional[DiffusionRLWandBLogger] = None

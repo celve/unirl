@@ -54,9 +54,7 @@ def test_validate_dynamic_dotpaths_rejects_invalid_data_source_path() -> None:
         validate_dynamic_dotpaths(
             args,
             resolved_model=SimpleNamespace(
-                sampler_dotpath=(
-                    "diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler"
-                )
+                sampler_dotpath=("diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler")
             ),
             algorithm_dotpath="diffusionrl.algorithms.grpo.GRPOAlgorithm",
         )

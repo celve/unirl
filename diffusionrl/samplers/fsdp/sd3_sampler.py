@@ -16,18 +16,17 @@ Reference:
 import logging
 import os
 from contextlib import nullcontext
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 
 from diffusionrl.sde.registry import resolve_sde_strategy_class
 from diffusionrl.sde.runtime import denoising_step, get_sigma_schedule
-from diffusionrl.types.sample import LogProbData
 from diffusionrl.types.forward_context import SD3ForwardContext
+from diffusionrl.types.sample import LogProbData
 from diffusionrl.types.trajectory_store import TrajectoryBuilder
+
 from ..base import RolloutSamples
 from .base_sampler import FSDPBaseSampler
 
@@ -57,9 +56,7 @@ def _save_debug_tensors(
     if rank != 0:
         return
     if len(name_tensor_pairs) % 2 != 0:
-        raise ValueError(
-            "name_tensor_pairs must contain alternating name, tensor pairs"
-        )
+        raise ValueError("name_tensor_pairs must contain alternating name, tensor pairs")
     step_dir = os.path.join(base_dir, f"step_{step_idx:03d}")
     os.makedirs(step_dir, exist_ok=True)
     for i in range(0, len(name_tensor_pairs), 2):
@@ -69,11 +66,7 @@ def _save_debug_tensors(
         if append and os.path.exists(path):
             try:
                 existing = torch.load(path, map_location="cpu", weights_only=True)
-                if (
-                    existing.ndim >= 1
-                    and new_tensor.ndim >= 1
-                    and existing.shape[1:] == new_tensor.shape[1:]
-                ):
+                if existing.ndim >= 1 and new_tensor.ndim >= 1 and existing.shape[1:] == new_tensor.shape[1:]:
                     new_tensor = torch.cat([existing, new_tensor], dim=0)
             except (FileNotFoundError, RuntimeError) as exc:
                 logger.debug("Could not load existing debug tensor at %s: %s", path, exc)
@@ -91,7 +84,6 @@ def calculate_shift(
     m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
     b = base_shift - m * base_seq_len
     return image_seq_len * m + b
-
 
 
 class SD3Sampler(FSDPBaseSampler):
@@ -131,7 +123,7 @@ class SD3Sampler(FSDPBaseSampler):
         scheduler: Optional[Any] = None,
         eta: float = 0.7,
         sde_type: str = "cps",  # SD3 typically uses "cps" or "flow"
-        shift: float = 3.0,    # SD3 uses shift=3.0
+        shift: float = 3.0,  # SD3 uses shift=3.0
         latent_channels: int = 16,  # SD3 uses 16 latent channels
         vae_scale_factor: int = 8,  # VAE 8x compression
         autocast_precision: Any = "bf16",
@@ -184,9 +176,7 @@ class SD3Sampler(FSDPBaseSampler):
         """
         if guidance_scale > 1.0:
             uncond_prompt_embeds = (
-                negative_prompt_embeds
-                if negative_prompt_embeds is not None
-                else torch.zeros_like(prompt_embeds)
+                negative_prompt_embeds if negative_prompt_embeds is not None else torch.zeros_like(prompt_embeds)
             )
             if pooled_prompt_embeds is not None:
                 uncond_pooled_embeds = (
@@ -194,25 +184,19 @@ class SD3Sampler(FSDPBaseSampler):
                     if negative_pooled_prompt_embeds is not None
                     else torch.zeros_like(pooled_prompt_embeds)
                 )
-                pooled_batched = torch.cat(
-                    [uncond_pooled_embeds, pooled_prompt_embeds], dim=0
-                )
+                pooled_batched = torch.cat([uncond_pooled_embeds, pooled_prompt_embeds], dim=0)
             else:
                 pooled_batched = None
 
             noise_pred = self.model(
                 hidden_states=torch.cat([latents, latents], dim=0),
-                encoder_hidden_states=torch.cat(
-                    [uncond_prompt_embeds, prompt_embeds], dim=0
-                ),
+                encoder_hidden_states=torch.cat([uncond_prompt_embeds, prompt_embeds], dim=0),
                 timestep=torch.cat([timestep, timestep], dim=0),
                 pooled_projections=pooled_batched,
                 return_dict=False,
             )[0]
             noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
-            return noise_pred_uncond + guidance_scale * (
-                noise_pred_cond - noise_pred_uncond
-            )
+            return noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
         return self.model(
             hidden_states=latents,
@@ -280,9 +264,7 @@ class SD3Sampler(FSDPBaseSampler):
         if prompt_embeds is None:
             if prompts is None:
                 raise ValueError("Either prompts or prompt_embeds must be provided")
-            prompt_embeds, pooled_prompt_embeds = self._encode_prompt(
-                prompts, max_sequence_length, device, embed_dtype
-            )
+            prompt_embeds, pooled_prompt_embeds = self._encode_prompt(prompts, max_sequence_length, device, embed_dtype)
             if guidance_scale > 1.0 and negative_prompt_embeds is None:
                 negative_prompt_embeds, negative_pooled_prompt_embeds = self._encode_prompt(
                     [""] * len(prompts), max_sequence_length, device, embed_dtype
@@ -300,9 +282,7 @@ class SD3Sampler(FSDPBaseSampler):
         if negative_pooled_prompt_embeds is not None:
             negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(device=device, dtype=embed_dtype)
         if guidance_scale > 1.0 and negative_prompt_embeds is None:
-            raise ValueError(
-                "SD3 CFG requires negative_prompt_embeds when guidance_scale > 1.0."
-            )
+            raise ValueError("SD3 CFG requires negative_prompt_embeds when guidance_scale > 1.0.")
 
         # Calculate latent dimensions
         latent_height = height // self.vae_scale_factor
@@ -311,6 +291,7 @@ class SD3Sampler(FSDPBaseSampler):
         # Initialize latents in trajectory_dtype (storage precision)
         if latents is None:
             from ..noise_utils import generate_latents
+
             latents = generate_latents(
                 batch_size=batch_size,
                 latent_shape=(self.latent_channels, latent_height, latent_width),
@@ -348,9 +329,7 @@ class SD3Sampler(FSDPBaseSampler):
         # Storage for trajectory and log probs
         latents = latents.to(self.trajectory_dtype)
         # Selective collection: only store positions needed for SDE step pairs
-        trajectory_store = TrajectoryBuilder.for_sde_steps(
-            sde_indices, num_inference_steps
-        )
+        trajectory_store = TrajectoryBuilder.for_sde_steps(sde_indices, num_inference_steps)
         trajectory_store.add(0, latents)
         log_probs_dict: Dict[int, torch.Tensor] = {}
 
@@ -364,9 +343,11 @@ class SD3Sampler(FSDPBaseSampler):
         _resolved_debug_dir_pre = debug_output_dir or os.environ.get("DIFFUSIONRL_DEBUG_OUTPUT_DIR")
         if _resolved_debug_dir_pre and rank == 0:
             logger.info(
-                "Debug sampling: rank=%d batch_size=%d latents=%s sde_indices=%s "
-                "already_dumped_steps=%s",
-                rank, batch_size, list(latents.shape), sorted(sde_indices),
+                "Debug sampling: rank=%d batch_size=%d latents=%s sde_indices=%s already_dumped_steps=%s",
+                rank,
+                batch_size,
+                list(latents.shape),
+                sorted(sde_indices),
                 sorted(self._debug_dumped_steps),
             )
         for i in range(num_inference_steps):
@@ -444,11 +425,7 @@ class SD3Sampler(FSDPBaseSampler):
                         "sigma",
                         sigma.unsqueeze(0) if sigma.dim() == 0 else sigma,
                         "sigma_next",
-                        (
-                            sigma_next.unsqueeze(0)
-                            if sigma_next.dim() == 0
-                            else sigma_next
-                        ),
+                        (sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next),
                         "timestep",
                         timestep,
                         rank=rank,
@@ -464,19 +441,24 @@ class SD3Sampler(FSDPBaseSampler):
                         )
                         if rank == 0:
                             import json
+
                             cfg_path = os.path.join(_sampling_debug_dir, "config.json")
                             with open(cfg_path, "w") as f:
-                                json.dump({
-                                    "sde_type": self.sde_type,
-                                    "eta": self.eta,
-                                    "shift": self.shift,
-                                    "num_inference_steps": num_inference_steps,
-                                    "guidance_scale": guidance_scale,
-                                    "sde_indices": sorted(sde_indices),
-                                    "batch_size": batch_size,
-                                    "height": height,
-                                    "width": width,
-                                }, f, indent=2)
+                                json.dump(
+                                    {
+                                        "sde_type": self.sde_type,
+                                        "eta": self.eta,
+                                        "shift": self.shift,
+                                        "num_inference_steps": num_inference_steps,
+                                        "guidance_scale": guidance_scale,
+                                        "sde_indices": sorted(sde_indices),
+                                        "batch_size": batch_size,
+                                        "height": height,
+                                        "width": width,
+                                    },
+                                    f,
+                                    indent=2,
+                                )
 
         trajectory = trajectory_store.finalize()
 
@@ -494,9 +476,7 @@ class SD3Sampler(FSDPBaseSampler):
             trajectories=trajectory,
             log_probs=LogProbData.from_dict(log_probs_dict),
             forward_context=forward_context,
-            step_indices=torch.arange(
-                sigmas.shape[0], device=sigmas.device, dtype=torch.long
-            ),
+            step_indices=torch.arange(sigmas.shape[0], device=sigmas.device, dtype=torch.long),
         )
 
     def compute_log_prob_for_training(
@@ -522,8 +502,7 @@ class SD3Sampler(FSDPBaseSampler):
         sigma_schedule = sigma_schedule.to(device=device, dtype=torch.float32)
         if timestep_index < 0 or timestep_index >= int(sigma_schedule.shape[0]) - 1:
             raise ValueError(
-                "timestep_index out of range for sigma_schedule: "
-                f"index={timestep_index}, len={sigma_schedule.shape[0]}"
+                f"timestep_index out of range for sigma_schedule: index={timestep_index}, len={sigma_schedule.shape[0]}"
             )
 
         sigma = sigma_schedule[timestep_index]
@@ -536,16 +515,12 @@ class SD3Sampler(FSDPBaseSampler):
         embed_dtype = self.autocast_dtype
         prompt_embeds = prompt_embeds.to(device=device, dtype=embed_dtype)
         pooled_prompt_embeds = (
-            pooled_prompt_embeds.to(device=device, dtype=embed_dtype)
-            if pooled_prompt_embeds is not None
-            else None
+            pooled_prompt_embeds.to(device=device, dtype=embed_dtype) if pooled_prompt_embeds is not None else None
         )
         if negative_prompt_embeds is not None:
             negative_prompt_embeds = negative_prompt_embeds.to(device=device, dtype=embed_dtype)
         if negative_pooled_prompt_embeds is not None:
-            negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(
-                device=device, dtype=embed_dtype
-            )
+            negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(device=device, dtype=embed_dtype)
 
         autocast_ctx = (
             torch.autocast("cuda", self.autocast_dtype)
@@ -565,9 +540,7 @@ class SD3Sampler(FSDPBaseSampler):
             )
 
         if self.uses_deterministic_solver:
-            raise ValueError(
-                "Deterministic SD3 sampling does not define stochastic log-prob replay."
-            )
+            raise ValueError("Deterministic SD3 sampling does not define stochastic log-prob replay.")
 
         sigma_max = float(sigma_schedule[1].item()) if int(sigma_schedule.shape[0]) > 1 else 1.0
         _, log_prob, _ = denoising_step(
@@ -634,8 +607,6 @@ class SD3Sampler(FSDPBaseSampler):
         dtype: torch.dtype,
     ) -> tuple:
         """Encode prompts using SD3's triple text encoder setup."""
-        batch_size = len(prompts)
-
         # Check if we have all encoders
         if self.text_encoder is None or self.text_encoder_2 is None or self.text_encoder_3 is None:
             raise ValueError("All three text encoders required for SD3")
@@ -657,7 +628,6 @@ class SD3Sampler(FSDPBaseSampler):
                 text_input_ids,
                 output_hidden_states=True,
             )
-            clip_embeds_1 = clip_output_1.hidden_states[-2]
             pooled_1 = clip_output_1.text_embeds
 
         # CLIP 2 encoding
@@ -675,11 +645,9 @@ class SD3Sampler(FSDPBaseSampler):
                 text_input_ids_2,
                 output_hidden_states=True,
             )
-            clip_embeds_2 = clip_output_2.hidden_states[-2]
             pooled_2 = clip_output_2.text_embeds
 
-        # Concatenate CLIP embeddings
-        clip_embeds = torch.cat([clip_embeds_1, clip_embeds_2], dim=-1)
+        # Concatenate CLIP embeddings (SD3 transformer uses T5 only; CLIP contributes pooled_embeds)
         pooled_embeds = torch.cat([pooled_1, pooled_2], dim=-1)
 
         # T5 encoding

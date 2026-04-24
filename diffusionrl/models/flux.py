@@ -8,9 +8,10 @@ FLUX is an image generation model from Black Forest Labs with:
 
 Reference: https://github.com/black-forest-labs/flux
 """
+
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type, Union
+from typing import List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -54,12 +55,8 @@ class FluxModelBundle(ModelBundle):
         super().__init__(config)
 
         self.vae_ckpt_path = config.vae_ckpt_path or config.pretrained_model_ckpt_path
-        self.text_encoder_ckpt_path = (
-            config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path
-        )
-        self.text_encoder_2_path = (
-            config.text_encoder_2_ckpt_path or config.pretrained_model_ckpt_path
-        )
+        self.text_encoder_ckpt_path = config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path
+        self.text_encoder_2_path = config.text_encoder_2_ckpt_path or config.pretrained_model_ckpt_path
         self.use_lora = bool(config.use_lora)
         self.lora_rank = int(config.lora_rank)
         self.lora_alpha = int(config.lora_alpha)
@@ -112,6 +109,7 @@ class FluxModelBundle(ModelBundle):
     @classmethod
     def forward_plugin(cls):
         from diffusionrl.models.forward_plugins import FluxForwardPlugin
+
         return FluxForwardPlugin()
 
     @classmethod
@@ -165,10 +163,12 @@ class FluxModelBundle(ModelBundle):
                 logger.info(f"Moved FLUX transformer to {self.device}")
             else:
                 # Ensure model stays on CPU for FSDP CPU offload
-                if str(first_param_device) != 'cpu':
-                    self._transformer.to('cpu')
-                    logger.info(f"Moved FLUX transformer to CPU for FSDP CPU offload")
-            logger.info(f"Loaded FLUX transformer from {self.pretrained_path} (skip_device_move={self.skip_device_move})")
+                if str(first_param_device) != "cpu":
+                    self._transformer.to("cpu")
+                    logger.info("Moved FLUX transformer to CPU for FSDP CPU offload")
+            logger.info(
+                f"Loaded FLUX transformer from {self.pretrained_path} (skip_device_move={self.skip_device_move})"
+            )
 
         except ImportError:
             logger.warning(
@@ -407,6 +407,7 @@ class FluxModelBundle(ModelBundle):
         FLUX dev uses shift=1.0, schnell can use shift=0.0.
         """
         from diffusionrl.sde.runtime import get_sigma_schedule
+
         return get_sigma_schedule(num_steps, shift, self.device)
 
 
@@ -460,8 +461,6 @@ class FluxTextEncoderWrapper:
         Returns:
             Tuple of (prompt_embeds, pooled_prompt_embeds)
         """
-        batch_size = len(prompt)
-
         # CLIP encoding for pooled embeddings
         pooled_prompt_embeds = self._encode_clip(prompt)
 
@@ -510,10 +509,7 @@ class FluxTextEncoderWrapper:
         """Encode with T5 for sequence embeddings."""
         if self.t5_encoder is None:
             batch_size = len(texts)
-            return torch.zeros(
-                batch_size, self.max_length, 4096,
-                dtype=self.dtype, device=self.device
-            )
+            return torch.zeros(batch_size, self.max_length, 4096, dtype=self.dtype, device=self.device)
 
         with torch.no_grad():
             text_inputs = self.t5_tokenizer(

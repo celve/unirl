@@ -9,7 +9,6 @@ from typing import Dict
 
 import torch
 
-
 READY_MARKER_SUFFIX = ".ready"
 
 
@@ -83,11 +82,7 @@ def publish_sglang_transformer_checkpoint_atomic(
 
     from safetensors.torch import save_file
 
-    cpu_state = {
-        key: value.detach().cpu().contiguous()
-        for key, value in state_dict.items()
-        if torch.is_tensor(value)
-    }
+    cpu_state = {key: value.detach().cpu().contiguous() for key, value in state_dict.items() if torch.is_tensor(value)}
     target_file = os.path.join(module_dir, filename)
     try:
         save_file(cpu_state, target_file)
@@ -118,9 +113,7 @@ def wait_for_published_checkpoint(
         if os.path.exists(checkpoint_path) and os.path.exists(ready_marker):
             return
         time.sleep(poll_interval_s)
-    raise TimeoutError(
-        f"Timed out waiting for published checkpoint: path={checkpoint_path}, marker={ready_marker}"
-    )
+    raise TimeoutError(f"Timed out waiting for published checkpoint: path={checkpoint_path}, marker={ready_marker}")
 
 
 def cleanup_published_checkpoint(checkpoint_path: str) -> None:

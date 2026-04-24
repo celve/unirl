@@ -26,13 +26,8 @@ class ModelBundleConfig:
     def __post_init__(self) -> None:
         if self.lora_target_modules is None:
             return
-        if (
-            not isinstance(self.lora_target_modules, list)
-            or not self.lora_target_modules
-        ):
-            raise ValueError(
-                "ModelBundleConfig.lora_target_modules must be None or a non-empty list."
-            )
+        if not isinstance(self.lora_target_modules, list) or not self.lora_target_modules:
+            raise ValueError("ModelBundleConfig.lora_target_modules must be None or a non-empty list.")
 
 
 __all__ = ["ModelBundleConfig"]

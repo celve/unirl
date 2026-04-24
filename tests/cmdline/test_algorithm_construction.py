@@ -26,8 +26,6 @@ def _make_args(*, algorithm_type: str, algorithm_kwargs: dict | None = None):
             trim_outliers_ratio=0.0,
             eval_ema_decay=0.9,
             eval_ema_update_interval=1,
-            shuffle_samples=True,
-            shuffle_seed=None,
             training_share_rollout_indices=True,
             rollout_scheduler={"timestep_strategy": "all", "timestep_fraction": 0.75},
             training_scheduler={"timestep_strategy": "all", "timestep_fraction": 0.5},
@@ -56,9 +54,7 @@ def test_build_algorithm_init_payload_uses_grpo_algorithm_config():
         algorithm_type="grpo",
         algorithm_kwargs={"clip_range": 1e-3, "skip_last_timestep": True},
     )
-    algorithm_init_payload = build_algorithm_init_payload_from_args(
-        args, sampling_spec=_make_sampling_spec()
-    )
+    algorithm_init_payload = build_algorithm_init_payload_from_args(args, sampling_spec=_make_sampling_spec())
 
     assert isinstance(algorithm_init_payload, ComponentInitPayload)
     assert algorithm_init_payload.component_dotpath.endswith(".GRPOAlgorithm")
@@ -72,19 +68,12 @@ def test_build_algorithm_init_payload_uses_nft_algorithm_config():
         algorithm_type="nft",
         algorithm_kwargs={"beta": 0.25, "train_timestep_mode": "fixed"},
     )
-    algorithm_init_payload = build_algorithm_init_payload_from_args(
-        args, sampling_spec=_make_sampling_spec()
-    )
+    algorithm_init_payload = build_algorithm_init_payload_from_args(args, sampling_spec=_make_sampling_spec())
 
     assert isinstance(algorithm_init_payload.component_config, NFTAlgorithmConfig)
     assert algorithm_init_payload.component_dotpath.endswith(".NFTAlgorithm")
     assert algorithm_init_payload.component_config.beta == 0.25
-    assert (
-        algorithm_init_payload.component_config.training_scheduler_config[
-            "timestep_fraction"
-        ]
-        == 0.5
-    )
+    assert algorithm_init_payload.component_config.training_scheduler_config["timestep_fraction"] == 0.5
 
 
 def test_create_algorithm_from_grpo_init_payload():
@@ -92,9 +81,7 @@ def test_create_algorithm_from_grpo_init_payload():
         algorithm_type="grpo",
         algorithm_kwargs={"ratio_reg_coef": 0.2, "model_type": "flux"},
     )
-    algorithm_init_payload = build_algorithm_init_payload_from_args(
-        args, sampling_spec=_make_sampling_spec()
-    )
+    algorithm_init_payload = build_algorithm_init_payload_from_args(args, sampling_spec=_make_sampling_spec())
     algorithm = create_algorithm_from_init_payload(algorithm_init_payload)
 
     assert isinstance(algorithm, GRPOAlgorithm)
@@ -108,9 +95,7 @@ def test_build_algorithm_init_payload_allows_grpo_kl_coef_in_algorithm_kwargs():
         algorithm_type="grpo",
         algorithm_kwargs={"kl_coef": 0.2, "clip_range": 1e-3},
     )
-    algorithm_init_payload = build_algorithm_init_payload_from_args(
-        args, sampling_spec=_make_sampling_spec()
-    )
+    algorithm_init_payload = build_algorithm_init_payload_from_args(args, sampling_spec=_make_sampling_spec())
 
     assert algorithm_init_payload.component_config.kl_coef == 0.2
     assert algorithm_init_payload.component_config.clip_range == 1e-3
@@ -121,9 +106,7 @@ def test_create_algorithm_from_nft_init_payload():
         algorithm_type="nft",
         algorithm_kwargs={"beta": 0.3, "ema_decay": 0.02},
     )
-    algorithm_init_payload = build_algorithm_init_payload_from_args(
-        args, sampling_spec=_make_sampling_spec()
-    )
+    algorithm_init_payload = build_algorithm_init_payload_from_args(args, sampling_spec=_make_sampling_spec())
     algorithm = create_algorithm_from_init_payload(algorithm_init_payload)
 
     assert isinstance(algorithm, NFTAlgorithm)
@@ -142,9 +125,7 @@ def test_build_algorithm_init_payload_rejects_unknown_grpo_algorithm_kwargs():
         ValueError,
         match=r"unsupported keys for GRPOAlgorithmConfig: \['nonexistent_knob'\]",
     ):
-        build_algorithm_init_payload_from_args(
-            args, sampling_spec=_make_sampling_spec()
-        )
+        build_algorithm_init_payload_from_args(args, sampling_spec=_make_sampling_spec())
 
 
 def test_build_algorithm_init_payload_rejects_base_config_keys_inside_algorithm_kwargs():
@@ -157,6 +138,4 @@ def test_build_algorithm_init_payload_rejects_base_config_keys_inside_algorithm_
         ValueError,
         match=r"unsupported keys for NFTAlgorithmConfig: \['component_mix_stage'\]",
     ):
-        build_algorithm_init_payload_from_args(
-            args, sampling_spec=_make_sampling_spec()
-        )
+        build_algorithm_init_payload_from_args(args, sampling_spec=_make_sampling_spec())

@@ -1,6 +1,7 @@
 """
 diffusionrl Ray Actor Base Classes.
 """
+
 import abc
 import logging
 import os

@@ -12,16 +12,13 @@ T = TypeVar("T")
 COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = defaultdict(dict)
 _COMPONENT_CONFIG_ATTR = "__CONFIG_CLASS__"
 
+
 def require_subclass(base_class: type) -> Callable[[Any], None]:
     """Return a lightweight class checker enforcing subclass inheritance."""
 
     def _checker(component_cls: Any) -> None:
-        if not isinstance(component_cls, type) or not issubclass(
-            component_cls, base_class
-        ):
-            raise TypeError(
-                f"Registered component {component_cls!r} must be a subclass of {base_class!r}."
-            )
+        if not isinstance(component_cls, type) or not issubclass(component_cls, base_class):
+            raise TypeError(f"Registered component {component_cls!r} must be a subclass of {base_class!r}.")
 
     return _checker
 
@@ -75,10 +72,7 @@ def derive_registry_or_dotpath(
     family_registry = COMPONENT_REGISTRY.get(normalized_family)
     if family_registry is None:
         available_families = sorted(COMPONENT_REGISTRY.keys())
-        raise ValueError(
-            f"Unknown component_family {normalized_family!r}. "
-            f"Available families: {available_families}."
-        )
+        raise ValueError(f"Unknown component_family {normalized_family!r}. Available families: {available_families}.")
 
     normalized_identifier = str(identifier or "").strip()
     if not normalized_identifier:

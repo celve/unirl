@@ -28,9 +28,7 @@ def load_engine_capabilities(engine_type: str) -> Dict[str, bool]:
     engine_cls = derive_rollout_engine_class(engine_type)
     declared = getattr(engine_cls, "declared_capabilities", None)
     if not callable(declared):
-        raise ValueError(
-            f"Engine class {engine_cls} must define classmethod declared_capabilities()."
-        )
+        raise ValueError(f"Engine class {engine_cls} must define classmethod declared_capabilities().")
     return dict(declared())
 
 

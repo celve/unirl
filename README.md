@@ -417,12 +417,12 @@ for f in scripts/*.sh; do bash -n "$f"; done
 
 ### Code Style
 
-Use [ruff](https://docs.astral.sh/ruff/) for linting and formatting:
+Install pre-commit hooks to match the CI lint gate (runs ruff + several safety checks on every commit):
 
 ```bash
-pip install ruff
-ruff check diffusionrl/
-ruff format diffusionrl/
+pip install pre-commit
+pre-commit install            # runs on every `git commit`
+pre-commit run --all-files    # manually run against the whole repo
 ```
 
 - Contributions are welcome! Feel free to submit an Issue or PR.

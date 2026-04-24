@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
@@ -54,6 +53,7 @@ def get_sigma_schedule_diffusers(
 # ---------------------------------------------------------------------------
 # Unified SDE step entrypoint (new primary API)
 # ---------------------------------------------------------------------------
+
 
 def denoising_step(
     noise_pred: torch.Tensor,
@@ -131,7 +131,7 @@ def denoising_step(
         sigma_next=sigma_next,
         eta=eta,
         prev_sample=prev_sample,
-        generator=None, # DONOT PASS GENERATOR HERE - It will hurt diversity and performance
+        generator=None,  # DONOT PASS GENERATOR HERE - It will hurt diversity and performance
         sigma_max=float(sigma_max),
         step_index=step_index,
     )
@@ -151,6 +151,7 @@ def denoising_step(
         log_prob = None
 
     return prev_sample, log_prob, prev_sample_mean
+
 
 __all__ = [
     "sd3_time_shift",

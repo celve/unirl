@@ -61,8 +61,7 @@ class BufferActor:
         payload = ray.get(payload_ref) if isinstance(payload_ref, ray.ObjectRef) else payload_ref
         if not isinstance(payload, RolloutPayload):
             raise TypeError(
-                "BufferActor.push_payload_ref expects RolloutPayload instances, "
-                f"got {type(payload).__name__}."
+                f"BufferActor.push_payload_ref expects RolloutPayload instances, got {type(payload).__name__}."
             )
 
         push_result = self.runtime.push(

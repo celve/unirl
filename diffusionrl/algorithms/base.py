@@ -138,9 +138,7 @@ class BaseAlgorithm(ABC):
     @abstractmethod
     def get_sampling_requirements(
         self,
-    ) -> (
-        SamplingRequirements
-    ):  # [PUBLIC-API → driver rollout runtime] rollout requirements
+    ) -> SamplingRequirements:  # [PUBLIC-API → driver rollout runtime] rollout requirements
         """
         Return the sampling requirements for this algorithm.
 
@@ -169,7 +167,7 @@ class BaseAlgorithm(ABC):
         """
         if self.adv_normalization_scope == "global":
             return self._normalize_global(rewards)
-        else: 
+        else:
             return self._normalize_group(
                 rewards,
                 group_ids=group_ids,
@@ -214,10 +212,7 @@ class BaseAlgorithm(ABC):
             if len(indices) != expected_group_size
         ]
         if invalid_groups:
-            formatted = ", ".join(
-                f"{group_id!r}:{group_size}"
-                for group_id, group_size in invalid_groups[:5]
-            )
+            formatted = ", ".join(f"{group_id!r}:{group_size}" for group_id, group_size in invalid_groups[:5])
             if len(invalid_groups) > 5:
                 formatted = f"{formatted}, ..."
             raise ValueError(
@@ -328,7 +323,7 @@ class BaseAlgorithm(ABC):
         """Declare EMA policy for this algorithm."""
         ...
 
-    def prepare_loss_advantages(  # [PUBLIC-API → train_executor] training side advantage transform
+    def prepare_loss_advantages(  # [PUBLIC-API → TrainStack] training side advantage transform
         self,
         advantages: torch.Tensor,
     ) -> torch.Tensor:
@@ -361,6 +356,7 @@ class BaseAlgorithm(ABC):
                     "inject plugin via model_bundle.forward_plugin()."
                 )
             from diffusionrl.models.forward_plugins import DefaultForwardPlugin
+
             self._forward_plugin = DefaultForwardPlugin()
             logger.warning(
                 "No forward_plugin set on %s (model_type=%s). "
@@ -371,7 +367,7 @@ class BaseAlgorithm(ABC):
             )
         return self._forward_plugin
 
-    def compute_loss_and_backward(  # [PUBLIC-API → train_executor] training side: core loss+backward
+    def compute_loss_and_backward(  # [PUBLIC-API → TrainStack] training side: core loss+backward
         self,
         *,
         model: nn.Module,
@@ -382,12 +378,12 @@ class BaseAlgorithm(ABC):
     ) -> tuple:
         """Compute loss and call backward for a single micro-batch.
 
-        The micro-batch loop is owned by ``train_executor``; each algorithm
+        The micro-batch loop is owned by ``TrainStack``; each algorithm
         only needs to handle one already-sliced micro-batch here.
 
         Args:
             model: The model to compute loss on.
-            batch: A single micro-batch (already sliced by train_executor).
+            batch: A single micro-batch (already sliced by TrainStack).
             timesteps: Pre-resolved training timesteps from
                 ``resolve_training_timesteps()``.
             loss_scale: Gradient accumulation scale (1 / num_mini_batches).
@@ -396,9 +392,7 @@ class BaseAlgorithm(ABC):
             ``(loss, metrics, num_timesteps, has_backward)``
         """
         del model, batch, timesteps, loss_scale, kwargs
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement compute_loss_and_backward()."
-        )
+        raise NotImplementedError(f"{type(self).__name__} must implement compute_loss_and_backward().")
 
     def resolve_training_timesteps(
         self,
@@ -440,7 +434,6 @@ class BaseAlgorithm(ABC):
     def get_sampler_validation_config(
         self, *, allow_replay: bool
     ) -> Dict[str, Any]:  # [PUBLIC-API → driver rollout pipeline] rollout side
-
         """Get sampler-output validation flags for rollout orchestration."""
         ...
 

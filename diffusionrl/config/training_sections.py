@@ -55,8 +55,6 @@ class TrainingExecutionConfig:
     replay_enabled: bool
     algorithm_type: str
     guidance_scale: float
-    shuffle_samples: bool = True
-    shuffle_seed: Optional[int] = None
     training_autocast_precision: str = "bf16"
     debug_output_dir: Optional[str] = None
 

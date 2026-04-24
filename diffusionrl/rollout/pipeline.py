@@ -17,8 +17,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
-import torch
 import ray
+import torch
 from ray.actor import ActorHandle
 
 from diffusionrl.ray.generate_sharding import build_generate_shard_plan_grouped
@@ -28,10 +28,10 @@ from diffusionrl.rollout.request_builders import (
     load_prompt_batch_from_source,
 )
 from diffusionrl.samplers.noise_utils import mix_rollout_base_seed
+from diffusionrl.types.prompts import Prompts
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.response import RolloutResponse
-from diffusionrl.types.sampling import SDEConfig, SamplingParams
-from diffusionrl.types.prompts import Prompts
+from diffusionrl.types.sampling import SamplingParams, SDEConfig
 from diffusionrl.types.training_batch import TrainingBatch
 
 if TYPE_CHECKING:
@@ -188,9 +188,7 @@ class RolloutPipeline:
             num_actors=len(rollout_actors),
             samples_per_prompt=int(samples_per_prompt),
         )
-        nested_refs = rollout_handle_group.scatter_gather_async(
-            "run_rollout_pipeline", shards
-        )
+        nested_refs = rollout_handle_group.scatter_gather_async("run_rollout_pipeline", shards)
         nested = ray.get(nested_refs)
         return [response for sub in nested for response in sub]
 
@@ -247,7 +245,8 @@ class RolloutPipeline:
         """
         if sde_indices is not None and control_algorithm is not None:
             filtered = control_algorithm.get_filtered_training_indices(
-                sde_indices, int(combined_response.samples.timesteps.shape[0]),
+                sde_indices,
+                int(combined_response.samples.timesteps.shape[0]),
             )
             if filtered:
                 sde_indices = filtered
@@ -377,7 +376,9 @@ class RolloutPipeline:
             shift=float(sampling_spec.sde_config.shift),
         )
         sampling_params = SamplingParams(
-            num_inference_steps=int(eval_num_steps) if eval_num_steps is not None else int(sampling_spec.num_inference_steps),
+            num_inference_steps=int(eval_num_steps)
+            if eval_num_steps is not None
+            else int(sampling_spec.num_inference_steps),
             guidance_scale=float(sampling_spec.guidance_scale),
             height=int(sampling_spec.height),
             width=int(sampling_spec.width),
@@ -402,9 +403,7 @@ class RolloutPipeline:
                 num_actors=len(rollout_actors),
                 samples_per_prompt=int(samples_per_prompt),
             )
-            nested_refs = rollout_handle_group.scatter_gather_async(
-                "run_eval_pipeline", shards
-            )
+            nested_refs = rollout_handle_group.scatter_gather_async("run_eval_pipeline", shards)
             nested = ray.get(nested_refs)
             responses = [resp for sub in nested for resp in sub]
 

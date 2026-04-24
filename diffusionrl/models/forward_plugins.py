@@ -180,9 +180,7 @@ class FluxForwardPlugin(BaseForwardPlugin):
         timestep = self._prepare_timestep(sigma, batch_size, device)
 
         # FLUX requires guidance tensor
-        guidance_tensor = torch.tensor(
-            [guidance_scale], device=device, dtype=dtype
-        ).expand(batch_size)
+        guidance_tensor = torch.tensor([guidance_scale], device=device, dtype=dtype).expand(batch_size)
 
         # Process text_ids: [B, seq, 3] -> [seq, 3]
         if text_ids is not None:
@@ -272,7 +270,6 @@ class SD3ForwardPlugin(BaseForwardPlugin):
         """Prepare SD3 kwargs (timestep multiplied by 1000)."""
         batch_size = latents.shape[0]
         device = latents.device
-        dtype = prompt_embeds.dtype
         # Keep timestep in float32 to avoid bfloat16 precision loss
         timestep = self._prepare_timestep(sigma, batch_size, device) * 1000
         model_kwargs: Dict[str, Any] = {
@@ -316,9 +313,7 @@ class SD3ForwardPlugin(BaseForwardPlugin):
                     negative_prompt_embeds = torch.zeros_like(prompt_embeds)
                 if negative_pooled_prompt_embeds is None:
                     negative_pooled_prompt_embeds = (
-                        torch.zeros_like(pooled_prompt_embeds)
-                        if pooled_prompt_embeds is not None
-                        else None
+                        torch.zeros_like(pooled_prompt_embeds) if pooled_prompt_embeds is not None else None
                     )
 
                 attn_kw: Dict[str, Any] = {}
@@ -333,7 +328,8 @@ class SD3ForwardPlugin(BaseForwardPlugin):
                     timestep=torch.cat([timestep, timestep], dim=0),
                     pooled_projections=(
                         torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
-                        if pooled_prompt_embeds is not None else None
+                        if pooled_prompt_embeds is not None
+                        else None
                     ),
                     return_dict=False,
                     **attn_kw,
@@ -365,6 +361,7 @@ class HunyuanForwardPlugin(BaseForwardPlugin):
     Hunyuan models have similar interface to SD3 with some variations
     in how embeddings are handled.
     """
+
     GUIDANCE_VALUE = 6018.0
 
     def prepare_model_kwargs(
@@ -398,9 +395,7 @@ class HunyuanForwardPlugin(BaseForwardPlugin):
                 dtype=torch.long,
             )
         timestep_1000 = self._prepare_timestep(sigma, batch_size, device) * 1000
-        guidance = torch.tensor(
-            [self.GUIDANCE_VALUE], device=device, dtype=dtype
-        )
+        guidance = torch.tensor([self.GUIDANCE_VALUE], device=device, dtype=dtype)
 
         model_kwargs: Dict[str, Any] = {
             "hidden_states": latents.to(dtype),
@@ -510,9 +505,7 @@ class MochiForwardPlugin(BaseForwardPlugin):
         with self._build_autocast_ctx(device):
             if guidance_scale > 1.0:
                 uncond_embeds = (
-                    negative_prompt_embeds
-                    if negative_prompt_embeds is not None
-                    else torch.zeros_like(prompt_embeds)
+                    negative_prompt_embeds if negative_prompt_embeds is not None else torch.zeros_like(prompt_embeds)
                 )
                 latents_batched = torch.cat([latents, latents], dim=0)
                 embeds_batched = torch.cat([uncond_embeds, prompt_embeds], dim=0)
@@ -534,9 +527,7 @@ class MochiForwardPlugin(BaseForwardPlugin):
 
                 noise_pred = model(**model_kwargs)[0]
                 noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
-                return noise_pred_uncond + guidance_scale * (
-                    noise_pred_cond - noise_pred_uncond
-                )
+                return noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
             return model(
                 **self.prepare_model_kwargs(
@@ -623,11 +614,7 @@ class DefaultForwardPlugin(BaseForwardPlugin):
                     uncond_pooled = (
                         negative_pooled_prompt_embeds
                         if negative_pooled_prompt_embeds is not None
-                        else (
-                            torch.zeros_like(pooled_prompt_embeds)
-                            if pooled_prompt_embeds is not None
-                            else None
-                        )
+                        else (torch.zeros_like(pooled_prompt_embeds) if pooled_prompt_embeds is not None else None)
                     )
 
                     # Concatenate for single batched forward
@@ -651,9 +638,7 @@ class DefaultForwardPlugin(BaseForwardPlugin):
 
                     # Split result
                     noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
-                    pred = noise_pred_uncond + guidance_scale * (
-                        noise_pred_cond - noise_pred_uncond
-                    )
+                    pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
                 else:
                     pred = model(
                         **self.prepare_model_kwargs(

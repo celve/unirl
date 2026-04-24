@@ -26,10 +26,11 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
 import torch
 
-from diffusionrl.utils.batched import Batched, concat_field, shared_field
 from diffusionrl.types.prompts import Prompts
-from .forward_context import ForwardContext
 from diffusionrl.types.sample import LogProbData
+from diffusionrl.utils.batched import Batched, concat_field, shared_field
+
+from .forward_context import ForwardContext
 from .trajectory_store import TrajectoryStore
 
 if TYPE_CHECKING:
@@ -54,16 +55,10 @@ class TimestepData:
             latents=self.latents.to(device),
             next_latents=self.next_latents.to(device),
             log_prob=self.log_prob.to(device) if self.log_prob is not None else None,
-            sigma=self.sigma.to(device)
-            if isinstance(self.sigma, torch.Tensor)
-            else self.sigma,
-            sigma_next=self.sigma_next.to(device)
-            if isinstance(self.sigma_next, torch.Tensor)
-            else self.sigma_next,
+            sigma=self.sigma.to(device) if isinstance(self.sigma, torch.Tensor) else self.sigma,
+            sigma_next=self.sigma_next.to(device) if isinstance(self.sigma_next, torch.Tensor) else self.sigma_next,
             timestep_idx=self.timestep_idx,
-            sigmas=self.sigmas.to(device)
-            if self.sigmas is not None
-            else None,
+            sigmas=self.sigmas.to(device) if self.sigmas is not None else None,
         )
 
 
@@ -164,9 +159,7 @@ class TrainingBatch(Batched):
         """Explicit step labels aligned with timesteps/trajectory axis."""
         if self.step_indices is not None:
             return self.step_indices
-        return torch.arange(
-            self.timesteps.shape[0], device=self.timesteps.device, dtype=torch.long
-        )
+        return torch.arange(self.timesteps.shape[0], device=self.timesteps.device, dtype=torch.long)
 
     def _is_contiguous_step_index(self) -> bool:
         steps = self.resolved_step_indices
@@ -178,9 +171,7 @@ class TrainingBatch(Batched):
         steps = self.resolved_step_indices
         hits = (steps == int(step_idx)).nonzero(as_tuple=False)
         if hits.numel() == 0:
-            raise ValueError(
-                f"step_idx={step_idx} not present in step_indices={steps.tolist()}"
-            )
+            raise ValueError(f"step_idx={step_idx} not present in step_indices={steps.tolist()}")
         pos = int(hits[0].item())
         if not self.trajectory_store.has_position(pos) or not self.trajectory_store.has_position(pos + 1):
             raise ValueError(
@@ -193,10 +184,7 @@ class TrainingBatch(Batched):
     def get_timestep_data(self, t_idx: int) -> TimestepData:
         """Extract data for a specific trajectory position index."""
         if not self._is_contiguous_step_index():
-            raise ValueError(
-                "Non-contiguous step_indices detected. "
-                "Use get_timestep_data_by_step(step_idx) instead."
-            )
+            raise ValueError("Non-contiguous step_indices detected. Use get_timestep_data_by_step(step_idx) instead.")
         log_prob = self.log_probs[t_idx] if self.log_probs is not None else None
         latents, next_latents = self.trajectory_store.get_pair(t_idx)
         return TimestepData(
@@ -253,39 +241,24 @@ class TrainingBatch(Batched):
         bs = self.batch_size
 
         if self.advantages.shape[0] != bs:
-            raise ValueError(
-                f"Advantages batch size {self.advantages.shape[0]} != "
-                f"trajectory batch size {bs}"
-            )
+            raise ValueError(f"Advantages batch size {self.advantages.shape[0]} != trajectory batch size {bs}")
 
         if self.trajectory_store.is_full:
             steps_count = self.trajectory_store.num_stored - 1
             if self.timesteps.shape[0] != steps_count + 1:
-                raise ValueError(
-                    f"Timesteps length {self.timesteps.shape[0]} != "
-                    f"expected {steps_count + 1}"
-                )
+                raise ValueError(f"Timesteps length {self.timesteps.shape[0]} != expected {steps_count + 1}")
 
             step_indices = self.resolved_step_indices
             if int(step_indices.shape[0]) != steps_count + 1:
-                raise ValueError(
-                    f"Step indices length {step_indices.shape[0]} != expected {steps_count + 1}"
-                )
-            if step_indices.numel() > 1 and not bool(
-                torch.all(step_indices[1:] > step_indices[:-1])
-            ):
-                raise ValueError(
-                    f"step_indices must be strictly increasing, got: {step_indices.tolist()}"
-                )
+                raise ValueError(f"Step indices length {step_indices.shape[0]} != expected {steps_count + 1}")
+            if step_indices.numel() > 1 and not bool(torch.all(step_indices[1:] > step_indices[:-1])):
+                raise ValueError(f"step_indices must be strictly increasing, got: {step_indices.tolist()}")
             if self.target_sde_indices is not None:
                 allowed_steps = set(int(v) for v in step_indices[:-1].tolist())
-                bad = sorted(
-                    int(i) for i in self.target_sde_indices if int(i) not in allowed_steps
-                )
+                bad = sorted(int(i) for i in self.target_sde_indices if int(i) not in allowed_steps)
                 if bad:
                     raise ValueError(
-                        f"target_sde_indices contain out-of-range steps: {bad}, "
-                        f"allowed={sorted(allowed_steps)}"
+                        f"target_sde_indices contain out-of-range steps: {bad}, allowed={sorted(allowed_steps)}"
                     )
 
         elif self.trajectory_store.is_selective:
@@ -307,10 +280,7 @@ class TrainingBatch(Batched):
 
         ctx_bs = self.forward_context.batch_size
         if ctx_bs > 0 and ctx_bs != bs:
-            raise ValueError(
-                f"ForwardContext batch size {ctx_bs} != "
-                f"trajectory batch size {bs}"
-            )
+            raise ValueError(f"ForwardContext batch size {ctx_bs} != trajectory batch size {bs}")
         for name in ("sample_ids", "prompt_ids", "group_ids"):
             ids = getattr(self, name)
             if ids is not None and len(ids) != bs:
@@ -319,10 +289,7 @@ class TrainingBatch(Batched):
         if self.log_probs is not None:
             for idx, log_prob in self.log_probs.data.items():
                 if log_prob.shape[0] != bs:
-                    raise ValueError(
-                        f"Log prob at index {idx} has batch size "
-                        f"{log_prob.shape[0]} != {bs}"
-                    )
+                    raise ValueError(f"Log prob at index {idx} has batch size {log_prob.shape[0]} != {bs}")
 
     # ---- modality detection -------------------------------------------------
 

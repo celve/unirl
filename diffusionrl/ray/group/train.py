@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from copy import deepcopy
-import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 import ray
@@ -16,9 +16,9 @@ from diffusionrl.ray.generate_sharding import (
     trim_generate_outputs,
 )
 from diffusionrl.ray.group_base import ActorHandleGroup
+from diffusionrl.transfer.buffer import BufferHandle
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.response import RolloutResponse
-from diffusionrl.transfer.buffer import BufferHandle
 
 logger = logging.getLogger(__name__)
 
@@ -94,11 +94,7 @@ class TrainActorGroup:
         actor_init_config = deepcopy(training_launch.actor_init_config)
         validate_training_actor_init_config(actor_init_config)
 
-        caps = (
-            training_launch.backend_capabilities.as_dict()
-            if training_launch.backend_capabilities
-            else {}
-        )
+        caps = training_launch.backend_capabilities.as_dict() if training_launch.backend_capabilities else {}
         if bool(caps.get("requires_custom_actor_class", False)):
             raise NotImplementedError(
                 "TrainActorGroup.bootstrap does not support backends that "
@@ -109,13 +105,10 @@ class TrainActorGroup:
             )
 
         topology = training_launch.topology
-        num_train_actors = (
-            int(topology.actor_count) if topology.actor_count is not None else 0
-        )
+        num_train_actors = int(topology.actor_count) if topology.actor_count is not None else 0
         if num_train_actors < 1:
             raise RuntimeError(
-                "Resolved training topology must declare actor_count >= 1, "
-                f"got {topology.actor_count!r}."
+                f"Resolved training topology must declare actor_count >= 1, got {topology.actor_count!r}."
             )
 
         # Pick distributed rendezvous (addr, port) on the driver before any
@@ -141,11 +134,7 @@ class TrainActorGroup:
         if launch_spec.num_gpus_per_actor is not None:
             ray_num_gpus = float(launch_spec.num_gpus_per_actor)
         else:
-            ray_num_gpus = (
-                float(training_launch.colocate_gpu_fraction)
-                if training_launch.colocate
-                else 1.0
-            )
+            ray_num_gpus = float(training_launch.colocate_gpu_fraction) if training_launch.colocate else 1.0
 
         if training_launch.colocate:
             logger.info("Colocate mode: TrainActors using %s GPU each", ray_num_gpus)
@@ -175,9 +164,7 @@ class TrainActorGroup:
             )
             # Merge determinism env vars into runtime_env (preserve any
             # launch-spec-provided runtime_env env vars).
-            base_runtime_env: Dict[str, Any] = (
-                dict(launch_spec.runtime_env) if launch_spec.runtime_env else {}
-            )
+            base_runtime_env: Dict[str, Any] = dict(launch_spec.runtime_env) if launch_spec.runtime_env else {}
             base_env_vars = dict(base_runtime_env.get("env_vars") or {})
             base_env_vars.update(_DETERMINISM_ENV_VARS)
             base_runtime_env["env_vars"] = base_env_vars
@@ -204,7 +191,9 @@ class TrainActorGroup:
         group = cls(handle_group)
         logger.info(
             "TrainActorGroup ready: %d actors (master=%s:%d)",
-            num_train_actors, master_addr, master_port,
+            num_train_actors,
+            master_addr,
+            master_port,
         )
         return group, master_addr, master_port
 
@@ -255,14 +244,10 @@ class TrainActorGroup:
         cursor = 0
         for i in range(n):
             shard_size = base + (1 if i < remainder else 0)
-            per_actor_args.append(
-                (rollout_id, training_batch.slice(cursor, cursor + shard_size))
-            )
+            per_actor_args.append((rollout_id, training_batch.slice(cursor, cursor + shard_size)))
             cursor += shard_size
 
-        refs = self._handle.call_per_actor_async(
-            "train", per_actor_args=per_actor_args
-        )
+        refs = self._handle.call_per_actor_async("train", per_actor_args=per_actor_args)
         return ray.get(refs)
 
     # ------------------------------------------------------------------
@@ -290,9 +275,7 @@ class TrainActorGroup:
 
     def generate_buffered(self, request: RolloutRequest) -> List[BufferHandle]:
         plan = self._build_generate_plan(request)
-        nested = ray.get(
-            self._handle.scatter_gather_async("generate_buffered", plan.shards)
-        )
+        nested = ray.get(self._handle.scatter_gather_async("generate_buffered", plan.shards))
         return [handle for actor_handles in nested for handle in actor_handles]
 
     # ------------------------------------------------------------------
@@ -330,10 +313,7 @@ class TrainActorGroup:
         try:
             resolved = int(expected_global_batch_size)
         except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                "Invalid expected_global_batch_size payload: "
-                f"{expected_global_batch_size!r}"
-            ) from exc
+            raise RuntimeError(f"Invalid expected_global_batch_size payload: {expected_global_batch_size!r}") from exc
         self._expected_global_batch_size_cache = resolved
         return resolved
 

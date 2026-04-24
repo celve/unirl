@@ -24,20 +24,12 @@ class Prompts(Batched):
     ) -> Prompts:
         """Create a pre-expansion Prompts from a list of unique prompt strings."""
         if prompt_ids is not None and len(prompt_ids) != len(prompts):
-            raise ValueError(
-                f"prompt_ids length {len(prompt_ids)} != prompts length {len(prompts)}"
-            )
+            raise ValueError(f"prompt_ids length {len(prompt_ids)} != prompts length {len(prompts)}")
         ids = (
-            [str(pid) for pid in prompt_ids]
-            if prompt_ids is not None
-            else [f"prompt:{i}" for i in range(len(prompts))]
+            [str(pid) for pid in prompt_ids] if prompt_ids is not None else [f"prompt:{i}" for i in range(len(prompts))]
         )
         sample_ids = [f"prompt:{pid}:sample:0" for pid in ids]
-        metadata = (
-            list(prompt_metadata)
-            if prompt_metadata is not None
-            else [{} for _ in prompts]
-        )
+        metadata = list(prompt_metadata) if prompt_metadata is not None else [{} for _ in prompts]
         return cls(
             prompts=list(prompts),
             prompt_ids=ids,
@@ -62,11 +54,7 @@ class Prompts(Batched):
         expanded_group_ids = [gid for gid in self.group_ids for _ in range(k)]
         expanded_metadata = [m for m in self.prompt_metadata for _ in range(k)]
 
-        sample_ids = [
-            f"prompt:{pid}:sample:{j}"
-            for pid in self.prompt_ids
-            for j in range(k)
-        ]
+        sample_ids = [f"prompt:{pid}:sample:{j}" for pid in self.prompt_ids for j in range(k)]
 
         if init_same_noise:
             noise_group_ids = expanded_prompt_ids

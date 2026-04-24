@@ -11,10 +11,10 @@ import torch
 
 from diffusionrl.sde.registry import register_sde_strategy
 
-
 # ---------------------------------------------------------------------------
 # Base class hierarchy
 # ---------------------------------------------------------------------------
+
 
 class StepStrategy(ABC):
     """Base class for all sampling step strategies (SDE and ODE solvers)."""
@@ -82,9 +82,11 @@ class SDEStrategy(StepStrategy, ABC):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Implement StepStrategy.step by delegating to step_with_log_prob or Euler ODE."""
 
+
 # ---------------------------------------------------------------------------
 # SDE strategy implementations
 # ---------------------------------------------------------------------------
+
 
 @register_sde_strategy("flow")
 class FlowSDEStrategy(SDEStrategy):
@@ -120,9 +122,7 @@ class FlowSDEStrategy(SDEStrategy):
 
         device = noise_pred.device
         dt = sigma_next - sigma
-        std_dev_t = torch.sqrt(
-            sigma / (1 - torch.where(sigma == 1, sigma_max, sigma))
-        ) * eta
+        std_dev_t = torch.sqrt(sigma / (1 - torch.where(sigma == 1, sigma_max, sigma))) * eta
 
         prev_sample_mean = (
             sample * (1 + std_dev_t**2 / (2 * sigma) * dt)
@@ -130,9 +130,7 @@ class FlowSDEStrategy(SDEStrategy):
         )
 
         if prev_sample is None:
-            noise = randn_tensor(
-                noise_pred.shape, generator=generator, device=device, dtype=noise_pred.dtype
-            )
+            noise = randn_tensor(noise_pred.shape, generator=generator, device=device, dtype=noise_pred.dtype)
             prev_sample = prev_sample_mean + std_dev_t * torch.sqrt(-dt) * noise
 
         std_var = std_dev_t * torch.sqrt(-dt)
@@ -170,15 +168,10 @@ class CPSSDEStrategy(SDEStrategy):
         std_dev_t = sigma_next * math.sin(eta * math.pi / 2)
         pred_original = sample - sigma * noise_pred
         noise_estimate = sample + noise_pred * (1 - sigma)
-        prev_sample_mean = (
-            pred_original * (1 - sigma_next)
-            + noise_estimate * torch.sqrt(sigma_next**2 - std_dev_t**2)
-        )
+        prev_sample_mean = pred_original * (1 - sigma_next) + noise_estimate * torch.sqrt(sigma_next**2 - std_dev_t**2)
 
         if prev_sample is None:
-            noise = randn_tensor(
-                noise_pred.shape, generator=generator, device=device, dtype=noise_pred.dtype
-            )
+            noise = randn_tensor(noise_pred.shape, generator=generator, device=device, dtype=noise_pred.dtype)
             prev_sample = prev_sample_mean + std_dev_t * noise
 
         return prev_sample, prev_sample_mean, std_dev_t
@@ -226,9 +219,7 @@ class DanceSDEStrategy(SDEStrategy):
         )
 
         if prev_sample is None:
-            noise = randn_tensor(
-                noise_pred.shape, generator=generator, device=device, dtype=noise_pred.dtype
-            )
+            noise = randn_tensor(noise_pred.shape, generator=generator, device=device, dtype=noise_pred.dtype)
             prev_sample = prev_sample_mean + std_dev_t * torch.sqrt(-dt) * noise
 
         std_var = std_dev_t * torch.sqrt(-dt)
@@ -239,6 +230,7 @@ class DanceSDEStrategy(SDEStrategy):
 # ---------------------------------------------------------------------------
 # DPM2 deterministic ODE strategy (migrated from sd3_sampler.py)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class _DPMState:
@@ -259,7 +251,9 @@ class _DPMState:
             self.lower_order_nums += 1
 
 
-def _convert_model_output(model_output: torch.Tensor, sample: torch.Tensor, sigmas: torch.Tensor, step_index: int) -> torch.Tensor:
+def _convert_model_output(
+    model_output: torch.Tensor, sample: torch.Tensor, sigmas: torch.Tensor, step_index: int
+) -> torch.Tensor:
     compute_device = model_output.device
     if sample.device != compute_device:
         sample = sample.to(compute_device)

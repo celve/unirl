@@ -3,6 +3,7 @@ diffusionrl Model Bundle Base Class.
 
 Defines the interface for model bundles that package transformer, VAE, and text encoder.
 """
+
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Type, Union
 
@@ -36,22 +37,14 @@ class ModelBundle(ABC):
             config: Typed model-bundle construction config
         """
         if not isinstance(config, ModelBundleConfig):
-            raise TypeError(
-                f"{type(self).__name__} expected {ModelBundleConfig.__name__}, got: {config!r}"
-            )
+            raise TypeError(f"{type(self).__name__} expected {ModelBundleConfig.__name__}, got: {config!r}")
         self.config = config
         self.pretrained_path = config.pretrained_model_ckpt_path
-        self.device = config.device or torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
+        self.device = config.device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = config.model_precision
-        self.vae_dtype = (
-            config.vae_dtype if config.vae_dtype is not None else config.model_precision
-        )
+        self.vae_dtype = config.vae_dtype if config.vae_dtype is not None else config.model_precision
         self.text_encoder_dtype = (
-            config.text_encoder_dtype
-            if config.text_encoder_dtype is not None
-            else config.model_precision
+            config.text_encoder_dtype if config.text_encoder_dtype is not None else config.model_precision
         )
 
         # Components (initialized by subclasses)
@@ -152,6 +145,7 @@ class ModelBundle(ABC):
         Returns a BaseForwardPlugin instance.
         """
         from diffusionrl.models.forward_plugins import DefaultForwardPlugin
+
         return DefaultForwardPlugin()
 
     @classmethod
@@ -270,6 +264,7 @@ class ModelBundle(ABC):
             Sigma schedule tensor [num_steps + 1]
         """
         from diffusionrl.sde.runtime import get_sigma_schedule
+
         return get_sigma_schedule(num_steps, shift, self.device)
 
     def to(self, device: Union[str, torch.device]) -> "ModelBundle":
@@ -419,8 +414,4 @@ class ModelBundle(ABC):
                 loader()
 
     def __repr__(self) -> str:
-        return (
-            f"{self.__class__.__name__}("
-            f"model_type={self.model_type}, "
-            f"pretrained_path={self.pretrained_path})"
-        )
+        return f"{self.__class__.__name__}(model_type={self.model_type}, pretrained_path={self.pretrained_path})"

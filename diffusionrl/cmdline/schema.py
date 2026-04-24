@@ -62,27 +62,19 @@ class ModelConfig:
 
     model_type: str = field(
         default="hunyuan",
-        metadata={
-            "help": "Model architecture type (hunyuan, flux, sd3, mochi, wan2.1, bagel)"
-        },
+        metadata={"help": "Model architecture type (hunyuan, flux, sd3, mochi, wan2.1, bagel)"},
     )
     model_dotpath: str = field(
         default=DEFAULT_MODEL_PATH,
-        metadata={
-            "help": "Python dotpath to ModelBundle class. Auto-derived from model_type"
-        },
+        metadata={"help": "Python dotpath to ModelBundle class. Auto-derived from model_type"},
     )
     pretrained_model_ckpt_path: str = field(
         default="",
-        metadata={
-            "help": "Path to pretrained model weights (local path or HuggingFace ID)"
-        },
+        metadata={"help": "Path to pretrained model weights (local path or HuggingFace ID)"},
     )
     vae_ckpt_path: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "Path to separate VAE checkpoint, if not bundled with the model"
-        },
+        metadata={"help": "Path to separate VAE checkpoint, if not bundled with the model"},
     )
     text_encoder_ckpt_path: Optional[str] = field(
         default=None,
@@ -107,9 +99,7 @@ class SamplingConfig:
 
     sampler_dotpath: str = field(
         default="",
-        metadata={
-            "help": "Optional Python dotpath to Sampler class; omit to auto-derive from model_type"
-        },
+        metadata={"help": "Optional Python dotpath to Sampler class; omit to auto-derive from model_type"},
     )
     logprob_source: str = field(
         default="replay",
@@ -120,19 +110,13 @@ class SamplingConfig:
     )
     replay_sampler_dotpath: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "Python dotpath to replay sampler, if different from sampler_dotpath"
-        },
+        metadata={"help": "Python dotpath to replay sampler, if different from sampler_dotpath"},
     )
     sampler_kwargs: Dict[str, Any] = field(
         default_factory=dict,
-        metadata={
-            "help": "Explicit sampler constructor kwargs for direct sampling and replay sampler instantiation."
-        },
+        metadata={"help": "Explicit sampler constructor kwargs for direct sampling and replay sampler instantiation."},
     )
-    num_inference_steps: int = field(
-        default=50, metadata={"help": "Number of denoising steps during sampling"}
-    )
+    num_inference_steps: int = field(default=50, metadata={"help": "Number of denoising steps during sampling"})
     eta: float = field(
         default=1.0,
         metadata={"help": "SDE noise coefficient (eta=0 is ODE, eta=1 is full SDE)"},
@@ -152,9 +136,7 @@ class SamplingConfig:
     )
     shift: float = field(
         default=3.0,
-        metadata={
-            "help": "Shift parameter for the sampling timestep schedule (model-specific)"
-        },
+        metadata={"help": "Shift parameter for the sampling timestep schedule (model-specific)"},
     )
     guidance_scale: float = field(
         default=7.5,
@@ -162,47 +144,33 @@ class SamplingConfig:
     )
     sampling_adapter: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "Sampling adapter type for special modes (e.g. 'old' for NFT)"
-        },
+        metadata={"help": "Sampling adapter type for special modes (e.g. 'old' for NFT)"},
     )
     init_same_noise: bool = field(
         default=False,
-        metadata={
-            "help": "Use identical initial noise for all samples of the same prompt"
-        },
+        metadata={"help": "Use identical initial noise for all samples of the same prompt"},
     )
 
     # Generated media dimensions and frame rate
-    height: int = field(
-        default=256, metadata={"help": "Generated image/video height in pixels"}
-    )
-    width: int = field(
-        default=256, metadata={"help": "Generated image/video width in pixels"}
-    )
+    height: int = field(default=256, metadata={"help": "Generated image/video height in pixels"})
+    width: int = field(default=256, metadata={"help": "Generated image/video width in pixels"})
     num_frames: int = field(
         default=16,
         metadata={"help": "Number of video frames to generate (video models only)"},
     )
-    fps: int = field(
-        default=8, metadata={"help": "Video frame rate (video models only)"}
-    )
+    fps: int = field(default=8, metadata={"help": "Video frame rate (video models only)"})
 
     @property
     def replay_enabled(self) -> bool:
         return self.logprob_source == "replay"
 
     def validate(self) -> None:
-        if (
-            self.max_samples_per_request is not None
-            and self.max_samples_per_request < 1
-        ):
+        if self.max_samples_per_request is not None and self.max_samples_per_request < 1:
             raise ValueError("max_samples_per_request must be >= 1 when set.")
         raw_sde_type = str(self.sde_type or "").strip().lower()
         if raw_sde_type not in SUPPORTED_USER_SDE_TYPES:
             raise ValueError(
-                f"Unknown sampling.sde_type={self.sde_type!r}. "
-                f"Supported values: {supported_sde_type_text()}."
+                f"Unknown sampling.sde_type={self.sde_type!r}. Supported values: {supported_sde_type_text()}."
             )
         if not isinstance(self.sampler_kwargs, dict):
             raise ValueError("sampling.sampler_kwargs must be a dict.")
@@ -215,8 +183,7 @@ class SamplingConfig:
         _leaked = _precision_keys & set(self.sampler_kwargs)
         if _leaked:
             raise ValueError(
-                f"sampling.sampler_kwargs must not contain precision keys {sorted(_leaked)}; "
-                "use precision.* instead."
+                f"sampling.sampler_kwargs must not contain precision keys {sorted(_leaked)}; use precision.* instead."
             )
 
 
@@ -238,9 +205,7 @@ class RewardConfig:
     # http reward service related fields
     reward_service_urls: Optional[List[str]] = field(
         default=None,
-        metadata={
-            "help": "HTTP reward service URL(s). Single URL string or a list for load balancing"
-        },
+        metadata={"help": "HTTP reward service URL(s). Single URL string or a list for load balancing"},
     )
 
     # local reward model related fields
@@ -252,9 +217,7 @@ class RewardConfig:
     )
     reward_model_ckpt_path: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "Path to reward model weights (local path or HuggingFace ID)"
-        },
+        metadata={"help": "Path to reward model weights (local path or HuggingFace ID)"},
     )
     reward_components: Optional[List[str]] = field(
         default_factory=lambda: ["hpsv2"],
@@ -262,9 +225,7 @@ class RewardConfig:
             "help": "Reward component name(s). Single scorer name or a list such as [hpsv2, pickscore, clip, ocr]"
         },
     )
-    reward_batch_size: int = field(
-        default=8, metadata={"help": "Batch size for reward model inference"}
-    )
+    reward_batch_size: int = field(default=8, metadata={"help": "Batch size for reward model inference"})
     local_reward_device: str = field(
         default="cpu",
         metadata={
@@ -276,36 +237,26 @@ class RewardConfig:
     # multi-reward related fields
     reward_weights: Optional[List[float]] = field(
         default=None,
-        metadata={
-            "help": "Weights for each reward component in multi-reward aggregation"
-        },
+        metadata={"help": "Weights for each reward component in multi-reward aggregation"},
     )
     reward_aggregation_method: str = field(
         default="weighted_sum",
-        metadata={
-            "help": "Multi-reward aggregation method: weighted_sum, mean, min, max, concat"
-        },
+        metadata={"help": "Multi-reward aggregation method: weighted_sum, mean, min, max, concat"},
     )
 
     def __post_init__(self):
         if isinstance(self.reward_service_urls, str):
             if "," in self.reward_service_urls:
                 raise ValueError(
-                    "reward.reward_service_urls: pass a list, not a comma string. "
-                    f"Got: {self.reward_service_urls!r}."
+                    f"reward.reward_service_urls: pass a list, not a comma string. Got: {self.reward_service_urls!r}."
                 )
-            self.reward_service_urls = (
-                [self.reward_service_urls] if self.reward_service_urls.strip() else None
-            )
+            self.reward_service_urls = [self.reward_service_urls] if self.reward_service_urls.strip() else None
         if isinstance(self.reward_components, str):
             if "," in self.reward_components:
                 raise ValueError(
-                    "reward.reward_components: pass a list, not a comma string. "
-                    f"Got: {self.reward_components!r}."
+                    f"reward.reward_components: pass a list, not a comma string. Got: {self.reward_components!r}."
                 )
-            self.reward_components = (
-                [self.reward_components] if self.reward_components.strip() else None
-            )
+            self.reward_components = [self.reward_components] if self.reward_components.strip() else None
 
     @property
     def has_http_reward_urls(self) -> bool:
@@ -328,17 +279,10 @@ class RewardConfig:
         if self.has_http_reward and not self.has_http_reward_urls:
             raise ValueError("reward_backend='http' requires reward_service_urls.")
         if not self.has_http_reward and self.has_http_reward_urls:
+            raise ValueError("reward_service_urls is only valid when reward_backend='http'.")
+        if not self.has_http_reward and not self.reward_dotpath and not self.has_builtin_reward:
             raise ValueError(
-                "reward_service_urls is only valid when reward_backend='http'."
-            )
-        if (
-            not self.has_http_reward
-            and not self.reward_dotpath
-            and not self.has_builtin_reward
-        ):
-            raise ValueError(
-                "Reward scoring requires either reward_components for built-ins, "
-                "or reward_dotpath for a custom scorer."
+                "Reward scoring requires either reward_components for built-ins, or reward_dotpath for a custom scorer."
             )
 
 
@@ -350,18 +294,10 @@ class RayConfig:
         default=None,
         metadata={"help": "Ray cluster address (None = auto-detect or start local)"},
     )
-    rollout_num_nodes: int = field(
-        default=1, metadata={"help": "Number of nodes for rollout actors"}
-    )
-    rollout_num_gpus_per_node: int = field(
-        default=4, metadata={"help": "GPUs per node for rollout actors"}
-    )
-    training_num_nodes: int = field(
-        default=1, metadata={"help": "Number of nodes for training actors"}
-    )
-    training_num_gpus_per_node: int = field(
-        default=4, metadata={"help": "GPUs per node for training actors"}
-    )
+    rollout_num_nodes: int = field(default=1, metadata={"help": "Number of nodes for rollout actors"})
+    rollout_num_gpus_per_node: int = field(default=4, metadata={"help": "GPUs per node for rollout actors"})
+    training_num_nodes: int = field(default=1, metadata={"help": "Number of nodes for training actors"})
+    training_num_gpus_per_node: int = field(default=4, metadata={"help": "GPUs per node for training actors"})
     placement_strategy: str = field(
         default="PACK",
         metadata={
@@ -380,12 +316,8 @@ class RayConfig:
         default=False,
         metadata={"help": "Allow multi-GPU rollout actors (experimental NOSET layout)"},
     )
-    offload_train: bool = field(
-        default=False, metadata={"help": "Enable model offload for training actors"}
-    )
-    offload_rollout: bool = field(
-        default=False, metadata={"help": "Enable model offload for rollout actors"}
-    )
+    offload_train: bool = field(default=False, metadata={"help": "Enable model offload for training actors"})
+    offload_rollout: bool = field(default=False, metadata={"help": "Enable model offload for rollout actors"})
 
     def validate(self) -> None:
         """Keep RayConfig validation intentionally thin.
@@ -433,27 +365,19 @@ class SyncConfig:
     )
     dir: str = field(
         default="outputs/weight_sync",
-        metadata={
-            "help": "Directory for checkpoint-based weight sync (use shared FS for multi-node)"
-        },
+        metadata={"help": "Directory for checkpoint-based weight sync (use shared FS for multi-node)"},
     )
     bucket_size: int = field(
         default=256,
-        metadata={
-            "help": "Weight sync tensor bucket size (MB) for tensor/distributed strategies"
-        },
+        metadata={"help": "Weight sync tensor bucket size (MB) for tensor/distributed strategies"},
     )
     flush_cache: bool = field(
         default=True,
-        metadata={
-            "help": "Whether the rollout side flushes inference-engine caches after each weight sync bucket"
-        },
+        metadata={"help": "Whether the rollout side flushes inference-engine caches after each weight sync bucket"},
     )
     target_modules: Optional[List[str]] = field(
         default=None,
-        metadata={
-            "help": "Rollout-side modules that receive weight updates (defaults to ['transformer'])."
-        },
+        metadata={"help": "Rollout-side modules that receive weight updates (defaults to ['transformer'])."},
     )
 
     def validate(self) -> None:
@@ -464,9 +388,7 @@ class SyncConfig:
                 "Choose one of disabled/tensor_payload/nccl_broadcast/checkpoint_path."
             )
         if int(self.rollout_update_interval) < 1:
-            raise ValueError(
-                f"sync.rollout_update_interval must be >= 1, got: {self.rollout_update_interval}"
-            )
+            raise ValueError(f"sync.rollout_update_interval must be >= 1, got: {self.rollout_update_interval}")
         if self.bucket_size < 1:
             raise ValueError("sync.bucket_size must be >= 1.")
         if self.target_modules is not None:
@@ -510,16 +432,12 @@ class SchedulerConfig:
             "choices": ["progressive", "random"],
         },
     )
-    window_size: int = field(
-        default=4, metadata={"help": "Number of timestep indices in each window"}
-    )
+    window_size: int = field(default=4, metadata={"help": "Number of timestep indices in each window"})
     iters_per_window: int = field(
         default=25,
         metadata={"help": "Number of training steps before advancing the window"},
     )
-    window_init_timestep: int = field(
-        default=0, metadata={"help": "Initial left boundary for the window scheduler"}
-    )
+    window_init_timestep: int = field(default=0, metadata={"help": "Initial left boundary for the window scheduler"})
     max_iters_per_window: Optional[int] = field(
         default=10, metadata={"help": "Reserved for decay-style window schedulers"}
     )
@@ -528,9 +446,7 @@ class SchedulerConfig:
     )
     overlap_size: int = field(
         default=0,
-        metadata={
-            "help": "Number of overlapping timesteps between adjacent windows (0 = no overlap)"
-        },
+        metadata={"help": "Number of overlapping timesteps between adjacent windows (0 = no overlap)"},
     )
     roll_back: bool = field(
         default=False,
@@ -557,9 +473,7 @@ class AlgorithmConfig:
     )
     algorithm_dotpath: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "Python dotpath to Algorithm class (auto-derive from algorithm_type when omitted)"
-        },
+        metadata={"help": "Python dotpath to Algorithm class (auto-derive from algorithm_type when omitted)"},
     )
     algorithm_kwargs: Dict[str, Any] = field(
         default_factory=dict,
@@ -597,48 +511,24 @@ class AlgorithmConfig:
             "choices": ["group", "global"],
         },
     )
-    adv_norm_eps: float = field(
-        default=1e-8, metadata={"help": "Numerical epsilon for advantage normalization"}
-    )
+    adv_norm_eps: float = field(default=1e-8, metadata={"help": "Numerical epsilon for advantage normalization"})
     clip_max: Optional[float] = field(
         default=None,
-        metadata={
-            "help": "Optional absolute clip for normalized advantages (None means no clipping)"
-        },
+        metadata={"help": "Optional absolute clip for normalized advantages (None means no clipping)"},
     )
     use_global_std: bool = field(
         default=False,
-        metadata={
-            "help": "Use global std instead of per-group std during grouped normalization"
-        },
+        metadata={"help": "Use global std instead of per-group std during grouped normalization"},
     )
     trim_outliers_ratio: float = field(
         default=0.0,
-        metadata={
-            "help": "Fraction of outliers to trim from each side for grouped reward normalization"
-        },
+        metadata={"help": "Fraction of outliers to trim from each side for grouped reward normalization"},
     )
-    eval_ema_decay: float = field(
-        default=0.9, metadata={"help": "Eval EMA decay shared by built-in algorithms"}
-    )
-    eval_ema_update_interval: int = field(
-        default=1, metadata={"help": "Eval EMA update interval in optimizer steps"}
-    )
-    shuffle_samples: bool = field(
-        default=True,
-        metadata={"help": "Shuffle training samples before local update execution"},
-    )
-    shuffle_seed: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": "Optional deterministic shuffle seed for training sample order"
-        },
-    )
+    eval_ema_decay: float = field(default=0.9, metadata={"help": "Eval EMA decay shared by built-in algorithms"})
+    eval_ema_update_interval: int = field(default=1, metadata={"help": "Eval EMA update interval in optimizer steps"})
     training_share_rollout_indices: bool = field(
         default=True,
-        metadata={
-            "help": "Reuse rollout index scheduler for training timestep selection unless disabled"
-        },
+        metadata={"help": "Reuse rollout index scheduler for training timestep selection unless disabled"},
     )
 
     # Sub-configuration
@@ -651,10 +541,7 @@ class AlgorithmConfig:
 
     def validate(self) -> None:
         if not self.algorithm_type and not self.algorithm_dotpath:
-            raise ValueError(
-                "algorithm_type or algorithm_dotpath must be set. "
-                "Available built-ins: grpo, nft."
-            )
+            raise ValueError("algorithm_type or algorithm_dotpath must be set. Available built-ins: grpo, nft.")
         if self.samples_per_prompt < 1:
             raise ValueError("samples_per_prompt must be >= 1.")
         if self.prompts_per_rollout < 1:
@@ -662,18 +549,11 @@ class AlgorithmConfig:
         if not isinstance(self.algorithm_kwargs, dict):
             raise ValueError("algorithm.algorithm_kwargs must be a dict.")
         if float(self.adv_norm_eps) <= 0:
-            raise ValueError(
-                "algorithm.adv_norm_eps must be > 0. " f"Got: {self.adv_norm_eps!r}"
-            )
+            raise ValueError(f"algorithm.adv_norm_eps must be > 0. Got: {self.adv_norm_eps!r}")
         if self.clip_max is not None and float(self.clip_max) <= 0:
-            raise ValueError(
-                "algorithm.clip_max must be > 0 when set. " f"Got: {self.clip_max!r}"
-            )
+            raise ValueError(f"algorithm.clip_max must be > 0 when set. Got: {self.clip_max!r}")
         if not (0.0 <= float(self.trim_outliers_ratio) < 0.5):
-            raise ValueError(
-                "algorithm.trim_outliers_ratio must be in [0.0, 0.5). "
-                f"Got: {self.trim_outliers_ratio!r}"
-            )
+            raise ValueError(f"algorithm.trim_outliers_ratio must be in [0.0, 0.5). Got: {self.trim_outliers_ratio!r}")
         if float(self.eval_ema_decay) < 0:
             raise ValueError("algorithm.eval_ema_decay must be >= 0.")
         if int(self.eval_ema_update_interval) < 1:
@@ -707,9 +587,7 @@ class TrainingConfig:
             "help": "Number of optimizer updates performed from one local batch. literally equals local_batch_size / mini_batch_size"
         },
     )
-    learning_rate: float = field(
-        default=1e-6, metadata={"help": "Peak learning rate for the optimizer"}
-    )
+    learning_rate: float = field(default=1e-6, metadata={"help": "Peak learning rate for the optimizer"})
     optimizer_type: str = field(
         default="adamw",
         metadata={
@@ -717,25 +595,15 @@ class TrainingConfig:
             "choices": ["adamw", "adam", "sgd"],
         },
     )
-    adam_beta1: float = field(
-        default=0.9, metadata={"help": "Adam optimizer beta1 (first moment decay)"}
-    )
-    adam_beta2: float = field(
-        default=0.999, metadata={"help": "Adam optimizer beta2 (second moment decay)"}
-    )
+    adam_beta1: float = field(default=0.9, metadata={"help": "Adam optimizer beta1 (first moment decay)"})
+    adam_beta2: float = field(default=0.999, metadata={"help": "Adam optimizer beta2 (second moment decay)"})
     adam_epsilon: float = field(
         default=1e-8,
         metadata={"help": "Adam optimizer epsilon for numerical stability"},
     )
-    weight_decay: float = field(
-        default=1e-4, metadata={"help": "Weight decay (L2 regularization) coefficient"}
-    )
-    max_grad_norm: float = field(
-        default=1.0, metadata={"help": "Max gradient norm for gradient clipping"}
-    )
-    warmup_steps: int = field(
-        default=0, metadata={"help": "Number of learning rate warmup steps"}
-    )
+    weight_decay: float = field(default=1e-4, metadata={"help": "Weight decay (L2 regularization) coefficient"})
+    max_grad_norm: float = field(default=1.0, metadata={"help": "Max gradient norm for gradient clipping"})
+    warmup_steps: int = field(default=0, metadata={"help": "Number of learning rate warmup steps"})
     lr_scheduler_type: str = field(
         default="constant",
         metadata={
@@ -747,35 +615,25 @@ class TrainingConfig:
     # Train backend
     train_backend: str = field(
         default="fsdp",
-        metadata={
-            "help": "Training backend name. Supported: fsdp, veomni."
-        },
+        metadata={"help": "Training backend name. Supported: fsdp, veomni."},
     )
     train_backend_kwargs: Dict[str, Any] = field(
         default_factory=dict,
-        metadata={
-            "help": "Extra kwargs for selected train backend; accepts JSON string (CLI) or mapping (YAML)"
-        },
+        metadata={"help": "Extra kwargs for selected train backend; accepts JSON string (CLI) or mapping (YAML)"},
     )
     resume_from_checkpoint: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "Directory containing training checkpoint.pt to resume from (after actors init)"
-        },
+        metadata={"help": "Directory containing training checkpoint.pt to resume from (after actors init)"},
     )
 
     # LoRA
     use_lora: bool = field(
         default=False,
-        metadata={
-            "help": "Enable LoRA (Low-Rank Adaptation) for parameter-efficient training"
-        },
+        metadata={"help": "Enable LoRA (Low-Rank Adaptation) for parameter-efficient training"},
     )
     lora_rank: int = field(
         default=16,
-        metadata={
-            "help": "LoRA rank (lower = fewer parameters, higher = more expressive)"
-        },
+        metadata={"help": "LoRA rank (lower = fewer parameters, higher = more expressive)"},
     )
     lora_alpha: int = field(
         default=16,
@@ -802,37 +660,28 @@ class TrainingConfig:
     )
 
     # Offload
-    fsdp_cpu_offload: bool = field(
-        default=False, metadata={"help": "Offload FSDP parameters and gradients to CPU"}
-    )
+    fsdp_cpu_offload: bool = field(default=False, metadata={"help": "Offload FSDP parameters and gradients to CPU"})
 
     # Memory optimization
     use_gradient_checkpointing: bool = field(
         default=False,
-        metadata={
-            "help": "Enable gradient checkpointing to save memory at the cost of compute"
-        },
+        metadata={"help": "Enable gradient checkpointing to save memory at the cost of compute"},
     )
 
     def __post_init__(self):
         if isinstance(self.lora_target_modules, str):
             if "," in self.lora_target_modules:
                 raise ValueError(
-                    "training.lora_target_modules: pass a list, not a comma string. "
-                    f"Got: {self.lora_target_modules!r}."
+                    f"training.lora_target_modules: pass a list, not a comma string. Got: {self.lora_target_modules!r}."
                 )
-            self.lora_target_modules = (
-                [self.lora_target_modules] if self.lora_target_modules.strip() else None
-            )
+            self.lora_target_modules = [self.lora_target_modules] if self.lora_target_modules.strip() else None
 
     def validate(self) -> None:
         if self.micro_batch_size is not None and self.micro_batch_size < 1:
             raise ValueError("micro_batch_size must be >= 1 when set.")
         if self.num_updates_per_batch < 1:
             raise ValueError("num_updates_per_batch must be >= 1.")
-        if self.lora_target_modules is not None and not isinstance(
-            self.lora_target_modules, list
-        ):
+        if self.lora_target_modules is not None and not isinstance(self.lora_target_modules, list):
             raise ValueError(
                 "training.lora_target_modules must be a list of strings or null. "
                 f"Got: {type(self.lora_target_modules).__name__}"
@@ -857,29 +706,21 @@ class PrecisionConfig:
     # Training Precision
     training_autocast_precision: str = field(
         default="bf16",
-        metadata={
-            "help": "Training-side autocast precision for loss/model forwards (default: bf16)"
-        },
+        metadata={"help": "Training-side autocast precision for loss/model forwards (default: bf16)"},
     )
 
     # Rollout Precision
     rollout_autocast_precision: str = field(
         default="bf16",
-        metadata={
-            "help": "Rollout-side autocast precision for sampler/replay forwards (default: bf16)"
-        },
+        metadata={"help": "Rollout-side autocast precision for sampler/replay forwards (default: bf16)"},
     )
     trajectory_precision: str = field(
         default="fp16",
-        metadata={
-            "help": "Precision used to store rollout trajectory latents (default: fp16)"
-        },
+        metadata={"help": "Precision used to store rollout trajectory latents (default: fp16)"},
     )
     logprob_precision: str = field(
         default="fp32",
-        metadata={
-            "help": "Precision used to store rollout log-prob tensors (default: fp32)"
-        },
+        metadata={"help": "Precision used to store rollout log-prob tensors (default: fp32)"},
     )
 
     def validate(self) -> None:
@@ -929,15 +770,11 @@ class RolloutConfig:
     )
     rollout_batch_size: int = field(
         default=1,
-        metadata={
-            "help": "Max prompts per rollout-engine generate() call before actor-side sub-batching."
-        },
+        metadata={"help": "Max prompts per rollout-engine generate() call before actor-side sub-batching."},
     )
     num_gpus_per_actor: Optional[int] = field(
         default=None,
-        metadata={
-            "help": "Dedicated rollout service GPUs per actor/engine. Required for separate and colocate."
-        },
+        metadata={"help": "Dedicated rollout service GPUs per actor/engine. Required for separate and colocate."},
     )
     tp_size: Optional[int] = field(
         default=None,
@@ -953,9 +790,7 @@ class RolloutConfig:
     )
     sglang_verify_weight_checksum: Optional[bool] = field(
         default=None,
-        metadata={
-            "help": "Whether SGLang verifies weight checksum after rollout-side updates."
-        },
+        metadata={"help": "Whether SGLang verifies weight checksum after rollout-side updates."},
     )
     sglang_disable_autocast: Optional[bool] = field(
         default=None,
@@ -966,23 +801,15 @@ class RolloutConfig:
     )
 
     # --- Buffer ---
-    max_queue_size: int = field(
-        default=0, metadata={"help": "Max rollout buffer queue size (0 = unbounded)"}
-    )
-    drop_invalid: bool = field(
-        default=True, metadata={"help": "Drop samples that fail validation checks"}
-    )
+    max_queue_size: int = field(default=0, metadata={"help": "Max rollout buffer queue size (0 = unbounded)"})
+    drop_invalid: bool = field(default=True, metadata={"help": "Drop samples that fail validation checks"})
     reward_min: Optional[float] = field(
         default=None,
-        metadata={
-            "help": "Minimum reward threshold for sample filtering (None = no filter)"
-        },
+        metadata={"help": "Minimum reward threshold for sample filtering (None = no filter)"},
     )
     reward_max: Optional[float] = field(
         default=None,
-        metadata={
-            "help": "Maximum reward threshold for sample filtering (None = no filter)"
-        },
+        metadata={"help": "Maximum reward threshold for sample filtering (None = no filter)"},
     )
     min_samples: int = field(
         default=1,
@@ -998,28 +825,20 @@ class RolloutConfig:
         default=1000,
         metadata={"help": "Total number of rollout iterations (outer-loop steps)"},
     )
-    start_rollout_id: int = field(
-        default=0, metadata={"help": "Starting rollout step/ID for resuming training"}
-    )
+    start_rollout_id: int = field(default=0, metadata={"help": "Starting rollout step/ID for resuming training"})
     max_inflight_rollouts: int = field(
         default=1,
-        metadata={
-            "help": "Max concurrent in-flight rollouts for the async training runner"
-        },
+        metadata={"help": "Max concurrent in-flight rollouts for the async training runner"},
     )
 
     # --- Artifacts ---
     output_dir: str = field(
         default="outputs",
-        metadata={
-            "help": "Output directory for checkpoints, logs, and generated samples"
-        },
+        metadata={"help": "Output directory for checkpoints, logs, and generated samples"},
     )
     save_steps: int = field(
         default=100,
-        metadata={
-            "help": "Save a checkpoint every N training steps (0 disables periodic saves)"
-        },
+        metadata={"help": "Save a checkpoint every N training steps (0 disables periodic saves)"},
     )
 
     def __post_init__(self):
@@ -1037,8 +856,7 @@ class RolloutConfig:
     def validate(self) -> None:
         if not str(self.mode or "").strip():
             raise ValueError(
-                "rollout.mode must be set explicitly. "
-                "Implicit rollout topology derivation has been removed."
+                "rollout.mode must be set explicitly. Implicit rollout topology derivation has been removed."
             )
         for attr_name in (
             "num_gpus_per_actor",
@@ -1056,9 +874,7 @@ class RolloutConfig:
             "sglang_prompt_encoder_dtype",
         }
         precision_override_keys = sorted(
-            key
-            for key in self.sglang_kwargs.keys()
-            if str(key) in forbidden_sglang_precision_keys
+            key for key in self.sglang_kwargs.keys() if str(key) in forbidden_sglang_precision_keys
         )
         if precision_override_keys:
             raise ValueError(
@@ -1068,27 +884,16 @@ class RolloutConfig:
                 f"{precision_override_keys}"
             )
         if self.max_queue_size < 0:
-            raise ValueError(
-                f"rollout.max_queue_size must be >= 0, got: {self.max_queue_size}"
-            )
+            raise ValueError(f"rollout.max_queue_size must be >= 0, got: {self.max_queue_size}")
         if self.min_samples < 1:
+            raise ValueError(f"rollout.min_samples must be >= 1, got: {self.min_samples}")
+        if self.reward_min is not None and self.reward_max is not None and self.reward_min > self.reward_max:
             raise ValueError(
-                f"rollout.min_samples must be >= 1, got: {self.min_samples}"
-            )
-        if (
-            self.reward_min is not None
-            and self.reward_max is not None
-            and self.reward_min > self.reward_max
-        ):
-            raise ValueError(
-                f"rollout.reward_min must be <= rollout.reward_max, "
-                f"got min={self.reward_min}, max={self.reward_max}"
+                f"rollout.reward_min must be <= rollout.reward_max, got min={self.reward_min}, max={self.reward_max}"
             )
         for i, path in enumerate(self.plugin_dotpaths):
             if not str(path).strip():
-                raise ValueError(
-                    f"rollout.plugin_dotpaths[{i}] must be a non-empty string"
-                )
+                raise ValueError(f"rollout.plugin_dotpaths[{i}] must be a non-empty string")
         if self.num_rollout < 1:
             raise ValueError("num_rollout must be >= 1.")
         if self.start_rollout_id < 0:
@@ -1105,13 +910,9 @@ class EvaluationConfig:
 
     eval_steps: int = field(
         default=100,
-        metadata={
-            "help": "Run evaluation every N training steps (0 disables periodic eval)"
-        },
+        metadata={"help": "Run evaluation every N training steps (0 disables periodic eval)"},
     )
-    eval_batch_size: int = field(
-        default=4, metadata={"help": "Batch size for evaluation"}
-    )
+    eval_batch_size: int = field(default=4, metadata={"help": "Batch size for evaluation"})
     num_inference_steps: Optional[int] = field(
         default=None,
         metadata={
@@ -1123,15 +924,11 @@ class EvaluationConfig:
     )
     sde_type: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "Optional eval-only sampler transition override. If unset, eval reuses sampling.sde_type."
-        },
+        metadata={"help": "Optional eval-only sampler transition override. If unset, eval reuses sampling.sde_type."},
     )
     eta: Optional[float] = field(
         default=None,
-        metadata={
-            "help": "Optional eval-only eta override. If unset, eval reuses sampling.eta."
-        },
+        metadata={"help": "Optional eval-only eta override. If unset, eval reuses sampling.eta."},
     )
 
     def validate(self) -> None:
@@ -1151,41 +948,25 @@ class LoggingConfig:
 
     logging_steps: int = field(
         default=10,
-        metadata={
-            "help": "Log metrics every N training steps (0 disables periodic step logging)"
-        },
+        metadata={"help": "Log metrics every N training steps (0 disables periodic step logging)"},
     )
     logging_dir: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "Directory for WandB logs/artifacts (defaults to output_dir/logs)"
-        },
+        metadata={"help": "Directory for WandB logs/artifacts (defaults to output_dir/logs)"},
     )
-    report_to_wandb: bool = field(
-        default=False, metadata={"help": "Enable WandB reporting (True/False)"}
-    )
-    project_name: str = field(
-        default="diffusionrl", metadata={"help": "Project name for WandB"}
-    )
-    run_name: Optional[str] = field(
-        default=None, metadata={"help": "Run name for WandB (auto-generated if None)"}
-    )
+    report_to_wandb: bool = field(default=False, metadata={"help": "Enable WandB reporting (True/False)"})
+    project_name: str = field(default="diffusionrl", metadata={"help": "Project name for WandB"})
+    run_name: Optional[str] = field(default=None, metadata={"help": "Run name for WandB (auto-generated if None)"})
     log_media: bool = field(
         default=False,
         metadata={"help": "Log generated media previews to WandB (true/false)"},
     )
     media_max_items: int = field(
         default=8,
-        metadata={
-            "help": "Maximum generated media items to log per rollout when log_media=true"
-        },
+        metadata={"help": "Maximum generated media items to log per rollout when log_media=true"},
     )
-    tags: Optional[List[str]] = field(
-        default=None, metadata={"help": "Tags for WandB run (e.g. [exp1, baseline])."}
-    )
-    entity: Optional[str] = field(
-        default=None, metadata={"help": "WandB entity (team or username)."}
-    )
+    tags: Optional[List[str]] = field(default=None, metadata={"help": "Tags for WandB run (e.g. [exp1, baseline])."})
+    entity: Optional[str] = field(default=None, metadata={"help": "WandB entity (team or username)."})
 
     def __post_init__(self):
         if isinstance(self.tags, str):
@@ -1193,9 +974,7 @@ class LoggingConfig:
 
     def validate(self) -> None:
         if self.logging_steps < 0:
-            raise ValueError(
-                "logging_steps must be >= 0 (0 disables periodic step logging)."
-            )
+            raise ValueError("logging_steps must be >= 0 (0 disables periodic step logging).")
         if self.media_max_items < 1:
             raise ValueError("media_max_items must be >= 1.")
 
@@ -1217,17 +996,13 @@ class DebugConfig:
     )
     save_intermediates: bool = field(
         default=False,
-        metadata={
-            "help": "Save rollout debug payloads during the normal training loop"
-        },
+        metadata={"help": "Save rollout debug payloads during the normal training loop"},
     )
     load_path: Optional[str] = field(
         default=None,
         metadata={"help": "Path to debug payload/training batch for train_only mode"},
     )
-    num_rollouts: int = field(
-        default=1, metadata={"help": "Number of train_only iterations to run"}
-    )
+    num_rollouts: int = field(default=1, metadata={"help": "Number of train_only iterations to run"})
     output_dir: Optional[str] = field(
         default=None,
         metadata={
@@ -1240,10 +1015,7 @@ class DebugConfig:
         if int(self.num_rollouts) < 1:
             raise ValueError("debug num_rollouts must be >= 1.")
         if self.mode == "train_only" and not self.load_path:
-            logger.info(
-                "debug mode=train_only without --debug.load-path: "
-                "will generate synthetic training data."
-            )
+            logger.info("debug mode=train_only without --debug.load-path: will generate synthetic training data.")
 
 
 @dataclass
@@ -1253,9 +1025,7 @@ class TrainingArguments:
     # ========== Dotpaths For Custom Modules (Dynamic Loading) ==========
     data_source_dotpath: str = field(
         default="diffusionrl.data.DefaultDataSource",
-        metadata={
-            "help": "Python dotpath to DataSource class for loading training/eval prompt streams"
-        },
+        metadata={"help": "Python dotpath to DataSource class for loading training/eval prompt streams"},
     )
     # ========== Grouped Configuration ==========
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -1301,17 +1071,9 @@ GROUP_CONFIG_TYPES = {
     if isinstance(info.type, type) and is_dataclass(info.type)
 }
 GROUP_CONFIG_NAMES = set(GROUP_CONFIG_TYPES)
-TOP_LEVEL_FIELD_NAMES = {
-    info.name
-    for info in fields(TrainingArguments)
-    if info.name not in GROUP_CONFIG_NAMES
-}
+TOP_LEVEL_FIELD_NAMES = {info.name for info in fields(TrainingArguments) if info.name not in GROUP_CONFIG_NAMES}
 GROUP_SUBCONFIG_NAMES: Dict[str, set[str]] = {
-    _group_name: {
-        info.name
-        for info in fields(_group_type)
-        if isinstance(info.type, type) and is_dataclass(info.type)
-    }
+    _group_name: {info.name for info in fields(_group_type) if isinstance(info.type, type) and is_dataclass(info.type)}
     for _group_name, _group_type in GROUP_CONFIG_TYPES.items()
 }
 
@@ -1361,9 +1123,7 @@ def _populate_dotted_config_dict(
 ) -> None:
     if not is_dataclass(value):
         if prefix is None:
-            raise ValueError(
-                "Dotted config export requires a key prefix for leaf values."
-            )
+            raise ValueError("Dotted config export requires a key prefix for leaf values.")
         target[prefix] = _copy_config_value(value)
         return
 
@@ -1430,9 +1190,7 @@ def _apply_derived_config(
     view["derived.training.pp_size"] = train_topology.pp_size
     view["derived.training.sp_size"] = train_topology.sp_size
     view["derived.training.ep_size"] = train_topology.ep_size
-    view["derived.rollout.prompts_per_rollout"] = int(
-        base_config["algorithm.prompts_per_rollout"]
-    )
+    view["derived.rollout.prompts_per_rollout"] = int(base_config["algorithm.prompts_per_rollout"])
 
     view["derived.training.global_batch_size"] = train_plan.global_batch_size
     view["derived.training.local_batch_size"] = train_plan.local_batch_size
@@ -1447,9 +1205,7 @@ def build_derived_config_view(
     derived_config: DerivedConfig,
 ) -> Dict[str, Any]:
     """Build a dotted config view from base config plus pre-derived values."""
-    derived_view = {
-        key: _copy_config_value(value) for key, value in dotted_config.items()
-    }
+    derived_view = {key: _copy_config_value(value) for key, value in dotted_config.items()}
 
     try:
         _apply_derived_config(

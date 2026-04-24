@@ -5,7 +5,7 @@ Supports SD3 and SD3.5 models for image generation.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -101,8 +101,7 @@ class SD3ModelBundle(ModelBundle):
             from diffusers import SD3Transformer2DModel
         except ImportError as e:
             raise ImportError(
-                "SD3 requires diffusers and transformers. "
-                "Install with: pip install diffusers transformers"
+                "SD3 requires diffusers and transformers. Install with: pip install diffusers transformers"
             ) from e
 
         self._transformer = SD3Transformer2DModel.from_pretrained(
@@ -117,8 +116,7 @@ class SD3ModelBundle(ModelBundle):
             from diffusers import AutoencoderKL
         except ImportError as e:
             raise ImportError(
-                "SD3 requires diffusers and transformers. "
-                "Install with: pip install diffusers transformers"
+                "SD3 requires diffusers and transformers. Install with: pip install diffusers transformers"
             ) from e
 
         if self._vae is not None:
@@ -143,8 +141,7 @@ class SD3ModelBundle(ModelBundle):
             )
         except ImportError as e:
             raise ImportError(
-                "SD3 requires diffusers and transformers. "
-                "Install with: pip install diffusers transformers"
+                "SD3 requires diffusers and transformers. Install with: pip install diffusers transformers"
             ) from e
 
         if self._text_encoder is None:
@@ -167,17 +164,11 @@ class SD3ModelBundle(ModelBundle):
             ).to(self.device)
 
         if self._tokenizer is None:
-            self._tokenizer = CLIPTokenizer.from_pretrained(
-                self.pretrained_path, subfolder="tokenizer"
-            )
+            self._tokenizer = CLIPTokenizer.from_pretrained(self.pretrained_path, subfolder="tokenizer")
         if self._tokenizer_2 is None:
-            self._tokenizer_2 = CLIPTokenizer.from_pretrained(
-                self.pretrained_path, subfolder="tokenizer_2"
-            )
+            self._tokenizer_2 = CLIPTokenizer.from_pretrained(self.pretrained_path, subfolder="tokenizer_2")
         if self._tokenizer_3 is None:
-            self._tokenizer_3 = T5TokenizerFast.from_pretrained(
-                self.pretrained_path, subfolder="tokenizer_3"
-            )
+            self._tokenizer_3 = T5TokenizerFast.from_pretrained(self.pretrained_path, subfolder="tokenizer_3")
 
         # Set eval mode for non-trainable components
         self._text_encoder.eval()
@@ -195,16 +186,13 @@ class SD3ModelBundle(ModelBundle):
             from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
         except ImportError as e:
             raise ImportError(
-                "SD3 requires diffusers and transformers. "
-                "Install with: pip install diffusers transformers"
+                "SD3 requires diffusers and transformers. Install with: pip install diffusers transformers"
             ) from e
 
         if self._scheduler is not None:
             return
 
-        self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-            self.pretrained_path, subfolder="scheduler"
-        )
+        self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(self.pretrained_path, subfolder="scheduler")
 
     def _add_lora_adapters(self) -> None:
         """Add LoRA adapters to transformer for efficient fine-tuning."""
@@ -290,6 +278,7 @@ class SD3ModelBundle(ModelBundle):
     @classmethod
     def forward_plugin(cls):
         from diffusionrl.models.forward_plugins import SD3ForwardPlugin
+
         return SD3ForwardPlugin()
 
     @classmethod
@@ -340,8 +329,6 @@ class SD3ModelBundle(ModelBundle):
             - prompt_embeds: [B, seq_len, hidden_dim] concatenated embeddings
             - pooled_prompt_embeds: [B, pooled_dim] pooled CLIP embeddings
         """
-        batch_size = len(prompts)
-
         # Encode with CLIP text encoders
         # CLIP 1
         text_inputs = self._tokenizer(
@@ -358,7 +345,6 @@ class SD3ModelBundle(ModelBundle):
                 text_input_ids,
                 output_hidden_states=True,
             )
-            clip_embeds_1 = clip_output_1.hidden_states[-2]  # Penultimate layer
             pooled_1 = clip_output_1.text_embeds
 
         # CLIP 2
@@ -376,11 +362,9 @@ class SD3ModelBundle(ModelBundle):
                 text_input_ids_2,
                 output_hidden_states=True,
             )
-            clip_embeds_2 = clip_output_2.hidden_states[-2]
             pooled_2 = clip_output_2.text_embeds
 
-        # Concatenate CLIP embeddings
-        clip_embeds = torch.cat([clip_embeds_1, clip_embeds_2], dim=-1)
+        # Concatenate CLIP embeddings (SD3 transformer uses T5 only; CLIP contributes pooled_embeds)
         pooled_embeds = torch.cat([pooled_1, pooled_2], dim=-1)
 
         # T5 encoding
@@ -480,12 +464,14 @@ class SD3ModelBundle(ModelBundle):
         # SD3.5 uses JointTransformerBlock
         try:
             from diffusers.models.transformers.transformer_sd3 import JointTransformerBlock
+
             results.append(JointTransformerBlock)
         except ImportError:
             pass
         # Older diffusers may use SD3TransformerBlock
         try:
             from diffusers.models.transformers.transformer_sd3 import SD3TransformerBlock
+
             results.append(SD3TransformerBlock)
         except ImportError:
             pass

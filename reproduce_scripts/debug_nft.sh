@@ -209,7 +209,7 @@ run_training() {
         --algorithm.samples-per-prompt "${NUM_SAMPLES_PER_PROMPT}" \
         --algorithm.kwarg clip_range=1e-4 \
         --algorithm.kwarg kl_coef=0.0001 \
-        --algorithm.adv-normalization group \
+        --algorithm.adv-normalization-scope group \
         --algorithm.use-global-std true \
         --algorithm.adv-norm-eps 1e-4 \
         --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}" \

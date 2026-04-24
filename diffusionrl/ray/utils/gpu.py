@@ -3,6 +3,7 @@
 All three functions are no-ops unless ``DIFFUSIONRL_LOG_GPU`` is set to a
 truthy value in the environment.
 """
+
 import logging
 import os
 from typing import Any
@@ -56,9 +57,15 @@ def log_gpu_state(
             allocated = 0.0
             reserved = 0.0
         logger.info(
-            "[GPU_STATE] %s rank=%s pid=%s cuda_visible=%s device=%s allocated_gb=%.3f "
-            "reserved_gb=%.3f offloaded=%s",
-            tag, rank, pid, cuda_visible, device_str, allocated, reserved, offloaded,
+            "[GPU_STATE] %s rank=%s pid=%s cuda_visible=%s device=%s allocated_gb=%.3f reserved_gb=%.3f offloaded=%s",
+            tag,
+            rank,
+            pid,
+            cuda_visible,
+            device_str,
+            allocated,
+            reserved,
+            offloaded,
         )
     except Exception as e:
         logger.warning(f"[GPU_STATE] {tag} failed: {e}")

@@ -27,14 +27,9 @@ class RewardService:
     ) -> None:
         if reward_config is not None:
             if executors is not None:
-                raise ValueError(
-                    "RewardService: pass either reward_config= or executors=, not both."
-                )
+                raise ValueError("RewardService: pass either reward_config= or executors=, not both.")
             if not isinstance(reward_config, RewardSpec):
-                raise TypeError(
-                    f"RewardService requires RewardSpec, "
-                    f"got: {type(reward_config).__name__}"
-                )
+                raise TypeError(f"RewardService requires RewardSpec, got: {type(reward_config).__name__}")
             executors = build_executors(reward_config)
             aggregation_method = reward_config.to_definition().reward_aggregation_method
 
@@ -102,8 +97,7 @@ class RewardService:
             return "image"
         if len(kinds) > 1:
             raise ValueError(
-                "Mixed reward input kinds in one service are not supported. "
-                f"Configured kinds={sorted(kinds)}."
+                f"Mixed reward input kinds in one service are not supported. Configured kinds={sorted(kinds)}."
             )
         return next(iter(kinds))
 

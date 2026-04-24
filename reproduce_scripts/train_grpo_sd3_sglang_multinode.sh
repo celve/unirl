@@ -96,7 +96,7 @@ fi
 PRETRAINED_MODEL="${PRETRAINED_MODEL:-stabilityai/stable-diffusion-3.5-medium}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/grpo_sd3_sglang_multinode}"
 SDE_TYPE="${SDE_TYPE:-flow}"
-TIMESTEP_FRACTION="${TIMESTEP_FRACTION:-[0.0, 0.5]}"
+TIMESTEP_FRACTION="${TIMESTEP_FRACTION:-[0.0,0.5]}"
 NUM_SDE_STEPS="${NUM_SDE_STEPS:-3}"
 REWARD_NAME="${REWARD_NAME:-pickscore}"
 DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/${REWARD_NAME}/train.txt}"
@@ -225,7 +225,7 @@ run_training() {
         --algorithm.kwarg clip_range=1e-4 \
         --algorithm.kwarg use_kl_penalty=true \
         --algorithm.kwarg kl_coef=0.0 \
-        --algorithm.adv-normalization group \
+        --algorithm.adv-normalization-scope group \
         --algorithm.use-global-std true \
         --algorithm.eval-ema-decay "${EVAL_EMA_DECAY}" \
         --algorithm.eval-ema-update-interval "${EVAL_EMA_UPDATE_INTERVAL}" \

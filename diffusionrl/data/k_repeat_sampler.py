@@ -64,10 +64,7 @@ class KRepeatSampler(Sampler[int]):
         """Yield indices with K repeats."""
         # Generate base indices
         if self.shuffle:
-            indices = torch.randperm(
-                self._num_samples,
-                generator=self._generator
-            ).tolist()
+            indices = torch.randperm(self._num_samples, generator=self._generator).tolist()
         else:
             indices = list(range(self._num_samples))
 

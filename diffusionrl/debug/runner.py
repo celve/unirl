@@ -10,7 +10,10 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+if TYPE_CHECKING:
+    from diffusionrl.config.assembly import DerivedConfig
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +22,8 @@ logger = logging.getLogger(__name__)
 # train_only
 # ---------------------------------------------------------------------------
 
-def run_debug_train_only(args: Any) -> None:
+
+def run_debug_train_only(args: Any, *, derived_config: "DerivedConfig") -> None:
     """Run only the training phase with synthetic or pre-saved data.
 
     Setup path:
@@ -39,7 +43,6 @@ def run_debug_train_only(args: Any) -> None:
     import ray
 
     from diffusionrl.cmdline.resolution import build_launch_config
-    from diffusionrl.cmdline.schema import validate_and_derive_config
     from diffusionrl.ray.group import TrainActorGroup
     from diffusionrl.ray.placement_group import create_placement_groups_from_launch
     from diffusionrl.utils import configure_logger, set_seed
@@ -75,8 +78,7 @@ def run_debug_train_only(args: Any) -> None:
 
     training_group = None
     try:
-        # 2. Resolve launch config first (new-style path)
-        args, derived_config = validate_and_derive_config(args)
+        # 2. Resolve launch config (derived_config threaded in from caller)
         launch_config = build_launch_config(args, derived_config=derived_config)
 
         # 3. Placement groups (only training PG is needed)
@@ -140,11 +142,11 @@ def run_debug_train_only(args: Any) -> None:
             )
 
         import math
+
         finite_losses = [v for v in all_losses if math.isfinite(v)]
         if finite_losses:
             logger.info(
-                "=== Summary: %d steps, loss %.6f -> %.6f, "
-                "mean=%.6f, total_time=%.1fs ===",
+                "=== Summary: %d steps, loss %.6f -> %.6f, mean=%.6f, total_time=%.1fs ===",
                 num_rollouts,
                 finite_losses[0],
                 finite_losses[-1],
@@ -182,6 +184,7 @@ def _load_debug_batch(path: str) -> Any:
 # ---------------------------------------------------------------------------
 # save helper (used by main loop with debug.save_intermediates)
 # ---------------------------------------------------------------------------
+
 
 def save_rollout_debug_payload(
     *,

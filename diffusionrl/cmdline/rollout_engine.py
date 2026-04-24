@@ -14,11 +14,15 @@ from diffusionrl.samplers.registry import ROLLOUT_ENGINE_COMPONENT_FAMILY
 from diffusionrl.types.engine import EngineConfig
 from diffusionrl.types.sampling import SamplingParams
 
-
 _ENDPOINT_POOL_KEYS = ("remote_scheduler_endpoints", "scheduler_endpoints", "sglang_scheduler_endpoints")
 _ENDPOINT_SINGLE_KEYS = ("remote_scheduler_endpoint", "scheduler_endpoint", "sglang_scheduler_endpoint")
-_SGLANG_NETWORK_KEYS = _ENDPOINT_POOL_KEYS + _ENDPOINT_SINGLE_KEYS + (
-    "sglang_port_base", "sglang_port_stride",
+_SGLANG_NETWORK_KEYS = (
+    _ENDPOINT_POOL_KEYS
+    + _ENDPOINT_SINGLE_KEYS
+    + (
+        "sglang_port_base",
+        "sglang_port_stride",
+    )
 )
 
 
@@ -86,8 +90,7 @@ def build_rollout_engine_config_from_args(
     model_config = model_init_payload.component_config
     if not isinstance(model_config, ModelBundleConfig):
         raise ValueError(
-            "model_init_payload.component_config must be a ModelBundleConfig, "
-            f"got: {type(model_config).__name__}"
+            f"model_init_payload.component_config must be a ModelBundleConfig, got: {type(model_config).__name__}"
         )
 
     rollout_engine = str(rollout_info.rollout_engine or "")
@@ -98,15 +101,11 @@ def build_rollout_engine_config_from_args(
     sglang_kwargs = args.rollout.sglang_kwargs
     if sglang_kwargs:
         if not isinstance(sglang_kwargs, dict):
-            raise ValueError(
-                "rollout.sglang_kwargs must be a dict after normalization."
-            )
+            raise ValueError("rollout.sglang_kwargs must be a dict after normalization.")
         engine_kwargs.update(sglang_kwargs)
 
     # Resolve SGLang endpoint / port config from engine_kwargs into typed fields.
-    host, scheduler_port, sglang_port_base, sglang_port_stride = (
-        _resolve_sglang_network_config(engine_kwargs)
-    )
+    host, scheduler_port, sglang_port_base, sglang_port_stride = _resolve_sglang_network_config(engine_kwargs)
 
     # --- Typed fields ---
     num_gpus = int(args.rollout.num_gpus_per_actor) if args.rollout.num_gpus_per_actor is not None else 1
@@ -128,18 +127,10 @@ def build_rollout_engine_config_from_args(
     lora_merge_mode = "online" if use_lora else None
 
     lora_target_modules_raw = model_config.lora_target_modules
-    lora_target_modules = (
-        tuple(lora_target_modules_raw)
-        if lora_target_modules_raw
-        else None
-    )
+    lora_target_modules = tuple(lora_target_modules_raw) if lora_target_modules_raw else None
 
     target_modules_raw = getattr(args.sync, "target_modules", None)
-    target_modules = (
-        tuple(target_modules_raw)
-        if target_modules_raw is not None
-        else None
-    )
+    target_modules = tuple(target_modules_raw) if target_modules_raw is not None else None
 
     return EngineConfig(
         model_dotpath=model_init_payload.component_dotpath,

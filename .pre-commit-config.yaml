@@ -1,31 +1,28 @@
-default_language_version:
-  python: python3
+default_stages: [pre-commit, pre-push, manual]
 
 repos:
-  # ---- 基础检查 ----
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: v6.0.0
     hooks:
       - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-toml
+      - id: check-ast
       - id: check-case-conflict
-      - id: detect-private-key
+      - id: check-merge-conflict
       - id: check-added-large-files
         args: ['--maxkb=1000']
+      - id: check-shebang-scripts-are-executable
+      - id: detect-private-key
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: debug-statements
       - id: requirements-txt-fixer
+      - id: no-commit-to-branch
 
-  # ---- Ruff: lint + format (替代 flake8/autoflake/black) ----
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.10
+    rev: v0.15.1
     hooks:
       - id: ruff-check
         args: [--fix]
       - id: ruff-format
-
-  # ---- import 排序 ----
-  - repo: https://github.com/pycqa/isort
-    rev: 5.13.2
-    hooks:
-      - id: isort
-        args:
-          - "--profile=black"
-          - "--filter-files"

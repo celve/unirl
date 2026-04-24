@@ -122,16 +122,16 @@ class FSDPBackend:
         shard_size = 8
         if world_size <= shard_size:
             logger.info(
-                "FSDPBackend: hybrid requested but world_size=%d <= %d; "
-                "falling back to pure FSDP.",
-                world_size, shard_size,
+                "FSDPBackend: hybrid requested but world_size=%d <= %d; falling back to pure FSDP.",
+                world_size,
+                shard_size,
             )
             return None
         if world_size % shard_size != 0:
             logger.warning(
-                "FSDPBackend: hybrid requested but world_size=%d is not a "
-                "multiple of %d; falling back to pure FSDP.",
-                world_size, shard_size,
+                "FSDPBackend: hybrid requested but world_size=%d is not a multiple of %d; falling back to pure FSDP.",
+                world_size,
+                shard_size,
             )
             return None
 
@@ -145,7 +145,8 @@ class FSDPBackend:
         )
         logger.info(
             "FSDPBackend: HSDP mesh dp_replicate=%d × dp_shard=%d",
-            replicate_size, shard_size,
+            replicate_size,
+            shard_size,
         )
         return mesh
 
@@ -200,10 +201,7 @@ class FSDPBackend:
             filtered = self._filter_lora_state(full)
             if filtered:
                 return filtered
-            raise ValueError(
-                "LoRA-only state dict requested but no LoRA parameters "
-                "were found in the model."
-            )
+            raise ValueError("LoRA-only state dict requested but no LoRA parameters were found in the model.")
 
         return full
 
@@ -370,9 +368,7 @@ class FSDPBackend:
     # Protocol: build_optimizer / build_scheduler
     # ------------------------------------------------------------------
 
-    def build_optimizer(
-        self, config: OptimizerConfig
-    ) -> Optional[OptimizerProtocol]:
+    def build_optimizer(self, config: OptimizerConfig) -> Optional[OptimizerProtocol]:
         """Default to the factory-level optimizer (torch AdamW)."""
         del config
         return None
@@ -438,9 +434,7 @@ class FSDPBackend:
 
         lora_state: Dict[str, Any] = {}
         for adapter_name in adapter_names:
-            lora_state.update(
-                get_peft_model_state_dict(base_model, adapter_name=adapter_name)
-            )
+            lora_state.update(get_peft_model_state_dict(base_model, adapter_name=adapter_name))
         return lora_state
 
     @staticmethod

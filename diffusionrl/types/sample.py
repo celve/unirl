@@ -1,12 +1,13 @@
-from dataclasses import dataclass, fields as dataclass_fields
+from dataclasses import dataclass
+from dataclasses import fields as dataclass_fields
 from typing import Any, Dict, List, Optional
 
-from diffusionrl.types.prompts import Prompts
-from diffusionrl.types.sampling import SamplingParams
-from diffusionrl.types.forward_context import ForwardContext
-from diffusionrl.types.trajectory_store import Trajectory
 import torch
 
+from diffusionrl.types.forward_context import ForwardContext
+from diffusionrl.types.prompts import Prompts
+from diffusionrl.types.sampling import SamplingParams
+from diffusionrl.types.trajectory_store import Trajectory
 from diffusionrl.utils.batched import Batched, concat_field, shared_field
 
 
@@ -19,13 +20,11 @@ def _tensor_bytes(value: Any) -> int:
     if isinstance(value, (list, tuple)):
         return sum(_tensor_bytes(v) for v in value)
     if isinstance(value, Batched):
-        return sum(
-            _tensor_bytes(getattr(value, f.name))
-            for f in dataclass_fields(value)
-        )
+        return sum(_tensor_bytes(getattr(value, f.name)) for f in dataclass_fields(value))
     if hasattr(value, "to_dict") and callable(value.to_dict):
         return _tensor_bytes(value.to_dict())
     return 0
+
 
 @dataclass
 class LogProbData(Batched):
@@ -48,9 +47,8 @@ class LogProbData(Batched):
         return dict(self.data)
 
     def cast_dtype(self, dtype: torch.dtype) -> "LogProbData":
-        return LogProbData(
-            data={k: v.to(dtype=dtype) if v.is_floating_point() else v for k, v in self.data.items()}
-        )
+        return LogProbData(data={k: v.to(dtype=dtype) if v.is_floating_point() else v for k, v in self.data.items()})
+
 
 @dataclass
 class RolloutSamples(Batched):
@@ -86,7 +84,9 @@ class RolloutSamples(Batched):
             prompts=self.prompts,
             trajectories=self.trajectories,
             log_probs=self.log_probs.cast_dtype(dtype) if self.log_probs is not None else self.log_probs,
-            forward_context=self.forward_context.cast_dtype(dtype) if self.forward_context is not None else self.forward_context,
+            forward_context=self.forward_context.cast_dtype(dtype)
+            if self.forward_context is not None
+            else self.forward_context,
             step_indices=self.step_indices,
             rewards=self.rewards,
             advantages=self.advantages,

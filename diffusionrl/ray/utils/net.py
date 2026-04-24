@@ -3,6 +3,7 @@
 These are the only stateless helpers the Ray actors actually call at runtime
 (``BaseTrainRayActor.get_master_info`` and ``RolloutActor._setup_distributed_env``).
 """
+
 import socket
 
 import ray
@@ -42,6 +43,4 @@ def get_free_port(start_port: int = 10000, max_tries: int = 1000) -> int:
             return port
         except OSError:
             continue
-    raise RuntimeError(
-        f"Could not find free port in range {start_port}-{start_port + max_tries}"
-    )
+    raise RuntimeError(f"Could not find free port in range {start_port}-{start_port + max_tries}")

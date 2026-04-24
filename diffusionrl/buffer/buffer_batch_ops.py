@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
 
 import torch
 
 from diffusionrl.types.batch_ops import batch_concat, batch_reindex
-from diffusionrl.types.forward_context import ForwardContext
 from diffusionrl.types.sample import LogProbData
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.types.trajectory_store import TrajectoryStore
@@ -28,10 +27,7 @@ def index_training_batch(batch: TrainingBatch, keep_indices: Sequence[int]) -> T
     log_probs = None
     if batch.log_probs is not None and len(batch.log_probs) > 0:
         log_probs = LogProbData.from_dict(
-            {
-                int(k): v.index_select(0, idx.to(v.device))
-                for k, v in batch.log_probs.to_dict().items()
-            }
+            {int(k): v.index_select(0, idx.to(v.device)) for k, v in batch.log_probs.to_dict().items()}
         )
 
     return TrainingBatch(
@@ -40,11 +36,7 @@ def index_training_batch(batch: TrainingBatch, keep_indices: Sequence[int]) -> T
         timesteps=batch.timesteps,
         advantages=batch.advantages.index_select(0, idx.to(batch.advantages.device)),
         forward_context=batch.forward_context.select(idx),
-        rewards=(
-            batch.rewards.index_select(0, idx.to(batch.rewards.device))
-            if batch.rewards is not None
-            else None
-        ),
+        rewards=(batch.rewards.index_select(0, idx.to(batch.rewards.device)) if batch.rewards is not None else None),
         prompts=batch.prompts.select(idx) if batch.prompts is not None else None,
         step_indices=batch.step_indices,
         target_sde_indices=batch.target_sde_indices,
@@ -101,12 +93,15 @@ def concat_training_batches(batches: Sequence[TrainingBatch]) -> TrainingBatch:
     rewards = None
     if all(b.rewards is not None for b in typed):
         rewards = torch.cat([b.rewards for b in typed if b.rewards is not None], dim=0)
-    extras = batch_concat(
-        [b.extras for b in typed],
-        batch_sizes=[int(b.batch_size) for b in typed],
-        deep_clone=True,
-        strict=False,
-    ) or {}
+    extras = (
+        batch_concat(
+            [b.extras for b in typed],
+            batch_sizes=[int(b.batch_size) for b in typed],
+            deep_clone=True,
+            strict=False,
+        )
+        or {}
+    )
 
     merged_ctx = type(first.forward_context).concat([b.forward_context for b in typed])
 

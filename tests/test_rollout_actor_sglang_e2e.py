@@ -31,12 +31,11 @@ from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.ray.actor_config import RolloutActorConfig
 from diffusionrl.ray.rollout_actor import RolloutActor
 from diffusionrl.reward.config import RewardSpec
+from diffusionrl.types.engine import EngineConfig
 from diffusionrl.types.prompts import Prompts
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.response import RolloutResponse
-from diffusionrl.types.sample import RolloutSamples
 from diffusionrl.types.sampling import SamplingParams, SDEConfig
-from diffusionrl.types.engine import EngineConfig
 from diffusionrl.types.training_batch import TrainingBatch
 
 MODEL_PATH = "/mnt/bj/models/stable-diffusion-3.5-medium"
@@ -117,6 +116,7 @@ def build_request(
 # Test functions
 # ---------------------------------------------------------------
 
+
 def test_basic_generate(actor):
     """Single prompt, verify response structure."""
     print("\n[test] Basic generate — single prompt")
@@ -140,12 +140,14 @@ def test_trajectory_content(response: RolloutResponse):
     print("\n[test] Trajectory content validation")
     traj = response.samples.trajectories
     assert traj is not None, "Trajectories is None"
-    assert traj.total_positions == NUM_STEPS + 1, f"Expected {NUM_STEPS+1} positions, got {traj.total_positions}"
+    assert traj.total_positions == NUM_STEPS + 1, f"Expected {NUM_STEPS + 1} positions, got {traj.total_positions}"
     assert traj.batch_size == response.samples.latents.shape[0]
 
     # Check position 0 (initial noise) has correct shape
     x0 = traj.get_position(0)
-    assert x0.shape == response.samples.latents.shape, f"Position 0 shape {x0.shape} != latents {response.samples.latents.shape}"
+    assert x0.shape == response.samples.latents.shape, (
+        f"Position 0 shape {x0.shape} != latents {response.samples.latents.shape}"
+    )
 
     # Check a (x_t, x_{t+1}) pair
     xt, xt1 = traj.get_pair(0)
@@ -389,9 +391,11 @@ def test_to_training_batch(actor):
     moved = batch.to_device("cpu")
     assert moved.batch_size == 4
 
-    print(f"  TrainingBatch: batch_size={batch.batch_size}, "
-          f"traj_positions={batch.trajectory_store.total_positions}, "
-          f"log_probs={batch.log_probs is not None}")
+    print(
+        f"  TrainingBatch: batch_size={batch.batch_size}, "
+        f"traj_positions={batch.trajectory_store.total_positions}, "
+        f"log_probs={batch.log_probs is not None}"
+    )
     print(f"  select(2): batch_size={sub.batch_size}")
     print(f"  slice(1,3): batch_size={sliced.batch_size}")
     print("  PASS")
@@ -411,6 +415,7 @@ def test_sleep_wake(actor):
 # Main
 # ---------------------------------------------------------------
 
+
 def main():
     print("=" * 60)
     print("SGLang + RolloutActor E2E Test (Expanded)")
@@ -422,7 +427,9 @@ def main():
     # Create and init actor
     print("\n--- Actor setup ---")
     actor = RolloutActor.options(num_gpus=1).remote(
-        rank=0, world_size=1, num_gpus_allocated=1,
+        rank=0,
+        world_size=1,
+        num_gpus_allocated=1,
     )
     t0 = time.time()
     ray.get(actor.init.remote(build_actor_config()))

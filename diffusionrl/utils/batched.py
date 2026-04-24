@@ -33,7 +33,8 @@ Example::
 from __future__ import annotations
 
 import copy
-from dataclasses import field, fields as dc_fields
+from dataclasses import field
+from dataclasses import fields as dc_fields
 from enum import Enum, auto
 from typing import (
     Any,
@@ -62,14 +63,13 @@ class FieldKind(Enum):
     MEAN = auto()
 
 
-_REDUCTION_KINDS = frozenset(
-    {FieldKind.MAX, FieldKind.MIN, FieldKind.SUM, FieldKind.MEAN}
-)
+_REDUCTION_KINDS = frozenset({FieldKind.MAX, FieldKind.MIN, FieldKind.SUM, FieldKind.MEAN})
 
 
 # ---------------------------------------------------------------------------
 # Field constructors
 # ---------------------------------------------------------------------------
+
 
 def concat_field(**kwargs: Any) -> Any:
     """Declare a per-sample field (concatenated along the batch dimension)."""
@@ -118,6 +118,7 @@ def _field_kind(f: Any) -> FieldKind:
 # ---------------------------------------------------------------------------
 # Value-level helpers
 # ---------------------------------------------------------------------------
+
 
 def _infer_batch_size(value: Any) -> Optional[int]:
     if isinstance(value, torch.Tensor) and value.dim() > 0:
@@ -171,11 +172,7 @@ def _concat_value(values: List[Any], batch_sizes: List[int]) -> Any:
         return None
 
     if all(isinstance(v, torch.Tensor) for v in non_none):
-        is_batched = [
-            v.dim() > 0 and int(v.shape[0]) == bs
-            for v, bs in zip(values, batch_sizes)
-            if v is not None
-        ]
+        is_batched = [v.dim() > 0 and int(v.shape[0]) == bs for v, bs in zip(values, batch_sizes) if v is not None]
         if all(is_batched):
             return torch.cat(non_none, dim=0)
         if not any(is_batched):
@@ -183,11 +180,7 @@ def _concat_value(values: List[Any], batch_sizes: List[int]) -> Any:
         raise ValueError("Mixed batched / non-batched tensors in concat field")
 
     if all(isinstance(v, list) for v in non_none):
-        is_batched = [
-            len(v) == bs
-            for v, bs in zip(values, batch_sizes)
-            if v is not None
-        ]
+        is_batched = [len(v) == bs for v, bs in zip(values, batch_sizes) if v is not None]
         if all(is_batched):
             merged: List[Any] = []
             for v in non_none:
@@ -195,11 +188,7 @@ def _concat_value(values: List[Any], batch_sizes: List[int]) -> Any:
             return merged
 
     if all(isinstance(v, tuple) for v in non_none):
-        is_batched = [
-            len(v) == bs
-            for v, bs in zip(values, batch_sizes)
-            if v is not None
-        ]
+        is_batched = [len(v) == bs for v, bs in zip(values, batch_sizes) if v is not None]
         if all(is_batched):
             merged_t: List[Any] = []
             for v in non_none:
@@ -229,10 +218,7 @@ def _concat_value(values: List[Any], batch_sizes: List[int]) -> Any:
     elif all(v == first for v in non_none[1:]):
         return copy.deepcopy(first)
 
-    raise ValueError(
-        f"Cannot concat values: types={[type(v).__name__ for v in values]}, "
-        f"batch_sizes={batch_sizes}"
-    )
+    raise ValueError(f"Cannot concat values: types={[type(v).__name__ for v in values]}, batch_sizes={batch_sizes}")
 
 
 def _to_index_list(indices: Union[torch.Tensor, Sequence[int]]) -> List[int]:
@@ -248,7 +234,9 @@ def _to_index_tensor(indices: Union[torch.Tensor, Sequence[int]]) -> torch.Tenso
 
 
 def _select_value(
-    value: Any, indices: Union[torch.Tensor, Sequence[int]], batch_size: int,
+    value: Any,
+    indices: Union[torch.Tensor, Sequence[int]],
+    batch_size: int,
 ) -> Any:
     """Re-index a per-sample value by an index tensor or list of ints."""
     if value is None:
@@ -323,6 +311,7 @@ def _clone_value(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 # Base class
 # ---------------------------------------------------------------------------
+
 
 class Batched:
     """Mixin / base for ``@dataclass`` containers with concat/shared fields.

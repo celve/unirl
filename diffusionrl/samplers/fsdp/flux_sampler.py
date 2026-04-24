@@ -27,9 +27,10 @@ import torch.nn as nn
 
 from diffusionrl.sde.registry import resolve_sde_strategy_class
 from diffusionrl.sde.runtime import denoising_step, sd3_time_shift
-from diffusionrl.types.sample import LogProbData
 from diffusionrl.types.forward_context import FluxForwardContext
+from diffusionrl.types.sample import LogProbData
 from diffusionrl.types.trajectory_store import TrajectoryBuilder
+
 from ..base import RolloutSamples
 from .base_sampler import FSDPBaseSampler
 
@@ -76,7 +77,7 @@ class FluxSampler(FSDPBaseSampler):
         vae: Optional[nn.Module] = None,
         eta: float = 0.7,
         sde_type: str = "dance",  # FLUX uses DanceGRPO formulation by default
-        shift: float = 1.0,       # FLUX uses shift=1.0
+        shift: float = 1.0,  # FLUX uses shift=1.0
         guidance_scale: float = 3.5,  # Configurable guidance (DanceGRPO default: 3.5)
         autocast_precision: Any = "bf16",
         trajectory_precision: Any = "fp16",
@@ -234,6 +235,7 @@ class FluxSampler(FSDPBaseSampler):
         # Initialize latents with optional shared noise (DanceGRPO line 346-350)
         if latents is None:
             from ..noise_utils import generate_latents
+
             latents = generate_latents(
                 batch_size=batch_size,
                 latent_shape=(self.IN_CHANNELS, latent_h, latent_w),
@@ -248,9 +250,7 @@ class FluxSampler(FSDPBaseSampler):
             latents = latents.to(device=device, dtype=trajectory_dtype)
 
         # Pack latents for FLUX transformer (DanceGRPO line 351)
-        packed_latents = self._pack_latents(
-            latents, batch_size, self.IN_CHANNELS, latent_h, latent_w
-        )
+        packed_latents = self._pack_latents(latents, batch_size, self.IN_CHANNELS, latent_h, latent_w)
 
         # Prepare image IDs with packed dimensions (DanceGRPO line 352)
         # Note: uses latent_h//2, latent_w//2 because packing halves dimensions
@@ -282,9 +282,7 @@ class FluxSampler(FSDPBaseSampler):
         # Storage for trajectory and log probs (DanceGRPO line 226-227)
         latents = packed_latents.to(dtype=trajectory_dtype)
         # Selective collection: only store positions needed for SDE step pairs
-        trajectory_store = TrajectoryBuilder.for_sde_steps(
-            sde_indices, num_inference_steps
-        )
+        trajectory_store = TrajectoryBuilder.for_sde_steps(sde_indices, num_inference_steps)
         trajectory_store.add(0, latents)
         all_log_probs: Dict[int, torch.Tensor] = {}
 
@@ -309,11 +307,9 @@ class FluxSampler(FSDPBaseSampler):
                         hidden_states=latents,
                         encoder_hidden_states=prompt_embeds,
                         timestep=timestep,
-                        guidance=torch.tensor(
-                            [actual_guidance],
-                            device=device,
-                            dtype=self.autocast_dtype
-                        ).expand(batch_size),
+                        guidance=torch.tensor([actual_guidance], device=device, dtype=self.autocast_dtype).expand(
+                            batch_size
+                        ),
                         txt_ids=text_ids[0],  # [seq, 3] - same for all batches
                         pooled_projections=pooled_prompt_embeds,
                         img_ids=image_ids,
@@ -361,9 +357,7 @@ class FluxSampler(FSDPBaseSampler):
             trajectories=trajectory,
             log_probs=LogProbData.from_dict(all_log_probs),
             forward_context=forward_context,
-            step_indices=torch.arange(
-                sigma_schedule.shape[0], device=sigma_schedule.device, dtype=torch.long
-            ),
+            step_indices=torch.arange(sigma_schedule.shape[0], device=sigma_schedule.device, dtype=torch.long),
         )
 
     def compute_log_prob_for_training(
@@ -420,11 +414,7 @@ class FluxSampler(FSDPBaseSampler):
                 hidden_states=latents,
                 encoder_hidden_states=prompt_embeds,
                 timestep=timestep,
-                guidance=torch.tensor(
-                    [actual_guidance],
-                    device=device,
-                    dtype=self.autocast_dtype
-                ).expand(batch_size),
+                guidance=torch.tensor([actual_guidance], device=device, dtype=self.autocast_dtype).expand(batch_size),
                 txt_ids=text_ids[0],  # [seq, 3] - same for all batches
                 pooled_projections=pooled_prompt_embeds,
                 img_ids=image_ids.squeeze(0) if image_ids.dim() > 2 else image_ids,
@@ -437,9 +427,7 @@ class FluxSampler(FSDPBaseSampler):
         # Upcast to float32 for stable log_prob.
         # Must use the same SDE formulation as sampling to keep math consistent.
         if self.uses_deterministic_solver:
-            raise ValueError(
-                "Deterministic FLUX sampling does not define stochastic log-prob replay."
-            )
+            raise ValueError("Deterministic FLUX sampling does not define stochastic log-prob replay.")
         sigma = sigma_schedule[timestep_index].to(device)
         sigma_next = sigma_schedule[timestep_index + 1].to(device)
         _, log_prob, _ = denoising_step(

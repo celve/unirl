@@ -17,7 +17,6 @@ from typing import Any, Dict, Mapping, Optional
 
 from diffusionrl.training.backends.base import TrainBackendConfig
 
-
 # ``BaseTrainBackendConfig`` is retained as an alias for the new marker so that
 # legacy type hints in the config layer continue to resolve to a real type.
 BaseTrainBackendConfig = TrainBackendConfig
@@ -43,9 +42,7 @@ class TrainBackendCapabilities:
     supports_custom_train_step: bool = False
     supports_backend_managed_offload: bool = False
     preferred_weight_export_format: Optional[str] = None
-    preferred_weight_export_format_by_rollout_engine: Mapping[str, str] = field(
-        default_factory=dict
-    )
+    preferred_weight_export_format_by_rollout_engine: Mapping[str, str] = field(default_factory=dict)
     supported_weight_export_formats: tuple[str, ...] = ("state_dict",)
     notes: str = ""
 

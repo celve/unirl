@@ -60,9 +60,7 @@ class InProcessRewardExecutor(BaseRewardExecutor):
 def build_executors(spec: RewardSpec) -> List[BaseRewardExecutor]:
     """Construct executor instances based on the spec's execution plan."""
     if not isinstance(spec, RewardSpec):
-        raise TypeError(
-            f"build_executors requires RewardSpec, got: {type(spec).__name__}"
-        )
+        raise TypeError(f"build_executors requires RewardSpec, got: {type(spec).__name__}")
 
     execution_plan = spec.to_execution_plan()
     if execution_plan.uses_http_backend:
@@ -90,11 +88,7 @@ def _build_http_executors(spec: RewardSpec) -> List[BaseRewardExecutor]:
         if component_weights and i < len(component_weights):
             weight = component_weights[i]
 
-        name = (
-            component_names[i]
-            if component_names and i < len(component_names)
-            else f"http_{i}"
-        )
+        name = component_names[i] if component_names and i < len(component_names) else f"http_{i}"
 
         executor = HTTPRewardExecutor(
             base_url=url,
@@ -132,8 +126,7 @@ def _build_local_executors(spec: RewardSpec) -> List[BaseRewardExecutor]:
 
         if not isinstance(scorer_cls, type) or not issubclass(scorer_cls, BaseRewardScorer):
             logger.warning(
-                "Local reward scorer %s does not inherit BaseRewardScorer; "
-                "treating it as a scorer via duck typing.",
+                "Local reward scorer %s does not inherit BaseRewardScorer; treating it as a scorer via duck typing.",
                 reward_dotpath or scorer_cls,
             )
 
@@ -187,10 +180,7 @@ def _resolve_local_device(local_device_pref: str) -> str:
     if pref == "cuda":
         if torch.cuda.is_available():
             return "cuda"
-        logger.warning(
-            "local_reward_device=cuda requested but CUDA is not available. "
-            "Falling back to CPU."
-        )
+        logger.warning("local_reward_device=cuda requested but CUDA is not available. Falling back to CPU.")
         return "cpu"
     logger.warning(
         "Unknown local_reward_device=%s. Falling back to CPU.",

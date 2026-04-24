@@ -15,9 +15,7 @@ def _resolve_shard_sizes(
 ) -> List[int]:
     batch_size = getattr(batch, "batch_size", None)
     if batch_size is None:
-        raise ValueError(
-            f"Training batch {type(batch).__name__} does not expose batch_size for DP partitioning."
-        )
+        raise ValueError(f"Training batch {type(batch).__name__} does not expose batch_size for DP partitioning.")
 
     resolved_batch_size = int(batch_size)
     resolved_dp_size = int(dp_size)
@@ -25,15 +23,11 @@ def _resolve_shard_sizes(
         raise ValueError(f"dp_size must be positive, got {dp_size}.")
 
     if per_rank_batch_size is None:
-        raise ValueError(
-            "Data-parallel batch partition requires an explicit per_rank_batch_size plan."
-        )
+        raise ValueError("Data-parallel batch partition requires an explicit per_rank_batch_size plan.")
 
     resolved_per_rank = int(per_rank_batch_size)
     if resolved_per_rank <= 0:
-        raise ValueError(
-            f"per_rank_batch_size must be positive, got {per_rank_batch_size}."
-        )
+        raise ValueError(f"per_rank_batch_size must be positive, got {per_rank_batch_size}.")
 
     expected_total = resolved_per_rank * resolved_dp_size
     if resolved_batch_size != expected_total:

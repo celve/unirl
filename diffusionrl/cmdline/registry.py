@@ -26,10 +26,7 @@ def register_cmdline_config_parser(
     if not isinstance(config_class, type):
         raise TypeError(f"config_class must be a class, got {type(config_class)!r}.")
     if type_checking not in (None, "subclass", "exact"):
-        raise ValueError(
-            "type_checking must be one of None/'subclass'/'exact', "
-            f"got {type_checking!r}."
-        )
+        raise ValueError(f"type_checking must be one of None/'subclass'/'exact', got {type_checking!r}.")
 
     def _register(fn: T) -> T:
         if not callable(fn):
@@ -53,8 +50,7 @@ def register_cmdline_config_parser(
         existing = CMDLINE_CONFIG_PARSER_REGISTRY.get(config_class)
         if existing is not None and getattr(existing, "__wrapped__", None) is not fn:
             raise ValueError(
-                f"Duplicate cmdline config parser registration for {config_class!r}: "
-                f"{existing!r} vs {fn!r}."
+                f"Duplicate cmdline config parser registration for {config_class!r}: {existing!r} vs {fn!r}."
             )
         CMDLINE_CONFIG_PARSER_REGISTRY[config_class] = _wrapped
         return _wrapped  # type: ignore[return-value]
@@ -70,12 +66,9 @@ def derive_cmdline_config_parser(config_class: type) -> ParserFn:
         raise TypeError(f"config_class must be a class, got {type(config_class)!r}.")
     parser_fn = CMDLINE_CONFIG_PARSER_REGISTRY.get(config_class)
     if parser_fn is None:
-        available = sorted(
-            cls.__name__ for cls in CMDLINE_CONFIG_PARSER_REGISTRY.keys()
-        )
+        available = sorted(cls.__name__ for cls in CMDLINE_CONFIG_PARSER_REGISTRY.keys())
         raise ValueError(
-            f"No cmdline config parser registered for {config_class.__name__!r}. "
-            f"Available config classes: {available}."
+            f"No cmdline config parser registered for {config_class.__name__!r}. Available config classes: {available}."
         )
     return parser_fn
 
@@ -83,14 +76,10 @@ def derive_cmdline_config_parser(config_class: type) -> ParserFn:
 def derive_component_cmdline_config_parser(component_class: type) -> ParserFn:
     """Derive a cmdline parser from a component class via its config-class attr."""
     if not isinstance(component_class, type):
-        raise TypeError(
-            f"component_class must be a class, got {type(component_class)!r}."
-        )
+        raise TypeError(f"component_class must be a class, got {type(component_class)!r}.")
     config_class = getattr(component_class, "__CONFIG_CLASS__", None)
     if not isinstance(config_class, type):
-        raise TypeError(
-            f"Component class {component_class!r} must define __CONFIG_CLASS__."
-        )
+        raise TypeError(f"Component class {component_class!r} must define __CONFIG_CLASS__.")
     return derive_cmdline_config_parser(config_class)
 
 

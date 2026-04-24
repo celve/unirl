@@ -27,9 +27,10 @@ import torch.nn as nn
 
 from diffusionrl.sde.registry import resolve_sde_strategy_class
 from diffusionrl.sde.runtime import denoising_step, sd3_time_shift
-from diffusionrl.types.sample import LogProbData
 from diffusionrl.types.forward_context import HunyuanForwardContext
+from diffusionrl.types.sample import LogProbData
 from diffusionrl.types.trajectory_store import TrajectoryBuilder
+
 from ..base import RolloutSamples
 from .base_sampler import FSDPBaseSampler
 
@@ -191,6 +192,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
 
         if latents is None:
             from ..noise_utils import generate_latents
+
             latents = generate_latents(
                 batch_size=batch_size,
                 latent_shape=(self.IN_CHANNELS, latent_t, latent_h, latent_w),
@@ -215,20 +217,14 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
                 sde_indices = set()
             else:
                 sde_indices = set(range(num_inference_steps))
-        actual_guidance = (
-            float(guidance_scale)
-            if guidance_scale is not None
-            else float(self.default_guidance_scale)
-        )
+        actual_guidance = float(guidance_scale) if guidance_scale is not None else float(self.default_guidance_scale)
 
         strategy = resolve_sde_strategy_class(self.sde_type)()
         strategy.init_schedule(sigma_schedule)
 
         # Storage for trajectory and log probs (DanceGRPO line 115-116)
         # Selective collection: only store positions needed for SDE step pairs
-        trajectory_store = TrajectoryBuilder.for_sde_steps(
-            sde_indices, num_inference_steps
-        )
+        trajectory_store = TrajectoryBuilder.for_sde_steps(sde_indices, num_inference_steps)
         trajectory_store.add(0, latents.clone().to(dtype=trajectory_dtype))
         all_log_probs: Dict[int, torch.Tensor] = {}
 
@@ -254,11 +250,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
                         encoder_hidden_states=prompt_embeds,
                         pooled_projections=pooled_prompt_embeds,
                         timestep=timestep,
-                        guidance=torch.tensor(
-                            [actual_guidance],
-                            device=device,
-                            dtype=self.autocast_dtype
-                        ),
+                        guidance=torch.tensor([actual_guidance], device=device, dtype=self.autocast_dtype),
                         encoder_attention_mask=encoder_attention_mask,
                         return_dict=False,
                     )[0]
@@ -299,9 +291,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
             trajectories=trajectory,
             log_probs=LogProbData.from_dict(all_log_probs),
             forward_context=forward_context,
-            step_indices=torch.arange(
-                sigma_schedule.shape[0], device=sigma_schedule.device, dtype=torch.long
-            ),
+            step_indices=torch.arange(sigma_schedule.shape[0], device=sigma_schedule.device, dtype=torch.long),
         )
 
     def compute_log_prob_for_training(
@@ -332,11 +322,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
         """
         device = latents.device
         batch_size = latents.shape[0]
-        actual_guidance = (
-            float(guidance_scale)
-            if guidance_scale is not None
-            else float(self.default_guidance_scale)
-        )
+        actual_guidance = float(guidance_scale) if guidance_scale is not None else float(self.default_guidance_scale)
         prompt_embeds = prompt_embeds.to(device=device)
         if encoder_attention_mask is None:
             encoder_attention_mask = torch.ones(
@@ -373,11 +359,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
                 encoder_hidden_states=prompt_embeds,
                 pooled_projections=pooled_prompt_embeds,
                 timestep=timestep,
-                guidance=torch.tensor(
-                    [actual_guidance],
-                    device=device,
-                    dtype=self.autocast_dtype
-                ),
+                guidance=torch.tensor([actual_guidance], device=device, dtype=self.autocast_dtype),
                 encoder_attention_mask=encoder_attention_mask,
                 return_dict=False,
             )[0]
@@ -386,9 +368,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
         # Training side: prev_latents is float16 from trajectory.
         # Upcast to float32 so that compute is on the same truncated value.
         if self.uses_deterministic_solver:
-            raise ValueError(
-                "Deterministic Hunyuan sampling does not define stochastic log-prob replay."
-            )
+            raise ValueError("Deterministic Hunyuan sampling does not define stochastic log-prob replay.")
 
         sigma = sigma_schedule[timestep_index].to(device)
         sigma_next = sigma_schedule[timestep_index + 1].to(device)

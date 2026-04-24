@@ -15,7 +15,6 @@ from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.reward.config import RewardSpec
 from diffusionrl.training.backends import (
     FSDPBackendConfig,
-    TrainBackendConfig,
     VeOmniBackendConfig,
 )
 from diffusionrl.training.types import TrainTopology
@@ -42,6 +41,7 @@ class TrainingActorConfig:
 @dataclass(frozen=True)
 class AdvantageParams:
     """Advantage normalization params, sourced from algorithm config."""
+
     epsilon: float = 1e-8
     clip_max: Optional[float] = 5.0
     trim_outliers_ratio: float = 0.0

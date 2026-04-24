@@ -26,10 +26,7 @@ def available_builtin_reward_models() -> Tuple[str, ...]:
 def _resolve_builtin_reward_entry(model_name: str) -> Tuple[str, str]:
     key = str(model_name or "").strip().lower()
     if key not in _BUILTIN_SCORERS:
-        raise ValueError(
-            f"Unknown model_name: {model_name}. "
-            f"Available: {list(available_builtin_reward_models())}"
-        )
+        raise ValueError(f"Unknown model_name: {model_name}. Available: {list(available_builtin_reward_models())}")
     return _BUILTIN_SCORERS[key]
 
 
@@ -45,9 +42,7 @@ def resolve_builtin_reward_scorer_class(model_name: str) -> Type[BaseRewardScore
     module = importlib.import_module(module_name)
     scorer_cls = getattr(module, attr_name)
     if not isinstance(scorer_cls, type) or not issubclass(scorer_cls, BaseRewardScorer):
-        raise TypeError(
-            f"Configured scorer {module_name}.{attr_name} is not a BaseRewardScorer."
-        )
+        raise TypeError(f"Configured scorer {module_name}.{attr_name} is not a BaseRewardScorer.")
     return scorer_cls
 
 

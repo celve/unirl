@@ -28,10 +28,7 @@ class HPSv3RewardScorer(BaseLocalRewardScorer):
         try:
             from hpsv3 import HPSv3RewardInferencer
         except ImportError:
-            raise ImportError(
-                "hpsv3 is required for HPSv3 reward. "
-                "Install from https://github.com/MizzenAI/HPSv3"
-            )
+            raise ImportError("hpsv3 is required for HPSv3 reward. Install from https://github.com/MizzenAI/HPSv3")
 
         self._hpsv3_inferencer = HPSv3RewardInferencer(
             device=self.device,

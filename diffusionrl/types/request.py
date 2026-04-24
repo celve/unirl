@@ -1,10 +1,8 @@
 from dataclasses import dataclass
-from typing import Any, Dict, List
-import copy
 
 from diffusionrl.types.prompts import Prompts
-from diffusionrl.utils.batched import Batched, shared_field, concat_field
 from diffusionrl.types.sampling import SamplingParams
+from diffusionrl.utils.batched import Batched, concat_field, shared_field
 
 
 @dataclass

@@ -10,6 +10,7 @@ import logging
 import os
 import random
 from typing import Any, Dict, List, Optional
+
 from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
@@ -54,16 +55,9 @@ def normalize_prompt_example(
 
     metadata = item.get("metadata")
     if metadata is None:
-        metadata = {
-            key: value
-            for key, value in item.items()
-            if key not in _PROMPT_EXAMPLE_EXCLUDED_KEYS
-        }
+        metadata = {key: value for key, value in item.items() if key not in _PROMPT_EXAMPLE_EXCLUDED_KEYS}
     elif not isinstance(metadata, dict):
-        raise TypeError(
-            "Prompt example metadata must be a dict when provided, "
-            f"got {type(metadata).__name__}."
-        )
+        raise TypeError(f"Prompt example metadata must be a dict when provided, got {type(metadata).__name__}.")
 
     result: Dict[str, Any] = {"prompt": prompt}
     prompt_id = item.get("prompt_id")
@@ -141,6 +135,7 @@ class TextPromptDataset(PromptExampleDataset):
 
     def _load_prompts(self) -> None:
         """Load prompts from file."""
+
         def _append_item(item: Any, *, context: str) -> None:
             sample_idx = len(self.samples)
             default_prompt_id = f"{self._source_prefix}:{sample_idx}"
@@ -155,10 +150,7 @@ class TextPromptDataset(PromptExampleDataset):
             candidate = dict(candidate)
             if self.prompt_key in candidate and self.prompt_key != "prompt":
                 candidate["prompt"] = candidate.pop(self.prompt_key)
-            legacy_fields = sorted(
-                field for field in _LEGACY_EMBEDDING_FIELDS
-                if field in candidate
-            )
+            legacy_fields = sorted(field for field in _LEGACY_EMBEDDING_FIELDS if field in candidate)
             if legacy_fields:
                 raise ValueError(
                     "Prompt manifests must be prompt-first and may not include legacy embedding fields. "
@@ -174,8 +166,8 @@ class TextPromptDataset(PromptExampleDataset):
             except (TypeError, ValueError) as exc:
                 logger.warning("Skipping invalid %s: %s", context, exc)
 
-        if self.file_path.endswith('.json'):
-            with open(self.file_path, 'r') as f:
+        if self.file_path.endswith(".json"):
+            with open(self.file_path, "r") as f:
                 data = json.load(f)
 
             if isinstance(data, list):
@@ -203,9 +195,9 @@ class TextPromptDataset(PromptExampleDataset):
                 elif "caption" in data:
                     _append_item(data, context="top-level caption item")
 
-        elif self.file_path.endswith('.jsonl'):
+        elif self.file_path.endswith(".jsonl"):
             # JSON Lines format: one JSON object per line
-            with open(self.file_path, 'r') as f:
+            with open(self.file_path, "r") as f:
                 for line_num, line in enumerate(f, 1):
                     line = line.strip()
                     if not line:
@@ -216,8 +208,8 @@ class TextPromptDataset(PromptExampleDataset):
                     except json.JSONDecodeError as e:
                         logger.warning(f"Skipping invalid JSON at line {line_num}: {e}")
 
-        elif self.file_path.endswith('.txt'):
-            with open(self.file_path, 'r') as f:
+        elif self.file_path.endswith(".txt"):
+            with open(self.file_path, "r") as f:
                 for line_num, line in enumerate(f, 1):
                     prompt = line.strip()
                     if not prompt:

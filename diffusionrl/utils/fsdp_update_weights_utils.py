@@ -115,6 +115,7 @@ class UpdateWeightFromTensor(BucketedUpdateWeight):
         except ImportError:
             from sglang.srt.patch_torch import monkey_patch_torch_reductions  # type: ignore[import]
         from sglang.srt.utils import MultiprocessingSerializer
+
         try:
             from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket  # type: ignore[import]
         except ImportError:

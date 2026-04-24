@@ -1,9 +1,11 @@
-from dataclasses import dataclass
-from typing import Dict, Generic, TypeVar
 import uuid
+from dataclasses import dataclass
+from typing import Dict
+
+from ray.actor import ActorHandle
 
 from diffusionrl.utils.batched import Batched
-from ray.actor import ActorHandle
+
 
 @dataclass
 class BufferHandle:
@@ -16,17 +18,18 @@ class BufferHandle:
         self.actor_handle.release_buffer.remote(self.id)
         self.actor_handle = actor_handle
 
-class Buffer: 
+
+class Buffer:
     def __init__(self):
         self.mappings: Dict[str, Batched] = {}
-        self.actor_handle: ActorHandle = None 
+        self.actor_handle: ActorHandle = None
 
     def put_buffer(self, key: Batched, value: Batched) -> BufferHandle:
         id = str(uuid.uuid4())
         self.mappings[id] = value
         return BufferHandle(id=id, key=key, actor_handle=self.actor_handle)
-    
-    def concat_buffer(self, handle1: BufferHandle, handle2: BufferHandle) -> BufferHandle: 
+
+    def concat_buffer(self, handle1: BufferHandle, handle2: BufferHandle) -> BufferHandle:
         id = str(uuid.uuid4())
         value1 = self.pop_buffer(handle1)
         value2 = self.pop_buffer(handle2)

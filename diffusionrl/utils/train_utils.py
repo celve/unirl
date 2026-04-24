@@ -53,6 +53,8 @@ def collect_rollout_batch_metrics(*, ray_module, batch_ref, compute_rollout_batc
         logger.warning("Failed to materialize training batch for rollout metrics: %s", exc)
         return {}
     return compute_rollout_batch_metrics_fn(training_data=training_data)
+
+
 __all__ = [
     "collect_rollout_batch_metrics",
     "should_eval",

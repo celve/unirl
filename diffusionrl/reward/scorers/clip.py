@@ -24,9 +24,7 @@ class ClipRewardScorer(BaseLocalRewardScorer):
         except ImportError:
             raise ImportError("transformers and torchvision are required for CLIP")
 
-        model_name = self.model_kwargs.get(
-            "model_name", "openai/clip-vit-large-patch14"
-        )
+        model_name = self.model_kwargs.get("model_name", "openai/clip-vit-large-patch14")
         self.model = CLIPModel.from_pretrained(model_name).to(self.device)
         self.processor = CLIPProcessor.from_pretrained(model_name)
 
@@ -40,16 +38,8 @@ class ClipRewardScorer(BaseLocalRewardScorer):
             raise ValueError(f"Invalid size: {size}")
 
         config = self.processor.image_processor.to_dict()
-        resize = (
-            T.Resize(_get_size(config.get("size")))
-            if config.get("do_resize")
-            else nn.Identity()
-        )
-        crop = (
-            T.CenterCrop(_get_size(config.get("crop_size")))
-            if config.get("do_center_crop")
-            else nn.Identity()
-        )
+        resize = T.Resize(_get_size(config.get("size"))) if config.get("do_resize") else nn.Identity()
+        crop = T.CenterCrop(_get_size(config.get("crop_size"))) if config.get("do_center_crop") else nn.Identity()
         normalise = (
             T.Normalize(
                 mean=self.processor.image_processor.image_mean,

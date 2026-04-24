@@ -4,7 +4,7 @@ Data loading utilities for GRPO training.
 Provides prompt-only data sources and prompt datasets for GRPO training.
 """
 
-from .data_source import ImageRLDataSource, DefaultDataSource
+from .data_source import DefaultDataSource, ImageRLDataSource
 from .datasets import (
     PromptExampleDataset,
     TextPromptDataset,

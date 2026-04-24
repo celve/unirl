@@ -43,11 +43,7 @@ def build_generate_shard_plan(
         raise ValueError("generate requires a non-empty prompt list")
 
     original_batch_size = len(request.prompts)
-    effective_batch_size = (
-        max(original_batch_size, num_actors)
-        if pad_to_actor_count
-        else original_batch_size
-    )
+    effective_batch_size = max(original_batch_size, num_actors) if pad_to_actor_count else original_batch_size
     effective_request = request.pad_to(effective_batch_size)
 
     shard_sizes = _balanced_shard_sizes(effective_batch_size, num_actors)
@@ -96,9 +92,7 @@ def build_generate_shard_plan_grouped(
     if total_samples == 0:
         return [None] * num_actors
     if samples_per_prompt < 1:
-        raise ValueError(
-            f"samples_per_prompt must be >= 1 for sharding, got {samples_per_prompt}"
-        )
+        raise ValueError(f"samples_per_prompt must be >= 1 for sharding, got {samples_per_prompt}")
     if total_samples % samples_per_prompt != 0:
         raise ValueError(
             f"total samples ({total_samples}) is not a multiple of "
@@ -126,9 +120,7 @@ def build_generate_shard_plan_grouped(
             noise_group_ids=list(p.noise_group_ids[start:end]),
             prompt_metadata=list(p.prompt_metadata[start:end]),
         )
-        shards.append(
-            RolloutRequest(prompts=sub_prompts, sampling_params=request.sampling_params)
-        )
+        shards.append(RolloutRequest(prompts=sub_prompts, sampling_params=request.sampling_params))
         cursor = end
     return shards
 

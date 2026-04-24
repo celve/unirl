@@ -79,8 +79,7 @@ class BaseRolloutEngine(ABC):
                 - encoder_attention_mask: [B, seq] (optional)
         """
         raise NotImplementedError(
-            f"{type(self).__name__} does not support prompt encoding. "
-            "Use engines that implement encode_prompt()."
+            f"{type(self).__name__} does not support prompt encoding. Use engines that implement encode_prompt()."
         )
 
     @abstractmethod

@@ -77,9 +77,7 @@ class ReplayLogProbPatch:
         )
         sampler_cls = load_function(sampler_dotpath)
         init_sig = inspect.signature(sampler_cls.__init__)
-        accepts_kwargs = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in init_sig.parameters.values()
-        )
+        accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in init_sig.parameters.values())
 
         sde_config = sampling_config.sde_config
         base_kwargs: Dict[str, Any] = {
@@ -102,9 +100,7 @@ class ReplayLogProbPatch:
 
         self._replay_sampler = sampler_cls(**filtered_kwargs)
         self._replay_sampler_dotpath = sampler_dotpath
-        logger.warning(
-            "Enabled experimental replay sampler for old log_probs: %s", sampler_dotpath
-        )
+        logger.warning("Enabled experimental replay sampler for old log_probs: %s", sampler_dotpath)
 
     def maybe_replay_old_log_probs(
         self,
@@ -149,9 +145,7 @@ class ReplayLogProbPatch:
         allowed_steps = set(int(v) for v in batch.resolved_step_indices.tolist())
         target_steps = sorted(int(i) for i in batch.sde_indices if int(i) in allowed_steps)
         if not target_steps:
-            raise RuntimeError(
-                "logprob_source='replay' requested but no target SDE steps were provided in batch."
-            )
+            raise RuntimeError("logprob_source='replay' requested but no target SDE steps were provided in batch.")
 
         replay_sig = inspect.signature(replay_fn)
         replayed: Dict[int, torch.Tensor] = {}
@@ -167,17 +161,14 @@ class ReplayLogProbPatch:
                 "sigma_schedule": batch.timesteps,
                 **ctx_dict,
             }
-            call_kwargs = {
-                name: value
-                for name, value in arg_map.items()
-                if name in replay_sig.parameters
-            }
+            call_kwargs = {name: value for name, value in arg_map.items() if name in replay_sig.parameters}
             missing_required = [
                 name
                 for name, param in replay_sig.parameters.items()
                 if (
                     param.default is inspect.Parameter.empty
-                    and param.kind in (
+                    and param.kind
+                    in (
                         inspect.Parameter.POSITIONAL_ONLY,
                         inspect.Parameter.POSITIONAL_OR_KEYWORD,
                         inspect.Parameter.KEYWORD_ONLY,
@@ -194,11 +185,11 @@ class ReplayLogProbPatch:
                 old_log_prob = replay_fn(**call_kwargs)
             if not torch.is_tensor(old_log_prob):
                 raise RuntimeError(
-                    "Replay sampler must return torch.Tensor for old_log_prob, "
-                    f"got {type(old_log_prob).__name__}"
+                    f"Replay sampler must return torch.Tensor for old_log_prob, got {type(old_log_prob).__name__}"
                 )
             replayed[int(step_idx)] = old_log_prob.detach()
 
         from diffusionrl.types.sample import LogProbData
+
         batch.log_probs = LogProbData.from_dict(replayed)
         return batch

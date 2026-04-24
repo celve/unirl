@@ -24,23 +24,23 @@ from pathlib import Path
 import ray
 import torch
 
+from diffusionrl.algorithms.grpo import GRPOAlgorithmConfig
 from diffusionrl.config.training_sections import (
     LrSchedulerConfig,
     OptimizerConfig,
 )
 from diffusionrl.construction import ComponentInitPayload
+from diffusionrl.models.config import ModelBundleConfig
 from diffusionrl.ray.actor_config import RolloutActorConfig
 from diffusionrl.ray.rollout_actor import RolloutActor
 from diffusionrl.ray.train_actor import TrainActor
 from diffusionrl.reward.config import RewardSpec
+from diffusionrl.training.backends.fsdp import FSDPBackendConfig
+from diffusionrl.types.engine import EngineConfig
 from diffusionrl.types.prompts import Prompts
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.sampling import SamplingParams, SDEConfig
-from diffusionrl.types.engine import EngineConfig
 from diffusionrl.types.training_batch import TrainingBatch
-from diffusionrl.models.config import ModelBundleConfig
-from diffusionrl.training.backends.fsdp import FSDPBackendConfig
-from diffusionrl.algorithms.grpo import GRPOAlgorithmConfig
 
 MODEL_PATH = "/mnt/bj/models/stable-diffusion-3.5-medium"
 NUM_STEPS = 28
@@ -49,9 +49,7 @@ NUM_STEPS = 28
 # skip_last_timestep convention used by SD3 production configs.
 SDE_INDICES = list(range(NUM_STEPS - 1))
 NUM_SAMPLES_PER_PROMPT = 4
-OCR_PROMPTS_PATH = (
-    Path(__file__).resolve().parents[1] / "data" / "samples" / "ocr_prompts_toy.json"
-)
+OCR_PROMPTS_PATH = Path(__file__).resolve().parents[1] / "data" / "samples" / "ocr_prompts_toy.json"
 
 
 def load_ocr_prompts() -> list[str]:
@@ -87,6 +85,7 @@ def _build_reward_spec(
 # ---------------------------------------------------------------
 # Config builders — rollout side
 # ---------------------------------------------------------------
+
 
 def build_engine_config() -> EngineConfig:
     return EngineConfig(
@@ -148,6 +147,7 @@ def build_request(prompts: list[str]) -> RolloutRequest:
 # Config builders — training side
 # ---------------------------------------------------------------
 
+
 def build_train_actor_kwargs(
     *,
     rank: int,
@@ -204,6 +204,7 @@ def build_train_actor_kwargs(
 # Helper: produce a TrainingBatch from rollout
 # ---------------------------------------------------------------
 
+
 def produce_training_batch(rollout_actor) -> TrainingBatch:
     """Run rollout, attach real OCR rewards, compute advantages, convert to TrainingBatch."""
     prompts = load_ocr_prompts()
@@ -232,6 +233,7 @@ def produce_training_batch(rollout_actor) -> TrainingBatch:
 # Test functions
 # ---------------------------------------------------------------
 
+
 def test_rollout_to_training_batch(rollout_actor):
     """Validate TrainingBatch produced from rollout."""
     print("\n[test] rollout_to_training_batch")
@@ -246,9 +248,11 @@ def test_rollout_to_training_batch(rollout_actor):
     assert batch.rewards is not None
     assert batch.prompts is not None
 
-    print(f"  batch_size={batch.batch_size}, "
-          f"traj_positions={batch.trajectory_store.total_positions}, "
-          f"log_probs={batch.log_probs is not None}")
+    print(
+        f"  batch_size={batch.batch_size}, "
+        f"traj_positions={batch.trajectory_store.total_positions}, "
+        f"log_probs={batch.log_probs is not None}"
+    )
     print("  PASS")
 
 
@@ -270,14 +274,13 @@ def test_train_from_buffer(training_actor, rollout_actor):
     elapsed = time.perf_counter() - t0
 
     assert result.rollout_step == 0
-    assert not math.isnan(result.loss),      f"loss is NaN: {result}"
-    assert not math.isinf(result.loss),      f"loss is Inf: {result}"
+    assert not math.isnan(result.loss), f"loss is NaN: {result}"
+    assert not math.isinf(result.loss), f"loss is Inf: {result}"
     assert not math.isnan(result.grad_norm), f"grad_norm is NaN: {result}"
     assert result.has_backward
     assert result.optimizer_steps >= 1
 
-    print(f"  loss={result.loss:.4f}, grad_norm={result.grad_norm:.4f}, "
-          f"lr={result.lr:.2e}, elapsed={elapsed:.1f}s")
+    print(f"  loss={result.loss:.4f}, grad_norm={result.grad_norm:.4f}, lr={result.lr:.2e}, elapsed={elapsed:.1f}s")
     print("  PASS")
 
 
@@ -295,8 +298,7 @@ def test_train_via_objectref(training_actor, rollout_actor):
     assert not math.isnan(result.loss)
     assert not math.isnan(result.grad_norm)
 
-    print(f"  loss={result.loss:.4f}, grad_norm={result.grad_norm:.4f}, "
-          f"elapsed={elapsed:.1f}s")
+    print(f"  loss={result.loss:.4f}, grad_norm={result.grad_norm:.4f}, elapsed={elapsed:.1f}s")
     print("  PASS")
 
 
@@ -318,6 +320,7 @@ def test_train_direct_batch(training_actor, rollout_actor):
 # Main
 # ---------------------------------------------------------------
 
+
 def main():
     print("=" * 60)
     print("SGLang Rollout + FSDP Training E2E Test")
@@ -336,7 +339,9 @@ def main():
     # --- Create rollout actor ---
     print("\n--- Rollout actor setup ---")
     rollout_actor = RolloutActor.options(num_gpus=1).remote(
-        rank=0, world_size=1, num_gpus_allocated=1,
+        rank=0,
+        world_size=1,
+        num_gpus_allocated=1,
     )
     t0 = time.time()
     ray.get(rollout_actor.init.remote(build_rollout_actor_config()))

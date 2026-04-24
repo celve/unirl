@@ -14,12 +14,12 @@ from diffusionrl.config.spec import (
 )
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.ray.actor_config import RolloutActorConfig, TrainingActorConfig
-from diffusionrl.types.sampling import SamplingParams
 from diffusionrl.training.types import (
     TrainBackendCapabilities,
     TrainBackendLaunchSpec,
     TrainTopology,
 )
+from diffusionrl.types.sampling import SamplingParams
 
 
 @dataclass(frozen=True)
@@ -47,10 +47,7 @@ class DerivedConfig:
     def require_training_plan(self) -> TrainingPlan:
         training_plan = self.training_plan
         if training_plan is None:
-            raise ValueError(
-                "DerivedConfig is missing training_plan. "
-                "Call attach_training_plan(...)."
-            )
+            raise ValueError("DerivedConfig is missing training_plan. Call attach_training_plan(...).")
         return training_plan
 
 

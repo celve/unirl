@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+
 def _resolve_target_modules(args: Any) -> list[str]:
     raw = args.sync.target_modules
     if isinstance(raw, (list, tuple)) and raw:
@@ -48,9 +49,7 @@ def _validate_tensor_sync_topology(launch_config: LaunchConfig) -> None:
     """Guard invalid topology values for tensor/distributed sync paths."""
     rollout = launch_config.rollout
     if rollout is None:
-        raise ValueError(
-            "Tensor/distributed weight sync requires a dedicated rollout launch config."
-        )
+        raise ValueError("Tensor/distributed weight sync requires a dedicated rollout launch config.")
     engine_config = rollout.engine_init_payload.component_config
     if not isinstance(engine_config, EngineConfig):
         raise ValueError(
@@ -72,15 +71,10 @@ def _resolve_rollout_tp_payload_count(rollout_runtime: Any) -> int:
         return 1
     topology = rollout_runtime.get_weight_sync_topology()
     if not isinstance(topology, dict):
-        raise ValueError(
-            f"Invalid rollout weight-sync topology payload: {topology!r}"
-        )
+        raise ValueError(f"Invalid rollout weight-sync topology payload: {topology!r}")
     payload_count = int(topology.get("num_gpus_per_actor", 1))
     if payload_count < 1:
-        raise ValueError(
-            "rollout weight-sync topology must expose num_gpus_per_actor >= 1. "
-            f"Got {payload_count}."
-        )
+        raise ValueError(f"rollout weight-sync topology must expose num_gpus_per_actor >= 1. Got {payload_count}.")
     return payload_count
 
 
@@ -88,9 +82,7 @@ def _select_export_format(launch_config: LaunchConfig) -> str:
     """Select checkpoint export format based on rollout engine and backend capabilities."""
     rollout = launch_config.rollout
     if rollout is None:
-        raise ValueError(
-            "Checkpoint weight sync requires a dedicated rollout runtime config."
-        )
+        raise ValueError("Checkpoint weight sync requires a dedicated rollout runtime config.")
     engine_type = str(rollout.rollout_engine or "").strip().lower()
     if not engine_type:
         raise ValueError(
@@ -98,9 +90,7 @@ def _select_export_format(launch_config: LaunchConfig) -> str:
             "Validate args before selecting dedicated rollout checkpoint export format."
         )
     backend_caps = (
-        launch_config.training.backend_capabilities.as_dict()
-        if launch_config.training.backend_capabilities
-        else {}
+        launch_config.training.backend_capabilities.as_dict() if launch_config.training.backend_capabilities else {}
     )
     if backend_caps:
         preferred_by_engine = backend_caps.get("preferred_weight_export_format_by_rollout_engine")
@@ -120,6 +110,7 @@ def _select_export_format(launch_config: LaunchConfig) -> str:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def build_weight_sync_config(
     args: Any,
@@ -163,9 +154,9 @@ def build_weight_sync_config(
             "bucket_size_mb": _resolve_bucket_size_mb(args),
             "flush_cache": _resolve_flush_cache(args),
             "rollout_num_gpus": total_rollout_gpus,
-            "rollout_num_gpus_per_engine": int(
-                topology.get("num_gpus_per_actor", 1)
-            ) if isinstance(topology, dict) else 1,
+            "rollout_num_gpus_per_engine": int(topology.get("num_gpus_per_actor", 1))
+            if isinstance(topology, dict)
+            else 1,
         }
 
     if mode == "checkpoint_path":
@@ -180,8 +171,7 @@ def build_weight_sync_config(
         }
 
     raise ValueError(
-        f"Unsupported sync.protocol={mode}. "
-        f"Expected one of: disabled, tensor_payload, nccl_broadcast, checkpoint_path"
+        f"Unsupported sync.protocol={mode}. Expected one of: disabled, tensor_payload, nccl_broadcast, checkpoint_path"
     )
 
 

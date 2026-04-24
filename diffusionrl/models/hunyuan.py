@@ -3,8 +3,9 @@ HunyuanVideo Model Bundle.
 
 Reference: DanceGRPO implementation
 """
+
 import logging
-from typing import Dict, List, Optional, Tuple, Type, Union
+from typing import List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -40,9 +41,7 @@ class HunyuanModelBundle(ModelBundle):
         super().__init__(config)
 
         self.vae_ckpt_path = config.vae_ckpt_path or config.pretrained_model_ckpt_path
-        self.text_encoder_ckpt_path = (
-            config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path
-        )
+        self.text_encoder_ckpt_path = config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path
         self.load()
 
     @property
@@ -64,6 +63,7 @@ class HunyuanModelBundle(ModelBundle):
     @classmethod
     def forward_plugin(cls):
         from diffusionrl.models.forward_plugins import HunyuanForwardPlugin
+
         return HunyuanForwardPlugin()
 
     @classmethod
@@ -234,6 +234,7 @@ class HunyuanModelBundle(ModelBundle):
                 HunyuanVideoSingleTransformerBlock,
                 HunyuanVideoTransformerBlock,
             )
+
             return (HunyuanVideoTransformerBlock, HunyuanVideoSingleTransformerBlock)
         except ImportError:
             return ()
@@ -326,9 +327,7 @@ class HunyuanTextEncoderWrapper:
             Tuple of (prompt_embeds, pooled_prompt_embeds)
         """
         if self.llama_encoder is None or self.clip_encoder is None:
-            raise RuntimeError(
-                "HunyuanTextEncoderWrapper is not initialized: LLAMA/CLIP encoders are unavailable."
-            )
+            raise RuntimeError("HunyuanTextEncoderWrapper is not initialized: LLAMA/CLIP encoders are unavailable.")
 
         with torch.no_grad():
             # LLAMA encoding

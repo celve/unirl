@@ -1,12 +1,13 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
+import torch
+
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.sample import LogProbData, RolloutSamples
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.types.trajectory_store import TrajectoryStore
-from diffusionrl.utils.batched import Batched, concat_field, shared_field
-import torch
+from diffusionrl.utils.batched import Batched, concat_field
 
 
 @dataclass
@@ -28,7 +29,7 @@ class RolloutResponse(Batched):
             indices = torch.tensor(groups[gid], dtype=torch.long)
             results.append(self.select(indices))
         return results
-    
+
     def to_meta(self) -> "RolloutResponseMeta":
         return RolloutResponseMeta(group_ids=self.request.prompts.group_ids, sample_ids=self.request.prompts.sample_ids)
 
@@ -56,9 +57,7 @@ class RolloutResponse(Batched):
             trajectory_store = samples.trajectories
             if log_probs is not None:
                 sde_int = {int(i) for i in sde_indices}
-                log_probs = LogProbData.from_dict(
-                    {k: v for k, v in log_probs.data.items() if k in sde_int}
-                )
+                log_probs = LogProbData.from_dict({k: v for k, v in log_probs.data.items() if k in sde_int})
                 recorded = {int(k) for k in log_probs.data.keys()}
                 if recorded != sde_int:
                     raise AssertionError(f"log_probs keys {sorted(recorded)} != sde_indices {sorted(sde_int)}")
@@ -84,7 +83,8 @@ class RolloutResponse(Batched):
         batch.validate()
         return batch
 
-@dataclass 
+
+@dataclass
 class RolloutResponseMeta(Batched):
     group_ids: List[str] = concat_field()
     sample_ids: List[str] = concat_field()

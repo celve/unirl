@@ -11,7 +11,6 @@ from diffusionrl.training.backends.fsdp import FSDPBackend, FSDPBackendConfig
 from diffusionrl.training.backends.veomni import VeOmniBackend, VeOmniBackendConfig
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
-
 _SUPPORTED_BACKENDS = ("fsdp", "veomni")
 
 
@@ -26,9 +25,7 @@ def build_fsdp_train_backend_config_from_args(args: Any) -> FSDPBackendConfig:
     # param_dtype may arrive as str in train_backend_kwargs; normalize to torch.dtype.
     extra_param_dtype = extra.pop("param_dtype", None)
     resolved_param_dtype = parse_torch_dtype(
-        extra_param_dtype
-        if extra_param_dtype is not None
-        else str(args.precision.fsdp_precision),
+        extra_param_dtype if extra_param_dtype is not None else str(args.precision.fsdp_precision),
         field_name="training.train_backend_kwargs.param_dtype",
     )
     fsdp_mode = str(getattr(args.training, "fsdp_mode", "full") or "full").strip().lower()
@@ -54,9 +51,7 @@ def build_veomni_train_backend_config_from_args(
     extra = _coerce_simple_dataclass_fields(VeOmniBackendConfig, extra)
     parallelize_kwargs = extra.get("parallelize_kwargs")
     if parallelize_kwargs is not None and not isinstance(parallelize_kwargs, dict):
-        raise TypeError(
-            "training.train_backend_kwargs.parallelize_kwargs must be a dict when provided."
-        )
+        raise TypeError("training.train_backend_kwargs.parallelize_kwargs must be a dict when provided.")
     if parallelize_kwargs is not None:
         extra["parallelize_kwargs"] = dict(parallelize_kwargs)
     return VeOmniBackendConfig(**extra)
@@ -79,8 +74,7 @@ def build_train_backend_init_payload_from_args(args: Any) -> ComponentInitPayloa
     parser_fn = _PARSER_DISPATCH.get(identifier)
     if parser_fn is None:
         raise ValueError(
-            f"Unsupported train_backend={identifier!r}. "
-            f"Supported built-in backends: {list(_SUPPORTED_BACKENDS)}."
+            f"Unsupported train_backend={identifier!r}. Supported built-in backends: {list(_SUPPORTED_BACKENDS)}."
         )
     component_config = parser_fn(args)
     return ComponentInitPayload(
@@ -95,9 +89,7 @@ def validate_train_backend_kwargs(
     train_backend_kwargs: Dict[str, Any],
 ) -> None:
     config_field_names = {field.name for field in dataclass_fields(config_class)}
-    unknown = sorted(
-        key for key in train_backend_kwargs.keys() if key not in config_field_names
-    )
+    unknown = sorted(key for key in train_backend_kwargs.keys() if key not in config_field_names)
     if unknown:
         raise ValueError(
             "training.train_backend_kwargs contains unsupported keys for "
@@ -121,24 +113,16 @@ def resolve_train_backend_identifier(args: Any) -> str:
             "extension mechanism."
         )
     if backend_name not in _SUPPORTED_BACKENDS:
-        raise ValueError(
-            f"Unsupported train_backend={backend_name!r}. "
-            f"Supported: {list(_SUPPORTED_BACKENDS)}."
-        )
+        raise ValueError(f"Unsupported train_backend={backend_name!r}. Supported: {list(_SUPPORTED_BACKENDS)}.")
     return backend_name
 
 
-def _coerce_simple_dataclass_fields(
-    config_class: type, raw: Dict[str, Any]
-) -> Dict[str, Any]:
+def _coerce_simple_dataclass_fields(config_class: type, raw: Dict[str, Any]) -> Dict[str, Any]:
     import typing
 
     simple_types = {int, float, bool, str}
     hints = typing.get_type_hints(config_class)
-    field_name_to_type = {
-        name: hint for name, hint in hints.items()
-        if hint in simple_types
-    }
+    field_name_to_type = {name: hint for name, hint in hints.items() if hint in simple_types}
     coerced: Dict[str, Any] = {}
     for key, value in raw.items():
         field_type = field_name_to_type.get(key)

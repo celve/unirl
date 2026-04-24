@@ -34,7 +34,8 @@ def aggregate(
     reducer = AGGREGATORS.get(method)
     if reducer is None:
         logger.warning(
-            "Unknown aggregation '%s', using weighted_sum", method,
+            "Unknown aggregation '%s', using weighted_sum",
+            method,
         )
         reducer = _weighted_sum
     return reducer(responses, batch_size, total_time)
@@ -74,9 +75,7 @@ def _weighted_sum(
         total_weight += weight
         component_rewards[executor.get_model_name()] = resp.rewards
 
-    final_rewards = (
-        (total / total_weight).tolist() if total_weight > 0 else total.tolist()
-    )
+    final_rewards = (total / total_weight).tolist() if total_weight > 0 else total.tolist()
     successes, errors = _merge_successes_errors(responses, batch_size)
     return RewardResponse(
         rewards=final_rewards,

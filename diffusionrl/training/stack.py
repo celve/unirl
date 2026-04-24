@@ -2,18 +2,40 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import torch
 
 from diffusionrl.algorithms import BaseAlgorithm
 from diffusionrl.training.backends.base import TrainBackend
-from diffusionrl.training.update_schedule import _build_micro_batch_slices
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils.ema import EMAManager
 from diffusionrl.utils.misc import aggregate_numeric_metrics
 
 logger = logging.getLogger(__name__)
+
+
+def _positive_int(*, name: str, value: Any) -> int:
+    resolved = int(value)
+    if resolved < 1:
+        raise ValueError(f"{name} must be >= 1. Got {resolved}.")
+    return resolved
+
+
+def _build_micro_batch_slices(
+    *,
+    total_size: int,
+    micro_batch_size: int,
+) -> Tuple[Tuple[int, int], ...]:
+    resolved_total_size = _positive_int(name="total_size", value=total_size)
+    resolved_micro_batch_size = _positive_int(name="micro_batch_size", value=micro_batch_size)
+    slices: List[Tuple[int, int]] = []
+    start = 0
+    while start < resolved_total_size:
+        end = min(start + resolved_micro_batch_size, resolved_total_size)
+        slices.append((start, end))
+        start = end
+    return tuple(slices)
 
 
 @dataclass(frozen=True)
@@ -120,14 +142,10 @@ class TrainStack:
         total_timesteps = sum(r.num_timesteps_trained for r in mini_results)
         has_backward = any(r.has_backward for r in mini_results)
 
-        aggregated_metrics = aggregate_numeric_metrics(
-            [r.metrics for r in mini_results if r.metrics]
-        )
+        aggregated_metrics = aggregate_numeric_metrics([r.metrics for r in mini_results if r.metrics])
 
         if optimizer_steps > 0:
-            self.ema_manager.post_rollout_end(
-                self.backend.model, aggregated_metrics
-            )
+            self.ema_manager.post_rollout_end(self.backend.model, aggregated_metrics)
 
         return BatchResult(
             rollout_step=rollout_step,
@@ -180,18 +198,14 @@ class TrainStack:
             update_num_timesteps = max(update_num_timesteps, result.num_timesteps)
             has_backward = has_backward or result.has_backward
 
-        aggregated_metrics = aggregate_numeric_metrics(
-            [r.metrics for r in micro_results if r.metrics]
-        )
+        aggregated_metrics = aggregate_numeric_metrics([r.metrics for r in micro_results if r.metrics])
 
         if has_backward:
             clipped = self.backend.clip_grad_norm(self.max_grad_norm)
             self.optimizer.step()
             if self.scheduler is not None:
                 self.scheduler.step()
-            self.ema_manager.post_optimizer_step(
-                self.backend.model, aggregated_metrics
-            )
+            self.ema_manager.post_optimizer_step(self.backend.model, aggregated_metrics)
         else:
             clipped = 0.0
             logger.warning(

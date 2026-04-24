@@ -6,7 +6,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List, Optional, Sequence
+from typing import Any, Deque, Dict, Optional, Sequence
 
 from diffusionrl.buffer.buffer_plugins import BufferPlugin, BufferPluginContext, build_buffer_plugins
 from diffusionrl.buffer.buffer_store import BatchStore
@@ -185,8 +185,7 @@ class BufferRuntime:
             got = int(payload.rollout_id)
             if got != int(expected_rollout_id):
                 raise RuntimeError(
-                    "Rollout/training payload mismatch: "
-                    f"expected rollout_id={expected_rollout_id}, got {got}."
+                    f"Rollout/training payload mismatch: expected rollout_id={expected_rollout_id}, got {got}."
                 )
         return payload
 

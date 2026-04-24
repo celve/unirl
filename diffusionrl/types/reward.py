@@ -33,9 +33,7 @@ class RewardRequest:
     sample_ids: Optional[List[str]] = None
     group_ids: Optional[List[str]] = None
     metadata: Optional[List[Optional[Dict[str, Any]]]] = None
-    reward_types: List[RewardType] = field(
-        default_factory=lambda: [RewardType.IMAGE_TEXT_ALIGNMENT]
-    )
+    reward_types: List[RewardType] = field(default_factory=lambda: [RewardType.IMAGE_TEXT_ALIGNMENT])
     return_components: bool = False
 
     @property
@@ -72,6 +70,7 @@ class RewardResponse(Batched):
     @property
     def batch_size(self) -> int:
         return len(self.rewards)
+
 
 __all__ = [
     "RewardRequest",

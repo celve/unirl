@@ -87,6 +87,7 @@ def build_lr_scheduler(
         return torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0)
 
     if scheduler_type == "linear":
+
         def lr_lambda(step: int) -> float:
             if step < warmup_steps:
                 return step / max(1, warmup_steps)

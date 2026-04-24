@@ -81,9 +81,7 @@ def test_build_model_bundle_init_payload_from_args_returns_typed_payload() -> No
     assert payload.component_config.lora_target_modules == ["transformer.blocks.0"]
 
 
-def test_build_model_bundle_init_payload_from_args_uses_none_for_default_lora_targets() -> (
-    None
-):
+def test_build_model_bundle_init_payload_from_args_uses_none_for_default_lora_targets() -> None:
     args = SimpleNamespace(
         model=SimpleNamespace(
             pretrained_model_ckpt_path="/tmp/model",
@@ -115,9 +113,7 @@ def test_model_bundle_config_rejects_empty_lora_target_modules() -> None:
     except ValueError as exc:
         assert "lora_target_modules" in str(exc)
     else:
-        raise AssertionError(
-            "Expected ModelBundleConfig to reject empty lora_target_modules"
-        )
+        raise AssertionError("Expected ModelBundleConfig to reject empty lora_target_modules")
 
 
 def test_create_model_bundle_from_init_payload_passes_typed_config() -> None:

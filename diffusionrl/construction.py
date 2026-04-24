@@ -25,8 +25,7 @@ def create_component_from_init_payload(
     """Instantiate a component from its canonical init payload."""
     if not isinstance(component_init_payload, ComponentInitPayload):
         raise TypeError(
-            "component_init_payload must be a ComponentInitPayload, "
-            f"got: {type(component_init_payload).__name__}"
+            f"component_init_payload must be a ComponentInitPayload, got: {type(component_init_payload).__name__}"
         )
 
     component_cls = derive_registry_or_dotpath(

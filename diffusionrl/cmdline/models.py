@@ -123,9 +123,7 @@ def build_flux_model_bundle_config_from_args(
             f"Unknown sampling.sde_type={args.sampling.sde_type!r} for model_type='flux'. "
             f"Valid options: {', '.join(t for t in valid_sde_types if t)}."
         )
-    return FluxModelBundleConfig(
-        **build_model_bundle_config_from_args(args, model_spec=model_spec).__dict__
-    )
+    return FluxModelBundleConfig(**build_model_bundle_config_from_args(args, model_spec=model_spec).__dict__)
 
 
 def build_model_bundle_init_payload_from_args(
