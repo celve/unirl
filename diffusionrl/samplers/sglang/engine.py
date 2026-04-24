@@ -308,9 +308,9 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 "the training side only ships LoRA weights for a subset, "
                 "leading to 'LoRA adapter None does not contain the weights "
                 "for layer ...' warnings and silently disabled LoRA on those "
-                "layers. Override %s.default_lora_target_modules() on the "
-                "model bundle or pass --training.lora-target-modules.",
-                type(self).__name__,
+                "layers. Override default_lora_target_modules() on the "
+                "model bundle (%s) or pass --training.lora-target-modules.",
+                getattr(self.config, "model_dotpath", None) or "<unknown>",
             )
 
         logger.info(
