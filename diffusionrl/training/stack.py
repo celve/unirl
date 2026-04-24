@@ -259,7 +259,7 @@ class TrainStack:
             num_timesteps,
             has_backward,
         ) = self.algorithm.compute_loss_and_backward(
-            model=self.backend.model,
+            model_bundle=self.backend.model_bundle,
             batch=micro_batch,
             timesteps=timesteps,
             loss_scale=loss_scale,

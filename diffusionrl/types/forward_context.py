@@ -10,22 +10,14 @@ Inherits from :class:`Batched` for generic ``concat`` / ``select`` /
 ForwardContext-specific helpers:
 
 - ``cast_dtype``: cast floating-point concat tensors for transport.
-- ``to_dict``: export non-None fields for ``**``-expansion into model forward.
+- ``to_dict``: export non-None fields for legacy ``**``-expansion paths.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
-from typing import (
-    Any,
-    ClassVar,
-    Dict,
-    Optional,
-    Sequence,
-    Type,
-    TypeVar,
-)
+from typing import Any, ClassVar, Dict, Optional, Sequence, Type, TypeVar
 
 import torch
 
@@ -108,8 +100,9 @@ class ForwardContext(Batched):
     def to_dict(self) -> Dict[str, Any]:
         """Export all non-None fields as a plain dict.
 
-        This is the dict that gets ``**``-expanded into
-        ``ModelForwardPlugin.forward(model, latents, sigma, **ctx.to_dict())``.
+        Legacy helper for call sites that still expand ``ForwardContext``
+        fields as keyword arguments. New training-forward dispatch should pass
+        ``ctx`` directly to ``ModelBundle.forward_denoiser(...)``.
         """
         result: Dict[str, Any] = {}
         for f in dataclass_fields(self):
@@ -140,9 +133,9 @@ class ForwardContext(Batched):
 class FluxForwardContext(ForwardContext):
     """ForwardContext for FLUX models.
 
-    Field naming follows the ModelForwardPlugin protocol: ``image_ids``
-    (not ``img_ids``) so that ``plugin.forward(**ctx.to_dict())`` maps
-    directly to the plugin signature without remapping.
+    Field naming follows the model-bundle-owned training-forward contract:
+    ``image_ids`` (not ``img_ids``) so bundle implementations can consume the
+    context directly without remapping.
     """
 
     guidance_scale: float = shared_field(default=3.5)

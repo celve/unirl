@@ -1,11 +1,11 @@
 from types import SimpleNamespace
 
-from diffusionrl.cmdline.algorithms import build_algorithm_init_payload_from_args
-from diffusionrl.config.build_domain_args import (
+from diffusionrl.cmdline.actors import (
     build_rollout_actor_init_config_from_args,
     build_training_actor_init_config_from_args,
 )
-from diffusionrl.config.spec import TrainingPlan
+from diffusionrl.cmdline.algorithms import build_algorithm_init_payload_from_args
+from diffusionrl.config.spec import ModelSpec, RolloutInfo, SamplingSpec, TrainingPlan
 from diffusionrl.config.training_sections import (
     LrSchedulerConfig,
     OptimizerConfig,
@@ -22,7 +22,7 @@ from diffusionrl.reward.config import RewardSpec
 from diffusionrl.training.backends import FSDPBackendConfig
 from diffusionrl.training.types import BaseTrainBackendConfig, TrainTopology
 from diffusionrl.types.engine import EngineConfig
-from diffusionrl.types.sampling import SamplingParams, SDEConfig
+from diffusionrl.types.sampling import SamplingParams
 
 
 def _make_algorithm_args():
@@ -47,16 +47,22 @@ def _make_algorithm_args():
             rollout_scheduler={"timestep_strategy": "all", "timestep_fraction": 0.75},
             training_scheduler={"timestep_strategy": "all", "timestep_fraction": 0.5},
         ),
-        precision=SimpleNamespace(training_autocast_precision="bf16"),
-        debug=SimpleNamespace(debug_output_dir=None),
+        precision=SimpleNamespace(
+            training_autocast_precision="bf16",
+            rollout_autocast_precision="bf16",
+            trajectory_precision="fp16",
+            logprob_precision="fp32",
+        ),
+        debug=SimpleNamespace(output_dir=None),
     )
 
 
 def _make_sampling_spec(
     *,
     guidance_scale: float = 3.5,
-) -> SamplingParams:
-    return SamplingParams(
+) -> SamplingSpec:
+    return SamplingSpec(
+        sampler_dotpath="diffusionrl.samplers.DefaultSampler",
         num_inference_steps=28,
         guidance_scale=guidance_scale,
         height=64,
@@ -65,10 +71,9 @@ def _make_sampling_spec(
         seed=123,
         init_same_noise=False,
         sampler_kwargs={},
-        sde_config=SDEConfig(eta=0.5, sde_type="vp", shift=1.0),
-        autocast_precision="bf16",
-        trajectory_precision="fp16",
-        logprob_precision="fp32",
+        eta=0.5,
+        sde_type="vp",
+        shift=1.0,
     )
 
 
@@ -104,13 +109,40 @@ def _make_reward_spec(*, reward_components=None) -> RewardSpec:
     )
 
 
+def _make_derived_config(*, sampling_spec: SamplingSpec):
+    return SimpleNamespace(
+        model_spec=ModelSpec(
+            model_dotpath="diffusionrl.models.sd3.SD3ModelBundle",
+            model_cls=object,
+            model_type="sd3",
+            sampler_dotpath="diffusionrl.samplers.DefaultSampler",
+        ),
+        sampling_spec=sampling_spec,
+        rollout_info=RolloutInfo(
+            mode="train_actor",
+            rollout_engine=None,
+            training_actor_sampling_mode=True,
+            is_sglang_engine=False,
+            logprob_source="engine",
+            replay_enabled=False,
+            sync_protocol="nccl",
+            algorithm_type="grpo",
+            max_samples_per_request=None,
+        ),
+        training_topology=_make_topology(),
+        training_plan=_make_training_plan(),
+        require_training_plan=_make_training_plan,
+    )
+
+
 def test_build_training_actor_init_config_from_args_returns_typed_config():
     args = _make_algorithm_args()
     sampling_spec = _make_sampling_spec()
     algorithm_init_payload = build_algorithm_init_payload_from_args(
         args,
-        sampling_spec=sampling_spec,
+        sampling_spec=sampling_spec.to_params(args.precision),
     )
+    derived_config = _make_derived_config(sampling_spec=sampling_spec)
 
     args.training = SimpleNamespace(
         learning_rate=1e-4,
@@ -126,9 +158,7 @@ def test_build_training_actor_init_config_from_args_returns_typed_config():
 
     config = build_training_actor_init_config_from_args(
         args,
-        replay_enabled=False,
-        topology=_make_topology(),
-        training_plan=_make_training_plan(),
+        derived_config=derived_config,
         algorithm_init_payload=algorithm_init_payload,
         model_init_payload=ComponentInitPayload(
             component_dotpath="diffusionrl.models.sd3.SD3ModelBundle",
@@ -137,7 +167,6 @@ def test_build_training_actor_init_config_from_args_returns_typed_config():
             ),
         ),
         reward_config=_make_reward_spec(reward_components=[]),
-        sampling_config=_make_sampling_spec(sampler_dotpath="s"),
         train_backend_init_payload=ComponentInitPayload(
             component_dotpath="diffusionrl.training.backends.fsdp.FSDPBackend",
             component_config=FSDPBackendConfig(),
@@ -168,7 +197,10 @@ def test_build_rollout_actor_init_config_from_args_returns_typed_config():
     args.model = SimpleNamespace()
     args.training = SimpleNamespace()
     args.precision = SimpleNamespace(
+        training_autocast_precision="bf16",
         rollout_autocast_precision="bf16",
+        trajectory_precision="fp16",
+        logprob_precision="fp32",
     )
     args.rollout = SimpleNamespace(
         num_gpus_per_actor=1,
@@ -191,17 +223,30 @@ def test_build_rollout_actor_init_config_from_args_returns_typed_config():
     args.ray = SimpleNamespace(
         offload_rollout=False,
     )
+    derived_config = SimpleNamespace(
+        sampling_spec=_make_sampling_spec(),
+        model_spec=ModelSpec(
+            model_dotpath="diffusionrl.models.sd3.SD3ModelBundle",
+            model_cls=object,
+            model_type="sd3",
+            sampler_dotpath="diffusionrl.samplers.DefaultSampler",
+        ),
+        rollout_info=RolloutInfo(
+            mode="separate",
+            rollout_engine="sglang",
+            training_actor_sampling_mode=False,
+            is_sglang_engine=True,
+            logprob_source="engine",
+            replay_enabled=False,
+            sync_protocol="nccl",
+            algorithm_type="grpo",
+            max_samples_per_request=None,
+        ),
+    )
 
     config = build_rollout_actor_init_config_from_args(
         args,
-        config_bundle=SimpleNamespace(
-            sampling_spec=_make_sampling_spec(),
-            model_spec=SimpleNamespace(model_dotpath="diffusionrl.models.sd3.SD3ModelBundle"),
-            rollout=SimpleNamespace(
-                logprob_source="engine",
-                rollout_topology=SimpleNamespace(rollout_engine="sglang"),
-            ),
-        ),
+        derived_config=derived_config,
         model_init_payload=ComponentInitPayload(
             component_dotpath="diffusionrl.models.sd3.SD3ModelBundle",
             component_config=ModelBundleConfig(

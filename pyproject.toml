@@ -78,3 +78,8 @@ quote-style = "double"
 testpaths = ["tests"]
 norecursedirs = ["_dev"]
 pythonpath = ["."]
+markers = [
+  "e2e: heavy end-to-end tests that are skipped unless --run-e2e is provided",
+  "gpu: tests that require GPU resources",
+  "slow: tests that are slow to execute",
+]

@@ -4,13 +4,19 @@ diffusionrl Model Bundle Base Class.
 Defines the interface for model bundles that package transformer, VAE, and text encoder.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Type, Union
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
 
 from .config import ModelBundleConfig
+
+if TYPE_CHECKING:
+    from diffusionrl.types.forward_context import ForwardContext
 
 
 class ModelBundle(ABC):
@@ -51,6 +57,7 @@ class ModelBundle(ABC):
         self._transformer: Optional[nn.Module] = None
         self._vae: Optional[nn.Module] = None
         self._text_encoder: Optional[nn.Module] = None
+        self.training_forward_autocast_dtype: Optional[torch.dtype] = None
 
     @property
     def transformer(self) -> nn.Module:
@@ -116,17 +123,6 @@ class ModelBundle(ABC):
     def default_sampler_engine(cls) -> Optional[str]:
         """Default sampler engine type for this model bundle."""
         return None
-
-    @classmethod
-    def forward_plugin(cls):
-        """Return the forward plugin for this model's loss computation.
-
-        Subclasses should override to provide model-specific forward logic.
-        Returns a BaseForwardPlugin instance.
-        """
-        from diffusionrl.models.forward_plugins import DefaultForwardPlugin
-
-        return DefaultForwardPlugin()
 
     @classmethod
     def supports_sglang_prompt_mode(cls) -> bool:
@@ -246,6 +242,48 @@ class ModelBundle(ABC):
         from diffusionrl.sde.runtime import get_sigma_schedule
 
         return get_sigma_schedule(num_steps, shift, self.device)
+
+    def set_training_forward_autocast_dtype(
+        self,
+        autocast_dtype: Optional[torch.dtype],
+    ) -> None:
+        """Set the autocast dtype used by training-side forward dispatch."""
+        self.training_forward_autocast_dtype = autocast_dtype
+
+    def _build_training_autocast_ctx(self, device: torch.device):
+        """Return an autocast context for training forward dispatch."""
+        if (
+            self.training_forward_autocast_dtype is not None
+            and device.type == "cuda"
+            and self.training_forward_autocast_dtype in (torch.float16, torch.bfloat16)
+        ):
+            return torch.autocast("cuda", self.training_forward_autocast_dtype)
+        return nullcontext()
+
+    def _prepare_training_timestep(
+        self,
+        sigma: torch.Tensor,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        """Expand per-step sigma to a batch-aligned timestep tensor."""
+        if sigma.dim() == 0:
+            sigma_expanded = sigma.unsqueeze(0)
+        else:
+            sigma_expanded = sigma
+        return sigma_expanded.expand(batch_size).to(device, dtype=dtype)
+
+    @abstractmethod
+    def forward_denoiser(
+        self,
+        *,
+        latents: torch.Tensor,
+        sigma: torch.Tensor,
+        ctx: ForwardContext,
+    ) -> torch.Tensor:
+        """Run the model-family-specific denoiser forward for training."""
+        ...
 
     def to(self, device: Union[str, torch.device]) -> "ModelBundle":
         """

@@ -10,7 +10,7 @@ Reference: https://github.com/genmoai/mochi
 """
 
 import logging
-from typing import List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -73,14 +73,62 @@ class MochiModelBundle(ModelBundle):
         return "sglang"
 
     @classmethod
-    def forward_plugin(cls):
-        from diffusionrl.models.forward_plugins import MochiForwardPlugin
-
-        return MochiForwardPlugin()
-
-    @classmethod
     def supports_sglang_prompt_mode(cls) -> bool:
         return True
+
+    def forward_denoiser(
+        self,
+        *,
+        latents: torch.Tensor,
+        sigma: torch.Tensor,
+        ctx,
+    ) -> torch.Tensor:
+        prompt_embeds = ctx.prompt_embeds
+        if prompt_embeds is None:
+            raise ValueError("MochiModelBundle.forward_denoiser requires ctx.prompt_embeds.")
+        negative_prompt_embeds = getattr(ctx, "negative_prompt_embeds", None)
+        encoder_attention_mask = getattr(ctx, "encoder_attention_mask", None)
+        attention_kwargs = getattr(ctx, "attention_kwargs", None)
+        guidance_scale = float(getattr(ctx, "guidance_scale", 3.5))
+
+        batch_size = latents.shape[0]
+        device = latents.device
+        dtype = prompt_embeds.dtype
+        timestep_1000 = self._prepare_training_timestep(sigma, batch_size, device) * 1000
+        model = self.transformer
+
+        with self._build_training_autocast_ctx(device):
+            if guidance_scale > 1.0:
+                uncond_embeds = (
+                    negative_prompt_embeds if negative_prompt_embeds is not None else torch.zeros_like(prompt_embeds)
+                )
+                model_kwargs: Dict[str, Any] = {
+                    "hidden_states": torch.cat([latents, latents], dim=0).to(dtype),
+                    "encoder_hidden_states": torch.cat([uncond_embeds, prompt_embeds], dim=0),
+                    "timestep": torch.cat([timestep_1000, timestep_1000], dim=0),
+                    "return_dict": False,
+                }
+                if encoder_attention_mask is not None:
+                    model_kwargs["encoder_attention_mask"] = torch.cat(
+                        [encoder_attention_mask, encoder_attention_mask], dim=0
+                    )
+                if attention_kwargs is not None:
+                    model_kwargs["attention_kwargs"] = attention_kwargs
+                noise_pred = model(**model_kwargs)[0]
+                noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
+                return noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+
+            model_kwargs = {
+                "hidden_states": latents.to(dtype),
+                "encoder_hidden_states": prompt_embeds,
+                "timestep": timestep_1000,
+                "return_dict": False,
+            }
+            if encoder_attention_mask is not None:
+                model_kwargs["encoder_attention_mask"] = encoder_attention_mask
+            if attention_kwargs is not None:
+                model_kwargs["attention_kwargs"] = attention_kwargs
+            return model(**model_kwargs)[0]
 
     def load(self) -> None:
         """Load all model components."""

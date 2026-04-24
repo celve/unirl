@@ -61,14 +61,49 @@ class HunyuanModelBundle(ModelBundle):
         return "fsdp"
 
     @classmethod
-    def forward_plugin(cls):
-        from diffusionrl.models.forward_plugins import HunyuanForwardPlugin
-
-        return HunyuanForwardPlugin()
-
-    @classmethod
     def supports_sglang_prompt_mode(cls) -> bool:
         return True
+
+    def forward_denoiser(
+        self,
+        *,
+        latents: torch.Tensor,
+        sigma: torch.Tensor,
+        ctx,
+    ) -> torch.Tensor:
+        prompt_embeds = ctx.prompt_embeds
+        if prompt_embeds is None:
+            raise ValueError("HunyuanModelBundle.forward_denoiser requires ctx.prompt_embeds.")
+        pooled_prompt_embeds = getattr(ctx, "pooled_prompt_embeds", None)
+        encoder_attention_mask = getattr(ctx, "encoder_attention_mask", None)
+        guidance_scale = float(getattr(ctx, "guidance_scale", 1.0))
+
+        batch_size = latents.shape[0]
+        device = latents.device
+        dtype = prompt_embeds.dtype
+        if pooled_prompt_embeds is None:
+            pooled_prompt_embeds = torch.zeros(batch_size, 768, device=device, dtype=dtype)
+        if encoder_attention_mask is None:
+            encoder_attention_mask = torch.ones(
+                batch_size,
+                prompt_embeds.shape[1],
+                device=device,
+                dtype=torch.long,
+            )
+        timestep_1000 = self._prepare_training_timestep(sigma, batch_size, device) * 1000
+        model = self.transformer
+        guidance = torch.tensor([guidance_scale], device=device, dtype=dtype)
+
+        with self._build_training_autocast_ctx(device):
+            return model(
+                hidden_states=latents.to(dtype),
+                encoder_hidden_states=prompt_embeds,
+                pooled_projections=pooled_prompt_embeds,
+                encoder_attention_mask=encoder_attention_mask,
+                timestep=timestep_1000,
+                guidance=guidance,
+                return_dict=False,
+            )[0]
 
     def load(self) -> None:
         """Load all model components."""
