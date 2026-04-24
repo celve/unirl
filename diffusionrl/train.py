@@ -80,10 +80,10 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
     # and assigns ``self.algorithm._debug_output_dir`` — the env var is the
     # safety net for rollout actors and for Ray worker processes that may not
     # inherit the parent's environment on every platform.
-    import os as _os
+    import os
     _debug_output_dir = getattr(args.debug, "output_dir", None)
     if _debug_output_dir:
-        _os.environ["DIFFUSIONRL_DEBUG_OUTPUT_DIR"] = str(_debug_output_dir)
+        os.environ["DIFFUSIONRL_DEBUG_OUTPUT_DIR"] = str(_debug_output_dir)
         logger.info(
             "Exported DIFFUSIONRL_DEBUG_OUTPUT_DIR=%s for downstream actors.",
             _debug_output_dir,

@@ -421,11 +421,18 @@ class BaseAlgorithm(ABC):
         self,
         *,
         current_step: int,
-    ) -> Set[int]:
+    ) -> Optional[Set[int]]:
         """Resolve rollout-time SDE indices for the current step.
 
+        Returns:
+            A set of step indices where SDE sampling should be used, or
+            ``None`` for forward-process algorithms (e.g. NFT) that do not
+            require SDE rollout.  When ``None`` is returned, the rollout
+            pipeline routes the response through the clean-latents branch
+            in ``RolloutResponse.to_training_batch``.
+
         Default behavior:
-        - Forward-process algorithms do not use rollout SDE indices.
+        - Forward-process algorithms return ``None`` (no SDE rollout indices).
         - Trajectory algorithms implement their own current-step-driven policy.
         """
         ...

@@ -44,7 +44,7 @@ def _resolve_lora_target_modules(
 
     try:
         model_cls = resolve_model_class(model_spec.model_dotpath)
-    except Exception as exc:  # pragma: no cover - diagnostic path
+    except (ImportError, AttributeError, KeyError) as exc:  # pragma: no cover - diagnostic path
         logger.debug(
             "Could not resolve model class %r for LoRA target lookup: %s",
             model_spec.model_dotpath,
@@ -58,7 +58,7 @@ def _resolve_lora_target_modules(
 
     try:
         resolved = fn()
-    except Exception as exc:  # pragma: no cover - diagnostic path
+    except (TypeError, NotImplementedError) as exc:  # pragma: no cover - diagnostic path
         logger.warning(
             "Model class %s.default_lora_target_modules() raised %s; "
             "falling back to None (SGLang will wrap every linear layer).",

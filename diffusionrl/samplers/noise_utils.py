@@ -12,7 +12,7 @@ MAX_TORCH_SEED = (1 << 63) - 1
 def _derive_group_seed(base_seed: int, group_id: str) -> int:
     payload = f"{int(base_seed)}::{str(group_id)}".encode("utf-8")
     digest = hashlib.blake2b(payload, digest_size=8).digest()
-    return int.from_bytes(digest, byteorder="big", signed=False) % MAX_TORCH_SEED
+    return int.from_bytes(digest, byteorder="big", signed=False) % (MAX_TORCH_SEED + 1)
 
 
 def mix_rollout_base_seed(base_seed: int, rollout_id: int) -> int:
@@ -23,7 +23,7 @@ def mix_rollout_base_seed(base_seed: int, rollout_id: int) -> int:
     """
     payload = f"rollout::{int(base_seed)}::{int(rollout_id)}".encode("utf-8")
     digest = hashlib.blake2b(payload, digest_size=8).digest()
-    return int.from_bytes(digest, byteorder="big", signed=False) % MAX_TORCH_SEED
+    return int.from_bytes(digest, byteorder="big", signed=False) % (MAX_TORCH_SEED + 1)
 
 
 def generate_shared_noise(

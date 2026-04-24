@@ -109,7 +109,6 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         self._warned_missing_decoded: bool = False
         self._warned_logprob_shape: bool = False
         self._warned_unsupported_rollout_sde: bool = False
-        self._warned_disabled_native_rollout: bool = False
         self._warned_missing_trajectory_with_optional_mode: bool = False
         self._warned_latent_encode_fallback: bool = False
         self._informed_sglang_initial_noise_policy: bool = False
@@ -956,10 +955,11 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         # log_prob" (``logprob_source``):
         #   • rollout_enabled = True  → SGLang runs SDE step (required for GRPO)
         #   • logprob_source=native   → also return trajectory_log_probs; use them
-        #   • logprob_source=replay   → recompute log_prob on training side
-        #                                from the SDE trajectory
-        # Returning log_probs on replay is harmless (one elementwise ratio) and
-        # a lot cheaper than silently going ODE and losing a whole training run.
+        #   • logprob_source=replay   → preserve the SDE trajectory but return
+        #                                ``log_probs=None`` so ReplayLogProbPatch
+        #                                recomputes log_prob on the training side
+        # Keeping replay on the SDE path is still much cheaper than silently
+        # going ODE and losing a whole training run.
         default_rollout_enabled = bool(
             require_log_probs and sde_indices is not None
         )
@@ -1072,65 +1072,68 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 "SGLangRolloutEngine._build_generate_kwargs: initialize() must run first "
                 "(server_args is required to prepare_latent_shape / initial_noise)."
             )
-        n_expanded = len(list(prompts))
-        if n_expanded > 0:
-            batch_stub = SimpleNamespace(
-                height=int(out_h), width=int(out_w), num_frames=int(out_f)
+        n_expanded = len(prompts)
+        assert n_expanded > 0, "non-empty prompts checked above"
+        batch_stub = SimpleNamespace(
+            height=int(out_h), width=int(out_w), num_frames=int(out_f)
+        )
+        full_shape = self._server_args.pipeline_config.prepare_latent_shape(
+            batch_stub, int(n_expanded), int(out_f)
+        )
+        if int(full_shape[0]) != n_expanded:
+            raise ValueError(
+                "prepare_latent_shape first dim != expanded prompt count: "
+                f"full_shape[0]={full_shape[0]}, n_expanded={n_expanded}."
             )
-            full_shape = self._server_args.pipeline_config.prepare_latent_shape(
-                batch_stub, int(n_expanded), int(out_f)
-            )
-            if int(full_shape[0]) != n_expanded:
+        per_sample_shape = tuple(full_shape[1:])
+        device = self._device
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Resolve initial-noise dtype from sampling config; SGLang's
+        # latent_preparation will `.to(dtype=model_dtype)` anyway, but
+        # generating at the right precision avoids a redundant cast.
+        _prec = getattr(sp, "autocast_precision", "bf16")
+        _prec_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+        latent_dtype = _prec_map.get(str(_prec), torch.bfloat16) if device.type == "cuda" else torch.float32
+        raw_prompts = request.prompts
+        raw_noise_group_ids = getattr(raw_prompts, "noise_group_ids", None)
+        if init_same_noise:
+            if not isinstance(raw_noise_group_ids, list) or len(
+                raw_noise_group_ids
+            ) != n_expanded:
                 raise ValueError(
-                    "prepare_latent_shape first dim != expanded prompt count: "
-                    f"full_shape[0]={full_shape[0]}, n_expanded={n_expanded}."
+                    "SGLang: init_same_noise=True requires request.prompts."
+                    f"noise_group_ids length {len(raw_noise_group_ids) if isinstance(raw_noise_group_ids, list) else 0} "
+                    f"to match expanded batch {n_expanded}."
                 )
-            per_sample_shape = tuple(full_shape[1:])
-            device = self._device
-            if device is None:
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            latent_dtype = (
-                torch.bfloat16 if device.type == "cuda" else torch.float32
+            ng_for_latents = [str(x) for x in raw_noise_group_ids]
+            base_for_latents = int(seed) if seed is not None else None
+            if base_for_latents is None:
+                raise ValueError("init_same_noise=True requires sampling_params.seed")
+        else:
+            ng_for_latents = None
+            base_for_latents = None
+        initial = generate_latents(
+            batch_size=n_expanded,
+            latent_shape=per_sample_shape,
+            device=device,
+            dtype=latent_dtype,
+            init_same_noise=init_same_noise,
+            samples_per_prompt=samples_per_prompt,
+            noise_group_ids=ng_for_latents,
+            base_seed=base_for_latents,
+        )
+        request_kwargs["initial_noise"] = initial
+        if not self._informed_sglang_initial_noise_policy:
+            logger.info(
+                "SGLang: initial latents are precomputed in DiffusionRL; "
+                "noise_group_ids are not sent to SGLang so per-step SDE noise is not group-seeded."
             )
-            raw_prompts = request.prompts
-            raw_noise_group_ids = getattr(raw_prompts, "noise_group_ids", None)
-            if init_same_noise:
-                if not isinstance(raw_noise_group_ids, list) or len(
-                    raw_noise_group_ids
-                ) != n_expanded:
-                    raise ValueError(
-                        "SGLang: init_same_noise=True requires request.prompts."
-                        f"noise_group_ids length {len(raw_noise_group_ids) if isinstance(raw_noise_group_ids, list) else 0} "
-                        f"to match expanded batch {n_expanded}."
-                    )
-                ng_for_latents = [str(x) for x in raw_noise_group_ids]
-                base_for_latents = int(seed) if seed is not None else None
-                if base_for_latents is None:
-                    raise ValueError("init_same_noise=True requires sampling_params.seed")
-            else:
-                ng_for_latents = None
-                base_for_latents = None
-            initial = generate_latents(
-                batch_size=n_expanded,
-                latent_shape=per_sample_shape,
-                device=device,
-                dtype=latent_dtype,
-                init_same_noise=init_same_noise,
-                samples_per_prompt=samples_per_prompt,
-                noise_group_ids=ng_for_latents,
-                base_seed=base_for_latents,
-            )
-            request_kwargs["initial_noise"] = initial
-            if not self._informed_sglang_initial_noise_policy:
-                logger.info(
-                    "SGLang: initial latents are precomputed in DiffusionRL; "
-                    "noise_group_ids are not sent to SGLang so per-step SDE noise is not group-seeded."
-                )
-                self._informed_sglang_initial_noise_policy = True
+            self._informed_sglang_initial_noise_policy = True
         # High-entropy batch seed: per-step SDE noise is not tied to the training
         # config seed (sp.seed is used for init noise in DiffusionRL only after
         # rollout mix in ``plan_requests``).
-        request_kwargs["seed"] = int.from_bytes(os.urandom(8), "big") % MAX_TORCH_SEED
+        request_kwargs["seed"] = int.from_bytes(os.urandom(8), "big") % (MAX_TORCH_SEED + 1)
 
         ctx = _GenerateContext(
             model_type=model_type,
