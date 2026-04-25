@@ -13,9 +13,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
-import torch.nn as nn
 
 from diffusionrl.algorithms.registry import register_algorithm
+from diffusionrl.models.base import ModelBundle
 from diffusionrl.types import TimestepData
 from diffusionrl.types.forward_context import ForwardContext
 from diffusionrl.utils.misc import aggregate_numeric_metrics
@@ -308,13 +308,13 @@ class GRPOAlgorithm(BaseAlgorithm):
 
     def compute_loss(
         self,
-        model: nn.Module,
+        model_bundle: ModelBundle,
         timestep_data: TimestepData,
         advantages: torch.Tensor,
         *,
         ctx: ForwardContext,
         sigmas: Optional[torch.Tensor] = None,
-        ref_model: Optional[nn.Module] = None,
+        ref_model_bundle: Optional[ModelBundle] = None,
         training_progress: float = 0.0,
         **kwargs,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
@@ -358,8 +358,11 @@ class GRPOAlgorithm(BaseAlgorithm):
         if not isinstance(sigma_next, torch.Tensor):
             sigma_next = torch.tensor(sigma_next, device=device)
 
-        plugin = self._get_forward_plugin(model)
-        pred = plugin.forward(model=model, latents=latents, sigma=sigma, **ctx.to_dict())
+        pred = model_bundle.forward_denoiser(
+            latents=latents,
+            sigma=sigma,
+            ctx=ctx,
+        )
 
         new_log_prob, prev_sample_mean = self.compute_log_prob(
             pred=pred,
@@ -478,14 +481,14 @@ class GRPOAlgorithm(BaseAlgorithm):
 
         if self.use_kl_penalty and self.kl_coef > 0:
             kl_loss = self._compute_kl_penalty(
-                model=model,
+                model_bundle=model_bundle,
                 latents=latents,
                 next_latents=next_latents,
                 sigma=sigma,
                 sigma_next=sigma_next,
                 sigma_max=sigma_max,
                 prev_sample_mean=prev_sample_mean,
-                ref_model=ref_model,
+                ref_model_bundle=ref_model_bundle,
                 ctx=ctx,
                 **kwargs,
             )
@@ -510,7 +513,7 @@ class GRPOAlgorithm(BaseAlgorithm):
     def compute_loss_and_backward(
         self,
         *,
-        model: nn.Module,
+        model_bundle: ModelBundle,
         batch: Any,
         timesteps: Any = None,
         loss_scale: float = 1.0,
@@ -526,7 +529,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         if not isinstance(batch, TrainingBatch):
             raise TypeError(f"{type(self).__name__} expects TrainingBatch, got {type(batch).__name__}")
 
-        model.train()
+        model_bundle.transformer.train()
 
         available_steps = set(int(s) for s in batch.resolved_step_indices[:-1].tolist())
         valid_step_indices = sorted(int(i) for i in batch.sde_indices if int(i) in available_steps)
@@ -543,7 +546,7 @@ class GRPOAlgorithm(BaseAlgorithm):
         for t_idx in valid_step_indices:
             timestep_data = batch.get_timestep_data_by_step(t_idx)
             loss_t, metrics_t = self.compute_loss(
-                model=model,
+                model_bundle=model_bundle,
                 timestep_data=timestep_data,
                 advantages=batch.advantages,
                 ctx=ctx,
@@ -563,33 +566,36 @@ class GRPOAlgorithm(BaseAlgorithm):
         return total_loss, all_metrics, num_timesteps, has_backward
 
     # ------------------------------------------------------------------
-    # Forward plugin
+    # Forward dispatch
     # ------------------------------------------------------------------
 
     def _compute_kl_penalty(
         self,
-        model: nn.Module,
+        model_bundle: ModelBundle,
         latents: torch.Tensor,
         next_latents: torch.Tensor,
         sigma: torch.Tensor,
         sigma_next: torch.Tensor,
         sigma_max: float,
         prev_sample_mean: torch.Tensor,
-        ref_model: Optional[nn.Module],
+        ref_model_bundle: Optional[ModelBundle],
         ctx: ForwardContext,
         **kwargs,
     ) -> Optional[torch.Tensor]:
         """Compute KL penalty between policy and reference."""
         ref_prev_sample_mean = None
-        plugin = self._get_forward_plugin(model)
-        ctx_kwargs = ctx.to_dict()
+        model = model_bundle.transformer
 
         adapter_model = model.module if hasattr(model, "module") else model
         if hasattr(adapter_model, "disable_adapter"):
             try:
                 with torch.no_grad():
                     with adapter_model.disable_adapter():
-                        ref_pred = plugin.forward(model=model, latents=latents, sigma=sigma, **ctx_kwargs)
+                        ref_pred = model_bundle.forward_denoiser(
+                            latents=latents,
+                            sigma=sigma,
+                            ctx=ctx,
+                        )
 
                 _, ref_prev_sample_mean = self.compute_log_prob(
                     pred=ref_pred,
@@ -602,9 +608,13 @@ class GRPOAlgorithm(BaseAlgorithm):
             except Exception:
                 pass
 
-        if ref_prev_sample_mean is None and ref_model is not None:
+        if ref_prev_sample_mean is None and ref_model_bundle is not None:
             with torch.no_grad():
-                ref_pred = plugin.forward(model=ref_model, latents=latents, sigma=sigma, **ctx_kwargs)
+                ref_pred = ref_model_bundle.forward_denoiser(
+                    latents=latents,
+                    sigma=sigma,
+                    ctx=ctx,
+                )
 
             _, ref_prev_sample_mean = self.compute_log_prob(
                 pred=ref_pred,

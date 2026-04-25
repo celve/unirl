@@ -51,8 +51,35 @@ class LogProbData(Batched):
 
 
 @dataclass
+class MediaPreview(Batched):
+    """Per-rollout wandb media preview: PIL images + prompts + rewards.
+
+    Declaring the three parallel lists as ``concat_field`` lets
+    ``Batched.concat`` auto-merge per-shard previews (lists extended) and
+    ``Batched.slice(0, n)`` naturally cap the payload size — no custom
+    concat/cap code is needed on the owning ``RolloutSamples``.
+    """
+
+    images: List[Any] = concat_field(default_factory=list)
+    prompts: List[str] = concat_field(default_factory=list)
+    rewards: List[float] = concat_field(default_factory=list)
+
+    def __len__(self) -> int:
+        return len(self.images)
+
+    def is_empty(self) -> bool:
+        return not self.images
+
+
+@dataclass
 class RolloutSamples(Batched):
-    """Lightweight sampler output contract shared across rollout stages."""
+    """Lightweight sampler output contract shared across rollout stages.
+
+    ``media_preview`` is a typed, batch-aligned preview payload
+    (``MediaPreview`` dataclass) intended only for wandb logging. It is
+    declared ``concat_field`` so that ``Batched.concat`` recurses into
+    ``MediaPreview.concat`` and auto-merges per-shard previews.
+    """
 
     latents: torch.Tensor = concat_field()
     timesteps: torch.Tensor = shared_field()
@@ -67,6 +94,7 @@ class RolloutSamples(Batched):
     component_rewards: Optional[Dict[str, torch.Tensor]] = concat_field(default=None)
     decoded_images: Optional[List[Any]] = concat_field(default=None)
     decoded_videos: Optional[List[Any]] = concat_field(default=None)
+    media_preview: Optional[MediaPreview] = concat_field(default=None)
 
     def cast_dtype(self, dtype: torch.dtype) -> "RolloutSamples":
         """Cast float tensors to *dtype* for transport optimization.
@@ -93,7 +121,23 @@ class RolloutSamples(Batched):
             component_rewards=self.component_rewards,
             decoded_images=self.decoded_images,
             decoded_videos=self.decoded_videos,
+            media_preview=self.media_preview,
         )
+
+    def cap_media_preview(self, max_items: int) -> None:
+        """Truncate ``media_preview`` to at most ``max_items`` entries.
+
+        Driver-side hook used after ``aggregate`` to enforce the final
+        per-rollout cap regardless of how many shards contributed. Delegates
+        to ``MediaPreview.slice`` (the Batched base) so all three parallel
+        lists stay in sync.
+        """
+        if self.media_preview is None:
+            return
+        limit = max(1, int(max_items))
+        if len(self.media_preview) <= limit:
+            return
+        self.media_preview = self.media_preview.slice(0, limit)
 
     def compute_bytes(self) -> int:
         total = 0

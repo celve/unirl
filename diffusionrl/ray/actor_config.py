@@ -64,7 +64,7 @@ def build_train_actor_init_kwargs(
     rank: int,
     master_addr: str,
     master_port: int,
-    sampling_config: Any = None,
+    sampling_config: Optional[SamplingParams] = None,
 ) -> Dict[str, Any]:
     """Map a resolved ``TrainingLaunch`` into eager-init ``TrainActor`` kwargs.
 

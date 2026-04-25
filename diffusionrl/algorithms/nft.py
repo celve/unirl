@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
-import torch.nn as nn
 from diffusers.utils.torch_utils import randn_tensor
 
 from diffusionrl.algorithms.base import (
@@ -21,6 +20,7 @@ from diffusionrl.algorithms.base import (
     SamplingRequirements,
 )
 from diffusionrl.algorithms.registry import register_algorithm
+from diffusionrl.models.base import ModelBundle
 from diffusionrl.types.forward_context import ForwardContext
 from diffusionrl.types.training_batch import TrainingBatch as _TrainingBatch
 from diffusionrl.utils.adapter_utils import switch_adapter
@@ -317,18 +317,18 @@ class NFTAlgorithm(BaseAlgorithm):
     @torch.no_grad()
     def get_old_prediction(
         self,
-        model: nn.Module,
+        model_bundle: ModelBundle,
         ctx: ForwardContext,
         *,
         latents: torch.Tensor,
         sigma: torch.Tensor,
-        old_model: Optional[nn.Module] = None,
+        old_model_bundle: Optional[ModelBundle] = None,
     ) -> torch.Tensor:
         """
         Get prediction from the NFT old policy.
 
         Accepted paths:
-        1. Explicit old_model
+        1. Explicit old_model_bundle
         2. Full-parameter EMA swap
         3. LoRA old-adapter switch
 
@@ -336,16 +336,23 @@ class NFTAlgorithm(BaseAlgorithm):
         adapter switching fails. Falling back to the base model or current
         model would silently change the NFT objective semantics.
         """
-        plugin = self._get_forward_plugin(model)
-        ctx_kwargs = ctx.to_dict()
-        if old_model is not None:
-            return plugin.forward(model=old_model, latents=latents, sigma=sigma, **ctx_kwargs)
+        model = model_bundle.transformer
+        if old_model_bundle is not None:
+            return old_model_bundle.forward_denoiser(
+                latents=latents,
+                sigma=sigma,
+                ctx=ctx,
+            )
 
         adapter_model = model.module if hasattr(model, "module") else model
         if hasattr(adapter_model, "set_adapter"):
             try:
                 with switch_adapter(adapter_model, self.old_adapter_name):
-                    return plugin.forward(model=model, latents=latents, sigma=sigma, **ctx_kwargs)
+                    return model_bundle.forward_denoiser(
+                        latents=latents,
+                        sigma=sigma,
+                        ctx=ctx,
+                    )
             except Exception as exc:
                 raise RuntimeError(
                     "NFT old-policy prediction failed while switching adapters. "
@@ -355,7 +362,7 @@ class NFTAlgorithm(BaseAlgorithm):
                 ) from exc
 
         raise RuntimeError(
-            "NFT old-policy prediction requires one of: explicit old_model, "
+            "NFT old-policy prediction requires one of: explicit old_model_bundle, "
             "full-parameter EMA, or adapter switching support via set_adapter(). "
             f"Model type={type(adapter_model).__name__} does not expose a valid old-policy path."
         )
@@ -363,32 +370,39 @@ class NFTAlgorithm(BaseAlgorithm):
     @torch.no_grad()
     def get_ref_prediction(
         self,
-        model: nn.Module,
+        model_bundle: ModelBundle,
         ctx: ForwardContext,
         *,
         latents: torch.Tensor,
         sigma: torch.Tensor,
-        ref_model: Optional[nn.Module] = None,
+        ref_model_bundle: Optional[ModelBundle] = None,
     ) -> torch.Tensor:
         """Get reference prediction for KL regularization (base model)."""
-        plugin = self._get_forward_plugin(model)
-        ctx_kwargs = ctx.to_dict()
+        model = model_bundle.transformer
         adapter_model = model.module if hasattr(model, "module") else model
         if hasattr(adapter_model, "disable_adapter"):
             try:
                 with adapter_model.disable_adapter():
-                    return plugin.forward(model=model, latents=latents, sigma=sigma, **ctx_kwargs)
+                    return model_bundle.forward_denoiser(
+                        latents=latents,
+                        sigma=sigma,
+                        ctx=ctx,
+                    )
             except Exception as exc:
                 raise RuntimeError(
                     "NFT reference prediction failed while disabling adapters. "
                     "Refusing to fall back to current model because that would collapse "
                     "the KL term toward zero."
                 ) from exc
-        if ref_model is not None:
-            return plugin.forward(model=ref_model, latents=latents, sigma=sigma, **ctx_kwargs)
+        if ref_model_bundle is not None:
+            return ref_model_bundle.forward_denoiser(
+                latents=latents,
+                sigma=sigma,
+                ctx=ctx,
+            )
         raise RuntimeError(
             "NFT reference prediction requires either disable_adapter() support "
-            "or an explicit ref_model. No valid base-model reference path was available."
+            "or an explicit ref_model_bundle. No valid base-model reference path was available."
         )
 
     # ------------------------------------------------------------------
@@ -398,7 +412,7 @@ class NFTAlgorithm(BaseAlgorithm):
     def compute_loss_and_backward(
         self,
         *,
-        model: nn.Module,
+        model_bundle: ModelBundle,
         batch: Any,
         timesteps: Any = None,
         loss_scale: float = 1.0,
@@ -429,7 +443,7 @@ class NFTAlgorithm(BaseAlgorithm):
         num_timesteps = timesteps.numel()
         for t in timesteps:
             loss, metrics = self.compute_loss(
-                model=model,
+                model_bundle=model_bundle,
                 batch=batch,
                 ctx=ctx,
                 timestep_values=t,
@@ -445,18 +459,18 @@ class NFTAlgorithm(BaseAlgorithm):
         return total_loss, all_metrics, num_timesteps, has_backward
 
     # ------------------------------------------------------------------
-    # Forward plugin
+    # Forward dispatch
     # ------------------------------------------------------------------
 
     def _compute_loss_core(
         self,
-        model: nn.Module,
+        model_bundle: ModelBundle,
         x0: torch.Tensor,
         advantages: torch.Tensor,
         ctx: ForwardContext,
         *,
-        ref_model: Optional[nn.Module] = None,
-        old_model: Optional[nn.Module] = None,
+        ref_model_bundle: Optional[ModelBundle] = None,
+        old_model_bundle: Optional[ModelBundle] = None,
         generator: Optional[torch.Generator] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
@@ -477,23 +491,26 @@ class NFTAlgorithm(BaseAlgorithm):
 
         t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
 
+        model = model_bundle.transformer
         adapter_model = model.module if hasattr(model, "module") else model
         assert hasattr(adapter_model, "set_adapter"), "adapter_model must have set_adapter method"
         adapter_model.set_adapter(self.new_adapter_name)
 
-        plugin = self._get_forward_plugin(model)
-        ctx_kwargs = ctx.to_dict()
         grad_context = torch.enable_grad() if not torch.is_grad_enabled() else nullcontext()
 
         with grad_context:
-            forward_prediction = plugin.forward(model=model, latents=xt, sigma=t, **ctx_kwargs)
+            forward_prediction = model_bundle.forward_denoiser(
+                latents=xt,
+                sigma=t,
+                ctx=ctx,
+            )
 
         old_prediction = self.get_old_prediction(
-            model,
+            model_bundle,
             ctx,
             latents=xt,
             sigma=t,
-            old_model=old_model,
+            old_model_bundle=old_model_bundle,
         )
 
         if hasattr(adapter_model, "set_adapter"):
@@ -546,11 +563,11 @@ class NFTAlgorithm(BaseAlgorithm):
 
         if self.kl_coef > 0:
             ref_prediction = self.get_ref_prediction(
-                model,
+                model_bundle,
                 ctx,
                 latents=xt,
                 sigma=t,
-                ref_model=ref_model,
+                ref_model_bundle=ref_model_bundle,
             )
             kl_div = ((forward_prediction - ref_prediction) ** 2).mean(dim=tuple(range(1, x0.ndim)))
             kl_div = torch.mean(kl_div)
@@ -562,23 +579,23 @@ class NFTAlgorithm(BaseAlgorithm):
 
     def compute_loss(
         self,
-        model: nn.Module,
+        model_bundle: ModelBundle,
         batch: _TrainingBatch,
         *,
         ctx: ForwardContext,
-        ref_model: Optional[nn.Module] = None,
-        old_model: Optional[nn.Module] = None,
+        ref_model_bundle: Optional[ModelBundle] = None,
+        old_model_bundle: Optional[ModelBundle] = None,
         generator: Optional[torch.Generator] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """Single NFT loss entrypoint for debugging and training."""
         return self._compute_loss_core(
-            model=model,
+            model_bundle=model_bundle,
             x0=batch.clean_latents.float(),
             advantages=batch.advantages,
             ctx=ctx,
-            ref_model=ref_model,
-            old_model=old_model,
+            ref_model_bundle=ref_model_bundle,
+            old_model_bundle=old_model_bundle,
             generator=generator,
             **kwargs,
         )

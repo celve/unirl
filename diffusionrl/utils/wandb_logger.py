@@ -347,23 +347,33 @@ class DiffusionRLWandBLogger:
     def log_generated_media(
         self,
         rollout_id: int,
-        media_preview: Dict[str, Any],
+        media_preview: Any,
         *,
         key: str = "rollout/generated_media",
     ) -> None:
-        """Log rollout media preview payload produced by the rollout pipeline."""
-        if not isinstance(media_preview, dict):
+        """Log rollout media preview payload produced by the rollout pipeline.
+
+        Accepts either a ``diffusionrl.types.sample.MediaPreview`` dataclass
+        (the canonical internal form) or a legacy ``{"images", "prompts",
+        "rewards"}`` dict. Non-matching payloads are silently ignored.
+        """
+        if media_preview is None:
             return
 
-        images = media_preview.get("images")
+        if isinstance(media_preview, dict):
+            images = media_preview.get("images")
+            prompts = media_preview.get("prompts")
+            rewards = media_preview.get("rewards")
+        else:
+            images = getattr(media_preview, "images", None)
+            prompts = getattr(media_preview, "prompts", None)
+            rewards = getattr(media_preview, "rewards", None)
+
         if not isinstance(images, list) or not images:
             return
-
-        prompts = media_preview.get("prompts")
         if not isinstance(prompts, list):
             prompts = []
 
-        rewards = media_preview.get("rewards")
         self.log_images(
             images=images,
             prompts=prompts,

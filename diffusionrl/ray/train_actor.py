@@ -28,6 +28,7 @@ from diffusionrl.training.stack import TrainStack
 from diffusionrl.transfer.buffer import Buffer, BufferHandle
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.response import RolloutResponse
+from diffusionrl.types.sampling import SamplingParams
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils import clear_memory as _clear_gpu_memory
 from diffusionrl.utils.dtypes import parse_torch_dtype
@@ -78,7 +79,7 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
         algorithm_init_payload: ComponentInitPayload,
         model_init_payload: ComponentInitPayload,
         training_autocast_precision: str = "bf16",
-        sampling_config: Any = None,
+        sampling_config: Optional[SamplingParams] = None,
         debug_output_dir: Optional[str] = None,
         seed: int = 42,
     ):
@@ -124,13 +125,12 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
         self.model = self.backend.model
 
         self.algorithm = create_algorithm_from_init_payload(algorithm_init_payload)
-        forward_plugin = model_bundle.forward_plugin()
-        self.algorithm._forward_plugin = forward_plugin
-        if hasattr(forward_plugin, "autocast_dtype"):
-            forward_plugin.autocast_dtype = parse_torch_dtype(
+        model_bundle.set_training_forward_autocast_dtype(
+            parse_torch_dtype(
                 training_autocast_precision,
                 field_name="training_autocast_precision",
             )
+        )
 
         # Wire train-inference consistency debug dump dir through from CLI
         # (``--debug.output-dir``).  ``GRPOAlgorithm.compute_loss`` gates its

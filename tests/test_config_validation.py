@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from diffusionrl.algorithms.base import BaseAlgorithmConfig
+from diffusionrl.algorithms.grpo import GRPOAlgorithmConfig
 from diffusionrl.config.spec import RolloutInfo, TrainingPlan
 from diffusionrl.config.training_sections import (
     LrSchedulerConfig as TrainingLrSchedulerConfig,
@@ -12,9 +13,7 @@ from diffusionrl.config.training_sections import (
 from diffusionrl.config.training_sections import (
     OptimizerConfig as TrainingOptimizerConfig,
 )
-from diffusionrl.config.training_sections import (
-    TrainingExecutionConfig,
-)
+from diffusionrl.config.training_sections import TrainingExecutionConfig
 from diffusionrl.config.validation import (
     validate_colocate_fractions,
     validate_direct_sampling_batch_geometry,
@@ -33,10 +32,7 @@ from diffusionrl.config.validation import (
 )
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.models.config import ModelBundleConfig
-from diffusionrl.ray.actor_config import (
-    RolloutActorConfig,
-    TrainingActorConfig,
-)
+from diffusionrl.ray.actor_config import RolloutActorConfig, TrainingActorConfig
 from diffusionrl.reward.config import RewardSpec
 from diffusionrl.training.backends import FSDPBackendConfig
 from diffusionrl.training.types import TrainTopology
@@ -152,6 +148,10 @@ def test_validate_rollout_actor_init_config_rejects_non_reward_spec() -> None:
                 sampler_dotpath="diffusionrl.samplers.default_sampler.DefaultSampler",
             ),
         ),
+        algorithm_init_payload=ComponentInitPayload(
+            component_dotpath="grpo",
+            component_config=GRPOAlgorithmConfig(),
+        ),
         reward_config="bad",
     )
 
@@ -216,13 +216,25 @@ def test_validate_training_actor_init_config_rejects_non_reward_spec() -> None:
             component_dotpath="diffusionrl.training.backends.fsdp.FSDPBackend",
             component_config=FSDPBackendConfig(),
         ),
-        sampling_config={},
+        sampling_config=None,
         reward_config="bad",
-        optimizer_config=TrainingOptimizerConfig(type="adamw"),
-        scheduler_config=TrainingLrSchedulerConfig(),
+        optimizer_config=TrainingOptimizerConfig(
+            learning_rate=1e-4,
+            adam_beta1=0.9,
+            adam_beta2=0.999,
+            adam_epsilon=1e-8,
+            weight_decay=0.01,
+        ),
+        scheduler_config=TrainingLrSchedulerConfig(
+            type="constant",
+            warmup_steps=0,
+            total_steps=1,
+        ),
         training_config=TrainingExecutionConfig(
             max_grad_norm=1.0,
             replay_enabled=False,
+            algorithm_type="grpo",
+            guidance_scale=3.5,
         ),
         training_plan_config=_make_training_plan(),
         topology_config=TrainTopology(world_size=1, dp_size=1, actor_count=1),

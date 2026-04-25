@@ -81,6 +81,20 @@ class RolloutPipelineMixin:
             response.samples.decoded_images = tensor_to_pil(decoded)
         self._ensure_reward_pipeline().score_and_attach(response)
 
+        # Build a tiny wandb media preview (PIL + prompt + reward) *before*
+        # dropping the full decoded-image list, so only the preview payload
+        # travels back across Ray to the driver.
+        if bool(getattr(response.request, "collect_media_preview", False)):
+            response.attach_media_preview(max_items=int(getattr(response.request, "media_max_items", 8)))
+        else:
+            response.samples.media_preview = None
+
+        # Always free decoded media on the actor; the (optional) preview
+        # above already holds an independent reference to the selected
+        # PIL images when one was requested.
+        response.samples.decoded_images = None
+        response.samples.decoded_videos = None
+
     # -- Advantage computation ---------------------------------------------
 
     def compute_advantages(self, handle: "BufferHandle") -> None:

@@ -120,7 +120,14 @@ def build_generate_shard_plan_grouped(
             noise_group_ids=list(p.noise_group_ids[start:end]),
             prompt_metadata=list(p.prompt_metadata[start:end]),
         )
-        shards.append(RolloutRequest(prompts=sub_prompts, sampling_params=request.sampling_params))
+        shards.append(
+            RolloutRequest(
+                prompts=sub_prompts,
+                sampling_params=request.sampling_params,
+                collect_media_preview=bool(request.collect_media_preview),
+                media_max_items=int(request.media_max_items),
+            )
+        )
         cursor = end
     return shards
 

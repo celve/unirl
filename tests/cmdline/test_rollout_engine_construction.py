@@ -55,8 +55,9 @@ def test_build_rollout_engine_init_payload_from_args_returns_typed_payload():
         sampling_spec=_make_sampling_spec(),
         rollout_info=SimpleNamespace(
             rollout_engine="sglang",
-            logprob_source="engine",
+            logprob_source="native",
         ),
+        sampler_dotpath="diffusionrl.samplers.default_sampler.DefaultSampler",
     )
 
     assert isinstance(payload, ComponentInitPayload)
@@ -64,11 +65,10 @@ def test_build_rollout_engine_init_payload_from_args_returns_typed_payload():
     assert isinstance(payload.component_config, EngineConfig)
     assert payload.component_config.sampler_dotpath.endswith("DefaultSampler")
     assert payload.component_config.num_inference_steps == 28
-    assert payload.component_config.engine_kwargs["num_gpus"] == 1
-    assert payload.component_config.engine_kwargs["tp_size"] == 2
-    assert payload.component_config.engine_kwargs["server_kwargs"] == {
-        "host": "127.0.0.1",
-        "scheduler_port": 31000,
-    }
-    assert payload.component_config.engine_kwargs["logprob_source"] == "engine"
-    assert payload.component_config.engine_kwargs["require_memory_api"] is True
+    assert payload.component_config.num_gpus == 1
+    assert payload.component_config.tp_size == 2
+    assert payload.component_config.host == "127.0.0.1"
+    assert payload.component_config.scheduler_port == 31000
+    assert payload.component_config.logprob_source == "native"
+    assert payload.component_config.require_memory_api is True
+    assert payload.component_config.engine_kwargs == {}
