@@ -158,7 +158,7 @@ class RolloutPipeline:
             collect_media_preview=bool(collect_media_preview),
             media_max_items=max(1, int(media_max_items)),
         )
-        sde_indices_set = set(int(i) for i in (sde_indices_list or [])) or None
+        sde_indices_set = set(int(i) for i in sde_indices_list) if sde_indices_list is not None else None
         return request, sde_indices_set
 
     def exec_request(
