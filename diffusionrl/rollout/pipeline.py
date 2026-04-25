@@ -145,9 +145,7 @@ class RolloutPipeline:
             current_step=int(rollout_id),
         )
         sde_indices_list = list(sde_indices) if sde_indices is not None else None
-        per_rollout_seed = mix_rollout_base_seed(
-            int(sampling_spec.seed), int(rollout_id)
-        )
+        per_rollout_seed = mix_rollout_base_seed(int(sampling_spec.seed), int(rollout_id))
         sampling_params = dataclasses.replace(
             sampling_spec,
             num_samples_per_prompt=int(samples_per_prompt),

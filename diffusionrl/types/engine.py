@@ -146,10 +146,7 @@ class EngineConfig:
         # sets ``disable_lora=True`` on the unmatched layers.  Forward them
         # explicitly so both sides agree.
         if self.use_lora:
-            if (
-                self.lora_target_modules is not None
-                and "lora_target_modules" in allowed_keys
-            ):
+            if self.lora_target_modules is not None and "lora_target_modules" in allowed_keys:
                 result["lora_target_modules"] = list(self.lora_target_modules)
             if "lora_rank" in allowed_keys:
                 result["lora_rank"] = int(self.lora_rank)

@@ -938,9 +938,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         fps = kwargs.pop("fps", None)
         num_outputs_per_prompt = kwargs.pop("num_outputs_per_prompt", None)
         init_same_noise = bool(sp.init_same_noise)
-        samples_per_prompt = int(
-            kwargs.pop("num_samples_per_prompt", sp.num_samples_per_prompt)
-        )
+        samples_per_prompt = int(kwargs.pop("num_samples_per_prompt", sp.num_samples_per_prompt))
         # SGLang MUST run SDE sampling whenever the algorithm wants SDE steps
         # (i.e. ``sde_indices`` is populated) — otherwise SGLang falls back to
         # a deterministic ODE step (``scheduler.step(...)`` with eta=0), which
@@ -960,16 +958,10 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         #                                recomputes log_prob on the training side
         # Keeping replay on the SDE path is still much cheaper than silently
         # going ODE and losing a whole training run.
-        default_rollout_enabled = bool(
-            require_log_probs and sde_indices is not None
-        )
+        default_rollout_enabled = bool(require_log_probs and sde_indices is not None)
         rollout_enabled = bool(kwargs.pop("enable_rollout_logprob", default_rollout_enabled))
         requested_rollout_sde = (
-            str(
-                normalize_sde_type(
-                    kwargs.pop("rollout_sde_type", getattr(self.config, "sde_type", "flow"))
-                )
-            )
+            str(normalize_sde_type(kwargs.pop("rollout_sde_type", getattr(self.config, "sde_type", "flow"))))
             .strip()
             .lower()
         )
@@ -988,11 +980,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             # computes log_prob on the training side from the SDE trajectory,
             # so GRPO keeps working.
             rollout_sde_type = "sde"
-            if (
-                rollout_enabled
-                and self._native_rollout_logprob_enabled()
-                and not self._warned_unsupported_rollout_sde
-            ):
+            if rollout_enabled and self._native_rollout_logprob_enabled() and not self._warned_unsupported_rollout_sde:
                 logger.warning(
                     "SGLang native rollout logprob currently supports only flow/cps, got sde_type=%r. "
                     "Forcing rollout_sde_type='sde' and suppressing native log_prob transport; "
@@ -1074,12 +1062,8 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             )
         n_expanded = len(prompts)
         assert n_expanded > 0, "non-empty prompts checked above"
-        batch_stub = SimpleNamespace(
-            height=int(out_h), width=int(out_w), num_frames=int(out_f)
-        )
-        full_shape = self._server_args.pipeline_config.prepare_latent_shape(
-            batch_stub, int(n_expanded), int(out_f)
-        )
+        batch_stub = SimpleNamespace(height=int(out_h), width=int(out_w), num_frames=int(out_f))
+        full_shape = self._server_args.pipeline_config.prepare_latent_shape(batch_stub, int(n_expanded), int(out_f))
         if int(full_shape[0]) != n_expanded:
             raise ValueError(
                 "prepare_latent_shape first dim != expanded prompt count: "
@@ -1098,9 +1082,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         raw_prompts = request.prompts
         raw_noise_group_ids = getattr(raw_prompts, "noise_group_ids", None)
         if init_same_noise:
-            if not isinstance(raw_noise_group_ids, list) or len(
-                raw_noise_group_ids
-            ) != n_expanded:
+            if not isinstance(raw_noise_group_ids, list) or len(raw_noise_group_ids) != n_expanded:
                 raise ValueError(
                     "SGLang: init_same_noise=True requires request.prompts."
                     f"noise_group_ids length {len(raw_noise_group_ids) if isinstance(raw_noise_group_ids, list) else 0} "

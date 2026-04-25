@@ -71,8 +71,7 @@ def _resolve_lora_target_modules(
         return None
     if not isinstance(resolved, (list, tuple)) or not resolved:
         logger.warning(
-            "%s.default_lora_target_modules() returned %r; expected a non-empty "
-            "list. Falling back to None.",
+            "%s.default_lora_target_modules() returned %r; expected a non-empty list. Falling back to None.",
             model_cls.__name__,
             resolved,
         )

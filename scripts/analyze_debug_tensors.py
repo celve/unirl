@@ -370,8 +370,10 @@ def main():
                 f"ratio_max_dev={ratio_dev:.8e}  [{status}]"
             )
     if onpolicy_step_count == 0:
-        print("  (no training-side old_log_prob/new_log_prob tensors found — "
-              "did the run reach GRPOAlgorithm.compute_loss with debug_output_dir set?)")
+        print(
+            "  (no training-side old_log_prob/new_log_prob tensors found — "
+            "did the run reach GRPOAlgorithm.compute_loss with debug_output_dir set?)"
+        )
     elif not any_onpolicy_divergence:
         print("  >> All steps PASS: old_log_prob == new_log_prob (ratio == 1.0)")
         print("     Training replay is perfectly consistent with transported sampling log-probs.")
