@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
-from diffusionrl.samplers.noise_utils import MAX_TORCH_SEED, generate_latents
+from diffusionrl.samplers.noise_utils import generate_latents
 from diffusionrl.samplers.registry import register_rollout_engine
 from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.sde.runtime import get_sigma_schedule
@@ -1130,10 +1130,8 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 "noise_group_ids are not sent to SGLang so per-step SDE noise is not group-seeded."
             )
             self._informed_sglang_initial_noise_policy = True
-        # High-entropy batch seed: per-step SDE noise is not tied to the training
-        # config seed (sp.seed is used for init noise in DiffusionRL only after
-        # rollout mix in ``plan_requests``).
-        request_kwargs["seed"] = int.from_bytes(os.urandom(8), "big") % (MAX_TORCH_SEED + 1)
+        # Global RNG for per-step SDE diversity (matches FSDP generator=None policy).
+        request_kwargs["seed"] = None
 
         ctx = _GenerateContext(
             model_type=model_type,
