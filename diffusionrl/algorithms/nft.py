@@ -174,15 +174,9 @@ class NFTAlgorithm(BaseAlgorithm):
         self,
         *,
         current_step: int,
-    ) -> Set[int]:
+    ) -> Optional[Set[int]]:
         del current_step
-
-        if self.num_inference_steps < 1:
-            raise ValueError(
-                "Algorithm.num_inference_steps must be set to a positive integer to resolve SDE indices for rollout."
-            )
-
-        return set(range(self.num_inference_steps))
+        return None
 
     def get_sampler_validation_config(self, *, allow_replay: bool) -> Dict[str, Any]:
         del allow_replay

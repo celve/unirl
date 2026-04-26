@@ -138,6 +138,21 @@ class EngineConfig:
         elif self.use_lora and "lora_merge_mode" in allowed_keys:
             result.setdefault("lora_merge_mode", "online")
 
+        # LoRA layout must match the training-side PEFT config.  If the
+        # rollout engine keeps ``lora_target_modules=None`` while training only
+        # injects LoRA into a subset of linears (e.g. SD3 joint-attention),
+        # SGLang wraps every linear layer and emits a wall of ``LoRA adapter
+        # None does not contain the weights for layer '...'`` warnings, then
+        # sets ``disable_lora=True`` on the unmatched layers.  Forward them
+        # explicitly so both sides agree.
+        if self.use_lora:
+            if self.lora_target_modules is not None and "lora_target_modules" in allowed_keys:
+                result["lora_target_modules"] = list(self.lora_target_modules)
+            if "lora_rank" in allowed_keys:
+                result["lora_rank"] = int(self.lora_rank)
+            if "lora_alpha" in allowed_keys:
+                result["lora_alpha"] = int(self.lora_alpha)
+
         if self.host is not None:
             result["host"] = str(self.host)
         if self.port is not None:

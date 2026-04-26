@@ -89,6 +89,24 @@ class FluxModelBundle(ModelBundle):
         return "fsdp"
 
     @classmethod
+    def default_lora_target_modules(cls) -> Optional[List[str]]:
+        """FLUX canonical LoRA targets.
+
+        Matches the hardcoded fallback previously in ``_add_lora_adapters``:
+        attention Q/K/V/out plus transformer projection layers.  Surfaced as a
+        class method so SGLang receives the same list via
+        ``EngineConfig.lora_target_modules``.
+        """
+        return [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0",
+            "proj_in",
+            "proj_out",
+        ]
+
+    @classmethod
     def supports_sglang_prompt_mode(cls) -> bool:
         return True
 
@@ -295,14 +313,17 @@ class FluxModelBundle(ModelBundle):
         # Default target modules for FLUX transformer
         target_modules = self.lora_target_modules
         if target_modules is None:
-            target_modules = [
-                "to_q",
-                "to_k",
-                "to_v",
-                "to_out.0",  # Attention
-                "proj_in",
-                "proj_out",  # Projections
-            ]
+            # Fallback for non-CLI code paths (direct ModelBundle construction).
+            # The CLI parser materialises this via ``default_lora_target_modules()``
+            # at config-build time; this branch only triggers when someone
+            # bypasses the CLI and constructs a ``ModelBundleConfig`` by hand.
+            target_modules = type(self).default_lora_target_modules()
+            if target_modules is None:
+                raise RuntimeError(
+                    "FLUX LoRA requested but lora_target_modules is unresolved. "
+                    "Pass --training.lora-target-modules or ensure "
+                    f"{type(self).__name__}.default_lora_target_modules() returns a list."
+                )
 
         # LoRA config for FLUX transformer
         lora_config = LoraConfig(

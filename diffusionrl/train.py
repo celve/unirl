@@ -68,6 +68,28 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
     rollout_mode_name = rollout_info.mode
     training_actor_sampling_mode = rollout_info.training_actor_sampling_mode
 
+    # Consistency-debug plumbing: when ``--debug.output-dir`` is set, export it
+    # as an env var so every Ray actor inherits it.  The per-step tensor dumps
+    # inside ``GRPOAlgorithm.compute_loss`` (training side) and
+    # ``FSDPBaseSampler.sample`` (direct-sampling side) look up
+    # ``DIFFUSIONRL_DEBUG_OUTPUT_DIR`` as a fallback when the explicit
+    # attribute/arg is unset, so this single export keeps debug dumps working
+    # across direct-sampling and separate (SGLang) topologies without having
+    # to thread the value through every actor ctor.  The ``TrainActor`` still
+    # also receives it as an explicit kwarg (see ``build_train_actor_init_kwargs``)
+    # and assigns ``self.algorithm._debug_output_dir`` — the env var is the
+    # safety net for rollout actors and for Ray worker processes that may not
+    # inherit the parent's environment on every platform.
+    import os
+
+    _debug_output_dir = getattr(args.debug, "output_dir", None)
+    if _debug_output_dir:
+        os.environ["DIFFUSIONRL_DEBUG_OUTPUT_DIR"] = str(_debug_output_dir)
+        logger.info(
+            "Exported DIFFUSIONRL_DEBUG_OUTPUT_DIR=%s for downstream actors.",
+            _debug_output_dir,
+        )
+
     validate_launch_config_for_train(launch_config=launch_config)
 
     logger.info("Starting diffusionRL training...")

@@ -94,8 +94,7 @@ resolve_batch_params
 validate_batch_params
 print_batch_params
 
-SHUFFLE_SEED="${SHUFFLE_SEED:-42}"
-SHUFFLE_SAMPLES="${SHUFFLE_SAMPLES:-true}"
+
 EVAL_EMA_DECAY="${EVAL_EMA_DECAY:-0.99}"
 EVAL_EMA_UPDATE_INTERVAL="${EVAL_EMA_UPDATE_INTERVAL:-1}"
 
@@ -186,8 +185,6 @@ run_training() {
         --sampling.num-inference-steps "${NUM_INFERENCE_STEPS}" \
         --sampling.guidance-scale 4.5 \
         --sampling.max-samples-per-request "${DIRECT_SAMPLING_BATCH_SIZE}" \
-        --algorithm.shuffle-seed "${SHUFFLE_SEED}" \
-        --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}" \
         --algorithm.kwarg beta=1 \
         --algorithm.kwarg adv_mode=raw \
         --algorithm.kwarg adv_clip_max=5.0 \

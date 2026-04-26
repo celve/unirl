@@ -107,6 +107,26 @@ class ModelBundle(ABC):
         return cls.default_sampler_dotpath()
 
     @classmethod
+    def default_lora_target_modules(cls) -> Optional[List[str]]:
+        """Default LoRA target module names for this model bundle.
+
+        Single source of truth for LoRA target selection. Used by:
+
+        * PEFT adapter injection inside the model bundle (training side)
+        * ``EngineConfig.lora_target_modules`` → SGLang ``ServerArgs`` (rollout side)
+        * Any checkpointing / logging that enumerates the trained LoRA layers
+
+        Return ``None`` to delegate to the sampler's "wrap everywhere" default
+        (NOT recommended in production — produces warnings like ``LoRA adapter
+        None does not contain the weights for layer '...'`` when the training
+        side only touches a subset of layers).
+
+        Subclasses SHOULD override this with the canonical list for the model.
+        CLI ``--training.lora-target-modules`` always wins when provided.
+        """
+        return None
+
+    @classmethod
     def declared_model_type(cls) -> Optional[str]:
         """Class-level model type declaration used by model discovery."""
         attr = getattr(cls, "model_type", None)

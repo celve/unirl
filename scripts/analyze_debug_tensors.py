@@ -339,9 +339,18 @@ def main():
     # ── Training On-Policy Consistency (primary metric) ──
     # This uses only training-side tensors (old_log_prob vs new_log_prob) which
     # are always correctly aligned regardless of sampling sub-batch ordering.
+    #
+    # Iterate over ``training_steps`` (not ``common_steps``) so that SGLang
+    # rollout runs — where ``sampling/`` is always empty because the SGLang
+    # scheduler / worker processes don't expose per-step tensors to the
+    # training process — still get a meaningful on-policy readout.  For
+    # FSDP direct-sampling this is equivalent to iterating common_steps,
+    # since training_steps ⊆ sampling_steps in that topology.
+    onpolicy_steps = sorted(training_steps)
     print("=== Training On-Policy Consistency (primary metric) ===")
     any_onpolicy_divergence = False
-    for step_idx in common_steps:
+    onpolicy_step_count = 0
+    for step_idx in onpolicy_steps:
         training_step_dir = os.path.join(training_dir, f"step_{step_idx:03d}")
         t_tensors = load_step_tensors(training_step_dir)
         t_old = t_tensors.get("old_log_prob")
@@ -355,14 +364,20 @@ def main():
             status = "OK" if max_diff <= args.threshold else "DRIFT"
             if max_diff > args.threshold:
                 any_onpolicy_divergence = True
+            onpolicy_step_count += 1
             print(
                 f"  step {step_idx}: |old_lp - new_lp| max={max_diff:.8e}  mean={mean_diff:.8e}  "
                 f"ratio_max_dev={ratio_dev:.8e}  [{status}]"
             )
-    if not any_onpolicy_divergence and common_steps:
+    if onpolicy_step_count == 0:
+        print(
+            "  (no training-side old_log_prob/new_log_prob tensors found — "
+            "did the run reach GRPOAlgorithm.compute_loss with debug_output_dir set?)"
+        )
+    elif not any_onpolicy_divergence:
         print("  >> All steps PASS: old_log_prob == new_log_prob (ratio == 1.0)")
         print("     Training replay is perfectly consistent with transported sampling log-probs.")
-    elif any_onpolicy_divergence:
+    else:
         print("  >> WARNING: ratio drift detected — old_log_prob != new_log_prob on training side.")
     print()
 

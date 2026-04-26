@@ -26,6 +26,7 @@ from diffusionrl.rollout.request_builders import (
     build_eval_request_batch,
     load_prompt_batch_from_source,
 )
+from diffusionrl.samplers.noise_utils import mix_rollout_base_seed
 from diffusionrl.types.prompts import Prompts
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.response import RolloutResponse
@@ -79,6 +80,7 @@ class RolloutPipeline:
         data_source: Any,
         prompt_batch_size: int,
         samples_per_prompt: int,
+        init_same_noise: bool = False,
     ) -> Prompts:
         """Fetch a raw prompt batch and expand to ``Prompts`` with samples_per_prompt.
 
@@ -89,6 +91,14 @@ class RolloutPipeline:
         ``Prompts.from_unique_prompts`` synthesizes generic ``prompt:N``
         IDs, producing different blake2b hashes → different initial
         latents → different trajectories, even with deterministic kernels.
+
+        ``init_same_noise`` is forwarded to ``Prompts.expand`` so the resulting
+        ``noise_group_ids`` match the caller's intent (share initial noise
+        across K samples of the same prompt vs. per-sample independent noise).
+        Defaults to ``False`` to preserve the historical per-sample behaviour;
+        ``run_once`` / ``run_eval`` pull the real value from the sampling
+        spec and pass it through so SGLang (which receives the same
+        ``noise_group_ids``) stays aligned with FSDP.
         """
         prompt_batch = load_prompt_batch_from_source(
             data_source=data_source,
@@ -105,7 +115,10 @@ class RolloutPipeline:
         )
         prompts = Prompts.from_unique_prompts(raw_prompts, prompt_ids=prompt_ids)
         if int(samples_per_prompt) > 1:
-            prompts = prompts.expand(int(samples_per_prompt))
+            prompts = prompts.expand(
+                int(samples_per_prompt),
+                init_same_noise=bool(init_same_noise),
+            )
         return prompts
 
     def plan_requests(
@@ -132,10 +145,12 @@ class RolloutPipeline:
             current_step=int(rollout_id),
         )
         sde_indices_list = list(sde_indices) if sde_indices is not None else None
+        per_rollout_seed = mix_rollout_base_seed(int(sampling_spec.seed), int(rollout_id))
         sampling_params = dataclasses.replace(
             sampling_spec,
             num_samples_per_prompt=int(samples_per_prompt),
             sde_indices=sde_indices_list,
+            seed=per_rollout_seed,
         )
         request = RolloutRequest(
             prompts=prompts,
@@ -143,7 +158,7 @@ class RolloutPipeline:
             collect_media_preview=bool(collect_media_preview),
             media_max_items=max(1, int(media_max_items)),
         )
-        sde_indices_set = set(int(i) for i in (sde_indices_list or [])) or None
+        sde_indices_set = set(int(i) for i in sde_indices_list) if sde_indices_list is not None else None
         return request, sde_indices_set
 
     def exec_request(
@@ -282,6 +297,7 @@ class RolloutPipeline:
             data_source=data_source,
             prompt_batch_size=prompt_batch_size,
             samples_per_prompt=samples_per_prompt,
+            init_same_noise=bool(getattr(sampling_spec, "init_same_noise", False)),
         )
         request, sde_indices = self.plan_requests(
             prompts=prompts,
@@ -363,7 +379,10 @@ class RolloutPipeline:
         )
         prompts = Prompts.from_unique_prompts(raw_prompts, prompt_ids=prompt_ids_for_eval)
         if int(samples_per_prompt) > 1:
-            prompts = prompts.expand(int(samples_per_prompt))
+            prompts = prompts.expand(
+                int(samples_per_prompt),
+                init_same_noise=bool(getattr(sampling_spec, "init_same_noise", False)),
+            )
 
         # 3. Build eval SamplingParams with config overrides
         eval_num_steps = getattr(evaluation_settings, "num_inference_steps", None)

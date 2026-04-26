@@ -116,8 +116,7 @@ resolve_batch_params
 validate_batch_params
 print_batch_params
 
-SHUFFLE_SEED="${SHUFFLE_SEED:-42}"
-SHUFFLE_SAMPLES="${SHUFFLE_SAMPLES:-false}"
+
 EVAL_EMA_DECAY="${EVAL_EMA_DECAY:-0.99}"
 EVAL_EMA_UPDATE_INTERVAL="${EVAL_EMA_UPDATE_INTERVAL:-2}"
 
@@ -206,6 +205,7 @@ run_training() {
         --rollout.tp-size "${TP_SIZE}" \
         --rollout.rollout-batch-size "${ROLLOUT_BATCH_SIZE}" \
         --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
+        --sampling.init-same-noise true \
         \
         --sampling.sde-type "${SDE_TYPE}" \
         --sampling.eta 0.7 \
@@ -215,8 +215,6 @@ run_training() {
         --algorithm.rollout-scheduler.timestep-fraction "${TIMESTEP_FRACTION}" \
         --algorithm.rollout-scheduler.num-sde-steps "${NUM_SDE_STEPS}" \
         \
-        --algorithm.shuffle-seed "${SHUFFLE_SEED}" \
-        --algorithm.shuffle-samples "${SHUFFLE_SAMPLES}" \
         --algorithm.prompts-per-rollout "${PROMPTS_PER_BATCH}" \
         "${micro_batch_args[@]}" \
         --training.num-updates-per-batch "${NUM_UPDATES_PER_BATCH}" \

@@ -26,6 +26,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${REPO_ROOT}/scripts/_check_wandb.sh"
 
+# ── Ray environment hygiene ──
+# This debug script uses --rollout.mode direct_sampling with --sync.protocol
+# disabled, so diffusionrl.train tries to bootstrap a fresh local Ray
+# cluster via ray.init(num_cpus=...). If a Ray cluster already exists on
+# this host (e.g. leftover ``ray start --head`` from a previous multinode
+# run, or RAY_ADDRESS inherited from the shell env), Ray auto-connects to
+# it instead and rejects the num_cpus kwarg with:
+#
+#   ValueError: When connecting to an existing cluster, num_cpus and
+#               num_gpus must not be provided.
+#
+# Force a clean slate so this debug run is always self-contained.
+unset RAY_ADDRESS
+ray stop >/dev/null 2>&1 || true
+
 # Default values
 PRETRAINED_MODEL="stabilityai/stable-diffusion-3.5-medium"
 MODEL_TYPE="sd3"
@@ -103,8 +118,6 @@ python -m diffusionrl.train \
     --sampling.guidance-scale 4.5 \
     --algorithm.rollout-scheduler.timestep-fraction "[0.1,0.5]" \
     \
-    --algorithm.shuffle-seed 42 \
-    --algorithm.shuffle-samples false \
     --algorithm.prompts-per-rollout ${PROMPTS_PER_BATCH} \
     --training.micro-batch-size "${MICRO_BATCH_SIZE}" \
     --training.num-updates-per-batch ${NUM_UPDATES_PER_BATCH} \
@@ -133,7 +146,7 @@ python -m diffusionrl.train \
     --sampling.height 512 \
     --sampling.width 512 \
     \
-    --rollout.num-rollout 1 \
+    --rollout.num-rollout 3 \
     --rollout.save-steps 0 \
     --evaluation.eval-steps 0 \
     --logging.logging-steps 1 \

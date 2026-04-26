@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+import logging
+from typing import Any, List, Optional
 
 from diffusionrl.cmdline.construction import build_component_init_payload_from_args
 from diffusionrl.cmdline.registry import register_cmdline_config_parser
@@ -10,8 +11,79 @@ from diffusionrl.config import ModelSpec
 from diffusionrl.construction import ComponentInitPayload
 from diffusionrl.models.config import ModelBundleConfig
 from diffusionrl.models.flux import FluxModelBundleConfig
-from diffusionrl.models.registry import MODEL_BUNDLE_COMPONENT_FAMILY
+from diffusionrl.models.registry import (
+    MODEL_BUNDLE_COMPONENT_FAMILY,
+    resolve_model_class,
+)
 from diffusionrl.utils.dtypes import parse_torch_dtype
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_lora_target_modules(
+    args: Any,
+    *,
+    model_spec: ModelSpec,
+) -> Optional[List[str]]:
+    """Resolve LoRA target modules with CLI > model-class default > None.
+
+    Single source of truth for LoRA target selection shared by PEFT (training
+    side) and SGLang ``ServerArgs.lora_target_modules`` (rollout side).  When
+    the CLI does not pass ``--training.lora-target-modules`` and the model
+    class declares a ``default_lora_target_modules()`` class method, the
+    declared list is materialised into ``ModelBundleConfig`` so downstream
+    consumers (``EngineConfig`` → SGLang) see a non-None value.
+    """
+    cli = args.training.lora_target_modules
+    if cli:
+        return list(cli)
+
+    # Only bother probing the model class when LoRA is actually used.
+    if not bool(args.training.use_lora):
+        return None
+
+    try:
+        model_cls = resolve_model_class(model_spec.model_dotpath)
+    except (ImportError, AttributeError, KeyError) as exc:  # pragma: no cover - diagnostic path
+        logger.debug(
+            "Could not resolve model class %r for LoRA target lookup: %s",
+            model_spec.model_dotpath,
+            exc,
+        )
+        return None
+
+    fn = getattr(model_cls, "default_lora_target_modules", None)
+    if not callable(fn):
+        return None
+
+    try:
+        resolved = fn()
+    except (TypeError, NotImplementedError) as exc:  # pragma: no cover - diagnostic path
+        logger.warning(
+            "Model class %s.default_lora_target_modules() raised %s; "
+            "falling back to None (SGLang will wrap every linear layer).",
+            model_cls.__name__,
+            exc,
+        )
+        return None
+
+    if resolved is None:
+        return None
+    if not isinstance(resolved, (list, tuple)) or not resolved:
+        logger.warning(
+            "%s.default_lora_target_modules() returned %r; expected a non-empty list. Falling back to None.",
+            model_cls.__name__,
+            resolved,
+        )
+        return None
+
+    materialised = [str(item) for item in resolved]
+    logger.info(
+        "LoRA target modules materialised from %s.default_lora_target_modules(): %s",
+        model_cls.__name__,
+        materialised,
+    )
+    return materialised
 
 
 @register_cmdline_config_parser(ModelBundleConfig)
@@ -28,7 +100,7 @@ def build_model_bundle_config_from_args(
         use_lora=bool(args.training.use_lora),
         lora_rank=int(args.training.lora_rank),
         lora_alpha=int(args.training.lora_alpha),
-        lora_target_modules=(list(args.training.lora_target_modules) if args.training.lora_target_modules else None),
+        lora_target_modules=_resolve_lora_target_modules(args, model_spec=model_spec),
         use_gradient_checkpointing=bool(args.training.use_gradient_checkpointing),
         model_precision=parse_torch_dtype(
             args.precision.model_precision,
