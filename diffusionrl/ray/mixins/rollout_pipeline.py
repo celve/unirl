@@ -127,7 +127,7 @@ class RolloutPipelineMixin:
         handles = self.generate_buffered(request)
         for h in handles:
             self.attach_reward(h)
-        responses: List[RolloutResponse] = [self.get_buffer(h) for h in handles]
+        responses: List[RolloutResponse] = [self.pop_buffer(h) for h in handles]
         for r in responses:
             if r.samples.rewards is None:
                 raise RuntimeError("Cannot compute advantages: rewards not attached.")
@@ -174,4 +174,4 @@ class RolloutPipelineMixin:
         handles = self.generate_buffered(request)
         for h in handles:
             self.attach_reward(h)
-        return [self.get_buffer(h) for h in handles]
+        return [self.pop_buffer(h) for h in handles]
