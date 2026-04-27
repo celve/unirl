@@ -33,6 +33,7 @@ from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils import clear_memory as _clear_gpu_memory
 from diffusionrl.utils.dtypes import parse_torch_dtype
 from diffusionrl.utils.ema import EMAManager
+from diffusionrl.utils.transfer_queue_utils import tqbridge
 
 
 def _build_backend_from_config(config: TrainBackendConfig, model_bundle: Any) -> TrainBackend:
@@ -266,6 +267,7 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
             scheduler=self.scheduler,
         )
 
+    @tqbridge(get=True, put=False)
     def _train_batch(self, rollout_step: int, batch: TrainingBatch) -> Dict[str, Any]:
         """Execute the training stack on a materialized batch."""
         # Batches arrive over Ray (or directly from CPU) and may have any of

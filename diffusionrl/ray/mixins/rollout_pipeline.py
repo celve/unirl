@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, List
 
+from diffusionrl.utils.transfer_queue_utils import create_transferqueue_client, reset_zero_copy_buffer_free, tqbridge
+
 if TYPE_CHECKING:
     from diffusionrl.transfer.buffer import BufferHandle
     from diffusionrl.types.request import RolloutRequest
@@ -111,6 +113,7 @@ class RolloutPipelineMixin:
 
     # -- Fused pipelines ---------------------------------------------------
 
+    @tqbridge(get=False, put=True)
     def run_rollout_pipeline(self, request: "RolloutRequest") -> List["RolloutResponse"]:
         """Fused actor-side rollout pipeline: generate + reward + advantages.
 
@@ -175,3 +178,11 @@ class RolloutPipelineMixin:
         for h in handles:
             self.attach_reward(h)
         return [self.pop_buffer(h) for h in handles]
+
+    def init_transferqueue_client(self, tq_global_config, tq_backend_config):
+        self.tq_global_config = tq_global_config
+        self.tq_backend_config = tq_backend_config
+        self.tq_client = create_transferqueue_client("Actor", tq_global_config, tq_backend_config)
+
+    def reset_zero_copy_buffer_free(self):
+        reset_zero_copy_buffer_free()

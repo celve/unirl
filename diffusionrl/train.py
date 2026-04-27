@@ -9,6 +9,7 @@ Usage:
     python -m diffusionrl.train --config scripts/example_flux_dancegrpo_direct.yaml
 """
 
+import copy
 import logging
 import time
 
@@ -54,6 +55,15 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
         should_eval,
         should_log,
         should_save,
+    )
+    from diffusionrl.utils.transfer_queue_utils import (
+        clear_partition,
+        create_transferqueue_client,
+        init_remote_actor_transferqueue_client,
+        init_transferqueue,
+        reset_actors_zero_copy_buffer_free,
+        reset_zero_copy_buffer_free,
+        update_single_controller_tq_config,
     )
     from diffusionrl.utils.wandb_logger import aggregate_metrics, init_logger
     from diffusionrl.utils.wandb_metrics import compute_rollout_batch_metrics
@@ -255,6 +265,25 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
             pipeline_actors = rollout_group.get_actors()
             pipeline_handle_group = rollout_group.handle
 
+        # init transfer queue and create client
+        tq_global_config, tq_backend_config = init_transferqueue(args)
+        single_ctrl_tq_global_config, single_ctrl_tq_backend_config = update_single_controller_tq_config(
+            copy.deepcopy(tq_global_config), copy.deepcopy(tq_backend_config), args
+        )
+        create_transferqueue_client(
+            "controller", single_ctrl_tq_global_config, single_ctrl_tq_backend_config, sync=True
+        )
+        init_remote_actor_transferqueue_client(
+            rollout_group.get_actors(),
+            tq_global_config,
+            tq_backend_config,
+        )
+        init_remote_actor_transferqueue_client(
+            train_group.get_actors(),
+            tq_global_config,
+            tq_backend_config,
+        )
+
         # 9. Main training loop
         # rollout_id is the outer rollout-train loop step; it behaves similarly to
         # a framework-level global step, but may differ from optimizer step count.
@@ -267,6 +296,10 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
             sync_phase_s = 0.0
             eval_phase_s = 0.0
             should_log_step = should_log(rollout_id, args)
+            # === Reset TransferQueue zero-copy buffer free ===
+            reset_zero_copy_buffer_free()
+            reset_actors_zero_copy_buffer_free(train_group.get_actors())
+            reset_actors_zero_copy_buffer_free(rollout_group.get_actors())
 
             # === Periodic Eval (before rollout/train of this step) ===
             if should_eval(rollout_id, args):
@@ -361,6 +394,9 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
                 save_path = f"{args.rollout.output_dir}/checkpoint-{rollout_id}"
                 train_group.save_model(save_path)
                 logger.info(f"Checkpoint saved: {save_path}")
+
+            # === Clear TransferQueue Partition Data ===
+            clear_partition()
 
             # === PHASE C: Offload + Weight Sync ===
             if args.ray.offload_train:

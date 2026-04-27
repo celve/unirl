@@ -1019,6 +1019,105 @@ class DebugConfig:
 
 
 @dataclass
+class MooncakeBackendConfig:
+    """Mooncake storage backend configuration (with zero-copy embedded)."""
+
+    # ===== basic backend =====
+    metadata_server: str = field(
+        default="", metadata={"help": "Metadata server address (e.g., http://{ip}:{port}/metadata)"}
+    )
+    master_server_address: str = field(
+        default="", metadata={"help": "Master node address for coordination (e.g., {ip}:{port}"}
+    )
+    global_segment_size_gb: int = field(default=64, metadata={"help": "One TQ client storage segment size in GB"})
+    local_buffer_size_gb: int = field(
+        default=10, metadata={"help": "One TQ client local buffer size in GB for caching"}
+    )
+    client_name: str = field(default="MooncakeStorageClient", metadata={"help": "Client identifier name"})
+    protocol: str = field(default="rdma", metadata={"help": "Communication protocol: 'rdma' or 'tcp'"})
+    device_name: str = field(default="mlx5_bond_1", metadata={"help": "RDMA device name (used when protocol='rdma')"})
+
+    # ===== zero-copy config =====
+    zero_copy_enable: bool = field(
+        default=True, metadata={"help": "Enable zero-copy data transfer to reduce memory copy"}
+    )
+    zero_copy_tensor_buffer_size_gb: float = field(
+        default=1, metadata={"help": "Total tensor buffer size (GB) for zero-copy"}
+    )
+    zero_copy_bytes_buffer_size_gb: float = field(
+        default=1, metadata={"help": "Total bytes buffer size (GB) for zero-copy"}
+    )
+    zero_copy_single_controller_tensor_buffer_size_gb: float = field(
+        default=1, metadata={"help": "Tensor buffer size (GB) of single_controller TQ client"}
+    )
+    zero_copy_single_controller_bytes_buffer_size_gb: float = field(
+        default=1, metadata={"help": "Bytes buffer size (GB) of single_controller TQ client"}
+    )
+    zero_copy_manager_merge_to_tensordict: bool = field(
+        default=False,
+        metadata={"help": "Should the zero copy output be merged into TensorDict, Set to `False` to reduce expenses"},
+    )
+
+    def validate(self) -> None:
+        if self.protocol not in ("rdma", "tcp"):
+            raise ValueError(f"Invalid protocol: {self.protocol}")
+
+        if self.global_segment_size_gb <= 0:
+            raise ValueError("global_segment_size_gb must be > 0")
+
+        if self.local_buffer_size_gb <= 0:
+            raise ValueError("local_buffer_size_gb must be > 0")
+
+
+@dataclass
+class SimpleStorageBackendConfig:
+    train_micro_batch_size: int = field(default=1, metadata={"help": "Micro batch size per training step"})
+    num_global_batch: int = field(default=1, metadata={"help": "Number of global batches in pipeline"})
+    item_size_one_batch: int = field(default=1, metadata={"help": "Size of a single item in one batch (logical unit)"})
+    num_data_storage_units_per_node: int = field(default=16, metadata={"help": "Number of storage units per node"})
+    storage_units_nnodes: int = field(default=1, metadata={"help": "Number of nodes participating in storage"})
+    rollout_n: int = field(default=1, metadata={"help": "Number of rollouts per input (used in RL or generation)"})
+
+    def validate(self) -> None:
+        if self.train_micro_batch_size <= 0:
+            raise ValueError("train_micro_batch_size must be > 0")
+
+        if self.num_global_batch <= 0:
+            raise ValueError("num_global_batch must be > 0")
+
+        if self.item_size_one_batch <= 0:
+            raise ValueError("item_size_one_batch must be > 0")
+
+        if self.num_data_storage_units_per_node <= 0:
+            raise ValueError("num_data_storage_units_per_node must be > 0")
+
+        if self.storage_units_nnodes <= 0:
+            raise ValueError("storage_units_nnodes must be > 0")
+
+
+@dataclass
+class TransferQueueConfig:
+    """Transfer queue configuration for distributed data movement."""
+
+    enable: bool = field(default=False, metadata={"help": "Enable transfer queue"})
+    storage_backend: str = field(default="MooncakeStorageManager", metadata={"help": "Storage backend type"})
+    mooncake_backend_config: MooncakeBackendConfig = field(
+        default_factory=MooncakeBackendConfig, metadata={"help": "Mooncake backend configuration"}
+    )
+    simple_storage_backend_config: SimpleStorageBackendConfig = field(
+        default_factory=SimpleStorageBackendConfig, metadata={"help": "Simple Storage backend configuration"}
+    )
+
+    def validate(self) -> None:
+        if self.storage_backend not in ("MooncakeStorageManager", "AsyncSimpleStorageManager"):
+            raise ValueError(f"Unsupported storage_backend: {self.storage_backend}")
+        if self.storage_backend == "AsyncSimpleStorageManager":
+            self.simple_storage_backend_config.validate()
+        elif self.storage_backend == "MooncakeStorageManager":
+            self.mooncake_backend_config.validate()
+
+
+@dataclass
 class TrainingArguments:
     """All configuration parameters for DiffusionRL training."""
 
@@ -1038,6 +1137,7 @@ class TrainingArguments:
     precision: PrecisionConfig = field(default_factory=PrecisionConfig)
     rollout: RolloutConfig = field(default_factory=RolloutConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    transfer_queue: TransferQueueConfig = field(default_factory=TransferQueueConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
 

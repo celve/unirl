@@ -179,11 +179,51 @@ class PlacementSpec:
     strategy: str
 
 
+@dataclass(frozen=True)
+class MooncakeZeroCopyConfig:
+    enable: bool
+    tensor_buffer_size_gb: float
+    bytes_buffer_size_gb: float
+    manager_merge_to_tensordict: bool
+
+
+@dataclass(frozen=True)
+class SimpleStorageBackendConfig:
+    train_micro_batch_size: int
+    num_global_batch: int
+    item_size_one_batch: int
+    num_data_storage_units_per_node: int
+    storage_units_nnodes: int
+    rollout_n: int
+
+
+@dataclass(frozen=True)
+class MooncakeBackendConfig:
+    metadata_server: str
+    master_server_address: str
+    global_segment_size_gb: int
+    local_buffer_size_gb: int
+    client_name: str
+    protocol: str
+    device_name: str
+    zero_copy: MooncakeZeroCopyConfig
+
+
+@dataclass(frozen=True)
+class TransferQueueGlobalConfig:
+    enable: bool
+    storage_backend: str
+
+
 __all__ = [
     "ModelSpec",
     "PlacementSpec",
     "RolloutInfo",
     "SamplingSpec",
     "TrainingPlan",
+    "MooncakeZeroCopyConfig",
+    "SimpleStorageBackendConfig",
+    "MooncakeBackendConfig",
+    "TransferQueueGlobalConfig",
     "ROLLOUT_ENGINE_TYPES",
 ]
