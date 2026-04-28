@@ -282,6 +282,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
         forward_context = HunyuanForwardContext(
             guidance_scale=float(actual_guidance),
             prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
             encoder_attention_mask=encoder_attention_mask,
         )
 

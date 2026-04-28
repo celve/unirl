@@ -94,6 +94,7 @@ docs/*
 !docs/Algorithm_Minimal_Template.md
 !docs/Loss_Minimal_Template.md
 !docs/Component_Architecture.md
+!docs/multimodal_model_bundle_design.md
 # !docs/Parameter_System_Guide.md
 !docs/GitHub_Issues_Workflow_Guide.md
 

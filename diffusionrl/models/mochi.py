@@ -22,7 +22,7 @@ from .registry import register_model
 logger = logging.getLogger(__name__)
 
 
-@register_model(component_name="mochi", component_cfg=ModelBundleConfig)
+@register_model(component_cfg=ModelBundleConfig)
 class MochiModelBundle(ModelBundle):
     """
     Mochi video model bundle.
@@ -60,7 +60,7 @@ class MochiModelBundle(ModelBundle):
 
     @property
     def media_type(self) -> str:
-        return "video"
+        return "t2v"
 
     @classmethod
     def default_sampler_dotpath(cls) -> Optional[str]:
@@ -239,16 +239,30 @@ class MochiModelBundle(ModelBundle):
             negative_prompt: Optional negative prompt(s)
 
         Returns:
-            Tuple of (prompt_embeds, pooled_prompt_embeds)
+            Tuple of (prompt_embeds, encoder_attention_mask)
         """
         if self._text_encoder is None:
-            raise RuntimeError("Text encoder not loaded")
+            self._raise_aux_component_not_loaded("text encoder")
 
         # Handle string input
         if isinstance(prompt, str):
             prompt = [prompt]
 
         return self._text_encoder.encode_prompt(prompt, negative_prompt)
+
+    def _encode_prompt_to_input_dict(
+        self,
+        prompts: Union[str, List[str]],
+        **kwargs: Any,
+    ) -> Dict[str, torch.Tensor]:
+        """Encode Mochi prompts without treating the attention mask as pooled embeddings."""
+        del kwargs
+        prompts_list = [prompts] if isinstance(prompts, str) else list(prompts)
+        prompt_embeds, encoder_attention_mask = self.encode_prompt(prompts_list)
+        return {
+            "prompt_embeds": prompt_embeds,
+            "encoder_attention_mask": encoder_attention_mask,
+        }
 
     def decode_latents(
         self,
@@ -264,7 +278,7 @@ class MochiModelBundle(ModelBundle):
             Video tensor [B, C, T, H', W']
         """
         if self._vae is None:
-            raise RuntimeError("VAE not loaded")
+            self._raise_aux_component_not_loaded("VAE")
 
         with torch.no_grad():
             # Mochi VAE expects specific latent format
@@ -290,7 +304,7 @@ class MochiModelBundle(ModelBundle):
             Latent tensor [B, C', T', H', W']
         """
         if self._vae is None:
-            raise RuntimeError("VAE not loaded")
+            self._raise_aux_component_not_loaded("VAE")
 
         with torch.no_grad():
             # Encode

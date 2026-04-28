@@ -27,6 +27,7 @@ __all__ = [
     "get_mochi_model_bundle",
     "get_flux_model_bundle",
     "get_sd3_model_bundle",
+    "get_wan21_model_bundle",
 ]
 
 ensure_builtin_model_registration()
@@ -59,3 +60,10 @@ def get_sd3_model_bundle():
     from .sd3 import SD3ModelBundle
 
     return SD3ModelBundle
+
+
+def get_wan21_model_bundle():
+    """Get WAN 2.1 model bundle class."""
+    from .wan import WAN21ModelBundle
+
+    return WAN21ModelBundle

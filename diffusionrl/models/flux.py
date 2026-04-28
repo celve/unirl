@@ -28,7 +28,7 @@ class FluxModelBundleConfig(ModelBundleConfig):
     text_encoder_2_ckpt_path: Optional[str] = None
 
 
-@register_model(component_name="flux", component_cfg=FluxModelBundleConfig)
+@register_model(component_cfg=FluxModelBundleConfig)
 class FluxModelBundle(ModelBundle):
     """
     FLUX image model bundle.
@@ -57,12 +57,12 @@ class FluxModelBundle(ModelBundle):
         self.vae_ckpt_path = config.vae_ckpt_path or config.pretrained_model_ckpt_path
         self.text_encoder_ckpt_path = config.text_encoder_ckpt_path or config.pretrained_model_ckpt_path
         self.text_encoder_2_path = config.text_encoder_2_ckpt_path or config.pretrained_model_ckpt_path
-        self.use_lora = bool(config.use_lora)
-        self.lora_rank = int(config.lora_rank)
-        self.lora_alpha = int(config.lora_alpha)
+        self.use_lora = config.use_lora
+        self.lora_rank = config.lora_rank
+        self.lora_alpha = config.lora_alpha
         self.lora_target_modules = config.lora_target_modules
-        self.training_only = bool(config.training_only)
-        self.skip_device_move = bool(config.skip_device_move)
+        self.training_only = config.training_only
+        self.skip_device_move = config.skip_device_move
 
         # Text encoder components
         self._clip_encoder = None
@@ -78,7 +78,7 @@ class FluxModelBundle(ModelBundle):
 
     @property
     def media_type(self) -> str:
-        return "image"
+        return "t2i"
 
     @classmethod
     def default_sampler_dotpath(cls) -> Optional[str]:
@@ -362,7 +362,7 @@ class FluxModelBundle(ModelBundle):
             Tuple of (prompt_embeds, pooled_prompt_embeds)
         """
         if self._text_encoder is None:
-            raise RuntimeError("Text encoder not loaded")
+            self._raise_aux_component_not_loaded("text encoder")
 
         # Handle string input
         if isinstance(prompt, str):
@@ -384,7 +384,7 @@ class FluxModelBundle(ModelBundle):
             Image tensor [B, C, H', W']
         """
         if self._vae is None:
-            raise RuntimeError("VAE not loaded")
+            self._raise_aux_component_not_loaded("VAE")
 
         with torch.no_grad():
             # FLUX VAE scaling factor
@@ -410,7 +410,7 @@ class FluxModelBundle(ModelBundle):
             Latent tensor [B, C', H', W']
         """
         if self._vae is None:
-            raise RuntimeError("VAE not loaded")
+            self._raise_aux_component_not_loaded("VAE")
 
         with torch.no_grad():
             # Encode

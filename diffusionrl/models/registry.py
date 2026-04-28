@@ -6,8 +6,8 @@ import importlib
 import inspect
 import logging
 import pkgutil
-from functools import lru_cache, partial
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from functools import lru_cache
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
 
 from diffusionrl.registry import (
     derive_registry_or_dotpath,
@@ -26,12 +26,28 @@ DEFAULT_MODEL_PACKAGES: Tuple[str, ...] = (
 )
 
 MODEL_BUNDLE_COMPONENT_FAMILY = "model_bundle"
+_T = TypeVar("_T", bound=type)
 
-register_model = partial(
-    register_component,
-    component_family=MODEL_BUNDLE_COMPONENT_FAMILY,
-    class_checker=require_subclass(ModelBundle),
-)
+
+def register_model(*, component_cfg: Optional[Any] = None) -> Callable[[_T], _T]:
+    """Register a model bundle using its declared ``model_type`` as the key."""
+
+    def decorator(model_cls: _T) -> _T:
+        require_subclass(ModelBundle)(model_cls)
+        model_type = _declared_model_type(model_cls)
+        if not model_type:
+            raise ValueError(
+                f"{model_cls.__module__}.{model_cls.__name__} must declare a non-empty model_type "
+                "before it can be registered."
+            )
+        return register_component(
+            component_family=MODEL_BUNDLE_COMPONENT_FAMILY,
+            component_name=model_type,
+            component_cfg=component_cfg,
+            class_checker=require_subclass(ModelBundle),
+        )(model_cls)
+
+    return decorator
 
 
 def ensure_builtin_model_registration() -> None:
@@ -40,6 +56,7 @@ def ensure_builtin_model_registration() -> None:
     importlib.import_module("diffusionrl.models.hunyuan")
     importlib.import_module("diffusionrl.models.mochi")
     importlib.import_module("diffusionrl.models.sd3")
+    importlib.import_module("diffusionrl.models.wan")
 
 
 def resolve_model_class(identifier: str) -> Any:

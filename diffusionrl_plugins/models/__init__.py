@@ -1,5 +1,6 @@
-"""Model plugin examples."""
+"""Model plugin examples.
 
-from .wan21 import Wan21ModelBundle
+WAN 2.1 now lives in the core model registry as ``--model.model-type wan21``.
+"""
 
-__all__ = ["Wan21ModelBundle"]
+__all__: list[str] = []

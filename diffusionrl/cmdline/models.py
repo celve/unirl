@@ -15,6 +15,7 @@ from diffusionrl.models.registry import (
     MODEL_BUNDLE_COMPONENT_FAMILY,
     resolve_model_class,
 )
+from diffusionrl.models.wan import WAN21ModelBundleConfig
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,15 @@ def build_flux_model_bundle_config_from_args(
             f"Valid options: {', '.join(t for t in valid_sde_types if t)}."
         )
     return FluxModelBundleConfig(**build_model_bundle_config_from_args(args, model_spec=model_spec).__dict__)
+
+
+@register_cmdline_config_parser(WAN21ModelBundleConfig)
+def build_wan21_model_bundle_config_from_args(
+    args: Any,
+    *,
+    model_spec: ModelSpec,
+) -> WAN21ModelBundleConfig:
+    return WAN21ModelBundleConfig(**build_model_bundle_config_from_args(args, model_spec=model_spec).__dict__)
 
 
 def build_model_bundle_init_payload_from_args(

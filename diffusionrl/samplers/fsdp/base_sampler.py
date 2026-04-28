@@ -2,7 +2,7 @@
 
 Provides shared state (model, text_encoder, vae, model_bundle) and concrete
 orchestration methods that were previously free functions in sampler_runner.py:
-sampler creation, prompt encoding, sample generation with optional adapter
+sampler creation, input encoding, sample generation with optional adapter
 switching, latent decoding, module discovery, and output post-processing.
 """
 
@@ -74,7 +74,7 @@ class FSDPBaseSampler(BaseSampler):
     Extends ``BaseSampler`` with:
     - Shared instance state (model, text_encoder, vae, model_bundle,
       precision dtypes).
-    - Orchestration methods for the full sampling lifecycle: prompt
+    - Orchestration methods for the full sampling lifecycle: input
       encoding, adapter-aware sampling, latent decoding, module
       discovery, and output post-processing.
     - A ``from_config`` factory classmethod for dotpath-based
@@ -139,24 +139,22 @@ class FSDPBaseSampler(BaseSampler):
         return next(self.model.parameters()).device
 
     # ------------------------------------------------------------------
-    # Prompt encoding
+    # Input encoding
     # ------------------------------------------------------------------
 
-    def encode_prompt(
+    def encode_inputs(
         self,
         prompts: List[str],
         **kwargs: Any,
     ) -> Dict[str, torch.Tensor]:
-        """Encode text prompts to embeddings via *model_bundle*.
+        """Encode sampler conditioning inputs via *model_bundle*.
 
         Raises:
             RuntimeError: If model_bundle is None or lacks the encoding method.
         """
         if self.model_bundle is None:
             raise RuntimeError("Model bundle not loaded")
-        if not hasattr(self.model_bundle, "encode_prompt_for_inference"):
-            raise RuntimeError("Model bundle does not support inference prompt encoding")
-        return self.model_bundle.encode_prompt_for_inference(prompts, **kwargs)
+        return self.model_bundle.encode_inputs(prompts, **kwargs)
 
     # ------------------------------------------------------------------
     # Latent decoding
@@ -264,7 +262,7 @@ class FSDPBaseSampler(BaseSampler):
         """Run the full prompt-only FSDP sampling flow.
 
         Reads resolved parameters from ``request.sampling_params``,
-        encodes prompts, then calls :meth:`run_sample`.
+        encodes conditioning inputs, then calls :meth:`run_sample`.
         """
         from diffusionrl.types.prompts import Prompts as _PromptsType
 
@@ -287,9 +285,9 @@ class FSDPBaseSampler(BaseSampler):
         sde_indices = None if sde_indices_raw is None else {int(v) for v in sde_indices_raw}
         noise_group_ids = list(raw_prompts.noise_group_ids) if isinstance(raw_prompts, _PromptsType) else None
 
-        encoded = self.encode_prompt(prompts)
+        encoded = self.encode_inputs(prompts, **kwargs)
         if encoded.get("prompt_embeds") is None:
-            raise RuntimeError(f"{host_label} prompt encoder returned no prompt_embeds.")
+            raise RuntimeError(f"{host_label} input encoder returned no prompt_embeds.")
 
         output = self.run_sample(
             sampling_adapter=sampling_adapter,

@@ -155,56 +155,21 @@ class SD3Sampler(FSDPBaseSampler):
         # use append mode to concatenate tensors along the batch dimension.
         self._debug_dumped_steps: set = set()
 
-    def _predict_noise_with_cfg(
+    def _forward_denoiser(
         self,
         *,
         latents: torch.Tensor,
-        timestep: torch.Tensor,
-        prompt_embeds: torch.Tensor,
-        pooled_prompt_embeds: Optional[torch.Tensor],
-        guidance_scale: float,
-        negative_prompt_embeds: Optional[torch.Tensor] = None,
-        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        sigma: torch.Tensor,
+        ctx: SD3ForwardContext,
     ) -> torch.Tensor:
-        """Predict noise with SD3 CFG using a single batched forward.
-
-        Matches flow_grpo/DiffusionNFT SD3 behavior:
-        - concat [uncond, cond] embeddings
-        - concat [latents, latents]
-        - single model forward
-        - chunk(2) and apply CFG formula
-        """
-        if guidance_scale > 1.0:
-            uncond_prompt_embeds = (
-                negative_prompt_embeds if negative_prompt_embeds is not None else torch.zeros_like(prompt_embeds)
-            )
-            if pooled_prompt_embeds is not None:
-                uncond_pooled_embeds = (
-                    negative_pooled_prompt_embeds
-                    if negative_pooled_prompt_embeds is not None
-                    else torch.zeros_like(pooled_prompt_embeds)
-                )
-                pooled_batched = torch.cat([uncond_pooled_embeds, pooled_prompt_embeds], dim=0)
-            else:
-                pooled_batched = None
-
-            noise_pred = self.model(
-                hidden_states=torch.cat([latents, latents], dim=0),
-                encoder_hidden_states=torch.cat([uncond_prompt_embeds, prompt_embeds], dim=0),
-                timestep=torch.cat([timestep, timestep], dim=0),
-                pooled_projections=pooled_batched,
-                return_dict=False,
-            )[0]
-            noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
-            return noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
-        return self.model(
-            hidden_states=latents,
-            encoder_hidden_states=prompt_embeds,
-            timestep=timestep,
-            pooled_projections=pooled_prompt_embeds,
-            return_dict=False,
-        )[0]
+        """Dispatch SD3 denoising through the model bundle's forward contract."""
+        if self.model_bundle is None or not hasattr(self.model_bundle, "forward_denoiser"):
+            raise RuntimeError("SD3 sampler requires model_bundle.forward_denoiser for denoiser dispatch")
+        return self.model_bundle.forward_denoiser(
+            latents=latents,
+            sigma=sigma,
+            ctx=ctx,
+        )
 
     def sample(
         self,
@@ -333,6 +298,14 @@ class SD3Sampler(FSDPBaseSampler):
         trajectory_store.add(0, latents)
         log_probs_dict: Dict[int, torch.Tensor] = {}
 
+        forward_context = SD3ForwardContext(
+            guidance_scale=guidance_scale,
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+        )
+
         # Denoising loop
         autocast_ctx = (
             torch.autocast("cuda", self.autocast_dtype)
@@ -354,20 +327,12 @@ class SD3Sampler(FSDPBaseSampler):
             sigma = sigmas[i].to(device)
             sigma_next = sigmas[i + 1].to(device)
 
-            # Create timestep tensor (SD3 uses 0-1000 range)
-            timestep = (sigma * 1000).expand(batch_size)
-
-            # Forward pass with CFG
             with torch.no_grad():
                 with autocast_ctx:
-                    noise_pred = self._predict_noise_with_cfg(
+                    noise_pred = self._forward_denoiser(
                         latents=latents,
-                        timestep=timestep,
-                        prompt_embeds=prompt_embeds,
-                        pooled_prompt_embeds=pooled_prompt_embeds,
-                        guidance_scale=guidance_scale,
-                        negative_prompt_embeds=negative_prompt_embeds,
-                        negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                        sigma=sigma,
+                        ctx=forward_context,
                     )
 
             # Debug: resolve sampling dump directory
@@ -427,7 +392,7 @@ class SD3Sampler(FSDPBaseSampler):
                         "sigma_next",
                         (sigma_next.unsqueeze(0) if sigma_next.dim() == 0 else sigma_next),
                         "timestep",
-                        timestep,
+                        (sigma * 1000).expand(batch_size),
                         rank=rank,
                     )
                     if not _append and i == min(sde_indices):
@@ -462,14 +427,6 @@ class SD3Sampler(FSDPBaseSampler):
 
         trajectory = trajectory_store.finalize()
 
-        forward_context = SD3ForwardContext(
-            guidance_scale=guidance_scale,
-            prompt_embeds=prompt_embeds,
-            pooled_prompt_embeds=pooled_prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-        )
-
         return RolloutSamples(
             latents=latents,
             timesteps=sigmas,
@@ -496,7 +453,6 @@ class SD3Sampler(FSDPBaseSampler):
             raise RuntimeError("Model not set. Initialize sampler with model parameter.")
 
         device = latents.device
-        batch_size = latents.shape[0]
         actual_guidance = float(guidance_scale if guidance_scale is not None else 1.0)
 
         sigma_schedule = sigma_schedule.to(device=device, dtype=torch.float32)
@@ -507,8 +463,6 @@ class SD3Sampler(FSDPBaseSampler):
 
         sigma = sigma_schedule[timestep_index]
         sigma_next = sigma_schedule[timestep_index + 1]
-        # Keep timestep in float32 to avoid reduced-precision loss
-        timestep = (sigma * 1000).expand(batch_size)
 
         # Embeddings use autocast_dtype (model compute precision), independent
         # of the trajectory storage dtype carried by latents.
@@ -527,16 +481,19 @@ class SD3Sampler(FSDPBaseSampler):
             if latents.is_cuda and self.autocast_dtype in (torch.float16, torch.bfloat16)
             else nullcontext()
         )
+        ctx = SD3ForwardContext(
+            guidance_scale=actual_guidance,
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+        )
         self.model.train()
         with autocast_ctx:
-            noise_pred = self._predict_noise_with_cfg(
+            noise_pred = self._forward_denoiser(
                 latents=latents,
-                timestep=timestep,
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                guidance_scale=actual_guidance,
-                negative_prompt_embeds=negative_prompt_embeds,
-                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                sigma=sigma,
+                ctx=ctx,
             )
 
         if self.uses_deterministic_solver:

@@ -128,7 +128,7 @@ class ForwardContext(Batched):
 # ---------------------------------------------------------------------------
 
 
-@register_forward_context("flux")
+@register_forward_context(model_type="flux")
 @dataclass
 class FluxForwardContext(ForwardContext):
     """ForwardContext for FLUX models.
@@ -146,7 +146,7 @@ class FluxForwardContext(ForwardContext):
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
 
-@register_forward_context("sd3")
+@register_forward_context(model_type="sd3")
 @dataclass
 class SD3ForwardContext(ForwardContext):
     """ForwardContext for SD3 models."""
@@ -160,30 +160,49 @@ class SD3ForwardContext(ForwardContext):
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
 
-@register_forward_context("hunyuan")
+@register_forward_context(model_type="hunyuan")
 @dataclass
 class HunyuanForwardContext(ForwardContext):
     """ForwardContext for HunyuanVideo models."""
 
     guidance_scale: float = shared_field(default=1.0)
     prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
+    pooled_prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
     encoder_attention_mask: Optional[torch.Tensor] = concat_field(default=None)
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
 
-@register_forward_context("mochi")
+@register_forward_context(model_type="mochi")
 @dataclass
 class MochiForwardContext(ForwardContext):
     """ForwardContext for Mochi video models."""
 
     guidance_scale: float = shared_field(default=4.5)
     prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
+    negative_prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
     encoder_attention_mask: Optional[torch.Tensor] = concat_field(default=None)
+    attention_kwargs: Optional[Dict[str, Any]] = shared_field(default=None)
+    autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
+
+
+@register_forward_context(model_type="wan21")
+@dataclass
+class WAN21ForwardContext(ForwardContext):
+    """ForwardContext for WAN 2.1 multi-task video/image generation."""
+
+    guidance_scale: float = shared_field(default=5.0)
+    prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
+    negative_prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
+    encoder_hidden_states_image: Optional[torch.Tensor] = concat_field(default=None)
+    negative_encoder_hidden_states_image: Optional[torch.Tensor] = concat_field(default=None)
+    image_conditioning_latents: Optional[torch.Tensor] = concat_field(default=None)
+    first_frame_mask: Optional[torch.Tensor] = concat_field(default=None)
+    attention_kwargs: Optional[Dict[str, Any]] = shared_field(default=None)
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
 
 # Also register "default" pointing to base ForwardContext for fallback
-@register_forward_context("default")
+@register_forward_context(model_type="default")
 @dataclass
 class DefaultForwardContext(ForwardContext):
     """Fallback ForwardContext with SD3-like fields."""
@@ -195,7 +214,7 @@ class DefaultForwardContext(ForwardContext):
     negative_pooled_prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
     encoder_attention_mask: Optional[torch.Tensor] = concat_field(default=None)
     text_ids: Optional[torch.Tensor] = concat_field(default=None)
-    image_ids: Optional[torch.Tensor] = concat_field(default=None)
+    image_ids: Optional[torch.Tensor] = shared_field(default=None)
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
 
@@ -205,6 +224,7 @@ __all__ = [
     "SD3ForwardContext",
     "HunyuanForwardContext",
     "MochiForwardContext",
+    "WAN21ForwardContext",
     "DefaultForwardContext",
     "register_forward_context",
     "get_forward_context_cls",

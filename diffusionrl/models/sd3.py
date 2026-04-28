@@ -5,7 +5,7 @@ Supports SD3 and SD3.5 models for image generation.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -17,7 +17,7 @@ from .registry import register_model
 logger = logging.getLogger(__name__)
 
 
-@register_model(component_name="sd3", component_cfg=ModelBundleConfig)
+@register_model(component_cfg=ModelBundleConfig)
 class SD3ModelBundle(ModelBundle):
     """
     Model bundle for Stable Diffusion 3 models.
@@ -52,11 +52,11 @@ class SD3ModelBundle(ModelBundle):
 
         self.pretrained_path = config.pretrained_model_ckpt_path
         self.device = torch.device(self.device)
-        self.use_lora = bool(config.use_lora)
-        self.lora_rank = int(config.lora_rank)
-        self.lora_alpha = int(config.lora_alpha)
+        self.use_lora = config.use_lora
+        self.lora_rank = config.lora_rank
+        self.lora_alpha = config.lora_alpha
         self.lora_target_modules = config.lora_target_modules
-        self.training_only = bool(config.training_only)
+        self.training_only = config.training_only
 
         self._transformer = None
         self._text_encoder = None
@@ -242,7 +242,7 @@ class SD3ModelBundle(ModelBundle):
 
     @property
     def media_type(self) -> str:
-        return "image"
+        return "t2i"
 
     @classmethod
     def default_sampler_dotpath(cls) -> Optional[str]:
@@ -368,6 +368,26 @@ class SD3ModelBundle(ModelBundle):
             return {}
         return {"scheduler": scheduler}
 
+    def _require_text_encoding_components(self) -> None:
+        missing = [
+            name
+            for name in (
+                "_text_encoder",
+                "_text_encoder_2",
+                "_text_encoder_3",
+                "_tokenizer",
+                "_tokenizer_2",
+                "_tokenizer_3",
+            )
+            if getattr(self, name, None) is None
+        ]
+        if missing:
+            self._raise_aux_component_not_loaded("text encoders/tokenizers", missing=missing)
+
+    def _require_vae(self) -> None:
+        if self._vae is None:
+            self._raise_aux_component_not_loaded("VAE")
+
     def encode_prompt(
         self,
         prompts: List[str],
@@ -385,6 +405,8 @@ class SD3ModelBundle(ModelBundle):
             - prompt_embeds: [B, seq_len, hidden_dim] concatenated embeddings
             - pooled_prompt_embeds: [B, pooled_dim] pooled CLIP embeddings
         """
+        self._require_text_encoding_components()
+
         # Encode with CLIP text encoders
         # CLIP 1
         text_inputs = self._tokenizer(
@@ -445,17 +467,37 @@ class SD3ModelBundle(ModelBundle):
 
         return prompt_embeds, pooled_embeds
 
-    def encode_prompt_for_inference(
+    def encode_inputs(
         self,
-        prompts: List[str],
-        **kwargs,
+        prompts: Union[str, List[str]],
+        negative_prompt: Optional[Union[str, List[str]]] = None,
+        image: Optional[Any] = None,
+        video: Optional[Any] = None,
+        **kwargs: Any,
     ) -> Dict[str, torch.Tensor]:
         """
         Encode SD3 prompts for inference, including CFG negative branch.
         """
-        output = super().encode_prompt_for_inference(prompts, **kwargs)
-        negative_prompts = [""] * len(prompts)
-        negative_output = super().encode_prompt_for_inference(negative_prompts, **kwargs)
+        if image is not None:
+            raise NotImplementedError(f"{type(self).__name__} does not support image conditioning")
+        if video is not None:
+            raise NotImplementedError(f"{type(self).__name__} does not support video conditioning")
+
+        prompts_list = [prompts] if isinstance(prompts, str) else list(prompts)
+        output = self._encode_prompt_to_input_dict(prompts_list, **kwargs)
+
+        if negative_prompt is None:
+            negative_prompts = [""] * len(prompts_list)
+        elif isinstance(negative_prompt, str):
+            negative_prompts = [negative_prompt] * len(prompts_list)
+        else:
+            negative_prompts = list(negative_prompt)
+            if len(negative_prompts) != len(prompts_list):
+                raise ValueError(
+                    f"negative_prompt batch size {len(negative_prompts)} does not match prompt batch size {len(prompts_list)}"
+                )
+
+        negative_output = self._encode_prompt_to_input_dict(negative_prompts, **kwargs)
         output["negative_prompt_embeds"] = negative_output.get("prompt_embeds")
         output["negative_pooled_prompt_embeds"] = negative_output.get("pooled_prompt_embeds")
         return output
@@ -470,6 +512,8 @@ class SD3ModelBundle(ModelBundle):
         Returns:
             [B, C, H//8, W//8] latents
         """
+        self._require_vae()
+
         with torch.no_grad():
             latents = self._vae.encode(images).latent_dist.sample()
             latents = latents * self._vae.config.scaling_factor
@@ -485,6 +529,8 @@ class SD3ModelBundle(ModelBundle):
         Returns:
             [B, C, H, W] images in [-1, 1] range
         """
+        self._require_vae()
+
         # VAE decode doesn't support bfloat16 ("Got unsupported ScalarType BFloat16")
         # Convert VAE and latents to float32 for decoding
         latents = latents.to(dtype=torch.float32) / self._vae.config.scaling_factor

@@ -125,13 +125,13 @@ class FSDPSamplingEngine(BaseRolloutEngine):
                 host_label="FSDPSamplingEngine",
             )
 
-    def encode_prompt(
+    def encode_inputs(
         self,
         prompts: List[str],
         **kwargs: Any,
     ) -> Dict[str, torch.Tensor]:
         self._require_ready()
-        return self._sampler.encode_prompt(prompts, **kwargs)
+        return self._sampler.encode_inputs(prompts, **kwargs)
 
     def decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
         self._require_ready()

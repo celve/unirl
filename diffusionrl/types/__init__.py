@@ -23,6 +23,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "SD3ForwardContext": ("diffusionrl.types.forward_context", "SD3ForwardContext"),
     "HunyuanForwardContext": ("diffusionrl.types.forward_context", "HunyuanForwardContext"),
     "MochiForwardContext": ("diffusionrl.types.forward_context", "MochiForwardContext"),
+    "WAN21ForwardContext": ("diffusionrl.types.forward_context", "WAN21ForwardContext"),
     "DefaultForwardContext": ("diffusionrl.types.forward_context", "DefaultForwardContext"),
     "get_forward_context_cls": ("diffusionrl.types.forward_context", "get_forward_context_cls"),
     "register_forward_context": ("diffusionrl.types.forward_context", "register_forward_context"),

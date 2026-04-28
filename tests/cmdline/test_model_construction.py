@@ -46,7 +46,7 @@ class _FakeModelBundle(ModelBundle):
 
     @property
     def media_type(self) -> str:
-        return "image"
+        return "t2i"
 
 
 def test_build_model_bundle_init_payload_from_args_returns_typed_payload() -> None:

@@ -17,7 +17,7 @@ from .registry import register_model
 logger = logging.getLogger(__name__)
 
 
-@register_model(component_name="hunyuan", component_cfg=ModelBundleConfig)
+@register_model(component_cfg=ModelBundleConfig)
 class HunyuanModelBundle(ModelBundle):
     """
     HunyuanVideo model bundle.
@@ -50,7 +50,7 @@ class HunyuanModelBundle(ModelBundle):
 
     @property
     def media_type(self) -> str:
-        return "video"
+        return "t2v"
 
     @classmethod
     def default_sampler_dotpath(cls) -> Optional[str]:
@@ -200,7 +200,7 @@ class HunyuanModelBundle(ModelBundle):
             Tuple of (prompt_embeds, pooled_prompt_embeds)
         """
         if self._text_encoder is None:
-            raise RuntimeError("Text encoder not loaded")
+            self._raise_aux_component_not_loaded("text encoder")
 
         # Handle string input
         if isinstance(prompt, str):
@@ -222,7 +222,7 @@ class HunyuanModelBundle(ModelBundle):
             Video tensor [B, C, T, H', W']
         """
         if self._vae is None:
-            raise RuntimeError("VAE not loaded")
+            self._raise_aux_component_not_loaded("VAE")
 
         with torch.no_grad():
             # Scale latents
@@ -247,7 +247,7 @@ class HunyuanModelBundle(ModelBundle):
             Latent tensor [B, C', T', H', W']
         """
         if self._vae is None:
-            raise RuntimeError("VAE not loaded")
+            self._raise_aux_component_not_loaded("VAE")
 
         with torch.no_grad():
             # Encode

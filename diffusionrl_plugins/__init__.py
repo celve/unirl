@@ -5,10 +5,10 @@ This package is a plain Python namespace.  There is NO auto-discovery or
 auto-registration magic.  To use a plugin, pass its full dotpath via
 the corresponding CLI argument:
 
-    --model-path   diffusionrl_plugins.models.wan21.Wan21ModelBundle
-    --sampler-path diffusionrl_plugins.samplers.minimal_sampler.MinimalSampler
-    --algorithm-path diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm
-    --reward-path diffusionrl_plugins.rewards.minimal_reward.MinimalRewardScorer
+    --model.model-type your_module.your_model.YourModel
+    --sampler.sampler-type diffusionrl_plugins.samplers.minimal_sampler.MinimalSampler
+    --algorithm.algorithm-type diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm
+    --reward.reward-type diffusionrl_plugins.rewards.minimal_reward.MinimalRewardScorer
     --rollout-buffer-plugin-paths your_module.your_buffer_plugin
 
 Plugin paths are validated by importability only.

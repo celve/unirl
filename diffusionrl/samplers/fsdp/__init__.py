@@ -11,6 +11,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "FluxSampler": ("diffusionrl.samplers.fsdp.flux_sampler", "FluxSampler"),
     "SD3Sampler": ("diffusionrl.samplers.fsdp.sd3_sampler", "SD3Sampler"),
     "FSDPHunyuanSampler": ("diffusionrl.samplers.fsdp.hunyuan_sampler", "FSDPHunyuanSampler"),
+    "FSDPWanSampler": ("diffusionrl.samplers.fsdp.wan_sampler", "FSDPWanSampler"),
 }
 
 __all__ = list(_LAZY_ATTRS.keys())

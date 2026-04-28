@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, NoReturn, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -57,7 +57,22 @@ class ModelBundle(ABC):
         self._transformer: Optional[nn.Module] = None
         self._vae: Optional[nn.Module] = None
         self._text_encoder: Optional[nn.Module] = None
+        self._vision_encoder: Optional[nn.Module] = None
         self.training_forward_autocast_dtype: Optional[torch.dtype] = None
+
+    def _raise_aux_component_not_loaded(
+        self,
+        component: str,
+        *,
+        missing: Optional[List[str]] = None,
+    ) -> NoReturn:
+        missing_msg = f" Missing components: {', '.join(missing)}." if missing else ""
+        raise RuntimeError(
+            f"{type(self).__name__} {component} not loaded.{missing_msg} "
+            "This can happen when the bundle was initialized with training_only=True. "
+            "Call load_aux_components() before calling encode/decode APIs, or use a bundle initialized with "
+            "auxiliary components."
+        )
 
     @property
     def transformer(self) -> nn.Module:
@@ -70,15 +85,22 @@ class ModelBundle(ABC):
     def vae(self) -> nn.Module:
         """Get the VAE model."""
         if self._vae is None:
-            raise RuntimeError("VAE not loaded. Call load() first.")
+            self._raise_aux_component_not_loaded("VAE")
         return self._vae
 
     @property
     def text_encoder(self) -> nn.Module:
         """Get the text encoder."""
         if self._text_encoder is None:
-            raise RuntimeError("Text encoder not loaded. Call load() first.")
+            self._raise_aux_component_not_loaded("text encoder")
         return self._text_encoder
+
+    @property
+    def vision_encoder(self) -> nn.Module:
+        """Get the optional vision encoder used by image/video-conditioned models."""
+        if self._vision_encoder is None:
+            self._raise_aux_component_not_loaded("vision encoder")
+        return self._vision_encoder
 
     @property
     @abstractmethod
@@ -89,7 +111,12 @@ class ModelBundle(ABC):
     @property
     @abstractmethod
     def media_type(self) -> str:
-        """Return the media type identifier ('image' or 'video')."""
+        """Return the task signature, e.g. ``t2i``, ``t2v``, or ``tiv2iv``.
+
+        The compact signature uses ``t`` (text), ``i`` (image), ``v`` (video),
+        and ``a`` (audio). Modalities before ``2`` are inputs; modalities after
+        ``2`` are outputs.
+        """
         ...
 
     @classmethod
@@ -172,16 +199,18 @@ class ModelBundle(ABC):
         """
         ...
 
-    def encode_prompt_for_inference(
+    def _encode_prompt_to_input_dict(
         self,
         prompts: Union[str, List[str]],
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
         """
-        Encode prompts for sampler inference path.
+        Encode prompts and normalize the result for ``encode_inputs``.
 
-        Subclasses can override to inject model-specific fields such as
-        CFG negative embeddings.
+        The default tuple interpretation matches SD3/FLUX-style text encoders:
+        ``(prompt_embeds, pooled_prompt_embeds, text_ids)``. Models whose
+        ``encode_prompt`` tuple carries different semantics should override this
+        private helper or ``encode_inputs``.
         """
         result = self.encode_prompt(prompts, **kwargs)
         if isinstance(result, tuple):
@@ -194,6 +223,47 @@ class ModelBundle(ABC):
         if isinstance(result, dict):
             return dict(result)
         return {"prompt_embeds": result}
+
+    def encode_inputs(
+        self,
+        prompts: Union[str, List[str]],
+        negative_prompt: Optional[Union[str, List[str]]] = None,
+        image: Optional[Any] = None,
+        video: Optional[Any] = None,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        """Encode multimodal conditioning inputs for sampler inference.
+
+        Text-only models use the prompt encoder by default. Multimodal models
+        can override this to add image/video conditioning tensors.
+        """
+        if image is not None and not self.accepts_image_input:
+            raise NotImplementedError(f"{type(self).__name__} does not support image conditioning")
+        if video is not None and not self.accepts_video_input:
+            raise NotImplementedError(f"{type(self).__name__} does not support video conditioning")
+        output = self._encode_prompt_to_input_dict(prompts, **kwargs)
+        if negative_prompt is None:
+            return output
+
+        negative_prompts: Union[str, List[str]]
+        if isinstance(negative_prompt, str):
+            if isinstance(prompts, str):
+                negative_prompts = negative_prompt
+            else:
+                negative_prompts = [negative_prompt] * len(prompts)
+        else:
+            prompt_batch_size = 1 if isinstance(prompts, str) else len(prompts)
+            if len(negative_prompt) != prompt_batch_size:
+                raise ValueError(
+                    f"negative_prompt batch size {len(negative_prompt)} does not match prompt batch size {prompt_batch_size}"
+                )
+            negative_prompts = negative_prompt
+        negative_output = self._encode_prompt_to_input_dict(negative_prompts, **kwargs)
+        if negative_output.get("prompt_embeds") is not None:
+            output["negative_prompt_embeds"] = negative_output["prompt_embeds"]
+        if negative_output.get("pooled_prompt_embeds") is not None:
+            output["negative_pooled_prompt_embeds"] = negative_output["pooled_prompt_embeds"]
+        return output
 
     def get_sampler_extra_kwargs(self) -> Dict[str, Any]:
         """
@@ -323,6 +393,8 @@ class ModelBundle(ABC):
             self._vae.to(self.device)
         if self._text_encoder is not None:
             self._text_encoder.to(self.device)
+        if self._vision_encoder is not None:
+            self._vision_encoder.to(self.device)
 
         return self
 
@@ -350,6 +422,8 @@ class ModelBundle(ABC):
             self._vae.eval()
         if self._text_encoder is not None:
             self._text_encoder.eval()
+        if self._vision_encoder is not None:
+            self._vision_encoder.eval()
         return self
 
     def state_dict(self) -> Dict[str, Any]:
@@ -369,13 +443,56 @@ class ModelBundle(ABC):
 
     @property
     def is_video_model(self) -> bool:
-        """Whether this is a video generation model."""
-        return self.media_type == "video"
+        """Whether this model can generate video outputs."""
+        return self.outputs_video
 
     @property
     def is_image_model(self) -> bool:
-        """Whether this is an image generation model."""
-        return self.media_type == "image"
+        """Whether this model can generate image outputs."""
+        return self.outputs_image
+
+    @property
+    def input_media_types(self) -> str:
+        """Compact input-modality signature, e.g. ``t`` or ``tiv``."""
+        return self._split_media_type()[0]
+
+    @property
+    def output_media_types(self) -> str:
+        """Compact output-modality signature, e.g. ``i``, ``v``, or ``iv``."""
+        return self._split_media_type()[1]
+
+    @property
+    def accepts_text_input(self) -> bool:
+        return "t" in self.input_media_types
+
+    @property
+    def accepts_image_input(self) -> bool:
+        return "i" in self.input_media_types
+
+    @property
+    def accepts_video_input(self) -> bool:
+        return "v" in self.input_media_types
+
+    @property
+    def outputs_image(self) -> bool:
+        return "i" in self.output_media_types
+
+    @property
+    def outputs_video(self) -> bool:
+        return "v" in self.output_media_types
+
+    def _split_media_type(self) -> Tuple[str, str]:
+        media_type = self.media_type.strip().lower()
+        if "2" not in media_type:
+            raise ValueError(
+                f"{type(self).__name__}.media_type must be a task signature like 't2i' "
+                f"or 'tiv2iv'; got {self.media_type!r}"
+            )
+        inputs, outputs = media_type.split("2", 1)
+        valid = set("tiva")
+        if not inputs or not outputs or any(ch not in valid for ch in inputs + outputs):
+            raise ValueError(f"{type(self).__name__}.media_type has invalid modality signature: {self.media_type!r}")
+        return inputs, outputs
 
     def get_config(self) -> Dict[str, Any]:
         """Get model bundle configuration."""
@@ -444,6 +561,12 @@ class ModelBundle(ABC):
                 loader = getattr(self, "_load_text_encoder", None)
                 if callable(loader):
                     loader()
+
+        # Load vision encoders for image/video-conditioned models when present.
+        if getattr(self, "_vision_encoder", None) is None:
+            loader = getattr(self, "_load_vision_encoder", None)
+            if callable(loader):
+                loader()
 
         # Load scheduler if missing
         if hasattr(self, "_scheduler") and getattr(self, "_scheduler", None) is None:

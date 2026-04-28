@@ -359,7 +359,7 @@ and the minimal reference implementation in
 This repo ships minimal templates under `diffusionrl_plugins/` for common extension
 points:
 
-- Model: `diffusionrl_plugins.models.wan21.Wan21ModelBundle`
+- Model: built-in `--model.model-type wan21`
 - Sampler: `diffusionrl_plugins.samplers.minimal_sampler.MinimalSampler`
 - Algorithm: `diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm`
 - Reward: `diffusionrl_plugins.rewards.minimal_reward.MinimalRewardScorer`
