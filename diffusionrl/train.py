@@ -273,11 +273,12 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
         create_transferqueue_client(
             "controller", single_ctrl_tq_global_config, single_ctrl_tq_backend_config, sync=True
         )
-        init_remote_actor_transferqueue_client(
-            rollout_group.get_actors(),
-            tq_global_config,
-            tq_backend_config,
-        )
+        if not training_actor_sampling_mode:
+            init_remote_actor_transferqueue_client(
+                rollout_group.get_actors(),
+                tq_global_config,
+                tq_backend_config,
+            )
         init_remote_actor_transferqueue_client(
             train_group.get_actors(),
             tq_global_config,
@@ -299,7 +300,8 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
             # === Reset TransferQueue zero-copy buffer free ===
             reset_zero_copy_buffer_free()
             reset_actors_zero_copy_buffer_free(train_group.get_actors())
-            reset_actors_zero_copy_buffer_free(rollout_group.get_actors())
+            if not training_actor_sampling_mode:
+                reset_actors_zero_copy_buffer_free(rollout_group.get_actors())
 
             # === Periodic Eval (before rollout/train of this step) ===
             if should_eval(rollout_id, args):
