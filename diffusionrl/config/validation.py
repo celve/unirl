@@ -124,13 +124,10 @@ def validate_colocate_fractions(
 def validate_reward_config(reward_config: RewardSpec) -> None:
     """Validate reward configuration consistency from the typed reward spec."""
     execution_plan = reward_config.to_execution_plan()
-    if execution_plan.uses_http_backend:
-        logger.info("Reward mode: sampling-actor HTTP (external service)")
-    else:
-        logger.info(
-            "Reward mode: sampling-actor-local worker (local_reward_device=%s)",
-            execution_plan.local_device,
-        )
+    logger.info(
+        "Reward mode: sampling-actor-local worker (local_reward_device=%s)",
+        execution_plan.local_device,
+    )
 
 
 # ============================================================================

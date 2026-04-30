@@ -62,45 +62,7 @@ def build_executors(spec: RewardSpec) -> List[BaseRewardExecutor]:
     if not isinstance(spec, RewardSpec):
         raise TypeError(f"build_executors requires RewardSpec, got: {type(spec).__name__}")
 
-    execution_plan = spec.to_execution_plan()
-    if execution_plan.uses_http_backend:
-        return _build_http_executors(spec)
     return _build_local_executors(spec)
-
-
-def _build_http_executors(spec: RewardSpec) -> List[BaseRewardExecutor]:
-    from .http import HTTPRewardExecutor
-
-    definition = spec.to_definition()
-    provider = spec.to_provider_config()
-    execution_plan = spec.to_execution_plan()
-
-    urls = list(execution_plan.reward_service_urls or ())
-    component_names = definition.component_names
-    component_weights = definition.component_weights_list
-
-    executors: List[BaseRewardExecutor] = []
-    for i, url in enumerate(urls):
-        if url is None:
-            continue
-
-        weight = 1.0
-        if component_weights and i < len(component_weights):
-            weight = component_weights[i]
-
-        name = component_names[i] if component_names and i < len(component_names) else f"http_{i}"
-
-        executor = HTTPRewardExecutor(
-            base_url=url,
-            model_name=name,
-            weight=weight,
-            timeout=provider.timeout,
-            batch_size=provider.batch_size,
-        )
-        executors.append(executor)
-        logger.info("Added HTTPRewardExecutor: %s (name=%s)", url, name)
-
-    return executors
 
 
 def _build_local_executors(spec: RewardSpec) -> List[BaseRewardExecutor]:
@@ -110,11 +72,7 @@ def _build_local_executors(spec: RewardSpec) -> List[BaseRewardExecutor]:
 
     device = _resolve_local_device(execution_plan.local_device)
     if device == "cuda":
-        logger.warning(
-            "Local reward scorer is running on CUDA in-process. "
-            "This can contend with sampling GPUs. Prefer HTTP reward service "
-            "for isolation when you need strict resource isolation."
-        )
+        logger.warning("Local reward scorer is running on CUDA in-process; this can contend with sampling GPUs.")
 
     reward_dotpath = provider.reward_dotpath
 

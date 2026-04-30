@@ -47,7 +47,6 @@ def _make_reward_spec() -> RewardSpec:
         reward_batch_size=1,
         local_reward_device="cpu",
         reward_backend="local",
-        reward_service_urls=None,
         reward_components=["hpsv2"],
         reward_weights=None,
         reward_aggregation_method="mean",
@@ -123,13 +122,12 @@ def test_validate_reward_config_rejects_invalid_backend() -> None:
         reward_batch_size=1,
         local_reward_device="cpu",
         reward_backend="weird",
-        reward_service_urls=None,
         reward_components=["hpsv2"],
         reward_weights=None,
         reward_aggregation_method="mean",
     )
 
-    with pytest.raises(ValueError, match="reward_backend must be one of local/http"):
+    with pytest.raises(ValueError, match="reward_backend must be 'local'"):
         validate_reward_config(reward_config)
 
 

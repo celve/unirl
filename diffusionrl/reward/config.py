@@ -77,11 +77,6 @@ class RewardExecutionPlan:
 
     backend: str
     local_device: str
-    reward_service_urls: Tuple[str, ...]
-
-    @property
-    def uses_http_backend(self) -> bool:
-        return str(self.backend or "local").strip().lower() == "http"
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +93,6 @@ class RewardSpec:
     reward_batch_size: int
     local_reward_device: str
     reward_backend: str
-    reward_service_urls: Optional[List[str]]
     reward_components: Optional[List[str]]
     reward_weights: Optional[List[float]]
     reward_aggregation_method: str
@@ -113,7 +107,6 @@ class RewardSpec:
             reward_batch_size=int(rc.reward_batch_size),
             local_reward_device=str(rc.local_reward_device),
             reward_backend=str(rc.reward_backend),
-            reward_service_urls=rc.reward_service_urls,
             reward_components=rc.reward_components,
             reward_weights=rc.reward_weights,
             reward_aggregation_method=rc.reward_aggregation_method,
@@ -148,13 +141,11 @@ class RewardSpec:
 
     def to_execution_plan(self) -> RewardExecutionPlan:
         backend = str(self.reward_backend or "local").strip().lower()
-        if backend not in {"local", "http"}:
-            raise ValueError(f"reward_backend must be one of local/http, got: {self.reward_backend!r}.")
-        service_urls = tuple(str(url) for url in (self.reward_service_urls or []) if str(url or "").strip())
+        if backend != "local":
+            raise ValueError(f"reward_backend must be 'local', got: {self.reward_backend!r}.")
         return RewardExecutionPlan(
             backend=backend,
             local_device=str(self.local_reward_device or "cpu"),
-            reward_service_urls=service_urls,
         )
 
     def component_weights(self) -> dict[str, float]:

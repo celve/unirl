@@ -287,7 +287,7 @@ Arguments in DiffusionRL are organized into the following categories:
 1.  **Model arguments**: `--model.model-type`, `--model.pretrained-model-ckpt-path`, `--training.use-lora`, `--training.lora-rank`, `--training.lora-alpha`, etc.
 2.  **Sampling arguments**: `--sampling.sde-type`, `--sampling.eta`, `--sampling.num-inference-steps`, `--sampling.guidance-scale`, `--sampling.shift`, `--sampling.timestep-fraction`, etc.
 3.  **Algorithm arguments**: `--algorithm.algorithm-dotpath`, `--algorithm.prompts-per-rollout`, `--algorithm.samples-per-prompt`, plus shared typed fields such as `--algorithm.adv-normalization`, `--algorithm.eval-ema-decay`, and `--algorithm.shuffle-samples`. Use repeated `--algorithm.kwarg key=value` only for true algorithm-specific extension keys. In YAML, put those extension keys under `algorithm.algorithm_kwargs`.
-4.  **Reward arguments**: `--reward.reward-components` for built-in scorers, `--reward.reward-dotpath` for custom scorer dotpaths, `--reward.reward-model-ckpt-path` for scorer checkpoints, `--reward.reward-backend {local,http}`, `--reward.local-reward-device`, and `--reward.reward-service-urls` for HTTP-backed scoring, etc.
+4.  **Reward arguments**: `--reward.reward-components` for built-in scorers, `--reward.reward-dotpath` for custom scorer dotpaths, `--reward.reward-model-ckpt-path` for scorer checkpoints, `--reward.reward-backend local`, `--reward.local-reward-device`, etc.
 5.  **Training arguments**: `--training.learning-rate`, `--training.num-updates-per-batch`, `--training.micro-batch-size`, `--training.max-grad-norm`, etc.
 6.  **Runtime arguments**: `--ray.rollout-num-gpus-per-node`, `--ray.training-num-gpus-per-node`, `--ray.colocate-training-gpu-fraction`, `--ray.colocate-rollout-gpu-fraction`, `--ray.placement-strategy`, `--ray.offload-train`, `--ray.offload-rollout`, etc.
 
@@ -377,12 +377,10 @@ Use reward config in three layers:
   `--reward.reward-components a,b --reward.reward-weights wa,wb` for multi-component reward.
 - Custom scorer: set `--reward.reward-dotpath your_module.MyRewardScorer` to a full
   scorer class dotpath.
-- Execution path: rewards are always computed on the active sampling actor.
-  Use `--reward.reward-backend local` for in-process scorers, or
-  `--reward.reward-backend http --reward.reward-service-urls ...` to call a
-  remote reward service from the actor and return only scalar rewards to the driver.
-  Local scoring defaults to `local_reward_device=cpu`; switch to `cuda` only when
-  you intentionally want in-process GPU scoring on the sampling host.
+- Execution path: rewards are always computed on the active sampling actor via
+  in-process scorers (`--reward.reward-backend local`). Local scoring defaults to
+  `local_reward_device=cpu`; switch to `cuda` only when you intentionally want
+  in-process GPU scoring on the sampling host.
 
 Subclass `BaseRewardScorer` for the minimal contract:
 

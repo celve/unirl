@@ -85,7 +85,6 @@ def build_actor_config(model_path: str, rollout_batch_size: int | None = None) -
             reward_batch_size=1,
             local_reward_device="cpu",
             reward_backend="local",
-            reward_service_urls=None,
             reward_components=None,
             reward_weights=None,
             reward_aggregation_method="mean",

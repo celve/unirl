@@ -197,15 +197,9 @@ class RewardConfig:
     reward_backend: str = field(
         default="local",
         metadata={
-            "help": "Reward backend: local or http",
-            "choices": ["local", "http"],
+            "help": "Reward backend: local",
+            "choices": ["local"],
         },
-    )
-
-    # http reward service related fields
-    reward_service_urls: Optional[List[str]] = field(
-        default=None,
-        metadata={"help": "HTTP reward service URL(s). Single URL string or a list for load balancing"},
     )
 
     # local reward model related fields
@@ -245,26 +239,12 @@ class RewardConfig:
     )
 
     def __post_init__(self):
-        if isinstance(self.reward_service_urls, str):
-            if "," in self.reward_service_urls:
-                raise ValueError(
-                    f"reward.reward_service_urls: pass a list, not a comma string. Got: {self.reward_service_urls!r}."
-                )
-            self.reward_service_urls = [self.reward_service_urls] if self.reward_service_urls.strip() else None
         if isinstance(self.reward_components, str):
             if "," in self.reward_components:
                 raise ValueError(
                     f"reward.reward_components: pass a list, not a comma string. Got: {self.reward_components!r}."
                 )
             self.reward_components = [self.reward_components] if self.reward_components.strip() else None
-
-    @property
-    def has_http_reward_urls(self) -> bool:
-        return bool(self.reward_service_urls)
-
-    @property
-    def has_http_reward(self) -> bool:
-        return str(self.reward_backend or "local").strip().lower() == "http"
 
     @property
     def has_builtin_reward(self) -> bool:
@@ -276,11 +256,7 @@ class RewardConfig:
         # reward_backend / local_reward_device choices are enforced by
         # cmdline.validation._validate_metadata_choices (driven by
         # validate_grouped_configs) via the ``metadata["choices"]`` declarations.
-        if self.has_http_reward and not self.has_http_reward_urls:
-            raise ValueError("reward_backend='http' requires reward_service_urls.")
-        if not self.has_http_reward and self.has_http_reward_urls:
-            raise ValueError("reward_service_urls is only valid when reward_backend='http'.")
-        if not self.has_http_reward and not self.reward_dotpath and not self.has_builtin_reward:
+        if not self.reward_dotpath and not self.has_builtin_reward:
             raise ValueError(
                 "Reward scoring requires either reward_components for built-ins, or reward_dotpath for a custom scorer."
             )

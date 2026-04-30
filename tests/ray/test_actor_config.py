@@ -102,7 +102,6 @@ def _make_reward_spec(*, reward_components=None) -> RewardSpec:
         reward_batch_size=1,
         local_reward_device="cpu",
         reward_backend="local",
-        reward_service_urls=None,
         reward_components=reward_components,
         reward_weights=None,
         reward_aggregation_method="mean",
