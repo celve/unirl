@@ -204,8 +204,11 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
     def generate(self, request: RolloutRequest) -> RolloutResponse:
         if self.engine is None:
             raise RuntimeError("TrainActor.generate() requires sampling_config to be set at construction.")
-        chunk_size = getattr(request.sampling_params, "sampling_forward_batch", None)
-        output = chunked_engine_generate(self.engine, request, chunk_size=chunk_size)
+        output = chunked_engine_generate(
+            self.engine,
+            request,
+            chunk_size=request.sampling_params.sampling_forward_batch,
+        )
         return RolloutResponse(request=request, samples=output)
 
     def apply_eval_ema(self) -> None:

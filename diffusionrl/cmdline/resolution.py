@@ -144,7 +144,7 @@ def derive_sampling_spec(
         eta=sampling.eta,
         sde_type=sampling.sde_type,
         shift=sampling.shift,
-        sampling_forward_batch=getattr(sampling, "forward_batch_size", None),
+        sampling_forward_batch=sampling.forward_batch_size,
     )
 
 

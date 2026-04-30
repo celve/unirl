@@ -80,15 +80,10 @@ class RolloutPipelineMixin:
             from diffusionrl.samplers.engine import chunked_decode_latents
             from diffusionrl.utils.media import tensor_to_pil
 
-            chunk_size = getattr(
-                getattr(response.request, "sampling_params", None),
-                "sampling_forward_batch",
-                None,
-            )
             decoded = chunked_decode_latents(
                 self.engine,
                 response.samples.latents,
-                chunk_size=chunk_size,
+                chunk_size=response.request.sampling_params.sampling_forward_batch,
             )
             response.samples.decoded_images = tensor_to_pil(decoded)
         self._ensure_reward_pipeline().score_and_attach(response)
@@ -96,8 +91,8 @@ class RolloutPipelineMixin:
         # Build a tiny wandb media preview (PIL + prompt + reward) *before*
         # dropping the full decoded-image list, so only the preview payload
         # travels back across Ray to the driver.
-        if bool(getattr(response.request, "collect_media_preview", False)):
-            response.attach_media_preview(max_items=int(getattr(response.request, "media_max_items", 8)))
+        if response.request.collect_media_preview:
+            response.attach_media_preview(max_items=int(response.request.media_max_items))
         else:
             response.samples.media_preview = None
 

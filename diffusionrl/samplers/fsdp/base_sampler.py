@@ -1,16 +1,15 @@
 """Base class for all FSDP-native samplers.
 
 Provides shared state (model, text_encoder, vae, model_bundle) and concrete
-orchestration methods that were previously free functions in sampler_runner.py:
-sampler creation, input encoding, sample generation with optional adapter
-switching, latent decoding, module discovery, and output post-processing.
+orchestration methods: sampler creation, input encoding, sample generation
+with optional adapter switching, latent decoding, and module discovery.
 """
 
 from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -22,7 +21,6 @@ from diffusionrl.types.sample import RolloutSamples
 from diffusionrl.utils import load_function
 from diffusionrl.utils.adapter_utils import switch_adapter
 from diffusionrl.utils.dtypes import parse_torch_dtype
-from diffusionrl.utils.media import tensor_to_pil
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +73,8 @@ class FSDPBaseSampler(BaseSampler):
     - Shared instance state (model, text_encoder, vae, model_bundle,
       precision dtypes).
     - Orchestration methods for the full sampling lifecycle: input
-      encoding, adapter-aware sampling, latent decoding, module
-      discovery, and output post-processing.
+      encoding, adapter-aware sampling, latent decoding, and module
+      discovery.
     - A ``from_config`` factory classmethod for dotpath-based
       instantiation.
 
@@ -257,7 +255,6 @@ class FSDPBaseSampler(BaseSampler):
         *,
         host_label: str,
         sampling_adapter: Optional[str] = None,
-        decode_for_reward: bool = True,
     ) -> RolloutSamples:
         """Run the full prompt-only FSDP sampling flow.
 
@@ -310,87 +307,6 @@ class FSDPBaseSampler(BaseSampler):
         from dataclasses import replace as _replace
 
         return _replace(output, sampling_params=sp, prompts=raw_prompts)
-
-    # ------------------------------------------------------------------
-    # Output post-processing
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _attach_metadata_defaults(
-        output: RolloutSamples,
-        metadata_defaults: Optional[Dict[str, Any]],
-    ) -> RolloutSamples:
-        """Fill missing keys in ``aux['metadata']`` from *metadata_defaults*."""
-        if not metadata_defaults:
-            return output
-        raw_metadata = output.aux.get("metadata")
-        metadata = dict(raw_metadata or {})
-        changed = False
-        for key, value in metadata_defaults.items():
-            if key not in metadata:
-                metadata[key] = value
-                changed = True
-        if changed:
-            output.aux["metadata"] = metadata
-        return output
-
-    def _decode_for_reward_if_needed(
-        self,
-        output: RolloutSamples,
-        *,
-        decode_for_reward: bool,
-        host_label: str,
-    ) -> RolloutSamples:
-        """VAE-decode final latents when the request asks for reward-ready pixels."""
-        if not decode_for_reward:
-            return output
-        if output.decoded_videos is not None or output.decoded_images is not None:
-            return output
-        try:
-            from diffusionrl.samplers.engine import chunked_decode_latents
-
-            sp = getattr(output, "sampling_params", None)
-            chunk_size = getattr(sp, "sampling_forward_batch", None)
-            decoded = chunked_decode_latents(self, output.latents, chunk_size=chunk_size)
-            decoded_images = tensor_to_pil(decoded)
-        except Exception as exc:
-            raise RuntimeError(
-                f"decode_for_reward requested but {host_label} produced no "
-                f"decoded media and latent decoding failed: {exc}"
-            ) from exc
-        from dataclasses import replace as _replace
-
-        return _replace(output, decoded_images=decoded_images)
-
-    def finalize_output(
-        self,
-        *,
-        output: RolloutSamples,
-        host_label: str,
-        decode_for_reward: bool = True,
-        metadata_defaults: Optional[Dict[str, Any]] = None,
-        local_reward_attach_fn: Optional[Callable[[RolloutSamples], RolloutSamples]] = None,
-        transport_optimize_fn: Optional[Callable[[RolloutSamples], RolloutSamples]] = None,
-        move_output_to_cpu: bool = True,
-    ) -> RolloutSamples:
-        """Apply shared sampling-output post-processing after raw generation.
-
-        Pipeline: metadata defaults -> decode-for-reward -> local reward ->
-        transport optimisation -> move to CPU.
-        """
-        output = self._attach_metadata_defaults(output, metadata_defaults)
-        output = self._decode_for_reward_if_needed(
-            output,
-            decode_for_reward=decode_for_reward,
-            host_label=host_label,
-        )
-        if decode_for_reward and local_reward_attach_fn is not None:
-            output = local_reward_attach_fn(output)
-        if transport_optimize_fn is not None:
-            output = transport_optimize_fn(output)
-        if move_output_to_cpu:
-            output = output.to_device("cpu")
-        return output
 
     # ------------------------------------------------------------------
     # Factory

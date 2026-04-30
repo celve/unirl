@@ -210,8 +210,7 @@ class RolloutPipeline:
         if not responses:
             raise RuntimeError("Rollout produced no responses.")
         combined = RolloutResponse.concat(responses)
-        max_items = int(getattr(combined.request, "media_max_items", 8))
-        combined.samples.cap_media_preview(max_items)
+        combined.samples.cap_media_preview(int(combined.request.media_max_items))
         return combined
 
     def score_samples(self, *args: Any, **kwargs: Any) -> None:
