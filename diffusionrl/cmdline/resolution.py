@@ -144,6 +144,7 @@ def derive_sampling_spec(
         eta=sampling.eta,
         sde_type=sampling.sde_type,
         shift=sampling.shift,
+        sampling_forward_batch=getattr(sampling, "forward_batch_size", None),
     )
 
 
@@ -194,7 +195,6 @@ def derive_rollout_info(args: Any) -> RolloutInfo:
         replay_enabled=replay_enabled,
         sync_protocol=args.sync.protocol,
         algorithm_type=algorithm_type,
-        max_samples_per_request=args.sampling.max_samples_per_request,
         effective_engine_capabilities=engine_caps,
     )
 

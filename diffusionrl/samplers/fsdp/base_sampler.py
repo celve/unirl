@@ -347,7 +347,11 @@ class FSDPBaseSampler(BaseSampler):
         if output.decoded_videos is not None or output.decoded_images is not None:
             return output
         try:
-            decoded = self.decode_latents(output.latents)
+            from diffusionrl.samplers.engine import chunked_decode_latents
+
+            sp = getattr(output, "sampling_params", None)
+            chunk_size = getattr(sp, "sampling_forward_batch", None)
+            decoded = chunked_decode_latents(self, output.latents, chunk_size=chunk_size)
             decoded_images = tensor_to_pil(decoded)
         except Exception as exc:
             raise RuntimeError(

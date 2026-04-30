@@ -15,13 +15,12 @@ from diffusionrl.ray.utils.net import get_free_port, get_node_ip
 from diffusionrl.reward.config import RewardSpec
 from diffusionrl.reward.pipeline import RewardPipeline
 from diffusionrl.samplers.construction import create_rollout_engine_from_init_payload
-from diffusionrl.samplers.engine import BaseRolloutEngine
+from diffusionrl.samplers.engine import BaseRolloutEngine, chunked_engine_generate
 from diffusionrl.samplers.registry import derive_rollout_engine_class
 from diffusionrl.transfer.buffer import Buffer
 from diffusionrl.types.engine import EngineConfig
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.response import RolloutResponse
-from diffusionrl.types.sample import RolloutSamples
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +78,7 @@ class RolloutActor(RolloutWeightSyncMixin, RolloutPipelineMixin, Buffer):
         self.rank = rank
         self.world_size = world_size
         self.config = config or {}
-        self._rollout_batch_size: Optional[int] = None
+        self._forward_batch_size: Optional[int] = None
         self.num_gpus_allocated = num_gpus_allocated
         self.master_addr = master_addr
         self.master_port = master_port
@@ -213,7 +212,7 @@ class RolloutActor(RolloutWeightSyncMixin, RolloutPipelineMixin, Buffer):
         if sampler_engine_type == "sglang":
             resolved_engine_config = resolved_engine_config.with_sglang_ports(self.rank)
 
-        self._rollout_batch_size = int(config.rollout_batch_size) if config.rollout_batch_size is not None else None
+        self._forward_batch_size = int(config.forward_batch_size) if config.forward_batch_size is not None else None
         self.engine = create_rollout_engine_from_init_payload(
             ComponentInitPayload(
                 component_dotpath=engine_init_payload.component_dotpath,
@@ -228,7 +227,7 @@ class RolloutActor(RolloutWeightSyncMixin, RolloutPipelineMixin, Buffer):
             "Rank %s: Rollout actor initialized with %s engine%s",
             self.rank,
             sampler_engine_type,
-            f" (rollout_batch_size={self._rollout_batch_size})" if self._rollout_batch_size else "",
+            f" (forward_batch_size={self._forward_batch_size})" if self._forward_batch_size else "",
         )
         self._log_resource_ids("rollout_init")
         self._log_gpu_state("rollout_init")
@@ -236,21 +235,21 @@ class RolloutActor(RolloutWeightSyncMixin, RolloutPipelineMixin, Buffer):
     def generate(self, request: RolloutRequest) -> RolloutResponse:
         if self.engine is None:
             raise RuntimeError("Engine not initialized. Call init() first.")
-        if not request.prompts or not request.prompts.prompts:
-            raise ValueError("RolloutActor.generate requires non-empty prompts.")
-
+        # Early prompt validation: avoid waking the engine + emitting a
+        # GPU-state log entry for trivially invalid requests.
+        # chunked_engine_generate keeps its own check so any future caller
+        # that doesn't pre-validate still fails the same way.
+        if request.prompts is None or not request.prompts.prompts:
+            raise ValueError(
+                f"RolloutActor.generate requires non-empty request.prompts.prompts; got prompts={request.prompts!r}."
+            )
         self._ensure_engine_ready_for_generate()
         self._log_gpu_state("inference_generate_start")
-        batch_size = self._rollout_batch_size
-        n_prompts = len(request.prompts.prompts)
-        if batch_size and n_prompts > batch_size:
-            outputs = []
-            for i in range(0, n_prompts, batch_size):
-                sub_request = request.slice(i, min(i + batch_size, n_prompts))
-                outputs.append(self.engine.generate(sub_request))
-            output = RolloutSamples.concat(outputs)
-        else:
-            output = self.engine.generate(request)
+        output = chunked_engine_generate(
+            self.engine,
+            request,
+            chunk_size=self._forward_batch_size,
+        )
         return RolloutResponse(request=request, samples=output)
 
     def get_num_gpus_allocated(self) -> int:

@@ -51,11 +51,11 @@ resolve_batch_params() {
 validate_batch_params() {
     local errors=0
 
-    # 1. Sampling forward batch must be aligned to group size
-    if [ $(( DIRECT_SAMPLING_BATCH_SIZE % NUM_SAMPLES_PER_PROMPT )) -ne 0 ]; then
-        echo "ERROR: SAMPLING_FORWARD_BATCH (${DIRECT_SAMPLING_BATCH_SIZE}) must be divisible by NUM_SAMPLES_PER_PROMPT (${NUM_SAMPLES_PER_PROMPT})" >&2
-        errors=$(( errors + 1 ))
-    fi
+    # 1. (Removed) SAMPLING_FORWARD_BATCH no longer needs to be a multiple of
+    #    NUM_SAMPLES_PER_PROMPT — the rollout/training actor chunks the request
+    #    via diffusionrl.samplers.engine.chunked_engine_generate (engine-agnostic;
+    #    applies to both FSDP and SGLang) and concats per-chunk RolloutSamples,
+    #    so any positive value works.
 
     # 2. Total samples must split evenly across GPUs and updates
     if [ $(( ROLLOUT_TOTAL_SAMPLES % (TOTAL_GPUS * NUM_UPDATES) )) -ne 0 ]; then
@@ -69,12 +69,10 @@ validate_batch_params() {
         errors=$(( errors + 1 ))
     fi
 
-    # 4. Sampling batch must evenly divide total samples (if smaller)
-    if [ "${DIRECT_SAMPLING_BATCH_SIZE}" -lt "${ROLLOUT_TOTAL_SAMPLES}" ] && \
-       [ $(( ROLLOUT_TOTAL_SAMPLES % DIRECT_SAMPLING_BATCH_SIZE )) -ne 0 ]; then
-        echo "ERROR: SAMPLING_FORWARD_BATCH (${DIRECT_SAMPLING_BATCH_SIZE}) must evenly divide ROLLOUT_TOTAL_SAMPLES (${ROLLOUT_TOTAL_SAMPLES})" >&2
-        errors=$(( errors + 1 ))
-    fi
+    # 4. (Removed) SAMPLING_FORWARD_BATCH no longer needs to evenly divide
+    #    ROLLOUT_TOTAL_SAMPLES — chunked_engine_generate emits a smaller final
+    #    chunk when the batch doesn't divide evenly, then RolloutSamples.concat
+    #    stitches them back.
 
     if [ "${errors}" -gt 0 ]; then
         echo "Batch geometry validation failed (${errors} error(s))." >&2

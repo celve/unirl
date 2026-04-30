@@ -15,6 +15,7 @@ raise ``NotImplementedError`` when the default ``run_once`` flow is used.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import ray
@@ -399,21 +400,21 @@ class RolloutPipeline:
             sde_type=eval_sde_type,
             shift=float(sampling_spec.sde_config.shift),
         )
-        sampling_params = SamplingParams(
-            num_inference_steps=int(eval_num_steps)
-            if eval_num_steps is not None
-            else int(sampling_spec.num_inference_steps),
-            guidance_scale=float(sampling_spec.guidance_scale),
-            height=int(sampling_spec.height),
-            width=int(sampling_spec.width),
-            num_frames=int(sampling_spec.num_frames),
-            seed=int(sampling_spec.seed),
-            num_samples_per_prompt=int(samples_per_prompt),
-            init_same_noise=bool(sampling_spec.init_same_noise),
-            sde_config=eval_sde_config,
-            sde_indices=None,
-            sampler_kwargs=dict(sampling_spec.sampler_kwargs or {}),
-        )
+        # Build eval SamplingParams via dataclasses.replace so any non-eval
+        # fields on the training-side spec (e.g. sampling_forward_batch +
+        # the three precision fields) are preserved automatically. A
+        # hand-rolled SamplingParams(...) silently drops any field not
+        # explicitly listed, which previously made eval skip
+        # sampling-batch chunking and triggered OOM on large group sizes.
+        eval_overrides: Dict[str, Any] = {
+            "num_samples_per_prompt": int(samples_per_prompt),
+            "sde_config": eval_sde_config,
+            "sde_indices": None,
+            "sampler_kwargs": dict(sampling_spec.sampler_kwargs or {}),
+        }
+        if eval_num_steps is not None:
+            eval_overrides["num_inference_steps"] = int(eval_num_steps)
+        sampling_params = dataclasses.replace(sampling_spec, **eval_overrides)
         request = RolloutRequest(
             prompts=prompts,
             sampling_params=sampling_params,

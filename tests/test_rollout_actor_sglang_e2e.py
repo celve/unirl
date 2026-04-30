@@ -5,7 +5,8 @@ Tests the full Ray + SGLang inference pipeline on a real model:
 
 Covers RL-realistic scenarios:
   - Multi-sample per prompt (the real GRPO/DanceGRPO pattern)
-  - Batch sub-splitting via rollout_batch_size
+  - Multi-prompt fast-path through chunked_engine_generate (the chunked
+    branch itself is covered CPU-only in tests/test_chunked_engine_generate.py)
   - Trajectory content validation (positions, pairs)
   - Log prob content validation (step keys, tensor shapes)
   - Forward context validation
@@ -73,7 +74,7 @@ def build_engine_config(model_path: str) -> EngineConfig:
     )
 
 
-def build_actor_config(model_path: str, rollout_batch_size: int | None = None) -> RolloutActorConfig:
+def build_actor_config(model_path: str, forward_batch_size: int | None = None) -> RolloutActorConfig:
     return RolloutActorConfig(
         engine_init_payload=ComponentInitPayload(
             component_dotpath="sglang",
@@ -93,7 +94,7 @@ def build_actor_config(model_path: str, rollout_batch_size: int | None = None) -
             component_dotpath="grpo",
             component_config=GRPOAlgorithmConfig(samples_per_prompt=4),
         ),
-        rollout_batch_size=rollout_batch_size,
+        forward_batch_size=forward_batch_size,
     )
 
 
@@ -260,11 +261,18 @@ def test_multi_sample_per_prompt(actor):
 
 
 def test_batch_subsplit(actor):
-    """Force batch sub-splitting via rollout_batch_size=1."""
-    print("\n[test] Batch sub-splitting (rollout_batch_size=1, 2 prompts)")
-    # We need to reinit with rollout_batch_size=1
-    # Instead, test the concat path by sending 2 prompts with the default actor
-    # (rollout_batch_size is set at init, so we test with the same actor)
+    """Smoke-test the multi-prompt path on the default RolloutActor fixture.
+
+    The fixture initialises ``forward_batch_size=None``, so this exercises
+    ``chunked_engine_generate``'s fast-path (a single ``engine.generate``
+    call with all prompts) end-to-end through ``RolloutActor`` + SGLang.
+
+    NOTE: this does NOT exercise the chunked branch (where the request is
+    sliced and per-chunk ``RolloutSamples`` are concat'd). That branch is
+    covered exhaustively (CPU-only) in
+    ``tests/test_chunked_engine_generate.py``.
+    """
+    print("\n[test] Multi-prompt fast-path (forward_batch_size=None, 2 prompts)")
     request = build_request(["mountain landscape", "ocean waves"])
     t0 = time.time()
     response = ray.get(actor.generate.remote(request))

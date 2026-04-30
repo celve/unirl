@@ -29,6 +29,7 @@ class SamplingSpec:
     sampling_adapter: Optional[str] = None
     init_same_noise: bool = False
     sampler_kwargs: Dict[str, Any] = field(default_factory=dict)
+    sampling_forward_batch: Optional[int] = None
 
     def __post_init__(self) -> None:
         # Resolved specs own a stable sampler_kwargs snapshot; downstream payload
@@ -99,6 +100,7 @@ class SamplingSpec:
             autocast_precision=precision_settings.rollout_autocast_precision,
             trajectory_precision=precision_settings.trajectory_precision,
             logprob_precision=precision_settings.logprob_precision,
+            sampling_forward_batch=self.sampling_forward_batch,
         )
 
 
@@ -156,7 +158,6 @@ class RolloutInfo:
     replay_enabled: bool
     sync_protocol: str
     algorithm_type: str
-    max_samples_per_request: Optional[int]
     effective_engine_capabilities: Optional[Dict[str, bool]] = None
 
     @property

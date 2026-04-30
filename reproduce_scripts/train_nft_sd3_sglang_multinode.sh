@@ -122,8 +122,9 @@ EVAL_STEPS="${EVAL_STEPS:-0}"
 NUM_INFERENCE_STEPS=10
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-48}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-16}
-# SGLang routes sampling through --rollout.rollout-batch-size, not
-# --sampling.max-samples-per-request (which is ignored by the SGLang engine).
+# Both direct_sampling and dedicated rollout (sglang) paths now read the same
+# CLI: --sampling.forward-batch-size. It bounds prompts per engine.generate()
+# call and applies via chunked_engine_generate.
 SAMPLING_FORWARD_BATCH=${SAMPLING_FORWARD_BATCH:-${NUM_SAMPLES_PER_PROMPT}}
 TRAINING_FORWARD_BATCH=${TRAINING_FORWARD_BATCH:-8}
 NUM_UPDATES=${NUM_UPDATES:-1}
@@ -223,7 +224,7 @@ run_training() {
         --rollout.rollout-engine sglang \
         --rollout.num-gpus-per-actor "${TP_SIZE}" \
         --rollout.tp-size "${TP_SIZE}" \
-        --rollout.rollout-batch-size "${ROLLOUT_BATCH_SIZE}" \
+        --sampling.forward-batch-size "${ROLLOUT_BATCH_SIZE}" \
         --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
         \
         --sampling.shift 3.0 \

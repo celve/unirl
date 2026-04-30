@@ -14,6 +14,7 @@ from diffusionrl.ray.actor_base import BaseTrainRayActor
 from diffusionrl.ray.mixins import RolloutPipelineMixin, TrainingWeightSyncMixin
 from diffusionrl.reward.config import RewardSpec
 from diffusionrl.reward.pipeline import RewardPipeline
+from diffusionrl.samplers.engine import chunked_engine_generate
 from diffusionrl.samplers.fsdp.engine import FSDPSamplingEngine
 from diffusionrl.training import build_lr_scheduler, build_optimizer
 from diffusionrl.training.backends import (
@@ -203,7 +204,8 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
     def generate(self, request: RolloutRequest) -> RolloutResponse:
         if self.engine is None:
             raise RuntimeError("TrainActor.generate() requires sampling_config to be set at construction.")
-        output = self.engine.generate(request)
+        chunk_size = getattr(request.sampling_params, "sampling_forward_batch", None)
+        output = chunked_engine_generate(self.engine, request, chunk_size=chunk_size)
         return RolloutResponse(request=request, samples=output)
 
     def apply_eval_ema(self) -> None:

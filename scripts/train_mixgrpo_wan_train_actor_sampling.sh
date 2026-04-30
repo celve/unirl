@@ -68,7 +68,7 @@ python -m diffusionrl.train \
     --sampling.eta "${ETA}" \
     --sampling.shift "${SHIFT}" \
     --sampling.num-inference-steps "${NUM_INFERENCE_STEPS}" \
-    --sampling.max-samples-per-request "${DIRECT_SAMPLING_BATCH_SIZE}" \
+    --sampling.forward-batch-size "${DIRECT_SAMPLING_BATCH_SIZE}" \
     --sampling.guidance-scale "${GUIDANCE_SCALE}" \
     --sampling.height "${HEIGHT}" \
     --sampling.width "${WIDTH}" \

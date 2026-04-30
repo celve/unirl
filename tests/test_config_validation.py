@@ -98,7 +98,6 @@ def test_validate_engine_algorithm_contract_rejects_missing_capabilities() -> No
         replay_enabled=False,
         sync_protocol="tensor_payload",
         algorithm_type="grpo",
-        max_samples_per_request=None,
         effective_engine_capabilities={},
     )
 
@@ -177,7 +176,6 @@ def test_validate_rollout_layout_rejects_non_dedicated_rollout_mode() -> None:
         replay_enabled=True,
         sync_protocol="tensor_payload",
         algorithm_type="grpo",
-        max_samples_per_request=None,
     )
 
     with pytest.raises(ValueError, match="only applies to dedicated rollout engines"):
@@ -252,7 +250,6 @@ def test_validate_training_actor_sampling_mode_rejects_backend_without_support()
         replay_enabled=True,
         sync_protocol="disabled",
         algorithm_type="grpo",
-        max_samples_per_request=None,
     )
 
     with pytest.raises(ValueError, match="does not declare supports_training_actor_sampling=true"):
@@ -305,7 +302,6 @@ def test_validate_weight_sync_rejects_non_disabled_protocol_in_direct_sampling()
         replay_enabled=True,
         sync_protocol="disabled",
         algorithm_type="grpo",
-        max_samples_per_request=None,
     )
 
     with pytest.raises(ValueError, match="requires sync.protocol='disabled'"):
@@ -318,10 +314,14 @@ def test_validate_weight_sync_rejects_non_disabled_protocol_in_direct_sampling()
         )
 
 
-def test_validate_direct_sampling_batch_geometry_rejects_non_direct_mode() -> None:
-    args = SimpleNamespace(
-        sampling=SimpleNamespace(max_samples_per_request=2),
-    )
+def test_validate_direct_sampling_batch_geometry_rejects_non_positive() -> None:
+    """forward_batch_size, when set, must be a positive integer.
+
+    Mode-agnostic: chunked_engine_generate is wired into both
+    direct_sampling (TrainActor) and dedicated rollout (RolloutActor)
+    paths via cmdline/actors.py, so the validator no longer restricts
+    the field to direct_sampling mode.
+    """
     rollout_info = RolloutInfo(
         mode="separate",
         rollout_engine="sglang",
@@ -331,11 +331,22 @@ def test_validate_direct_sampling_batch_geometry_rejects_non_direct_mode() -> No
         replay_enabled=False,
         sync_protocol="tensor_payload",
         algorithm_type="grpo",
-        max_samples_per_request=2,
     )
 
-    with pytest.raises(ValueError, match="only valid when sampling runs directly on training actors"):
+    with pytest.raises(ValueError, match="sampling.forward_batch_size must be >= 1"):
         validate_direct_sampling_batch_geometry(
             rollout_info=rollout_info,
-            max_samples_per_request=args.sampling.max_samples_per_request,
+            forward_batch_size=0,
         )
+
+    # None is a valid no-op.
+    validate_direct_sampling_batch_geometry(
+        rollout_info=rollout_info,
+        forward_batch_size=None,
+    )
+
+    # Positive ints accepted in any rollout mode.
+    validate_direct_sampling_batch_geometry(
+        rollout_info=rollout_info,
+        forward_batch_size=2,
+    )

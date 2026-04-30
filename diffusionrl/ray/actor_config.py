@@ -52,7 +52,7 @@ class RolloutActorConfig:
     engine_init_payload: ComponentInitPayload
     reward_config: RewardSpec
     algorithm_init_payload: ComponentInitPayload
-    rollout_batch_size: int | None = None
+    forward_batch_size: int | None = None
     advantage_params: AdvantageParams = AdvantageParams()
     seed: int = 42
 

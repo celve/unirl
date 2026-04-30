@@ -184,7 +184,7 @@ run_training() {
         --algorithm.training-scheduler.timestep-fraction 0.99 \
         --sampling.num-inference-steps "${NUM_INFERENCE_STEPS}" \
         --sampling.guidance-scale 4.5 \
-        --sampling.max-samples-per-request "${DIRECT_SAMPLING_BATCH_SIZE}" \
+        --sampling.forward-batch-size "${DIRECT_SAMPLING_BATCH_SIZE}" \
         --algorithm.kwarg beta=1 \
         --algorithm.kwarg adv_mode=raw \
         --algorithm.kwarg adv_clip_max=5.0 \

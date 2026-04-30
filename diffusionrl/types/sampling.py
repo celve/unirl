@@ -59,6 +59,16 @@ class SamplingParams:
     autocast_precision: str = "bf16"
     trajectory_precision: str = "fp16"
     logprob_precision: str = "fp32"
+    # Maximum samples per chunkable rollout-side operation. When set,
+    # applied to:
+    #   1. engine.generate prompt batches (via chunked_engine_generate)
+    #   2. engine.decode_latents reward-decode batches in attach_reward
+    #      (via chunked_decode_latents).
+    # Engine-agnostic on the FSDP / TrainActor path. SGLang's engine-side
+    # decode is controlled by SGLang server args, not by this knob (the
+    # SGLang rollout path skips diffusionrl's decode_latents because the
+    # SGLang server returns decoded media directly).
+    sampling_forward_batch: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

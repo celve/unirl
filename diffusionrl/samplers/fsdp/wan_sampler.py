@@ -193,14 +193,13 @@ class FSDPWanSampler(FSDPBaseSampler):
 
             with torch.no_grad():
                 with autocast_ctx:
-                    if self.model_bundle is not None:
-                        noise_pred = self.model_bundle.forward_denoiser(
-                            latents=latents,
-                            sigma=sigma,
-                            ctx=forward_context,
-                        )
-                    else:
+                    if self.model_bundle is None:
                         raise RuntimeError("WAN sampler requires model_bundle for model-specific forward dispatch")
+                    noise_pred = self.model_bundle.forward_denoiser(
+                        latents=latents,
+                        sigma=sigma,
+                        ctx=forward_context,
+                    )
 
             step_eta = self.eta if i in sde_indices else 0.0
             latents, log_prob, _ = denoising_step(

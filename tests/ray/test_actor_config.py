@@ -126,7 +126,6 @@ def _make_derived_config(*, sampling_spec: SamplingSpec):
             replay_enabled=False,
             sync_protocol="nccl",
             algorithm_type="grpo",
-            max_samples_per_request=None,
         ),
         training_topology=_make_topology(),
         training_plan=_make_training_plan(),
@@ -209,7 +208,6 @@ def test_build_rollout_actor_init_config_from_args_returns_typed_config():
         sglang_verify_weight_checksum=None,
         sglang_disable_autocast=None,
         sglang_kwargs={},
-        rollout_batch_size=4,
     )
     args.logging = SimpleNamespace()
     args.sync = SimpleNamespace(
@@ -218,6 +216,7 @@ def test_build_rollout_actor_init_config_from_args_returns_typed_config():
     )
     args.sampling = SimpleNamespace(
         fps=24,
+        forward_batch_size=4,
     )
     args.ray = SimpleNamespace(
         offload_rollout=False,
@@ -239,7 +238,6 @@ def test_build_rollout_actor_init_config_from_args_returns_typed_config():
             replay_enabled=False,
             sync_protocol="nccl",
             algorithm_type="grpo",
-            max_samples_per_request=None,
         ),
     )
 
@@ -262,6 +260,6 @@ def test_build_rollout_actor_init_config_from_args_returns_typed_config():
     assert config.engine_init_payload.component_config.sampler_dotpath.endswith("DefaultSampler")
     assert isinstance(config.reward_config, RewardSpec)
     assert config.reward_config.reward_components == []
-    assert config.rollout_batch_size == 4
+    assert config.forward_batch_size == 4
 
     validate_rollout_actor_init_config(config)

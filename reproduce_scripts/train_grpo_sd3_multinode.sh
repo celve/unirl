@@ -186,7 +186,7 @@ run_training() {
         --sampling.eta 0.7 \
         --sampling.shift 3.0 \
         --sampling.num-inference-steps "${NUM_INFERENCE_STEPS}" \
-        --sampling.max-samples-per-request "${DIRECT_SAMPLING_BATCH_SIZE}" \
+        --sampling.forward-batch-size "${DIRECT_SAMPLING_BATCH_SIZE}" \
         --sampling.guidance-scale 1.0 \
         --algorithm.rollout-scheduler.timestep-fraction "${TIMESTEP_FRACTION}" \
         --algorithm.rollout-scheduler.num-sde-steps "${NUM_SDE_STEPS}" \

@@ -208,20 +208,25 @@ def validate_training_actor_sampling_mode(
 def validate_direct_sampling_batch_geometry(
     *,
     rollout_info: RolloutInfo,
-    max_samples_per_request: Optional[int],
+    forward_batch_size: Optional[int],
 ) -> None:
-    """Validate prompt-batch splitting for training-actor direct sampling."""
-    if max_samples_per_request is None:
+    """Sanity-check the sampler forward-batch chunk size.
+
+    ``forward_batch_size`` controls per-engine.generate() prompt slicing in
+    both direct_sampling (TrainActor.generate) and dedicated rollout
+    (RolloutActor.generate) paths via ``chunked_engine_generate``. This
+    function only enforces a positive integer when set; callers that need
+    mode-specific gating should validate elsewhere.
+
+    ``rollout_info`` is accepted but currently unused; kept for forward
+    compatibility with mode-aware checks.
+    """
+    del rollout_info
+    if forward_batch_size is None:
         return
-
-    if not rollout_info.training_actor_sampling_mode:
-        raise ValueError(
-            "sampling.max_samples_per_request is only valid when sampling runs directly on training actors."
-        )
-
-    max_samples_per_request = int(max_samples_per_request)
-    if max_samples_per_request < 1:
-        raise ValueError("sampling.max_samples_per_request must be >= 1.")
+    forward_batch_size = int(forward_batch_size)
+    if forward_batch_size < 1:
+        raise ValueError(f"sampling.forward_batch_size must be >= 1 when set, got {forward_batch_size!r}.")
 
 
 def validate_weight_sync(

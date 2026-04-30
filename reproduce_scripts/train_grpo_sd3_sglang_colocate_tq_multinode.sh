@@ -118,7 +118,7 @@ EVAL_STEPS="${EVAL_STEPS:-0}"
 NUM_INFERENCE_STEPS=10
 PROMPTS_PER_BATCH=${PROMPTS_PER_BATCH:-48}
 NUM_SAMPLES_PER_PROMPT=${NUM_SAMPLES_PER_PROMPT:-16}
-SAMPLING_FORWARD_BATCH=${SAMPLING_FORWARD_BATCH:-${NUM_SAMPLES_PER_PROMPT}}  # passthrough; sglang uses --rollout.rollout-batch-size
+SAMPLING_FORWARD_BATCH=${SAMPLING_FORWARD_BATCH:-${NUM_SAMPLES_PER_PROMPT}}  # passthrough to --sampling.forward-batch-size
 TRAINING_FORWARD_BATCH=${TRAINING_FORWARD_BATCH:-8}     # per-device peak forward batch during training
 NUM_UPDATES=${NUM_UPDATES:-2}                           # gradient update steps per local batch
 
@@ -264,7 +264,7 @@ run_training() {
         --rollout.num-gpus-per-actor "${TP_SIZE}" \
         --rollout.tp-size "${TP_SIZE}" \
         --rollout.sglang-disable-autocast true \
-        --rollout.rollout-batch-size "${ROLLOUT_BATCH_SIZE}" \
+        --sampling.forward-batch-size "${ROLLOUT_BATCH_SIZE}" \
         --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
         --sampling.init-same-noise true \
         \

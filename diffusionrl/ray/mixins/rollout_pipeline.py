@@ -77,9 +77,19 @@ class RolloutPipelineMixin:
             )
             self._logged_decode_diag = True
         if response.samples.decoded_images is None:
+            from diffusionrl.samplers.engine import chunked_decode_latents
             from diffusionrl.utils.media import tensor_to_pil
 
-            decoded = self.engine.decode_latents(response.samples.latents)
+            chunk_size = getattr(
+                getattr(response.request, "sampling_params", None),
+                "sampling_forward_batch",
+                None,
+            )
+            decoded = chunked_decode_latents(
+                self.engine,
+                response.samples.latents,
+                chunk_size=chunk_size,
+            )
             response.samples.decoded_images = tensor_to_pil(decoded)
         self._ensure_reward_pipeline().score_and_attach(response)
 

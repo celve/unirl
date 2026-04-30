@@ -90,7 +90,6 @@ def test_validate_rollout_mode_constraints_rejects_model_without_sglang_support(
         replay_enabled=False,
         sync_protocol="tensor_payload",
         algorithm_type="grpo",
-        max_samples_per_request=None,
     )
 
     with pytest.raises(ValueError, match="supports_sglang_prompt_mode"):
@@ -114,7 +113,6 @@ def test_validate_rollout_topology_contract_rejects_direct_sampling_with_service
         replay_enabled=True,
         sync_protocol="disabled",
         algorithm_type="grpo",
-        max_samples_per_request=None,
     )
 
     with pytest.raises(ValueError, match="must be unset"):
@@ -147,7 +145,7 @@ def test_validate_rollout_mode_wraps_underlying_validation_error() -> None:
     args.ray.offload_rollout = False
     args.ray.colocate_training_gpu_fraction = 0.5
     args.ray.colocate_rollout_gpu_fraction = 0.5
-    args.sampling.max_samples_per_request = None
+    args.sampling.forward_batch_size = None
     args.sync.protocol = "disabled"
     rollout_info = RolloutInfo(
         mode="direct_sampling",
@@ -158,7 +156,6 @@ def test_validate_rollout_mode_wraps_underlying_validation_error() -> None:
         replay_enabled=True,
         sync_protocol="disabled",
         algorithm_type="grpo",
-        max_samples_per_request=None,
     )
 
     with pytest.raises(ValueError, match="Invalid rollout mode while validating offload/colocate settings"):
@@ -188,7 +185,6 @@ def test_validate_offload_and_colocate_config_rejects_offload_in_direct_sampling
         replay_enabled=True,
         sync_protocol="disabled",
         algorithm_type="grpo",
-        max_samples_per_request=None,
     )
 
     with pytest.raises(ValueError, match="cannot be combined with ray.offload_train / ray.offload_rollout"):

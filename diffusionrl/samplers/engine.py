@@ -8,6 +8,8 @@ import torch
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.sample import RolloutSamples
 
+__all__ = ["BaseRolloutEngine", "chunked_engine_generate", "chunked_decode_latents"]
+
 
 class BaseRolloutEngine(ABC):
     """
@@ -197,3 +199,93 @@ class BaseRolloutEngine(ABC):
         if self._is_offloaded:
             return True  # Offloaded state is healthy
         return self._is_initialized
+
+
+def chunked_engine_generate(
+    engine: BaseRolloutEngine,
+    request: RolloutRequest,
+    *,
+    chunk_size: Optional[int],
+) -> RolloutSamples:
+    """Call ``engine.generate`` over mini-batch chunks of *request* and concat outputs.
+
+    Splits the request's prompt list into chunks of size ``chunk_size``, calls
+    ``engine.generate`` once per chunk, and concatenates the per-chunk
+    ``RolloutSamples`` along the batch dim via ``RolloutSamples.concat``.
+
+    Fast path (zero overhead): when ``chunk_size`` is ``None`` or
+    ``>= n_prompts``, this is a single direct call to ``engine.generate(request)``.
+
+    Determinism caveats (chunked vs. unchunked):
+
+    - **Initial noise** is bit-identical iff ``init_same_noise=True``: in
+      that path ``samplers/noise_utils.py`` keys per-group noise on each
+      sample's ``noise_group_id`` (preserved by ``Prompts.slice`` /
+      ``Batched``) plus a base seed. With ``init_same_noise=False`` the
+      fallback is plain ``torch.randn`` consuming global RNG state, so
+      the per-chunk draw schedule differs from a single full-batch draw
+      and initial latents will diverge.
+    - **Per-step SDE noise** (``eta > 0``) is intentionally unseeded —
+      see ``sde/runtime.py:denoising_step`` — so trajectories and
+      ``log_probs`` are NOT bit-identical to an unchunked call regardless
+      of ``init_same_noise``.
+
+    Outputs remain valid i.i.d. samples; the practical implication is
+    that reproducibility depends on ``chunk_size``.
+    """
+    if request.prompts is None or not request.prompts.prompts:
+        raise ValueError(
+            f"chunked_engine_generate requires non-empty request.prompts.prompts; got prompts={request.prompts!r}."
+        )
+    n_prompts = len(request.prompts.prompts)
+    if chunk_size is None:
+        return engine.generate(request)
+    if not isinstance(chunk_size, int) or chunk_size < 1:
+        raise ValueError(
+            f"chunk_size must be a positive int when set; got {chunk_size!r} (type={type(chunk_size).__name__})."
+        )
+    if n_prompts <= chunk_size:
+        return engine.generate(request)
+    outputs: List[RolloutSamples] = []
+    for start in range(0, n_prompts, chunk_size):
+        end = min(start + chunk_size, n_prompts)
+        outputs.append(engine.generate(request.slice(start, end)))
+    return RolloutSamples.concat(outputs)
+
+
+def chunked_decode_latents(
+    engine: "BaseRolloutEngine",
+    latents: torch.Tensor,
+    *,
+    chunk_size: Optional[int],
+) -> torch.Tensor:
+    """Run ``engine.decode_latents`` over mini-batch chunks of *latents* and concat outputs.
+
+    Mirrors :func:`chunked_engine_generate`: fast-path (``chunk_size is None``
+    or ``>= batch``) is a single direct call, otherwise slice along dim 0 and
+    ``torch.cat`` the per-chunk results. VAE decode is embarrassingly parallel
+    along the batch dim so chunking is bit-identical to a single full-batch
+    call (no determinism caveat).
+
+    The ``engine`` argument is duck-typed: any object exposing
+    ``decode_latents(latents) -> Tensor`` works (e.g. ``BaseRolloutEngine``
+    subclasses, ``FSDPBaseSampler``).
+    """
+    if not isinstance(latents, torch.Tensor) or latents.dim() == 0:
+        raise TypeError(f"chunked_decode_latents requires a batched tensor, got {type(latents).__name__}.")
+    n = int(latents.shape[0])
+    if n == 0:
+        raise ValueError("chunked_decode_latents requires non-empty latents (got batch=0).")
+    if chunk_size is None:
+        return engine.decode_latents(latents)
+    if not isinstance(chunk_size, int) or chunk_size < 1:
+        raise ValueError(
+            f"chunk_size must be a positive int when set; got {chunk_size!r} (type={type(chunk_size).__name__})."
+        )
+    if n <= chunk_size:
+        return engine.decode_latents(latents)
+    chunks: List[torch.Tensor] = []
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        chunks.append(engine.decode_latents(latents[start:end]))
+    return torch.cat(chunks, dim=0)

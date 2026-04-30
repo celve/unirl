@@ -183,7 +183,6 @@ _ROLLOUT_TOPOLOGY_FIELD_NAMES = frozenset(
     {
         "mode",
         "rollout_engine",
-        "rollout_batch_size",
         "num_gpus_per_actor",
         "tp_size",
         "sp_size",
@@ -228,7 +227,7 @@ def _format_rollout_mode_state(
             f"  is_sglang_engine = {rollout_info.is_sglang_engine}",
             f"  sampling.logprob_source = {rollout_info.logprob_source!r}",
             f"  derived.replay_enabled = {rollout_info.replay_enabled}",
-            f"  sampling.max_samples_per_request = {args.sampling.max_samples_per_request!r}",
+            f"  sampling.forward_batch_size = {args.sampling.forward_batch_size!r}",
             f"  sync.protocol = {args.sync.protocol!r}",
             "  offload flags = "
             f"(ray.offload_train={bool(args.ray.offload_train)}, "
@@ -333,10 +332,10 @@ def validate_rollout_mode(
             rollout_info=rollout_info,
         )
 
-        check_name = "direct-sampling request sizing"
+        check_name = "sampling forward-batch chunk size"
         validate_direct_sampling_batch_geometry(
             rollout_info=rollout_info,
-            max_samples_per_request=args.sampling.max_samples_per_request,
+            forward_batch_size=args.sampling.forward_batch_size,
         )
 
         check_name = "weight-sync settings"

@@ -75,10 +75,8 @@ def build_rollout_actor_init_config_from_args(
         engine_init_payload=engine_init_payload,
         reward_config=(reward_config if reward_config is not None else RewardSpec.from_args(args)),
         algorithm_init_payload=algorithm_init_payload,
-        rollout_batch_size=(
-            int(args.rollout.rollout_batch_size)
-            if getattr(args.rollout, "rollout_batch_size", None) is not None
-            else None
+        forward_batch_size=(
+            int(args.sampling.forward_batch_size) if args.sampling.forward_batch_size is not None else None
         ),
     )
 

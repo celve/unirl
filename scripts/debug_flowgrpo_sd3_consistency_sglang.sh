@@ -36,18 +36,18 @@
 #   python scripts/analyze_debug_tensors.py ${DEBUG_OUTPUT_DIR}
 #
 # Usage:
-#   bash reproduce_scripts/debug_flowgrpo_sd3_consistency_sglang.sh
+#   bash scripts/debug_flowgrpo_sd3_consistency_sglang.sh
 #
 #   # Native SGLang log_probs (stress SGLang's SDE kernel):
 #   SGLANG_LOGPROB_MODE=native \
-#     bash reproduce_scripts/debug_flowgrpo_sd3_consistency_sglang.sh
+#     bash scripts/debug_flowgrpo_sd3_consistency_sglang.sh
 #
 #   # With LoRA enabled (default: disabled to avoid first-rollout init drift):
 #   USE_LORA=true \
-#     bash reproduce_scripts/debug_flowgrpo_sd3_consistency_sglang.sh
+#     bash scripts/debug_flowgrpo_sd3_consistency_sglang.sh
 #
 #   # Override any sampling flag via pass-through CLI:
-#   bash reproduce_scripts/debug_flowgrpo_sd3_consistency_sglang.sh \
+#   bash scripts/debug_flowgrpo_sd3_consistency_sglang.sh \
 #       --sampling.eta 0.5
 # =============================================================================
 
@@ -115,8 +115,9 @@ USE_LORA="${USE_LORA:-false}"
 NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-10}"
 PROMPTS_PER_BATCH="${PROMPTS_PER_BATCH:-4}"
 NUM_SAMPLES_PER_PROMPT="${NUM_SAMPLES_PER_PROMPT:-4}"
-# SGLang routes sampling through --rollout.rollout-batch-size, not
-# --sampling.max-samples-per-request (which is ignored by the SGLang engine).
+# Both direct_sampling and dedicated rollout (sglang) paths now read
+# --sampling.forward-batch-size; it bounds prompts per engine.generate()
+# call via chunked_engine_generate.
 SAMPLING_FORWARD_BATCH="${SAMPLING_FORWARD_BATCH:-${NUM_SAMPLES_PER_PROMPT}}"
 TRAINING_FORWARD_BATCH="${TRAINING_FORWARD_BATCH:-4}"
 NUM_UPDATES="${NUM_UPDATES:-1}"   # must be 1 for on-policy debug
@@ -204,7 +205,7 @@ python -m diffusionrl.train \
     --rollout.rollout-engine sglang \
     --rollout.num-gpus-per-actor "${TP_SIZE}" \
     --rollout.tp-size "${TP_SIZE}" \
-    --rollout.rollout-batch-size "${ROLLOUT_BATCH_SIZE}" \
+    --sampling.forward-batch-size "${ROLLOUT_BATCH_SIZE}" \
     --sampling.logprob-source "${SGLANG_LOGPROB_MODE}" \
     \
     --sampling.sde-type flow \

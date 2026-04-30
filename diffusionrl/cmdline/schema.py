@@ -128,10 +128,18 @@ class SamplingConfig:
             "choices": ["flow", "cps", "dance", "dpm2"],
         },
     )
-    max_samples_per_request: Optional[int] = field(
+    forward_batch_size: Optional[int] = field(
         default=None,
         metadata={
-            "help": "Generated-sample cap per training-actor direct-sampling request; rollout_total_samples stays prompts_per_rollout*samples_per_prompt"
+            "help": (
+                "Sampler mini-batch size: max prompts per engine.generate() call. "
+                "When set, the request is sliced into chunks of this size and "
+                "RolloutSamples.concat'd back. Controls peak GPU memory of "
+                "encode_inputs + denoising + trajectory store. None or >= total "
+                "samples means no chunking (single direct call, zero overhead). "
+                "Replaces the (now-removed) --sampling.max-samples-per-request and "
+                "--rollout.rollout-batch-size flags."
+            )
         },
     )
     shift: float = field(
@@ -165,8 +173,8 @@ class SamplingConfig:
         return self.logprob_source == "replay"
 
     def validate(self) -> None:
-        if self.max_samples_per_request is not None and self.max_samples_per_request < 1:
-            raise ValueError("max_samples_per_request must be >= 1 when set.")
+        if self.forward_batch_size is not None and self.forward_batch_size < 1:
+            raise ValueError(f"sampling.forward_batch_size must be >= 1 when set, got {self.forward_batch_size!r}.")
         raw_sde_type = str(self.sde_type or "").strip().lower()
         if raw_sde_type not in SUPPORTED_USER_SDE_TYPES:
             raise ValueError(
@@ -744,10 +752,6 @@ class RolloutConfig:
             "help": "Dedicated rollout engine selector for separate or colocate. Must be unset in direct_sampling."
         },
     )
-    rollout_batch_size: int = field(
-        default=1,
-        metadata={"help": "Max prompts per rollout-engine generate() call before actor-side sub-batching."},
-    )
     num_gpus_per_actor: Optional[int] = field(
         default=None,
         metadata={"help": "Dedicated rollout service GPUs per actor/engine. Required for separate and colocate."},
@@ -838,7 +842,6 @@ class RolloutConfig:
             "num_gpus_per_actor",
             "tp_size",
             "sp_size",
-            "rollout_batch_size",
         ):
             value = getattr(self, attr_name)
             if value is not None and int(value) < 1:

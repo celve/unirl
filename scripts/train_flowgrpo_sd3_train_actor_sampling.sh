@@ -36,8 +36,9 @@
 # - training.num_updates_per_batch (+ optional training.micro_batch_size when tuning memory)
 # - reward_components defaults to pickscore
 # - prompts_per_rollout=16, samples_per_prompt=8 on 8 GPUs
-# - sampling.max_samples_per_request only controls OOM-safe request splitting;
-#   rollout_total_samples still equals prompts_per_rollout * samples_per_prompt
+# - sampling.forward_batch_size only controls OOM-safe per-engine.generate()
+#   chunk size; rollout_total_samples still equals
+#   prompts_per_rollout * samples_per_prompt
 #
 # NOTE: Use --sampling.sde-type cps for CPS variant (e.g., geneval_sd3_fast_nocfg)
 #
@@ -130,7 +131,7 @@ python -m diffusionrl.train \
     --sampling.eta 0.7 \
     --sampling.shift 3.0 \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
-    --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
+    --sampling.forward-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 1.0 \
     --algorithm.rollout-scheduler.timestep-fraction 0.99 \
     \

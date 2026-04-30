@@ -13,11 +13,11 @@
 # step where sampling and training diverge.
 #
 # Usage:
-#   bash reproduce_scripts/debug_flowgrpo_sd3_consistency.sh
+#   bash scripts/debug_flowgrpo_sd3_consistency.sh
 #   # With CPS:
-#   bash reproduce_scripts/debug_flowgrpo_sd3_consistency.sh --sampling.sde-type cps
+#   bash scripts/debug_flowgrpo_sd3_consistency.sh --sampling.sde-type cps
 #   # With custom eta:
-#   bash reproduce_scripts/debug_flowgrpo_sd3_consistency.sh --sampling.eta 0.5
+#   bash scripts/debug_flowgrpo_sd3_consistency.sh --sampling.eta 0.5
 # =============================================================================
 
 set -e
@@ -114,7 +114,7 @@ python -m diffusionrl.train \
     --sampling.eta 0.7 \
     --sampling.shift 3.0 \
     --sampling.num-inference-steps ${NUM_INFERENCE_STEPS} \
-    --sampling.max-samples-per-request ${DIRECT_SAMPLING_BATCH_SIZE} \
+    --sampling.forward-batch-size ${DIRECT_SAMPLING_BATCH_SIZE} \
     --sampling.guidance-scale 4.5 \
     --algorithm.rollout-scheduler.timestep-fraction "[0.1,0.5]" \
     \
