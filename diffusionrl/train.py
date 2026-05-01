@@ -372,6 +372,7 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
                 media_max_items=wandb_media_max_items,
             )
             rollout_phase_s = time.perf_counter() - rollout_phase_start_t
+            reward_compute_s = float(rollout_response.samples.reward_compute_s)
 
             # Even when no preview was requested, the response is now small
             # (actors drop decoded_images after scoring), so we keep the
@@ -430,10 +431,11 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
                 avg_loss = sum(m.get("loss", 0) for m in metrics) / max(len(metrics), 1)
                 step_time_s = time.perf_counter() - step_start_t
                 logger.info(
-                    "Rollout %s: loss=%.4E rollout=%.3fs train=%.3fs sync=%.3fs eval=%.3fs step=%.3fs",
+                    "Rollout %s: loss=%.4E rollout=%.3fs reward=%.3fs train=%.3fs sync=%.3fs eval=%.3fs step=%.3fs",
                     rollout_id,
                     avg_loss,
                     rollout_phase_s,
+                    reward_compute_s,
                     train_phase_s,
                     sync_phase_s,
                     eval_phase_s,
@@ -467,6 +469,7 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
 
                     perf_metrics = {
                         "rollout_phase_s": rollout_phase_s,
+                        "reward_compute_s": reward_compute_s,
                         "train_phase_s": train_phase_s,
                         "sync_phase_s": sync_phase_s,
                         "eval_phase_s": eval_phase_s,

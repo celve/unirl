@@ -205,8 +205,16 @@ class RewardConfig:
     reward_backend: str = field(
         default="local",
         metadata={
-            "help": "Reward backend: local",
-            "choices": ["local"],
+            "help": "Reward backend: local or reward_service",
+            "choices": ["local", "reward_service"],
+        },
+    )
+
+    # reward_service backend related fields
+    reward_service_url: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "RewardService HTTP URL; only valid when reward_backend='reward_service'.",
         },
     )
 
@@ -246,6 +254,16 @@ class RewardConfig:
         metadata={"help": "Multi-reward aggregation method: weighted_sum, mean, min, max, concat"},
     )
 
+    # reward_service backend tunables (only used when reward_backend=reward_service)
+    reward_service_kwargs: Optional[Dict[str, Any]] = field(
+        default=None,
+        metadata={
+            "help": "Optional JSON dict of tunables forwarded to RewardServiceExecutor. "
+            "Supported keys: sub_metric_reduce (first|mean|max), image_format (JPEG|PNG), "
+            "image_quality (1-95), max_retries (>=1), retry_delay (>=0)."
+        },
+    )
+
     def __post_init__(self):
         if isinstance(self.reward_components, str):
             if "," in self.reward_components:
@@ -253,6 +271,14 @@ class RewardConfig:
                     f"reward.reward_components: pass a list, not a comma string. Got: {self.reward_components!r}."
                 )
             self.reward_components = [self.reward_components] if self.reward_components.strip() else None
+
+    @property
+    def has_reward_service(self) -> bool:
+        return str(self.reward_backend or "local").strip().lower() == "reward_service"
+
+    @property
+    def has_reward_service_url(self) -> bool:
+        return bool(self.reward_service_url)
 
     @property
     def has_builtin_reward(self) -> bool:
@@ -264,6 +290,25 @@ class RewardConfig:
         # reward_backend / local_reward_device choices are enforced by
         # cmdline.validation._validate_metadata_choices (driven by
         # validate_grouped_configs) via the ``metadata["choices"]`` declarations.
+        if self.has_reward_service:
+            if not self.has_reward_service_url:
+                raise ValueError("reward_backend='reward_service' requires reward_service_url.")
+            if not self.has_builtin_reward:
+                raise ValueError(
+                    "reward_backend='reward_service' requires reward_components to specify "
+                    "which rewards to request from the service (e.g. [hpsv2, clip])."
+                )
+            agg = str(self.reward_aggregation_method or "").strip().lower()
+            if agg == "concat":
+                raise ValueError(
+                    "reward_aggregation_method='concat' is not supported with "
+                    "reward_backend='reward_service' (the executor multiplexes rewards "
+                    "in one HTTP call and uses an internal aggregation). "
+                    "Choose one of: weighted_sum, mean, min, max."
+                )
+            return
+        if self.has_reward_service_url:
+            raise ValueError("reward_service_url is only valid when reward_backend='reward_service'.")
         if not self.reward_dotpath and not self.has_builtin_reward:
             raise ValueError(
                 "Reward scoring requires either reward_components for built-ins, or reward_dotpath for a custom scorer."

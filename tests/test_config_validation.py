@@ -126,7 +126,7 @@ def test_validate_reward_config_rejects_invalid_backend() -> None:
         reward_aggregation_method="mean",
     )
 
-    with pytest.raises(ValueError, match="reward_backend must be 'local'"):
+    with pytest.raises(ValueError, match="reward_backend must be one of local/reward_service"):
         validate_reward_config(reward_config)
 
 

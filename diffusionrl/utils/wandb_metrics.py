@@ -99,11 +99,17 @@ def compute_rollout_batch_metrics(
     *,
     training_data: Any,
 ) -> Dict[str, float]:
-    """Build rollout metrics from typed training batch (or partition list)."""
+    """Build rollout metrics from typed training batch (or partition list).
+
+    For multi-reward runs, also emits ``reward_<component>_{mean,std,min,max}``
+    per key in ``component_rewards``. Component names with ``/`` are flattened
+    to ``_`` so the keys stay leaf metrics under the ``rollout/`` prefix.
+    """
     metrics: Dict[str, float] = {}
 
     reward_tensors: List[torch.Tensor] = []
     advantage_tensors: List[torch.Tensor] = []
+    component_tensors: Dict[str, List[torch.Tensor]] = {}
     total_samples = 0
     zero_std_groups = 0
     total_groups = 0
@@ -128,6 +134,16 @@ def compute_rollout_batch_metrics(
         if torch.is_tensor(advantages) and advantages.numel() > 0:
             advantage_tensors.append(advantages.detach().to(dtype=torch.float32).reshape(-1).cpu())
 
+        component_rewards = getattr(batch, "component_rewards", None)
+        if isinstance(component_rewards, dict):
+            for name, tensor in component_rewards.items():
+                if not torch.is_tensor(tensor) or tensor.numel() == 0:
+                    continue
+                safe_name = str(name).replace("/", "_")
+                component_tensors.setdefault(safe_name, []).append(
+                    tensor.detach().to(dtype=torch.float32).reshape(-1).cpu()
+                )
+
         if batch.has_trajectory_rl_data:
             sde_selected += len(batch.sde_indices)
             sde_total += max(int(batch.trajectory_store.total_positions) - 1, 0)
@@ -137,6 +153,10 @@ def compute_rollout_batch_metrics(
     if reward_tensors:
         rewards_cat = torch.cat(reward_tensors, dim=0)
         metrics.update(_tensor_stats("reward", rewards_cat))
+
+    for safe_name, tensors in component_tensors.items():
+        cat = tensors[0] if len(tensors) == 1 else torch.cat(tensors, dim=0)
+        metrics.update(_tensor_stats(f"reward_{safe_name}", cat))
 
     if advantage_tensors:
         advantages_cat = torch.cat(advantage_tensors, dim=0)

@@ -79,6 +79,9 @@ class TrainingBatch(Batched):
     # Optional per-sample fields
     log_probs: Optional[LogProbData] = concat_field(default=None)
     rewards: Optional[torch.Tensor] = concat_field(default=None)
+    # Per-sample-per-component breakdown of `rewards`; observability-only
+    # (compute_rollout_batch_metrics), unused by loss/advantage code.
+    component_rewards: Optional[Dict[str, torch.Tensor]] = concat_field(default=None)
     prompts: Optional[Prompts] = concat_field(default=None)
     extras: Dict[str, Any] = concat_field(default_factory=dict)
 

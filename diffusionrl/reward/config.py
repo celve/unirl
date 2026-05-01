@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Spec types (reward semantics, provider config, execution plan)
@@ -77,6 +77,11 @@ class RewardExecutionPlan:
 
     backend: str
     local_device: str
+    reward_service_url: Optional[str] = None
+
+    @property
+    def uses_reward_service_backend(self) -> bool:
+        return str(self.backend or "local").strip().lower() == "reward_service"
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +101,8 @@ class RewardSpec:
     reward_components: Optional[List[str]]
     reward_weights: Optional[List[float]]
     reward_aggregation_method: str
+    reward_service_url: Optional[str] = None
+    reward_service_kwargs: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_args(cls, args) -> "RewardSpec":
@@ -110,6 +117,8 @@ class RewardSpec:
             reward_components=rc.reward_components,
             reward_weights=rc.reward_weights,
             reward_aggregation_method=rc.reward_aggregation_method,
+            reward_service_url=getattr(rc, "reward_service_url", None),
+            reward_service_kwargs=getattr(rc, "reward_service_kwargs", None),
         )
 
     def to_definition(self) -> RewardDefinition:
@@ -141,11 +150,13 @@ class RewardSpec:
 
     def to_execution_plan(self) -> RewardExecutionPlan:
         backend = str(self.reward_backend or "local").strip().lower()
-        if backend != "local":
-            raise ValueError(f"reward_backend must be 'local', got: {self.reward_backend!r}.")
+        if backend not in {"local", "reward_service"}:
+            raise ValueError(f"reward_backend must be one of local/reward_service, got: {self.reward_backend!r}.")
+        url = (self.reward_service_url or "").strip() or None
         return RewardExecutionPlan(
             backend=backend,
             local_device=str(self.local_reward_device or "cpu"),
+            reward_service_url=url,
         )
 
     def component_weights(self) -> dict[str, float]:

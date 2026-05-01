@@ -21,6 +21,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "RewardProviderConfig": ("diffusionrl.reward.config", "RewardProviderConfig"),
     "read_rewards": ("diffusionrl.reward.pipeline", "read_rewards"),
     "RewardSpec": ("diffusionrl.reward.config", "RewardSpec"),
+    "RewardServiceExecutor": ("diffusionrl.reward.reward_service_executor", "RewardServiceExecutor"),
     "RewardService": ("diffusionrl.reward.service", "RewardService"),
     "VideoRewardScorer": ("diffusionrl.reward.scorers.video", "VideoRewardScorer"),
 }

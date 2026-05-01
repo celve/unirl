@@ -117,6 +117,7 @@ class RolloutResponse(Batched):
             forward_context=samples.forward_context,
             log_probs=log_probs,
             rewards=samples.rewards,
+            component_rewards=samples.component_rewards,
             prompts=self.request.prompts,
             step_indices=samples.step_indices,
             target_sde_indices=set(int(i) for i in sde_indices) if sde_indices is not None else None,

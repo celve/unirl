@@ -17,6 +17,7 @@ The host must provide:
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, List
 
 from diffusionrl.utils.transfer_queue_utils import create_transferqueue_client, reset_zero_copy_buffer_free, tqbridge
@@ -25,6 +26,16 @@ if TYPE_CHECKING:
     from diffusionrl.transfer.buffer import BufferHandle
     from diffusionrl.types.request import RolloutRequest
     from diffusionrl.types.response import RolloutResponse
+
+
+def _stamp_actor_reward_total(responses: List["RolloutResponse"]) -> None:
+    """Replace each per-handle ``samples.reward_compute_s`` with the per-actor sum.
+
+    See ``RolloutSamples.reward_compute_s`` for the wall-clock semantics.
+    """
+    actor_total = sum(float(r.samples.reward_compute_s) for r in responses)
+    for r in responses:
+        r.samples.reward_compute_s = actor_total
 
 
 class RolloutPipelineMixin:
@@ -86,7 +97,9 @@ class RolloutPipelineMixin:
                 chunk_size=response.request.sampling_params.sampling_forward_batch,
             )
             response.samples.decoded_images = tensor_to_pil(decoded)
+        score_t0 = time.perf_counter()
         self._ensure_reward_pipeline().score_and_attach(response)
+        response.samples.reward_compute_s = time.perf_counter() - score_t0
 
         # Build a tiny wandb media preview (PIL + prompt + reward) *before*
         # dropping the full decoded-image list, so only the preview payload
@@ -136,6 +149,7 @@ class RolloutPipelineMixin:
         for h in handles:
             self.attach_reward(h)
         responses: List[RolloutResponse] = [self.pop_buffer(h) for h in handles]
+        _stamp_actor_reward_total(responses)
         for r in responses:
             if r.samples.rewards is None:
                 raise RuntimeError("Cannot compute advantages: rewards not attached.")
@@ -182,7 +196,9 @@ class RolloutPipelineMixin:
         handles = self.generate_buffered(request)
         for h in handles:
             self.attach_reward(h)
-        return [self.pop_buffer(h) for h in handles]
+        responses: List[RolloutResponse] = [self.pop_buffer(h) for h in handles]
+        _stamp_actor_reward_total(responses)
+        return responses
 
     def init_transferqueue_client(self, tq_global_config, tq_backend_config):
         self.tq_global_config = tq_global_config

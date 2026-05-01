@@ -8,7 +8,7 @@ from diffusionrl.types.forward_context import ForwardContext
 from diffusionrl.types.prompts import Prompts
 from diffusionrl.types.sampling import SamplingParams
 from diffusionrl.types.trajectory_store import Trajectory
-from diffusionrl.utils.batched import Batched, concat_field, shared_field
+from diffusionrl.utils.batched import Batched, concat_field, max_field, shared_field
 
 
 def _tensor_bytes(value: Any) -> int:
@@ -95,6 +95,10 @@ class RolloutSamples(Batched):
     decoded_images: Optional[List[Any]] = concat_field(default=None)
     decoded_videos: Optional[List[Any]] = concat_field(default=None)
     media_preview: Optional[MediaPreview] = concat_field(default=None)
+    # Per-actor sum of per-handle score_and_attach seconds; reduces by max
+    # across actors so the driver sees the wall-clock reward share of
+    # rollout_phase_s. See ``RewardResponse.compute_time`` for the same pattern.
+    reward_compute_s: float = max_field(default=0.0)
 
     def cast_dtype(self, dtype: torch.dtype) -> "RolloutSamples":
         """Cast float tensors to *dtype* for transport optimization.
@@ -122,6 +126,7 @@ class RolloutSamples(Batched):
             decoded_images=self.decoded_images,
             decoded_videos=self.decoded_videos,
             media_preview=self.media_preview,
+            reward_compute_s=self.reward_compute_s,
         )
 
     def cap_media_preview(self, max_items: int) -> None:

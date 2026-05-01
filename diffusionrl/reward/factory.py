@@ -62,7 +62,61 @@ def build_executors(spec: RewardSpec) -> List[BaseRewardExecutor]:
     if not isinstance(spec, RewardSpec):
         raise TypeError(f"build_executors requires RewardSpec, got: {type(spec).__name__}")
 
+    execution_plan = spec.to_execution_plan()
+    if execution_plan.uses_reward_service_backend:
+        return _build_reward_service_executors(spec)
     return _build_local_executors(spec)
+
+
+_ALLOWED_SERVICE_KWARGS = frozenset(
+    {"sub_metric_reduce", "image_format", "image_quality", "max_retries", "retry_delay"}
+)
+
+
+def _build_reward_service_executors(spec: RewardSpec) -> List[BaseRewardExecutor]:
+    """Build a single RewardServiceExecutor that calls the RewardService API.
+
+    Creates one executor that handles all reward components in a single HTTP
+    round trip because the RewardService multiplexes via ``required_rewards``.
+    """
+    from .reward_service_executor import RewardServiceExecutor
+
+    definition = spec.to_definition()
+    provider = spec.to_provider_config()
+    execution_plan = spec.to_execution_plan()
+
+    base_url = execution_plan.reward_service_url
+    if not base_url:
+        raise ValueError("reward_service backend requires reward_service_url.")
+
+    required_rewards = definition.component_names or [definition.default_model_name]
+    reward_weights = definition.component_weights()
+
+    service_kwargs = dict(spec.reward_service_kwargs or {})
+    unknown = set(service_kwargs) - _ALLOWED_SERVICE_KWARGS
+    if unknown:
+        raise ValueError(
+            f"Unknown key(s) in reward_service_kwargs: {sorted(unknown)}. Allowed: {sorted(_ALLOWED_SERVICE_KWARGS)}."
+        )
+
+    executor = RewardServiceExecutor(
+        base_url=base_url,
+        required_rewards=required_rewards,
+        reward_weights=reward_weights,
+        model_name="reward_service",
+        weight=1.0,
+        batch_size=provider.batch_size,
+        timeout=provider.timeout,
+        aggregation_method=definition.reward_aggregation_method,
+        **service_kwargs,
+    )
+    logger.info(
+        "Added RewardServiceExecutor: %s (rewards=%s, weights=%s)",
+        base_url,
+        required_rewards,
+        reward_weights,
+    )
+    return [executor]
 
 
 def _build_local_executors(spec: RewardSpec) -> List[BaseRewardExecutor]:
