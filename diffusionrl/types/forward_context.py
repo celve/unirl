@@ -21,11 +21,11 @@ from typing import Any, ClassVar, Dict, Optional, Sequence, Type, TypeVar
 
 import torch
 
+from diffusionrl.distributed.transfer_queue.transportable import Transportable
 from diffusionrl.utils.batched import (
-    Batched,
     FieldKind,
     _field_kind,
-    concat_field,
+    field,
     shared_field,
 )
 
@@ -66,7 +66,7 @@ def get_forward_context_cls(model_type: str) -> Type["ForwardContext"]:
 
 
 @dataclass
-class ForwardContext(Batched):
+class ForwardContext(Transportable):
     """Pure-data container for model forward parameters.
 
     Stores all parameters needed for model forward / inference **except**
@@ -74,7 +74,16 @@ class ForwardContext(Batched):
 
     Subclasses annotate fields with ``concat_field()`` (per-sample tensors
     batched along dim-0) or ``shared_field()`` (scalars / batch-shared
-    tensors).  All batch operations are inherited from :class:`Batched`.
+    tensors).  All batch operations are inherited from :class:`Batched`
+    (via :class:`Transportable`).
+
+    Per-sample tensor fields (``concat_field``-shaped) are tagged
+    ``transport=True`` so they round-trip through TransferQueue when this
+    container is nested in a :class:`Transportable` parent
+    (``RolloutSamples`` / ``TrainingBatch``). Scalars (``guidance_scale``),
+    ``torch.dtype`` (``autocast_dtype``), and dicts (``attention_kwargs``)
+    are intentionally untagged — they ride along on the Ray return-value
+    pickle path with the rest of the container.
     """
 
     _registered_model_type: ClassVar[str] = ""
@@ -139,9 +148,9 @@ class FluxForwardContext(ForwardContext):
     """
 
     guidance_scale: float = shared_field(default=3.5)
-    prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    pooled_prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    text_ids: Optional[torch.Tensor] = concat_field(default=None)
+    prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    pooled_prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    text_ids: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
     image_ids: Optional[torch.Tensor] = shared_field(default=None)
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
@@ -152,11 +161,11 @@ class SD3ForwardContext(ForwardContext):
     """ForwardContext for SD3 models."""
 
     guidance_scale: float = shared_field(default=7.0)
-    prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    pooled_prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    negative_prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    negative_pooled_prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    encoder_attention_mask: Optional[torch.Tensor] = concat_field(default=None)
+    prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    pooled_prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    negative_prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    negative_pooled_prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    encoder_attention_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
 
@@ -166,9 +175,9 @@ class HunyuanForwardContext(ForwardContext):
     """ForwardContext for HunyuanVideo models."""
 
     guidance_scale: float = shared_field(default=1.0)
-    prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    pooled_prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    encoder_attention_mask: Optional[torch.Tensor] = concat_field(default=None)
+    prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    pooled_prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    encoder_attention_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
 
@@ -178,9 +187,9 @@ class MochiForwardContext(ForwardContext):
     """ForwardContext for Mochi video models."""
 
     guidance_scale: float = shared_field(default=4.5)
-    prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    negative_prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    encoder_attention_mask: Optional[torch.Tensor] = concat_field(default=None)
+    prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    negative_prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    encoder_attention_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
     attention_kwargs: Optional[Dict[str, Any]] = shared_field(default=None)
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
@@ -191,12 +200,14 @@ class WAN21ForwardContext(ForwardContext):
     """ForwardContext for WAN 2.1 multi-task video/image generation."""
 
     guidance_scale: float = shared_field(default=5.0)
-    prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    negative_prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    encoder_hidden_states_image: Optional[torch.Tensor] = concat_field(default=None)
-    negative_encoder_hidden_states_image: Optional[torch.Tensor] = concat_field(default=None)
-    image_conditioning_latents: Optional[torch.Tensor] = concat_field(default=None)
-    first_frame_mask: Optional[torch.Tensor] = concat_field(default=None)
+    prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    negative_prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    encoder_hidden_states_image: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    negative_encoder_hidden_states_image: Optional[torch.Tensor] = field(
+        kind=FieldKind.CONCAT, default=None, transport=True
+    )
+    image_conditioning_latents: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    first_frame_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
     attention_kwargs: Optional[Dict[str, Any]] = shared_field(default=None)
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
@@ -208,12 +219,12 @@ class DefaultForwardContext(ForwardContext):
     """Fallback ForwardContext with SD3-like fields."""
 
     guidance_scale: float = shared_field(default=3.5)
-    prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    pooled_prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    negative_prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    negative_pooled_prompt_embeds: Optional[torch.Tensor] = concat_field(default=None)
-    encoder_attention_mask: Optional[torch.Tensor] = concat_field(default=None)
-    text_ids: Optional[torch.Tensor] = concat_field(default=None)
+    prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    pooled_prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    negative_prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    negative_pooled_prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    encoder_attention_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    text_ids: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
     image_ids: Optional[torch.Tensor] = shared_field(default=None)
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 

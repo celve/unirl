@@ -20,7 +20,7 @@ import torch
 
 from diffusionrl.distributed.transfer_queue.meta import TqMeta
 from diffusionrl.distributed.transfer_queue.transportable import Transportable
-from diffusionrl.utils.batched import FieldKind, concat_field, field
+from diffusionrl.utils.batched import FieldKind, concat_field, field, shared_field
 
 # =========================================================
 # fixtures
@@ -265,6 +265,128 @@ def test_dehydrate_then_hydrate_roundtrip() -> None:
     assert isinstance(outer.latents, torch.Tensor)
     assert isinstance(outer.inner.embeds, torch.Tensor)
     assert isinstance(outer.images, list)
+
+
+# =========================================================
+# ForwardContext-shaped nested Transportable: tensor on the wire,
+# scalar / dtype ride the in-memory pickle path
+# =========================================================
+
+
+@dataclass
+class _FCLike(Transportable):
+    """Mirror of the ForwardContext shape: per-row tensor + untagged shared
+    scalar + untagged shared dtype. Only the tensor field is transport-tagged
+    so only it travels via TQ; the others survive on the dataclass instance
+    via Ray's pickle path on the return value.
+    """
+
+    embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    guidance_scale: float = shared_field(default=7.0)
+    autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
+
+
+@dataclass
+class _OuterWithFC(Transportable):
+    latents: torch.Tensor = field(kind=FieldKind.CONCAT, transport=True)
+    fc: Optional[_FCLike] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+
+
+def test_forward_context_shaped_nested_transport_only_tensor_on_wire() -> None:
+    """The walker enters the nested ``_FCLike`` (Transportable + tagged) but
+    only its tensor leaf produces a wire key; untagged scalar / dtype fields
+    are invisible to the walker."""
+    bs = 4
+    obj = _OuterWithFC(
+        latents=torch.zeros(bs, 3, 8, 8),
+        fc=_FCLike(
+            embeds=torch.arange(bs * 5).reshape(bs, 5).float(),
+            guidance_scale=7.0,
+            autocast_dtype=torch.bfloat16,
+        ),
+    )
+    td = obj.to_tensordict()
+    assert td is not None
+    # Only the tagged-tensor leaves appear; guidance_scale and autocast_dtype
+    # are NOT on the wire (untagged).
+    assert sorted(td.keys()) == ["fc.embeds", "latents"]
+    assert int(td.batch_size[0]) == bs
+
+
+def test_forward_context_shaped_replace_with_meta_preserves_untagged_fields() -> None:
+    """``replace_with_meta`` only swaps tagged-tensor leaves; the scalar /
+    dtype fields stay on the in-memory instance, ready to be pickled by Ray
+    on the return-value path."""
+    bs = 2
+    obj = _OuterWithFC(
+        latents=torch.zeros(bs, 3, 8, 8),
+        fc=_FCLike(
+            embeds=torch.ones(bs, 5),
+            guidance_scale=3.5,
+            autocast_dtype=torch.bfloat16,
+        ),
+    )
+    obj.replace_with_meta(_FakeMeta(list(obj.to_tensordict().keys())))
+
+    # Tagged leaves are now TqMeta refs.
+    assert isinstance(obj.latents, TqMeta)
+    assert isinstance(obj.fc.embeds, TqMeta)
+    assert obj.fc.embeds._data_key == "fc.embeds"
+    # Untagged scalar / dtype fields are untouched — they ride the Ray pickle.
+    assert obj.fc.guidance_scale == 3.5
+    assert obj.fc.autocast_dtype is torch.bfloat16
+
+
+def test_forward_context_shaped_dehydrate_hydrate_roundtrip() -> None:
+    """Full TQ roundtrip: tensor goes through the stub client; scalar / dtype
+    survive on the instance unchanged."""
+    import asyncio
+
+    bs = 3
+    obj = _OuterWithFC(
+        latents=torch.arange(bs * 2 * 2 * 2).reshape(bs, 2, 2, 2).float(),
+        fc=_FCLike(
+            embeds=torch.arange(bs * 4).reshape(bs, 4).float() + 100,
+            guidance_scale=5.5,
+            autocast_dtype=torch.float16,
+        ),
+    )
+    expected_latents = obj.latents.clone()
+    expected_embeds = obj.fc.embeds.clone()
+
+    client = _StubClient()
+
+    async def go():
+        await obj.dehydrate(client, partition_id="fc-test")
+        await obj.hydrate(client)
+
+    asyncio.run(go())
+
+    # Tagged tensors round-tripped via the wire.
+    assert isinstance(obj.latents, torch.Tensor)
+    assert torch.equal(obj.latents, expected_latents)
+    assert isinstance(obj.fc, _FCLike)
+    assert isinstance(obj.fc.embeds, torch.Tensor)
+    assert torch.equal(obj.fc.embeds, expected_embeds)
+    # Untagged scalar + dtype survived in-memory unchanged.
+    assert obj.fc.guidance_scale == 5.5
+    assert obj.fc.autocast_dtype is torch.float16
+    # Wire only carried the tagged-tensor leaves.
+    assert sorted(client.put_calls[0]["keys"]) == ["fc.embeds", "latents"]
+
+
+def test_forward_context_shaped_none_tensor_field_skipped() -> None:
+    """When a transport-tagged tensor field is ``None`` it is filtered at
+    ``_walk_leaves`` (line 117) and never appears on the wire — matching the
+    real ForwardContext flow where most fields default to ``None``."""
+    bs = 2
+    obj = _OuterWithFC(
+        latents=torch.zeros(bs, 3),
+        fc=_FCLike(embeds=None, guidance_scale=1.0, autocast_dtype=None),
+    )
+    td = obj.to_tensordict()
+    # ``fc.embeds`` is None → skipped. Only the outer ``latents`` remains.
+    assert sorted(td.keys()) == ["latents"]
 
 
 # =========================================================
