@@ -33,6 +33,7 @@ from diffusionrl.config.validation import (
     validate_dynamic_dotpaths,
     validate_offload_contract,
     validate_rollout_layout,
+    validate_sampling_chunk_geometry,
     validate_training_actor_sampling_mode,
     validate_training_batch_geometry,
     validate_weight_sync_contract,
@@ -177,3 +178,60 @@ class TestValidateOffloadContract:
         cfg.training.execution.offload_rollout = True
         with pytest.raises(ValueError, match="offload_rollout=True"):
             validate_offload_contract(cfg)
+
+
+class TestValidateSamplingChunkGeometry:
+    """Cover the four short-circuit paths and the two reject paths.
+
+    Default cfg has rollout/engine=fsdp + plan.forward_batch_size=None,
+    so SGLang-path tests toggle the engine and chunk size explicitly.
+    """
+
+    def test_default_passes(self, cfg):
+        validate_sampling_chunk_geometry(cfg)
+
+    def test_fsdp_engine_skips_gate(self, cfg):
+        cfg.rollout.engine._target_ = _FSDP_ENGINE_TARGET
+        cfg.algorithm.samples_per_prompt = 4
+        cfg.algorithm.prompts_per_rollout = 8
+        cfg.rollout.plan.forward_batch_size = 2  # would be rejected on sglang
+        validate_sampling_chunk_geometry(cfg)
+
+    def test_k_one_skips_gate(self, cfg):
+        cfg.rollout.engine._target_ = _SGLANG_ENGINE_TARGET
+        cfg.algorithm.samples_per_prompt = 1
+        cfg.algorithm.prompts_per_rollout = 8
+        cfg.rollout.plan.forward_batch_size = 3
+        validate_sampling_chunk_geometry(cfg)
+
+    def test_full_batch_in_one_chunk_skips_gate(self, cfg):
+        # fwd >= prompts_per_rollout * K → chunked_engine_generate sends the
+        # full request in one call; even non-K-multiple values pass.
+        cfg.rollout.engine._target_ = _SGLANG_ENGINE_TARGET
+        cfg.algorithm.samples_per_prompt = 4
+        cfg.algorithm.prompts_per_rollout = 1  # expanded total = 4
+        cfg.rollout.plan.forward_batch_size = 5  # >= 4, no slice fires
+        validate_sampling_chunk_geometry(cfg)
+
+    def test_sglang_rejects_chunk_smaller_than_k(self, cfg):
+        cfg.rollout.engine._target_ = _SGLANG_ENGINE_TARGET
+        cfg.algorithm.samples_per_prompt = 4
+        cfg.algorithm.prompts_per_rollout = 8
+        cfg.rollout.plan.forward_batch_size = 2
+        with pytest.raises(ValueError, match="< samples_per_prompt"):
+            validate_sampling_chunk_geometry(cfg)
+
+    def test_sglang_rejects_chunk_not_multiple_of_k(self, cfg):
+        cfg.rollout.engine._target_ = _SGLANG_ENGINE_TARGET
+        cfg.algorithm.samples_per_prompt = 4
+        cfg.algorithm.prompts_per_rollout = 8
+        cfg.rollout.plan.forward_batch_size = 6  # >= K but 6 % 4 != 0
+        with pytest.raises(ValueError, match="not a multiple of"):
+            validate_sampling_chunk_geometry(cfg)
+
+    def test_sglang_accepts_chunk_equal_to_k(self, cfg):
+        cfg.rollout.engine._target_ = _SGLANG_ENGINE_TARGET
+        cfg.algorithm.samples_per_prompt = 4
+        cfg.algorithm.prompts_per_rollout = 8
+        cfg.rollout.plan.forward_batch_size = 4
+        validate_sampling_chunk_geometry(cfg)

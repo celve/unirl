@@ -121,6 +121,60 @@ def validate_training_batch_geometry(cfg: DictConfig) -> None:
     )
 
 
+def validate_sampling_chunk_geometry(cfg: DictConfig) -> None:
+    """Cross-section: SGLang chunk size must keep every chunk K-aligned.
+
+    SGLang's ``_deexpand_prompts`` (``samplers/sglang/engine.py``) folds
+    K-major prompts back into ``unique_prompts + num_outputs_per_prompt=K``
+    to unlock the K-aware fast path (shared prompt encoding, KV-cache reuse).
+    The fold succeeds only when every chunk emitted by
+    ``chunked_engine_generate`` is K-aligned; misaligned chunks silently
+    collapse to ``K=1`` and the fast path is lost without any error surface.
+
+    Skip when chunking can't fire (``fwd is None``), the engine isn't
+    SGLang, ``K <= 1``, or ``fwd >= prompts_per_rollout * K`` (a conservative
+    single-actor upper bound — the chunker short-circuits to one call so
+    fold sees the full K-major layout). Otherwise require ``fwd >= K`` and
+    ``fwd % K == 0``. FSDP paths treat the expanded list as a flat batch
+    and have no K-aware fast path to lose.
+    """
+    fwd = cfg.rollout.plan.forward_batch_size
+    if fwd is None:
+        return
+
+    engine_target = str(cfg.rollout.engine.get("_target_") or "")
+    if not engine_target.endswith(_SGLANG_ENGINE_TARGET_SUFFIX):
+        return
+
+    samples_per_prompt = int(cfg.algorithm.samples_per_prompt)
+    if samples_per_prompt <= 1:
+        return
+
+    prompts_per_rollout = int(cfg.algorithm.prompts_per_rollout)
+    fwd = int(fwd)
+    if fwd >= prompts_per_rollout * samples_per_prompt:
+        return  # chunked_engine_generate fast-paths to one engine.generate call
+
+    fix_hint = (
+        f"set cfg.rollout.plan.forward_batch_size to a multiple of "
+        f"cfg.algorithm.samples_per_prompt ({samples_per_prompt}) that is >= K, "
+        "or leave it unset."
+    )
+    require(
+        fwd >= samples_per_prompt,
+        f"sglang rollout engine: forward_batch_size ({fwd}) < samples_per_prompt "
+        f"({samples_per_prompt}). Sub-K chunks split K-groups across SGLang requests "
+        "and the client silently falls back to K=1, losing the K-aware fast path; " + fix_hint,
+    )
+    require(
+        fwd % samples_per_prompt == 0,
+        f"sglang rollout engine: forward_batch_size ({fwd}) is not a multiple of "
+        f"samples_per_prompt ({samples_per_prompt}). Misaligned chunks cross K-group "
+        "boundaries and the SGLang client silently falls back to K=1, losing the "
+        "K-aware fast path; " + fix_hint,
+    )
+
+
 def validate_weight_sync_contract(cfg: DictConfig) -> None:
     """Weight-sync section presence + variant must match rollout engine."""
     has_sync = cfg.get("sync") is not None
@@ -254,6 +308,7 @@ __all__ = [
     "validate_offload_contract",
     "validate_precision_type",
     "validate_rollout_layout",
+    "validate_sampling_chunk_geometry",
     "validate_training_actor_sampling_mode",
     "validate_training_batch_geometry",
     "validate_weight_sync_contract",
