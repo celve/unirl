@@ -270,6 +270,23 @@ class TestParseScoreResponse:
         assert resp.rewards[0] == pytest.approx(0.7)
         assert resp.rewards[1] == 0.0 and resp.rewards[2] == 0.0
 
+    def test_silent_missing_required_reward_marks_failure(self):
+        """A required reward absent from results AND errors must NOT count as success.
+
+        Regression guard for the silent-corruption path: server returns a
+        partial response (one reward present, one silently missing without an
+        error entry). Before the fix this aggregated to success=True, feeding
+        a partial-only reward into advantage computation.
+        """
+        ex = _make_executor(required_rewards=["hpsv2", "pickscore"])
+        raw = {
+            "results": [{"hpsv2": {"score": 0.8}}],  # pickscore silently absent
+            "errors": [{}],  # no error explanation either
+        }
+        resp = ex._parse_score_response(raw, batch_size=1, compute_time=0.1)
+        assert resp.successes == [False]
+        assert resp.errors[0] is not None and "pickscore" in resp.errors[0]
+
 
 # ---------------------------------------------------------------------------
 # Sub-metric reduction

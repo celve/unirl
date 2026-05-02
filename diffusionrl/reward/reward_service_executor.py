@@ -401,6 +401,13 @@ class RewardServiceExecutor(BaseRewardExecutor):
             weights: List[float] = []
             error_parts: List[str] = []
 
+            # Validation contract: every reward this sample asked for must come
+            # back. Today every sample asks for the same self.required_rewards
+            # (set at executor construction). When per-sample required_rewards
+            # arrives for multi-turn rollouts (the wire format already supports
+            # it via wire_requests[i]["required_rewards"]), replace the loop
+            # source with `request.required_rewards[i]` — the failure semantics
+            # ("asked-for not returned") stay identical.
             for reward_name in self.required_rewards:
                 if reward_name in sample_result:
                     sub_metrics = sample_result[reward_name]
@@ -412,6 +419,9 @@ class RewardServiceExecutor(BaseRewardExecutor):
                     component_rewards[reward_name].append(0.0)
                     if reward_name in sample_errors_dict:
                         error_parts.append(f"{reward_name}: {sample_errors_dict[reward_name]}")
+                    else:
+                        # Asked-for reward absent without explanation: server bug, not legitimate omission.
+                        error_parts.append(f"{reward_name}: missing from server response without error")
 
             if scores:
                 aggregated_rewards.append(self._aggregate_scores(scores, weights))

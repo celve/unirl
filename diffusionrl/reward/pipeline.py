@@ -264,11 +264,24 @@ class RewardPipeline:
         Assumes response.samples.decoded_images (or .decoded_videos) is already
         populated — decoding remains the actor's responsibility since it owns
         the sampling engine.
+
+        Fail-fast on per-sample failure flags so partial/corrupt rewards
+        cannot silently enter advantage computation. Successes are computed
+        against each sample's own requested reward set, so future per-sample
+        required_rewards (multi-turn) will not raise spuriously here.
         """
         if _read_reward_payload(response.samples) is not None:
             raise RuntimeError("Actor-side reward compute does not accept precomputed rewards on sampler outputs.")
         request = self.build_request(response)
         reward_response = self.reward_service.compute_rewards(request)
+
+        failed = [(i, e) for i, (ok, e) in enumerate(zip(reward_response.successes, reward_response.errors)) if not ok]
+        if failed:
+            raise RuntimeError(
+                f"Reward computation flagged {len(failed)} of "
+                f"{len(reward_response.successes)} sample(s) as failure. First few: {failed[:3]}"
+            )
+
         response.samples.rewards = torch.tensor(reward_response.rewards, dtype=torch.float32)
         response.samples.component_rewards = {
             str(name): torch.tensor(list(values or []), dtype=torch.float32)
