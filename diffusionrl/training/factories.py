@@ -17,10 +17,7 @@ from typing import Any, Iterable, Optional
 
 import torch
 
-from diffusionrl.config.training_sections import (
-    LrSchedulerConfig,
-    OptimizerConfig,
-)
+from diffusionrl.training.backends.base import LrSchedulerConfig, OptimizerConfig
 from diffusionrl.training.backends.protocols import (
     LRSchedulerProtocol,
     OptimizerProtocol,

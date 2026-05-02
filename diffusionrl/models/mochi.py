@@ -17,12 +17,10 @@ import torch.nn as nn
 
 from .base import ModelBundle
 from .config import ModelBundleConfig
-from .registry import register_model
 
 logger = logging.getLogger(__name__)
 
 
-@register_model(component_cfg=ModelBundleConfig)
 class MochiModelBundle(ModelBundle):
     """
     Mochi video model bundle.

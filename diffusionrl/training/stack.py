@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
 import torch
+from omegaconf import DictConfig
 
 from diffusionrl.algorithms import BaseAlgorithm
 from diffusionrl.training.backends.base import TrainBackend
@@ -107,16 +108,15 @@ class TrainStack:
     scheduler: torch.optim.lr_scheduler.LRScheduler
     algorithm: BaseAlgorithm
     ema_manager: EMAManager
-    max_grad_norm: float = 1.0
+    cfg: DictConfig
 
     def train_batch(
         self,
         batch: TrainingBatch,
         *,
-        mini_batch_size: int,
-        micro_batch_size: int,
         rollout_step: int,
     ) -> BatchResult:
+        mini_batch_size = int(self.cfg.training.plan.local_mini_batch_size)
         mini_slices = _build_micro_batch_slices(
             total_size=batch.batch_size,
             micro_batch_size=mini_batch_size,
@@ -129,7 +129,6 @@ class TrainStack:
             mini_results.append(
                 self.train_minibatch(
                     batch.slice(start, end),
-                    micro_batch_size=micro_batch_size,
                     rollout_step=rollout_step,
                 )
             )
@@ -164,7 +163,6 @@ class TrainStack:
         self,
         batch: TrainingBatch,
         *,
-        micro_batch_size: int,
         rollout_step: int,
     ) -> MiniBatchResult:
         self.optimizer.zero_grad()
@@ -174,6 +172,7 @@ class TrainStack:
             current_step=rollout_step,
         )
 
+        micro_batch_size = int(self.cfg.training.plan.micro_batch_size)
         micro_slices = _build_micro_batch_slices(
             total_size=batch.batch_size,
             micro_batch_size=micro_batch_size,
@@ -201,7 +200,8 @@ class TrainStack:
         aggregated_metrics = aggregate_numeric_metrics([r.metrics for r in micro_results if r.metrics])
 
         if has_backward:
-            clipped = self.backend.clip_grad_norm(self.max_grad_norm)
+            max_grad_norm = float(self.cfg.training.execution.max_grad_norm)
+            clipped = self.backend.clip_grad_norm(max_grad_norm)
             self.optimizer.step()
             if self.scheduler is not None:
                 self.scheduler.step()

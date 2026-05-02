@@ -10,7 +10,8 @@ from typing import List, Optional, Set
 import torch
 
 # Import shared data types from canonical types package
-from diffusionrl.sde.rules import is_deterministic_sde_type, normalize_sde_type
+from diffusionrl.sde.kernels import FlowSDEStrategy, StepStrategy
+from diffusionrl.sde.rules import is_deterministic_sde_type
 from diffusionrl.types.sample import RolloutSamples
 
 
@@ -43,7 +44,7 @@ class BaseSampler(ABC):
     def __init__(
         self,
         eta: float = 1.0,
-        sde_type: str = "flow",
+        strategy: Optional[StepStrategy] = None,
         shift: float = 3.0,
     ):
         """
@@ -51,12 +52,18 @@ class BaseSampler(ABC):
 
         Args:
             eta: Noise level for SDE (controls stochasticity)
-            sde_type: Transition rule (flow/cps/dance/dpm2)
+            strategy: SDE step strategy instance (Flow/CPS/Dance/DPM2). When
+                ``None``, defaults to ``FlowSDEStrategy()``.
             shift: Time shift parameter for sigma schedule
         """
         self.eta = eta
-        self.sde_type = normalize_sde_type(sde_type)
+        self.strategy = strategy if strategy is not None else FlowSDEStrategy()
         self.shift = shift
+
+    @property
+    def sde_type(self) -> str:
+        """Canonical name of the active SDE strategy."""
+        return type(self.strategy).canonical_name
 
     @property
     def uses_deterministic_solver(self) -> bool:

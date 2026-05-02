@@ -7,6 +7,9 @@ from typing import List
 import torch
 from PIL import Image
 
+from diffusionrl.config.registration import register_config
+from diffusionrl.reward.base import BaseRewardComponentSpec
+from diffusionrl.reward.scorers._device import resolve_device
 from diffusionrl.types.reward import RewardRequest, RewardType
 
 from .base_local import BaseLocalRewardScorer
@@ -23,6 +26,12 @@ class HPSv3RewardScorer(BaseLocalRewardScorer):
     """
 
     canonical_model_name = "hpsv3"
+
+    def __init__(self, *, config: "HPSv3Spec", base_device: str) -> None:
+        super().__init__(
+            device=resolve_device(config.device, base_device),
+            batch_size=config.batch_size,
+        )
 
     def _load_model(self) -> None:
         try:
@@ -63,3 +72,19 @@ class HPSv3RewardScorer(BaseLocalRewardScorer):
                 all_rewards.extend(scores.cpu().tolist())
 
         return all_rewards
+
+
+@register_config(
+    group="reward/component",
+    name="hpsv3",
+    target="diffusionrl.reward.scorers.hpsv3.HPSv3RewardScorer",
+)
+class HPSv3Spec(BaseRewardComponentSpec):
+    """Typed config for the HPSv3 reward component.
+
+    HPSv3RewardInferencer self-loads its checkpoint, so no path knobs.
+    """
+
+    weight: float = 1.0
+    batch_size: int = 8
+    device: str = "auto"

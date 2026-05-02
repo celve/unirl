@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import torch
 
 from diffusionrl.sde.kernels import SDEStrategy
-from diffusionrl.sde.registry import resolve_sde_strategy_class
 
 if TYPE_CHECKING:
     from diffusionrl.sde.kernels import StepStrategy
@@ -60,11 +59,11 @@ def denoising_step(
     sample: torch.Tensor,
     sigma: torch.Tensor,
     sigma_next: torch.Tensor,
+    *,
+    strategy: "StepStrategy",
     eta: float = 1.0,
     prev_sample: Optional[torch.Tensor] = None,
-    sde_type: str = "flow",
     sigma_max: float = 0.99,
-    strategy: Optional["StepStrategy"] = None,
     step_index: int = 0,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
     """Unified SDE step: handles both sampling and training replay.
@@ -85,17 +84,15 @@ def denoising_step(
         sample: Current noisy sample x_t.
         sigma: Current noise level (scalar or broadcastable).
         sigma_next: Next noise level.
+        strategy: Pre-built strategy instance built once via
+            ``build(cfg.sampling.sde_strategy)`` and reused across steps.
+            Stateful strategies (e.g. DPM2) require the same instance for
+            every step in a sampling pass.
         eta: Stochasticity level.  ``0`` yields a deterministic Euler step.
         prev_sample: If provided, used for training-time log-prob replay
             instead of generating a new sample.
-        sde_type: SDE formulation name (``flow``, ``cps``, ``dance``,
-            ``dpm2``, …).
         sigma_max: Maximum sigma, used by some formulations for numerical
             stability at the boundary.
-        strategy: Pre-built strategy instance.  When ``None``, a fresh
-            instance is created from *sde_type*.  Pass an existing instance
-            for stateful strategies (e.g. DPM2) that must persist across
-            steps.
         step_index: Current step index (used by stateful strategies like
             DPM2).
 
@@ -120,9 +117,6 @@ def denoising_step(
     while sigma.dim() < sample.dim():
         sigma = sigma.unsqueeze(-1)
         sigma_next = sigma_next.unsqueeze(-1)
-
-    if strategy is None:
-        strategy = resolve_sde_strategy_class(sde_type)()
 
     prev_sample, prev_sample_mean, std_var = strategy.step(
         noise_pred=noise_pred,

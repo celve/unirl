@@ -10,20 +10,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from diffusionrl.config.registration import register_config
+
 from .base import ModelBundle
 from .config import ModelBundleConfig
-from .registry import register_model
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@register_config(
+    group="model",
+    name="wan",
+    target="diffusionrl.models.wan.WAN21ModelBundle",
+)
+@dataclass
 class WAN21ModelBundleConfig(ModelBundleConfig):
     image_encoder_ckpt_path: Optional[str] = None
     max_sequence_length: int = 512
 
 
-@register_model(component_cfg=WAN21ModelBundleConfig)
 class WAN21ModelBundle(ModelBundle):
     """WAN 2.1 bundle supporting text-to-video and image-conditioned video tasks."""
 
@@ -125,6 +130,11 @@ class WAN21ModelBundle(ModelBundle):
                 if str(first_param_device) != "cpu":
                     self._transformer.to("cpu")
             else:
+                # Dtype unification matters here even though from_pretrained got
+                # torch_dtype=self.dtype: diffusers leaves some parameters /
+                # buffers (timestep embeddings, RoPE freqs, ...) in fp32, and
+                # FSDP's _init_mp_dtypes asserts a uniform original-param dtype
+                # across the wrapped module.
                 self._transformer.to(self.device, dtype=self.dtype)
             logger.info("Loaded WAN transformer from %s", self.pretrained_path)
         except Exception as exc:

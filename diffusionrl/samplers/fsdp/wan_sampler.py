@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import torch
 import torch.nn as nn
 
-from diffusionrl.sde.registry import resolve_sde_strategy_class
+from diffusionrl.sde.kernels import DanceSDEStrategy, StepStrategy
 from diffusionrl.sde.runtime import denoising_step, sd3_time_shift
 from diffusionrl.types.forward_context import WAN21ForwardContext
 from diffusionrl.types.sample import LogProbData
@@ -34,7 +34,7 @@ class FSDPWanSampler(FSDPBaseSampler):
         text_encoder: Optional[Any] = None,
         vae: Optional[nn.Module] = None,
         eta: float = 1.0,
-        sde_type: str = "dance",
+        strategy: Optional[StepStrategy] = None,
         shift: float = 5.0,
         guidance_scale: float = 5.0,
         autocast_precision: Any = "bf16",
@@ -47,7 +47,7 @@ class FSDPWanSampler(FSDPBaseSampler):
             text_encoder=text_encoder,
             vae=vae,
             eta=eta,
-            sde_type=sde_type,
+            strategy=strategy if strategy is not None else DanceSDEStrategy(),
             shift=shift,
             autocast_precision=autocast_precision,
             trajectory_precision=trajectory_precision,
@@ -165,7 +165,7 @@ class FSDPWanSampler(FSDPBaseSampler):
         if sde_indices is None:
             sde_indices = set() if self.uses_deterministic_solver else set(range(num_inference_steps))
 
-        strategy = resolve_sde_strategy_class(self.sde_type)()
+        strategy = self.strategy
         strategy.init_schedule(sigma_schedule)
         trajectory_store = TrajectoryBuilder.for_sde_steps(sde_indices, num_inference_steps)
         trajectory_store.add(0, latents.clone().to(dtype=self.trajectory_dtype))
@@ -208,7 +208,6 @@ class FSDPWanSampler(FSDPBaseSampler):
                 sigma=sigma,
                 sigma_next=sigma_next,
                 eta=step_eta,
-                sde_type=self.sde_type,
                 sigma_max=sigma_schedule[1].item(),
                 strategy=strategy,
                 step_index=i,

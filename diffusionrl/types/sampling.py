@@ -6,19 +6,24 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
-from diffusionrl.sde.rules import normalize_sde_type
+from diffusionrl.config.registration import register_config
+from diffusionrl.config.require import require
+
+_RESERVED_SAMPLER_KWARGS = frozenset({"autocast_precision", "trajectory_precision", "logprob_precision"})
 
 
-@dataclass(frozen=True)
+@dataclass
 class SDEConfig:
-    """Stable SDE math contract shared by rollout and training."""
+    """Stable SDE math contract shared by rollout and training.
+
+    Strategy choice (flow/cps/dance/dpm2) is now a separate Hydra group at
+    ``cfg.sampling.sde_strategy`` (registered via the ``sampling/sde_strategy``
+    group in :mod:`diffusionrl.sde.kernels`); ``SDEConfig`` only carries
+    the per-strategy math params.
+    """
 
     eta: float = 1.0
-    sde_type: str = "flow"
     shift: float = 3.0
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "sde_type", normalize_sde_type(self.sde_type))
 
     @classmethod
     def from_mapping(
@@ -26,13 +31,11 @@ class SDEConfig:
         raw: Optional[Mapping[str, Any]] = None,
         *,
         eta: float = 1.0,
-        sde_type: str = "flow",
         shift: float = 3.0,
     ) -> "SDEConfig":
         payload = dict(raw or {})
         return cls(
             eta=float(payload.get("eta", eta)),
-            sde_type=str(payload.get("sde_type", sde_type)),
             shift=float(payload.get("shift", shift)),
         )
 
@@ -40,35 +43,42 @@ class SDEConfig:
         return asdict(self)
 
 
-@dataclass(frozen=True)
+@register_config(group="sampling", name="default")
+@dataclass
 class SamplingParams:
     """Canonical resolved sampling view built once from SamplingConfig."""
 
-    num_inference_steps: int
-    guidance_scale: float
-    height: int
-    width: int
-    num_frames: int
-    seed: int
+    num_inference_steps: int = 50
+    guidance_scale: float = 7.5
+    height: int = 256
+    width: int = 256
+    num_frames: int = 16
+    seed: int = 42
     num_samples_per_prompt: int = 1
     init_same_noise: bool = False
     sde_config: SDEConfig = field(default_factory=SDEConfig)
+    # SDE step strategy chosen via the Hydra group ``sampling/sde_strategy``
+    # (e.g. ``defaults: [- sampling/sde_strategy: dpm2]``). Holds the
+    # registered Spec dataclass (FlowSpec / CPSSpec / DanceSpec / DPM2Spec)
+    # whose ``_target_`` resolves to the matching strategy class. Built into
+    # an instance via ``build(cfg.sampling.sde_strategy)`` at the boundary.
+    # Defaults to ``None`` so nested ``SamplingParams`` copies (e.g.
+    # ``cfg.rollout.engine.sampling``) compose without requiring their own
+    # group selection — actors look up the strategy from ``cfg.sampling``.
+    sde_strategy: Any = None
     sde_indices: Optional[List[int]] = None
     sampler_kwargs: Dict[str, Any] = field(default_factory=dict)
     # Numerical policy (construction-time ride-along; SGLang ignores these)
     autocast_precision: str = "bf16"
     trajectory_precision: str = "fp16"
     logprob_precision: str = "fp32"
-    # Maximum samples per chunkable rollout-side operation. When set,
-    # applied to:
-    #   1. engine.generate prompt batches (via chunked_engine_generate)
-    #   2. engine.decode_latents reward-decode batches in attach_reward
-    #      (via chunked_decode_latents).
-    # Engine-agnostic on the FSDP / TrainActor path. SGLang's engine-side
-    # decode is controlled by SGLang server args, not by this knob (the
-    # SGLang rollout path skips diffusionrl's decode_latents because the
-    # SGLang server returns decoded media directly).
-    sampling_forward_batch: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        shadowed = _RESERVED_SAMPLER_KWARGS & set(self.sampler_kwargs)
+        require(
+            not shadowed,
+            f"SamplingParams.sampler_kwargs cannot contain reserved keys {sorted(shadowed)}; set them as fields instead",
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

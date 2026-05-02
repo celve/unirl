@@ -44,14 +44,23 @@ class ModelBundle(ABC):
         """
         if not isinstance(config, ModelBundleConfig):
             raise TypeError(f"{type(self).__name__} expected {ModelBundleConfig.__name__}, got: {config!r}")
+        from diffusionrl.utils.dtypes import parse_torch_dtype
+
         self.config = config
         self.pretrained_path = config.pretrained_model_ckpt_path
         self.device = config.device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.dtype = config.model_precision
-        self.vae_dtype = config.vae_dtype if config.vae_dtype is not None else config.model_precision
-        self.text_encoder_dtype = (
-            config.text_encoder_dtype if config.text_encoder_dtype is not None else config.model_precision
-        )
+        # Coerce string-form precision aliases ("bf16", "fp16", "fp32") to real
+        # torch.dtype here so every downstream consumer (transformers
+        # from_pretrained, .to(dtype=...), torch.zeros(dtype=...), etc.) gets a
+        # typed value. Diffusers accepts string dtypes; transformers and
+        # torch.Tensor.to do not, so without this coercion bundles intermittently
+        # raise "'str' object has no attribute 'is_floating_point'" or
+        # "to() received an invalid combination of arguments - got (str, dtype=str)".
+        self.dtype = parse_torch_dtype(config.model_precision, field_name="model_precision")
+        vae_raw = config.vae_dtype if config.vae_dtype is not None else config.model_precision
+        self.vae_dtype = parse_torch_dtype(vae_raw, field_name="vae_dtype")
+        te_raw = config.text_encoder_dtype if config.text_encoder_dtype is not None else config.model_precision
+        self.text_encoder_dtype = parse_torch_dtype(te_raw, field_name="text_encoder_dtype")
 
         # Components (initialized by subclasses)
         self._transformer: Optional[nn.Module] = None

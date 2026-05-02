@@ -77,10 +77,10 @@ def build_eval_request_batch(
     if sampling_adapter is not None and str(sampling_adapter).strip():
         eval_overrides["sampling_adapter"] = str(sampling_adapter).strip()
 
+    # Eval-time kwarg overrides for sampler internals. Strategy choice is no
+    # longer overridable at this layer — eval inherits the sampling-side
+    # ``cfg.sampling.sde_strategy`` chosen at compose time.
     sampler_overrides: Dict[str, Any] = {}
-    raw_sde_type = getattr(evaluation_settings, "sde_type", None)
-    if raw_sde_type is not None and str(raw_sde_type).strip():
-        sampler_overrides["sde_type"] = str(raw_sde_type).strip()
     if getattr(evaluation_settings, "eta", None) is not None:
         sampler_overrides["eta"] = float(evaluation_settings.eta)
     if sampler_overrides:

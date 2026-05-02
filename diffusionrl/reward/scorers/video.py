@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import dataclasses
 import time
-from typing import List, Optional
+from typing import List
 
 import torch
 from PIL import Image
 
-from diffusionrl.reward.base import BaseRewardScorer
+from diffusionrl.config.registration import register_config
+from diffusionrl.reward.base import BaseRewardComponentSpec, BaseRewardScorer
 from diffusionrl.types.reward import RewardRequest, RewardResponse
 
-from .registry import resolve_builtin_reward_scorer_class
+from .registry import (
+    resolve_builtin_reward_scorer_class,
+    resolve_builtin_reward_spec_class,
+)
 
 
 class VideoRewardScorer(BaseRewardScorer):
@@ -19,37 +24,29 @@ class VideoRewardScorer(BaseRewardScorer):
 
     input_kind = "video"
 
-    def __init__(
-        self,
-        model_name: Optional[str] = "pickscore",
-        temporal_weight: float = 0.3,
-        alignment_weight: float = 0.7,
-        sample_frames: int = 8,
-        device: str = "cuda",
-        dtype: torch.dtype = torch.float16,
-        batch_size: int = 8,
-        timeout: float = 60.0,
-        **model_kwargs,
-    ) -> None:
-        resolved_frame_model = str(model_name or "pickscore").strip().lower()
+    def __init__(self, *, config: "VideoSpec", base_device: str) -> None:
+        inner_model = str(config.inner_model_name or "pickscore").strip().lower()
         super().__init__(
-            model_name=resolved_frame_model,
-            batch_size=batch_size,
-            timeout=timeout,
+            model_name=inner_model,
+            batch_size=config.batch_size,
         )
-        self.temporal_weight = temporal_weight
-        self.alignment_weight = alignment_weight
-        self.sample_frames = sample_frames
+        self.temporal_weight = config.temporal_weight
+        self.alignment_weight = config.alignment_weight
+        self.sample_frames = config.sample_frames
 
-        scorer_cls = resolve_builtin_reward_scorer_class(resolved_frame_model)
-        self.frame_scorer = scorer_cls(
-            model_name=resolved_frame_model,
-            device=device,
-            dtype=dtype,
-            batch_size=batch_size,
-            timeout=timeout,
-            **model_kwargs,
-        )
+        inner_scorer_cls = resolve_builtin_reward_scorer_class(inner_model)
+        inner_spec_cls = resolve_builtin_reward_spec_class(inner_model)
+        inner_spec = inner_spec_cls()
+        # Outer VideoSpec overrides what the inner Spec accepts. OCR has no
+        # device/batch_size; everything else does — hasattr keeps this generic.
+        overrides = {
+            field_name: getattr(config, field_name)
+            for field_name in ("device", "batch_size")
+            if hasattr(inner_spec, field_name)
+        }
+        if overrides:
+            inner_spec = dataclasses.replace(inner_spec, **overrides)
+        self.frame_scorer = inner_scorer_cls(config=inner_spec, base_device=base_device)
 
     def compute_rewards(self, request: RewardRequest) -> RewardResponse:
         if not request.is_video:
@@ -145,3 +142,24 @@ class VideoRewardScorer(BaseRewardScorer):
 
     def dispose(self) -> None:
         self.frame_scorer.dispose()
+
+
+@register_config(
+    group="reward/component",
+    name="video",
+    target="diffusionrl.reward.scorers.video.VideoRewardScorer",
+)
+class VideoSpec(BaseRewardComponentSpec):
+    """Typed config for the Video reward component.
+
+    Wraps an inner frame-level scorer (selected by ``inner_model_name``) and
+    blends frame-level alignment with temporal consistency.
+    """
+
+    weight: float = 1.0
+    batch_size: int = 8
+    device: str = "auto"
+    inner_model_name: str = "pickscore"
+    temporal_weight: float = 0.3
+    alignment_weight: float = 0.7
+    sample_frames: int = 8

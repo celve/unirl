@@ -20,7 +20,8 @@ class BufferHandle:
 
 
 class Buffer:
-    def __init__(self):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self.mappings: Dict[str, Batched] = {}
         self.actor_handle: ActorHandle = None
 

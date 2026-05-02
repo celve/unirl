@@ -13,11 +13,11 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
+from diffusionrl.models.config import ModelBundleConfig
 from diffusionrl.samplers.noise_utils import generate_latents
-from diffusionrl.samplers.registry import register_rollout_engine
+from diffusionrl.samplers.sglang.config import SGLangEngineConfig
 from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.sde.runtime import get_sigma_schedule
-from diffusionrl.types.engine import EngineConfig
 from diffusionrl.types.forward_context import ForwardContext, get_forward_context_cls
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.sample import LogProbData, RolloutSamples
@@ -83,9 +83,10 @@ class _GenerateContext:
     return_decoded_for_reward: bool
 
 
-@register_rollout_engine(component_name="sglang", component_cfg=EngineConfig)
 class SGLangRolloutEngine(BaseRolloutEngine):
     """Inference engine backed by `sglang.multimodal_gen` DiffGenerator."""
+
+    _component_name = "sglang"
 
     @classmethod
     def declared_capabilities(cls) -> Dict[str, bool]:
@@ -95,8 +96,24 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             "requires_embeddings": True,
         }
 
-    def __init__(self, config: EngineConfig):
+    def __init__(
+        self,
+        *,
+        config: SGLangEngineConfig,
+        model_config: ModelBundleConfig,
+        rank: Optional[int] = None,
+    ):
+        # Per-rank SGLang port rewrite. When caller passes ``rank`` (the new
+        # cfg path via ``build(engine_cfg, rank=...)`` from
+        # ``RolloutActor.__init__``), this class offsets the SGLang port
+        # range internally. The legacy argparse path pre-rewrites and calls
+        # with ``rank=None``, so no double-offset.
+        if rank is not None:
+            config = config.with_sglang_ports(int(rank))
+        if not model_config.pretrained_model_ckpt_path:
+            raise ValueError("SGLang engine requires model_config.pretrained_model_ckpt_path")
         super().__init__(config)
+        self._model_config = model_config
         self._device: Optional[torch.device] = None
         self._generator: Any = None
         self._server_args: Any = None
@@ -274,7 +291,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         return self._logprob_source() == "native"
 
     def _build_server_kwargs(self, server_args_cls: Any) -> Dict[str, Any]:
-        """Build ServerArgs kwargs from typed EngineConfig fields + escape hatch."""
+        """Build ServerArgs kwargs from typed SGLangEngineConfig fields + escape hatch."""
         self._local_mode = bool(self.config.local_mode)
         self._verify_weight_checksum = bool(self.config.verify_weight_checksum)
         self._require_memory_api = bool(self.config.require_memory_api)
@@ -283,11 +300,10 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         if target_modules:
             self._target_modules = [str(m) for m in target_modules]
 
-        model_path = self.config.pretrained_model_ckpt_path or self.config.model_dotpath
-        if not model_path:
-            raise ValueError("SGLang engine requires pretrained_model_ckpt_path or model_dotpath")
-
-        return self.config.build_server_kwargs(server_args_cls)
+        return self.config.build_server_kwargs(
+            server_args_cls,
+            model_config=self._model_config,
+        )
 
     # ---------------------------------------------------------------------
     # Engine lifecycle
@@ -301,7 +317,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         # SGLang MUST agree on the target-module set; otherwise SGLang defaults
         # to wrapping every linear layer and emits a wall of ``LoRA adapter
         # None does not contain the weights for layer '...'`` warnings.
-        if self.config.use_lora and not server_kwargs.get("lora_target_modules"):
+        if self._model_config.use_lora and not server_kwargs.get("lora_target_modules"):
             logger.warning(
                 "SGLang LoRA enabled but lora_target_modules is not provided. "
                 "SGLang will wrap EVERY linear layer in the transformer while "
@@ -335,8 +351,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
     def _infer_model_type(self) -> str:
         value = (
             str(self.config.engine_kwargs.get("model_type", ""))
-            or str(self.config.model_dotpath or "")
-            or str(self.config.pretrained_model_ckpt_path or "")
+            or str(self._model_config.pretrained_model_ckpt_path or "")
         ).lower()
         if "hunyuan" in value:
             return "hunyuan"
@@ -541,10 +556,10 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         if model_type not in {"sd3", "flux"}:
             raise RuntimeError(f"SGLang latent fallback currently supports sd3/flux, got model_type={model_type}.")
 
-        model_path = self.config.pretrained_model_ckpt_path or self.config.model_dotpath
+        model_path = self._model_config.pretrained_model_ckpt_path
         if not model_path:
             raise RuntimeError(
-                "Missing pretrained_model_ckpt_path or model_dotpath while initializing latent fallback VAE."
+                "Missing model_config.pretrained_model_ckpt_path while initializing latent fallback VAE."
             )
 
         from diffusers import AutoencoderKL
@@ -643,7 +658,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             )
         timesteps = get_sigma_schedule(
             int(num_inference_steps),
-            shift=float(self.config.shift),
+            shift=float(self.config.sampling.sde_config.shift),
         ).cpu()
         step_indices = torch.arange(timesteps.shape[0], dtype=torch.long)
         if int(timesteps.shape[0]) != traj_len:
@@ -960,10 +975,12 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         # going ODE and losing a whole training run.
         default_rollout_enabled = bool(require_log_probs and sde_indices is not None)
         rollout_enabled = bool(kwargs.pop("enable_rollout_logprob", default_rollout_enabled))
+        # Default sde name comes from the injected strategy class
+        # (set by RolloutActor / TrainActor right after build).
+        # ``rollout_sde_type`` kwarg overrides per-call.
+        default_sde_name = type(self.strategy).canonical_name if self.strategy is not None else "flow"
         requested_rollout_sde = (
-            str(normalize_sde_type(kwargs.pop("rollout_sde_type", getattr(self.config, "sde_type", "flow"))))
-            .strip()
-            .lower()
+            str(normalize_sde_type(kwargs.pop("rollout_sde_type", default_sde_name))).strip().lower()
         )
         # Internal config only uses canonical flow/cps/dance/dpm2 names.
         # The native SGLang backend still expects "sde" as the flow-kernel label,
@@ -991,7 +1008,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         rollout_noise_level = float(
             kwargs.pop(
                 "rollout_noise_level",
-                kwargs.pop("eta", getattr(self.config, "eta", 1.0)),
+                kwargs.pop("eta", self.config.sampling.sde_config.eta),
             )
         )
 
@@ -1018,7 +1035,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             sampling_params_kwargs["num_outputs_per_prompt"] = int(num_outputs_per_prompt)
         sampling_params_kwargs["sigmas"] = get_sigma_schedule(
             steps,
-            shift=float(self.config.shift),
+            shift=float(self.config.sampling.sde_config.shift),
         )[:-1].tolist()
         if rollout_enabled:
             sampling_params_kwargs["rollout"] = True
@@ -1186,7 +1203,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 results=results,
                 model_type=ctx.model_type,
             )
-            timesteps = get_sigma_schedule(ctx.steps, shift=float(self.config.shift)).cpu()
+            timesteps = get_sigma_schedule(ctx.steps, shift=float(self.config.sampling.sde_config.shift)).cpu()
             step_indices = torch.arange(timesteps.shape[0], dtype=torch.long)
 
         per_result_log_probs: List[Optional[torch.Tensor]] = []
@@ -1333,8 +1350,8 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         if model_type == "flux":
             if prompt_embeds is None:
                 raise RuntimeError("SGLang encode_prompt() returned no prompt_embeds for FLUX")
-            height = int(kwargs.get("height", self.config.height))
-            width = int(kwargs.get("width", self.config.width))
+            height = int(kwargs.get("height", self.config.sampling.height))
+            width = int(kwargs.get("width", self.config.sampling.width))
             output["text_ids"] = self._build_flux_text_ids(prompt_embeds)
             output["image_ids"] = self._build_flux_image_ids(
                 height=height,

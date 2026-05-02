@@ -6,6 +6,9 @@ from typing import List
 
 import torch
 
+from diffusionrl.config.registration import register_config
+from diffusionrl.reward.base import BaseRewardComponentSpec
+from diffusionrl.reward.scorers._device import resolve_device
 from diffusionrl.types.reward import RewardRequest, RewardType
 
 from .base_local import BaseLocalRewardScorer
@@ -16,6 +19,13 @@ class ClipRewardScorer(BaseLocalRewardScorer):
 
     canonical_model_name = "clip"
 
+    def __init__(self, *, config: "ClipSpec", base_device: str) -> None:
+        super().__init__(
+            device=resolve_device(config.device, base_device),
+            batch_size=config.batch_size,
+            model_id=config.model_id,
+        )
+
     def _load_model(self) -> None:
         try:
             import torch.nn as nn
@@ -24,9 +34,9 @@ class ClipRewardScorer(BaseLocalRewardScorer):
         except ImportError:
             raise ImportError("transformers and torchvision are required for CLIP")
 
-        model_name = self.model_kwargs.get("model_name", "openai/clip-vit-large-patch14")
-        self.model = CLIPModel.from_pretrained(model_name).to(self.device)
-        self.processor = CLIPProcessor.from_pretrained(model_name)
+        model_id = self.model_kwargs.get("model_id", "openai/clip-vit-large-patch14")
+        self.model = CLIPModel.from_pretrained(model_id).to(self.device)
+        self.processor = CLIPProcessor.from_pretrained(model_id)
 
         def _get_size(size):
             if isinstance(size, int):
@@ -82,3 +92,17 @@ class ClipRewardScorer(BaseLocalRewardScorer):
                 all_rewards.extend(scores.cpu().tolist())
 
         return all_rewards
+
+
+@register_config(
+    group="reward/component",
+    name="clip",
+    target="diffusionrl.reward.scorers.clip.ClipRewardScorer",
+)
+class ClipSpec(BaseRewardComponentSpec):
+    """Typed config for the CLIP similarity reward component."""
+
+    weight: float = 1.0
+    batch_size: int = 8
+    device: str = "auto"
+    model_id: str = "openai/clip-vit-large-patch14"

@@ -6,21 +6,25 @@ Defines algorithm responsibilities in rollout/advantage pipeline.
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
 import torch
+from omegaconf import SI
 
+from diffusionrl.config.registration import register_config
+from diffusionrl.config.require import require
 from diffusionrl.models.base import ModelBundle
-from diffusionrl.types.sampling import SamplingRequirements
+from diffusionrl.types.sampling import SamplingParams, SamplingRequirements
 
 from .normalizers import normalize_global, normalize_grouped
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class EMASpec:
+@register_config(group="algorithm/ema", name="default")
+@dataclass
+class EMAConfig:
     """Algorithm-declared EMA policy.
 
     The algorithm declares *what* EMA behavior it needs. Runtime owns
@@ -40,8 +44,20 @@ class EMASpec:
     old_adapter_name: str = "old"
     new_adapter_name: str = "default"
 
+    def __post_init__(self) -> None:
+        require(self.eval_ema_decay >= 0, f"EMAConfig.eval_ema_decay must be >= 0; got {self.eval_ema_decay!r}")
+        require(
+            self.eval_ema_update_interval >= 1,
+            f"EMAConfig.eval_ema_update_interval must be >= 1; got {self.eval_ema_update_interval!r}",
+        )
+        require(
+            self.reference_mode in {"none", "nft_old_policy"},
+            f"EMAConfig.reference_mode must be one of {{'none', 'nft_old_policy'}}; got {self.reference_mode!r}",
+        )
 
-@dataclass(frozen=True)
+
+@register_config(group="algorithm", name="base")
+@dataclass
 class BaseAlgorithmConfig:
     """Common runtime config shared by current built-in algorithms."""
 
@@ -49,13 +65,36 @@ class BaseAlgorithmConfig:
     component_mix_stage: str = "reward"
     adv_normalization_scope: str = "group"
     samples_per_prompt: int = 1
-    num_inference_steps: int = 0
-    eval_ema_decay: float = 0.9
-    eval_ema_update_interval: int = 1
+    prompts_per_rollout: int = 1
+    # Default to a live interpolation back to top-level cfg.sampling so
+    # algorithm-side sampling tracks the canonical spec without a YAML override
+    # (which OmegaConf rejects when merging a string into a structured field).
+    # Experiments override fields under cfg.algorithm.sampling.* to diverge.
+    sampling: SamplingParams = field(default_factory=lambda: SI("${sampling}"))
+    ema: EMAConfig = field(default_factory=EMAConfig)
     epsilon: float = 1e-8
     clip_max: Optional[float] = 5.0
     use_global_std: bool = False
     trim_outliers_ratio: float = 0.0
+
+    def __post_init__(self) -> None:
+        require(
+            self.samples_per_prompt >= 1,
+            f"BaseAlgorithmConfig.samples_per_prompt must be >= 1; got {self.samples_per_prompt!r}",
+        )
+        require(
+            self.prompts_per_rollout >= 1,
+            f"BaseAlgorithmConfig.prompts_per_rollout must be >= 1; got {self.prompts_per_rollout!r}",
+        )
+        require(self.epsilon > 0, f"BaseAlgorithmConfig.epsilon must be > 0; got {self.epsilon!r}")
+        require(
+            self.clip_max is None or self.clip_max > 0,
+            f"BaseAlgorithmConfig.clip_max must be > 0 when set; got {self.clip_max!r}",
+        )
+        require(
+            0.0 <= self.trim_outliers_ratio < 0.5,
+            f"BaseAlgorithmConfig.trim_outliers_ratio must be in [0.0, 0.5); got {self.trim_outliers_ratio!r}",
+        )
 
 
 class BaseAlgorithm(ABC):
@@ -82,7 +121,6 @@ class BaseAlgorithm(ABC):
     """
 
     model_type: str = "default"
-    __CONFIG_CLASS__ = BaseAlgorithmConfig
 
     def __init__(
         self,
@@ -90,9 +128,8 @@ class BaseAlgorithm(ABC):
         component_mix_stage: str = "reward",
         adv_normalization_scope: str = "group",
         samples_per_prompt: int = 1,
-        num_inference_steps: int = 0,
-        eval_ema_decay: float = 0.9,
-        eval_ema_update_interval: int = 1,
+        sampling: Optional[SamplingParams] = None,
+        ema: Optional[EMAConfig] = None,
         epsilon: float = 1e-8,
         clip_max: Optional[float] = 5.0,
         use_global_std: bool = False,
@@ -107,9 +144,10 @@ class BaseAlgorithm(ABC):
             component_mix_stage: Multi-component reward mixing stage ("reward" or "advantage")
             adv_normalization_scope: Scope of advantage normalization ("global" or "group")
             samples_per_prompt: Number of rollout samples to generate per prompt
-            num_inference_steps: Rollout denoising horizon shared by algorithm logic
-            eval_ema_decay: Eval-time EMA decay
-            eval_ema_update_interval: Eval-time EMA update interval in optimizer steps
+            sampling: Algorithm-side sampling spec; ``num_inference_steps`` here is the
+                rollout denoising horizon orchestrated by algorithm logic. Defaults to
+                ``SamplingParams()`` and is normally inherited from ``cfg.sampling``.
+            ema: Algorithm-declared EMA policy (eval + reference). Defaults to ``EMAConfig()``.
             epsilon: Small value for numerical stability in advantage normalization
             clip_max: Maximum advantage value for clipping (None to disable)
             use_global_std: Use global std instead of per-group std
@@ -120,9 +158,8 @@ class BaseAlgorithm(ABC):
         self.component_mix_stage = str(component_mix_stage)
         self.adv_normalization_scope = adv_normalization_scope
         self.samples_per_prompt = max(1, int(samples_per_prompt))
-        self.num_inference_steps = max(0, int(num_inference_steps))
-        self.eval_ema_decay = float(eval_ema_decay)
-        self.eval_ema_update_interval = max(1, int(eval_ema_update_interval))
+        self.sampling = sampling if sampling is not None else SamplingParams()
+        self.ema = ema if ema is not None else EMAConfig()
         self.epsilon = epsilon
         self.clip_max = clip_max
         self.use_global_std = use_global_std
@@ -317,7 +354,7 @@ class BaseAlgorithm(ABC):
     @abstractmethod
     def get_ema_spec(
         self,
-    ) -> EMASpec:  # [PUBLIC-API → TrainActor] training side
+    ) -> EMAConfig:  # [PUBLIC-API → TrainActor] training side
         """Declare EMA policy for this algorithm."""
         ...
 

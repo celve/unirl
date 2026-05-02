@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import torch
+from omegaconf import DictConfig
 
-from diffusionrl.reward.config import RewardSpec
 from diffusionrl.reward.service import RewardService
-from diffusionrl.types.reward import RewardRequest, RewardResponse
+from diffusionrl.types.reward import RewardRequest
 from diffusionrl.types.sample import RolloutSamples
 
 if TYPE_CHECKING:
@@ -20,12 +20,11 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Stateless helpers (used by both the class and driver-side callers)
+# Stateless helpers
 # ---------------------------------------------------------------------------
 
 
-def extract_images_from_output(output: RolloutSamples) -> List[Any]:
-    """Extract decoded images from one rollout output."""
+def _extract_images_from_output(output: RolloutSamples) -> List[Any]:
     if output.decoded_images is not None:
         return [img for img in output.decoded_images]
     raise ValueError(
@@ -34,8 +33,7 @@ def extract_images_from_output(output: RolloutSamples) -> List[Any]:
     )
 
 
-def extract_videos_from_output(output: RolloutSamples) -> List[torch.Tensor]:
-    """Extract decoded videos from one rollout output."""
+def _extract_videos_from_output(output: RolloutSamples) -> List[torch.Tensor]:
     decoded_videos = output.decoded_videos
     if torch.is_tensor(decoded_videos):
         if decoded_videos.dim() >= 5:
@@ -48,7 +46,7 @@ def extract_videos_from_output(output: RolloutSamples) -> List[torch.Tensor]:
     )
 
 
-def normalize_prompt_metadata(
+def _normalize_prompt_metadata(
     *,
     prompt_metadata: Optional[List[Optional[Dict[str, Any]]]],
     prompts: List[str],
@@ -89,9 +87,7 @@ def normalize_prompt_metadata(
     )
 
 
-def _read_reward_payload(
-    output: RolloutSamples,
-) -> Optional[Tuple[List[float], Dict[str, List[float]]]]:
+def _read_reward_payload(output: RolloutSamples):
     if output.rewards is None:
         return None
     rewards = [float(v) for v in output.rewards.tolist()]
@@ -99,39 +95,6 @@ def _read_reward_payload(
     for name, values in dict(output.component_rewards or {}).items():
         normalized_components[str(name)] = [float(v) for v in values.tolist()]
     return rewards, normalized_components
-
-
-def read_rewards(
-    *,
-    sampler_outputs: List[RolloutSamples],
-) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
-    """Read rewards from sampler output typed fields (written by RewardPipeline.score_and_attach)."""
-    if not sampler_outputs:
-        raise RuntimeError("Reward read requires at least one rollout output with scored rewards.")
-
-    all_rewards: List[float] = []
-    component_rewards: Dict[str, List[float]] = {}
-
-    for output in sampler_outputs:
-        payload = _read_reward_payload(output)
-        if payload is None:
-            raise RuntimeError("Reward read requires scored rewards on all sampler outputs.")
-        rewards, components = payload
-        if len(rewards) != int(output.latents.shape[0]):
-            raise ValueError(
-                "Rewards length must match rollout output batch_size. "
-                f"Got rewards={len(rewards)} batch_size={int(output.latents.shape[0])}."
-            )
-        all_rewards.extend(rewards)
-        for name, values in components.items():
-            if len(values) != len(rewards):
-                raise ValueError(
-                    "Reward component length must match reward length. "
-                    f"Got component={name} len={len(values)} rewards={len(rewards)}."
-                )
-            component_rewards.setdefault(name, []).extend(values)
-
-    return torch.tensor(all_rewards, dtype=torch.float32), component_rewards
 
 
 def _build_request_for_samples(
@@ -158,7 +121,7 @@ def _build_request_for_samples(
     all_metadata: List[Optional[Dict[str, Any]]] = []
     sample_idx = 0
 
-    normalized_prompt_metadata = normalize_prompt_metadata(
+    normalized_prompt_metadata = _normalize_prompt_metadata(
         prompt_metadata=prompt_metadata,
         prompts=prompts,
         prompt_ids=prompt_ids,
@@ -188,10 +151,10 @@ def _build_request_for_samples(
 
     if reward_input_kind == "video":
         for output in sampler_outputs:
-            _append_media(extract_videos_from_output(output), all_videos)
+            _append_media(_extract_videos_from_output(output), all_videos)
     else:
         for output in sampler_outputs:
-            _append_media(extract_images_from_output(output), all_images)
+            _append_media(_extract_images_from_output(output), all_images)
 
     if not all_images and not all_videos:
         raise RuntimeError("Reward stage could not assemble any decoded media from sampler outputs.")
@@ -225,8 +188,8 @@ class RewardPipeline:
         self.reward_service = reward_service
 
     @classmethod
-    def from_spec(cls, spec: RewardSpec) -> "RewardPipeline":
-        return cls(RewardService.from_spec(spec))
+    def from_configs(cls, reward: DictConfig) -> "RewardPipeline":
+        return cls(RewardService.from_configs(reward))
 
     @property
     def preferred_input_kind(self) -> str:
@@ -238,25 +201,6 @@ class RewardPipeline:
             "Reward service must expose preferred_input_kind as 'image' or 'video'. "
             f"Got {preferred!r} from {type(self.reward_service).__name__}."
         )
-
-    def build_request(self, response: "RolloutResponse") -> RewardRequest:
-        """Assemble a RewardRequest from a RolloutResponse."""
-        prompts = response.request.prompts
-        samples_per_prompt = max(1, int(response.request.sampling_params.num_samples_per_prompt))
-        return _build_request_for_samples(
-            reward_input_kind=self.preferred_input_kind,
-            samples_per_prompt=samples_per_prompt,
-            sampler_outputs=[response.samples],
-            prompts=prompts.prompts,
-            prompt_ids=prompts.prompt_ids,
-            sample_ids=prompts.sample_ids,
-            group_ids=prompts.group_ids,
-            prompt_metadata=prompts.prompt_metadata,
-        )
-
-    def compute_rewards(self, request: RewardRequest) -> RewardResponse:
-        """Dispatch a prepared RewardRequest directly to the inner service."""
-        return self.reward_service.compute_rewards(request)
 
     def score_and_attach(self, response: "RolloutResponse") -> "RolloutResponse":
         """Score one response's samples and attach rewards to typed fields in-place.
@@ -272,7 +216,18 @@ class RewardPipeline:
         """
         if _read_reward_payload(response.samples) is not None:
             raise RuntimeError("Actor-side reward compute does not accept precomputed rewards on sampler outputs.")
-        request = self.build_request(response)
+        prompts = response.request.prompts
+        samples_per_prompt = max(1, int(response.request.sampling_params.num_samples_per_prompt))
+        request = _build_request_for_samples(
+            reward_input_kind=self.preferred_input_kind,
+            samples_per_prompt=samples_per_prompt,
+            sampler_outputs=[response.samples],
+            prompts=prompts.prompts,
+            prompt_ids=prompts.prompt_ids,
+            sample_ids=prompts.sample_ids,
+            group_ids=prompts.group_ids,
+            prompt_metadata=prompts.prompt_metadata,
+        )
         reward_response = self.reward_service.compute_rewards(request)
 
         failed = [(i, e) for i, (ok, e) in enumerate(zip(reward_response.successes, reward_response.errors)) if not ok]
@@ -289,15 +244,6 @@ class RewardPipeline:
         }
         return response
 
-    def score_and_attach_many(
-        self,
-        responses: List["RolloutResponse"],
-    ) -> List["RolloutResponse"]:
-        """Convenience batch variant for the fused rollout pipeline."""
-        for response in responses:
-            self.score_and_attach(response)
-        return responses
-
     def offload(self) -> None:
         self.reward_service.offload()
 
@@ -313,8 +259,4 @@ class RewardPipeline:
 
 __all__ = [
     "RewardPipeline",
-    "extract_images_from_output",
-    "extract_videos_from_output",
-    "normalize_prompt_metadata",
-    "read_rewards",
 ]

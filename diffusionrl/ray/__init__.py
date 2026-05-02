@@ -6,24 +6,17 @@ import importlib
 from typing import Dict, Tuple
 
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
-    # Placement groups
-    "RuntimePlacementConfig": ("diffusionrl.ray.placement_group", "RuntimePlacementConfig"),
-    "PlacementGroupResult": ("diffusionrl.ray.placement_group", "PlacementGroupResult"),
-    "create_placement_groups": ("diffusionrl.ray.placement_group", "create_placement_groups"),
-    "create_placement_groups_from_runtime": ("diffusionrl.ray.placement_group", "create_placement_groups_from_runtime"),
-    "remove_placement_group": ("diffusionrl.ray.placement_group", "remove_placement_group"),
+    # Placement
+    "PlacementConfig": ("diffusionrl.ray.placement", "PlacementConfig"),
+    "Placement": ("diffusionrl.ray.placement", "Placement"),
+    "ActorPlacement": ("diffusionrl.ray.placement", "ActorPlacement"),
     "BufferActor": ("diffusionrl.ray.buffer_actor", "BufferActor"),
     "create_buffer_actor": ("diffusionrl.ray.buffer_actor", "create_buffer_actor"),
     # Actor groups
-    "ActorHandleGroup": ("diffusionrl.ray.group_base", "ActorHandleGroup"),
-    "PlacementGroupActorPool": ("diffusionrl.ray.group_base", "PlacementGroupActorPool"),
-    "ActorGroup": ("diffusionrl.ray.group_base", "ActorGroup"),
+    "ActorGroup": ("diffusionrl.ray.group.base", "ActorGroup"),
     # Actors
-    "RayActor": ("diffusionrl.ray.actor_base", "RayActor"),
-    "BaseTrainRayActor": ("diffusionrl.ray.actor_base", "BaseTrainRayActor"),
+    "DistributedMixin": ("diffusionrl.ray.distributed", "DistributedMixin"),
     "RolloutActor": ("diffusionrl.ray.rollout_actor", "RolloutActor"),
-    "RolloutActorConfig": ("diffusionrl.ray.actor_config", "RolloutActorConfig"),
-    "TrainingActorConfig": ("diffusionrl.ray.actor_config", "TrainingActorConfig"),
     # Utils - node-level constants
     "NOSET_VISIBLE_DEVICES_ENV_VARS_LIST": (
         "diffusionrl.ray.utils.node",

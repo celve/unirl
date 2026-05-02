@@ -7,6 +7,9 @@ from typing import List
 import torch
 from PIL import Image
 
+from diffusionrl.config.registration import register_config
+from diffusionrl.reward.base import BaseRewardComponentSpec
+from diffusionrl.reward.scorers._device import resolve_device
 from diffusionrl.types.reward import RewardRequest, RewardType
 
 from .base_local import BaseLocalRewardScorer
@@ -16,6 +19,14 @@ class HPSv2RewardScorer(BaseLocalRewardScorer):
     """HPSv2 image-text alignment reward."""
 
     canonical_model_name = "hpsv2"
+
+    def __init__(self, *, config: "HPSv2Spec", base_device: str) -> None:
+        super().__init__(
+            device=resolve_device(config.device, base_device),
+            batch_size=config.batch_size,
+            open_clip_path=config.open_clip_path,
+            checkpoint_path=config.checkpoint_path,
+        )
 
     def _load_model(self) -> None:
         try:
@@ -88,3 +99,18 @@ class HPSv2RewardScorer(BaseLocalRewardScorer):
                     all_rewards.append(0.0)
 
         return all_rewards
+
+
+@register_config(
+    group="reward/component",
+    name="hpsv2",
+    target="diffusionrl.reward.scorers.hpsv2.HPSv2RewardScorer",
+)
+class HPSv2Spec(BaseRewardComponentSpec):
+    """Typed config for the HPSv2 reward component."""
+
+    weight: float = 1.0
+    batch_size: int = 8
+    device: str = "auto"
+    open_clip_path: str = "./hps_ckpt/open_clip_pytorch_model.bin"
+    checkpoint_path: str = "./hps_ckpt/HPS_v2.1_compressed.pt"

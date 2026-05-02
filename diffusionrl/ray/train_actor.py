@@ -1,51 +1,59 @@
+import logging
 import os
-from dataclasses import replace
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Union
 
 import ray
 import torch
+from omegaconf import DictConfig
 
-from diffusionrl.algorithms import create_algorithm_from_init_payload
-from diffusionrl.config.training_sections import LrSchedulerConfig, OptimizerConfig
-from diffusionrl.construction import ComponentInitPayload
-from diffusionrl.models import create_model_bundle_from_init_payload
+from diffusionrl.config.registration import register_config
+from diffusionrl.config.validation import validate_precision_type
+from diffusionrl.distributed.transfer_queue import tqbridge
 from diffusionrl.patches.replay_logprob import ReplayLogProbPatch
-from diffusionrl.ray.actor_base import BaseTrainRayActor
+from diffusionrl.ray.actor_config import ConfigActor
+from diffusionrl.ray.distributed import DistributedMixin
 from diffusionrl.ray.mixins import RolloutPipelineMixin, TrainingWeightSyncMixin
-from diffusionrl.reward.config import RewardSpec
 from diffusionrl.reward.pipeline import RewardPipeline
 from diffusionrl.samplers.engine import chunked_engine_generate
 from diffusionrl.samplers.fsdp.engine import FSDPSamplingEngine
-from diffusionrl.training import build_lr_scheduler, build_optimizer
-from diffusionrl.training.backends import (
-    FSDPBackend,
-    FSDPBackendConfig,
-    TrainBackend,
-    TrainBackendConfig,
-    VeOmniBackend,
-    VeOmniBackendConfig,
-)
+from diffusionrl.training.factories import build_lr_scheduler, build_optimizer
 from diffusionrl.training.stack import TrainStack
 from diffusionrl.transfer.buffer import Buffer, BufferHandle
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.response import RolloutResponse
-from diffusionrl.types.sampling import SamplingParams
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils import clear_memory as _clear_gpu_memory
 from diffusionrl.utils.dtypes import parse_torch_dtype
 from diffusionrl.utils.ema import EMAManager
-from diffusionrl.utils.transfer_queue_utils import tqbridge
+
+logger = logging.getLogger(__name__)
 
 
-def _build_backend_from_config(config: TrainBackendConfig, model_bundle: Any) -> TrainBackend:
-    if isinstance(config, FSDPBackendConfig):
-        return FSDPBackend(config=config, model_bundle=model_bundle)
-    if isinstance(config, VeOmniBackendConfig):
-        return VeOmniBackend(config=config, model_bundle=model_bundle)
-    raise TypeError(
-        "TrainActor received unsupported backend config type: "
-        f"{type(config).__name__}. Expected FSDPBackendConfig or VeOmniBackendConfig."
-    )
+@register_config(group="training/execution", name="default")
+@dataclass
+class TrainingExecutionConfig:
+    """Per-step training-execution knobs read by the training actor.
+
+    Read sites:
+      - ``training/stack.py::TrainStack`` reads ``max_grad_norm``
+      - ``ray/train_actor.py::TrainActor.__init__`` reads
+        ``training_autocast_precision``
+      - ``train.py`` reads ``offload_train`` / ``offload_rollout`` to gate
+        per-rollout sleep/wake of the training + rollout groups.
+    """
+
+    max_grad_norm: float
+    training_autocast_precision: str = "bf16"
+    offload_train: bool = False
+    offload_rollout: bool = False
+
+    def __post_init__(self) -> None:
+        if self.max_grad_norm <= 0:
+            raise ValueError(f"TrainingExecutionConfig.max_grad_norm must be > 0; got {self.max_grad_norm!r}")
+        validate_precision_type(
+            self.training_autocast_precision, field="TrainingExecutionConfig.training_autocast_precision"
+        )
 
 
 def _iter_optimizer_param_states(optimizer: Any) -> Iterable[Dict[str, Any]]:
@@ -64,101 +72,116 @@ def _iter_optimizer_param_states(optimizer: Any) -> Iterable[Dict[str, Any]]:
 
 
 @ray.remote(num_gpus=1)
-class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixin, Buffer):
+class TrainActor(ConfigActor, TrainingWeightSyncMixin, DistributedMixin, RolloutPipelineMixin, Buffer):
     def __init__(
         self,
+        *,
+        cfg: DictConfig,
         world_size: int,
         rank: int,
         master_addr: Optional[str],
         master_port: Optional[int],
-        mini_batch_size: int,
-        micro_batch_size: int,
-        max_grad_norm: float,
-        backend_config: TrainBackendConfig,
-        optimizer_config: OptimizerConfig,
-        scheduler_config: LrSchedulerConfig,
-        reward_spec: RewardSpec,
-        algorithm_init_payload: ComponentInitPayload,
-        model_init_payload: ComponentInitPayload,
-        training_autocast_precision: str = "bf16",
-        sampling_config: Optional[SamplingParams] = None,
-        debug_output_dir: Optional[str] = None,
         seed: int = 42,
     ):
-        # Per-actor determinism setup: must run BEFORE any CUDA op so that
-        # cuDNN / cuBLAS / deterministic-algorithm flags are in effect for
-        # the subsequent model construction, FSDP wrap, and training ops.
+        """Initialize TrainActor from the composed cfg + topology scalars.
+
+        ``cfg`` is installed into ``actor_config._current`` by ``ConfigActor``
+        and read on demand for every configurable section. Registered leaves
+        with ``_target_`` (``cfg.model``, ``cfg.algorithm``, ``cfg.training.backend``,
+        ``cfg.rollout.engine`` in direct-sampling mode) are materialized via
+        ``build()``. Schema-only leaves (``cfg.training.optimizer`` /
+        ``.lr_scheduler`` / ``.execution`` / ``.plan``) are materialized at
+        the read site via ``OmegaConf.to_object`` / ``materialize``.
+        ``cfg.reward`` is kept as a ``DictConfig`` and forwarded into
+        ``RewardPipeline.from_configs``, which dispatches each component
+        through ``build()``.
+        """
+        from diffusionrl.config.instantiate import build, materialize
         from diffusionrl.utils import set_seed
 
         set_seed(int(seed))
 
-        BaseTrainRayActor.__init__(self, world_size, rank, master_addr, master_port)
-        Buffer.__init__(self)
+        super().__init__(
+            cfg=cfg,
+            world_size=world_size,
+            rank=rank,
+            master_addr=master_addr,
+            master_port=master_port,
+        )
         self._init_weight_sync_state()
-        self._use_lora = bool(model_init_payload.component_config.use_lora)
 
-        self.mini_batch_size = mini_batch_size
-        self.micro_batch_size = micro_batch_size
-        self._reward_spec = reward_spec
+        training_execution: TrainingExecutionConfig = materialize(cfg.training.execution)
+        training_autocast_precision = str(training_execution.training_autocast_precision)
+
+        self._use_lora = bool(cfg.model.get("use_lora", False))
+        self._reward_config = cfg.reward
 
         # Distributed must be up before FSDP wraps the model.
         self._device = torch.device(f"cuda:{os.environ.get('LOCAL_RANK', 0)}")
         torch.cuda.set_device(self._device)
         self._init_distributed()
 
-        # Override the model bundle config so the model is created on this
-        # actor's GPU. With FSDP2 + cpu_offload=False we want params on the
-        # GPU before fully_shard wraps them; if cpu_offload is on, the model
-        # bundle should skip the device move and let FSDP2 manage placement.
-        skip_device_move = bool(getattr(backend_config, "cpu_offload", False))
-        runtime_model_config = replace(
-            model_init_payload.component_config,
-            device=self._device,
-            training_only=True,
-            skip_device_move=skip_device_move,
+        # Model bundle built via build(). device/training_only/skip_device_move
+        # already live on ModelBundleConfig, so apply the runtime values to the
+        # cfg slice in-place rather than threading them as kwargs (model bundle
+        # constructors only accept ``config``). ``ModelBundleConfig`` is
+        # registered with ``mutable=True`` so post-compose writes succeed without
+        # toggling readonly. FSDP2 + cpu_offload=False wants params on GPU
+        # before fully_shard wraps them; cpu_offload=True means the bundle
+        # skips the device move and lets FSDP2 manage placement.
+        cfg.model.device = str(self._device)
+        cfg.model.training_only = True
+        cfg.model.skip_device_move = bool(cfg.training.backend.get("cpu_offload", False))
+        self.model_bundle = build(cfg.model)
+        # Backend takes the model bundle + topology as runtime deps.
+        self.backend = build(
+            cfg.training.backend,
+            model_bundle=self.model_bundle,
+            topology=materialize(cfg.training.topology),
         )
-        runtime_model_init_payload = replace(
-            model_init_payload,
-            component_config=runtime_model_config,
-        )
-        model_bundle = create_model_bundle_from_init_payload(runtime_model_init_payload)
-        self.model_bundle = model_bundle
-        self.backend: TrainBackend = _build_backend_from_config(backend_config, model_bundle)
         self.model = self.backend.model
 
-        self.algorithm = create_algorithm_from_init_payload(algorithm_init_payload)
-        model_bundle.set_training_forward_autocast_dtype(
+        self.algorithm = build(cfg.algorithm)
+        # Inject the SDE strategy chosen at cfg.sampling.sde_strategy so the
+        # algorithm can use it for log-prob replay during training.
+        self.algorithm._strategy = build(cfg.sampling.sde_strategy)
+        self.model_bundle.set_training_forward_autocast_dtype(
             parse_torch_dtype(
                 training_autocast_precision,
                 field_name="training_autocast_precision",
             )
         )
 
-        # Wire train-inference consistency debug dump dir through from CLI
-        # (``--debug.output-dir``).  ``GRPOAlgorithm.compute_loss`` gates its
-        # per-step tensor dump on ``self._debug_output_dir or
-        # $DIFFUSIONRL_DEBUG_OUTPUT_DIR``; the env var is also exported from
-        # the driver in ``diffusionrl.train`` so other actors (e.g. sampler
-        # side in direct-sampling mode) see it too.  Assign both so that the
-        # dumps fire regardless of whether a specific Ray worker inherits the
-        # parent process env (some runtime_env configs strip it).
-        if debug_output_dir:
-            self.algorithm._debug_output_dir = str(debug_output_dir)
-            os.environ.setdefault("DIFFUSIONRL_DEBUG_OUTPUT_DIR", str(debug_output_dir))
+        # Wire train-inference consistency debug dump dir through cfg.debug.save_dir.
+        # ``GRPOAlgorithm.compute_loss`` reads ``self._debug_output_dir`` for its
+        # per-step tensor dump.
+        debug_save_dir = cfg.debug.get("save_dir") if cfg.get("debug") else None
+        if debug_save_dir:
+            self.algorithm._debug_output_dir = str(debug_save_dir)
 
-        self.ema_manager = EMAManager.from_model_and_spec(
+        self.ema_manager = EMAManager.from_model_and_config(
             model=self.model,
-            spec=self.algorithm.get_ema_spec(),
+            config=self.algorithm.get_ema_spec(),
             use_lora=self._use_lora,
             uses_sharded_model=True,
             algorithm=self.algorithm,
         )
-        self.engine: Optional[FSDPSamplingEngine] = None
-        if sampling_config is not None:
-            self.engine = FSDPSamplingEngine(sampling_config)
-            self.engine.initialize(self._device)
-            self.engine.bind_model(model=self.model, model_bundle=self.model_bundle)
+        from diffusionrl.config.validation import is_direct_sampling
 
+        self.engine: Optional[FSDPSamplingEngine] = None
+        self._rollout_plan = materialize(cfg.rollout.plan)
+        if is_direct_sampling(cfg):
+            self.engine = build(cfg.rollout.engine)
+            self.engine.strategy = build(cfg.sampling.sde_strategy)
+            self.engine.initialize(self._device)
+            self.engine.bind_model(
+                model=self.model,
+                model_bundle=self.model_bundle,
+                strategy=self.engine.strategy,
+            )
+
+        optimizer_config = materialize(cfg.training.optimizer)
+        scheduler_config = materialize(cfg.training.lr_scheduler)
         self.optimizer = build_optimizer(
             optimizer_config,
             params=self.model.parameters(),
@@ -177,39 +200,63 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
             scheduler=self.lr_scheduler,
             algorithm=self.algorithm,
             ema_manager=self.ema_manager,
-            max_grad_norm=max_grad_norm,
+            cfg=cfg,
         )
         self.reward_pipeline: Optional[RewardPipeline] = None
 
-        # Replay-logprob patch — required when sglang rollout is configured with
-        # ``--sampling.logprob-source replay`` (sglang skips native log_prob
-        # output and training must recompute log_prob_old via FSDP forward).
-        # Without it batch.log_probs stays None for every rollout, GRPO loss
-        # returns 0.0 with no gradient, and the policy never updates (the
-        # symptom observed in run ``kwqghmlv``: reward flat at baseline 0.755
-        # for 70+ rollouts).
-        self._sampling_config = sampling_config
+        # Replay-logprob patch — required when sglang rollout is configured
+        # with ``--sampling.logprob-source replay`` (sglang skips native
+        # log_prob output and training must recompute log_prob_old via FSDP
+        # forward). Short-circuits internally when ``batch.log_probs`` is
+        # already populated.
+        self._sampling_config = materialize(cfg.sampling)
         self._replay_logprob_patch = ReplayLogProbPatch()
         self.text_encoder = None
         self.vae = None
         self.scheduler = None
 
+    def _setup_distributed_env(self) -> None:
+        """Write env vars for the cross-actor training process group."""
+        if self.master_addr is None or self.master_port is None:
+            raise ValueError("master_addr and master_port must be set")
+
+        cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if cuda_devices:
+            local_rank = 0
+        else:
+            device_count = torch.cuda.device_count()
+            local_rank = self.rank % device_count if device_count > 0 else 0
+
+        self._write_distributed_env(
+            master_addr=self.master_addr,
+            master_port=self.master_port,
+            world_size=self.world_size,
+            rank=self.rank,
+            local_rank=local_rank,
+        )
+        logger.info(
+            f"Distributed env setup: rank={self.rank}, world_size={self.world_size}, "
+            f"master={self.master_addr}:{self.master_port}"
+        )
+
     def _ensure_reward_pipeline(self) -> RewardPipeline:
-        if self._reward_spec is None:
-            raise RuntimeError("Reward pipeline requested before reward spec initialization.")
+        if self._reward_config is None:
+            raise RuntimeError("Reward pipeline requested before reward config was extracted.")
         if self.reward_pipeline is None:
-            self.reward_pipeline = RewardPipeline.from_spec(self._reward_spec)
+            self.reward_pipeline = RewardPipeline.from_configs(self._reward_config)
         return self.reward_pipeline
 
     def generate(self, request: RolloutRequest) -> RolloutResponse:
         if self.engine is None:
             raise RuntimeError("TrainActor.generate() requires sampling_config to be set at construction.")
-        output = chunked_engine_generate(
-            self.engine,
-            request,
-            chunk_size=request.sampling_params.sampling_forward_batch,
+        return RolloutResponse(
+            request=request,
+            samples=chunked_engine_generate(
+                self.engine,
+                request,
+                chunk_size=self._rollout_plan.forward_batch_size,
+            ),
         )
-        return RolloutResponse(request=request, samples=output)
 
     def apply_eval_ema(self) -> None:
         """Swap eval-EMA weights into the model for evaluation."""
@@ -265,6 +312,7 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
             enabled=True,
             algorithm_type=algorithm_type,
             sampling_config=self._sampling_config,
+            strategy=self.algorithm._strategy,
             model_bundle=self.model_bundle,
             model=self.model,
             text_encoder=self.text_encoder,
@@ -286,8 +334,6 @@ class TrainActor(TrainingWeightSyncMixin, BaseTrainRayActor, RolloutPipelineMixi
         batch = self._maybe_replay_old_log_probs(batch)
         return self.train_stack.train_batch(
             batch=batch,
-            mini_batch_size=self.mini_batch_size,
-            micro_batch_size=self.micro_batch_size,
             rollout_step=rollout_step,
         )
 

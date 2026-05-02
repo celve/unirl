@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
-
-CANONICAL_SDE_TYPES: Tuple[str, ...] = ("flow", "cps", "dance", "dpm2")
-SUPPORTED_USER_SDE_TYPES: Tuple[str, ...] = CANONICAL_SDE_TYPES
+from typing import Any, Optional
 
 
 def normalize_sde_type(value: Any) -> str:
-    """Normalize an sde_type value to canonical lowercase text."""
+    """Normalize an sde_type value to canonical lowercase text.
+
+    Used at sglang-engine kwarg boundaries that still flow strings; the
+    canonical Python-side dispatch uses the typed
+    ``cfg.sampling.sde_strategy`` Hydra group instead.
+    """
     return str(value or "").strip().lower()
 
 
@@ -19,8 +21,7 @@ def is_deterministic_sde_type(
 ) -> bool:
     """Whether the transition is deterministic at runtime.
 
-    Expects *sde_type* to already be canonical lowercase (validated by
-    ``_validate_metadata_choices`` in config validation).
+    Expects *sde_type* to already be canonical lowercase.
     """
     if sde_type == "dpm2":
         return True
@@ -29,16 +30,7 @@ def is_deterministic_sde_type(
     return float(eta) == 0.0
 
 
-def supported_sde_type_text(values: Tuple[str, ...] = SUPPORTED_USER_SDE_TYPES) -> str:
-    """Render a stable list of accepted transition rule names."""
-
-    return ", ".join(values)
-
-
 __all__ = [
-    "CANONICAL_SDE_TYPES",
-    "SUPPORTED_USER_SDE_TYPES",
     "is_deterministic_sde_type",
     "normalize_sde_type",
-    "supported_sde_type_text",
 ]

@@ -5,11 +5,11 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import ClassVar, List, Optional, Tuple
 
 import torch
 
-from diffusionrl.sde.registry import register_sde_strategy
+from diffusionrl.config.registration import register_config
 
 # ---------------------------------------------------------------------------
 # Base class hierarchy
@@ -88,9 +88,13 @@ class SDEStrategy(StepStrategy, ABC):
 # ---------------------------------------------------------------------------
 
 
-@register_sde_strategy("flow")
 class FlowSDEStrategy(SDEStrategy):
     """Standard SDE formulation from flow-GRPO."""
+
+    canonical_name: ClassVar[str] = "flow"
+
+    def __init__(self, *, config: Optional["FlowSpec"] = None) -> None:
+        del config  # empty Spec — strategy has no per-instance fields
 
     def compute_log_prob(
         self,
@@ -138,9 +142,13 @@ class FlowSDEStrategy(SDEStrategy):
         return prev_sample, prev_sample_mean, std_var
 
 
-@register_sde_strategy("cps")
 class CPSSDEStrategy(SDEStrategy):
     """Coefficient-preserving sampling."""
+
+    canonical_name: ClassVar[str] = "cps"
+
+    def __init__(self, *, config: Optional["CPSSpec"] = None) -> None:
+        del config
 
     def compute_log_prob(
         self,
@@ -177,9 +185,13 @@ class CPSSDEStrategy(SDEStrategy):
         return prev_sample, prev_sample_mean, std_dev_t
 
 
-@register_sde_strategy("dance")
 class DanceSDEStrategy(SDEStrategy):
     """DanceGRPO SDE formulation."""
+
+    canonical_name: ClassVar[str] = "dance"
+
+    def __init__(self, *, config: Optional["DanceSpec"] = None) -> None:
+        del config
 
     def compute_log_prob(
         self,
@@ -365,11 +377,13 @@ def _dpm_step(
     return prev_sample.to(model_output.dtype)
 
 
-@register_sde_strategy("dpm2")
 class DPM2Strategy(StepStrategy):
     """DPM-Solver-2 multi-step ODE strategy (deterministic, stateful)."""
 
-    def __init__(self) -> None:
+    canonical_name: ClassVar[str] = "dpm2"
+
+    def __init__(self, *, config: Optional["DPM2Spec"] = None) -> None:
+        del config
         self._state = _DPMState(order=2)
         self._sigmas: Optional[torch.Tensor] = None
 
@@ -407,6 +421,46 @@ class DPM2Strategy(StepStrategy):
         return result, None, None
 
 
+@register_config(
+    group="sampling/sde_strategy",
+    name="flow",
+    target="diffusionrl.sde.kernels.FlowSDEStrategy",
+)
+@dataclass
+class FlowSpec:
+    """Empty Spec: FlowSDEStrategy has no per-strategy config fields."""
+
+
+@register_config(
+    group="sampling/sde_strategy",
+    name="cps",
+    target="diffusionrl.sde.kernels.CPSSDEStrategy",
+)
+@dataclass
+class CPSSpec:
+    """Empty Spec: CPSSDEStrategy has no per-strategy config fields."""
+
+
+@register_config(
+    group="sampling/sde_strategy",
+    name="dance",
+    target="diffusionrl.sde.kernels.DanceSDEStrategy",
+)
+@dataclass
+class DanceSpec:
+    """Empty Spec: DanceSDEStrategy has no per-strategy config fields."""
+
+
+@register_config(
+    group="sampling/sde_strategy",
+    name="dpm2",
+    target="diffusionrl.sde.kernels.DPM2Strategy",
+)
+@dataclass
+class DPM2Spec:
+    """Empty Spec: DPM2Strategy has no per-strategy config fields."""
+
+
 __all__ = [
     "StepStrategy",
     "SDEStrategy",
@@ -414,4 +468,8 @@ __all__ = [
     "CPSSDEStrategy",
     "DanceSDEStrategy",
     "DPM2Strategy",
+    "FlowSpec",
+    "CPSSpec",
+    "DanceSpec",
+    "DPM2Spec",
 ]

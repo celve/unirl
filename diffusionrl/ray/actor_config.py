@@ -1,117 +1,49 @@
-"""Typed configs for fixed Ray actor runtimes."""
+"""Ambient cfg access for Ray actor processes.
+
+Each Ray actor is a Python process of its own. ``ConfigActor`` stashes the
+composed Hydra cfg into a module-level handle at actor construction time,
+so any code running inside that process can reach the cfg via ``current()``
+without receiving it as a kwarg.
+
+Outside a Ray actor — on the driver, in tests that do not construct a
+ConfigActor — ``current()`` raises. This is intentional: the ambient view
+is a read on actor-process-local state, not a global app config.
+
+The module deliberately uses a plain module-level handle rather than a
+``ContextVar``. Ray actor methods run single-context, pure-sync in this
+codebase; scoping primitives buy nothing here and would obscure the
+"install once, read many times" contract.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
-from diffusionrl.config.spec import TrainingPlan
-from diffusionrl.config.training_sections import (
-    LrSchedulerConfig,
-    OptimizerConfig,
-    TrainingExecutionConfig,
-)
-from diffusionrl.construction import ComponentInitPayload
-from diffusionrl.reward.config import RewardSpec
-from diffusionrl.training.backends import (
-    FSDPBackendConfig,
-    VeOmniBackendConfig,
-)
-from diffusionrl.training.types import TrainTopology
-from diffusionrl.types.sampling import SamplingParams
+from omegaconf import DictConfig
+
+_current: Optional[DictConfig] = None
 
 
-@dataclass(frozen=True)
-class TrainingActorConfig:
-    model_init_payload: ComponentInitPayload
-    reward_config: RewardSpec
-    optimizer_config: OptimizerConfig
-    scheduler_config: LrSchedulerConfig
-    algorithm_init_payload: ComponentInitPayload
-    training_config: TrainingExecutionConfig
-    topology_config: TrainTopology
-    training_plan_config: TrainingPlan
-    # None means the training actor will not perform sampling itself
-    # (train-from-buffer mode) and will not run the replay-logprob patch.
-    sampling_config: Optional[SamplingParams]
-    train_backend_init_payload: ComponentInitPayload
-    seed: int = 42
+def current() -> DictConfig:
+    """Return the cfg installed by the actor that owns this process."""
+    if _current is None:
+        raise RuntimeError("actor_config.current() called before a ConfigActor installed a cfg")
+    return _current
 
 
-@dataclass(frozen=True)
-class AdvantageParams:
-    """Advantage normalization params, sourced from algorithm config."""
+class ConfigActor:
+    """Cooperative-super base that installs ``cfg`` into the module handle.
 
-    epsilon: float = 1e-8
-    clip_max: Optional[float] = 5.0
-    trim_outliers_ratio: float = 0.0
-
-
-@dataclass(frozen=True)
-class RolloutActorConfig:
-    engine_init_payload: ComponentInitPayload
-    reward_config: RewardSpec
-    algorithm_init_payload: ComponentInitPayload
-    forward_batch_size: int | None = None
-    advantage_params: AdvantageParams = AdvantageParams()
-    seed: int = 42
-
-
-def build_train_actor_init_kwargs(
-    *,
-    training_launch: Any,
-    world_size: int,
-    rank: int,
-    master_addr: str,
-    master_port: int,
-    sampling_config: Optional[SamplingParams] = None,
-) -> Dict[str, Any]:
-    """Map a resolved ``TrainingLaunch`` into eager-init ``TrainActor`` kwargs.
-
-    Used by the new-actor path (``TrainActorGroup.bootstrap``). The
-    ``training_launch`` argument is duck-typed to avoid a hard import cycle
-    with ``diffusionrl.config.assembly``; in practice it is always a
-    ``LaunchConfig.training`` (``TrainingLaunch``) instance.
-
-    When *sampling_config* (a ``SamplingParams``) is provided, the
-    ``TrainActor`` will initialise an ``FSDPSamplingEngine`` for direct
-    sampling mode.
+    Place first in the MRO so ``super().__init__(cfg=..., **rest)`` from the
+    subclass installs the cfg before any other parent's ``__init__`` runs.
     """
-    actor_cfg = training_launch.actor_init_config
-    backend_cfg = actor_cfg.train_backend_init_payload.component_config
-    if not isinstance(backend_cfg, (FSDPBackendConfig, VeOmniBackendConfig)):
-        raise NotImplementedError(
-            "The new-actor training path supports FSDPBackendConfig and "
-            f"VeOmniBackendConfig. Got backend config type: {type(backend_cfg).__name__}."
-        )
-    training_plan = actor_cfg.training_plan_config
-    training_exec = actor_cfg.training_config
-    kwargs = dict(
-        world_size=int(world_size),
-        rank=int(rank),
-        master_addr=str(master_addr),
-        master_port=int(master_port),
-        mini_batch_size=int(training_plan.local_mini_batch_size),
-        micro_batch_size=int(training_plan.micro_batch_size),
-        max_grad_norm=float(training_exec.max_grad_norm),
-        backend_config=backend_cfg,
-        optimizer_config=actor_cfg.optimizer_config,
-        scheduler_config=actor_cfg.scheduler_config,
-        reward_spec=actor_cfg.reward_config,
-        algorithm_init_payload=actor_cfg.algorithm_init_payload,
-        model_init_payload=actor_cfg.model_init_payload,
-        training_autocast_precision=str(training_exec.training_autocast_precision),
-        debug_output_dir=training_exec.debug_output_dir,
-        seed=int(getattr(actor_cfg, "seed", 42)),
-    )
-    if sampling_config is not None:
-        kwargs["sampling_config"] = sampling_config
-    return kwargs
+
+    def __init__(self, *, cfg: Optional[DictConfig] = None, **kwargs: Any) -> None:
+        global _current
+        if cfg is not None:
+            _current = cfg
+            self._cfg = cfg
+        super().__init__(**kwargs)
 
 
-__all__ = [
-    "AdvantageParams",
-    "RolloutActorConfig",
-    "TrainingActorConfig",
-    "build_train_actor_init_kwargs",
-]
+__all__ = ["ConfigActor", "current"]

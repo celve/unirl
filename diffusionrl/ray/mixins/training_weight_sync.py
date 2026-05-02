@@ -1,11 +1,16 @@
 """Training-side weight synchronization mixin (weight sender/publisher)."""
 
 import logging
-from typing import Any, List
+from typing import TYPE_CHECKING, Any, List
 
 import ray
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from omegaconf import DictConfig
+
+    from diffusionrl.ray.placement import PlacementConfig
 
 logger = logging.getLogger(__name__)
 
@@ -37,47 +42,30 @@ class TrainingWeightSyncMixin:
 
     # -- Handler-based weight sync --------------------------------------
 
-    def setup_weight_sync(self, config: dict) -> None:
+    def setup_weight_sync(
+        self,
+        *,
+        sync_cfg: "DictConfig",
+        placement_cfg: "PlacementConfig",
+        rollout_runtime: Any,
+    ) -> None:
         """Configure a handler-based rollout weight-sync path."""
-        from argparse import Namespace
+        from diffusionrl.config.instantiate import build
 
-        from diffusionrl.utils.fsdp_update_weights_utils import (
-            UpdateWeightFromCheckpoint,
-            UpdateWeightFromDistributed,
-            UpdateWeightFromTensor,
-        )
-
-        mode = str(config.get("mode", ""))
-        rollout_actors = config.get("rollout_actors", [])
-        self._rollout_actors = list(rollout_actors) if rollout_actors else []
+        self._rollout_actors = list(rollout_runtime.get_rollout_actors()) if rollout_runtime is not None else []
         self._lora_initialized_on_rollout = False
 
-        handler_args = Namespace(
-            target_modules=config.get("target_modules"),
-            flush_cache=config.get("flush_cache", True),
-            update_weight_buffer_size=config.get("bucket_size_mb", 256) * 1024 * 1024,
-            rollout_num_gpus_per_engine=config.get("rollout_num_gpus_per_engine", 1),
-            rollout_num_gpus=config.get("rollout_num_gpus", len(self._rollout_actors)),
+        self._update_weight_handler = build(
+            sync_cfg,
+            model=self.model,
+            rollout_runtime=rollout_runtime,
+            placement_cfg=placement_cfg,
         )
-
-        if mode == "tensor_payload":
-            self._update_weight_handler = UpdateWeightFromTensor(handler_args, self.model)
-        elif mode == "nccl_broadcast":
-            self._update_weight_handler = UpdateWeightFromDistributed(handler_args, self.model)
-        elif mode == "checkpoint_path":
-            handler_args.weight_sync_dir = config.get("weight_sync_dir", "/tmp/diffusionrl_wsync")
-            handler_args.export_format = config.get("export_format", "state_dict")
-            handler_args.rollout_runtime = config.get("rollout_runtime")
-            handler_args.rollout_target = config.get("rollout_target")
-            self._update_weight_handler = UpdateWeightFromCheckpoint(handler_args, self.model)
-        else:
-            raise ValueError(f"Unknown weight sync mode: {mode!r}")
-
-        self._update_weight_handler.connect_rollout_engines(self._rollout_actors, None)
+        self._update_weight_handler.connect_rollout_engines()
         logger.info(
-            "Rank %s: configured weight sync handler mode=%s rollout_actors=%d",
+            "Rank %s: configured weight sync handler target=%s rollout_actors=%d",
             self.rank,
-            mode,
+            sync_cfg.get("_target_"),
             len(self._rollout_actors),
         )
 

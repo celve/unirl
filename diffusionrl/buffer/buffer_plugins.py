@@ -10,7 +10,6 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from diffusionrl.buffer.buffer_batch_ops import index_training_batch
-from diffusionrl.cmdline.argument_parsing import parse_cli_list
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils import load_function
 
@@ -107,6 +106,10 @@ class RewardRangeFilterPlugin(BufferPlugin):
         super().__init__()
         self.min_reward = float(min_reward) if min_reward is not None else None
         self.max_reward = float(max_reward) if max_reward is not None else None
+        if self.min_reward is not None and self.max_reward is not None and self.min_reward > self.max_reward:
+            raise ValueError(
+                f"RewardRangeFilterPlugin: min_reward must be <= max_reward; got min={self.min_reward!r}, max={self.max_reward!r}"
+            )
         self.filtered_samples = 0
         self.rejected_batches = 0
 
@@ -178,7 +181,19 @@ def normalize_plugin_dotpaths(raw: Any) -> List[str]:
     if raw is None:
         return []
     if isinstance(raw, str):
-        return parse_cli_list(raw, item_type=str)
+        stripped = raw.strip()
+        if not stripped:
+            return []
+        # Accept JSON list syntax and comma-separated shorthand — same surface
+        # the argparse layer used to normalize.
+        if stripped.startswith("["):
+            import json
+
+            parsed = json.loads(stripped)
+            if not isinstance(parsed, list):
+                raise TypeError(f"rollout.plugin_dotpaths JSON must be a list; got {type(parsed).__name__}")
+            return [str(x).strip() for x in parsed if str(x).strip()]
+        return [part.strip() for part in stripped.split(",") if part.strip()]
     if isinstance(raw, (list, tuple)):
         return [str(x).strip() for x in raw if str(x).strip()]
     raise TypeError(f"rollout.plugin_dotpaths must be a list of strings or a single string; got {type(raw).__name__}")

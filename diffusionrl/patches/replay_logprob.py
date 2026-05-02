@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from diffusionrl.sde.kernels import StepStrategy
 from diffusionrl.types.sampling import SamplingParams
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.utils import load_function
@@ -61,6 +62,7 @@ class ReplayLogProbPatch:
         self,
         *,
         sampling_config: SamplingParams,
+        strategy: StepStrategy,
         model_bundle: Any,
         model: Any,
         text_encoder: Any,
@@ -86,7 +88,7 @@ class ReplayLogProbPatch:
             "vae": vae,
             "scheduler": scheduler,
             "eta": sde_config.eta,
-            "sde_type": sde_config.sde_type,
+            "strategy": strategy,
             "shift": sde_config.shift,
             "autocast_precision": sampling_config.autocast_precision,
             "trajectory_precision": sampling_config.trajectory_precision,
@@ -109,6 +111,7 @@ class ReplayLogProbPatch:
         enabled: bool,
         algorithm_type: str,
         sampling_config: Optional[SamplingParams],
+        strategy: StepStrategy,
         model_bundle: Any,
         model: Any,
         text_encoder: Any,
@@ -127,6 +130,7 @@ class ReplayLogProbPatch:
 
         self._build_replay_sampler(
             sampling_config=sampling_config,
+            strategy=strategy,
             model_bundle=model_bundle,
             model=model,
             text_encoder=text_encoder,

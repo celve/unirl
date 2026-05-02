@@ -24,7 +24,7 @@ DiffusionRL supports the following diffusion models:
 
 - **Training Actors (Ray + TrainBackend)**: Responsible for the main training process through pluggable training backends (FSDP2 / VeOmni native; Megatron scaffold), reads `TrainingBatch` from the rollout buffer, and synchronizes parameters to the inference actors after training.
 - **Inference Actors (FSDP / SGLang)**: Generates denoising trajectories and latent samples using pluggable sampling engines, producing lightweight `RolloutSamples`.
-- **Reward Runtime**: Evaluates generated samples using configurable reward models (HPS, CLIP, PickScore, OCR, etc.) through one actor-side precompute path with either local or HTTP-backed scoring.
+- **Reward Runtime**: Evaluates generated samples using configurable reward models (HPS, CLIP, PickScore, OCR, etc.) through one actor-side precompute path with local in-process scoring.
 - **RolloutPipeline**: The driver owns the outer rollout loop via `RolloutPipeline`, which drives the `load_prompts -> plan_requests -> exec_request -> aggregate -> convert_training_data` phases. Reward scoring and advantage computation run inside the rollout actor through `RolloutActor.run_rollout_pipeline`, and the driver then assembles the final `TrainingBatch`.
 
 ```
@@ -103,12 +103,7 @@ Install them only when needed (Geneval/OpenMMLab workflows):
 ### Data Preparation
 
 Toy data is included in `data/samples/` for smoke tests.
-For real datasets, symlink into `data/datasets/` and override `DATA_PATH`:
-
-```bash
-DATA_PATH=data/datasets/hpdv2/train.json \
-  bash scripts/train_flowgrpo_sd3_train_actor_sampling.sh --rollout.num-rollout 1
-```
+For real datasets, symlink into `data/datasets/` and override `DATA_PATH` when invoking a `reproduce_scripts/` wrapper.
 
 The user-facing dataset contract is prompt-only:
 
@@ -127,34 +122,11 @@ Default local paths are resolved against the repository root:
 
 For a real validation split, pass `eval_data_path` explicitly. This keeps eval prompts independent from the training iterator and avoids train/eval data-stream coupling.
 
-For external data / model directories, pass absolute paths directly (or create symlinks manually):
-
-```bash
-DATA_PATH=/path/to/external/data/train.json \
-PRETRAINED_MODEL=/path/to/external/shared_models/sd3 \
-bash scripts/train_flowgrpo_sd3_train_actor_sampling.sh --rollout.num-rollout 1
-```
+For external data / model directories, pass absolute paths directly (or create symlinks manually) via `DATA_PATH` / `PRETRAINED_MODEL` when invoking a `reproduce_scripts/` wrapper.
 
 ### Training
 
-We provide pre-configured training scripts for various algorithm + model combinations:
-
-```bash
-# FlowGRPO with SD3 (training-actor direct sampling)
-bash scripts/train_flowgrpo_sd3_train_actor_sampling.sh
-
-# MixGRPO with SD3 (SGLang separate mode, rollout/training split)
-bash scripts/train_mixgrpo_sd3_sglang_separate.sh
-
-# NFT with SD3 (SGLang separate mode)
-bash scripts/train_nft_sd3_sglang_separate.sh
-
-# Override default parameters via environment variables
-PRETRAINED_MODEL=/path/to/shared_models/sd3 \
-DATA_PATH=/path/to/prompts.json \
-ROLLOUT_GPUS=2 TRAINING_GPUS=2 BATCH_SIZE=2 \
-    bash scripts/train_mixgrpo_sd3_sglang_separate.sh
-```
+See `reproduce_scripts/` for per-recipe wrappers; all delegate to `scripts/train.sh` (or `scripts/train_tq.sh` for TransferQueue variants).
 
 Or use the CLI directly:
 
@@ -164,7 +136,7 @@ python -m diffusionrl.train \
     --model.model-type flux \
     --algorithm.algorithm-type grpo \
     --algorithm.prompts-per-rollout 8 \
-    --reward.reward-components hpsv2 \
+    --reward.definition.components "[{model_name: hpsv2, weight: 1.0}]" \
     --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \
     --data-path data/samples/prompts_toy.json \
     --eval-data-path data/samples/prompts_toy.json \
@@ -180,18 +152,10 @@ python -m diffusionrl.train \
     --precision.rollout.logprob-precision fp32 \
     --rollout.mode direct_sampling \
     --rollout.num-rollout 300 \
-    --rollout.output-dir outputs/my_experiment \
-    --sync.protocol disabled
+    --rollout.output-dir outputs/my_experiment
 ```
 
-For asynchronous separate rollout/training overlap, use a dedicated async entry such as:
-
-```bash
-bash scripts/train_mixgrpo_sd3_sglang_separate.sh
-```
-
-For researcher work, start from `scripts/*.sh`.
-Those shell templates are the primary maintained entry surface in this repo.
+For researcher work, start from `reproduce_scripts/*.sh` — those per-recipe wrappers are the primary maintained entry surface and delegate to the generic launchers `scripts/train.sh` / `scripts/train_tq.sh`.
 The local `configs/recipes/` directory may exist in some working trees, but it is
 gitignored and is not the public repo interface.
 
@@ -214,9 +178,10 @@ For dedicated SGLang rollout, the rollout-side prompt encoder also follows
 prompt-encoder dtype under `rollout`.
 CLI options always override YAML. Unknown YAML keys fail fast by default; use
 `--allow-unknown-config-keys` only when you intentionally want to ignore unknown keys.
-`sync.protocol` must now be set explicitly: use `disabled` for `direct_sampling`,
-and a dedicated-rollout sync mode (`tensor_payload`, `nccl_broadcast`, or
-`checkpoint_path`) when rollout runs outside training actors.
+Weight sync is opt-in: omit `cfg.sync` for `direct_sampling` (no rollout actors to push to),
+and select a dedicated-rollout sync variant (`+sync=tensor_payload`, `+sync=nccl_broadcast`,
+or `+sync=checkpoint_path`) when rollout runs outside training actors. The cross-component
+validator enforces this biconditional (`engine=fsdp` ⇔ no `sync`; `engine=sglang` ⇔ `sync` set).
 In `direct_sampling`, leave `rollout.rollout_engine` unset.
 Direct sampling is selected only by `rollout.mode=direct_sampling`;
 dedicated rollout-only fields must remain unset there.
@@ -260,16 +225,6 @@ Notes:
 - diffusionRL intentionally keeps VeOmni backend on `fsdp2` only for RL training.
 - Built-in `veomni` backend calls VeOmni native APIs for model parallelization / optimizer / scheduler / grad clipping.
 
-### Available Training Scripts
-
-| Script | Algorithm | Model | Mode |
-|--------|-----------|-------|------|
-| `train_mixgrpo_sd3_sglang_separate.sh` | MixGRPO | SD3 | Separate (dedicated rollout actors, SGLang engine) |
-| `train_nft_sd3_sglang_separate.sh` | NFT | SD3 | Separate (dedicated rollout actors, SGLang engine) |
-| `train_flowgrpo_sd3_train_actor_sampling.sh` | FlowGRPO | SD3 | Training-actor direct sampling (FSDP engine) |
-
-See [scripts/README.md](scripts/README.md) for exact per-script defaults.
-
 ## Supported Algorithms
 
 | Algorithm | Description | Transition Rule | Key Feature |
@@ -287,7 +242,7 @@ Arguments in DiffusionRL are organized into the following categories:
 1.  **Model arguments**: `--model.model-type`, `--model.pretrained-model-ckpt-path`, `--training.use-lora`, `--training.lora-rank`, `--training.lora-alpha`, etc.
 2.  **Sampling arguments**: `--sampling.sde-type`, `--sampling.eta`, `--sampling.num-inference-steps`, `--sampling.guidance-scale`, `--sampling.shift`, `--sampling.timestep-fraction`, etc.
 3.  **Algorithm arguments**: `--algorithm.algorithm-dotpath`, `--algorithm.prompts-per-rollout`, `--algorithm.samples-per-prompt`, plus shared typed fields such as `--algorithm.adv-normalization`, `--algorithm.eval-ema-decay`, and `--algorithm.shuffle-samples`. Use repeated `--algorithm.kwarg key=value` only for true algorithm-specific extension keys. In YAML, put those extension keys under `algorithm.algorithm_kwargs`.
-4.  **Reward arguments**: `--reward.reward-components` for built-in scorers, `--reward.reward-dotpath` for custom scorer dotpaths, `--reward.reward-model-ckpt-path` for scorer checkpoints, `--reward.reward-backend local`, `--reward.local-reward-device`, etc.
+4.  **Reward arguments**: `--reward.definition.components` for built-in scorers (typed `{model_name, weight}` records), `--reward.provider.dotpath` for custom scorer dotpaths, `--reward.provider.model-ckpt-path` for scorer checkpoints, `--reward.execution.local-device`, etc.
 5.  **Training arguments**: `--training.learning-rate`, `--training.num-updates-per-batch`, `--training.micro-batch-size`, `--training.max-grad-norm`, etc.
 6.  **Runtime arguments**: `--ray.rollout-num-gpus-per-node`, `--ray.training-num-gpus-per-node`, `--ray.colocate-training-gpu-fraction`, `--ray.colocate-rollout-gpu-fraction`, `--ray.placement-strategy`, `--ray.offload-train`, `--ray.offload-rollout`, etc.
 
@@ -295,7 +250,7 @@ For config mechanics and current conventions, read
 [diffusionrl/config/arguments.py](diffusionrl/config/arguments.py)
 alongside `diffusionrl/config/argument_parsing.py`, `diffusionrl/config/validation.py`,
 and `diffusionrl/config/resolution.py`. For runnable config examples, start with
-[scripts/README.md](scripts/README.md) and the committed YAMLs under `scripts/`.
+[scripts/README.md](scripts/README.md) and the experiment YAMLs under `conf/experiment/`.
 
 ## Developer Guide
 
@@ -323,7 +278,7 @@ diffusionrl/
 ├── samplers/                       # Inference engines (FSDP, SGLang)
 │   ├── fsdp/                       #   FSDP-based: FluxSampler, SD3Sampler, HunyuanSampler
 │   └── sglang/                     #   SGLang external service engine
-├── reward/                         # Reward executors (local, HTTP, actor-side precompute)
+├── reward/                         # Reward executors (local in-process, actor-side precompute)
 ├── models/                         # Model implementations (FLUX, SD3, Hunyuan, Mochi)
 ├── data/                           # Data loading and datasets
 ├── rollout/                        # Driver rollout runtime, request planning/execution, default hooks
@@ -359,7 +314,7 @@ and the minimal reference implementation in
 This repo ships minimal templates under `diffusionrl_plugins/` for common extension
 points:
 
-- Model: built-in `--model.model-type wan21`
+- Model: `diffusionrl_plugins.models.wan21.Wan21ModelBundle`
 - Sampler: `diffusionrl_plugins.samplers.minimal_sampler.MinimalSampler`
 - Algorithm: `diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm`
 - Reward: `diffusionrl_plugins.rewards.minimal_reward.MinimalRewardScorer`
@@ -373,14 +328,14 @@ Notes:
 
 Use reward config in three layers:
 
-- Built-in scorer: set `--reward.reward-components <builtin>` for one scorer, or
-  `--reward.reward-components a,b --reward.reward-weights wa,wb` for multi-component reward.
-- Custom scorer: set `--reward.reward-dotpath your_module.MyRewardScorer` to a full
+- Built-in scorer: set `--reward.definition.components "[{model_name: <builtin>, weight: 1.0}]"`
+  for one scorer, or pass multiple `{model_name, weight}` records for multi-component reward.
+- Custom scorer: set `--reward.provider.dotpath your_module.MyRewardScorer` to a full
   scorer class dotpath.
-- Execution path: rewards are always computed on the active sampling actor via
-  in-process scorers (`--reward.reward-backend local`). Local scoring defaults to
-  `local_reward_device=cpu`; switch to `cuda` only when you intentionally want
-  in-process GPU scoring on the sampling host.
+- Execution path: rewards are always computed on the active sampling actor
+  using in-process scorers. Local scoring defaults to
+  `reward.execution.local_device=cpu`; switch to `cuda` only when you
+  intentionally want in-process GPU scoring on the sampling host.
 
 Subclass `BaseRewardScorer` for the minimal contract:
 
@@ -394,7 +349,7 @@ class MyRewardScorer(BaseRewardScorer):
         ...
 ```
 
-Then pass it via `--reward.reward-dotpath your_module.MyRewardScorer`.
+Then pass it via `--reward.provider.dotpath your_module.MyRewardScorer`.
 
 If you want the built-in local scorer lifecycle helpers (`device`, eager model
 load, standard `offload()` / `onload()` behavior), subclass

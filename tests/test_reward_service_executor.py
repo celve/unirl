@@ -67,6 +67,7 @@ _rse_mod = _load_module_directly(
 )
 
 RewardServiceExecutor = _rse_mod.RewardServiceExecutor
+RewardServiceSpec = _rse_mod.RewardServiceSpec
 _encode_image_b64 = _rse_mod._encode_image_b64
 _pil_from_tensor = _rse_mod._pil_from_tensor
 
@@ -85,18 +86,23 @@ def _make_tensor_image(channels: int = 3, height: int = 64, width: int = 64) -> 
     return torch.rand(channels, height, width)
 
 
-def _make_executor(**overrides) -> RewardServiceExecutor:
+def _make_spec(**overrides) -> RewardServiceSpec:
     defaults = dict(
         base_url="http://localhost:8080",
-        required_rewards=["hpsv2", "clip"],
+        required_rewards=("hpsv2", "clip"),
         reward_weights={"hpsv2": 0.6, "clip": 0.4},
-        model_name="reward_service",
         timeout=10.0,
         max_retries=1,
         retry_delay=0.0,
     )
     defaults.update(overrides)
-    return RewardServiceExecutor(**defaults)
+    if isinstance(defaults.get("required_rewards"), list):
+        defaults["required_rewards"] = tuple(defaults["required_rewards"])
+    return RewardServiceSpec(**defaults)
+
+
+def _make_executor(**overrides) -> RewardServiceExecutor:
+    return RewardServiceExecutor(config=_make_spec(**overrides), base_device="cpu")
 
 
 def _make_reward_request(n: int = 3) -> RewardRequest:
@@ -141,20 +147,24 @@ class TestPilFromTensor:
 
 
 # ---------------------------------------------------------------------------
-# Constructor validation
+# Spec validation (RewardServiceSpec.__post_init__)
 # ---------------------------------------------------------------------------
 
 
-class TestExecutorInit:
+class TestRewardServiceSpec:
     def test_empty_required_rewards_raises(self):
         with pytest.raises(ValueError, match="required_rewards"):
-            RewardServiceExecutor(base_url="http://localhost:8080", required_rewards=[])
+            RewardServiceSpec(base_url="http://localhost:8080", required_rewards=())
+
+    def test_empty_url_raises(self):
+        with pytest.raises(ValueError, match="base_url"):
+            RewardServiceSpec(base_url="", required_rewards=("hpsv2",))
 
     def test_bad_reduce_strategy_raises(self):
         with pytest.raises(ValueError, match="sub_metric_reduce"):
-            RewardServiceExecutor(
+            RewardServiceSpec(
                 base_url="http://localhost:8080",
-                required_rewards=["hpsv2"],
+                required_rewards=("hpsv2",),
                 sub_metric_reduce="invalid",
             )
 
@@ -165,18 +175,26 @@ class TestExecutorInit:
 
     def test_zero_max_retries_raises(self):
         with pytest.raises(ValueError, match="max_retries"):
-            RewardServiceExecutor(
+            RewardServiceSpec(
                 base_url="http://localhost:8080",
-                required_rewards=["hpsv2"],
+                required_rewards=("hpsv2",),
                 max_retries=0,
             )
 
     def test_negative_retry_delay_raises(self):
         with pytest.raises(ValueError, match="retry_delay"):
-            RewardServiceExecutor(
+            RewardServiceSpec(
                 base_url="http://localhost:8080",
-                required_rewards=["hpsv2"],
+                required_rewards=("hpsv2",),
                 retry_delay=-1.0,
+            )
+
+    def test_invalid_aggregation_method_raises(self):
+        with pytest.raises(ValueError, match="aggregation_method"):
+            RewardServiceSpec(
+                base_url="http://localhost:8080",
+                required_rewards=("hpsv2",),
+                aggregation_method="invalid",
             )
 
 
@@ -447,94 +465,6 @@ class TestIsAvailable:
 
 
 # ---------------------------------------------------------------------------
-# Config validation (cmdline/schema.py RewardConfig)
-# ---------------------------------------------------------------------------
-
-
-class TestRewardConfigValidation:
-    """Test RewardConfig.validate() for the reward_service backend."""
-
-    @staticmethod
-    def _load_reward_config_class():
-        class _StubModule(types.ModuleType):
-            def __init__(self, name):
-                super().__init__(name)
-                self.__path__ = []  # Package-like so sub-imports resolve
-
-            def __getattr__(self, name):
-                if name == "__path__":
-                    return []
-                return lambda *a, **kw: None
-
-        stubs = [
-            "diffusionrl.cmdline.validation",
-            "diffusionrl.algorithms",
-            "diffusionrl.algorithms.base",
-            "diffusionrl.algorithms.construction",
-            "diffusionrl.algorithms.registry",
-            "diffusionrl.algorithms.grpo",
-            "diffusionrl.cmdline.algorithms",
-            "diffusionrl.config.validation",
-        ]
-        originals = {}
-        for name in stubs:
-            originals[name] = sys.modules.get(name)
-            sys.modules[name] = _StubModule(name)
-        try:
-            spec = importlib.util.spec_from_file_location(
-                "diffusionrl.cmdline.schema_isolated",
-                os.path.join(_PROJECT_ROOT, "diffusionrl", "cmdline", "schema.py"),
-            )
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            return mod.RewardConfig
-        finally:
-            for name in stubs:
-                if originals[name] is None:
-                    sys.modules.pop(name, None)
-                else:
-                    sys.modules[name] = originals[name]
-
-    def test_reward_service_requires_url(self):
-        RC = self._load_reward_config_class()
-        cfg = RC(reward_backend="reward_service", reward_service_url=None, reward_components=["hpsv2"])
-        with pytest.raises(ValueError, match="reward_service_url"):
-            cfg.validate()
-
-    def test_reward_service_requires_components(self):
-        RC = self._load_reward_config_class()
-        cfg = RC(reward_backend="reward_service", reward_service_url="http://localhost", reward_components=None)
-        with pytest.raises(ValueError, match="reward_components"):
-            cfg.validate()
-
-    def test_reward_service_valid(self):
-        RC = self._load_reward_config_class()
-        cfg = RC(
-            reward_backend="reward_service",
-            reward_service_url="http://localhost:8080",
-            reward_components=["hpsv2", "clip"],
-            reward_weights=[0.6, 0.4],
-        )
-        cfg.validate()  # Should not raise
-
-    def test_reward_service_rejects_concat_aggregation(self):
-        # 'concat' is a cross-executor flatten op in reward.aggregation.AGGREGATORS;
-        # the reward_service backend multiplexes inside a single executor and
-        # cannot honour it. We want this caught at args-parse time, well before
-        # Ray spins up and surfaces the late check inside RewardServiceExecutor.
-        RC = self._load_reward_config_class()
-        cfg = RC(
-            reward_backend="reward_service",
-            reward_service_url="http://localhost:8080",
-            reward_components=["hpsv2", "clip"],
-            reward_weights=[0.6, 0.4],
-            reward_aggregation_method="concat",
-        )
-        with pytest.raises(ValueError, match="concat.*not supported.*reward_service"):
-            cfg.validate()
-
-
-# ---------------------------------------------------------------------------
 # Aggregation methods
 # ---------------------------------------------------------------------------
 
@@ -579,10 +509,6 @@ class TestAggregationMethods:
         }
         resp = ex._parse_score_response(raw, batch_size=1, compute_time=0.1)
         assert resp.rewards[0] == pytest.approx(0.7)
-
-    def test_invalid_aggregation_method_raises(self):
-        with pytest.raises(ValueError, match="aggregation_method"):
-            _make_executor(aggregation_method="invalid")
 
 
 # ---------------------------------------------------------------------------

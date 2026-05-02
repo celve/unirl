@@ -75,5 +75,5 @@ version, reinstall after hpsv3 setup.
 
 ## 6. GPU memory
 
-HPSv3 is a 7B model (~14GB in bf16). When using `local_reward_device=cuda`
+HPSv3 is a 7B model (~14GB in bf16). When using `reward.execution.local_device=cuda`
 (shared GPU with training), reduce batch geometry to avoid OOM.

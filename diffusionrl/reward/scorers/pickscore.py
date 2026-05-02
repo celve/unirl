@@ -8,6 +8,9 @@ from typing import List
 import torch
 from tqdm import tqdm
 
+from diffusionrl.config.registration import register_config
+from diffusionrl.reward.base import BaseRewardComponentSpec
+from diffusionrl.reward.scorers._device import resolve_device
 from diffusionrl.types.reward import RewardRequest, RewardType
 
 from .base_local import BaseLocalRewardScorer
@@ -17,6 +20,14 @@ class PickScoreRewardScorer(BaseLocalRewardScorer):
     """PickScore image-text alignment reward."""
 
     canonical_model_name = "pickscore"
+
+    def __init__(self, *, config: "PickScoreSpec", base_device: str) -> None:
+        super().__init__(
+            device=resolve_device(config.device, base_device),
+            batch_size=config.batch_size,
+            processor_id=config.processor_id,
+            model_id=config.model_id,
+        )
 
     def _load_model(self) -> None:
         try:
@@ -90,3 +101,18 @@ class PickScoreRewardScorer(BaseLocalRewardScorer):
                 all_rewards.extend(scores.cpu().tolist())
 
         return all_rewards
+
+
+@register_config(
+    group="reward/component",
+    name="pickscore",
+    target="diffusionrl.reward.scorers.pickscore.PickScoreRewardScorer",
+)
+class PickScoreSpec(BaseRewardComponentSpec):
+    """Typed config for the PickScore reward component."""
+
+    weight: float = 1.0
+    batch_size: int = 8
+    device: str = "auto"
+    processor_id: str = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
+    model_id: str = "yuvalkirstain/PickScore_v1"

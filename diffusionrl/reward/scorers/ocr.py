@@ -8,6 +8,8 @@ from typing import List
 from PIL import Image
 from tqdm import tqdm
 
+from diffusionrl.config.registration import register_config
+from diffusionrl.reward.base import BaseRewardComponentSpec
 from diffusionrl.types.reward import RewardRequest, RewardType
 
 from .base_local import BaseLocalRewardScorer
@@ -17,6 +19,11 @@ class OCRRewardScorer(BaseLocalRewardScorer):
     """OCR reward for text rendering tasks."""
 
     canonical_model_name = "ocr"
+
+    def __init__(self, *, config: "OCRSpec", base_device: str) -> None:
+        # base_device unused: paddleocr forces CPU init.
+        del base_device
+        super().__init__(lang=config.lang)
 
     def _load_model(self) -> None:
         try:
@@ -41,7 +48,7 @@ class OCRRewardScorer(BaseLocalRewardScorer):
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,
-            lang="en",
+            lang=self.model_kwargs.get("lang", "en"),
         )
         self._levenshtein_distance = levenshtein_distance
         self.model = "ocr"
@@ -112,3 +119,19 @@ class OCRRewardScorer(BaseLocalRewardScorer):
                         if isinstance(text, str) and text:
                             texts.append(text)
         return "".join(texts)
+
+
+@register_config(
+    group="reward/component",
+    name="ocr",
+    target="diffusionrl.reward.scorers.ocr.OCRRewardScorer",
+)
+class OCRSpec(BaseRewardComponentSpec):
+    """Typed config for the OCR (PaddleOCR) reward component.
+
+    OCR is forced to CPU by paddleocr's runtime and processes one image at a
+    time, so neither ``device`` nor ``batch_size`` appear here.
+    """
+
+    weight: float = 1.0
+    lang: str = "en"

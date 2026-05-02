@@ -14,30 +14,33 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 
-from diffusionrl.algorithms.registry import register_algorithm
+from diffusionrl.config.registration import register_config
 from diffusionrl.models.base import ModelBundle
 from diffusionrl.types import TimestepData
 from diffusionrl.types.forward_context import ForwardContext
+from diffusionrl.types.sampling import SDEConfig
 from diffusionrl.utils.misc import aggregate_numeric_metrics
-from diffusionrl.utils.scheduler_utils import create_indices_scheduler
+from diffusionrl.utils.scheduler_utils import SchedulerConfig, create_indices_scheduler
 
-from .base import BaseAlgorithm, BaseAlgorithmConfig, EMASpec, SamplingRequirements
+from .base import BaseAlgorithm, BaseAlgorithmConfig, EMAConfig, SamplingRequirements
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@register_config(
+    group="algorithm",
+    name="grpo",
+    target="diffusionrl.algorithms.grpo.GRPOAlgorithm",
+)
+@dataclass
 class GRPOAlgorithmConfig(BaseAlgorithmConfig):
     clip_range: float = 1e-4
     clip_schedule: str = "constant"
     use_kl_penalty: bool = True
     ratio_reg_coef: float = 0.0
-    eta: float = 1.0
-    sde_type: str = "flow"
-    shift: float = 3.0
+    sde_config: SDEConfig = field(default_factory=SDEConfig)
     training_share_rollout_indices: bool = True
-    rollout_scheduler_config: Dict[str, Any] = field(default_factory=dict)
-    training_scheduler_config: Dict[str, Any] = field(default_factory=dict)
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     skip_last_timestep: bool = False
     skip_initial_timesteps: int = 0
     model_type: str = "default"
@@ -74,7 +77,6 @@ def _save_training_debug_tensor(
     torch.save(new_tensor, path)
 
 
-@register_algorithm(component_name="grpo", component_cfg=GRPOAlgorithmConfig)
 class GRPOAlgorithm(BaseAlgorithm):
     """
     Standard GRPO Algorithm — algorithm owns loss and training step.
@@ -107,9 +109,8 @@ class GRPOAlgorithm(BaseAlgorithm):
             component_mix_stage=config.component_mix_stage,
             adv_normalization_scope=config.adv_normalization_scope,
             samples_per_prompt=config.samples_per_prompt,
-            num_inference_steps=config.num_inference_steps,
-            eval_ema_decay=config.eval_ema_decay,
-            eval_ema_update_interval=config.eval_ema_update_interval,
+            sampling=config.sampling,
+            ema=config.ema,
             epsilon=config.epsilon,
             clip_max=config.clip_max,
             use_global_std=config.use_global_std,
@@ -121,23 +122,20 @@ class GRPOAlgorithm(BaseAlgorithm):
         self.clip_schedule = config.clip_schedule
         self.use_kl_penalty = config.use_kl_penalty
         self.ratio_reg_coef = config.ratio_reg_coef
-        self._eta = config.eta
-        self._sde_type = config.sde_type
-        self._shift = config.shift
+        self._sde_config = config.sde_config
         self.model_type = config.model_type
         self.training_share_rollout_indices = bool(config.training_share_rollout_indices)
-        self.rollout_scheduler_config = dict(config.rollout_scheduler_config)
-        self.training_scheduler_config = dict(config.training_scheduler_config or self.rollout_scheduler_config)
+        self.scheduler_config = config.scheduler
         self.rollout_indices_scheduler = create_indices_scheduler(
-            scheduler_config=self.rollout_scheduler_config,
-            num_timesteps=self.num_inference_steps,
+            scheduler_config=config.scheduler,
+            num_timesteps=self.sampling.num_inference_steps,
         )
         if self.training_share_rollout_indices:
             self.training_indices_scheduler = self.rollout_indices_scheduler
         else:
             self.training_indices_scheduler = create_indices_scheduler(
-                scheduler_config=self.training_scheduler_config,
-                num_timesteps=self.num_inference_steps,
+                scheduler_config=config.scheduler,
+                num_timesteps=self.sampling.num_inference_steps,
             )
 
         # MixGRPO stability controls
@@ -150,15 +148,11 @@ class GRPOAlgorithm(BaseAlgorithm):
 
     @property
     def eta(self) -> float:
-        return self._eta
-
-    @property
-    def sde_type(self) -> str:
-        return self._sde_type
+        return self._sde_config.eta
 
     @property
     def time_shift(self) -> float:
-        return self._shift
+        return self._sde_config.shift
 
     def get_sampling_requirements(self) -> SamplingRequirements:
         """Return GRPO sampling requirements."""
@@ -168,22 +162,18 @@ class GRPOAlgorithm(BaseAlgorithm):
             requires_embeddings=True,
         )
 
-    def get_ema_spec(self) -> EMASpec:
-        return EMASpec(
-            enable_eval_ema=True,
-            eval_ema_decay=self.eval_ema_decay,
-            eval_ema_update_interval=self.eval_ema_update_interval,
-        )
+    def get_ema_spec(self) -> EMAConfig:
+        return self.config.ema
 
     def resolve_rollout_sde_indices(
         self,
         *,
         current_step: int,
     ) -> Optional[Set[int]]:
-        if self.num_inference_steps < 1:
+        if self.sampling.num_inference_steps < 1:
             raise ValueError(
                 f"{type(self).__name__}.resolve_rollout_sde_indices requires "
-                f"num_inference_steps >= 1, got {self.num_inference_steps}."
+                f"sampling.num_inference_steps >= 1, got {self.sampling.num_inference_steps}."
             )
         return set(self.rollout_indices_scheduler.get_sde_indices(current_step))
 
@@ -301,7 +291,7 @@ class GRPOAlgorithm(BaseAlgorithm):
             sigma_next=sigma_next,
             eta=self.eta,
             prev_sample=next_sample,
-            sde_type=self.sde_type,
+            strategy=self._strategy,
             sigma_max=sigma_max,
         )
         return new_log_prob, prev_sample_mean

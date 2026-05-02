@@ -19,10 +19,8 @@ import dataclasses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import ray
-from ray.actor import ActorHandle
 
-from diffusionrl.ray.generate_sharding import build_generate_shard_plan_grouped
-from diffusionrl.ray.group_base import ActorHandleGroup
+from diffusionrl.ray.group.base import ActorGroup
 from diffusionrl.rollout.request_builders import (
     build_eval_request_batch,
     load_prompt_batch_from_source,
@@ -166,32 +164,30 @@ class RolloutPipeline:
         self,
         *,
         request: RolloutRequest,
-        rollout_actors: List[ActorHandle],
-        rollout_handle_group: ActorHandleGroup,
+        rollout_group: ActorGroup,
         samples_per_prompt: int,
     ) -> List[RolloutResponse]:
         """Dispatch to actor(s) using the fused ``run_rollout_pipeline`` actor method.
 
         Single-actor fast path uses a direct ``ray.get`` on the one handle.
         Multi-actor path shards the request at group boundaries via
-        ``build_generate_shard_plan_grouped`` and scatter-gathers across all
+        ``rollout_group.rollout_plan.shard_grouped`` and scatter-gathers across all
         actors. Shards cover whole groups so that per-actor advantage
         normalization (with ``use_global_std=True``) always sees complete
         group populations; std is therefore scoped to one actor's shard in
         the multi-actor case.
         """
-        if not rollout_actors:
+        if rollout_group.num_actors == 0:
             raise RuntimeError("RolloutPipeline.exec_request: no rollout actors.")
-        if len(rollout_actors) == 1:
-            return ray.get(rollout_actors[0].run_rollout_pipeline.remote(request))
+        if rollout_group.num_actors == 1:
+            return ray.get(rollout_group.get_actors()[0].run_rollout_pipeline.remote(request))
 
-        shards = build_generate_shard_plan_grouped(
-            request=request,
-            num_actors=len(rollout_actors),
+        shards = rollout_group.rollout_plan.shard_grouped(
+            request,
+            num_actors=rollout_group.num_actors,
             samples_per_prompt=int(samples_per_prompt),
         )
-        nested_refs = rollout_handle_group.scatter_gather_async("run_rollout_pipeline", shards)
-        nested = ray.get(nested_refs)
+        nested = rollout_group.scatter_gather("run_rollout_pipeline", shards)
         return [response for sub in nested for response in sub]
 
     def aggregate(
@@ -271,8 +267,7 @@ class RolloutPipeline:
     def run_once(
         self,
         *,
-        rollout_actors: List[ActorHandle],
-        rollout_handle_group: ActorHandleGroup,
+        rollout_group: ActorGroup,
         data_source: Any,
         prompt_batch_size: int,
         samples_per_prompt: int,
@@ -310,8 +305,7 @@ class RolloutPipeline:
         )
         responses = self.exec_request(
             request=request,
-            rollout_actors=rollout_actors,
-            rollout_handle_group=rollout_handle_group,
+            rollout_group=rollout_group,
             samples_per_prompt=samples_per_prompt,
         )
         combined = self.aggregate(responses=responses)
@@ -329,8 +323,7 @@ class RolloutPipeline:
     def run_eval(
         self,
         *,
-        rollout_actors: List[ActorHandle],
-        rollout_handle_group: ActorHandleGroup,
+        rollout_group: ActorGroup,
         data_source: Any,
         prompt_batch_size: int,
         samples_per_prompt: int,
@@ -384,27 +377,21 @@ class RolloutPipeline:
                 init_same_noise=bool(getattr(sampling_spec, "init_same_noise", False)),
             )
 
-        # 3. Build eval SamplingParams with config overrides
+        # 3. Build eval SamplingParams with config overrides. Strategy choice
+        # inherits from the sampling-side cfg.sampling.sde_strategy (the
+        # injected RolloutEngine.strategy on the actor); only eta and
+        # num_inference_steps are eval-overridable.
         eval_num_steps = getattr(evaluation_settings, "num_inference_steps", None)
         eval_eta = getattr(evaluation_settings, "eta", None)
-        raw_sde_type = getattr(evaluation_settings, "sde_type", None)
-        eval_sde_type = (
-            str(raw_sde_type).strip()
-            if raw_sde_type is not None and str(raw_sde_type).strip()
-            else str(sampling_spec.sde_config.sde_type)
-        )
 
         eval_sde_config = SDEConfig(
             eta=float(eval_eta) if eval_eta is not None else float(sampling_spec.sde_config.eta),
-            sde_type=eval_sde_type,
             shift=float(sampling_spec.sde_config.shift),
         )
         # Build eval SamplingParams via dataclasses.replace so any non-eval
-        # fields on the training-side spec (e.g. sampling_forward_batch +
-        # the three precision fields) are preserved automatically. A
-        # hand-rolled SamplingParams(...) silently drops any field not
-        # explicitly listed, which previously made eval skip
-        # sampling-batch chunking and triggered OOM on large group sizes.
+        # fields on the training-side spec (e.g. the three precision fields)
+        # are preserved automatically. A hand-rolled SamplingParams(...)
+        # silently drops any field not explicitly listed.
         eval_overrides: Dict[str, Any] = {
             "num_samples_per_prompt": int(samples_per_prompt),
             "sde_config": eval_sde_config,
@@ -422,18 +409,17 @@ class RolloutPipeline:
         )
 
         # 4. Dispatch to actors via run_eval_pipeline
-        if not rollout_actors:
+        if rollout_group.num_actors == 0:
             raise RuntimeError("RolloutPipeline.run_eval: no rollout actors.")
-        if len(rollout_actors) == 1:
-            responses = ray.get(rollout_actors[0].run_eval_pipeline.remote(request))
+        if rollout_group.num_actors == 1:
+            responses = ray.get(rollout_group.get_actors()[0].run_eval_pipeline.remote(request))
         else:
-            shards = build_generate_shard_plan_grouped(
-                request=request,
-                num_actors=len(rollout_actors),
+            shards = rollout_group.rollout_plan.shard_grouped(
+                request,
+                num_actors=rollout_group.num_actors,
                 samples_per_prompt=int(samples_per_prompt),
             )
-            nested_refs = rollout_handle_group.scatter_gather_async("run_eval_pipeline", shards)
-            nested = ray.get(nested_refs)
+            nested = rollout_group.scatter_gather("run_eval_pipeline", shards)
             responses = [resp for sub in nested for resp in sub]
 
         # 5. Aggregate and compute reward statistics

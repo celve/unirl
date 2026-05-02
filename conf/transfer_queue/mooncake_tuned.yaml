@@ -1,0 +1,31 @@
+# Tuned Mooncake variant for SD3-class diffusion-RL workloads.
+#
+# Inherits the registered ``mooncake`` structured config (MooncakeBackendConfig)
+# and overlays values that the FlowGRPO-SD3 colocate recipe was tested with.
+# Compose via ``+transfer_queue=mooncake_tuned``.
+#
+# metadata_server and master_server_address are intentionally left empty —
+# they're host-dependent (need ${HEAD_IP}) and are injected as Hydra CLI
+# overrides by scripts/train_tq.sh at launch time. MooncakeBackendConfig's
+# __post_init__ will fail-fast if either is still empty when materialized.
+#
+# device_name is auto-discovered at runtime by runtime.create_client (see
+# diffusionrl.distributed.transfer_queue.topology). Mooncake's
+# MC_ENABLE_DEST_DEVICE_AFFINITY=1 mode then picks the PIX-distance HCA per
+# CUDA context. Override at the CLI with transfer_queue.device_name=<name>
+# only for ops debugging.
+defaults:
+  - mooncake          # registered structured config from @register_config
+  - _self_
+
+global_segment_size_gb: 10
+local_buffer_size_gb: 10
+protocol: rdma
+client_name: MooncakeStorageClient
+zero_copy:
+  enable: true
+  tensor_buffer_size_gb: 2.0
+  bytes_buffer_size_gb: 2.0
+  single_controller_tensor_buffer_size_gb: 10.0
+  single_controller_bytes_buffer_size_gb: 10.0
+  manager_merge_to_tensordict: false

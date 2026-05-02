@@ -26,9 +26,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
 import torch
 
+from diffusionrl.distributed.transfer_queue.transportable import Transportable
 from diffusionrl.types.prompts import Prompts
 from diffusionrl.types.sample import LogProbData
-from diffusionrl.utils.batched import Batched, concat_field, shared_field
+from diffusionrl.utils.batched import FieldKind, concat_field, field, shared_field
 
 from .forward_context import ForwardContext
 from .trajectory_store import TrajectoryStore
@@ -63,18 +64,22 @@ class TimestepData:
 
 
 @dataclass
-class TrainingBatch(Batched):
+class TrainingBatch(Transportable):
     """Unified training batch for all algorithms.
 
     Combines what was previously ``BackwardTrainingBatch`` (GRPO)
     and ``ForwardTrainingBatch`` (NFT) into a single type.
+
+    ``trajectory_store`` and ``forward_context`` are tagged
+    ``transport=True`` so a single ``hydrate`` walk fetches both subtrees in
+    one TQ round-trip.
     """
 
     # Required fields (no defaults) — must come first for dataclass
-    trajectory_store: TrajectoryStore = concat_field()
+    trajectory_store: TrajectoryStore = field(kind=FieldKind.CONCAT, transport=True)
     timesteps: torch.Tensor = shared_field()
     advantages: torch.Tensor = concat_field()
-    forward_context: ForwardContext = concat_field()
+    forward_context: ForwardContext = field(kind=FieldKind.CONCAT, transport=True)
 
     # Optional per-sample fields
     log_probs: Optional[LogProbData] = concat_field(default=None)

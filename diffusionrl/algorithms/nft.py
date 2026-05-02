@@ -16,12 +16,13 @@ from diffusers.utils.torch_utils import randn_tensor
 from diffusionrl.algorithms.base import (
     BaseAlgorithm,
     BaseAlgorithmConfig,
-    EMASpec,
+    EMAConfig,
     SamplingRequirements,
 )
-from diffusionrl.algorithms.registry import register_algorithm
+from diffusionrl.config.registration import register_config
 from diffusionrl.models.base import ModelBundle
 from diffusionrl.types.forward_context import ForwardContext
+from diffusionrl.types.sampling import SDEConfig
 from diffusionrl.types.training_batch import TrainingBatch as _TrainingBatch
 from diffusionrl.utils.adapter_utils import switch_adapter
 from diffusionrl.utils.misc import aggregate_numeric_metrics
@@ -29,31 +30,24 @@ from diffusionrl.utils.misc import aggregate_numeric_metrics
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@register_config(
+    group="algorithm",
+    name="nft",
+    target="diffusionrl.algorithms.nft.NFTAlgorithm",
+)
+@dataclass
 class NFTAlgorithmConfig(BaseAlgorithmConfig):
     beta: float = 0.1
     adv_clip_max: float = 5.0
     adv_mode: str = "raw"
     use_adaptive_weight: bool = True
-    eta: float = 1.0
-    sde_type: str = "flow"
-    shift: float = 3.0
-    use_reference_ema: bool = True
-    ema_decay: float = 0.001
-    ema_decay_type: str = "constant"
-    ema_flat_steps: int = 0
-    ema_uprate: float = 0.001
-    ema_uphold: float = 0.5
-    reference_update_timing: str = "optimizer_step"
-    old_adapter_name: str = "old"
-    new_adapter_name: str = "default"
+    sde_config: SDEConfig = field(default_factory=SDEConfig)
     train_timestep_mode: str = "random"
     shuffle_train_timesteps: bool = True
     apply_time_shift_in_loss: bool = False
-    training_scheduler_config: Dict[str, Any] = field(default_factory=dict)
+    training_timestep_fraction: Any = 1.0
 
 
-@register_algorithm(component_name="nft", component_cfg=NFTAlgorithmConfig)
 class NFTAlgorithm(BaseAlgorithm):
     """
     NFT (Negative Fine-Tuning) Algorithm — algorithm owns loss and advantages.
@@ -98,9 +92,8 @@ class NFTAlgorithm(BaseAlgorithm):
             component_mix_stage=config.component_mix_stage,
             adv_normalization_scope=config.adv_normalization_scope,
             samples_per_prompt=config.samples_per_prompt,
-            num_inference_steps=config.num_inference_steps,
-            eval_ema_decay=config.eval_ema_decay,
-            eval_ema_update_interval=config.eval_ema_update_interval,
+            sampling=config.sampling,
+            ema=config.ema,
             epsilon=config.epsilon,
             clip_max=config.clip_max,
             use_global_std=config.use_global_std,
@@ -112,38 +105,19 @@ class NFTAlgorithm(BaseAlgorithm):
         self.adv_clip_max = config.adv_clip_max
         self.adv_mode = config.adv_mode
         self.use_adaptive_weight = config.use_adaptive_weight
-        self._eta = config.eta
-        self._sde_type = config.sde_type
-        self._shift = config.shift
-        self.use_reference_ema = bool(config.use_reference_ema)
-        self.ema_decay = config.ema_decay
-        self.ema_decay_type = str(config.ema_decay_type)
-        self.ema_flat_steps = int(config.ema_flat_steps)
-        self.ema_uprate = float(config.ema_uprate)
-        self.ema_uphold = float(config.ema_uphold)
-        self.reference_update_timing = str(config.reference_update_timing).strip().lower()
-        self.old_adapter_name = config.old_adapter_name
-        self.new_adapter_name = config.new_adapter_name
+        self._sde_config = config.sde_config
         self.train_timestep_mode = str(config.train_timestep_mode)
         self.shuffle_train_timesteps = bool(config.shuffle_train_timesteps)
         self.apply_time_shift_in_loss = bool(config.apply_time_shift_in_loss)
-        self.training_scheduler_config = dict(config.training_scheduler_config)
-        self.training_timestep_fraction = self.training_scheduler_config.get(
-            "timestep_fraction",
-            1.0,
-        )
+        self.training_timestep_fraction = config.training_timestep_fraction
 
     @property
     def eta(self) -> float:
-        return self._eta
-
-    @property
-    def sde_type(self) -> str:
-        return self._sde_type
+        return self._sde_config.eta
 
     @property
     def time_shift(self) -> float:
-        return self._shift
+        return self._sde_config.shift
 
     def get_sampling_requirements(self) -> SamplingRequirements:
         """Return NFT sampling requirements."""
@@ -154,21 +128,8 @@ class NFTAlgorithm(BaseAlgorithm):
             requires_clean_latents=True,
         )
 
-    def get_ema_spec(self) -> EMASpec:
-        return EMASpec(
-            enable_eval_ema=True,
-            eval_ema_decay=self.eval_ema_decay,
-            eval_ema_update_interval=self.eval_ema_update_interval,
-            reference_mode=("nft_old_policy" if self.use_reference_ema else "none"),
-            reference_decay=self.ema_decay,
-            reference_decay_type=self.ema_decay_type,
-            reference_flat_steps=self.ema_flat_steps,
-            reference_uprate=self.ema_uprate,
-            reference_uphold=self.ema_uphold,
-            reference_update_timing=self.reference_update_timing,
-            old_adapter_name=self.old_adapter_name,
-            new_adapter_name=self.new_adapter_name,
-        )
+    def get_ema_spec(self) -> EMAConfig:
+        return self.config.ema
 
     def resolve_rollout_sde_indices(
         self,
@@ -347,7 +308,7 @@ class NFTAlgorithm(BaseAlgorithm):
         adapter_model = model.module if hasattr(model, "module") else model
         if hasattr(adapter_model, "set_adapter"):
             try:
-                with switch_adapter(adapter_model, self.old_adapter_name):
+                with switch_adapter(adapter_model, self.ema.old_adapter_name):
                     return model_bundle.forward_denoiser(
                         latents=latents,
                         sigma=sigma,
@@ -356,7 +317,7 @@ class NFTAlgorithm(BaseAlgorithm):
             except Exception as exc:
                 raise RuntimeError(
                     "NFT old-policy prediction failed while switching adapters. "
-                    f"Expected adapter={self.old_adapter_name!r}. "
+                    f"Expected adapter={self.ema.old_adapter_name!r}. "
                     "Refusing to fall back to base/current model because that would "
                     "change the training objective."
                 ) from exc
@@ -494,7 +455,7 @@ class NFTAlgorithm(BaseAlgorithm):
         model = model_bundle.transformer
         adapter_model = model.module if hasattr(model, "module") else model
         assert hasattr(adapter_model, "set_adapter"), "adapter_model must have set_adapter method"
-        adapter_model.set_adapter(self.new_adapter_name)
+        adapter_model.set_adapter(self.ema.new_adapter_name)
 
         grad_context = torch.enable_grad() if not torch.is_grad_enabled() else nullcontext()
 
@@ -514,7 +475,7 @@ class NFTAlgorithm(BaseAlgorithm):
         )
 
         if hasattr(adapter_model, "set_adapter"):
-            adapter_model.set_adapter(self.new_adapter_name)
+            adapter_model.set_adapter(self.ema.new_adapter_name)
 
         adv_processed = self.prepare_loss_advantages(advantages)
         adv_clipped = torch.clamp(adv_processed, -self.adv_clip_max, self.adv_clip_max)
@@ -604,6 +565,8 @@ class NFTAlgorithm(BaseAlgorithm):
     # Configuration export
     def get_config(self) -> Dict[str, Any]:
         """Get algorithm configuration as dictionary."""
+        from dataclasses import asdict
+
         config = super().get_config()
         config.update(
             {
@@ -612,17 +575,9 @@ class NFTAlgorithm(BaseAlgorithm):
                 "adv_clip_max": self.adv_clip_max,
                 "adv_mode": self.adv_mode,
                 "use_adaptive_weight": self.use_adaptive_weight,
-                "sde_config": {"eta": self._eta, "sde_type": self._sde_type, "shift": self._shift},
+                "sde_config": self._sde_config.to_dict(),
                 "time_shift": self.time_shift,
-                "ema_decay": self.ema_decay,
-                "ema_decay_type": self.ema_decay_type,
-                "ema_flat_steps": self.ema_flat_steps,
-                "ema_uprate": self.ema_uprate,
-                "ema_uphold": self.ema_uphold,
-                "reference_update_timing": self.reference_update_timing,
-                "use_reference_ema": self.use_reference_ema,
-                "old_adapter_name": self.old_adapter_name,
-                "new_adapter_name": self.new_adapter_name,
+                "ema": asdict(self.ema),
                 "train_timestep_mode": self.train_timestep_mode,
                 "shuffle_train_timesteps": self.shuffle_train_timesteps,
                 "apply_time_shift_in_loss": self.apply_time_shift_in_loss,

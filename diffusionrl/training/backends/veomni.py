@@ -24,9 +24,14 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple
 import torch
 from torch import nn
 
-from diffusionrl.config.training_sections import LrSchedulerConfig, OptimizerConfig
+from diffusionrl.config.registration import register_config
 from diffusionrl.models.base import ModelBundle
-from diffusionrl.training.backends.base import TrainBackendConfig
+from diffusionrl.training.backends.base import (
+    LrSchedulerConfig,
+    OptimizerConfig,
+    TrainBackendConfig,
+    TrainTopology,
+)
 from diffusionrl.training.backends.protocols import (
     LRSchedulerProtocol,
     OptimizerProtocol,
@@ -35,19 +40,12 @@ from diffusionrl.training.backends.protocols import (
 logger = logging.getLogger(__name__)
 
 
-def _as_optional_int(raw: Any) -> Optional[int]:
-    if raw is None:
-        return None
-    try:
-        value = int(raw)
-    except Exception:
-        return None
-    if value < 1:
-        return None
-    return value
-
-
-@dataclass(frozen=True)
+@register_config(
+    group="training/backend",
+    name="veomni",
+    target="diffusionrl.training.backends.veomni.VeOmniBackend",
+)
+@dataclass
 class VeOmniBackendConfig(TrainBackendConfig):
     """Config for the VeOmni training backend.
 
@@ -63,15 +61,11 @@ class VeOmniBackendConfig(TrainBackendConfig):
     name: ClassVar[str] = "veomni"
 
     # Topology / parallel mode
+    # All parallel dims (dp_size, dp_replicate_size, dp_shard_size, tp_size,
+    # pp_size, sp_size, ep_size, cp_size) come from the TrainTopology
+    # runtime dep injected by the caller at build() time. Only
+    # VeOmni-specific knobs live here.
     data_parallel_mode: str = "fsdp2"
-    dp_size: Optional[int] = None
-    dp_replicate_size: int = 1
-    dp_shard_size: Optional[int] = None
-    tp_size: int = 1
-    pp_size: int = 1
-    sp_size: int = 1
-    ep_size: int = 1
-    cp_size: int = 1
 
     # VeOmni parallelize knobs
     enable_full_shard: bool = True
@@ -108,6 +102,8 @@ class VeOmniBackend:
         self,
         config: VeOmniBackendConfig,
         model_bundle: ModelBundle,
+        *,
+        topology: TrainTopology,
     ) -> None:
         dp_mode = str(config.data_parallel_mode or "fsdp2").strip().lower()
         if dp_mode != "fsdp2":
@@ -116,6 +112,7 @@ class VeOmniBackend:
         self.config = config
         self.model_bundle: ModelBundle = model_bundle
         self.model: nn.Module = model_bundle.transformer
+        self._topology = topology
         self._dp_mode = dp_mode
         self._last_optimizer_lr: Optional[float] = None
         self._runtime_init_device: Optional[str] = None
@@ -205,10 +202,13 @@ class VeOmniBackend:
         return 0
 
     def _resolve_dp_sizes(self) -> Tuple[int, int, int]:
+        topo = self._topology
         world_size = self._current_world_size()
-        dp_size = int(_as_optional_int(self.config.dp_size) or world_size)
-        dp_replicate = int(_as_optional_int(self.config.dp_replicate_size) or 1)
-        dp_shard = int(_as_optional_int(self.config.dp_shard_size) or max(1, dp_size // max(1, dp_replicate)))
+        dp_size = int(topo.dp_size) if topo.dp_size is not None else int(world_size)
+        dp_replicate = int(topo.dp_replicate_size)
+        dp_shard = (
+            int(topo.dp_shard_size) if topo.dp_shard_size is not None else max(1, dp_size // max(1, dp_replicate))
+        )
 
         if dp_replicate * dp_shard != dp_size:
             raise ValueError(
@@ -220,6 +220,7 @@ class VeOmniBackend:
     def _init_parallel_state(self) -> None:
         init_parallel_state, *_ = self._veomni_apis()
         dp_size, dp_replicate, dp_shard = self._resolve_dp_sizes()
+        topo = self._topology
         runtime_init_device = str(self.config.init_device)
         if dp_size <= 1 and runtime_init_device in {"meta", "cpu"}:
             logger.warning(
@@ -234,11 +235,11 @@ class VeOmniBackend:
             dp_size=int(dp_size),
             dp_replicate_size=int(dp_replicate),
             dp_shard_size=int(dp_shard),
-            tp_size=int(_as_optional_int(self.config.tp_size) or 1),
-            ep_size=int(_as_optional_int(self.config.ep_size) or 1),
-            pp_size=int(_as_optional_int(self.config.pp_size) or 1),
-            cp_size=int(_as_optional_int(self.config.cp_size) or 1),
-            ulysses_size=int(_as_optional_int(self.config.sp_size) or 1),
+            tp_size=int(topo.tp_size),
+            ep_size=int(topo.ep_size),
+            pp_size=int(topo.pp_size),
+            cp_size=int(topo.cp_size),
+            ulysses_size=int(topo.sp_size),
             dp_mode=self._dp_mode,
         )
 

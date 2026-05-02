@@ -9,18 +9,30 @@ from typing import Any, ClassVar, Dict, Optional, Tuple
 import torch
 from torch import nn
 
-from diffusionrl.config.training_sections import LrSchedulerConfig, OptimizerConfig
+from diffusionrl.config.registration import register_config
+from diffusionrl.config.validation import validate_precision_type
 from diffusionrl.models.base import ModelBundle
-from diffusionrl.training.backends.base import TrainBackendConfig
+from diffusionrl.training.backends.base import (
+    LrSchedulerConfig,
+    OptimizerConfig,
+    TrainBackendConfig,
+    TrainTopology,
+)
 from diffusionrl.training.backends.protocols import (
     LRSchedulerProtocol,
     OptimizerProtocol,
 )
+from diffusionrl.utils.dtypes import parse_torch_dtype
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@register_config(
+    group="training/backend",
+    name="fsdp",
+    target="diffusionrl.training.backends.fsdp.FSDPBackend",
+)
+@dataclass
 class FSDPBackendConfig(TrainBackendConfig):
     """Config for the FSDP2 training backend.
 
@@ -32,10 +44,16 @@ class FSDPBackendConfig(TrainBackendConfig):
     name: ClassVar[str] = "fsdp"
 
     cpu_offload: bool = False
-    param_dtype: torch.dtype = torch.bfloat16
+    param_dtype: str = "bf16"
     mixed_precision: bool = True
     fsdp_mode: str = "full"
     reshard_after_forward: bool = True
+
+    def __post_init__(self) -> None:
+        # Normalize aliases (bfloat16/bf16/fp16/...) to the canonical short form
+        # so the resolved cfg stays YAML-serializable (Hydra dumps it on every
+        # run) and the registry renders identically across recipes.
+        self.param_dtype = validate_precision_type(self.param_dtype, field="training.backend.param_dtype")
 
 
 class FSDPBackend:
@@ -43,7 +61,13 @@ class FSDPBackend:
         self,
         config: FSDPBackendConfig,
         model_bundle: ModelBundle,
+        *,
+        topology: Optional[TrainTopology] = None,
     ) -> None:
+        # topology is accepted for call-site symmetry with VeOmniBackend but
+        # unused here — FSDP2 derives world/DP sizes from
+        # ``torch.distributed.get_world_size()`` at wrap time.
+        del topology
         self.config = config
         self.model_bundle: ModelBundle = model_bundle
         self.model: nn.Module = model_bundle.transformer
@@ -74,7 +98,7 @@ class FSDPBackend:
 
         if self.config.mixed_precision:
             fsdp_kwargs["mp_policy"] = MixedPrecisionPolicy(
-                param_dtype=self.config.param_dtype,
+                param_dtype=parse_torch_dtype(self.config.param_dtype, field_name="training.backend.param_dtype"),
                 reduce_dtype=torch.float32,
             )
 

@@ -33,15 +33,15 @@ class ImageRLDataSource:
         Initialize data source from arguments.
 
         Args:
-            args: TrainingArguments instance with:
-                - data_path: Path to data file (JSON, JSONL, or TXT)
-                - batch_size: Batch size
-                - seed: Random seed
+            args: Hydra ``cfg`` (DictConfig) with:
+                - run.data_path: Path to data file (JSON, JSONL, or TXT)
+                - run.seed: Random seed
+                - algorithm.prompts_per_rollout: Batch size
         """
         self.args = args
-        self.data_path = args.data_path
-        self.eval_data_path = args.eval_data_path
-        self.seed = args.seed
+        self.data_path = args.run.data_path
+        self.eval_data_path = args.run.eval_data_path
+        self.seed = args.run.seed
         self.prompts_per_rollout = args.algorithm.prompts_per_rollout
         self.drop_last = True
 
@@ -53,7 +53,7 @@ class ImageRLDataSource:
         self._eval_dataset_ready = False
 
         if not self.data_path:
-            raise ValueError("ImageRLDataSource requires args.data_path.")
+            raise ValueError("ImageRLDataSource requires args.run.data_path.")
         if not os.path.exists(self.data_path):
             raise FileNotFoundError(f"Training data path not found: {self.data_path}")
         self._init_dataset()
@@ -237,7 +237,7 @@ class DefaultDataSource:
         Initialize default data source.
 
         Args:
-            args: TrainingArguments instance
+            args: Hydra ``cfg`` (DictConfig)
         """
         self.args = args
         self.drop_last = False

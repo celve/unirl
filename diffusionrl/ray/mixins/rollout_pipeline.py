@@ -9,6 +9,7 @@ Host class contract
 The host must provide:
 
 - ``self.engine``   – a ``BaseRolloutEngine`` (for ``decode_latents``)
+- ``self._rollout_plan`` – a ``RolloutPlan`` (drives chunked decode size)
 - ``self.algorithm`` – a ``BaseAlgorithm`` (owns ``compute_advantages``)
 - ``self.generate(request)`` – returns ``RolloutResponse``
 - ``self.get_buffer(handle)`` / ``self.put_buffer(key, value)`` – from ``Buffer``
@@ -20,7 +21,8 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, List
 
-from diffusionrl.utils.transfer_queue_utils import create_transferqueue_client, reset_zero_copy_buffer_free, tqbridge
+from diffusionrl.distributed.transfer_queue import TransferQueueRuntime, tqbridge
+from diffusionrl.samplers.engine import chunked_decode_latents
 
 if TYPE_CHECKING:
     from diffusionrl.transfer.buffer import BufferHandle
@@ -87,16 +89,22 @@ class RolloutPipelineMixin:
                 _img_pairs,
             )
             self._logged_decode_diag = True
-        if response.samples.decoded_images is None:
-            from diffusionrl.samplers.engine import chunked_decode_latents
-            from diffusionrl.utils.media import tensor_to_pil
-
+        if response.samples.decoded_images is None and response.samples.decoded_videos is None:
             decoded = chunked_decode_latents(
                 self.engine,
                 response.samples.latents,
-                chunk_size=response.request.sampling_params.sampling_forward_batch,
+                chunk_size=self._rollout_plan.forward_batch_size,
             )
-            response.samples.decoded_images = tensor_to_pil(decoded)
+            # VAE decode returns 5D (B, C, T, H, W) for video models and
+            # 4D (B, C, H, W) for image models. Route to the matching field
+            # so the reward pipeline's _extract_{images,videos}_from_output
+            # finds what it needs.
+            if decoded.dim() >= 5:
+                response.samples.decoded_videos = decoded
+            else:
+                from diffusionrl.utils.media import tensor_to_pil
+
+                response.samples.decoded_images = tensor_to_pil(decoded)
         score_t0 = time.perf_counter()
         self._ensure_reward_pipeline().score_and_attach(response)
         response.samples.reward_compute_s = time.perf_counter() - score_t0
@@ -104,8 +112,8 @@ class RolloutPipelineMixin:
         # Build a tiny wandb media preview (PIL + prompt + reward) *before*
         # dropping the full decoded-image list, so only the preview payload
         # travels back across Ray to the driver.
-        if response.request.collect_media_preview:
-            response.attach_media_preview(max_items=int(response.request.media_max_items))
+        if bool(getattr(response.request, "collect_media_preview", False)):
+            response.attach_media_preview(max_items=int(getattr(response.request, "media_max_items", 8)))
         else:
             response.samples.media_preview = None
 
@@ -200,10 +208,12 @@ class RolloutPipelineMixin:
         _stamp_actor_reward_total(responses)
         return responses
 
-    def init_transferqueue_client(self, tq_global_config, tq_backend_config):
-        self.tq_global_config = tq_global_config
-        self.tq_backend_config = tq_backend_config
-        self.tq_client = create_transferqueue_client("Actor", tq_global_config, tq_backend_config)
+    def init_transferqueue_client(self, *, handoff: dict):
+        """Install per-actor TransferQueue client (called from the driver)."""
+        self.tq_handoff = handoff
+        self.tq_runtime = TransferQueueRuntime().install()
+        self.tq_client = self.tq_runtime.create_client("Actor", handoff)
 
     def reset_zero_copy_buffer_free(self):
-        reset_zero_copy_buffer_free()
+        """Reset the actor's zero-copy buffer-free state at the top of each rollout step."""
+        self.tq_runtime.reset_zero_copy_buffer_free()

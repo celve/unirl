@@ -10,22 +10,17 @@ import importlib
 from typing import Dict, Tuple
 
 from .base import BaseAlgorithm
-from .construction import create_algorithm_from_init_payload
-from .registry import ensure_builtin_algorithm_registration
 
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "GRPOAlgorithm": ("diffusionrl.algorithms.grpo", "GRPOAlgorithm"),
     "NFTAlgorithm": ("diffusionrl.algorithms.nft", "NFTAlgorithm"),
 }
 
-ensure_builtin_algorithm_registration()
-
 
 __all__ = [
     "BaseAlgorithm",
     "GRPOAlgorithm",
     "NFTAlgorithm",
-    "create_algorithm_from_init_payload",
 ]
 
 

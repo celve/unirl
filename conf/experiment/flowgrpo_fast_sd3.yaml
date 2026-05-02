@@ -1,0 +1,104 @@
+# @package _global_
+# FlowGRPO-Fast SD3 recipe — direct-sampling (fsdp engine) GRPO on SD3.5.
+#
+# Shared by:
+#   reproduce_scripts/train_grpo_sd3_multinode.sh
+#
+# Anchored to a 2-node × 8-GPU cluster (16 actors total). All recipe values
+# are hardcoded; the launcher passes only env-derived overrides for cluster
+# topology, paths, and wandb identity. Run on a different cluster shape via
+# CLI overrides on training.topology.actor_count + training.plan.* (validators
+# surface mismatches with clear errors).
+defaults:
+  - override /algorithm: grpo
+  - override /model: sd3
+  - override /sampling/sde_strategy: flow
+  - _self_
+
+run:
+  data_source_dotpath: diffusionrl.data.data_source.ImageRLDataSource
+  num_rollouts: 10000
+  data_path: /tmp/diffusionrl/data/train.txt
+  eval_data_path: /tmp/diffusionrl/data/test.txt
+
+sampling:
+  num_inference_steps: 10
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+  sde_config:
+    eta: 0.7
+    shift: 3.0
+
+algorithm:
+  prompts_per_rollout: 48
+  samples_per_prompt: 16
+  adv_normalization_scope: group
+  use_global_std: true
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  use_kl_penalty: true
+  kl_coef: 0.0
+  ema:
+    eval_ema_decay: 0.99
+    eval_ema_update_interval: 2
+  scheduler:
+    timestep_fraction: [0.0, 0.5]
+    num_sde_steps: 3
+  # Bind GRPO's SDE math params to sampling.sde_config — the rollout/replay
+  # path. Without this, GRPO falls back to SDEConfig dataclass defaults
+  # (eta=1.0) and train-side log_prob diverges from rollout/replay log_prob,
+  # producing ratio≈1.23 at iter 0.
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+    shift: ${sampling.sde_config.shift}
+
+training:
+  plan:
+    # Anchored to 2 nodes × 8 GPUs = 16 actors. global = prompts*samples = 768.
+    micro_batch_size: 8
+    num_updates_per_batch: 2
+    local_mini_batch_size: 24    # = global / actor_count / num_updates = 768/16/2
+    local_batch_size: 48         # = local_mini_batch_size * num_updates_per_batch
+    global_batch_size: 768       # = prompts_per_rollout * samples_per_prompt
+  topology:
+    actor_count: 16              # 2 nodes × 8 GPUs
+  optimizer:
+    learning_rate: 3.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    total_steps: 10000
+  execution:
+    max_grad_norm: 1.0
+    offload_train: false
+    offload_rollout: false
+
+model:
+  use_lora: true
+  lora_rank: 32
+  lora_alpha: 64
+  use_gradient_checkpointing: false
+  pretrained_model_ckpt_path: stabilityai/stable-diffusion-3.5-medium
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    - name: pickscore
+      weight: 1.0
+      batch_size: 8
+
+logging:
+  logging_steps: 1
+  log_media: true
+  media_max_items: 48
+  report_to_wandb: true
+  project_name: diffusionrl-flowgrpo
+
+evaluation:
+  eval_steps: 0

@@ -1,52 +1,80 @@
 #!/usr/bin/env python
-"""
-diffusionrl Training Entry Point.
+"""diffusionRL training entry point (Hydra-native).
 
-Spawns ``TrainActor`` and ``RolloutActor`` handles directly and drives the
-rollout loop via ``RolloutPipeline``.
+Spawns ``TrainActor`` and ``RolloutActor`` handles directly from a Hydra
+``DictConfig`` and drives the rollout loop via ``RolloutPipeline``.
 
 Usage:
-    python -m diffusionrl.train --config scripts/example_flux_dancegrpo_direct.yaml
+    python -m diffusionrl.train algorithm=grpo model=flux ...
 """
 
-import copy
+from __future__ import annotations
+
 import logging
 import time
 
+import hydra
+from omegaconf import DictConfig, OmegaConf
+
+# Populate Hydra's ConfigStore with every @register_config leaf before
+# @hydra.main triggers composition. Done as an explicit call (not a side
+# effect of importing diffusionrl.config) so Ray workers and other importers
+# don't trigger the package-wide walk, which can create circular imports.
+from diffusionrl.config import register_all_configs
+
+register_all_configs()
+
 logger = logging.getLogger(__name__)
 
-"""
-Main control-plane path (sync mode):
-    parse_args_with_derived_config -> build_launch_config
-    -> validate_launch_config_for_train -> create_placement_groups_from_launch
-    -> RolloutActorGroup.bootstrap -> rollout_group
-    -> TrainActorGroup.bootstrap -> (train_group, master_addr, master_port)
-    -> per rollout: RolloutPipeline.run_once (load_prompts + plan_requests
-       + exec_request [actor-side run_rollout_pipeline fuses
-       generate_buffered + attach_reward + compute_advantages + get_buffer]
-       + aggregate + convert_training_data -> TrainingBatch)
-    -> train_group.train(rollout_id, batch) [slices per-rank, dispatches]
-    -> train_group.sync_weights_to_rollout
-"""
+
+def _run_cross_component_validators(cfg: DictConfig) -> None:
+    """Cross-component invariants that span multiple resolved sections.
+
+    Runs on the driver after ``validate(cfg)`` has materialized every
+    registered leaf. Each helper raises ``ValueError`` with a single-line
+    message on failure.
+    """
+    from diffusionrl.config.validation import (
+        validate_dynamic_dotpaths,
+        validate_lora_target_modules,
+        validate_offload_contract,
+        validate_rollout_layout,
+        validate_training_actor_sampling_mode,
+        validate_training_batch_geometry,
+        validate_weight_sync_contract,
+    )
+
+    validate_dynamic_dotpaths(cfg)
+    # LoRA target materializer must run before downstream validators / Ray
+    # bootstrap so PEFT and SGLang share one resolved target list.
+    validate_lora_target_modules(cfg)
+    validate_training_actor_sampling_mode(cfg)
+    validate_training_batch_geometry(cfg)
+    validate_weight_sync_contract(cfg)
+    validate_rollout_layout(cfg)
+    validate_offload_contract(cfg)
 
 
-def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
-    """Synchronous training entrypoint built on TrainActor / RolloutActor handles."""
-    debug_mode = str(args.debug.mode or "none").strip().lower()
-    if debug_mode == "train_only":
-        from diffusionrl.debug import run_debug_train_only
+def train(cfg: DictConfig) -> None:
+    """Synchronous training entrypoint, cfg-native."""
+    debug_mode = str(cfg.debug.get("mode") or "none").strip().lower()
+    if debug_mode and debug_mode != "none":
+        raise NotImplementedError(
+            f"debug.mode={debug_mode!r} is not supported on the cfg-native "
+            "train entry (the argparse debug runner is retired)."
+        )
 
-        return run_debug_train_only(args, derived_config=derived_config)
+    from diffusionrl.config.instantiate import build, validate
+
+    # Fail-fast schema check on the driver before any Ray work.
+    validate(cfg)
+    _run_cross_component_validators(cfg)
 
     import ray
 
-    from diffusionrl.algorithms.construction import create_algorithm_from_init_payload
-    from diffusionrl.cmdline.resolution import build_launch_config
-    from diffusionrl.cmdline.schema import build_derived_config_view
-    from diffusionrl.config.validation import validate_launch_config_for_train
-    from diffusionrl.distributed.weight_sync import build_weight_sync_config
+    from diffusionrl.config.validation import is_direct_sampling
+    from diffusionrl.distributed.transfer_queue import TransferQueueRuntime
     from diffusionrl.ray.group import RolloutActorGroup, TrainActorGroup
-    from diffusionrl.ray.placement_group import create_placement_groups_from_launch
     from diffusionrl.rollout.pipeline import RolloutPipeline, build_media_preview
     from diffusionrl.utils import configure_logger, load_function, set_seed
     from diffusionrl.utils.train_utils import (
@@ -56,91 +84,80 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
         should_log,
         should_save,
     )
-    from diffusionrl.utils.transfer_queue_utils import (
-        clear_partition,
-        create_transferqueue_client,
-        init_remote_actor_transferqueue_client,
-        init_transferqueue,
-        reset_actors_zero_copy_buffer_free,
-        reset_zero_copy_buffer_free,
-        update_single_controller_tq_config,
-    )
     from diffusionrl.utils.wandb_logger import aggregate_metrics, init_logger
     from diffusionrl.utils.wandb_metrics import compute_rollout_batch_metrics
 
     configure_logger()
-    set_seed(args.seed)
-    launch_config = build_launch_config(args, derived_config=derived_config)
-    algorithm_init_payload = launch_config.algorithm_init_payload
-    control_algorithm = create_algorithm_from_init_payload(algorithm_init_payload)
-    rollout_info = launch_config.rollout_info
-    sync_mode = rollout_info.sync_protocol
-    rollout_mode_name = rollout_info.mode
-    training_actor_sampling_mode = rollout_info.training_actor_sampling_mode
+    set_seed(int(cfg.run.seed))
 
-    # Consistency-debug plumbing: when ``--debug.output-dir`` is set, export it
-    # as an env var so every Ray actor inherits it.  The per-step tensor dumps
-    # inside ``GRPOAlgorithm.compute_loss`` (training side) and
-    # ``FSDPBaseSampler.sample`` (direct-sampling side) look up
-    # ``DIFFUSIONRL_DEBUG_OUTPUT_DIR`` as a fallback when the explicit
-    # attribute/arg is unset, so this single export keeps debug dumps working
-    # across direct-sampling and separate (SGLang) topologies without having
-    # to thread the value through every actor ctor.  The ``TrainActor`` still
-    # also receives it as an explicit kwarg (see ``build_train_actor_init_kwargs``)
-    # and assigns ``self.algorithm._debug_output_dir`` — the env var is the
-    # safety net for rollout actors and for Ray worker processes that may not
-    # inherit the parent's environment on every platform.
-    import os
+    # Derived inline from cfg — no intermediate launch/info wrappers.
+    sync_cfg = cfg.get("sync")
+    sync_enabled = sync_cfg is not None
+    sync_target = str(sync_cfg.get("_target_") or "") if sync_enabled else ""
+    training_actor_sampling_mode = is_direct_sampling(cfg)
 
-    _debug_output_dir = getattr(args.debug, "output_dir", None)
-    if _debug_output_dir:
-        os.environ["DIFFUSIONRL_DEBUG_OUTPUT_DIR"] = str(_debug_output_dir)
-        logger.info(
-            "Exported DIFFUSIONRL_DEBUG_OUTPUT_DIR=%s for downstream actors.",
-            _debug_output_dir,
+    if sync_enabled and sync_target.endswith("UpdateWeightFromCheckpoint"):
+        raise NotImplementedError(
+            "train does not yet support sync=checkpoint_path "
+            "(would call training_runtime.export_weights_to_path which the new TrainActor lacks)."
         )
 
-    validate_launch_config_for_train(launch_config=launch_config)
+    control_algorithm = build(cfg.algorithm)
+    training_plan = OmegaConf.to_object(cfg.training.plan)
+    topology = OmegaConf.to_object(cfg.training.topology)
+    sampling_spec = OmegaConf.to_object(cfg.sampling)
+
+    # Driver-side logging derivations; bootstrap re-derives its own copies.
+    from diffusionrl.ray.group.train import _backend_name_from_cfg
+
+    backend_name = _backend_name_from_cfg(cfg)
 
     logger.info("Starting diffusionRL training...")
-    logger.info(f"Model: {args.model.pretrained_model_ckpt_path}")
-    logger.info("Algorithm: %s", algorithm_init_payload.component_dotpath)
-    logger.info(f"Mode: {rollout_mode_name}")
-    logger.info(f"Offload train: {args.ray.offload_train}, Offload rollout: {args.ray.offload_rollout}")
-    logger.info("Weight sync mode: %s", sync_mode)
+    logger.info("Model: %s", cfg.model.pretrained_model_ckpt_path)
+    logger.info("Algorithm: %s", cfg.algorithm._target_)
+    logger.info("Mode: %s", "direct_sampling" if training_actor_sampling_mode else "separate")
+    logger.info(
+        "Offload train: %s, Offload rollout: %s",
+        cfg.training.execution.offload_train,
+        cfg.training.execution.offload_rollout,
+    )
+    logger.info("Weight sync: %s", sync_target if sync_enabled else "disabled")
     logger.info(
         "Periodic controls: save_steps=%s eval_steps=%s logging_steps=%s",
-        args.rollout.save_steps,
-        args.evaluation.eval_steps,
-        args.logging.logging_steps,
+        cfg.resume.save_steps,
+        cfg.evaluation.eval_steps,
+        cfg.logging.logging_steps,
     )
     logger.info(
         "Debug flags: mode=%s save_intermediates=%s save_dir=%s",
         debug_mode,
-        bool(args.debug.save_intermediates),
-        args.debug.save_dir,
+        bool(cfg.debug.save_intermediates),
+        cfg.debug.save_dir,
     )
 
-    # Initialize Ray
+    # Initialize Ray. Auto-connects via RAY_ADDRESS when set, else local.
     if not ray.is_initialized():
-        if args.ray.ray_address:
-            ray.init(address=args.ray.ray_address, ignore_reinit_error=True)
-        else:
-            # Cap num_cpus to avoid slow startup on high-core machines (e.g. 384 cores)
-            # where Ray pre-starts one worker per CPU, causing connect timeouts.
-            import os
+        import os
 
+        if os.environ.get("RAY_ADDRESS"):
+            # Connecting to an existing cluster — Ray rejects num_cpus/num_gpus
+            # in this mode. The head allocator already provisioned resources.
+            ray.init()
+        else:
+            # Local cluster: cap num_cpus to avoid slow startup on high-core
+            # machines (e.g. 384 cores) where Ray pre-starts one worker per CPU,
+            # causing connect timeouts.
             _max_cpus = min(os.cpu_count() or 64, 64)
             ray.init(num_cpus=_max_cpus)
 
     wandb_logger = None
     rollout_group = None
     train_group = None
-    sync_config = None
+    placement = None
 
     try:
-        if args.logging.report_to_wandb and args.logging.project_name:
-            raw_tags = args.logging.tags
+        if cfg.logging.report_to_wandb and cfg.logging.project_name:
+            raw_tags = cfg.logging.tags
             if raw_tags:
                 if isinstance(raw_tags, str):
                     raw_tags = raw_tags.split(",")
@@ -148,33 +165,32 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
             else:
                 wandb_tags = None
             wandb_logger = init_logger(
-                project=args.logging.project_name,
-                run_name=args.logging.run_name,
-                config=build_derived_config_view(args.to_dotted_dict(), derived_config=derived_config),
-                log_dir=args.logging.logging_dir,
+                project=str(cfg.logging.project_name),
+                run_name=cfg.logging.run_name,
+                config=OmegaConf.to_container(cfg, resolve=True),
+                log_dir=cfg.logging.logging_dir,
                 rank=0,
                 tags=wandb_tags,
-                entity=args.logging.entity or None,
+                entity=cfg.logging.entity or None,
                 require_success=True,
             )
             if wandb_logger.initialized:
                 logger.info(
                     "WandB initialized: project=%s, run=%s",
-                    args.logging.project_name,
-                    args.logging.run_name,
+                    cfg.logging.project_name,
+                    cfg.logging.run_name,
                 )
 
         # 1. Resource allocation
-        pgs = create_placement_groups_from_launch(launch_config)
-        logger.info("Placement groups created")
+        placement = build(cfg.placement)
+        logger.info("Placement ready: %s", placement.config)
         rollout_on_gpu = True
 
         # 2. Driver-side data source + sampling defaults
-        data_source_cls = load_function(args.data_source_dotpath)
-        data_source = data_source_cls(args)
-        prompt_batch_size = int(getattr(control_algorithm, "prompts_per_rollout", args.algorithm.prompts_per_rollout))
+        data_source_cls = load_function(str(cfg.run.data_source_dotpath))
+        data_source = data_source_cls(cfg)
+        prompt_batch_size = int(cfg.algorithm.prompts_per_rollout)
         samples_per_prompt = int(getattr(control_algorithm, "samples_per_prompt", 1))
-        sampling_spec = launch_config.sampling_spec
         logger.info(
             "Driver-side rollout config: prompt_batch_size=%s samples_per_prompt=%s",
             prompt_batch_size,
@@ -182,28 +198,24 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
         )
         rollout_pipeline = RolloutPipeline()
 
-        # 3. Bootstrap rollout group (spawns actors + wraps in single facade)
+        # 3. Bootstrap rollout group
         if not training_actor_sampling_mode:
-            rollout_pgs = pgs.get("rollout")
-            if rollout_pgs is None:
-                raise ValueError("Missing rollout placement-group allocation.")
             rollout_group = RolloutActorGroup.bootstrap(
-                launch_config=launch_config,
-                rollout_pgs=rollout_pgs,
+                cfg=cfg,
+                placement=placement,
             )
 
         # 4. Optional pre-offload to relieve memory pressure before train init
-        if not training_actor_sampling_mode and args.ray.offload_rollout:
+        if not training_actor_sampling_mode and cfg.training.execution.offload_rollout:
             rollout_group.sleep()
             rollout_on_gpu = False
 
-        # 5. Bootstrap training group (picks rendezvous + spawns train actors)
-        training_pgs = pgs.get("training")
-        if training_pgs is None:
-            raise ValueError("Missing training placement-group allocation.")
+        # 5. Bootstrap training group
         train_group, master_addr, master_port = TrainActorGroup.bootstrap(
-            launch_config=launch_config,
-            training_pgs=training_pgs,
+            cfg=cfg,
+            placement=placement,
+            colocate=bool(cfg.placement.colocate),
+            colocate_gpu_fraction=float(cfg.placement.colocate_gpu_fraction),
         )
         logger.info(
             "Resolved training distributed master: addr=%s port=%s world_size=%d",
@@ -212,12 +224,13 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
             train_group.num_actors,
         )
 
-        if args.training.resume_from_checkpoint:
-            train_group.load_checkpoint(args.training.resume_from_checkpoint)
-            logger.info("Checkpoint loaded: %s", args.training.resume_from_checkpoint)
+        if cfg.resume.resume_from_checkpoint:
+            ckpt_path = str(cfg.resume.resume_from_checkpoint)
+            train_group.load_checkpoint(ckpt_path)
+            logger.info("Checkpoint loaded: %s", ckpt_path)
             restored_rollout_id = maybe_restore_start_rollout_id_from_checkpoint(
-                args,
-                args.training.resume_from_checkpoint,
+                cfg,
+                ckpt_path,
             )
             if restored_rollout_id is not None:
                 logger.info(
@@ -225,12 +238,10 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
                     restored_rollout_id,
                 )
 
-        # Driver-side values (replace runtime calls that don't exist on TrainActor)
-        training_plan = launch_config.training.actor_init_config.training_plan_config
         expected_global_batch_size = int(training_plan.global_batch_size)
         train_backend_info = {
-            "name": launch_config.training.backend_name,
-            "topology": launch_config.training.topology.as_dict(),
+            "name": backend_name,
+            "topology": topology.as_dict(),
             "training_plan": training_plan.as_dict(),
         }
         logger.info("Training backend: %s", train_backend_info)
@@ -240,86 +251,69 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
         logger.info("Initial update_weights() skipped — FSDP2 TrainActor inits deterministically per rank")
 
         # 7. Post-init offload dance
-        if not training_actor_sampling_mode and args.ray.offload_rollout:
-            if args.ray.offload_train:
+        if not training_actor_sampling_mode and cfg.training.execution.offload_rollout:
+            if cfg.training.execution.offload_train:
                 train_group.offload()
             rollout_group.wake_up()
             rollout_on_gpu = True
 
-        # 8. Weight sync setup (no central BufferActor)
-        if not training_actor_sampling_mode:
-            sync_config = build_weight_sync_config(
-                args,
-                launch_config,
-                mode=sync_mode,
+        # 8. Weight sync setup
+        if not training_actor_sampling_mode and sync_enabled:
+            train_group.setup_weight_sync(
+                sync_cfg=sync_cfg,
+                placement_cfg=placement.config,
                 rollout_runtime=rollout_group,
             )
-            if sync_config:
-                train_group.setup_weight_sync(sync_config)
 
         # 8b. Resolve pipeline dispatch targets
         if training_actor_sampling_mode:
-            pipeline_actors = train_group.get_actors()
-            pipeline_handle_group = train_group.handle
+            pipeline_group = train_group
         else:
-            pipeline_actors = rollout_group.get_actors()
-            pipeline_handle_group = rollout_group.handle
+            pipeline_group = rollout_group
 
-        # init transfer queue and create client
-        tq_global_config, tq_backend_config = init_transferqueue(args)
-        single_ctrl_tq_global_config, single_ctrl_tq_backend_config = update_single_controller_tq_config(
-            copy.deepcopy(tq_global_config), copy.deepcopy(tq_backend_config), args
-        )
-        create_transferqueue_client(
-            "controller", single_ctrl_tq_global_config, single_ctrl_tq_backend_config, sync=True
-        )
-        if not training_actor_sampling_mode:
-            init_remote_actor_transferqueue_client(
-                rollout_group.get_actors(),
-                tq_global_config,
-                tq_backend_config,
-            )
-        init_remote_actor_transferqueue_client(
-            train_group.get_actors(),
-            tq_global_config,
-            tq_backend_config,
-        )
+        # 8c. Initialize TransferQueue (no-op when cfg.transfer_queue is absent)
+        tq_runtime = TransferQueueRuntime().install()
+        tq_handoffs = tq_runtime.init(cfg)
+        if tq_handoffs is not None:
+            controller_handoff, actor_handoff = tq_handoffs
+            tq_runtime.create_client("controller", controller_handoff, sync=True)
+            if not training_actor_sampling_mode:
+                tq_runtime.init_remote_actor_clients(rollout_group.get_actors(), actor_handoff)
+            tq_runtime.init_remote_actor_clients(train_group.get_actors(), actor_handoff)
 
         # 9. Main training loop
-        # rollout_id is the outer rollout-train loop step; it behaves similarly to
-        # a framework-level global step, but may differ from optimizer step count.
-        # global_optimizer_step tracks real optimizer step for wandb logging
-        wandb_media_enabled = wandb_logger is not None and args.logging.log_media
-        wandb_media_max_items = max(1, int(args.logging.media_max_items))
+        wandb_media_enabled = wandb_logger is not None and bool(cfg.logging.log_media)
+        wandb_media_max_items = max(1, int(cfg.logging.media_max_items))
         global_optimizer_step = 0
-        for rollout_id in range(args.rollout.start_rollout_id, args.rollout.num_rollout):
+        for rollout_id in range(int(cfg.resume.start_rollout_id), int(cfg.run.num_rollouts)):
             step_start_t = time.perf_counter()
             sync_phase_s = 0.0
             eval_phase_s = 0.0
-            should_log_step = should_log(rollout_id, args)
-            # === Reset TransferQueue zero-copy buffer free ===
-            reset_zero_copy_buffer_free()
-            reset_actors_zero_copy_buffer_free(train_group.get_actors())
-            if not training_actor_sampling_mode:
-                reset_actors_zero_copy_buffer_free(rollout_group.get_actors())
+            should_log_step = should_log(rollout_id, cfg)
+
+            # === Reset TransferQueue zero-copy buffer free (no-op when disabled) ===
+            if cfg.get("transfer_queue") is not None:
+                tq_runtime.reset_zero_copy_buffer_free()
+                tq_runtime.reset_actors_zero_copy_buffer_free(train_group.get_actors())
+                if not training_actor_sampling_mode:
+                    tq_runtime.reset_actors_zero_copy_buffer_free(rollout_group.get_actors())
 
             # === Periodic Eval (before rollout/train of this step) ===
-            if should_eval(rollout_id, args):
+            if should_eval(rollout_id, cfg):
                 eval_phase_start_t = time.perf_counter()
                 if not training_actor_sampling_mode:
-                    if args.ray.offload_rollout and not rollout_on_gpu:
+                    if cfg.training.execution.offload_rollout and not rollout_on_gpu:
                         rollout_group.wake_up()
                         rollout_on_gpu = True
 
                 def _run_eval():
                     return rollout_pipeline.run_eval(
-                        rollout_actors=pipeline_actors,
-                        rollout_handle_group=pipeline_handle_group,
+                        rollout_group=pipeline_group,
                         data_source=data_source,
                         prompt_batch_size=prompt_batch_size,
                         samples_per_prompt=samples_per_prompt,
                         sampling_spec=sampling_spec,
-                        evaluation_settings=args.evaluation,
+                        evaluation_settings=cfg.evaluation,
                         rollout_id=rollout_id,
                         collect_media_preview=wandb_media_enabled,
                         media_max_items=wandb_media_max_items,
@@ -354,14 +348,13 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
             # === PHASE A: Rollout ===
             rollout_phase_start_t = time.perf_counter()
             if not training_actor_sampling_mode:
-                if args.ray.offload_rollout and not rollout_on_gpu:
+                if cfg.training.execution.offload_rollout and not rollout_on_gpu:
                     rollout_group.wake_up()
                     rollout_on_gpu = True
 
             collect_rollout_preview = bool(should_log_step and wandb_media_enabled)
             training_batch, sample_count, rollout_response = rollout_pipeline.run_once(
-                rollout_actors=pipeline_actors,
-                rollout_handle_group=pipeline_handle_group,
+                rollout_group=pipeline_group,
                 data_source=data_source,
                 prompt_batch_size=prompt_batch_size,
                 samples_per_prompt=samples_per_prompt,
@@ -378,39 +371,40 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
             # (actors drop decoded_images after scoring), so we keep the
             # reference for the logging path below. No eager ``del`` needed.
 
-            if not training_actor_sampling_mode and args.ray.offload_rollout:
+            if not training_actor_sampling_mode and cfg.training.execution.offload_rollout:
                 rollout_group.sleep()
                 rollout_on_gpu = False
 
             # === PHASE B: Training ===
             train_phase_start_t = time.perf_counter()
-            if args.ray.offload_train:
+            if cfg.training.execution.offload_train:
                 train_group.onload()
 
-            batch_ref = ray.put(training_batch)  # for collect_rollout_batch_metrics below
+            batch_ref = ray.put(training_batch)
             results = train_group.train(rollout_id, training_batch)
             metrics = [r.to_legacy_metric_dict() for r in results]
             train_phase_s = time.perf_counter() - train_phase_start_t
 
             # Periodic save (collective; before offload so weights are still on GPU)
-            if should_save(rollout_id, args):
-                save_path = f"{args.rollout.output_dir}/checkpoint-{rollout_id}"
+            if should_save(rollout_id, cfg):
+                save_path = f"{cfg.resume.output_dir}/checkpoint-{rollout_id}"
                 train_group.save_model(save_path)
-                logger.info(f"Checkpoint saved: {save_path}")
+                logger.info("Checkpoint saved: %s", save_path)
 
-            # === Clear TransferQueue Partition Data ===
-            clear_partition()
+            # === Clear TransferQueue Partition Data (no-op when disabled) ===
+            if cfg.get("transfer_queue") is not None:
+                tq_runtime.clear_partition()
 
             # === PHASE C: Offload + Weight Sync ===
-            if args.ray.offload_train:
+            if cfg.training.execution.offload_train:
                 train_group.offload()
             else:
                 train_group.clear_memory()
 
             if (
                 not training_actor_sampling_mode
-                and sync_config
-                and (rollout_id + 1) % args.sync.rollout_update_interval == 0
+                and sync_enabled
+                and (rollout_id + 1) % int(cfg.run.weight_sync_interval) == 0
             ):
                 sync_phase_start_t = time.perf_counter()
                 rollout_group.wake_up()
@@ -488,7 +482,7 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
                             metrics={"sync/elapsed_s": sync_phase_s},
                         )
     finally:
-        if not training_actor_sampling_mode and sync_config and train_group is not None:
+        if not training_actor_sampling_mode and sync_enabled and train_group is not None:
             try:
                 train_group.teardown_weight_sync()
             except Exception:
@@ -497,17 +491,26 @@ def train(args, *, derived_config):  # [PUBLIC-API -> main()] sync entrypoint
             rollout_group.dispose()
         if train_group is not None:
             train_group.dispose()
+        if placement is not None:
+            try:
+                placement.destroy()
+            except Exception:
+                logger.exception("Placement teardown failed")
         if wandb_logger:
             wandb_logger.finish()
 
     logger.info("Training complete!")
 
 
-def main(argv=None):  # [PUBLIC-API -> __main__] sync CLI entrypoint
-    from diffusionrl.cmdline.parse_args import parse_args_with_derived_config
+@hydra.main(version_base=None, config_path="../conf", config_name="train")
+def main(cfg: DictConfig) -> None:
+    from diffusionrl.config.instantiate import freeze
+    from diffusionrl.config.polymorphic import expand_polymorphic_lists
 
-    args, derived_config = parse_args_with_derived_config(argv)
-    train(args, derived_config=derived_config)
+    OmegaConf.resolve(cfg)
+    expand_polymorphic_lists(cfg)
+    freeze(cfg)
+    train(cfg)
 
 
 if __name__ == "__main__":

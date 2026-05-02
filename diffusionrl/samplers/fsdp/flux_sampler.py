@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Set
 import torch
 import torch.nn as nn
 
-from diffusionrl.sde.registry import resolve_sde_strategy_class
+from diffusionrl.sde.kernels import DanceSDEStrategy, StepStrategy
 from diffusionrl.sde.runtime import denoising_step, sd3_time_shift
 from diffusionrl.types.forward_context import FluxForwardContext
 from diffusionrl.types.sample import LogProbData
@@ -76,7 +76,7 @@ class FluxSampler(FSDPBaseSampler):
         text_encoder: Optional[Any] = None,
         vae: Optional[nn.Module] = None,
         eta: float = 0.7,
-        sde_type: str = "dance",  # FLUX uses DanceGRPO formulation by default
+        strategy: Optional[StepStrategy] = None,
         shift: float = 1.0,  # FLUX uses shift=1.0
         guidance_scale: float = 3.5,  # Configurable guidance (DanceGRPO default: 3.5)
         autocast_precision: Any = "bf16",
@@ -89,7 +89,7 @@ class FluxSampler(FSDPBaseSampler):
             text_encoder=text_encoder,
             vae=vae,
             eta=eta,
-            sde_type=sde_type,
+            strategy=strategy if strategy is not None else DanceSDEStrategy(),
             shift=shift,
             autocast_precision=autocast_precision,
             trajectory_precision=trajectory_precision,
@@ -276,8 +276,7 @@ class FluxSampler(FSDPBaseSampler):
             else:
                 sde_indices = set(range(num_inference_steps))
 
-        strategy = resolve_sde_strategy_class(self.sde_type)()
-        strategy.init_schedule(sigma_schedule)
+        self.strategy.init_schedule(sigma_schedule)
 
         # Storage for trajectory and log probs (DanceGRPO line 226-227)
         latents = packed_latents.to(dtype=trajectory_dtype)
@@ -327,9 +326,8 @@ class FluxSampler(FSDPBaseSampler):
                 sigma=sigma,
                 sigma_next=sigma_next,
                 eta=step_eta,
-                sde_type=self.sde_type,
                 sigma_max=sigma_schedule[1].item(),
-                strategy=strategy,
+                strategy=self.strategy,
                 step_index=i,
             )
             latents = latents.to(dtype=trajectory_dtype)
@@ -437,7 +435,7 @@ class FluxSampler(FSDPBaseSampler):
             sigma_next=sigma_next,
             eta=self.eta,
             prev_sample=prev_latents,
-            sde_type=self.sde_type,
+            strategy=self.strategy,
         )
 
         return log_prob.to(dtype=self.logprob_dtype)

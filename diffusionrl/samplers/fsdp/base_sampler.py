@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from diffusionrl.samplers.base import BaseSampler
+from diffusionrl.sde.kernels import StepStrategy
 from diffusionrl.sde.rules import normalize_sde_type
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.sample import RolloutSamples
@@ -88,7 +89,7 @@ class FSDPBaseSampler(BaseSampler):
         text_encoder: Optional[Any] = None,
         vae: Optional[nn.Module] = None,
         eta: float = 1.0,
-        sde_type: str = "flow",
+        strategy: Optional[StepStrategy] = None,
         shift: float = 3.0,
         model_bundle: Optional[Any] = None,
         autocast_precision: Any = "bf16",
@@ -96,7 +97,7 @@ class FSDPBaseSampler(BaseSampler):
         logprob_precision: Any = "fp32",
         **kwargs: Any,
     ):
-        super().__init__(eta=eta, sde_type=sde_type, shift=shift)
+        super().__init__(eta=eta, strategy=strategy, shift=shift)
         self.model = model
         self.text_encoder = text_encoder
         self.vae = vae
@@ -321,7 +322,7 @@ class FSDPBaseSampler(BaseSampler):
         text_encoder: Optional[Any] = None,
         vae: Optional[Any] = None,
         eta: float = 1.0,
-        sde_type: str = "flow",
+        strategy: Optional[StepStrategy] = None,
         shift: float = 3.0,
         model_bundle: Optional[Any] = None,
         **sampler_kwargs: Any,
@@ -334,7 +335,9 @@ class FSDPBaseSampler(BaseSampler):
             text_encoder: Text encoder (may be None for embedding-only mode).
             vae: VAE decoder (may be None if decoding is not needed).
             eta: SDE noise scale.
-            sde_type: Transition rule ("flow", "cps", "dance", "dpm2").
+            strategy: SDE step strategy instance built from
+                ``cfg.sampling.sde_strategy`` (Flow/CPS/Dance/DPM2). When
+                ``None``, the concrete sampler subclass picks a default.
             shift: Time-shift parameter.
             model_bundle: Optional ModelBundle that may provide extra kwargs.
             **sampler_kwargs: Forwarded to sampler constructor.
@@ -352,7 +355,7 @@ class FSDPBaseSampler(BaseSampler):
             text_encoder=text_encoder,
             vae=vae,
             eta=eta,
-            sde_type=sde_type,
+            strategy=strategy,
             shift=shift,
             model_bundle=model_bundle,
             **sampler_kwargs,

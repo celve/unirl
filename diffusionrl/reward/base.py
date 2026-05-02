@@ -123,7 +123,71 @@ class BaseRewardExecutor(_BaseRewardNode):
         """Check if the executor backend is available."""
 
 
+class BaseRewardComponentSpec(ABC):
+    """Marker base for every reward component spec.
+
+    Each scorer registers a concrete ``<Name>Spec`` dataclass via
+    ``@register_config(group="reward/component", name="<short>", target=...)``
+    and inherits from this base. Kept as a plain ``ABC`` (not a ``@dataclass``)
+    so that ``register_config``'s auto-promotion processes each subclass's own
+    field annotations without ``is_dataclass(parent)`` short-circuiting.
+
+    The Spec is pure data. The ``target`` on each subclass points at the
+    runtime constructor (a scorer ``__init__`` for in-process scorers);
+    ``RewardService.from_configs`` invokes ``config.build(...)`` per component
+    to produce the runtime node.
+
+    The polymorphic-list field on ``RewardConfig`` is typed as
+    ``Tuple[Any, ...]`` at runtime rather than
+    ``Tuple[BaseRewardComponentSpec, ...]``: OmegaConf's structured-config
+    validation rejects raw dict assignment to a typed-base list at YAML
+    compose time. The polymorphism is carried by ``polymorphic_field``
+    metadata, not by the field's declared element type.
+    """
+
+    weight: float
+
+
+class InProcessRewardExecutor(BaseRewardExecutor):
+    """Thin executor wrapper around one in-process reward scorer."""
+
+    def __init__(
+        self,
+        scorer: BaseRewardScorer,
+        *,
+        weight: float,
+    ) -> None:
+        super().__init__(
+            model_name=scorer.get_model_name(),
+            weight=weight,
+            batch_size=scorer.batch_size,
+            timeout=scorer.timeout,
+        )
+        self.scorer = scorer
+
+    @property
+    def preferred_input_kind(self) -> str:
+        return self.scorer.preferred_input_kind
+
+    def compute_rewards(self, request: RewardRequest) -> RewardResponse:
+        return self.scorer.compute_rewards(request)
+
+    def is_available(self) -> bool:
+        return self.scorer.is_available()
+
+    def offload(self) -> None:
+        self.scorer.offload()
+
+    def onload(self) -> None:
+        self.scorer.onload()
+
+    def dispose(self) -> None:
+        self.scorer.dispose()
+
+
 __all__ = [
+    "BaseRewardComponentSpec",
     "BaseRewardScorer",
     "BaseRewardExecutor",
+    "InProcessRewardExecutor",
 ]

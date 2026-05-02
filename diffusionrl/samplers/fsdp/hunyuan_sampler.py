@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Set
 import torch
 import torch.nn as nn
 
-from diffusionrl.sde.registry import resolve_sde_strategy_class
+from diffusionrl.sde.kernels import DanceSDEStrategy, StepStrategy
 from diffusionrl.sde.runtime import denoising_step, sd3_time_shift
 from diffusionrl.types.forward_context import HunyuanForwardContext
 from diffusionrl.types.sample import LogProbData
@@ -78,7 +78,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
         text_encoder: Optional[Any] = None,
         vae: Optional[nn.Module] = None,
         eta: float = 1.0,
-        sde_type: str = "dance",  # Use DanceGRPO formulation
+        strategy: Optional[StepStrategy] = None,
         shift: float = 1.0,  # DanceGRPO default
         guidance_scale: float = DEFAULT_GUIDANCE_VALUE,
         autocast_precision: Any = "bf16",
@@ -91,7 +91,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
             text_encoder=text_encoder,
             vae=vae,
             eta=eta,
-            sde_type=sde_type,
+            strategy=strategy if strategy is not None else DanceSDEStrategy(),
             shift=shift,
             autocast_precision=autocast_precision,
             trajectory_precision=trajectory_precision,
@@ -219,8 +219,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
                 sde_indices = set(range(num_inference_steps))
         actual_guidance = float(guidance_scale) if guidance_scale is not None else float(self.default_guidance_scale)
 
-        strategy = resolve_sde_strategy_class(self.sde_type)()
-        strategy.init_schedule(sigma_schedule)
+        self.strategy.init_schedule(sigma_schedule)
 
         # Storage for trajectory and log probs (DanceGRPO line 115-116)
         # Selective collection: only store positions needed for SDE step pairs
@@ -263,9 +262,8 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
                 sigma=sigma,
                 sigma_next=sigma_next,
                 eta=step_eta,
-                sde_type=self.sde_type,
                 sigma_max=sigma_schedule[1].item(),
-                strategy=strategy,
+                strategy=self.strategy,
                 step_index=i,
             )
             latents = latents.to(dtype=self.trajectory_dtype)
@@ -282,7 +280,6 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
         forward_context = HunyuanForwardContext(
             guidance_scale=float(actual_guidance),
             prompt_embeds=prompt_embeds,
-            pooled_prompt_embeds=pooled_prompt_embeds,
             encoder_attention_mask=encoder_attention_mask,
         )
 
@@ -380,7 +377,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
             sigma_next=sigma_next,
             eta=self.eta,
             prev_sample=prev_latents,
-            sde_type=self.sde_type,
+            strategy=self.strategy,
         )
 
         return log_prob.to(dtype=self.logprob_dtype)

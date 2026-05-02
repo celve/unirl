@@ -22,15 +22,12 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "denoising_step": ("diffusionrl.sde", "denoising_step"),
     "get_sigma_schedule": ("diffusionrl.sde", "get_sigma_schedule"),
     # reward
-    "BaseRewardScorer": ("diffusionrl.reward", "BaseRewardScorer"),
+    "BaseRewardScorer": ("diffusionrl.reward.base", "BaseRewardScorer"),
     # algorithms
     "BaseAlgorithm": ("diffusionrl.algorithms", "BaseAlgorithm"),
     "GRPOAlgorithm": ("diffusionrl.algorithms", "GRPOAlgorithm"),
     "NFTAlgorithm": ("diffusionrl.algorithms", "NFTAlgorithm"),
-    # config / utils / models
-    "TrainingArguments": ("diffusionrl.cmdline.schema", "TrainingArguments"),
-    "parse_args": ("diffusionrl.cmdline.parse_args", "parse_args"),
-    "get_default_args": ("diffusionrl.cmdline.schema", "get_default_args"),
+    # utils / models
     "load_function": ("diffusionrl.utils", "load_function"),
     "set_seed": ("diffusionrl.utils", "set_seed"),
     "configure_logger": ("diffusionrl.utils", "configure_logger"),

@@ -4,11 +4,12 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+from diffusionrl.distributed.transfer_queue.transportable import Transportable
 from diffusionrl.types.forward_context import ForwardContext
 from diffusionrl.types.prompts import Prompts
 from diffusionrl.types.sampling import SamplingParams
 from diffusionrl.types.trajectory_store import Trajectory
-from diffusionrl.utils.batched import Batched, concat_field, max_field, shared_field
+from diffusionrl.utils.batched import Batched, FieldKind, concat_field, field, max_field, shared_field
 
 
 def _tensor_bytes(value: Any) -> int:
@@ -72,32 +73,37 @@ class MediaPreview(Batched):
 
 
 @dataclass
-class RolloutSamples(Batched):
+class RolloutSamples(Transportable):
     """Lightweight sampler output contract shared across rollout stages.
 
     ``media_preview`` is a typed, batch-aligned preview payload
     (``MediaPreview`` dataclass) intended only for wandb logging. It is
     declared ``concat_field`` so that ``Batched.concat`` recurses into
     ``MediaPreview.concat`` and auto-merges per-shard previews.
+
+    Heavy per-sample tensors (``latents``, ``decoded_images``,
+    ``decoded_videos``) are tagged ``transport=True`` so they route through
+    the efficient transport path (TQ) when enabled; small per-sample fields
+    (``rewards``, ``advantages``, …) ride the default Ray channel.
     """
 
-    latents: torch.Tensor = concat_field()
+    latents: torch.Tensor = field(kind=FieldKind.CONCAT, transport=True)
     timesteps: torch.Tensor = shared_field()
     sampling_params: Optional[SamplingParams] = shared_field(default=None)
     prompts: Optional[Prompts] = concat_field(default=None)
-    trajectories: Optional[Trajectory] = concat_field(default=None)
+    trajectories: Optional[Trajectory] = field(kind=FieldKind.CONCAT, default=None, transport=True)
     log_probs: Optional[LogProbData] = concat_field(default=None)
-    forward_context: Optional[ForwardContext] = concat_field(default=None)
+    forward_context: Optional[ForwardContext] = field(kind=FieldKind.CONCAT, default=None, transport=True)
     step_indices: Optional[torch.Tensor] = shared_field(default=None)
     rewards: Optional[torch.Tensor] = concat_field(default=None)
     advantages: Optional[torch.Tensor] = concat_field(default=None)
     component_rewards: Optional[Dict[str, torch.Tensor]] = concat_field(default=None)
-    decoded_images: Optional[List[Any]] = concat_field(default=None)
-    decoded_videos: Optional[List[Any]] = concat_field(default=None)
+    decoded_images: Optional[List[Any]] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    decoded_videos: Optional[List[Any]] = field(kind=FieldKind.CONCAT, default=None, transport=True)
     media_preview: Optional[MediaPreview] = concat_field(default=None)
     # Per-actor sum of per-handle score_and_attach seconds; reduces by max
     # across actors so the driver sees the wall-clock reward share of
-    # rollout_phase_s. See ``RewardResponse.compute_time`` for the same pattern.
+    # rollout_phase_s.
     reward_compute_s: float = max_field(default=0.0)
 
     def cast_dtype(self, dtype: torch.dtype) -> "RolloutSamples":

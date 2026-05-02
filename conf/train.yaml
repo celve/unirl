@@ -1,0 +1,30 @@
+# DiffusionRL Hydra entry — registered-leaf composition.
+#
+# Every section is backed by a @register_config-decorated dataclass and
+# composed via the defaults list below. No top-level scalars or untyped
+# blocks live on the root cfg.
+
+defaults:
+  - run: default
+  - algorithm: grpo
+  - model: flux
+  - reward: default
+  - sampling: default
+  - sampling/sde_strategy: flow
+  - rollout/engine: fsdp
+  - rollout/plan: default
+  - placement: default
+  - training/backend: fsdp
+  - training/optimizer: default
+  - training/lr_scheduler: default
+  - training/execution: default
+  - training/topology: default
+  - training/plan: default
+  - logging: default
+  - debug: default
+  - evaluation: default
+  - resume: default
+
+# Algorithm-side sampling defaults to a live interpolation of the canonical
+# top-level ``cfg.sampling`` (see ``BaseAlgorithmConfig.sampling``).
+# Experiments may override ``cfg.algorithm.sampling.*`` to diverge.

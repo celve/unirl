@@ -5,24 +5,10 @@ from __future__ import annotations
 import importlib
 from typing import Dict, Tuple
 
-from diffusionrl.samplers.registry import ensure_builtin_rollout_engine_registration
-
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "BaseSampler": ("diffusionrl.samplers.base", "BaseSampler"),
     "RolloutSamples": ("diffusionrl.samplers.base", "RolloutSamples"),
     "BaseRolloutEngine": ("diffusionrl.samplers.engine", "BaseRolloutEngine"),
-    "build_rollout_engine_init_payload_from_args": (
-        "diffusionrl.cmdline.rollout_engine",
-        "build_rollout_engine_init_payload_from_args",
-    ),
-    "derive_rollout_engine_class": (
-        "diffusionrl.samplers.registry",
-        "derive_rollout_engine_class",
-    ),
-    "create_rollout_engine_from_init_payload": (
-        "diffusionrl.samplers.construction",
-        "create_rollout_engine_from_init_payload",
-    ),
     "FSDPBaseSampler": ("diffusionrl.samplers.fsdp.base_sampler", "FSDPBaseSampler"),
     "FSDPSamplingEngine": ("diffusionrl.samplers.fsdp.engine", "FSDPSamplingEngine"),
     "FluxSampler": ("diffusionrl.samplers.fsdp.flux_sampler", "FluxSampler"),
@@ -30,8 +16,6 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "FSDPHunyuanSampler": ("diffusionrl.samplers.fsdp.hunyuan_sampler", "FSDPHunyuanSampler"),
     "SGLangRolloutEngine": ("diffusionrl.samplers.sglang.engine", "SGLangRolloutEngine"),
 }
-
-ensure_builtin_rollout_engine_registration()
 
 __all__ = list(_LAZY_ATTRS.keys())
 

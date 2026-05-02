@@ -372,11 +372,11 @@ class EMAManager:
         self._optimizer_step = 0
 
     @classmethod
-    def from_model_and_spec(
+    def from_model_and_config(
         cls,
         *,
         model: nn.Module,
-        spec: Any,
+        config: Any,
         use_lora: bool,
         uses_sharded_model: bool,
         algorithm: Optional[Any] = None,
@@ -387,33 +387,33 @@ class EMAManager:
 
         ema_device = None if uses_sharded_model else torch.device("cpu")
         eval_ema = None
-        if bool(getattr(spec, "enable_eval_ema", True)):
+        if bool(getattr(config, "enable_eval_ema", True)):
             eval_ema = EMAModuleWrapper(
                 trainable_params,
-                decay=float(getattr(spec, "eval_ema_decay", 0.9)),
-                update_step_interval=max(1, int(getattr(spec, "eval_ema_update_interval", 1))),
+                decay=float(getattr(config, "eval_ema_decay", 0.9)),
+                update_step_interval=max(1, int(getattr(config, "eval_ema_update_interval", 1))),
                 device=ema_device,
             )
 
-        reference_mode = str(getattr(spec, "reference_mode", "none") or "none").strip().lower()
+        reference_mode = str(getattr(config, "reference_mode", "none") or "none").strip().lower()
         reference_param_ema = None
         reference_adapter_ema = None
         if reference_mode == "nft_old_policy":
             if use_lora:
                 reference_adapter_ema = DualAdapterEMA(
-                    decay=float(getattr(spec, "reference_decay", 0.001)),
-                    decay_type=str(getattr(spec, "reference_decay_type", "constant")),
-                    flat_steps=int(getattr(spec, "reference_flat_steps", 0)),
-                    uprate=float(getattr(spec, "reference_uprate", 0.001)),
-                    uphold=float(getattr(spec, "reference_uphold", 0.5)),
-                    old_adapter_name=str(getattr(spec, "old_adapter_name", "old")),
-                    new_adapter_name=str(getattr(spec, "new_adapter_name", "default")),
+                    decay=float(getattr(config, "reference_decay", 0.001)),
+                    decay_type=str(getattr(config, "reference_decay_type", "constant")),
+                    flat_steps=int(getattr(config, "reference_flat_steps", 0)),
+                    uprate=float(getattr(config, "reference_uprate", 0.001)),
+                    uphold=float(getattr(config, "reference_uphold", 0.5)),
+                    old_adapter_name=str(getattr(config, "old_adapter_name", "old")),
+                    new_adapter_name=str(getattr(config, "new_adapter_name", "default")),
                 )
             else:
                 reference_param_ema = EMAModuleWrapper(
                     trainable_params,
-                    decay=float(getattr(spec, "reference_decay", 0.001)),
-                    decay_fn=cls._build_reference_decay_fn(spec),
+                    decay=float(getattr(config, "reference_decay", 0.001)),
+                    decay_fn=cls._build_reference_decay_fn(config),
                     update_step_interval=1,
                     device=ema_device,
                 )
@@ -422,7 +422,7 @@ class EMAManager:
             eval_ema=eval_ema,
             reference_param_ema=reference_param_ema,
             reference_adapter_ema=reference_adapter_ema,
-            reference_update_timing=str(getattr(spec, "reference_update_timing", "optimizer_step")),
+            reference_update_timing=str(getattr(config, "reference_update_timing", "optimizer_step")),
         )
         if reference_adapter_ema is not None:
             reference_adapter_ema.sync_from_new(model)
@@ -430,12 +430,12 @@ class EMAManager:
         return manager
 
     @staticmethod
-    def _build_reference_decay_fn(spec: Any) -> Callable[[int], float]:
-        decay_type = str(getattr(spec, "reference_decay_type", "constant"))
-        base_decay = float(getattr(spec, "reference_decay", 0.001))
-        flat_steps = int(getattr(spec, "reference_flat_steps", 0))
-        uprate = float(getattr(spec, "reference_uprate", 0.001))
-        uphold = float(getattr(spec, "reference_uphold", 0.5))
+    def _build_reference_decay_fn(config: Any) -> Callable[[int], float]:
+        decay_type = str(getattr(config, "reference_decay_type", "constant"))
+        base_decay = float(getattr(config, "reference_decay", 0.001))
+        flat_steps = int(getattr(config, "reference_flat_steps", 0))
+        uprate = float(getattr(config, "reference_uprate", 0.001))
+        uphold = float(getattr(config, "reference_uphold", 0.5))
         if decay_type == "linear":
             return lambda step: min(step * uprate, uphold)
         if decay_type == "warmup":

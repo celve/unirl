@@ -15,6 +15,8 @@ import torch.nn as nn
 
 from diffusionrl.samplers.engine import BaseRolloutEngine
 from diffusionrl.samplers.fsdp.base_sampler import FSDPBaseSampler
+from diffusionrl.samplers.fsdp.config import FSDPEngineConfig
+from diffusionrl.sde.kernels import StepStrategy
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.sample import RolloutSamples
 
@@ -32,16 +34,15 @@ class FSDPSamplingEngine(BaseRolloutEngine):
 
     Lifecycle::
 
-        engine = FSDPSamplingEngine(sampling_params)
+        engine = build(cfg.rollout.engine)  # returns FSDPSamplingEngine
         engine.initialize(device)
         engine.bind_model(model=model, model_bundle=model_bundle)
         # ... later ...
         samples = engine.generate(request)
     """
 
-    def __init__(self, sampling_params: Any) -> None:
-        super().__init__(config=sampling_params)
-        self._sampling_params = sampling_params
+    def __init__(self, *, config: FSDPEngineConfig) -> None:
+        super().__init__(config=config)
         self._sampler: Optional[FSDPBaseSampler] = None
         self._model: Optional[nn.Module] = None
         self._model_bundle: Optional[Any] = None
@@ -64,16 +65,23 @@ class FSDPSamplingEngine(BaseRolloutEngine):
         *,
         model: nn.Module,
         model_bundle: Any,
+        strategy: StepStrategy,
     ) -> None:
         """Bind to the training actor's model and create the sampler.
 
         Must be called once after :meth:`initialize` and before the
         first :meth:`generate` call.
+
+        Args:
+            model: Training-actor's model (transformer / denoiser).
+            model_bundle: Model bundle providing aux components + sampler dotpath.
+            strategy: SDE step strategy instance, built via Hydra
+                ``build(cfg.sampling.sde_strategy)`` by the caller.
         """
         self._model = model
         self._model_bundle = model_bundle
 
-        sp = self._sampling_params
+        sp = self.config.sampling
 
         try:
             model_bundle.load_aux_components()
@@ -97,7 +105,7 @@ class FSDPSamplingEngine(BaseRolloutEngine):
             text_encoder=text_encoder,
             vae=vae,
             eta=sde_config.eta,
-            sde_type=sde_config.sde_type,
+            strategy=strategy,
             shift=sde_config.shift,
             model_bundle=model_bundle,
             autocast_precision=sp.autocast_precision,
@@ -125,13 +133,13 @@ class FSDPSamplingEngine(BaseRolloutEngine):
                 host_label="FSDPSamplingEngine",
             )
 
-    def encode_inputs(
+    def encode_prompt(
         self,
         prompts: List[str],
         **kwargs: Any,
     ) -> Dict[str, torch.Tensor]:
         self._require_ready()
-        return self._sampler.encode_inputs(prompts, **kwargs)
+        return self._sampler.encode_prompt(prompts, **kwargs)
 
     def decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
         self._require_ready()

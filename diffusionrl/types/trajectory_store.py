@@ -10,7 +10,8 @@ from typing import List, Set, Tuple
 
 import torch
 
-from diffusionrl.utils.batched import Batched, concat_field, shared_field
+from diffusionrl.distributed.transfer_queue.transportable import Transportable
+from diffusionrl.utils.batched import FieldKind, field, shared_field
 
 
 def compute_trajectory_positions(sde_indices: Set[int], num_steps: int) -> List[int]:
@@ -32,7 +33,7 @@ def compute_trajectory_positions(sde_indices: Set[int], num_steps: int) -> List[
 
 
 @dataclass
-class Trajectory(Batched):
+class Trajectory(Transportable):
     """Compact trajectory storage with index map.
 
     Attributes:
@@ -45,7 +46,7 @@ class Trajectory(Batched):
             trajectory (T+1).
     """
 
-    data: torch.Tensor = concat_field()
+    data: torch.Tensor = field(kind=FieldKind.CONCAT, transport=True)
     index_map: torch.Tensor = shared_field()
     total_positions: int = shared_field()
 

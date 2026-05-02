@@ -5,19 +5,30 @@ Supports SD3 and SD3.5 models for image generation.
 """
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 
+from diffusionrl.config.registration import register_config
+
 from .base import ModelBundle
 from .config import ModelBundleConfig
-from .registry import register_model
 
 logger = logging.getLogger(__name__)
 
 
-@register_model(component_cfg=ModelBundleConfig)
+@register_config(
+    group="model",
+    name="sd3",
+    target="diffusionrl.models.sd3.SD3ModelBundle",
+)
+@dataclass
+class SD3ModelBundleConfig(ModelBundleConfig):
+    """SD3 bundle config; inherits all fields from ModelBundleConfig."""
+
+
 class SD3ModelBundle(ModelBundle):
     """
     Model bundle for Stable Diffusion 3 models.

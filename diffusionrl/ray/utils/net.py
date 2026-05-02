@@ -1,7 +1,7 @@
 """Network helpers used to discover the local node IP and a free TCP port.
 
 These are the only stateless helpers the Ray actors actually call at runtime
-(``BaseTrainRayActor.get_master_info`` and ``RolloutActor._setup_distributed_env``).
+(``DistributedMixin.get_master_info`` and ``RolloutActor._setup_distributed_env``).
 """
 
 import socket

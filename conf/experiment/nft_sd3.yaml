@@ -1,0 +1,113 @@
+# @package _global_
+# DiffusionNFT SD3 recipe — direct-sampling (fsdp engine) NFT on SD3.5.
+#
+# Used by:
+#   reproduce_scripts/train_nft_sd3_multinode.sh
+#
+# Forward-process diffusion RL with dual-adapter EMA reference. Anchored to
+# a 2-node × 8-GPU cluster (16 train actors, no separate rollout actors).
+defaults:
+  - override /algorithm: nft
+  - override /model: sd3
+  - override /sampling/sde_strategy: dpm2
+  - _self_
+
+run:
+  data_source_dotpath: diffusionrl.data.data_source.ImageRLDataSource
+  num_rollouts: 10000
+  data_path: /tmp/diffusionrl/data/train.txt
+  eval_data_path: /tmp/diffusionrl/data/test.txt
+
+sampling:
+  num_inference_steps: 10
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+  sde_config:
+    eta: 0.0
+    shift: 3.0
+
+algorithm:
+  prompts_per_rollout: 48
+  samples_per_prompt: 16
+  adv_normalization_scope: group
+  use_global_std: true
+  kl_coef: 0.0
+  beta: 1.0
+  adv_clip_max: 5.0
+  adv_mode: raw
+  use_adaptive_weight: true
+  train_timestep_mode: all
+  shuffle_train_timesteps: true
+  apply_time_shift_in_loss: false
+  epsilon: 1.0e-4
+  ema:
+    eval_ema_decay: 0.99
+    eval_ema_update_interval: 1
+    reference_mode: nft_old_policy
+    reference_decay: 0.001
+    reference_decay_type: warmup
+    reference_flat_steps: 0
+    reference_uprate: 0.001
+    reference_uphold: 0.5
+    reference_update_timing: rollout_end
+  training_timestep_fraction: 0.99
+
+placement:
+  # NFT runs all-in on training; no separate rollout actor.
+  num_rollout_nodes: 0
+  num_rollout_gpus_per_node: 0
+
+# NFT uses FSDP direct-sampling (no engine override → inherits rollout/engine: fsdp
+# from conf/train.yaml). Direct-sampling forbids cfg.sync per
+# validate_weight_sync_contract; no sync section here.
+
+training:
+  plan:
+    # Anchored to 2 nodes × 8 GPUs = 16 actors. global = prompts*samples = 768.
+    micro_batch_size: 8
+    num_updates_per_batch: 1
+    local_mini_batch_size: 48    # = global / actor_count / num_updates = 768/16/1
+    local_batch_size: 48         # = local_mini_batch_size * num_updates_per_batch
+    global_batch_size: 768       # = prompts_per_rollout * samples_per_prompt
+  topology:
+    actor_count: 16              # 2 nodes × 8 GPUs
+  optimizer:
+    learning_rate: 3.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 1.0e-4
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    total_steps: 10000
+  execution:
+    max_grad_norm: 1.0
+    offload_train: false
+    offload_rollout: false
+
+model:
+  use_lora: true
+  lora_rank: 32
+  lora_alpha: 64
+  use_gradient_checkpointing: false
+  pretrained_model_ckpt_path: stabilityai/stable-diffusion-3.5-medium
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    - name: pickscore
+      weight: 1.0
+      batch_size: 8
+
+logging:
+  logging_steps: 1
+  log_media: true
+  media_max_items: 48
+  report_to_wandb: true
+  project_name: diffusionrl-diffusionNFT
+
+evaluation:
+  eval_steps: 0

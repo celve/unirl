@@ -2,35 +2,17 @@
 
 from .base import ModelBundle
 from .config import ModelBundleConfig
-from .construction import create_model_bundle_from_init_payload
-from .registry import (
-    derive_model_bundle_path,
-    discover_model_bundle_paths,
-    ensure_builtin_model_registration,
-    list_model_types,
-    register_model,
-    resolve_model_class,
-)
 
 __all__ = [
     "ModelBundle",
     "ModelBundleConfig",
-    "create_model_bundle_from_init_payload",
-    "discover_model_bundle_paths",
-    "ensure_builtin_model_registration",
-    "derive_model_bundle_path",
-    "resolve_model_class",
-    "register_model",
-    "list_model_types",
     # Lazy import getters
     "get_hunyuan_model_bundle",
     "get_mochi_model_bundle",
     "get_flux_model_bundle",
     "get_sd3_model_bundle",
-    "get_wan21_model_bundle",
+    "get_wan_model_bundle",
 ]
-
-ensure_builtin_model_registration()
 
 
 # Lazy imports for model implementations
@@ -62,8 +44,8 @@ def get_sd3_model_bundle():
     return SD3ModelBundle
 
 
-def get_wan21_model_bundle():
-    """Get WAN 2.1 model bundle class."""
+def get_wan_model_bundle():
+    """Get Wan video model bundle class."""
     from .wan import WAN21ModelBundle
 
     return WAN21ModelBundle

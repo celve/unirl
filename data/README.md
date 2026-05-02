@@ -10,8 +10,4 @@
 
 ## Using real datasets
 
-Override `DATA_PATH` to point to a real dataset:
-
-```bash
-DATA_PATH=data/datasets/hpdv2/train.json bash scripts/train_flowgrpo_sd3_train_actor_sampling.sh
-```
+Override `DATA_PATH` to point to a real dataset (e.g. `DATA_PATH=data/datasets/hpdv2/train.json`) when invoking a `reproduce_scripts/` wrapper.

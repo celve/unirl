@@ -8,10 +8,13 @@ trip because the server multiplexes them via ``required_rewards``.
 Typical config::
 
     reward:
-      reward_backend: reward_service
-      reward_service_url: "http://reward-server:8080"
-      reward_components: [hpsv2, clip]
-      reward_weights: [0.6, 0.4]
+      aggregation_method: weighted_sum
+      base_device: cpu
+      components:
+        - name: reward_service
+          base_url: http://reward-server:8080
+          required_rewards: [hpsv2, clip]
+          reward_weights: {hpsv2: 0.6, clip: 0.4}
 """
 
 from __future__ import annotations
@@ -20,13 +23,15 @@ import base64
 import io
 import logging
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import requests as http_requests
 import torch
 from PIL import Image
 
-from diffusionrl.reward.base import BaseRewardExecutor
+from diffusionrl.config.registration import register_config
+from diffusionrl.config.require import require
+from diffusionrl.reward.base import BaseRewardComponentSpec, BaseRewardExecutor
 from diffusionrl.types.reward import RewardRequest, RewardResponse
 
 logger = logging.getLogger(__name__)
@@ -91,75 +96,33 @@ class RewardServiceExecutor(BaseRewardExecutor):
     because the RewardService server multiplexes multiple reward models
     via the ``required_rewards`` field per request.
 
-    Args:
-        base_url: Root URL of the RewardService (e.g. ``http://host:8080``).
-        required_rewards: Reward model names to request
-            (e.g. ``["hpsv2", "clip"]``).
-        reward_weights: Per-reward aggregation weights, keyed by reward name.
-            Rewards not listed default to weight 1.0.
-        sub_metric_reduce: Strategy for collapsing multiple sub-metrics
-            within a single reward into one float.  ``"first"`` takes the
-            first value, ``"mean"`` averages all, ``"max"`` takes the max.
-        image_format: Image encoding for the wire payload
-            (``"JPEG"`` or ``"PNG"``).
-        image_quality: JPEG quality (1-95); ignored for PNG.
-        max_retries: Number of retry attempts on transient HTTP errors.
-        retry_delay: Seconds between retries.
-        aggregation_method: How to aggregate across rewards for each sample.
-            ``"weighted_sum"`` (default), ``"mean"``, ``"min"``, ``"max"``.
+    Constructed via :class:`RewardServiceSpec` through the polymorphic
+    ``reward/component`` registry; ``base_device`` is accepted for interface
+    uniformity with :func:`diffusionrl.config.instantiate.build` but ignored
+    (the executor is HTTP-only).
     """
 
     _REDUCE_STRATEGIES = {"first", "mean", "max"}
     _AGGREGATION_METHODS = {"weighted_sum", "mean", "min", "max"}
 
-    def __init__(
-        self,
-        base_url: str,
-        required_rewards: List[str],
-        reward_weights: Optional[Dict[str, float]] = None,
-        model_name: str = "reward_service",
-        weight: float = 1.0,
-        batch_size: int = 8,
-        timeout: float = 120.0,
-        max_retries: int = 3,
-        retry_delay: float = 1.0,
-        sub_metric_reduce: str = "first",
-        image_format: str = "JPEG",
-        image_quality: int = 95,
-        raise_on_failure: bool = True,
-        aggregation_method: str = "weighted_sum",
-    ) -> None:
+    def __init__(self, *, config: "RewardServiceSpec", base_device: str) -> None:
+        del base_device  # HTTP backend, no device dependency
         super().__init__(
-            model_name=model_name,
-            weight=weight,
-            batch_size=batch_size,
-            timeout=timeout,
+            model_name="reward_service",
+            weight=config.weight,
+            batch_size=config.batch_size,
+            timeout=config.timeout,
         )
-        if not required_rewards:
-            raise ValueError("required_rewards must be a non-empty list of reward names.")
-        if max_retries < 1:
-            raise ValueError(f"max_retries must be >= 1, got {max_retries}.")
-        if retry_delay < 0:
-            raise ValueError(f"retry_delay must be >= 0, got {retry_delay}.")
-        if sub_metric_reduce not in self._REDUCE_STRATEGIES:
-            raise ValueError(
-                f"sub_metric_reduce must be one of {sorted(self._REDUCE_STRATEGIES)}, got {sub_metric_reduce!r}."
-            )
-        if aggregation_method not in self._AGGREGATION_METHODS:
-            raise ValueError(
-                f"aggregation_method must be one of {sorted(self._AGGREGATION_METHODS)}, got {aggregation_method!r}."
-            )
-
-        self.base_url = base_url.rstrip("/")
-        self.required_rewards = list(required_rewards)
-        self.reward_weights = dict(reward_weights or {})
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
-        self.sub_metric_reduce = sub_metric_reduce
-        self.image_format = image_format
-        self.image_quality = image_quality
-        self.raise_on_failure = raise_on_failure
-        self.aggregation_method = aggregation_method
+        self.base_url = config.base_url.rstrip("/")
+        self.required_rewards = list(config.required_rewards)
+        self.reward_weights = dict(config.reward_weights or {})
+        self.max_retries = config.max_retries
+        self.retry_delay = config.retry_delay
+        self.sub_metric_reduce = config.sub_metric_reduce
+        self.image_format = config.image_format
+        self.image_quality = config.image_quality
+        self.raise_on_failure = config.raise_on_failure
+        self.aggregation_method = config.aggregation_method
 
         self._remote_rewards_validated = False
 
@@ -481,6 +444,61 @@ class RewardServiceExecutor(BaseRewardExecutor):
         return float(max(values))
 
 
+@register_config(
+    group="reward/component",
+    name="reward_service",
+    target="diffusionrl.reward.reward_service_executor.RewardServiceExecutor",
+)
+class RewardServiceSpec(BaseRewardComponentSpec):
+    """Typed config for the remote RewardService backend.
+
+    Registered as a polymorphic ``reward/component``; one instance multiplexes
+    all ``required_rewards`` in a single HTTP round-trip to ``base_url``.
+    """
+
+    base_url: str = ""
+    required_rewards: Tuple[str, ...] = ()
+    reward_weights: Optional[Dict[str, float]] = None
+    weight: float = 1.0
+    batch_size: int = 8
+    timeout: float = 120.0
+    max_retries: int = 3
+    retry_delay: float = 1.0
+    sub_metric_reduce: str = "first"
+    aggregation_method: str = "weighted_sum"
+    image_format: str = "JPEG"
+    image_quality: int = 95
+    raise_on_failure: bool = True
+
+    def __post_init__(self) -> None:
+        require(
+            bool(str(self.base_url).strip()),
+            "RewardServiceSpec.base_url must be non-empty",
+        )
+        require(
+            len(self.required_rewards) > 0,
+            "RewardServiceSpec.required_rewards must be non-empty",
+        )
+        require(
+            self.max_retries >= 1,
+            f"RewardServiceSpec.max_retries must be >= 1; got {self.max_retries!r}",
+        )
+        require(
+            self.retry_delay >= 0,
+            f"RewardServiceSpec.retry_delay must be >= 0; got {self.retry_delay!r}",
+        )
+        require(
+            self.sub_metric_reduce in {"first", "mean", "max"},
+            f"RewardServiceSpec.sub_metric_reduce must be one of first/mean/max; got {self.sub_metric_reduce!r}",
+        )
+        require(
+            self.aggregation_method in {"weighted_sum", "mean", "min", "max"},
+            f"RewardServiceSpec.aggregation_method must be one of "
+            f"weighted_sum/mean/min/max; got {self.aggregation_method!r}",
+        )
+
+
 __all__ = [
     "RewardServiceExecutor",
+    "RewardServiceSpec",
 ]

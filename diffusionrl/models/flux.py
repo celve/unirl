@@ -16,19 +16,24 @@ from typing import List, Optional, Tuple, Type, Union
 import torch
 import torch.nn as nn
 
+from diffusionrl.config.registration import register_config
+
 from .base import ModelBundle
 from .config import ModelBundleConfig
-from .registry import register_model
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@register_config(
+    group="model",
+    name="flux",
+    target="diffusionrl.models.flux.FluxModelBundle",
+)
+@dataclass
 class FluxModelBundleConfig(ModelBundleConfig):
     text_encoder_2_ckpt_path: Optional[str] = None
 
 
-@register_model(component_cfg=FluxModelBundleConfig)
 class FluxModelBundle(ModelBundle):
     """
     FLUX image model bundle.

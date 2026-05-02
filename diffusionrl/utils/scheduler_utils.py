@@ -6,7 +6,32 @@ from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Type, Union
 
 import numpy as np
 
+from diffusionrl.config.registration import register_config
+
 Strategy = Literal["all", "progressive", "random", "decay", "exp_decay"]
+
+
+@register_config(group="algorithm/scheduler", name="default")
+@dataclass
+class SchedulerConfig:
+    """Typed view of the indices-scheduler options consumed by ``create_indices_scheduler``.
+
+    Mirrors the keys the factory reads. ``timestep_fraction`` uses ``Any`` because
+    it accepts either a scalar or a 2-element ``[start, end]`` list — OmegaConf
+    structured configs do not support Python ``Union`` directly.
+    """
+
+    timestep_strategy: str = "all"
+    timestep_fraction: Any = 1.0
+    num_sde_steps: Optional[int] = None
+    window_strategy: str = "progressive"
+    window_size: int = 4
+    iters_per_window: int = 25
+    window_init_timestep: int = 0
+    overlap_size: int = 0
+    roll_back: bool = False
+    max_iters_per_window: Optional[int] = None
+    min_iters_per_window: Optional[int] = None
 
 
 @dataclass
@@ -151,10 +176,10 @@ SCHEDULER_REGISTRY: Dict[str, Type[TimestepScheduler]] = {
 
 def create_indices_scheduler(
     *,
-    scheduler_config: Any,
+    scheduler_config: Union[SchedulerConfig, Dict[str, Any]],
     num_timesteps: int,
 ) -> TimestepScheduler:
-    """Create an index scheduler from a scheduler-config object or dict."""
+    """Create an index scheduler from a ``SchedulerConfig`` (or legacy dict)."""
 
     if isinstance(scheduler_config, dict):
 

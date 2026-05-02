@@ -5,33 +5,40 @@ import os
 import re
 from typing import Optional
 
+from omegaconf import DictConfig
+
 logger = logging.getLogger(__name__)
 
 
-def should_save(rollout_id: int, args) -> bool:
+def should_save(rollout_id: int, cfg: DictConfig) -> bool:
     """Check if we should save a checkpoint at this rollout."""
-    interval = int(args.rollout.save_steps)
+    interval = int(cfg.resume.save_steps)
     return interval > 0 and (rollout_id + 1) % interval == 0
 
 
-def should_eval(rollout_id: int, args) -> bool:
+def should_eval(rollout_id: int, cfg: DictConfig) -> bool:
     """Check if we should run evaluation at this rollout."""
-    interval = int(args.evaluation.eval_steps)
+    interval = int(cfg.evaluation.eval_steps)
     return interval > 0 and (rollout_id + 1) % interval == 0
 
 
-def should_log(rollout_id: int, args) -> bool:
+def should_log(rollout_id: int, cfg: DictConfig) -> bool:
     """Check if we should emit periodic rollout logs at this rollout."""
-    interval = int(args.logging.logging_steps)
+    interval = int(cfg.logging.logging_steps)
     return interval > 0 and (rollout_id + 1) % interval == 0
 
 
-def maybe_restore_start_rollout_id_from_checkpoint(args, checkpoint_path: Optional[str]) -> Optional[int]:
-    """Infer and persist the next rollout id when resuming from a checkpoint path."""
+def maybe_restore_start_rollout_id_from_checkpoint(cfg: DictConfig, checkpoint_path: Optional[str]) -> Optional[int]:
+    """Infer and persist the next rollout id when resuming from a checkpoint path.
+
+    Writes the resolved ``start_rollout_id`` back onto ``cfg.resume`` so
+    the outer loop picks it up. Returns the value for logging, or ``None``
+    when no restore is needed.
+    """
     if not checkpoint_path:
         return None
 
-    if int(args.rollout.start_rollout_id) != 0:
+    if int(cfg.resume.start_rollout_id) != 0:
         return None
 
     match = re.search(r"checkpoint-(\d+)$", os.path.basename(os.path.normpath(checkpoint_path)))
@@ -39,7 +46,7 @@ def maybe_restore_start_rollout_id_from_checkpoint(args, checkpoint_path: Option
         return None
 
     next_rollout_id = int(match.group(1)) + 1
-    args.rollout.set_start_rollout_id(next_rollout_id)
+    cfg.resume.start_rollout_id = next_rollout_id
     return next_rollout_id
 
 
@@ -60,4 +67,5 @@ __all__ = [
     "should_eval",
     "should_log",
     "should_save",
+    "maybe_restore_start_rollout_id_from_checkpoint",
 ]

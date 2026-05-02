@@ -6,11 +6,12 @@ import logging
 import time
 from typing import List, Optional
 
-from diffusionrl.reward.config import RewardSpec
+from omegaconf import DictConfig
+
+from diffusionrl.config.instantiate import build, materialize
 
 from .aggregation import aggregate
-from .base import BaseRewardExecutor, RewardRequest, RewardResponse
-from .factory import build_executors
+from .base import BaseRewardExecutor, BaseRewardScorer, InProcessRewardExecutor, RewardRequest, RewardResponse
 
 logger = logging.getLogger(__name__)
 
@@ -22,17 +23,7 @@ class RewardService:
         self,
         executors: Optional[List[BaseRewardExecutor]] = None,
         aggregation_method: str = "weighted_sum",
-        *,
-        reward_config: Optional[RewardSpec] = None,
     ) -> None:
-        if reward_config is not None:
-            if executors is not None:
-                raise ValueError("RewardService: pass either reward_config= or executors=, not both.")
-            if not isinstance(reward_config, RewardSpec):
-                raise TypeError(f"RewardService requires RewardSpec, got: {type(reward_config).__name__}")
-            executors = build_executors(reward_config)
-            aggregation_method = reward_config.to_definition().reward_aggregation_method
-
         self.executors: List[BaseRewardExecutor] = list(executors or [])
         self.reward_aggregation_method = str(aggregation_method)
 
@@ -43,9 +34,26 @@ class RewardService:
         )
 
     @classmethod
-    def from_spec(cls, spec: RewardSpec) -> "RewardService":
-        """Build a RewardService directly from a RewardSpec."""
-        return cls(reward_config=spec)
+    def from_configs(cls, reward: DictConfig) -> "RewardService":
+        """Build a RewardService from the raw ``cfg.reward`` DictConfig.
+
+        Materializes the parent for top-level fields (``aggregation_method``,
+        ``base_device``) plus per-component weights, then dispatches each
+        component via :func:`diffusionrl.config.instantiate.build`. Scorer
+        results are wrapped in :class:`InProcessRewardExecutor`; executor
+        results pass through (HTTP).
+        """
+        rc = materialize(reward)
+        executors: List[BaseRewardExecutor] = []
+        for cfg_node, spec in zip(reward.components, rc.components):
+            built = build(cfg_node, base_device=rc.base_device)
+            if isinstance(built, BaseRewardScorer):
+                built = InProcessRewardExecutor(built, weight=spec.weight)
+            executors.append(built)
+        return cls(
+            executors=executors,
+            aggregation_method=rc.aggregation_method,
+        )
 
     def compute_rewards(self, request: RewardRequest) -> RewardResponse:
         """Compute rewards using configured executors."""

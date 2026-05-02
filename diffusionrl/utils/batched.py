@@ -33,7 +33,8 @@ Example::
 from __future__ import annotations
 
 import copy
-from dataclasses import field
+import inspect as _inspect
+from dataclasses import field as _dc_field
 from dataclasses import fields as dc_fields
 from enum import Enum, auto
 from typing import (
@@ -51,7 +52,11 @@ import torch
 
 T = TypeVar("T", bound="Batched")
 
-_FIELD_KIND_KEY = "field_kind"
+# Metadata key under which the field kind enum is stored. The string value is
+# also the kwarg name accepted by ``field()`` below — caller writes
+# ``field(kind=FieldKind.CONCAT, ...)`` and the routing is identical to the
+# legacy ``concat_field()`` helper.
+_FIELD_KIND_KEY = "kind"
 
 
 class FieldKind(Enum):
@@ -65,30 +70,59 @@ class FieldKind(Enum):
 
 _REDUCTION_KINDS = frozenset({FieldKind.MAX, FieldKind.MIN, FieldKind.SUM, FieldKind.MEAN})
 
+# Cache of dataclasses.field's accepted kwargs so the generic ``field()`` below
+# can route arbitrary keyword args between dc.field params and free-form metadata.
+_DC_FIELD_PARAMS = frozenset(_inspect.signature(_dc_field).parameters)
+
 
 # ---------------------------------------------------------------------------
 # Field constructors
 # ---------------------------------------------------------------------------
 
 
+def field(**kwargs: Any) -> Any:
+    """Generic field constructor with open metadata.
+
+    Kwargs matching ``dataclasses.field`` parameters (``default``,
+    ``default_factory``, ``init``, ``repr``, ``compare``, ``hash``,
+    ``metadata``, ``kw_only``) pass through to the underlying call.
+    Any other kwarg becomes an entry in the field's ``metadata`` dict.
+
+    Consumers (``Batched``, ``Transportable``, …) read the metadata keys
+    they recognize. Adding a new behavior axis is just a new kwarg + a
+    consumer that reads its key — no proliferation of ``*_field`` helpers.
+
+    This shadows ``dataclasses.field`` in this module's namespace; callers
+    that want the stdlib version should import it as ``dc_field``.
+    """
+    metadata = dict(kwargs.pop("metadata", None) or {})
+    dc_kwargs: Dict[str, Any] = {}
+    for k, v in kwargs.items():
+        if k in _DC_FIELD_PARAMS:
+            dc_kwargs[k] = v
+        else:
+            metadata[k] = v
+    return _dc_field(metadata=metadata, **dc_kwargs)
+
+
 def concat_field(**kwargs: Any) -> Any:
     """Declare a per-sample field (concatenated along the batch dimension)."""
     metadata = dict(kwargs.pop("metadata", None) or {})
     metadata[_FIELD_KIND_KEY] = FieldKind.CONCAT
-    return field(metadata=metadata, **kwargs)
+    return _dc_field(metadata=metadata, **kwargs)
 
 
 def shared_field(**kwargs: Any) -> Any:
     """Declare a shared field (identical for every sample in the batch)."""
     metadata = dict(kwargs.pop("metadata", None) or {})
     metadata[_FIELD_KIND_KEY] = FieldKind.SHARED
-    return field(metadata=metadata, **kwargs)
+    return _dc_field(metadata=metadata, **kwargs)
 
 
 def _reduction_field(kind: FieldKind, **kwargs: Any) -> Any:
     metadata = dict(kwargs.pop("metadata", None) or {})
     metadata[_FIELD_KIND_KEY] = kind
-    return field(metadata=metadata, **kwargs)
+    return _dc_field(metadata=metadata, **kwargs)
 
 
 def max_field(**kwargs: Any) -> Any:
@@ -402,9 +436,10 @@ __all__ = [
     "Batched",
     "FieldKind",
     "concat_field",
-    "shared_field",
+    "field",
     "max_field",
-    "min_field",
-    "sum_field",
     "mean_field",
+    "min_field",
+    "shared_field",
+    "sum_field",
 ]

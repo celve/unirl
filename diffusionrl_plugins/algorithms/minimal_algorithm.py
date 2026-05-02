@@ -11,7 +11,7 @@ import torch.nn as nn
 from diffusionrl.algorithms.base import (
     BaseAlgorithm,
     BaseAlgorithmConfig,
-    EMASpec,
+    EMAConfig,
     SamplingRequirements,
 )
 from diffusionrl.algorithms.registry import register_algorithm
@@ -59,9 +59,11 @@ def build_minimal_algorithm_config_from_args(
         component_mix_stage=str(args.algorithm.component_mix_stage),
         adv_normalization_scope=str(args.algorithm.adv_normalization_scope),
         samples_per_prompt=int(args.algorithm.samples_per_prompt),
-        num_inference_steps=int(sampling_spec.num_inference_steps),
-        eval_ema_decay=float(args.algorithm.eval_ema_decay),
-        eval_ema_update_interval=int(args.algorithm.eval_ema_update_interval),
+        sampling=sampling_spec,
+        ema=EMAConfig(
+            eval_ema_decay=float(args.algorithm.eval_ema_decay),
+            eval_ema_update_interval=int(args.algorithm.eval_ema_update_interval),
+        ),
         epsilon=float(args.algorithm.adv_norm_eps),
         clip_max=args.algorithm.clip_max,
         use_global_std=bool(args.algorithm.use_global_std),
@@ -119,9 +121,11 @@ class MinimalAlgorithm(BaseAlgorithm):
             component_mix_stage=str(config.get("component_mix_stage", "reward")),
             adv_normalization_scope=str(config.get("adv_normalization_scope", "group")),
             samples_per_prompt=int(config.get("samples_per_prompt", 1)),
-            num_inference_steps=int(config.get("num_inference_steps", 0)),
-            eval_ema_decay=float(config.get("eval_ema_decay", 0.9)),
-            eval_ema_update_interval=int(config.get("eval_ema_update_interval", 1)),
+            sampling=SamplingParams(num_inference_steps=int(config.get("num_inference_steps", 0))),
+            ema=EMAConfig(
+                eval_ema_decay=float(config.get("eval_ema_decay", 0.9)),
+                eval_ema_update_interval=int(config.get("eval_ema_update_interval", 1)),
+            ),
             epsilon=float(config.get("adv_norm_eps", 1e-8)),
             clip_max=config.get("clip_max", 5.0),
             use_global_std=bool(config.get("use_global_std", False)),
@@ -153,9 +157,8 @@ class MinimalAlgorithm(BaseAlgorithm):
             component_mix_stage=config.component_mix_stage,
             adv_normalization_scope=config.adv_normalization_scope,
             samples_per_prompt=config.samples_per_prompt,
-            num_inference_steps=config.num_inference_steps,
-            eval_ema_decay=config.eval_ema_decay,
-            eval_ema_update_interval=config.eval_ema_update_interval,
+            sampling=config.sampling,
+            ema=config.ema,
             epsilon=config.epsilon,
             clip_max=config.clip_max,
             use_global_std=config.use_global_std,
@@ -173,8 +176,8 @@ class MinimalAlgorithm(BaseAlgorithm):
             requires_embeddings=True,
         )
 
-    def get_ema_spec(self) -> EMASpec:
-        return EMASpec(enable_eval_ema=False)
+    def get_ema_spec(self) -> EMAConfig:
+        return EMAConfig(enable_eval_ema=False)
 
     def resolve_rollout_sde_indices(
         self,
@@ -182,12 +185,12 @@ class MinimalAlgorithm(BaseAlgorithm):
         current_step: int,
     ) -> Set[int]:
         del current_step
-        if self.num_inference_steps < 1:
+        if self.sampling.num_inference_steps < 1:
             raise ValueError(
                 f"{type(self).__name__}.resolve_rollout_sde_indices requires "
-                f"num_inference_steps >= 1, got {self.num_inference_steps}."
+                f"sampling.num_inference_steps >= 1, got {self.sampling.num_inference_steps}."
             )
-        return set(range(self.num_inference_steps))
+        return set(range(self.sampling.num_inference_steps))
 
     def get_sampler_validation_config(self, *, allow_replay: bool) -> Dict[str, Any]:
         return {
