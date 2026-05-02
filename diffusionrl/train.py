@@ -39,7 +39,6 @@ def _run_cross_component_validators(cfg: DictConfig) -> None:
         validate_lora_target_modules,
         validate_offload_contract,
         validate_rollout_layout,
-        validate_sampling_chunk_geometry,
         validate_training_actor_sampling_mode,
         validate_training_batch_geometry,
         validate_weight_sync_contract,
@@ -51,7 +50,6 @@ def _run_cross_component_validators(cfg: DictConfig) -> None:
     validate_lora_target_modules(cfg)
     validate_training_actor_sampling_mode(cfg)
     validate_training_batch_geometry(cfg)
-    validate_sampling_chunk_geometry(cfg)
     validate_weight_sync_contract(cfg)
     validate_rollout_layout(cfg)
     validate_offload_contract(cfg)
