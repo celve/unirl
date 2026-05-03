@@ -1,15 +1,10 @@
 """Duck-typed protocols for optimizer and LR scheduler objects.
 
-VeOmni's ``build_optimizer`` may return a ``MultiOptimizer`` whose ``__init__``
-skips ``super().__init__()`` — so it isn't a true ``torch.optim.Optimizer``
-even though it subclasses it nominally. VeOmni's ``build_lr_scheduler`` may
-return a ``MultiLRScheduler`` that subclasses ``dict``, not
-``torch.optim.lr_scheduler.LRScheduler``. Annotating backend hooks and
-factory returns with the torch base classes would be a false contract.
-
 These protocols capture the method surface the diffusionrl training code
 actually uses, verified by grep across ``ray/train_actor.py`` and
-``training/stack.py``.
+``training/stack.py``. The FSDP backend returns plain
+``torch.optim.Optimizer`` / ``torch.optim.lr_scheduler.LRScheduler``
+instances which satisfy the protocols structurally.
 """
 
 from __future__ import annotations

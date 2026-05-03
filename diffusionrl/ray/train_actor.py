@@ -57,18 +57,12 @@ class TrainingExecutionConfig:
 
 
 def _iter_optimizer_param_states(optimizer: Any) -> Iterable[Dict[str, Any]]:
-    """Yield per-parameter optimizer state dicts across plain and Multi optimizers.
+    """Yield per-parameter optimizer state dicts.
 
-    VeOmni's ``MultiOptimizer`` skips ``super().__init__()`` so it has no
-    ``state`` attribute, but it exposes the sub-optimizers on
-    ``optimizers_dict``. Iterate the union of their ``state.values()``.
+    The FSDP backend uses ``torch.optim.AdamW``, which exposes per-parameter
+    state via ``optimizer.state.values()``.
     """
-    sub_dict = getattr(optimizer, "optimizers_dict", None)
-    if sub_dict is not None:
-        for sub_opt in sub_dict.values():
-            yield from sub_opt.state.values()
-    else:
-        yield from optimizer.state.values()
+    yield from optimizer.state.values()
 
 
 @ray.remote(num_gpus=1)

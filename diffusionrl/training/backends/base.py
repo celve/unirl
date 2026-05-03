@@ -50,7 +50,7 @@ class TrainBackendConfig:
 
     1. **Identifier is a ClassVar, not a field.** Each concrete config
        declares ``name: ClassVar[str]`` as its stable identifier (for
-       example ``"fsdp"``, ``"veomni"``). Consumers that need the
+       example ``"fsdp"``). Consumers that need the
        identifier read ``config.name``. Using a ClassVar keeps the
        identifier out of the frozen-dataclass init signature and out of
        Ray-side serialization payloads, while still giving validation /
@@ -127,8 +127,8 @@ class TrainTopology:
     train-actor count at bootstrap time.
 
     Parallel dims (``tp_size`` / ``pp_size`` / ``sp_size`` / ``ep_size``) are
-    consumed only by backends that honor them (VeOmni); FSDP ignores
-    topology and derives its own sizes from ``dist.get_world_size()``.
+    consumed only by backends that honor them; FSDP ignores topology and
+    derives its own sizes from ``dist.get_world_size()``.
     """
 
     dp_size: Optional[int] = None

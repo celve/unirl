@@ -4,7 +4,6 @@ from diffusionrl.training.backends.protocols import (
     LRSchedulerProtocol,
     OptimizerProtocol,
 )
-from diffusionrl.training.backends.veomni import VeOmniBackend, VeOmniBackendConfig
 
 __all__ = [
     "TrainBackend",
@@ -13,6 +12,4 @@ __all__ = [
     "LRSchedulerProtocol",
     "FSDPBackend",
     "FSDPBackendConfig",
-    "VeOmniBackend",
-    "VeOmniBackendConfig",
 ]

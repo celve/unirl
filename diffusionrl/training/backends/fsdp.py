@@ -64,8 +64,8 @@ class FSDPBackend:
         *,
         topology: Optional[TrainTopology] = None,
     ) -> None:
-        # topology is accepted for call-site symmetry with VeOmniBackend but
-        # unused here — FSDP2 derives world/DP sizes from
+        # topology is accepted for call-site symmetry across training backends
+        # but unused here — FSDP2 derives world/DP sizes from
         # ``torch.distributed.get_world_size()`` at wrap time.
         del topology
         self.config = config

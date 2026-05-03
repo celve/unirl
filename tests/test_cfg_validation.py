@@ -39,7 +39,6 @@ from diffusionrl.reward import config as _reward_config  # noqa: F401
 from diffusionrl.samplers.fsdp import engine as _fsdp_engine  # noqa: F401
 from diffusionrl.samplers.sglang import engine as _sglang_engine  # noqa: F401
 from diffusionrl.training.backends import fsdp as _fsdp  # noqa: F401
-from diffusionrl.training.backends import veomni as _veomni  # noqa: F401
 from diffusionrl.types import sampling as _sampling  # noqa: F401
 
 _CONF_DIR = str(Path(__file__).resolve().parent.parent / "conf")

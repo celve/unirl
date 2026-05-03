@@ -22,7 +22,7 @@ DiffusionRL supports the following diffusion models:
 
 **Module Descriptions**:
 
-- **Training Actors (Ray + TrainBackend)**: Responsible for the main training process through pluggable training backends (FSDP2 / VeOmni native; Megatron scaffold), reads `TrainingBatch` from the rollout buffer, and synchronizes parameters to the inference actors after training.
+- **Training Actors (Ray + TrainBackend)**: Responsible for the main training process through pluggable training backends (FSDP2; Megatron scaffold), reads `TrainingBatch` from the rollout buffer, and synchronizes parameters to the inference actors after training.
 - **Inference Actors (FSDP / SGLang)**: Generates denoising trajectories and latent samples using pluggable sampling engines, producing lightweight `RolloutSamples`.
 - **Reward Runtime**: Evaluates generated samples using configurable reward models (HPS, CLIP, PickScore, OCR, etc.) through one actor-side precompute path with local in-process scoring.
 - **RolloutPipeline**: The driver owns the outer rollout loop via `RolloutPipeline`, which drives the `load_prompts -> plan_requests -> exec_request -> aggregate -> convert_training_data` phases. Reward scoring and advantage computation run inside the rollout actor through `RolloutActor.run_rollout_pipeline`, and the driver then assembles the final `TrainingBatch`.
@@ -198,10 +198,9 @@ Training geometry is rollout-driven only:
 
 ### Training Backend Selection
 
-`diffusionRL` now exposes three train backend entries:
+`diffusionRL` now exposes two train backend entries:
 
 - `fsdp`: default backend, implemented as **FSDP2** (`fully_shard` path).
-- `veomni`: VeOmni native backend with FSDP2-focused data parallel mode (`data_parallel_mode=fsdp2`).
 - `megatron`: interface scaffold for future integration (launcher/topology hooks are present, runtime path is not complete yet; requires a Megatron-specific actor class via `train_backend_kwargs.actor_class_path`).
 
 Example: default FSDP2 training
@@ -211,19 +210,9 @@ python -m diffusionrl.train \
   --training.train-backend fsdp
 ```
 
-Example: VeOmni-compatible FSDP2 mode
-
-```bash
-python -m diffusionrl.train \
-  --training.train-backend veomni \
-  --training.train-backend-kwargs '{"data_parallel_mode":"fsdp2"}'
-```
-
 Notes:
 
 - FSDP2 runtime requires a torch build that provides composable FSDP2 APIs (`fully_shard`) and distributed checkpoint state-dict helpers.
-- diffusionRL intentionally keeps VeOmni backend on `fsdp2` only for RL training.
-- Built-in `veomni` backend calls VeOmni native APIs for model parallelization / optimizer / scheduler / grad clipping.
 
 ## Supported Algorithms
 

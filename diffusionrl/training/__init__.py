@@ -7,8 +7,6 @@ from diffusionrl.training.backends import (
     OptimizerProtocol,
     TrainBackend,
     TrainBackendConfig,
-    VeOmniBackend,
-    VeOmniBackendConfig,
 )
 from diffusionrl.training.batch_partition import shard_training_batch_for_rank
 from diffusionrl.training.factories import build_lr_scheduler, build_optimizer
@@ -33,8 +31,6 @@ __all__ = [
     "LRSchedulerProtocol",
     "FSDPBackend",
     "FSDPBackendConfig",
-    "VeOmniBackend",
-    "VeOmniBackendConfig",
     "BaseTrainBackendConfig",
     "TrainBackendCapabilities",
     "TrainBackendLaunchSpec",
