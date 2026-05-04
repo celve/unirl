@@ -43,20 +43,17 @@ logger = logging.getLogger(__name__)
 
 
 def _pil_from_tensor(tensor: torch.Tensor) -> Image.Image:
-    """Convert a CHW or HW torch.Tensor to a PIL RGB image.
+    """Convert a CHW float or uint8 tensor to a PIL RGB image.
 
-    Handles both [0, 1] float and [0, 255] float/byte tensors.
-    Always moves to CPU before conversion.
+    Float tensors are clamped to ``[0, 1]`` (the producer-side contract on
+    ``RolloutSamples.decoded_images``); ``to_pil_image`` then handles the
+    uint8 conversion. Always moves to CPU before conversion.
     """
     from torchvision.transforms.functional import to_pil_image
 
     tensor = tensor.detach().cpu()
     if tensor.is_floating_point():
-        if tensor.max() <= 1.0:
-            tensor = tensor.clamp(0.0, 1.0)
-        else:
-            # Assume 0–255 range; normalize to 0–1 for to_pil_image.
-            tensor = (tensor / 255.0).clamp(0.0, 1.0)
+        tensor = tensor.clamp(0.0, 1.0)
     return to_pil_image(tensor)
 
 

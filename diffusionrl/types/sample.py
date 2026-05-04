@@ -98,7 +98,11 @@ class RolloutSamples(Transportable):
     rewards: Optional[torch.Tensor] = concat_field(default=None)
     advantages: Optional[torch.Tensor] = concat_field(default=None)
     component_rewards: Optional[Dict[str, torch.Tensor]] = concat_field(default=None)
-    decoded_images: Optional[List[Any]] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    # ``decoded_images`` carries canonical 3D ``[C,H,W]`` float tensors in [0,1]
+    # (one per sample; for video models, the middle frame). PIL conversion is
+    # deferred to ``RolloutResponse.attach_media_preview`` (the wandb boundary)
+    # — reward handlers consume the float tensor directly.
+    decoded_images: Optional[List[torch.Tensor]] = field(kind=FieldKind.CONCAT, default=None, transport=True)
     decoded_videos: Optional[List[Any]] = field(kind=FieldKind.CONCAT, default=None, transport=True)
     media_preview: Optional[MediaPreview] = concat_field(default=None)
     # Per-actor sum of per-handle score_and_attach seconds; reduces by max

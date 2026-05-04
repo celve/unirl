@@ -62,7 +62,6 @@ class SGLangEngineConfig:
     local_mode: bool = True
     logprob_source: str = "replay"
     verify_weight_checksum: bool = True
-    require_memory_api: bool = False
     disable_autocast: bool = False
 
     # --- Weight sync ---

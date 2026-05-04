@@ -145,7 +145,7 @@ class FSDPWanSampler(FSDPBaseSampler):
         latent_t, latent_h, latent_w = self._latent_shape(height=height, width=width, num_frames=num_frames)
         latent_channels = self._latent_channels()
         if latents is None:
-            from ..noise_utils import generate_latents
+            from ..utils.noise import generate_latents
 
             latents = generate_latents(
                 batch_size=batch_size,

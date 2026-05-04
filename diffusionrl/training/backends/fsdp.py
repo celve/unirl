@@ -354,19 +354,21 @@ class FSDPBackend:
     # ------------------------------------------------------------------
 
     def offload(self) -> None:
-        """Move model params and grads to CPU. Idempotent."""
+        """Move model params and grads to CPU. Idempotent.
+
+        Uses ``Module._apply`` (via ``self.model.cpu()``) so DTensor wrappers
+        are reconstructed on a CPU device-mesh and ``state_dict()`` /
+        ``redistribute()`` continue to work post-offload. Per-param
+        ``param.data = ...`` mutation crashes torch >= 2.9 inside
+        ``_correct_storage_aliasing`` because the wrapper's mesh stays on
+        cuda while its storage moves to cpu.
+        """
         if self._is_offloaded:
             return
 
-        cpu = torch.device("cpu")
-        for param in self.model.parameters():
-            local = self._local_or_self(param.data)
-            param.data = local.to(cpu, non_blocking=False)
-            if param.grad is not None:
-                local_grad = self._local_or_self(param.grad)
-                param.grad = local_grad.to(cpu, non_blocking=False)
-
+        self.model.cpu()
         if torch.cuda.is_available():
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
         self._is_offloaded = True
@@ -377,16 +379,12 @@ class FSDPBackend:
         if not self._is_offloaded:
             return
 
-        target = self._device
-        for param in self.model.parameters():
-            local = self._local_or_self(param.data)
-            param.data = local.to(target, non_blocking=False)
-            if param.grad is not None:
-                local_grad = self._local_or_self(param.grad)
-                param.grad = local_grad.to(target, non_blocking=False)
+        self.model.to(self._device)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
 
         self._is_offloaded = False
-        logger.debug("FSDPBackend: onloaded params/grads to %s", target)
+        logger.debug("FSDPBackend: onloaded params/grads to %s", self._device)
 
     # ------------------------------------------------------------------
     # Protocol: build_optimizer / build_scheduler
@@ -460,16 +458,6 @@ class FSDPBackend:
         for adapter_name in adapter_names:
             lora_state.update(get_peft_model_state_dict(base_model, adapter_name=adapter_name))
         return lora_state
-
-    @staticmethod
-    def _local_or_self(tensor: torch.Tensor) -> torch.Tensor:
-        """Return the local shard for DTensors, else the tensor itself."""
-        if hasattr(tensor, "to_local") and callable(getattr(tensor, "to_local")):
-            try:
-                return tensor.to_local()
-            except Exception:
-                return tensor
-        return tensor
 
     @staticmethod
     def _infer_device(model: nn.Module) -> torch.device:

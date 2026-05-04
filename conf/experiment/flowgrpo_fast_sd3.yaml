@@ -83,7 +83,7 @@ model:
   lora_rank: 32
   lora_alpha: 64
   use_gradient_checkpointing: false
-  pretrained_model_ckpt_path: stabilityai/stable-diffusion-3.5-medium
+  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
 
 reward:
   aggregation_method: mean

@@ -25,7 +25,7 @@ from diffusionrl.rollout.request_builders import (
     build_eval_request_batch,
     load_prompt_batch_from_source,
 )
-from diffusionrl.samplers.noise_utils import mix_rollout_base_seed
+from diffusionrl.samplers.utils.noise import mix_rollout_base_seed
 from diffusionrl.types.prompts import Prompts
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.response import RolloutResponse

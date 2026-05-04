@@ -102,9 +102,9 @@ class RolloutPipelineMixin:
             if decoded.dim() >= 5:
                 response.samples.decoded_videos = decoded
             else:
-                from diffusionrl.utils.media import tensor_to_pil
-
-                response.samples.decoded_images = tensor_to_pil(decoded)
+                # VAE 4D output [B,C,H,W] → list of 3D [C,H,W] tensors. PIL
+                # conversion is deferred to attach_media_preview (wandb boundary).
+                response.samples.decoded_images = list(decoded.unbind(0))
         score_t0 = time.perf_counter()
         self._ensure_reward_pipeline().score_and_attach(response)
         response.samples.reward_compute_s = time.perf_counter() - score_t0

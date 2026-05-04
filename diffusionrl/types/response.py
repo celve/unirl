@@ -8,6 +8,7 @@ from diffusionrl.types.sample import LogProbData, MediaPreview, RolloutSamples
 from diffusionrl.types.training_batch import TrainingBatch
 from diffusionrl.types.trajectory_store import TrajectoryStore
 from diffusionrl.utils.batched import Batched, concat_field
+from diffusionrl.utils.media import tensor_frame_to_pil
 
 
 @dataclass
@@ -37,11 +38,13 @@ class RolloutResponse(Batched):
         """Build a ``MediaPreview`` from this (already-scored) response and
         bind it directly onto ``self.samples.media_preview``.
 
-        Reads up to ``max_items`` PIL images from
-        ``self.samples.decoded_images``, pairs them with the corresponding
-        prompt strings and (already-attached) reward floats, and writes a
-        typed ``MediaPreview`` back onto ``self.samples.media_preview``.
-        Writes ``None`` when no PIL images are available on the samples.
+        Reads up to ``max_items`` canonical 3D ``[C,H,W]`` float tensors from
+        ``self.samples.decoded_images``, converts each to a PIL image via
+        ``tensor_frame_to_pil`` (the wandb boundary), pairs them with the
+        corresponding prompt strings and (already-attached) reward floats,
+        and writes a typed ``MediaPreview`` back onto
+        ``self.samples.media_preview``. Writes ``None`` when no decoded
+        tensors are available on the samples.
         Used by the actor-side rollout pipeline right after reward scoring
         (see ``RolloutPipelineMixin.attach_reward``) and as a fallback on
         the driver side.
@@ -63,9 +66,11 @@ class RolloutResponse(Batched):
         for idx, img in enumerate(decoded_images):
             if len(images) >= limit:
                 break
-            if not hasattr(img, "save"):
+            if not torch.is_tensor(img):
                 continue
-            images.append(img)
+            # Slice to first 3 channels (drops alpha / model-specific 4th channel)
+            # before PIL conversion — wandb wants RGB.
+            images.append(tensor_frame_to_pil(img[:3]))
             prompts_out.append(str(prompt_texts[idx]) if idx < len(prompt_texts) else "")
             reward_values.append(float(rewards_flat[idx]) if idx < len(rewards_flat) else 0.0)
 

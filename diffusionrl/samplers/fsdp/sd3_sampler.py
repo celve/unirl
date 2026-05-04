@@ -290,7 +290,7 @@ class SD3Sampler(FSDPBaseSampler):
 
         # Initialize latents in trajectory_dtype (storage precision)
         if latents is None:
-            from ..noise_utils import generate_latents
+            from ..utils.noise import generate_latents
 
             latents = generate_latents(
                 batch_size=batch_size,

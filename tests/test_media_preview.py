@@ -178,17 +178,21 @@ def test_attach_reward_builds_preview_and_drops_images():
         media_max_items=2,
     )
     samples_on = make_samples(3)
-    samples_on.decoded_images = [_FakePIL(f"img{i}") for i in range(3)]
+    # ``decoded_images`` now carries canonical 3D tensors; ``attach_media_preview``
+    # converts them to PIL on the wandb boundary.
+    samples_on.decoded_images = [torch.full((3, 8, 8), float(i) / 10.0) for i in range(3)]
     response_on = RolloutResponse(request=req_on, samples=samples_on)
 
     host_on = _Host(response_on)
     host_on.attach_reward(handle=object())
 
+    from PIL.Image import Image as _PILImage
+
     assert response_on.samples.rewards is not None
     assert response_on.samples.rewards.tolist() == [0.0, 1.0, 2.0]
     assert isinstance(response_on.samples.media_preview, MediaPreview)
     assert len(response_on.samples.media_preview.images) == 2
-    assert [im.tag for im in response_on.samples.media_preview.images] == ["img0", "img1"]
+    assert all(isinstance(im, _PILImage) for im in response_on.samples.media_preview.images)
     assert response_on.samples.media_preview.prompts[:2] == [
         req_on.prompts.prompts[0],
         req_on.prompts.prompts[1],
@@ -204,7 +208,7 @@ def test_attach_reward_builds_preview_and_drops_images():
         media_max_items=2,
     )
     samples_off = make_samples(3)
-    samples_off.decoded_images = [_FakePIL(f"off{i}") for i in range(3)]
+    samples_off.decoded_images = [torch.full((3, 8, 8), float(i) / 10.0) for i in range(3)]
     response_off = RolloutResponse(request=req_off, samples=samples_off)
 
     host_off = _Host(response_off)

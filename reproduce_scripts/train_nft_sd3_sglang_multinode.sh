@@ -94,16 +94,6 @@ TP_SIZE="${TP_SIZE:-1}"
 SGLANG_LOGPROB_MODE="${SGLANG_LOGPROB_MODE:-replay}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-24}"
 
-# Prefer local sibling sglang checkout when available; otherwise use installed package.
-SGLANG_PYTHON_PATH="${SGLANG_PYTHON_PATH:-${REPO_ROOT}/../sglang/python}"
-if [ -d "${SGLANG_PYTHON_PATH}" ]; then
-    export SGLANG_PYTHON_PATH
-    export PYTHONPATH="${SGLANG_PYTHON_PATH}:${PYTHONPATH:-}"
-    echo "[SGLang] Using local source: ${SGLANG_PYTHON_PATH}"
-else
-    echo "[SGLang] Local source not found at ${SGLANG_PYTHON_PATH}; using installed sglang."
-fi
-
 # ── Training hyperparameters ──
 PRETRAINED_MODEL="${PRETRAINED_MODEL:-stabilityai/stable-diffusion-3.5-medium}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/nft_sd3_sglang_multinode}"

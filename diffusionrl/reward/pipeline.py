@@ -25,12 +25,24 @@ logger = logging.getLogger(__name__)
 
 
 def _extract_images_from_output(output: RolloutSamples) -> List[Any]:
-    if output.decoded_images is not None:
-        return [img for img in output.decoded_images]
-    raise ValueError(
-        "Reward stage requires decoded_images on RolloutSamples for image rewards. "
-        "Sampler output did not include decoded media."
-    )
+    if output.decoded_images is None:
+        raise ValueError(
+            "Reward stage requires decoded_images on RolloutSamples for image rewards. "
+            "Sampler output did not include decoded media."
+        )
+    # HF image processors (CLIPProcessor and friends) default to do_rescale=True
+    # which divides by 255 — correct for uint8 PIL, but already-rescaled for
+    # tensor [0,1]. Convert tensors back to PIL here so every reward consumer
+    # sees the pre-refactor uint8 RGB contract.
+    from diffusionrl.utils.media import tensor_frame_to_pil
+
+    items: List[Any] = []
+    for img in output.decoded_images:
+        if torch.is_tensor(img):
+            items.append(tensor_frame_to_pil(img))
+        else:
+            items.append(img)
+    return items
 
 
 def _extract_videos_from_output(output: RolloutSamples) -> List[torch.Tensor]:

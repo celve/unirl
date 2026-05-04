@@ -18,6 +18,7 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 from PIL import Image
@@ -517,20 +518,19 @@ class TestAggregationMethods:
 
 
 class TestPilFromTensorRobust:
-    def test_float_0_to_255_range(self):
-        """Float tensor in 0–255 range should be normalized to 0–1."""
-        t = torch.tensor([[[128.0, 64.0], [32.0, 255.0]]] * 3)  # 3xHxW
-        img = _pil_from_tensor(t)
-        assert isinstance(img, Image.Image)
-
     def test_gpu_tensor_moved_to_cpu(self):
         """Tensor should be detached and moved to CPU (no error even on CPU-only)."""
         t = torch.rand(3, 8, 8, requires_grad=True)
         img = _pil_from_tensor(t)
         assert isinstance(img, Image.Image)
 
-    def test_clamping_out_of_range(self):
-        """Values > 255 or < 0 should be clamped."""
-        t = torch.tensor([[[300.0, -10.0], [128.0, 0.0]]] * 3)
+    def test_overshoot_clamped(self):
+        """Floats slightly outside [0, 1] (typical VAE overshoot) must be
+        clamped, not interpreted as 0–255 — otherwise the consumer crushes
+        the whole tensor by 255 and produces a near-uniform black image."""
+        torch.manual_seed(0)
+        t = torch.rand(3, 16, 16) * 1.05  # overshoots [0, 1] by ~5%
         img = _pil_from_tensor(t)
+        arr = np.array(img.convert("RGB"))
         assert isinstance(img, Image.Image)
+        assert arr.std() > 20, f"image collapsed to near-uniform: std={arr.std()}"

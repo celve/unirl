@@ -219,7 +219,7 @@ def chunked_engine_generate(
     Determinism caveats (chunked vs. unchunked):
 
     - **Initial noise** is bit-identical iff ``init_same_noise=True``: in
-      that path ``samplers/noise_utils.py`` keys per-group noise on each
+      that path ``samplers/utils/noise.py`` keys per-group noise on each
       sample's ``noise_group_id`` (preserved by ``Prompts.slice`` /
       ``Batched``) plus a base seed. With ``init_same_noise=False`` the
       fallback is plain ``torch.randn`` consuming global RNG state, so

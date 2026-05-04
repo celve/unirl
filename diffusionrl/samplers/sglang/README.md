@@ -52,7 +52,14 @@ class SGLangHunyuanSampler(SGLangSampler):
 ## Dependencies
 
 ```
-sglang>=0.3.0  # When diffusion support is available
+sglang[diffusion] @ git+https://github.com/celve/sglang.git@diffusionrl#subdirectory=python
+```
+
+For source-mode development against a sibling SGLang checkout:
+
+```bash
+# Dev mode: install your sibling sglang clone editable so source changes take effect without reinstall.
+pip install -e ../sglang/python
 ```
 
 ## Usage (Future)

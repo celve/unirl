@@ -395,12 +395,12 @@ def train(cfg: DictConfig) -> None:
             if cfg.get("transfer_queue") is not None:
                 tq_runtime.clear_partition()
 
-            # === PHASE C: Offload + Weight Sync ===
-            if cfg.training.execution.offload_train:
-                train_group.offload()
-            else:
-                train_group.clear_memory()
-
+            # === PHASE C: Weight Sync + Offload ===
+            # Sync runs first so train weights are still on GPU; rollout wakes
+            # up to receive into its weight buffer. Train offloads after sync.
+            # This matches verl/slime's time-multiplexed pattern: at sync time
+            # both train shards (M/W per rank) and rollout's weight buffer
+            # coexist on GPU, with rollout's KV cache asleep until wake-up.
             if (
                 not training_actor_sampling_mode
                 and sync_enabled
@@ -411,6 +411,11 @@ def train(cfg: DictConfig) -> None:
                 train_group.sync_weights_to_rollout()
                 sync_phase_s = time.perf_counter() - sync_phase_start_t
                 rollout_on_gpu = True
+
+            if cfg.training.execution.offload_train:
+                train_group.offload()
+            else:
+                train_group.clear_memory()
 
             # === Per-optimizer-step wandb logging ===
             if wandb_logger and metrics:

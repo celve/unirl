@@ -191,7 +191,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
         trajectory_dtype = self.trajectory_dtype
 
         if latents is None:
-            from ..noise_utils import generate_latents
+            from ..utils.noise import generate_latents
 
             latents = generate_latents(
                 batch_size=batch_size,
