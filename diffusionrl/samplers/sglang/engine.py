@@ -124,8 +124,6 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         self._supports_memory_api: bool = False
         self._require_memory_api: bool = False
         self._warned_missing_decoded: bool = False
-        self._warned_logprob_shape: bool = False
-        self._warned_unsupported_rollout_sde: bool = False
         self._warned_missing_trajectory_with_optional_mode: bool = False
         self._warned_latent_encode_fallback: bool = False
         self._informed_sglang_initial_noise_policy: bool = False
@@ -349,19 +347,21 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         self._is_initialized = True
 
     def _infer_model_type(self) -> str:
-        value = (
-            str(self.config.engine_kwargs.get("model_type", ""))
-            or str(self._model_config.pretrained_model_ckpt_path or "")
-        ).lower()
-        if "hunyuan" in value:
-            return "hunyuan"
-        if "flux" in value:
-            return "flux"
-        if "sd3" in value:
-            return "sd3"
-        if "mochi" in value:
-            return "mochi"
-        return "unknown"
+        raw_override = str(self.config.engine_kwargs.get("model_type", ""))
+        raw_path = str(self._model_config.pretrained_model_ckpt_path or "")
+        value = (raw_override or raw_path).lower()
+        for substring in ("hunyuan", "flux", "sd3", "mochi"):
+            if substring in value:
+                return substring
+        raise ValueError(
+            f"SGLangRolloutEngine could not infer model_type from "
+            f"engine_kwargs.model_type={raw_override!r} or "
+            f"pretrained_model_ckpt_path={raw_path!r}. "
+            f"Set engine_kwargs.model_type explicitly to one of "
+            f"{{'hunyuan', 'flux', 'sd3', 'mochi'}} (an exact match — the "
+            f"pre-existing rule is a substring check, so e.g. "
+            f"'stabilityai/stable-diffusion-3.5-medium' does not match 'sd3')."
+        )
 
     # ---------------------------------------------------------------------
     # Data conversion helpers
@@ -645,6 +645,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         *,
         trajectories_tensor: torch.Tensor,
         num_inference_steps: int,
+        results: Sequence[Any],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         traj_len = int(trajectories_tensor.shape[1])
         if traj_len != int(num_inference_steps) + 1:
@@ -666,7 +667,55 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 "SGLang timestep/trajectory length mismatch after conversion: "
                 f"timesteps={timesteps.shape[0]}, trajectory_len={traj_len}"
             )
+        self._verify_sglang_timesteps(results, expected=timesteps)
         return timesteps, step_indices
+
+    @staticmethod
+    def _verify_sglang_timesteps(
+        results: Sequence[Any],
+        *,
+        expected: torch.Tensor,
+        atol: float = 1e-5,
+        rtol: float = 1e-4,
+    ) -> None:
+        """Cross-check SGLang's emitted ``trajectory_timesteps`` against the
+        client-recomputed sigma schedule.
+
+        The client recomputes timesteps via ``get_sigma_schedule(num_steps, shift)``
+        and uses those values for log-prob math. SGLang internally computes
+        the same schedule on its side; if those two ever drift (sigma
+        formula change, shift propagation bug, num_steps mismatch), all
+        downstream math is silently wrong. Raises ``RuntimeError`` on any
+        divergence.
+        """
+        expected_f32 = expected.to(torch.float32)
+        for i, result in enumerate(results):
+            actual = getattr(result, "trajectory_timesteps", None)
+            if actual is None:
+                raise RuntimeError(
+                    f"Result index {i} missing trajectory_timesteps; cannot cross-check "
+                    f"SGLang's sigma schedule against the client-recomputed one. "
+                    f"Either upgrade SGLang to emit trajectory_timesteps or pin a build "
+                    f"that does — silent agreement on timesteps is not safe."
+                )
+            actual_t = actual.detach().cpu() if torch.is_tensor(actual) else torch.as_tensor(actual)
+            actual_t = actual_t.to(torch.float32)
+            if actual_t.shape != expected_f32.shape:
+                raise RuntimeError(
+                    f"SGLang trajectory_timesteps shape mismatch on result {i}: "
+                    f"got {tuple(actual_t.shape)}, expected {tuple(expected_f32.shape)}. "
+                    f"Investigate sigma_schedule formula drift on the SGLang side."
+                )
+            if not torch.allclose(actual_t, expected_f32, atol=atol, rtol=rtol):
+                max_diff = (actual_t - expected_f32).abs().max().item()
+                raise RuntimeError(
+                    f"SGLang trajectory_timesteps value mismatch on result {i}: "
+                    f"max abs diff={max_diff:.3e} (atol={atol:g}, rtol={rtol:g}). "
+                    f"Client schedule (head): {expected_f32.tolist()[:5]}; "
+                    f"SGLang returned (head): {actual_t.tolist()[:5]}. "
+                    f"Verify that get_sigma_schedule(num_steps, shift) matches the "
+                    f"SGLang-side sigma formula and that ``shift`` is propagated end-to-end."
+                )
 
     def _extract_decoded_media(self, result: Any) -> tuple[Optional[Any], Optional[torch.Tensor]]:
         sample = getattr(result, "samples", None)
@@ -733,6 +782,43 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             idx = max(0, min(idx, lp.shape[0] - 1))
             lp = lp[idx : idx + 1]
         return lp.detach().cpu()
+
+    def _merge_native_log_probs(
+        self,
+        per_result_log_probs: List[Optional[torch.Tensor]],
+        *,
+        results: List[Any],
+        expected_steps: int,
+        num_inference_steps: int,
+    ) -> torch.Tensor:
+        """Concatenate per-result native log_probs after fail-fast validation.
+
+        Raises ``RuntimeError`` if any result is missing a usable log_prob or
+        if the joined tensor's second dim disagrees with ``expected_steps``.
+        Caller (``_parse_generate_results``) only invokes this when
+        ``logprob_source='native'`` is in effect — under ``replay`` the helper
+        is bypassed entirely.
+        """
+        missing = [i for i, lp in enumerate(per_result_log_probs) if lp is None]
+        if missing:
+            sample_idx = missing[0]
+            raise RuntimeError(
+                f"logprob_source='native' but SGLang did not return usable trajectory_log_probs "
+                f"for {len(missing)}/{len(results)} result(s) (first missing index={sample_idx}); "
+                f"sample result fields: {self._describe_result_fields(results[sample_idx])}. "
+                f"Either pin a SGLang build that emits trajectory_log_probs of shape [B, T] or [T] "
+                f"or switch logprob_source='replay' to recompute on the training side."
+            )
+        log_prob_tensor = torch.cat([lp for lp in per_result_log_probs if lp is not None], dim=0)
+        if int(log_prob_tensor.shape[1]) != expected_steps:
+            raise RuntimeError(
+                f"logprob_source='native' but SGLang trajectory_log_probs shape {tuple(log_prob_tensor.shape)} "
+                f"does not match expected second dim={expected_steps} "
+                f"(= step_indices length - 1, with num_inference_steps={num_inference_steps}). "
+                f"This points at a denoising-step / SGLang version mismatch — fix the source rather than "
+                f"fall back to replay silently."
+            )
+        return log_prob_tensor
 
     @staticmethod
     def _align_embedding_tensor(name: str, value: Optional[torch.Tensor], batch_size: int) -> Optional[torch.Tensor]:
@@ -891,11 +977,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             "guidance_scale": guidance_scale,
         }
 
-        target_model_type = model_type or "default"
-        try:
-            ctx_cls = get_forward_context_cls(target_model_type)
-        except KeyError:
-            ctx_cls = get_forward_context_cls("default")
+        ctx_cls = get_forward_context_cls(model_type)
 
         valid_fields = {f.name for f in dataclass_fields(ctx_cls)}
 
@@ -984,27 +1066,35 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         )
         # Internal config only uses canonical flow/cps/dance/dpm2 names.
         # The native SGLang backend still expects "sde" as the flow-kernel label,
-        # so translate only at this external boundary.
+        # so translate only at this external boundary. Unknown / dance / dpm2
+        # have no validated SGLang kernel: the previous "coerce to flow + log
+        # warning" behavior was a silent kernel mismatch — SGLang would sample
+        # with the flow kernel while training-side replay recomputed log_prob
+        # with the user-configured kernel, producing wrong GRPO ratios. Fail
+        # fast here until each strategy has an explicit, math-equivalent SGLang
+        # kernel mapping verified end-to-end. The validation is gated by
+        # ``rollout_enabled``: ODE-only paths (NFT, eval) never pass
+        # ``rollout_sde_type`` to SGLang at all (see ``if rollout_enabled:`` block
+        # below), so the kernel-mismatch concern doesn't apply and the raise
+        # would be a spurious blocker on legitimate ODE callers.
         if requested_rollout_sde == "flow":
             rollout_sde_type = "sde"
         elif requested_rollout_sde == "cps":
             rollout_sde_type = "cps"
+        elif rollout_enabled:
+            raise ValueError(
+                f"SGLang rollout currently supports only sde_type in {{'flow', 'cps'}} "
+                f"(those have a verified SGLang-side kernel that matches DiffusionRL's math); "
+                f"got requested_rollout_sde={requested_rollout_sde!r}. Either switch the SDE "
+                f"strategy on this engine, or add an explicit mapping after verifying the SGLang-side "
+                f"kernel is mathematically equivalent — do not let SGLang sample with the flow kernel "
+                f"while training-side replay uses a different kernel."
+            )
         else:
-            # Unknown SDE label — we still want SGLang to run its SDE kernel
-            # (rather than falling back to a deterministic ODE step) but we
-            # can't promise the returned log_probs match DiffusionRL's math,
-            # so suppress the native log_prob transport.  Replay path still
-            # computes log_prob on the training side from the SDE trajectory,
-            # so GRPO keeps working.
+            # ODE path: ``rollout_sde_type`` is never read (``if rollout_enabled:``
+            # below short-circuits), so use the flow-kernel label as a harmless
+            # placeholder rather than leaving the variable unset.
             rollout_sde_type = "sde"
-            if rollout_enabled and self._native_rollout_logprob_enabled() and not self._warned_unsupported_rollout_sde:
-                logger.warning(
-                    "SGLang native rollout logprob currently supports only flow/cps, got sde_type=%r. "
-                    "Forcing rollout_sde_type='sde' and suppressing native log_prob transport; "
-                    "training will recompute log_prob via replay.",
-                    requested_rollout_sde,
-                )
-                self._warned_unsupported_rollout_sde = True
         rollout_noise_level = float(
             kwargs.pop(
                 "rollout_noise_level",
@@ -1043,6 +1133,16 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             sampling_params_kwargs["rollout_noise_level"] = rollout_noise_level
             if sde_indices is not None:
                 sampling_params_kwargs["rollout_sde_indices"] = sorted(int(i) for i in sde_indices)
+
+        # Forward any leftover ``sampler_kwargs`` as backend-specific overrides
+        # for SGLang. Typed-field shadowing is blocked in
+        # ``SamplingParams.__post_init__``; engine-known keys (``negative_prompt``,
+        # ``fps``, ``rollout_sde_type``, ...) were popped above. What remains is
+        # genuine user-authored escape-hatch knobs — let SGLang reject any it
+        # doesn't accept rather than silently dropping them here. Engine pins
+        # always win, so ``setdefault`` only fills keys we didn't set.
+        for key, value in kwargs.items():
+            sampling_params_kwargs.setdefault(key, value)
 
         unique_prompts, validated_k = _deexpand_prompts(list(prompts), samples_per_prompt)
         if num_outputs_per_prompt is not None:
@@ -1176,6 +1276,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             timesteps, step_indices = self._derive_timestep_alignment(
                 trajectories_tensor=trajectories_tensor,
                 num_inference_steps=ctx.steps,
+                results=results,
             )
             final_latents = trajectories_tensor[:, -1].clone()
 
@@ -1206,39 +1307,32 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             timesteps = get_sigma_schedule(ctx.steps, shift=float(self.config.sampling.sde_config.shift)).cpu()
             step_indices = torch.arange(timesteps.shape[0], dtype=torch.long)
 
-        per_result_log_probs: List[Optional[torch.Tensor]] = []
         # Only consume SGLang-returned log_probs when logprob_source='native'.
         # Under ``logprob_source='replay'`` we still ask SGLang to run SDE
         # sampling (so the trajectory has real Gaussian residuals), but the
         # authoritative log_prob must be recomputed on the training side via
         # ``ReplayLogProbPatch`` — that path is gated on
-        # ``batch.log_probs is None``, so we intentionally return None here.
+        # ``batch.log_probs is None``, so we intentionally skip extraction here.
+        merged_log_probs: Optional[LogProbData] = None
         if ctx.require_log_probs and self._native_rollout_logprob_enabled():
             per_result_log_probs = [self._extract_log_probs_from_result(result) for result in results]
-
-        merged_log_probs: Optional[LogProbData] = None
-        if ctx.require_log_probs and per_result_log_probs and all(lp is not None for lp in per_result_log_probs):
-            log_prob_tensor = torch.cat([lp for lp in per_result_log_probs if lp is not None], dim=0)
             expected_steps = int(step_indices.shape[0]) - 1
-            if int(log_prob_tensor.shape[1]) == expected_steps:
-                lp_dict = {int(step_indices[i].item()): log_prob_tensor[:, i] for i in range(expected_steps)}
-                merged_log_probs = LogProbData.from_dict(lp_dict)
-                if not getattr(self, "_logged_logprob_attach", False):
-                    logger.info(
-                        "SGLang native logprobs attached: tensor_shape=%s, step_keys=%s, require_log_probs=%s",
-                        tuple(log_prob_tensor.shape),
-                        sorted(lp_dict.keys()),
-                        ctx.require_log_probs,
-                    )
-                    self._logged_logprob_attach = True
-            elif not getattr(self, "_warned_logprob_shape", False):
-                logger.warning(
-                    "SGLang trajectory_log_probs shape mismatch: got %s, expected second dim=%s. "
-                    "Ignoring rollout log_probs and keeping replay path enabled.",
+            log_prob_tensor = self._merge_native_log_probs(
+                per_result_log_probs,
+                results=results,
+                expected_steps=expected_steps,
+                num_inference_steps=ctx.steps,
+            )
+            lp_dict = {int(step_indices[i].item()): log_prob_tensor[:, i] for i in range(expected_steps)}
+            merged_log_probs = LogProbData.from_dict(lp_dict)
+            if not getattr(self, "_logged_logprob_attach", False):
+                logger.info(
+                    "SGLang native logprobs attached: tensor_shape=%s, step_keys=%s, require_log_probs=%s",
                     tuple(log_prob_tensor.shape),
-                    expected_steps,
+                    sorted(lp_dict.keys()),
+                    ctx.require_log_probs,
                 )
-                self._warned_logprob_shape = True
+                self._logged_logprob_attach = True
 
         rollout_noise_preds_tensor: Optional[torch.Tensor] = None
         per_result_noise_preds = [getattr(result, "trajectory_noise_preds", None) for result in results]

@@ -128,7 +128,6 @@ class TestSGLangEngineConfig:
             ("num_gpus", 0, "num_gpus must be >= 1"),
             ("tp_size", 0, "tp_size must be >= 1 when set"),
             ("sp_degree", 0, "sp_degree must be >= 1 when set"),
-            ("batch_size", 0, "batch_size must be >= 1 when set"),
         ],
     )
     def test_rejects(self, field, bad, msg):

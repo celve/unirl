@@ -88,8 +88,10 @@ class SGLangEngineConfig:
         if self.engine_kwargs is None:
             self.engine_kwargs = {}
         self.logprob_source = str(self.logprob_source or "replay").strip().lower()
-        if self.logprob_source not in {"replay", "native"}:
-            self.logprob_source = "native"
+        require(
+            self.logprob_source in {"replay", "native"},
+            f"SGLangEngineConfig.logprob_source must be 'replay' or 'native'; got {self.logprob_source!r}",
+        )
         require(self.num_gpus >= 1, f"SGLangEngineConfig.num_gpus must be >= 1; got {self.num_gpus!r}")
         require(
             self.tp_size is None or self.tp_size >= 1,

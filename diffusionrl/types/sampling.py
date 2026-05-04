@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Optional
 
 from diffusionrl.config.registration import register_config
 from diffusionrl.config.require import require
-
-_RESERVED_SAMPLER_KWARGS = frozenset({"autocast_precision", "trajectory_precision", "logprob_precision"})
 
 
 @dataclass
@@ -74,7 +72,13 @@ class SamplingParams:
     logprob_precision: str = "fp32"
 
     def __post_init__(self) -> None:
-        shadowed = _RESERVED_SAMPLER_KWARGS & set(self.sampler_kwargs)
+        # Every typed field (except sampler_kwargs itself) is part of the engine
+        # contract and cannot be shadowed via sampler_kwargs — engine-pinned keys
+        # like ``num_inference_steps``/``guidance_scale``/``height``/``width`` and
+        # the precision knobs would otherwise be silently overridden by the
+        # typed-field copy at the use site, masking user typos as no-ops.
+        reserved = {f.name for f in fields(self) if f.name != "sampler_kwargs"}
+        shadowed = reserved & set(self.sampler_kwargs)
         require(
             not shadowed,
             f"SamplingParams.sampler_kwargs cannot contain reserved keys {sorted(shadowed)}; set them as fields instead",

@@ -61,6 +61,12 @@ rollout:
   engine:
     tp_size: 1
     logprob_source: native
+    # ``stabilityai/stable-diffusion-3.5-medium`` does not contain the
+    # ``sd3`` substring the engine's auto-inference looks for, so we
+    # declare the model_type explicitly here. See
+    # ``SGLangRolloutEngine._infer_model_type`` for the rule list.
+    engine_kwargs:
+      model_type: sd3
   plan:
     forward_batch_size: 32
 
