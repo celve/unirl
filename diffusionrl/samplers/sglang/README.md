@@ -28,12 +28,15 @@ class SGLangSampler(BaseSampler):
     pass
 ```
 
-### SGLangHunyuanSampler
+### SGLangHunyuanVideoSampler
 
 ```python
-class SGLangHunyuanSampler(SGLangSampler):
+class SGLangHunyuanVideoSampler(SGLangSampler):
     """
     HunyuanVideo-specific SGLang sampler.
+
+    Targets Tencent's HunyuanVideo (text-to-video) family; Hunyuan-Image
+    is **not** covered by this sampler.
 
     Features:
     - Optimized for HunyuanVideo architecture
@@ -65,10 +68,10 @@ pip install -e ../sglang/python
 ## Usage (Future)
 
 ```python
-from diffusionrl.samplers.sglang import SGLangHunyuanSampler
+from diffusionrl.samplers.sglang import SGLangHunyuanVideoSampler
 
-sampler = SGLangHunyuanSampler(
-    model_path="path/to/hunyuan",
+sampler = SGLangHunyuanVideoSampler(
+    model_path="path/to/hunyuan_video",
     tensor_parallel_size=4,
     pipeline_parallel_size=2,
 )

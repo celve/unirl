@@ -169,10 +169,15 @@ class SD3ForwardContext(ForwardContext):
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
 
-@register_forward_context(model_type="hunyuan")
+@register_forward_context(model_type="hunyuan_video")
 @dataclass
-class HunyuanForwardContext(ForwardContext):
-    """ForwardContext for HunyuanVideo models."""
+class HunyuanVideoForwardContext(ForwardContext):
+    """ForwardContext for HunyuanVideo (text-to-video) models.
+
+    Note: this targets HunyuanVideo specifically and does **not** cover
+    Hunyuan-Image. The class / registry key are explicitly suffixed with
+    ``_video`` to disambiguate.
+    """
 
     guidance_scale: float = shared_field(default=1.0)
     prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
@@ -233,7 +238,7 @@ __all__ = [
     "ForwardContext",
     "FluxForwardContext",
     "SD3ForwardContext",
-    "HunyuanForwardContext",
+    "HunyuanVideoForwardContext",
     "MochiForwardContext",
     "WAN21ForwardContext",
     "DefaultForwardContext",

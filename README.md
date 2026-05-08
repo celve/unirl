@@ -265,10 +265,10 @@ diffusionrl/
 ├── config/                         # Configuration system (TrainingArguments)
 ├── algorithms/                     # RL algorithms + advantage normalization helpers
 ├── samplers/                       # Inference engines (FSDP, SGLang)
-│   ├── fsdp/                       #   FSDP-based: FluxSampler, SD3Sampler, HunyuanSampler
+│   ├── fsdp/                       #   FSDP-based: FluxSampler, SD3Sampler, FSDPHunyuanVideoSampler
 │   └── sglang/                     #   SGLang external service engine
 ├── reward/                         # Reward executors (local in-process, actor-side precompute)
-├── models/                         # Model implementations (FLUX, SD3, Hunyuan, Mochi)
+├── models/                         # Model implementations (FLUX, SD3, HunyuanVideo, Mochi)
 ├── data/                           # Data loading and datasets
 ├── rollout/                        # Driver rollout runtime, request planning/execution, default hooks
 ├── training/                       # Training workflow, executor, update schedule, train backends

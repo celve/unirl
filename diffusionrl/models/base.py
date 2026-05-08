@@ -114,7 +114,7 @@ class ModelBundle(ABC):
     @property
     @abstractmethod
     def model_type(self) -> str:
-        """Return the model type identifier (e.g., 'hunyuan', 'mochi', 'flux')."""
+        """Return the model type identifier (e.g., 'hunyuan_video', 'mochi', 'flux')."""
         ...
 
     @property

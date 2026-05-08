@@ -1,6 +1,11 @@
 """
 HunyuanVideo Model Bundle.
 
+This bundle targets Tencent's HunyuanVideo (text-to-video) family
+specifically — it does **not** cover Hunyuan-Image. The class /
+``model_type`` naming is therefore explicitly ``HunyuanVideo`` /
+``hunyuan_video``.
+
 Reference: DanceGRPO implementation
 """
 
@@ -16,7 +21,7 @@ from .config import ModelBundleConfig
 logger = logging.getLogger(__name__)
 
 
-class HunyuanModelBundle(ModelBundle):
+class HunyuanVideoModelBundle(ModelBundle):
     """
     HunyuanVideo model bundle.
 
@@ -44,7 +49,7 @@ class HunyuanModelBundle(ModelBundle):
 
     @property
     def model_type(self) -> str:
-        return "hunyuan"
+        return "hunyuan_video"
 
     @property
     def media_type(self) -> str:
@@ -52,7 +57,7 @@ class HunyuanModelBundle(ModelBundle):
 
     @classmethod
     def default_sampler_dotpath(cls) -> Optional[str]:
-        return "diffusionrl.samplers.fsdp.hunyuan_sampler.FSDPHunyuanSampler"
+        return "diffusionrl.samplers.fsdp.hunyuan_video_sampler.FSDPHunyuanVideoSampler"
 
     @classmethod
     def default_sampler_engine(cls) -> Optional[str]:
@@ -71,7 +76,7 @@ class HunyuanModelBundle(ModelBundle):
     ) -> torch.Tensor:
         prompt_embeds = ctx.prompt_embeds
         if prompt_embeds is None:
-            raise ValueError("HunyuanModelBundle.forward_denoiser requires ctx.prompt_embeds.")
+            raise ValueError("HunyuanVideoModelBundle.forward_denoiser requires ctx.prompt_embeds.")
         pooled_prompt_embeds = getattr(ctx, "pooled_prompt_embeds", None)
         encoder_attention_mask = getattr(ctx, "encoder_attention_mask", None)
         guidance_scale = float(getattr(ctx, "guidance_scale", 1.0))
@@ -171,7 +176,7 @@ class HunyuanModelBundle(ModelBundle):
         """Load the text encoder."""
         try:
             # HunyuanVideo uses LLAMA + CLIP dual encoder
-            self._text_encoder = HunyuanTextEncoderWrapper(
+            self._text_encoder = HunyuanVideoTextEncoderWrapper(
                 pretrained_path=self.text_encoder_ckpt_path,
                 device=self.device,
                 dtype=self.text_encoder_dtype,
@@ -273,7 +278,7 @@ class HunyuanModelBundle(ModelBundle):
             return ()
 
 
-class HunyuanTextEncoderWrapper:
+class HunyuanVideoTextEncoderWrapper:
     """
     Wrapper for HunyuanVideo's dual text encoder (LLAMA + CLIP).
     """
@@ -360,7 +365,9 @@ class HunyuanTextEncoderWrapper:
             Tuple of (prompt_embeds, pooled_prompt_embeds)
         """
         if self.llama_encoder is None or self.clip_encoder is None:
-            raise RuntimeError("HunyuanTextEncoderWrapper is not initialized: LLAMA/CLIP encoders are unavailable.")
+            raise RuntimeError(
+                "HunyuanVideoTextEncoderWrapper is not initialized: LLAMA/CLIP encoders are unavailable."
+            )
 
         with torch.no_grad():
             # LLAMA encoding
@@ -391,7 +398,7 @@ class HunyuanTextEncoderWrapper:
 
         return prompt_embeds, pooled_embeds
 
-    def to(self, device: Union[str, torch.device]) -> "HunyuanTextEncoderWrapper":
+    def to(self, device: Union[str, torch.device]) -> "HunyuanVideoTextEncoderWrapper":
         """Move encoders to device."""
         self.device = device
         if self.llama_encoder is not None:

@@ -6,7 +6,7 @@ for HunyuanVideo models using native PyTorch (FSDP-compatible).
 It is fully aligned with DanceGRPO's implementation.
 
 Reference:
-- DanceGRPO Hunyuan training implementation (lines 54-96, 104-143)
+- DanceGRPO HunyuanVideo training implementation (lines 54-96, 104-143)
 
 Key alignment points with DanceGRPO:
 - sd3_time_shift(): sigma schedule transformation (line 54-55)
@@ -27,7 +27,7 @@ import torch.nn as nn
 
 from diffusionrl.sde.kernels import DanceSDEStrategy, StepStrategy
 from diffusionrl.sde.runtime import denoising_step, sd3_time_shift
-from diffusionrl.types.forward_context import HunyuanForwardContext
+from diffusionrl.types.forward_context import HunyuanVideoForwardContext
 from diffusionrl.types.sample import LogProbData
 from diffusionrl.types.trajectory_store import TrajectoryBuilder
 
@@ -37,13 +37,15 @@ from .base_sampler import FSDPBaseSampler
 logger = logging.getLogger(__name__)
 
 
-class FSDPHunyuanSampler(FSDPBaseSampler):
+class FSDPHunyuanVideoSampler(FSDPBaseSampler):
     """
     HunyuanVideo FSDP sampler with log probability computation.
 
-    This sampler is fully aligned with DanceGRPO's implementation for
-    HunyuanVideo models. It uses native PyTorch operations and is
-    compatible with FSDP for distributed training.
+    This sampler targets the HunyuanVideo (text-to-video) family and is
+    fully aligned with DanceGRPO's implementation for HunyuanVideo
+    models. It uses native PyTorch operations and is compatible with
+    FSDP for distributed training. (Hunyuan-Image is **not** covered by
+    this sampler.)
 
     Key features:
     - SDE sampling with exact DanceGRPO formulation
@@ -53,8 +55,8 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
     - Full trajectory and log probability tracking
 
     Example:
-        sampler = FSDPHunyuanSampler(
-            model=hunyuan_transformer,
+        sampler = FSDPHunyuanVideoSampler(
+            model=hunyuan_video_transformer,
             eta=1.0,
             shift=1.0,
         )
@@ -159,7 +161,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
         if pooled_prompt_embeds is not None:
             pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=self.autocast_dtype)
         else:
-            # Newer diffusers Hunyuan forward requires pooled_projections.
+            # Newer diffusers HunyuanVideo forward requires pooled_projections.
             # pooled_prompt_embeds stays in autocast precision for model forward.
             proj_dim = getattr(getattr(self.model, "config", None), "pooled_projection_dim", 768)
             pooled_prompt_embeds = torch.zeros(
@@ -171,7 +173,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
         if encoder_attention_mask is not None:
             encoder_attention_mask = encoder_attention_mask.to(device=device)
         else:
-            # Recent diffusers Hunyuan forward expects a valid attention mask.
+            # Recent diffusers HunyuanVideo forward expects a valid attention mask.
             encoder_attention_mask = torch.ones(
                 batch_size,
                 prompt_embeds.shape[1],
@@ -277,7 +279,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
 
         trajectory = trajectory_store.finalize()
 
-        forward_context = HunyuanForwardContext(
+        forward_context = HunyuanVideoForwardContext(
             guidance_scale=float(actual_guidance),
             prompt_embeds=prompt_embeds,
             encoder_attention_mask=encoder_attention_mask,
@@ -366,7 +368,7 @@ class FSDPHunyuanSampler(FSDPBaseSampler):
         # Training side: prev_latents is float16 from trajectory.
         # Upcast to float32 so that compute is on the same truncated value.
         if self.uses_deterministic_solver:
-            raise ValueError("Deterministic Hunyuan sampling does not define stochastic log-prob replay.")
+            raise ValueError("Deterministic HunyuanVideo sampling does not define stochastic log-prob replay.")
 
         sigma = sigma_schedule[timestep_index].to(device)
         sigma_next = sigma_schedule[timestep_index + 1].to(device)

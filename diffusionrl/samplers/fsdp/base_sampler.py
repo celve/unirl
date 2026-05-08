@@ -79,7 +79,7 @@ class FSDPBaseSampler(BaseSampler):
     - A ``from_config`` factory classmethod for dotpath-based
       instantiation.
 
-    Concrete subclasses (FluxSampler, SD3Sampler, FSDPHunyuanSampler)
+    Concrete subclasses (FluxSampler, SD3Sampler, FSDPHunyuanVideoSampler)
     only need to implement ``sample()``.
     """
 

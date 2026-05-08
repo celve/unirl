@@ -140,20 +140,34 @@ class SGLangRolloutEngine(BaseRolloutEngine):
     # ------------------------------------------------------------------
     # Model-type policy
     # ------------------------------------------------------------------
+    # Substring aliases → canonical model_type (registry key) used by the
+    # bundle / forward-context registries. First match wins. Aliases are
+    # listed in order of specificity so that, e.g., a future
+    # ``hunyuan_image`` substring would not be shadowed by a more generic
+    # ``hunyuan`` match.
+    _MODEL_TYPE_ALIASES: tuple = (
+        ("hunyuan_video", "hunyuan_video"),
+        ("hunyuanvideo", "hunyuan_video"),
+        ("flux", "flux"),
+        ("sd3", "sd3"),
+        ("mochi", "mochi"),
+    )
+
     def _infer_model_type(self) -> str:
         raw_override = str(self.config.engine_kwargs.get("model_type", ""))
         raw_path = str(self._model_config.pretrained_model_ckpt_path or "")
         value = (raw_override or raw_path).lower()
-        for substring in ("hunyuan", "flux", "sd3", "mochi"):
+        for substring, canonical in self._MODEL_TYPE_ALIASES:
             if substring in value:
-                return substring
+                return canonical
+        canonical_keys = sorted({canonical for _, canonical in self._MODEL_TYPE_ALIASES})
         raise ValueError(
             f"SGLangRolloutEngine could not infer model_type from "
             f"engine_kwargs.model_type={raw_override!r} or "
             f"pretrained_model_ckpt_path={raw_path!r}. "
             f"Set engine_kwargs.model_type explicitly to one of "
-            f"{{'hunyuan', 'flux', 'sd3', 'mochi'}} (an exact match — the "
-            f"pre-existing rule is a substring check, so e.g. "
+            f"{set(canonical_keys)} (matching is a substring check on "
+            f"either the override or the pretrained path, so e.g. "
             f"'stabilityai/stable-diffusion-3.5-medium' does not match 'sd3')."
         )
 
