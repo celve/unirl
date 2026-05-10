@@ -305,14 +305,11 @@ class SD3Sampler(FSDPBaseSampler):
         else:
             latents = latents.to(device=device, dtype=latent_dtype)
 
-        # Get sigma schedule (align with diffusers scheduler if available)
-        patch_size = int(getattr(getattr(self.model, "config", None), "patch_size", 1) or 1)
-        image_seq_len = (latents.shape[-2] // patch_size) * (latents.shape[-1] // patch_size)
-        sigmas = self._get_sigma_schedule(
-            num_inference_steps,
-            device,
-            image_seq_len=image_seq_len,
-        )
+        # Use DiffusionRL's own ``get_sigma_schedule`` (Style A:
+        # ``linspace(1, 0, N+1)`` directly shifted) instead of routing
+        # through diffusers' ``retrieve_timesteps`` default (Style B:
+        # ``linspace(1000, sigma_min_t, N)`` then shift).
+        sigmas = get_sigma_schedule(num_inference_steps, self.shift, device)
 
         # Default: all timesteps use SDE; in deterministic (dpm2) mode, use ODE only.
         # When eta=0 the SDE degenerates to ODE (no noise), so skip SDE steps
@@ -626,6 +623,12 @@ class SD3Sampler(FSDPBaseSampler):
                 text_input_ids,
                 output_hidden_states=True,
             )
+            # SD3 uses the penultimate hidden state from each CLIP encoder
+            # (matching diffusers' StableDiffusion3Pipeline._get_clip_prompt_embeds
+            # default with clip_skip=None). The pooled output goes into
+            # pooled_projections; the penultimate hidden state goes into
+            # encoder_hidden_states alongside T5.
+            clip_hidden_1 = clip_output_1.hidden_states[-2]
             pooled_1 = clip_output_1.text_embeds
 
         # CLIP 2 encoding
@@ -643,9 +646,10 @@ class SD3Sampler(FSDPBaseSampler):
                 text_input_ids_2,
                 output_hidden_states=True,
             )
+            clip_hidden_2 = clip_output_2.hidden_states[-2]
             pooled_2 = clip_output_2.text_embeds
 
-        # Concatenate CLIP embeddings (SD3 transformer uses T5 only; CLIP contributes pooled_embeds)
+        # Concatenate CLIP pooled embeddings for pooled_projections head.
         pooled_embeds = torch.cat([pooled_1, pooled_2], dim=-1)
 
         # T5 encoding
@@ -662,9 +666,19 @@ class SD3Sampler(FSDPBaseSampler):
             t5_output = self.text_encoder_3(text_input_ids_3)
             t5_embeds = t5_output.last_hidden_state
 
-        # SD3 transformer expects:
-        # - encoder_hidden_states: T5 embeddings only [B, seq_len, 4096]
-        # - pooled_projections: CLIP pooled embeddings [B, 2048]
-        prompt_embeds = t5_embeds
+        # SD3 transformer expects encoder_hidden_states to be the official
+        # diffusers SD3 concatenation:
+        #   cat([clip_merged_padded, t5], dim=-2) where
+        #   clip_merged = cat([clip_hidden_1, clip_hidden_2], dim=-1) padded
+        #   along last dim to match t5_dim.
+        # See diffusers.pipelines.stable_diffusion_3.StableDiffusion3Pipeline.
+        # Previously this code used T5 hidden states alone, which dropped the
+        # CLIP textual conditioning and produced systematically different
+        # rewards from the SGLang replay path (which follows the official
+        # spec).  Aligning to the official spec here gives both engines the
+        # same encoder_hidden_states shape ([B, clip_seq + t5_seq, t5_dim]).
+        clip_merged = torch.cat([clip_hidden_1, clip_hidden_2], dim=-1)
+        clip_merged = torch.nn.functional.pad(clip_merged, (0, t5_embeds.shape[-1] - clip_merged.shape[-1]))
+        prompt_embeds = torch.cat([clip_merged, t5_embeds], dim=-2)
 
         return prompt_embeds.to(dtype=dtype), pooled_embeds.to(dtype=dtype)

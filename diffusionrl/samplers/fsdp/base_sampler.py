@@ -175,8 +175,12 @@ class FSDPBaseSampler(BaseSampler):
                 scaling_factor = self.vae.config.scaling_factor
             else:
                 scaling_factor = 0.18215
+            shift_factor = getattr(getattr(self.vae, "config", None), "shift_factor", None)
             latents_float = latents.to(dtype=torch.float32)
-            decoded = self.vae.to(torch.float32).decode(latents_float / scaling_factor).sample
+            vae_input = latents_float / scaling_factor
+            if shift_factor is not None:
+                vae_input = vae_input + float(shift_factor)
+            decoded = self.vae.to(torch.float32).decode(vae_input).sample
             return (decoded + 1) / 2  # [-1, 1] -> [0, 1]
 
     # ------------------------------------------------------------------

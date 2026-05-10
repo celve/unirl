@@ -527,6 +527,9 @@ class SD3ModelBundle(ModelBundle):
 
         with torch.no_grad():
             latents = self._vae.encode(images).latent_dist.sample()
+            shift_factor = getattr(self._vae.config, "shift_factor", None)
+            if shift_factor is not None:
+                latents = latents - float(shift_factor)
             latents = latents * self._vae.config.scaling_factor
         return latents
 
@@ -545,6 +548,9 @@ class SD3ModelBundle(ModelBundle):
         # VAE decode doesn't support bfloat16 ("Got unsupported ScalarType BFloat16")
         # Convert VAE and latents to float32 for decoding
         latents = latents.to(dtype=torch.float32) / self._vae.config.scaling_factor
+        shift_factor = getattr(self._vae.config, "shift_factor", None)
+        if shift_factor is not None:
+            latents = latents + float(shift_factor)
         with torch.no_grad():
             images = self._vae.to(torch.float32).decode(latents).sample
         return images
