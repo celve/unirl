@@ -74,16 +74,12 @@ class RewardService:
         for executor in self.executors:
             try:
                 resp = executor.compute_rewards(request)
-                responses.append((resp, executor))
             except Exception as e:
-                logger.error("Executor %s failed: %s", executor.get_model_name(), e)
-                error_resp = RewardResponse(
-                    rewards=[0.0] * request.batch_size,
-                    successes=[False] * request.batch_size,
-                    errors=[str(e)] * request.batch_size,
-                    compute_time=0.0,
-                )
-                responses.append((error_resp, executor))
+                raise RuntimeError(
+                    f"Reward executor {executor.get_model_name()!r} failed during compute_rewards "
+                    f"(batch_size={request.batch_size}): {type(e).__name__}: {e}"
+                ) from e
+            responses.append((resp, executor))
 
         batch_size = responses[0][0].batch_size if responses else 0
         return aggregate(

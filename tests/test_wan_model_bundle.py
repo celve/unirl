@@ -6,7 +6,7 @@ pytest.importorskip("torch")
 
 import torch
 
-from diffusionrl.models.wan import WAN21ModelBundle, WANTextEncoderWrapper
+from diffusionrl.models.wan21 import WAN21ModelBundle, WANTextEncoderWrapper
 
 
 class _FakeWANTextEncoder:

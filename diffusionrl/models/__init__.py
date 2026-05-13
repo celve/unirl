@@ -12,6 +12,7 @@ __all__ = [
     "get_flux_model_bundle",
     "get_sd3_model_bundle",
     "get_wan_model_bundle",
+    "get_wan22_model_bundle",
 ]
 
 
@@ -46,6 +47,13 @@ def get_sd3_model_bundle():
 
 def get_wan_model_bundle():
     """Get Wan video model bundle class."""
-    from .wan import WAN21ModelBundle
+    from .wan21 import WAN21ModelBundle
 
     return WAN21ModelBundle
+
+
+def get_wan22_model_bundle():
+    """Get Wan2.2 dual-transformer video model bundle class."""
+    from .wan22 import WAN22ModelBundle
+
+    return WAN22ModelBundle

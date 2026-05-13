@@ -9,7 +9,7 @@ from .image_reward import ImageRewardScorer
 from .ocr import OCRRewardScorer
 from .pickscore import PickScoreRewardScorer
 from .registry import available_builtin_reward_models, resolve_builtin_reward_scorer_class
-from .video import VideoRewardScorer
+from .video_pickscore import VideoPickScoreScorer
 
 __all__ = [
     "AestheticRewardScorer",
@@ -20,7 +20,7 @@ __all__ = [
     "ImageRewardScorer",
     "OCRRewardScorer",
     "PickScoreRewardScorer",
-    "VideoRewardScorer",
+    "VideoPickScoreScorer",
     "available_builtin_reward_models",
     "resolve_builtin_reward_scorer_class",
 ]

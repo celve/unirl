@@ -1,4 +1,10 @@
-"""Media conversion helpers shared across runtime layers."""
+"""Media conversion helpers shared across runtime layers.
+
+This module is deliberately wandb-agnostic: it only converts between tensors
+and PIL images. The wandb-side construction of ``wandb.Image`` / ``wandb.Video``
+lives in ``diffusionrl.utils.wandb_logger`` so that ``utils/media.py`` and the
+``types/`` layer have zero dependency on wandb.
+"""
 
 from __future__ import annotations
 

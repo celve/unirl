@@ -53,31 +53,19 @@ class BaseLocalRewardScorer(BaseRewardScorer):
         return raw_name
 
     def compute_rewards(self, request: RewardRequest) -> RewardResponse:
-        start = time.time()
-
         if not self._is_loaded:
-            return RewardResponse(
-                rewards=[0.0] * request.batch_size,
-                successes=[False] * request.batch_size,
-                errors=["Model not loaded"] * request.batch_size,
-                compute_time=0.0,
+            raise RuntimeError(
+                f"{type(self).__name__}.compute_rewards called before _load_model "
+                f"completed (model_name={self.model_name!r}, batch_size={request.batch_size})."
             )
-
-        try:
-            rewards = self._compute_model_rewards(request)
-            return RewardResponse(
-                rewards=rewards,
-                successes=[True] * len(rewards),
-                errors=[None] * len(rewards),
-                compute_time=time.time() - start,
-            )
-        except Exception as e:
-            return RewardResponse(
-                rewards=[0.0] * request.batch_size,
-                successes=[False] * request.batch_size,
-                errors=[str(e)] * request.batch_size,
-                compute_time=time.time() - start,
-            )
+        start = time.time()
+        rewards = self._compute_model_rewards(request)
+        return RewardResponse(
+            rewards=rewards,
+            successes=[True] * len(rewards),
+            errors=[None] * len(rewards),
+            compute_time=time.time() - start,
+        )
 
     @abstractmethod
     def _load_model(self) -> None:

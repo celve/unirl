@@ -17,15 +17,14 @@ Usage:
     # Log rollout metrics
     logger.log_rollout(rollout_id=10, metrics={"reward_mean": 0.8})
 
-    # Log images
-    logger.log_images(images, prompts, rewards, step=100)
+    # Log images and/or videos via the typed MediaPreview payload
+    logger.log_generated_media(rollout_id=10, media_preview=preview)
 """
 
 import os
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import torch
-from PIL import Image
 
 try:
     import wandb
@@ -284,104 +283,77 @@ class DiffusionRLWandBLogger:
             prefix="perf/",
         )
 
-    def log_images(
-        self,
-        images: List[Image.Image],
-        prompts: List[str],
-        rewards: Optional[Union[List[float], torch.Tensor, Dict[str, Any]]] = None,
-        step: int = 0,
-        max_images: int = 8,
-        key: str = "samples",
-    ):
-        """Log sample images with captions.
-
-        Format: "{prompt:.100} | reward: {reward:.2f}"
-
-        Args:
-            images: List of PIL images
-            prompts: List of prompts
-            rewards: Rewards (list, tensor, or dict with 'avg' key)
-            step: Global step number
-            max_images: Maximum number of images to log
-            key: Key name for wandb logging
-        """
-        if not self.enabled or not self._initialized:
-            return
-
-        try:
-            # Sample images if too many
-            num_images = min(len(images), max_images)
-            sample_indices = list(range(num_images))
-
-            # Process rewards
-            reward_values = None
-            if rewards is not None:
-                if isinstance(rewards, dict):
-                    reward_values = rewards.get("avg", rewards.get("rewards"))
-                elif isinstance(rewards, torch.Tensor):
-                    reward_values = rewards.cpu().tolist()
-                else:
-                    reward_values = list(rewards)
-
-            # Create wandb images with captions
-            wandb_images = []
-            for idx in sample_indices:
-                prompt = prompts[idx] if idx < len(prompts) else ""
-                if reward_values and idx < len(reward_values):
-                    caption = f"{prompt[:100]} | reward: {reward_values[idx]:.2f}"
-                else:
-                    caption = f"{prompt[:100]}"
-
-                # Pass PIL images directly to avoid temporary-file lifetime issues.
-                wandb_images.append(wandb.Image(images[idx], caption=caption))
-
-            wandb.log(
-                {
-                    "rollout/step": int(step),
-                    key: wandb_images,
-                }
-            )
-        except Exception as e:
-            print(f"Warning: Failed to log images: {e}")
-
     def log_generated_media(
         self,
         rollout_id: int,
         media_preview: Any,
         *,
-        key: str = "rollout/generated_media",
+        image_key: str = "rollout/generated_images",
+        video_key: str = "rollout/generated_videos",
+        step_key: str = "rollout/step",
     ) -> None:
-        """Log rollout media preview payload produced by the rollout pipeline.
+        """Log a typed ``MediaPreview`` as images and/or videos in one wandb step.
 
-        Accepts either a ``diffusionrl.types.sample.MediaPreview`` dataclass
-        (the canonical internal form) or a legacy ``{"images", "prompts",
-        "rewards"}`` dict. Non-matching payloads are silently ignored.
+        Images and videos go to *separate* wandb keys (so wandb renders each
+        as its native panel type) but in a *single* ``wandb.log`` call sharing
+        ``step_key``. Either side may be empty: image-only, video-only, and
+        image+video previews are all supported.
+
+        Captions ("{prompt:.100} | reward: {r:.2f}") are built right here from
+        ``media_preview.prompts`` and ``media_preview.rewards`` and applied to
+        both ``wandb.Image`` and ``wandb.Video``, so image and video panels
+        always show identical caption strings per index.
+
+        Args:
+            rollout_id: Outer rollout-train loop step. Used as the shared
+                value for ``step_key``.
+            media_preview: A ``diffusionrl.types.sample.MediaPreview``. The
+                canonical typed payload; passing any other type raises.
+            image_key: wandb key for PIL images (wrapped here as
+                ``wandb.Image``).
+            video_key: wandb key for video clips (raw 4D ``(C, T, H, W)``
+                tensors on the preview, wrapped here as ``wandb.Video``).
+            step_key: wandb step axis shared by image and video panels.
+
+        Raises:
+            TypeError: when ``media_preview`` is not a ``MediaPreview``.
+            ValueError: when a video tensor on the preview is not 4D.
         """
-        if media_preview is None:
+        if not self.enabled or not self._initialized or media_preview is None:
             return
 
-        if isinstance(media_preview, dict):
-            images = media_preview.get("images")
-            prompts = media_preview.get("prompts")
-            rewards = media_preview.get("rewards")
-        else:
-            images = getattr(media_preview, "images", None)
-            prompts = getattr(media_preview, "prompts", None)
-            rewards = getattr(media_preview, "rewards", None)
+        # Lazy import to avoid the diffusionrl.utils <-> diffusionrl.types
+        # init-time cycle (utils/__init__ eager-loads this module).
+        from diffusionrl.types.sample import MediaPreview
 
-        if not isinstance(images, list) or not images:
+        if not isinstance(media_preview, MediaPreview):
+            raise TypeError(
+                f"expected diffusionrl.types.sample.MediaPreview, got {type(media_preview).__name__}: {media_preview!r}"
+            )
+
+        if media_preview.is_empty():
             return
-        if not isinstance(prompts, list):
-            prompts = []
 
-        self.log_images(
-            images=images,
-            prompts=prompts,
-            rewards=rewards if isinstance(rewards, (list, torch.Tensor, dict)) else None,
-            step=int(rollout_id),
-            max_images=max(1, len(images)),
-            key=key,
-        )
+        prompts = media_preview.prompts
+        rewards = media_preview.rewards
+
+        def _caption(i: int) -> str:
+            prompt = prompts[i] if i < len(prompts) else ""
+            if i < len(rewards):
+                return f"{prompt[:100]} | reward: {rewards[i]:.2f}"
+            return prompt[:100]
+
+        log_dict: Dict[str, Any] = {step_key: int(rollout_id)}
+
+        if media_preview.images:
+            # Pass PIL images directly to avoid temporary-file lifetime issues.
+            log_dict[image_key] = [wandb.Image(pil, caption=_caption(i)) for i, pil in enumerate(media_preview.images)]
+
+        if media_preview.videos:
+            captions = [_caption(i) for i in range(len(media_preview.videos))]
+            log_dict[video_key] = _build_wandb_videos(media_preview.videos, captions)
+
+        wandb.log(log_dict)
 
     def log_eval(
         self,
@@ -408,6 +380,48 @@ class DiffusionRLWandBLogger:
                 wandb.finish()
             except Exception:
                 pass
+
+
+def _build_wandb_videos(
+    videos: List[Any],
+    captions: List[str],
+    *,
+    fps: int = 8,
+    fmt: str = "mp4",
+) -> List[Any]:
+    """Build a list of ``wandb.Video`` objects from raw 4D ``(C, T, H, W)`` tensors.
+
+    Lives in ``wandb_logger`` (rather than ``utils/media``) so that
+    ``utils/media.py`` and the ``types/`` layer stay free of any wandb
+    dependency. Captions are required and applied per item so that the wandb
+    video panel reads the same prompt/reward context as the corresponding
+    image panel built in ``log_generated_media``.
+
+    Args:
+        videos: Per-sample CPU tensors of shape ``(C, T, H, W)`` with values
+            in ``[0, 1]``.
+        captions: Per-sample caption strings; length must equal ``len(videos)``.
+        fps: Frame rate for the encoded video.
+        fmt: Container format (``"mp4"``, ``"gif"``, ``"webm"``).
+
+    Raises:
+        ValueError: when ``len(captions) != len(videos)``, or when any item
+            is not a 4D ``(C, T, H, W)`` ``torch.Tensor``.
+    """
+    if len(captions) != len(videos):
+        raise ValueError(f"len(captions)={len(captions)} does not match len(videos)={len(videos)}")
+    out: List[Any] = []
+    for i, v in enumerate(videos):
+        if not torch.is_tensor(v) or v.dim() != 4:
+            raise ValueError(
+                f"videos[{i}] must be a 4D (C, T, H, W) torch.Tensor; "
+                f"got type={type(v).__name__}, shape={getattr(v, 'shape', None)}"
+            )
+        v = v.detach().float().cpu().clamp(0.0, 1.0)
+        # (C, T, H, W) -> (T, C, H, W) per wandb's expected layout
+        frames_np = v.permute(1, 0, 2, 3).mul(255).byte().numpy()
+        out.append(wandb.Video(frames_np, fps=fps, format=fmt, caption=captions[i]))
+    return out
 
 
 # Global logger instance

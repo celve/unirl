@@ -112,7 +112,12 @@ class RolloutPipeline:
             if isinstance(raw_prompt_ids, list) and len(raw_prompt_ids) == len(raw_prompts)
             else None
         )
-        prompts = Prompts.from_unique_prompts(raw_prompts, prompt_ids=prompt_ids)
+        # Pass metadata through so downstream I2V pipelines can access image paths
+        raw_metadata = prompt_batch.get("metadata")
+        prompt_metadata = (
+            list(raw_metadata) if isinstance(raw_metadata, list) and len(raw_metadata) == len(raw_prompts) else None
+        )
+        prompts = Prompts.from_unique_prompts(raw_prompts, prompt_ids=prompt_ids, prompt_metadata=prompt_metadata)
         if int(samples_per_prompt) > 1:
             prompts = prompts.expand(
                 int(samples_per_prompt),
@@ -341,9 +346,12 @@ class RolloutPipeline:
 
         When ``collect_media_preview=True``, the returned dict also
         includes a ``media_preview`` key carrying up to ``media_max_items``
-        decoded PIL images paired with their prompts and reward scores —
-        ready to hand to ``wandb_logger.log_generated_media(...,
-        key="eval/generated_media")``.
+        decoded media (PIL images and/or 4D ``(C, T, H, W)`` video tensors)
+        paired with their prompts and reward scores — ready to hand to
+        ``wandb_logger.log_generated_media(
+        ..., image_key="eval/generated_images",
+        video_key="eval/generated_videos")``. Image-only, video-only, and
+        image+video previews are all supported by the ``MediaPreview`` payload.
 
         Returns dict with keys ``rollout_id``, ``num_samples``,
         ``mean_reward``, ``std_reward``, and optionally ``media_preview``.

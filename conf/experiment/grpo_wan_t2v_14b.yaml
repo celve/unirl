@@ -1,13 +1,13 @@
 # @package _global_
-# GRPO WAN 2.1 T2V recipe — direct-sampling (fsdp engine) GRPO on WAN T2V 1.3B
-# with LoRA + video reward (pickscore inner) and PPO-style multi-update epochs.
+# GRPO WAN 2.1 T2V 14B recipe — inherits grpo_wan_t2v (1.3B base) and
+# overrides model path, resolution, and sampling batch size for the larger
+# 14B variant.
 #
-# Translates the legacy launcher
-#   scripts/wan/train_grpo_wan21_t2v_multinode.sh
-# into LIN-185's per-experiment Hydra recipe pattern. Anchored to a single-node
-# 8-GPU cluster (8 train actors). Override topology + plan via CLI for larger
-# shapes (e.g. 2 nodes: training.topology.actor_count=16,
-# training.plan.local_mini_batch_size=24, .local_batch_size=48).
+# Used by:
+#   reproduce_scripts/train_grpo_wan21_t2v_14b_multinode.sh
+#
+# 14B requires smaller forward batch (1 vs 4) and lower resolution
+# (480x832 vs 720x1280) to fit in GPU memory.
 defaults:
   - override /algorithm: grpo
   - override /model: wan21
@@ -21,10 +21,10 @@ run:
   eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
 
 sampling:
-  num_inference_steps: 14
+  num_inference_steps: 20
   guidance_scale: 1.0
-  height: 720
-  width: 1280
+  height: 480
+  width: 832
   # 3 frames maps to a single latent frame (temporal_downsample=4) — fast
   # iteration recipe that exercises the full T2V pipeline without the cost of
   # long videos. Bump `num_frames` for actual video training.
@@ -61,8 +61,8 @@ placement:
 rollout:
   plan:
     # Direct-sampling per-call chunk size (legacy: SAMPLING_FORWARD_BATCH).
-    # Caps the per-actor activation footprint during 720p×1280 generate.
-    forward_batch_size: 4
+    # Caps the per-actor activation footprint during 480p×832 generate.
+    forward_batch_size: 1
 
 training:
   plan:
@@ -74,7 +74,7 @@ training:
     local_batch_size: 96          # = local_mini_batch_size * num_updates_per_batch
     global_batch_size: 768        # = prompts_per_rollout * samples_per_prompt
   topology:
-    actor_count: 8                # 1 node × 8 GPUs
+    actor_count: 16                # 2 nodes × 8 GPUs
   optimizer:
     learning_rate: 3.0e-4
     adam_beta1: 0.9
@@ -95,7 +95,7 @@ model:
   lora_rank: 64
   lora_alpha: 128
   use_gradient_checkpointing: true
-  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,Wan-AI/Wan2.1-T2V-1.3B-Diffusers}
+  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,Wan-AI/Wan2.1-T2V-14B-Diffusers}
 
 reward:
   aggregation_method: mean

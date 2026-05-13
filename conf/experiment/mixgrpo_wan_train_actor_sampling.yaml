@@ -8,7 +8,7 @@
 # for different topology / paths / wandb identity.
 defaults:
   - override /algorithm: grpo
-  - override /model: wan
+  - override /model: wan21
   - override /sampling/sde_strategy: dance
   - _self_
 

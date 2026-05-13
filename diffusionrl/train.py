@@ -342,7 +342,9 @@ def train(cfg: DictConfig) -> None:
                         wandb_logger.log_generated_media(
                             rollout_id,
                             eval_media_preview,
-                            key="eval/generated_media",
+                            image_key="eval/generated_images",
+                            video_key="eval/generated_videos",
+                            step_key="eval/step",
                         )
 
             # === PHASE A: Rollout ===

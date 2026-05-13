@@ -234,6 +234,18 @@ class DefaultForwardContext(ForwardContext):
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
 
+@register_forward_context(model_type="wan22")
+@dataclass
+class WAN22ForwardContext(WAN21ForwardContext):
+    """ForwardContext for WAN 2.2 dual-transformer video generation.
+
+    Extends WAN21ForwardContext with per-stage guidance scale.
+    boundary_ratio is a bundle-level config, not per-call context.
+    """
+
+    guidance_scale_2: Optional[float] = shared_field(default=None)
+
+
 __all__ = [
     "ForwardContext",
     "FluxForwardContext",
@@ -241,6 +253,7 @@ __all__ = [
     "HunyuanVideoForwardContext",
     "MochiForwardContext",
     "WAN21ForwardContext",
+    "WAN22ForwardContext",
     "DefaultForwardContext",
     "register_forward_context",
     "get_forward_context_cls",

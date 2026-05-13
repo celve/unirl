@@ -7,6 +7,7 @@ images so they don't cross Ray.
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from diffusionrl.types.prompts import Prompts
@@ -217,3 +218,66 @@ def test_attach_reward_builds_preview_and_drops_images():
     assert response_off.samples.media_preview is None
     assert response_off.samples.decoded_images is None
     assert response_off.samples.decoded_videos is None
+
+
+def test_attach_media_preview_mixed_slices_videos_by_selected_image_indices() -> None:
+    """Videos must match the batch indices of tensors actually used for images."""
+    n = 4
+    req = make_request(n)
+    samples = make_samples(n)
+    samples.rewards = torch.arange(n, dtype=torch.float32)
+    # Index 0 skipped (non-tensor); first two successful tensors at 1 and 3.
+    samples.decoded_images = [
+        "not-a-tensor",
+        torch.full((3, 8, 8), 0.25),
+        "not-a-tensor",
+        torch.full((3, 8, 8), 0.75),
+    ]
+    samples.decoded_videos = torch.stack(
+        [torch.full((3, 5, 8, 8), float(i) / 10.0) for i in range(n)],
+        dim=0,
+    )
+    response = RolloutResponse(request=req, samples=samples)
+    response.attach_media_preview(max_items=2)
+
+    mp = response.samples.media_preview
+    assert mp is not None
+    assert len(mp.images) == 2
+    assert len(mp.videos) == 2
+    assert mp.prompts == [req.prompts.prompts[1], req.prompts.prompts[3]]
+    assert mp.rewards == [1.0, 3.0]
+    # Video rows 1 and 3 must be selected (not 0 and 1).
+    assert torch.allclose(mp.videos[0], samples.decoded_videos[1].cpu())
+    assert torch.allclose(mp.videos[1], samples.decoded_videos[3].cpu())
+
+
+def test_attach_media_preview_all_non_tensor_images_uses_video_only_path() -> None:
+    """Non-empty decoded_images with no tensors should still fill prompts from videos."""
+    n = 2
+    req = make_request(n)
+    samples = make_samples(n)
+    samples.rewards = torch.tensor([0.7, 0.8], dtype=torch.float32)
+    samples.decoded_images = ["skip", "skip"]
+    samples.decoded_videos = torch.stack(
+        [torch.full((3, 5, 8, 8), float(i) / 5.0) for i in range(n)],
+        dim=0,
+    )
+    response = RolloutResponse(request=req, samples=samples)
+    response.attach_media_preview(max_items=8)
+
+    mp = response.samples.media_preview
+    assert mp is not None
+    assert len(mp.videos) == 2
+    assert len(mp.images) == 2
+    assert mp.prompts == list(req.prompts.prompts[:2])
+    assert mp.rewards == [0.7, 0.8]
+
+
+def test_attach_media_preview_mixed_raises_when_video_row_missing() -> None:
+    samples = make_samples(2)
+    samples.rewards = torch.zeros(2, dtype=torch.float32)
+    samples.decoded_images = [torch.full((3, 8, 8), 0.1), torch.full((3, 8, 8), 0.2)]
+    samples.decoded_videos = torch.stack([torch.full((3, 5, 8, 8), 0.3)], dim=0)
+    response = RolloutResponse(request=make_request(2), samples=samples)
+    with pytest.raises(ValueError, match="no matching decoded_videos"):
+        response.attach_media_preview(max_items=8)

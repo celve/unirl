@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 @register_config(
     group="model",
-    name="wan",
-    target="diffusionrl.models.wan.WAN21ModelBundle",
+    name="wan21",
+    target="diffusionrl.models.wan21.WAN21ModelBundle",
 )
 @dataclass
 class WAN21ModelBundleConfig(ModelBundleConfig):
@@ -50,6 +50,7 @@ class WAN21ModelBundle(ModelBundle):
         self._umt5_encoder: Optional[nn.Module] = None
         self._tokenizer = None
         self._clip_vision_processor = None
+        self._is_i2v_model: bool = False
 
         self.load()
 
@@ -60,6 +61,11 @@ class WAN21ModelBundle(ModelBundle):
     @property
     def media_type(self) -> str:
         return "tiv2iv"
+
+    @property
+    def is_i2v_capable(self) -> bool:
+        """Whether the loaded transformer supports image-to-video conditioning."""
+        return self._is_i2v_model
 
     @classmethod
     def default_sampler_dotpath(cls) -> Optional[str]:
@@ -136,7 +142,13 @@ class WAN21ModelBundle(ModelBundle):
                 # FSDP's _init_mp_dtypes asserts a uniform original-param dtype
                 # across the wrapped module.
                 self._transformer.to(self.device, dtype=self.dtype)
-            logger.info("Loaded WAN transformer from %s", self.pretrained_path)
+
+            # Detect I2V capability: I2V models have added_kv_proj_dim for image
+            # cross-attention (add_k_proj / add_v_proj in attention layers).
+            added_kv_proj_dim = getattr(getattr(self._transformer, "config", None), "added_kv_proj_dim", None)
+            self._is_i2v_model = added_kv_proj_dim is not None and added_kv_proj_dim > 0
+            variant_str = "I2V" if self._is_i2v_model else "T2V"
+            logger.info("Loaded WAN transformer from %s (variant: %s)", self.pretrained_path, variant_str)
         except Exception as exc:
             logger.warning("Could not load WAN transformer: %s", exc)
             self._transformer = None
@@ -197,10 +209,32 @@ class WAN21ModelBundle(ModelBundle):
             self._vae.to(self.device)
             self._vae.eval()
             self._vae.requires_grad_(False)
+            self._vae_norm_cache: Dict[Tuple[torch.device, torch.dtype], Tuple[torch.Tensor, torch.Tensor]] = {}
             logger.info("Loaded WAN VAE from %s", self.vae_ckpt_path)
         except Exception as exc:
             logger.warning("Could not load WAN VAE: %s", exc)
             self._vae = None
+
+    def _vae_norm_params(self, device: torch.device, dtype: torch.dtype) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        """Return cached (mean, std_reciprocal) tensors for VAE latent normalization.
+
+        Returns None if the VAE does not use per-channel normalization.
+        """
+        latents_mean = getattr(self._vae.config, "latents_mean", None)
+        latents_std = getattr(self._vae.config, "latents_std", None)
+        if latents_mean is None or latents_std is None:
+            return None
+
+        cache_key = (device, dtype)
+        cached = self._vae_norm_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        z_dim = int(getattr(self._vae.config, "z_dim", 16))
+        mean = torch.tensor(latents_mean, device=device, dtype=dtype).view(1, z_dim, 1, 1, 1)
+        std_reciprocal = (1.0 / torch.tensor(latents_std, device=device, dtype=dtype)).view(1, z_dim, 1, 1, 1)
+        self._vae_norm_cache[cache_key] = (mean, std_reciprocal)
+        return mean, std_reciprocal
 
     def _load_text_encoder(self) -> None:
         try:
@@ -327,8 +361,18 @@ class WAN21ModelBundle(ModelBundle):
             self._raise_aux_component_not_loaded("VAE")
         vae_dtype = next(self._vae.parameters()).dtype
         with torch.no_grad():
-            scale = getattr(self._vae.config, "scaling_factor", 1.0)
-            return self._vae.decode(latents.to(dtype=vae_dtype) / scale).sample
+            latents = latents.to(dtype=vae_dtype)
+            norm = self._vae_norm_params(latents.device, vae_dtype)
+            if norm is not None:
+                mean, std_reciprocal = norm
+                latents = latents / std_reciprocal + mean
+            else:
+                scaling_factor = getattr(self._vae.config, "scaling_factor", 1.0)
+                shift_factor = getattr(self._vae.config, "shift_factor", 0.0)
+                latents = latents / scaling_factor
+                if shift_factor and not (isinstance(shift_factor, (int, float)) and shift_factor == 0.0):
+                    latents = latents + shift_factor
+            return self._vae.decode(latents).sample
 
     def encode_images(self, images: torch.Tensor) -> torch.Tensor:
         if self._vae is None:
@@ -338,8 +382,14 @@ class WAN21ModelBundle(ModelBundle):
             encoded = self._vae.encode(images.to(device=self.device, dtype=vae_dtype))
             latent_dist = getattr(encoded, "latent_dist", encoded)
             latents = latent_dist.sample()
-            scale = getattr(self._vae.config, "scaling_factor", 1.0)
-            return latents * scale
+            norm = self._vae_norm_params(latents.device, vae_dtype)
+            if norm is not None:
+                mean, std_reciprocal = norm
+                latents = (latents - mean) * std_reciprocal
+            else:
+                scale = getattr(self._vae.config, "scaling_factor", 1.0)
+                latents = latents * scale
+            return latents
 
     def encode_image_inputs(
         self,
@@ -449,13 +499,10 @@ class WAN21ModelBundle(ModelBundle):
 
         out_dtype = dtype or self.dtype
         latent_condition = latent_condition.to(device=self.device, dtype=out_dtype)
-        latents_mean = getattr(self._vae.config, "latents_mean", None)
-        latents_std = getattr(self._vae.config, "latents_std", None)
-        if latents_mean is not None and latents_std is not None:
-            z_dim = int(getattr(self._vae.config, "z_dim", latent_condition.shape[1]))
-            mean = torch.tensor(latents_mean, device=self.device, dtype=out_dtype).view(1, z_dim, 1, 1, 1)
-            std = torch.tensor(latents_std, device=self.device, dtype=out_dtype).view(1, z_dim, 1, 1, 1)
-            latent_condition = (latent_condition - mean) * (1.0 / std)
+        norm = self._vae_norm_params(self.device, out_dtype)
+        if norm is not None:
+            mean, std_reciprocal = norm
+            latent_condition = (latent_condition - mean) * std_reciprocal
         else:
             scale = getattr(self._vae.config, "scaling_factor", None)
             if scale is not None:
