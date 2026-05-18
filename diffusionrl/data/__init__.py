@@ -1,10 +1,10 @@
 """
 Data loading utilities for GRPO training.
 
-Provides prompt-only data sources and prompt datasets for GRPO training.
+Provides multimodal data sources and prompt datasets for GRPO training.
 """
 
-from .data_source import DefaultDataSource, ImageRLDataSource
+from .data_source import DefaultDataSource, MultimodalRLDataSource
 from .datasets import (
     PromptExampleDataset,
     TextPromptDataset,
@@ -14,7 +14,7 @@ from .k_repeat_sampler import KRepeatSampler
 
 __all__ = [
     # Data sources
-    "ImageRLDataSource",
+    "MultimodalRLDataSource",
     "DefaultDataSource",
     # Datasets
     "PromptExampleDataset",

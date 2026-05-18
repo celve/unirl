@@ -17,6 +17,8 @@ import torch.nn as nn
 from diffusionrl.samplers.base import BaseSampler
 from diffusionrl.sde.kernels import StepStrategy
 from diffusionrl.sde.rules import normalize_sde_type
+from diffusionrl.types.media import MediaRef
+from diffusionrl.types.prompts import Prompts
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.sample import RolloutSamples
 from diffusionrl.utils import load_function
@@ -155,6 +157,107 @@ class FSDPBaseSampler(BaseSampler):
             raise RuntimeError("Model bundle not loaded")
         return self.model_bundle.encode_inputs(prompts, **kwargs)
 
+    def prepare_multimodal_encode_kwargs(
+        self,
+        request: RolloutRequest,
+        *,
+        height: int,
+        width: int,
+        num_frames: int,
+    ) -> Dict[str, Any]:
+        """Build model-bundle encode kwargs from typed per-sample media refs.
+
+        First version supports condition images. Video/audio refs remain typed
+        on the request for rewards and future samplers, but are not loaded here
+        until a model-side contract exists.
+        """
+        image_refs = self._select_media_refs(request.prompts, modality="image", role="condition")
+        if image_refs is None:
+            return {}
+
+        if self.model_bundle is None or not getattr(self.model_bundle, "accepts_image_input", False):
+            model_name = type(self.model_bundle).__name__ if self.model_bundle is not None else "<missing>"
+            raise ValueError(f"{model_name} received condition image media refs but does not accept image input.")
+
+        return {
+            "image": self._load_image_refs(image_refs, height=height, width=width),
+            "height": height,
+            "width": width,
+            "num_frames": num_frames,
+        }
+
+    def _select_media_refs(
+        self,
+        prompts: Any,
+        *,
+        modality: str,
+        role: str,
+    ) -> Optional[List[MediaRef]]:
+        """Select exactly one media ref per sample for a modality/role pair."""
+        if not isinstance(prompts, Prompts):
+            return None
+
+        selected: List[Optional[MediaRef]] = []
+        has_any = False
+        modality = str(modality).strip().lower()
+        role = str(role).strip().lower()
+        for sample_idx, refs in enumerate(prompts.media_refs):
+            matches = [
+                ref for ref in refs if ref.modality.strip().lower() == modality and ref.role.strip().lower() == role
+            ]
+            if len(matches) > 1:
+                raise ValueError(
+                    f"Expected at most one {role} {modality} media ref per sample; "
+                    f"got {len(matches)} at sample index {sample_idx}."
+                )
+            if matches:
+                has_any = True
+                selected.append(matches[0])
+            else:
+                selected.append(None)
+
+        if not has_any:
+            return None
+        missing = [idx for idx, ref in enumerate(selected) if ref is None]
+        if missing:
+            raise ValueError(f"Batch has mixed {role} {modality} media refs. Missing refs at sample indices: {missing}")
+        return [ref for ref in selected if ref is not None]
+
+    def _load_image_refs(self, refs: List[MediaRef], *, height: int, width: int) -> torch.Tensor:
+        """Load image refs to a [B, 3, H, W] tensor in [-1, 1]."""
+        try:
+            from PIL import Image as PILImage
+            from torchvision import transforms
+        except ImportError as exc:
+            raise ImportError(
+                "Image media refs require torchvision and Pillow. Install with: pip install torchvision pillow"
+            ) from exc
+
+        transform = self._get_image_transform(height, width, transforms)
+        tensors: List[torch.Tensor] = []
+        for ref in refs:
+            with PILImage.open(ref.uri) as pil_img:
+                tensors.append(transform(pil_img.convert("RGB")))
+        device = self._resolve_runtime_device(prompt_embeds=None, latents=None)
+        return torch.stack(tensors, dim=0).to(device=device)
+
+    def _get_image_transform(self, height: int, width: int, transforms: Any) -> Any:
+        """Return a cached image transform pipeline for the given resolution."""
+        cache = getattr(self, "_image_transform_cache", None)
+        if cache is None:
+            self._image_transform_cache: Dict[Tuple[int, int], Any] = {}
+            cache = self._image_transform_cache
+        key = (int(height), int(width))
+        if key not in cache:
+            cache[key] = transforms.Compose(
+                [
+                    transforms.Resize(key, interpolation=transforms.InterpolationMode.BICUBIC),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+                ]
+            )
+        return cache[key]
+
     # ------------------------------------------------------------------
     # Latent decoding
     # ------------------------------------------------------------------
@@ -287,7 +390,16 @@ class FSDPBaseSampler(BaseSampler):
         sde_indices = None if sde_indices_raw is None else {int(v) for v in sde_indices_raw}
         noise_group_ids = list(raw_prompts.noise_group_ids) if isinstance(raw_prompts, _PromptsType) else None
 
-        encoded = self.encode_inputs(prompts, **kwargs)
+        encode_kwargs = dict(kwargs)
+        encode_kwargs.update(
+            self.prepare_multimodal_encode_kwargs(
+                request,
+                height=height,
+                width=width,
+                num_frames=num_frames,
+            )
+        )
+        encoded = self.encode_inputs(prompts, **encode_kwargs)
         if encoded.get("prompt_embeds") is None:
             raise RuntimeError(f"{host_label} input encoder returned no prompt_embeds.")
 

@@ -9,14 +9,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import torch
 import torch.nn as nn
 
-try:
-    from PIL import Image as _PILImage
-    from torchvision import transforms as _tv_transforms
-
-    _HAS_VISION_LIBS = True
-except ImportError:
-    _HAS_VISION_LIBS = False
-
 from diffusionrl.sde.kernels import DanceSDEStrategy, StepStrategy
 from diffusionrl.sde.runtime import denoising_step, sd3_time_shift
 from diffusionrl.types.forward_context import WAN21ForwardContext
@@ -278,14 +270,15 @@ class FSDPWanSampler(FSDPBaseSampler):
         sde_indices = None if sde_indices_raw is None else {int(v) for v in sde_indices_raw}
         noise_group_ids = list(raw_prompts.noise_group_ids) if isinstance(raw_prompts, _PromptsType) else None
 
-        # I2V: Extract images from prompt metadata if available
         encode_kwargs: Dict[str, Any] = dict(kwargs)
-        image_tensor = self._load_images_from_metadata(raw_prompts, height=height, width=width)
-        if image_tensor is not None:
-            encode_kwargs["image"] = image_tensor
-            encode_kwargs["height"] = height
-            encode_kwargs["width"] = width
-            encode_kwargs["num_frames"] = num_frames
+        encode_kwargs.update(
+            self.prepare_multimodal_encode_kwargs(
+                request,
+                height=height,
+                width=width,
+                num_frames=num_frames,
+            )
+        )
 
         encoded = self.encode_inputs(prompts, **encode_kwargs)
         if encoded.get("prompt_embeds") is None:
@@ -311,82 +304,6 @@ class FSDPWanSampler(FSDPBaseSampler):
         from dataclasses import replace as _replace
 
         return _replace(output, sampling_params=sp, prompts=raw_prompts)
-
-    def _load_images_from_metadata(
-        self,
-        prompts: Any,
-        *,
-        height: int,
-        width: int,
-    ) -> Optional[torch.Tensor]:
-        """Load conditioning images from prompt metadata for I2V.
-
-        Returns a [B, 3, H, W] tensor in [-1, 1] range, or None if no images.
-        Raises if images are requested but cannot be loaded (fail-fast).
-        """
-        from diffusionrl.types.prompts import Prompts as _PromptsType
-
-        if not isinstance(prompts, _PromptsType):
-            return None
-
-        metadata_list = prompts.prompt_metadata
-        if not metadata_list:
-            return None
-
-        image_paths: List[Optional[str]] = []
-        has_any_image = False
-        for meta in metadata_list:
-            if not isinstance(meta, dict):
-                image_paths.append(None)
-                continue
-            path = meta.get("image") or meta.get("image_path")
-            if path and isinstance(path, str):
-                has_any_image = True
-                image_paths.append(path)
-            else:
-                image_paths.append(None)
-
-        if not has_any_image:
-            return None
-
-        if not _HAS_VISION_LIBS:
-            raise ImportError(
-                "I2V conditioning requires torchvision and Pillow. Install with: pip install torchvision pillow"
-            )
-
-        # Validate: if any image is present, all entries must have an image
-        missing_indices = [i for i, p in enumerate(image_paths) if p is None]
-        if missing_indices:
-            raise ValueError(
-                f"I2V batch has mixed image/no-image entries. Missing image paths at indices: {missing_indices}"
-            )
-
-        transform = self._get_image_transform(height, width)
-        tensors: List[torch.Tensor] = []
-        for path in image_paths:
-            with _PILImage.open(path) as pil_img:
-                rgb = pil_img.convert("RGB")
-            tensors.append(transform(rgb))
-
-        device = self._resolve_runtime_device(prompt_embeds=None, latents=None)
-        return torch.stack(tensors, dim=0).to(device=device)
-
-    def _get_image_transform(self, height: int, width: int) -> Any:
-        """Return a cached image transform pipeline for the given resolution."""
-        cache = getattr(self, "_transform_cache", None)
-        if cache is None:
-            self._transform_cache: Dict[Tuple[int, int], Any] = {}
-            cache = self._transform_cache
-        key = (height, width)
-        if key not in cache:
-            cache[key] = _tv_transforms.Compose(
-                [
-                    _tv_transforms.Resize((height, width), interpolation=_tv_transforms.InterpolationMode.BICUBIC),
-                    _tv_transforms.ToTensor(),
-                    _tv_transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-                ]
-            )
-        return cache[key]
 
 
 __all__ = ["FSDPWanSampler"]

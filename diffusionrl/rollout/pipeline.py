@@ -112,12 +112,22 @@ class RolloutPipeline:
             if isinstance(raw_prompt_ids, list) and len(raw_prompt_ids) == len(raw_prompts)
             else None
         )
-        # Pass metadata through so downstream I2V pipelines can access image paths
         raw_metadata = prompt_batch.get("metadata")
         prompt_metadata = (
             list(raw_metadata) if isinstance(raw_metadata, list) and len(raw_metadata) == len(raw_prompts) else None
         )
-        prompts = Prompts.from_unique_prompts(raw_prompts, prompt_ids=prompt_ids, prompt_metadata=prompt_metadata)
+        raw_media_refs = prompt_batch.get("media_refs")
+        media_refs = (
+            list(raw_media_refs)
+            if isinstance(raw_media_refs, list) and len(raw_media_refs) == len(raw_prompts)
+            else None
+        )
+        prompts = Prompts.from_unique_prompts(
+            raw_prompts,
+            prompt_ids=prompt_ids,
+            prompt_metadata=prompt_metadata,
+            media_refs=media_refs,
+        )
         if int(samples_per_prompt) > 1:
             prompts = prompts.expand(
                 int(samples_per_prompt),
@@ -378,7 +388,22 @@ class RolloutPipeline:
             if isinstance(raw_prompt_ids, list) and len(raw_prompt_ids) == len(raw_prompts)
             else None
         )
-        prompts = Prompts.from_unique_prompts(raw_prompts, prompt_ids=prompt_ids_for_eval)
+        raw_metadata = request_batch.get("metadata")
+        prompt_metadata = (
+            list(raw_metadata) if isinstance(raw_metadata, list) and len(raw_metadata) == len(raw_prompts) else None
+        )
+        raw_media_refs = request_batch.get("media_refs")
+        media_refs = (
+            list(raw_media_refs)
+            if isinstance(raw_media_refs, list) and len(raw_media_refs) == len(raw_prompts)
+            else None
+        )
+        prompts = Prompts.from_unique_prompts(
+            raw_prompts,
+            prompt_ids=prompt_ids_for_eval,
+            prompt_metadata=prompt_metadata,
+            media_refs=media_refs,
+        )
         if int(samples_per_prompt) > 1:
             prompts = prompts.expand(
                 int(samples_per_prompt),

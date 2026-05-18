@@ -59,11 +59,17 @@ def build_eval_request_batch(
         prompt_metadata = prompt_metadata[: len(prompts)]
     else:
         prompt_metadata = None
+    media_refs = eval_batch.get("media_refs")
+    if isinstance(media_refs, list):
+        media_refs = media_refs[: len(prompts)]
+    else:
+        media_refs = None
 
     request_batch: Dict[str, Any] = {
         "prompts": prompts,
         "prompt_ids": prompt_ids,
         "metadata": prompt_metadata,
+        "media_refs": media_refs,
     }
     raw_request_kwargs = eval_batch.get("kwargs")
     if isinstance(raw_request_kwargs, dict):

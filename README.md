@@ -137,7 +137,7 @@ python -m diffusionrl.train \
     --algorithm.algorithm-type grpo \
     --algorithm.prompts-per-rollout 8 \
     --reward.definition.components "[{model_name: hpsv2, weight: 1.0}]" \
-    --data-source-dotpath diffusionrl.data.data_source.ImageRLDataSource \
+    --data-source-dotpath diffusionrl.data.data_source.MultimodalRLDataSource \
     --data-path data/samples/prompts_toy.json \
     --eval-data-path data/samples/prompts_toy.json \
     --sampling.sde-type dance \

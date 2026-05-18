@@ -19,7 +19,7 @@ defaults:
   - _self_
 
 run:
-  data_source_dotpath: diffusionrl.data.data_source.ImageRLDataSource
+  data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
   num_rollouts: 10000
   data_path: /tmp/diffusionrl/data/train.txt
   eval_data_path: /tmp/diffusionrl/data/test.txt

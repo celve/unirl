@@ -157,6 +157,7 @@ class RolloutPlan:
                 group_ids=list(p.group_ids[start:end]),
                 noise_group_ids=list(p.noise_group_ids[start:end]),
                 prompt_metadata=list(p.prompt_metadata[start:end]),
+                media_refs=[list(refs) for refs in p.media_refs[start:end]],
             )
             shards.append(
                 RolloutRequest(

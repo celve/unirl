@@ -13,21 +13,9 @@ from typing import Any, Dict, List, Optional
 
 from torch.utils.data import Dataset
 
-logger = logging.getLogger(__name__)
+from diffusionrl.types.media import MediaRef
 
-_PROMPT_EXAMPLE_EXCLUDED_KEYS = {
-    "prompt",
-    "caption",
-    "metadata",
-    "prompt_embed_path",
-    "pooled_embed_path",
-    "pooled_prompt_embeds_path",
-    "text_ids_path",
-    "text_ids",
-    "prompt_embeds",
-    "pooled_prompt_embeds",
-    "prompt_id",
-}
+logger = logging.getLogger(__name__)
 
 _LEGACY_EMBEDDING_FIELDS = {
     "prompt_embed_path",
@@ -38,6 +26,52 @@ _LEGACY_EMBEDDING_FIELDS = {
     "prompt_embeds",
     "pooled_prompt_embeds",
 }
+
+_PROMPT_EXAMPLE_EXCLUDED_KEYS = {
+    "prompt",
+    "caption",
+    "media",
+    "media_refs",
+    "metadata",
+    "prompt_id",
+    *_LEGACY_EMBEDDING_FIELDS,
+}
+
+_MEDIA_REF_FIELDS = {"modality", "role", "uri"}
+
+
+def _normalize_media_refs(raw_media: Any) -> List[MediaRef]:
+    """Normalize a manifest ``media`` list into typed media references."""
+    if raw_media is None:
+        return []
+    if not isinstance(raw_media, list):
+        raise TypeError(f"Prompt example media must be a list, got {type(raw_media).__name__}.")
+
+    media_refs: List[MediaRef] = []
+    for idx, item in enumerate(raw_media):
+        if isinstance(item, MediaRef):
+            media_refs.append(item)
+            continue
+        if not isinstance(item, dict):
+            raise TypeError(f"Prompt example media[{idx}] must be a dict, got {type(item).__name__}.")
+
+        extra_fields = sorted(set(item) - _MEDIA_REF_FIELDS)
+        if extra_fields:
+            raise ValueError(
+                "Prompt example media entries may only contain 'modality', 'role', and 'uri'. "
+                f"Got extra fields={extra_fields} at media[{idx}]."
+            )
+        missing_fields = sorted(field for field in _MEDIA_REF_FIELDS if not item.get(field))
+        if missing_fields:
+            raise ValueError(f"Prompt example media[{idx}] is missing required fields={missing_fields}.")
+
+        modality = str(item["modality"]).strip().lower()
+        role = str(item["role"]).strip().lower()
+        uri = str(item["uri"]).strip()
+        if not modality or not role or not uri:
+            raise ValueError(f"Prompt example media[{idx}] fields must be non-empty strings.")
+        media_refs.append(MediaRef(modality=modality, role=role, uri=uri))
+    return media_refs
 
 
 def normalize_prompt_example(
@@ -59,6 +93,9 @@ def normalize_prompt_example(
     elif not isinstance(metadata, dict):
         raise TypeError(f"Prompt example metadata must be a dict when provided, got {type(metadata).__name__}.")
 
+    raw_media = item.get("media_refs", item.get("media"))
+    media_refs = _normalize_media_refs(raw_media)
+
     result: Dict[str, Any] = {"prompt": prompt}
     prompt_id = item.get("prompt_id")
     if prompt_id is None and default_prompt_id is not None:
@@ -67,6 +104,8 @@ def normalize_prompt_example(
         result["prompt_id"] = str(prompt_id)
     if metadata:
         result["metadata"] = dict(metadata)
+    if media_refs:
+        result["media_refs"] = media_refs
     return result
 
 
@@ -83,7 +122,11 @@ class PromptExampleDataset(Dataset):
 
 class TextPromptDataset(PromptExampleDataset):
     """
-    Simple dataset for text prompts.
+    File-backed dataset for text prompt examples.
+
+    This class owns file parsing and per-row normalization only. Runtime
+    concerns such as epoch ordering, batching, and drop-last policy belong in
+    the data source / sampler layer.
 
     Supports:
     - JSON file with list of strings
@@ -105,7 +148,7 @@ class TextPromptDataset(PromptExampleDataset):
         file_path: str,
         prompt_key: str = "prompt",
         seed: Optional[int] = None,
-        shuffle: bool = True,
+        shuffle: bool = False,
     ):
         """
         Initialize text prompt dataset.
@@ -113,8 +156,9 @@ class TextPromptDataset(PromptExampleDataset):
         Args:
             file_path: Path to JSON or TXT file containing prompts
             prompt_key: Key for prompt in JSON dicts
-            seed: Random seed for shuffling
-            shuffle: Whether to shuffle prompts on load
+            seed: Random seed for optional standalone load-time shuffling
+            shuffle: Whether to shuffle prompts on load. Training data sources
+                should normally leave this disabled and shuffle via samplers.
         """
         self.file_path = file_path
         self.prompt_key = prompt_key
@@ -164,6 +208,9 @@ class TextPromptDataset(PromptExampleDataset):
                 )
                 self.samples.append(normalized)
             except (TypeError, ValueError) as exc:
+                has_media_contract = any(field in candidate for field in ("media", "media_refs"))
+                if has_media_contract:
+                    raise
                 logger.warning("Skipping invalid %s: %s", context, exc)
 
         if self.file_path.endswith(".json"):

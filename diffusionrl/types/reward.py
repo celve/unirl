@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 from PIL import Image
 
+from diffusionrl.types.media import MediaRef
 from diffusionrl.utils.batched import Batched, concat_field, max_field
 
 
@@ -32,6 +33,7 @@ class RewardRequest:
     prompt_ids: Optional[List[str]] = None
     sample_ids: Optional[List[str]] = None
     group_ids: Optional[List[str]] = None
+    input_media_refs: Optional[List[List[MediaRef]]] = None
     metadata: Optional[List[Optional[Dict[str, Any]]]] = None
     reward_types: List[RewardType] = field(default_factory=lambda: [RewardType.IMAGE_TEXT_ALIGNMENT])
     return_components: bool = False

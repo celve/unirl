@@ -1,8 +1,8 @@
 """
 Data source implementations for GRPO training.
 
-The default data-source contract is prompt-only:
-- prompts plus optional metadata for rollout/eval input
+The default data-source contract is prompt-first:
+- prompts plus optional typed media references and metadata for rollout/eval input
 
 Runtime prompt embeddings are produced inside rollout engines and training
 pipelines, not provided by the external dataset.
@@ -12,6 +12,7 @@ import logging
 import os
 from typing import Any, Dict, Iterator, List, Optional
 
+import torch
 from torch.utils.data import DataLoader
 
 from .datasets import PromptExampleDataset, TextPromptDataset, normalize_prompt_example
@@ -19,13 +20,18 @@ from .datasets import PromptExampleDataset, TextPromptDataset, normalize_prompt_
 logger = logging.getLogger(__name__)
 
 
-class ImageRLDataSource:
+class MultimodalRLDataSource:
     """
-    Prompt-only data source for image/video RL training.
+    Multimodal runtime data source for RL training.
+
+    This layer owns run-time example ordering, batching, and train/eval source
+    selection. Dataset implementations stay responsible for loading indexed
+    examples from storage.
 
     Accepted user-facing formats:
     - JSON/TXT/JSONL prompt datasets
-    - JSON manifests with ``prompt`` or ``caption`` plus extra metadata
+    - JSON manifests with ``prompt`` or ``caption`` plus optional ``media``
+      references and extra metadata
     """
 
     def __init__(self, args):
@@ -51,31 +57,29 @@ class ImageRLDataSource:
         self._dataloader = None
         self._iter: Optional[Iterator] = None
         self._eval_dataset_ready = False
+        self._shuffle_generator = torch.Generator()
+        self._shuffle_generator.manual_seed(int(self.seed))
 
         if not self.data_path:
-            raise ValueError("ImageRLDataSource requires args.run.data_path.")
+            raise ValueError("MultimodalRLDataSource requires args.run.data_path.")
         if not os.path.exists(self.data_path):
             raise FileNotFoundError(f"Training data path not found: {self.data_path}")
         self._init_dataset()
 
     def _init_dataset(self) -> None:
         """Initialize the training dataset and dataloader."""
-        self.train_dataset = self._build_dataset(self.data_path, shuffle=True)
+        self.train_dataset = self._build_dataset(self.data_path)
         logger.info(
-            "Loaded prompt-only training dataset from %s (%d samples)",
+            "Loaded multimodal training dataset from %s (%d samples)",
             self.data_path,
             len(self.train_dataset),
         )
         self._create_dataloader()
 
-    def _build_dataset(self, path: str, *, shuffle: bool) -> PromptExampleDataset:
+    def _build_dataset(self, path: str) -> PromptExampleDataset:
         """Build one prompt dataset instance for either training or evaluation."""
-        dataset_seed = self.seed if shuffle else None
-
         return TextPromptDataset(
             file_path=path,
-            seed=dataset_seed,
-            shuffle=shuffle,
         )
 
     def _resolve_eval_path(self) -> Optional[str]:
@@ -97,7 +101,7 @@ class ImageRLDataSource:
             self._eval_dataset_ready = True
             return
 
-        self.eval_dataset = self._build_dataset(eval_path, shuffle=False)
+        self.eval_dataset = self._build_dataset(eval_path)
         self._eval_dataset_ready = True
 
         source_label = "eval_data_path" if self.eval_data_path else "data_path"
@@ -127,6 +131,7 @@ class ImageRLDataSource:
             batch_size=self.prompts_per_rollout,
             sampler=sampler,
             shuffle=(sampler is None),  # Only shuffle if not using custom sampler
+            generator=self._shuffle_generator if sampler is None else None,
             num_workers=0,  # Keep simple for Ray
             collate_fn=self._collate_text,
             drop_last=True,
@@ -139,9 +144,12 @@ class ImageRLDataSource:
         prompts = [item["prompt"] for item in batch]
         prompt_ids = self._resolve_prompt_ids(batch)
         metadata = [item.get("metadata") for item in batch]
+        media_refs = [item.get("media_refs", []) for item in batch]
         result: Dict[str, Any] = {"prompts": prompts, "prompt_ids": prompt_ids}
         if any(m is not None for m in metadata):
             result["metadata"] = metadata
+        if any(media_refs):
+            result["media_refs"] = media_refs
         return result
 
     @property
@@ -160,6 +168,9 @@ class ImageRLDataSource:
         metadata = [item.get("metadata") for item in prompt_examples]
         if any(m is not None for m in metadata):
             result["metadata"] = metadata
+        media_refs = [item.get("media_refs", []) for item in prompt_examples]
+        if any(media_refs):
+            result["media_refs"] = media_refs
         return result
 
     def _resolve_prompt_ids(self, prompt_examples: List[Dict[str, Any]]) -> List[str]:
@@ -184,7 +195,7 @@ class ImageRLDataSource:
             Dict containing prompt text plus optional metadata.
         """
         if self._iter is None:
-            raise RuntimeError("ImageRLDataSource is not initialized. Training prompt DataLoader is unavailable.")
+            raise RuntimeError("MultimodalRLDataSource is not initialized. Training DataLoader is unavailable.")
 
         try:
             batch = next(self._iter)
@@ -204,7 +215,7 @@ class ImageRLDataSource:
         self._ensure_eval_dataset()
         if self.eval_dataset is None:
             raise RuntimeError(
-                "ImageRLDataSource could not initialize evaluation prompt data. "
+                "MultimodalRLDataSource could not initialize evaluation prompt data. "
                 "Provide eval_data_path or a readable training data_path."
             )
 
