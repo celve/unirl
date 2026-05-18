@@ -217,6 +217,39 @@ class WAN21ForwardContext(ForwardContext):
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
 
+@register_forward_context(model_type="hunyuan_veido1p5")
+@dataclass
+class HunyuanVeido1p5ForwardContext(ForwardContext):
+    """ForwardContext for HunyuanVideo-1.5 (Qwen2.5-VL + ByT5 + SigLIP).
+
+    The model exposes two parallel text streams (MLLM + ByT5 glyph) plus an
+    optional SigLIP vision stream.  All three are fed through the bundle's
+    ``forward_denoiser``; the sampler never assembles model-private kwargs
+    directly.
+
+    Field-name choices (per skill rules): we deliberately keep
+    ``prompt_embeds_mask`` / ``prompt_embeds_2`` / ``prompt_embeds_mask_2``
+    instead of overloading the SD3-style ``encoder_attention_mask``, so the
+    upstream pipeline wiring (`encoder_hidden_states_2`, `encoder_attention_mask_2`)
+    maps cleanly to the bundle-owned contract.
+    """
+
+    guidance_scale: float = shared_field(default=6.0)
+    prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    prompt_embeds_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    prompt_embeds_2: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    prompt_embeds_mask_2: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    negative_prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    negative_prompt_embeds_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    negative_prompt_embeds_2: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    negative_prompt_embeds_mask_2: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    image_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    cond_latents: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    cond_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
+    attention_kwargs: Optional[Dict[str, Any]] = shared_field(default=None)
+    autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
+
+
 # Also register "default" pointing to base ForwardContext for fallback
 @register_forward_context(model_type="default")
 @dataclass
@@ -251,6 +284,7 @@ __all__ = [
     "FluxForwardContext",
     "SD3ForwardContext",
     "HunyuanVideoForwardContext",
+    "HunyuanVeido1p5ForwardContext",
     "MochiForwardContext",
     "WAN21ForwardContext",
     "WAN22ForwardContext",

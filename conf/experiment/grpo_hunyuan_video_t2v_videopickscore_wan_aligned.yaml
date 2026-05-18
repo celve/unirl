@@ -1,0 +1,151 @@
+# @package _global_
+# GRPO HunyuanVideo (1.0) T2V recipe — aligned with WAN 2.1 14B training params.
+#
+# Based on grpo_hunyuan_video_t2v_videopickscore.yaml but with key training
+# hyperparameters aligned to grpo_wan_t2v_14b.yaml for controlled comparison:
+#   - learning_rate: 3e-4 (LoRA-appropriate, was 1e-5)
+#   - weight_decay: 0.0 (was 1e-4)
+#   - eta: 0.7 (was 0.25)
+#   - ema_decay: 0.9 (was 0.999)
+#   - timestep_fraction: [0.0, 0.5] (was [0.0, 0.6])
+#   - samples_per_prompt: 16 (was 24, matches WAN)
+#   - num_rollouts: 1000 (was 202)
+#   - use_lora: true (was false)
+#   - guidance_scale: 1.0 (was 0.0)
+#   - num_inference_steps: 20 (was 16)
+#   - resolution: 480x832 widescreen (was 480x480)
+#   - reward: video (pickscore + temporal, was standalone videopickscore)
+#
+# Keeps HunyuanVideo-specific constants: shift=5.0, model=hunyuan_video.
+defaults:
+  - override /algorithm: grpo
+  - override /model: hunyuan_video
+  - override /sampling/sde_strategy: flow
+  - _self_
+
+run:
+  data_source_dotpath: diffusionrl.data.data_source.ImageRLDataSource
+  # Aligned with WAN 14B (was 202).
+  num_rollouts: 1000
+  data_path: ${oc.env:DATA_PATH}
+  eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
+
+sampling:
+  # Aligned with WAN 14B (was 16).
+  num_inference_steps: 20
+  # WAN uses 1.0; DanceGRPO uses 0.0. Align with WAN for this comparison.
+  guidance_scale: 1.0
+  # Widescreen to match WAN 14B (was 480x480).
+  height: 480
+  width: 832
+  num_frames: 5
+  sde_config:
+    # Aligned with WAN 14B (was 0.25).
+    eta: 0.7
+    shift: 5.0
+
+algorithm:
+  prompts_per_rollout: 48
+  # Aligned with WAN 14B (was 24).
+  samples_per_prompt: 16
+  adv_normalization_scope: group
+  use_global_std: true
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  use_kl_penalty: false
+  kl_coef: 0.0
+  ema:
+    # Aligned with WAN 14B (was 0.999).
+    eval_ema_decay: 0.9
+    eval_ema_update_interval: 1
+  scheduler:
+    # Aligned with WAN 14B (was [0.0, 0.6]).
+    timestep_fraction: [0.0, 0.5]
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+    shift: ${sampling.sde_config.shift}
+
+placement:
+  num_rollout_nodes: 0
+  num_rollout_gpus_per_node: 0
+
+rollout:
+  plan:
+    forward_batch_size: 1
+
+training:
+  plan:
+    # global = 48 * 16 = 768 (was 1152 with samples_per_prompt=24).
+    # 1 node x 8 GPU: local = 768/8 = 96; mini = 96/2 = 48.
+    micro_batch_size: 1
+    num_updates_per_batch: 2
+    local_mini_batch_size: 48
+    local_batch_size: 96
+    global_batch_size: 768
+  topology:
+    actor_count: 8
+  optimizer:
+    # Aligned with WAN 14B LoRA lr (was 1e-5).
+    learning_rate: 3.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    # Aligned with WAN 14B (was 1e-4).
+    weight_decay: 0.0
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    total_steps: 1000
+  execution:
+    max_grad_norm: 1.0
+    offload_train: false
+    offload_rollout: false
+
+model:
+  # LoRA on, aligned with WAN 14B.
+  use_lora: true
+  lora_rank: 64
+  lora_alpha: 128
+  lora_target_modules:
+    - attn.to_q
+    - attn.to_k
+    - attn.to_v
+    - attn.to_out.0
+    - attn.add_q_proj
+    - attn.add_k_proj
+    - attn.add_v_proj
+    - attn.to_add_out
+    - ff.net.0.proj
+    - ff.net.2
+    - ff_context.net.0.proj
+    - ff_context.net.2
+  use_gradient_checkpointing: true
+  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,hunyuanvideo-community/HunyuanVideo}
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    # video reward (pickscore + temporal) aligned with WAN 14B recipe.
+    - name: video
+      weight: 1.0
+      batch_size: 8
+      inner_model_name: pickscore
+      temporal_weight: 0.3
+      alignment_weight: 0.7
+      sample_frames: 1
+
+logging:
+  logging_steps: 1
+  log_media: true
+  media_max_items: 8
+  report_to_wandb: true
+  project_name: diffusionrl-grpo-t2v
+  run_name: grpo_hunyuan_video_t2v_videopickscore_wan_aligned
+  tags: [hunyuan_video, t2v, grpo, video, pickscore, wan_aligned]
+
+evaluation:
+  eval_steps: 60
+
+resume:
+  save_steps: 60

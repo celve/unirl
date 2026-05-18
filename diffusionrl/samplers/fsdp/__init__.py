@@ -10,10 +10,8 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "FSDPSamplingEngine": ("diffusionrl.samplers.fsdp.engine", "FSDPSamplingEngine"),
     "FluxSampler": ("diffusionrl.samplers.fsdp.flux_sampler", "FluxSampler"),
     "SD3Sampler": ("diffusionrl.samplers.fsdp.sd3_sampler", "SD3Sampler"),
-    "FSDPHunyuanVideoSampler": (
-        "diffusionrl.samplers.fsdp.hunyuan_video_sampler",
-        "FSDPHunyuanVideoSampler",
-    ),
+    "FSDPHunyuanVideoSampler": ("diffusionrl.samplers.fsdp.hunyuan_video_sampler", "FSDPHunyuanVideoSampler"),
+    "FSDPHunyuanVeido1p5Sampler": ("diffusionrl.samplers.fsdp.hunyuan_veido1p5_sampler", "FSDPHunyuanVeido1p5Sampler"),
     "FSDPWanSampler": ("diffusionrl.samplers.fsdp.wan_sampler", "FSDPWanSampler"),
 }
 

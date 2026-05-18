@@ -243,6 +243,18 @@ class SGLangRolloutResponse:
                 )
             if not torch.allclose(actual_t, expected_f32, atol=atol, rtol=rtol):
                 max_diff = (actual_t - expected_f32).abs().max().item()
+                # Some models (e.g. HunyuanVideo) apply a TIMESTEP_SCALE
+                # (typically 1000) inside their forward_denoiser but SGLang
+                # returns the scaled timesteps. Detect and tolerate this by
+                # checking if the ratio is a consistent integer scale.
+                if max_diff > 1.0 and expected_f32.abs().max() > 0:
+                    ratio = actual_t / expected_f32.clamp(min=1e-8)
+                    median_ratio = ratio.median().item()
+                    if abs(median_ratio - round(median_ratio)) < 0.01 and round(median_ratio) >= 2:
+                        scale = round(median_ratio)
+                        rescaled = actual_t / scale
+                        if torch.allclose(rescaled, expected_f32, atol=atol, rtol=rtol):
+                            continue  # scaled timesteps match after de-scaling
                 raise RuntimeError(
                     f"SGLang trajectory_timesteps value mismatch on result {i}: "
                     f"max abs diff={max_diff:.3e} (atol={atol:g}, rtol={rtol:g}). "

@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, List
 
 import torch
 
+from diffusionrl.config.registration import register_config
+from diffusionrl.reward.base import BaseRewardComponentSpec
 from diffusionrl.types.reward import RewardRequest
 from diffusionrl.utils.media import tensor_frame_to_pil
 
@@ -104,3 +106,26 @@ class VideoPickScoreScorer(PickScoreRewardScorer):
                 return_components=request.return_components,
             )
         return super()._compute_model_rewards(request)
+
+
+@register_config(
+    group="reward/component",
+    name="videopickscore",
+    target="diffusionrl.reward.scorers.video_pickscore.VideoPickScoreScorer",
+)
+class VideoPickScoreSpec(BaseRewardComponentSpec):
+    """Typed config for the VideoPickScore reward component.
+
+    Mirrors ``PickScoreSpec`` field-for-field — ``VideoPickScoreScorer``
+    inherits ``PickScoreRewardScorer.__init__``, which consumes exactly
+    ``device``, ``batch_size``, ``processor_id``, and ``model_id`` from
+    its config. A dedicated Spec (instead of reusing ``PickScoreSpec``)
+    keeps Hydra's structured-config registry one-Spec-per-name and lets
+    YAML reference this scorer as ``name: videopickscore``.
+    """
+
+    weight: float = 1.0
+    batch_size: int = 8
+    device: str = "auto"
+    processor_id: str = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
+    model_id: str = "yuvalkirstain/PickScore_v1"

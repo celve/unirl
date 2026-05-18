@@ -8,6 +8,7 @@ __all__ = [
     "ModelBundleConfig",
     # Lazy import getters
     "get_hunyuan_video_model_bundle",
+    "get_hunyuan_veido1p5_model_bundle",
     "get_mochi_model_bundle",
     "get_flux_model_bundle",
     "get_sd3_model_bundle",
@@ -22,6 +23,13 @@ def get_hunyuan_video_model_bundle():
     from .hunyuan_video import HunyuanVideoModelBundle
 
     return HunyuanVideoModelBundle
+
+
+def get_hunyuan_veido1p5_model_bundle():
+    """Get HunyuanVideo-1.5 model bundle class."""
+    from .hunyuan_veido1p5 import HunyuanVeido1p5ModelBundle
+
+    return HunyuanVeido1p5ModelBundle
 
 
 def get_mochi_model_bundle():

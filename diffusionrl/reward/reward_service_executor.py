@@ -76,6 +76,54 @@ def _encode_image_b64(
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _encode_video_b64(
+    video: torch.Tensor,
+    fps: int = 8,
+) -> str:
+    """Encode a video tensor ``(C, T, H, W)`` to a base64 mp4 string.
+
+    Uses ``diffusers.utils.export_to_video`` for frame encoding, then reads
+    the bytes and base64-encodes them for HTTP transmission.
+    """
+    import tempfile
+
+    from diffusers.utils import export_to_video
+    from PIL import Image as _PIL_Image
+
+    v = video.detach().cpu()
+    if v.dim() == 5:
+        v = v.squeeze(0)
+    if v.dim() != 4:
+        raise ValueError(f"Expected 4D (C, T, H, W) video tensor, got shape {tuple(v.shape)}.")
+
+    # Channel-first to list of PIL frames
+    if v.is_floating_point():
+        v = v.clamp(0.0, 1.0)
+    frames = []
+    for t in range(v.shape[1]):
+        frame = v[:, t, :, :]  # (C, H, W)
+        if frame.is_floating_point():
+            frame = (frame * 255).byte()
+        frame_np = frame.permute(1, 2, 0).numpy()
+        frames.append(_PIL_Image.fromarray(frame_np))
+
+    tmp = tempfile.NamedTemporaryFile(prefix="reward_svc_", suffix=".mp4", delete=False)
+    tmp.close()
+    import os
+
+    try:
+        export_to_video(frames, tmp.name, fps=fps)
+        with open(tmp.name, "rb") as f:
+            video_bytes = f.read()
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+    return base64.b64encode(video_bytes).decode("ascii")
+
+
 # ---------------------------------------------------------------------------
 # RewardServiceExecutor
 # ---------------------------------------------------------------------------
@@ -120,6 +168,7 @@ class RewardServiceExecutor(BaseRewardExecutor):
         self.image_quality = config.image_quality
         self.raise_on_failure = config.raise_on_failure
         self.aggregation_method = config.aggregation_method
+        self.video_fps = config.video_fps
 
         self._remote_rewards_validated = False
 
@@ -150,13 +199,10 @@ class RewardServiceExecutor(BaseRewardExecutor):
             the weighted aggregation of all required_rewards), and
             ``component_rewards`` keyed by reward name.
         """
-        if request.is_video:
-            n = len(request.videos or [])
-            raise NotImplementedError(
-                f"RewardServiceExecutor does not support video requests "
-                f"(received {n} video(s)). Use a local video reward scorer instead."
-            )
         start = time.time()
+        if request.is_video:
+            return self._compute_video_rewards(request, start)
+
         bs = request.batch_size
         try:
             payload = self._build_score_payload(request)
@@ -271,6 +317,51 @@ class RewardServiceExecutor(BaseRewardExecutor):
                     "history": [{"text": prompt, "image_b64": image_b64}],
                     "required_rewards": list(self.required_rewards),
                     "metadata": sample_metadata,
+                }
+            )
+
+        return {"requests": wire_requests}
+
+    # ------------------------------------------------------------------
+    # Video reward support
+    # ------------------------------------------------------------------
+
+    def _compute_video_rewards(self, request: RewardRequest, start: float) -> RewardResponse:
+        """Send video tensors to the remote service and parse the response."""
+        bs = request.batch_size
+        try:
+            payload = self._build_video_score_payload(request)
+            raw = self._post_score(payload)
+            return self._parse_score_response(raw, bs, time.time() - start)
+        except Exception:
+            if self.raise_on_failure:
+                raise
+            logger.exception("RewardServiceExecutor._compute_video_rewards failed (degraded mode)")
+            return RewardResponse(
+                rewards=[0.0] * bs,
+                successes=[False] * bs,
+                errors=["RewardServiceExecutor video failure (see logs)"] * bs,
+                compute_time=time.time() - start,
+            )
+
+    def _build_video_score_payload(self, request: RewardRequest) -> Dict[str, Any]:
+        """Convert a video ``RewardRequest`` into a JSON payload with base64 mp4.
+
+        Each sample ``(videos[i], prompts[i])`` is encoded to an mp4 file in
+        memory and base64-encoded for transmission.
+        """
+        videos = request.videos or []
+        prompts = request.prompts
+        wire_requests: List[Dict[str, Any]] = []
+
+        for idx in range(len(videos)):
+            prompt = prompts[idx] if idx < len(prompts) else ""
+            video_b64 = _encode_video_b64(videos[idx], fps=self.video_fps)
+            wire_requests.append(
+                {
+                    "video_b64": video_b64,
+                    "prompt": prompt,
+                    "required_rewards": list(self.required_rewards),
                 }
             )
 
@@ -465,6 +556,7 @@ class RewardServiceSpec(BaseRewardComponentSpec):
     aggregation_method: str = "weighted_sum"
     image_format: str = "JPEG"
     image_quality: int = 95
+    video_fps: int = 8
     raise_on_failure: bool = True
 
     def __post_init__(self) -> None:

@@ -69,7 +69,29 @@ def init_process_group(
         store.set_timeout(timeout)
         store = PrefixStore(group_name, store)
 
-    pg_options_param_name = "backend_options" if str(torch.__version__) >= "2.6" else "pg_options"
+    # Detect the correct keyword for process group options. PyTorch renamed
+    # this parameter across versions:
+    #   < 2.6  : pg_options
+    #   2.6-2.x: backend_options
+    #   some builds: neither (positional only or removed)
+    # Introspect the actual signature to avoid version-string comparison bugs.
+    #
+    # Context: SGLang separate mode uses the vllm-sglang-omni-v3 image which
+    # ships a newer PyTorch (≥2.6) that renamed pg_options → backend_options.
+    # The diffusionrl:latest image still uses the old name. Naive string
+    # comparison (str(torch.__version__) >= "2.6") breaks on versions like
+    # "2.10" (string '1' < '6'). Using inspect.signature avoids all such
+    # issues — we just ask the function what it actually accepts.
+    import inspect
+
+    _npg_sig = inspect.signature(_new_process_group_helper)
+    _npg_params = set(_npg_sig.parameters.keys())
+
+    pg_extra_kwargs: dict = {}
+    if "backend_options" in _npg_params:
+        pg_extra_kwargs["backend_options"] = pg_options
+    elif "pg_options" in _npg_params:
+        pg_extra_kwargs["pg_options"] = pg_options
 
     default_pg = dist.group.WORLD if dist.is_initialized() else None
     saved_bound_device_id = None
@@ -84,7 +106,7 @@ def init_process_group(
         backend,
         store,
         group_name=group_name,
-        **{pg_options_param_name: pg_options},
+        **pg_extra_kwargs,
         timeout=timeout,
     )
 

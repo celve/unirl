@@ -1,21 +1,22 @@
-"""
-HunyuanVideo FSDP Sampler for GRPO Training.
+"""HunyuanVideo (1.0) FSDP sampler for GRPO training.
 
-This sampler implements SDE sampling with log probability computation
-for HunyuanVideo models using native PyTorch (FSDP-compatible).
-It is fully aligned with DanceGRPO's implementation.
+Mirrors the structure of :class:`FSDPHunyuanVeido1p5Sampler` /
+:class:`FSDPWanSampler`: the model-private call goes through
+``model_bundle.forward_denoiser(...)``, so the sampler only owns the sampling
+loop, latent shape, sigma schedule, trajectory recording and
+``ForwardContext`` construction.
+
+Routing both sample-time and train-time forward through the same
+``forward_denoiser`` is required for the PPO importance ratio to be ≈1 at
+inner-step 0: it pins ``hidden_states`` dtype, autocast policy, timestep
+formatting and pooled-projection fallback to a single source of truth.
 
 Reference:
-- DanceGRPO HunyuanVideo training implementation (lines 54-96, 104-143)
+- DanceGRPO HunyuanVideo training implementation
+- HunyuanVideo 1.5 sibling: diffusionrl.samplers.fsdp.hunyuan_veido1p5_sampler
 
-Key alignment points with DanceGRPO:
-- sd3_time_shift(): sigma schedule transformation (line 54-55)
-- flux_step(): SDE step with log_prob computation (line 57-96)
-- run_sample_step(): sampling loop (line 104-143)
-- SDE solver correction term (line 76-79)
-- Guidance default: 6018.0 (line 129; configurable via runtime args)
-- Latent normalization: /0.476986 (line 140)
-- Precision: bfloat16 for forward, float32 for SDE step, float16 for trajectory storage
+DanceGRPO-derived constants (guidance default, latent scale, channel layout)
+are kept here because they are inference-loop knobs, not forward-pass details.
 """
 
 import logging
@@ -149,6 +150,8 @@ class FSDPHunyuanVideoSampler(FSDPBaseSampler):
         """
         if self.model is None:
             raise RuntimeError("Model not set. Initialize sampler with model parameter.")
+        if self.model_bundle is None:
+            raise RuntimeError("FSDPHunyuanVideoSampler requires model_bundle for model-specific forward dispatch")
 
         if prompt_embeds is None:
             raise ValueError("prompt_embeds (encoder_hidden_states) is required for HunyuanVideo")
@@ -235,30 +238,36 @@ class FSDPHunyuanVideoSampler(FSDPBaseSampler):
             else nullcontext()
         )
 
+        # Build a long-lived ForwardContext used for every step. We keep one
+        # instance per call because all conditioning is shared across steps —
+        # only ``latents`` and ``sigma`` vary. Routing the per-step forward
+        # through ``model_bundle.forward_denoiser(ctx=forward_context)`` is
+        # what guarantees sample-time and train-time forward share the exact
+        # same dtype cast / autocast / timestep formatting.
+        forward_context = HunyuanVideoForwardContext(
+            guidance_scale=float(actual_guidance),
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+            encoder_attention_mask=encoder_attention_mask,
+        )
+
         # Denoising loop (DanceGRPO line 117-139)
+        self.model.eval()
         for i in range(num_inference_steps):
             sigma = sigma_schedule[i].to(device)
             sigma_next = sigma_schedule[i + 1].to(device)
-            # Keep timestep in float32 to avoid precision loss (no int truncation)
-            timestep = (sigma.float() * 1000).expand(batch_size)
 
-            # Forward pass (DanceGRPO line 123-135)
-            self.model.eval()
             with torch.no_grad():
                 with autocast_ctx:
-                    model_pred = self.model(
-                        hidden_states=latents,
-                        encoder_hidden_states=prompt_embeds,
-                        pooled_projections=pooled_prompt_embeds,
-                        timestep=timestep,
-                        guidance=torch.tensor([actual_guidance], device=device, dtype=self.autocast_dtype),
-                        encoder_attention_mask=encoder_attention_mask,
-                        return_dict=False,
-                    )[0]
+                    model_pred = self.model_bundle.forward_denoiser(
+                        latents=latents,
+                        sigma=sigma,
+                        ctx=forward_context,
+                    )
 
             # Unified step: eta controls SDE vs ODE behaviour.
             step_eta = self.eta if i in sde_indices else 0.0
-            latents, log_prob, prev_sample_mean = denoising_step(
+            latents, log_prob, _ = denoising_step(
                 noise_pred=model_pred,
                 sample=latents,
                 sigma=sigma,
@@ -279,12 +288,6 @@ class FSDPHunyuanVideoSampler(FSDPBaseSampler):
 
         trajectory = trajectory_store.finalize()
 
-        forward_context = HunyuanVideoForwardContext(
-            guidance_scale=float(actual_guidance),
-            prompt_embeds=prompt_embeds,
-            encoder_attention_mask=encoder_attention_mask,
-        )
-
         return RolloutSamples(
             latents=final_latents,
             timesteps=sigma_schedule,
@@ -303,11 +306,20 @@ class FSDPHunyuanVideoSampler(FSDPBaseSampler):
         timestep_index: int,
         sigma_schedule: torch.Tensor,
         guidance_scale: Optional[float] = None,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Compute log probability for a single training step.
+        """Compute log probability for a single training step (replay path).
 
-        This is aligned with DanceGRPO's grpo_one_step (line 146-173).
+        Routes the forward through ``model_bundle.forward_denoiser`` so the
+        train-time numerical path is bit-equivalent to the rollout-time
+        forward used in :meth:`sample`. This is what
+        ``ReplayLogProbPatch.maybe_replay_old_log_probs`` calls when sglang
+        rollout omits log-probs.
+
+        Aligned with DanceGRPO's grpo_one_step (line 146-173) at the
+        algorithm level — the dtype / autocast / preprocessing details are
+        owned by ``HunyuanVideoModelBundle.forward_denoiser`` and matched
+        to the sampler-side forward by construction.
 
         Args:
             latents: Current latents x_t
@@ -316,62 +328,52 @@ class FSDPHunyuanVideoSampler(FSDPBaseSampler):
             encoder_attention_mask: Attention mask
             timestep_index: Index in sigma schedule
             sigma_schedule: Full sigma schedule
+            guidance_scale: Optional per-call guidance override
+            pooled_prompt_embeds: Optional pooled projections (HunyuanVideo
+                1.0 defaults to a zero tensor inside the bundle when omitted)
 
         Returns:
             log_prob: Log probability [B]
         """
-        device = latents.device
-        batch_size = latents.shape[0]
-        actual_guidance = float(guidance_scale) if guidance_scale is not None else float(self.default_guidance_scale)
-        prompt_embeds = prompt_embeds.to(device=device)
-        if encoder_attention_mask is None:
-            encoder_attention_mask = torch.ones(
-                batch_size,
-                prompt_embeds.shape[1],
-                device=device,
-                dtype=torch.long,
-            )
-        else:
-            encoder_attention_mask = encoder_attention_mask.to(device=device)
-
-        sigma = sigma_schedule[timestep_index]
-        # Keep timestep in float32 to avoid precision loss (no int truncation)
-        timestep = (sigma.float() * 1000).expand(batch_size)
-
-        proj_dim = getattr(getattr(self.model, "config", None), "pooled_projection_dim", 768)
-        pooled_prompt_embeds = torch.zeros(
-            batch_size,
-            int(proj_dim),
-            device=device,
-            dtype=self.autocast_dtype,
-        )
-
-        # Forward pass with gradients (DanceGRPO line 158-171)
-        self.model.train()
-        autocast_ctx = (
-            torch.autocast("cuda", self.autocast_dtype)
-            if latents.is_cuda and self.autocast_dtype in (torch.float16, torch.bfloat16)
-            else nullcontext()
-        )
-        with autocast_ctx:
-            model_pred = self.model(
-                hidden_states=latents,
-                encoder_hidden_states=prompt_embeds,
-                pooled_projections=pooled_prompt_embeds,
-                timestep=timestep,
-                guidance=torch.tensor([actual_guidance], device=device, dtype=self.autocast_dtype),
-                encoder_attention_mask=encoder_attention_mask,
-                return_dict=False,
-            )[0]
-
-        # Compute log probability (DanceGRPO line 172)
-        # Training side: prev_latents is float16 from trajectory.
-        # Upcast to float32 so that compute is on the same truncated value.
         if self.uses_deterministic_solver:
             raise ValueError("Deterministic HunyuanVideo sampling does not define stochastic log-prob replay.")
+        if self.model_bundle is None:
+            raise RuntimeError(
+                "FSDPHunyuanVideoSampler.compute_log_prob_for_training requires model_bundle "
+                "for model-specific forward dispatch"
+            )
+
+        device = latents.device
+        actual_guidance = float(guidance_scale) if guidance_scale is not None else float(self.default_guidance_scale)
+        prompt_embeds = prompt_embeds.to(device=device)
+        if encoder_attention_mask is not None:
+            encoder_attention_mask = encoder_attention_mask.to(device=device)
+        if pooled_prompt_embeds is not None:
+            pooled_prompt_embeds = pooled_prompt_embeds.to(device=device)
+
+        forward_context = HunyuanVideoForwardContext(
+            guidance_scale=actual_guidance,
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+            encoder_attention_mask=encoder_attention_mask,
+        )
 
         sigma = sigma_schedule[timestep_index].to(device)
         sigma_next = sigma_schedule[timestep_index + 1].to(device)
+
+        # Forward pass with gradients (DanceGRPO line 158-171). The bundle's
+        # ``forward_denoiser`` owns the autocast / dtype-cast / timestep math
+        # that must mirror :meth:`sample`.
+        self.model.train()
+        model_pred = self.model_bundle.forward_denoiser(
+            latents=latents,
+            sigma=sigma,
+            ctx=forward_context,
+        )
+
+        # Training side: prev_latents is float16 from trajectory.
+        # ``denoising_step`` upcasts to float32 internally so the SDE log-prob
+        # is computed on the same fp16-rounded value the sampler stored.
         _, log_prob, _ = denoising_step(
             noise_pred=model_pred,
             sample=latents,

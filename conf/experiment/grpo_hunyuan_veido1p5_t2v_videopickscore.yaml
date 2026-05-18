@@ -1,0 +1,174 @@
+# @package _global_
+# GRPO HunyuanVideo-1.5 T2V recipe — direct-sampling (fsdp engine) GRPO on
+# the 480p T2V checkpoint with LoRA + VideoPickScore reward (PickScore on
+# the first frame) and PPO-style multi-update epochs.
+#
+# Variant of `conf/experiment/grpo_hunyuan_veido1p5_t2v.yaml`: identical
+# everywhere except the reward block, which here uses the standalone
+# `VideoPickScoreScorer` (registered as `name: videopickscore`) instead of
+# the composite `VideoRewardScorer + inner_model_name=pickscore + sample_frames=1`
+# path. After group z-score normalization the two are equivalent
+# learning signals, but `videopickscore` is the more direct expression
+# (no temporal placebo term, no per-video frame-sampling indirection).
+#
+# Anchored to a single-node 8-GPU cluster (8 train actors); override
+# topology + plan via CLI for larger shapes.
+defaults:
+  - override /algorithm: grpo
+  - override /model: hunyuan_veido1p5
+  - override /sampling/sde_strategy: flow
+  - _self_
+
+run:
+  # Aligned with DanceGRPO's `--max_train_steps 202`. lr_scheduler.total_steps
+  # tracks the same number so the (constant) schedule is consistent.
+  data_source_dotpath: diffusionrl.data.data_source.ImageRLDataSource
+  num_rollouts: 202
+  data_path: ${oc.env:DATA_PATH}
+  eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
+
+# Sampler hyperparameters aligned with
+# DanceGRPO/scripts/finetune/finetune_hunyuan_grpo.sh:
+#   --sampling_steps 16  --cfg 0.0  --eta 0.25  --shift 5
+#   --h 480  --w 480  --t 53
+# NOTE: this recipe runs at `num_frames=5` (smallest legal Hunyuan temporal
+# length: 2 latent frames → 5 decoded frames) for cheap-iteration. To reproduce
+# the upstream 53-frame DanceGRPO baseline, override `sampling.num_frames=53`
+# (and re-tune `rollout.plan.forward_batch_size` / training.plan if you OOM).
+sampling:
+  num_inference_steps: 16
+  # CFG=0 disables the CFG path (RL on top of a CFG-distilled base; matches
+  # DanceGRPO's `--cfg 0.0`).
+  guidance_scale: 0.0
+  # 480x480 square frames — matches DanceGRPO `--h 480 --w 480` exactly.
+  height: 480
+  width: 480
+  # Hunyuan-Video 1.5 3D VAE has temporal_downsample=4, so num_frames must
+  # satisfy ``(num_frames - 1) % 4 == 0`` (otherwise the value is silently
+  # truncated by ``latent_t = ((n-1)//4) + 1`` in the sampler). Legal small
+  # values: 1 (single frame, image-equivalent), 5, 9, 13, ..., 53, ..., 129.
+  # We default to 5 (= 2 latent frames, ~10x cheaper rollout/training memory
+  # than 53) so the full GRPO loop fits in a typical cluster shape; flip back
+  # to 53 to reproduce DanceGRPO's `--t 53` configuration exactly.
+  num_frames: 5
+  sde_config:
+    eta: 0.25
+    shift: 5.0
+
+algorithm:
+  prompts_per_rollout: 48
+  # DanceGRPO `--num_generations 24`.
+  samples_per_prompt: 24
+  adv_normalization_scope: group
+  use_global_std: true
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  use_kl_penalty: false
+  kl_coef: 0.0
+  ema:
+    # DanceGRPO `--ema_decay 0.999`.
+    eval_ema_decay: 0.999
+    eval_ema_update_interval: 1
+  scheduler:
+    # DanceGRPO `--timestep_fraction 0.6` (front 60% of timesteps trained).
+    timestep_fraction: [0.0, 0.6]
+  # Bind GRPO's SDE math params to sampling.sde_config so train-side log_prob
+  # replay uses the same eta/shift as the rollout sampler.
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+    shift: ${sampling.sde_config.shift}
+
+placement:
+  # Direct-sampling: train actors also sample; no separate rollout actor.
+  num_rollout_nodes: 0
+  num_rollout_gpus_per_node: 0
+
+rollout:
+  plan:
+    # Direct-sampling per-call chunk size. Anchored to the heaviest legal
+    # shape (53 frames + 480x480) so it stays safe when the user dials
+    # `num_frames` back up. With the default `num_frames=5` the per-sample
+    # activation footprint is ~10x lower along the temporal axis, so you can
+    # bump this to 4–8 for a meaningful rollout speedup; revert to 1 when
+    # restoring `num_frames=53` (DanceGRPO `--train_batch_size 1`).
+    forward_batch_size: 1
+
+training:
+  plan:
+    # Anchored to 1 node × 8 GPUs = 8 train actors.
+    # global = prompts_per_rollout * samples_per_prompt = 48 * 24 = 1152.
+    # local = 1152 / 8 = 144; mini = local / num_updates_per_batch = 72.
+    micro_batch_size: 1
+    num_updates_per_batch: 2
+    local_mini_batch_size: 72
+    local_batch_size: 144
+    global_batch_size: 1152
+  topology:
+    actor_count: 8
+  optimizer:
+    # DanceGRPO `--learning_rate 1e-5` and `--weight_decay 0.0001`.
+    learning_rate: 1.0e-5
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 1.0e-4
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    # Tracks DanceGRPO `--max_train_steps 202`.
+    total_steps: 202
+  execution:
+    max_grad_norm: 1.0
+    offload_train: false
+    offload_rollout: false
+
+model:
+  use_lora: true
+  lora_rank: 64
+  lora_alpha: 128
+  use_gradient_checkpointing: true
+  # T2V recipe: ``_build_image_conditioning(image=None)`` always returns a
+  # zero ``image_embeds`` placeholder, so the SigLIP vision encoder is never
+  # reached — disabling it here frees ~1.6 GB of permanently-resident GPU
+  # memory per actor (gated in both ``__init__`` and ``load_aux_components``
+  # lazy-reload paths). Flip back to ``true`` for any I2V variant.
+  load_vision_encoder: false
+  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,hunyuanvideo-community/HunyuanVideo-1.5-480p_t2v}
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    # Standalone VideoPickScore: PickScore directly on the first frame of
+    # each decoded video. `input_kind = "video"` on the scorer makes the
+    # reward pipeline route decoded video tensors into RewardRequest.videos
+    # (so request.is_video = True) and the scorer extracts frame 0 itself.
+    #
+    # processor_id / model_id support env-var override (parallel to how
+    # `PRETRAINED_MODEL` overrides `model.pretrained_model_ckpt_path`):
+    #   PICKSCORE_PROCESSOR — local path to laion/CLIP-ViT-H-14-laion2B-s32B-b79K
+    #   PICKSCORE_MODEL     — local path to yuvalkirstain/PickScore_v1
+    # Defaults fall back to the HuggingFace Hub identifiers so the recipe
+    # still works in environments without a pre-staged model cache.
+    - name: videopickscore
+      weight: 1.0
+      batch_size: 8
+      processor_id: ${oc.env:PICKSCORE_PROCESSOR,laion/CLIP-ViT-H-14-laion2B-s32B-b79K}
+      model_id: ${oc.env:PICKSCORE_MODEL,yuvalkirstain/PickScore_v1}
+
+logging:
+  logging_steps: 1
+  log_media: true
+  media_max_items: 8
+  report_to_wandb: true
+  project_name: diffusionrl-grpo-t2v
+  run_name: grpo_hunyuan_veido1p5_t2v_videopickscore
+  tags: [hunyuan_veido1p5, t2v, grpo, videopickscore]
+
+evaluation:
+  # Synced with `resume.save_steps` (= DanceGRPO `--checkpointing_steps 50`).
+  eval_steps: 50
+
+resume:
+  # DanceGRPO `--checkpointing_steps 50`.
+  save_steps: 50
