@@ -1,0 +1,137 @@
+# @package _global_
+# GRPO WAN 2.1 I2V 14B recipe — image-to-video generation with RL.
+#
+# Aligned with grpo_wan_t2v_14b.yaml; key differences:
+# - I2V model checkpoint (Wan-AI/Wan2.1-I2V-14B-Diffusers)
+# - Dataset uses sharegpt4o_image_mini (JSONL with "media" field)
+#
+# Dataset format (JSONL):
+#   {"prompt": "...", "media": [{"modality": "image", "role": "condition", "uri": "img.png"}]}
+#
+# Usage:
+#   bash reproduce_scripts/train_grpo_wan21_i2v_14b.sh
+defaults:
+  - override /algorithm: grpo
+  - override /model: wan21
+  - override /sampling/sde_strategy: flow
+  - _self_
+
+run:
+  data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
+  num_rollouts: 1000
+  data_path: ${oc.env:DATA_PATH}
+  eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
+
+sampling:
+  num_inference_steps: 12
+  guidance_scale: 1.0
+  height: 480
+  width: 640
+  # 9 frames → 3 latent frames (temporal_downsample=4). A short recipe that
+  # exercises the full I2V pipeline at low cost.
+  # Bump `num_frames` (must satisfy (n-1)%4==0) for longer videos.
+  num_frames: 9
+  sde_config:
+    eta: 0.7
+    shift: 5.0
+
+algorithm:
+  prompts_per_rollout: 48
+  samples_per_prompt: 16
+  adv_normalization_scope: group
+  use_global_std: true
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  use_kl_penalty: false
+  kl_coef: 0.0
+  ema:
+    eval_ema_decay: 0.9
+    eval_ema_update_interval: 1
+  scheduler:
+    timestep_fraction: [0.0, 0.5]
+  # Bind GRPO's SDE math params to sampling.sde_config so train-side log_prob
+  # replay uses the same eta/shift as the rollout sampler.
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+    shift: ${sampling.sde_config.shift}
+
+placement:
+  # Direct-sampling: train actors also sample; no separate rollout actor.
+  num_rollout_nodes: 0
+  num_rollout_gpus_per_node: 0
+
+rollout:
+  plan:
+    # Direct-sampling per-call chunk size (legacy: SAMPLING_FORWARD_BATCH).
+    # Caps the per-actor activation footprint during 480p×640 generate.
+    forward_batch_size: 1
+
+training:
+  plan:
+    # Anchored to 1 node × 8 GPUs = 8 train actors.
+    # global = prompts_per_rollout * samples_per_prompt = 48 * 16 = 768.
+    micro_batch_size: 1
+    num_updates_per_batch: 2
+    local_mini_batch_size: 48     # = global / actor_count / num_updates = 768/8/2
+    local_batch_size: 96          # = local_mini_batch_size * num_updates_per_batch
+    global_batch_size: 768        # = prompts_per_rollout * samples_per_prompt
+  topology:
+    actor_count: 8                # 1 nodes × 8 GPUs
+  optimizer:
+    learning_rate: 3.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    total_steps: 1000
+  execution:
+    max_grad_norm: 1.0
+    offload_train: false
+    offload_rollout: false
+
+model:
+  use_lora: true
+  lora_rank: 64
+  lora_alpha: 128
+  use_gradient_checkpointing: true
+  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,Wan-AI/Wan2.1-I2V-14B-720P-Diffusers}
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    # `video` wraps a frame-level scorer (pickscore by default) with a
+    # temporal-consistency term — the LIN-185 equivalent of the legacy
+    # `videopickscore` reward.
+    #
+    # ``sample_frames=1`` selects only the first frame for PickScore. With
+    # ``num_frames=9 → 3 latent frames → 9 decoded frames``, picking one
+    # frame keeps reward compute cheap while still providing a usable gradient
+    # signal. The temporal term averages over consecutive-frame differences;
+    # group z-score subtracts the batch mean, so the alignment_weight/
+    # temporal_weight ratio controls the relative signal strength.
+    - name: video
+      weight: 1.0
+      batch_size: 8
+      inner_model_name: pickscore
+      temporal_weight: 0.3
+      alignment_weight: 0.7
+      sample_frames: 1
+
+logging:
+  logging_steps: 1
+  log_media: true
+  media_max_items: 8
+  report_to_wandb: true
+  project_name: diffusionrl-grpo-i2v
+  run_name: grpo_wan_i2v_14b
+  tags: [wan21, i2v, grpo, video, pickscore]
+
+evaluation:
+  eval_steps: 60
+
+resume:
+  save_steps: 60

@@ -51,6 +51,7 @@ class WAN21ModelBundle(ModelBundle):
         self._tokenizer = None
         self._clip_vision_processor = None
         self._is_i2v_model: bool = False
+        self._uses_clip_vision: bool = False
 
         self.load()
 
@@ -66,6 +67,11 @@ class WAN21ModelBundle(ModelBundle):
     def is_i2v_capable(self) -> bool:
         """Whether the loaded transformer supports image-to-video conditioning."""
         return self._is_i2v_model
+
+    @property
+    def uses_clip_vision(self) -> bool:
+        """Whether this I2V model uses CLIP vision encoder for image cross-attention."""
+        return self._uses_clip_vision
 
     @classmethod
     def default_sampler_dotpath(cls) -> Optional[str]:
@@ -143,10 +149,16 @@ class WAN21ModelBundle(ModelBundle):
                 # across the wrapped module.
                 self._transformer.to(self.device, dtype=self.dtype)
 
-            # Detect I2V capability: I2V models have added_kv_proj_dim for image
-            # cross-attention (add_k_proj / add_v_proj in attention layers).
-            added_kv_proj_dim = getattr(getattr(self._transformer, "config", None), "added_kv_proj_dim", None)
-            self._is_i2v_model = added_kv_proj_dim is not None and added_kv_proj_dim > 0
+            # Detect I2V capability and cache CLIP vision flag
+            config = getattr(self._transformer, "config", None)
+            added_kv_proj_dim = getattr(config, "added_kv_proj_dim", None)
+            in_channels = getattr(config, "in_channels", None)
+            out_channels = getattr(config, "out_channels", None)
+            self._is_i2v_model = (added_kv_proj_dim is not None and added_kv_proj_dim > 0) or (
+                in_channels is not None and out_channels is not None and in_channels > out_channels
+            )
+            image_dim = getattr(config, "image_dim", None)
+            self._uses_clip_vision = image_dim is not None and image_dim > 0
             variant_str = "I2V" if self._is_i2v_model else "T2V"
             logger.info("Loaded WAN transformer from %s (variant: %s)", self.pretrained_path, variant_str)
         except Exception as exc:
@@ -401,13 +413,6 @@ class WAN21ModelBundle(ModelBundle):
         num_frames: Optional[int] = None,
         expand_timesteps: Optional[bool] = None,
     ) -> Dict[str, torch.Tensor]:
-        if self._vision_encoder is None or self._clip_vision_processor is None:
-            missing = []
-            if self._vision_encoder is None:
-                missing.append("_vision_encoder")
-            if self._clip_vision_processor is None:
-                missing.append("_clip_vision_processor")
-            self._raise_aux_component_not_loaded("vision encoder/image processor", missing=missing)
         if self._vae is None:
             self._raise_aux_component_not_loaded("VAE")
 
@@ -419,14 +424,30 @@ class WAN21ModelBundle(ModelBundle):
                 f"Conditioning image batch size {image_tensor.shape[0]} does not match prompt batch size {batch_size}"
             )
 
-        clip_images = ((image_tensor + 1.0) / 2.0).clamp(0.0, 1.0).detach().cpu()
-        image_inputs = self._clip_vision_processor(images=clip_images, return_tensors="pt")
-        vision_dtype = next(self._vision_encoder.parameters()).dtype
-        pixel_values = image_inputs.pixel_values.to(self.device, dtype=vision_dtype)
+        output: Dict[str, torch.Tensor] = {}
 
-        with torch.no_grad():
-            image_embeds = self._vision_encoder(pixel_values=pixel_values, output_hidden_states=True).hidden_states[-2]
+        # WAN 2.1 I2V: encode image via CLIP vision for cross-attention
+        if self.uses_clip_vision:
+            if self._vision_encoder is None or self._clip_vision_processor is None:
+                missing = []
+                if self._vision_encoder is None:
+                    missing.append("_vision_encoder")
+                if self._clip_vision_processor is None:
+                    missing.append("_clip_vision_processor")
+                self._raise_aux_component_not_loaded("vision encoder/image processor", missing=missing)
 
+            clip_images = ((image_tensor + 1.0) / 2.0).clamp(0.0, 1.0).detach().cpu()
+            image_inputs = self._clip_vision_processor(images=clip_images, return_tensors="pt")
+            vision_dtype = next(self._vision_encoder.parameters()).dtype
+            pixel_values = image_inputs.pixel_values.to(self.device, dtype=vision_dtype)
+
+            with torch.no_grad():
+                image_embeds = self._vision_encoder(pixel_values=pixel_values, output_hidden_states=True).hidden_states[
+                    -2
+                ]
+            output["encoder_hidden_states_image"] = image_embeds.to(dtype=self.dtype)
+
+        # Both paths: VAE latent conditioning (first frame + mask)
         image_conditioning_latents, first_frame_mask = self.prepare_image_conditioning_latents(
             image_tensor,
             height=height,
@@ -435,10 +456,7 @@ class WAN21ModelBundle(ModelBundle):
             dtype=self.dtype,
             expand_timesteps=expand_timesteps,
         )
-        output = {
-            "encoder_hidden_states_image": image_embeds.to(dtype=self.dtype),
-            "image_conditioning_latents": image_conditioning_latents,
-        }
+        output["image_conditioning_latents"] = image_conditioning_latents
         if first_frame_mask is not None:
             output["first_frame_mask"] = first_frame_mask
         return output
@@ -465,6 +483,14 @@ class WAN21ModelBundle(ModelBundle):
         spatial_scale = int(getattr(self._vae.config, "scale_factor_spatial", 8))
         temporal_scale = int(getattr(self._vae.config, "scale_factor_temporal", 4))
         num_frames = int(num_frames or (temporal_scale * 20 + 1))
+
+        if not expand_timesteps and (num_frames - 1) % temporal_scale != 0:
+            raise ValueError(
+                f"I2V image conditioning requires (num_frames - 1) % temporal_scale == 0. "
+                f"Got num_frames={num_frames}, temporal_scale={temporal_scale}. "
+                f"Valid num_frames: {temporal_scale + 1}, {2 * temporal_scale + 1}, "
+                f"{3 * temporal_scale + 1}, ... (i.e., 4k+1 for temporal_scale=4)."
+            )
 
         target_height = int(height or image.shape[-2])
         target_width = int(width or image.shape[-1])

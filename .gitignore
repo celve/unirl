@@ -79,6 +79,7 @@ models/local/reward_models/*
 !models/local/reward_models/.gitkeep
 data/datasets/*
 !data/datasets/pickscore
+!data/datasets/sharegpt4o_image_mini
 
 # Large model artifacts (defense-in-depth)
 models/**/*.bin

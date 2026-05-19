@@ -40,8 +40,11 @@ _PROMPT_EXAMPLE_EXCLUDED_KEYS = {
 _MEDIA_REF_FIELDS = {"modality", "role", "uri"}
 
 
-def _normalize_media_refs(raw_media: Any) -> List[MediaRef]:
-    """Normalize a manifest ``media`` list into typed media references."""
+def _normalize_media_refs(raw_media: Any, *, base_dir: Optional[str] = None) -> List[MediaRef]:
+    """Normalize a manifest ``media`` list into typed media references.
+
+    Relative URIs are resolved against *base_dir* when provided.
+    """
     if raw_media is None:
         return []
     if not isinstance(raw_media, list):
@@ -67,7 +70,7 @@ def _normalize_media_refs(raw_media: Any) -> List[MediaRef]:
 
         modality = str(item["modality"]).strip().lower()
         role = str(item["role"]).strip().lower()
-        uri = str(item["uri"]).strip()
+        uri = _resolve_media_uri(str(item["uri"]).strip(), base_dir=base_dir)
         if not modality or not role or not uri:
             raise ValueError(f"Prompt example media[{idx}] fields must be non-empty strings.")
         media_refs.append(MediaRef(modality=modality, role=role, uri=uri))
@@ -78,8 +81,16 @@ def normalize_prompt_example(
     item: Dict[str, Any],
     *,
     default_prompt_id: Optional[str] = None,
+    base_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Normalize one raw dataset entry into prompt/metadata form."""
+    """Normalize one raw dataset entry into prompt/metadata form.
+
+    Args:
+        item: Raw dataset entry dict.
+        default_prompt_id: Fallback prompt ID if none is present in the item.
+        base_dir: Base directory for resolving relative media URIs. Typically
+            the parent directory of the dataset file.
+    """
     if not isinstance(item, dict):
         raise TypeError(f"Prompt example must be a dict, got {type(item).__name__}.")
 
@@ -94,7 +105,7 @@ def normalize_prompt_example(
         raise TypeError(f"Prompt example metadata must be a dict when provided, got {type(metadata).__name__}.")
 
     raw_media = item.get("media_refs", item.get("media"))
-    media_refs = _normalize_media_refs(raw_media)
+    media_refs = _normalize_media_refs(raw_media, base_dir=base_dir)
 
     result: Dict[str, Any] = {"prompt": prompt}
     prompt_id = item.get("prompt_id")
@@ -107,6 +118,22 @@ def normalize_prompt_example(
     if media_refs:
         result["media_refs"] = media_refs
     return result
+
+
+def _resolve_media_uri(raw_path: str, *, base_dir: Optional[str] = None) -> str:
+    """Resolve a media path to an absolute URI.
+
+    - Absolute paths and URLs (http://, https://, s3://, gs://) are returned as-is.
+    - Relative paths are joined with *base_dir* (if provided) to produce an
+      absolute filesystem path.
+    """
+    if raw_path.startswith(("http://", "https://", "s3://", "gs://")):
+        return raw_path
+    if os.path.isabs(raw_path):
+        return raw_path
+    if base_dir:
+        return os.path.join(base_dir, raw_path)
+    return raw_path
 
 
 class PromptExampleDataset(Dataset):
@@ -163,6 +190,7 @@ class TextPromptDataset(PromptExampleDataset):
         self.file_path = file_path
         self.prompt_key = prompt_key
         self.samples: List[Dict[str, Any]] = []
+        self._base_dir = os.path.dirname(os.path.abspath(file_path))
 
         # Load prompts
         self._source_prefix = os.path.basename(self.file_path) or "prompt_source"
@@ -205,6 +233,7 @@ class TextPromptDataset(PromptExampleDataset):
                 normalized = normalize_prompt_example(
                     candidate,
                     default_prompt_id=default_prompt_id,
+                    base_dir=self._base_dir,
                 )
                 self.samples.append(normalized)
             except (TypeError, ValueError) as exc:
@@ -279,4 +308,5 @@ class TextPromptDataset(PromptExampleDataset):
         return normalize_prompt_example(
             self.samples[idx],
             default_prompt_id=f"{self._source_prefix}:{idx}",
+            base_dir=self._base_dir,
         )
