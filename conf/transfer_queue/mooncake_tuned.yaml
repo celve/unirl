@@ -5,9 +5,9 @@
 # Compose via ``+transfer_queue=mooncake_tuned``.
 #
 # metadata_server and master_server_address are intentionally left empty —
-# they're host-dependent (need ${HEAD_IP}) and are injected as Hydra CLI
-# overrides by scripts/train_tq.sh at launch time. MooncakeBackendConfig's
-# __post_init__ will fail-fast if either is still empty when materialized.
+# they're host-dependent (need ${HEAD_IP}) and must be injected as Hydra CLI
+# overrides at launch time. MooncakeBackendConfig's __post_init__ will
+# fail-fast if either is still empty when materialized.
 #
 # device_name is auto-discovered at runtime by runtime.create_client (see
 # diffusionrl.distributed.transfer_queue.topology). Mooncake's

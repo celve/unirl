@@ -25,7 +25,6 @@ from diffusionrl.config.validation import (
     validate_offload_contract,
     validate_precision_type,
     validate_rollout_layout,
-    validate_training_actor_sampling_mode,
     validate_training_batch_geometry,
     validate_weight_sync_contract,
 )
@@ -45,17 +44,16 @@ __all__ = [
     "validate_offload_contract",
     "validate_precision_type",
     "validate_rollout_layout",
-    "validate_training_actor_sampling_mode",
     "validate_training_batch_geometry",
     "validate_weight_sync_contract",
 ]
 
 
 # Walks the whole diffusionrl package and imports every submodule so that
-# @register_config decorators (scattered across config/, training/,
-# algorithms/, models/, ray/, samplers/, reward/, etc.) populate Hydra's
-# ConfigStore. Without this, train.yaml's defaults list references unresolved
-# leaves (resume/default, training/plan/default, ...).
+# @register_config decorators (scattered across config/, training_new/,
+# algorithms_new/, models_new/, ray/, rollout/, reward/, etc.) populate
+# Hydra's ConfigStore. Without this, train_new.yaml's defaults list
+# references unresolved leaves (resume/default, training/plan/default, ...).
 #
 # Call this explicitly from the train entry, NOT as an import side effect of
 # this package: when a Ray worker re-imports diffusionrl through a partially
@@ -70,8 +68,6 @@ def register_all_configs() -> None:
     import diffusionrl
 
     for module_info in pkgutil.walk_packages(diffusionrl.__path__, prefix=f"{diffusionrl.__name__}."):
-        if module_info.name == "diffusionrl.train":
-            continue
         if module_info.name in sys.modules:
             continue
         importlib.import_module(module_info.name)

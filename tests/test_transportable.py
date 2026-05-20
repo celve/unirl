@@ -415,3 +415,259 @@ def test_concat_with_wrapper_slots_preserves_batched_semantics() -> None:
     assert isinstance(merged.latents, TqMeta)
     assert isinstance(merged.inner.embeds, TqMeta)
     assert merged.advantages.shape[0] == 5
+
+
+# =========================================================
+# list[Transportable] — per-element eid in wire path
+# =========================================================
+
+
+@dataclass
+class _LeafT(Transportable):
+    """Tiny Transportable used as an element of list/dict containers."""
+
+    data: torch.Tensor = field(kind=FieldKind.CONCAT, transport=True)
+    tag: Optional[torch.Tensor] = concat_field(default=None)
+
+
+@dataclass
+class _AltLeafT(Transportable):
+    """Schema-different Transportable used to test heterogeneous lists."""
+
+    payload: torch.Tensor = field(kind=FieldKind.CONCAT, transport=True)
+
+
+@dataclass
+class _ListContainer(Transportable):
+    items: List[Any] = field(kind=FieldKind.CONCAT, transport=True)
+
+
+@dataclass
+class _DictContainer(Transportable):
+    items: Dict[str, _LeafT] = field(kind=FieldKind.CONCAT, transport=True)
+
+
+def test_list_of_transportable_walker_emits_eid_keyed_paths() -> None:
+    """The walker recurses into each list element using a UUID segment, NOT
+    the integer index — so cross-shard merges can't collide on positions."""
+    obj = _ListContainer(
+        items=[_LeafT(data=torch.zeros(1, 4)), _LeafT(data=torch.ones(1, 4))],
+    )
+    td = obj.to_tensordict()
+    assert td is not None
+    keys = sorted(td.keys())
+    assert len(keys) == 2
+    # Both keys share the items.<eid>.data shape.
+    for k in keys:
+        parts = k.split(".")
+        assert parts[0] == "items"
+        assert parts[-1] == "data"
+        # Middle segment is a 12-char hex eid (not an int).
+        assert len(parts[1]) == 12
+        with pytest.raises(ValueError):
+            int(parts[1])
+
+
+def test_list_of_transportable_roundtrip_single_shard() -> None:
+    import asyncio
+
+    expected = [torch.arange(4).float(), torch.arange(4, 8).float() * 10]
+    obj = _ListContainer(items=[_LeafT(data=expected[0].unsqueeze(0)), _LeafT(data=expected[1].unsqueeze(0))])
+    client = _StubClient()
+
+    async def go():
+        await obj.dehydrate(client, partition_id="list-rt")
+        await obj.hydrate(client)
+
+    asyncio.run(go())
+
+    # Each element's tensor restored to its original.
+    assert isinstance(obj.items[0].data, torch.Tensor)
+    assert torch.equal(obj.items[0].data.squeeze(0), expected[0])
+    assert torch.equal(obj.items[1].data.squeeze(0), expected[1])
+    # Two separate puts, one fetch.
+    assert len(client.put_calls[0]["keys"]) == 2
+
+
+def test_list_of_transportable_two_shards_no_collision_after_concat() -> None:
+    """After dehydrating two shards independently, the wire keys are distinct
+    (different eids per shard) — so the merged container's TqMetas don't
+    collapse on `_data_key`. Verifies via the keys recorded by the stub."""
+    import asyncio
+
+    a = _ListContainer(items=[_LeafT(data=torch.full((1, 3), 1.0))])
+    b = _ListContainer(items=[_LeafT(data=torch.full((1, 3), 2.0))])
+    client = _StubClient()
+
+    async def go():
+        await a.dehydrate(client, partition_id="A")
+        await b.dehydrate(client, partition_id="B")
+
+    asyncio.run(go())
+
+    # Two separate puts, each with one key. The keys must differ (different eids).
+    assert len(client.put_calls) == 2
+    a_key = client.put_calls[0]["keys"][0]
+    b_key = client.put_calls[1]["keys"][0]
+    assert a_key != b_key, f"eid collision: both shards used {a_key!r}"
+    # Both are well-formed `items.<eid>.data` paths.
+    for k in (a_key, b_key):
+        parts = k.split(".")
+        assert parts[0] == "items" and parts[-1] == "data" and len(parts[1]) == 12
+
+
+def test_list_of_transportable_heterogeneous_element_types() -> None:
+    """List with mixed element types (different dataclass schemas). Each
+    element's leaves are walked according to its own fields."""
+    import asyncio
+
+    leaf = _LeafT(data=torch.ones(1, 2))
+    alt = _AltLeafT(payload=torch.full((1, 5), 7.0))
+    obj = _ListContainer(items=[leaf, alt])
+    client = _StubClient()
+
+    async def go():
+        await obj.dehydrate(client, partition_id="hetero")
+        await obj.hydrate(client)
+
+    asyncio.run(go())
+
+    # _LeafT contributes `items.<eid_leaf>.data`; _AltLeafT contributes
+    # `items.<eid_alt>.payload`. Different field names → different last segments.
+    keys = sorted(client.put_calls[0]["keys"])
+    assert len(keys) == 2
+    last_segments = sorted(k.rsplit(".", 1)[1] for k in keys)
+    assert last_segments == ["data", "payload"]
+    # Round-trip preserved each element's tensor.
+    assert torch.equal(obj.items[0].data, torch.ones(1, 2))
+    assert torch.equal(obj.items[1].payload, torch.full((1, 5), 7.0))
+
+
+def test_list_of_non_transportable_still_treated_as_leaf() -> None:
+    """Backward compat: a list of non-Transportable values (e.g., strings) does
+    NOT enter the new branch — falls through to the leaf path and gets wrapped
+    in NonTensorData by ``to_tensordict.collect``."""
+    obj = _ListContainer(items=["a", "b", "c"])
+    td = obj.to_tensordict()
+    assert td is not None
+    assert sorted(td.keys()) == ["items"]
+    # The whole list is a single NonTensorData leaf.
+    inner = td.get("items")
+    assert list(inner.data) == ["a", "b", "c"]
+
+
+def test_same_instance_twice_in_list_raises_duplicate_key() -> None:
+    """If the same Transportable object is placed in the list twice, the eid
+    is reused → wire keys collide → ``to_tensordict.collect`` raises with a
+    duplicate-key error. Loud failure, no silent corruption."""
+    leaf = _LeafT(data=torch.zeros(1, 2))
+    obj = _ListContainer(items=[leaf, leaf])
+    with pytest.raises(ValueError, match="duplicate transport key"):
+        obj.to_tensordict()
+
+
+# =========================================================
+# dict[str, Transportable] — dict key as wire-segment
+# =========================================================
+
+
+def test_dict_of_transportable_walker_emits_dict_key_paths() -> None:
+    """The walker recurses into each dict value using the dict key as the
+    segment — same key across shards means same wire path (which is what
+    ``_concat_value`` for dicts wants)."""
+    obj = _DictContainer(
+        items={"alpha": _LeafT(data=torch.zeros(1, 4)), "beta": _LeafT(data=torch.ones(1, 4))},
+    )
+    td = obj.to_tensordict()
+    assert sorted(td.keys()) == ["items.alpha.data", "items.beta.data"]
+
+
+def test_dict_of_transportable_roundtrip_single_shard() -> None:
+    import asyncio
+
+    obj = _DictContainer(
+        items={
+            "alpha": _LeafT(data=torch.arange(4).float().unsqueeze(0)),
+            "beta": _LeafT(data=(torch.arange(4).float() * 10).unsqueeze(0)),
+        },
+    )
+    client = _StubClient()
+
+    async def go():
+        await obj.dehydrate(client, partition_id="dict-rt")
+        await obj.hydrate(client)
+
+    asyncio.run(go())
+
+    assert isinstance(obj.items["alpha"].data, torch.Tensor)
+    assert torch.equal(obj.items["alpha"].data.squeeze(0), torch.arange(4).float())
+    assert torch.equal(obj.items["beta"].data.squeeze(0), torch.arange(4).float() * 10)
+
+
+def test_dict_of_transportable_disjoint_keys_two_shards() -> None:
+    """Two shards, disjoint dict keys → distinct wire paths → no collision.
+    Verifies via the stub client's recorded keys."""
+    import asyncio
+
+    a = _DictContainer(items={"alpha": _LeafT(data=torch.full((1, 3), 1.0))})
+    b = _DictContainer(items={"beta": _LeafT(data=torch.full((1, 3), 2.0))})
+    client = _StubClient()
+
+    async def go():
+        await a.dehydrate(client, partition_id="A")
+        await b.dehydrate(client, partition_id="B")
+
+    asyncio.run(go())
+
+    assert client.put_calls[0]["keys"] == ["items.alpha.data"]
+    assert client.put_calls[1]["keys"] == ["items.beta.data"]
+
+
+def test_dict_of_transportable_empty_dict_skipped() -> None:
+    """Empty dict-of-Transportable: walker doesn't enter the branch; whole
+    field falls through to the leaf path and is rejected by
+    ``to_tensordict.collect`` (dicts aren't a supported leaf type)."""
+    obj = _DictContainer(items={})
+    # Empty dict on a transport-tagged field falls through to the leaf branch.
+    # ``to_tensordict.collect`` only handles Tensor / list, so dict raises.
+    with pytest.raises(TypeError, match="expected Tensor or list"):
+        obj.to_tensordict()
+
+
+def test_dict_of_transportable_invalid_key_raises() -> None:
+    """Dict keys with `.` are rejected at walk time with a clear error."""
+    obj = _DictContainer(
+        items={"good_key": _LeafT(data=torch.zeros(1, 1)), "bad.key": _LeafT(data=torch.zeros(1, 1))},
+    )
+    with pytest.raises(ValueError, match="dict-of-Transportable key"):
+        obj.to_tensordict()
+
+
+def test_dict_of_transportable_non_string_key_raises() -> None:
+    """Non-string dict keys are rejected at walk time."""
+
+    @dataclass
+    class _IntKeyDict(Transportable):
+        items: Dict[int, _LeafT] = field(kind=FieldKind.CONCAT, transport=True)
+
+    obj = _IntKeyDict(items={0: _LeafT(data=torch.zeros(1, 1))})
+    with pytest.raises(ValueError, match="dict-of-Transportable key"):
+        obj.to_tensordict()
+
+
+@pytest.mark.skipif(
+    not _UPSTREAM_TQ_AVAILABLE,
+    reason="upstream transfer_queue not installed; dict same-key cross-shard merge needs TqMeta.concat → BatchMeta",
+)
+def test_dict_of_transportable_overlapping_keys_merge_via_tqmeta_concat() -> None:
+    """Same dict key on both shards: ``_concat_value`` recursively merges via
+    ``Batched.concat`` on the values, which for TqMeta-bearing types collapses
+    per-shard TqMetas into one merged TqMeta. Single fetch returns concat'd."""
+    a = _DictContainer(items={"shared": _LeafT(data=torch.full((2, 3), 1.0))})
+    b = _DictContainer(items={"shared": _LeafT(data=torch.full((3, 3), 2.0))})
+    a.replace_with_meta(_FakeMeta(list(a.to_tensordict().keys())))
+    b.replace_with_meta(_FakeMeta(list(b.to_tensordict().keys())))
+    merged = _DictContainer.concat([a, b])
+    # One slot, one merged TqMeta inside (not two).
+    assert set(merged.items.keys()) == {"shared"}
+    assert isinstance(merged.items["shared"].data, TqMeta)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Optional, Tuple
 
 import ray
 import torch.distributed as dist
@@ -11,6 +11,7 @@ import torch.distributed as dist
 from diffusionrl.config.registration import register_config
 from diffusionrl.config.require import require
 from diffusionrl.distributed.weight_sync.base import BucketedUpdateWeight
+from diffusionrl.utils.peft_merge import lora_tensors_for_vllm
 
 
 @register_config(
@@ -41,6 +42,35 @@ class TensorPayloadSyncConfig:
 
 class UpdateWeightFromTensor(BucketedUpdateWeight):
     """Push model weights to rollout engines via serialized tensors."""
+
+    def update_weights(
+        self,
+        *,
+        peft_config: Optional[dict] = None,
+        base_sync_done: bool = False,
+    ) -> None:
+        if peft_config and base_sync_done:
+            # All FSDP ranks must materialize the LoRA DTensors so the
+            # underlying all_gathers complete; only the local gather source
+            # sends the resulting tensors to its rollout actor.
+            lora_tensors = lora_tensors_for_vllm(
+                self.model,
+                param_name_prefix=self._param_name_prefix,
+            )
+            if self._ipc_engine is None or self._ipc_gather_src is None:
+                return
+            if dist.get_rank() != self._ipc_gather_src:
+                return
+            ray.get(
+                self._ipc_engine.set_lora_from_tensors.remote(
+                    "default",
+                    lora_tensors,
+                    peft_config=peft_config,
+                )
+            )
+            return
+
+        super().update_weights()
 
     def connect_rollout_engines(self) -> None:
         rollout_engines = list(self._rollout_runtime.get_rollout_actors())

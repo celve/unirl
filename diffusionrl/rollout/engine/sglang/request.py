@@ -1,0 +1,227 @@
+"""``RolloutReq`` → SGLang ``DiffGenerator.generate(sampling_params_kwargs=...)`` translator.
+
+Single free function ``_to_sglang_kwargs(req, *, cfg, sde_label, initial_noise)``
+that mirrors the layered kwargs build from the legacy
+``samplers/sglang/request.py:to_kwargs``:
+
+1. **Escape hatch** — ``cfg.sampling.sampler_kwargs`` (raw SGLang overrides).
+2. **Typed / computed fields** — prompts (with optional K de-expansion),
+   sigma schedule, geometry, sample count.
+3. **Engine pins** — trajectory return shape, RNG seed-out, no group-share
+   inside SGLang.
+4. **SDE-mode kernel kwargs** — only when ``stage_params['diffusion'][
+   'sde_indices']`` is non-None.
+
+``initial_noise`` is taken as an argument (engine-computed or pre-shipped via
+``req.request_conditions['initial_latents']``); the translator is pure and
+performs no allocation.
+
+De-expansion uses ``req.group_ids``: when every group has the same repeat
+count ``k`` and the per-group prompts are identical strings, the translator
+collapses to unique prompts + ``num_outputs_per_prompt=k`` so SGLang runs one
+text-encode pass per group instead of K. Falls through unchanged for any
+deviation (heterogeneous K, mismatched prompts within a group).
+
+The negative-prompt CFG invariant from legacy ``samplers/sglang/request.py:128-137``
+ports over verbatim — set ``return_negative_prompt_embeds=True`` whenever
+``negative_prompt`` is provided.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Tuple
+
+import torch
+
+from diffusionrl.config.require import require
+from diffusionrl.rollout.engine.sglang.config import SGLangEngineConfig
+from diffusionrl.types.primitives import Texts
+from diffusionrl.types.rollout_req import RolloutReq
+
+
+def _deexpand_prompts_from_groups(
+    prompts: List[str],
+    group_ids: List[str],
+) -> Tuple[List[str], int]:
+    """Collapse K-expanded prompts back to unique prompts when groups agree.
+
+    Returns ``(unique_prompts, k)`` where ``k`` is the repeat count to set
+    as ``num_outputs_per_prompt`` on SGLang. Falls through to ``(prompts, 1)``
+    when the structure doesn't admit a clean collapse: heterogeneous K per
+    group, mismatched prompt strings within a group, or empty groups.
+    """
+    n = len(prompts)
+    if n == 0 or len(group_ids) != n:
+        return list(prompts), 1
+
+    # Walk in order, recording per-group sample positions.
+    groups: Dict[str, List[int]] = {}
+    order: List[str] = []
+    for i, gid in enumerate(group_ids):
+        if gid not in groups:
+            order.append(gid)
+            groups[gid] = []
+        groups[gid].append(i)
+
+    if not groups:
+        return list(prompts), 1
+
+    k_per_group = {gid: len(idxs) for gid, idxs in groups.items()}
+    k_values = set(k_per_group.values())
+    if len(k_values) != 1:
+        return list(prompts), 1
+
+    k = next(iter(k_values))
+    if k <= 1:
+        return list(prompts), 1
+
+    unique_prompts: List[str] = []
+    for gid in order:
+        idxs = groups[gid]
+        base = prompts[idxs[0]]
+        if any(prompts[i] != base for i in idxs[1:]):
+            return list(prompts), 1
+        unique_prompts.append(base)
+    return unique_prompts, k
+
+
+def _to_sglang_kwargs(
+    req: RolloutReq,
+    *,
+    cfg: SGLangEngineConfig,
+    sde_label: Optional[str],
+    initial_noise: Optional[torch.Tensor],
+) -> Dict[str, Any]:
+    """Translate a ``RolloutReq`` into the kwargs dict ``DiffGenerator.generate`` consumes."""
+    text_prim = req.primitives.get("text")
+    if not isinstance(text_prim, Texts):
+        raise TypeError(
+            f"_to_sglang_kwargs: req.primitives['text'] must be Texts; got "
+            f"{type(text_prim).__name__ if text_prim is not None else 'None'}"
+        )
+    prompts = list(text_prim.texts)
+    require(bool(prompts), "_to_sglang_kwargs: req.primitives['text'] must be non-empty")
+    require(
+        len(prompts) == len(req.sample_ids),
+        f"_to_sglang_kwargs: text count {len(prompts)} != sample_ids count {len(req.sample_ids)}",
+    )
+
+    diffusion = dict(req.stage_params.get("diffusion") or {})
+    require(
+        bool(diffusion),
+        "_to_sglang_kwargs: req.stage_params['diffusion'] is required (set by NewRolloutPipeline)",
+    )
+
+    num_inference_steps = int(diffusion["num_inference_steps"])
+    guidance_scale = float(diffusion["guidance_scale"])
+    height = int(diffusion["height"])
+    width = int(diffusion["width"])
+    eta = float(diffusion["eta"])
+    sde_indices_raw = diffusion.get("sde_indices")
+    sde_indices = sorted(int(v) for v in sde_indices_raw) if sde_indices_raw is not None else None
+
+    # σ is the SSOT field on ``RolloutReq``. The engine populates it via
+    # :func:`diffusionrl.sde.runtime.ensure_req_sigmas` BEFORE calling
+    # this translator; we never recompute here so any drift between the
+    # schedule training will replay against and what SGLang executes is
+    # impossible. ``req.sigmas`` is a length-``T+1`` tensor (terminal 0
+    # included); SGLang's ``set_timesteps(sigmas=...)`` expects the
+    # interior ``T`` values (terminal 0 is implicit), so slice it off
+    # right before serializing.
+    require(
+        req.sigmas is not None,
+        "_to_sglang_kwargs: req.sigmas must be set by the engine before "
+        "calling the translator (see "
+        "diffusionrl.sde.runtime.ensure_req_sigmas).",
+    )
+    require(
+        int(req.sigmas.shape[0]) == num_inference_steps + 1,
+        f"_to_sglang_kwargs: req.sigmas length {int(req.sigmas.shape[0])} != "
+        f"num_inference_steps+1 ({num_inference_steps + 1}). Engine must "
+        f"populate σ for the resolved num_inference_steps.",
+    )
+    sigmas = req.sigmas.detach().cpu().tolist()[:-1]
+
+    # De-expansion: collapse K-expanded prompts on group boundaries when clean.
+    unique_prompts, k = _deexpand_prompts_from_groups(prompts, list(req.group_ids))
+    prompt_payload: Any = unique_prompts if len(unique_prompts) > 1 else unique_prompts[0]
+    num_outputs_per_prompt: Optional[int] = k if k > 1 else None
+
+    sampler_kwargs: Dict[str, Any] = dict(cfg.sampling.sampler_kwargs or {})
+
+    # Negative-prompt CFG invariant (ported from samplers/sglang/request.py:128-137):
+    # SGLang gates CFG on guidance_scale>1 independently of
+    # return_negative_prompt_embeds. If we accept ``negative_prompt`` without
+    # also pinning ``return_negative_prompt_embeds=True``, rollout conditions on
+    # the negative prompt while training-side replay falls back to zero negative
+    # embeds — silent GRPO ratio mismatch. Fail fast at the boundary.
+    neg_prompt = sampler_kwargs.get("negative_prompt")
+    return_neg_embeds = bool(sampler_kwargs.get("return_negative_prompt_embeds", False))
+    require(
+        neg_prompt is None or return_neg_embeds,
+        "_to_sglang_kwargs: sampler_kwargs.negative_prompt is set but "
+        "return_negative_prompt_embeds is not True. SGLang gates CFG on "
+        "guidance_scale>1 independently of return_negative_prompt_embeds, so the "
+        "rollout would condition on the negative prompt while training-side "
+        "replay falls back to zero negative embeds — silent GRPO ratio mismatch. "
+        "Set sampler_kwargs.return_negative_prompt_embeds=True to keep rollout "
+        "and replay aligned.",
+    )
+
+    # Layer 1: caller escape-hatch (lowest priority).
+    kwargs: Dict[str, Any] = dict(sampler_kwargs)
+
+    # Layers 2 + 3: typed/computed + engine pins (override layer 1).
+    kwargs.update(
+        {
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "height": height,
+            "width": width,
+            "num_frames": int(cfg.sampling.num_frames),
+            "sigmas": sigmas,
+            "prompt": prompt_payload,
+            # SGLang noise group sharing must be off — initial_noise already
+            # encodes the (optional) group-sharing pattern.
+            "init_same_noise": False,
+            # Output shape policy: latents + prompt embeds, no per-step decoded
+            # frames, no scheduler-emitted seed.
+            "seed": None,
+            "save_output": False,
+            "return_file_paths_only": False,
+            "return_trajectory_latents": True,
+            "return_trajectory_decoded": False,
+            "return_prompt_embeds": True,
+        }
+    )
+
+    if initial_noise is not None:
+        kwargs["initial_noise"] = initial_noise
+
+    # SGLang accepts per-sample noise group ids for deterministic SDE
+    # transitions (commit b84a4f9db). req.group_ids carries the same semantic
+    # — pass straight through. When all samples are in distinct groups (no
+    # K-expansion), this is per-sample unique noise; when K-expanded, samples
+    # in the same group share noise.
+    if req.group_ids:
+        kwargs["noise_group_ids"] = [str(gid) for gid in req.group_ids]
+
+    # Layer 4: SDE-kernel kwargs only apply when the algorithm requested
+    # per-step SDE noise (GRPO). ODE/non-SDE mode (eval, NFT) omits them.
+    if sde_indices is not None:
+        require(
+            sde_label is not None,
+            "_to_sglang_kwargs: SDE mode requires sde_label (resolved by engine ctor)",
+        )
+        kwargs["rollout"] = True
+        kwargs["rollout_sde_type"] = sde_label
+        kwargs["rollout_noise_level"] = eta
+        kwargs["rollout_sde_indices"] = sde_indices
+
+    if num_outputs_per_prompt is not None:
+        kwargs["num_outputs_per_prompt"] = num_outputs_per_prompt
+
+    return kwargs
+
+
+__all__ = ["_to_sglang_kwargs", "_deexpand_prompts_from_groups"]

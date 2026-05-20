@@ -1,0 +1,47 @@
+# DiffusionRL Hydra entry — NEW-DESIGN driver (train_new.py).
+#
+# Sibling of conf/train.yaml. Same composition shape, but every
+# training/* schema group reference is replaced with training_new/* so
+# register_config registrations from diffusionrl.training_new.* are picked
+# up instead of the legacy ones. This keeps the new-design path physically
+# + Hydra-config independent of the legacy training/ stack.
+#
+# Note on @package overrides below: @register_config without an explicit
+# ``package=`` argument falls back to the group path, so a default like
+# ``training_new/optimizer: default`` would land the schema at
+# ``cfg.training_new.optimizer``. But the new driver code (train_new.py,
+# ray/new_train_actor.py, ray/group/new_train.py, training_new/stack.py)
+# reads ``cfg.training.optimizer`` / ``cfg.training.plan`` / etc. — the
+# yaml field path stays ``training.*`` for parity with the legacy driver.
+# The ``@training.<X>`` package override tells Hydra: pick from group
+# ``training_new/<X>``, but place at package ``training.<X>``.
+#
+# Differences from conf/train.yaml:
+#   - training_new/* schema groups (registered by diffusionrl.training_new.*)
+#     packaged into cfg.training.* via @-override
+#   - No training/backend (new path has no Backend concept; the Policy
+#     stack is composed via cfg.training.policies inside the experiment)
+
+defaults:
+  - run: default
+  - algorithm: grpo
+  - model: sd3_v2
+  - reward: default
+  - sampling: default
+  - sampling/sde_strategy: flow
+  - rollout/engine: trainside
+  - rollout/plan: default
+  - placement: default
+  - training_new/optimizer@training.optimizer: default
+  - training_new/lr_scheduler@training.lr_scheduler: default
+  - training_new/execution@training.execution: default
+  - training_new/topology@training.topology: default
+  - training_new/plan@training.plan: default
+  - logging: default
+  - debug: default
+  - evaluation: default
+  - resume: default
+
+# Algorithm-side sampling defaults to a live interpolation of the canonical
+# top-level ``cfg.sampling`` (see ``BaseAlgorithmConfig.sampling``).
+# Experiments may override ``cfg.algorithm.sampling.*`` to diverge.

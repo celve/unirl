@@ -169,23 +169,6 @@ class SD3ForwardContext(ForwardContext):
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
 
-@register_forward_context(model_type="hunyuan_video")
-@dataclass
-class HunyuanVideoForwardContext(ForwardContext):
-    """ForwardContext for HunyuanVideo (text-to-video) models.
-
-    Note: this targets HunyuanVideo specifically and does **not** cover
-    Hunyuan-Image. The class / registry key are explicitly suffixed with
-    ``_video`` to disambiguate.
-    """
-
-    guidance_scale: float = shared_field(default=1.0)
-    prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
-    pooled_prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
-    encoder_attention_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
-    autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
-
-
 @register_forward_context(model_type="mochi")
 @dataclass
 class MochiForwardContext(ForwardContext):
@@ -217,39 +200,6 @@ class WAN21ForwardContext(ForwardContext):
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
 
-@register_forward_context(model_type="hunyuan_veido1p5")
-@dataclass
-class HunyuanVeido1p5ForwardContext(ForwardContext):
-    """ForwardContext for HunyuanVideo-1.5 (Qwen2.5-VL + ByT5 + SigLIP).
-
-    The model exposes two parallel text streams (MLLM + ByT5 glyph) plus an
-    optional SigLIP vision stream.  All three are fed through the bundle's
-    ``forward_denoiser``; the sampler never assembles model-private kwargs
-    directly.
-
-    Field-name choices (per skill rules): we deliberately keep
-    ``prompt_embeds_mask`` / ``prompt_embeds_2`` / ``prompt_embeds_mask_2``
-    instead of overloading the SD3-style ``encoder_attention_mask``, so the
-    upstream pipeline wiring (`encoder_hidden_states_2`, `encoder_attention_mask_2`)
-    maps cleanly to the bundle-owned contract.
-    """
-
-    guidance_scale: float = shared_field(default=6.0)
-    prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
-    prompt_embeds_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
-    prompt_embeds_2: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
-    prompt_embeds_mask_2: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
-    negative_prompt_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
-    negative_prompt_embeds_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
-    negative_prompt_embeds_2: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
-    negative_prompt_embeds_mask_2: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
-    image_embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
-    cond_latents: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
-    cond_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None, transport=True)
-    attention_kwargs: Optional[Dict[str, Any]] = shared_field(default=None)
-    autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
-
-
 # Also register "default" pointing to base ForwardContext for fallback
 @register_forward_context(model_type="default")
 @dataclass
@@ -267,27 +217,12 @@ class DefaultForwardContext(ForwardContext):
     autocast_dtype: Optional[torch.dtype] = shared_field(default=None)
 
 
-@register_forward_context(model_type="wan22")
-@dataclass
-class WAN22ForwardContext(WAN21ForwardContext):
-    """ForwardContext for WAN 2.2 dual-transformer video generation.
-
-    Extends WAN21ForwardContext with per-stage guidance scale.
-    boundary_ratio is a bundle-level config, not per-call context.
-    """
-
-    guidance_scale_2: Optional[float] = shared_field(default=None)
-
-
 __all__ = [
     "ForwardContext",
     "FluxForwardContext",
     "SD3ForwardContext",
-    "HunyuanVideoForwardContext",
-    "HunyuanVeido1p5ForwardContext",
     "MochiForwardContext",
     "WAN21ForwardContext",
-    "WAN22ForwardContext",
     "DefaultForwardContext",
     "register_forward_context",
     "get_forward_context_cls",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import socket
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Optional, Tuple
 
 import ray
 import torch.distributed as dist
@@ -14,6 +14,7 @@ from diffusionrl.config.registration import register_config
 from diffusionrl.config.require import require
 from diffusionrl.distributed.weight_sync.base import BucketedUpdateWeight
 from diffusionrl.utils.distributed_utils import init_process_group
+from diffusionrl.utils.peft_merge import lora_tensors_for_vllm
 
 
 @register_config(
@@ -24,11 +25,17 @@ from diffusionrl.utils.distributed_utils import init_process_group
 )
 @dataclass(frozen=True)
 class NcclBroadcastSyncConfig:
-    """Broadcast model weights to sglang rollout engines via a temporary NCCL group."""
+    """Broadcast model weights to sglang rollout engines via a temporary NCCL group.
+
+    ``stage_ids`` lets multi-stage engines (vllm-omni HI3) scope the broadcast
+    to specific stages. Empty (default) means "all stages the engine exposes"
+    — single-stage engines (SGLang) ignore the kwarg.
+    """
 
     bucket_size: int = 256
     flush_cache: bool = True
     target_modules: Tuple[str, ...] = field(default_factory=lambda: ("transformer",))
+    stage_ids: Tuple[int, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         require(self.bucket_size >= 1, f"NcclBroadcastSyncConfig.bucket_size must be >= 1; got {self.bucket_size!r}")
@@ -45,6 +52,65 @@ class NcclBroadcastSyncConfig:
 class UpdateWeightFromDistributed(BucketedUpdateWeight):
     """Broadcast weights via a temporary NCCL group to rollout engines."""
 
+    def __init__(
+        self,
+        *,
+        model,
+        rollout_runtime,
+        placement_cfg,
+        bucket_size: int,
+        flush_cache: bool,
+        target_modules: Tuple[str, ...],
+        stage_ids: Tuple[int, ...] = (),
+        param_name_prefix: str = "",
+    ) -> None:
+        super().__init__(
+            model=model,
+            rollout_runtime=rollout_runtime,
+            placement_cfg=placement_cfg,
+            bucket_size=bucket_size,
+            flush_cache=flush_cache,
+            target_modules=target_modules,
+            param_name_prefix=param_name_prefix,
+        )
+        # Empty tuple → don't pass stage_ids on RPC (legacy SGLang signature).
+        # Non-empty → forward as a list to the engine, which scopes the
+        # broadcast to the named stages (multi-stage engines only).
+        self._stage_ids: Tuple[int, ...] = tuple(int(s) for s in stage_ids)
+
+    def _stage_kwargs(self) -> dict:
+        return {"stage_ids": list(self._stage_ids)} if self._stage_ids else {}
+
+    def update_weights(
+        self,
+        *,
+        peft_config: Optional[dict] = None,
+        base_sync_done: bool = False,
+    ) -> None:
+        if peft_config and base_sync_done:
+            # All FSDP ranks must materialize the LoRA DTensors so the
+            # underlying all_gathers complete; only the source rank fans out
+            # the resulting tensors over Ray.
+            lora_tensors = lora_tensors_for_vllm(
+                self.model,
+                param_name_prefix=self._param_name_prefix,
+            )
+            if not self._is_src_rank:
+                return
+            refs = [
+                actor.set_lora_from_tensors.remote(
+                    "default",
+                    lora_tensors,
+                    peft_config=peft_config,
+                    **self._stage_kwargs(),
+                )
+                for actor in self.rollout_engines
+            ]
+            ray.get(refs)
+            return
+
+        super().update_weights()
+
     def connect_rollout_engines(self) -> None:
         rollout_engines = list(self._rollout_runtime.get_rollout_actors())
         self.rollout_engines = rollout_engines
@@ -59,6 +125,7 @@ class UpdateWeightFromDistributed(BucketedUpdateWeight):
                 master_port = sock.getsockname()[1]
             world_size = total_rollout_gpus + 1
 
+            stage_kwargs = self._stage_kwargs()
             refs = [
                 engine.init_weights_update_group.remote(
                     master_address=master_address,
@@ -67,6 +134,7 @@ class UpdateWeightFromDistributed(BucketedUpdateWeight):
                     world_size=world_size,
                     group_name=self._group_name,
                     backend="nccl",
+                    **stage_kwargs,
                 )
                 for i, engine in enumerate(rollout_engines)
             ]
@@ -84,6 +152,7 @@ class UpdateWeightFromDistributed(BucketedUpdateWeight):
         if not self._is_src_rank or not named_tensors:
             return
 
+        stage_kwargs = self._stage_kwargs()
         refs = [
             engine.update_weights_from_distributed.remote(
                 names=[name for name, _ in named_tensors],
@@ -92,6 +161,7 @@ class UpdateWeightFromDistributed(BucketedUpdateWeight):
                 group_name=self._group_name,
                 target_modules=self._target_modules,
                 flush_cache=(self._flush_cache and is_last_bucket),
+                **stage_kwargs,
             )
             for engine in self.rollout_engines
         ]

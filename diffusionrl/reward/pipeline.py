@@ -46,12 +46,36 @@ def _extract_images_from_output(output: RolloutSamples) -> List[Any]:
 
 
 def _extract_videos_from_output(output: RolloutSamples) -> List[torch.Tensor]:
+    """Normalize ``RolloutSamples.decoded_videos`` into a per-sample list.
+
+    Accepts the three real-world shapes produced by upstream samplers:
+
+    - **stacked 5D tensor** ``[B, C, T, H, W]``: legacy FSDP-engine WAN
+      sampler. Unbind along batch dim 0.
+    - **single 4D tensor** ``[C, T, H, W]``: degenerate B=1 case.
+    - **list of 4D tensors**: the modality-iterative bridge
+      (``types_compat::resp_to_samples``) emits per-sample
+      ``[C, T, H, W]`` tensors from a ``Videos`` primitive's
+      ``to_list() + permute(1, 0, 2, 3)``. Each entry must be a 4D
+      ``torch.Tensor`` — anything else is a contract violation.
+    """
     decoded_videos = output.decoded_videos
     if torch.is_tensor(decoded_videos):
         if decoded_videos.dim() >= 5:
             return [video for video in decoded_videos]
         if decoded_videos.dim() == 4:
             return [decoded_videos]
+    if isinstance(decoded_videos, list) and decoded_videos:
+        for idx, vid in enumerate(decoded_videos):
+            if not torch.is_tensor(vid):
+                raise ValueError(
+                    f"Reward stage: decoded_videos[{idx}] must be a torch.Tensor; got {type(vid).__name__}."
+                )
+            if vid.dim() != 4:
+                raise ValueError(
+                    f"Reward stage: decoded_videos[{idx}] must be 4D [C, T, H, W]; got shape {tuple(vid.shape)}."
+                )
+        return list(decoded_videos)
     raise ValueError(
         "Reward stage requires decoded_videos on RolloutSamples for video rewards. "
         "Sampler output did not include decoded video media."
@@ -118,7 +142,6 @@ def _build_request_for_samples(
     prompt_ids: Optional[List[str]] = None,
     sample_ids: Optional[List[str]] = None,
     group_ids: Optional[List[str]] = None,
-    input_media_refs: Optional[List[List[Any]]] = None,
     prompt_metadata: Optional[List[Optional[Dict[str, Any]]]] = None,
 ) -> RewardRequest:
     """Assemble a RewardRequest from sample-aligned rollout outputs."""
@@ -131,7 +154,6 @@ def _build_request_for_samples(
     all_prompt_ids: List[str] = []
     all_sample_ids: List[str] = []
     all_group_ids: List[str] = []
-    all_input_media_refs: List[List[Any]] = []
     all_metadata: List[Optional[Dict[str, Any]]] = []
     sample_idx = 0
 
@@ -158,8 +180,6 @@ def _build_request_for_samples(
                 all_sample_ids.append(str(sample_ids[sample_idx]))
             if group_ids is not None and sample_idx < len(group_ids):
                 all_group_ids.append(str(group_ids[sample_idx]))
-            if input_media_refs is not None and sample_idx < len(input_media_refs):
-                all_input_media_refs.append(list(input_media_refs[sample_idx]))
             all_metadata.append(
                 normalized_prompt_metadata[sample_idx] if normalized_prompt_metadata is not None else None
             )
@@ -185,8 +205,6 @@ def _build_request_for_samples(
         request_kwargs["sample_ids"] = all_sample_ids
     if len(all_group_ids) == len(all_prompts):
         request_kwargs["group_ids"] = all_group_ids
-    if len(all_input_media_refs) == len(all_prompts):
-        request_kwargs["input_media_refs"] = all_input_media_refs
     if all_videos:
         request_kwargs["videos"] = all_videos
     else:
@@ -244,7 +262,6 @@ class RewardPipeline:
             prompt_ids=prompts.prompt_ids,
             sample_ids=prompts.sample_ids,
             group_ids=prompts.group_ids,
-            input_media_refs=prompts.media_refs,
             prompt_metadata=prompts.prompt_metadata,
         )
         reward_response = self.reward_service.compute_rewards(request)

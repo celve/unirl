@@ -175,6 +175,59 @@ def compute_rollout_batch_metrics(
     return metrics
 
 
+def compute_rollout_resp_metrics(*, resp: Any) -> Dict[str, float]:
+    """Build rollout metrics directly from a :class:`RolloutResp`.
+
+    Mirrors :func:`compute_rollout_batch_metrics` but consumes the
+    new-design path's ``RolloutResp`` instead of a ``TrainingBatch``
+    (or list thereof). Emits the same wandb key shape under the
+    ``rollout/`` prefix:
+
+    - ``num_samples``
+    - ``reward_{mean,std,min,max}``
+    - ``advantage_{mean,std,min,max}``
+    - ``reward_<component>_{mean,std,min,max}`` per
+      ``resp.component_rewards`` entry (``/`` flattened to ``_``)
+    - ``group_count``, ``zero_std_group_ratio``,
+      ``zero_std_group_count`` when ``resp.group_ids`` is populated
+
+    Skips the legacy ``has_trajectory_rl_data`` / ``sde_indices`` block
+    since neither concept exists on ``RolloutResp``.
+    """
+    metrics: Dict[str, float] = {}
+
+    metrics["num_samples"] = float(int(getattr(resp, "batch_size", 0)))
+
+    rewards = getattr(resp, "rewards", None)
+    if torch.is_tensor(rewards) and rewards.numel() > 0:
+        rewards_f = rewards.detach().to(dtype=torch.float32).reshape(-1).cpu()
+        metrics.update(_tensor_stats("reward", rewards_f))
+        zero_cnt, group_cnt = _zero_std_group_counts_from_ids(
+            rewards_f,
+            getattr(resp, "group_ids", None),
+        )
+        if group_cnt > 0:
+            metrics["zero_std_group_ratio"] = float(zero_cnt) / float(group_cnt)
+            metrics["zero_std_group_count"] = float(zero_cnt)
+            metrics["group_count"] = float(group_cnt)
+
+    advantages = getattr(resp, "advantages", None)
+    if torch.is_tensor(advantages) and advantages.numel() > 0:
+        adv_f = advantages.detach().to(dtype=torch.float32).reshape(-1).cpu()
+        metrics.update(_tensor_stats("advantage", adv_f))
+
+    component_rewards = getattr(resp, "component_rewards", None)
+    if isinstance(component_rewards, dict):
+        for name, tensor in component_rewards.items():
+            if not torch.is_tensor(tensor) or tensor.numel() == 0:
+                continue
+            safe_name = str(name).replace("/", "_")
+            cat = tensor.detach().to(dtype=torch.float32).reshape(-1).cpu()
+            metrics.update(_tensor_stats(f"reward_{safe_name}", cat))
+
+    return metrics
+
+
 _BUFFER_CORE_KEYS = (
     "queue_size",
     "pushed_batches",

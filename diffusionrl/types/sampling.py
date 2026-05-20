@@ -18,10 +18,16 @@ class SDEConfig:
     ``cfg.sampling.sde_strategy`` (registered via the ``sampling/sde_strategy``
     group in :mod:`diffusionrl.sde.kernels`); ``SDEConfig`` only carries
     the per-strategy math params.
+
+    Note on ``shift``: this dataclass used to also carry ``shift: float``,
+    a duplicate of ``model.shift`` (the FlowMatch policy ``shift`` of the
+    σ schedule). It was removed in the σ-consolidation refactor — the
+    canonical σ shift now lives **only** on the model config (loaded into
+    :class:`diffusionrl.sde.runtime.FlowMatchSchedulePolicy` once per
+    actor). Engine adapters read it directly from ``model_config.shift``.
     """
 
     eta: float = 1.0
-    shift: float = 3.0
 
     @classmethod
     def from_mapping(
@@ -29,13 +35,9 @@ class SDEConfig:
         raw: Optional[Mapping[str, Any]] = None,
         *,
         eta: float = 1.0,
-        shift: float = 3.0,
     ) -> "SDEConfig":
         payload = dict(raw or {})
-        return cls(
-            eta=float(payload.get("eta", eta)),
-            shift=float(payload.get("shift", shift)),
-        )
+        return cls(eta=float(payload.get("eta", eta)))
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

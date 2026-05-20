@@ -1,0 +1,195 @@
+# @package _global_
+# GRPO WAN 2.2 T2V 14B recipe — NEW Policy stack, trainside (direct-sampling).
+#
+# Wan2.2-T2V uses two ``WanTransformer3DModel`` instances:
+#   - transformer / ``high_noise``:  sigma >= boundary_ratio (coarse structure)
+#   - transformer_2 / ``low_noise``: sigma <  boundary_ratio (detail refinement)
+#
+# Both transformers live under :class:`WanDualTransformer` composite. FSDP2
+# wraps each ``WanTransformerBlock`` independently (recurses into both
+# sub-transformers). peft's LoRA injection walks ``named_modules()`` so the
+# ``target_modules`` suffixes hit BOTH branches — verify on first GPU smoke
+# that ``requires_grad`` parameters list contains both ``high_noise.*`` and
+# ``low_noise.*`` LoRA params (see
+# ``WAN22DiffusionStage.trainable_module()`` docstring).
+#
+# Launch via:
+#   python -m diffusionrl.train_new +experiment=grpo_wan22_t2v_14b_new
+defaults:
+  - override /algorithm: grpo
+  - override /model: wan22_v2
+  - override /rollout/engine: trainside
+  - override /sampling/sde_strategy: flow
+  - _self_
+
+run:
+  seed: 42
+  num_rollouts: 1000
+  data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
+  data_path: ${oc.env:DATA_PATH}
+  eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
+
+sampling:
+  num_inference_steps: 20
+  guidance_scale: 1.0
+  # WAN22 dual-stage CFG: ``guidance_scale_2`` defaults to None → low_noise
+  # branch reuses guidance_scale. Set explicitly per recipe if the two
+  # stages should diverge.
+  # guidance_scale_2: 1.0
+  height: 480
+  width: 640
+  num_frames: 1
+  seed: 42
+  init_same_noise: false
+  sde_config:
+    eta: 0.7
+
+algorithm:
+  prompts_per_rollout: 48
+  samples_per_prompt: 16
+  adv_normalization_scope: group
+  use_global_std: true
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  use_kl_penalty: false
+  kl_coef: 0.0
+  ema:
+    eval_ema_decay: 0.9
+    eval_ema_update_interval: 1
+  scheduler:
+    timestep_fraction: [0.0, 0.2]
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+
+# ----------------------------------------------------------------------
+# New-stack training surface
+# ----------------------------------------------------------------------
+algorithms:
+  video:
+    _target_: diffusionrl.algorithms_new.grpo.DiffusionGRPO
+    stage_attr: diffusion
+    clip_range: 1.0e-4
+    clip_schedule: constant
+    # WAN22 reuses WAN21Conditions (no extra slots; guidance_scale_2 is
+    # request-shape, lives on WAN22DiffusionParams).
+    conditions_cls: diffusionrl.models_new.wan21.conditions.WAN21Conditions
+    params:
+      # ALL request-shape params interpolate from the ``sampling`` block so
+      # a CLI override of e.g. ``+sampling.height=512`` propagates to BOTH
+      # rollout AND replay. Hardcoding any of ``num_inference_steps`` /
+      # ``height`` / ``width`` / ``num_frames`` / ``seed`` here would
+      # silently let rollout and replay use different shapes → logprob
+      # recomputation mismatch → GRPO ratio drift.
+      _target_: diffusionrl.models_new.wan22.diffusion.WAN22DiffusionParams
+      num_inference_steps: ${sampling.num_inference_steps}
+      guidance_scale: ${sampling.guidance_scale}
+      # guidance_scale_2: null   # fall back to guidance_scale
+      height: ${sampling.height}
+      width: ${sampling.width}
+      num_frames: ${sampling.num_frames}
+      seed: ${run.seed}
+      eta: ${sampling.sde_config.eta}
+
+placement:
+  num_rollout_nodes: 0
+  num_rollout_gpus_per_node: 0
+
+rollout:
+  engine: {}
+  plan:
+    forward_batch_size: 1
+
+training:
+  policy_source: diffusion
+  policies:
+    - _target_: diffusionrl.training_new.lora_policy.LoRAPolicy
+      rank: 64
+      alpha: 128
+      dropout: 0.0
+      # Same WAN attention / FFN / proj_out target suffixes as WAN21.
+      # peft's ``named_modules()`` walk on the WanDualTransformer
+      # composite matches under BOTH ``high_noise.*`` and
+      # ``low_noise.*`` prefixes (suffix match), so a single target list
+      # LoRA-wraps both sub-transformers — including the per-branch
+      # ``proj_out`` Linear at each composite root.
+      target_modules:
+        - attn1.to_q
+        - attn1.to_k
+        - attn1.to_v
+        - attn1.to_out.0
+        - attn2.to_q
+        - attn2.to_k
+        - attn2.to_v
+        - attn2.to_out.0
+        - ffn.net.0.proj
+        - ffn.net.2
+        - proj_out
+    - _target_: diffusionrl.training_new.fsdp_policy.FSDPPolicy
+      cpu_offload: false
+      param_dtype: bf16
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: true
+  materialize:
+    with_aux: []
+  plan:
+    micro_batch_size: 1
+    num_updates_per_batch: 2
+    local_mini_batch_size: 48
+    local_batch_size: 96
+    global_batch_size: 768
+  topology:
+    actor_count: 8
+  optimizer:
+    learning_rate: 3.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    total_steps: 1000
+  execution:
+    max_grad_norm: 1.0
+    offload_train: false
+    offload_rollout: false
+
+model:
+  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,Wan-AI/Wan2.2-T2V-A14B-Diffusers}
+  model_precision: bf16
+  autocast_precision: bf16
+  trajectory_precision: fp16
+  logprob_precision: fp32
+  shift: 5.0
+  max_sequence_length: 512
+  boundary_ratio: 0.875
+  num_train_timesteps: 1000
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    - name: video
+      weight: 1.0
+      batch_size: 8
+      inner_model_name: pickscore
+      temporal_weight: 0.3
+      alignment_weight: 0.7
+      sample_frames: 1
+
+logging:
+  logging_steps: 1
+  log_media: true
+  media_max_items: 8
+  report_to_wandb: true
+  project_name: diffusionrl-grpo-t2v-newstack
+  run_name: grpo_wan22_t2v
+  tags: [wan22, t2v, grpo, video, pickscore, dual-transformer, new-stack]
+
+evaluation:
+  eval_steps: 60
+
+resume:
+  save_steps: 60

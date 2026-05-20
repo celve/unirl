@@ -34,6 +34,7 @@ import inspect
 import logging
 import os
 import time
+import uuid as _uuid
 from dataclasses import Field
 from dataclasses import fields as dc_fields
 from functools import wraps
@@ -80,6 +81,21 @@ def _stack_data(data_ret: Any) -> Any:
     raise ValueError(f"unexpected payload shape from TQ: {type(data_ret).__name__}")
 
 
+def _ensure_element_eid(elem: "Transportable") -> str:
+    """Lazily stamp a transient UUID on a ``list[Transportable]`` element.
+
+    The eid becomes a wire-key segment so each element's transport leaves get
+    globally unique ``_data_key``s — required because list positions are not
+    identities, so two shards' element-0s must not share a wire key. Stored via
+    ``object.__setattr__`` to bypass any frozen-dataclass restriction.
+    """
+    eid = getattr(elem, "__transport_eid__", None)
+    if eid is None:
+        eid = _uuid.uuid4().hex[:12]
+        object.__setattr__(elem, "__transport_eid__", eid)
+    return eid
+
+
 # =========================================================
 # Transportable mixin
 # =========================================================
@@ -95,9 +111,19 @@ class Transportable(Batched):
             kind=FieldKind.CONCAT, default=None, transport=True,
         )
 
-    Recursion enters a tagged field iff its value is itself a ``Transportable``.
-    Leaf wire-keys are dotted paths assembled from the field-attribute names
-    along the way (e.g. ``forward_context.prompt_embeds``).
+    Recursion enters a tagged field when its value is one of:
+    - a ``Transportable`` — recurse with the field name as the next path segment;
+    - a ``list[Transportable]`` (homogeneous) — recurse into each element using
+      a per-element transient UUID as the path segment, so cross-shard merges
+      don't collide on positional indices;
+    - a ``dict[str, Transportable]`` (homogeneous values) — recurse into each
+      value using the dict key as the path segment. Same key across shards is
+      by design; ``_concat_value`` for dicts merges same-keyed values.
+
+    Other tagged values are leaves and the visitor sees them. Leaf wire-keys
+    are dotted paths assembled from the segments along the way (e.g.
+    ``forward_context.prompt_embeds``, ``trajectories.<eid>.latents``,
+    ``extras.advantages.data``).
     """
 
     # ---- per-leaf walker (visitor-as-map) ------------------------------------
@@ -110,8 +136,9 @@ class Transportable(Batched):
         """Apply ``fn`` to each reachable transport leaf.
 
         Recursion is entered iff a field is tagged ``transport=True`` AND its
-        value is a ``Transportable``. Other tagged fields are leaves and the
-        visitor sees them.
+        value is a ``Transportable``, a homogeneous ``list[Transportable]``,
+        or a homogeneous ``dict[str, Transportable]``. Other tagged fields are
+        leaves and the visitor sees them.
 
         ``fn`` receives ``(owner, field, value, dotted_key)`` and returns the
         value to leave in the slot. The walker writes back via ``setattr`` only
@@ -127,6 +154,18 @@ class Transportable(Batched):
             key = f"{prefix}.{f.name}" if prefix else f.name
             if isinstance(v, Transportable):
                 v._walk_leaves(fn, key)
+            elif isinstance(v, list) and v and all(isinstance(x, Transportable) for x in v):
+                for elem in v:
+                    eid = _ensure_element_eid(elem)
+                    elem._walk_leaves(fn, f"{key}.{eid}")
+            elif isinstance(v, dict) and v and all(isinstance(x, Transportable) for x in v.values()):
+                for dk, elem in v.items():
+                    if not isinstance(dk, str) or "." in dk:
+                        raise ValueError(
+                            f"dict-of-Transportable key must be a string without '.'; "
+                            f"got {dk!r} on {type(self).__name__}.{f.name}"
+                        )
+                    elem._walk_leaves(fn, f"{key}.{dk}")
             else:
                 new_v = fn(self, f, v, key)
                 if new_v is not v:

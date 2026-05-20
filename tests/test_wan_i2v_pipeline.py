@@ -1,9 +1,9 @@
-"""Integration tests for the WAN I2V pipeline.
+"""Integration tests for the WAN I2V dataset path.
 
 Tests cover:
 - Dataset loading with canonical "media" format → MediaRef conversion
 - Relative path resolution against dataset base_dir
-- End-to-end data pipeline threading (DataSource → Prompts → Sampler multimodal kwargs)
+- DataSource collation of media refs into batches
 """
 
 from __future__ import annotations
@@ -12,21 +12,16 @@ import json
 import os
 from types import SimpleNamespace
 from typing import Any, Dict, List
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 pytest.importorskip("torch")
-
-import torch
 
 from diffusionrl.data import MultimodalRLDataSource, TextPromptDataset
 from diffusionrl.data.datasets import (
     _resolve_media_uri,
     normalize_prompt_example,
 )
-from diffusionrl.types.media import MediaRef
-from diffusionrl.types.prompts import Prompts
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -223,90 +218,3 @@ class TestMultimodalDataSourceI2V:
 
         assert "media_refs" in eval_batch
         assert len(eval_batch["media_refs"]) == 2
-
-
-# ---------------------------------------------------------------------------
-# Tests: Sampler multimodal encode kwargs (mocked model bundle)
-# ---------------------------------------------------------------------------
-
-
-class TestSamplerMultimodalEncode:
-    """Tests for prepare_multimodal_encode_kwargs with I2V media refs."""
-
-    def test_prepare_multimodal_encode_kwargs_with_image_refs(self):
-        """Sampler correctly extracts condition image refs and calls model bundle."""
-        from diffusionrl.samplers.fsdp.base_sampler import FSDPBaseSampler
-        from diffusionrl.types.request import RolloutRequest
-        from diffusionrl.types.sampling import SamplingParams
-
-        # Build a request with media refs
-        prompts = Prompts.from_unique_prompts(
-            ["A cat jumping"],
-            media_refs=[
-                [MediaRef(modality="image", role="condition", uri="/tmp/cat.png")],
-            ],
-        )
-        sampling_params = MagicMock(spec=SamplingParams)
-        request = RolloutRequest(prompts=prompts, sampling_params=sampling_params)
-
-        # Mock model bundle that accepts image input
-        mock_bundle = MagicMock()
-        mock_bundle.accepts_image_input = True
-
-        sampler = FSDPBaseSampler.__new__(FSDPBaseSampler)
-        sampler.model_bundle = mock_bundle
-
-        # Mock _load_image_refs to avoid actual file I/O
-        fake_tensor = torch.randn(1, 3, 480, 832)
-        with patch.object(sampler, "_load_image_refs", return_value=fake_tensor):
-            result = sampler.prepare_multimodal_encode_kwargs(request, height=480, width=832, num_frames=81)
-
-        assert "image" in result
-        assert torch.equal(result["image"], fake_tensor)
-        assert result["height"] == 480
-        assert result["width"] == 832
-        assert result["num_frames"] == 81
-
-    def test_prepare_multimodal_encode_kwargs_no_refs_returns_empty(self):
-        """Sampler returns empty dict when no image refs are present."""
-        from diffusionrl.samplers.fsdp.base_sampler import FSDPBaseSampler
-        from diffusionrl.types.request import RolloutRequest
-        from diffusionrl.types.sampling import SamplingParams
-
-        # T2V prompts - no media refs
-        prompts = Prompts.from_unique_prompts(["A sunset over ocean"])
-        sampling_params = MagicMock(spec=SamplingParams)
-        request = RolloutRequest(prompts=prompts, sampling_params=sampling_params)
-
-        sampler = FSDPBaseSampler.__new__(FSDPBaseSampler)
-        sampler.model_bundle = MagicMock()
-
-        result = sampler.prepare_multimodal_encode_kwargs(request, height=480, width=832, num_frames=81)
-
-        assert result == {}
-
-    def test_mixed_batch_raises_error(self):
-        """Sampler raises ValueError on mixed I2V/T2V batch."""
-        from diffusionrl.samplers.fsdp.base_sampler import FSDPBaseSampler
-        from diffusionrl.types.request import RolloutRequest
-        from diffusionrl.types.sampling import SamplingParams
-
-        # Mixed batch: first sample has image, second doesn't
-        prompts = Prompts.from_unique_prompts(
-            ["With image", "Without image"],
-            media_refs=[
-                [MediaRef(modality="image", role="condition", uri="/tmp/a.png")],
-                [],  # no media ref
-            ],
-        )
-        sampling_params = MagicMock(spec=SamplingParams)
-        request = RolloutRequest(prompts=prompts, sampling_params=sampling_params)
-
-        mock_bundle = MagicMock()
-        mock_bundle.accepts_image_input = True
-
-        sampler = FSDPBaseSampler.__new__(FSDPBaseSampler)
-        sampler.model_bundle = mock_bundle
-
-        with pytest.raises(ValueError, match="mixed"):
-            sampler.prepare_multimodal_encode_kwargs(request, height=480, width=832, num_frames=81)

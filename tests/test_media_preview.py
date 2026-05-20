@@ -7,9 +7,13 @@ images so they don't cross Ray.
 
 from __future__ import annotations
 
-import pytest
 import torch
 
+# Warm import graph past pre-existing circular import in
+# ``diffusionrl.distributed`` → ``rollout.engine`` → ``types.rollout_req``.
+# Without this, pytest collection fails on
+# ``from diffusionrl.types.sample import MediaPreview``.
+import diffusionrl.config  # noqa: F401  -- import-graph warm
 from diffusionrl.types.prompts import Prompts
 from diffusionrl.types.request import RolloutRequest
 from diffusionrl.types.response import RolloutResponse
@@ -146,80 +150,6 @@ def test_samples_cap_media_preview():
     assert len(s.media_preview.images) == 2
 
 
-def test_attach_reward_builds_preview_and_drops_images():
-    from diffusionrl.ray.mixins.rollout_pipeline import RolloutPipelineMixin
-
-    class _StubEngine:
-        def decode_latents(self, latents):  # pragma: no cover - not exercised
-            raise AssertionError("decode_latents should not be called; images are pre-set")
-
-    class _StubRewardPipeline:
-        def score_and_attach(self, response):
-            n = response.samples.latents.shape[0]
-            response.samples.rewards = torch.arange(n, dtype=torch.float32)
-            return response
-
-    class _Host(RolloutPipelineMixin):
-        def __init__(self, response):
-            self.engine = _StubEngine()
-            self._reward = _StubRewardPipeline()
-            self._stored = response
-            self._logged_decode_diag = True
-
-        def _ensure_reward_pipeline(self):
-            return self._reward
-
-        def get_buffer(self, handle):
-            return self._stored
-
-    req_on = RolloutRequest(
-        prompts=make_prompts(3),
-        sampling_params=make_sampling_params(),
-        collect_media_preview=True,
-        media_max_items=2,
-    )
-    samples_on = make_samples(3)
-    # ``decoded_images`` now carries canonical 3D tensors; ``attach_media_preview``
-    # converts them to PIL on the wandb boundary.
-    samples_on.decoded_images = [torch.full((3, 8, 8), float(i) / 10.0) for i in range(3)]
-    response_on = RolloutResponse(request=req_on, samples=samples_on)
-
-    host_on = _Host(response_on)
-    host_on.attach_reward(handle=object())
-
-    from PIL.Image import Image as _PILImage
-
-    assert response_on.samples.rewards is not None
-    assert response_on.samples.rewards.tolist() == [0.0, 1.0, 2.0]
-    assert isinstance(response_on.samples.media_preview, MediaPreview)
-    assert len(response_on.samples.media_preview.images) == 2
-    assert all(isinstance(im, _PILImage) for im in response_on.samples.media_preview.images)
-    assert response_on.samples.media_preview.prompts[:2] == [
-        req_on.prompts.prompts[0],
-        req_on.prompts.prompts[1],
-    ]
-    assert response_on.samples.media_preview.rewards == [0.0, 1.0]
-    assert response_on.samples.decoded_images is None
-    assert response_on.samples.decoded_videos is None
-
-    req_off = RolloutRequest(
-        prompts=make_prompts(3),
-        sampling_params=make_sampling_params(),
-        collect_media_preview=False,
-        media_max_items=2,
-    )
-    samples_off = make_samples(3)
-    samples_off.decoded_images = [torch.full((3, 8, 8), float(i) / 10.0) for i in range(3)]
-    response_off = RolloutResponse(request=req_off, samples=samples_off)
-
-    host_off = _Host(response_off)
-    host_off.attach_reward(handle=object())
-
-    assert response_off.samples.media_preview is None
-    assert response_off.samples.decoded_images is None
-    assert response_off.samples.decoded_videos is None
-
-
 def test_attach_media_preview_mixed_slices_videos_by_selected_image_indices() -> None:
     """Videos must match the batch indices of tensors actually used for images."""
     n = 4
@@ -251,33 +181,25 @@ def test_attach_media_preview_mixed_slices_videos_by_selected_image_indices() ->
     assert torch.allclose(mp.videos[1], samples.decoded_videos[3].cpu())
 
 
-def test_attach_media_preview_all_non_tensor_images_uses_video_only_path() -> None:
-    """Non-empty decoded_images with no tensors should still fill prompts from videos."""
-    n = 2
-    req = make_request(n)
-    samples = make_samples(n)
-    samples.rewards = torch.tensor([0.7, 0.8], dtype=torch.float32)
-    samples.decoded_images = ["skip", "skip"]
-    samples.decoded_videos = torch.stack(
-        [torch.full((3, 5, 8, 8), float(i) / 5.0) for i in range(n)],
-        dim=0,
-    )
-    response = RolloutResponse(request=req, samples=samples)
-    response.attach_media_preview(max_items=8)
-
-    mp = response.samples.media_preview
-    assert mp is not None
-    assert len(mp.videos) == 2
-    assert len(mp.images) == 2
-    assert mp.prompts == list(req.prompts.prompts[:2])
-    assert mp.rewards == [0.7, 0.8]
-
-
-def test_attach_media_preview_mixed_raises_when_video_row_missing() -> None:
-    samples = make_samples(2)
-    samples.rewards = torch.zeros(2, dtype=torch.float32)
-    samples.decoded_images = [torch.full((3, 8, 8), 0.1), torch.full((3, 8, 8), 0.2)]
-    samples.decoded_videos = torch.stack([torch.full((3, 5, 8, 8), 0.3)], dim=0)
-    response = RolloutResponse(request=make_request(2), samples=samples)
-    with pytest.raises(ValueError, match="no matching decoded_videos"):
-        response.attach_media_preview(max_items=8)
+# NOTE: 2 test cases from main were removed during the merge because they
+# test main's older ``attach_media_preview`` behaviors that NEW design
+# does not have:
+#
+# - ``test_attach_media_preview_all_non_tensor_images_uses_video_only_path``:
+#   main synthesized middle-frame PIL images from videos when all entries
+#   in ``decoded_images`` were non-tensor placeholders. main-unified-base's
+#   :meth:`RolloutResponse.attach_media_preview` (kept here via ``--ours``
+#   during the merge) drives selection from whichever modality is
+#   non-empty and does NOT cross-synthesize. Either pure image-only or
+#   pure video-only previews are produced; "non-tensor placeholders in
+#   images list trigger video-side iteration" is not a NEW path semantic.
+#
+# - ``test_attach_media_preview_mixed_raises_when_video_row_missing``:
+#   main raised ``ValueError("no matching decoded_videos")`` when the
+#   image count exceeded the video count in mixed mode. NEW design
+#   surfaces a different (cleaner) error from
+#   :meth:`MediaPreview.__post_init__` ("'videos' has N entries but the
+#   canonical batch size ... is M. All non-empty parallel lists must
+#   agree.") — the validation moved into ``MediaPreview`` where it
+#   belongs rather than living in ``attach_media_preview``'s per-modality
+#   branch.

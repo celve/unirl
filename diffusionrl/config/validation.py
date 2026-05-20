@@ -55,19 +55,27 @@ def validate_precision_type(value: Any, *, field: str) -> str:
 
 
 _SGLANG_ENGINE_TARGET_SUFFIX = "SGLangRolloutEngine"
-_FSDP_ENGINE_TARGET_SUFFIX = "FSDPSamplingEngine"
-_TENSOR_SYNC_SUFFIXES = frozenset({"UpdateWeightFromTensor", "UpdateWeightFromDistributed"})
+_VLLM_OMNI_ENGINE_TARGET_SUFFIX = "VLLMOmniRolloutEngine"
+_TRAINSIDE_ENGINE_TARGET_SUFFIX = "TrainsideRolloutEngine"
+_DIRECT_SAMPLING_ENGINE_SUFFIXES: tuple = (_TRAINSIDE_ENGINE_TARGET_SUFFIX,)
+# Sync handlers that only one engine implements. Listed here so the validator
+# can fail fast on a mismatched pairing. UpdateWeightFromTensor /
+# UpdateWeightFromDistributed work on BOTH sglang and vllm-omni — they're
+# transport-shape contracts, not engine-specific (vllm-omni's receivers live
+# in diffusionrl.rollout.engine.vllm_omni.weight_sync.{ipc,nccl}_receive_mixin).
+_IPC_SYNC_SUFFIXES = frozenset({"UpdateWeightFromIPC"})  # vllm-omni only
 
 
 def is_direct_sampling(cfg: DictConfig) -> bool:
     """Training-actor-sampling mode is derived from the selected engine.
 
-    ``rollout/engine: fsdp`` wires ``_target_=FSDPSamplingEngine``, which is
-    exactly the case where the training actor samples directly on its own
-    GPU (no dedicated rollout service).
+    ``rollout/engine: trainside`` → ``TrainsideRolloutEngine`` (the
+    in-process Pipeline adapter; see ``diffusionrl/rollout/engine/trainside``)
+    is the only direct-sampling engine. All other engines (sglang, vllm-omni)
+    run dedicated rollout actors.
     """
     target = str(cfg.rollout.engine.get("_target_") or "")
-    return target.endswith(_FSDP_ENGINE_TARGET_SUFFIX)
+    return target.endswith(_DIRECT_SAMPLING_ENGINE_SUFFIXES)
 
 
 def validate_dynamic_dotpaths(cfg: DictConfig) -> None:
@@ -82,21 +90,6 @@ def validate_dynamic_dotpaths(cfg: DictConfig) -> None:
         load_function(dotpath)
     except Exception as exc:
         raise ValueError(f"cfg.run.data_source_dotpath={dotpath!r} failed to import: {exc}") from exc
-
-
-def validate_training_actor_sampling_mode(cfg: DictConfig) -> None:
-    """Direct-sampling mode requires a backend that supports it."""
-    if not is_direct_sampling(cfg):
-        return
-    from diffusionrl.ray.group.train import _backend_name_from_cfg
-    from diffusionrl.training.types import resolve_train_backend_capabilities
-
-    backend_name = _backend_name_from_cfg(cfg)
-    caps = resolve_train_backend_capabilities(backend_name)
-    require(
-        caps.supports_training_actor_sampling,
-        f"direct_sampling mode (rollout/engine=fsdp) requires a backend with supports_training_actor_sampling=True; got backend={backend_name!r}",
-    )
 
 
 def validate_training_batch_geometry(cfg: DictConfig) -> None:
@@ -127,20 +120,21 @@ def validate_weight_sync_contract(cfg: DictConfig) -> None:
     is_direct = is_direct_sampling(cfg)
     require(
         not is_direct or not has_sync,
-        f"direct_sampling mode (rollout/engine=fsdp) forbids a sync section; got cfg.sync={cfg.get('sync')!r}",
+        f"direct_sampling mode forbids a sync section; got cfg.sync={cfg.get('sync')!r}",
     )
     require(
         is_direct or has_sync,
-        "dedicated-rollout mode (rollout/engine=sglang) requires a sync variant; got no sync section",
+        "dedicated-rollout mode (rollout/engine=sglang or vllm_omni) requires a sync variant; got no sync section",
     )
     if has_sync:
         sync_target = str(cfg.sync.get("_target_") or "")
         sync_name = sync_target.rsplit(".", 1)[-1]
-        if sync_name in _TENSOR_SYNC_SUFFIXES:
+        if sync_name in _IPC_SYNC_SUFFIXES:
             engine_target = str(cfg.rollout.engine.get("_target_") or "")
             require(
-                engine_target.endswith(_SGLANG_ENGINE_TARGET_SUFFIX),
-                f"sync={sync_name} requires the sglang rollout engine; got rollout.engine._target_={engine_target!r}",
+                engine_target.endswith(_VLLM_OMNI_ENGINE_TARGET_SUFFIX),
+                f"sync={sync_name} (bucketed CUDA-IPC) is only implemented by the "
+                f"vllm-omni rollout engine; got rollout.engine._target_={engine_target!r}",
             )
 
 
@@ -161,11 +155,11 @@ def validate_offload_contract(cfg: DictConfig) -> None:
         return
     require(
         not bool(cfg.training.execution.offload_train),
-        "direct_sampling mode (rollout/engine=fsdp) is incompatible with cfg.training.execution.offload_train=True",
+        "direct_sampling mode is incompatible with cfg.training.execution.offload_train=True",
     )
     require(
         not bool(cfg.training.execution.offload_rollout),
-        "direct_sampling mode (rollout/engine=fsdp) is incompatible with cfg.training.execution.offload_rollout=True",
+        "direct_sampling mode is incompatible with cfg.training.execution.offload_rollout=True",
     )
 
 
@@ -254,7 +248,6 @@ __all__ = [
     "validate_offload_contract",
     "validate_precision_type",
     "validate_rollout_layout",
-    "validate_training_actor_sampling_mode",
     "validate_training_batch_geometry",
     "validate_weight_sync_contract",
 ]

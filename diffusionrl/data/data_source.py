@@ -20,6 +20,49 @@ from .datasets import PromptExampleDataset, TextPromptDataset, normalize_prompt_
 logger = logging.getLogger(__name__)
 
 
+def _load_condition_images(media_refs: List[Any]) -> Optional[List[Any]]:
+    """Load ``(modality="image", role="condition")`` media refs into ``Image``.
+
+    Returns a per-prompt list of ``Image`` (or ``None`` for prompts that
+    carry no condition image), or ``None`` when no prompt in the batch
+    has a condition image — letting the caller omit the ``images`` key
+    from the collated batch entirely.
+
+    Raises ``ValueError`` if any prompt carries more than one condition
+    image (WAN I2V is single-frame conditioned).
+    """
+    if not media_refs:
+        return None
+    # Local imports keep PIL / torchvision off the import path for
+    # text-only training runs that never touch this code.
+    import PIL.Image
+    import torchvision.transforms.functional as TF
+
+    from diffusionrl.types.primitives import Image as PrimImage
+
+    images_per_prompt: List[Any] = []
+    any_loaded = False
+    for refs in media_refs:
+        selected = [
+            r
+            for r in (refs or [])
+            if getattr(r, "modality", None) == "image" and getattr(r, "role", None) == "condition"
+        ]
+        if not selected:
+            images_per_prompt.append(None)
+            continue
+        if len(selected) > 1:
+            raise ValueError(f"WAN I2V expects <=1 (image, condition) MediaRef per prompt, got {len(selected)}")
+        pil = PIL.Image.open(selected[0].uri).convert("RGB")
+        tensor = TF.to_tensor(pil)  # [3, H, W] in [0, 1]
+        images_per_prompt.append(PrimImage(pixels=tensor))
+        any_loaded = True
+
+    if not any_loaded:
+        return None
+    return images_per_prompt
+
+
 class MultimodalRLDataSource:
     """
     Multimodal runtime data source for RL training.
@@ -150,6 +193,9 @@ class MultimodalRLDataSource:
             result["metadata"] = metadata
         if any(media_refs):
             result["media_refs"] = media_refs
+        images = _load_condition_images(media_refs)
+        if images is not None:
+            result["images"] = images
         return result
 
     @property
@@ -171,6 +217,9 @@ class MultimodalRLDataSource:
         media_refs = [item.get("media_refs", []) for item in prompt_examples]
         if any(media_refs):
             result["media_refs"] = media_refs
+        images = _load_condition_images(media_refs)
+        if images is not None:
+            result["images"] = images
         return result
 
     def _resolve_prompt_ids(self, prompt_examples: List[Dict[str, Any]]) -> List[str]:

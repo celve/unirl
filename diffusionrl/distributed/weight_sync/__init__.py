@@ -14,6 +14,10 @@ from diffusionrl.distributed.weight_sync.checkpoint import (
     CheckpointSyncConfig,
     UpdateWeightFromCheckpoint,
 )
+from diffusionrl.distributed.weight_sync.ipc import (
+    IPCBucketedSyncConfig,
+    UpdateWeightFromIPC,
+)
 from diffusionrl.distributed.weight_sync.nccl import (
     NcclBroadcastSyncConfig,
     UpdateWeightFromDistributed,
@@ -26,10 +30,12 @@ from diffusionrl.distributed.weight_sync.tensor import (
 __all__ = [
     "BucketedUpdateWeight",
     "CheckpointSyncConfig",
+    "IPCBucketedSyncConfig",
     "NcclBroadcastSyncConfig",
     "TensorPayloadSyncConfig",
     "UpdateWeight",
     "UpdateWeightFromCheckpoint",
     "UpdateWeightFromDistributed",
+    "UpdateWeightFromIPC",
     "UpdateWeightFromTensor",
 ]

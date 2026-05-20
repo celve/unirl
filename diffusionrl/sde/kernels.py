@@ -42,6 +42,77 @@ class StepStrategy(ABC):
         """Set full sigma schedule (no-op for stateless strategies)."""
         pass
 
+    def denoise(
+        self,
+        noise_pred: torch.Tensor,
+        sample: torch.Tensor,
+        sigma: torch.Tensor,
+        sigma_next: torch.Tensor,
+        *,
+        eta: float = 1.0,
+        prev_sample: Optional[torch.Tensor] = None,
+        sigma_max: float = 0.99,
+        step_index: int = 0,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Run one denoising transition. Returns ``(prev_sample, log_prob, prev_sample_mean)``.
+
+        ``prev_sample=None`` ⇒ sampling; otherwise log-prob replay. ``log_prob``
+        is ``None`` for ODE strategies and for SDE strategies with ``eta<1e-7``.
+        """
+        input_dtype = sample.dtype
+        noise_pred = noise_pred.float()
+        sample = sample.float()
+        if prev_sample is not None:
+            prev_sample = prev_sample.float()
+        # Ensure sigma/sigma_next are float32 to match sglang's explicit
+        # `sigma = self.sigmas[step_indices].to(sample.device).to(sample.dtype)`.
+        # Without this, sigma may arrive as float64 (torch.linspace default),
+        # causing prev_sample_mean / std_var to compute in float64 while sglang
+        # uses float32 — a systematic precision mismatch amplified by 1/(2σ²).
+        sigma = sigma.float()
+        sigma_next = sigma_next.float()
+
+        if sigma.dim() == 0:
+            sigma = sigma.unsqueeze(0)
+        if sigma_next.dim() == 0:
+            sigma_next = sigma_next.unsqueeze(0)
+        while sigma.dim() < sample.dim():
+            sigma = sigma.unsqueeze(-1)
+            sigma_next = sigma_next.unsqueeze(-1)
+
+        prev_out, prev_mean, std_var = self.step(
+            noise_pred=noise_pred,
+            sample=sample,
+            sigma=sigma,
+            sigma_next=sigma_next,
+            eta=eta,
+            prev_sample=prev_sample,
+            generator=None,  # DONOT PASS GENERATOR HERE - It will hurt diversity and performance
+            sigma_max=sigma_max,
+            step_index=step_index,
+        )
+        prev_out, log_prob = self._finalize_logp(
+            prev_sample=prev_out,
+            prev_sample_mean=prev_mean,
+            std_var=std_var,
+            eta=eta,
+            input_dtype=input_dtype,
+        )
+        return prev_out, log_prob, prev_mean
+
+    def _finalize_logp(
+        self,
+        *,
+        prev_sample: torch.Tensor,
+        prev_sample_mean: Optional[torch.Tensor],
+        std_var: Optional[torch.Tensor],
+        eta: float,
+        input_dtype: torch.dtype,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Default ODE finalize: no log_prob, no quantization."""
+        del prev_sample_mean, std_var, eta, input_dtype
+        return prev_sample, None
+
 
 class SDEStrategy(StepStrategy, ABC):
     """Base class for SDE log probability computation strategies.
@@ -81,6 +152,31 @@ class SDEStrategy(StepStrategy, ABC):
         step_index: int = 0,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Implement StepStrategy.step by delegating to step_with_log_prob or Euler ODE."""
+
+    def _finalize_logp(
+        self,
+        *,
+        prev_sample: torch.Tensor,
+        prev_sample_mean: torch.Tensor,
+        std_var: torch.Tensor,
+        eta: float,
+        input_dtype: torch.dtype,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """SDE finalize: dtype round-trip on ``prev_sample`` then per-sample log_prob.
+
+        The dtype round-trip simulates trajectory storage precision so replay-time
+        log_prob matches sampling-time precision. Skipped for ``eta<1e-7``.
+        """
+        if eta < 1e-7:
+            return prev_sample, None
+        prev_sample = prev_sample.to(dtype=input_dtype).float()
+        log_prob = self.compute_log_prob(
+            prev_sample=prev_sample,
+            prev_sample_mean=prev_sample_mean,
+            std_var=std_var,
+        )
+        log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
+        return prev_sample, log_prob
 
 
 # ---------------------------------------------------------------------------

@@ -53,28 +53,35 @@ class LogProbData(Batched):
 
 @dataclass
 class MediaPreview(Batched):
-    """Per-rollout media preview payload that stays wandb-agnostic.
+    """Per-rollout wandb media preview payload that stays wandb-agnostic.
 
-    ``images`` carries PIL images (one per sample, decoded middle frame for
-    video models). ``videos`` carries raw 4D ``(C, T, H, W)`` CPU tensors
-    with values in ``[0, 1]`` — NOT pre-built ``wandb.Video`` objects. The
-    wandb-side encoding (mp4 / fps / caption) is owned by
-    ``diffusionrl.utils.wandb_logger.log_generated_media`` so that this
-    dataclass and the ``utils/media.py`` helpers have zero wandb dependency.
+    ``images`` carries PIL images (one per sample; image models or
+    middle-frame extraction for video models that want still previews).
+    ``videos`` carries raw 4D ``(C, T, H, W)`` CPU tensors with values in
+    ``[0, 1]`` — NOT pre-built ``wandb.Video`` objects. The wandb-side
+    encoding (mp4 / fps / caption) is owned by
+    :func:`diffusionrl.utils.wandb_logger.DiffusionRLWandBLogger.log_generated_media`
+    so this dataclass + the ``utils/media.py`` helpers carry zero wandb
+    dependency.
 
     Declaring the four parallel lists as ``concat_field`` lets
     ``Batched.concat`` auto-merge per-shard previews (lists extended) and
     ``Batched.slice(0, n)`` naturally cap the payload size — no custom
     concat/cap code is needed on the owning ``RolloutSamples``.
 
-    Invariants (enforced in ``__post_init__``):
-      * Image-only, video-only, and image+video previews are all valid.
-      * Whichever side is non-empty defines the canonical batch size; every
-        non-empty parallel list must agree with that size. ``__len__`` and
-        ``batch_size`` mirror this so ``Batched.slice`` truncates every
-        relevant list (the default ``Batched.batch_size`` would otherwise
-        anchor on the first concat field, ``images``, and silently leave
-        ``videos`` un-sliced when ``len(videos) > len(images)``).
+    Three valid states (enforced in ``__post_init__``):
+
+    - **image-only**: ``images`` populated, ``videos`` empty
+    - **video-only**: ``videos`` populated, ``images`` empty
+    - **image+video**: both populated; both must agree on per-sample
+      length and the parallel ``prompts`` / ``rewards`` lists.
+
+    Whichever side is non-empty defines the canonical batch size; every
+    non-empty parallel list must agree with that size. ``__len__`` and
+    ``batch_size`` mirror this — without the override, the default
+    ``Batched.batch_size`` anchors on the first concat field
+    (``images``), which would silently leave ``videos`` un-sliced when
+    ``len(videos) > 0`` and ``len(images) == 0``.
     """
 
     images: List[Any] = concat_field(default_factory=list)
@@ -83,8 +90,11 @@ class MediaPreview(Batched):
     rewards: List[float] = concat_field(default_factory=list)
 
     def __post_init__(self) -> None:
+        # The canonical batch size is taken from whichever media side is
+        # non-empty; ``images`` wins ties (consistent with the legacy
+        # image-only path). Empty parallel lists are tolerated; partial
+        # populations that disagree on length surface as a hard error.
         n = len(self.images) if self.images else len(self.videos)
-        source = "images" if self.images else "videos"
         for name, val in (
             ("images", self.images),
             ("videos", self.videos),
@@ -93,16 +103,13 @@ class MediaPreview(Batched):
         ):
             if val and len(val) != n:
                 raise ValueError(
-                    f"MediaPreview.{name} has length {len(val)} which disagrees with "
-                    f"the canonical batch size {n} (derived from {source}). All "
-                    f"non-empty parallel lists must be index-aligned."
+                    f"MediaPreview: {name!r} has {len(val)} entries but the "
+                    f"canonical batch size (from images / videos) is {n}. "
+                    f"All non-empty parallel lists must agree."
                 )
 
     @property
     def batch_size(self) -> int:
-        # Override Batched.batch_size so video-only previews are not silently
-        # treated as size 0 (the default would walk the empty ``images`` list
-        # first and anchor on it).
         return len(self.images) if self.images else len(self.videos)
 
     def __len__(self) -> int:

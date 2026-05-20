@@ -1,0 +1,69 @@
+From: diffusionrl HI3-Instruct RL team
+Subject: [PATCH] omni.py: forward lora_request through Omni.generate to engine.add_request
+
+Required for HI3-Instruct t2i RL (`think_recaption` mode) so that the AR
+prelude stage in vllm-omni picks up the per-rollout LoRA adapter alongside
+the DiT stage. Without this, `VLLMOmniRolloutEngine.generate` cannot pass
+`lora_request` into the AR stage's request scheduler — the AR worker runs
+the base model while DiT runs the LoRA-adapted model (half-adapted
+trajectory => silent policy/rollout mismatch).
+
+Base commit: 4a24a517abc7769b1399ded594558a3fe8269872
+  ("[BugFix] Probe __dict__ instead of hasattr when patching WanRMS_norm (#3400)")
+
+Applied to pod-local editable install of vllm-omni
+(/root/vllm-omni/vllm_omni/entrypoints/omni.py) until upstream merges
+equivalent change. Required on every host that runs `train_new` (both
+launcher and worker-* pods of taiji 2-node colocate).
+
+---
+diff --git a/vllm_omni/entrypoints/omni.py b/vllm_omni/entrypoints/omni.py
+index 223c208..5bfa952 100644
+--- a/vllm_omni/entrypoints/omni.py
++++ b/vllm_omni/entrypoints/omni.py
+@@ -65,6 +65,7 @@ class Omni(OmniBase):
+         *,
+         py_generator: bool = False,
+         use_tqdm: bool | Callable[..., tqdm] = True,
++        lora_request: Any = None,
+     ) -> Generator[OmniRequestOutput, None, None] | list[OmniRequestOutput]:
+         # Expand sampling params for PD disaggregation (user may provide N-1 params)
+         if (
+@@ -76,8 +77,8 @@ class Omni(OmniBase):
+         sampling_params_list = self.resolve_sampling_params_list(sampling_params_list)
+         try:
+             if py_generator:
+-                return self._run_generation_with_generator(prompts, sampling_params_list, use_tqdm)
+-            return list(self._run_generation(prompts, sampling_params_list, use_tqdm))
++                return self._run_generation_with_generator(prompts, sampling_params_list, use_tqdm, lora_request=lora_request)
++            return list(self._run_generation(prompts, sampling_params_list, use_tqdm, lora_request=lora_request))
+         except Exception as e:
+             logger.exception("[Omni] Failed to run generation: %s", e)
+             self.close()
+@@ -88,8 +89,9 @@ class Omni(OmniBase):
+         prompts: OmniPromptType | Sequence[OmniPromptType],
+         sampling_params_list: Sequence[OmniSamplingParams],
+         use_tqdm: bool | Callable[..., tqdm] = True,
++        lora_request: Any = None,
+     ) -> Generator[OmniRequestOutput, None, None]:
+-        gen = self._run_generation(prompts, sampling_params_list, use_tqdm)
++        gen = self._run_generation(prompts, sampling_params_list, use_tqdm, lora_request=lora_request)
+         try:
+             yield from gen
+         finally:
+@@ -100,6 +102,7 @@ class Omni(OmniBase):
+         prompts: OmniPromptType | Sequence[OmniPromptType],
+         sampling_params_list: Sequence[OmniSamplingParams],
+         use_tqdm: bool | Callable[..., tqdm] = True,
++        lora_request: Any = None,
+     ) -> Generator[OmniRequestOutput, None, None]:
+         try:
+             sampling_params_list = self._set_final_only_for_llm_stages(sampling_params_list)
+@@ -144,6 +147,7 @@ class Omni(OmniBase):
+                     prompt=prompt,
+                     sampling_params_list=req_sp_list,
+                     final_stage_id=final_stage_id,
++                    lora_request=lora_request,
+                 )
+                 submit_ts = time.time()
+                 req_state.metrics.stage_first_ts[0] = submit_ts

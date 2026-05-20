@@ -3,7 +3,7 @@
 **DiffusionRL** is a distributed reinforcement learning framework for diffusion model optimization, providing two core capabilities:
 
 1.  **High-Performance Distributed Training**: Supports efficient RL training in various deployment modes (separate, colocate, async pipeline) by orchestrating Ray-based inference and training actor pools;
-2.  **Flexible Algorithm & Engine Integration**: Enables pluggable RL algorithms (GRPO, MixGRPO, DanceGRPO, FlowGRPO, NFT), sampling engines (FSDP, SGLang), and reward models through a unified contract-driven architecture.
+2.  **Flexible Algorithm & Engine Integration**: Enables pluggable RL algorithms (GRPO, MixGRPO, DanceGRPO, FlowGRPO, NFT), rollout engines (trainside / SGLang / vLLM-Omni), and reward models through a unified contract-driven architecture.
 
 DiffusionRL supports the following diffusion models:
 - **Image**: FLUX.1 (Black Forest Labs), Stable Diffusion 3 (Stability AI);
@@ -126,38 +126,31 @@ For external data / model directories, pass absolute paths directly (or create s
 
 ### Training
 
-See `reproduce_scripts/` for per-recipe wrappers; all delegate to `scripts/train.sh` (or `scripts/train_tq.sh` for TransferQueue variants).
-
-Or use the CLI directly:
+The maintained entry point is `python -m diffusionrl.train_new` with a Hydra
+``+experiment=<name>`` selector. Curated launchers under `scripts/` wrap
+common runs and inject env-var overrides; the experiment YAMLs under
+`conf/experiment/` are the source of truth for recipe geometry.
 
 ```bash
-python -m diffusionrl.train \
-    --model.pretrained-model-ckpt-path black-forest-labs/FLUX.1-dev \
-    --model.model-type flux \
-    --algorithm.algorithm-type grpo \
-    --algorithm.prompts-per-rollout 8 \
-    --reward.definition.components "[{model_name: hpsv2, weight: 1.0}]" \
-    --data-source-dotpath diffusionrl.data.data_source.MultimodalRLDataSource \
-    --data-path data/samples/prompts_toy.json \
-    --eval-data-path data/samples/prompts_toy.json \
-    --sampling.sde-type dance \
-    --sampling.eta 0.3 \
-    --sampling.num-inference-steps 25 \
-    --training.use-lora true \
-    --training.lora-rank 16 \
-    --precision.training.model-precision bf16 \
-    --precision.training.autocast-precision bf16 \
-    --precision.rollout.autocast-precision bf16 \
-    --precision.rollout.trajectory-precision fp16 \
-    --precision.rollout.logprob-precision fp32 \
-    --rollout.mode direct_sampling \
-    --rollout.num-rollout 300 \
-    --rollout.output-dir outputs/my_experiment
+# Single-node SD3.5 colocate smoke (vllm-omni + FSDP DP=8 on 1×8 H20)
+bash scripts/run_sd3_colocate.sh
+
+# WAN 2.1 T2V 14B smoke (1×8, trainside direct-sampling)
+bash scripts/run_wan21_t2v_14b_smoke.sh
+
+# HunyuanVideo-1.5 T2V smoke (1×8, trainside)
+bash scripts/run_hunyuan_video15_t2v_smoke.sh
+
+# Or invoke the entry directly with any +experiment from conf/experiment/
+python -m diffusionrl.train_new \
+    +experiment=flowgrpo_fast_sd3_new_colocate \
+    run.data_path=data/samples/prompts_toy.json \
+    resume.output_dir=outputs/my_experiment
 ```
 
-For researcher work, start from `reproduce_scripts/*.sh` — those per-recipe wrappers are the primary maintained entry surface and delegate to the generic launchers `scripts/train.sh` / `scripts/train_tq.sh`.
-The local `configs/recipes/` directory may exist in some working trees, but it is
-gitignored and is not the public repo interface.
+CLI overrides use Hydra dotted-key syntax (e.g.
+``run.num_rollouts=100``); see `scripts/run_*.sh` for the full env-var ⇄
+Hydra-override pattern that the recipes follow.
 
 Terminology:
 
@@ -165,28 +158,24 @@ Terminology:
 - In practice it behaves similarly to a framework-level global step.
 - It is not strictly the same as optimizer update count when gradient accumulation or inner epochs are enabled.
 
-`--config` supports grouped YAML mappings (for example `algorithm: { ... }`, `training: { ... }`).
-For rollout, use a grouped `rollout` YAML mapping (`rollout.mode`,
-`rollout.control`, `rollout.logging`, etc.) so the file shape matches the config sections in code.
-Grouped YAML is now the only supported style for grouped fields.
-Grouped CLI options also use dotted names (for example `--training.train-backend`).
-Precision is grouped by runtime owner: use `precision.training.*` for training
-model/FSDP/loss-forward precision, and `precision.rollout.*` for sampler/replay
-autocast plus trajectory/logprob storage precision.
-For dedicated SGLang rollout, the rollout-side prompt encoder also follows
-`precision.rollout.autocast_precision`; do not configure a separate
-prompt-encoder dtype under `rollout`.
-CLI options always override YAML. Unknown YAML keys fail fast by default; use
-`--allow-unknown-config-keys` only when you intentionally want to ignore unknown keys.
-Weight sync is opt-in: omit `cfg.sync` for `direct_sampling` (no rollout actors to push to),
-and select a dedicated-rollout sync variant (`+sync=tensor_payload`, `+sync=nccl_broadcast`,
-or `+sync=checkpoint_path`) when rollout runs outside training actors. The cross-component
-validator enforces this biconditional (`engine=fsdp` ⇔ no `sync`; `engine=sglang` ⇔ `sync` set).
-In `direct_sampling`, leave `rollout.rollout_engine` unset.
-Direct sampling is selected only by `rollout.mode=direct_sampling`;
-dedicated rollout-only fields must remain unset there.
-Config docs are descriptive rather than normative: current behavior lives under
-`diffusionrl/config/*`, and docs/examples should be updated alongside config refactors.
+Configuration is Hydra-driven. Each experiment YAML under
+`conf/experiment/*.yaml` selects a recipe via the `defaults:` list (model,
+algorithm, rollout engine, sync variant, etc.) and pins recipe-defining
+values. CLI overrides use Hydra's dotted-key syntax
+(e.g. ``run.num_rollouts=100``, ``training.plan.local_batch_size=24``);
+unknown keys fail fast.
+
+Precision is grouped by runtime owner: ``precision.training.*`` for
+training model/FSDP/loss-forward precision; ``precision.rollout.*`` for
+rollout autocast plus trajectory/logprob storage precision.
+
+Weight sync is opt-in. Direct-sampling mode
+(`rollout/engine: trainside`) forbids a `sync:` section — the train
+actor already owns the model. Dedicated-rollout mode
+(`rollout/engine: sglang` or `vllm_omni`) requires a sync variant —
+typical choices are `tensor_payload` (CUDA-IPC, colocate), `nccl_broadcast`
+(separate), or `checkpoint_path` (disk staging). The cross-component
+validator enforces this biconditional.
 
 Training geometry is rollout-driven only:
 
@@ -198,21 +187,13 @@ Training geometry is rollout-driven only:
 
 ### Training Backend Selection
 
-`diffusionRL` now exposes two train backend entries:
+Training composition is policy-driven (no separate "train backend" abstraction).
+A typical stack composes ``LoRA → FSDP → EMA`` via
+``cfg.training.policies``; the policies are real classes from
+`diffusionrl.training_new` and chain through `PolicyBase.walk_source_chain`.
 
-- `fsdp`: default backend, implemented as **FSDP2** (`fully_shard` path).
-- `megatron`: interface scaffold for future integration (launcher/topology hooks are present, runtime path is not complete yet; requires a Megatron-specific actor class via `train_backend_kwargs.actor_class_path`).
-
-Example: default FSDP2 training
-
-```bash
-python -m diffusionrl.train \
-  --training.train-backend fsdp
-```
-
-Notes:
-
-- FSDP2 runtime requires a torch build that provides composable FSDP2 APIs (`fully_shard`) and distributed checkpoint state-dict helpers.
+FSDP2 runtime requires a torch build that provides composable FSDP2 APIs
+(`fully_shard`) and distributed checkpoint state-dict helpers.
 
 ## Supported Algorithms
 
@@ -224,22 +205,35 @@ Notes:
 | **MixGRPO** | Mixed ODE/SDE sampling | Configurable | Flexible SDE ratio (0~1) with window scheduler |
 | **NFT** | Negative Fine-Tuning | N/A | Forward diffusion, no trajectory needed |
 
-## Arguments Walkthrough
+## Configuration Walkthrough
 
-Arguments in DiffusionRL are organized into the following categories:
+DiffusionRL uses Hydra. Settings group into typed sections under
+`cfg.*`; each has a registered dataclass:
 
-1.  **Model arguments**: `--model.model-type`, `--model.pretrained-model-ckpt-path`, `--training.use-lora`, `--training.lora-rank`, `--training.lora-alpha`, etc.
-2.  **Sampling arguments**: `--sampling.sde-type`, `--sampling.eta`, `--sampling.num-inference-steps`, `--sampling.guidance-scale`, `--sampling.shift`, `--sampling.timestep-fraction`, etc.
-3.  **Algorithm arguments**: `--algorithm.algorithm-dotpath`, `--algorithm.prompts-per-rollout`, `--algorithm.samples-per-prompt`, plus shared typed fields such as `--algorithm.adv-normalization`, `--algorithm.eval-ema-decay`, and `--algorithm.shuffle-samples`. Use repeated `--algorithm.kwarg key=value` only for true algorithm-specific extension keys. In YAML, put those extension keys under `algorithm.algorithm_kwargs`.
-4.  **Reward arguments**: `--reward.definition.components` for built-in scorers (typed `{model_name, weight}` records), `--reward.provider.dotpath` for custom scorer dotpaths, `--reward.provider.model-ckpt-path` for scorer checkpoints, `--reward.execution.local-device`, etc.
-5.  **Training arguments**: `--training.learning-rate`, `--training.num-updates-per-batch`, `--training.micro-batch-size`, `--training.max-grad-norm`, etc.
-6.  **Runtime arguments**: `--ray.rollout-num-gpus-per-node`, `--ray.training-num-gpus-per-node`, `--ray.colocate-training-gpu-fraction`, `--ray.colocate-rollout-gpu-fraction`, `--ray.placement-strategy`, `--ray.offload-train`, `--ray.offload-rollout`, etc.
+| Section | What it owns | Registered under |
+|---|---|---|
+| `cfg.model` | Model bundle (pretrained ckpt path, dtype, LoRA, model-specific knobs) | `diffusionrl/models_new/<model>/config.py` (e.g. `model: sd3_v2`, `wan21_v2`) |
+| `cfg.algorithm` | Algorithm hyperparams (clip range, schedule, sampling spec) | `diffusionrl/algorithms_new/` + `rollout_control.py` (`algorithm: grpo`) |
+| `cfg.algorithms.<slot>` | Per-segment trainer-side algorithm (e.g. `algorithms.video: DiffusionGRPO`) | Set inline in experiment YAML via `_target_:` |
+| `cfg.sampling` | SDE strategy (`flow`, `dance`, `cps`, …), `eta`, `num_inference_steps`, `guidance_scale`, `shift` | `diffusionrl/sde/` + `diffusionrl/config/sampling.py` |
+| `cfg.reward` | Reward provider + components + execution mode | `diffusionrl/reward/` (`reward: default`) |
+| `cfg.rollout.engine` | Rollout engine (`trainside`, `sglang`, `vllm_omni`) | `diffusionrl/rollout/engine/*/config.py` |
+| `cfg.rollout.plan` | Rollout request planning (forward batch size, etc.) | `diffusionrl/rollout/plan.py` |
+| `cfg.training.plan` | Training batch geometry (`global_batch_size`, `local_batch_size`, `num_updates_per_batch`, `micro_batch_size`) | `diffusionrl/training_new/plan.py` |
+| `cfg.training.topology` | DP / replica / shard sizes, actor count | `diffusionrl/training_new/topology.py` |
+| `cfg.training.execution` | Offload (train/rollout), gradient accumulation, max-grad-norm | `diffusionrl/training_new/execution.py` |
+| `cfg.training.optimizer`, `cfg.training.lr_scheduler` | Optimizer + LR schedule | `diffusionrl/training_new/factories.py` |
+| `cfg.training.policies` | Composable Policy stack (e.g. `[LoRA, FSDP, EMA]`) | `diffusionrl/training_new/{lora,fsdp,ema}_policy.py` |
+| `cfg.placement` | GPU placement / colocate / sglang split | `diffusionrl/ray/placement.py` |
+| `cfg.sync` | Weight-sync variant (only when `rollout.engine` is dedicated) | `diffusionrl/distributed/weight_sync/*` |
+| `cfg.run` | Outer loop (num_rollouts, data path, eval cadence) | `diffusionrl/config/run.py` |
+| `cfg.logging` | wandb / report destinations | `diffusionrl/config/logging.py` |
 
-For config mechanics and current conventions, read
-[diffusionrl/config/arguments.py](diffusionrl/config/arguments.py)
-alongside `diffusionrl/config/argument_parsing.py`, `diffusionrl/config/validation.py`,
-and `diffusionrl/config/resolution.py`. For runnable config examples, start with
-[scripts/README.md](scripts/README.md) and the experiment YAMLs under `conf/experiment/`.
+To see the resolved cfg for any experiment:
+
+```bash
+python -m diffusionrl.train_new +experiment=<name> --cfg job --resolve
+```
 
 ## Developer Guide
 
@@ -247,86 +241,79 @@ and `diffusionrl/config/resolution.py`. For runnable config examples, start with
 
 The Ray control plane is split into worker implementations and worker-group orchestration:
 
-- `diffusionrl/ray/{rollout_actor.py,train_actor.py}`: single worker implementations
-- `diffusionrl/ray/group/{rollout.py,train.py}`: group orchestration (spawn + dispatch + control plane)
+- `diffusionrl/ray/{new_rollout_actor.py, new_train_actor.py}`: single worker implementations
+- `diffusionrl/ray/group/{new_rollout.py, new_train.py}`: group orchestration (spawn + dispatch + control plane)
 - `diffusionrl/ray/utils/`: stateless helpers imported by actors (`net`, `gpu`, `node`)
-- `diffusionrl/rollout/**`: driver-side `RolloutPipeline` and request-builder helpers
-- `diffusionrl/training/**`: training execution + train backend logic
-- `diffusionrl/distributed/**`: distributed coordination such as weight sync
-
-The layer summary above is the current authoritative control-plane map.
+- `diffusionrl/rollout/new_pipeline.py`: driver-side `NewRolloutPipeline`
+- `diffusionrl/rollout/engine/{trainside,sglang,vllm_omni}/`: rollout engine implementations
+- `diffusionrl/training_new/**`: training execution + composable Policy stack
+- `diffusionrl/algorithms_new/**`: stage-driven RL algorithms (GRPO, ARGRPO, GRPORolloutControl)
+- `diffusionrl/distributed/weight_sync/**`: trainer→rollout weight broadcast (NCCL, IPC, tensor payload, checkpoint)
 
 ### Project Structure
 
 ```
 diffusionrl/
-├── train.py                        # Training entry point
-├── types/                          # Canonical shared data types (RolloutRequest, RolloutSamples, TrainingBatch, Reward, Engine, SDE)
-├── config/                         # Configuration system (TrainingArguments)
-├── algorithms/                     # RL algorithms + advantage normalization helpers
-├── samplers/                       # Inference engines (FSDP, SGLang)
-│   ├── fsdp/                       #   FSDP-based: FluxSampler, SD3Sampler, FSDPHunyuanVideoSampler
-│   └── sglang/                     #   SGLang external service engine
-├── reward/                         # Reward executors (local in-process, actor-side precompute)
-├── models/                         # Model implementations (FLUX, SD3, HunyuanVideo, Mochi)
+├── train_new.py                    # Training entry point
+├── types/                          # Canonical shared data types (RolloutRequest, RolloutResp, TrajectoryStore, segments, etc.)
+├── config/                         # Hydra registration + validation + instantiation
+├── algorithms_new/                 # Stage-driven algorithms (DiffusionGRPO, ARGRPO, GRPORolloutControl, normalizers)
+├── models_new/                     # Per-model NEW stack (sd3, wan21, wan22, qwen_image, hunyuan_video15, hunyuan_image3)
+├── reward/                         # Reward executors + scorers (local + remote service)
 ├── data/                           # Data loading and datasets
-├── rollout/                        # Driver rollout runtime, request planning/execution, default hooks
-├── training/                       # Training workflow, executor, update schedule, train backends
+├── rollout/                        # Driver rollout runtime
+│   ├── new_pipeline.py             #   NewRolloutPipeline
+│   └── engine/{trainside,sglang,vllm_omni}/
+├── training_new/                   # Stage train stack + composable Policy chain (FSDP, LoRA, EMA)
 ├── buffer/                         # Buffer subsystem (queue/filter/store)
-├── distributed/                    # Distributed coordination (for example weight sync)
+├── distributed/                    # Distributed coordination (weight sync, transfer queue)
 ├── ray/                            # Ray distributed orchestration
-│   ├── rollout_actor.py / train_actor.py
-│   ├── group/                      #   rollout.py / train.py (group orchestration)
-│   ├── buffer_actor.py / placement_group.py
-│   ├── utils/                      #   net/gpu/node stateless helpers
-├── patches/                        # Runtime patches (for example replay log-prob support)
-└── utils/                          # Checkpointing, logging, EMA, media helpers
+│   ├── new_rollout_actor.py / new_train_actor.py
+│   ├── group/                      #   new_rollout.py / new_train.py (group orchestration)
+│   ├── mixins/                     #   reusable actor mixins
+│   ├── buffer_actor.py / placement.py / distributed.py
+│   └── utils/                      #   net/gpu/node stateless helpers
+├── sde/                            # SDE runtime (sigma schedules, step indices)
+├── patches/                        # Runtime patches
+└── utils/                          # Checkpointing, logging, media helpers
 ```
 
 ### Adding a Custom Algorithm
 
-Subclass `BaseAlgorithm` and implement the current algorithm-centric contract:
-`__init__(*, config)`, `get_sampling_requirements()`, reward/advantage handling, and
-the training objective owned by the algorithm (`compute_loss_and_backward()`).
-For new code, always import shared data types from `diffusionrl.types` (single entry).
-See `diffusionrl_plugins/algorithms/minimal_algorithm.py` for a complete example.
+Subclass `diffusionrl.algorithms_new.base.StageAlgorithm` and implement
+`compute_loss_and_backward(*, conditions, segment, advantages, training_progress, loss_scale)`,
+returning an `AlgorithmStepResult`. The stage (e.g. `DiffusionStage`,
+`ARStage`) owns the forward path; the algorithm is pure loss math against
+`segment.sde_logp` / `segment.log_probs`. Reference implementations:
+`diffusionrl/algorithms_new/grpo.py` (`DiffusionGRPO`, `ARGRPO`).
 
-Then pass it via `--algorithm.algorithm-dotpath your_module.MyAlgorithm`.
-See the fully working reference implementation:
-`diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm`.
-For the current extension contract, read [`diffusionrl/algorithms/base.py`](diffusionrl/algorithms/base.py)
-and the minimal reference implementation in
-`diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm`.
+For driver-side rollout control (advantage normalization, SDE-index
+scheduling, training-index filtering), subclass `GRPORolloutControl` in
+`diffusionrl/algorithms_new/rollout_control.py`.
+
+Wire your algorithm into an experiment via Hydra:
+
+```yaml
+# conf/experiment/my_recipe.yaml
+algorithms:
+  video:
+    _target_: my_module.MyDiffusionAlgo
+```
 
 ### Plugin Templates (diffusionrl_plugins)
 
-This repo ships minimal templates under `diffusionrl_plugins/` for common extension
-points:
+`diffusionrl_plugins/` is a third-party extension namespace. Currently the
+maintained example is the reward template:
 
-- Model: `diffusionrl_plugins.models.wan21.Wan21ModelBundle`
-- Sampler: `diffusionrl_plugins.samplers.minimal_sampler.MinimalSampler`
-- Algorithm: `diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm`
 - Reward: `diffusionrl_plugins.rewards.minimal_reward.MinimalRewardScorer`
-Notes:
-- There is no plugin auto-registration; pass full dotpaths via CLI args.
-- `--model.model-type <name>` short-name resolution works only when the model class
-  declares `declared_model_type()`, `default_sampler_path()`, and
-  `default_sampler_engine()`.
+
+There is no plugin auto-registration. Reference your extension via Hydra
+`_target_:` in an experiment YAML.
 
 ### Adding a Custom Reward Scorer
 
-Use reward config in three layers:
-
-- Built-in scorer: set `--reward.definition.components "[{model_name: <builtin>, weight: 1.0}]"`
-  for one scorer, or pass multiple `{model_name, weight}` records for multi-component reward.
-- Custom scorer: set `--reward.provider.dotpath your_module.MyRewardScorer` to a full
-  scorer class dotpath.
-- Execution path: rewards are always computed on the active sampling actor
-  using in-process scorers. Local scoring defaults to
-  `reward.execution.local_device=cpu`; switch to `cuda` only when you
-  intentionally want in-process GPU scoring on the sampling host.
-
-Subclass `BaseRewardScorer` for the minimal contract:
+Subclass `BaseRewardScorer` and wire it into the experiment via Hydra
+`_target_:`:
 
 ```python
 from diffusionrl.types.reward import RewardRequest, RewardResponse
@@ -338,17 +325,22 @@ class MyRewardScorer(BaseRewardScorer):
         ...
 ```
 
-Then pass it via `--reward.provider.dotpath your_module.MyRewardScorer`.
+```yaml
+# conf/experiment/my_recipe.yaml
+reward:
+  provider:
+    _target_: my_module.MyRewardScorer
+```
 
-If you want the built-in local scorer lifecycle helpers (`device`, eager model
-load, standard `offload()` / `onload()` behavior), subclass
+If you want the built-in local scorer lifecycle helpers (`device`, eager
+model load, standard `offload()` / `onload()` behavior), subclass
 `diffusionrl.reward.scorers.base_local.BaseLocalRewardScorer` instead.
 
 ### Running Tests
 
 ```bash
-# CLI parse smoke check
-python -m diffusionrl.train --help
+# Hydra compose smoke (replace +experiment= with any conf/experiment/*.yaml)
+python -m diffusionrl.train_new +experiment=smoke_direct_sampling_sd3 --cfg job --resolve
 
 # Python syntax check
 python -m compileall -q diffusionrl

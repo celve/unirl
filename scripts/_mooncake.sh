@@ -1,9 +1,9 @@
 #!/bin/bash
 # scripts/_mooncake.sh
 #
-# Sourced by scripts/train_tq.sh. Encapsulates the lifecycle of the external
-# `mooncake_master` HTTP+RPC server that backs TransferQueue's Mooncake
-# storage manager.
+# Sourced by any TransferQueue-using launcher. Encapsulates the lifecycle
+# of the external ``mooncake_master`` HTTP+RPC server that backs
+# TransferQueue's Mooncake storage manager.
 #
 # Required env (caller sets):
 #   HEAD_IP                          IP of the head node (server binds 0.0.0.0)

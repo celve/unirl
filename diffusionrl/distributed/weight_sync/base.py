@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import abc
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 
 import torch.nn as nn
 
@@ -31,7 +31,12 @@ class UpdateWeight(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def update_weights(self) -> None:
+    def update_weights(
+        self,
+        *,
+        peft_config: Optional[dict] = None,
+        base_sync_done: bool = False,
+    ) -> None:
         raise NotImplementedError
 
 
@@ -47,17 +52,37 @@ class BucketedUpdateWeight(UpdateWeight):
         bucket_size: int,
         flush_cache: bool,
         target_modules: Tuple[str, ...],
+        param_name_prefix: str = "",
     ) -> None:
         super().__init__(model=model, rollout_runtime=rollout_runtime, placement_cfg=placement_cfg)
         self._update_weight_buffer_size = int(bucket_size) * 1024 * 1024
         self._flush_cache = bool(flush_cache)
         self._target_modules = list(target_modules)
+        # Prefix prepended to every ``raw_state_dict`` key before shipping.
+        # Needed when the trainer's ``self.model`` is a sub-module of the
+        # rollout-side pipeline (e.g. SD3: trainer holds the bare DiT, the
+        # vllm-omni pipeline holds it under ``transformer.*`` — set
+        # ``param_name_prefix="transformer."`` so the receiver finds the
+        # parameter on the pipeline). Empty (default) preserves the legacy
+        # "trainer keys == rollout keys" contract.
+        self._param_name_prefix = str(param_name_prefix or "")
 
-    def update_weights(self) -> None:
+    def update_weights(
+        self,
+        *,
+        peft_config: Optional[dict] = None,
+        base_sync_done: bool = False,
+    ) -> None:
+        del peft_config, base_sync_done
         self.weight_version += 1
         bucket = []
         bucket_size = 0
+        prefix = self._param_name_prefix
         for name, param in raw_state_dict(self.model):
+            if name.endswith(".lora_A") or name.endswith(".lora_B"):
+                continue
+            if prefix:
+                name = prefix + name
             param_size = param.numel() * param.element_size()
             if bucket and bucket_size + param_size >= self._update_weight_buffer_size:
                 self._flush_bucket(bucket, is_last_bucket=False)

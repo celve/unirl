@@ -35,7 +35,7 @@ _BUILTIN_SPECS: Dict[str, Tuple[str, str]] = {
     "pickscore": ("diffusionrl.reward.scorers.pickscore", "PickScoreSpec"),
     "hpsv3": ("diffusionrl.reward.scorers.hpsv3", "HPSv3Spec"),
     "image_reward": ("diffusionrl.reward.scorers.image_reward", "ImageRewardSpec"),
-    "videopickscore": ("diffusionrl.reward.scorers.pickscore", "PickScoreSpec"),
+    "videopickscore": ("diffusionrl.reward.scorers.video_pickscore", "VideoPickScoreSpec"),
 }
 
 

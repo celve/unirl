@@ -1,9 +1,8 @@
 """Training-side weight synchronization mixin (weight sender/publisher)."""
 
 import logging
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any
 
-import ray
 import torch
 import torch.nn as nn
 
@@ -31,14 +30,15 @@ class TrainingWeightSyncMixin:
 
     # -- Mixin-owned state (initialized via _init_weight_sync_state) ----
     _update_weight_handler: Any
-    _rollout_actors: List[Any]
-    _lora_initialized_on_rollout: bool
+    _base_sync_done: bool
 
     def _init_weight_sync_state(self) -> None:
         """Initialize mixin-owned attributes. Call from host __init__."""
         self._update_weight_handler = None
-        self._rollout_actors = []
-        self._lora_initialized_on_rollout = False
+        # Skip base sync — rollout already loaded base weights from disk.
+        # The base sync path has an unverified prefix/name transform bug
+        # (v44b ValueError). LoRA-only sync is the critical path.
+        self._base_sync_done = True
 
     # -- Handler-based weight sync --------------------------------------
 
@@ -48,100 +48,172 @@ class TrainingWeightSyncMixin:
         sync_cfg: "DictConfig",
         placement_cfg: "PlacementConfig",
         rollout_runtime: Any,
+        param_name_prefix: str = "",
+        packed_modules: dict | None = None,
     ) -> None:
         """Configure a handler-based rollout weight-sync path."""
         from diffusionrl.config.instantiate import build
 
-        self._rollout_actors = list(rollout_runtime.get_rollout_actors()) if rollout_runtime is not None else []
-        self._lora_initialized_on_rollout = False
+        # Keep base sync skipped — rollout already loaded base weights from
+        # disk. setup() used to reset this to False (base sync would run once
+        # after setup), but base sync has an unverified prefix bug.
+        self._base_sync_done = True
 
         self._update_weight_handler = build(
             sync_cfg,
             model=self.model,
             rollout_runtime=rollout_runtime,
             placement_cfg=placement_cfg,
+            param_name_prefix=str(param_name_prefix or ""),
         )
+        # Store packed_modules mapping for fused→split LoRA tensor conversion
+        self._update_weight_handler._packed_modules = dict(packed_modules or {})
         self._update_weight_handler.connect_rollout_engines()
         logger.info(
-            "Rank %s: configured weight sync handler target=%s rollout_actors=%d",
+            "Rank %s: configured weight sync handler target=%s param_name_prefix=%r",
             self.rank,
             sync_cfg.get("_target_"),
-            len(self._rollout_actors),
+            param_name_prefix,
         )
 
+    def _resolve_peft_config_obj(self, adapter_name: str = "default") -> Any:
+        """Walk the model wrap layers and return the per-adapter PEFT config.
+
+        Mirrors ``_detect_lora_on_model`` in ``ray/new_train_actor.py``: PEFT
+        installs ``peft_config`` directly on the model, but FSDP / PEFT
+        wrappers sometimes hide it under ``.module`` / ``.base_model``.
+        Returns ``None`` if not found (caller decides whether that's fatal).
+        """
+        cur = self.model
+        seen = set()
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            pc = getattr(cur, "peft_config", None)
+            if isinstance(pc, dict) and adapter_name in pc:
+                return pc[adapter_name]
+            cur = getattr(cur, "module", None) or getattr(cur, "base_model", None)
+        return None
+
+    def _extract_lora_state(self, adapter_name: str = "default") -> tuple[dict, dict]:
+        """Return ``(lora_tensors, peft_config_dict)`` for one PEFT adapter.
+
+        ``lora_tensors`` uses vLLM's in-memory LoRA parser format:
+        ``base_model.model.<prefix><module>.lora_A.weight`` /
+        ``...lora_B.weight``. Alpha is carried by ``peft_config_dict``.
+        """
+        from diffusionrl.utils.peft_merge import lora_tensors_for_vllm
+
+        prefix = getattr(self._update_weight_handler, "_param_name_prefix", "")
+        tensors = lora_tensors_for_vllm(
+            self.model,
+            param_name_prefix=str(prefix or ""),
+            adapter_name=adapter_name,
+        )
+        peft_dict = self._peft_config_dict(adapter_name)
+        n_pairs = sum(1 for key in tensors if key.endswith(".lora_A.weight"))
+        if n_pairs == 0:
+            raise RuntimeError(
+                f"_extract_lora_state: extracted 0 LoRA layers from "
+                f"self.model.state_dict() (looking for adapter "
+                f"{adapter_name!r}). Either PEFT didn't inject any "
+                f"adapters or the parameter naming has drifted."
+            )
+        return tensors, peft_dict
+
+    def _peft_config_dict(self, adapter_name: str = "default") -> dict:
+        """Return a JSON/Ray-safe PEFT config dict for one adapter."""
+        peft_cfg_obj = self._resolve_peft_config_obj(adapter_name)
+        if peft_cfg_obj is None:
+            raise RuntimeError(
+                f"TrainingWeightSyncMixin._peft_config_dict: model has no "
+                f"peft_config[{adapter_name!r}] entry. LoRA detection said "
+                f"the adapter exists but the per-adapter config is missing "
+                f"— probably a wrap mismatch (FSDP unwrap, PEFT base_model)."
+            )
+
+        if hasattr(peft_cfg_obj, "to_dict"):
+            peft_dict = peft_cfg_obj.to_dict()
+        else:
+            peft_dict = dict(peft_cfg_obj)
+
+        # Normalize ``target_modules`` — PEFT accepts str (regex) | list |
+        # set | tuple, but vllm-omni's worker-side PEFTHelper.from_dict
+        # is JSON-shipped over msgspec which doesn't know about set/tuple,
+        # and at the receive side the helper expects a list-or-str.
+        # CRITICAL: do NOT do ``list(map(str, target_modules))`` blindly —
+        # a regex string would be exploded into its individual characters.
+        tm = peft_dict.get("target_modules")
+        if isinstance(tm, str):
+            # regex pattern; leave as-is (PEFTHelper accepts str).
+            pass
+        elif isinstance(tm, (list, tuple, set, frozenset)):
+            peft_dict["target_modules"] = sorted(tm) if isinstance(tm, (set, frozenset)) else list(tm)
+        elif tm is None:
+            pass  # caught by the required-keys check below
+        else:
+            raise RuntimeError(
+                f"_peft_config_dict: peft_config['target_modules'] has "
+                f"unsupported type {type(tm).__name__}; expected str / list / "
+                f"set / tuple."
+            )
+
+        # vllm-omni's PEFTHelper.from_dict requires these — fail fast here
+        # rather than at receive time on the worker subprocess.
+        for required in ("r", "lora_alpha", "target_modules"):
+            if peft_dict.get(required) in (None, "", [], ()):
+                raise RuntimeError(
+                    f"_peft_config_dict: peft_config[{required!r}] is "
+                    f"missing or empty (got {peft_dict.get(required)!r}); "
+                    f"vllm-omni LoRA receive will reject this."
+                )
+
+        return peft_dict
+
+    # Back-compat shim: legacy callers still expect the dict-only return.
+    # Internal callers should switch to ``_extract_lora_state``.
     def _extract_lora_tensors_with_alpha(self) -> dict:
-        """Extract LoRA A/B tensors plus per-layer alpha scalars."""
-        from diffusionrl.utils.peft_merge import _strip_peft_prefix, _to_full_tensor
-
-        result = {}
-        adapter_name = "default"
-        for raw_name, param in self.model.state_dict().items():
-            name = _strip_peft_prefix(raw_name)
-            if ".lora_A." in name:
-                prefix, adapter_suffix = name.split(".lora_A.", 1)
-                adapter, *_rest = adapter_suffix.split(".", 1)
-                if adapter == adapter_name:
-                    result[prefix + ".lora_A"] = _to_full_tensor(param).cpu()
-            elif ".lora_B." in name:
-                prefix, adapter_suffix = name.split(".lora_B.", 1)
-                adapter, *_rest = adapter_suffix.split(".", 1)
-                if adapter == adapter_name:
-                    result[prefix + ".lora_B"] = _to_full_tensor(param).cpu()
-
-        peft_cfg = getattr(self.model, "peft_config", {}).get(adapter_name)
-        if peft_cfg is not None:
-            alpha_val = torch.tensor(float(peft_cfg.lora_alpha))
-            for key in list(result.keys()):
-                if key.endswith(".lora_A"):
-                    prefix = key[: -len(".lora_A")]
-                    result[prefix + ".alpha"] = alpha_val
-        return result
+        tensors, _ = self._extract_lora_state()
+        return tensors
 
     def sync_weights_to_rollout(self) -> None:
-        """Synchronize weights through the configured rollout weight-sync handler."""
+        """Synchronize weights through the configured rollout weight-sync handler.
+
+        LoRA mode: sync frozen base weights once, then sync LoRA tensors on
+        every call through the configured transport handler. The handler owns
+        tensor extraction so it can apply the rollout-side parameter prefix
+        consistently for IPC, NCCL and tensor-payload transports.
+
+        Full-FT mode: drop straight to the NCCL/IPC handler that ships the
+        whole state dict.
+        """
         if self._update_weight_handler is None:
             raise RuntimeError(
                 "Weight sync handler not configured. Call setup_weight_sync() before sync_weights_to_rollout()."
             )
 
-        if self._use_lora and not self._lora_initialized_on_rollout:
-            lora_tensors = self._extract_lora_tensors_with_alpha()
-            if self.rank == 0:
-                # Fan out LoRA init in parallel — not serial. The previous
-                # ``for actor: ray.get(remote())`` pattern forced each
-                # set_lora_from_tensors to complete before the next one
-                # started, leaving rank 0 blocking inside Ray while the
-                # other training ranks had already reached the subsequent
-                # ``update_weights()`` collective (raw_state_dict ->
-                # _to_full_tensor all-gather). With N rollout actors, rank 0
-                # spent ~N× the per-actor init time holding up the
-                # collective. Firing all remote calls first and then a
-                # single ray.get() waits for the slowest init, not the
-                # sum — and lets all actors work concurrently.
-                refs = [actor.set_lora_from_tensors.remote("default", lora_tensors) for actor in self._rollout_actors]
-                ray.get(refs)
-            # All training ranks MUST wait for rank 0's set_lora to finish
-            # on every rollout actor before any of them calls update_weights.
-            # Without this barrier, ranks 1..N-1 race ahead and push
-            # raw_state_dict (base + .lora_A + .lora_B) to their paired
-            # sglang engines — but those engines don't have LoRA layers
-            # yet, so the .lora_A / .lora_B keys silently no-op and the
-            # subsequent set_lora_from_tensors arrival just sees an empty
-            # adapter. Observed on 4×8 pod: only rollout_actors[0] ever
-            # emitted ``SGLang LoRA initialized`` because the scheduler on
-            # each other engine queued update_weights ahead of set_lora
-            # and one of them hung.
+        if self._use_lora:
+            peft_cfg_dict = self._peft_config_dict()
+            if not self._base_sync_done:
+                self._update_weight_handler.update_weights(
+                    peft_config=None,
+                    base_sync_done=False,
+                )
+                self._base_sync_done = True
+
+            self._update_weight_handler.update_weights(
+                peft_config=peft_cfg_dict,
+                base_sync_done=True,
+            )
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
-            self._lora_initialized_on_rollout = True
+        else:
+            self._update_weight_handler.update_weights()
 
-        self._update_weight_handler.update_weights()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     def teardown_weight_sync(self) -> None:
         """Release handler state after rollout weight-sync finishes."""
         self._update_weight_handler = None
-        self._rollout_actors = []
-        self._lora_initialized_on_rollout = False
+        self._base_sync_done = False
         logger.info("Rank %s: weight sync handler torn down", self.rank)

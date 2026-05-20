@@ -1,77 +1,204 @@
 # @package _global_
-# DiffusionNFT SD3 recipe — direct-sampling (fsdp engine) NFT on SD3.5.
+# DiffusionNFT SD3 recipe — NEW Policy stack, trainside (direct-sampling).
 #
-# Used by:
-#   reproduce_scripts/train_nft_sd3_multinode.sh
+# Forward-process diffusion RL with dual-adapter EMA reference. Replaces
+# the OLD ``conf/experiment/nft_sd3.yaml`` (deleted in commit 0f2bb2c3
+# "refactor: delete OLD recipes"); recovered baseline values via
+# ``git show 0f2bb2c3~1:conf/experiment/nft_sd3.yaml`` then adapted to
+# the NEW schema:
+#   - ``override /algorithm: nft`` selects ``NFTRolloutControl`` (driver-side)
+#   - ``override /model: sd3_v2`` selects the NEW SD3 pipeline
+#   - ``override /rollout/engine: trainside`` keeps the OLD direct-sampling
+#     semantics (train actors also sample; no separate rollout actor; no
+#     ``cfg.sync`` block per validate_weight_sync_contract)
+#   - ``algorithm.scheduler.num_sde_steps: 0`` — KEY: forward-process path.
+#     Rollout engine sees ``sde_indices=None`` and runs Euler ODE only;
+#     trajectory stores clean final latents (see
+#     ``rollout/new_pipeline.py:725-746``).
+#   - ``algorithms.image._target_: DiffusionNFT`` — stage-driven loss class
+#     (forward-diffusion + dual blend + x0 reconstruction). Production
+#     defaults (beta=1.0, adv_mode=raw, use_adaptive_weight=true,
+#     train_timestep_mode=all, training_timestep_fraction=0.99) inlined
+#     as flat kwargs.
+#   - ``training.policies[0]`` is :class:`NFTLoRAPolicy` (replaces the
+#     plain LoRAPolicy used by GRPO). It owns the dual-adapter
+#     ("default" + "old") install + EMA update at the rollout boundary.
 #
-# Forward-process diffusion RL with dual-adapter EMA reference. Anchored to
-# a 2-node × 8-GPU cluster (16 train actors, no separate rollout actors).
+# Children:
+#   - ``debug_nft.yaml`` — 3-rollout short loop for visual sanity
+#   - ``nft_sd3_reward_service.yaml`` — remote reward service variant
+#   - ``nft_sd3_sglang.yaml`` — SGLang separate-mode variant (overrides
+#     ``rollout/engine`` to ``sglang_new`` + adds ``sync: nccl_broadcast``)
+#
+# Launch via:
+#   python -m diffusionrl.train_new +experiment=nft_sd3
+
 defaults:
   - override /algorithm: nft
-  - override /model: sd3
-  - override /sampling/sde_strategy: dpm2
+  - override /model: sd3_v2
+  - override /rollout/engine: trainside
+  - override /sampling/sde_strategy: flow
   - _self_
 
 run:
+  seed: 42
   data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
   num_rollouts: 10000
-  data_path: /tmp/diffusionrl/data/train.txt
-  eval_data_path: /tmp/diffusionrl/data/test.txt
+  data_path: ${oc.env:DATA_PATH,/root/diffusionrl/data/datasets/pickscore/train.txt}
+  eval_data_path: ${oc.env:EVAL_DATA_PATH,/root/diffusionrl/data/datasets/pickscore/test.txt}
 
 sampling:
   num_inference_steps: 10
   guidance_scale: 1.0
   height: 512
   width: 512
+  init_same_noise: false
   sde_config:
+    # NFT is forward-process — no SDE noise. Rollout engine sees
+    # ``num_sde_steps: 0`` in the schedule below and skips the SDE branch.
     eta: 0.0
-    shift: 3.0
 
 algorithm:
+  # Driver-side singular: ``NFTRolloutControl``. Schema-shape compatible
+  # with ``GRPORolloutControlConfig``; the two recipes are interchangeable
+  # at this layer (``override /algorithm: nft`` flips the registered target).
   prompts_per_rollout: 48
   samples_per_prompt: 16
   adv_normalization_scope: group
   use_global_std: true
+  # KL math deferred to Phase 2 (kl_coef > 0 fails fast in DiffusionNFT).
   kl_coef: 0.0
-  beta: 1.0
-  adv_clip_max: 5.0
-  adv_mode: raw
-  use_adaptive_weight: true
-  train_timestep_mode: all
-  shuffle_train_timesteps: true
-  apply_time_shift_in_loss: false
-  epsilon: 1.0e-4
-  ema:
-    eval_ema_decay: 0.99
-    eval_ema_update_interval: 1
-    reference_mode: nft_old_policy
-    reference_decay: 0.001
-    reference_decay_type: warmup
-    reference_flat_steps: 0
-    reference_uprate: 0.001
-    reference_uphold: 0.5
-    reference_update_timing: rollout_end
-  training_timestep_fraction: 0.99
+  use_kl_penalty: false
+  scheduler:
+    # KEY: ``num_sde_steps: 0`` triggers the forward-process rollout path.
+    # ``AllSDEScheduler`` returns an empty SDE index set; rollout engine
+    # captures dense latents but no per-step log_prob.
+    timestep_fraction: [0.0, 1.0]
+    num_sde_steps: 0
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+
+algorithms:
+  # Slot key = rollout response segment key (SD3 emits resp.rollout_traces["image"]).
+  # ``stage_attr: diffusion`` overrides the default pipeline-attribute
+  # lookup (SD3Pipeline exposes ``self.diffusion``, not ``self.image``).
+  # NewTrainActor injects ``nft_lora_policy=<NFTLoRAPolicy in chain>`` at
+  # instantiate time so the algorithm can call
+  # ``policy.with_old_adapter()`` for the reference forward.
+  image:
+    _target_: diffusionrl.algorithms_new.DiffusionNFT
+    stage_attr: diffusion
+    conditions_cls: diffusionrl.models_new.sd3.conditions.SD3Conditions
+    # Production defaults from OLD nft_sd3.yaml ema + algorithm blocks.
+    # NEW collapses OLD's separate timestep_mode/shuffle/fraction into
+    # the three flat fields below; advanced modes (adv_mode != raw, etc.)
+    # fail fast in DiffusionNFT.__init__.
+    beta: 1.0
+    adv_clip_max: 5.0
+    adv_mode: raw
+    use_adaptive_weight: true
+    train_timestep_mode: all
+    shuffle_train_timesteps: true
+    apply_time_shift_in_loss: false
+    training_timestep_fraction: 0.99
+    kl_coef: 0.0
+    params:
+      _target_: diffusionrl.models_new.sd3.diffusion.SD3DiffusionParams
+      num_inference_steps: ${sampling.num_inference_steps}
+      guidance_scale: ${sampling.guidance_scale}
+      height: ${sampling.height}
+      width: ${sampling.width}
+      seed: ${run.seed}
+      # NFT rollout passes ``sde_indices=null`` (the engine reads this as
+      # "no SDE; forward-process path"); the algorithm's loss math picks
+      # its own ``t`` per sample inside ``compute_loss_and_backward``.
+      sde_indices: null
+      eta: ${sampling.sde_config.eta}
+      init_same_noise: ${sampling.init_same_noise}
+      samples_per_prompt: ${algorithm.samples_per_prompt}
+      noise_group_ids: null
+      max_sequence_length: 256
 
 placement:
-  # NFT runs all-in on training; no separate rollout actor.
+  # Direct-sampling: train actors sample on their own GPUs; no separate
+  # rollout actor pool. Matches OLD NFT layout (FSDP direct-sampling).
   num_rollout_nodes: 0
   num_rollout_gpus_per_node: 0
+  num_train_nodes: 1
+  num_train_gpus_per_node: 8
+  num_train_gpus_per_actor: 1
+  colocate: false
+  strategy: PACK
+  allow_noset_multi_gpu_inference: true
 
-# NFT uses FSDP direct-sampling (no engine override → inherits rollout/engine: fsdp
-# from conf/train.yaml). Direct-sampling forbids cfg.sync per
-# validate_weight_sync_contract; no sync section here.
+rollout:
+  # ``trainside`` is a no-op placeholder at the engine layer (the train
+  # actor's own Pipeline runs sampling). Empty engine block is sufficient.
+  engine: {}
+  plan:
+    # Forward-batch size during direct-sampling on each train actor.
+    # 512²/10-step SD3.5 sampling on an H20 96GB safely accommodates 32.
+    forward_batch_size: ${oc.decode:${oc.env:FBS,32}}
 
 training:
+  policy_source: diffusion
+  policies:
+    # NFTLoRAPolicy replaces LoRAPolicy: same peft target_modules list, +
+    # installs a second "old" adapter that tracks "default" via EMA.
+    # NOTE: ``compose_policy`` wraps inside-out, so NFTLoRAPolicy is the
+    # innermost adapter-management layer; FSDPPolicy outer-wraps the
+    # composite peft-injected module (both adapters get FSDP-sharded
+    # under the same tree).
+    - _target_: diffusionrl.training_new.nft_lora_policy.NFTLoRAPolicy
+      rank: 32
+      alpha: 64
+      dropout: 0.0
+      target_modules:
+        - attn.add_k_proj
+        - attn.add_q_proj
+        - attn.add_v_proj
+        - attn.to_add_out
+        - attn.to_k
+        - attn.to_out.0
+        - attn.to_q
+        - attn.to_v
+      bias: none
+      task_type: FEATURE_EXTRACTION
+      # Dual-adapter EMA — production OLD nft_sd3.yaml values (warmup decay,
+      # update at the rollout boundary). decay_type=warmup with flat_steps=0
+      # means: decay starts at 0 (= hard copy default→old on step 0) then
+      # climbs at ema_uprate per update toward ema_uphold.
+      old_adapter_name: old
+      ema_decay: 0.001
+      ema_decay_type: warmup
+      ema_flat_steps: 0
+      ema_uprate: 0.001
+      ema_uphold: 0.5
+      ema_update_timing: rollout_end
+    - _target_: diffusionrl.training_new.fsdp_policy.FSDPPolicy
+      cpu_offload: false
+      param_dtype: bf16
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      # Activation checkpointing matters less for NFT (no SDE replay,
+      # so the loss is one forward + one no-grad forward); but enabled
+      # for parity with GRPO recipes on the same hardware.
+      activation_checkpointing: true
+  materialize:
+    with_aux: []
   plan:
-    # Anchored to 2 nodes × 8 GPUs = 16 actors. global = prompts*samples = 768.
+    # 1 node × 8 GPUs = 8 train actors. global = prompts*samples = 768.
+    # OLD nft_sd3 was anchored to 2 nodes × 8 GPUs = 16 actors; we scale
+    # down to 1×8 for single-node smoke ease. Sglang child re-tunes for
+    # 2-node setup. local_batch = global / actors = 96.
     micro_batch_size: 8
     num_updates_per_batch: 1
-    local_mini_batch_size: 48    # = global / actor_count / num_updates = 768/16/1
-    local_batch_size: 48         # = local_mini_batch_size * num_updates_per_batch
-    global_batch_size: 768       # = prompts_per_rollout * samples_per_prompt
+    local_mini_batch_size: 96
+    local_batch_size: 96
+    global_batch_size: 768
   topology:
-    actor_count: 16              # 2 nodes × 8 GPUs
+    actor_count: 8
   optimizer:
     learning_rate: 3.0e-4
     adam_beta1: 0.9
@@ -88,11 +215,11 @@ training:
     offload_rollout: false
 
 model:
-  use_lora: true
-  lora_rank: 32
-  lora_alpha: 64
-  use_gradient_checkpointing: false
   pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
+  model_precision: bf16
+  autocast_precision: bf16
+  trajectory_precision: bf16
+  logprob_precision: fp32
 
 reward:
   aggregation_method: mean
@@ -108,6 +235,8 @@ logging:
   media_max_items: 48
   report_to_wandb: true
   project_name: diffusionrl-diffusionNFT
+  run_name: nft_sd3
+  tags: [sd3.5, nft, pickscore, new-stack, trainside]
 
 evaluation:
   eval_steps: 0

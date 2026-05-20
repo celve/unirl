@@ -1,0 +1,163 @@
+# @package _global_
+# End-to-end weight-sync smoke for the NEW groups (NewRolloutActorGroup +
+# NewTrainActorGroup) against SD3 — **disjoint-GPU / NCCL variant**.
+# Consumed by ``scripts/smoke_new_groups_weight_sync_sd3.py --mode disjoint``
+# (NOT by ``train.py``). The sibling
+# ``smoke_vllm_omni_sd3_weight_sync_colocate.yaml`` is the shared-GPU
+# variant for tensor_payload + ipc_bucketed.
+#
+# Layout:
+#   - 1 rollout actor (TP=1, device 0) wrapping vllm-omni's stock
+#     ``StableDiffusion3Pipeline`` (single diffusion stage, modality=sd35_t2i).
+#   - 4 train actors (1 GPU each, FSDP DP=4) on disjoint GPUs 1..4.
+#   - colocate=false (NCCL broadcast group requires disjoint physical
+#     devices — "Duplicate GPU detected" otherwise). Total GPUs = 1+4 = 5.
+#
+# This config verifies the nccl_broadcast transport only. tensor_payload
+# and ipc_bucketed both pickle CUDA-IPC handles whose device UUIDs come
+# from the trainer's local GPUs — the rollout worker on a disjoint GPU
+# set fails with "Invalid device_uuid". Use the colocate sibling for
+# those two transports.
+
+defaults:
+  - override /algorithm: grpo
+  - override /model: sd3_v2
+  - override /rollout/engine: vllm_omni
+  - override /sampling/sde_strategy: flow
+  - _self_
+
+run:
+  seed: 42
+  num_rollouts: 1
+  data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
+  # Smoke uses synthetic param mutation, not real data. Required for
+  # MultimodalRLDataSource's fallback paths; never read.
+  data_path: /tmp/smoke_unused.txt
+  eval_data_path: /tmp/smoke_unused.txt
+  weight_sync_interval: 1
+
+sampling:
+  num_inference_steps: 4
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+  init_same_noise: false
+  sde_config:
+    # eta=0 → deterministic ODE on the rollout side. The smoke does not need
+    # SDE trajectory capture (we're verifying weight transfer, not sampling).
+    eta: 0.0
+
+algorithm:
+  prompts_per_rollout: 4
+  samples_per_prompt: 1
+  adv_normalization_scope: group
+  use_global_std: true
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  use_kl_penalty: false
+  kl_coef: 0.0
+  scheduler:
+    timestep_fraction: [0.0, 1.0]
+    num_sde_steps: 4
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+
+# New train actor reads ``cfg.algorithms`` (plural) keyed by pipeline slot.
+# For SD3 the diffusion slot's stage object is ``pipeline.diffusion``
+# (SD3DiffusionStage). The smoke never calls compute_loss_and_backward, so
+# ``params`` falling back to None (no ``diffusion_params`` attr on the
+# pipeline) is acceptable here.
+algorithms:
+  diffusion:
+    _target_: diffusionrl.algorithms_new.DiffusionGRPO
+    clip_range: 1.0e-4
+    clip_schedule: constant
+
+model:
+  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
+  model_precision: bf16
+  autocast_precision: bf16
+  trajectory_precision: bf16
+  logprob_precision: fp32
+
+rollout:
+  engine:
+    model_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
+    modality: sd35_t2i
+    default_height: 512
+    default_width: 512
+    default_num_inference_steps: 4
+    default_guidance_scale: 1.0
+    default_eta: 0.0
+  plan:
+    forward_batch_size: ${oc.decode:${oc.env:FBS,1}}
+
+placement:
+  # Non-colocate: rollout on GPU 0 (TP=1), train on GPUs 1..4 (DP=4).
+  # NCCL weight-sync requires the trainer rank and rollout worker ranks to
+  # sit on disjoint physical devices ("Duplicate GPU detected" otherwise),
+  # so colocate=false is required for the smoke.
+  num_rollout_nodes: 1
+  num_rollout_gpus_per_node: 1
+  num_rollout_gpus_per_actor: 1       # one TP=1 rollout actor
+  num_train_nodes: 1
+  num_train_gpus_per_node: 4
+  num_train_gpus_per_actor: 1         # 4 DP=4 train actors
+  colocate: false
+  strategy: PACK
+  allow_noset_multi_gpu_inference: true
+
+training:
+  policies:
+    - _target_: diffusionrl.training_new.fsdp_policy.FSDPPolicy
+      cpu_offload: false
+      param_dtype: bf16
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: false
+  policy_source: diffusion
+  topology:
+    actor_count: 4              # matches placement.num_train_actors
+  plan:
+    micro_batch_size: 1
+    num_updates_per_batch: 1
+    local_mini_batch_size: 1
+    local_batch_size: 1
+    global_batch_size: 4
+  optimizer:
+    learning_rate: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    total_steps: 1
+  execution:
+    max_grad_norm: 1.0
+    offload_train: false
+    offload_rollout: false
+  # Skip materializing aux modules (vae / text encoders) on the train side —
+  # rollout holds the real ones. ``with_aux=()`` keeps the bundle's
+  # non-transformer modules on meta and lets the trainer focus on the
+  # transformer weights that ride the weight sync.
+  materialize:
+    with_aux: []
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    - name: pickscore
+      weight: 1.0
+      batch_size: 1
+
+logging:
+  logging_steps: 1
+  log_media: false
+  report_to_wandb: false
+
+evaluation:
+  eval_steps: 0

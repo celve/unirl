@@ -1,0 +1,180 @@
+# @package _global_
+# FlowGRPO SD3 — SGLang NATIVE logprob, separate mode (NEW-DESIGN path).
+#
+# SGLang rollout engine computes log_probs natively during inference.
+# Trainer side does NOT need to replay — uses rollout-emitted sde_logp directly.
+#
+# Layout: 2-node x 8-GPU, separate (4 rollout + 4 train per node):
+#   - 8 SGLang rollout actors (TP=1, logprob_source=native)
+#   - 8 FSDP DP=8 train actors
+#   - nccl_broadcast weight sync
+#
+# Batch geometry (8 train actors):
+#   prompts_per_rollout = 16, samples_per_prompt = 8
+#   global_batch_size = 128
+#   local_batch_size = 128 / 8 = 16
+#   local_mini_batch_size = 16 / 2 = 8
+#   micro_batch_size = 1
+#   -> 8 grad-accum steps per mini-batch
+defaults:
+  - /sync@sync: nccl_broadcast
+  - override /algorithm: grpo
+  - override /model: sd3_v2
+  - override /rollout/engine: sglang_new
+  - override /sampling/sde_strategy: flow
+  - _self_
+
+run:
+  seed: 42
+  data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
+  num_rollouts: 10000
+  data_path: /root/diffusionrl/data/datasets/pickscore/train.txt
+  eval_data_path: /root/diffusionrl/data/datasets/pickscore/test.txt
+  weight_sync_interval: 1
+
+sampling:
+  num_inference_steps: 10
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+  init_same_noise: false
+  sde_config:
+    eta: 0.7
+
+algorithm:
+  prompts_per_rollout: 16
+  samples_per_prompt: 8
+  adv_normalization_scope: group
+  use_global_std: true
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  use_kl_penalty: true
+  kl_coef: 0.0
+  ema:
+    eval_ema_decay: 0.99
+    eval_ema_update_interval: 2
+  scheduler:
+    timestep_fraction: [0.0, 0.5]
+    num_sde_steps: 3
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+
+algorithms:
+  image:
+    _target_: diffusionrl.algorithms_new.DiffusionGRPO
+    stage_attr: diffusion
+    conditions_cls: diffusionrl.models_new.sd3.conditions.SD3Conditions
+    clip_range: 1.0e-4
+    clip_schedule: constant
+    params:
+      _target_: diffusionrl.models_new.sd3.diffusion.SD3DiffusionParams
+      num_inference_steps: ${sampling.num_inference_steps}
+      guidance_scale: ${sampling.guidance_scale}
+      height: ${sampling.height}
+      width: ${sampling.width}
+      seed: ${run.seed}
+      sde_indices: null
+      eta: ${sampling.sde_config.eta}
+      init_same_noise: ${sampling.init_same_noise}
+      samples_per_prompt: ${algorithm.samples_per_prompt}
+      noise_group_ids: null
+      max_sequence_length: 256
+
+model:
+  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
+  model_precision: bf16
+  autocast_precision: bf16
+  trajectory_precision: bf16
+  logprob_precision: fp32
+
+rollout:
+  engine:
+    model_family: sd3
+    tp_size: 1
+    logprob_source: native
+    populate_conditions: true
+    init_same_noise: ${sampling.init_same_noise}
+    engine_kwargs:
+      model_type: sd3
+  plan:
+    forward_batch_size: ${oc.decode:${oc.env:FBS,16}}
+
+placement:
+  num_rollout_nodes: 2
+  num_rollout_gpus_per_node: 4
+  num_rollout_gpus_per_actor: 1       # 8 SGLang actors (TP=1)
+  num_train_nodes: 2
+  num_train_gpus_per_node: 4
+  num_train_gpus_per_actor: 1         # 8 FSDP DP=8 train actors
+  colocate: false
+  strategy: PACK
+  allow_noset_multi_gpu_inference: true
+
+training:
+  policies:
+    - _target_: diffusionrl.training_new.lora_policy.LoRAPolicy
+      rank: 32
+      alpha: 64
+      dropout: 0.0
+      target_modules:
+        - attn.add_k_proj
+        - attn.add_q_proj
+        - attn.add_v_proj
+        - attn.to_add_out
+        - attn.to_k
+        - attn.to_out.0
+        - attn.to_q
+        - attn.to_v
+      bias: none
+      task_type: FEATURE_EXTRACTION
+    - _target_: diffusionrl.training_new.fsdp_policy.FSDPPolicy
+      cpu_offload: false
+      param_dtype: bf16
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: true
+  policy_source: diffusion
+  topology:
+    actor_count: 8
+  plan:
+    micro_batch_size: 1
+    num_updates_per_batch: 2
+    local_mini_batch_size: 8
+    local_batch_size: 16
+    global_batch_size: 128
+  optimizer:
+    learning_rate: 3.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    total_steps: 10000
+  execution:
+    max_grad_norm: 1.0
+    offload_train: false
+    offload_rollout: false
+  materialize:
+    with_aux: []
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    - name: pickscore
+      weight: 1.0
+      batch_size: 8
+
+logging:
+  logging_steps: 1
+  log_media: false
+  report_to_wandb: true
+  project_name: diffusionrl-flowgrpo-newstack
+  entity: null
+  tags: ["sd3.5-medium", "sglang", "native", "separate", "lora-r32", "2x8-h20"]
+
+evaluation:
+  eval_steps: 0

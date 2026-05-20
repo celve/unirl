@@ -14,7 +14,7 @@
 defaults:
   - nft_sd3
   - /sync: nccl_broadcast
-  - override /rollout/engine: sglang
+  - override /rollout/engine: sglang_new
   - _self_
 
 rollout:

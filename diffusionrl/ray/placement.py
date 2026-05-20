@@ -212,8 +212,14 @@ class _BundleProbe:
         from diffusionrl.ray.utils.net import get_free_port
 
         self.ip = socket.gethostbyname(socket.gethostname())
-        cv = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-        self.gpu_ids = [int(x) for x in cv.split(",")] if cv else []
+        # Prefer ray.get_gpu_ids() — works even when the bundle's runtime_env
+        # disables CVD (e.g. NOSET). Returns strings; coerce to int.
+        ray_ids = ray.get_gpu_ids()
+        if ray_ids:
+            self.gpu_ids = [int(x) for x in ray_ids]
+        else:
+            cv = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            self.gpu_ids = [int(x) for x in cv.split(",")] if cv else []
         self.port = int(get_free_port(start_port=29500))
 
     def info(self) -> Tuple[str, List[int], int]:
@@ -221,9 +227,13 @@ class _BundleProbe:
 
 
 def _probe_pg(pg: PlacementGroup, n: int) -> List[Tuple[str, int, int]]:
+    # Claim num_gpus=1 per probe so Ray actually reserves the bundle's GPU
+    # and ray.get_gpu_ids() / CVD are populated. Probes are killed before
+    # rollout actors schedule, so the 1-GPU claim is transient.
     probes = [
         _BundleProbe.options(
-            scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=pg, placement_group_bundle_index=i)
+            num_gpus=1,
+            scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=pg, placement_group_bundle_index=i),
         ).remote()
         for i in range(n)
     ]

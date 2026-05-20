@@ -1,0 +1,193 @@
+# @package _global_
+# HI3-Instruct think_recaption RL — NEW-DESIGN path, COLOCATE, 1-node 8-GPU.
+#
+# Full e2e on-policy training:
+#   rollout → reward → train (AR+Diffusion GRPO) → weight sync (ipc_bucketed)
+#
+# Layout:
+#   - 1 vllm-omni rollout actor on 8 GPUs (NOSET: AR TP=4 + DiT TP=4)
+#   - 8 FSDP DP=8 train actors (1 GPU each, colocated)
+#   - ipc_bucketed sync (ZMQ + cudaIpcGetMemHandle, no UUID dependency)
+#   - offload_rollout: true (sleep vllm-omni during train)
+#
+# Dual-algorithm training:
+#   - "image" slot: DiffusionGRPO over LatentSegment (diffusion trajectory)
+#   - "ar"    slot: ARGRPO over TextSegment (think+recaption tokens)
+# Both share the same underlying transformer (HI3 shared MoE backbone).
+#
+# LoRA target: [qkv_proj, o_proj] — full attention LoRA.
+# HI3 uses fused qkv_proj; peft_merge.py GQA-interleaved split handles
+# the fused→split conversion for vLLM's per-projection LoRA format.
+#
+# Usage:
+#   python -m diffusionrl.train_new +experiment=hi3_think_recaption_colocate
+defaults:
+  - /sync@sync: ipc_bucketed
+  - override /algorithm: grpo
+  - override /model: hunyuan_image3_v2
+  - override /rollout/engine: vllm_omni
+  - override /sampling/sde_strategy: flow
+  - _self_
+
+run:
+  data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
+  num_rollouts: 5
+  seed: 42
+  data_path: /root/diffusionrl/data/datasets/pickscore/train.txt
+  eval_data_path: /root/diffusionrl/data/datasets/pickscore/test.txt
+  weight_sync_interval: 1
+
+sampling:
+  num_inference_steps: 16
+  guidance_scale: 2.5
+  height: 1024
+  width: 1024
+  init_same_noise: false
+  sde_config:
+    eta: 1.0
+    # NOTE: ``shift`` was removed from ``SDEConfig`` (see
+    # ``types/sampling.py:22``) — the canonical σ shift now lives
+    # **only** on ``model.shift`` (FlowMatchSchedulePolicy). Keeping a
+    # stale ``sampling.sde_config.shift`` here would be a dead override
+    # that misleads readers into thinking it controls anything.
+
+algorithm:
+  prompts_per_rollout: 8
+  samples_per_prompt: 1
+  adv_normalization_scope: global
+  use_global_std: true
+  clip_range: 0.2
+  clip_schedule: constant
+  use_kl_penalty: false
+  kl_coef: 0.0
+  scheduler:
+    timestep_fraction: [0.0, 1.0]
+    num_sde_steps: 16
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+    # shift removed — see note above; canonical shift = model.shift.
+
+algorithms:
+  image:
+    _target_: diffusionrl.algorithms_new.DiffusionGRPO
+    stage_attr: diffusion
+    conditions_cls: diffusionrl.models_new.hunyuan_image3.conditions.HunyuanImage3DiffusionConditions
+    clip_range: 1.0e-4
+    clip_schedule: constant
+    params:
+      _target_: diffusionrl.models_new.hunyuan_image3.diffusion.HunyuanImage3DiffusionParams
+      num_inference_steps: ${sampling.num_inference_steps}
+      guidance_scale: ${sampling.guidance_scale}
+      height: ${sampling.height}
+      width: ${sampling.width}
+      seed: ${run.seed}
+      sde_indices: null
+      eta: ${sampling.sde_config.eta}
+      init_same_noise: ${sampling.init_same_noise}
+      samples_per_prompt: ${algorithm.samples_per_prompt}
+      noise_group_ids: null
+  ar:
+    _target_: diffusionrl.algorithms_new.ARGRPO
+    stage_attr: ar
+    conditions_cls: diffusionrl.models_new.hunyuan_image3.conditions.HunyuanImage3ARConditions
+    clip_range: 1.0e-4
+    clip_schedule: constant
+
+model:
+  _target_: diffusionrl.models_new.hunyuan_image3.HunyuanImage3Pipeline.from_meta_config
+  pretrained_model_ckpt_path: /root/HunyuanImage-3-Instruct
+  model_precision: bf16
+  autocast_precision: bf16
+  trajectory_precision: fp16
+  logprob_precision: fp32
+  guidance_scale: 2.5
+
+rollout:
+  engine:
+    model_path: /root/HunyuanImage-3-Instruct
+    modality: t2i_think_recaption
+    default_height: 1024
+    default_width: 1024
+    default_num_inference_steps: 16
+    default_guidance_scale: 2.5
+    default_eta: 1.0
+    default_ar_max_tokens: 4096
+    default_ar_temperature: 0.6
+    default_ar_top_p: 0.95
+    default_ar_top_k: 1024
+  plan:
+    forward_batch_size: ${oc.decode:${oc.env:FBS,1}}
+
+placement:
+  num_rollout_nodes: 1
+  num_rollout_gpus_per_node: 8
+  num_rollout_gpus_per_actor: 8
+  num_train_nodes: 1
+  num_train_gpus_per_node: 8
+  num_train_gpus_per_actor: 1
+  colocate: true
+  colocate_gpu_fraction: 0.5
+  strategy: PACK
+  allow_noset_multi_gpu_inference: true
+
+training:
+  policies:
+    - _target_: diffusionrl.training_new.lora_policy.LoRAPolicy
+      rank: 8
+      alpha: 16
+      dropout: 0.0
+      target_modules:
+        - qkv_proj
+        - o_proj
+      bias: none
+      task_type: FEATURE_EXTRACTION
+    - _target_: diffusionrl.training_new.fsdp_policy.FSDPPolicy
+      cpu_offload: false
+      param_dtype: bf16
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: true
+  policy_source: diffusion
+  topology:
+    actor_count: 8
+  plan:
+    micro_batch_size: 1
+    num_updates_per_batch: 1
+    local_mini_batch_size: 1
+    local_batch_size: 1
+    global_batch_size: 8
+  optimizer:
+    learning_rate: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    total_steps: 100
+  execution:
+    max_grad_norm: 1.0
+    offload_train: true
+    offload_rollout: true
+  materialize:
+    with_aux: []
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    - name: pickscore
+      weight: 1.0
+      batch_size: 4
+      model_id: /root/yuvalkirstain/PickScore_v1
+      processor_id: /root/yuvalkirstain/PickScore_v1
+
+logging:
+  logging_steps: 1
+  log_media: false
+  report_to_wandb: false
+
+evaluation:
+  eval_steps: 0

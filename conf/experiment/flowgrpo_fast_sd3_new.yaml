@@ -1,0 +1,212 @@
+# @package _global_
+# FlowGRPO-Fast SD3 recipe — NEW-DESIGN path (NewRolloutActorGroup +
+# NewTrainActorGroup + train_new.py). Sibling of flowgrpo_fast_sd3.yaml
+# (legacy direct-sampling FSDP-engine path).
+#
+# Targets a 1-node x 5-GPU layout: 1 vllm-omni rollout actor (TP=1 on
+# GPU 0) + 4 FSDP DP=4 train actors (GPUs 1..4). Adjust placement
+# + training.topology.actor_count + training.plan.* for other cluster
+# shapes.
+#
+# Differences from flowgrpo_fast_sd3.yaml (legacy):
+#   - rollout/engine: vllm_omni (not FSDP sampling)
+#   - explicit sync block (nccl_broadcast) — new-design needs weight sync
+#   - algorithms (plural, slot-keyed) for NewTrainActor
+#   - training.policies list with LoRA + FSDP
+#   - placement: dedicated rollout, disjoint GPUs (not direct-sampling)
+#   - reduced batch (32 vs 768) — fits a single 1x8 H20 node
+defaults:
+  # Additive (sync not in base train.yaml defaults) must come BEFORE
+  # override entries per Hydra ordering rules.
+  - /sync@sync: nccl_broadcast       # bind cfg.sync to NcclBroadcastSyncConfig
+                                     # schema so build() honors expand=True
+  - override /algorithm: grpo
+  - override /model: sd3_v2          # new-pipeline preset; lacks LoRA fields
+                                     # (LoRA lives in training.policies below)
+  - override /rollout/engine: vllm_omni
+  - override /sampling/sde_strategy: flow
+  - _self_
+
+run:
+  data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
+  num_rollouts: 20
+  data_path: /root/diffusionrl/data/datasets/pickscore/train.txt
+  eval_data_path: /root/diffusionrl/data/datasets/pickscore/test.txt
+  weight_sync_interval: 1
+
+sampling:
+  num_inference_steps: 10
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+  init_same_noise: false
+  sde_config:
+    eta: 0.7
+
+algorithm:
+  # Driver-side singular: feeds prompt batching, SDE-index scheduling,
+  # and sampling scalars. NewTrainActor reads the plural `algorithms`
+  # block below; the two are kept aligned but distinct.
+  prompts_per_rollout: 4
+  samples_per_prompt: 8
+  adv_normalization_scope: group
+  use_global_std: true
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  use_kl_penalty: true
+  kl_coef: 0.0
+  scheduler:
+    timestep_fraction: [0.0, 0.5]
+    num_sde_steps: 3
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+
+algorithms:
+  # Slot key = rollout response segment key (SD3 emits resp.rollout_traces["image"]).
+  # stage_attr overrides the default pipeline-attribute lookup (pipe.image
+  # doesn't exist; pipe.diffusion does — SD3's deliberate naming split).
+  # params is built inline since SD3Pipeline doesn't expose
+  # pipe.image_params (or pipe.diffusion_params) — the smoke script
+  # constructs SD3DiffusionParams by hand for the same reason.
+  image:
+    _target_: diffusionrl.algorithms_new.DiffusionGRPO
+    stage_attr: diffusion
+    # Dotted path resolved by NewTrainActor via hydra.utils.get_class.
+    # SD3 stage.replay accesses conditions.text directly, so the dict
+    # form must be wrapped in the typed Conditions container.
+    conditions_cls: diffusionrl.models_new.sd3.conditions.SD3Conditions
+    clip_range: 1.0e-4
+    clip_schedule: constant
+    params:
+      _target_: diffusionrl.models_new.sd3.diffusion.SD3DiffusionParams
+      num_inference_steps: ${sampling.num_inference_steps}
+      guidance_scale: ${sampling.guidance_scale}
+      height: ${sampling.height}
+      width: ${sampling.width}
+      seed: ${run.seed}
+      sde_indices: null               # algorithm reads from segment.sde_indices
+      eta: ${sampling.sde_config.eta}
+      init_same_noise: ${sampling.init_same_noise}
+      samples_per_prompt: ${algorithm.samples_per_prompt}
+      noise_group_ids: null
+      max_sequence_length: 256
+
+model:
+  # sd3_v2 (SD3PipelineConfig) is weights+params only — LoRA, gradient
+  # checkpointing, and FSDP knobs live in training.policies below.
+  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
+  model_precision: bf16
+  autocast_precision: bf16
+  trajectory_precision: bf16
+  logprob_precision: fp32
+
+rollout:
+  engine:
+    model_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
+    modality: sd35_t2i
+    default_height: 512
+    default_width: 512
+    default_num_inference_steps: 10
+    default_guidance_scale: 1.0
+    default_eta: 0.7
+  plan:
+    forward_batch_size: ${oc.decode:${oc.env:FBS,32}}
+
+placement:
+  # vllm-omni's SD3.5-medium stage runs TP=1 for trainer-parity numerics.
+  # Allocation must match the spawned worker count; over-allocation makes
+  # the NCCL weight-sync handshake wait for workers that do not exist.
+  num_rollout_nodes: 1
+  num_rollout_gpus_per_node: 1
+  num_rollout_gpus_per_actor: 1       # 1 vllm-omni actor, TP=1 (SD3.5)
+  num_train_nodes: 1
+  num_train_gpus_per_node: 4
+  num_train_gpus_per_actor: 1         # 4 FSDP DP=4 train actors
+  colocate: false
+  strategy: PACK
+  allow_noset_multi_gpu_inference: true
+
+training:
+  policies:
+    # LoRA injected first (closest to the bundle), then FSDP wraps the
+    # adapted module. Order matters: FSDP must see the LoRA-injected
+    # graph so it shards adapter params correctly.
+    - _target_: diffusionrl.training_new.lora_policy.LoRAPolicy
+      rank: 32
+      alpha: 64
+      dropout: 0.0
+      target_modules:
+        - attn.add_k_proj
+        - attn.add_q_proj
+        - attn.add_v_proj
+        - attn.to_add_out
+        - attn.to_k
+        - attn.to_out.0
+        - attn.to_q
+        - attn.to_v
+      bias: none
+      task_type: FEATURE_EXTRACTION
+    - _target_: diffusionrl.training_new.fsdp_policy.FSDPPolicy
+      cpu_offload: false
+      param_dtype: bf16
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      # SD3 replay rebuilds the full forward graph for autograd; with
+      # micro_batch_size=1 + LoRA on H20 96GB the activations alone push
+      # past ~90 GiB. AC recomputes block forwards during backward to
+      # cut activation memory roughly in half.
+      activation_checkpointing: true
+  policy_source: diffusion
+  topology:
+    actor_count: 4
+  plan:
+    # global = prompts_per_rollout * samples_per_prompt = 4 * 8 = 32
+    # local = global / actor_count = 32 / 4 = 8
+    # local_mini = local / num_updates_per_batch = 8 / 2 = 4
+    # micro_batch_size: 1 (down from 4) — SD3 replay activations under
+    # full transformer autograd OOM H20 96GB at micro=4 even with LoRA.
+    micro_batch_size: 1
+    num_updates_per_batch: 2
+    local_mini_batch_size: 4
+    local_batch_size: 8
+    global_batch_size: 32
+  optimizer:
+    learning_rate: 3.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    total_steps: 10000
+  execution:
+    max_grad_norm: 1.0
+    offload_train: false
+    offload_rollout: false
+  materialize:
+    with_aux: []
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    - name: pickscore
+      weight: 1.0
+      batch_size: 8
+
+# Weight sync between train and rollout: the defaults list above binds
+# cfg.sync to the registered NcclBroadcastSyncConfig preset
+# (target=UpdateWeightFromDistributed, expand=True). NcclBroadcastSyncConfig
+# is @dataclass(frozen=True) — schema-sealed — so per-field overrides here
+# are rejected. The preset's defaults (bucket_size=256, flush_cache=True,
+# target_modules=("transformer",)) are what we want; no overrides needed.
+
+logging:
+  logging_steps: 1
+  log_media: false
+  report_to_wandb: false
+
+evaluation:
+  eval_steps: 0

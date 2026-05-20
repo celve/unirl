@@ -108,10 +108,15 @@ class AllSDEScheduler(TimestepScheduler):
                     f"in fraction range [{self._effective_start}, {self._effective_end}) "
                     f"(pool_size={pool_size})"
                 )
-            if num_sde_steps <= 0:
-                raise ValueError(f"num_sde_steps must be positive, got {num_sde_steps}")
+            if num_sde_steps < 0:
+                raise ValueError(f"num_sde_steps must be non-negative, got {num_sde_steps}")
 
     def get_sde_indices(self, step: Optional[int] = None) -> Set[int]:
+        # ``num_sde_steps=0`` is the forward-process / NFT path: no step runs
+        # SDE, no log_prob is captured. Rollout pipeline reads ``None`` /
+        # empty set the same way (see ``rollout/new_pipeline.py:725-746``).
+        if self.num_sde_steps == 0:
+            return set()
         pool = list(range(self._effective_start, self._effective_end))
         if self.num_sde_steps is None or self.num_sde_steps >= len(pool):
             return set(pool)

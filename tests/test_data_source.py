@@ -43,18 +43,28 @@ def test_text_prompt_dataset_preserves_file_order_by_default(tmp_path):
 
 
 def test_multimodal_data_source_collates_typed_media_refs(tmp_path):
+    import PIL.Image
+
+    # Phase 4 turned the ``(image, condition)`` channel into an actual
+    # PIL load + tensor conversion (``Prompts.images``); test URIs must
+    # therefore resolve to real image files on disk.
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    PIL.Image.new("RGB", (4, 4), color=(255, 0, 0)).save(a_path)
+    PIL.Image.new("RGB", (4, 4), color=(0, 255, 0)).save(b_path)
+
     path = tmp_path / "prompts.json"
     path.write_text(
         json.dumps(
             [
                 {
                     "prompt": "a prompt",
-                    "media": [{"modality": "image", "role": "condition", "uri": "/shared/a.png"}],
+                    "media": [{"modality": "image", "role": "condition", "uri": str(a_path)}],
                     "metadata": {"dataset": "toy"},
                 },
                 {
                     "prompt": "b prompt",
-                    "media": [{"modality": "image", "role": "condition", "uri": "/shared/b.png"}],
+                    "media": [{"modality": "image", "role": "condition", "uri": str(b_path)}],
                 },
             ]
         )
@@ -63,14 +73,24 @@ def test_multimodal_data_source_collates_typed_media_refs(tmp_path):
     data_source = MultimodalRLDataSource(_args(path, seed=0, prompts_per_rollout=2))
     batch = data_source.get_samples(2)
 
-    assert sorted(refs[0].uri for refs in batch["media_refs"]) == ["/shared/a.png", "/shared/b.png"]
+    assert sorted(refs[0].uri for refs in batch["media_refs"]) == sorted([str(a_path), str(b_path)])
     assert any(metadata == {"dataset": "toy"} for metadata in batch["metadata"])
+    # NEW-path image conditioning channel: per-prompt ``Image`` instances
+    # (the data layer eagerly converts (image, condition) MediaRefs to
+    # tensor primitives).
+    assert "images" in batch
+    assert len(batch["images"]) == 2
+    for img in batch["images"]:
+        assert img is not None
+        assert img.pixels.shape == (3, 4, 4)
 
     eval_batch = data_source.get_eval_samples(2)
     assert [refs[0] for refs in eval_batch["media_refs"]] == [
-        MediaRef(modality="image", role="condition", uri="/shared/a.png"),
-        MediaRef(modality="image", role="condition", uri="/shared/b.png"),
+        MediaRef(modality="image", role="condition", uri=str(a_path)),
+        MediaRef(modality="image", role="condition", uri=str(b_path)),
     ]
+    assert "images" in eval_batch
+    assert len(eval_batch["images"]) == 2
 
 
 def test_prompts_expand_preserves_sample_aligned_media_refs():

@@ -16,7 +16,6 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "ActorGroup": ("diffusionrl.ray.group.base", "ActorGroup"),
     # Actors
     "DistributedMixin": ("diffusionrl.ray.distributed", "DistributedMixin"),
-    "RolloutActor": ("diffusionrl.ray.rollout_actor", "RolloutActor"),
     # Utils - node-level constants
     "NOSET_VISIBLE_DEVICES_ENV_VARS_LIST": (
         "diffusionrl.ray.utils.node",
@@ -33,10 +32,6 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "RolloutWeightSyncMixin": (
         "diffusionrl.ray.mixins.rollout_weight_sync",
         "RolloutWeightSyncMixin",
-    ),
-    "RolloutPipelineMixin": (
-        "diffusionrl.ray.mixins.rollout_pipeline",
-        "RolloutPipelineMixin",
     ),
 }
 

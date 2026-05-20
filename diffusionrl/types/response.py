@@ -38,25 +38,34 @@ class RolloutResponse(Batched):
         """Build a ``MediaPreview`` from this (already-scored) response and
         bind it directly onto ``self.samples.media_preview``.
 
-        Handles three decode layouts:
+        Two parallel modality paths:
 
-        * **Image-only** (``decoded_images`` is a list of 3D tensors):
-          converts each to PIL via ``tensor_frame_to_pil``.
-        * **Video-only** (``decoded_videos`` is a 5D tensor or list of 4D
-          tensors): extracts the middle frame of each clip as a still-image
-          preview and keeps the raw 4D tensor for ``wandb.Video``.
-        * **Both**: images drive the preview; videos are sliced to the same
-          indices.
+        - **Image path**: reads canonical 3D ``[C, H, W]`` float tensors
+          from ``self.samples.decoded_images``, converts each to PIL via
+          ``tensor_frame_to_pil`` (the wandb boundary).
+        - **Video path**: reads 4D ``[C, T, H, W]`` per-sample tensors
+          (list-of-tensors) or a 5D ``[B, C, T, H, W]`` stacked tensor
+          from ``self.samples.decoded_videos``, keeps them as 4D CPU
+          float tensors on the preview — NOT pre-built ``wandb.Video``.
+          The wandb-side encoding is owned by
+          ``DiffusionRLWandBLogger.log_generated_media``.
 
-        Writes ``None`` when neither modality is populated.
+        Both paths cap at ``max_items`` per modality and pair the per-
+        sample media with prompts + rewards. Image-only, video-only, and
+        image+video previews are all valid. Writes ``None`` when neither
+        modality has decoded media.
+
+        Used by the actor-side rollout pipeline right after reward
+        scoring (see ``RolloutPipelineMixin.attach_reward``) and as a
+        fallback on the driver side.
         """
         decoded_images = self.samples.decoded_images
         decoded_videos = self.samples.decoded_videos
 
         has_images = isinstance(decoded_images, list) and bool(decoded_images)
-        has_videos = (
-            torch.is_tensor(decoded_videos) and decoded_videos.dim() == 5 and decoded_videos.shape[0] > 0
-        ) or (isinstance(decoded_videos, list) and bool(decoded_videos))
+        has_videos = (isinstance(decoded_videos, list) and bool(decoded_videos)) or (
+            torch.is_tensor(decoded_videos) and decoded_videos.dim() == 5 and int(decoded_videos.shape[0]) > 0
+        )
         if not has_images and not has_videos:
             self.samples.media_preview = None
             return
@@ -67,64 +76,59 @@ class RolloutResponse(Batched):
         if self.samples.rewards is not None and torch.is_tensor(self.samples.rewards):
             rewards_flat = [float(v) for v in self.samples.rewards.detach().cpu().reshape(-1).tolist()]
 
+        # Per-sample video accessor — normalizes list-of-4D-tensor and
+        # stacked-5D-tensor inputs into a single ``video[idx] -> 4D | None``
+        # surface.
+        def _video_at(idx: int):
+            if isinstance(decoded_videos, list):
+                if 0 <= idx < len(decoded_videos):
+                    vid = decoded_videos[idx]
+                    return vid if torch.is_tensor(vid) and vid.dim() == 4 else None
+                return None
+            if torch.is_tensor(decoded_videos) and decoded_videos.dim() == 5 and idx < int(decoded_videos.shape[0]):
+                return decoded_videos[idx]  # [C, T, H, W]
+            return None
+
+        # Collect per-sample (image | video) up to ``limit``. We use a
+        # single ``selected_indices`` list so prompts / rewards stay
+        # aligned across both modalities. Image side drives the iteration
+        # when present (legacy behavior); video-only path iterates the
+        # video batch dim.
+        selected_indices: List[int] = []
         images: List[Any] = []
         videos: List[Any] = []
-        prompts_out: List[str] = []
-        reward_values: List[float] = []
-        selected_indices: List[int] = []
 
         if has_images:
             for idx, img in enumerate(decoded_images):
-                if len(images) >= limit:
+                if len(selected_indices) >= limit:
                     break
                 if not torch.is_tensor(img):
                     continue
-                selected_indices.append(idx)
+                # Slice to first 3 channels (drops alpha / model-specific
+                # 4th channel) before PIL — wandb wants RGB.
                 images.append(tensor_frame_to_pil(img[:3]))
-                prompts_out.append(str(prompt_texts[idx]) if idx < len(prompt_texts) else "")
-                reward_values.append(float(rewards_flat[idx]) if idx < len(rewards_flat) else 0.0)
+                selected_indices.append(idx)
+                if has_videos:
+                    vid = _video_at(idx)
+                    if vid is not None:
+                        videos.append(vid.detach().cpu().to(dtype=torch.float32))
+        else:
+            n_video = len(decoded_videos) if isinstance(decoded_videos, list) else int(decoded_videos.shape[0])
+            for idx in range(n_video):
+                if len(selected_indices) >= limit:
+                    break
+                vid = _video_at(idx)
+                if vid is None:
+                    continue
+                videos.append(vid.detach().cpu().to(dtype=torch.float32))
+                selected_indices.append(idx)
 
-        images_were_materialized = bool(images)
-
-        if has_videos:
-            if images_were_materialized and selected_indices:
-                if torch.is_tensor(decoded_videos):
-                    batch = int(decoded_videos.shape[0])
-                    for i in selected_indices:
-                        if i >= batch:
-                            raise ValueError(
-                                f"attach_media_preview: image index {i} has no matching decoded_videos "
-                                f"row (batch size {batch})."
-                            )
-                    video_list = [decoded_videos[int(i)] for i in selected_indices]
-                else:
-                    n_vid = len(decoded_videos)
-                    for i in selected_indices:
-                        if i >= n_vid:
-                            raise ValueError(
-                                f"attach_media_preview: image index {i} has no matching decoded_videos "
-                                f"entry (len={n_vid})."
-                            )
-                    video_list = [decoded_videos[int(i)] for i in selected_indices]
-            else:
-                if torch.is_tensor(decoded_videos):
-                    video_list = [decoded_videos[i] for i in range(min(int(decoded_videos.shape[0]), limit))]
-                else:
-                    video_list = decoded_videos[:limit]
-            for idx, vid in enumerate(video_list):
-                vid_cpu = vid.detach().cpu() if torch.is_tensor(vid) else vid
-                videos.append(vid_cpu)
-                if not images_were_materialized:
-                    mid = vid_cpu.shape[1] // 2 if torch.is_tensor(vid_cpu) and vid_cpu.dim() == 4 else 0
-                    frame = vid_cpu[:3, mid] if torch.is_tensor(vid_cpu) and vid_cpu.dim() == 4 else vid_cpu[:3]
-                    images.append(tensor_frame_to_pil(frame))
-                    prompts_out.append(str(prompt_texts[idx]) if idx < len(prompt_texts) else "")
-                    reward_values.append(float(rewards_flat[idx]) if idx < len(rewards_flat) else 0.0)
-
-        if not images and not videos:
+        if not selected_indices:
             self.samples.media_preview = None
             return
 
+        prompts_out = [str(prompt_texts[i]) if i < len(prompt_texts) else "" for i in selected_indices]
+        reward_values = [float(rewards_flat[i]) if i < len(rewards_flat) else 0.0 for i in selected_indices]
         self.samples.media_preview = MediaPreview(
             images=images,
             videos=videos,

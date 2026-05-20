@@ -1,28 +1,18 @@
 """
 diffusionrl_plugins — external / third-party extension namespace.
 
-This package is a plain Python namespace.  There is NO auto-discovery or
-auto-registration magic.  To use a plugin, pass its full dotpath via
-the corresponding CLI argument:
+This package is a plain Python namespace. There is no auto-discovery or
+auto-registration. Third-party extensions live in their own modules and
+are wired in via Hydra ``_target_:`` strings in experiment YAML.
 
-    --model.model-type your_module.your_model.YourModel
-    --sampler.sampler-type diffusionrl_plugins.samplers.minimal_sampler.MinimalSampler
-    --algorithm.algorithm-type diffusionrl_plugins.algorithms.minimal_algorithm.MinimalAlgorithm
-    --reward.reward-type diffusionrl_plugins.rewards.minimal_reward.MinimalRewardScorer
-    --rollout-buffer-plugin-paths your_module.your_buffer_plugin
+A working example is shipped at
+``diffusionrl_plugins/rewards/minimal_reward.py`` — a ``BaseRewardScorer``
+subclass that you can reference from a reward config block::
 
-Plugin paths are validated by importability only.
+    reward:
+      provider:
+        _target_: diffusionrl_plugins.rewards.minimal_reward.MinimalRewardScorer
 
-Algorithm is the extension point for rollout requirements, advantage logic,
-and gradient objective ownership.
-
-Model short-name resolution (`--model-type your_model`) works when the model
-class declares:
-    - declared_model_type()
-    - default_sampler_path()
-    - default_sampler_engine()
-
-For new plugin algorithms, import shared data types from:
-
-    diffusionrl.types
+For shared data types (``RewardRequest``, ``RewardResponse``, segment
+shapes, etc.), import from ``diffusionrl.types``.
 """

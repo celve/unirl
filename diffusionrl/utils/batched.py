@@ -6,6 +6,10 @@ slice, to_device, and clone that dispatch on the field kind and value type.
 
 Field kinds:
   - ``concat_field()`` — per-sample, batch-aligned; concatenated along dim 0.
+  - ``packed_field()`` — per-sample variable-length data packed along dim 0.
+    Per-sample sizes (``cu_seqlens``) are framework-managed metadata, hidden
+    on the instance; the user constructs via ``Cls.pack(field=[t0, t1, t2])``
+    passing per-sample tensor lists.
   - ``shared_field()`` — identical across samples; first value taken on concat.
   - ``max_field()`` / ``min_field()`` / ``sum_field()`` / ``mean_field()`` —
     scalar or same-shape-across-instances; reduced across instances on concat
@@ -28,6 +32,23 @@ Example::
         schedule: torch.Tensor = shared_field()
         config: str = shared_field(default="default")
         wall_clock: float = max_field(default=0.0)
+
+Packed-varlen example (``cu_seqlens`` is implicit, never declared)::
+
+    @dataclass
+    class MyPackedBatch(Batched):
+        tokens: Optional[torch.Tensor] = packed_field(default=None)     # [total]
+        log_probs: Optional[torch.Tensor] = packed_field(default=None)  # [total]
+        sample_indices: Optional[torch.Tensor] = concat_field(default=None)  # [N]
+
+    seg = MyPackedBatch.pack(
+        tokens=[t0, t1, t2],            # framework packs and tracks cu_seqlens
+        log_probs=[lp0, lp1, lp2],      # same per-sample sizes as tokens
+        sample_indices=torch.arange(3),
+    )
+    seg.cu_seqlens   # [N+1] cumulative offsets, framework-managed
+    seg.lengths      # [N] per-sample sizes (derived)
+    seg.slice(0, 2)  # auto-slices both data and cu_seqlens
 """
 
 from __future__ import annotations
@@ -66,6 +87,7 @@ class FieldKind(Enum):
     MIN = auto()
     SUM = auto()
     MEAN = auto()
+    PACKED = auto()
 
 
 _REDUCTION_KINDS = frozenset({FieldKind.MAX, FieldKind.MIN, FieldKind.SUM, FieldKind.MEAN})
@@ -109,6 +131,30 @@ def concat_field(**kwargs: Any) -> Any:
     """Declare a per-sample field (concatenated along the batch dimension)."""
     metadata = dict(kwargs.pop("metadata", None) or {})
     metadata[_FIELD_KIND_KEY] = FieldKind.CONCAT
+    return _dc_field(metadata=metadata, **kwargs)
+
+
+def packed_field(**kwargs: Any) -> Any:
+    """Declare a per-sample variable-length field packed along dim 0.
+
+    The field's stored value is a packed ``torch.Tensor`` of shape
+    ``[total, ...]`` where ``total = sum(per_sample_sizes)``. The framework
+    auto-derives and tracks the cumulative offsets (``cu_seqlens``) as
+    hidden instance state on the ``Batched`` container — the user neither
+    declares a sibling cu_seqlens field nor sets one explicitly.
+
+    Construction is via the regular ``@dataclass`` constructor: pass a
+    ``Sequence[Tensor]`` of per-sample tensors and the framework's
+    ``Batched.__post_init__`` packs them and computes cu_seqlens. Multiple
+    ``packed_field``s on the same dataclass must agree on per-sample sizes
+    (they share the single instance-level cu_seqlens).
+
+    See :class:`Batched` for the auto-pack / propagation contract and
+    :attr:`Batched.cu_seqlens` / :attr:`Batched.lengths` for read access
+    to the metadata.
+    """
+    metadata = dict(kwargs.pop("metadata", None) or {})
+    metadata[_FIELD_KIND_KEY] = FieldKind.PACKED
     return _dc_field(metadata=metadata, **kwargs)
 
 
@@ -343,6 +389,99 @@ def _clone_value(value: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Packed-varlen helpers (data + cu_seqlens algorithms)
+# ---------------------------------------------------------------------------
+
+
+def _concat_cu_seqlens(cus: List[Optional[torch.Tensor]]) -> Optional[torch.Tensor]:
+    """Merge per-shard cu_seqlens with offset shift.
+
+    Shard 0 is taken as-is. Each subsequent shard contributes ``cu[1:] +
+    running_total`` (drop its leading 0, shift by the running total). The
+    result is a single ``[sum_N + 1]`` cu_seqlens tensor.
+    """
+    non_none = [c for c in cus if c is not None]
+    if not non_none:
+        return None
+    parts: List[torch.Tensor] = [non_none[0]]
+    running = int(non_none[0][-1].item())
+    for cu in non_none[1:]:
+        parts.append(cu[1:] + running)
+        running += int(cu[-1].item())
+    return torch.cat(parts, dim=0)
+
+
+def _slice_cu_seqlens(cu: torch.Tensor, start: int, end: int) -> torch.Tensor:
+    """Slice cu_seqlens for samples ``[start, end)`` and re-zero.
+
+    Returns a ``[end - start + 1]`` tensor whose first entry is 0.
+    Empty range (start == end) returns ``[0]``.
+    """
+    sliced = cu[start : end + 1]
+    if sliced.numel() == 0:
+        return torch.zeros(1, dtype=cu.dtype, device=cu.device)
+    return (sliced - sliced[0]).clone()
+
+
+def _select_cu_seqlens(cu: torch.Tensor, indices: List[int]) -> torch.Tensor:
+    """Rebuild cu_seqlens from selected sample sizes.
+
+    Result starts at 0 and accumulates ``cu[i+1] - cu[i]`` for each
+    requested index.
+    """
+    sizes = [int(cu[i + 1].item() - cu[i].item()) for i in indices]
+    cu_list = [0]
+    for s in sizes:
+        cu_list.append(cu_list[-1] + s)
+    return torch.tensor(cu_list, dtype=cu.dtype, device=cu.device)
+
+
+def _concat_packed_data(values: List[Optional[torch.Tensor]]) -> Optional[torch.Tensor]:
+    """Concat packed-data tensors along dim 0 (no shape-vs-batch_size check)."""
+    non_none = [v for v in values if v is not None]
+    if not non_none:
+        return None
+    return torch.cat(non_none, dim=0)
+
+
+def _slice_packed_data(
+    value: Optional[torch.Tensor],
+    start: int,
+    end: int,
+    cu: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    """Slice ``data[cu[start]:cu[end]]``. Requires cu_seqlens to be set."""
+    if value is None:
+        return None
+    if cu is None:
+        raise ValueError(
+            "packed_field slice requires _packed_cu_seqlens to be populated; "
+            "construct via the regular dataclass __init__ with per-sample lists."
+        )
+    a, b = int(cu[start].item()), int(cu[end].item())
+    return value[a:b].clone()
+
+
+def _select_packed_data(
+    value: Optional[torch.Tensor],
+    indices: List[int],
+    cu: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    """Gather chunks ``data[cu[i]:cu[i+1]]`` per index, concat along dim 0."""
+    if value is None:
+        return None
+    if cu is None:
+        raise ValueError(
+            "packed_field select requires _packed_cu_seqlens to be populated; "
+            "construct via the regular dataclass __init__ with per-sample lists."
+        )
+    if not indices:
+        return value[:0].clone()
+    chunks = [value[int(cu[i].item()) : int(cu[i + 1].item())] for i in indices]
+    return torch.cat(chunks, dim=0)
+
+
+# ---------------------------------------------------------------------------
 # Base class
 # ---------------------------------------------------------------------------
 
@@ -351,12 +490,44 @@ class Batched:
     """Mixin / base for ``@dataclass`` containers with concat/shared fields.
 
     Subclasses must be ``@dataclass``es whose fields are annotated with
-    ``concat_field()`` or ``shared_field()``.  Fields without annotation are
-    treated as shared.
+    ``concat_field()``, ``packed_field()``, ``shared_field()``, or one of
+    the reduction-kind constructors.  Fields without annotation are treated
+    as shared.
 
-    ``batch_size`` is inferred from the first non-None concat field.
-    Subclasses may override the property if custom logic is needed.
+    ``batch_size`` is inferred from the first non-None concat field, or
+    from ``len(_packed_cu_seqlens) - 1`` if the dataclass uses packed
+    fields.
+
+    Packed fields use a framework-managed ``cu_seqlens`` metadata stored
+    as a hidden instance attribute.  User code constructs instances with
+    packed fields via :meth:`pack` (passing per-sample tensor lists);
+    ``concat`` / ``slice`` / ``select`` propagate cu_seqlens through ops.
+    Read access is via the :attr:`cu_seqlens` and :attr:`lengths`
+    properties; there is no setter and no constructor argument.
     """
+
+    # Hidden cumulative-offsets metadata for ``packed_field`` values on
+    # this instance.  Initialized to None (class-level default); populated
+    # by :meth:`pack` when packed fields are present, and propagated by
+    # ``concat`` / ``slice`` / ``select``.  Never set directly by user
+    # code — read via :attr:`cu_seqlens` / :attr:`lengths`.
+    _packed_cu_seqlens: Optional[torch.Tensor] = None
+
+    @property
+    def cu_seqlens(self) -> Optional[torch.Tensor]:
+        """Framework-managed cumulative offsets ``[N+1]`` for packed fields.
+
+        ``None`` when the instance has no populated packed fields.
+        """
+        return self._packed_cu_seqlens
+
+    @property
+    def lengths(self) -> Optional[torch.Tensor]:
+        """Per-sample lengths derived from :attr:`cu_seqlens`."""
+        cu = self._packed_cu_seqlens
+        if cu is None:
+            return None
+        return cu[1:] - cu[:-1]
 
     @property
     def batch_size(self) -> int:
@@ -366,7 +537,77 @@ class Batched:
             bs = _infer_batch_size(getattr(self, f.name))
             if bs is not None:
                 return bs
+        cu = self._packed_cu_seqlens
+        if cu is not None and cu.numel() > 0:
+            return int(cu.shape[0]) - 1
         return 0
+
+    @classmethod
+    def pack(cls: Type[T], **kwargs: Any) -> T:
+        """Construct ``cls``, packing per-sample tensor lists for ``packed_field``s.
+
+        The user-facing canonical constructor for instances with packed fields.
+        For each ``packed_field`` whose kwarg value is a ``Sequence[Tensor]``,
+        ``torch.cat`` along dim 0 to produce the packed tensor and record per-
+        sample sizes. All populated packed fields must agree on per-sample
+        sizes (else raise). Then build the instance via ``cls(**packed_kwargs)``
+        and attach ``_packed_cu_seqlens`` derived from the recorded sizes.
+
+        Non-``packed_field`` kwargs pass through unchanged. ``None`` is a
+        valid value for any packed field — that field stays empty and
+        contributes no sizes.
+
+        Already-packed tensors are rejected with a clear error directing the
+        caller to the regular ``cls(...)`` constructor (intended for tests
+        and adapter code).
+        """
+        sizes: Optional[List[int]] = None
+        packed_kwargs: Dict[str, Any] = dict(kwargs)
+        for f in dc_fields(cls):  # type: ignore[arg-type]
+            if _field_kind(f) is not FieldKind.PACKED:
+                continue
+            if f.name not in packed_kwargs:
+                continue
+            value = packed_kwargs[f.name]
+            if value is None:
+                continue
+            if isinstance(value, torch.Tensor):
+                raise TypeError(
+                    f"{cls.__name__}.pack: packed_field {f.name!r} expects a "
+                    f"Sequence[Tensor] of per-sample tensors, not an "
+                    f"already-packed Tensor. Use the regular {cls.__name__}(...) "
+                    f"constructor for already-packed inputs."
+                )
+            if not isinstance(value, (list, tuple)):
+                raise TypeError(
+                    f"{cls.__name__}.pack: packed_field {f.name!r} expects a "
+                    f"Sequence[Tensor]; got {type(value).__name__}"
+                )
+            if not all(isinstance(v, torch.Tensor) for v in value):
+                raise TypeError(
+                    f"{cls.__name__}.pack: packed_field {f.name!r} elements "
+                    f"must all be torch.Tensor; got types "
+                    f"{[type(v).__name__ for v in value]}"
+                )
+            local_sizes = [int(v.shape[0]) if v.dim() > 0 else 1 for v in value]
+            if sizes is None:
+                sizes = local_sizes
+            elif local_sizes != sizes:
+                raise ValueError(
+                    f"{cls.__name__}.pack: packed_field {f.name!r} per-sample "
+                    f"sizes {local_sizes} don't match earlier packed-field "
+                    f"sizes {sizes}"
+                )
+            packed_kwargs[f.name] = torch.cat(value, dim=0) if value else value
+
+        instance = cls(**packed_kwargs)
+        if sizes is not None:
+            cu_list = [0]
+            for s in sizes:
+                cu_list.append(cu_list[-1] + s)
+            cu = torch.tensor(cu_list, dtype=torch.long)
+            object.__setattr__(instance, "_packed_cu_seqlens", cu)
+        return instance
 
     @classmethod
     def concat(cls: Type[T], items: Sequence[T]) -> T:
@@ -376,6 +617,12 @@ class Batched:
         if len(items) == 1:
             return items[0]
 
+        has_packed = any(
+            _field_kind(f) is FieldKind.PACKED
+            for f in dc_fields(items[0])  # type: ignore[arg-type]
+        )
+        merged_cu = _concat_cu_seqlens([item._packed_cu_seqlens for item in items]) if has_packed else None
+
         batch_sizes = [item.batch_size for item in items]
         kwargs: Dict[str, Any] = {}
         for f in dc_fields(items[0]):  # type: ignore[arg-type]
@@ -383,11 +630,17 @@ class Batched:
             kind = _field_kind(f)
             if kind is FieldKind.CONCAT:
                 kwargs[f.name] = _concat_value(values, batch_sizes)
+            elif kind is FieldKind.PACKED:
+                kwargs[f.name] = _concat_packed_data(values)
             elif kind in _REDUCTION_KINDS:
                 kwargs[f.name] = _reduce_value(values, kind)
             else:
                 kwargs[f.name] = values[0]
-        return cls(**kwargs)
+
+        instance = cls(**kwargs)
+        if has_packed:
+            object.__setattr__(instance, "_packed_cu_seqlens", merged_cu)
+        return instance
 
     def concat_with(self: T, *others: T) -> T:
         """Concatenate ``self`` with one or more other instances."""
@@ -396,40 +649,89 @@ class Batched:
     def select(self: T, indices: torch.Tensor) -> T:
         """Re-index along the batch dimension (gather / shuffle / subsample)."""
         bs = self.batch_size
+        cu = self._packed_cu_seqlens
+        idx_list = _to_index_list(indices)
+        has_packed = any(
+            _field_kind(f) is FieldKind.PACKED
+            for f in dc_fields(self)  # type: ignore[arg-type]
+        )
         kwargs: Dict[str, Any] = {}
         for f in dc_fields(self):  # type: ignore[arg-type]
             val = getattr(self, f.name)
-            if _field_kind(f) is FieldKind.CONCAT:
+            kind = _field_kind(f)
+            if kind is FieldKind.CONCAT:
                 kwargs[f.name] = _select_value(val, indices, bs)
+            elif kind is FieldKind.PACKED:
+                kwargs[f.name] = _select_packed_data(val, idx_list, cu)
             else:
                 kwargs[f.name] = val
-        return type(self)(**kwargs)
+        instance = type(self)(**kwargs)
+        if has_packed:
+            new_cu = _select_cu_seqlens(cu, idx_list) if cu is not None else None
+            object.__setattr__(instance, "_packed_cu_seqlens", new_cu)
+        return instance
 
     def slice(self: T, start: int, end: int) -> T:
         """Slice ``[start, end)`` along the batch dimension."""
         bs = self.batch_size
+        cu = self._packed_cu_seqlens
+        has_packed = any(
+            _field_kind(f) is FieldKind.PACKED
+            for f in dc_fields(self)  # type: ignore[arg-type]
+        )
         kwargs: Dict[str, Any] = {}
         for f in dc_fields(self):  # type: ignore[arg-type]
             val = getattr(self, f.name)
-            if _field_kind(f) is FieldKind.CONCAT:
+            kind = _field_kind(f)
+            if kind is FieldKind.CONCAT:
                 kwargs[f.name] = _slice_value(val, start, end, bs)
+            elif kind is FieldKind.PACKED:
+                kwargs[f.name] = _slice_packed_data(val, start, end, cu)
             else:
                 kwargs[f.name] = val
-        return type(self)(**kwargs)
+        instance = type(self)(**kwargs)
+        if has_packed:
+            new_cu = _slice_cu_seqlens(cu, start, end) if cu is not None else None
+            object.__setattr__(instance, "_packed_cu_seqlens", new_cu)
+        return instance
 
     def to_device(self: T, device: Union[str, torch.device]) -> T:
         """Move all tensor-like values to *device*."""
+        has_packed = any(
+            _field_kind(f) is FieldKind.PACKED
+            for f in dc_fields(self)  # type: ignore[arg-type]
+        )
         kwargs: Dict[str, Any] = {}
         for f in dc_fields(self):  # type: ignore[arg-type]
             kwargs[f.name] = _move_value(getattr(self, f.name), device)
-        return type(self)(**kwargs)
+        instance = type(self)(**kwargs)
+        if has_packed:
+            cu = self._packed_cu_seqlens
+            object.__setattr__(
+                instance,
+                "_packed_cu_seqlens",
+                cu.to(device) if cu is not None else None,
+            )
+        return instance
 
     def clone(self: T) -> T:
         """Deep-clone the container (tensors are ``.clone()``'d)."""
+        has_packed = any(
+            _field_kind(f) is FieldKind.PACKED
+            for f in dc_fields(self)  # type: ignore[arg-type]
+        )
         kwargs: Dict[str, Any] = {}
         for f in dc_fields(self):  # type: ignore[arg-type]
             kwargs[f.name] = _clone_value(getattr(self, f.name))
-        return type(self)(**kwargs)
+        instance = type(self)(**kwargs)
+        if has_packed:
+            cu = self._packed_cu_seqlens
+            object.__setattr__(
+                instance,
+                "_packed_cu_seqlens",
+                cu.clone() if cu is not None else None,
+            )
+        return instance
 
 
 __all__ = [
@@ -440,6 +742,7 @@ __all__ = [
     "max_field",
     "mean_field",
     "min_field",
+    "packed_field",
     "shared_field",
     "sum_field",
 ]

@@ -62,7 +62,8 @@ class UpdateWeightFromCheckpoint(UpdateWeight):
     def connect_rollout_engines(self) -> None:
         return
 
-    def update_weights(self) -> None:
+    def update_weights(self, *, peft_config: dict | None = None, base_sync_done: bool = False) -> None:
+        del peft_config, base_sync_done
         self.weight_version += 1
         is_rank0 = dist.get_rank() == 0
 
