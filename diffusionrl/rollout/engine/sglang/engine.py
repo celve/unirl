@@ -546,6 +546,46 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 key = key[len(pipeline_prefix) :]
             stripped[key] = tensor
 
+        # 2026-05-21 LoRA-SCALE FIX: inject ``<module>.alpha`` tensors so
+        # SGLang's ``_apply_lora_to_layers`` (lora_pipeline.py:448-463) infers
+        # the correct PEFT scale = alpha/rank. Without these keys the loader
+        # falls back to ``inferred_alpha = inferred_rank`` (line 459-462),
+        # which makes ``BaseLayerWithLoRA.forward`` (linear.py:90-93) skip the
+        # ``delta * (alpha/rank)`` multiply (the if-condition is False when
+        # alpha == rank). For our trainer config (rank=32, alpha=64) this
+        # silently dropped LoRA scale from 2.0 to 1.0 — every LoRA-targeted
+        # attn module produced a delta with HALF the trainer's magnitude,
+        # which is exactly the source of the ~21μ rollout-vs-replay logp_diff
+        # floor at SDE step 0 (vs. vllm's ~3μ baseline). PEFT bakes the
+        # alpha/rank scale into the forward; we have to mirror that on the
+        # SGLang side or the two engines compute different DiT outputs even
+        # with identical LoRA tensors.
+        if peft_config:
+            lora_alpha = peft_config.get("lora_alpha")
+            lora_rank = peft_config.get("r") or peft_config.get("lora_rank")
+            if lora_alpha is not None:
+                # Derive the layer-base name from each lora_A key in
+                # ``stripped`` (post-prefix-strip) and inject ``<base>.alpha``.
+                layer_bases: set = set()
+                for k in list(stripped.keys()):
+                    for suf in (".lora_A.weight", ".lora_A"):
+                        if k.endswith(suf):
+                            layer_bases.add(k[: -len(suf)])
+                            break
+                alpha_tensor = torch.tensor(float(lora_alpha))
+                for base in layer_bases:
+                    alpha_key = f"{base}.alpha"
+                    if alpha_key not in stripped:
+                        stripped[alpha_key] = alpha_tensor
+                logger.info(
+                    "SGLang LoRA scale fix: injected .alpha=%s for %d layers "
+                    "(rank=%s) so SGLang applies scale=%s instead of 1.0",
+                    lora_alpha,
+                    len(layer_bases),
+                    lora_rank,
+                    (lora_alpha / lora_rank) if lora_rank else "?",
+                )
+
         request = self._runtime["SetLoraFromTensorsReq"](
             lora_nickname=str(adapter_name),
             lora_tensors=stripped,
@@ -563,6 +603,8 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         # match. For SD3.5-medium this is ~191.
         layer_names = set()
         for key in stripped:
+            if key.endswith(".alpha"):
+                continue  # injected by LoRA-SCALE FIX above; not a layer suffix
             base = key
             for suffix in (".lora_A.weight", ".lora_B.weight", ".lora_A", ".lora_B"):
                 if base.endswith(suffix):
