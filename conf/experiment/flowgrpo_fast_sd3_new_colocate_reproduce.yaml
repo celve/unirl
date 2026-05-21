@@ -25,7 +25,7 @@
 #   local_batch_size: 96 (vs 48) — global/actor_count
 #   local_mini_batch_size: 48 (vs 24) — local_batch/num_updates
 #   micro_batch_size: 1 — H20 memory constraint with AC + LoRA + full replay
-#   → 48 grad-accum steps per mini-batch (vs 3 with micro=8 on 16 actors)
+#   → 48 grad-accum steps per optimizer step (vs 3 with micro=8 on 16 actors)
 #   This preserves the same effective gradient per optimizer step.
 #
 # === Layout (1×8 H20 96GB, colocate) ===

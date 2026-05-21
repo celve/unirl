@@ -51,7 +51,7 @@ def _build_micro_batch_slices(
 
 
 @dataclass(frozen=True)
-class StageMiniBatchResult:
+class TrainOptimizerStepResult:
     """Result of one optimizer step under the stage-driven contract."""
 
     loss: float
@@ -143,7 +143,7 @@ class StageTrainStack:
         trace is emitted).
 
         Does not touch the optimizer; callers manage the
-        ``zero_grad`` / ``step`` cadence (typically :meth:`train_minibatch`).
+        ``zero_grad`` / ``step`` cadence (typically :meth:`train_optimizer_step`).
         """
         if resp.advantages is None:
             raise ValueError(
@@ -177,18 +177,17 @@ class StageTrainStack:
             )
         return results
 
-    def train_minibatch(
+    def train_optimizer_step(
         self,
         resp: RolloutResp,
         *,
         training_progress: float,
-    ) -> StageMiniBatchResult:
-        """One optimizer step over a mini-batch of ``resp``.
+    ) -> TrainOptimizerStepResult:
+        """One optimizer step over ``resp``.
 
         Slices the response into micro-batches per
         ``cfg.training.plan.micro_batch_size``, accumulates scaled backward
-        across micros, then clips + steps + EMA once at the end. Mirrors
-        the legacy ``TrainStack.train_minibatch``.
+        across micros, then clips + steps + EMA once at the end.
         """
         self.optimizer.zero_grad()
 
@@ -199,15 +198,15 @@ class StageTrainStack:
             micro_batch_size=micro_batch_size,
         )
         if not micro_slices:
-            raise ValueError("train_minibatch requires a non-empty batch.")
+            raise ValueError("train_optimizer_step requires a non-empty batch.")
 
         loss_scale = 1.0 / len(micro_slices)
         per_slot_micros: Dict[str, List[AlgorithmStepResult]] = {slot: [] for slot in self.algorithms}
         total_loss = 0.0
         has_backward = False
 
-        # Fast-path: with a single micro-batch covering the whole minibatch,
-        # skip ``resp.slice``. The slice is otherwise a no-op semantically
+        # Fast-path: with a single micro-batch covering the whole optimizer-step
+        # batch, skip ``resp.slice``. The slice is otherwise a no-op semantically
         # but materially mutates condition tensors that carry CFG-doubled
         # batch dims (e.g. ``FusedMultimodalCondition.input_ids`` is CONCAT
         # but ``rope_cache`` is SHARED — sample-level slicing breaks the
@@ -260,7 +259,7 @@ class StageTrainStack:
         else:
             clipped = 0.0
             logger.warning(
-                "StageTrainStack.train_minibatch: no slot reported backward; skipping optimizer step",
+                "StageTrainStack.train_optimizer_step: no slot reported backward; skipping optimizer step",
             )
 
         if clipped is None:
@@ -270,7 +269,7 @@ class StageTrainStack:
         else:
             grad_norm_value = float(clipped)
 
-        return StageMiniBatchResult(
+        return TrainOptimizerStepResult(
             loss=total_loss,
             grad_norm=grad_norm_value,
             lr=self._current_lr(),
@@ -284,7 +283,7 @@ class StageTrainStack:
         chain that implements ``on_rollout_end(step)``.
 
         Called by ``new_train_actor._train_resp`` after a rollout's
-        ``train_minibatch`` has finished. Used by
+        ``train_optimizer_step`` has finished. Used by
         :class:`NFTLoRAPolicy` with ``ema_update_timing == "rollout_end"``
         to advance its dual-adapter EMA exactly once per rollout cycle
         (independent of the optimizer-step count inside the rollout).
@@ -309,4 +308,4 @@ class StageTrainStack:
         return 0.0
 
 
-__all__ = ["StageMiniBatchResult", "StageTrainStack"]
+__all__ = ["TrainOptimizerStepResult", "StageTrainStack"]

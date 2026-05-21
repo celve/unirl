@@ -15,7 +15,7 @@
 #   local_batch_size = 128 / 8 = 16
 #   local_mini_batch_size = 16 / 2 = 8
 #   micro_batch_size = 1
-#   -> 8 grad-accum steps per mini-batch
+#   -> 8 grad-accum steps per optimizer step
 defaults:
   - /sync@sync: nccl_broadcast
   - override /algorithm: grpo

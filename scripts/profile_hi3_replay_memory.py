@@ -7,7 +7,7 @@ Phases (executed in order on the SAME materialized pipeline):
   B. ``pipe.diffusion.replay`` WITHOUT no_grad — same forward but PyTorch
      saves activations for the backward graph. This is what
      ``DiffusionGRPO.compute_loss_and_backward`` triggers inside
-     ``StageTrainStack.train_minibatch``.
+     ``StageTrainStack.train_optimizer_step``.
   C. ``loss.backward()`` on the sum of replay log_probs — if (B) survived
      OOM, run backward and record post-backward memory.
 

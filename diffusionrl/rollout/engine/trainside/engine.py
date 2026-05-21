@@ -91,7 +91,7 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
         transformer skips activation bookkeeping and dropout layers
         behave deterministically. Restores the prior training-mode
         flag on the policy's module before returning so a downstream
-        ``train_minibatch`` call resumes training-mode forwards.
+        ``train_optimizer_step`` call resumes training-mode forwards.
 
         Pins ``req.sigmas`` via :func:`ensure_req_sigmas` so the
         pipeline (and any replay path consuming

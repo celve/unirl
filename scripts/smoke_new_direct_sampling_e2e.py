@@ -18,7 +18,7 @@ Phases:
 7. Assertions:
    * ``sample_count`` matches ``prompts_per_rollout * samples_per_prompt``.
    * Per-group advantage z-score mean ≈ 0.
-   * Each rank's ``StageMiniBatchResult`` reports ``has_backward=True``
+   * Each rank's ``TrainOptimizerStepResult`` reports ``has_backward=True``
      and a finite loss.
 
 Run on a pod with 1 H20 GPU::
@@ -187,17 +187,19 @@ def main() -> int:
 
     print("[smoke] Phase 6: train_group.train(rollout_id=0, combined) ...")
     t0 = time.time()
-    results = train_group.train(rollout_id=0, training_resp=combined)
+    per_update_results = train_group.train(rollout_id=0, training_resp=combined)
     dt = time.time() - t0
-    print("[smoke] train done in %.1fs (num_results=%d)" % (dt, len(results)))
+    num_updates = len(per_update_results)
+    print("[smoke] train done in %.1fs (num_updates=%d)" % (dt, num_updates))
 
-    for i, r in enumerate(results):
-        assert getattr(r, "has_backward", False), f"rank {i}: has_backward False"
-        loss = float(getattr(r, "loss", math.nan))
-        grad_norm = float(getattr(r, "grad_norm", math.nan))
-        assert math.isfinite(loss), f"rank {i}: loss not finite: {loss}"
-        assert math.isfinite(grad_norm), f"rank {i}: grad_norm not finite: {grad_norm}"
-        print("[smoke]   rank=%d loss=%.6f grad_norm=%.4f" % (i, loss, grad_norm))
+    for u, per_actor_results in enumerate(per_update_results):
+        for i, r in enumerate(per_actor_results):
+            assert getattr(r, "has_backward", False), f"update {u} rank {i}: has_backward False"
+            loss = float(getattr(r, "loss", math.nan))
+            grad_norm = float(getattr(r, "grad_norm", math.nan))
+            assert math.isfinite(loss), f"update {u} rank {i}: loss not finite: {loss}"
+            assert math.isfinite(grad_norm), f"update {u} rank {i}: grad_norm not finite: {grad_norm}"
+            print("[smoke]   update=%d rank=%d loss=%.6f grad_norm=%.4f" % (u, i, loss, grad_norm))
 
     print("[smoke] ALL OK — direct-sampling on the new stack end-to-end")
     print("[smoke] Phase 7: cleanup ...")

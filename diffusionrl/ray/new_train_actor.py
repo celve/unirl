@@ -57,7 +57,7 @@ from diffusionrl.ray.mixins import TrainingWeightSyncMixin
 from diffusionrl.ray.mixins.new_rollout_pipeline import NewRolloutPipelineMixin
 from diffusionrl.reward.pipeline import RewardPipeline
 from diffusionrl.rollout.engine import chunked_engine_generate_req
-from diffusionrl.training_new import StageMiniBatchResult, StageTrainStack
+from diffusionrl.training_new import StageTrainStack, TrainOptimizerStepResult
 from diffusionrl.training_new.ema_policy import EMAPolicy
 from diffusionrl.training_new.fsdp_policy import FSDPPolicy
 from diffusionrl.training_new.policy import Policy, compose_policy, walk_source_chain
@@ -520,15 +520,20 @@ class NewTrainActor(
         return self._reward_pipeline
 
     # ------------------------------------------------------------------
-    # Train (RolloutResp in, StageMiniBatchResult out)
+    # Train (RolloutResp in, TrainOptimizerStepResult out)
     # ------------------------------------------------------------------
 
     def train(
         self,
         rollout_step: int,
         resp_or_handle: Union[ray.ObjectRef, RolloutResp],
-    ) -> StageMiniBatchResult:
-        """Execute one training step on a materialized RolloutResp."""
+    ) -> List[TrainOptimizerStepResult]:
+        """Execute training on a materialized RolloutResp.
+
+        Returns one ``TrainOptimizerStepResult`` per optimizer step (i.e.
+        ``num_updates_per_batch`` results) so the driver can log
+        per-step metrics individually.
+        """
         if isinstance(resp_or_handle, ray.ObjectRef):
             resp: RolloutResp = ray.get(resp_or_handle)
         else:
@@ -539,30 +544,28 @@ class NewTrainActor(
         self,
         rollout_step: int,
         handle: BufferHandle,
-    ) -> StageMiniBatchResult:
+    ) -> List[TrainOptimizerStepResult]:
         """Pop a RolloutResp from a remote buffer and train on it."""
         resp: RolloutResp = ray.get(handle.actor_handle.pop_buffer.remote(handle))
         return self._train_resp(rollout_step, resp)
 
-    def _train_resp(self, rollout_step: int, resp: RolloutResp) -> StageMiniBatchResult:
+    def _train_resp(self, rollout_step: int, resp: RolloutResp) -> List[TrainOptimizerStepResult]:
+        """Run ``num_updates_per_batch`` optimizer steps on one RolloutResp.
+
+        Returns a list with one result per optimizer step so the driver
+        can log per-step metrics (ratio, loss, etc.) individually.
+        """
         resp = resp.to_device(self._device)
         num_rollouts = int(self._cfg.run.num_rollouts)
         progress = max(0.0, min(1.0, float(rollout_step) / max(1, num_rollouts)))
         self._prepare_segments(resp)
         num_updates = int(self._cfg.training.plan.get("num_updates_per_batch", 1))
-        result = None
-        for _ in range(num_updates):
-            result = self.train_stack.train_minibatch(resp, training_progress=progress)
+        results = [self.train_stack.train_optimizer_step(resp, training_progress=progress) for _ in range(num_updates)]
         # Per-rollout-boundary Policy hook. Fires once per ``_train_resp``
         # call regardless of ``num_updates_per_batch`` because the
-        # multi-update loop is contained inside this method. (Previously,
-        # the loop lived on the driver side and re-entered ``_train_resp``
-        # N times per rollout, multiplying the hook frequency by N — which
-        # forced ``num_updates_per_batch=1`` for rollout-end-keyed Policies
-        # like ``NFTLoRAPolicy`` with ``ema_update_timing="rollout_end"``.
-        # That constraint is no longer needed.)
+        # multi-update loop is contained inside this method.
         self.train_stack.on_rollout_end()
-        return result
+        return results
 
     def _prepare_segments(self, resp: RolloutResp) -> None:
         """Dispatch :meth:`StageAlgorithm.prepare_segment` once per slot.

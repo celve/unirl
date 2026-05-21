@@ -1,9 +1,8 @@
 """End-to-end one-round full-pipeline smoke for the SD3 stage-driven path.
 
-Sibling of :mod:`scripts.smoke_new_train_actor_e2e` (HI3). Runs one full
-round on SD3 medium: ``SD3Pipeline.generate(req)`` → real reward via
+Runs one full round on SD3 medium: ``SD3Pipeline.generate(req)`` → real reward via
 :class:`RewardPipeline` → group-normalized advantages → one
-:meth:`StageTrainStack.train_minibatch` step over a LoRA → FSDP → EMA
+:meth:`StageTrainStack.train_optimizer_step` step over a LoRA → FSDP → EMA
 policy chain.
 
 Phases:
@@ -25,7 +24,7 @@ Phases:
 7. Score via :func:`_build_legacy_response_view` + ``reward_pipeline.score_and_attach``,
    copy rewards back onto ``resp``, compute group-normalized advantages
    inline (legacy ``GRPOAlgorithm`` is Hydra-bound; the math is 10 lines).
-8. ``train_stack.train_minibatch(resp, training_progress=0.0)``.
+8. ``train_stack.train_optimizer_step(resp, training_progress=0.0)``.
 9. Print + assert: ``has_backward``, finite ``loss``, ``grad_norm > 0``,
    ``_optimizer_step == 1``, EMA ``optimization_step`` advanced 0 → 1,
    ``resp.rewards`` finite, ``resp.advantages`` group-normalized (single
@@ -68,7 +67,7 @@ from diffusionrl.reward.pipeline import RewardPipeline
 from diffusionrl.reward.scorers.pickscore import PickScoreRewardScorer, PickScoreSpec
 from diffusionrl.reward.service import RewardService
 from diffusionrl.sde.kernels import FlowSDEStrategy
-from diffusionrl.training_new import StageMiniBatchResult, StageTrainStack
+from diffusionrl.training_new import StageTrainStack, TrainOptimizerStepResult
 from diffusionrl.training_new.ema_policy import EMAPolicy, EMAPolicyConfig
 from diffusionrl.training_new.fsdp_policy import FSDPPolicy, FSDPPolicyConfig
 from diffusionrl.training_new.lora_policy import LoRAPolicyConfig
@@ -362,16 +361,16 @@ def main() -> None:
     )
     resp.advantages = advantages
 
-    # --- One minibatch step ----------------------------------------------
+    # --- One optimizer step ----------------------------------------------
     ema_step_before = int(getattr(ema.ema, "optimization_step", 0))
 
     torch.cuda.reset_peak_memory_stats()
     t0 = time.time()
-    result: StageMiniBatchResult = train_stack.train_minibatch(resp, training_progress=0.0)
+    result: TrainOptimizerStepResult = train_stack.train_optimizer_step(resp, training_progress=0.0)
     torch.cuda.synchronize()
     train_dt = time.time() - t0
     peak_alloc_gb = torch.cuda.max_memory_allocated() / (1024**3)
-    _r(f"[sd3-smoke] train_minibatch in {train_dt:.1f}s  peak_alloc_GB={peak_alloc_gb:.2f}", rank)
+    _r(f"[sd3-smoke] train_optimizer_step in {train_dt:.1f}s  peak_alloc_GB={peak_alloc_gb:.2f}", rank)
     _r(f"[sd3-smoke]   loss={result.loss:.6f}  grad_norm={result.grad_norm:.4f}  lr={result.lr:.3e}", rank)
     _r(f"[sd3-smoke]   has_backward={result.has_backward}  per_slot={list(result.per_slot.keys())}", rank)
     _r(f"[sd3-smoke]   metrics={dict(result.metrics)}", rank)

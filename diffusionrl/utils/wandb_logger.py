@@ -531,9 +531,9 @@ def aggregate_metrics(metrics_list: List[Dict[str, Any]]) -> Dict[str, float]:
 
 
 def aggregate_stage_results(results: List[Any]) -> Dict[str, float]:
-    """Average StageMiniBatchResult metrics across the per-actor list.
+    """Average TrainOptimizerStepResult metrics across the per-actor list.
 
-    ``StageMiniBatchResult.metrics`` is already namespaced per slot
+    ``TrainOptimizerStepResult.metrics`` is already namespaced per slot
     (e.g. ``image/policy_loss``) and aggregated across micro-batches
     inside the actor via ``aggregate_numeric_metrics`` (see
     ``training_new/stack.py``). This helper:

@@ -29,6 +29,7 @@ from diffusionrl.types.rollout_resp import RolloutResp
 
 if TYPE_CHECKING:
     from diffusionrl.ray.placement import Placement
+    from diffusionrl.training_new import TrainOptimizerStepResult
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +160,7 @@ class NewTrainActorGroup(ActorGroup):
     # Data plane: train (balanced shard split)
     # ------------------------------------------------------------------
 
-    def train(self, rollout_id: int, training_resp: RolloutResp) -> List[Any]:
+    def train(self, rollout_id: int, training_resp: RolloutResp) -> "List[List[TrainOptimizerStepResult]]":
         """Slice the RolloutResp across DP ranks and dispatch one shard per actor.
 
         Per-actor shard sizes use a balanced split: every actor receives at
@@ -168,31 +169,36 @@ class NewTrainActorGroup(ActorGroup):
         ``batch_size >= num_actors`` is required so every FSDP rank gets at
         least one sample (collectives deadlock if any rank is skipped).
 
-        Returns one ``StageMiniBatchResult`` per actor (in actor-rank order).
+        Returns ``List[List[TrainOptimizerStepResult]]`` — outer list is per
+        optimizer step (``num_updates_per_batch`` entries), inner list is
+        per actor. This lets the driver log metrics per optimizer step.
         """
         n = self.num_actors
         if n == 1:
             refs = [a.train.remote(rollout_id, training_resp) for a in self._actors]
-            return ray.get(refs)
+            per_actor: List[List[Any]] = ray.get(refs)  # each actor returns List[Result]
+        else:
+            batch_size = int(training_resp.batch_size)
+            if batch_size < n:
+                raise ValueError(
+                    f"RolloutResp.batch_size ({batch_size}) is smaller than "
+                    f"num_train_actors ({n}); every train actor must receive at "
+                    "least one sample (FSDP collectives require all ranks to "
+                    "participate)."
+                )
+            base = batch_size // n
+            remainder = batch_size % n
+            refs: List[ray.ObjectRef] = []
+            cursor = 0
+            for i, actor in enumerate(self._actors):
+                shard_size = base + (1 if i < remainder else 0)
+                refs.append(actor.train.remote(rollout_id, training_resp.slice(cursor, cursor + shard_size)))
+                cursor += shard_size
+            per_actor = ray.get(refs)  # List[List[Result]], per-actor × per-update
 
-        batch_size = int(training_resp.batch_size)
-        if batch_size < n:
-            raise ValueError(
-                f"RolloutResp.batch_size ({batch_size}) is smaller than "
-                f"num_train_actors ({n}); every train actor must receive at "
-                "least one sample (FSDP collectives require all ranks to "
-                "participate)."
-            )
-
-        base = batch_size // n
-        remainder = batch_size % n
-        refs: List[ray.ObjectRef] = []
-        cursor = 0
-        for i, actor in enumerate(self._actors):
-            shard_size = base + (1 if i < remainder else 0)
-            refs.append(actor.train.remote(rollout_id, training_resp.slice(cursor, cursor + shard_size)))
-            cursor += shard_size
-        return ray.get(refs)
+        # Transpose: per-actor × per-update → per-update × per-actor
+        num_updates = len(per_actor[0]) if per_actor else 0
+        return [[per_actor[a][u] for a in range(n)] for u in range(num_updates)]
 
     # ------------------------------------------------------------------
     # Control plane

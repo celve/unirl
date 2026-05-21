@@ -99,6 +99,10 @@ class DiffusionNFTConfig:
 class DiffusionNFT(StageAlgorithm):
     """Forward-process NFT over a diffusion ``LatentSegment``.
 
+    NFT is off-policy: the rollout uses EMA-smoothed weights to produce
+    high-quality trajectories, and the dual-adapter loss trains against
+    them (``requires_ema_rollout = True``).
+
     Args:
         stage: A :class:`DiffusionStage` exposing
             :meth:`predict_noise_at_step(conditions, *, sample, sigma, params)`.
@@ -118,6 +122,8 @@ class DiffusionNFT(StageAlgorithm):
         conditions_cls: Optional stage-typed conditions container with
             a ``from_dict(Mapping[str, Condition])`` classmethod.
     """
+
+    requires_ema_rollout: bool = True
 
     def __init__(
         self,

@@ -15,7 +15,7 @@
 #   local_batch_size = 128 / 16 = 8
 #   local_mini_batch_size = 8 / 2 = 4
 #   micro_batch_size = 1
-#   -> 4 grad-accum steps per mini-batch
+#   -> 4 grad-accum steps per optimizer step
 defaults:
   - /sync@sync: tensor_payload
   - override /algorithm: grpo

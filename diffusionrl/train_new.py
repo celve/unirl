@@ -79,6 +79,35 @@ def _run_cross_component_validators_new(cfg: DictConfig) -> None:
     validate_offload_contract(cfg)
 
 
+def _should_use_ema_rollout(cfg: DictConfig) -> bool:
+    """Check whether any configured algorithm requires EMA weights during rollout.
+
+    Resolves each ``cfg.algorithms.<slot>._target_`` to its class and reads
+    the ``requires_ema_rollout`` class attribute. Returns True if ANY
+    algorithm declares it (off-policy / NFT); False otherwise (on-policy / GRPO).
+    """
+    for slot, alg_node in cfg.algorithms.items():
+        target = str(alg_node.get("_target_") or "")
+        if not target:
+            continue
+        try:
+            alg_cls = hydra.utils.get_class(target)
+        except Exception as exc:
+            logger.warning(
+                "EMA rollout check: failed to resolve _target_=%r for slot %r: %s. "
+                "Assuming on-policy (no EMA rollout).",
+                target,
+                slot,
+                exc,
+            )
+            continue
+        if getattr(alg_cls, "requires_ema_rollout", False):
+            logger.info("EMA rollout policy: enabled (off-policy algorithm in slot %r)", slot)
+            return True
+    logger.info("EMA rollout policy: disabled (on-policy)")
+    return False
+
+
 def train_new(cfg: DictConfig) -> None:
     """Synchronous training entrypoint for the new-design stack."""
     debug_mode = str(cfg.debug.get("mode") or "none").strip().lower()
@@ -274,6 +303,8 @@ def train_new(cfg: DictConfig) -> None:
         # work will thread checkpoint-saved values through here.
         global_optimizer_step = 0
 
+        _use_ema_rollout = _should_use_ema_rollout(cfg) if direct_sampling else False
+
         _rollout_is_sleeping = False
 
         # 5. Main loop
@@ -295,11 +326,17 @@ def train_new(cfg: DictConfig) -> None:
                 logger.info("[LOOP r=%d] Rollout awake.", rollout_id)
 
             # --- Rollout: 4 direct phase calls (skip convert_training_data) ---
-            # In direct mode, swap to EMA weights for the rollout so the
-            # training Policy isn't sampling against itself. In separate
-            # mode, the rollout actor has its own state; no swap needed.
+            # EMA rollout gating: on-policy algorithms (GRPO) MUST sample
+            # with base weights so the importance ratio equals 1 on the
+            # first training step. Off-policy / forward-process algorithms
+            # (NFT) intentionally use EMA-smoothed weights for higher-
+            # quality trajectories. The flag ``_use_ema_rollout`` is
+            # resolved once before the loop from the configured algorithms'
+            # ``requires_ema_rollout`` class attribute.
             with timings.measure("rollout"):
-                ema_ctx = train_group.use_eval_ema() if direct_sampling else contextlib.nullcontext()
+                ema_ctx = (
+                    train_group.use_eval_ema() if (direct_sampling and _use_ema_rollout) else contextlib.nullcontext()
+                )
                 with ema_ctx:
                     prompts = rollout_pipeline.load_prompts(
                         data_source=data_source,
@@ -353,9 +390,9 @@ def train_new(cfg: DictConfig) -> None:
                 if cfg.training.execution.offload_train:
                     logger.info("[LOOP r=%d] Onloading train...", rollout_id)
                     train_group.onload()
-                update_results: list = []
-                update_results.append(train_group.train(rollout_id, rollout_resp))
-                results = update_results[-1] if update_results else []
+                # per_update_results: List[List[TrainOptimizerStepResult]]
+                #   outer = per optimizer step, inner = per actor
+                per_update_results = train_group.train(rollout_id, rollout_resp)
 
             # --- Sync, then offload ---
             #
@@ -404,10 +441,12 @@ def train_new(cfg: DictConfig) -> None:
                 train_group.clear_memory()
 
             # --- Metric aggregation + console scalar summary ---
-            n = max(1, len(results))
-            mean_loss = float(sum(r.loss for r in results) / n)
-            mean_grad = float(sum(r.grad_norm for r in results) / n)
-            mean_lr = float(sum(r.lr for r in results) / n) if results else 0.0
+            # Flatten all per-update × per-actor results for the rollout-level summary.
+            all_results = [r for update in per_update_results for r in update]
+            n = max(1, len(all_results))
+            mean_loss = float(sum(r.loss for r in all_results) / n)
+            mean_grad = float(sum(r.grad_norm for r in all_results) / n)
+            mean_lr = float(sum(r.lr for r in all_results) / n) if all_results else 0.0
             reward_mean = float(rollout_resp.rewards.mean().item()) if rollout_resp.rewards is not None else 0.0
             rollout_s = timings.get("rollout")
             train_s = timings.get("train")
@@ -431,23 +470,23 @@ def train_new(cfg: DictConfig) -> None:
 
             # --- W&B logging (no-op when wandb_logger is None) ---
             if wandb_logger is not None:
-                training_metrics = aggregate_stage_results(results)
                 rollout_metrics = compute_rollout_resp_metrics(resp=rollout_resp)
 
-                # rollout/ panel — training scalars + ratio/clip/KL + reward stats.
+                # rollout/ panel — averaged training scalars + reward stats.
+                rollout_training_metrics = aggregate_stage_results(all_results)
                 wandb_logger.log_rollout(
                     rollout_id,
-                    {**training_metrics, **rollout_metrics},
+                    {**rollout_training_metrics, **rollout_metrics},
                 )
 
-                # train/ panel — one synthetic optimizer-step entry per rollout.
-                # The new path runs at most 1 optimizer step per train_minibatch
-                # call; collapse micro-step detail. Increment the global counter
-                # by the number of actors that actually backwarded.
-                step_count = sum(int(bool(r.has_backward)) for r in results)
-                if step_count > 0:
-                    global_optimizer_step += step_count
-                    wandb_logger.log_step(global_optimizer_step, training_metrics)
+                # train/ panel — one entry PER optimizer step so ratio/loss
+                # curves have full num_updates_per_batch granularity.
+                for per_actor_results in per_update_results:
+                    step_count = sum(int(bool(r.has_backward)) for r in per_actor_results)
+                    if step_count > 0:
+                        global_optimizer_step += 1
+                        step_metrics = aggregate_stage_results(per_actor_results)
+                        wandb_logger.log_step(global_optimizer_step, step_metrics)
 
                 # perf/ panel — driver-side timings + actor-reported
                 # reward_compute_s (which the rollout-phase guard can't see).

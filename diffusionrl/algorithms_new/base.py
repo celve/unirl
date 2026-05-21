@@ -43,7 +43,18 @@ class StageAlgorithm(ABC):
     :class:`diffusionrl.models_new.types.ar.ARStage` and dispatches all
     model forward / SDE / CFG work into ``stage.replay(...)``. It does not
     know its slot key in the dispatcher; slot routing lives on the train stack.
+
+    Class attributes:
+        requires_ema_rollout: Whether the algorithm requires EMA weights
+            during rollout sampling. On-policy algorithms (GRPO) MUST
+            sample with the same weights used in training replay so the
+            importance ratio equals 1 on the first step (default False).
+            Off-policy / forward-process algorithms (NFT) override to
+            True so the rollout uses EMA-smoothed weights for higher-
+            quality trajectories.
     """
+
+    requires_ema_rollout: bool = False
 
     def prepare_segment(
         self,

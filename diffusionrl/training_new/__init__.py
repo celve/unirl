@@ -8,9 +8,9 @@ LoRA / EMA composed via :func:`compose_policy`).
 
 from __future__ import annotations
 
-from .stack import StageMiniBatchResult, StageTrainStack
+from .stack import StageTrainStack, TrainOptimizerStepResult
 
 __all__ = [
-    "StageMiniBatchResult",
     "StageTrainStack",
+    "TrainOptimizerStepResult",
 ]

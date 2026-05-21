@@ -16,7 +16,7 @@
 #   num_updates_per_batch = 2
 #   local_mini_batch_size = 48 / 2 = 24 (identical to 1x8 per-actor!)
 #   micro_batch_size = 1 (H20 memory constraint)
-#   -> 24 grad-accum steps per mini-batch (same as 1x8 baseline)
+#   -> 24 grad-accum steps per optimizer step (same as 1x8 baseline)
 #
 # === Layout (4x8 H20 96GB, colocate) ===
 #   - 32 vllm-omni rollout actors (TP=1, 1 GPU each, DP rollout)
@@ -156,7 +156,7 @@ training:
     # local = 1536 / 32 = 48 (identical to 1x8 per-actor!)
     # local_mini = 48 / 2 = 24 (identical to 1x8 per-actor!)
     # micro = 1 (H20 memory constraint)
-    # -> 24 grad-accum steps per mini-batch (same as 1x8)
+    # -> 24 grad-accum steps per optimizer step (same as 1x8)
     micro_batch_size: 1
     num_updates_per_batch: 2
     local_mini_batch_size: 24
