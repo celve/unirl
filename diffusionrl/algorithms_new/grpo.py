@@ -119,12 +119,24 @@ class DiffusionGRPO(StageAlgorithm):
         self.clip_schedule = str(clip_schedule)
         self.conditions_cls = conditions_cls
 
-    def replay_old_log_probs(self, conditions: Mapping[str, "Condition"], segment: "LatentSegment") -> None:
-        """Pre-compute old_logp for replay mode and store on segment.
+    def prepare_segment(
+        self,
+        *,
+        conditions: Mapping[str, "Condition"],
+        segment: "LatentSegment",
+    ) -> None:
+        """Lazy-initialize ``segment.sde_logp`` in SGLang replay-mode rollouts.
 
-        No-op if segment.sde_logp is already populated (native mode).
-        Called once before multi-update training so old_logp is frozen at
-        the pre-update weights.
+        SGLang ``logprob_source='replay'`` emits the trajectory but no
+        per-step log-probs, leaving ``segment.sde_logp = None``. The trainer
+        fills it here via a ``torch.no_grad`` forward through
+        :meth:`DiffusionStage.replay`, producing log-probs at the
+        **pre-update** policy weights — frozen for all N
+        ``num_updates_per_batch`` micro-updates that follow.
+
+        No-op if ``segment.sde_logp`` is already populated (native mode,
+        or a previous ``prepare_segment`` call on the same segment) or if
+        the segment has no SDE-gated steps to train on.
         """
         if segment.sde_logp is not None or segment.sde_indices is None:
             return

@@ -12,6 +12,13 @@ each slot corresponds to. No NaN sentinels: every slot is a valid SDE
 log-prob; non-SDE steps simply aren't represented. This mirrors the
 ``Trajectory.index_map`` pattern (``trajectory_store.py``) — replay code
 reads ``sde_logp[:, s]`` and uses ``sde_indices[s]`` for the step lookup.
+
+``sde_logp`` may be populated either at rollout time by a native log-prob
+source (SGLang ``logprob_source='native'``, vllm_omni) or lazily by the
+trainer via :meth:`StageAlgorithm.prepare_segment` (SGLang
+``logprob_source='replay'`` mode, where the rollout emits the trajectory
+but no log-probs). Both paths produce the same ``[N_segs, S]`` shape with
+``S == len(sde_indices)``.
 """
 
 from __future__ import annotations

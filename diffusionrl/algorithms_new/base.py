@@ -45,6 +45,39 @@ class StageAlgorithm(ABC):
     know its slot key in the dispatcher; slot routing lives on the train stack.
     """
 
+    def prepare_segment(
+        self,
+        *,
+        conditions: Mapping[str, "Condition"],
+        segment: "Segment",
+    ) -> None:
+        """Optional pre-step hook called once before the multi-update loop.
+
+        Default no-op. Algorithms whose log-prob source is rollout-native
+        (e.g. NFT, SFT, native-logprob GRPO) can ignore the hook entirely.
+
+        Algorithms that need to lazily populate segment fields before
+        training override this. The canonical use case is
+        :class:`DiffusionGRPO` running in SGLang ``logprob_source='replay'``
+        mode: SGLang emits the trajectory but not the per-step log-probs,
+        so the trainer fills ``segment.sde_logp`` here via a ``torch.no_grad``
+        ``stage.replay``. Because this hook fires ONCE per ``RolloutResp``
+        — before the ``num_updates_per_batch`` loop in
+        :meth:`diffusionrl.ray.new_train_actor.NewTrainActor._train_resp`
+        — the populated tensor is frozen at pre-update weights across all
+        N updates, matching the on-policy ratio semantics of PPO-style
+        algorithms.
+
+        Args:
+            conditions: ``RolloutResp.conditions`` — stage-typed conditions
+                are reconstructed inside the algorithm if needed.
+            segment: ``RolloutResp.rollout_traces[slot]`` for this algorithm's
+                slot. Implementations may mutate field defaults that were
+                left ``None`` by the rollout (lazy initialization); they
+                must NOT mutate fields that the rollout already populated.
+        """
+        return None
+
     @abstractmethod
     def compute_loss_and_backward(
         self,
