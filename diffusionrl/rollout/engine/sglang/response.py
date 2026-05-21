@@ -157,15 +157,14 @@ def _build_image_segment(
             trajectories_tensor = trajectories_tensor[:, keep_cols]
             indices_t = torch.tensor(keep_cols, dtype=torch.long)
 
-    # ``sde_logp`` + ``sde_indices`` on the segment travel together: when
-    # ``use_native_logprob`` is on, both come from SGLang's emitted
-    # ``trajectory_log_probs`` so trainer-side replay
-    # (:meth:`SD3DiffusionStage.replay`) can look up which transitions to
-    # recompute. Replay mode (``use_native_logprob=False``) leaves both
-    # ``None`` — that segment isn't intended for training-side replay, only
-    # for inference/eval. Training rollouts must use native log-probs.
+    # sde_indices: always populated (trainer needs to know which steps to replay).
+    # sde_logp: only populated in native mode; replay mode computes it on trainer side.
+    sde_indices_t: Optional[torch.Tensor] = (
+        torch.tensor(list(sde_indices), dtype=torch.long)
+        if sde_indices is not None
+        else torch.arange(num_steps, dtype=torch.long)
+    )
     sde_logp: Optional[torch.Tensor] = None
-    sde_indices_t: Optional[torch.Tensor] = None
     if use_native_logprob:
         per_result_log_probs: List[Optional[torch.Tensor]] = [
             result.trajectory_log_probs.detach().cpu()
@@ -204,11 +203,6 @@ def _build_image_segment(
             f"source rather than fall back to replay silently.",
         )
         sde_logp = log_prob_tensor
-        sde_indices_t = (
-            torch.tensor(list(sde_indices), dtype=torch.long)
-            if sde_indices is not None
-            else torch.arange(num_steps, dtype=torch.long)
-        )
 
     batch_size = int(trajectories_tensor.shape[0])
     return make_image_segment(

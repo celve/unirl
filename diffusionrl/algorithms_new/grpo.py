@@ -119,6 +119,23 @@ class DiffusionGRPO(StageAlgorithm):
         self.clip_schedule = str(clip_schedule)
         self.conditions_cls = conditions_cls
 
+    def replay_old_log_probs(self, conditions: Mapping[str, "Condition"], segment: "LatentSegment") -> None:
+        """Pre-compute old_logp for replay mode and store on segment.
+
+        No-op if segment.sde_logp is already populated (native mode).
+        Called once before multi-update training so old_logp is frozen at
+        the pre-update weights.
+        """
+        if segment.sde_logp is not None or segment.sde_indices is None:
+            return
+        target_steps = self._resolve_target_steps(segment)
+        if not target_steps:
+            return
+        typed_conds = _typed_conditions(conditions, self.conditions_cls)
+        with torch.no_grad():
+            result = self.stage.replay(typed_conds, segment=segment, params=self.params, step_indices=target_steps)
+        segment.sde_logp = result.log_probs.detach().cpu()
+
     def compute_loss_and_backward(
         self,
         *,

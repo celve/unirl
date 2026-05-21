@@ -354,8 +354,7 @@ def train_new(cfg: DictConfig) -> None:
                     logger.info("[LOOP r=%d] Onloading train...", rollout_id)
                     train_group.onload()
                 update_results: list = []
-                for _ in range(num_updates_per_batch):
-                    update_results.append(train_group.train(rollout_id, rollout_resp))
+                update_results.append(train_group.train(rollout_id, rollout_resp))
                 results = update_results[-1] if update_results else []
 
             # --- Sync, then offload ---

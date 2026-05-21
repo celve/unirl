@@ -548,7 +548,11 @@ class NewTrainActor(
         resp = resp.to_device(self._device)
         num_rollouts = int(self._cfg.run.num_rollouts)
         progress = max(0.0, min(1.0, float(rollout_step) / max(1, num_rollouts)))
-        result = self.train_stack.train_minibatch(resp, training_progress=progress)
+        self._maybe_replay_old_log_probs(resp)
+        num_updates = int(self._cfg.training.plan.get("num_updates_per_batch", 1))
+        result = None
+        for _ in range(num_updates):
+            result = self.train_stack.train_minibatch(resp, training_progress=progress)
         # Per-rollout-boundary Policy hook. Fires once per ``train()`` RPC
         # call. Production NFT runs with ``num_updates_per_batch=1`` so
         # this coincides with the rollout boundary; recipes that bump
@@ -557,6 +561,13 @@ class NewTrainActor(
         # ema_update_timing="rollout_end") must keep num_updates_per_batch=1.
         self.train_stack.on_rollout_end()
         return result
+
+    def _maybe_replay_old_log_probs(self, resp: RolloutResp) -> None:
+        """Fill segment.sde_logp via replay if missing (replay mode support)."""
+        for slot, alg in self.train_stack.algorithms.items():
+            seg = resp.rollout_traces.get(slot)
+            if seg is not None and hasattr(alg, "replay_old_log_probs"):
+                alg.replay_old_log_probs(resp.conditions, seg)
 
     # ------------------------------------------------------------------
     # Eval-EMA swap (RPC-style; uses the explicit EMAPolicy lifecycle
