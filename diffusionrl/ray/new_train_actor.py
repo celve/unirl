@@ -548,26 +548,38 @@ class NewTrainActor(
         resp = resp.to_device(self._device)
         num_rollouts = int(self._cfg.run.num_rollouts)
         progress = max(0.0, min(1.0, float(rollout_step) / max(1, num_rollouts)))
-        self._maybe_replay_old_log_probs(resp)
+        self._prepare_segments(resp)
         num_updates = int(self._cfg.training.plan.get("num_updates_per_batch", 1))
         result = None
         for _ in range(num_updates):
             result = self.train_stack.train_minibatch(resp, training_progress=progress)
-        # Per-rollout-boundary Policy hook. Fires once per ``train()`` RPC
-        # call. Production NFT runs with ``num_updates_per_batch=1`` so
-        # this coincides with the rollout boundary; recipes that bump
-        # that knob multiply the hook frequency by the same factor, so
-        # rollout-end-keyed Policies (NFTLoRAPolicy with
-        # ema_update_timing="rollout_end") must keep num_updates_per_batch=1.
+        # Per-rollout-boundary Policy hook. Fires once per ``_train_resp``
+        # call regardless of ``num_updates_per_batch`` because the
+        # multi-update loop is contained inside this method. (Previously,
+        # the loop lived on the driver side and re-entered ``_train_resp``
+        # N times per rollout, multiplying the hook frequency by N — which
+        # forced ``num_updates_per_batch=1`` for rollout-end-keyed Policies
+        # like ``NFTLoRAPolicy`` with ``ema_update_timing="rollout_end"``.
+        # That constraint is no longer needed.)
         self.train_stack.on_rollout_end()
         return result
 
-    def _maybe_replay_old_log_probs(self, resp: RolloutResp) -> None:
-        """Fill segment.sde_logp via replay if missing (replay mode support)."""
+    def _prepare_segments(self, resp: RolloutResp) -> None:
+        """Dispatch :meth:`StageAlgorithm.prepare_segment` once per slot.
+
+        Runs before the ``num_updates_per_batch`` loop so any lazy field
+        initialization (e.g. :class:`DiffusionGRPO` populating
+        ``segment.sde_logp`` via no-grad replay in SGLang replay mode) is
+        frozen at pre-update weights across all N micro-updates.
+
+        The base class default is a no-op, so algorithms whose log-prob
+        source is rollout-native (NFT, SFT, native-logprob GRPO) pay
+        nothing here.
+        """
         for slot, alg in self.train_stack.algorithms.items():
             seg = resp.rollout_traces.get(slot)
-            if seg is not None and hasattr(alg, "replay_old_log_probs"):
-                alg.replay_old_log_probs(resp.conditions, seg)
+            if seg is not None:
+                alg.prepare_segment(conditions=resp.conditions, segment=seg)
 
     # ------------------------------------------------------------------
     # Eval-EMA swap (RPC-style; uses the explicit EMAPolicy lifecycle
