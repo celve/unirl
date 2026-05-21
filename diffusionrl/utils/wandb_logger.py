@@ -536,7 +536,7 @@ def aggregate_stage_results(results: List[Any]) -> Dict[str, float]:
     ``TrainOptimizerStepResult.metrics`` is already namespaced per slot
     (e.g. ``image/policy_loss``) and aggregated across micro-batches
     inside the actor via ``aggregate_numeric_metrics`` (see
-    ``training_new/stack.py``). This helper:
+    ``training/stack.py``). This helper:
 
     1. Stamps the scalar fields ``loss / grad_norm / lr / has_backward``
        onto each per-actor dict.

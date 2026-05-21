@@ -1,25 +1,27 @@
-# DiffusionRL Hydra entry — registered-leaf composition.
+# DiffusionRL Hydra entry.
 #
 # Every section is backed by a @register_config-decorated dataclass and
 # composed via the defaults list below. No top-level scalars or untyped
 # blocks live on the root cfg.
+#
+# The ``@training.<X>`` package override tells Hydra: pick from group
+# ``training/<X>``, but place at package ``training.<X>``.
 
 defaults:
   - run: default
   - algorithm: grpo
-  - model: flux
+  - model: sd3
   - reward: default
   - sampling: default
   - sampling/sde_strategy: flow
-  - rollout/engine: fsdp
+  - rollout/engine: trainside
   - rollout/plan: default
   - placement: default
-  - training/backend: fsdp
-  - training/optimizer: default
-  - training/lr_scheduler: default
-  - training/execution: default
-  - training/topology: default
-  - training/plan: default
+  - training/optimizer@training.optimizer: default
+  - training/lr_scheduler@training.lr_scheduler: default
+  - training/execution@training.execution: default
+  - training/topology@training.topology: default
+  - training/plan@training.plan: default
   - logging: default
   - debug: default
   - evaluation: default

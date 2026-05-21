@@ -21,7 +21,7 @@ grep -c 'v44e' $VLLM_SITE/lora/utils.py                                # expect 
 
 # 3. Launch training (from launcher pod)
 cd $DIFFRL
-python -m diffusionrl.train_new +experiment=hi3_think_recaption_colocate
+python -m diffusionrl.train +experiment=hi3_think_recaption_colocate
 ```
 
 Key config knobs (override via CLI):
@@ -56,7 +56,7 @@ A clean `git apply` is more maintainable until vllm-omni upstreams this.
 
 ## How to apply
 
-On each pod (launcher AND every worker) that runs `train_new`:
+On each pod (launcher AND every worker) that runs `train`:
 
 ```bash
 PATCHES=/apdcephfs_fsgm3/share_305110755/hunyuan/gxhe/project/diffusionrl-main-unified-base-hi3-instruct/diffusionrl/patches

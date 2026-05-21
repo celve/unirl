@@ -2,8 +2,8 @@
 
 Empty dataclass — the engine's only runtime deps (``pipeline``,
 ``policy``) are Python handles owned by the train actor, not Hydra
-leaves. ``NewTrainActor`` injects them via ``build(cfg.rollout.engine,
-pipeline=..., policy=...)`` the same way ``NewRolloutActor`` injects
+leaves. ``TrainActor`` injects them via ``build(cfg.rollout.engine,
+pipeline=..., policy=...)`` the same way ``RolloutActor`` injects
 ``device`` / ``strategy`` / ``rank`` / ``model_config`` into
 ``VLLMOmniRolloutEngine`` at build time.
 

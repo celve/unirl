@@ -81,6 +81,9 @@ quote-style = "double"
 testpaths = ["tests"]
 norecursedirs = ["_dev"]
 pythonpath = ["."]
+# importlib mode avoids stdlib shadowing when subdirs use names like ``types``
+# that collide with Python's stdlib during diffusionrl.types submodule resolution.
+addopts = "--import-mode=importlib"
 markers = [
   "e2e: heavy end-to-end tests that are skipped unless --run-e2e is provided",
   "gpu: tests that require GPU resources",

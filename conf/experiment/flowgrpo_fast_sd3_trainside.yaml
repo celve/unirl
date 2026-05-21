@@ -1,8 +1,8 @@
 # @package _global_
-# FlowGRPO-Fast SD3 recipe — direct-sampling on the NEW Policy stack.
+# FlowGRPO-Fast SD3 recipe — direct-sampling on the Policy stack.
 #
 # Mirror of conf/experiment/flowgrpo_fast_sd3.yaml (legacy fsdp engine)
-# mapped onto the new-stack shape: ``rollout/engine: trainside``,
+# mapped onto the configured shape: ``rollout/engine: trainside``,
 # ``cfg.training.policies: [LoRA, FSDP, EMA]``, slot-keyed
 # ``cfg.algorithms.image: DiffusionGRPO``.
 #
@@ -13,10 +13,10 @@
 #   micro_batch_size   = 8                                 (12 micros per update)
 #
 # Launch via:
-#   python -m diffusionrl.train_new +experiment=flowgrpo_fast_sd3_new
+#   python -m diffusionrl.train +experiment=flowgrpo_fast_sd3
 defaults:
   - override /algorithm: grpo
-  - override /model: sd3_v2
+  - override /model: sd3
   - override /rollout/engine: trainside
   - override /sampling/sde_strategy: flow
   - _self_
@@ -86,42 +86,42 @@ placement:
   strategy: PACK
 
 # ----------------------------------------------------------------------
-# New-stack training surface
+# Training surface
 # ----------------------------------------------------------------------
 algorithms:
   # Slot ``image`` matches RolloutResp.rollout_traces["image"] on SD3.
   # ``stage_attr: diffusion`` points the algorithm at the right stage on
   # SD3Pipeline (whose attribute name differs from the slot name).
   image:
-    _target_: diffusionrl.algorithms_new.grpo.DiffusionGRPO
+    _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
     stage_attr: diffusion
     clip_range: 1.0e-4
     clip_schedule: constant
-    conditions_cls: diffusionrl.models_new.sd3.conditions.SD3Conditions
+    conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
     params:
       # ``guidance_scale`` / ``eta`` interpolate from sampling so replay
       # (which reads both) tracks any CLI override on the rollout side.
-      _target_: diffusionrl.models_new.sd3.diffusion.SD3DiffusionParams
+      _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
       num_inference_steps: 10
       guidance_scale: ${sampling.guidance_scale}
       height: 512
       width: 512
       seed: 42
       eta: ${sampling.sde_config.eta}
-      # sde_indices: null — resolved per-rollout by NewRolloutPipeline.
+      # sde_indices: null — resolved per-rollout by RolloutPipeline.
       # plan_requests from algorithm.scheduler.{timestep_fraction,
       # num_sde_steps} and stuffed into RolloutReq.stage_params.
 
 training:
   policy_source: diffusion
   policies:
-    - _target_: diffusionrl.training_new.lora_policy.LoRAPolicy
+    - _target_: diffusionrl.training.lora_policy.LoRAPolicy
       rank: 32
       alpha: 64
       dropout: 0.0
       # Canonical SD3 LoRA targets — mirror diffusionrl/models/sd3.py
       # default_lora_target_modules(). validate_lora_target_modules only
-      # propagates to cfg.model.lora_target_modules, not into the new-stack
+      # propagates to cfg.model.lora_target_modules, not into the training
       # policy chain, so we set them explicitly here.
       target_modules:
         - attn.add_k_proj
@@ -132,14 +132,14 @@ training:
         - attn.to_out.0
         - attn.to_q
         - attn.to_v
-    - _target_: diffusionrl.training_new.fsdp_policy.FSDPPolicy
+    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
       cpu_offload: false
       param_dtype: bf16
       mixed_precision: true
       fsdp_mode: full
       reshard_after_forward: true
       activation_checkpointing: false
-    - _target_: diffusionrl.training_new.ema_policy.EMAPolicy
+    - _target_: diffusionrl.training.ema_policy.EMAPolicy
       decay: 0.99
       update_step_interval: 2
   materialize:

@@ -114,7 +114,7 @@ class AllSDEScheduler(TimestepScheduler):
     def get_sde_indices(self, step: Optional[int] = None) -> Set[int]:
         # ``num_sde_steps=0`` is the forward-process / NFT path: no step runs
         # SDE, no log_prob is captured. Rollout pipeline reads ``None`` /
-        # empty set the same way (see ``rollout/new_pipeline.py:725-746``).
+        # empty set the same way (see ``rollout/pipeline.py:725-746``).
         if self.num_sde_steps == 0:
             return set()
         pool = list(range(self._effective_start, self._effective_end))

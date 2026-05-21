@@ -326,9 +326,9 @@ class BucketedIPCReceiveMixin:
     ) -> dict:
         """Return ``{name: short_sha256_hex}`` for the worker's loaded model.
 
-        Used by ``scripts/smoke_weight_sync_e2e.py`` to assert that a given
-        weight-sync transport actually mutated worker-side parameters. Cheap
-        when ``names`` is provided (skips the rest); expensive when ``None``.
+        Used to assert that a given weight-sync transport actually mutated
+        worker-side parameters. Cheap when ``names`` is provided (skips the
+        rest); expensive when ``None``.
 
         Pulls parameters from ``self.model_runner.pipeline`` (DiT) or
         ``self.model_runner.model`` (AR) depending on which attribute exists.

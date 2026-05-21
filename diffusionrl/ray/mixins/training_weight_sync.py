@@ -79,7 +79,7 @@ class TrainingWeightSyncMixin:
     def _resolve_peft_config_obj(self, adapter_name: str = "default") -> Any:
         """Walk the model wrap layers and return the per-adapter PEFT config.
 
-        Mirrors ``_detect_lora_on_model`` in ``ray/new_train_actor.py``: PEFT
+        Mirrors ``_detect_lora_on_model`` in ``ray/train_actor.py``: PEFT
         installs ``peft_config`` directly on the model, but FSDP / PEFT
         wrappers sometimes hide it under ``.module`` / ``.base_model``.
         Returns ``None`` if not found (caller decides whether that's fatal).

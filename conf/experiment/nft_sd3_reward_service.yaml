@@ -6,11 +6,8 @@
 # to compute hpsv2, pickscore, unified_reward, imagereward, and hpsv3 in
 # one round trip. This frees all local GPUs for training and rollout.
 #
-# Used by:
-#   reproduce_scripts/train_nft_sd3_reward_service_multinode.sh
-#
 # Override the service URL via env:
-#   REWARD_SERVICE_URL=http://10.0.0.5:8080 bash reproduce_scripts/...
+#   REWARD_SERVICE_URL=http://10.0.0.5:8080 python -m diffusionrl.train +experiment=nft_sd3_reward_service
 defaults:
   - nft_sd3
   - _self_

@@ -1,6 +1,6 @@
 """In-process rollout engine adapter for direct-sampling mode.
 
-Exposes a materialized ``models_new`` ``Pipeline`` as a
+Exposes a materialized ``models`` ``Pipeline`` as a
 :class:`diffusionrl.rollout.engine.base.BaseRolloutEngine`. Used when the
 training Policy itself is the sampler (direct sampling, on-policy RL) —
 the rollout runs in the same Ray actor / Python process / GPU as

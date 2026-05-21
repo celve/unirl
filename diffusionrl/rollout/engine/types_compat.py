@@ -1,11 +1,11 @@
-"""Translation between legacy ``RolloutRequest``/``RolloutSamples`` and the
-new ``RolloutReq``/``RolloutResp`` containers.
+"""Translation between legacy ``RolloutRequest``/``RolloutSamples`` and
+``RolloutReq``/``RolloutResp`` containers.
 
-The actor (``diffusionrl.ray.rollout_actor.RolloutActor``) and the rollout
-pipeline mixin still speak the legacy types. New-ABC engines speak only the
-new types. These helpers bridge the gap so the actor can be migrated
-gradually: the actor calls ``request_to_req`` before delegating to a new
-engine and ``resp_to_samples`` after.
+The reward pipeline still speaks the legacy ``RolloutResponse``/``RolloutSamples``
+types. These helpers bridge engines that speak ``RolloutReq``/``RolloutResp``
+end-to-end into the reward path: the actor calls ``request_to_req`` before
+delegating to the engine and ``resp_to_samples`` after to feed the reward
+pipeline.
 
 Design notes:
 
@@ -189,7 +189,7 @@ def resp_to_samples(
     # and let any caller that tries per-step lookups raise loudly. The
     # only live consumer of this bridge today is the reward pipeline,
     # which does not call ``get_position_for_step``; sparse-SDE per-step
-    # lookups live on the new path (``stage.replay`` reads
+    # lookups live in this module (``stage.replay`` reads
     # ``segment.sigmas`` directly, bypasses this bridge entirely).
     if seg.sigmas is not None:
         timesteps = seg.sigmas

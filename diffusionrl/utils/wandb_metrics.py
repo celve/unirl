@@ -179,7 +179,7 @@ def compute_rollout_resp_metrics(*, resp: Any) -> Dict[str, float]:
     """Build rollout metrics directly from a :class:`RolloutResp`.
 
     Mirrors :func:`compute_rollout_batch_metrics` but consumes the
-    new-design path's ``RolloutResp`` instead of a ``TrainingBatch``
+    ``RolloutResp`` instead of a ``TrainingBatch``
     (or list thereof). Emits the same wandb key shape under the
     ``rollout/`` prefix:
 

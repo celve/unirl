@@ -110,7 +110,7 @@ HUGGINGFACE_HUB_TOKEN="${HUGGINGFACE_HUB_TOKEN:-${HF_TOKEN}}"
 WANDB_ENTITY="${WANDB_ENTITY:-qianqiu95-personal}"
 WANDB_PROJECT_NAME="${WANDB_PROJECT_NAME:-train_grpo_sd3_multinode}"
 WEIGHT_SYNC_DIR="${WEIGHT_SYNC_DIR:-/apdcephfs_nj10/share_301739632/qianqiu/hy-exploration/diffusionrl_weight_sync/flowgrpo_fast_sd3_multinode}"
-TRAIN_SCRIPT="${TRAIN_SCRIPT:-train_grpo_sd3_multinode.sh}"
+TRAIN_SCRIPT="${TRAIN_SCRIPT:-run_sd3_colocate_4x8_multinode.sh}"
 
 HEAD_PORT="${HEAD_PORT:-6379}"
 # ============================================================
@@ -203,7 +203,7 @@ if [ ${NODE_COUNT} -gt 1 ]; then
              TRAINING_GPUS_PER_NODE=${RANK_PER_NODE} \
              TRAINING_FORWARD_BATCH=${TRAINING_FORWARD_BATCH:-12} \
              NUM_UPDATES=${NUM_UPDATES:-2} \
-             nohup bash reproduce_scripts/${TRAIN_SCRIPT} auto \
+             nohup bash scripts/${TRAIN_SCRIPT} auto \
              > /tmp/diffusionrl_worker_${i}.log 2>&1 &"
         echo "  Worker ${i} SSH 已发送"
     done
@@ -242,4 +242,4 @@ ROLLOUT_BATCH_SIZE=24 \
 TRAINING_GPUS_PER_NODE=${RANK_PER_NODE} \
 TRAINING_FORWARD_BATCH=12 \
 NUM_UPDATES=2 \
-bash "reproduce_scripts/${TRAIN_SCRIPT}" "${TRAIN_ROLE}" "${EXTRA_ARGS[@]}"
+bash "scripts/${TRAIN_SCRIPT}" "${TRAIN_ROLE}" "${EXTRA_ARGS[@]}"

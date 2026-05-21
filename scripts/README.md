@@ -1,90 +1,89 @@
 # Training Scripts
 
-These shell scripts are the primary researcher entry points. Each is a
-thin wrapper around `python -m diffusionrl.train_new +experiment=<name>`
-that sets recipe-specific env vars (paths, output dir) and starts a Ray
-cluster.
+`scripts/` is intentionally thin. Training semantics live in
+`conf/experiment/*.yaml`; shell scripts only prepare the runtime, start Ray,
+set path/logging defaults, and forward Hydra overrides.
 
-## Available launchers
+## Launchers
 
-| Script | Recipe (experiment) | Layout |
-|---|---|---|
-| `run_sd3_colocate.sh` | `flowgrpo_fast_sd3_new_colocate` | 1×8 H20, 8 vllm-omni rollout + 8 FSDP train, colocate, tensor-IPC sync |
-| `run_sd3_colocate_reproduce.sh` | `flowgrpo_fast_sd3_new_colocate_reproduce` | Reproduce-grade single-node SD3 colocate |
-| `run_wan21_t2v_14b_smoke.sh` | `grpo_wan21_t2v_new` | 1×8, WAN21 T2V 14B, trainside direct-sampling smoke |
-| `run_hunyuan_video15_t2v_smoke.sh` | `grpo_hunyuan_video15_t2v_videopickscore_new` | 1×8, HunyuanVideo-1.5, trainside smoke |
+| Script | Use |
+|---|---|
+| `run_experiment_single_node.sh <experiment>` | Generic 1-node launcher for any `conf/experiment/<experiment>.yaml` |
+| `run_experiment_multinode.sh <experiment>` | Generic role-aware launcher for multi-node jobs; workers join Ray and the head runs training |
 
-Usage:
+Examples:
 
 ```bash
-# Default settings
-bash scripts/run_sd3_colocate.sh
-
-# Append any Hydra overrides
-bash scripts/run_sd3_colocate.sh run.num_rollouts=100
-
-# Dry-run (print the resolved python command without executing)
-DRY_RUN=1 bash scripts/run_sd3_colocate.sh
+bash scripts/run_experiment_single_node.sh grpo_wan21_t2v
+bash scripts/run_experiment_single_node.sh flowgrpo_fast_sd3_colocate
+bash scripts/run_experiment_multinode.sh flowgrpo_fast_qwen_image_2x8
+bash scripts/run_experiment_multinode.sh nft_qwen_image_4x8 run.num_rollouts=100
+DRY_RUN=1 bash scripts/run_experiment_single_node.sh mixgrpo_sd35
 ```
 
-Each launcher accepts arbitrary trailing Hydra overrides (`run.<key>=<val>`,
-`training.plan.local_batch_size=24`, …) which are forwarded to `train_new.py`.
+The generic launchers set these environment-derived overrides:
 
-## Helpers (not user-facing)
+- `run.data_path=${DATA_PATH}`
+- `run.eval_data_path=${EVAL_DATA_PATH}`
+- `resume.output_dir=${OUTPUT_DIR}`
+- `logging.run_name=${WANDB_RUN_NAME}`
+- `logging.report_to_wandb=${REPORT_TO_WANDB}`
+- `logging.entity=${WANDB_ENTITY}` when `WANDB_ENTITY` is set
 
-| File | Purpose |
+Model checkpoint env vars remain recipe-specific, for example
+`PRETRAINED_MODEL`, `SD3_PATH`, `QWEN_IMAGE_PATH`, and
+`HUNYUAN_VIDEO15_PATH`.
+
+## Config Inventory
+
+These are training recipes, not smoke/debug fixtures.
+
+| Family | Experiments | Notes |
+|---|---|---|
+| SD3 FlowGRPO | `flowgrpo_fast_sd3`, `flowgrpo_fast_sd3_trainside`, `flowgrpo_fast_sd3_colocate`, `flowgrpo_fast_sd3_colocate_reproduce`, `flowgrpo_fast_sd3_colocate_reproduce_4x8` | SD3 GRPO variants across trainside, vLLM-Omni, colocate, and reproduce layouts |
+| SD3 SGLang GRPO | `flowgrpo_sd3_sglang_native_colocate`, `flowgrpo_sd3_sglang_native_separate`, `flowgrpo_sd3_sglang_replay_colocate`, `flowgrpo_sd3_sglang_replay_separate` | Dedicated rollout engine variants |
+| SD3 NFT | `nft_sd3`, `nft_sd3_reward_service`, `nft_sd3_sglang` | PR #96 lineage, mapped to current NFT policy stack |
+| SD3 Dance/Mix | `dancegrpo_fast_sd3`, `mixgrpo_sd35` | PR #109 training recipes; Dance uses `sampling/sde_strategy=dance`, Mix uses windowed Flow SDE indices |
+| Qwen-Image | `flowgrpo_fast_qwen_image`, `flowgrpo_fast_qwen_image_2x8`, `flowgrpo_fast_qwen_image_4x8` | PR #104 lineage; node-size geometry is YAML, not bash |
+| Qwen-Image NFT | `nft_qwen_image`, `nft_qwen_image_2x8`, `nft_qwen_image_4x8` | Qwen-Image forward-process NFT recipes |
+| WAN T2V | `grpo_wan21_t2v`, `grpo_wan22_t2v_14b` | PR #96 lineage, current WAN21/WAN22 model packages |
+| WAN I2V | `grpo_wan21_i2v`, `grpo_wan22_i2v` | PR #103 lineage; image-conditioned data source path required |
+| HunyuanVideo | `grpo_hunyuan_video15_t2v_videopickscore` | PR #101 lineage |
+| HunyuanImage3 | `hi3_think_recaption_colocate` | HunyuanImage3 diffusion + AR recipe |
+
+## What Goes Where
+
+| Layer | What belongs there |
 |---|---|
-| `_check_wandb.sh` | wandb credential preflight |
-| `_mooncake.sh` | TransferQueue Mooncake storage-server lifecycle (sourced by recipes that use TransferQueue sync) |
+| `conf/experiment/<exp>.yaml` | Model, algorithm, reward, rollout engine, sync, placement, batch geometry, LoRA/FSDP/EMA/NFT policy choices |
+| YAML env interpolation | Checkpoint/data/output paths and logging identity when those are deployment-specific |
+| `scripts/*.sh` | Python env activation, Ray startup, per-job path defaults, and forwarding CLI overrides |
 
-## Override precedence
+Override precedence is:
 
-For any cfg field: **CLI override (`train_new +experiment=… key=value`) > launcher env var > experiment YAML default**.
-
-## What goes where
-
-| Layer | What lives there |
-|---|---|
-| `conf/experiment/<exp>.yaml` (hardcoded) | All recipe-defining values: model, reward, algorithm hyperparams, batch geometry (`training.plan.*`, `training.topology.actor_count`), rollout engine settings, NFT placement |
-| YAML `${oc.env:VAR,default}` interpolations | Genuinely env-dependent values only: filesystem paths (`run.data_path`, `resume.output_dir`, `sync.dir`), wandb identity (`logging.run_name`, `logging.entity`) |
-| Launcher env exports (`scripts/run_*.sh`) | Per-launcher defaults for those env vars (paths under `${REPO_ROOT}`, output dir, etc.) |
-
-To override placement / batch geometry for a different cluster shape, pass
-them on the CLI:
-
-```bash
-bash scripts/run_sd3_colocate.sh \
-    training.topology.actor_count=32 \
-    training.plan.local_batch_size=24 \
-    training.plan.local_mini_batch_size=12
+```text
+CLI Hydra override > launcher env var > YAML default
 ```
 
-`validate_training_batch_geometry` (in `diffusionrl/config/validation.py`)
-surfaces mismatches with clear error messages.
-
-## Engine selection (Hydra)
-
-| Mode | `rollout/engine` | `sync` |
-|---|---|---|
-| Direct sampling (train actor samples in-process) | `trainside` | not set (forbidden) |
-| Dedicated rollout, SGLang | `sglang_new` | required (`tensor_payload`, `nccl_broadcast`, or `checkpoint_path`) |
-| Dedicated rollout, vLLM-Omni | `vllm_omni` | required (same options as sglang) |
-
-The cross-component validator enforces this biconditional.
-
-## Local model + data paths
-
-Recipes read inputs from defaults rooted at `${REPO_ROOT}`:
-
-- Toy prompts: `data/samples/prompts_toy.json`, `data/samples/video_prompts_toy.txt`
-- Local model mount: `models/local/<model>` (symlinks to shared model checkpoints)
-- Outputs: `outputs/`
-
-Override via env vars when invoking a launcher:
+For different cluster geometry, override both placement and training batch
+geometry together:
 
 ```bash
-DATA_PATH=/path/to/prompts.json \
-PRETRAINED_MODEL=/path/to/model \
-OUTPUT_DIR=/path/to/output \
-bash scripts/run_sd3_colocate.sh
+bash scripts/run_experiment_multinode.sh flowgrpo_fast_qwen_image_4x8 \
+    placement.num_train_nodes=2 \
+    placement.num_rollout_nodes=2 \
+    training.topology.actor_count=16 \
+    training.plan.local_batch_size=36 \
+    training.plan.local_mini_batch_size=18
+```
+
+`validate_training_batch_geometry` reports inconsistent geometry before Ray
+work starts.
+
+## Compose Check
+
+Use a real training recipe for config validation:
+
+```bash
+python -m diffusionrl.train +experiment=<experiment> --cfg job --resolve
 ```

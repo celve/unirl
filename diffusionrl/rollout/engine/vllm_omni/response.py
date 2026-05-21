@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 
-from diffusionrl.models_new.hunyuan_image3.conditions import (
+from diffusionrl.models.hunyuan_image3.conditions import (
     HunyuanImage3FusedMultimodalCondition,
 )
 from diffusionrl.rollout.engine.sigma_verify import verify_engine_used_sigmas

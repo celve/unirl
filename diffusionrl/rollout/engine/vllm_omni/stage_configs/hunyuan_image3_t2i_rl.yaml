@@ -45,7 +45,7 @@ stage_args:
       max_num_batched_tokens: 32768
       tensor_parallel_size: 4
       pipeline_parallel_size: 1
-      # When running inside a Ray actor (e.g. NewRolloutActor), vllm's auto-
+      # When running inside a Ray actor (e.g. RolloutActor), vllm's auto-
       # detection picks the ray executor backend, but the StageEngineCoreProc
       # subprocess loses the placement-group handle (KeyError: 'bundles').
       # Force mp executor so each stage spawns workers via multiprocessing,

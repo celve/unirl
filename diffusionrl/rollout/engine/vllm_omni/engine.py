@@ -303,18 +303,15 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         # ``OmniDiffusionSamplingParams.sigmas`` into
         # ``scheduler.set_timesteps(sigmas=...)`` and echoes back the
         # actual schedule used; the response handler asserts a match.
-        # Symmetric with SGLangRolloutEngine: ``model_config.shift`` is the
-        # single SOT (per σ-consolidation refactor). Silent fallback to 3.0
-        # would mis-shift Wan (5.0) / Flux (1.0) / HunyuanVideo (1.0) etc.
-        # Fail fast and force the caller to use a new-path model config.
+        # ``model_config.shift`` is the single SOT for the σ schedule.
+        # Silent fallback to 3.0 would mis-shift Wan (5.0) / Flux (1.0) /
+        # HunyuanVideo (1.0) etc., so fail fast if the model config doesn't
+        # carry it.
         if not hasattr(model_config, "shift"):
             raise RuntimeError(
-                "VLLMOmniRolloutEngine requires model_config.shift "
-                "(legacy ModelBundleConfig has no shift field after the "
-                "σ-consolidation refactor). Switch the experiment's "
-                "``cfg.model`` to a new-path model config (e.g. "
-                "``sd3_v2``, ``wan21_v2``, ``wan22_v2``, "
-                "``hunyuan_image3_v2``)."
+                f"VLLMOmniRolloutEngine requires model_config.shift; got "
+                f"{type(model_config).__name__}. Use a registered model preset "
+                f"(e.g. ``sd3``, ``wan21``, ``wan22``, ``hunyuan_image3``)."
             )
         # Mirror the trainside engine's "Pipeline owns its dynamic-shift
         # posture" hook here by checking the model config for an explicit

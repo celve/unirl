@@ -1,0 +1,109 @@
+# @package _global_
+# DiffusionNFT Qwen-Image recipe, trainside direct sampling.
+#
+# Shares the Qwen-Image model/reward/runtime surface with
+# flowgrpo_fast_qwen_image, but switches the driver to NFTRolloutControl,
+# the stage algorithm to DiffusionNFT, and the adapter policy to
+# NFTLoRAPolicy. All NFT/GRPO semantics live in YAML; launchers only
+# choose the experiment and set environment-dependent paths.
+defaults:
+  - flowgrpo_fast_qwen_image
+  - override /algorithm: nft
+  - _self_
+
+sampling:
+  sde_config:
+    eta: 0.0
+
+algorithm:
+  prompts_per_rollout: 48
+  samples_per_prompt: 16
+  adv_normalization_scope: group
+  use_global_std: true
+  use_kl_penalty: false
+  kl_coef: 0.0
+  scheduler:
+    timestep_fraction: [0.0, 1.0]
+    num_sde_steps: 0
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+
+algorithms:
+  image:
+    _target_: diffusionrl.algorithms.DiffusionNFT
+    stage_attr: diffusion
+    conditions_cls: diffusionrl.models.qwen_image.conditions.QwenImageConditions
+    beta: 1.0
+    adv_clip_max: 5.0
+    adv_mode: raw
+    use_adaptive_weight: true
+    train_timestep_mode: all
+    shuffle_train_timesteps: true
+    apply_time_shift_in_loss: false
+    training_timestep_fraction: 0.99
+    kl_coef: 0.0
+    params:
+      _target_: diffusionrl.models.qwen_image.diffusion.QwenImageDiffusionParams
+      num_inference_steps: ${sampling.num_inference_steps}
+      guidance_scale: ${sampling.guidance_scale}
+      height: ${sampling.height}
+      width: ${sampling.width}
+      seed: ${run.seed}
+      sde_indices: null
+      eta: ${sampling.sde_config.eta}
+      init_same_noise: ${sampling.init_same_noise}
+      samples_per_prompt: ${algorithm.samples_per_prompt}
+      noise_group_ids: null
+      distilled_guidance_scale: null
+
+training:
+  policies:
+    - _target_: diffusionrl.training.nft_lora_policy.NFTLoRAPolicy
+      rank: 64
+      alpha: 128
+      dropout: 0.0
+      target_modules:
+        - to_q
+        - to_k
+        - to_v
+        - to_out.0
+        - add_q_proj
+        - add_k_proj
+        - add_v_proj
+        - to_add_out
+        - img_mlp.net.0.proj
+        - img_mlp.net.2
+        - txt_mlp.net.0.proj
+        - txt_mlp.net.2
+      bias: none
+      task_type: FEATURE_EXTRACTION
+      old_adapter_name: old
+      ema_decay: 0.001
+      ema_decay_type: warmup
+      ema_flat_steps: 0
+      ema_uprate: 0.001
+      ema_uphold: 0.5
+      ema_update_timing: rollout_end
+    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
+      cpu_offload: false
+      param_dtype: bf16
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: true
+  plan:
+    micro_batch_size: 1
+    num_updates_per_batch: 1
+    local_mini_batch_size: 96
+    local_batch_size: 96
+    global_batch_size: 768
+  topology:
+    actor_count: 8
+
+logging:
+  project_name: diffusionrl-diffusionNFT
+  run_name: ${oc.env:WANDB_RUN_NAME,nft_qwen_image}
+  tags: [qwen-image, t2i, nft, newstack]
+
+resume:
+  output_dir: ${oc.env:OUTPUT_DIR,outputs/nft_qwen_image}

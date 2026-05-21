@@ -1,0 +1,37 @@
+# @package _global_
+# DiffusionNFT Qwen-Image, 2 nodes x 8 GPUs.
+defaults:
+  - nft_qwen_image
+  - _self_
+
+sampling:
+  height: 256
+  width: 256
+
+algorithm:
+  samples_per_prompt: 12
+
+placement:
+  num_rollout_nodes: 2
+  num_rollout_gpus_per_node: 8
+  num_train_nodes: 2
+  num_train_gpus_per_node: 8
+
+rollout:
+  plan:
+    forward_batch_size: 1
+
+training:
+  plan:
+    global_batch_size: 576
+    local_batch_size: 36
+    local_mini_batch_size: 36
+  topology:
+    actor_count: 16
+
+logging:
+  run_name: ${oc.env:WANDB_RUN_NAME,Qwen-Image-NFT-2x8}
+  tags: [qwen-image, t2i, nft, newstack, 2x8]
+
+resume:
+  output_dir: ${oc.env:OUTPUT_DIR,outputs/nft_qwen_image_2x8}

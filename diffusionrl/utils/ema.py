@@ -1,9 +1,9 @@
 """Exponential moving average of model parameters.
 
-Used by :class:`diffusionrl.training_new.ema_policy.EMAPolicy` to track
+Used by :class:`diffusionrl.training.ema_policy.EMAPolicy` to track
 a shadow copy of the trainable parameters for eval. NFT's dual-adapter
 reference EMA lives directly on
-:class:`diffusionrl.training_new.nft_lora_policy.NFTLoRAPolicy`; this
+:class:`diffusionrl.training.nft_lora_policy.NFTLoRAPolicy`; this
 module is intentionally narrow to a single primitive.
 
 FSDP / DTensor: when model parameters are DTensors (e.g. under FSDP2),

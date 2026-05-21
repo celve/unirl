@@ -1,5 +1,5 @@
 # @package _global_
-# HI3-Instruct think_recaption RL — NEW-DESIGN path, COLOCATE, 1-node 8-GPU.
+# HI3-Instruct think_recaption RL — COLOCATE, 1-node 8-GPU.
 #
 # Full e2e on-policy training:
 #   rollout → reward → train (AR+Diffusion GRPO) → weight sync (ipc_bucketed)
@@ -20,11 +20,11 @@
 # the fused→split conversion for vLLM's per-projection LoRA format.
 #
 # Usage:
-#   python -m diffusionrl.train_new +experiment=hi3_think_recaption_colocate
+#   python -m diffusionrl.train +experiment=hi3_think_recaption_colocate
 defaults:
   - /sync@sync: ipc_bucketed
   - override /algorithm: grpo
-  - override /model: hunyuan_image3_v2
+  - override /model: hunyuan_image3
   - override /rollout/engine: vllm_omni
   - override /sampling/sde_strategy: flow
   - _self_
@@ -69,13 +69,13 @@ algorithm:
 
 algorithms:
   image:
-    _target_: diffusionrl.algorithms_new.DiffusionGRPO
+    _target_: diffusionrl.algorithms.DiffusionGRPO
     stage_attr: diffusion
-    conditions_cls: diffusionrl.models_new.hunyuan_image3.conditions.HunyuanImage3DiffusionConditions
+    conditions_cls: diffusionrl.models.hunyuan_image3.conditions.HunyuanImage3DiffusionConditions
     clip_range: 1.0e-4
     clip_schedule: constant
     params:
-      _target_: diffusionrl.models_new.hunyuan_image3.diffusion.HunyuanImage3DiffusionParams
+      _target_: diffusionrl.models.hunyuan_image3.diffusion.HunyuanImage3DiffusionParams
       num_inference_steps: ${sampling.num_inference_steps}
       guidance_scale: ${sampling.guidance_scale}
       height: ${sampling.height}
@@ -87,14 +87,14 @@ algorithms:
       samples_per_prompt: ${algorithm.samples_per_prompt}
       noise_group_ids: null
   ar:
-    _target_: diffusionrl.algorithms_new.ARGRPO
+    _target_: diffusionrl.algorithms.ARGRPO
     stage_attr: ar
-    conditions_cls: diffusionrl.models_new.hunyuan_image3.conditions.HunyuanImage3ARConditions
+    conditions_cls: diffusionrl.models.hunyuan_image3.conditions.HunyuanImage3ARConditions
     clip_range: 1.0e-4
     clip_schedule: constant
 
 model:
-  _target_: diffusionrl.models_new.hunyuan_image3.HunyuanImage3Pipeline.from_meta_config
+  _target_: diffusionrl.models.hunyuan_image3.HunyuanImage3Pipeline.from_meta_config
   pretrained_model_ckpt_path: /root/HunyuanImage-3-Instruct
   model_precision: bf16
   autocast_precision: bf16
@@ -132,7 +132,7 @@ placement:
 
 training:
   policies:
-    - _target_: diffusionrl.training_new.lora_policy.LoRAPolicy
+    - _target_: diffusionrl.training.lora_policy.LoRAPolicy
       rank: 8
       alpha: 16
       dropout: 0.0
@@ -141,7 +141,7 @@ training:
         - o_proj
       bias: none
       task_type: FEATURE_EXTRACTION
-    - _target_: diffusionrl.training_new.fsdp_policy.FSDPPolicy
+    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
       cpu_offload: false
       param_dtype: bf16
       mixed_precision: true

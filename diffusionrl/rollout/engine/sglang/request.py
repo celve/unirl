@@ -109,7 +109,7 @@ def _to_sglang_kwargs(
     diffusion = dict(req.stage_params.get("diffusion") or {})
     require(
         bool(diffusion),
-        "_to_sglang_kwargs: req.stage_params['diffusion'] is required (set by NewRolloutPipeline)",
+        "_to_sglang_kwargs: req.stage_params['diffusion'] is required (set by RolloutPipeline)",
     )
 
     num_inference_steps = int(diffusion["num_inference_steps"])

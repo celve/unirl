@@ -1,20 +1,20 @@
 # @package _global_
-# DiffusionNFT SD3 recipe — NEW Policy stack, trainside (direct-sampling).
+# DiffusionNFT SD3 recipe — Policy stack, trainside (direct-sampling).
 #
 # Forward-process diffusion RL with dual-adapter EMA reference. Replaces
 # the OLD ``conf/experiment/nft_sd3.yaml`` (deleted in commit 0f2bb2c3
 # "refactor: delete OLD recipes"); recovered baseline values via
 # ``git show 0f2bb2c3~1:conf/experiment/nft_sd3.yaml`` then adapted to
-# the NEW schema:
+# the schema:
 #   - ``override /algorithm: nft`` selects ``NFTRolloutControl`` (driver-side)
-#   - ``override /model: sd3_v2`` selects the NEW SD3 pipeline
+#   - ``override /model: sd3`` selects the SD3 pipeline
 #   - ``override /rollout/engine: trainside`` keeps the OLD direct-sampling
 #     semantics (train actors also sample; no separate rollout actor; no
 #     ``cfg.sync`` block per validate_weight_sync_contract)
 #   - ``algorithm.scheduler.num_sde_steps: 0`` — KEY: forward-process path.
 #     Rollout engine sees ``sde_indices=None`` and runs Euler ODE only;
 #     trajectory stores clean final latents (see
-#     ``rollout/new_pipeline.py:725-746``).
+#     ``rollout/pipeline.py:725-746``).
 #   - ``algorithms.image._target_: DiffusionNFT`` — stage-driven loss class
 #     (forward-diffusion + dual blend + x0 reconstruction). Production
 #     defaults (beta=1.0, adv_mode=raw, use_adaptive_weight=true,
@@ -25,17 +25,16 @@
 #     ("default" + "old") install + EMA update at the rollout boundary.
 #
 # Children:
-#   - ``debug_nft.yaml`` — 3-rollout short loop for visual sanity
 #   - ``nft_sd3_reward_service.yaml`` — remote reward service variant
 #   - ``nft_sd3_sglang.yaml`` — SGLang separate-mode variant (overrides
-#     ``rollout/engine`` to ``sglang_new`` + adds ``sync: nccl_broadcast``)
+#     ``rollout/engine`` to ``sglang`` + adds ``sync: nccl_broadcast``)
 #
 # Launch via:
-#   python -m diffusionrl.train_new +experiment=nft_sd3
+#   python -m diffusionrl.train +experiment=nft_sd3
 
 defaults:
   - override /algorithm: nft
-  - override /model: sd3_v2
+  - override /model: sd3
   - override /rollout/engine: trainside
   - override /sampling/sde_strategy: flow
   - _self_
@@ -82,13 +81,13 @@ algorithms:
   # Slot key = rollout response segment key (SD3 emits resp.rollout_traces["image"]).
   # ``stage_attr: diffusion`` overrides the default pipeline-attribute
   # lookup (SD3Pipeline exposes ``self.diffusion``, not ``self.image``).
-  # NewTrainActor injects ``nft_lora_policy=<NFTLoRAPolicy in chain>`` at
+  # TrainActor injects ``nft_lora_policy=<NFTLoRAPolicy in chain>`` at
   # instantiate time so the algorithm can call
   # ``policy.with_old_adapter()`` for the reference forward.
   image:
-    _target_: diffusionrl.algorithms_new.DiffusionNFT
+    _target_: diffusionrl.algorithms.DiffusionNFT
     stage_attr: diffusion
-    conditions_cls: diffusionrl.models_new.sd3.conditions.SD3Conditions
+    conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
     # Production defaults from OLD nft_sd3.yaml ema + algorithm blocks.
     # NEW collapses OLD's separate timestep_mode/shuffle/fraction into
     # the three flat fields below; advanced modes (adv_mode != raw, etc.)
@@ -103,7 +102,7 @@ algorithms:
     training_timestep_fraction: 0.99
     kl_coef: 0.0
     params:
-      _target_: diffusionrl.models_new.sd3.diffusion.SD3DiffusionParams
+      _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
       num_inference_steps: ${sampling.num_inference_steps}
       guidance_scale: ${sampling.guidance_scale}
       height: ${sampling.height}
@@ -149,7 +148,7 @@ training:
     # innermost adapter-management layer; FSDPPolicy outer-wraps the
     # composite peft-injected module (both adapters get FSDP-sharded
     # under the same tree).
-    - _target_: diffusionrl.training_new.nft_lora_policy.NFTLoRAPolicy
+    - _target_: diffusionrl.training.nft_lora_policy.NFTLoRAPolicy
       rank: 32
       alpha: 64
       dropout: 0.0
@@ -175,7 +174,7 @@ training:
       ema_uprate: 0.001
       ema_uphold: 0.5
       ema_update_timing: rollout_end
-    - _target_: diffusionrl.training_new.fsdp_policy.FSDPPolicy
+    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
       cpu_offload: false
       param_dtype: bf16
       mixed_precision: true
@@ -236,7 +235,7 @@ logging:
   report_to_wandb: true
   project_name: diffusionrl-diffusionNFT
   run_name: nft_sd3
-  tags: [sd3.5, nft, pickscore, new-stack, trainside]
+  tags: [sd3.5, nft, pickscore, trainside]
 
 evaluation:
   eval_steps: 0

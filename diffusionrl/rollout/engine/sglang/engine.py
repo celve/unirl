@@ -1,4 +1,4 @@
-"""New-protocol SGLang rollout engine.
+"""SGLang rollout engine.
 
 One class, one-shot construction. Implements
 :class:`diffusionrl.rollout.engine.base.BaseRolloutEngine` and speaks the
@@ -24,7 +24,7 @@ Weight sync:
     SGLang. ``update_weights_from_ipc`` raises ``NotImplementedError`` —
     SGLang has no bucketed-IPC receiver today.
 
-What this engine intentionally does NOT do (vs the legacy SGLang adapter at
+What this engine intentionally does NOT do (vs upstream SGLang at
 ``diffusionrl/samplers/sglang/engine.py``):
 
 - No ``initialize(device)`` step / ``_is_initialized`` flag — one-shot ctor.
@@ -34,7 +34,7 @@ What this engine intentionally does NOT do (vs the legacy SGLang adapter at
 - No ``_infer_model_type`` substring match — ``cfg.model_family`` is an
   explicit enum.
 - No instance-level ``_cached_runtime`` import hook — lazy module-level.
-- No ``encode_prompt`` / ``decode_latents`` — not on the new ABC.
+- No ``encode_prompt`` / ``decode_latents`` — not on BaseRolloutEngine.
 - No ``supports_distributed`` / ``requires_external_service`` properties.
 - No ``get_last_weight_checksum`` / ``_verify_weight_checksum`` flag — use
   :meth:`loaded_param_checksums` on demand.
@@ -93,9 +93,9 @@ def _import_sglang_runtime() -> Dict[str, Any]:
 
 
 class SGLangRolloutEngine(BaseRolloutEngine):
-    """New-protocol rollout engine backed by ``sglang.multimodal_gen.DiffGenerator``."""
+    """Rollout engine backed by ``sglang.multimodal_gen.DiffGenerator``."""
 
-    _component_name = "sglang_new"
+    _component_name = "sglang"
 
     def __init__(
         self,
@@ -140,7 +140,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             )
 
         logger.info(
-            "Initializing new-protocol SGLang engine (rank=%s, local_mode=%s, "
+            "Initializing SGLang engine (rank=%s, local_mode=%s, "
             "target_modules=%s, model_family=%s, populate_conditions=%s, "
             "logprob_source=%s)",
             rank,
@@ -168,19 +168,14 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         # request crosses the wire to the SGLang worker.
         #
         # ``shift`` source: ``model_config.shift`` is the single SOT.
-        # New-path ``SD3PipelineConfig`` / ``WAN21PipelineConfig`` /
+        # ``SD3PipelineConfig`` / ``WAN21PipelineConfig`` /
         # ``WAN22PipelineConfig`` / ``HunyuanImage3PipelineConfig`` all
-        # carry it (SD3=3.0, Wan=5.0, etc.). Legacy ``ModelBundleConfig``
-        # has no ``shift`` field — that path is no longer compatible
-        # with the new engine; users must migrate to the new model
-        # configs.
+        # carry it (SD3=3.0, Wan=5.0, etc.).
         if not hasattr(model_config, "shift"):
             raise RuntimeError(
-                "SGLangRolloutEngine requires model_config.shift "
-                "(legacy ModelBundleConfig has no shift field after the "
-                "σ-consolidation refactor). Switch the experiment's "
-                "``cfg.model`` to a new-path model config (e.g. "
-                "``sd3_v2``, ``wan21_v2``, ``hunyuan_image3_v2``)."
+                f"SGLangRolloutEngine requires model_config.shift; got "
+                f"{type(model_config).__name__}. Use a registered model preset "
+                f"(e.g. ``sd3``, ``wan21``, ``hunyuan_image3``)."
             )
         # Same use_dynamic_shifting hook as vllm_omni engine. Generic —
         # any model config that declares it (Qwen-Image, future dynamic
@@ -532,7 +527,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         # ``LoRA adapter ... applied to 0 layers`` and the rollout runs the
         # base model. Strip both the PEFT envelope and the pipeline-level
         # ``transformer.`` head here so the registered keys match SGLang's
-        # module-name space exactly. This is a sglang_new-side normalization
+        # module-name space exactly. This is a sglang-side normalization
         # only; trainer-side ``weight_sync_param_name_prefix`` stays as-is so
         # vllm-omni continues to work on the same recipe.
         stripped: Dict[str, torch.Tensor] = {}

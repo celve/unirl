@@ -20,13 +20,13 @@ def load_function(path: str) -> Any:
     Dynamically load a class or function from a module path.
 
     Args:
-        path: Full path to the class/function, e.g., "diffusionrl.algorithms_new.grpo.DiffusionGRPO"
+        path: Full path to the class/function, e.g., "diffusionrl.algorithms.grpo.DiffusionGRPO"
 
     Returns:
         The loaded class or function
 
     Example:
-        >>> algo_cls = load_function("diffusionrl.algorithms_new.grpo.DiffusionGRPO")
+        >>> algo_cls = load_function("diffusionrl.algorithms.grpo.DiffusionGRPO")
     """
     if path is None or path == "":
         raise ValueError("Path cannot be None or empty")

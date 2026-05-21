@@ -18,14 +18,14 @@ class Prompts(Batched):
     prompt_metadata: List[Dict[str, Any]] = concat_field()
     # ``default_factory=list`` keeps the field optional for NEW callers
     # that never set per-sample media refs (text-only rollouts on the
-    # new-path ``NewRolloutPipeline.convert_training_data`` /
-    # ``NewRolloutPipelineMixin.resp_to_response_shard`` construct
+    # ``RolloutPipeline.convert_training_data`` /
+    # ``RolloutPipelineMixin.resp_to_response_shard`` construct
     # ``Prompts(...)`` with the 6 original fields). Without a default,
     # the merge of PR #100 broke every NEW ``Prompts(...)`` site with
     # ``TypeError: missing 1 required positional argument: 'media_refs'``.
     # OLD callers always go through ``from_unique_prompts(media_refs=...)``
     # which fills it explicitly, so the default-factory only kicks in on
-    # the NEW direct-construction path.
+    # the direct-construction path.
     #
     # ``media_refs`` is OLD-only conceptually; NEW image-as-condition
     # goes through ``RolloutReq.primitives["image"]: Images`` + typed
@@ -36,7 +36,7 @@ class Prompts(Batched):
     # prompts that carry no condition image). The data layer
     # (:meth:`MultimodalRLDataSource._collate_text`) loads these from
     # ``(image, condition)`` MediaRefs;
-    # :meth:`NewRolloutPipeline.plan_requests` then injects them as
+    # :meth:`RolloutPipeline.plan_requests` then injects them as
     # ``RolloutReq.primitives["image"]: Images``. Default-factory is
     # ``list`` (same rationale as ``media_refs``).
     images: List[Optional[Image]] = concat_field(default_factory=list)

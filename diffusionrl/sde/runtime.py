@@ -451,7 +451,7 @@ def ensure_req_sigmas(req: Any, policy: FlowMatchSchedulePolicy) -> None:
     All three keys are **required** —  silent ``height=1024`` /
     ``width=1024`` defaults would mis-derive μ for dynamic-shift models
     when the request actually rendered at a different resolution
-    (e.g. WAN T2V at 480×832). Drivers (``NewRolloutPipeline.plan_requests``)
+    (e.g. WAN T2V at 480×832). Drivers (``RolloutPipeline.plan_requests``)
     always set all three; absence means a wiring bug.
     """
     if req.sigmas is not None:
@@ -462,7 +462,7 @@ def ensure_req_sigmas(req: Any, policy: FlowMatchSchedulePolicy) -> None:
         raise ValueError(
             f"ensure_req_sigmas: req.stage_params['diffusion'] is missing "
             f"required key(s) {missing} for σ schedule computation. The "
-            f"driver (NewRolloutPipeline.plan_requests / _build_diffusion_"
+            f"driver (RolloutPipeline.plan_requests / _build_diffusion_"
             f"stage_params) must set num_inference_steps / height / width."
         )
     req.sigmas = compute_flowmatch_sigma(

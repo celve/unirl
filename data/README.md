@@ -10,4 +10,4 @@
 
 ## Using real datasets
 
-Override `DATA_PATH` to point to a real dataset (e.g. `DATA_PATH=data/datasets/hpdv2/train.json`) when invoking a `reproduce_scripts/` wrapper.
+Override `DATA_PATH` to point to a real dataset (e.g. `DATA_PATH=data/datasets/hpdv2/train.json`) when invoking a `scripts/` wrapper.

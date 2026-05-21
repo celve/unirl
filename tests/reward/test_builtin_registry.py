@@ -38,7 +38,7 @@ def test_every_builtin_name_resolves_to_concrete_classes() -> None:
 def test_videopickscore_resolves_scorer_and_spec() -> None:
     """Specific assertion for the videopickscore registry entry — guards
     against a regression where main's PR #96/#101 used ``PickScoreSpec``
-    here (registry reuse) while the NEW path uses the dedicated
+    here (registry reuse) while the path uses the dedicated
     ``VideoPickScoreSpec`` (one-Spec-per-name in the Hydra
     ``reward/component`` registry)."""
     scorer_cls = resolve_builtin_reward_scorer_class("videopickscore")

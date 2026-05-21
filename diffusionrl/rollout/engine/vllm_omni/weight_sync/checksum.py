@@ -18,7 +18,7 @@ Used by:
   ``lora.optimize()`` scales ``lora_b`` by ``alpha / r``).
 
 Equality on every (stage, rank, name) is the value-correctness criterion
-in ``scripts/smoke_weight_sync_e2e.py``.
+for weight-sync transports.
 """
 
 from __future__ import annotations

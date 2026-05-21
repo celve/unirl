@@ -169,7 +169,7 @@ def validate_lora_target_modules(cfg: DictConfig) -> None:
     When LoRA is requested but no explicit target list was supplied, resolve the
     model class via ``cfg.model._target_`` and call its
     ``default_lora_target_modules()`` classmethod. Mutates ``cfg.model`` in
-    place (``ModelBundleConfig`` is registered ``mutable=True``) so PEFT (training
+    place (the model config is registered ``mutable=True``) so PEFT (training
     side) and SGLang ``ServerArgs.lora_target_modules`` (rollout side) see the
     same list. Without this materializer, PEFT injects LoRA into a model-class
     default subset while SGLang receives ``None`` and wraps every linear layer,

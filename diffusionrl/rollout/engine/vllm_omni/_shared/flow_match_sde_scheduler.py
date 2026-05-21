@@ -337,7 +337,7 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             # (the ``+ std_dev_t² / (2σ) * dt`` corrections) here, even
             # though ``self._eta > 0`` — the trainer-side replay drives
             # non-SDE steps with ``eta=0`` (see
-            # ``diffusionrl/models_new/sd3/diffusion.py:375``:
+            # ``diffusionrl/models/sd3/diffusion.py:375``:
             # ``step_eta = float(params.eta) if i in sde_set else 0.0``),
             # which collapses the mean to plain Euler ``sample + v·dt``.
             # Using SDE-form mean here would put the rollout trajectory

@@ -6,15 +6,12 @@
 # forward-process algorithm — it does not consume rollout-side log_probs,
 # so logprob_source is kept at ``replay`` for parity with GRPO-SGLang.
 #
-# Used by:
-#   reproduce_scripts/train_nft_sd3_sglang_multinode.sh
-#
 # Anchored to a 2-node x 8-GPU cluster split 4-train / 4-rollout per node,
 # giving 8 single-GPU SGLang rollout actors (TP=1) and 8 FSDP train actors.
 defaults:
   - nft_sd3
   - /sync: nccl_broadcast
-  - override /rollout/engine: sglang_new
+  - override /rollout/engine: sglang
   - _self_
 
 rollout:

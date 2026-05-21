@@ -1,0 +1,67 @@
+# @package _global_
+# MixGRPO SD3.5 recipe — trainside direct-sampling with windowed SDE
+# indices.
+#
+# Imported from PR #109's training recipe and mapped onto the current
+# Policy stack shape. MixGRPO is represented by GRPO + Flow SDE +
+# progressive window scheduling; unsupported legacy-only knobs are not
+# carried over.
+defaults:
+  - flowgrpo_fast_sd3_trainside
+  - override /sampling/sde_strategy: flow
+  - _self_
+
+run:
+  seed: 42
+  num_rollouts: 10000
+  data_path: ${oc.env:DATA_PATH,/mnt/bj/data/datasets/pickscore/train.txt}
+  eval_data_path: ${oc.env:EVAL_DATA_PATH,/mnt/bj/data/datasets/pickscore/test.txt}
+
+sampling:
+  init_same_noise: true
+  sde_config:
+    eta: 0.7
+
+algorithm:
+  prompts_per_rollout: 48
+  samples_per_prompt: 16
+  skip_last_timestep: true
+  scheduler:
+    timestep_strategy: window
+    window_strategy: progressive
+    window_size: 4
+    iters_per_window: 25
+    window_init_timestep: 0
+    overlap_size: 1
+    roll_back: true
+    max_iters_per_window: 10
+    min_iters_per_window: 1
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+
+placement:
+  num_rollout_nodes: 2
+  num_rollout_gpus_per_node: 8
+  num_train_nodes: 2
+  num_train_gpus_per_node: 8
+
+training:
+  plan:
+    micro_batch_size: 8
+    num_updates_per_batch: 2
+    local_mini_batch_size: 24
+    local_batch_size: 48
+    global_batch_size: 768
+  topology:
+    actor_count: 16
+  optimizer:
+    weight_decay: 1.0e-4
+
+logging:
+  project_name: diffusionrl-mixgrpo
+  run_name: ${oc.env:WANDB_RUN_NAME,mixgrpo_sd35}
+  report_to_wandb: ${oc.decode:${oc.env:REPORT_TO_WANDB,true}}
+  tags: [sd3.5, mixgrpo, grpo, trainside]
+
+resume:
+  output_dir: ${oc.env:OUTPUT_DIR,outputs/mixgrpo_sd35}

@@ -35,7 +35,7 @@ stage_args:
       # ``DiffusionLoRAManager._registered_adapters`` (so checksum probes
       # pass), but no Linear consults it and the forward silently runs base
       # weights. ``max_lora_rank`` must be >= the recipe's LoRAPolicy rank
-      # (32 in flowgrpo_fast_sd3_new); the vllm.config.lora default of 16
+      # (32 in flowgrpo_fast_sd3); the vllm.config.lora default of 16
       # silently rejects larger adapters at add time.
       enable_lora: true
       max_lora_rank: 32

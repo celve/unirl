@@ -50,9 +50,9 @@ __all__ = [
 
 
 # Walks the whole diffusionrl package and imports every submodule so that
-# @register_config decorators (scattered across config/, training_new/,
-# algorithms_new/, models_new/, ray/, rollout/, reward/, etc.) populate
-# Hydra's ConfigStore. Without this, train_new.yaml's defaults list
+# @register_config decorators (scattered across config/, training/,
+# algorithms/, models/, ray/, rollout/, reward/, etc.) populate
+# Hydra's ConfigStore. Without this, train.yaml's defaults list
 # references unresolved leaves (resume/default, training/plan/default, ...).
 #
 # Call this explicitly from the train entry, NOT as an import side effect of
@@ -62,15 +62,47 @@ __all__ = [
 # the only safe time to run it.
 def register_all_configs() -> None:
     import importlib
+    import logging
     import pkgutil
     import sys
 
     import diffusionrl
 
+    # Rollout engines (vllm-omni, sglang) and reward scorers carry
+    # heavy optional runtime deps (vllm, vllm_omni, sglang, easyocr, …).
+    # On a CPU pod or compose-only environment those won't import; their
+    # @register_config decorators just don't get exercised in that
+    # environment, which is fine — recipes that don't need them still
+    # compose. Real (non-optional) ImportError still propagates.
+    _OPTIONAL_RUNTIME_DEPS = {
+        "vllm",
+        "vllm_omni",
+        "sglang",
+        "easyocr",
+        "hpsv3",
+        "pickscore",
+        "msgspec",
+        "ImageReward",
+        "mmcv",
+        "mmdet",
+    }
+    _registration_logger = logging.getLogger(__name__)
+
     for module_info in pkgutil.walk_packages(diffusionrl.__path__, prefix=f"{diffusionrl.__name__}."):
         if module_info.name in sys.modules:
             continue
-        importlib.import_module(module_info.name)
+        try:
+            importlib.import_module(module_info.name)
+        except ModuleNotFoundError as exc:
+            missing = (exc.name or "").split(".", 1)[0]
+            if missing in _OPTIONAL_RUNTIME_DEPS:
+                _registration_logger.debug(
+                    "register_all_configs: skipping %s (optional dep %r missing)",
+                    module_info.name,
+                    missing,
+                )
+                continue
+            raise
 
 
 __all__ = list(__all__) + ["register_all_configs"]

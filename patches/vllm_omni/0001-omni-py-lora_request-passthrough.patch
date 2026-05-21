@@ -13,7 +13,7 @@ Base commit: 4a24a517abc7769b1399ded594558a3fe8269872
 
 Applied to pod-local editable install of vllm-omni
 (/root/vllm-omni/vllm_omni/entrypoints/omni.py) until upstream merges
-equivalent change. Required on every host that runs `train_new` (both
+equivalent change. Required on every host that runs `train` (both
 launcher and worker-* pods of taiji 2-node colocate).
 
 ---

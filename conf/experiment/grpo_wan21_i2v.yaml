@@ -1,0 +1,189 @@
+# @package _global_
+# GRPO WAN 2.1 I2V recipe — Policy stack, trainside (direct-sampling).
+#
+# I2V variant of grpo_wan21_t2v.yaml: bundle loads a CLIP vision tower
+# automatically when the I2V checkpoint declares ``image_dim > 0``; the
+# data source loads (image, condition) MediaRefs into Prompts.images, and
+# the rollout pipeline injects them as RolloutReq.primitives["image"].
+#
+# The WAN 2.1 I2V LoRA target set extends the T2V set with
+# ``attn2.add_k_proj`` / ``attn2.add_v_proj`` (the image-cross-KV adders
+# inside the WAN transformer's image cross-attention sublayer).
+#
+# Launch via:
+#   python -m diffusionrl.train +experiment=grpo_wan21_i2v
+defaults:
+  - override /algorithm: grpo
+  - override /model: wan21
+  - override /rollout/engine: trainside
+  - override /sampling/sde_strategy: flow
+  - _self_
+
+run:
+  seed: 42
+  num_rollouts: 1000
+  data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
+  data_path: ${oc.env:DATA_PATH}
+  eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
+
+sampling:
+  num_inference_steps: 14
+  guidance_scale: 1.0
+  height: 720
+  width: 1280
+  # num_frames=9 maps to 3 latent frames (T_lat = (9-1)//4 + 1). A
+  # short-but-non-trivial temporal axis for I2V smoke; bump for real
+  # training. The WAN VAE requires ``(num_frames - 1) % 4 == 0``, so
+  # valid choices are 1, 5, 9, 13, 17, 21, … .
+  num_frames: 9
+  seed: 42
+  init_same_noise: false
+  sde_config:
+    eta: 0.7
+
+algorithm:
+  prompts_per_rollout: 48
+  samples_per_prompt: 16
+  adv_normalization_scope: group
+  use_global_std: true
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  use_kl_penalty: false
+  kl_coef: 0.0
+  ema:
+    eval_ema_decay: 0.9
+    eval_ema_update_interval: 1
+  scheduler:
+    timestep_fraction: [0.0, 0.5]
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+
+# ----------------------------------------------------------------------
+# Training surface
+# ----------------------------------------------------------------------
+algorithms:
+  video:
+    _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
+    stage_attr: diffusion
+    clip_range: 1.0e-4
+    clip_schedule: constant
+    conditions_cls: diffusionrl.models.wan21.conditions.WAN21Conditions
+    params:
+      _target_: diffusionrl.models.wan21.diffusion.WAN21DiffusionParams
+      num_inference_steps: ${sampling.num_inference_steps}
+      guidance_scale: ${sampling.guidance_scale}
+      height: ${sampling.height}
+      width: ${sampling.width}
+      num_frames: ${sampling.num_frames}
+      seed: ${run.seed}
+      eta: ${sampling.sde_config.eta}
+
+placement:
+  num_rollout_nodes: 0
+  num_rollout_gpus_per_node: 0
+
+rollout:
+  engine: {}
+  plan:
+    forward_batch_size: 4
+
+training:
+  policy_source: diffusion
+  policies:
+    - _target_: diffusionrl.training.lora_policy.LoRAPolicy
+      rank: 64
+      alpha: 128
+      dropout: 0.0
+      # WAN 2.1 I2V target set: T2V suffixes + the image cross-KV
+      # adders. ``attn2.add_k_proj`` / ``attn2.add_v_proj`` are the
+      # I2V-specific weights that fuse the CLIP image embeddings into
+      # the cross-attention key/value projections — without them the
+      # CLIP path's gradients never reach the transformer's
+      # cross-attention.
+      target_modules:
+        - attn1.to_q
+        - attn1.to_k
+        - attn1.to_v
+        - attn1.to_out.0
+        - attn2.to_q
+        - attn2.to_k
+        - attn2.to_v
+        - attn2.to_out.0
+        - attn2.add_k_proj
+        - attn2.add_v_proj
+        - ffn.net.0.proj
+        - ffn.net.2
+        - proj_out
+    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
+      cpu_offload: false
+      param_dtype: bf16
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: true
+  materialize:
+    with_aux: []
+  plan:
+    micro_batch_size: 1
+    num_updates_per_batch: 2
+    local_mini_batch_size: 48
+    local_batch_size: 96
+    global_batch_size: 768
+  topology:
+    actor_count: 8
+  optimizer:
+    learning_rate: 3.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    total_steps: 1000
+  execution:
+    max_grad_norm: 1.0
+    offload_train: false
+    offload_rollout: false
+
+model:
+  # WAN 2.1 I2V checkpoint. Diffusers names follow the pattern
+  # ``Wan-AI/Wan2.1-I2V-14B-{480P,720P}-Diffusers``.
+  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,Wan-AI/Wan2.1-I2V-14B-720P-Diffusers}
+  # When None, the bundle derives ``image_encoder/`` + ``image_processor/``
+  # subfolders from ``pretrained_model_ckpt_path``. Override if the CLIP
+  # tower lives in a separate location.
+  image_encoder_ckpt_path: null
+  model_precision: bf16
+  autocast_precision: bf16
+  trajectory_precision: fp16
+  logprob_precision: fp32
+  shift: 5.0
+  max_sequence_length: 512
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    - name: video
+      weight: 1.0
+      batch_size: 8
+      inner_model_name: pickscore
+      temporal_weight: 0.3
+      alignment_weight: 0.7
+      sample_frames: 1
+
+logging:
+  logging_steps: 1
+  log_media: true
+  media_max_items: 8
+  report_to_wandb: true
+  project_name: diffusionrl-grpo-i2v-newstack
+  run_name: grpo_wan21_i2v
+  tags: [wan21, i2v, grpo, video, pickscore]
+
+evaluation:
+  eval_steps: 60
+
+resume:
+  save_steps: 60

@@ -246,7 +246,7 @@ def _build_decoded_images(
     if skipped_video:
         logger.warning(
             "SGLang result contained 4D (video) samples — Videos primitive packing "
-            "is not yet implemented in the new-protocol response translator; dropping. "
+            "is not yet implemented in the response translator; dropping. "
             "Add a Videos branch when a video reward consumer lands."
         )
     if not per_sample_tensors:

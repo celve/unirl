@@ -1,6 +1,6 @@
 """Trainside (in-process) rollout engine adapter.
 
-Wraps a materialized ``models_new`` :class:`Pipeline` plus the
+Wraps a materialized ``models`` :class:`Pipeline` plus the
 :class:`Policy` that holds its trainable module, and exposes them as a
 :class:`BaseRolloutEngine`. Used in direct-sampling mode where the
 training Policy IS the sampler (on-policy RL) and rollout runs in the
@@ -12,8 +12,8 @@ Why this is just a ~50-line adapter:
 - ``BaseRolloutEngine`` already specifies the ``generate(req) →
   RolloutResp`` contract. ``Pipeline.generate(req)`` returns exactly
   that shape, with conditions populated by the per-mode generate
-  function (e.g. ``models_new/hunyuan_image3/modes/t2i.py:85``,
-  ``models_new/sd3/pipeline.py:156``).
+  function (e.g. ``models/hunyuan_image3/modes/t2i.py:85``,
+  ``models/sd3/pipeline.py:156``).
 - The trainable module is FSDP-wrapped behind ``policy.model``; FSDP2
   auto-unshards on forward, including under ``eval()`` + ``no_grad()``.
   We only need to flip the module to eval mode for the rollout pass
@@ -28,10 +28,10 @@ from __future__ import annotations
 
 import torch
 
-from diffusionrl.models_new.types.pipeline import Pipeline
+from diffusionrl.models.types.pipeline import Pipeline
 from diffusionrl.rollout.engine.base import BaseRolloutEngine
 from diffusionrl.sde.runtime import FlowMatchSchedulePolicy, ensure_req_sigmas
-from diffusionrl.training_new.policy import Policy
+from diffusionrl.training.policy import Policy
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp
 
@@ -39,13 +39,13 @@ from diffusionrl.types.rollout_resp import RolloutResp
 class TrainsideRolloutEngine(BaseRolloutEngine):
     """In-process rollout engine: the train actor's Pipeline IS the sampler.
 
-    Adapter that lets ``NewTrainActor`` participate in the
-    :class:`NewRolloutPipelineMixin` host-contract by providing
+    Adapter that lets ``TrainActor`` participate in the
+    :class:`RolloutPipelineMixin` host-contract by providing
     ``self.engine`` whose ``generate`` runs the materialized in-process
     pipeline under ``eval()`` + ``no_grad()``.
 
     Args:
-        pipeline: A materialized ``models_new`` pipeline (e.g.
+        pipeline: A materialized ``models`` pipeline (e.g.
             ``HunyuanImage3Pipeline`` or ``SD3Pipeline``) whose
             ``generate(req)`` populates ``RolloutResp`` with
             conditions / rollout traces / decoded primitives.

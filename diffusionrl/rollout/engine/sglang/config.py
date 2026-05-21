@@ -1,10 +1,10 @@
 """SGLang rollout-engine configuration (new ``BaseRolloutEngine`` protocol).
 
-Registered under ``rollout/engine: sglang_new`` so it coexists with the legacy
+Registered under ``rollout/engine: sglang`` so it coexists with the legacy
 ``rollout/engine: sglang`` preset at ``diffusionrl/samplers/sglang/config.py``.
 Materialized via ``build(cfg.rollout.engine, device=..., strategy=...,
 rank=..., model_config=...)`` from
-:class:`diffusionrl.ray.new_rollout_actor.NewRolloutActor`.
+:class:`diffusionrl.ray.rollout_actor.RolloutActor`.
 
 Differences vs the legacy config:
 
@@ -39,8 +39,7 @@ from diffusionrl.types.sampling import SamplingParams
 
 # Per-rank SGLang port layout for co-located actors on a single node. Each
 # rank reserves a stride-sized slice starting at ``base + rank * stride``:
-# slot 0 is port, slot 11 is scheduler_port, slot 23 is master_port. Match
-# the legacy layout so co-located new+legacy actors don't collide either.
+# slot 0 is port, slot 11 is scheduler_port, slot 23 is master_port.
 _SGLANG_PORT_BASE = 33000
 _SGLANG_PORT_STRIDE = 100
 
@@ -51,12 +50,12 @@ _VALID_LOGPROB_SOURCES = ("replay", "native")
 
 @register_config(
     group="rollout/engine",
-    name="sglang_new",
+    name="sglang",
     target="diffusionrl.rollout.engine.sglang.engine.SGLangRolloutEngine",
 )
 @dataclass
 class SGLangEngineConfig:
-    """Configuration for the new-protocol SGLang rollout-side inference engine."""
+    """Configuration for the SGLang rollout-side inference engine."""
 
     # --- Sampling (live interpolation back to top-level cfg.sampling) ---
     sampling: SamplingParams = dc_field(default_factory=lambda: SI("${sampling}"))
@@ -146,7 +145,7 @@ class SGLangEngineConfig:
         2. ``engine_kwargs`` entries whose key is a valid ServerArgs field.
 
         ``model_config`` is duck-typed: any object exposing
-        ``.pretrained_model_ckpt_path`` works. NEW PipelineConfigs
+        ``.pretrained_model_ckpt_path`` works. Registered PipelineConfigs
         (``SD3PipelineConfig``, ``WAN21PipelineConfig``, etc.) all carry
         it as a top-level field; they intentionally do NOT inherit from
         a common base because each pipeline owns its own config schema.

@@ -161,7 +161,7 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
         calls that follow when KV-cache reuse kicks in on later steps.
 
         Field map matches our own per-step kernel
-        (``models_new/hunyuan_image3/diffusion.py:212-231``), which calls
+        (``models/hunyuan_image3/diffusion.py:212-231``), which calls
         ``prepare_inputs_for_generation`` with the same kwarg names that
         upstream uses internally.
         """
