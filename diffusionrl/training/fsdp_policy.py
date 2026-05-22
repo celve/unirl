@@ -56,6 +56,7 @@ class FSDPPolicyConfig:
     fsdp_mode: str = "full"  # "full" | "hybrid" (HSDP)
     reshard_after_forward: bool = True
     activation_checkpointing: bool = False
+    use_torch_compile: bool = False  # per-block torch.compile after fully_shard
 
     def __post_init__(self) -> None:
         self.param_dtype = validate_precision_type(self.param_dtype, field="training.policy.param_dtype")
@@ -187,6 +188,28 @@ class FSDPPolicy(PolicyBase):
 
             for layer in block_instances:
                 layer.forward = _make_ckpt_forward(layer.forward)
+
+        # Per-block ``torch.compile`` via in-place ``layer.forward`` monkey-
+        # patch — mirrors the activation-checkpointing pattern above. Order
+        # is fully_shard -> (optional) ckpt-wrap -> compile, so the compiled
+        # graph wraps the checkpoint higher-order op (dynamo treats
+        # ``torch.utils.checkpoint.checkpoint`` as a recognized HOP since
+        # 2.1, no graph break) rather than the other way around.
+        #
+        # We must NOT do ``self.model = torch.compile(self.model)`` at the
+        # root: that returns a new ``OptimizedModule`` bound only to
+        # ``FSDPPolicy.self.model``, while the training forward path goes
+        # through the source bundle (``bundle.transformer.model``) which
+        # still references the original module — the compiled wrapper is
+        # never invoked. Same reason rules out ``layer = torch.compile(layer)``
+        # inside the loop (would rebind the local but the parent
+        # ``ModuleList`` still holds the original layer). Monkey-patching
+        # ``layer.forward`` is in-place on the same object, so every existing
+        # reference sees the compiled forward on next call.
+        if self.config.use_torch_compile:
+            for layer in block_instances:
+                layer.forward = torch.compile(layer.forward)
+
         # No root ``fully_shard(self.model)``. The HF wrapper (the parent
         # of trainable_root in HI3) calls into leaf children of
         # trainable_root directly — e.g. ``transformer.forward`` does
@@ -200,10 +223,16 @@ class FSDPPolicy(PolicyBase):
 
         rank = self._current_rank()
         if rank == 0:
+            compiled_fwd_type = (
+                type(block_instances[0].forward).__name__
+                if (self.config.use_torch_compile and block_instances)
+                else None
+            )
             logger.info(
                 "FSDPPolicy: wrapped %d backbone block(s) of class %r "
                 "(%s, cpu_offload=%s, mixed_precision=%s, reshard_after_forward=%s, "
-                "activation_checkpointing=%s, dtype_casts=%d)",
+                "activation_checkpointing=%s, use_torch_compile=%s, "
+                "compiled_block_forward_type=%s, dtype_casts=%d)",
                 len(block_instances),
                 tuple(block_class_names),
                 "HSDP" if mesh is not None else "FSDP2",
@@ -211,6 +240,8 @@ class FSDPPolicy(PolicyBase):
                 self.config.mixed_precision,
                 fsdp_kwargs["reshard_after_forward"],
                 self.config.activation_checkpointing,
+                self.config.use_torch_compile,
+                compiled_fwd_type,
                 casts,
             )
 

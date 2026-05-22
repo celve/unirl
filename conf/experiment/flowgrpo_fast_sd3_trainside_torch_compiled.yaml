@@ -1,0 +1,193 @@
+# @package _global_
+# FlowGRPO-Fast SD3 recipe — direct-sampling on the Policy stack.
+#
+# Mirror of conf/experiment/flowgrpo_fast_sd3.yaml (legacy fsdp engine)
+# mapped onto the configured shape: ``rollout/engine: trainside``,
+# ``cfg.training.policies: [LoRA, FSDP, EMA]``, slot-keyed
+# ``cfg.algorithms.image: DiffusionGRPO``.
+#
+# Variant of flowgrpo_fast_sd3_trainside.yaml that enables
+# `torch.compile()` on the FSDPPolicy-wrapped trainable module.
+# See PR description for the A/B benchmark.
+#
+# Anchored to a 1-node × 8-GPU pod (8 actors). Math:
+#   global_batch       = prompts_per_rollout * samples_per_prompt = 48*16 = 768
+#   local_batch_size   = global / actor_count = 768 / 8 = 96
+#   local_mini_batch   = local / num_updates_per_batch = 96 / 2 = 48
+#   micro_batch_size   = 8                                 (12 micros per update)
+#
+# Launch via:
+#   python -m diffusionrl.train +experiment=flowgrpo_fast_sd3
+defaults:
+  - override /algorithm: grpo
+  - override /model: sd3
+  - override /rollout/engine: trainside
+  - override /sampling/sde_strategy: flow
+  - _self_
+
+run:
+  seed: 42
+  num_rollouts: 10000
+  data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
+  # Pickscore prompts live on Ceph at /mnt/bj/data/datasets/pickscore
+  # (mounted on every diffrl pod). The pod doesn't need a local copy.
+  data_path: /mnt/bj/data/datasets/pickscore/train.txt
+  eval_data_path: /mnt/bj/data/datasets/pickscore/test.txt
+
+sampling:
+  num_inference_steps: 10
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+  seed: 42
+  init_same_noise: false
+  sde_config:
+    eta: 0.7
+
+algorithm:
+  prompts_per_rollout: 48
+  samples_per_prompt: 16
+  adv_normalization_scope: group
+  use_global_std: true
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  use_kl_penalty: true
+  kl_coef: 0.0
+  ema:
+    eval_ema_decay: 0.99
+    eval_ema_update_interval: 2
+  scheduler:
+    timestep_fraction: [0.0, 0.5]
+    num_sde_steps: 3
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+
+model:
+  # SD3.5-medium lives on Ceph at /mnt/bj/models/stable-diffusion-3.5-medium.
+  # Eager-load is one-shot per actor at startup; subsequent reads are
+  # in-process from device memory.
+  pretrained_model_ckpt_path: ${oc.env:SD3_PATH,/mnt/bj/models/stable-diffusion-3.5-medium}
+  model_precision: bf16
+  autocast_precision: bf16
+  trajectory_precision: bf16
+  logprob_precision: fp32
+  shift: 3.0
+
+rollout:
+  engine: {}
+  plan:
+    forward_batch_size: 8
+
+placement:
+  num_rollout_nodes: 1
+  num_rollout_gpus_per_node: 8
+  num_rollout_gpus_per_actor: 1
+  num_train_nodes: 1
+  num_train_gpus_per_node: 8
+  num_train_gpus_per_actor: 1
+  colocate: true
+  colocate_gpu_fraction: 0.9
+  strategy: PACK
+
+# ----------------------------------------------------------------------
+# Training surface
+# ----------------------------------------------------------------------
+algorithms:
+  # Slot ``image`` matches RolloutResp.rollout_traces["image"] on SD3.
+  # ``stage_attr: diffusion`` points the algorithm at the right stage on
+  # SD3Pipeline (whose attribute name differs from the slot name).
+  image:
+    _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
+    stage_attr: diffusion
+    clip_range: 1.0e-4
+    clip_schedule: constant
+    conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
+    params:
+      # ``guidance_scale`` / ``eta`` interpolate from sampling so replay
+      # (which reads both) tracks any CLI override on the rollout side.
+      _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
+      num_inference_steps: 10
+      guidance_scale: ${sampling.guidance_scale}
+      height: 512
+      width: 512
+      seed: 42
+      eta: ${sampling.sde_config.eta}
+      # sde_indices: null — resolved per-rollout by RolloutPipeline.
+      # plan_requests from algorithm.scheduler.{timestep_fraction,
+      # num_sde_steps} and stuffed into RolloutReq.stage_params.
+
+training:
+  policy_source: diffusion
+  policies:
+    - _target_: diffusionrl.training.lora_policy.LoRAPolicy
+      rank: 32
+      alpha: 64
+      dropout: 0.0
+      # Canonical SD3 LoRA targets — mirror diffusionrl/models/sd3.py
+      # default_lora_target_modules(). validate_lora_target_modules only
+      # propagates to cfg.model.lora_target_modules, not into the training
+      # policy chain, so we set them explicitly here.
+      target_modules:
+        - attn.add_k_proj
+        - attn.add_q_proj
+        - attn.add_v_proj
+        - attn.to_add_out
+        - attn.to_k
+        - attn.to_out.0
+        - attn.to_q
+        - attn.to_v
+    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
+      cpu_offload: false
+      param_dtype: bf16
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: false
+      use_torch_compile: true
+    - _target_: diffusionrl.training.ema_policy.EMAPolicy
+      decay: 0.99
+      update_step_interval: 2
+  materialize:
+    with_aux: [vae, text_encoder, text_encoder_2, text_encoder_3]
+  plan:
+    micro_batch_size: 8
+    num_updates_per_batch: 2
+    local_mini_batch_size: 48
+    local_batch_size: 96
+    global_batch_size: 768
+  topology:
+    actor_count: 8
+  optimizer:
+    learning_rate: 3.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    total_steps: 10000
+  execution:
+    max_grad_norm: 1.0
+    offload_train: false
+    offload_rollout: false
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    - name: pickscore
+      weight: 1.0
+      batch_size: 8
+
+logging:
+  logging_steps: 1
+  log_media: false   # disabled to avoid wandb media overhead during long run
+  media_max_items: 8
+  report_to_wandb: true
+  project_name: diffusionrl-flowgrpo-newstack
+  entity: he-guangxin-1999-hong-kong-university-of-science-and-tec
+
+
+evaluation:
+  eval_steps: 0
