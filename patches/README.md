@@ -35,10 +35,10 @@ Key config knobs (override via CLI):
 
 # Third-party patches required for HI3-Instruct RL
 
-Only **one** pod-local patch remains. The fp32 LoRA skip logic (formerly
-`vllm/0001` + `vllm_omni/0002`) has been migrated into the in-repo
-`lora_hijack.py:VLLMOmniHijack.hijack()` monkey-patch — it follows
-`git pull` automatically and requires no pod-local intervention.
+Two pod-local patches are currently required for HI3 / vLLM-Omni rollout
+workers. The in-repo `lora_hijack.py:VLLMOmniHijack.hijack()` handles
+runtime tensor-bag LoRA loading, but these two upstream changes still need
+to be applied in the external vLLM / vLLM-Omni checkouts used by the pod.
 
 ## Patch list
 

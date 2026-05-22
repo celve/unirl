@@ -1,6 +1,8 @@
 # Model Artifact Layout
 
-This folder also contains Python model implementation code (`flux.py`, `sd3.py`, ...).
+This folder contains Python model implementation packages such as `sd3/`,
+`wan21/`, `wan22/`, `qwen_image/`, `hunyuan_video15/`, and
+`hunyuan_image3/`.
 
 ## Directories
 
@@ -9,7 +11,8 @@ This folder also contains Python model implementation code (`flux.py`, `sd3.py`,
 
 ## HuggingFace Fallback
 
-If local model paths don't exist, training scripts automatically fall back to
-HuggingFace model IDs (configured in `diffusionrl/config/arguments.py`).
+Experiment YAMLs and model configs provide HuggingFace ID fallbacks through
+Hydra env interpolation, for example
+`${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}`.
 
 Do not commit large model weights (`.bin`, `.safetensors`, `.pt`, etc.).

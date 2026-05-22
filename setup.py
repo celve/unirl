@@ -13,8 +13,6 @@ setup(
         include=(
             "diffusionrl",
             "diffusionrl.*",
-            "diffusionrl_plugins",
-            "diffusionrl_plugins.*",
         ),
     ),
     install_requires=[
