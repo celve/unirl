@@ -270,14 +270,16 @@ class UpdateWeightFromIPC(BucketedUpdateWeight):
         ``BucketedUpdateWeight.update_weights`` never runs for this path —
         we have to apply ``param_name_prefix`` here too.
         """
-        from diffusionrl.utils.peft_merge import lora_tensors_for_vllm, raw_state_dict
+        from diffusionrl.utils.peft_merge import adapt_lora_for_vllm, extract_lora_tensors, raw_state_dict
 
         prefix = self._param_name_prefix
         if peft_config and base_sync_done:
-            yield from lora_tensors_for_vllm(
-                self.model,
-                param_name_prefix=prefix,
-                packed_modules=getattr(self, "_packed_modules", None),
+            yield from adapt_lora_for_vllm(
+                extract_lora_tensors(
+                    self.model,
+                    param_name_prefix=prefix,
+                    packed_modules=getattr(self, "_packed_modules", None),
+                )
             ).items()
             return
 

@@ -120,20 +120,22 @@ def raw_state_dict(
         yield (_strip_peft_prefix(raw_name), _to_full_tensor(state_dict[raw_name]))
 
 
-def lora_tensors_for_vllm(
+def extract_lora_tensors(
     model: torch.nn.Module,
     *,
     param_name_prefix: str = "",
     adapter_name: str = "default",
     packed_modules: dict | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Extract LoRA tensors in vLLM's parser format.
+    """Extract LoRA tensors in canonical wire format.
 
-    vLLM expects tensor names inside the PEFT envelope, with a trailing
-    ``.weight`` component:
-    ``base_model.model.<prefix><module>.lora_A.weight`` and
-    ``...lora_B.weight``. The alpha scaling is supplied through the PEFT config,
-    not as per-layer ``.alpha`` tensors.
+    Canonical format: ``<pipeline_prefix><module>.lora_A.weight`` and
+    ``<pipeline_prefix><module>.lora_B.weight`` — PEFT envelope
+    (``base_model.model.``) and per-adapter name stripped; pipeline prefix
+    retained.  Downstream receivers convert to their engine-specific format:
+    :func:`adapt_lora_for_vllm` re-adds the envelope for vllm-omni;
+    :func:`adapt_lora_for_sglang` strips the prefix and injects ``.alpha``
+    for SGLang.
 
     ``packed_modules`` maps fused module names to their split sub-names,
     e.g. ``{"qkv_proj": {"sub_names": ["q_proj", "k_proj", "v_proj"], ...}}``.
@@ -151,7 +153,7 @@ def lora_tensors_for_vllm(
             adapter, *_rest = adapter_suffix.split(".", 1)
             if adapter != adapter_name:
                 break
-            out_name = f"base_model.model.{prefix}{head}.{suffix}.weight"
+            out_name = f"{prefix}{head}.{suffix}.weight"
             result[out_name] = _to_full_tensor(param).detach().cpu()
             break
 
@@ -196,7 +198,7 @@ def lora_tensors_for_vllm(
                     expected_out = num_kv_heads * (kv_groups + 2) * head_dim
                     rank = B.shape[1]
                     assert B.shape[0] == expected_out, (
-                        f"lora_tensors_for_vllm: B.shape[0]={B.shape[0]} != "
+                        f"extract_lora_tensors: B.shape[0]={B.shape[0]} != "
                         f"expected {expected_out} for gqa_interleaved "
                         f"(num_q={num_q_heads}, num_kv={num_kv_heads}, "
                         f"head_dim={head_dim})"
@@ -212,7 +214,7 @@ def lora_tensors_for_vllm(
                     # Block layout: simple contiguous split
                     n = len(sub_names)
                     assert B.shape[0] % n == 0, (
-                        f"lora_tensors_for_vllm: B.shape[0]={B.shape[0]} not "
+                        f"extract_lora_tensors: B.shape[0]={B.shape[0]} not "
                         f"divisible by {n} for block split of {fused_name}."
                     )
                     step = B.shape[0] // n
@@ -237,9 +239,78 @@ def lora_tensors_for_vllm(
     if _bad_dtype:
         sample = ", ".join(f"{k}={dt}" for k, dt in _bad_dtype[:3])
         raise RuntimeError(
-            f"lora_tensors_for_vllm: {len(_bad_dtype)} LoRA tensor(s) have "
+            f"extract_lora_tensors: {len(_bad_dtype)} LoRA tensor(s) have "
             f"unsupported dtype for vllm punica kernel (expected bf16/fp16). "
             f"Sample: [{sample}]. Check FSDP MixedPrecisionPolicy.param_dtype."
         )
+
+    return result
+
+
+def adapt_lora_for_vllm(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Wrap canonical-format LoRA keys in the vllm-omni PEFT envelope.
+
+    Canonical → vllm-omni format::
+
+        <pipeline_prefix><module>.lora_A.weight
+        → base_model.model.<pipeline_prefix><module>.lora_A.weight
+
+    This is the receiver-side adapter for
+    :class:`~diffusionrl.rollout.engine.vllm_omni.engine.VLLMOmniRolloutEngine`.
+    """
+    return {f"{_PEFT_PREFIX}{k}": v for k, v in tensors.items()}
+
+
+def adapt_lora_for_sglang(
+    tensors: dict[str, torch.Tensor],
+    *,
+    pipeline_prefix: str = "",
+    peft_config: dict | None = None,
+) -> dict[str, torch.Tensor]:
+    """Convert canonical-format LoRA tensors to SGLang's native key format.
+
+    Canonical → SGLang native::
+
+        <pipeline_prefix><module>.lora_A.weight
+        → <module>.lora_A.weight
+        + <module>.alpha            ← injected from peft_config["lora_alpha"]
+
+    SGLang's ``_apply_lora_to_layers`` keys its ``lora_layers`` dict by
+    ``named_modules()`` of ``self.modules["transformer"]`` — i.e. starting
+    *inside* the transformer — so layer keys are bare module names without
+    any pipeline prefix.  The ``.alpha`` key is required so SGLang computes
+    ``scale = lora_alpha / r`` correctly; without it SGLang falls back to
+    ``inferred_alpha = inferred_rank`` → scale = 1.0 (wrong for alpha ≠ rank).
+
+    Args:
+        tensors: Canonical-format output of :func:`extract_lora_tensors`.
+        pipeline_prefix: The pipeline-level prefix to strip, e.g.
+            ``"transformer."`` for SD3/WAN/HV15/Qwen or ``"model."`` for
+            HunyuanImage3.  Read from
+            ``model_config.weight_sync_param_name_prefix`` at the call site.
+        peft_config: PEFT config dict; provides ``lora_alpha`` for injecting
+            ``.alpha`` keys.
+    """
+    prefix = str(pipeline_prefix or "")
+    result: dict[str, torch.Tensor] = {}
+    for key, tensor in tensors.items():
+        if prefix and key.startswith(prefix):
+            key = key[len(prefix):]
+        result[key] = tensor
+
+    if peft_config:
+        lora_alpha = peft_config.get("lora_alpha")
+        if lora_alpha is not None:
+            layer_bases: set[str] = set()
+            for k in result:
+                for suf in (".lora_A.weight", ".lora_A"):
+                    if k.endswith(suf):
+                        layer_bases.add(k[: -len(suf)])
+                        break
+            alpha_tensor = torch.tensor(float(lora_alpha))
+            for base in layer_bases:
+                alpha_key = f"{base}.alpha"
+                if alpha_key not in result:
+                    result[alpha_key] = alpha_tensor
 
     return result

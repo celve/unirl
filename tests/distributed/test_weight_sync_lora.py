@@ -13,7 +13,7 @@ from diffusionrl.ray.mixins.training_weight_sync import TrainingWeightSyncMixin
 from diffusionrl.utils import peft_merge
 
 
-def test_lora_tensors_for_vllm_uses_peft_envelope_and_weight_suffix(monkeypatch):
+def test_extract_lora_tensors_with_adapt_for_vllm_uses_peft_envelope_and_weight_suffix(monkeypatch):
     monkeypatch.setattr(peft_merge, "_to_full_tensor", lambda tensor: tensor)
 
     class Model:
@@ -24,9 +24,11 @@ def test_lora_tensors_for_vllm_uses_peft_envelope_and_weight_suffix(monkeypatch)
                 "base_model.model.block.attn.base_layer.weight": torch.ones(4, 3),
             }
 
-    tensors = peft_merge.lora_tensors_for_vllm(
-        Model(),
-        param_name_prefix="transformer.",
+    tensors = peft_merge.adapt_lora_for_vllm(
+        peft_merge.extract_lora_tensors(
+            Model(),
+            param_name_prefix="transformer.",
+        )
     )
 
     assert set(tensors) == {
@@ -135,7 +137,7 @@ def test_nccl_lora_phase_materializes_on_non_source_rank(monkeypatch):
     calls = []
     monkeypatch.setattr(
         nccl_mod,
-        "lora_tensors_for_vllm",
+        "extract_lora_tensors",
         lambda model, *, param_name_prefix: calls.append((model, param_name_prefix)) or {},
     )
 
@@ -153,7 +155,7 @@ def test_tensor_lora_phase_materializes_on_non_sender_rank(monkeypatch):
     calls = []
     monkeypatch.setattr(
         tensor_mod,
-        "lora_tensors_for_vllm",
+        "extract_lora_tensors",
         lambda model, *, param_name_prefix: calls.append((model, param_name_prefix)) or {},
     )
 

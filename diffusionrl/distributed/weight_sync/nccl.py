@@ -14,7 +14,7 @@ from diffusionrl.config.registration import register_config
 from diffusionrl.config.require import require
 from diffusionrl.distributed.weight_sync.base import BucketedUpdateWeight
 from diffusionrl.utils.distributed_utils import init_process_group
-from diffusionrl.utils.peft_merge import lora_tensors_for_vllm
+from diffusionrl.utils.peft_merge import extract_lora_tensors
 
 
 @register_config(
@@ -91,7 +91,7 @@ class UpdateWeightFromDistributed(BucketedUpdateWeight):
             # All FSDP ranks must materialize the LoRA DTensors so the
             # underlying all_gathers complete; only the source rank fans out
             # the resulting tensors over Ray.
-            lora_tensors = lora_tensors_for_vllm(
+            lora_tensors = extract_lora_tensors(
                 self.model,
                 param_name_prefix=self._param_name_prefix,
             )

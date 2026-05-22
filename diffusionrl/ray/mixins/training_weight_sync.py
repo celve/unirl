@@ -97,17 +97,19 @@ class TrainingWeightSyncMixin:
     def _extract_lora_state(self, adapter_name: str = "default") -> tuple[dict, dict]:
         """Return ``(lora_tensors, peft_config_dict)`` for one PEFT adapter.
 
-        ``lora_tensors`` uses vLLM's in-memory LoRA parser format:
+        ``lora_tensors`` uses the vllm-omni format (PEFT envelope):
         ``base_model.model.<prefix><module>.lora_A.weight`` /
         ``...lora_B.weight``. Alpha is carried by ``peft_config_dict``.
         """
-        from diffusionrl.utils.peft_merge import lora_tensors_for_vllm
+        from diffusionrl.utils.peft_merge import adapt_lora_for_vllm, extract_lora_tensors
 
         prefix = getattr(self._update_weight_handler, "_param_name_prefix", "")
-        tensors = lora_tensors_for_vllm(
-            self.model,
-            param_name_prefix=str(prefix or ""),
-            adapter_name=adapter_name,
+        tensors = adapt_lora_for_vllm(
+            extract_lora_tensors(
+                self.model,
+                param_name_prefix=str(prefix or ""),
+                adapter_name=adapter_name,
+            )
         )
         peft_dict = self._peft_config_dict(adapter_name)
         n_pairs = sum(1 for key in tensors if key.endswith(".lora_A.weight"))

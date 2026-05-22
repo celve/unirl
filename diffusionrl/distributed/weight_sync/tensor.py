@@ -11,7 +11,7 @@ import torch.distributed as dist
 from diffusionrl.config.registration import register_config
 from diffusionrl.config.require import require
 from diffusionrl.distributed.weight_sync.base import BucketedUpdateWeight
-from diffusionrl.utils.peft_merge import lora_tensors_for_vllm
+from diffusionrl.utils.peft_merge import extract_lora_tensors
 
 
 @register_config(
@@ -53,7 +53,7 @@ class UpdateWeightFromTensor(BucketedUpdateWeight):
             # All FSDP ranks must materialize the LoRA DTensors so the
             # underlying all_gathers complete; only the local gather source
             # sends the resulting tensors to its rollout actor.
-            lora_tensors = lora_tensors_for_vllm(
+            lora_tensors = extract_lora_tensors(
                 self.model,
                 param_name_prefix=self._param_name_prefix,
             )
