@@ -77,6 +77,7 @@ def test_training_weight_sync_lora_skips_base_sync_and_calls_lora_every_call():
     Each sync_weights_to_rollout call issues exactly one handler.update_weights
     with peft_config set and base_sync_done=True.
     """
+
     class PeftConfig:
         def to_dict(self):
             return {"r": 4, "lora_alpha": 8, "target_modules": {"to_q", "to_v"}}

@@ -130,9 +130,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         # Pipeline prefix embedded in canonical LoRA keys, e.g. "transformer."
         # for SD3/WAN/HV15/Qwen or "model." for HunyuanImage3.  Stripped by
         # adapt_lora_for_sglang so keys match SGLang's named_modules() space.
-        self._pipeline_prefix: str = str(
-            getattr(model_config, "weight_sync_param_name_prefix", "") or ""
-        )
+        self._pipeline_prefix: str = str(getattr(model_config, "weight_sync_param_name_prefix", "") or "")
 
         server_kwargs = self.cfg.build_server_kwargs(
             self._runtime["ServerArgs"],

@@ -295,7 +295,7 @@ def adapt_lora_for_sglang(
     result: dict[str, torch.Tensor] = {}
     for key, tensor in tensors.items():
         if prefix and key.startswith(prefix):
-            key = key[len(prefix):]
+            key = key[len(prefix) :]
         result[key] = tensor
 
     if peft_config:
