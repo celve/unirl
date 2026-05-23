@@ -23,6 +23,10 @@ from typing import Optional
 
 import torch
 
+from diffusionrl.rollout.engine.vllm_omni.vllm_patches import (
+    OmniTensorLoRARequest,
+    VLLMOmniHijack,
+)
 from diffusionrl.rollout.engine.vllm_omni.weight_sync.bucketed_transfer import (
     BucketedWeightReceiver,
 )
@@ -32,10 +36,6 @@ from diffusionrl.rollout.engine.vllm_omni.weight_sync.ipc_dispatch import (
     DIFFRL_LORA_PATH,
     replica_rank_from_env,
     zmq_handle,
-)
-from diffusionrl.rollout.engine.vllm_omni.weight_sync.lora_hijack import (
-    OmniTensorLoRARequest,
-    VLLMOmniHijack,
 )
 
 logger = logging.getLogger(__name__)
@@ -267,7 +267,7 @@ class BucketedIPCReceiveMixin:
             raise RuntimeError(
                 f"{type(self).__name__}.set_lora_from_tensor_dict: sglang is not installed in this worker. ({exc})"
             ) from exc
-        from diffusionrl.rollout.engine.vllm_omni.weight_sync.lora_hijack import (
+        from diffusionrl.rollout.engine.vllm_omni.vllm_patches import (
             OmniTensorLoRARequest,
         )
 

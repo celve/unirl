@@ -8,11 +8,10 @@ Modules:
 - ``ipc_dispatch``: shared constants + ZMQ-handle naming used by both the
   driver-side ``UpdateWeightFromIPC`` and the rollout-side extensions.
   Pure-Python — does NOT pull vllm-omni at import time.
-- ``lora_hijack``: ``OmniTensorLoRARequest`` + ``VLLMOmniHijack`` to load
-  LoRA tensors directly from memory rather than from a file path. Pulls
-  vllm-omni's ``DiffusionLoRAManager`` at import time — heavy.
 - ``ipc_receive_mixin`` / ``nccl_receive_mixin``: receive-side mixins for
-  the worker extensions. Light, but ipc_receive_mixin imports lora_hijack.
+  the worker extensions. Light, but ``ipc_receive_mixin`` imports
+  ``diffusionrl.rollout.engine.vllm_omni.vllm_patches`` (sibling module
+  holding the monkey-patch bundle for vllm / vllm-omni).
 - ``ar_extension`` / ``dit_extension``: per-stage worker extension classes
   installed via stage YAML ``engine_args.worker_extension_cls``. Pull
   vllm-omni base classes at import time — heaviest.
@@ -41,8 +40,6 @@ from diffusionrl.rollout.engine.vllm_omni.weight_sync.ipc_dispatch import (
 # actually requested. Keeps `import .weight_sync` cheap and CUDA-driver
 # independent.
 _LAZY_TARGETS = {
-    "OmniTensorLoRARequest": ("lora_hijack", "OmniTensorLoRARequest"),
-    "VLLMOmniHijack": ("lora_hijack", "VLLMOmniHijack"),
     "BucketedIPCReceiveMixin": ("ipc_receive_mixin", "BucketedIPCReceiveMixin"),
     "NcclBroadcastReceiveMixin": ("nccl_receive_mixin", "NcclBroadcastReceiveMixin"),
     "HI3ARWeightSyncExtension": ("ar_extension", "HI3ARWeightSyncExtension"),
@@ -73,8 +70,6 @@ __all__ = [
     "DiTWeightSyncExtension",
     "HI3ARWeightSyncExtension",
     "NcclBroadcastReceiveMixin",
-    "OmniTensorLoRARequest",
-    "VLLMOmniHijack",
     "replica_rank_from_env",
     "zmq_handle",
 ]

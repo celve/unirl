@@ -202,6 +202,19 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         rank: Optional[int] = None,
         model_config: Any = None,
     ) -> None:
+        # Install vllm / vllm-omni monkey-patches in the driver process before
+        # any worker subprocess is spawned. ``hijack()`` first calls
+        # ``wrap_mp_process_for_children()``, which hooks ``mp.Process.__init__``
+        # so every spawn-spawned worker target also runs ``hijack()`` at startup
+        # — the primary mechanism for propagating patches across the spawn
+        # boundary. The same ``hijack()`` is invoked again from the worker
+        # extension's ``BucketedIPCReceiveMixin.__new__`` as defensive backup;
+        # both calls are idempotent. Mirrors the LIN-210 sglang patch entry
+        # point in ``samplers/sglang/engine.py``.
+        from diffusionrl.rollout.engine.vllm_omni.vllm_patches import VLLMOmniHijack
+
+        VLLMOmniHijack.hijack()
+
         # vllm-omni's MultiprocDiffusionExecutor calls
         # ``mp.set_start_method("spawn", force=True)`` after constructing
         # multiprocessing.Event/Pipe objects in the parent process. The

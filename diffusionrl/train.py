@@ -409,26 +409,32 @@ def train(cfg: DictConfig) -> None:
             logger.info("[LOOP r=%d] Train done (%.1fs).", rollout_id, timings.get("train"))
 
             if sync_enabled and (rollout_id + 1) % int(cfg.run.weight_sync_interval) == 0:
+                # Offload train before sync so rollout wake_up has GPU room.
+                # sync_weights_to_rollout → _to_full_tensor will .cuda() each
+                # LoRA tensor back individually (few MB) for the all_gather +
+                # ZMQ send, so this is safe even with train offloaded.
+                if cfg.training.execution.offload_train:
+                    train_group.offload()
+                else:
+                    train_group.clear_memory()
+
                 with timings.measure("sync"):
                     if cfg.training.execution.offload_rollout:
                         logger.info("[LOOP r=%d] Waking rollout for sync...", rollout_id)
                         rollout_group.wake_up()
                         _rollout_is_sleeping = False
-                    # Train is still on-load here (we haven't called
-                    # train_group.offload() yet) — sync_weights_to_rollout
-                    # reads from live GPU params for IPC / NCCL transport.
                     train_group.sync_weights_to_rollout()
                     logger.info("[LOOP r=%d] Sync done.", rollout_id)
                     # Sleep rollout after sync (will be waked at next iter start).
                     if cfg.training.execution.offload_rollout:
                         rollout_group.sleep()
                         _rollout_is_sleeping = True
-
-            # Offload train AFTER sync so the sync path saw live GPU params.
-            if cfg.training.execution.offload_train:
-                train_group.offload()
             else:
-                train_group.clear_memory()
+                # No sync this iter — still offload train for next rollout.
+                if cfg.training.execution.offload_train:
+                    train_group.offload()
+                else:
+                    train_group.clear_memory()
 
             # --- Metric aggregation + console scalar summary ---
             # Flatten all per-update × per-actor results for the rollout-level summary.
