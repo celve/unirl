@@ -762,6 +762,16 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
             DIFFRL_LORA_NAME,
             DIFFRL_LORA_PATH,
         )
+        from diffusionrl.utils.peft_merge import adapt_lora_for_vllm
+
+        # Senders (nccl.py, tensor.py) ship canonical-format keys:
+        #   ``<pipeline_prefix><module>.lora_A.weight``
+        # vllm-omni's PEFTHelper expects the PEFT envelope:
+        #   ``base_model.model.<pipeline_prefix><module>.lora_A.weight``
+        # Wrap if not already wrapped (idempotent check on first key).
+        first_key = next(iter(lora_tensors), "")
+        if lora_tensors and not first_key.startswith("base_model.model."):
+            lora_tensors = adapt_lora_for_vllm(lora_tensors)
 
         if stage_ids is None:
             stage_ids = list(range(int(self._omni.engine.num_stages)))

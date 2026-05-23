@@ -72,7 +72,7 @@ class HunyuanImage3PipelineConfig:
 
     # Fused→split mapping for LoRA weight sync. HI3 uses fused qkv_proj
     # (Q+K+V packed into one Linear) but vLLM's LoRA system expects split
-    # q_proj/k_proj/v_proj keys. This dict tells lora_tensors_for_vllm to
+    # q_proj/k_proj/v_proj keys. This dict tells extract_lora_tensors to
     # split fused LoRA tensors before sending to rollout.
     #
     # HI3 qkv_proj is GROUP-INTERLEAVED (not block [Q|K|V]):

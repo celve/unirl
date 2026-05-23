@@ -59,6 +59,7 @@ from diffusionrl.sde.runtime import FlowMatchSchedulePolicy, ensure_req_sigmas
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp
 from diffusionrl.utils.dtypes import parse_torch_dtype
+from diffusionrl.utils.peft_merge import adapt_lora_for_sglang
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,10 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         self._target_modules: List[str] = list(self.cfg.target_modules or ("transformer",))
         self._runtime = _import_sglang_runtime()
         self._is_offloaded = False
+        # Pipeline prefix embedded in canonical LoRA keys, e.g. "transformer."
+        # for SD3/WAN/HV15/Qwen or "model." for HunyuanImage3.  Stripped by
+        # adapt_lora_for_sglang so keys match SGLang's named_modules() space.
+        self._pipeline_prefix: str = str(getattr(model_config, "weight_sync_param_name_prefix", "") or "")
 
         server_kwargs = self.cfg.build_server_kwargs(
             self._runtime["ServerArgs"],
@@ -508,78 +513,21 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         peft_config: Optional[dict] = None,
         stage_ids: Optional[List[int]] = None,
     ) -> None:
-        # ``lora_tensors_for_vllm`` ships keys in vLLM's PEFT-envelope form
-        # ``base_model.model.<prefix><module>.lora_A.weight``, where
-        # ``<prefix>`` comes from ``weight_sync_param_name_prefix`` on the
-        # pipeline config (e.g. ``transformer.`` for SD3, set so vllm-omni's
-        # whole-pipeline loader matches its own module names).
-        #
-        # SGLang's ``LoRAPipeline._register_lora_state_dict`` only strips
-        # ``diffusion_model.`` and ``.weight``; it does NOT strip
-        # ``base_model.model.`` or any pipeline-level module prefix. SGLang's
-        # ``lora_layers`` dict, however, is keyed by ``named_modules()`` of
+        # Senders (nccl.py, tensor.py) ship keys in canonical wire format:
+        #   ``<pipeline_prefix><module>.lora_A.weight``
+        # SGLang's ``lora_layers`` dict is keyed by ``named_modules()`` of
         # ``self.modules["transformer"]`` — i.e. starting INSIDE the
-        # transformer — so layer keys are bare ``transformer_blocks.<i>...``.
-        #
-        # Without normalization here the registered key ends up as
-        # ``base_model.model.transformer.<module>.lora_A`` while SGLang's
-        # layers are just ``<module>``. The mismatch silently degrades to
-        # ``LoRA adapter ... applied to 0 layers`` and the rollout runs the
-        # base model. Strip both the PEFT envelope and the pipeline-level
-        # ``transformer.`` head here so the registered keys match SGLang's
-        # module-name space exactly. This is a sglang-side normalization
-        # only; trainer-side ``weight_sync_param_name_prefix`` stays as-is so
-        # vllm-omni continues to work on the same recipe.
-        stripped: Dict[str, torch.Tensor] = {}
-        envelope = "base_model.model."
-        pipeline_prefix = "transformer."
-        for name, tensor in lora_tensors.items():
-            key = name
-            if key.startswith(envelope):
-                key = key[len(envelope) :]
-            if key.startswith(pipeline_prefix):
-                key = key[len(pipeline_prefix) :]
-            stripped[key] = tensor
-
-        # 2026-05-21 LoRA-SCALE FIX: inject ``<module>.alpha`` tensors so
-        # SGLang's ``_apply_lora_to_layers`` (lora_pipeline.py:448-463) infers
-        # the correct PEFT scale = alpha/rank. Without these keys the loader
-        # falls back to ``inferred_alpha = inferred_rank`` (line 459-462),
-        # which makes ``BaseLayerWithLoRA.forward`` (linear.py:90-93) skip the
-        # ``delta * (alpha/rank)`` multiply (the if-condition is False when
-        # alpha == rank). For our trainer config (rank=32, alpha=64) this
-        # silently dropped LoRA scale from 2.0 to 1.0 — every LoRA-targeted
-        # attn module produced a delta with HALF the trainer's magnitude,
-        # which is exactly the source of the ~21μ rollout-vs-replay logp_diff
-        # floor at SDE step 0 (vs. vllm's ~3μ baseline). PEFT bakes the
-        # alpha/rank scale into the forward; we have to mirror that on the
-        # SGLang side or the two engines compute different DiT outputs even
-        # with identical LoRA tensors.
-        if peft_config:
-            lora_alpha = peft_config.get("lora_alpha")
-            lora_rank = peft_config.get("r") or peft_config.get("lora_rank")
-            if lora_alpha is not None:
-                # Derive the layer-base name from each lora_A key in
-                # ``stripped`` (post-prefix-strip) and inject ``<base>.alpha``.
-                layer_bases: set = set()
-                for k in list(stripped.keys()):
-                    for suf in (".lora_A.weight", ".lora_A"):
-                        if k.endswith(suf):
-                            layer_bases.add(k[: -len(suf)])
-                            break
-                alpha_tensor = torch.tensor(float(lora_alpha))
-                for base in layer_bases:
-                    alpha_key = f"{base}.alpha"
-                    if alpha_key not in stripped:
-                        stripped[alpha_key] = alpha_tensor
-                logger.info(
-                    "SGLang LoRA scale fix: injected .alpha=%s for %d layers "
-                    "(rank=%s) so SGLang applies scale=%s instead of 1.0",
-                    lora_alpha,
-                    len(layer_bases),
-                    lora_rank,
-                    (lora_alpha / lora_rank) if lora_rank else "?",
-                )
+        # transformer — so layer keys must be bare module names with no
+        # pipeline prefix.  ``adapt_lora_for_sglang`` strips the prefix
+        # (read from ``model_config.weight_sync_param_name_prefix``) and
+        # injects ``.alpha`` keys so SGLang computes scale = alpha/rank
+        # correctly (without them SGLang falls back to inferred_alpha =
+        # inferred_rank → scale = 1.0, wrong for alpha ≠ rank).
+        stripped = adapt_lora_for_sglang(
+            lora_tensors,
+            pipeline_prefix=self._pipeline_prefix,
+            peft_config=peft_config,
+        )
 
         request = self._runtime["SetLoraFromTensorsReq"](
             lora_nickname=str(adapter_name),
@@ -591,11 +539,8 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         error = getattr(response, "error", None)
         require(error is None, f"set_lora_from_tensors failed: {error}")
         # Count the distinct LoRA layer names we registered (each layer ships
-        # two tensors: ``lora_A`` + ``lora_B``). With the trainer's PEFT-envelope
-        # + pipeline prefix stripped above, every key here is the bare
-        # SGLang-layer name + ``.lora_A`` / ``.lora_B`` suffix, so deduping on
-        # that gives the layer count SGLang's ``_apply_lora_to_layers`` will
-        # match. For SD3.5-medium this is ~191.
+        # two tensors: ``lora_A`` + ``lora_B``).  Alpha keys are excluded.
+        # For SD3.5-medium this is ~191.
         layer_names = set()
         for key in stripped:
             if key.endswith(".alpha"):
