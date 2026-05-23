@@ -19,8 +19,8 @@ def test_extract_lora_tensors_with_adapt_for_vllm_uses_peft_envelope_and_weight_
     class Model:
         def state_dict(self):
             return {
-                "base_model.model.block.attn.lora_A.default.weight": torch.ones(2, 3),
-                "base_model.model.block.attn.lora_B.default.weight": torch.ones(4, 2),
+                "base_model.model.block.attn.lora_A.default.weight": torch.ones(2, 3, dtype=torch.bfloat16),
+                "base_model.model.block.attn.lora_B.default.weight": torch.ones(4, 2, dtype=torch.bfloat16),
                 "base_model.model.block.attn.base_layer.weight": torch.ones(4, 3),
             }
 
@@ -72,7 +72,11 @@ def test_bucketed_base_sync_filters_lora_keys(monkeypatch):
     assert [name for name, _ in handler.captured] == ["transformer.block.weight"]
 
 
-def test_training_weight_sync_lora_uses_base_once_then_lora_every_call():
+def test_training_weight_sync_lora_skips_base_sync_and_calls_lora_every_call():
+    """Base sync is permanently skipped (_base_sync_done=True on init).
+    Each sync_weights_to_rollout call issues exactly one handler.update_weights
+    with peft_config set and base_sync_done=True.
+    """
     class PeftConfig:
         def to_dict(self):
             return {"r": 4, "lora_alpha": 8, "target_modules": {"to_q", "to_v"}}
@@ -101,11 +105,11 @@ def test_training_weight_sync_lora_uses_base_once_then_lora_every_call():
     host.sync_weights_to_rollout()
     host.sync_weights_to_rollout()
 
-    assert handler.calls[0] == (None, False)
+    assert len(handler.calls) == 2
+    assert handler.calls[0][0]["target_modules"] == ["to_q", "to_v"]
+    assert handler.calls[0][1] is True
     assert handler.calls[1][0]["target_modules"] == ["to_q", "to_v"]
     assert handler.calls[1][1] is True
-    assert handler.calls[2][0]["target_modules"] == ["to_q", "to_v"]
-    assert handler.calls[2][1] is True
 
 
 def test_ipc_orphan_rank_drains_iterator_without_sender(monkeypatch):
