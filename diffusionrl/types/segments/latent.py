@@ -59,6 +59,7 @@ class LatentSegment(Segment):
     sigmas: Optional[torch.Tensor] = shared_field(default=None)
     indices: Optional[torch.Tensor] = shared_field(default=None)
     sde_logp: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    sde_means: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
     sde_indices: Optional[torch.Tensor] = shared_field(default=None)
     log_probs: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
     loss_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)

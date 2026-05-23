@@ -19,7 +19,7 @@ from diffusionrl.types.conditions import Condition
 from diffusionrl.types.segments.latent import LatentSegment
 from diffusionrl.types.segments.text import TextSegment
 
-from .base import AlgorithmStepResult, StageAlgorithm
+from .base import AlgorithmStepResult, StageAlgorithm, gather_sde_field, typed_conditions
 
 
 def _resolve_clip_range_from_schedule(clip_range: float, schedule: str, progress: float) -> float:
@@ -66,21 +66,6 @@ def _grpo_clip_loss(
         "approx_kl": (0.5 * log_diff.pow(2)).mean().detach(),
     }
     return loss_per_elem, metrics
-
-
-def _typed_conditions(
-    conditions: Mapping[str, Condition],
-    conditions_cls: Optional[Type[Any]],
-) -> Any:
-    """Reconstruct the stage's typed conditions container from the dict shape.
-
-    When ``conditions_cls`` is ``None`` (e.g. unit tests against a fake stage
-    that accepts the dict directly), the dict is forwarded verbatim. Otherwise
-    ``conditions_cls.from_dict(...)`` is invoked.
-    """
-    if conditions_cls is None:
-        return conditions
-    return conditions_cls.from_dict(dict(conditions))
 
 
 class DiffusionGRPO(StageAlgorithm):
@@ -143,7 +128,7 @@ class DiffusionGRPO(StageAlgorithm):
         target_steps = self._resolve_target_steps(segment)
         if not target_steps:
             return
-        typed_conds = _typed_conditions(conditions, self.conditions_cls)
+        typed_conds = typed_conditions(conditions, self.conditions_cls)
         with torch.no_grad():
             result = self.stage.replay(typed_conds, segment=segment, params=self.params, step_indices=target_steps)
         segment.sde_logp = result.log_probs.detach().cpu()
@@ -161,7 +146,7 @@ class DiffusionGRPO(StageAlgorithm):
         if not target_steps:
             return AlgorithmStepResult(loss=0.0, metrics={}, num_steps_or_tokens=0, has_backward=False)
 
-        typed_conds = _typed_conditions(conditions, self.conditions_cls)
+        typed_conds = typed_conditions(conditions, self.conditions_cls)
         replay_result = self.stage.replay(
             typed_conds,
             segment=segment,
@@ -170,7 +155,9 @@ class DiffusionGRPO(StageAlgorithm):
         )
         new_logp = replay_result.log_probs  # [B, S']
 
-        old_logp = self._gather_old_sde_logp(segment, target_steps).to(dtype=new_logp.dtype, device=new_logp.device)
+        old_logp = gather_sde_field(segment.sde_logp, segment.sde_indices, target_steps, field_name="sde_logp").to(
+            dtype=new_logp.dtype, device=new_logp.device
+        )
 
         clip_range = _resolve_clip_range_from_schedule(self.clip_range, self.clip_schedule, training_progress)
         adv_b = advantages.detach().to(dtype=new_logp.dtype, device=new_logp.device).reshape(-1, 1).expand_as(new_logp)
@@ -208,24 +195,6 @@ class DiffusionGRPO(StageAlgorithm):
         if segment.sde_indices is None:
             return []
         return [int(i) for i in segment.sde_indices.tolist()]
-
-    @staticmethod
-    def _gather_old_sde_logp(segment: "LatentSegment", target_steps: List[int]) -> torch.Tensor:
-        """Slice ``segment.sde_logp[:, slot_for_each_target_step]`` → ``[B, S']``."""
-        if segment.sde_logp is None or segment.sde_indices is None:
-            raise ValueError(
-                "DiffusionGRPO requires segment.sde_logp and segment.sde_indices "
-                "(rollout must record SDE log-probs for the steps you train on)."
-            )
-        sde_indices_list = [int(i) for i in segment.sde_indices.tolist()]
-        try:
-            positions = [sde_indices_list.index(i) for i in target_steps]
-        except ValueError as exc:
-            raise ValueError(
-                f"DiffusionGRPO target step not present in segment.sde_indices: "
-                f"target_steps={target_steps}, sde_indices={sde_indices_list}"
-            ) from exc
-        return segment.sde_logp[:, positions]
 
 
 class ARGRPO(StageAlgorithm):
@@ -272,7 +241,7 @@ class ARGRPO(StageAlgorithm):
         if int(segment.tokens.shape[0]) == 0:
             return AlgorithmStepResult(loss=0.0, metrics={}, num_steps_or_tokens=0, has_backward=False)
 
-        typed_conds = _typed_conditions(conditions, self.conditions_cls)
+        typed_conds = typed_conditions(conditions, self.conditions_cls)
         new_logp = self.stage.replay(typed_conds, segment=segment)  # [total_tokens]
         old_logp = segment.log_probs.to(dtype=new_logp.dtype, device=new_logp.device)
         adv_per_token = self._expand_advantages_to_tokens(

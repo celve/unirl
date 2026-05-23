@@ -11,13 +11,70 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, List, Mapping, Optional, Type
 
 import torch
 
 if TYPE_CHECKING:
     from diffusionrl.types.conditions import Condition
     from diffusionrl.types.segments.base import Segment
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers used by DiffusionGRPO, DiffusionDPPO, DiffusionNFT
+# ---------------------------------------------------------------------------
+
+
+def typed_conditions(
+    conditions: Mapping[str, "Condition"],
+    conditions_cls: Optional[Type[Any]],
+) -> Any:
+    """Reconstruct the stage's typed conditions container from the dict shape.
+
+    When ``conditions_cls`` is ``None`` (e.g. unit tests against a fake stage
+    that accepts the dict directly), the dict is forwarded verbatim. Otherwise
+    ``conditions_cls.from_dict(...)`` is invoked.
+    """
+    if conditions_cls is None:
+        return conditions
+    return conditions_cls.from_dict(dict(conditions))
+
+
+def gather_sde_field(
+    tensor: Optional[torch.Tensor],
+    sde_indices: Optional[torch.Tensor],
+    target_steps: List[int],
+    *,
+    field_name: str = "field",
+) -> torch.Tensor:
+    """Gather slices from a segment's SDE-aligned tensor by step index.
+
+    Maps ``target_steps`` to positions in ``sde_indices`` via
+    ``torch.searchsorted`` (O(S' log S)) and returns
+    ``tensor[:, positions, ...]``.
+
+    Used by GRPO (for ``sde_logp``) and DPPO (for ``sde_logp`` + ``sde_means``).
+    """
+    if tensor is None or sde_indices is None:
+        raise ValueError(
+            f"gather_sde_field: {field_name} or sde_indices is None "
+            f"(ensure prepare_segment ran before compute_loss_and_backward)."
+        )
+    target_t = torch.tensor(target_steps, dtype=sde_indices.dtype, device=sde_indices.device)
+    # Ensure sde_indices is sorted (searchsorted requirement)
+    sort_order = sde_indices.argsort()
+    sde_indices = sde_indices[sort_order]
+    tensor = tensor[:, sort_order.tolist()]
+    positions = torch.searchsorted(sde_indices, target_t)
+    # Clamp to valid range before validation (searchsorted can return len for out-of-range)
+    positions = positions.clamp(max=sde_indices.shape[0] - 1)
+    # Validate looked-up positions match
+    if (sde_indices[positions] != target_t).any():
+        bad = [int(t) for t, p in zip(target_steps, positions) if sde_indices[p] != t]
+        raise ValueError(
+            f"gather_sde_field({field_name}): target steps {bad} not in sde_indices={sde_indices.tolist()}"
+        )
+    return tensor[:, positions.tolist()]
 
 
 @dataclass(frozen=True)
@@ -117,4 +174,4 @@ class StageAlgorithm(ABC):
         ...
 
 
-__all__ = ["AlgorithmStepResult", "StageAlgorithm"]
+__all__ = ["AlgorithmStepResult", "StageAlgorithm", "gather_sde_field", "typed_conditions"]

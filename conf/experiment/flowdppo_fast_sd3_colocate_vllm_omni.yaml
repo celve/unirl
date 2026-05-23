@@ -1,0 +1,184 @@
+# @package _global_
+# Flow-DPPO SD3 recipe — COLOCATE variant with vllm-omni rollout engine.
+#
+# Uses DiffusionDPPO algorithm (KL-divergence-based masking) with
+# vllm-omni rollout engine: separate rollout actors handle sampling,
+# tensor_payload sync transfers weights between rollout and train actors.
+#
+# For the trainside (FSDP sampling) variant, see:
+#   flowdppo_fast_sd3_colocate.yaml
+#
+# Batch geometry (1-node × 8-GPU):
+#   global_batch     = prompts_per_rollout * samples_per_prompt = 48 * 16 = 768
+#   local_batch_size = global / actor_count = 768 / 8 = 96
+#   local_mini_batch = local / num_updates_per_batch = 96 / 2 = 48
+#   micro_batch_size = 1
+#
+# Launch:
+#   python -m diffusionrl.train +experiment=flowdppo_fast_sd3_colocate_vllm_omni
+defaults:
+  - /sync@sync: tensor_payload
+  - override /algorithm: grpo
+  - override /model: sd3
+  - override /rollout/engine: vllm_omni
+  - override /sampling/sde_strategy: flow
+  - _self_
+
+run:
+  data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
+  num_rollouts: 10000
+  data_path: /root/diffusionrl/data/datasets/pickscore/train.txt
+  eval_data_path: /root/diffusionrl/data/datasets/pickscore/test.txt
+  weight_sync_interval: 1
+
+sampling:
+  num_inference_steps: 10
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+  init_same_noise: false
+  sde_config:
+    eta: 0.7
+
+algorithm:
+  # Driver-side singular — feeds prompt batching, SDE-index scheduling.
+  prompts_per_rollout: 48
+  samples_per_prompt: 16
+  adv_normalization_scope: group
+  use_global_std: true
+  # clip_range is unused by DPPO but kept for driver-side compat
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  use_kl_penalty: true
+  kl_coef: 0.0
+  scheduler:
+    timestep_fraction: [0.0, 0.5]
+    num_sde_steps: 3
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+
+algorithms:
+  # Slot key = rollout response trace key (SD3 emits resp.rollout_traces["image"]).
+  image:
+    _target_: diffusionrl.algorithms.dppo.DiffusionDPPO
+    stage_attr: diffusion
+    conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
+    # Flow-DPPO hyperparameters
+    kl_mask_threshold: 1.0e-5
+    add_kl_coefficient: true
+    params:
+      _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
+      num_inference_steps: ${sampling.num_inference_steps}
+      guidance_scale: ${sampling.guidance_scale}
+      height: ${sampling.height}
+      width: ${sampling.width}
+      seed: ${run.seed}
+      sde_indices: null
+      eta: ${sampling.sde_config.eta}
+      init_same_noise: ${sampling.init_same_noise}
+      samples_per_prompt: ${algorithm.samples_per_prompt}
+      noise_group_ids: null
+      max_sequence_length: 256
+
+model:
+  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
+  model_precision: bf16
+  autocast_precision: bf16
+  trajectory_precision: bf16
+  logprob_precision: fp32
+
+rollout:
+  engine:
+    model_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
+    modality: sd35_t2i
+    default_height: 512
+    default_width: 512
+    default_num_inference_steps: 10
+    default_guidance_scale: 1.0
+    default_eta: 0.7
+  plan:
+    forward_batch_size: ${oc.decode:${oc.env:FBS,32}}
+
+placement:
+  num_rollout_nodes: 1
+  num_rollout_gpus_per_node: 8
+  num_rollout_gpus_per_actor: 1
+  num_train_nodes: 1
+  num_train_gpus_per_node: 8
+  num_train_gpus_per_actor: 1
+  colocate: true
+  colocate_gpu_fraction: 0.5
+  strategy: PACK
+  allow_noset_multi_gpu_inference: true
+
+training:
+  policies:
+    - _target_: diffusionrl.training.lora_policy.LoRAPolicy
+      rank: 32
+      alpha: 64
+      dropout: 0.0
+      target_modules:
+        - attn.add_k_proj
+        - attn.add_q_proj
+        - attn.add_v_proj
+        - attn.to_add_out
+        - attn.to_k
+        - attn.to_out.0
+        - attn.to_q
+        - attn.to_v
+      bias: none
+      task_type: FEATURE_EXTRACTION
+    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
+      cpu_offload: false
+      param_dtype: bf16
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: true
+  policy_source: diffusion
+  topology:
+    actor_count: 8
+  plan:
+    # global = 48 * 16 = 768
+    # local = 768 / 8 = 96
+    # local_mini = 96 / 2 = 48
+    micro_batch_size: 1
+    num_updates_per_batch: 2
+    local_mini_batch_size: 48
+    local_batch_size: 96
+    global_batch_size: 768
+  optimizer:
+    learning_rate: 3.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    total_steps: 10000
+  execution:
+    max_grad_norm: 1.0
+    offload_train: false
+    offload_rollout: false
+  materialize:
+    with_aux: []
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    - name: pickscore
+      weight: 1.0
+      batch_size: 8
+
+logging:
+  logging_steps: 1
+  log_media: false
+  report_to_wandb: ${oc.decode:${oc.env:REPORT_TO_WANDB,true}}
+  project_name: diffusionrl-flow-dppo
+  run_name: ${oc.env:WANDB_RUN_NAME,flowdppo_fast_sd3_vllm_omni}
+  tags: [sd3, t2i, dppo, flow-dppo, kl-adv, vllm-omni]
+
+evaluation:
+  eval_steps: 0
