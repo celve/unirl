@@ -94,34 +94,6 @@ class TrainingWeightSyncMixin:
             cur = getattr(cur, "module", None) or getattr(cur, "base_model", None)
         return None
 
-    def _extract_lora_state(self, adapter_name: str = "default") -> tuple[dict, dict]:
-        """Return ``(lora_tensors, peft_config_dict)`` for one PEFT adapter.
-
-        ``lora_tensors`` uses the vllm-omni format (PEFT envelope):
-        ``base_model.model.<prefix><module>.lora_A.weight`` /
-        ``...lora_B.weight``. Alpha is carried by ``peft_config_dict``.
-        """
-        from diffusionrl.utils.peft_merge import adapt_lora_for_vllm, extract_lora_tensors
-
-        prefix = getattr(self._update_weight_handler, "_param_name_prefix", "")
-        tensors = adapt_lora_for_vllm(
-            extract_lora_tensors(
-                self.model,
-                param_name_prefix=str(prefix or ""),
-                adapter_name=adapter_name,
-            )
-        )
-        peft_dict = self._peft_config_dict(adapter_name)
-        n_pairs = sum(1 for key in tensors if key.endswith(".lora_A.weight"))
-        if n_pairs == 0:
-            raise RuntimeError(
-                f"_extract_lora_state: extracted 0 LoRA layers from "
-                f"self.model.state_dict() (looking for adapter "
-                f"{adapter_name!r}). Either PEFT didn't inject any "
-                f"adapters or the parameter naming has drifted."
-            )
-        return tensors, peft_dict
-
     def _peft_config_dict(self, adapter_name: str = "default") -> dict:
         """Return a JSON/Ray-safe PEFT config dict for one adapter."""
         peft_cfg_obj = self._resolve_peft_config_obj(adapter_name)
@@ -170,12 +142,6 @@ class TrainingWeightSyncMixin:
                 )
 
         return peft_dict
-
-    # Back-compat shim: legacy callers still expect the dict-only return.
-    # Internal callers should switch to ``_extract_lora_state``.
-    def _extract_lora_tensors_with_alpha(self) -> dict:
-        tensors, _ = self._extract_lora_state()
-        return tensors
 
     def sync_weights_to_rollout(self) -> None:
         """Synchronize weights through the configured rollout weight-sync handler.
