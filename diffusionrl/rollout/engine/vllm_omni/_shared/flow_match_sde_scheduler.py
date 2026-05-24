@@ -130,8 +130,8 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         the caller passes ``sigmas`` externally (see issue #13243 / PR
         #13246 unmerged as of 2026-05). For DiffusionRL we treat
         ``sigmas`` as **final values** computed main-side via
-        :func:`diffusionrl.sde.runtime.compute_flowmatch_sigma`, so any
-        further shift on the worker would double-apply.
+        :meth:`diffusionrl.sde.runtime.FlowMatchSchedulePolicy.compute_sigma`,
+        so any further shift on the worker would double-apply.
 
         Cross-repo precedent
         --------------------

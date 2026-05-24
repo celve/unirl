@@ -5,11 +5,16 @@ Three layers, all owned by this module:
 1. **Pure math** — :func:`get_sigma_schedule` for the FlowMatch σ schedule.
    Static branch implemented here (diffusers' static path has issue #13243);
    dynamic branch delegates to diffusers (its dynamic path is bug-free).
-   :func:`calculate_dynamic_mu` derives μ from image_seq_len.
+   The dynamic μ is chosen by :meth:`FlowMatchSchedulePolicy.compute_mu` —
+   the **single per-model override point**. Its default delegates to
+   :func:`calculate_dynamic_mu` (linear in image_seq_len); FLUX.2-klein
+   overrides it with an empirical μ that also depends on num_inference_steps.
 
-2. **Schedule policy** — :class:`FlowMatchSchedulePolicy` is the *static*
-   data the σ computation needs from a model: shift, the 5 dynamic-shift
-   knobs, vae_scale_factor and patch_size. :meth:`from_pretrained` reads
+2. **Schedule policy** — :class:`FlowMatchSchedulePolicy` is the model-owned
+   schedule data (loaded once, constant per actor) the σ computation needs:
+   shift, the 5 dynamic-shift knobs, vae_scale_factor and patch_size.
+   (NB: "static" elsewhere in this module names the no-μ *shift branch*, a
+   different axis from this once-loaded config.) :meth:`from_pretrained` reads
    the three diffusers-standard JSONs (``scheduler/scheduler_config.json``,
    ``transformer/config.json``, ``vae/config.json``) under a model
    checkpoint directory and assembles a policy. The loader is **pure I/O
@@ -18,11 +23,18 @@ Three layers, all owned by this module:
    is what lets sglang / vllm-omni engines compute σ without holding the
    model in memory.
 
-3. **Glue** — :func:`compute_flowmatch_sigma` applies a policy to the
-   per-request (T, H, W) triple and produces the σ tensor.
-   :func:`ensure_req_sigmas` pins the result onto ``RolloutReq.sigmas`` if
-   not already set (every rollout engine calls it at the top of its
-   ``generate``).
+3. **Glue** — :func:`ensure_req_sigmas` validates a ``RolloutReq`` and pins
+   ``policy.compute_sigma(...)`` onto ``RolloutReq.sigmas`` (every rollout
+   engine calls it at the top of its ``generate``).
+
+Naming convention (a symbol's name tells you its layer):
+
+- ``FlowMatchSchedulePolicy.compute_*`` are **methods** — model-aware
+  behavior that reads the policy's own fields (``compute_mu`` → the
+  per-model μ; ``compute_sigma`` → the full per-request σ).
+- free ``get_sigma_schedule`` / ``calculate_dynamic_mu`` are **stateless
+  math primitives** — fully-resolved scalars in, no policy state.
+- ``ensure_req_sigmas`` is **request glue** — it operates on a RolloutReq.
 
 Ownership map (kept explicit so reading the code doesn't require
 following six getattr chains)::
@@ -54,56 +66,6 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 
 
-def _flowmatch_static_shift(shift: float, t: torch.Tensor) -> torch.Tensor:
-    """SD3-paper time shift, applied exactly once to ``t`` in ``[0, 1]``::
-
-        t' = (shift * t) / (1 + (shift - 1) * t)
-
-    Why we own this instead of delegating to diffusers: the upstream
-    ``FlowMatchEulerDiscreteScheduler`` applies this same formula in its
-    ``use_dynamic_shifting=False`` branch but a confirmed bug (issue
-    #13243) applies it twice. Dynamic branch is unaffected — see
-    :func:`_flowmatch_dynamic_shift_via_diffusers`.
-    """
-    return (shift * t) / (1 + (shift - 1) * t)
-
-
-def _flowmatch_dynamic_shift_via_diffusers(
-    mu: float,
-    num_steps: int,
-    *,
-    time_shift_type: str = "exponential",
-    num_train_timesteps: int = 1000,
-) -> torch.Tensor:
-    """Dynamic-shift σ schedule, delegated to diffusers.
-
-    Returns a ``[num_steps + 1]`` tensor matching diffusers'
-    ``FlowMatchEulerDiscreteScheduler`` output when configured with
-    ``use_dynamic_shifting=True`` and ``mu`` from the request's
-    image_seq_len. Grid differs from our static Style A grid — callers
-    asking for dynamic are asking for diffusers' reference behavior.
-
-    Base sigmas are explicitly ``np.linspace(1.0, 1/num_steps, num_steps)``
-    — the kickoff every upstream diffusers FlowMatch dynamic-shift
-    pipeline uses (``QwenImagePipeline.__call__``, ``FluxPipeline.__call__``
-    and friends all pass exactly this). Without passing them, diffusers'
-    ``set_timesteps`` falls back to ``linspace(sigma_max, sigma_min, T)``
-    with ``sigma_min ≈ 1/num_train_timesteps = 0.001`` — drifts the small-σ
-    tail by ~0.13 at T=12 / Qwen-Image's μ. That's the σ the model was
-    trained against; the fallback isn't.
-    """
-    from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
-
-    scheduler = FlowMatchEulerDiscreteScheduler(
-        num_train_timesteps=num_train_timesteps,
-        use_dynamic_shifting=True,
-        time_shift_type=time_shift_type,
-    )
-    base_sigmas = np.linspace(1.0, 1.0 / num_steps, num_steps)
-    scheduler.set_timesteps(num_inference_steps=num_steps, sigmas=base_sigmas, mu=mu)
-    return scheduler.sigmas
-
-
 def get_sigma_schedule(
     num_steps: int,
     shift: float = 3.0,
@@ -114,19 +76,33 @@ def get_sigma_schedule(
 ) -> torch.Tensor:
     """Compute the FlowMatch σ schedule of length ``num_steps + 1``.
 
-    ``mu is None`` → static branch (own implementation). ``mu is not None``
-    → dynamic branch (diffusers delegation). The "should I be dynamic?"
-    decision belongs upstream — this is the math primitive.
+    ``mu`` is the static↔dynamic **mode switch**:
+
+    - ``mu is None`` → **static**: SD3-paper shift applied once,
+      ``t' = shift·t / (1 + (shift-1)·t)``. Computed here instead of
+      delegated because diffusers' ``use_dynamic_shifting=False`` path
+      double-applies the shift (#13243). ``time_shift_type`` is unused.
+    - ``mu is not None`` → **dynamic**: delegate to diffusers, passing the
+      ``linspace(1, 1/T)`` base grid every real FlowMatch pipeline uses
+      (omitting ``sigmas=`` degenerates diffusers' small-σ tail to
+      ``≈ 1/num_train_timesteps``). ``shift`` is unused.
     """
     if mu is None:
+        # DELETE-WHEN: diffusers #13243 fixed → drop this branch and route
+        # static through diffusers too (symmetric with the dynamic branch).
         t = torch.linspace(1.0, 0.0, num_steps + 1)
-        sigmas = _flowmatch_static_shift(shift, t)
+        sigmas = (shift * t) / (1 + (shift - 1) * t)
     else:
-        sigmas = _flowmatch_dynamic_shift_via_diffusers(
-            mu=mu,
-            num_steps=num_steps,
+        from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
+
+        scheduler = FlowMatchEulerDiscreteScheduler(
+            num_train_timesteps=1000,
+            use_dynamic_shifting=True,
             time_shift_type=time_shift_type,
         )
+        base_sigmas = np.linspace(1.0, 1.0 / num_steps, num_steps)
+        scheduler.set_timesteps(num_inference_steps=num_steps, sigmas=base_sigmas, mu=mu)
+        sigmas = scheduler.sigmas
     if device is not None:
         sigmas = sigmas.to(device)
     return sigmas
@@ -142,7 +118,10 @@ def calculate_dynamic_mu(
     """Linear interpolation of dynamic-shift μ from image sequence length.
 
     Mirrors diffusers' ``calculate_shift`` used by SD3 / Flux pipelines.
-    Feed into :func:`get_sigma_schedule` via ``mu=...``.
+    This is the **default** μ formula: :meth:`FlowMatchSchedulePolicy.compute_mu`
+    calls it, and a model subclass overrides ``compute_mu`` when its μ differs
+    (e.g. FLUX.2-klein's empirical μ). Feed the result into
+    :func:`get_sigma_schedule` via ``mu=...``.
     """
     m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
     b = base_shift - m * base_seq_len
@@ -150,7 +129,7 @@ def calculate_dynamic_mu(
 
 
 # ===========================================================================
-# Layer 2 — schedule policy (static data owned by the model checkpoint)
+# Layer 2 — schedule policy (model-owned config + behavior, from the checkpoint)
 # ===========================================================================
 
 
@@ -210,12 +189,14 @@ def _normalize_patch_size(value: Any, default: int) -> int:
 
 @dataclass
 class FlowMatchSchedulePolicy:
-    """The static σ recipe for a model. Loaded once per actor.
+    """The model-owned σ schedule policy. Loaded once per actor.
 
     Built either from a pretrained checkpoint directory
     (:meth:`from_pretrained`) or from explicit fields
-    (:meth:`static_only`). The policy is **pure data** — pickleable,
-    pass-by-value across Ray IPC, no Bundle required to construct it.
+    (:meth:`static_only`). It is **lightweight and pickleable** —
+    pass-by-value across Ray IPC, no Bundle / model weights required to
+    construct it; its only behavior is the σ math
+    (:meth:`compute_mu` / :meth:`compute_sigma`).
 
     Field semantics
     ---------------
@@ -227,9 +208,9 @@ class FlowMatchSchedulePolicy:
     ``base_image_seq_len``, ``max_image_seq_len``, ``time_shift_type``:
     dynamic-shift block. Sourced from
     ``<pretrained>/scheduler/scheduler_config.json``. When
-    ``use_dynamic_shifting=True``, :func:`compute_flowmatch_sigma`
-    derives μ from image_seq_len and delegates to diffusers' dynamic
-    branch; otherwise these fields are ignored.
+    ``use_dynamic_shifting=True``, :meth:`compute_sigma` derives μ from
+    image_seq_len (via :meth:`compute_mu`) and delegates to diffusers'
+    dynamic branch; otherwise these fields are ignored.
 
     ``vae_scale_factor``, ``patch_size``: latent-grid divisors used in
     image_seq_len = ``(H // vae_scale_factor // patch_size) * (W // ...)``.
@@ -247,6 +228,58 @@ class FlowMatchSchedulePolicy:
     time_shift_type: str = "exponential"
     vae_scale_factor: int = 8
     patch_size: int = 2
+
+    def compute_mu(self, image_seq_len: int, num_inference_steps: int) -> float:
+        """Dynamic-shift μ for this policy — the single per-model override point.
+
+        Default delegates to :func:`calculate_dynamic_mu` (linear in
+        ``image_seq_len``; ``num_inference_steps`` is unused in the base
+        formula). Override in a model-specific subclass whose μ differs —
+        e.g. FLUX.2-klein's empirical μ depends on **both** ``image_seq_len``
+        and ``num_inference_steps`` (see ``Flux2KleinSchedulePolicy``). Only
+        the μ value is model-specific; the schedule application (base grid +
+        diffusers time-shift) stays shared in :meth:`compute_sigma`.
+        """
+        return calculate_dynamic_mu(
+            image_seq_len,
+            base_seq_len=self.base_image_seq_len,
+            max_seq_len=self.max_image_seq_len,
+            base_shift=self.base_shift,
+            max_shift=self.max_shift,
+        )
+
+    def compute_sigma(
+        self,
+        *,
+        num_inference_steps: int,
+        height: int,
+        width: int,
+        device: Optional[torch.device] = None,
+    ) -> torch.Tensor:
+        """Apply this policy to a request's ``(T, H, W)`` → σ tensor ``[T+1]``.
+
+        - static (``use_dynamic_shifting=False``): uses ``shift`` only.
+        - dynamic: derive ``image_seq_len`` from ``(H, W)`` via
+          ``vae_scale_factor`` / ``patch_size``, take μ from
+          :meth:`compute_mu` (the per-model override point), then apply the
+          diffusers dynamic shift.
+
+        The stateless math beyond this point lives in the free functions
+        :func:`get_sigma_schedule` / :func:`calculate_dynamic_mu`.
+        """
+        if not self.use_dynamic_shifting:
+            return get_sigma_schedule(num_inference_steps, self.shift, device)
+        latent_h = int(height) // int(self.vae_scale_factor)
+        latent_w = int(width) // int(self.vae_scale_factor)
+        image_seq_len = (latent_h // int(self.patch_size)) * (latent_w // int(self.patch_size))
+        mu = self.compute_mu(image_seq_len, num_inference_steps)
+        return get_sigma_schedule(
+            num_inference_steps,
+            self.shift,
+            device,
+            mu=mu,
+            time_shift_type=self.time_shift_type,
+        )
 
     @classmethod
     def static_only(cls, shift: float) -> "FlowMatchSchedulePolicy":
@@ -342,21 +375,21 @@ class FlowMatchSchedulePolicy:
         I.4). Each Pipeline's ``build_schedule_policy()`` knows its own
         dynamic-shift posture and passes the right hints.
         """
-        if path is None:
+        # Local JSON dir unreadable — either no path given, or an HF repo ID
+        # not yet on disk. Both fall back the same way: require_dynamic →
+        # build from overrides (raises if absent); otherwise static-only.
+        root = Path(path) if path is not None else None
+        if root is None or not root.exists():
             if require_dynamic:
                 return cls._dynamic_from_overrides(shift, dynamic_overrides, path)
-            return cls.static_only(shift)
-        root = Path(path)
-        if not root.exists():
-            if require_dynamic:
-                return cls._dynamic_from_overrides(shift, dynamic_overrides, path)
-            logger.debug(
-                "FlowMatchSchedulePolicy.from_pretrained: %s does not exist "
-                "locally (likely an HF repo ID — bundle.from_pretrained will "
-                "resolve it). Falling back to static_only(shift=%s).",
-                root,
-                shift,
-            )
+            if root is not None:
+                logger.debug(
+                    "FlowMatchSchedulePolicy.from_pretrained: %s does not exist "
+                    "locally (likely an HF repo ID — bundle.from_pretrained will "
+                    "resolve it). Falling back to static_only(shift=%s).",
+                    root,
+                    shift,
+                )
             return cls.static_only(shift)
 
         defaults = cls()  # canonical default values
@@ -394,56 +427,16 @@ class FlowMatchSchedulePolicy:
 
 
 # ===========================================================================
-# Layer 3 — apply policy to a request → σ tensor
+# Layer 3 — request glue (pin σ onto a RolloutReq)
 # ===========================================================================
 
 
-def compute_flowmatch_sigma(
-    policy: FlowMatchSchedulePolicy,
-    *,
-    num_inference_steps: int,
-    height: int,
-    width: int,
-    device: Optional[torch.device] = None,
-) -> torch.Tensor:
-    """Apply ``policy`` to the per-request ``(T, H, W)`` triple → σ tensor.
-
-    Static branch: ``get_sigma_schedule(T, policy.shift)``.
-    Dynamic branch: derive ``image_seq_len`` from
-    ``(H // vae_scale_factor // patch_size) * (W // ... // ...)``,
-    compute μ via :func:`calculate_dynamic_mu`, delegate to diffusers.
-
-    Returns ``Tensor[T+1]``, dtype float32, range ``[0, 1]``.
-    """
-    if not policy.use_dynamic_shifting:
-        return get_sigma_schedule(num_inference_steps, policy.shift, device)
-    latent_h = int(height) // int(policy.vae_scale_factor)
-    latent_w = int(width) // int(policy.vae_scale_factor)
-    image_seq_len = (latent_h // int(policy.patch_size)) * (latent_w // int(policy.patch_size))
-    mu = calculate_dynamic_mu(
-        image_seq_len,
-        base_seq_len=policy.base_image_seq_len,
-        max_seq_len=policy.max_image_seq_len,
-        base_shift=policy.base_shift,
-        max_shift=policy.max_shift,
-    )
-    return get_sigma_schedule(
-        num_inference_steps,
-        policy.shift,
-        device,
-        mu=mu,
-        time_shift_type=policy.time_shift_type,
-    )
-
-
 def ensure_req_sigmas(req: Any, policy: FlowMatchSchedulePolicy) -> None:
-    """Pin σ schedule onto ``req.sigmas`` if not already set.
+    """Compute and pin the σ schedule onto ``req.sigmas``.
 
-    Every rollout engine calls this at the top of ``generate(req)``.
-    Idempotent: if ``req.sigmas`` is already set (e.g. a caller pre-pinned
-    a custom schedule for testing), this is a no-op.
+    Every rollout engine calls this once at the top of ``generate(req)``.
 
-    ``req`` must expose ``req.sigmas`` (read/write) and
+    ``req`` must expose ``req.sigmas`` (write) and
     ``req.stage_params["diffusion"]`` with ``num_inference_steps`` /
     ``height`` / ``width`` keys (duck-typed to avoid importing
     ``RolloutReq`` here — keeps this module free of types/* deps).
@@ -454,8 +447,6 @@ def ensure_req_sigmas(req: Any, policy: FlowMatchSchedulePolicy) -> None:
     (e.g. WAN T2V at 480×832). Drivers (``RolloutPipeline.plan_requests``)
     always set all three; absence means a wiring bug.
     """
-    if req.sigmas is not None:
-        return
     diffusion = dict(req.stage_params.get("diffusion") or {})
     missing = [k for k in ("num_inference_steps", "height", "width") if k not in diffusion]
     if missing:
@@ -465,8 +456,7 @@ def ensure_req_sigmas(req: Any, policy: FlowMatchSchedulePolicy) -> None:
             f"driver (RolloutPipeline.plan_requests / _build_diffusion_"
             f"stage_params) must set num_inference_steps / height / width."
         )
-    req.sigmas = compute_flowmatch_sigma(
-        policy,
+    req.sigmas = policy.compute_sigma(
         num_inference_steps=int(diffusion["num_inference_steps"]),
         height=int(diffusion["height"]),
         width=int(diffusion["width"]),
@@ -474,9 +464,11 @@ def ensure_req_sigmas(req: Any, policy: FlowMatchSchedulePolicy) -> None:
 
 
 __all__ = [
+    # Layer 2 — the per-model schedule object (engines build it; models subclass)
+    "FlowMatchSchedulePolicy",
+    # Layer 3 — request glue (rollout engines call this)
+    "ensure_req_sigmas",
+    # Layer 1 — stateless math primitives (used directly by tests / advanced callers)
     "get_sigma_schedule",
     "calculate_dynamic_mu",
-    "FlowMatchSchedulePolicy",
-    "compute_flowmatch_sigma",
-    "ensure_req_sigmas",
 ]

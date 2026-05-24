@@ -214,7 +214,7 @@ right file:
 | Which indices run SDE on rollout step *k*? | `GRPORolloutControl.resolve_rollout_sde_indices` |
 | Which indices contribute to training loss after rollout? | `GRPORolloutControl.get_filtered_training_indices` |
 | What is the per-step kernel that produces `log_prob_i`? | `diffusionrl/sde/kernels.py` (`FlowSDEStrategy`, `DanceSDEStrategy`, `CPSSDEStrategy`, `DPM2Strategy`) |
-| Where does the σ schedule come from? | `diffusionrl/sde/runtime.py` (`FlowMatchSchedulePolicy`, `compute_flowmatch_sigma`) |
+| Where does the σ schedule come from? | `diffusionrl/sde/runtime.py` (`FlowMatchSchedulePolicy.compute_sigma`, pinned onto the request by `ensure_req_sigmas`) |
 | What is the MixGRPO sliding-window schedule? | `diffusionrl.utils.scheduler_utils.WindowScheduler` (selected by `algorithm.scheduler.timestep_strategy: window`) |
 
 `NFTRolloutControl.resolve_rollout_sde_indices` returns `None` because NFT

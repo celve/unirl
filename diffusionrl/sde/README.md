@@ -20,7 +20,7 @@ controller) backed by `diffusionrl.utils.scheduler_utils` (`AllSDEScheduler`,
 | File | Owns |
 |---|---|
 | `kernels.py` | `StepStrategy` base, `SDEStrategy` mixin, and four concrete kernels: `FlowSDEStrategy`, `DanceSDEStrategy`, `CPSSDEStrategy`, `DPM2Strategy`. Each `step(...)` returns `(prev_sample, prev_sample_mean, std_var)`; SDE variants also expose log-prob computation. |
-| `runtime.py` | `FlowMatchSchedulePolicy` (reads `shift`, `patch_size`, `vae_scale_factor` from the model checkpoint), `get_sigma_schedule`, `compute_flowmatch_sigma`, `ensure_req_sigmas` (pins σ onto each outbound `RolloutReq`). |
+| `runtime.py` | `FlowMatchSchedulePolicy` (model-owned static **+** dynamic schedule config, incl. the `compute_mu` / `compute_sigma` methods — see the "σ Schedule Policy" section below), `get_sigma_schedule`, `ensure_req_sigmas` (pins σ onto each outbound `RolloutReq`). |
 | `noise.py` | Deterministic seed mixing and `generate_latents` / `generate_shared_noise` for per-group noise sharing across rollouts. |
 | `rules.py` | String-level `sde_type` normalization at engine wire boundaries (e.g. SGLang kwargs). Typed Python paths read `cfg.sampling.sde_strategy` directly. |
 
@@ -51,7 +51,7 @@ Each rollout engine (and train-side replay) builds the strategy once and
 calls it inside the inference loop. The shape is the same across backends:
 
 ```text
-sigmas   = compute_flowmatch_sigma(policy, num_inference_steps, height, width)
+sigmas   = policy.compute_sigma(num_inference_steps=..., height=..., width=...)
 strategy = build(cfg.sampling.sde_strategy)
 sde_idx  = control.resolve_rollout_sde_indices(current_rollout_step)
 
@@ -80,12 +80,24 @@ evaluation but cannot be the trained strategy for any GRPO recipe.
 ## σ Schedule Policy
 
 `FlowMatchSchedulePolicy` is loaded from the model checkpoint once at startup
-and shared across rollout and train actors. It carries:
+(`from_pretrained` reads the `scheduler/transformer/vae` JSONs) and shared
+across rollout and train actors. It carries:
 
-- `shift` — static, or `calculate_dynamic_mu(...)`-derived from output
-  `height x width`;
-- `patch_size`, `vae_scale_factor` — needed for dynamic shift;
-- `num_train_timesteps`.
+- `shift` — **static** FlowMatch time-shift scalar; used only on the static
+  branch (`use_dynamic_shifting=False`);
+- `use_dynamic_shifting` — selects the static vs dynamic branch;
+- `base_shift`, `max_shift`, `base_image_seq_len`, `max_image_seq_len`,
+  `time_shift_type` — the dynamic-shift block;
+- `vae_scale_factor`, `patch_size` — derive `image_seq_len` from
+  `height x width`.
+
+On the dynamic branch the per-request μ is computed by
+`policy.compute_mu(image_seq_len, num_inference_steps)` — **the single
+per-model override point**. The default delegates to `calculate_dynamic_mu`
+(linear in `image_seq_len`); a model whose μ differs subclasses the policy and
+overrides `compute_mu` (e.g. FLUX.2-klein's empirical μ, which also depends on
+`num_inference_steps`). The schedule *application* (base grid + diffusers
+time-shift) stays shared — only the μ value is model-specific.
 
 `ensure_req_sigmas(req, policy)` pins σ onto each outbound `RolloutReq` so
 every rollout actor (including dedicated backends that do not re-read the

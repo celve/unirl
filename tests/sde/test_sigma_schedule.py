@@ -118,7 +118,14 @@ def test_static_no_double_shift_regression():
 
 
 def _diffusers_dynamic_sigmas(num_steps: int, mu: float, time_shift_type: str = "exponential"):
-    """Direct call to upstream diffusers for cross-check."""
+    """Direct call to upstream diffusers for cross-check.
+
+    Must pass the ``linspace(1, 1/T)`` base sigmas — exactly how production
+    (:func:`get_sigma_schedule`'s dynamic branch) and every real diffusers
+    FlowMatch pipeline call ``set_timesteps``. Omitting ``sigmas=`` makes
+    diffusers fall back to its degenerate ``sigma_min ≈ 1/1000`` grid, which
+    drifts the small-σ tail and is NOT what the model trained against.
+    """
     from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 
     sch = FlowMatchEulerDiscreteScheduler(
@@ -126,7 +133,8 @@ def _diffusers_dynamic_sigmas(num_steps: int, mu: float, time_shift_type: str = 
         use_dynamic_shifting=True,
         time_shift_type=time_shift_type,
     )
-    sch.set_timesteps(num_inference_steps=num_steps, mu=mu)
+    base_sigmas = torch.linspace(1.0, 1.0 / num_steps, num_steps).numpy()
+    sch.set_timesteps(sigmas=base_sigmas, mu=mu)
     return sch.sigmas
 
 
@@ -206,12 +214,14 @@ def test_sde_runtime_public_surface():
     assert hasattr(rt, "get_sigma_schedule")
     assert hasattr(rt, "calculate_dynamic_mu")
     assert hasattr(rt, "FlowMatchSchedulePolicy")
-    assert hasattr(rt, "compute_flowmatch_sigma")
+    assert hasattr(rt.FlowMatchSchedulePolicy, "compute_sigma")  # apply is a policy method now
     assert hasattr(rt, "ensure_req_sigmas")
     # Legacy symbols must be gone — if they re-appear someone is
     # re-introducing a deprecated entry point.
     assert not hasattr(rt, "sd3_time_shift")
     assert not hasattr(rt, "get_sigma_schedule_diffusers")
+    # Moved onto the policy as FlowMatchSchedulePolicy.compute_sigma (PR #129).
+    assert not hasattr(rt, "compute_flowmatch_sigma")
 
 
 # ---------------------------------------------------------------------------
@@ -360,18 +370,15 @@ def test_policy_shift_override_wins_over_scheduler_json(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# compute_flowmatch_sigma — applies policy to (T, H, W)
+# FlowMatchSchedulePolicy.compute_sigma — applies policy to (T, H, W)
 # ---------------------------------------------------------------------------
 
 
 def test_compute_static_matches_get_sigma_schedule():
-    from diffusionrl.sde.runtime import (
-        FlowMatchSchedulePolicy,
-        compute_flowmatch_sigma,
-    )
+    from diffusionrl.sde.runtime import FlowMatchSchedulePolicy
 
     policy = FlowMatchSchedulePolicy(shift=3.0, use_dynamic_shifting=False)
-    out = compute_flowmatch_sigma(policy, num_inference_steps=10, height=1024, width=1024)
+    out = policy.compute_sigma(num_inference_steps=10, height=1024, width=1024)
     expected = get_sigma_schedule(10, shift=3.0)
     assert torch.allclose(out, expected)
 
@@ -382,7 +389,6 @@ def test_compute_dynamic_derives_mu_and_matches_diffusers():
     from diffusionrl.sde.runtime import (
         FlowMatchSchedulePolicy,
         calculate_dynamic_mu,
-        compute_flowmatch_sigma,
     )
 
     policy = FlowMatchSchedulePolicy(
@@ -396,14 +402,13 @@ def test_compute_dynamic_derives_mu_and_matches_diffusers():
         vae_scale_factor=8,
         patch_size=2,
     )
-    # Manually compute mu the same way compute_flowmatch_sigma does
+    # Manually compute mu the same way policy.compute_sigma does
     latent_h = 1024 // 8
     latent_w = 1024 // 8
     image_seq_len = (latent_h // 2) * (latent_w // 2)
     mu = calculate_dynamic_mu(image_seq_len, 256, 4096, 0.5, 1.16)
     expected = get_sigma_schedule(10, 3.0, mu=mu, time_shift_type="exponential")
-    out = compute_flowmatch_sigma(
-        policy,
+    out = policy.compute_sigma(
         num_inference_steps=10,
         height=1024,
         width=1024,
@@ -432,18 +437,6 @@ def test_ensure_req_sigmas_populates_when_none():
     ensure_req_sigmas(req, policy)
     assert req.sigmas is not None
     assert req.sigmas.shape == (11,)
-
-
-def test_ensure_req_sigmas_idempotent_no_overwrite():
-    """Pre-pinned σ must NOT be overwritten — supports test/escape-hatch use."""
-    from diffusionrl.sde.runtime import FlowMatchSchedulePolicy, ensure_req_sigmas
-
-    policy = FlowMatchSchedulePolicy(shift=3.0)
-    req = _FakeReq(num_inference_steps=10, height=1024, width=1024)
-    sentinel = torch.zeros(11)
-    req.sigmas = sentinel
-    ensure_req_sigmas(req, policy)
-    assert req.sigmas is sentinel
 
 
 def test_ensure_req_sigmas_missing_num_steps_raises():
