@@ -176,6 +176,19 @@ def train(cfg: DictConfig) -> None:
     rollout_group = None
     train_group = None
     placement = None
+    tq_runtime = None
+    tq_actor_handoff = None
+    tq_actor_handles = []
+
+    if cfg.get("transfer_queue") is not None:
+        from diffusionrl.distributed.transfer_queue import TransferQueueRuntime
+
+        tq_runtime = TransferQueueRuntime().install()
+        tq_handoffs = tq_runtime.init(cfg)
+        if tq_handoffs is not None:
+            controller_handoff, tq_actor_handoff = tq_handoffs
+            tq_runtime.create_client("Driver", controller_handoff, sync=True)
+            logger.info("TransferQueue enabled: driver/controller client initialized.")
 
     try:
         # 0. W&B init (parity with legacy train.py; ``init_logger`` is a no-op
@@ -256,6 +269,14 @@ def train(cfg: DictConfig) -> None:
                 rollout_group.wake_up()
                 logger.info("[BOOTSTRAP] Rollout waked up.")
 
+        if tq_runtime is not None and tq_actor_handoff is not None:
+            if direct_sampling:
+                tq_actor_handles = train_group.get_actors()
+            else:
+                tq_actor_handles = rollout_group.get_rollout_actors() + train_group.get_actors()
+            tq_runtime.init_remote_actor_clients(tq_actor_handles, tq_actor_handoff)
+            logger.info("TransferQueue actor clients initialized: %d actor(s).", len(tq_actor_handles))
+
         # 4. Optional weight-sync setup (separate sampling only).
         if sync_enabled:
             param_name_prefix = str(cfg.model.get("weight_sync_param_name_prefix", "") or "")
@@ -314,6 +335,9 @@ def train(cfg: DictConfig) -> None:
                 rollout_group.wake_up()
                 _rollout_is_sleeping = False
                 logger.info("[LOOP r=%d] Rollout awake.", rollout_id)
+
+            if tq_runtime is not None and tq_actor_handles:
+                tq_runtime.reset_actors_zero_copy_buffer_free(tq_actor_handles)
 
             # --- Rollout: 4 direct phase calls (skip convert_training_data) ---
             # EMA rollout gating: on-policy algorithms (GRPO) MUST sample
@@ -383,6 +407,8 @@ def train(cfg: DictConfig) -> None:
                 # per_update_results: List[List[TrainOptimizerStepResult]]
                 #   outer = per optimizer step, inner = per actor
                 per_update_results = train_group.train(rollout_id, rollout_resp)
+                if tq_runtime is not None:
+                    tq_runtime.clear_partition()
 
             # --- Sync, then offload ---
             #

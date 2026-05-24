@@ -277,6 +277,7 @@ class RolloutPipelineMixin:
             offset += n
         return responses
 
+    @tqbridge(get=False, put=True)
     def run_eval_pipeline(self, req: "RolloutReq") -> List["RolloutResp"]:
         """Eval pipeline: generate + reward, no advantages."""
         handles = self.generate_buffered(req)

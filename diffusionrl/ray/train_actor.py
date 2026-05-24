@@ -46,6 +46,7 @@ import ray
 import torch
 from omegaconf import DictConfig
 
+from diffusionrl.distributed.transfer_queue import resolve_batch_from_tq, tqbridge
 from diffusionrl.ray.actor_config import ConfigActor
 from diffusionrl.ray.distributed import DistributedMixin
 from diffusionrl.ray.mixins import TrainingWeightSyncMixin
@@ -516,6 +517,7 @@ class TrainActor(
     # Train (RolloutResp in, TrainOptimizerStepResult out)
     # ------------------------------------------------------------------
 
+    @tqbridge(get=True, put=False)
     def train(
         self,
         rollout_step: int,
@@ -531,8 +533,10 @@ class TrainActor(
             resp: RolloutResp = ray.get(resp_or_handle)
         else:
             resp = resp_or_handle
+        resp = resolve_batch_from_tq(resp)
         return self._train_resp(rollout_step, resp)
 
+    @tqbridge(get=True, put=False)
     def train_from_buffer(
         self,
         rollout_step: int,
@@ -540,6 +544,7 @@ class TrainActor(
     ) -> List[TrainOptimizerStepResult]:
         """Pop a RolloutResp from a remote buffer and train on it."""
         resp: RolloutResp = ray.get(handle.actor_handle.pop_buffer.remote(handle))
+        resp = resolve_batch_from_tq(resp)
         return self._train_resp(rollout_step, resp)
 
     def _train_resp(self, rollout_step: int, resp: RolloutResp) -> List[TrainOptimizerStepResult]:

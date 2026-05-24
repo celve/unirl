@@ -1,0 +1,223 @@
+# @package _global_
+# FLUX.2-klein-9B GRPO — single node × 8 GPUs = 8 actors.
+#
+# Derived from grpo_flux2_klein9b_trainside_4x8.yaml. Goal: reproduce the
+# driver-side gather OOM on one node, then A/B test it against TransferQueue.
+#
+# PER-GPU batch is kept IDENTICAL to the tuned 4x8 recipe — only the node
+# count and prompt count drop:
+#
+#   prompts_per_rollout = 16
+#   samples_per_prompt  = 16    -> global_batch_size = 256
+#   actor_count         = 8     -> local_batch_size  = 256 / 8 = 32   (== 4x8)
+#   num_updates_per_batch = 2   -> local_mini        = 32 / 2 = 16    (== 4x8)
+#   micro_batch_size    = 4     -> 4 micros / update                  (== 4x8)
+#
+# Why NOT keep global_batch_size = 1024 on 8 GPUs:
+#   1024 / 8 actors = local 128 per GPU = 4x the tuned per-GPU load, and the
+#   fp16 rollout cache (~30GB/actor at local=32) would balloon to ~120GB
+#   and OOM during GENERATION — a different failure that TransferQueue does
+#   NOT address. Keeping local=32 means any OOM you see is the driver gather
+#   (the TQ-fixable one), not a per-GPU train/rollout-cache OOM.
+#
+# Everything Klein-specific (fp32 FSDP master, LoRA targets, dance SDE,
+# offload=false) is kept VERBATIM from 4x8 so this is a faithful single-node
+# reproduction of the production memory profile.
+#
+# Reproduce the OOM (TransferQueue OFF — the current default):
+#   DATA_PATH=/apdcephfs_zwfy8/share_305110755/hunyuan/rzhu/DiffusionRL/data/datasets/pickscore/train.txt \
+#   EVAL_DATA_PATH=/apdcephfs_zwfy8/share_305110755/hunyuan/rzhu/DiffusionRL/data/datasets/pickscore/test.txt \
+#   bash scripts/run_experiment_single_node.sh grpo_flux2_klein9b_trainside_1x8
+#
+# Then re-run with TransferQueue ON to see if the OOM disappears:
+#   ... bash scripts/run_experiment_single_node.sh grpo_flux2_klein9b_trainside_1x8 \
+#       +transfer_queue=mooncake_tuned
+#
+# NOTE: at global=256 the driver gather is 1/4 of production's 1024, so it
+# may sit just under the GPU-0 OOM threshold. If it does NOT OOM, the gather
+# mechanism is confirmed (smaller gather fits) but the definitive repro of
+# the 1024-sample gather still needs the multi-node 4x8.
+defaults:
+  - override /algorithm: grpo
+  - override /model: flux2_klein_v2
+  - override /rollout/engine: trainside
+  - override /sampling/sde_strategy: dance
+  - _self_
+
+run:
+  seed: 42
+  num_rollouts: 10000
+  data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
+  data_path: ${oc.env:PICKSCORE_DATA_PATH,/apdcephfs_zwfy8/share_305110755/hunyuan/rzhu/DiffusionRL/data/datasets/pickscore/train.txt}
+  eval_data_path: ${oc.env:PICKSCORE_EVAL_DATA_PATH,/apdcephfs_zwfy8/share_305110755/hunyuan/rzhu/DiffusionRL/data/datasets/pickscore/test.txt}
+
+sampling:
+  num_inference_steps: 10
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+  seed: 42
+  init_same_noise: true
+  sde_config:
+    eta: 0.7
+
+algorithm:
+  prompts_per_rollout: 16
+  samples_per_prompt: 16
+  adv_normalization_scope: group
+  use_global_std: false
+  clip_range: 5.0e-3
+  clip_schedule: constant
+  use_kl_penalty: true
+  kl_coef: 0.0
+  ema:
+    eval_ema_decay: 0.99
+    eval_ema_update_interval: 2
+  scheduler:
+    timestep_fraction: [0.0, 0.5]
+    num_sde_steps: 3
+  sde_config:
+    eta: ${sampling.sde_config.eta}
+
+model:
+  pretrained_model_ckpt_path: ${oc.env:FLUX2_KLEIN_PATH,/apdcephfs_zwfy8/share_305110755/hunyuan/public_models/black-forest-labs/FLUX.2-klein-base-9B}
+  model_precision: bf16
+  autocast_precision: bf16
+  trajectory_precision: fp16
+  logprob_precision: fp32
+
+rollout:
+  engine: {}
+  plan:
+    forward_batch_size: 16
+
+placement:
+  num_rollout_nodes: 1
+  num_rollout_gpus_per_node: 8
+  num_rollout_gpus_per_actor: 1
+  num_train_nodes: 1
+  num_train_gpus_per_node: 8
+  num_train_gpus_per_actor: 1
+  colocate: true
+  colocate_gpu_fraction: 0.9
+  strategy: PACK
+
+# ----------------------------------------------------------------------
+# New-stack training surface — Klein-specific GRPO algorithm subclass +
+# Klein-specific LoRA targets + single Qwen3 text encoder.
+# ----------------------------------------------------------------------
+algorithms:
+  image:
+    _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
+    stage_attr: diffusion
+    clip_range: 5.0e-3
+    clip_schedule: constant
+    conditions_cls: diffusionrl.models.flux2_klein.conditions.Flux2KleinConditions
+    params:
+      _target_: diffusionrl.models.flux2_klein.diffusion.Flux2KleinDiffusionParams
+      num_inference_steps: ${sampling.num_inference_steps}
+      guidance_scale: ${sampling.guidance_scale}
+      height: ${sampling.height}
+      width: ${sampling.width}
+      seed: ${sampling.seed}
+      eta: ${sampling.sde_config.eta}
+      init_same_noise: ${sampling.init_same_noise}
+
+training:
+  policy_source: diffusion
+  policies:
+    - _target_: diffusionrl.training.lora_policy.LoRAPolicy
+      rank: 16
+      alpha: 32
+      dropout: 0.0
+      # Klein canonical LoRA targets — mirrors
+      # ``Flux2ModelBundle.default_lora_target_modules()`` in the
+      # legacy codebase. PEFT silently drops any name that doesn't
+      # match a real submodule, so listing both un-fused and fused
+      # projection names is safe.
+      target_modules:
+        - to_q
+        - to_k
+        - to_v
+        - to_out.0
+        - proj_in
+        - proj_out
+        - qkv_proj
+        - ff_proj
+    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
+      cpu_offload: false
+      # Klein's empirical-mu schedule is numerically sensitive; the
+      # legacy recipe uses ``FSDP_PRECISION=fp32`` for the master
+      # weights and bf16 mixed-precision for the forward.
+      #
+      # NOTE: on a single node FSDP shards across only 8 ranks (not 32),
+      # so each GPU holds ~4x the model/optimizer state of the 4x8 run.
+      # If this OOMs at TRAIN time (not at the gather), the quickest
+      # single-node relief is param_dtype: bf16 (halves FSDP state) —
+      # acceptable for a smoke/repro run, but reward drifts after a few
+      # hundred rollouts per the comment above, so don't ship it.
+      param_dtype: fp32
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      # 9B transformer + LoRA + full replay graph is the hot path
+      # for activation memory; AC keeps the 80GB H20 envelope.
+      activation_checkpointing: true
+    - _target_: diffusionrl.training.ema_policy.EMAPolicy
+      decay: 0.99
+      update_step_interval: 2
+  materialize:
+    with_aux: [vae, text_encoder]
+  plan:
+    # global = 16 prompts × 16 samples = 256
+    # local  = global / 8 actors = 32   (identical to the tuned 4x8)
+    # local_mini = local / 2 updates = 16
+    # micro = 4 → 4 micros/update
+    micro_batch_size: 4
+    num_updates_per_batch: 2
+    local_mini_batch_size: 16
+    local_batch_size: 32
+    global_batch_size: 256
+  topology:
+    actor_count: 8
+  optimizer:
+    learning_rate: 5.0e-5
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    total_steps: 10000
+  execution:
+    max_grad_norm: 1.0
+    # Kept false to match the production memory profile so the gather is
+    # the only OOM variable. Do NOT flip these on for the TQ A/B test —
+    # offload_train=true would free FSDP state and mask the gather OOM.
+    offload_train: false
+    offload_rollout: false
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    - name: pickscore
+      weight: 1.0
+      batch_size: 8
+
+logging:
+  logging_steps: 1
+  log_media: true
+  media_max_items: 16
+  report_to_wandb: true
+  project_name: diffusionrl-flowgrpo-newstack
+  tags:
+    - flux2-klein-9b
+    - dance
+    - fsdp-trainside
+    - pickscore
+    - single-node
+
+evaluation:
+  eval_steps: 0
