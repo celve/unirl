@@ -14,6 +14,7 @@ rebroadcasts the master endpoint via rank 0 — symmetric with
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Dict, List
 
@@ -93,7 +94,13 @@ class TrainActorGroup(ActorGroup):
 
         master_addr, master_port = placement.train_master
         seed = int(cfg.run.seed)
-        runtime_env: Dict[str, Any] = {"env_vars": dict(_DETERMINISM_ENV_VARS)}
+        # Forward NCCL / network-transport env from the launch (driver) environment
+        # into every actor's runtime_env, so e.g. NCCL_IB_DISABLE / NCCL_SOCKET_IFNAME
+        # set once on the head reach all actors on every node. Ray does NOT propagate
+        # a worker node's shell env to that node's actors, but runtime_env does.
+        env_vars: Dict[str, str] = dict(_DETERMINISM_ENV_VARS)
+        env_vars.update({k: v for k, v in os.environ.items() if k.startswith("NCCL_")})
+        runtime_env: Dict[str, Any] = {"env_vars": env_vars}
 
         # In colocate mode the train actor shares the bundle with a rollout
         # actor that already claimed ``colocate_gpu_fraction`` of the GPU;
