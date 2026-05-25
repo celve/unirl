@@ -80,6 +80,20 @@ def _stamp_actor_reward_total(responses: List["RolloutResp"]) -> None:
         r.reward_compute_s = actor_total
 
 
+def _responses_to_cpu(responses: List["RolloutResp"]) -> List["RolloutResp"]:
+    """Stage rollout payloads on CPU before Ray serializes them.
+
+    With TransferQueue off (the default), returned CUDA tensors deserialize
+    onto the driver's GPU 0 — every actor's shard collapses there under
+    ``CUDA_VISIBLE_DEVICES`` isolation — so the driver gather + ``aggregate``
+    OOMs as the global batch grows. Staging on CPU keeps that in host RAM;
+    train actors move their shard back to device in ``_train_resp``. With TQ
+    on, ``@tqbridge(put=True)`` dehydrates these already-CPU payloads into the
+    store, so the two paths compose.
+    """
+    return [response.to_device("cpu") for response in responses]
+
+
 def _build_legacy_response_view(
     req_shard: "RolloutReq",
     resp_shard: "RolloutResp",
@@ -275,7 +289,7 @@ class RolloutPipelineMixin:
             n = int(r.rewards.shape[0])
             r.advantages = all_advantages[offset : offset + n]
             offset += n
-        return responses
+        return _responses_to_cpu(responses)
 
     def run_eval_pipeline(self, req: "RolloutReq") -> List["RolloutResp"]:
         """Eval pipeline: generate + reward, no advantages."""
@@ -287,7 +301,7 @@ class RolloutPipelineMixin:
         for h in handles:
             state.pop(h.id, None)
         _stamp_actor_reward_total(responses)
-        return responses
+        return _responses_to_cpu(responses)
 
     # ---- TransferQueue lifecycle (parity with legacy mixin) ---------------
 

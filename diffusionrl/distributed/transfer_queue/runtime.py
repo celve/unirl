@@ -138,6 +138,11 @@ class TransferQueueRuntime:
         ray.get(refs)
 
     def reset_actors_zero_copy_buffer_free(self, actors: list) -> None:
+        # Zero-copy buffer free-list reset is Mooncake-specific; skip it for
+        # other backends (e.g. the simple in-Ray storage backend has no such
+        # buffers, so the upstream reset call is meaningless there).
+        if self.backend is None or self.backend.manager_type != "MooncakeStorageManager":
+            return
         import ray
 
         refs = [actor.reset_zero_copy_buffer_free.remote() for actor in actors]

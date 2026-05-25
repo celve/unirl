@@ -55,8 +55,11 @@ class Segment(Transportable):
 
     modality: ClassVar[Modality]
 
-    sample_indices: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    positions: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    # Keep small routing metadata inline. The driver mutates/sample-offsets
+    # these fields while aggregating per-actor RolloutResp shards; moving them
+    # behind TransferQueue would leave only TqMeta handles at that boundary.
+    sample_indices: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
+    positions: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
     status: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
 
     # ---- promotion to Condition ---------------------------------------------
