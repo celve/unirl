@@ -23,9 +23,8 @@
 #
 #   # multi-node mechanism, zero infra:
 #   DATA_PLANE=tq_simple bash scripts/run_experiment_multinode_taiji.sh grpo_flux2_klein9b_trainside_2x8
-#   # real RDMA validation (needs an external mooncake_master + http_metadata_server on the head):
-#   DATA_PLANE=tq_mooncake PROTOCOL=rdma MOONCAKE_METADATA_URL=http://$CHIEF_IP:8080/metadata \
-#     MOONCAKE_MASTER_ADDR=$CHIEF_IP:50051 bash scripts/run_experiment_multinode_taiji.sh grpo_flux2_klein9b_trainside_2x8
+#   # real RDMA validation (rank 0 auto-starts the mooncake services + derives MOONCAKE_* from CHIEF_IP):
+#   DATA_PLANE=tq_mooncake PROTOCOL=rdma bash scripts/run_experiment_multinode_taiji.sh grpo_flux2_klein9b_trainside_2x8
 defaults:
   - override /algorithm: grpo
   - override /model: flux2_klein_v2

@@ -9,8 +9,9 @@
 # Data plane (how rollout samples reach the trainer) is selected with DATA_PLANE:
 #   ray         (default) driver gathers rollouts over the Ray object store
 #   tq_simple   TransferQueue on Ray-backed host storage (off-driver, zero infra)
-#   tq_mooncake TransferQueue over mooncake RDMA (production) — needs an EXTERNAL
-#               mooncake_master + http_metadata_server on the head; set MOONCAKE_*
+#   tq_mooncake TransferQueue over mooncake RDMA (production) — rank 0 auto-starts
+#               mooncake_master + http_metadata_server and derives MOONCAKE_* from
+#               CHIEF_IP (override MOONCAKE_* to point at external services)
 #   keep_local  direct-sampling actors keep rollouts local; only light metadata
 #               crosses to the driver (no transfer at all)
 #
@@ -19,8 +20,6 @@
 #   bash scripts/run_experiment_multinode_taiji.sh grpo_flux2_klein9b_trainside_2x8
 #   DATA_PLANE=tq_simple bash scripts/run_experiment_multinode_taiji.sh <experiment>
 #   DATA_PLANE=tq_mooncake PROTOCOL=rdma \
-#     MOONCAKE_METADATA_URL=http://$CHIEF_IP:8080/metadata \
-#     MOONCAKE_MASTER_ADDR=$CHIEF_IP:50051 \
 #     bash scripts/run_experiment_multinode_taiji.sh grpo_flux2_klein9b_trainside_2x8
 #
 set -euo pipefail
@@ -88,9 +87,17 @@ case "${DATA_PLANE}" in
         CMD+=("+transfer_queue=simple")
         ;;
     tq_mooncake)
+        # Default the mooncake endpoints to the head (CHIEF_IP), where rank 0
+        # starts the services below; explicit MOONCAKE_* still win.
+        if [ -z "${MOONCAKE_MASTER_ADDR:-}" ] && [ -n "${CHIEF_IP:-}" ]; then
+            MOONCAKE_MASTER_ADDR="${CHIEF_IP}:50051"
+        fi
+        if [ -z "${MOONCAKE_METADATA_URL:-}" ] && [ -n "${CHIEF_IP:-}" ]; then
+            MOONCAKE_METADATA_URL="http://${CHIEF_IP}:8080/metadata"
+        fi
         if [ -z "${MOONCAKE_METADATA_URL:-}" ] || [ -z "${MOONCAKE_MASTER_ADDR:-}" ]; then
-            echo "DATA_PLANE=tq_mooncake needs MOONCAKE_METADATA_URL=http://<HEAD_IP>:<port>/metadata" >&2
-            echo "and MOONCAKE_MASTER_ADDR=<HEAD_IP>:<rpc_port> (external mooncake_master on the head)." >&2
+            echo "DATA_PLANE=tq_mooncake needs CHIEF_IP (taiji sets it) to derive the endpoints," >&2
+            echo "or explicit MOONCAKE_METADATA_URL + MOONCAKE_MASTER_ADDR." >&2
             exit 2
         fi
         CMD+=(
@@ -149,6 +156,25 @@ NODE_IP="${NODE_IP:-127.0.0.1}"
 
 HEAD_IP="${HEAD_IP:-${CHIEF_IP:-${NODE_IP}}}"          # taiji CHIEF_IP:     head node IP
 
+# Head-only mooncake control plane: bring the services up so a single job
+# submission is self-contained. Idempotent (skips if already running); logs to
+# /tmp. Override MOONCAKE_* (above) to use external services instead.
+start_mooncake_services() {
+    if ! command -v mooncake_master >/dev/null 2>&1; then
+        echo "WARNING: mooncake_master not on PATH — start the mooncake services manually." >&2
+        return
+    fi
+    if ! pgrep -f mooncake_master >/dev/null 2>&1; then
+        echo "Starting mooncake_master (:50051) -> /tmp/mooncake_master.log"
+        nohup mooncake_master --port=50051 >/tmp/mooncake_master.log 2>&1 &
+    fi
+    if ! pgrep -f http_metadata_server >/dev/null 2>&1; then
+        echo "Starting mooncake http_metadata_server (:8080) -> /tmp/mooncake_metadata.log"
+        nohup python -m mooncake.http_metadata_server --port 8080 >/tmp/mooncake_metadata.log 2>&1 &
+    fi
+    sleep "${MOONCAKE_STARTUP_WAIT_S:-5}"
+}
+
 mkdir -p "${OUTPUT_DIR}"
 ray stop >/dev/null 2>&1 || true
 
@@ -158,6 +184,9 @@ if [ "${NODE_RANK}" = "0" ]; then
         --port="${RAY_PORT}" \
         --dashboard-host=0.0.0.0 \
         --num-gpus="${GPUS_PER_NODE}"
+    if [ "${DATA_PLANE}" = "tq_mooncake" ]; then
+        start_mooncake_services
+    fi
 else
     until ray start \
         --address="${HEAD_IP}:${RAY_PORT}" \

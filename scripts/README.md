@@ -45,15 +45,13 @@ Both launchers pick how rollout samples reach the trainer with `DATA_PLANE`:
 |---|---|---|
 | `ray` (default) | Driver gathers rollouts over the Ray object store | none |
 | `tq_simple` | TransferQueue on Ray-backed host storage (off-driver) | none |
-| `tq_mooncake` | TransferQueue over mooncake (RDMA across nodes) | external `mooncake_master` + `http_metadata_server`; set `MOONCAKE_METADATA_URL`, `MOONCAKE_MASTER_ADDR`, `PROTOCOL` (rdma/tcp) |
+| `tq_mooncake` | TransferQueue over mooncake (RDMA across nodes) | needs `mooncake_master` + `http_metadata_server` — the **taiji** launcher's rank 0 auto-starts them and derives `MOONCAKE_*` from `CHIEF_IP`; just set `PROTOCOL` (rdma/tcp) |
 | `keep_local` | Direct-sampling actors keep rollouts local; only light metadata crosses to the driver | none |
 
 ```bash
 DATA_PLANE=tq_simple bash scripts/run_experiment_single_node.sh <experiment>
 
 DATA_PLANE=tq_mooncake PROTOCOL=rdma \
-  MOONCAKE_METADATA_URL=http://$CHIEF_IP:8080/metadata \
-  MOONCAKE_MASTER_ADDR=$CHIEF_IP:50051 \
   bash scripts/run_experiment_multinode_taiji.sh grpo_flux2_klein9b_trainside_2x8
 ```
 
