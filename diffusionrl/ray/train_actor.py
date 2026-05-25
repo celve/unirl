@@ -46,7 +46,7 @@ import ray
 import torch
 from omegaconf import DictConfig
 
-from diffusionrl.distributed.transfer_queue import resolve_batch_from_tq, tqbridge
+from diffusionrl.distributed.transfer_queue import resolve_batch_from_tq
 from diffusionrl.ray.actor_config import ConfigActor
 from diffusionrl.ray.distributed import DistributedMixin
 from diffusionrl.ray.mixins import TrainingWeightSyncMixin
@@ -517,7 +517,6 @@ class TrainActor(
     # Train (RolloutResp in, TrainOptimizerStepResult out)
     # ------------------------------------------------------------------
 
-    @tqbridge(get=True, put=False)
     def train(
         self,
         rollout_step: int,
@@ -536,7 +535,6 @@ class TrainActor(
         resp = resolve_batch_from_tq(resp)
         return self._train_resp(rollout_step, resp)
 
-    @tqbridge(get=True, put=False)
     def train_from_buffer(
         self,
         rollout_step: int,
