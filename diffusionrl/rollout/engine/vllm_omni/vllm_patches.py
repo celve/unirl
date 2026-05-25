@@ -236,7 +236,7 @@ def patch_fp32_skip() -> None:
           e.g. vllm_omni DiffusionBaseLinearLayerWithLoRA
       (c) filter target_modules so it does not match this layer
 
-    Replaces pod-local patch: patches/vllm/0001-utils-skip-fp32-from-layer.patch
+    Replaces pod-local file patch on ``vllm/lora/utils.py``.
     """
     try:
         import torch as _torch
@@ -267,6 +267,65 @@ def patch_fp32_skip() -> None:
     _lora_utils.from_layer = _patched_from_layer
 
 
+def patch_lora_request_passthrough() -> None:
+    """Forward ``lora_request`` through ``Omni.generate`` to ``engine.add_request``.
+
+    Required for HI3-Instruct t2i RL (``think_recaption`` mode) so that the AR
+    prelude stage in vllm-omni picks up the per-rollout LoRA adapter alongside
+    the DiT stage. Without this, ``VLLMOmniRolloutEngine.generate`` cannot pass
+    ``lora_request`` into the AR stage's request scheduler — the AR worker runs
+    the base model while DiT runs the LoRA-adapted model (half-adapted
+    trajectory => silent policy/rollout mismatch).
+
+    Replaces pod-local file patch on ``vllm_omni/entrypoints/omni.py``.
+    """
+    try:
+        from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
+        from vllm_omni.entrypoints.omni import Omni
+    except (ImportError, AttributeError):
+        return  # vllm-omni not available in this process; skip
+
+    # ── Omni.generate: stash lora_request on the engine instance ──────
+    _orig_omni_generate = Omni.generate
+    if not getattr(_orig_omni_generate, "_diffrl_lora_request_passthrough", False):
+
+        def _patched_omni_generate(self, *args, lora_request=None, _orig=_orig_omni_generate, **kwargs):
+            self.engine._diffrl_pending_lora_request = lora_request
+            py_generator = kwargs.get("py_generator", False)
+            try:
+                result = _orig(self, *args, **kwargs)
+            except Exception:
+                self.engine._diffrl_pending_lora_request = None
+                raise
+            if py_generator:
+                # ``_orig`` returned a generator — wrap so we clear the stash
+                # only when the generator is exhausted / closed.
+                def _wrapped(gen, engine):
+                    try:
+                        yield from gen
+                    finally:
+                        engine._diffrl_pending_lora_request = None
+
+                return _wrapped(result, self.engine)
+            self.engine._diffrl_pending_lora_request = None
+            return result
+
+        _patched_omni_generate._diffrl_lora_request_passthrough = True  # type: ignore[attr-defined]
+        Omni.generate = _patched_omni_generate
+
+    # ── AsyncOmniEngine.add_request: pickup from stash ────────────────
+    _orig_add_request = AsyncOmniEngine.add_request
+    if not getattr(_orig_add_request, "_diffrl_lora_request_passthrough", False):
+
+        def _patched_add_request(self, *args, lora_request=None, _orig=_orig_add_request, **kwargs):
+            if lora_request is None:
+                lora_request = getattr(self, "_diffrl_pending_lora_request", None)
+            return _orig(self, *args, lora_request=lora_request, **kwargs)
+
+        _patched_add_request._diffrl_lora_request_passthrough = True  # type: ignore[attr-defined]
+        AsyncOmniEngine.add_request = _patched_add_request
+
+
 def patch_sigmas_passthrough() -> None:
     """Monkey-patch HunyuanImage3Pipeline to forward custom sigmas to DiT scheduler.
 
@@ -279,7 +338,7 @@ def patch_sigmas_passthrough() -> None:
     forwarded to the DiT scheduler (rollout-train sigma mismatch
     max abs diff ~0.158 => GRPO log-prob replay incorrect).
 
-    Replaces pod-local patch: patches/vllm_omni/0002-pipeline-sigmas-passthrough.patch
+    Replaces pod-local file patch on ``vllm_omni/diffusion/models/hunyuan_image3/pipeline_hunyuan_image3.py``.
     """
     try:
         from vllm_omni.diffusion.models.hunyuan_image3.pipeline_hunyuan_image3 import (
@@ -344,6 +403,7 @@ class VLLMOmniHijack:
         patch_dit_lora_loader()
         patch_ar_lora_loader()
         patch_fp32_skip()
+        patch_lora_request_passthrough()
         patch_sigmas_passthrough()
 
 
