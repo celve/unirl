@@ -18,15 +18,14 @@
 # Everything Klein-specific (fp32 FSDP master, LoRA targets, dance SDE,
 # offload=false) is kept VERBATIM from 4x8.
 #
-# Launch — run on BOTH nodes (NODE_RANK=0 is the Ray head + driver). The
-# scripts/run_tq_2x8.sh wrapper injects the TQ overrides:
+# Launch — submit once as the taiji multi-node job (it fans out to both nodes and
+# sets INDEX + CHIEF_IP); DATA_PLANE picks the transport:
 #
-#   # A) multi-node mechanism, zero infra:
-#   TQ_BACKEND=simple   NODE_RANK=0 HEAD_IP=$IP NODE_IP=$IP bash scripts/run_tq_2x8.sh
-#   # C) real RDMA validation (needs an external mooncake_master running):
-#   TQ_BACKEND=mooncake PROTOCOL=rdma MOONCAKE_METADATA_URL=http://$IP:8080/metadata \
-#     MOONCAKE_MASTER_ADDR=$IP:50051 NODE_RANK=0 HEAD_IP=$IP NODE_IP=$IP bash scripts/run_tq_2x8.sh
-#   # worker node: same line, NODE_RANK=1 NODE_IP=<worker_ip>
+#   # multi-node mechanism, zero infra:
+#   DATA_PLANE=tq_simple bash scripts/run_experiment_multinode_taiji.sh grpo_flux2_klein9b_trainside_2x8
+#   # real RDMA validation (needs an external mooncake_master + http_metadata_server on the head):
+#   DATA_PLANE=tq_mooncake PROTOCOL=rdma MOONCAKE_METADATA_URL=http://$CHIEF_IP:8080/metadata \
+#     MOONCAKE_MASTER_ADDR=$CHIEF_IP:50051 bash scripts/run_experiment_multinode_taiji.sh grpo_flux2_klein9b_trainside_2x8
 defaults:
   - override /algorithm: grpo
   - override /model: flux2_klein_v2

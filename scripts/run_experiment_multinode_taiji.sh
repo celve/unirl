@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
 #
-# Single-node experiment launcher (cluster-agnostic — no platform env needed).
-# Starts a local Ray head on this machine and runs the training driver.
+# Multi-node experiment launcher for the taiji platform. The platform runs this
+# SAME script on every node (SPMD): rank 0 starts the Ray head and the training
+# driver; every other rank joins Ray and idles. Cluster topology defaults to
+# taiji's job env (see "Cluster topology" below); set the explicit vars to run
+# on any other cluster.
 #
 # Data plane (how rollout samples reach the trainer) is selected with DATA_PLANE:
 #   ray         (default) driver gathers rollouts over the Ray object store
 #   tq_simple   TransferQueue on Ray-backed host storage (off-driver, zero infra)
-#   tq_mooncake TransferQueue over mooncake — needs a LOCAL mooncake_master +
-#               http_metadata_server; set MOONCAKE_METADATA_URL / MOONCAKE_MASTER_ADDR
+#   tq_mooncake TransferQueue over mooncake RDMA (production) — needs an EXTERNAL
+#               mooncake_master + http_metadata_server on the head; set MOONCAKE_*
 #   keep_local  direct-sampling actors keep rollouts local; only light metadata
 #               crosses to the driver (no transfer at all)
 #
-# Example:
-#   bash scripts/run_experiment_single_node.sh flowgrpo_fast_sd3_colocate
-#   DATA_PLANE=tq_simple bash scripts/run_experiment_single_node.sh grpo_wan21_t2v
+# Submit once as the platform's multi-node job entrypoint (it fans out to every
+# node and sets INDEX + CHIEF_IP). Examples (same line on every node):
+#   bash scripts/run_experiment_multinode_taiji.sh grpo_flux2_klein9b_trainside_2x8
+#   DATA_PLANE=tq_simple bash scripts/run_experiment_multinode_taiji.sh <experiment>
+#   DATA_PLANE=tq_mooncake PROTOCOL=rdma \
+#     MOONCAKE_METADATA_URL=http://$CHIEF_IP:8080/metadata \
+#     MOONCAKE_MASTER_ADDR=$CHIEF_IP:50051 \
+#     bash scripts/run_experiment_multinode_taiji.sh grpo_flux2_klein9b_trainside_2x8
 #
 set -euo pipefail
 
@@ -81,9 +89,8 @@ case "${DATA_PLANE}" in
         ;;
     tq_mooncake)
         if [ -z "${MOONCAKE_METADATA_URL:-}" ] || [ -z "${MOONCAKE_MASTER_ADDR:-}" ]; then
-            echo "DATA_PLANE=tq_mooncake needs MOONCAKE_METADATA_URL=http://<host>:<port>/metadata" >&2
-            echo "and MOONCAKE_MASTER_ADDR=<host>:<rpc_port> (start a local mooncake_master +" >&2
-            echo "http_metadata_server first)." >&2
+            echo "DATA_PLANE=tq_mooncake needs MOONCAKE_METADATA_URL=http://<HEAD_IP>:<port>/metadata" >&2
+            echo "and MOONCAKE_MASTER_ADDR=<HEAD_IP>:<rpc_port> (external mooncake_master on the head)." >&2
             exit 2
         fi
         CMD+=(
@@ -116,21 +123,53 @@ if [ "${INSTALL_EDITABLE:-1}" = "1" ]; then
     pip install --no-deps -e .
 fi
 
-# --- Single-node Ray (local head) -------------------------------------------
-# GPU count: override with GPUS_PER_NODE, else autodetect, else assume 8.
-if [ -z "${GPUS_PER_NODE:-}" ]; then
-    GPUS_PER_NODE="$(nvidia-smi -L 2>/dev/null | wc -l || true)"
-    [ "${GPUS_PER_NODE:-0}" -gt 0 ] 2>/dev/null || GPUS_PER_NODE=8
+# --- Cluster topology (taiji platform defaults) -----------------------------
+# Defaults come from taiji's multi-node job env (commented per line); the
+# explicit vars always win, so this launcher also runs on a non-taiji cluster.
+NUM_NODES="${NUM_NODES:-${HOST_NUM:-2}}"               # taiji HOST_NUM:     node count
+GPUS_PER_NODE="${GPUS_PER_NODE:-${HOST_GPU_NUM:-8}}"   # taiji HOST_GPU_NUM: GPUs per node
+NODE_RANK="${NODE_RANK:-${INDEX:-0}}"                  # taiji INDEX:        this node's rank
+RAY_PORT="${RAY_PORT:-6379}"
+
+# This node's IP. Prefer an explicit NODE_IP, else taiji's LOCAL_IP. On multi-NIC
+# / container nodes `hostname -I` often returns a container-internal IP that peers
+# can't reach, so when CHIEF_IP is known, pick this node's IP on the chief's /16.
+all_ips="$(hostname -I 2>/dev/null || true)"
+if [ -z "${NODE_IP:-}" ] && [ -n "${LOCAL_IP:-}" ]; then
+    NODE_IP="${LOCAL_IP}"
+fi
+if [ -z "${NODE_IP:-}" ] && [ -n "${CHIEF_IP:-}" ]; then
+    chief_subnet="$(echo "${CHIEF_IP}" | cut -d. -f1-2)"
+    NODE_IP="$(echo "${all_ips}" | tr ' ' '\n' | grep "^${chief_subnet}\." | head -1 || true)"
+fi
+if [ -z "${NODE_IP:-}" ]; then
+    NODE_IP="$(echo "${all_ips}" | awk '{print $1}')"
 fi
 NODE_IP="${NODE_IP:-127.0.0.1}"
-RAY_PORT="${RAY_PORT:-6379}"
+
+HEAD_IP="${HEAD_IP:-${CHIEF_IP:-${NODE_IP}}}"          # taiji CHIEF_IP:     head node IP
 
 mkdir -p "${OUTPUT_DIR}"
 ray stop >/dev/null 2>&1 || true
-ray start --head \
-    --node-ip-address="${NODE_IP}" \
-    --port="${RAY_PORT}" \
-    --dashboard-host=0.0.0.0 \
-    --num-gpus="${GPUS_PER_NODE}"
 
+if [ "${NODE_RANK}" = "0" ]; then
+    ray start --head \
+        --node-ip-address="${NODE_IP}" \
+        --port="${RAY_PORT}" \
+        --dashboard-host=0.0.0.0 \
+        --num-gpus="${GPUS_PER_NODE}"
+else
+    until ray start \
+        --address="${HEAD_IP}:${RAY_PORT}" \
+        --node-ip-address="${NODE_IP}" \
+        --num-gpus="${GPUS_PER_NODE}"; do
+        echo "Ray head not ready yet; retrying in 5s..."
+        sleep 5
+    done
+    echo "Worker node joined Ray cluster; head node owns the training driver."
+    tail -f /dev/null
+fi
+
+echo "Ray cluster target: ${NUM_NODES} node(s) x ${GPUS_PER_NODE} GPU(s)"
+sleep "${RAY_CLUSTER_WAIT_S:-30}"
 exec "${CMD[@]}"

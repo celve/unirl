@@ -47,10 +47,10 @@ Run a single-node recipe:
 bash scripts/run_experiment_single_node.sh flowgrpo_fast_sd3_colocate
 ```
 
-Run a multi-node recipe:
+Run a multi-node recipe (taiji platform):
 
 ```bash
-bash scripts/run_experiment_multinode.sh flowgrpo_fast_qwen_image_2x8
+bash scripts/run_experiment_multinode_taiji.sh flowgrpo_fast_qwen_image_2x8
 ```
 
 Invoke the Hydra entrypoint directly:
