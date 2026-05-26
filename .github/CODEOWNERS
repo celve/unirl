@@ -1,0 +1,34 @@
+# CODEOWNERS
+#
+# GitHub requests reviews from the last matching owner rule for each changed
+# file. Keep the fallback first so later, more specific rules can override it.
+
+* @CjhHa1 @haonan3 @celve @Jayce-Ping
+
+# Documentation and automation.
+/.github/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/.cursor/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/.claude/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/docs/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+
+# Launch and configuration surface.
+/scripts/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/conf/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+
+# Core training and distributed runtime.
+/diffusionrl/training/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/diffusionrl/algorithms/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/diffusionrl/ray/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/diffusionrl/distributed/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+
+# Rollout, reward, SDE, and model integration.
+/diffusionrl/rollout/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/diffusionrl/reward/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/diffusionrl/sde/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/diffusionrl/models/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+
+# Data, model artifacts, patches, and tests.
+/data/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/models/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/patches/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/tests/ @CjhHa1 @haonan3 @celve @Jayce-Ping

@@ -62,7 +62,7 @@ from diffusionrl.rollout.engine.sglang_llm._server import (
 )
 from diffusionrl.rollout.engine.sglang_llm.config import SGLangLLMEngineConfig
 from diffusionrl.types.conditions import TextTokenCondition
-from diffusionrl.types.primitives import Texts
+from diffusionrl.types.primitives import Image, Images, Texts
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
 from diffusionrl.types.sampling import get_ar_params
@@ -97,6 +97,21 @@ def _strip_thinking_tags(text: str) -> Tuple[str, str]:
         return content, reasoning
 
     return text.strip(), ""
+
+
+# ---------------------------------------------------------------------------
+# Image serialization for HTTP transport
+# ---------------------------------------------------------------------------
+
+
+def _pil_to_base64(image: Any) -> str:
+    """Encode a PIL image as a ``data:image/png;base64,...`` URI for SRT."""
+    import base64
+    import io
+
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +448,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             "enable_lora",
             "max_lora_rank",
             "lora_target_modules",
+            "enable_multimodal",
         ):
             if key in engine_kwargs:
                 server_kwargs[key] = engine_kwargs[key]
@@ -607,6 +623,27 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             f"SGLangLLMRolloutEngine.generate: prompt count {len(prompts)} != req.batch_size {int(req.batch_size)}",
         )
 
+        # --- Image extraction (VLM) ---
+        image_prim = req.primitives.get("image")
+        pil_images: Optional[List[Any]] = None
+        if image_prim is not None:
+            require(
+                self.cfg.image_token is not None,
+                "SGLangLLMRolloutEngine.generate: req contains images but "
+                "config.image_token is None (text-only mode). Set image_token "
+                "in the engine config to enable VLM.",
+            )
+            require(
+                isinstance(image_prim, Images),
+                f"SGLangLLMRolloutEngine.generate: req.primitives['image'] must be "
+                f"Images, got {type(image_prim).__name__}",
+            )
+            require(
+                len(image_prim) == len(prompts),
+                f"SGLangLLMRolloutEngine.generate: image batch {len(image_prim)} != prompt count {len(prompts)}",
+            )
+            pil_images = [Image(pixels=image_prim.pixels[i]).to_pil() for i in range(len(image_prim))]
+
         ar = get_ar_params(req.sampling_params)
         stage_ar: Dict[str, Any] = dict(req.stage_config.get("ar") or {})
         n = int(ar.samples_per_prompt if ar is not None else stage_ar.get("n", 1))
@@ -622,7 +659,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             if key in stage_ar:
                 sampling[key] = stage_ar[key]
 
-        raw_results = self._run_async_gather(prompts, sampling)
+        raw_results = self._run_async_gather(prompts, sampling, images=pil_images)
         pad_id = getattr(self._tokenizer, "pad_token_id", None) or getattr(self._tokenizer, "eos_token_id", None) or 0
         return build_rollout_resp(
             req,
@@ -636,6 +673,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         self,
         prompts: List[str],
         sampling_params: Dict[str, Any],
+        images: Optional[List[Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Drive ``_generate_text_async`` from a fresh event loop."""
         if self._http_client is None:
@@ -645,7 +683,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         t0 = time.perf_counter()
         loop = asyncio.new_event_loop()
         try:
-            results = loop.run_until_complete(self._generate_text_async(prompts, sampling_params))
+            results = loop.run_until_complete(self._generate_text_async(prompts, sampling_params, images=images))
         finally:
             loop.close()
         elapsed = time.perf_counter() - t0
@@ -661,6 +699,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         self,
         prompts: List[str],
         sampling_params: Dict[str, Any],
+        images: Optional[List[Any]] = None,
     ) -> List[Dict[str, Any]]:
         """All prompts sent in parallel via asyncio.gather + Semaphore."""
         params = dict(sampling_params)
@@ -678,8 +717,13 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             if key in params:
                 extra_sampling[key] = params[key]
 
-        async def _generate_one(prompt: str) -> List[Dict[str, Any]]:
-            prompt_token_ids = self._apply_chat_template(prompt, system_instruction)
+        async def _generate_one(prompt: str, image: Any = None) -> List[Dict[str, Any]]:
+            has_image = image is not None
+            prompt_token_ids = self._apply_chat_template(
+                prompt,
+                system_instruction,
+                has_image=has_image,
+            )
             sampling_block = {
                 "temperature": temperature,
                 "max_new_tokens": max_new_tokens,
@@ -707,6 +751,8 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             # SGLang's LoRA inference path is debugged.
             # if self._lora_loaded:
             #     payload["lora_path"] = "default"
+            if has_image:
+                payload["image_data"] = _pil_to_base64(image)
             async with sem:
                 response = await self._apost("/generate", payload)
             parsed = _parse_one_response(response, prompt, prompt_token_ids, tokenizer=self._tokenizer)
@@ -715,15 +761,20 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
                 first = parsed[0]
                 logger.info(
                     "SGLangLLMRolloutEngine first response: "
-                    "prompt_token_ids=%d token_ids=%d logprobs=%d raw_text[:200]=%r",
+                    "prompt_token_ids=%d token_ids=%d logprobs=%d raw_text[:200]=%r has_image=%s",
                     len(first.get("prompt_token_ids") or []),
                     len(first.get("token_ids") or []),
                     len(first.get("logprobs") or []),
                     str(first.get("text", ""))[:200],
+                    has_image,
                 )
             return parsed
 
-        nested = await asyncio.gather(*[_generate_one(p) for p in prompts])
+        tasks = []
+        for i, p in enumerate(prompts):
+            img = images[i] if images is not None else None
+            tasks.append(_generate_one(p, img))
+        nested = await asyncio.gather(*tasks)
         return [item for sublist in nested for item in sublist]
 
     async def _apost(
@@ -773,8 +824,15 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         self,
         user_prompt: str,
         system_instruction: Optional[str] = None,
+        has_image: bool = False,
     ) -> Optional[List[int]]:
         """Build chat-formatted ``input_ids`` via the tokenizer's chat template.
+
+        When ``has_image`` is True, builds multimodal content parts
+        (``[{"type": "image"}, {"type": "text", ...}]``) for VLMs like
+        Qwen2.5-VL whose HF chat templates handle structured content
+        natively. Falls back to prepending ``image_token`` as a plain
+        string for older templates that only accept flat text.
 
         Returns ``None`` if tokenizer or chat template is unavailable; the
         caller then falls back to the ``text`` payload variant.
@@ -784,10 +842,18 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         if not hasattr(self._tokenizer, "apply_chat_template"):
             return None
 
-        messages: List[Dict[str, str]] = []
+        messages: List[Dict[str, Any]] = []
         if system_instruction:
             messages.append({"role": "system", "content": system_instruction})
-        messages.append({"role": "user", "content": user_prompt})
+
+        if has_image and self.cfg.image_token:
+            content: List[Dict[str, str]] = [
+                {"type": "image"},
+                {"type": "text", "text": user_prompt},
+            ]
+            messages.append({"role": "user", "content": content})
+        else:
+            messages.append({"role": "user", "content": user_prompt})
 
         try:
             input_ids = self._tokenizer.apply_chat_template(
@@ -796,18 +862,43 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
                 tokenize=True,
             )
         except Exception as exc:
-            if not self._chat_template_logged:
-                self._chat_template_logged = True
-                logger.warning("apply_chat_template failed, falling back to raw text: %s", exc)
-            return None
+            # Fallback for tokenizers that don't support structured content
+            # parts: prepend the image_token as plain text.
+            if has_image and self.cfg.image_token:
+                fallback_text = f"{self.cfg.image_token}\n{user_prompt}"
+                messages_fb: List[Dict[str, Any]] = []
+                if system_instruction:
+                    messages_fb.append({"role": "system", "content": system_instruction})
+                messages_fb.append({"role": "user", "content": fallback_text})
+                try:
+                    input_ids = self._tokenizer.apply_chat_template(
+                        messages_fb,
+                        add_generation_prompt=True,
+                        tokenize=True,
+                    )
+                except Exception as fb_exc:
+                    if not self._chat_template_logged:
+                        self._chat_template_logged = True
+                        logger.warning(
+                            "apply_chat_template failed (structured=%s, fallback=%s), using raw text",
+                            exc,
+                            fb_exc,
+                        )
+                    return None
+            else:
+                if not self._chat_template_logged:
+                    self._chat_template_logged = True
+                    logger.warning("apply_chat_template failed, falling back to raw text: %s", exc)
+                return None
 
         if not self._chat_template_logged:
             self._chat_template_logged = True
             decoded_preview = self._tokenizer.decode(input_ids[:30], skip_special_tokens=False)
             logger.info(
-                "Chat template applied: %d tokens, preview=%r",
+                "Chat template applied: %d tokens, preview=%r, has_image=%s",
                 len(input_ids),
                 decoded_preview,
+                has_image,
             )
 
         return input_ids

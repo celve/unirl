@@ -106,6 +106,12 @@ settings.json
 *.iml
 *.code-workspace
 .DS_Store
-.claude/
-.cursor
+.claude/*
+!.claude/skills/
+!.claude/skills/**
+.cursor/*
+!.cursor/skills/
+!.cursor/skills/**
+!.cursor/rules/
+!.cursor/rules/**
 REFACTOR_LOG.md

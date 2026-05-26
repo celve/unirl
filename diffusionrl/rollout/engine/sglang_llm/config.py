@@ -43,6 +43,12 @@ class SGLangLLMEngineConfig(BaseEngineConfig):
     # --- Concurrency / async ---
     concurrency: int = 8
 
+    # --- VLM multimodal ---
+    # Image token placeholder injected into the chat template at image
+    # positions.  Model-specific: e.g. "<|vision_start|><|image_pad|><|vision_end|>"
+    # for Qwen2.5-VL.  None (default) = text-only mode.
+    image_token: Optional[str] = None
+
     # --- LLM sampling (forwarded to SGLang /generate sampling_params) ---
     max_new_tokens: int = 512
     temperature: float = 0.7
