@@ -38,14 +38,15 @@ from __future__ import annotations
 
 import dataclasses as _dc
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from diffusionrl.models.types.pipeline import Pipeline
 from diffusionrl.sde.kernels import DanceSDEStrategy, StepStrategy
 from diffusionrl.sde.runtime import FlowMatchSchedulePolicy
 from diffusionrl.types.primitives import Texts
 from diffusionrl.types.rollout_req import RolloutReq
-from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
+from diffusionrl.types.sampling import get_diffusion_params
 
 from .bundle import Flux2KleinBundle
 from .conditions import Flux2KleinConditions
@@ -87,18 +88,19 @@ class Flux2KleinPipeline(Pipeline):
     - ``primitives["negative_text"]: Texts`` — optional CFG negatives.
       The canonical Klein recipe runs at ``guidance_scale=1.0`` with
       no negative branch.
-    - ``stage_params["diffusion"]: dict`` — kwargs for
-      :class:`Flux2KleinDiffusionParams`.
+    - ``sampling_params: DiffusionSamplingParams`` — typed sampling
+      config; the relevant subset is mapped onto
+      :class:`Flux2KleinDiffusionParams` via ``get_diffusion_params``.
     - ``sigmas: Tensor[T+1]`` — pinned by the engine adapter (required).
 
-    Writes to ``RolloutResp``:
+    Writes to ``RolloutResp.tracks["image"]: RolloutTrack``:
 
     - ``conditions["text"]: TextEmbedCondition``; plus
       ``conditions["negative_text"]: TextEmbedCondition`` when negative
       prompts were supplied.
-    - ``rollout_traces["image"]: LatentSegment`` (patchified spatial
-      shape ``[B, K, 128, H_pat, W_pat]``).
-    - ``decoded["image"]: Images``.
+    - ``segment: LatentSegment`` (patchified spatial shape
+      ``[B, K, 128, H_pat, W_pat]``).
+    - ``decoded: Images``.
     """
 
     def __init__(
@@ -229,9 +231,9 @@ class Flux2KleinPipeline(Pipeline):
                 f"{len(negatives.texts)} != text length {len(texts.texts)}"
             )
 
-        raw_dict: Dict[str, Any] = dict(req.stage_params.get("diffusion") or {})
+        sampling = get_diffusion_params(req.sampling_params)
         allowed = {f.name for f in _dc.fields(Flux2KleinDiffusionParams)}
-        params_dict = {k: v for k, v in raw_dict.items() if k in allowed}
+        params_dict = {k: getattr(sampling, k) for k in allowed if hasattr(sampling, k)}
         params = Flux2KleinDiffusionParams(**params_dict)
 
         text_cond = self.text_embed.embed(texts)
@@ -261,11 +263,15 @@ class Flux2KleinPipeline(Pipeline):
         images = self.vae_decode.decode(latent_seg)
 
         return RolloutResp(
-            sample_ids=list(req.sample_ids),
-            group_ids=list(req.group_ids),
-            conditions=klein_conds.to_dict(),
-            rollout_traces={"image": latent_seg},
-            decoded={"image": images},
+            tracks={
+                "image": RolloutTrack(
+                    sample_ids=list(req.sample_ids),
+                    parent_ids=list(req.group_ids),
+                    conditions=klein_conds.to_dict(),
+                    segment=latent_seg,
+                    decoded=images,
+                ),
+            }
         )
 
 
