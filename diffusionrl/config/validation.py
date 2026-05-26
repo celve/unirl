@@ -240,11 +240,64 @@ def validate_lora_target_modules(cfg: DictConfig) -> None:
     )
 
 
+def validate_multi_track_mini_batch_geometry(cfg: DictConfig) -> None:
+    """Multi-track mini-batching requires per-actor sample counts divisible by num_updates.
+
+    In a multi-track PE joint setup (ar + diffusion), the train actor splits the
+    rollout response into ``num_updates_per_batch`` mini-batches along the root
+    track (ar).  The root track's per-actor batch size is
+    ``P * N / actor_count`` and must divide evenly by ``num_updates_per_batch``;
+    otherwise the lineage-aware split cannot produce equal-sized chunks.
+
+    Skips validation when:
+    - ``num_updates_per_batch <= 1`` (no splitting)
+    - ``cfg.training.tracks`` is absent or has <= 1 track (single-track mode)
+    """
+    num_updates = int(cfg.training.plan.get("num_updates_per_batch", 1))
+    if num_updates <= 1:
+        return
+
+    tracks = cfg.training.get("tracks")
+    if tracks is None or len(tracks) <= 1:
+        return
+
+    # Compute root (ar) track per-actor batch size: P * N / actor_count.
+    P = int(cfg.algorithm.get("prompts_per_rollout", 1))
+    N = int(cfg.algorithm.get("pe_rewrites_per_prompt", 1))
+    actor_count = int(cfg.training.topology.get("actor_count", 1))
+
+    ar_per_actor = (P * N) // max(actor_count, 1)
+    require(
+        ar_per_actor > 0,
+        f"Multi-track mini-batch validation: P*N/actor_count = {P}*{N}/{actor_count} = {ar_per_actor} must be > 0.",
+    )
+    require(
+        ar_per_actor % num_updates == 0,
+        f"Multi-track mini-batch geometry: root track (ar) per-actor batch size = "
+        f"P*N/actor_count = {P}*{N}/{actor_count} = {ar_per_actor}, which is not "
+        f"divisible by num_updates_per_batch={num_updates}. "
+        f"Adjust prompts_per_rollout, pe_rewrites_per_prompt, actor_count, or "
+        f"num_updates_per_batch to satisfy ar_per_actor % num_updates == 0.",
+    )
+
+    # Also check diffusion track: P * N * M / actor_count.
+    M = int(cfg.algorithm.get("samples_per_prompt", 1))
+    diff_per_actor = (P * N * M) // max(actor_count, 1)
+    require(
+        diff_per_actor % num_updates == 0,
+        f"Multi-track mini-batch geometry: diffusion track per-actor batch size = "
+        f"P*N*M/actor_count = {P}*{N}*{M}/{actor_count} = {diff_per_actor}, which is not "
+        f"divisible by num_updates_per_batch={num_updates}. "
+        f"Adjust samples_per_prompt or num_updates_per_batch.",
+    )
+
+
 __all__ = [
     "PrecisionName",
     "is_direct_sampling",
     "validate_dynamic_dotpaths",
     "validate_lora_target_modules",
+    "validate_multi_track_mini_batch_geometry",
     "validate_offload_contract",
     "validate_precision_type",
     "validate_rollout_layout",

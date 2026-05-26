@@ -235,18 +235,21 @@ class TrainActor(
         num_updates = int(self._cfg.training.plan.get("num_updates_per_batch", 1))
         offload_train = bool(self._cfg.training.execution.get("offload_train", False))
 
-        root_bs = next(iter(resp.tracks.values())).batch_size
-        mini_size = root_bs // num_updates
+        mini_sizes = {name: track.batch_size // num_updates for name, track in resp.tracks.items()}
 
         results: Dict[str, TrackMiniBatchResult] = {}
         for track_name in self.tracks:
             self._onload_track(track_name)
             try:
                 for i in range(num_updates):
-                    start = i * mini_size
-                    end = start + mini_size
                     mini_resp = RolloutResp(
-                        tracks={name: track.slice(start, end) for name, track in resp.tracks.items()}
+                        tracks={
+                            name: track.slice(
+                                i * mini_sizes[name],
+                                (i + 1) * mini_sizes[name],
+                            )
+                            for name, track in resp.tracks.items()
+                        }
                     )
                     results[track_name] = self.train_stack.train_track(
                         mini_resp,
