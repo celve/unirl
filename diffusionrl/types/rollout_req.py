@@ -80,6 +80,7 @@ class RolloutReq(Transportable):
     # by construction (geometry varies per-sample only via height/width,
     # but plan_requests / driver fix those per-batch). Hence ``shared_field``.
     sigmas: Optional[torch.Tensor] = shared_field(default=None)
+    metadata: List[Optional[Dict[str, Any]]] = concat_field(default_factory=list)
 
     @property
     def batch_size(self) -> int:

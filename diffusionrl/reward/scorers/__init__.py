@@ -6,6 +6,7 @@ from .clip import ClipRewardScorer
 from .hpsv2 import HPSv2RewardScorer
 from .hpsv3 import HPSv3RewardScorer
 from .image_reward import ImageRewardScorer
+from .mc_exact_match import MCExactMatchRewardScorer
 from .ocr import OCRRewardScorer
 from .pickscore import PickScoreRewardScorer
 from .registry import available_builtin_reward_models, resolve_builtin_reward_scorer_class
@@ -19,6 +20,7 @@ __all__ = [
     "HPSv2RewardScorer",
     "HPSv3RewardScorer",
     "ImageRewardScorer",
+    "MCExactMatchRewardScorer",
     "OCRRewardScorer",
     "PickScoreRewardScorer",
     "VideoPickScoreScorer",

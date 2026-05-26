@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 from diffusionrl.types.rollout_req import PrimitiveValue
 from diffusionrl.utils.batched import Batched, concat_field
@@ -12,6 +12,7 @@ class RolloutInputs(Batched):
     primitives: Dict[str, PrimitiveValue] = concat_field(default_factory=dict)
     sample_ids: List[str] = concat_field(default_factory=list)
     group_ids: List[str] = concat_field(default_factory=list)
+    metadata: List[Optional[Dict[str, Any]]] = concat_field(default_factory=list)
 
     def expand(self, samples_per_prompt: int) -> RolloutInputs:
         """Expand each prompt into samples_per_prompt entries."""

@@ -29,7 +29,9 @@ class QwenVLPipeline(Pipeline):
         self.ar = ar
 
     @classmethod
-    def from_config(cls, config: QwenVLPipelineConfig) -> "QwenVLPipeline":
+    def from_config(cls, config) -> "QwenVLPipeline":
+        if isinstance(config, dict):
+            config = QwenVLPipelineConfig(**{k: v for k, v in config.items() if k != "_target_"})
         bundle = QwenVLBundle.from_config(config)
         chat_template = QwenVLChatTemplateStage(
             bundle,

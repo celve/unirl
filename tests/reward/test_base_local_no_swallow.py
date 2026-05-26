@@ -29,6 +29,8 @@ class _DummyLocalScorer(BaseLocalRewardScorer):
 
 def test_compute_rewards_propagates_errors() -> None:
     scorer = _DummyLocalScorer(model_name="dummy", device="cpu")
-    request = RewardRequest(prompts=["a", "b"])
+    from diffusionrl.types.primitives import Texts
+
+    request = RewardRequest(primitives={"text": Texts(texts=["a", "b"])})
     with pytest.raises(ValueError, match="boom"):
         scorer.compute_rewards(request)

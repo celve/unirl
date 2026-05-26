@@ -20,33 +20,77 @@ class RewardType(Enum):
 
 @dataclass
 class RewardRequest:
-    """
-    Request for reward computation.
+    """Request for reward computation.
 
-    Supports both image and video inputs.
+    Two typed primitive dicts mirror the ``RolloutReq`` contract:
+
+    ``primitives``
+        Input context — what was fed to the model.  Copied from
+        ``RolloutReq.primitives``.  Typical keys: ``"text"`` (prompt
+        ``Texts``), ``"image"`` (conditioning ``Images``).
+
+    ``generated``
+        Model output being scored — from ``RolloutTrack.decoded``.
+        Typical keys: ``"image"`` (generated ``Images``), ``"video"``
+        (generated ``Videos``), ``"text"`` (generated ``Texts``).
+
+    Backward-compat properties (``prompts``, ``images``, ``videos``,
+    ``texts``) bridge to the new structure with lazy format conversion
+    so existing scorers work unchanged.
     """
 
-    images: Optional[List[Union[Image.Image, torch.Tensor]]] = None
-    videos: Optional[List[torch.Tensor]] = None  # [B, T, C, H, W] or [B, C, T, H, W]
-    prompts: List[str] = field(default_factory=list)
+    primitives: Dict[str, Any] = field(default_factory=dict)
+    generated: Dict[str, Any] = field(default_factory=dict)
+    metadata: Optional[List[Optional[Dict[str, Any]]]] = None
     prompt_ids: Optional[List[str]] = None
     sample_ids: Optional[List[str]] = None
     group_ids: Optional[List[str]] = None
-    metadata: Optional[List[Optional[Dict[str, Any]]]] = None
     reward_types: List[RewardType] = field(default_factory=lambda: [RewardType.IMAGE_TEXT_ALIGNMENT])
     return_components: bool = False
 
     @property
+    def prompts(self) -> List[str]:
+        prim = self.primitives.get("text")
+        if prim is None:
+            return []
+        return list(prim.texts)
+
+    @property
+    def images(self) -> Optional[List[Union[Image.Image, torch.Tensor]]]:
+        prim = self.generated.get("image")
+        if prim is None:
+            return None
+        from diffusionrl.utils.media import tensor_frame_to_pil
+
+        return [tensor_frame_to_pil(img) for img in prim.pixels.unbind(0)]
+
+    @property
+    def videos(self) -> Optional[List[torch.Tensor]]:
+        prim = self.generated.get("video")
+        if prim is None:
+            return None
+        return [v.frames.permute(1, 0, 2, 3).contiguous() for v in prim.to_list()]
+
+    @property
+    def texts(self) -> Optional[List[str]]:
+        prim = self.generated.get("text")
+        if prim is None:
+            return None
+        return list(prim.texts)
+
+    @property
     def batch_size(self) -> int:
-        if self.images is not None:
-            return len(self.images)
-        if self.videos is not None:
-            return len(self.videos)
-        return len(self.prompts)
+        for v in self.generated.values():
+            if v is not None:
+                return len(v)
+        for v in self.primitives.values():
+            if v is not None:
+                return len(v)
+        return 0
 
     @property
     def is_video(self) -> bool:
-        return self.videos is not None
+        return "video" in self.generated
 
 
 @dataclass

@@ -56,6 +56,7 @@ from diffusionrl.types.media_preview import build_media_preview_for_track
 from diffusionrl.types.sampling import get_ar_params, get_diffusion_params
 from diffusionrl.types.segments.base import Segment
 from diffusionrl.types.segments.latent import LatentSegment
+from diffusionrl.types.segments.text import TextSegment
 from diffusionrl.utils.batched import Batched, concat_field
 
 if TYPE_CHECKING:
@@ -69,6 +70,7 @@ logger = logging.getLogger(__name__)
 
 SCORER_BY_SEGMENT_TYPE: Dict[Type[Segment], str] = {
     LatentSegment: "default",
+    TextSegment: "default",
 }
 """Maps a track's segment type to a scorer-registry key.
 

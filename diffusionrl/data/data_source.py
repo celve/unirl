@@ -216,10 +216,13 @@ class MultimodalRLDataSource:
             _validate_homogeneous_images(images)
             primitives["image"] = Images.from_list([img for img in images if img is not None])
 
+        metadata_list = [item.get("metadata") for item in batch]
+
         return RolloutInputs(
             primitives=primitives,
             sample_ids=sample_ids,
             group_ids=list(prompt_ids),
+            metadata=metadata_list,
         )
 
     @property
@@ -249,10 +252,13 @@ class MultimodalRLDataSource:
             _validate_homogeneous_images(images)
             primitives["image"] = Images.from_list([img for img in images if img is not None])
 
+        metadata_list = [item.get("metadata") for item in prompt_examples]
+
         return RolloutInputs(
             primitives=primitives,
             sample_ids=sample_ids,
             group_ids=list(prompt_ids),
+            metadata=metadata_list,
         )
 
     def _resolve_prompt_ids(self, prompt_examples: List[Dict[str, Any]]) -> List[str]:

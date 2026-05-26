@@ -25,6 +25,7 @@ _BUILTIN_SCORERS: Dict[str, Tuple[str, str]] = {
     "hpsv3": ("diffusionrl.reward.scorers.hpsv3", "HPSv3RewardScorer"),
     "image_reward": ("diffusionrl.reward.scorers.image_reward", "ImageRewardScorer"),
     "videopickscore": ("diffusionrl.reward.scorers.video_pickscore", "VideoPickScoreScorer"),
+    "mc_exact_match": ("diffusionrl.reward.scorers.mc_exact_match", "MCExactMatchRewardScorer"),
 }
 
 _BUILTIN_SPECS: Dict[str, Tuple[str, str]] = {
@@ -36,6 +37,7 @@ _BUILTIN_SPECS: Dict[str, Tuple[str, str]] = {
     "hpsv3": ("diffusionrl.reward.scorers.hpsv3", "HPSv3Spec"),
     "image_reward": ("diffusionrl.reward.scorers.image_reward", "ImageRewardSpec"),
     "videopickscore": ("diffusionrl.reward.scorers.video_pickscore", "VideoPickScoreSpec"),
+    "mc_exact_match": ("diffusionrl.reward.scorers.mc_exact_match", "MCExactMatchSpec"),
 }
 
 
