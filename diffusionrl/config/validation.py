@@ -163,6 +163,29 @@ def validate_offload_contract(cfg: DictConfig) -> None:
     )
 
 
+def validate_keep_local_contract(cfg: DictConfig) -> None:
+    """Keep-local data plane is direct-sampling-only and excludes TransferQueue.
+
+    ``cfg.training.execution.keep_local=True`` makes each train actor cache the
+    rollout it produced and train on it in place, so heavy tensors never reach the
+    driver. That requires producer==consumer (direct sampling), and is mutually
+    exclusive with TransferQueue — the other off-driver data plane.
+    """
+    if not bool(cfg.training.execution.get("keep_local", False)):
+        return
+    require(
+        is_direct_sampling(cfg),
+        "cfg.training.execution.keep_local=True requires direct sampling "
+        "(rollout/engine=trainside): in separate-sampling mode the rollout "
+        "producer is not the train consumer, so payloads cannot stay local.",
+    )
+    require(
+        cfg.get("transfer_queue") is None,
+        "cfg.training.execution.keep_local=True is mutually exclusive with "
+        "transfer_queue (both move data off the driver); enable exactly one.",
+    )
+
+
 def validate_lora_target_modules(cfg: DictConfig) -> None:
     """Materialize ``cfg.model.lora_target_modules`` from the bundle's class default.
 

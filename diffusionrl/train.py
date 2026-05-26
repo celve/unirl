@@ -52,11 +52,12 @@ def _run_cross_component_validators(cfg: DictConfig) -> None:
     """Cross-component invariants (dual-mode).
 
     Calls the dynamic-dotpath, LoRA-target-modules and training-batch-geometry
-    validators that apply to both modes, plus the three direct-sampling /
-    weight-sync / offload contracts that gate on ``is_direct_sampling(cfg)``.
+    validators that apply to both modes, plus the direct-sampling / weight-sync /
+    offload / keep-local contracts that gate on ``is_direct_sampling(cfg)``.
     """
     from diffusionrl.config.validation import (
         validate_dynamic_dotpaths,
+        validate_keep_local_contract,
         validate_lora_target_modules,
         validate_multi_track_mini_batch_geometry,
         validate_offload_contract,
@@ -70,6 +71,7 @@ def _run_cross_component_validators(cfg: DictConfig) -> None:
     validate_multi_track_mini_batch_geometry(cfg)
     validate_weight_sync_contract(cfg)
     validate_offload_contract(cfg)
+    validate_keep_local_contract(cfg)
 
 
 def _should_use_ema_rollout(cfg: DictConfig) -> bool:

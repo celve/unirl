@@ -123,6 +123,9 @@ class TrainActorGroup(ActorGroup):
         super().__init__(train_actors)
         self.master_addr: str = master_addr
         self.master_port: int = master_port
+        # Keep-local data plane: each actor trains on the rollout it produced and
+        # cached (TrainActor.train_local); train() then skips the driver shard.
+        self._keep_local: bool = bool(cfg.training.execution.get("keep_local", False))
         logger.info(
             "TrainActorGroup ready: %d actors (master=%s:%d)",
             len(train_actors),
@@ -155,6 +158,12 @@ class TrainActorGroup(ActorGroup):
         (per-track, per-actor) so downstream metric aggregation can iterate
         cleanly per track.
 
+        Keep-local mode (``cfg.training.execution.keep_local``, direct sampling):
+        skip sharding entirely — each actor trains on the rollout it produced and
+        cached locally via ``TrainActor.train_local``. ``training_resp`` here is
+        only the light per-track metadata the driver logs; its heavy payload is
+        never read.
+
         Fail-fast on:
 
         - Multi-root resps (ambiguous sharding choice).
@@ -162,7 +171,11 @@ class TrainActorGroup(ActorGroup):
           require all ranks to receive at least one sample).
         """
         n = self.num_actors
-        if n == 1:
+        if self._keep_local:
+            # Skip the driver shard/scatter — each actor trains the rollout it
+            # produced and cached locally (producer == consumer, direct sampling).
+            refs = [a.train_local.remote(rollout_id) for a in self._actors]
+        elif n == 1:
             refs = [a.train.remote(rollout_id, training_resp) for a in self._actors]
         else:
             shards = shard_resp_per_actor(training_resp, n)

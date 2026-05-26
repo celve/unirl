@@ -390,6 +390,25 @@ class RolloutResp(Transportable):
             return next(iter(self.tracks.values())).batch_size
         return max(t.batch_size for t in self.tracks.values())
 
+    # ---- light (metadata-only) view ----------------------------------------
+
+    def metadata_only(self) -> "RolloutResp":
+        """Per-track metadata-only view (keep-local light data plane).
+
+        ``tracks`` is itself a ``transport=True`` field, so the inherited
+        :meth:`Transportable.metadata_only` would drop the whole dict — losing
+        the per-track light metadata (sample_ids / rewards / advantages) the
+        driver needs for logging. Override to recurse: keep the tracks dict but
+        replace each track with its own ``metadata_only`` (which drops that
+        track's heavy ``conditions`` / ``segment`` / ``decoded`` and keeps the
+        light + lineage fields). ``parent_track`` / ``parent_ids`` / ``sample_ids``
+        are preserved, so the per-track lineage invariants still hold.
+        """
+        return RolloutResp(
+            tracks={name: track.metadata_only() for name, track in self.tracks.items()},
+            reward_compute_s=self.reward_compute_s,
+        )
+
     # ---- structural lookups ------------------------------------------------
 
     def root_track(self) -> "RolloutTrack":

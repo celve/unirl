@@ -30,15 +30,16 @@ wire is keyed by the sender's structure, end of story.
 
 from __future__ import annotations
 
+import copy
 import inspect
 import logging
 import os
 import time
 import uuid as _uuid
-from dataclasses import Field
+from dataclasses import MISSING, Field
 from dataclasses import fields as dc_fields
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Callable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, TypeVar
 
 import torch
 
@@ -57,6 +58,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _DEBUG = int(os.getenv("TRANSFER_QUEUE_UTILS_DEBUG", 0))
+
+T = TypeVar("T", bound="Transportable")
 
 
 def _tq_enabled() -> bool:
@@ -169,6 +172,37 @@ class Transportable(Batched):
                 new_v = fn(self, f, v, key)
                 if new_v is not v:
                     setattr(self, f.name, new_v)
+
+    # ---- light (metadata-only) copy ------------------------------------------
+
+    def metadata_only(self: T) -> T:
+        """Return a shallow copy with every ``transport=True`` field reset to its
+        default — the light metadata, with the heavy transport payload dropped.
+
+        The ``transport=True`` tag is the single source of truth for "what is
+        heavy" (the same tag :meth:`to_tensordict` / :meth:`dehydrate` route on),
+        so adding/removing a transport field needs no matching edit here. Light
+        (non-transport) fields are carried over by reference.
+
+        This is a *top-level-field* drop. A container whose own light data lives
+        *inside* a transport field (e.g. ``RolloutResp.tracks``) must override
+        this to recurse, since dropping the field here would discard that data.
+        """
+        light = copy.copy(self)
+        for f in dc_fields(self):
+            if not f.metadata.get("transport"):
+                continue
+            if f.default_factory is not MISSING:
+                default: Any = f.default_factory()
+            elif f.default is not MISSING:
+                default = f.default
+            else:
+                raise ValueError(
+                    f"metadata_only() cannot drop transport field "
+                    f"{type(self).__name__}.{f.name}: it declares no default to reset to"
+                )
+            setattr(light, f.name, default)
+        return light
 
     # ---- four roundtrip methods (consume the walker) -------------------------
 
