@@ -1,0 +1,132 @@
+# @package _global_
+# ARGRPO Qwen2.5-VL recipe — VLM RL with text+image input, text output.
+#
+# AR-only pipeline: QwenVLPipeline reads primitives["text"] + primitives["image"],
+# generates text via QwenVLARStage, trains via ARGRPO.
+#
+# Trainside engine (no separate rollout actors). ViT frozen, LLM trained
+# with LoRA. For initial validation — prompts_per_rollout is small.
+#
+# Launch:
+#   QWEN_VL_PATH=/path/to/Qwen2.5-VL-2B-Instruct \
+#   DATA_PATH=/path/to/dataset.jsonl \
+#   python -m diffusionrl.train +experiment=argrpo_qwen_vl
+defaults:
+  - override /algorithm: grpo
+  - override /model: qwen_vl
+  - override /rollout/engine: trainside
+  - _self_
+
+run:
+  seed: 42
+  num_rollouts: 100
+  data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
+  data_path: ${oc.env:DATA_PATH,/root/diffusionrl/data/datasets/vqa_test.jsonl}
+  eval_data_path: ${oc.env:EVAL_DATA_PATH,${run.data_path}}
+
+sampling:
+  seed: 42
+
+algorithm:
+  prompts_per_rollout: 4
+  samples_per_prompt: 4
+  adv_normalization_scope: group
+  use_global_std: true
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  use_kl_penalty: false
+  kl_coef: 0.0
+  algorithms:
+    ar:
+      name: ar_grpo
+      stage_attr: ar
+      conditions_cls: diffusionrl.models.qwen_vl.conditions.QwenVLARConditions
+      clip_range: 1.0e-4
+      clip_schedule: constant
+
+model:
+  pretrained_model_ckpt_path: ${oc.env:QWEN_VL_PATH,Qwen/Qwen2.5-VL-2B-Instruct}
+  model_precision: bf16
+  autocast_precision: bf16
+  logprob_precision: fp32
+  freeze_vision_tower: true
+  use_gradient_checkpointing: true
+  max_prompt_length: 2048
+
+rollout:
+  engine: {}
+  plan:
+    forward_batch_size: 1
+
+placement:
+  num_rollout_nodes: 1
+  num_rollout_gpus_per_node: 8
+  num_rollout_gpus_per_actor: 1
+  num_train_nodes: 1
+  num_train_gpus_per_node: 8
+  num_train_gpus_per_actor: 1
+  colocate: true
+  colocate_gpu_fraction: 0.9
+  strategy: PACK
+
+training:
+  policy_source: ar
+  policies:
+    - _target_: diffusionrl.training.lora_policy.LoRAPolicy
+      rank: 16
+      alpha: 32
+      dropout: 0.0
+      target_modules:
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+        - gate_proj
+        - up_proj
+        - down_proj
+      bias: none
+      task_type: CAUSAL_LM
+    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
+      cpu_offload: false
+      param_dtype: bf16
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: true
+  materialize:
+    with_aux: []
+  plan:
+    micro_batch_size: 1
+    num_updates_per_batch: 1
+    local_mini_batch_size: 2
+    local_batch_size: 2
+    global_batch_size: 16
+  topology:
+    actor_count: 8
+  optimizer:
+    learning_rate: 1.0e-5
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  lr_scheduler:
+    type: constant
+    warmup_steps: 0
+    total_steps: 1000
+  execution:
+    max_grad_norm: 1.0
+    offload_train: false
+    offload_rollout: false
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components: {}
+
+logging:
+  logging_steps: 1
+  log_media: false
+  report_to_wandb: false
+
+evaluation:
+  eval_steps: 0
