@@ -12,14 +12,32 @@ the core math; the class wires them into the stage-driven training contract.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from dataclasses import field as dc_field
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Type
 
 import torch
 
+from diffusionrl.config.registration import register_config
 from diffusionrl.types.conditions import Condition
 from diffusionrl.types.segments.latent import LatentSegment
 
-from .base import AlgorithmStepResult, StageAlgorithm, gather_sde_field, typed_conditions
+from .base import AlgorithmStepResult, BaseAlgorithmConfig, StageAlgorithm, gather_sde_field, typed_conditions
+
+
+@register_config(
+    group="algorithm",
+    name="diffusion_dppo",
+    target="diffusionrl.algorithms.dppo.DiffusionDPPO",
+)
+@dataclass
+class DiffusionDPPOConfig(BaseAlgorithmConfig):
+    stage_attr: str = "diffusion"
+    conditions_cls: str = ""
+    kl_mask_threshold: float = 1e-5
+    add_kl_coefficient: bool = True
+    params: Any = dc_field(default=None)
+
 
 # ---------------------------------------------------------------------------
 # Loss helpers

@@ -66,32 +66,31 @@ algorithm:
   sde_config:
     eta: ${sampling.sde_config.eta}
     # shift removed — see note above; canonical shift = model.shift.
-
-algorithms:
-  image:
-    _target_: diffusionrl.algorithms.DiffusionGRPO
-    stage_attr: diffusion
-    conditions_cls: diffusionrl.models.hunyuan_image3.conditions.HunyuanImage3DiffusionConditions
-    clip_range: 1.0e-4
-    clip_schedule: constant
-    params:
-      _target_: diffusionrl.models.hunyuan_image3.diffusion.HunyuanImage3DiffusionParams
-      num_inference_steps: ${sampling.num_inference_steps}
-      guidance_scale: ${sampling.guidance_scale}
-      height: ${sampling.height}
-      width: ${sampling.width}
-      seed: ${run.seed}
-      sde_indices: null
-      eta: ${sampling.sde_config.eta}
-      init_same_noise: ${sampling.init_same_noise}
-      samples_per_prompt: ${algorithm.samples_per_prompt}
-      noise_group_ids: null
-  ar:
-    _target_: diffusionrl.algorithms.ARGRPO
-    stage_attr: ar
-    conditions_cls: diffusionrl.models.hunyuan_image3.conditions.HunyuanImage3ARConditions
-    clip_range: 1.0e-4
-    clip_schedule: constant
+  algorithms:
+    diffusion:
+      name: diffusion_grpo
+      stage_attr: diffusion
+      conditions_cls: diffusionrl.models.hunyuan_image3.conditions.HunyuanImage3DiffusionConditions
+      clip_range: 1.0e-4
+      clip_schedule: constant
+      params:
+        _target_: diffusionrl.models.hunyuan_image3.diffusion.HunyuanImage3DiffusionParams
+        num_inference_steps: ${sampling.num_inference_steps}
+        guidance_scale: ${sampling.guidance_scale}
+        height: ${sampling.height}
+        width: ${sampling.width}
+        seed: ${run.seed}
+        sde_indices: null
+        eta: ${sampling.sde_config.eta}
+        init_same_noise: ${sampling.init_same_noise}
+        samples_per_prompt: ${algorithm.samples_per_prompt}
+        noise_group_ids: null
+    ar:
+      name: ar_grpo
+      stage_attr: ar
+      conditions_cls: diffusionrl.models.hunyuan_image3.conditions.HunyuanImage3ARConditions
+      clip_range: 1.0e-4
+      clip_schedule: constant
 
 model:
   _target_: diffusionrl.models.hunyuan_image3.HunyuanImage3Pipeline.from_meta_config
@@ -131,24 +130,22 @@ placement:
   allow_noset_multi_gpu_inference: true
 
 training:
-  policies:
-    - _target_: diffusionrl.training.lora_policy.LoRAPolicy
-      rank: 8
-      alpha: 16
-      dropout: 0.0
-      target_modules:
-        - qkv_proj
-        - o_proj
-      bias: none
-      task_type: FEATURE_EXTRACTION
-    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
-      cpu_offload: false
-      param_dtype: bf16
-      mixed_precision: true
-      fsdp_mode: full
-      reshard_after_forward: true
-      activation_checkpointing: true
-  policy_source: diffusion
+  lora:
+    rank: 8
+    alpha: 16
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    target_modules:
+      - qkv_proj
+      - o_proj
+  fsdp:
+    cpu_offload: false
+    param_dtype: bf16
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: true
   topology:
     actor_count: 8
   plan:
@@ -178,7 +175,7 @@ reward:
   aggregation_method: mean
   base_device: cuda
   components:
-    - name: pickscore
+    pickscore:
       weight: 1.0
       batch_size: 4
       model_id: /root/yuvalkirstain/PickScore_v1

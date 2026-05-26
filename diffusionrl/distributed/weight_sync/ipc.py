@@ -51,10 +51,6 @@ class IPCBucketedSyncConfig:
     flush_cache: bool = True
     use_shm: bool = False
     target_modules: Tuple[str, ...] = field(default_factory=lambda: ("transformer",))
-    # Stage IDs to ship to. Default ``None`` (i.e. "all stages the engine
-    # exposes") is interpreted on the rollout side; override here to scope
-    # sync to e.g. only the DiT stage during early bring-up.
-    stage_ids: Tuple[int, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         require(self.bucket_size >= 1, f"bucket_size must be >= 1; got {self.bucket_size!r}")
@@ -87,7 +83,6 @@ class UpdateWeightFromIPC(BucketedUpdateWeight):
         flush_cache: bool = True,
         use_shm: bool = False,
         target_modules: Tuple[str, ...] = ("transformer",),
-        stage_ids: Tuple[int, ...] = (),
         param_name_prefix: str = "",
     ) -> None:
         super().__init__(
@@ -101,7 +96,7 @@ class UpdateWeightFromIPC(BucketedUpdateWeight):
         )
         self._bucket_size_mb = int(bucket_size_mb)
         self._use_shm = bool(use_shm)
-        self._stage_ids = tuple(int(s) for s in stage_ids)
+        self._stage_ids: tuple = ()
         self._rollout_actors: list = []
         self._this_rank: int = 0
 
@@ -148,16 +143,25 @@ class UpdateWeightFromIPC(BucketedUpdateWeight):
     def update_weights(
         self,
         *,
+        model: Optional[object] = None,
         peft_config: Optional[dict] = None,
         base_sync_done: bool = False,
+        param_name_prefix: Optional[str] = None,
+        packed_modules: Optional[dict] = None,
+        track_prefix: str = "",
     ) -> None:
         """Override the base bucket loop so receivers are wired up once per
         full update (not once per bucket)."""
+        iter_kwargs = dict(
+            peft_config=peft_config,
+            base_sync_done=base_sync_done,
+            model=model,
+            param_name_prefix=param_name_prefix,
+            packed_modules=packed_modules,
+            track_prefix=track_prefix,
+        )
         if not self._rollout_actors:
             return
-        # Resolve per-this-rank receivers BEFORE iterating buckets so the
-        # remote receivers are already listening on the sockets when the
-        # first bucket arrives.
         actor_idx = self._this_rank // max(1, int(self._placement_cfg.num_rollout_gpus_per_actor))
         has_destination = actor_idx < len(self._rollout_actors)
         if has_destination:
@@ -165,16 +169,6 @@ class UpdateWeightFromIPC(BucketedUpdateWeight):
             actor_n_stages = self._actor_num_stages[actor_idx]
             local_rank = self._this_rank - actor_idx * int(self._placement_cfg.num_rollout_gpus_per_actor)
 
-            stages = self._stage_ids if self._stage_ids else None
-            # Only one trainer per rollout actor fires the receiver-spawn RPC.
-            # Ray actor methods are serialized — if all DP ranks each call
-            # ``actor.update_weights_from_ipc.remote(...)``, Ray queues N
-            # invocations. The 1st invocation's ``collective_rpc`` opens
-            # receivers on every TP worker and they consume the buckets each
-            # trainer rank pushes; the 2nd..Nth invocations then re-open
-            # receivers with no senders left and hang forever. Pick the
-            # group-local rank-0 trainer as the spawner; everyone else just
-            # opens their ZMQ sender for their own local_rank socket.
             is_actor_lead = local_rank == 0
             spawn_ref = None
             if is_actor_lead:
@@ -182,30 +176,16 @@ class UpdateWeightFromIPC(BucketedUpdateWeight):
                     peft_config=peft_config,
                     base_sync_done=base_sync_done,
                     use_shm=self._use_shm,
-                    stage_ids=list(stages) if stages is not None else None,
                 )
 
-            # For each stage, push the full state-dict over the matching socket.
-            # We re-use BucketedUpdateWeight's bucketing for the pump itself.
             replica_rank = replica_rank_from_env()
-            # If stages is empty (the smoke-friendly default), use the
-            # actor's cached ``num_stages``. The engine-side collective_rpc
-            # drives one ZMQ socket per (stage, local_rank) pair.
-            stage_list = list(stages) if stages else list(range(actor_n_stages))
+            stage_list = list(range(actor_n_stages))
 
             for sid in stage_list:
-                # Orphan guard: skip ZMQ send if this rank has no matching
-                # receiver. HI3 dual-stage AR(TP=4) + DiT(TP=4), but FSDP
-                # train has 8 ranks. Ranks 4-7 must drain the iterator (to
-                # keep NCCL all_gather in sync) but NOT open a ZMQ sender.
                 tp_map = self._actor_tp_per_stage[actor_idx] if actor_idx < len(self._actor_tp_per_stage) else {}
                 tp_size = tp_map.get(sid, int(self._placement_cfg.num_rollout_gpus_per_actor))
                 if local_rank >= tp_size:
-                    # Drain iterator to keep NCCL in sync, but skip ZMQ send
-                    for _name, _tensor in self._iter_named_params(
-                        peft_config=peft_config,
-                        base_sync_done=base_sync_done,
-                    ):
+                    for _name, _tensor in self._iter_named_params(**iter_kwargs):
                         del _name, _tensor
                     continue
 
@@ -219,33 +199,15 @@ class UpdateWeightFromIPC(BucketedUpdateWeight):
                     bucket_size_mb=self._bucket_size_mb,
                     use_shm=self._use_shm,
                 )
-                # Drive the bucket loop directly via the sender's async API.
-                asyncio.run(
-                    self._sender.async_send_weights(
-                        self._iter_named_params(
-                            peft_config=peft_config,
-                            base_sync_done=base_sync_done,
-                        )
-                    )
-                )
+                asyncio.run(self._sender.async_send_weights(self._iter_named_params(**iter_kwargs)))
                 self._sender = None
 
             if spawn_ref is not None:
                 ray.get(spawn_ref)
         else:
-            # Orphan ranks (more train ranks than rollout GPU slots) still
-            # need to drain the iterator so DTensor all_gathers inside
-            # ``_to_full_tensor`` see every training rank.
-            n_stages = (
-                len(self._stage_ids)
-                if self._stage_ids
-                else (self._actor_num_stages[0] if self._actor_num_stages else 1)
-            )
+            n_stages = self._actor_num_stages[0] if self._actor_num_stages else 1
             for _ in range(n_stages):
-                for _name, _tensor in self._iter_named_params(
-                    peft_config=peft_config,
-                    base_sync_done=base_sync_done,
-                ):
+                for _name, _tensor in self._iter_named_params(**iter_kwargs):
                     del _name, _tensor
 
         # The non-leader ranks need to wait for the lead's RPC to finish
@@ -262,6 +224,10 @@ class UpdateWeightFromIPC(BucketedUpdateWeight):
         *,
         peft_config: Optional[dict] = None,
         base_sync_done: bool = False,
+        model: Optional[object] = None,
+        param_name_prefix: Optional[str] = None,
+        packed_modules: Optional[dict] = None,
+        track_prefix: str = "",
     ):
         """Yield ``(name, tensor)`` pairs from the model state dict.
 
@@ -272,23 +238,27 @@ class UpdateWeightFromIPC(BucketedUpdateWeight):
         """
         from diffusionrl.utils.peft_merge import adapt_lora_for_vllm, extract_lora_tensors, raw_state_dict
 
-        prefix = self._param_name_prefix
+        resolved_model = self._resolve_model(model)
+        prefix = self._resolve_prefix(param_name_prefix)
+        resolved_packed = packed_modules if packed_modules is not None else getattr(self, "_packed_modules", None)
         if peft_config and base_sync_done:
-            yield from adapt_lora_for_vllm(
+            tensors = adapt_lora_for_vllm(
                 extract_lora_tensors(
-                    self.model,
+                    resolved_model,
                     param_name_prefix=prefix,
-                    packed_modules=getattr(self, "_packed_modules", None),
+                    packed_modules=resolved_packed,
                 )
-            ).items()
+            )
+            for k, v in tensors.items():
+                yield self._apply_track_prefix(k, track_prefix), v
             return
 
-        for name, param in raw_state_dict(self.model):
+        for name, param in raw_state_dict(resolved_model):
             if name.endswith(".lora_A") or name.endswith(".lora_B"):
                 continue
             if prefix:
                 name = prefix + name
-            yield name, param
+            yield self._apply_track_prefix(name, track_prefix), param
 
     # ``_infer_default_stage_ids`` was removed: the stage count is now
     # cached on ``self._actor_num_stages`` during ``connect_rollout_engines``

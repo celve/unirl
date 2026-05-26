@@ -9,8 +9,8 @@ that mirrors the layered kwargs build from the legacy
    sigma schedule, geometry, sample count.
 3. **Engine pins** — trajectory return shape, RNG seed-out, no group-share
    inside SGLang.
-4. **SDE-mode kernel kwargs** — only when ``stage_params['diffusion'][
-   'sde_indices']`` is non-None.
+4. **SDE-mode kernel kwargs** — only when ``sampling_params.diffusion.
+   sde_indices`` is non-None.
 
 ``initial_noise`` is taken as an argument (engine-computed or pre-shipped via
 ``req.request_conditions['initial_latents']``); the translator is pure and
@@ -37,6 +37,7 @@ from diffusionrl.config.require import require
 from diffusionrl.rollout.engine.sglang.config import SGLangEngineConfig
 from diffusionrl.types.primitives import Texts
 from diffusionrl.types.rollout_req import RolloutReq
+from diffusionrl.types.sampling import get_diffusion_params
 
 
 def _deexpand_prompts_from_groups(
@@ -106,18 +107,18 @@ def _to_sglang_kwargs(
         f"_to_sglang_kwargs: text count {len(prompts)} != sample_ids count {len(req.sample_ids)}",
     )
 
-    diffusion = dict(req.stage_params.get("diffusion") or {})
+    diffusion = get_diffusion_params(req.sampling_params)
     require(
-        bool(diffusion),
-        "_to_sglang_kwargs: req.stage_params['diffusion'] is required (set by RolloutPipeline)",
+        diffusion is not None,
+        "_to_sglang_kwargs: req.sampling_params must contain diffusion params (set by RolloutPipeline)",
     )
 
-    num_inference_steps = int(diffusion["num_inference_steps"])
-    guidance_scale = float(diffusion["guidance_scale"])
-    height = int(diffusion["height"])
-    width = int(diffusion["width"])
-    eta = float(diffusion["eta"])
-    sde_indices_raw = diffusion.get("sde_indices")
+    num_inference_steps = int(diffusion.num_inference_steps)
+    guidance_scale = float(diffusion.guidance_scale)
+    height = int(diffusion.height)
+    width = int(diffusion.width)
+    eta = float(diffusion.eta)
+    sde_indices_raw = diffusion.sde_indices
     sde_indices = sorted(int(v) for v in sde_indices_raw) if sde_indices_raw is not None else None
 
     # σ is the SSOT field on ``RolloutReq``. The engine populates it via
@@ -147,7 +148,7 @@ def _to_sglang_kwargs(
     prompt_payload: Any = unique_prompts if len(unique_prompts) > 1 else unique_prompts[0]
     num_outputs_per_prompt: Optional[int] = k if k > 1 else None
 
-    sampler_kwargs: Dict[str, Any] = dict(cfg.sampling.sampler_kwargs or {})
+    sampler_kwargs: Dict[str, Any] = dict(diffusion.sampler_kwargs or {})
 
     # Negative-prompt CFG invariant (ported from samplers/sglang/request.py:128-137):
     # SGLang gates CFG on guidance_scale>1 independently of
@@ -178,7 +179,7 @@ def _to_sglang_kwargs(
             "guidance_scale": guidance_scale,
             "height": height,
             "width": width,
-            "num_frames": int(cfg.sampling.num_frames),
+            "num_frames": int(diffusion.num_frames),
             "sigmas": sigmas,
             "prompt": prompt_payload,
             # SGLang noise group sharing must be off — initial_noise already

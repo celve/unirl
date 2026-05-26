@@ -35,6 +35,7 @@ from diffusionrl.types.conditions.image import ImageLatentCondition
 from diffusionrl.types.conditions.text import TextEmbedCondition
 from diffusionrl.types.primitives import Texts
 from diffusionrl.types.rollout_req import RolloutReq
+from diffusionrl.types.sampling import DiffusionSamplingParams
 
 
 class _FakeTransformer(nn.Module):
@@ -100,17 +101,15 @@ def _make_req(prompts, initial_latents=None, T=2):
         sample_ids=[f"s{i}" for i in range(len(prompts))],
         group_ids=[f"g{i}" for i in range(len(prompts))],
         primitives={"text": Texts(texts=list(prompts))},
-        stage_params={
-            "diffusion": {
-                "num_inference_steps": T,
-                "guidance_scale": 1.0,
-                "height": 8,
-                "width": 8,
-                "seed": 99,
-                "sde_indices": list(range(T)),
-                "eta": 0.0,
-            }
-        },
+        sampling_params=DiffusionSamplingParams(
+            num_inference_steps=T,
+            guidance_scale=1.0,
+            height=8,
+            width=8,
+            seed=99,
+            sde_indices=list(range(T)),
+            eta=0.0,
+        ),
         request_conditions=req_cond,
         sigmas=sigmas,
     )
@@ -128,7 +127,7 @@ def test_pipeline_generate_consumes_preshipped_initial_latents(monkeypatch):
     monkeypatch.setattr(pipeline, "vae_decode", _NoOpDecode())
 
     resp = pipeline.generate(req)
-    seg = resp.rollout_traces["image"]
+    seg = resp.tracks["image"].segment
     # Pre-shipped tensor lands at position 0 verbatim.
     assert torch.allclose(seg.latents[:, 0].float(), fixed_x_T.float())
 
@@ -141,7 +140,7 @@ def test_pipeline_generate_without_initial_latents_falls_back_to_internal(monkey
     monkeypatch.setattr(pipeline, "vae_decode", _NoOpDecode())
 
     resp = pipeline.generate(req)
-    seg = resp.rollout_traces["image"]
+    seg = resp.tracks["image"].segment
     # Just verify a sensible Gaussian came out of the internal path
     # (shape correct, finite, not all-equal to the fixed tensor).
     assert seg.latents.shape == (2, 3, 4, 1, 1)

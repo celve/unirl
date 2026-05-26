@@ -16,14 +16,14 @@ prefix lives in ``input_ids`` only (see vllm-omni
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from diffusionrl.types.primitives import Texts
 from diffusionrl.types.rollout_req import RolloutReq
-from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
+from diffusionrl.types.sampling import DiffusionSamplingParams, get_diffusion_params
 
 from ..conditions import HunyuanImage3DiffusionConditions
-from ..diffusion import HunyuanImage3DiffusionParams
 
 if TYPE_CHECKING:
     from ..pipeline import HunyuanImage3Pipeline
@@ -46,9 +46,8 @@ def generate(pipeline: "HunyuanImage3Pipeline", req: RolloutReq) -> RolloutResp:
             f"{len(negatives.texts)} != text length {len(texts.texts)}"
         )
 
-    params_dict: Dict[str, Any] = dict(req.stage_params.get("diffusion") or {})
-    params = HunyuanImage3DiffusionParams(**params_dict)
-    bot_task: str = str(req.stage_params.get("bot_task", "image"))
+    params: DiffusionSamplingParams = get_diffusion_params(req.sampling_params)
+    bot_task: str = str(req.stage_config.get("bot_task", "image"))
 
     # Build the upstream multimodal input tensors. CFG-batched [cond, uncond]
     # when guidance > 1; else single batch axis. ``mm`` is
@@ -83,9 +82,13 @@ def generate(pipeline: "HunyuanImage3Pipeline", req: RolloutReq) -> RolloutResp:
     images = pipeline.vae_decode.decode(latent_seg)
 
     return RolloutResp(
-        sample_ids=list(req.sample_ids),
-        group_ids=list(req.group_ids),
-        conditions=diff_conds.to_dict(),
-        rollout_traces={"image": latent_seg},
-        decoded={"image": images},
+        tracks={
+            "image": RolloutTrack(
+                sample_ids=list(req.sample_ids),
+                parent_ids=list(req.group_ids),
+                conditions=diff_conds.to_dict(),
+                segment=latent_seg,
+                decoded=images,
+            ),
+        }
     )

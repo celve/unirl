@@ -62,29 +62,28 @@ algorithm:
     num_sde_steps: 3
   sde_config:
     eta: ${sampling.sde_config.eta}
-
-algorithms:
-  # Slot ``image`` matches RolloutResp.rollout_traces["image"] on SD3.
-  # ``stage_attr: diffusion`` points the algorithm at the right stage.
-  image:
-    _target_: diffusionrl.algorithms.dppo.DiffusionDPPO
-    stage_attr: diffusion
-    conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
-    # Flow-DPPO hyperparameters
-    kl_mask_threshold: 1.0e-5
-    add_kl_coefficient: true
-    params:
-      _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
-      num_inference_steps: ${sampling.num_inference_steps}
-      guidance_scale: ${sampling.guidance_scale}
-      height: ${sampling.height}
-      width: ${sampling.width}
-      seed: ${run.seed}
-      eta: ${sampling.sde_config.eta}
-      init_same_noise: ${sampling.init_same_noise}
-      samples_per_prompt: ${algorithm.samples_per_prompt}
-      noise_group_ids: null
-      max_sequence_length: 256
+  algorithms:
+    # Slot ``image`` matches RolloutResp.rollout_traces["image"] on SD3.
+    # ``stage_attr: diffusion`` points the algorithm at the right stage.
+    diffusion:
+      name: diffusion_dppo
+      stage_attr: diffusion
+      conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
+      # Flow-DPPO hyperparameters
+      kl_mask_threshold: 1.0e-5
+      add_kl_coefficient: true
+      params:
+        _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
+        num_inference_steps: ${sampling.num_inference_steps}
+        guidance_scale: ${sampling.guidance_scale}
+        height: ${sampling.height}
+        width: ${sampling.width}
+        seed: ${run.seed}
+        eta: ${sampling.sde_config.eta}
+        init_same_noise: ${sampling.init_same_noise}
+        samples_per_prompt: ${algorithm.samples_per_prompt}
+        noise_group_ids: null
+        max_sequence_length: 256
 
 model:
   pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
@@ -114,31 +113,20 @@ placement:
 # Training surface
 # ----------------------------------------------------------------------
 training:
-  policy_source: diffusion
-  policies:
-    - _target_: diffusionrl.training.lora_policy.LoRAPolicy
-      rank: 32
-      alpha: 64
-      dropout: 0.0
-      target_modules:
-        - attn.add_k_proj
-        - attn.add_q_proj
-        - attn.add_v_proj
-        - attn.to_add_out
-        - attn.to_k
-        - attn.to_out.0
-        - attn.to_q
-        - attn.to_v
-    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
-      cpu_offload: false
-      param_dtype: bf16
-      mixed_precision: true
-      fsdp_mode: full
-      reshard_after_forward: true
-      activation_checkpointing: true
-    - _target_: diffusionrl.training.ema_policy.EMAPolicy
-      decay: 0.99
-      update_step_interval: 2
+  lora:
+    rank: 32
+    alpha: 64
+    dropout: 0.0
+  ema:
+    decay: 0.99
+    update_step_interval: 2
+  fsdp:
+    cpu_offload: false
+    param_dtype: bf16
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: true
   materialize:
     with_aux: [vae, text_encoder, text_encoder_2, text_encoder_3]
   plan:
@@ -171,7 +159,7 @@ reward:
   aggregation_method: mean
   base_device: cuda
   components:
-    - name: pickscore
+    pickscore:
       weight: 1.0
       batch_size: 8
 

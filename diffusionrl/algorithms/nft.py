@@ -51,7 +51,7 @@ from diffusionrl.types.segments.latent import LatentSegment
 from diffusionrl.utils.misc import aggregate_numeric_metrics
 from diffusionrl.utils.scheduler_utils import normalize_timestep_fraction
 
-from .base import AlgorithmStepResult, StageAlgorithm
+from .base import AlgorithmStepResult, BaseAlgorithmConfig, StageAlgorithm
 
 
 @register_config(
@@ -61,7 +61,7 @@ from .base import AlgorithmStepResult, StageAlgorithm
     mutable=True,
 )
 @dataclass
-class DiffusionNFTConfig:
+class DiffusionNFTConfig(BaseAlgorithmConfig):
     """Per-call NFT loss hyperparameters.
 
     Only the configuration surface exercised by current recipes is
@@ -94,6 +94,15 @@ class DiffusionNFTConfig:
     # KL penalty against the un-adapted base model. Not implemented in
     # this revision; ``> 0`` raises so recipes can't silently drop the term.
     kl_coef: float = 0.0
+
+
+register_config(
+    DiffusionNFTConfig,
+    group="algorithm",
+    name="diffusion_nft",
+    target="diffusionrl.algorithms.nft.DiffusionNFT",
+    mutable=True,
+)
 
 
 class DiffusionNFT(StageAlgorithm):
@@ -168,13 +177,12 @@ class DiffusionNFT(StageAlgorithm):
         if not (0.0 < float(adv_clip_max)):
             raise ValueError(f"DiffusionNFT: adv_clip_max must be > 0; got {adv_clip_max!r}.")
 
-        for method_name in ("with_old_adapter", "step", "on_rollout_end"):
-            if not callable(getattr(nft_lora_policy, method_name, None)):
-                raise TypeError(
-                    f"DiffusionNFT: nft_lora_policy={type(nft_lora_policy).__name__} "
-                    f"is missing required method {method_name!r}; expected an "
-                    f"instance of NFTLoRAPolicy (or compatible)."
-                )
+        if not callable(getattr(nft_lora_policy, "use_shadow", None)):
+            raise TypeError(
+                f"DiffusionNFT: nft_lora_policy={type(nft_lora_policy).__name__} "
+                f"is missing required method 'use_shadow'; expected an "
+                f"EMA handle (or compatible)."
+            )
 
         self.stage = stage
         self.params = params
@@ -325,7 +333,7 @@ class DiffusionNFT(StageAlgorithm):
         # Reference adapter forward, detached. ``with_old_adapter``
         # temporarily activates the EMA-tracked adapter; the surrounding
         # ``no_grad`` keeps autograd off this branch.
-        with torch.no_grad(), self.nft_lora_policy.with_old_adapter():
+        with torch.no_grad(), self.nft_lora_policy.use_shadow():
             old_pred = self.stage.predict_noise_at_step(
                 conditions,
                 sample=xt,

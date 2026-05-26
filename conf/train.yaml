@@ -17,8 +17,6 @@ defaults:
   - rollout/engine: trainside
   - rollout/plan: default
   - placement: default
-  - training/optimizer@training.optimizer: default
-  - training/lr_scheduler@training.lr_scheduler: default
   - training/execution@training.execution: default
   - training/topology@training.topology: default
   - training/plan@training.plan: default

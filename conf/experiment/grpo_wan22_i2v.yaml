@@ -63,28 +63,27 @@ algorithm:
     timestep_fraction: [0.0, 0.2]
   sde_config:
     eta: ${sampling.sde_config.eta}
+  algorithms:
+    video:
+      name: diffusion_grpo
+      stage_attr: diffusion
+      clip_range: 1.0e-4
+      clip_schedule: constant
+      conditions_cls: diffusionrl.models.wan21.conditions.WAN21Conditions
+      params:
+        _target_: diffusionrl.models.wan22.diffusion.WAN22DiffusionParams
+        num_inference_steps: ${sampling.num_inference_steps}
+        guidance_scale: ${sampling.guidance_scale}
+        # guidance_scale_2: null   # fall back to guidance_scale
+        height: ${sampling.height}
+        width: ${sampling.width}
+        num_frames: ${sampling.num_frames}
+        seed: ${run.seed}
+        eta: ${sampling.sde_config.eta}
 
 # ----------------------------------------------------------------------
 # Training surface
 # ----------------------------------------------------------------------
-algorithms:
-  video:
-    _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
-    stage_attr: diffusion
-    clip_range: 1.0e-4
-    clip_schedule: constant
-    conditions_cls: diffusionrl.models.wan21.conditions.WAN21Conditions
-    params:
-      _target_: diffusionrl.models.wan22.diffusion.WAN22DiffusionParams
-      num_inference_steps: ${sampling.num_inference_steps}
-      guidance_scale: ${sampling.guidance_scale}
-      # guidance_scale_2: null   # fall back to guidance_scale
-      height: ${sampling.height}
-      width: ${sampling.width}
-      num_frames: ${sampling.num_frames}
-      seed: ${run.seed}
-      eta: ${sampling.sde_config.eta}
-
 placement:
   num_rollout_nodes: 0
   num_rollout_gpus_per_node: 0
@@ -95,38 +94,17 @@ rollout:
     forward_batch_size: 1
 
 training:
-  policy_source: diffusion
-  policies:
-    - _target_: diffusionrl.training.lora_policy.LoRAPolicy
-      rank: 64
-      alpha: 128
-      dropout: 0.0
-      # WAN 2.2 14B I2V target set: T2V suffixes + image cross-KV
-      # adders. WAN 2.2 reuses the WAN transformer block layout, so
-      # ``attn2.add_k_proj`` / ``attn2.add_v_proj`` exist under both
-      # ``high_noise.*`` and ``low_noise.*`` and peft's suffix-match
-      # walk wraps both branches.
-      target_modules:
-        - attn1.to_q
-        - attn1.to_k
-        - attn1.to_v
-        - attn1.to_out.0
-        - attn2.to_q
-        - attn2.to_k
-        - attn2.to_v
-        - attn2.to_out.0
-        - attn2.add_k_proj
-        - attn2.add_v_proj
-        - ffn.net.0.proj
-        - ffn.net.2
-        - proj_out
-    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
-      cpu_offload: false
-      param_dtype: bf16
-      mixed_precision: true
-      fsdp_mode: full
-      reshard_after_forward: true
-      activation_checkpointing: true
+  lora:
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+  fsdp:
+    cpu_offload: false
+    param_dtype: bf16
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: true
   materialize:
     with_aux: []
   plan:
@@ -171,7 +149,7 @@ reward:
   aggregation_method: mean
   base_device: cuda
   components:
-    - name: video
+    video:
       weight: 1.0
       batch_size: 8
       inner_model_name: pickscore

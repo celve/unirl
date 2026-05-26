@@ -29,7 +29,6 @@ from diffusionrl.models.wan21.clip_vision_encode import WAN21CLIPVisionEncodeSta
 from diffusionrl.models.wan21.conditions import WAN21Conditions
 from diffusionrl.models.wan21.config import WAN21PipelineConfig
 from diffusionrl.models.wan21.diffusion import (
-    WAN21DiffusionParams,
     WAN21DiffusionStage,
     WAN21DiffusionStep,
 )
@@ -42,7 +41,6 @@ __all__ = [
     "WAN21Bundle",
     "WAN21CLIPVisionEncodeStage",
     "WAN21Conditions",
-    "WAN21DiffusionParams",
     "WAN21DiffusionStage",
     "WAN21DiffusionStep",
     "WAN21ImageLatentEncodeStage",

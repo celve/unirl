@@ -2,92 +2,123 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, fields
+from abc import ABC
+from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional
 
+from diffusionrl.config.polymorphic import polymorphic_field
 from diffusionrl.config.registration import register_config
 from diffusionrl.config.require import require
 
 
-@dataclass
-class SDEConfig:
-    """Stable SDE math contract shared by rollout and training.
+class BaseSamplingParams(ABC):
+    """Marker base for all sampling config dataclasses.
 
-    Strategy choice (flow/cps/dance/dpm2) is now a separate Hydra group at
-    ``cfg.sampling.sde_strategy`` (registered via the ``sampling/sde_strategy``
-    group in :mod:`diffusionrl.sde.kernels`); ``SDEConfig`` only carries
-    the per-strategy math params.
-
-    Note on ``shift``: this dataclass used to also carry ``shift: float``,
-    a duplicate of ``model.shift`` (the FlowMatch policy ``shift`` of the
-    σ schedule). It was removed in the σ-consolidation refactor — the
-    canonical σ shift now lives **only** on the model config (loaded into
-    :class:`diffusionrl.sde.runtime.FlowMatchSchedulePolicy` once per
-    actor). Engine adapters read it directly from ``model_config.shift``.
+    Used as the type annotation for polymorphic sampling config fields so that
+    static type checkers see a meaningful type. At runtime, the annotation
+    is erased to ``Any`` by ``erase_polymorphic_annotations``.
     """
 
-    eta: float = 1.0
 
-    @classmethod
-    def from_mapping(
-        cls,
-        raw: Optional[Mapping[str, Any]] = None,
-        *,
-        eta: float = 1.0,
-    ) -> "SDEConfig":
-        payload = dict(raw or {})
-        return cls(eta=float(payload.get("eta", eta)))
+def get_diffusion_params(sampling: Any) -> "DiffusionSamplingParams":
+    """Extract ``DiffusionSamplingParams`` from either pure or composed config.
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+    During the transition period, ``cfg.sampling`` may be either a bare
+    ``DiffusionSamplingParams`` (legacy recipes) or a
+    ``ComposedSamplingParams`` (composed recipes with ``.diffusion`` attr).
+    This helper normalizes access.
+    """
+    return sampling.diffusion if hasattr(sampling, "diffusion") else sampling
+
+
+def get_ar_params(sampling: Any) -> Optional["ARSamplingParams"]:
+    """Extract ``ARSamplingParams`` from composed or bare AR config.
+
+    Returns ``None`` for pure diffusion configs that have no AR component.
+    """
+    if hasattr(sampling, "ar"):
+        return sampling.ar
+    if isinstance(sampling, ARSamplingParams):
+        return sampling
+    return None
 
 
 @register_config(group="sampling", name="default")
 @dataclass
-class SamplingParams:
-    """Canonical resolved sampling view built once from SamplingConfig."""
+class DiffusionSamplingParams(BaseSamplingParams):
+    """Canonical diffusion sampling params — single source of truth.
 
+    Flows unchanged from YAML config → rollout pipeline → model pipeline.
+    """
+
+    # --- common (all diffusion models) ---
     num_inference_steps: int = 50
     guidance_scale: float = 7.5
     height: int = 256
     width: int = 256
     num_frames: int = 16
     seed: int = 42
-    num_samples_per_prompt: int = 1
+    samples_per_prompt: int = 1
     init_same_noise: bool = False
-    sde_config: SDEConfig = field(default_factory=SDEConfig)
-    # SDE step strategy chosen via the Hydra group ``sampling/sde_strategy``
-    # (e.g. ``defaults: [- sampling/sde_strategy: dpm2]``). Holds the
-    # registered Spec dataclass (FlowSpec / CPSSpec / DanceSpec / DPM2Spec)
-    # whose ``_target_`` resolves to the matching strategy class. Built into
-    # an instance via ``build(cfg.sampling.sde_strategy)`` at the boundary.
-    # Defaults to ``None`` so nested ``SamplingParams`` copies (e.g.
-    # ``cfg.rollout.engine.sampling``) compose without requiring their own
-    # group selection — actors look up the strategy from ``cfg.sampling``.
+    noise_group_ids: Optional[List[str]] = None
+
+    # --- SDE ---
+    eta: float = 1.0
     sde_strategy: Any = None
     sde_indices: Optional[List[int]] = None
+
+    # --- engine knobs ---
     sampler_kwargs: Dict[str, Any] = field(default_factory=dict)
-    # Numerical policy (construction-time ride-along; SGLang ignores these)
+
+    # --- precision ---
     autocast_precision: str = "bf16"
     trajectory_precision: str = "fp16"
     logprob_precision: str = "fp32"
 
+    # --- model-specific (optional, unused fields ignored) ---
+    max_sequence_length: Optional[int] = None
+    taylor_cache_interval: Optional[int] = None
+    taylor_cache_order: Optional[int] = None
+    distilled_guidance_scale: Optional[float] = None
+    guidance_scale_2: Optional[float] = None
+
+    # --- backward compat (removed once all consumers migrate) ---
+    num_samples_per_prompt: int = 1
+
     def __post_init__(self) -> None:
-        # Every typed field (except sampler_kwargs itself) is part of the engine
-        # contract and cannot be shadowed via sampler_kwargs — engine-pinned keys
-        # like ``num_inference_steps``/``guidance_scale``/``height``/``width`` and
-        # the precision knobs would otherwise be silently overridden by the
-        # typed-field copy at the use site, masking user typos as no-ops.
+        if self.num_samples_per_prompt != 1 and self.samples_per_prompt == 1:
+            object.__setattr__(self, "samples_per_prompt", self.num_samples_per_prompt)
+        elif self.samples_per_prompt != 1 and self.num_samples_per_prompt == 1:
+            object.__setattr__(self, "num_samples_per_prompt", self.samples_per_prompt)
+
         reserved = {f.name for f in fields(self) if f.name != "sampler_kwargs"}
         shadowed = reserved & set(self.sampler_kwargs)
         require(
             not shadowed,
-            f"SamplingParams.sampler_kwargs cannot contain reserved keys {sorted(shadowed)}; set them as fields instead",
+            f"DiffusionSamplingParams.sampler_kwargs cannot contain reserved keys {sorted(shadowed)}; set them as fields instead",
         )
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+
+@register_config(group="sampling", name="ar")
+@dataclass
+class ARSamplingParams(BaseSamplingParams):
+    """AR (autoregressive) sampling parameters for LLM-based PE generation."""
+
+    temperature: float = 0.7
+    max_new_tokens: int = 512
+    top_p: float = 0.9
+    top_k: int = 1024
+    stop_token_id: int | None = None
+    samples_per_prompt: int = 1
+
+
+@register_config(group="sampling", name="composed")
+@dataclass
+class ComposedSamplingParams(BaseSamplingParams):
+    """Composed sampling config with per-modality typed sampling params."""
+
+    diffusion: BaseSamplingParams = polymorphic_field(group="sampling")
+    ar: BaseSamplingParams = polymorphic_field(group="sampling")
 
 
 @dataclass(frozen=True)

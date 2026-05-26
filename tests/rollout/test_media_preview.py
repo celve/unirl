@@ -1,205 +1,126 @@
-"""MediaPreview plumbing tests (wandb eval + actor-side image drop).
+"""Tests for ``build_media_preview_for_track`` — track-aware preview builder.
 
-Covers the request knobs, batched concat/cap semantics on the dataclass, and
-the mixin attach_reward path that builds the preview and drops decoded
-images so they don't cross Ray.
+Replaces the legacy ``RolloutResponse.attach_media_preview`` tests that
+read decoded media off ``samples.decoded_images`` / ``decoded_videos``.
+The new helper consumes ``track.decoded`` (``Images`` or ``Videos``)
+plus ``req.primitives['text']`` directly.
 """
 
 from __future__ import annotations
 
+from typing import List
+
+import pytest
 import torch
 
-# Warm import graph past pre-existing circular import in
-# ``diffusionrl.distributed`` → ``rollout.engine`` → ``types.rollout_req``.
-# Without this, pytest collection fails on
-# ``from diffusionrl.types.sample import MediaPreview``.
-import diffusionrl.config  # noqa: F401  -- import-graph warm
-from diffusionrl.types.prompts import Prompts
-from diffusionrl.types.request import RolloutRequest
-from diffusionrl.types.response import RolloutResponse
-from diffusionrl.types.sample import LogProbData, MediaPreview, RolloutSamples
-from diffusionrl.types.sampling import SamplingParams
-from diffusionrl.types.trajectory_store import Trajectory, TrajectoryBuilder
+from diffusionrl.types.media_preview import (
+    MediaPreview,
+    build_media_preview_for_track,
+)
+from diffusionrl.types.primitives import (
+    Image,
+    Images,
+    Texts,
+    Video,
+    Videos,
+)
+from diffusionrl.types.rollout_req import RolloutReq
+from diffusionrl.types.rollout_resp import RolloutTrack
 
 
-def make_prompts(n: int) -> Prompts:
-    return Prompts.from_unique_prompts(prompts=[f"a photo of a cat {i}" for i in range(n)])
-
-
-def make_sampling_params() -> SamplingParams:
-    return SamplingParams(
-        num_inference_steps=20,
-        guidance_scale=7.5,
-        height=256,
-        width=256,
-        num_frames=1,
-        seed=42,
+def _make_track(*, decoded, rewards: List[float], n: int) -> RolloutTrack:
+    return RolloutTrack(
+        sample_ids=[f"s{i}" for i in range(n)],
+        parent_ids=["g"] * n,
+        decoded=decoded,
+        rewards=torch.tensor(rewards, dtype=torch.float32) if rewards else None,
     )
 
 
-def make_request(n: int = 4) -> RolloutRequest:
-    return RolloutRequest(prompts=make_prompts(n), sampling_params=make_sampling_params())
-
-
-def make_trajectory(batch_size: int, num_steps: int = 5) -> Trajectory:
-    builder = TrajectoryBuilder.full(num_steps)
-    for i in range(num_steps + 1):
-        builder.add(i, torch.randn(batch_size, 4, 32, 32))
-    return builder.finalize()
-
-
-def make_log_probs(num_steps: int = 5) -> LogProbData:
-    return LogProbData(data={i: torch.randn(4) for i in range(num_steps)})
-
-
-def make_samples(n: int = 4) -> RolloutSamples:
-    return RolloutSamples(
-        latents=torch.randn(n, 4, 32, 32),
-        timesteps=torch.linspace(1.0, 0.0, 6),
-        sampling_params=make_sampling_params(),
-        prompts=make_prompts(n),
-        trajectories=make_trajectory(n),
-        log_probs=make_log_probs(),
-        forward_context=None,
-        step_indices=torch.arange(6),
+def _make_req(texts: List[str]) -> RolloutReq:
+    return RolloutReq(
+        sample_ids=[f"s{i}" for i in range(len(texts))],
+        group_ids=["g"] * len(texts),
+        primitives={"text": Texts(texts=list(texts))},
     )
 
 
-class _FakePIL:
-    """Minimal PIL-image stand-in that only exposes ``save`` (duck-typed)."""
+def test_image_path_emits_pil_per_sample():
+    images = Images.from_list([Image(pixels=torch.rand(3, 4, 4)) for _ in range(3)])
+    track = _make_track(decoded=images, rewards=[0.1, 0.2, 0.3], n=3)
+    req = _make_req(["p0", "p1", "p2"])
 
-    def __init__(self, tag: str) -> None:
-        self.tag = tag
-
-    def save(self, *args, **kwargs) -> None:  # pragma: no cover - never called
-        return None
-
-
-def test_request_carries_media_preview_knobs():
-    req = RolloutRequest(
-        prompts=make_prompts(2),
-        sampling_params=make_sampling_params(),
-        collect_media_preview=True,
-        media_max_items=3,
-    )
-    assert req.collect_media_preview is True
-    assert req.media_max_items == 3
-    default_req = make_request(2)
-    assert default_req.collect_media_preview is False
-    assert default_req.media_max_items == 8
-    sub = req.slice(0, 1)
-    assert sub.collect_media_preview is True
-    assert sub.media_max_items == 3
+    preview = build_media_preview_for_track(req=req, track=track, max_items=8)
+    assert isinstance(preview, MediaPreview)
+    assert len(preview) == 3
+    assert preview.prompts == ["p0", "p1", "p2"]
+    assert preview.rewards == pytest.approx([0.1, 0.2, 0.3], abs=1e-6)
+    assert not preview.videos
 
 
-def test_samples_media_preview_concat_merges_lists():
-    s1 = make_samples(2)
-    s2 = make_samples(3)
-    s1.media_preview = MediaPreview(
-        images=[_FakePIL("a"), _FakePIL("b")],
-        prompts=["p0", "p1"],
-        rewards=[0.1, 0.2],
-    )
-    s2.media_preview = MediaPreview(
-        images=[_FakePIL("c")],
-        prompts=["p2"],
-        rewards=[0.3],
-    )
-    merged = RolloutSamples.concat([s1, s2])
-    assert merged.media_preview is not None
-    assert [im.tag for im in merged.media_preview.images] == ["a", "b", "c"]
-    assert merged.media_preview.prompts == ["p0", "p1", "p2"]
-    assert merged.media_preview.rewards == [0.1, 0.2, 0.3]
+def test_image_path_caps_at_max_items():
+    images = Images.from_list([Image(pixels=torch.rand(3, 4, 4)) for _ in range(5)])
+    track = _make_track(decoded=images, rewards=[0.0, 1.0, 2.0, 3.0, 4.0], n=5)
+    req = _make_req(["p0", "p1", "p2", "p3", "p4"])
+
+    preview = build_media_preview_for_track(req=req, track=track, max_items=2)
+    assert len(preview) == 2
+    assert preview.prompts == ["p0", "p1"]
+    assert preview.rewards == pytest.approx([0.0, 1.0], abs=1e-6)
 
 
-def test_samples_media_preview_concat_all_none():
-    s1 = make_samples(2)
-    s2 = make_samples(2)
-    s1.media_preview = None
-    s2.media_preview = None
-    merged = RolloutSamples.concat([s1, s2])
-    assert merged.media_preview is None
+def test_image_path_strips_alpha_to_three_channels():
+    """Four-channel input is sliced to RGB before PIL conversion."""
+    images = Images.from_list([Image(pixels=torch.rand(4, 4, 4)) for _ in range(1)])
+    track = _make_track(decoded=images, rewards=[0.5], n=1)
+    req = _make_req(["only"])
+
+    preview = build_media_preview_for_track(req=req, track=track, max_items=8)
+    assert preview is not None
+    # tensor_frame_to_pil returns a PIL.Image; verify by attribute presence.
+    img = preview.images[0]
+    assert hasattr(img, "mode")
+    assert img.mode == "RGB"
 
 
-def test_samples_media_preview_single_item_is_noop():
-    s1 = make_samples(2)
-    original = MediaPreview(
-        images=[_FakePIL("x")],
-        prompts=["only"],
-        rewards=[0.5],
-    )
-    s1.media_preview = original
-    merged = RolloutSamples.concat([s1])
-    assert merged.media_preview is original
+def test_video_path_emits_4d_cpu_float32_per_sample():
+    """Per-sample [T, C, H, W] frames → preview keeps [C, T, H, W] CPU float32."""
+    n = 2
+    videos = Videos.from_list([Video(frames=torch.rand(3, 3, 4, 4)) for _ in range(n)])
+    track = _make_track(decoded=videos, rewards=[0.1, 0.2], n=n)
+    req = _make_req(["v0", "v1"])
+
+    preview = build_media_preview_for_track(req=req, track=track, max_items=8)
+    assert isinstance(preview, MediaPreview)
+    assert len(preview) == n
+    assert not preview.images
+    for vid in preview.videos:
+        assert torch.is_tensor(vid)
+        assert vid.dim() == 4
+        assert vid.dtype == torch.float32
+        assert vid.device.type == "cpu"
 
 
-def test_samples_cap_media_preview():
-    s = make_samples(2)
-    s.media_preview = MediaPreview(
-        images=[_FakePIL(f"img{i}") for i in range(5)],
-        prompts=[f"p{i}" for i in range(5)],
-        rewards=[float(i) for i in range(5)],
-    )
-    s.cap_media_preview(2)
-    assert len(s.media_preview.images) == 2
-    assert s.media_preview.prompts == ["p0", "p1"]
-    assert s.media_preview.rewards == [0.0, 1.0]
-    s.cap_media_preview(2)
-    assert len(s.media_preview.images) == 2
-    s.cap_media_preview(10)
-    assert len(s.media_preview.images) == 2
+def test_returns_none_when_decoded_is_none():
+    track = _make_track(decoded=None, rewards=[], n=0)
+    req = _make_req([])
+    assert build_media_preview_for_track(req=req, track=track, max_items=4) is None
 
 
-def test_attach_media_preview_mixed_slices_videos_by_selected_image_indices() -> None:
-    """Videos must match the batch indices of tensors actually used for images."""
-    n = 4
-    req = make_request(n)
-    samples = make_samples(n)
-    samples.rewards = torch.arange(n, dtype=torch.float32)
-    # Index 0 skipped (non-tensor); first two successful tensors at 1 and 3.
-    samples.decoded_images = [
-        "not-a-tensor",
-        torch.full((3, 8, 8), 0.25),
-        "not-a-tensor",
-        torch.full((3, 8, 8), 0.75),
-    ]
-    samples.decoded_videos = torch.stack(
-        [torch.full((3, 5, 8, 8), float(i) / 10.0) for i in range(n)],
-        dim=0,
-    )
-    response = RolloutResponse(request=req, samples=samples)
-    response.attach_media_preview(max_items=2)
-
-    mp = response.samples.media_preview
-    assert mp is not None
-    assert len(mp.images) == 2
-    assert len(mp.videos) == 2
-    assert mp.prompts == [req.prompts.prompts[1], req.prompts.prompts[3]]
-    assert mp.rewards == [1.0, 3.0]
-    # Video rows 1 and 3 must be selected (not 0 and 1).
-    assert torch.allclose(mp.videos[0], samples.decoded_videos[1].cpu())
-    assert torch.allclose(mp.videos[1], samples.decoded_videos[3].cpu())
+def test_returns_none_when_decoded_is_text():
+    """Text tracks aren't image/video — preview is N/A."""
+    texts = Texts(texts=["x", "y"])
+    track = _make_track(decoded=texts, rewards=[0.1, 0.2], n=2)
+    req = _make_req(["p0", "p1"])
+    assert build_media_preview_for_track(req=req, track=track, max_items=4) is None
 
 
-# NOTE: 2 test cases from main were removed during the merge because they
-# test main's older ``attach_media_preview`` behaviors that the current
-# design does not have:
-#
-# - ``test_attach_media_preview_all_non_tensor_images_uses_video_only_path``:
-#   main synthesized middle-frame PIL images from videos when all entries
-#   in ``decoded_images`` were non-tensor placeholders. main-unified-base's
-#   :meth:`RolloutResponse.attach_media_preview` (kept here via ``--ours``
-#   during the merge) drives selection from whichever modality is
-#   non-empty and does NOT cross-synthesize. Either pure image-only or
-#   pure video-only previews are produced; "non-tensor placeholders in
-#   images list trigger video-side iteration" is not part of the contract.
-#
-# - ``test_attach_media_preview_mixed_raises_when_video_row_missing``:
-#   main raised ``ValueError("no matching decoded_videos")`` when the
-#   image count exceeded the video count in mixed mode. The current
-#   design surfaces a different (cleaner) error from
-#   :meth:`MediaPreview.__post_init__` ("'videos' has N entries but the
-#   canonical batch size ... is M. All non-empty parallel lists must
-#   agree.") — the validation moved into ``MediaPreview`` where it
-#   belongs rather than living in ``attach_media_preview``'s per-modality
-#   branch.
+def test_zero_rewards_use_default_zero_floats():
+    """Missing/empty rewards: emitted rewards default to 0.0 per sample."""
+    images = Images.from_list([Image(pixels=torch.rand(3, 4, 4)) for _ in range(2)])
+    track = _make_track(decoded=images, rewards=[], n=2)  # rewards stays None
+    req = _make_req(["p0", "p1"])
+
+    preview = build_media_preview_for_track(req=req, track=track, max_items=4)
+    assert preview is not None
+    assert preview.rewards == [0.0, 0.0]

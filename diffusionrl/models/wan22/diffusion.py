@@ -31,7 +31,6 @@ Math derived from ``models/wan22.py::forward_denoiser`` and
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Optional, Set, Tuple
 
 import torch
@@ -39,8 +38,8 @@ import torch
 from diffusionrl.models.types.diffusion import DiffusionStage, DiffusionStep
 from diffusionrl.models.types.replay_result import ReplayResult
 from diffusionrl.models.wan21.conditions import WAN21Conditions
-from diffusionrl.models.wan21.diffusion import WAN21DiffusionParams
 from diffusionrl.sde.kernels import StepStrategy
+from diffusionrl.types.sampling import DiffusionSamplingParams
 from diffusionrl.types.segments.latent import LatentSegment, make_video_segment
 from diffusionrl.types.trajectory_store import compute_trajectory_positions
 from diffusionrl.utils.dtypes import parse_torch_dtype
@@ -48,18 +47,6 @@ from diffusionrl.utils.dtypes import parse_torch_dtype
 from .bundle import WAN22Bundle
 
 _WAN_TIMESTEP_SCALE: float = 1000.0
-
-
-@dataclass
-class WAN22DiffusionParams(WAN21DiffusionParams):
-    """Per-request sampling knobs for WAN 2.2 T2V diffusion.
-
-    Extends :class:`WAN21DiffusionParams` with the optional per-stage
-    ``guidance_scale_2``. When ``None``, the low-noise branch reuses
-    ``guidance_scale``.
-    """
-
-    guidance_scale_2: Optional[float] = None
 
 
 class WAN22DiffusionStep(DiffusionStep[WAN22Bundle, WAN21Conditions]):
@@ -380,7 +367,7 @@ class WAN22DiffusionStage(DiffusionStage[WAN21Conditions]):
         conditions: WAN21Conditions,
         *,
         schedule: torch.Tensor,
-        params: WAN22DiffusionParams,
+        params: DiffusionSamplingParams,
         initial_latents: Optional[torch.Tensor] = None,
     ) -> LatentSegment:
         """Run full WAN 2.2 T2V sampling. Returns a ``LatentSegment``.
@@ -516,7 +503,7 @@ class WAN22DiffusionStage(DiffusionStage[WAN21Conditions]):
         conditions: WAN21Conditions,
         *,
         segment: LatentSegment,
-        params: WAN22DiffusionParams,
+        params: DiffusionSamplingParams,
         step_indices: Optional[List[int]] = None,
     ) -> ReplayResult:
         """Segment-based log-prob replay. Routes by sigma exactly as rollout."""
@@ -596,7 +583,7 @@ class WAN22DiffusionStage(DiffusionStage[WAN21Conditions]):
         *,
         sample: torch.Tensor,
         sigma: torch.Tensor,
-        params: WAN22DiffusionParams,
+        params: DiffusionSamplingParams,
     ) -> torch.Tensor:
         """Single ``(xt, sigma)`` model forward — no scheduler iteration.
 
@@ -657,4 +644,4 @@ class WAN22DiffusionStage(DiffusionStage[WAN21Conditions]):
         return self.model.transformer
 
 
-__all__ = ["WAN22DiffusionParams", "WAN22DiffusionStage", "WAN22DiffusionStep"]
+__all__ = ["WAN22DiffusionStage", "WAN22DiffusionStep"]

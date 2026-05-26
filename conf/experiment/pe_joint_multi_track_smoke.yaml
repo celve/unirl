@@ -1,0 +1,306 @@
+# @package _global_
+# PE-joint multi-track smoke: ARGRPO over Qwen3 + DiffusionGRPO over SD3.5,
+# composed via the LIN-279 ComposedRolloutEngine, scored by pickscore,
+# trained on a 1x8 H20 colocate pod.
+#
+# Wires together:
+#   - rollout: ComposedRolloutEngine with SGLang-LLM (Qwen3-0.6B) +
+#     SGLang-diffusion (SD3.5-medium) children, emitting a 2-track
+#     RolloutResp(tracks={"llm": ..., "diffusion": ...}). The SGLang LLM
+#     child now packs the chat-template-formatted prompt input_ids into
+#     llm_track.conditions['prompt'] so Qwen3ARStage.replay can
+#     teacher-force at train time.
+#   - reward: pickscore scores the "diffusion" track's images;
+#     propagate_rewards(op="mean") fills the "llm" track from its children.
+#   - train: per-track StageTrainStack (LIN-282 C1-C6) with ARGRPO on
+#     "llm" + DiffusionGRPO on "diffusion", each with its own LoRA+FSDP
+#     policy stack + optimizer + scheduler.
+#   - weight sync: both tracks sync to rollout via tensor_payload.
+#     WeightSync iterates all tracks; tensor keys are prefixed with
+#     the track name for ComposedRolloutEngine prefix-based demux.
+#
+# Success: rollout/diffusion/reward_mean trends upward over 5-30 rollouts;
+# both per-track optimizer counters advance; no NaN; ratio in [0.5, 2.0].
+defaults:
+  - /sync@sync: tensor_payload
+  # Compose typed schemas at the per-track paths. Without these, the
+  # nested cfg blocks (model, optimizer, lr_scheduler) materialize to
+  # plain dicts and downstream code (SD3Pipeline.from_config,
+  # build_optimizer) raises AttributeError when reading .field on dicts.
+  #
+  # Layer order:
+  #   1. TrainingTrackConfig schema at each track (gives optimizer +
+  #      lr_scheduler their typed schemas via the dataclass fields).
+  #   2. Model schema at <track>.model (sd3 / qwen3_v2 preset).
+  # Hydra rule: additive composes come BEFORE override directives.
+  - /training/track@training.tracks.diffusion: default
+  - /training/track@training.tracks.ar: default
+  - /model@training.tracks.diffusion.model: sd3
+  - /model@training.tracks.ar.model: qwen3_v2
+  - override /algorithm: grpo
+  - override /rollout/engine: composed_pe
+  - override /sampling/sde_strategy: flow
+  - _self_
+
+run:
+  data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
+  num_rollouts: 30
+  seed: 42
+  data_path: /root/diffusionrl/data/datasets/pickscore/train.txt
+  eval_data_path: /root/diffusionrl/data/datasets/pickscore/test.txt
+  weight_sync_interval: 1
+
+sampling:
+  num_inference_steps: 20
+  guidance_scale: 4.5
+  height: 512
+  width: 512
+  init_same_noise: false
+  eta: 0.7
+  samples_per_prompt: 2
+
+algorithm:
+  # Driver-side singular GRPORolloutControl: feeds prompt batching + SDE
+  # scheduling. With ComposedRolloutEngine doing the branching itself
+  # (N=2 LLM rewrites × M=2 diffusion samples per rewrite), the driver
+  # does NOT pre-expand prompts — samples_per_prompt=1 here lets the
+  # composed engine own all branching.
+  prompts_per_rollout: 4              # P
+  # samples_per_prompt sets the group size for per-track advantage
+  # normalization (validator in compute_advantages checks every group has
+  # exactly this many samples). For PE-joint with N=M=2:
+  #   - LLM track: each prompt's group = N rewrites = 2.
+  #   - Diffusion track: each rewrite's group = M images = 2.
+  # Both happen to be 2 → samples_per_prompt=2 satisfies both validators.
+  # The driver may also pre-expand prompts by this factor before the
+  # rollout request; the composed engine receives 2*P=8 prompts and
+  # branches each by N*M=4, producing 32 diffusion samples per rollout
+  # (vs the 16 we'd get without pre-expansion). Acceptable for the smoke.
+  samples_per_prompt: 2
+  pe_rewrites_per_prompt: 2           # N — forwarded into stage_params['ar']['n'] by C7
+  adv_normalization_scope: group
+  use_global_std: true
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  use_kl_penalty: true
+  kl_coef: 0.0                        # reference-model KL is a follow-up
+  scheduler:
+    timestep_fraction: [0.0, 0.5]
+    num_sde_steps: 5
+  algorithms:
+    # Track keys MUST match cfg.training.tracks.<name> AND the engine's
+    # emitted track names. ComposedRolloutEngine emits {"ar", "diffusion"}.
+    ar:
+      name: ar_grpo
+      stage_attr: ar                    # pipeline.ar resolves to Qwen3ARStage
+      conditions_cls: diffusionrl.models.qwen3.conditions.Qwen3ARConditions
+      clip_range: 1.0e-4
+      clip_schedule: constant
+      # ARGRPO ctor signature has no `params` kwarg (see algorithms/grpo.py:248).
+      # conditions_cls reconstructs the typed Qwen3ARConditions dataclass from
+      # track.conditions, which carries the chat-template-formatted prompt
+      # input_ids that the SGLang LLM child packed via build_rollout_resp.
+      # Qwen3ARStage.replay reads ``conditions.prompt.input_ids`` — attribute
+      # access, not dict lookup — so the typed dataclass is required.
+    diffusion:
+      name: diffusion_grpo
+      stage_attr: diffusion             # pipeline.diffusion resolves to SD3 diffusion stage
+      conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
+      clip_range: 1.0e-4
+      clip_schedule: constant
+      # SD3Pipeline doesn't expose pipe.diffusion_params; must inline params.
+      params:
+        _target_: diffusionrl.types.sampling.DiffusionSamplingParams
+        num_inference_steps: ${sampling.num_inference_steps}
+        guidance_scale: ${sampling.guidance_scale}
+        height: ${sampling.height}
+        width: ${sampling.width}
+        seed: ${run.seed}
+        sde_indices: null
+        eta: ${sampling.eta}
+        init_same_noise: ${sampling.init_same_noise}
+        # M = 2: per-PE-rewrite, the diffusion engine generates 2 samples.
+        # Total diffusion samples per rollout = P * N * M = 4 * 2 * 2 = 16.
+        samples_per_prompt: 2
+        noise_group_ids: null
+        max_sequence_length: 256
+
+# Top-level model block: read by the composed engine's diffusion child
+# via the actor's ``model_config`` runtime kwarg (parity with
+# smoke_composed_pe.yaml).
+model:
+  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,/root/diffusionrl/models/local/stable-diffusion-3.5-medium}
+
+rollout:
+  engine:
+    ar:
+      name: sglang_llm
+      pretrained_model_ckpt_path: ${oc.env:LLM_MODEL,/root/diffusionrl/models/local/Qwen3-0.6B}
+      tp_size: 1
+      max_new_tokens: 128
+      temperature: 0.7
+      top_p: 0.9
+      concurrency: 4
+      engine_kwargs:
+        mem_fraction_static: 0.35
+        skip_server_warmup: true
+        disable_cuda_graph: true
+        attention_backend: triton
+        enable_lora: true
+        max_lora_rank: 16
+        lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+    diffusion:
+      name: sglang
+      sampling: ${sampling}
+      model_family: sd3
+      num_gpus: 1
+      tp_size: 1
+      local_mode: true
+      engine_kwargs:
+        mem_fraction_static: 0.45
+        skip_server_warmup: true
+        disable_cuda_graph: true
+        attention_backend: torch_sdpa
+    sleep_diffusion_on_start: false
+
+placement:
+  num_rollout_nodes: 1
+  num_rollout_gpus_per_node: 8
+  num_rollout_gpus_per_actor: 1
+  num_train_nodes: 1
+  num_train_gpus_per_node: 8
+  num_train_gpus_per_actor: 1
+  colocate: true
+  colocate_gpu_fraction: 0.5
+  strategy: PACK
+  allow_noset_multi_gpu_inference: true
+
+training:
+  primary_track: diffusion
+
+  tracks:
+    diffusion:
+      # ``model`` schema (SD3PipelineConfig + _target_) is composed via the
+      # defaults list above; this block only overrides individual fields.
+      model:
+        pretrained_model_ckpt_path: ${model.pretrained_model_ckpt_path}
+        model_precision: bf16
+        autocast_precision: bf16
+        trajectory_precision: bf16
+        logprob_precision: fp32
+      source_stage_attr: diffusion
+      lora:
+        rank: 16
+        alpha: 32
+        dropout: 0.0
+        target_modules:
+          - attn.add_k_proj
+          - attn.add_q_proj
+          - attn.add_v_proj
+          - attn.to_add_out
+          - attn.to_k
+          - attn.to_out.0
+          - attn.to_q
+          - attn.to_v
+        bias: none
+        task_type: FEATURE_EXTRACTION
+      fsdp:
+        cpu_offload: false
+        param_dtype: bf16
+        mixed_precision: true
+        fsdp_mode: full
+        reshard_after_forward: true
+        activation_checkpointing: true
+      optimizer:
+        learning_rate: 3.0e-4
+        adam_beta1: 0.9
+        adam_beta2: 0.999
+        adam_epsilon: 1.0e-8
+        weight_decay: 0.0
+      lr_scheduler:
+        type: constant
+        warmup_steps: 0
+        total_steps: 1000
+
+    ar:
+      # ``model`` schema (Qwen3PipelineConfig + _target_) composed via defaults;
+      # this block only overrides fields.
+      model:
+        pretrained_model_ckpt_path: ${oc.env:LLM_MODEL,/root/diffusionrl/models/local/Qwen3-0.6B}
+        model_precision: bf16
+        use_lora: true
+        lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+      source_stage_attr: ar
+      lora:
+        rank: 16
+        alpha: 32
+        dropout: 0.0
+        target_modules: [q_proj, k_proj, v_proj, o_proj]
+        bias: none
+        task_type: CAUSAL_LM
+      fsdp:
+        cpu_offload: false
+        param_dtype: bf16
+        mixed_precision: true
+        fsdp_mode: full
+        reshard_after_forward: true
+        activation_checkpointing: true
+      optimizer:
+        # 30x smaller than the diffusion LoRA: ARGRPO ratio is sensitive to
+        # large updates per step (token-level vs SDE-step-level signal).
+        learning_rate: 1.0e-5
+        adam_beta1: 0.9
+        adam_beta2: 0.999
+        adam_epsilon: 1.0e-8
+        weight_decay: 0.0
+      lr_scheduler:
+        type: constant
+        warmup_steps: 0
+        total_steps: 1000
+
+  topology:
+    actor_count: 8
+  plan:
+    # Diffusion track per-rollout batch: P*N*M = 4*2*2 = 16
+    # LLM track per-rollout batch:       P*N   = 4*2   = 8
+    # Per-actor (DP=8): diffusion 2, llm 1. micro=1 → 2 / 1 micro steps.
+    # The stack handles per-track different batch sizes via the
+    # parallel-dicts shape (C1-C3).
+    micro_batch_size: 1
+    num_updates_per_batch: 1
+    local_mini_batch_size: 2
+    local_batch_size: 2
+    global_batch_size: 16
+  execution:
+    max_grad_norm: 1.0
+    # H20 96GB can hold both rollout (Qwen3 1.5GB + SD3.5 24GB) AND train
+    # (2x FSDP shards ~3GB/GPU). Enable offload only if OOM during launch.
+    offload_train: false
+    offload_rollout: false
+  materialize:
+    with_aux: []
+
+reward:
+  aggregation_method: mean
+  base_device: cuda
+  components:
+    pickscore:
+      weight: 1.0
+      batch_size: 8
+  # Note: switched from image_reward → pickscore because the ImageReward
+  # PyPI package bundles a stale BLIP/transformers import path
+  # (apply_chunking_to_forward) that fails on transformers >= 4.40.
+  # pickscore is what the canonical flowgrpo_fast_sd3 recipes use; well
+  # exercised on the same SD3.5 + GZ pod stack.
+
+logging:
+  logging_steps: 1
+  log_media: false
+  report_to_wandb: true
+  project_name: pe-joint-smoke
+  run_name: pe-joint-smoke-${now:%m%d-%H%M}
+  entity: linyuwus
+
+evaluation:
+  eval_steps: 0

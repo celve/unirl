@@ -1,20 +1,19 @@
-"""Reward scoring pipeline: actor-side computation and driver-side reading."""
+"""Reward scoring pipeline: actor-side computation against a ``RolloutTrack``."""
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 from omegaconf import DictConfig
 
 from diffusionrl.reward.service import RewardService
+from diffusionrl.types.primitives import Images, Videos
 from diffusionrl.types.reward import RewardRequest
-from diffusionrl.types.sample import RolloutSamples
-
-if TYPE_CHECKING:
-    from diffusionrl.types.response import RolloutResponse
-
+from diffusionrl.types.rollout_req import RolloutReq
+from diffusionrl.types.rollout_resp import RolloutTrack
+from diffusionrl.types.sampling import get_ar_params, get_diffusion_params
 
 logger = logging.getLogger(__name__)
 
@@ -24,62 +23,45 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _extract_images_from_output(output: RolloutSamples) -> List[Any]:
-    if output.decoded_images is None:
-        raise ValueError(
-            "Reward stage requires decoded_images on RolloutSamples for image rewards. "
-            "Sampler output did not include decoded media."
-        )
-    # HF image processors (CLIPProcessor and friends) default to do_rescale=True
-    # which divides by 255 — correct for uint8 PIL, but already-rescaled for
-    # tensor [0,1]. Convert tensors back to PIL here so every reward consumer
-    # sees the pre-refactor uint8 RGB contract.
+def _images_from_track(track: RolloutTrack) -> List[Any]:
+    """Extract per-sample PIL images from ``track.decoded``.
+
+    HF image processors (``CLIPProcessor`` and friends) default to
+    ``do_rescale=True`` which divides by 255 — correct for uint8 PIL,
+    but already-rescaled for tensor ``[0, 1]``. Convert tensors back to
+    PIL here so every reward consumer sees the uint8 RGB contract.
+    """
+    decoded = track.decoded
+    if not isinstance(decoded, Images):
+        kind = type(decoded).__name__ if decoded is not None else "None"
+        raise ValueError(f"Reward stage requires Images on track.decoded for image rewards; got {kind}.")
+    pixels = getattr(decoded, "pixels", None)
+    if pixels is None:
+        raise ValueError("Reward stage: Images.pixels is None on track.decoded.")
+
     from diffusionrl.utils.media import tensor_frame_to_pil
 
-    items: List[Any] = []
-    for img in output.decoded_images:
-        if torch.is_tensor(img):
-            items.append(tensor_frame_to_pil(img))
-        else:
-            items.append(img)
-    return items
+    return [tensor_frame_to_pil(img) for img in pixels.unbind(0)]
 
 
-def _extract_videos_from_output(output: RolloutSamples) -> List[torch.Tensor]:
-    """Normalize ``RolloutSamples.decoded_videos`` into a per-sample list.
-
-    Accepts the three real-world shapes produced by upstream samplers:
-
-    - **stacked 5D tensor** ``[B, C, T, H, W]``: legacy FSDP-engine WAN
-      sampler. Unbind along batch dim 0.
-    - **single 4D tensor** ``[C, T, H, W]``: degenerate B=1 case.
-    - **list of 4D tensors**: the modality-iterative bridge
-      (``types_compat::resp_to_samples``) emits per-sample
-      ``[C, T, H, W]`` tensors from a ``Videos`` primitive's
-      ``to_list() + permute(1, 0, 2, 3)``. Each entry must be a 4D
-      ``torch.Tensor`` — anything else is a contract violation.
-    """
-    decoded_videos = output.decoded_videos
-    if torch.is_tensor(decoded_videos):
-        if decoded_videos.dim() >= 5:
-            return [video for video in decoded_videos]
-        if decoded_videos.dim() == 4:
-            return [decoded_videos]
-    if isinstance(decoded_videos, list) and decoded_videos:
-        for idx, vid in enumerate(decoded_videos):
-            if not torch.is_tensor(vid):
-                raise ValueError(
-                    f"Reward stage: decoded_videos[{idx}] must be a torch.Tensor; got {type(vid).__name__}."
-                )
-            if vid.dim() != 4:
-                raise ValueError(
-                    f"Reward stage: decoded_videos[{idx}] must be 4D [C, T, H, W]; got shape {tuple(vid.shape)}."
-                )
-        return list(decoded_videos)
-    raise ValueError(
-        "Reward stage requires decoded_videos on RolloutSamples for video rewards. "
-        "Sampler output did not include decoded video media."
-    )
+def _videos_from_track(track: RolloutTrack) -> List[torch.Tensor]:
+    """Extract per-sample 4D ``[C, T, H, W]`` video tensors from ``track.decoded``."""
+    decoded = track.decoded
+    if not isinstance(decoded, Videos):
+        kind = type(decoded).__name__ if decoded is not None else "None"
+        raise ValueError(f"Reward stage requires Videos on track.decoded for video rewards; got {kind}.")
+    out: List[torch.Tensor] = []
+    for idx, video in enumerate(decoded.to_list()):
+        frames = video.frames
+        if not torch.is_tensor(frames):
+            raise ValueError(f"Reward stage: track.decoded video[{idx}].frames is not a Tensor.")
+        if frames.dim() != 4:
+            raise ValueError(
+                f"Reward stage: track.decoded video[{idx}].frames must be 4D [T, C, H, W]; "
+                f"got shape {tuple(frames.shape)}."
+            )
+        out.append(frames.permute(1, 0, 2, 3).contiguous())
+    return out
 
 
 def _normalize_prompt_metadata(
@@ -123,102 +105,60 @@ def _normalize_prompt_metadata(
     )
 
 
-def _read_reward_payload(output: RolloutSamples):
-    if output.rewards is None:
-        return None
-    rewards = [float(v) for v in output.rewards.tolist()]
-    normalized_components: Dict[str, List[float]] = {}
-    for name, values in dict(output.component_rewards or {}).items():
-        normalized_components[str(name)] = [float(v) for v in values.tolist()]
-    return rewards, normalized_components
-
-
-def _build_request_for_samples(
+def _build_request_for_track(
     *,
     reward_input_kind: str,
     samples_per_prompt: int,
-    sampler_outputs: List[RolloutSamples],
+    track: RolloutTrack,
     prompts: List[str],
-    prompt_ids: Optional[List[str]] = None,
-    sample_ids: Optional[List[str]] = None,
-    group_ids: Optional[List[str]] = None,
+    prompt_ids: List[str],
+    sample_ids: List[str],
+    group_ids: List[str],
     prompt_metadata: Optional[List[Optional[Dict[str, Any]]]] = None,
 ) -> RewardRequest:
-    """Assemble a RewardRequest from sample-aligned rollout outputs."""
-    if not isinstance(prompts, list) or len(prompts) == 0:
-        raise ValueError("Reward request assembly requires a non-empty sample-aligned prompts list.")
+    """Assemble a ``RewardRequest`` from one track + its request-side texts."""
+    if not prompts:
+        raise ValueError("Reward request assembly requires a non-empty prompts list.")
 
-    all_images: List[Any] = []
-    all_videos: List[torch.Tensor] = []
-    all_prompts: List[str] = []
-    all_prompt_ids: List[str] = []
-    all_sample_ids: List[str] = []
-    all_group_ids: List[str] = []
-    all_metadata: List[Optional[Dict[str, Any]]] = []
-    sample_idx = 0
+    if reward_input_kind == "video":
+        media = _videos_from_track(track)
+        media_key = "videos"
+    else:
+        media = _images_from_track(track)
+        media_key = "images"
 
-    normalized_prompt_metadata = _normalize_prompt_metadata(
+    if len(media) != len(prompts):
+        raise RuntimeError(f"Reward stage: track decoded count {len(media)} != prompts count {len(prompts)}.")
+
+    normalized_metadata = _normalize_prompt_metadata(
         prompt_metadata=prompt_metadata,
         prompts=prompts,
         prompt_ids=prompt_ids,
         samples_per_prompt=samples_per_prompt,
     )
 
-    def _append_media(items: List[Any], target: List[Any]) -> None:
-        nonlocal sample_idx
-        for item in items:
-            if sample_idx >= len(prompts):
-                raise IndexError(
-                    "Reward media count exceeded prompt count while assembling RewardRequest. "
-                    f"sample_idx={sample_idx}, prompts={len(prompts)}"
-                )
-            target.append(item)
-            all_prompts.append(prompts[sample_idx])
-            if prompt_ids is not None and sample_idx < len(prompt_ids):
-                all_prompt_ids.append(str(prompt_ids[sample_idx]))
-            if sample_ids is not None and sample_idx < len(sample_ids):
-                all_sample_ids.append(str(sample_ids[sample_idx]))
-            if group_ids is not None and sample_idx < len(group_ids):
-                all_group_ids.append(str(group_ids[sample_idx]))
-            all_metadata.append(
-                normalized_prompt_metadata[sample_idx] if normalized_prompt_metadata is not None else None
-            )
-            sample_idx += 1
-
-    if reward_input_kind == "video":
-        for output in sampler_outputs:
-            _append_media(_extract_videos_from_output(output), all_videos)
-    else:
-        for output in sampler_outputs:
-            _append_media(_extract_images_from_output(output), all_images)
-
-    if not all_images and not all_videos:
-        raise RuntimeError("Reward stage could not assemble any decoded media from sampler outputs.")
-
     request_kwargs: Dict[str, Any] = {
-        "prompts": all_prompts,
-        "metadata": all_metadata if any(m is not None for m in all_metadata) else None,
+        "prompts": list(prompts),
+        "prompt_ids": list(prompt_ids),
+        "sample_ids": list(sample_ids),
+        "group_ids": list(group_ids),
+        "metadata": (
+            normalized_metadata
+            if normalized_metadata is not None and any(m is not None for m in normalized_metadata)
+            else None
+        ),
+        media_key: media,
     }
-    if len(all_prompt_ids) == len(all_prompts):
-        request_kwargs["prompt_ids"] = all_prompt_ids
-    if len(all_sample_ids) == len(all_prompts):
-        request_kwargs["sample_ids"] = all_sample_ids
-    if len(all_group_ids) == len(all_prompts):
-        request_kwargs["group_ids"] = all_group_ids
-    if all_videos:
-        request_kwargs["videos"] = all_videos
-    else:
-        request_kwargs["images"] = all_images
     return RewardRequest(**request_kwargs)
 
 
 # ---------------------------------------------------------------------------
-# RewardPipeline — actor-side adapter binding RolloutResponse <-> RewardService
+# RewardPipeline — actor-side adapter binding RolloutTrack <-> RewardService
 # ---------------------------------------------------------------------------
 
 
 class RewardPipeline:
-    """Actor-side reward adapter: scores RolloutResponses with a RewardService."""
+    """Actor-side reward adapter: scores one ``RolloutTrack`` with a ``RewardService``."""
 
     def __init__(self, reward_service: RewardService) -> None:
         self.reward_service = reward_service
@@ -238,31 +178,78 @@ class RewardPipeline:
             f"Got {preferred!r} from {type(self.reward_service).__name__}."
         )
 
-    def score_and_attach(self, response: "RolloutResponse") -> "RolloutResponse":
-        """Score one response's samples and attach rewards to typed fields in-place.
+    def score_and_attach(self, *, req: RolloutReq, track: RolloutTrack) -> None:
+        """Score one track's decoded media and write rewards onto the track in-place.
 
-        Assumes response.samples.decoded_images (or .decoded_videos) is already
-        populated — decoding remains the actor's responsibility since it owns
-        the sampling engine.
+        Reads texts off ``req.primitives['text']`` (raises if missing) and pairs
+        them with ``track.sample_ids`` / ``track.group_ids``. Synthesizes
+        ``prompt_ids`` from sample ids — no live scorer reads them as anything
+        besides opaque strings.
 
         Fail-fast on per-sample failure flags so partial/corrupt rewards
         cannot silently enter advantage computation. Successes are computed
         against each sample's own requested reward set, so future per-sample
         required_rewards (multi-turn) will not raise spuriously here.
         """
-        if _read_reward_payload(response.samples) is not None:
-            raise RuntimeError("Actor-side reward compute does not accept precomputed rewards on sampler outputs.")
-        prompts = response.request.prompts
-        samples_per_prompt = max(1, int(response.request.sampling_params.num_samples_per_prompt))
-        request = _build_request_for_samples(
+        if track.rewards is not None:
+            raise RuntimeError("Actor-side reward compute does not accept precomputed rewards on the track.")
+
+        text_prim = req.primitives.get("text")
+        if text_prim is None or not getattr(text_prim, "texts", None):
+            raise RuntimeError(
+                "RewardPipeline.score_and_attach: req.primitives['text'] must be non-empty for reward scoring."
+            )
+        texts = list(text_prim.texts)
+        sample_ids = list(track.sample_ids)
+        if len(texts) != len(sample_ids):
+            # PE-joint case: the composed engine expands each prompt by N*M
+            # (N LLM rewrites × M diffusion samples) before producing the
+            # final track. ``req.primitives['text']`` carries the original
+            # P prompts unexpanded; the leaf track has P*N*M samples per
+            # actor. Replicate each prompt by the integer expansion factor
+            # so scoring stays sample-aligned. This preserves the
+            # "score against the original user intent" semantic for PE
+            # training (reward grounds on user prompt vs final image,
+            # giving the LLM rewriter a signal toward improving alignment).
+            if len(sample_ids) > 0 and len(texts) > 0 and len(sample_ids) % len(texts) == 0:
+                factor = len(sample_ids) // len(texts)
+                # Cross-check the divisibility heuristic against the request's
+                # explicit branching factors (N=PE-rewrites × M=samples-per-PE).
+                # Without this, an accidentally divisible mismatch
+                # (e.g. resp=2× when N×M=4) would silently mis-replicate texts.
+                ar_params = get_ar_params(req.sampling_params)
+                diff_params = get_diffusion_params(req.sampling_params)
+                _N = int(ar_params.samples_per_prompt) if ar_params is not None else 1
+                _M = int(diff_params.samples_per_prompt) if diff_params is not None else 1
+                expected_factor = _N * _M
+                if factor != expected_factor:
+                    raise RuntimeError(
+                        f"RewardPipeline.score_and_attach: implicit expansion factor "
+                        f"{factor} (len(sample_ids)={len(sample_ids)} / len(texts)={len(texts)}) "
+                        f"does not match sampling_params N*M={expected_factor} "
+                        f"(N={_N}, M={_M}). "
+                        f"Sample alignment is ambiguous."
+                    )
+                texts = [t for t in texts for _ in range(factor)]
+            else:
+                raise RuntimeError(
+                    f"RewardPipeline.score_and_attach: text count {len(texts)} != "
+                    f"track.sample_ids count {len(sample_ids)} and not an integer "
+                    "multiple — sample alignment broken."
+                )
+        # Each track shard reaches reward as a single GRPO group (the mixin
+        # group-splits before calling), so samples_per_prompt == group size.
+        samples_per_prompt = max(1, len(sample_ids))
+
+        request = _build_request_for_track(
             reward_input_kind=self.preferred_input_kind,
             samples_per_prompt=samples_per_prompt,
-            sampler_outputs=[response.samples],
-            prompts=prompts.prompts,
-            prompt_ids=prompts.prompt_ids,
-            sample_ids=prompts.sample_ids,
-            group_ids=prompts.group_ids,
-            prompt_metadata=prompts.prompt_metadata,
+            track=track,
+            prompts=texts,
+            prompt_ids=[str(sid) for sid in sample_ids],
+            sample_ids=sample_ids,
+            group_ids=list(track.group_ids),
+            prompt_metadata=None,
         )
         reward_response = self.reward_service.compute_rewards(request)
 
@@ -273,12 +260,11 @@ class RewardPipeline:
                 f"{len(reward_response.successes)} sample(s) as failure. First few: {failed[:3]}"
             )
 
-        response.samples.rewards = torch.tensor(reward_response.rewards, dtype=torch.float32)
-        response.samples.component_rewards = {
+        track.rewards = torch.tensor(reward_response.rewards, dtype=torch.float32)
+        track.component_rewards = {
             str(name): torch.tensor(list(values or []), dtype=torch.float32)
             for name, values in dict(reward_response.component_rewards or {}).items()
         }
-        return response
 
     def offload(self) -> None:
         self.reward_service.offload()

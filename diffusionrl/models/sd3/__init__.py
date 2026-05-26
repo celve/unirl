@@ -14,13 +14,11 @@ make ``model/sd3`` resolvable in the ConfigStore.
 from diffusionrl.models.sd3.bundle import SD3Bundle
 from diffusionrl.models.sd3.conditions import SD3Conditions
 from diffusionrl.models.sd3.config import SD3PipelineConfig
-from diffusionrl.models.sd3.diffusion import SD3DiffusionParams
 from diffusionrl.models.sd3.pipeline import SD3Pipeline
 
 __all__ = [
     "SD3Bundle",
     "SD3Conditions",
-    "SD3DiffusionParams",
     "SD3Pipeline",
     "SD3PipelineConfig",
 ]

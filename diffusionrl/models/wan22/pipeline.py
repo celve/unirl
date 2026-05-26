@@ -19,7 +19,7 @@ sibling stages), matching the SD3 convention of one-package-per-model.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from diffusionrl.models.types.pipeline import Pipeline
 from diffusionrl.models.wan21.clip_vision_encode import WAN21CLIPVisionEncodeStage
@@ -31,11 +31,12 @@ from diffusionrl.sde.kernels import DanceSDEStrategy, StepStrategy
 from diffusionrl.types.conditions import ImageEmbedCondition, ImageLatentCondition
 from diffusionrl.types.primitives import Images, Texts
 from diffusionrl.types.rollout_req import RolloutReq
-from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
+from diffusionrl.types.sampling import DiffusionSamplingParams, get_diffusion_params
 
 from .bundle import WAN22Bundle
 from .config import WAN22PipelineConfig
-from .diffusion import WAN22DiffusionParams, WAN22DiffusionStage, WAN22DiffusionStep
+from .diffusion import WAN22DiffusionStage, WAN22DiffusionStep
 
 
 class WAN22Pipeline(Pipeline):
@@ -54,8 +55,8 @@ class WAN22Pipeline(Pipeline):
     - ``conditions["text"]: TextEmbedCondition``; plus
       ``conditions["negative_text"]: TextEmbedCondition`` when negative
       prompts were supplied.
-    - ``rollout_traces["video"]: LatentSegment``.
-    - ``decoded["video"]: Videos``.
+    - ``tracks["video"].segment: LatentSegment``.
+    - ``tracks["video"].decoded: Videos``.
     """
 
     def __init__(
@@ -147,12 +148,7 @@ class WAN22Pipeline(Pipeline):
                 f"WAN22Pipeline.generate: negative_text length {len(negatives.texts)} != text length {len(texts.texts)}"
             )
 
-        import dataclasses as _dc
-
-        raw_dict: Dict[str, Any] = dict(req.stage_params.get("diffusion") or {})
-        allowed = {f.name for f in _dc.fields(WAN22DiffusionParams)}
-        params_dict = {k: v for k, v in raw_dict.items() if k in allowed}
-        params = WAN22DiffusionParams(**params_dict)
+        params: DiffusionSamplingParams = get_diffusion_params(req.sampling_params)
 
         text_cond = self.text_embed.embed(texts)
         # CFG empty negative: same rationale as WAN21Pipeline (see that
@@ -218,11 +214,15 @@ class WAN22Pipeline(Pipeline):
         videos = self.vae_decode.decode(latent_seg)
 
         return RolloutResp(
-            sample_ids=list(req.sample_ids),
-            group_ids=list(req.group_ids),
-            conditions=wan_conds.to_dict(),
-            rollout_traces={"video": latent_seg},
-            decoded={"video": videos},
+            tracks={
+                "video": RolloutTrack(
+                    sample_ids=list(req.sample_ids),
+                    parent_ids=list(req.group_ids),
+                    conditions=wan_conds.to_dict(),
+                    segment=latent_seg,
+                    decoded=videos,
+                ),
+            }
         )
 
 

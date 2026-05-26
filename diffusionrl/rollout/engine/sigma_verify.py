@@ -12,7 +12,7 @@ The engine adapter (main side):
        the engine's :class:`FlowMatchSchedulePolicy` to the per-request
        ``(T, H, W)`` triple).
     2. Forwards ``req.sigmas`` to the worker (SGLang's
-       ``SamplingParams.sigmas`` / vllm-omni's
+       ``DiffusionSamplingParams.sigmas`` / vllm-omni's
        ``OmniDiffusionSamplingParams.sigmas``).
     3. Worker calls ``scheduler.set_timesteps(sigmas=...)`` so the loop
        uses the schedule verbatim.

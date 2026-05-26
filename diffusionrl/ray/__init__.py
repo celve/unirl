@@ -10,8 +10,6 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "PlacementConfig": ("diffusionrl.ray.placement", "PlacementConfig"),
     "Placement": ("diffusionrl.ray.placement", "Placement"),
     "ActorPlacement": ("diffusionrl.ray.placement", "ActorPlacement"),
-    "BufferActor": ("diffusionrl.ray.buffer_actor", "BufferActor"),
-    "create_buffer_actor": ("diffusionrl.ray.buffer_actor", "create_buffer_actor"),
     # Actor groups
     "ActorGroup": ("diffusionrl.ray.group.base", "ActorGroup"),
     # Actors

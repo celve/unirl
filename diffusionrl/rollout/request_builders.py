@@ -4,21 +4,21 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from diffusionrl.types.prompts import RolloutInputs
+
 
 def load_prompt_batch_from_source(
     *,
     data_source: Any,
     prompt_batch_size: int,
-) -> Dict[str, Any]:
+) -> RolloutInputs:
     """Fetch one rollout prompt batch from the configured data source."""
     if data_source is None:
         raise RuntimeError("Rollout pipeline requires an initialized data source.")
-    samples = data_source.get_samples(int(prompt_batch_size))
-    if isinstance(samples, dict):
-        return samples
-    raise TypeError(
-        f"DataSource.get_samples() must return Dict[str, Any] with at least 'prompts'. Got {type(samples).__name__}."
-    )
+    inputs = data_source.get_samples(int(prompt_batch_size))
+    if not isinstance(inputs, RolloutInputs):
+        raise TypeError(f"DataSource.get_samples() must return RolloutInputs. Got {type(inputs).__name__}.")
+    return inputs
 
 
 def build_eval_request_batch(

@@ -60,10 +60,10 @@ class HunyuanImage3Pipeline(Pipeline):
     Writes to ``RolloutResp``:
 
     - ``conditions``: per-task — see each ``modes/<task>.py``.
-    - ``rollout_traces["text"]: TextSegment`` for AR-mode tasks.
-    - ``rollout_traces["image"]: LatentSegment`` for diffusion-mode tasks.
-    - ``decoded["text"]: Texts`` (AR-mode) / ``decoded["image"]: Images``
-      (diffusion-mode).
+    - ``tracks["text"].segment: TextSegment`` for AR-mode tasks.
+    - ``tracks["image"].segment: LatentSegment`` for diffusion-mode tasks.
+    - ``tracks["text"].decoded: Texts`` (AR-mode) /
+      ``tracks["image"].decoded: Images`` (diffusion-mode).
     """
 
     def __init__(
@@ -170,7 +170,7 @@ class HunyuanImage3Pipeline(Pipeline):
         """
         from .modes import i2t, it2i, t2i, t2t
 
-        task = req.stage_params.get("task", "t2i")
+        task = req.stage_config.get("task", "t2i")
         if task == "t2t":
             return t2t.generate(self, req)
         if task == "i2t":

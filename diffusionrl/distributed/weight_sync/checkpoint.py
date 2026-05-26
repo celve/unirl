@@ -62,13 +62,23 @@ class UpdateWeightFromCheckpoint(UpdateWeight):
     def connect_rollout_engines(self) -> None:
         return
 
-    def update_weights(self, *, peft_config: dict | None = None, base_sync_done: bool = False) -> None:
-        del peft_config, base_sync_done
+    def update_weights(
+        self,
+        *,
+        model: object | None = None,
+        peft_config: dict | None = None,
+        base_sync_done: bool = False,
+        param_name_prefix: str | None = None,
+        packed_modules: dict | None = None,
+        track_prefix: str = "",
+    ) -> None:
+        del peft_config, base_sync_done, param_name_prefix, packed_modules, track_prefix
+        resolved_model = self._resolve_model(model)
         self.weight_version += 1
         is_rank0 = dist.get_rank() == 0
 
         state_dict = {}
-        for name, param in merged_state_dict(self.model):
+        for name, param in merged_state_dict(resolved_model):
             if is_rank0:
                 state_dict[name] = param
 

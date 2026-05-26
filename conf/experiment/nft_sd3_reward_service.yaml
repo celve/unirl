@@ -16,7 +16,7 @@ reward:
   aggregation_method: weighted_sum
   base_device: cpu
   components:
-    - name: reward_service
+    reward_service:
       base_url: ${oc.env:REWARD_SERVICE_URL,http://localhost:8080}
       weight: 1.0
       batch_size: 8

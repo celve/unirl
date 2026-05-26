@@ -425,8 +425,10 @@ class _FakeReq:
     """Minimal duck-typed stand-in for RolloutReq."""
 
     def __init__(self, **diffusion):
+        from diffusionrl.types.sampling import DiffusionSamplingParams
+
         self.sigmas = None
-        self.stage_params = {"diffusion": diffusion}
+        self.sampling_params = DiffusionSamplingParams(**diffusion)
 
 
 def test_ensure_req_sigmas_populates_when_none():
@@ -626,8 +628,10 @@ class _StubReq:
     the translator reads from RolloutReq)."""
 
     def __init__(self, num_inference_steps: int, *, sigmas=None):
+        from diffusionrl.types.sampling import DiffusionSamplingParams
+
         self.sigmas = sigmas
-        self.stage_params = {"diffusion": {"num_inference_steps": num_inference_steps}}
+        self.sampling_params = DiffusionSamplingParams(num_inference_steps=num_inference_steps)
 
 
 def test_vllm_omni_sigmas_list_length_is_T_not_T_plus_1():
@@ -657,146 +661,6 @@ def test_vllm_omni_sigmas_list_returns_none_when_req_has_none():
 
     req = _StubReq(num_inference_steps=10, sigmas=None)
     assert _sigmas_list_from_req(req, 10) is None
-
-
-# ---------------------------------------------------------------------------
-# resp_to_samples sparse SDE — full sigma schedule survives the bridge
-# ---------------------------------------------------------------------------
-
-
-def test_resp_to_samples_keeps_full_sigma_schedule_for_sparse_sde():
-    """When the segment has sparse seg.indices, the bridge must use
-    Trajectory.from_selective so the FULL σ schedule travels with
-    samples.timesteps. Legacy GRPO loss reads ``td.sigmas[1]`` for
-    sigma_max — cropping to sparse local view would silently
-    mis-map it to e.g. sigma[5]."""
-    import torch
-
-    from diffusionrl.rollout.engine.types_compat import resp_to_samples
-    from diffusionrl.types.prompts import Prompts
-    from diffusionrl.types.request import RolloutRequest
-    from diffusionrl.types.rollout_resp import RolloutResp
-    from diffusionrl.types.sampling import SamplingParams
-    from diffusionrl.types.segments.latent import LatentSegment
-
-    T = 10  # T+1 = 11 σ values
-    full_sigmas = get_sigma_schedule(T, shift=3.0)  # length 11
-    # Sparse store: only positions [0, 5, 6, 10, 11] kept (5 latents)
-    sparse_positions = [0, 5, 6, 10]
-    sparse_latents = torch.zeros(
-        2,
-        len(sparse_positions),
-        4,
-        8,
-        8,
-        dtype=torch.float32,
-    )
-
-    seg = LatentSegment(
-        sample_indices=torch.arange(2, dtype=torch.long),
-        positions=torch.zeros(2, dtype=torch.long),
-        latents=sparse_latents,
-        sigmas=full_sigmas,
-        indices=torch.tensor(sparse_positions, dtype=torch.long),
-        sde_logp=None,
-        sde_indices=None,
-    )
-
-    resp = RolloutResp(
-        sample_ids=["a", "b"],
-        group_ids=["g", "g"],
-        conditions={},
-        rollout_traces={"image": seg},
-        decoded={},
-    )
-
-    request = RolloutRequest(
-        prompts=Prompts(
-            prompts=["p", "p"],
-            prompt_ids=["0", "0"],
-            sample_ids=["a", "b"],
-            group_ids=["g", "g"],
-            noise_group_ids=["a", "b"],
-            prompt_metadata=[{}, {}],
-        ),
-        sampling_params=SamplingParams(num_inference_steps=T),
-        collect_media_preview=False,
-        media_max_items=8,
-    )
-
-    samples = resp_to_samples(resp, request=request)
-    # Full schedule preserved (legacy GRPO reads ``td.sigmas[1]`` for
-    # sigma_max — must point at global step-1 σ, not the sparse local
-    # position-1 σ).
-    assert samples.timesteps.shape == (T + 1,)
-    assert torch.allclose(samples.timesteps, full_sigmas)
-    # Trajectory store uses selective form so validate() accepts the
-    # "len(timesteps) != num_stored" combination via the is_selective branch.
-    assert samples.trajectories.is_selective
-    assert samples.trajectories.total_positions == T + 1
-    assert samples.trajectories.num_stored == len(sparse_positions)
-    # step_indices MUST be None for selective: the legacy
-    # ``TrainingBatch.get_position_for_step`` method assumes
-    # ``compact_index == global_position`` (true only for full
-    # trajectories). With selective storage, returning sparse global
-    # labels would make has_position fail in surprising ways. Set
-    # ``None`` so any caller that tries per-step lookups on this
-    # bridge gets a clean error pointing them to the API
-    # (``stage.replay`` reads ``segment.sigmas`` directly).
-    assert samples.step_indices is None
-
-
-def test_resp_to_samples_full_dense_keeps_step_indices():
-    """The selective→None rule must NOT affect full dense trajectories,
-    where step_indices is well-defined as the identity mapping."""
-    import torch
-
-    from diffusionrl.rollout.engine.types_compat import resp_to_samples
-    from diffusionrl.types.prompts import Prompts
-    from diffusionrl.types.request import RolloutRequest
-    from diffusionrl.types.rollout_resp import RolloutResp
-    from diffusionrl.types.sampling import SamplingParams
-    from diffusionrl.types.segments.latent import LatentSegment
-
-    T = 4  # tiny dense schedule, K = T+1 = 5
-    full_sigmas = get_sigma_schedule(T, shift=3.0)
-    full_positions = list(range(T + 1))  # [0,1,2,3,4]
-    dense_latents = torch.zeros(2, T + 1, 4, 8, 8, dtype=torch.float32)
-    seg = LatentSegment(
-        sample_indices=torch.arange(2, dtype=torch.long),
-        positions=torch.zeros(2, dtype=torch.long),
-        latents=dense_latents,
-        sigmas=full_sigmas,
-        indices=torch.tensor(full_positions, dtype=torch.long),
-        sde_logp=None,
-        sde_indices=None,
-    )
-    resp = RolloutResp(
-        sample_ids=["a", "b"],
-        group_ids=["g", "g"],
-        conditions={},
-        rollout_traces={"image": seg},
-        decoded={},
-    )
-    request = RolloutRequest(
-        prompts=Prompts(
-            prompts=["p", "p"],
-            prompt_ids=["0", "0"],
-            sample_ids=["a", "b"],
-            group_ids=["g", "g"],
-            noise_group_ids=["a", "b"],
-            prompt_metadata=[{}, {}],
-        ),
-        sampling_params=SamplingParams(num_inference_steps=T),
-        collect_media_preview=False,
-        media_max_items=8,
-    )
-    samples = resp_to_samples(resp, request=request)
-    # Dense path: trajectory is full, step_indices remains the identity
-    # mapping so legacy code keeps working.
-    assert samples.trajectories.is_full
-    assert samples.step_indices is not None
-    assert samples.step_indices.tolist() == full_positions
 
 
 def test_sglang_sparse_trim_keeps_terminal_position():

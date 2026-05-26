@@ -40,7 +40,7 @@ Ownership map (kept explicit so reading the code doesn't require
 following six getattr chains)::
 
     Policy        owned by  MODEL CHECKPOINT (scheduler/transformer/vae JSONs)
-    Params (T,H,W) owned by REQUEST (RolloutReq.stage_params["diffusion"])
+    Params (T,H,W) owned by REQUEST (RolloutReq.sampling_params.diffusion)
     σ computation owned by THIS MODULE (pure function)
     σ flow        carried by RolloutReq.sigmas (set by engine, read by
                   pipeline / worker / replay; verified end-to-end by
@@ -57,6 +57,8 @@ from typing import Any, Dict, Optional, Union
 
 import numpy as np
 import torch
+
+from diffusionrl.types.sampling import get_diffusion_params
 
 logger = logging.getLogger(__name__)
 
@@ -436,10 +438,9 @@ def ensure_req_sigmas(req: Any, policy: FlowMatchSchedulePolicy) -> None:
 
     Every rollout engine calls this once at the top of ``generate(req)``.
 
-    ``req`` must expose ``req.sigmas`` (write) and
-    ``req.stage_params["diffusion"]`` with ``num_inference_steps`` /
-    ``height`` / ``width`` keys (duck-typed to avoid importing
-    ``RolloutReq`` here — keeps this module free of types/* deps).
+    ``req`` must expose ``req.sigmas`` (read/write) and
+    ``req.sampling_params`` with diffusion params containing
+    ``num_inference_steps`` / ``height`` / ``width`` keys.
 
     All three keys are **required** —  silent ``height=1024`` /
     ``width=1024`` defaults would mis-derive μ for dynamic-shift models
@@ -447,19 +448,17 @@ def ensure_req_sigmas(req: Any, policy: FlowMatchSchedulePolicy) -> None:
     (e.g. WAN T2V at 480×832). Drivers (``RolloutPipeline.plan_requests``)
     always set all three; absence means a wiring bug.
     """
-    diffusion = dict(req.stage_params.get("diffusion") or {})
-    missing = [k for k in ("num_inference_steps", "height", "width") if k not in diffusion]
-    if missing:
+    if req.sigmas is not None:
+        return
+    diffusion = get_diffusion_params(req.sampling_params)
+    if diffusion is None:
         raise ValueError(
-            f"ensure_req_sigmas: req.stage_params['diffusion'] is missing "
-            f"required key(s) {missing} for σ schedule computation. The "
-            f"driver (RolloutPipeline.plan_requests / _build_diffusion_"
-            f"stage_params) must set num_inference_steps / height / width."
+            "ensure_req_sigmas: req.sampling_params must contain diffusion params for σ schedule computation."
         )
     req.sigmas = policy.compute_sigma(
-        num_inference_steps=int(diffusion["num_inference_steps"]),
-        height=int(diffusion["height"]),
-        width=int(diffusion["width"]),
+        num_inference_steps=int(diffusion.num_inference_steps),
+        height=int(diffusion.height),
+        width=int(diffusion.width),
     )
 
 

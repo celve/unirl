@@ -15,7 +15,7 @@ Coverage:
 - ``conditions['negative_text']`` populated when CFG negative embeds present;
   absent when not.
 - ``conditions`` empty when ``cfg.populate_conditions=False``.
-- ``decoded['image']`` is float32 [B, C, H, W] in [0, 1].
+- ``tracks['image'].decoded`` is Images float32 [B, C, H, W] in [0, 1].
 - Native vs replay logp policy: ``sde_logp`` populated in native mode, None
   in replay.
 """
@@ -32,7 +32,7 @@ from diffusionrl.rollout.engine.sglang.response import _to_rollout_resp
 from diffusionrl.sde.runtime import get_sigma_schedule
 from diffusionrl.types.primitives import Texts
 from diffusionrl.types.rollout_req import RolloutReq
-from diffusionrl.types.sampling import SamplingParams, SDEConfig
+from diffusionrl.types.sampling import DiffusionSamplingParams
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -40,7 +40,7 @@ from diffusionrl.types.sampling import SamplingParams, SDEConfig
 
 
 def _make_cfg(*, populate_conditions: bool = True) -> SGLangEngineConfig:
-    sampling = SamplingParams(
+    sampling = DiffusionSamplingParams(
         num_inference_steps=4,
         guidance_scale=4.5,
         height=64,
@@ -48,7 +48,7 @@ def _make_cfg(*, populate_conditions: bool = True) -> SGLangEngineConfig:
         num_frames=1,
         seed=0,
         num_samples_per_prompt=1,
-        sde_config=SDEConfig(eta=0.7),
+        eta=0.7,
         sde_indices=None,
         sampler_kwargs={},
     )
@@ -64,12 +64,10 @@ def _make_req(batch: int = 2) -> RolloutReq:
         sample_ids=[f"s{i}" for i in range(batch)],
         group_ids=[f"g{i}" for i in range(batch)],
         primitives={"text": Texts(texts=[f"prompt_{i}" for i in range(batch)])},
-        stage_params={
-            "diffusion": {
-                "num_inference_steps": 4,
-                "num_samples_per_prompt": 1,
-            },
-        },
+        sampling_params=DiffusionSamplingParams(
+            num_inference_steps=4,
+            samples_per_prompt=1,
+        ),
     )
 
 
@@ -175,7 +173,7 @@ def test_sgl_timesteps_diffusers_scale_normalized_before_compare():
     )
     # Sanity: segment built; sigmas on the segment stay in normalized [0,1]
     # (they come from get_sigma_schedule, not SGLang).
-    seg = resp.rollout_traces["image"]
+    seg = resp.tracks["image"].segment
     assert float(seg.sigmas.max().item()) <= 1.0
     assert float(seg.sigmas.min().item()) >= 0.0
 
@@ -197,7 +195,7 @@ def test_segment_full_trajectory_when_no_subset_trim():
         sde_indices=None,
         use_native_logprob=False,
     )
-    seg = resp.rollout_traces["image"]
+    seg = resp.tracks["image"].segment
     assert seg.latents.shape == (2, 5, 4, 8, 8)
     assert seg.sigmas.shape == (5,)
     assert torch.equal(seg.indices, torch.arange(5))
@@ -221,7 +219,7 @@ def test_segment_selective_trim_with_subset_sde_indices():
         sde_indices=[1],  # needs positions [1, 2]
         use_native_logprob=False,
     )
-    seg = resp.rollout_traces["image"]
+    seg = resp.tracks["image"].segment
     # Trimmed to positions [1, 2] → 2 columns out of 5.
     assert seg.latents.shape == (2, 2, 4, 8, 8)
     assert torch.equal(seg.indices, torch.tensor([1, 2]))
@@ -242,7 +240,7 @@ def test_native_logp_lands_on_sde_logp():
         sde_indices=None,
         use_native_logprob=True,
     )
-    seg = resp.rollout_traces["image"]
+    seg = resp.tracks["image"].segment
     assert seg.sde_logp is not None
     assert seg.sde_logp.shape == (2, 4)
     assert torch.equal(seg.sde_logp[0], torch.tensor([1.0, 2.0, 3.0, 4.0]))
@@ -269,7 +267,7 @@ def test_replay_mode_leaves_both_sde_logp_and_sde_indices_none():
         sde_indices=[0, 1, 2, 3],  # request SDE mode
         use_native_logprob=False,
     )
-    seg = resp.rollout_traces["image"]
+    seg = resp.tracks["image"].segment
     assert seg.sde_logp is None
     assert seg.sde_indices is None
 
@@ -291,8 +289,8 @@ def test_conditions_text_populated_when_populate_on():
         sde_indices=None,
         use_native_logprob=False,
     )
-    assert "text" in resp.conditions
-    text_cond = resp.conditions["text"]
+    assert "text" in resp.tracks["image"].conditions
+    text_cond = resp.tracks["image"].conditions["text"]
     assert text_cond.embeds.shape == (2, 7, 12)
     assert text_cond.pooled.shape == (2, 12)
     assert text_cond.attn_mask.shape == (2, 7)
@@ -311,8 +309,8 @@ def test_conditions_negative_text_populated_only_when_cfg_active():
         sde_indices=None,
         use_native_logprob=False,
     )
-    assert "negative_text" in resp.conditions
-    neg = resp.conditions["negative_text"]
+    assert "negative_text" in resp.tracks["image"].conditions
+    neg = resp.tracks["image"].conditions["negative_text"]
     assert neg.embeds.shape == (2, 7, 12)
     assert neg.pooled.shape == (2, 12)
 
@@ -342,7 +340,7 @@ def test_populate_conditions_off_yields_empty_dict():
         sde_indices=None,
         use_native_logprob=False,
     )
-    assert resp.conditions == {}
+    assert resp.tracks["image"].conditions == {}
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +360,7 @@ def test_decoded_images_shape_and_range():
         sde_indices=None,
         use_native_logprob=False,
     )
-    decoded = resp.decoded["image"]
+    decoded = resp.tracks["image"].decoded
     assert decoded.pixels.dtype == torch.float32
     assert decoded.pixels.shape == (2, 3, 64, 64)
     assert float(decoded.pixels.min().item()) >= 0.0
@@ -387,5 +385,5 @@ def test_sample_and_group_ids_carried_through():
         sde_indices=None,
         use_native_logprob=False,
     )
-    assert resp.sample_ids == req.sample_ids
-    assert resp.group_ids == req.group_ids
+    assert resp.tracks["image"].sample_ids == req.sample_ids
+    assert resp.tracks["image"].group_ids == req.group_ids

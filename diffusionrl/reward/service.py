@@ -45,7 +45,9 @@ class RewardService:
         """
         rc = materialize(reward)
         executors: List[BaseRewardExecutor] = []
-        for cfg_node, spec in zip(reward.components, rc.components):
+        for key in reward.components:
+            cfg_node = reward.components[key]
+            spec = rc.components[key]
             built = build(cfg_node, base_device=rc.base_device)
             if isinstance(built, BaseRewardScorer):
                 built = InProcessRewardExecutor(built, weight=spec.weight)

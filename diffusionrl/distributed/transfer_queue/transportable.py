@@ -5,7 +5,7 @@ constructor in ``utils/batched.py``) to route them through efficient transport.
 Recursion is gated on the same flag — a tagged field whose value is itself a
 ``Transportable`` is descended into; an untagged field never is. Reachable
 leaves get a *dotted-path* key derived from the field-attr names along the way
-(e.g. ``forward_context.prompt_embeds``), unique by construction.
+(e.g. ``segment.latents``), unique by construction.
 
 Two concentric levels of API:
 
@@ -107,7 +107,7 @@ class Transportable(Batched):
     Tag a field via the generic ``field(...)`` constructor::
 
         latents: Tensor = field(kind=FieldKind.CONCAT, transport=True)
-        forward_context: ForwardContext = field(
+        segment: Optional[Segment] = field(
             kind=FieldKind.CONCAT, default=None, transport=True,
         )
 
@@ -122,8 +122,7 @@ class Transportable(Batched):
 
     Other tagged values are leaves and the visitor sees them. Leaf wire-keys
     are dotted paths assembled from the segments along the way (e.g.
-    ``forward_context.prompt_embeds``, ``trajectories.<eid>.latents``,
-    ``extras.advantages.data``).
+    ``segment.latents``, ``conditions.<key>.embeds``).
     """
 
     # ---- per-leaf walker (visitor-as-map) ------------------------------------

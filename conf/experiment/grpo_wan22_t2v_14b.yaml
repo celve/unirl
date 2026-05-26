@@ -60,36 +60,35 @@ algorithm:
     timestep_fraction: [0.0, 0.2]
   sde_config:
     eta: ${sampling.sde_config.eta}
+  algorithms:
+    video:
+      name: diffusion_grpo
+      stage_attr: diffusion
+      clip_range: 1.0e-4
+      clip_schedule: constant
+      # WAN22 reuses WAN21Conditions (no extra slots; guidance_scale_2 is
+      # request-shape, lives on WAN22DiffusionParams).
+      conditions_cls: diffusionrl.models.wan21.conditions.WAN21Conditions
+      params:
+        # ALL request-shape params interpolate from the ``sampling`` block so
+        # a CLI override of e.g. ``+sampling.height=512`` propagates to BOTH
+        # rollout AND replay. Hardcoding any of ``num_inference_steps`` /
+        # ``height`` / ``width`` / ``num_frames`` / ``seed`` here would
+        # silently let rollout and replay use different shapes → logprob
+        # recomputation mismatch → GRPO ratio drift.
+        _target_: diffusionrl.models.wan22.diffusion.WAN22DiffusionParams
+        num_inference_steps: ${sampling.num_inference_steps}
+        guidance_scale: ${sampling.guidance_scale}
+        # guidance_scale_2: null   # fall back to guidance_scale
+        height: ${sampling.height}
+        width: ${sampling.width}
+        num_frames: ${sampling.num_frames}
+        seed: ${run.seed}
+        eta: ${sampling.sde_config.eta}
 
 # ----------------------------------------------------------------------
 # Training surface
 # ----------------------------------------------------------------------
-algorithms:
-  video:
-    _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
-    stage_attr: diffusion
-    clip_range: 1.0e-4
-    clip_schedule: constant
-    # WAN22 reuses WAN21Conditions (no extra slots; guidance_scale_2 is
-    # request-shape, lives on WAN22DiffusionParams).
-    conditions_cls: diffusionrl.models.wan21.conditions.WAN21Conditions
-    params:
-      # ALL request-shape params interpolate from the ``sampling`` block so
-      # a CLI override of e.g. ``+sampling.height=512`` propagates to BOTH
-      # rollout AND replay. Hardcoding any of ``num_inference_steps`` /
-      # ``height`` / ``width`` / ``num_frames`` / ``seed`` here would
-      # silently let rollout and replay use different shapes → logprob
-      # recomputation mismatch → GRPO ratio drift.
-      _target_: diffusionrl.models.wan22.diffusion.WAN22DiffusionParams
-      num_inference_steps: ${sampling.num_inference_steps}
-      guidance_scale: ${sampling.guidance_scale}
-      # guidance_scale_2: null   # fall back to guidance_scale
-      height: ${sampling.height}
-      width: ${sampling.width}
-      num_frames: ${sampling.num_frames}
-      seed: ${run.seed}
-      eta: ${sampling.sde_config.eta}
-
 placement:
   num_rollout_nodes: 0
   num_rollout_gpus_per_node: 0
@@ -100,37 +99,17 @@ rollout:
     forward_batch_size: 1
 
 training:
-  policy_source: diffusion
-  policies:
-    - _target_: diffusionrl.training.lora_policy.LoRAPolicy
-      rank: 64
-      alpha: 128
-      dropout: 0.0
-      # Same WAN attention / FFN / proj_out target suffixes as WAN21.
-      # peft's ``named_modules()`` walk on the WanDualTransformer
-      # composite matches under BOTH ``high_noise.*`` and
-      # ``low_noise.*`` prefixes (suffix match), so a single target list
-      # LoRA-wraps both sub-transformers — including the per-branch
-      # ``proj_out`` Linear at each composite root.
-      target_modules:
-        - attn1.to_q
-        - attn1.to_k
-        - attn1.to_v
-        - attn1.to_out.0
-        - attn2.to_q
-        - attn2.to_k
-        - attn2.to_v
-        - attn2.to_out.0
-        - ffn.net.0.proj
-        - ffn.net.2
-        - proj_out
-    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
-      cpu_offload: false
-      param_dtype: bf16
-      mixed_precision: true
-      fsdp_mode: full
-      reshard_after_forward: true
-      activation_checkpointing: true
+  lora:
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+  fsdp:
+    cpu_offload: false
+    param_dtype: bf16
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: true
   materialize:
     with_aux: []
   plan:
@@ -171,7 +150,7 @@ reward:
   aggregation_method: mean
   base_device: cuda
   components:
-    - name: video
+    video:
       weight: 1.0
       batch_size: 8
       inner_model_name: pickscore

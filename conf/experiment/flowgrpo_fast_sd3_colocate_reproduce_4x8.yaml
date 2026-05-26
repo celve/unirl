@@ -64,29 +64,28 @@ algorithm:
     num_sde_steps: 3
   sde_config:
     eta: ${sampling.sde_config.eta}
+  algorithms:
+    diffusion:
+      name: diffusion_grpo
+      stage_attr: diffusion
+      conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
+      clip_range: 1.0e-4
+      clip_schedule: constant
+      params:
+        _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
+        num_inference_steps: ${sampling.num_inference_steps}
+        guidance_scale: ${sampling.guidance_scale}
+        height: ${sampling.height}
+        width: ${sampling.width}
+        seed: ${run.seed}
+        sde_indices: null
+        eta: ${sampling.sde_config.eta}
+        init_same_noise: ${sampling.init_same_noise}
+        samples_per_prompt: ${algorithm.samples_per_prompt}
+        noise_group_ids: null
+        max_sequence_length: 256
 
 # -- Algorithms (per-slot config) --
-algorithms:
-  image:
-    _target_: diffusionrl.algorithms.DiffusionGRPO
-    stage_attr: diffusion
-    conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
-    clip_range: 1.0e-4
-    clip_schedule: constant
-    params:
-      _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
-      num_inference_steps: ${sampling.num_inference_steps}
-      guidance_scale: ${sampling.guidance_scale}
-      height: ${sampling.height}
-      width: ${sampling.width}
-      seed: ${run.seed}
-      sde_indices: null
-      eta: ${sampling.sde_config.eta}
-      init_same_noise: ${sampling.init_same_noise}
-      samples_per_prompt: ${algorithm.samples_per_prompt}
-      noise_group_ids: null
-      max_sequence_length: 256
-
 # -- Model (identical to reference) --
 model:
   pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,/apdcephfs_zwfy8/share_305110755/hunyuan/haonan/mmgrpo/diffusionRL/models/local/sd3.5-medium}
@@ -123,32 +122,28 @@ placement:
 
 # -- Training (32 actors; same effective gradient as reference) --
 training:
-  policies:
-    # LoRA (identical to reference: rank=32, alpha=64)
-    - _target_: diffusionrl.training.lora_policy.LoRAPolicy
-      rank: 32
-      alpha: 64
-      dropout: 0.0
-      target_modules:
-        - attn.add_k_proj
-        - attn.add_q_proj
-        - attn.add_v_proj
-        - attn.to_add_out
-        - attn.to_k
-        - attn.to_out.0
-        - attn.to_q
-        - attn.to_v
-      bias: none
-      task_type: FEATURE_EXTRACTION
-    # FSDP wraps the LoRA-adapted module
-    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
-      cpu_offload: false
-      param_dtype: bf16
-      mixed_precision: true
-      fsdp_mode: full
-      reshard_after_forward: true
-      activation_checkpointing: true
-  policy_source: diffusion
+  lora:
+    rank: 32
+    alpha: 64
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    target_modules:
+      - attn.add_k_proj
+      - attn.add_q_proj
+      - attn.add_v_proj
+      - attn.to_add_out
+      - attn.to_k
+      - attn.to_out.0
+      - attn.to_q
+      - attn.to_v
+  fsdp:
+    cpu_offload: false
+    param_dtype: bf16
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: true
   topology:
     actor_count: 32                   # 4 nodes x 8 GPUs
   plan:
@@ -184,7 +179,7 @@ reward:
   aggregation_method: mean
   base_device: cuda
   components:
-    - name: pickscore
+    pickscore:
       weight: 1.0
       batch_size: 8
       processor_id: /apdcephfs_zwfy8/share_305110755/hunyuan/haonan/mmgrpo/diffusionRL/models/local/reward_models/CLIP-ViT-H-14

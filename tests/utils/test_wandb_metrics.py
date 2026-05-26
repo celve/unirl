@@ -1,115 +1,112 @@
-"""Tests for compute_rollout_batch_metrics per-component reward stats."""
+"""Tests for ``compute_rollout_resp_metrics`` — track-aware metric builder.
+
+Replaces the legacy ``compute_rollout_batch_metrics`` tests that
+consumed ``TrainingBatch`` payloads. The new entrypoint reads
+per-track rewards / advantages / component_rewards / group_ids
+directly off a :class:`RolloutResp`.
+"""
 
 from __future__ import annotations
 
-import pytest
+from typing import List, Optional
+
 import torch
 
-from diffusionrl.utils.wandb_metrics import compute_rollout_batch_metrics
+from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
+from diffusionrl.utils.wandb_metrics import compute_rollout_resp_metrics
 
 
-class _BatchStub:
-    """Duck-typed stand-in for `TrainingBatch` -- fed via monkeypatched `_iter_batches`."""
+def _make_track(
+    *,
+    n: int,
+    parent_ids: Optional[List[str]],
+    rewards: Optional[List[float]] = None,
+    advantages: Optional[List[float]] = None,
+    component_rewards: Optional[dict] = None,
+) -> RolloutTrack:
+    return RolloutTrack(
+        sample_ids=[f"s{i}" for i in range(n)],
+        parent_ids=list(parent_ids) if parent_ids is not None else None,
+        rewards=torch.tensor(rewards, dtype=torch.float32) if rewards is not None else None,
+        advantages=torch.tensor(advantages, dtype=torch.float32) if advantages is not None else None,
+        component_rewards=(
+            {k: torch.tensor(v, dtype=torch.float32) for k, v in component_rewards.items()}
+            if component_rewards
+            else None
+        ),
+    )
 
-    def __init__(self, *, rewards=None, advantages=None, component_rewards=None, batch_size=0):
-        self.rewards = rewards
-        self.advantages = advantages
-        self.component_rewards = component_rewards
-        self.batch_size = batch_size
-        self.group_ids = None
-        self.has_trajectory_rl_data = False
+
+def test_single_track_keys_unprefixed():
+    track = _make_track(
+        n=4,
+        parent_ids=["g0", "g0", "g1", "g1"],
+        rewards=[0.0, 2.0, 4.0, 6.0],
+        advantages=[-1.0, 1.0, -1.0, 1.0],
+    )
+    resp = RolloutResp(tracks={"image": track})
+
+    metrics = compute_rollout_resp_metrics(resp=resp)
+    assert metrics["num_samples"] == 4.0
+    assert metrics["reward_mean"] == 3.0
+    assert metrics["reward_min"] == 0.0
+    assert metrics["reward_max"] == 6.0
+    assert metrics["advantage_mean"] == 0.0
+    # No keys are namespaced under the track name in single-track mode.
+    assert not any(k.startswith("image_") for k in metrics)
 
 
-def _patch_iter(monkeypatch, batches):
-    from diffusionrl.utils import wandb_metrics
+def test_multi_track_keys_namespaced():
+    image = _make_track(
+        n=2,
+        parent_ids=["g", "g"],
+        rewards=[1.0, 3.0],
+    )
+    refined = _make_track(
+        n=2,
+        parent_ids=["p", "p"],
+        rewards=[5.0, 7.0],
+    )
+    resp = RolloutResp(tracks={"refined": refined, "image": image})
 
-    monkeypatch.setattr(wandb_metrics, "_iter_batches", lambda training_data: batches)
+    metrics = compute_rollout_resp_metrics(resp=resp)
+    # Per-track prefixes are used when more than one track is present.
+    assert metrics["image_reward_mean"] == 2.0
+    assert metrics["refined_reward_mean"] == 6.0
+    # No unprefixed reward_mean — every track is namespaced.
+    assert "reward_mean" not in metrics
 
 
-class TestComputeRolloutBatchMetrics:
-    def test_no_components_emits_only_aggregate(self, monkeypatch):
-        b = _BatchStub(
-            rewards=torch.tensor([1.0, 2.0, 3.0]),
-            component_rewards=None,
-            batch_size=3,
-        )
-        _patch_iter(monkeypatch, [b])
-        m = compute_rollout_batch_metrics(training_data=None)
-        assert m["reward_mean"] == pytest.approx(2.0)
-        per_comp = [k for k in m if k.startswith("reward_") and k.endswith("_mean") and k != "reward_mean"]
-        assert per_comp == []
+def test_zero_std_groups_counted_when_group_ids_align():
+    # Two groups of two; first group has std 0 (both rewards equal).
+    track = _make_track(
+        n=4,
+        parent_ids=["g0", "g0", "g1", "g1"],
+        rewards=[1.0, 1.0, 1.0, 3.0],
+    )
+    resp = RolloutResp(tracks={"image": track})
+    metrics = compute_rollout_resp_metrics(resp=resp)
+    assert metrics["group_count"] == 2.0
+    assert metrics["zero_std_group_count"] == 1.0
+    assert metrics["zero_std_group_ratio"] == 0.5
 
-    def test_with_components_emits_both(self, monkeypatch):
-        b = _BatchStub(
-            rewards=torch.tensor([0.7, 0.5]),
-            component_rewards={
-                "pickscore": torch.tensor([0.8, 0.6]),
-                "hpsv2": torch.tensor([0.6, 0.4]),
-            },
-            batch_size=2,
-        )
-        _patch_iter(monkeypatch, [b])
-        m = compute_rollout_batch_metrics(training_data=None)
-        assert m["reward_mean"] == pytest.approx(0.6)
-        assert m["reward_pickscore_mean"] == pytest.approx(0.7)
-        assert m["reward_pickscore_min"] == pytest.approx(0.6)
-        assert m["reward_pickscore_max"] == pytest.approx(0.8)
-        assert m["reward_hpsv2_mean"] == pytest.approx(0.5)
 
-    def test_multi_batch_concat(self, monkeypatch):
-        b1 = _BatchStub(
-            rewards=torch.tensor([1.0]),
-            component_rewards={"pickscore": torch.tensor([1.0])},
-            batch_size=1,
-        )
-        b2 = _BatchStub(
-            rewards=torch.tensor([3.0]),
-            component_rewards={"pickscore": torch.tensor([3.0])},
-            batch_size=1,
-        )
-        _patch_iter(monkeypatch, [b1, b2])
-        m = compute_rollout_batch_metrics(training_data=None)
-        assert m["reward_mean"] == pytest.approx(2.0)
-        assert m["reward_pickscore_mean"] == pytest.approx(2.0)
+def test_component_rewards_emit_per_metric_stats():
+    track = _make_track(
+        n=3,
+        parent_ids=["g", "g", "g"],
+        rewards=[0.0, 2.0, 4.0],
+        component_rewards={"clip/score": [0.5, 1.0, 1.5]},
+    )
+    resp = RolloutResp(tracks={"image": track})
+    metrics = compute_rollout_resp_metrics(resp=resp)
+    # '/' in component name flattens to '_' under the rollout/ prefix.
+    assert "reward_clip_score_mean" in metrics
+    assert metrics["reward_clip_score_mean"] == 1.0
 
-    def test_slash_in_component_name_normalized(self, monkeypatch):
-        b = _BatchStub(
-            rewards=torch.tensor([0.5]),
-            component_rewards={"a/b": torch.tensor([0.5])},
-            batch_size=1,
-        )
-        _patch_iter(monkeypatch, [b])
-        m = compute_rollout_batch_metrics(training_data=None)
-        assert "reward_a_b_mean" in m
-        assert "reward_a/b_mean" not in m
 
-    def test_heterogeneous_keys_across_batches(self, monkeypatch):
-        b1 = _BatchStub(
-            rewards=torch.tensor([0.5, 0.7]),
-            component_rewards={"pickscore": torch.tensor([0.5, 0.7])},
-            batch_size=2,
-        )
-        b2 = _BatchStub(
-            rewards=torch.tensor([0.2]),
-            component_rewards={"hpsv2": torch.tensor([0.2])},
-            batch_size=1,
-        )
-        _patch_iter(monkeypatch, [b1, b2])
-        m = compute_rollout_batch_metrics(training_data=None)
-        assert m["reward_pickscore_mean"] == pytest.approx(0.6)
-        assert m["reward_hpsv2_mean"] == pytest.approx(0.2)
-
-    def test_empty_tensor_skipped(self, monkeypatch):
-        # An empty per-component tensor is silently skipped (no metric, no crash).
-        b = _BatchStub(
-            rewards=torch.tensor([0.5]),
-            component_rewards={
-                "pickscore": torch.tensor([]),
-                "hpsv2": torch.tensor([0.5]),
-            },
-            batch_size=1,
-        )
-        _patch_iter(monkeypatch, [b])
-        m = compute_rollout_batch_metrics(training_data=None)
-        assert "reward_pickscore_mean" not in m
-        assert m["reward_hpsv2_mean"] == pytest.approx(0.5)
+def test_no_rewards_yields_only_num_samples():
+    track = _make_track(n=2, parent_ids=["g", "g"])
+    resp = RolloutResp(tracks={"image": track})
+    metrics = compute_rollout_resp_metrics(resp=resp)
+    assert metrics == {"num_samples": 2.0}

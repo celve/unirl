@@ -31,19 +31,19 @@ neither owns a σ builder nor reads model-specific scheduler config.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from diffusionrl.models.types.pipeline import Pipeline
 from diffusionrl.sde.kernels import FlowSDEStrategy, StepStrategy
 from diffusionrl.types.primitives import Texts
 from diffusionrl.types.rollout_req import RolloutReq
-from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
+from diffusionrl.types.sampling import DiffusionSamplingParams, get_diffusion_params
 
 from .bundle import QwenImageBundle
 from .conditions import QwenImageConditions
 from .config import QwenImagePipelineConfig
 from .diffusion import (
-    QwenImageDiffusionParams,
     QwenImageDiffusionStage,
     QwenImageDiffusionStep,
 )
@@ -67,8 +67,8 @@ class QwenImagePipeline(Pipeline):
     - ``conditions["text"]: TextEmbedCondition``; plus
       ``conditions["negative_text"]: TextEmbedCondition`` when negative
       prompts were supplied.
-    - ``rollout_traces["image"]: LatentSegment``.
-    - ``decoded["image"]: Images``.
+    - ``tracks["image"].segment: LatentSegment``.
+    - ``tracks["image"].decoded: Images``.
     """
 
     def __init__(
@@ -213,17 +213,7 @@ class QwenImagePipeline(Pipeline):
                 f"{len(negatives.texts)} != text length {len(texts.texts)}"
             )
 
-        # Filter stage_params["diffusion"] down to fields that
-        # QwenImageDiffusionParams actually accepts. Upstream drivers
-        # (e.g. RolloutPipeline) stash rollout-metadata keys here
-        # too — most notably ``num_samples_per_prompt`` — and the
-        # dataclass constructor rejects unknown kwargs.
-        import dataclasses as _dc
-
-        raw_dict: Dict[str, Any] = dict(req.stage_params.get("diffusion") or {})
-        allowed = {f.name for f in _dc.fields(QwenImageDiffusionParams)}
-        params_dict = {k: v for k, v in raw_dict.items() if k in allowed}
-        params = QwenImageDiffusionParams(**params_dict)
+        params: DiffusionSamplingParams = get_diffusion_params(req.sampling_params)
 
         text_cond = self.text_embed.embed(texts)
         # CFG empty negative: Qwen-Image upstream (diffusers v0.37.1
@@ -257,11 +247,15 @@ class QwenImagePipeline(Pipeline):
         images = self.vae_decode.decode(latent_seg)
 
         return RolloutResp(
-            sample_ids=list(req.sample_ids),
-            group_ids=list(req.group_ids),
-            conditions=qwen_conds.to_dict(),
-            rollout_traces={"image": latent_seg},
-            decoded={"image": images},
+            tracks={
+                "image": RolloutTrack(
+                    sample_ids=list(req.sample_ids),
+                    parent_ids=list(req.group_ids),
+                    conditions=qwen_conds.to_dict(),
+                    segment=latent_seg,
+                    decoded=images,
+                ),
+            }
         )
 
 

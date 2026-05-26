@@ -18,15 +18,15 @@ those slots via the ``HunyuanStaticCache``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from diffusionrl.types.conditions import ImageEmbedCondition, ImageLatentCondition
 from diffusionrl.types.primitives import Images, Texts
 from diffusionrl.types.rollout_req import RolloutReq
-from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
+from diffusionrl.types.sampling import DiffusionSamplingParams, get_diffusion_params
 
 from ..conditions import HunyuanImage3DiffusionConditions
-from ..diffusion import HunyuanImage3DiffusionParams
 
 if TYPE_CHECKING:
     from ..pipeline import HunyuanImage3Pipeline
@@ -56,8 +56,7 @@ def generate(pipeline: "HunyuanImage3Pipeline", req: RolloutReq) -> RolloutResp:
             f"{len(negatives.texts)} != text length {len(texts.texts)}"
         )
 
-    diff_kwargs: Dict[str, Any] = dict(req.stage_params.get("diffusion") or {})
-    params = HunyuanImage3DiffusionParams(**diff_kwargs)
+    params: DiffusionSamplingParams = get_diffusion_params(req.sampling_params)
     if req.sigmas is None:
         raise ValueError(
             "HunyuanImage3 it2i: req.sigmas is None. Engine adapter must call "
@@ -93,7 +92,7 @@ def generate(pipeline: "HunyuanImage3Pipeline", req: RolloutReq) -> RolloutResp:
         neg_strs = ["" for _ in texts.texts]
     else:
         neg_strs = None
-    bot_task = str(req.stage_params.get("bot_task", "image"))
+    bot_task = str(req.stage_config.get("bot_task", "image"))
     mm = pipeline.bundle.build_t2i_inputs(
         list(texts.texts),
         neg_strs,
@@ -125,9 +124,13 @@ def generate(pipeline: "HunyuanImage3Pipeline", req: RolloutReq) -> RolloutResp:
     edited = pipeline.vae_decode.decode(latent_seg)
 
     return RolloutResp(
-        sample_ids=list(req.sample_ids),
-        group_ids=list(req.group_ids),
-        conditions=diff_conds.to_dict(),
-        rollout_traces={"image": latent_seg},
-        decoded={"image": edited},
+        tracks={
+            "image": RolloutTrack(
+                sample_ids=list(req.sample_ids),
+                parent_ids=list(req.group_ids),
+                conditions=diff_conds.to_dict(),
+                segment=latent_seg,
+                decoded=edited,
+            ),
+        }
     )

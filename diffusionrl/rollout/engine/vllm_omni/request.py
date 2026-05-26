@@ -30,7 +30,7 @@ Modality → upstream task mapping (mirrors upstream ``_TASK_PRESETS``):
     t2t  → ("t2t",        "en_unified", ["text"])
 
 The bot_task can be overridden per-request via
-``stage_params["bot_task"]`` (e.g. ``"recaption"`` swaps the trigger tag
+``stage_config["bot_task"]`` (e.g. ``"recaption"`` swaps the trigger tag
 from ``<think>`` to ``<recaption>``); when omitted, the default for
 modality is used.
 """
@@ -44,6 +44,7 @@ import torch
 from diffusionrl.config.require import require
 from diffusionrl.types.primitives import Image, Images, Texts
 from diffusionrl.types.rollout_req import RolloutReq
+from diffusionrl.types.sampling import get_ar_params, get_diffusion_params
 
 if TYPE_CHECKING:
     from diffusionrl.rollout.engine.vllm_omni.config import VLLMOmniEngineConfig
@@ -59,20 +60,20 @@ _TASK_DEFAULTS: Dict[str, Tuple[str, str, List[str]]] = {
 }
 
 
-def _resolve_task(modality: str, stage_params: Dict[str, Any]) -> Tuple[str, str, List[str]]:
+def _resolve_task(modality: str, stage_config: Dict[str, Any]) -> Tuple[str, str, List[str]]:
     """Resolve ``(task_key, sys_type, modalities)`` with optional overrides.
 
-    ``stage_params["bot_task"]`` swaps the trigger tag used by upstream's
-    chat template (``think`` / ``recaption``). ``stage_params["sys_type"]``
+    ``stage_config["bot_task"]`` swaps the trigger tag used by upstream's
+    chat template (``think`` / ``recaption``). ``stage_config["sys_type"]``
     overrides the system-prompt key (``en_unified`` / ``en_vanilla``).
     """
     if modality not in _TASK_DEFAULTS:
         raise ValueError(f"_resolve_task: unsupported modality {modality!r}. Choose one of {list(_TASK_DEFAULTS)}.")
     default_task, default_sys, modalities = _TASK_DEFAULTS[modality]
 
-    sys_type = stage_params.get("sys_type") or default_sys
+    sys_type = stage_config.get("sys_type") or default_sys
 
-    bot_task = stage_params.get("bot_task")
+    bot_task = stage_config.get("bot_task")
     if bot_task and modality in ("t2i", "it2i", "t2i_think_recaption"):
         # think / recaption / vanilla — translate to upstream task key.
         if bot_task == "vanilla" and modality == "t2i":
@@ -156,32 +157,26 @@ def _to_omni_sd35_t2i(
     "negative_prompt": ...}``). Sampling-params list is single-element:
     ``[dit_sampling]``.
     """
-    stage_params = req.stage_params or {}
     if req.primitives.get("image") is not None:
         raise ValueError("modality='sd35_t2i' does not accept req.primitives['image']")
 
     texts = _texts_from_req(req)
-    diff_params = stage_params.get("diffusion") or {}
+    diff_params = get_diffusion_params(req.sampling_params)
 
-    height = int(diff_params.get("height", cfg.default_height))
-    width = int(diff_params.get("width", cfg.default_width))
-    negative_prompt = str(diff_params.get("negative_prompt", "") or "")
+    height = int(getattr(diff_params, "height", cfg.default_height))
+    width = int(getattr(diff_params, "width", cfg.default_width))
+    negative_prompt = str(getattr(diff_params, "negative_prompt", "") or "")
 
     prompts: List[Any] = [{"prompt": text, "negative_prompt": negative_prompt} for text in texts.texts]
 
-    num_inference_steps = int(diff_params.get("num_inference_steps", cfg.default_num_inference_steps))
+    num_inference_steps = int(getattr(diff_params, "num_inference_steps", cfg.default_num_inference_steps))
     diff_kwargs: Dict[str, Any] = dict(
         height=height,
         width=width,
         num_inference_steps=num_inference_steps,
-        guidance_scale=float(diff_params.get("guidance_scale", cfg.default_guidance_scale)),
-        # HI3 upstream gates its use of req.sampling_params.guidance_scale on
-        # this flag (vllm-omni/.../pipeline_hunyuan_image3.py:1326-1327);
-        # without it the request's guidance_scale is silently ignored and
-        # the forward fn default kicks in. SD3 upstream doesn't read this
-        # field — setting it here is harmless on that path.
+        guidance_scale=float(getattr(diff_params, "guidance_scale", cfg.default_guidance_scale)),
         guidance_scale_provided=True,
-        eta=float(diff_params.get("eta", cfg.default_eta)),
+        eta=float(getattr(diff_params, "eta", cfg.default_eta)),
         return_trajectory_latents=True,
         return_trajectory_decoded=False,
         num_outputs_per_prompt=1,
@@ -189,10 +184,10 @@ def _to_omni_sd35_t2i(
     sigmas = _sigmas_list_from_req(req, num_inference_steps)
     if sigmas is not None:
         diff_kwargs["sigmas"] = sigmas
-    max_seq_len = diff_params.get("max_sequence_length")
+    max_seq_len = getattr(diff_params, "max_sequence_length", None)
     if max_seq_len is not None:
         diff_kwargs["max_sequence_length"] = int(max_seq_len)
-    seed = diff_params.get("seed")
+    seed = getattr(diff_params, "seed", None)
     if seed is not None:
         diff_kwargs["seed"] = int(seed)
 
@@ -210,11 +205,11 @@ def _to_omni_sd35_t2i(
     #     ``int(req.request_id.split('_', 1)[0])`` to pick this request's
     #     row. We source the tensor from ``RolloutReq.request_conditions``
     #     (CONCAT field — sliced correctly under multi-actor sharding;
-    #     ``stage_params`` is SHARED and would broadcast the full-batch
+    #     ``sampling_params`` is SHARED and would broadcast the full-batch
     #     tensor to every shard).
     # When neither key is set we omit ``extra_args`` entirely.
     extra_args = dict(diff_kwargs.get("extra_args") or {})
-    sde_indices = diff_params.get("sde_indices")
+    sde_indices = getattr(diff_params, "sde_indices", None)
     if sde_indices is not None:
         extra_args["sde_indices"] = sorted({int(i) for i in sde_indices})
     initial_latent_cond = (req.request_conditions or {}).get("initial_latents")
@@ -272,8 +267,8 @@ def _to_omni_per_stage(
         build_prompt_tokens,
     )
 
-    stage_params = req.stage_params or {}
-    task, sys_type, modalities_field = _resolve_task(modality, stage_params)
+    stage_config = req.stage_config or {}
+    task, sys_type, modalities_field = _resolve_task(modality, stage_config)
 
     texts = _texts_from_req(req)
     n = len(texts.texts)
@@ -285,11 +280,11 @@ def _to_omni_per_stage(
     if not has_image_input and req.primitives.get("image") is not None:
         raise ValueError(f"modality={modality!r} does not accept req.primitives['image']")
 
-    diff_params = stage_params.get("diffusion") or {}
-    ar_params = stage_params.get("ar") or {}
+    diff_params = get_diffusion_params(req.sampling_params)
+    ar_params = get_ar_params(req.sampling_params) or {}
 
-    height = int(diff_params.get("height", cfg.default_height))
-    width = int(diff_params.get("width", cfg.default_width))
+    height = int(getattr(diff_params, "height", cfg.default_height))
+    width = int(getattr(diff_params, "width", cfg.default_width))
 
     prompts: List[Any] = []
     for i, text in enumerate(texts.texts):
@@ -337,17 +332,14 @@ def _to_omni_per_stage(
     # field on OmniDiffusionSamplingParams (data.py:252); our
     # RLHunyuanImage3Pipeline.forward reads it directly off
     # req.sampling_params.eta for the scheduler swap.
-    num_inference_steps = int(diff_params.get("num_inference_steps", cfg.default_num_inference_steps))
+    num_inference_steps = int(getattr(diff_params, "num_inference_steps", cfg.default_num_inference_steps))
     diff_kwargs: Dict[str, Any] = dict(
         height=height,
         width=width,
         num_inference_steps=num_inference_steps,
-        guidance_scale=float(diff_params.get("guidance_scale", cfg.default_guidance_scale)),
-        # HI3 upstream gates its use of req.sampling_params.guidance_scale on
-        # this flag (vllm-omni/.../pipeline_hunyuan_image3.py:1326-1327);
-        # without it the request's guidance_scale is silently ignored.
+        guidance_scale=float(getattr(diff_params, "guidance_scale", cfg.default_guidance_scale)),
         guidance_scale_provided=True,
-        eta=float(diff_params.get("eta", cfg.default_eta)),
+        eta=float(getattr(diff_params, "eta", cfg.default_eta)),
         return_trajectory_latents=True,
         return_trajectory_decoded=False,
         num_outputs_per_prompt=1,
@@ -355,13 +347,12 @@ def _to_omni_per_stage(
     sigmas = _sigmas_list_from_req(req, num_inference_steps)
     if sigmas is not None:
         diff_kwargs["sigmas"] = sigmas
-    seed = diff_params.get("seed")
+    seed = getattr(diff_params, "seed", None)
     if seed is not None:
         diff_kwargs["seed"] = int(seed)
 
-    # See _to_omni_sd35_t2i for the rationale on this extra_args plumbing.
     extra_args = dict(diff_kwargs.get("extra_args") or {})
-    sde_indices = diff_params.get("sde_indices")
+    sde_indices = getattr(diff_params, "sde_indices", None)
     if sde_indices is not None:
         extra_args["sde_indices"] = sorted({int(i) for i in sde_indices})
 

@@ -1,13 +1,10 @@
 """Shared helpers for sync/async training entrypoints."""
 
-import logging
 import os
 import re
 from typing import Optional
 
 from omegaconf import DictConfig
-
-logger = logging.getLogger(__name__)
 
 
 def should_save(rollout_id: int, cfg: DictConfig) -> bool:
@@ -50,20 +47,7 @@ def maybe_restore_start_rollout_id_from_checkpoint(cfg: DictConfig, checkpoint_p
     return next_rollout_id
 
 
-def collect_rollout_batch_metrics(*, ray_module, batch_ref, compute_rollout_batch_metrics_fn) -> dict:
-    """Best-effort materialization for rollout-level observability only."""
-    if batch_ref is None:
-        return {}
-    try:
-        training_data = ray_module.get(batch_ref)
-    except Exception as exc:
-        logger.warning("Failed to materialize training batch for rollout metrics: %s", exc)
-        return {}
-    return compute_rollout_batch_metrics_fn(training_data=training_data)
-
-
 __all__ = [
-    "collect_rollout_batch_metrics",
     "should_eval",
     "should_log",
     "should_save",

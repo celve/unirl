@@ -37,6 +37,7 @@ from diffusionrl.rollout.engine import chunked_engine_generate_req
 from diffusionrl.transfer.buffer import Buffer
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.sampling import get_diffusion_params
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,9 @@ class RolloutActor(ConfigActor, RolloutWeightSyncMixin, DistributedMixin, Rollou
         self._setup_distributed_env()
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.algorithm = build(self._cfg.algorithm)
+        self._adv_scope = str(getattr(self._cfg.algorithm, "adv_normalization_scope", "group"))
+        self._adv_use_global_std = bool(getattr(self._cfg.algorithm, "use_global_std", False))
+        self._adv_samples_per_prompt = max(1, int(getattr(self._cfg.algorithm, "samples_per_prompt", 1)))
         self._reward_config = self._cfg.reward
         # One-shot engine construction. ``strategy`` rides as a ctor kwarg;
         # vllm-omni currently stores it as an attribute and does not consume
@@ -128,7 +131,7 @@ class RolloutActor(ConfigActor, RolloutWeightSyncMixin, DistributedMixin, Rollou
         self.engine = build(
             self._cfg.rollout.engine,
             device=self._device,
-            strategy=build(self._cfg.sampling.sde_strategy),
+            strategy=build(get_diffusion_params(self._cfg.sampling).sde_strategy),
             rank=self.rank,
             model_config=materialize(self._cfg.model),
         )

@@ -11,15 +11,45 @@ and per-step iteration are owned by ``stage.replay(...)``; the algorithm is
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
+from dataclasses import field as dc_field
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Type
 
 import torch
 
+from diffusionrl.config.registration import register_config
 from diffusionrl.types.conditions import Condition
 from diffusionrl.types.segments.latent import LatentSegment
 from diffusionrl.types.segments.text import TextSegment
 
-from .base import AlgorithmStepResult, StageAlgorithm, gather_sde_field, typed_conditions
+from .base import AlgorithmStepResult, BaseAlgorithmConfig, StageAlgorithm, gather_sde_field, typed_conditions
+
+
+@register_config(
+    group="algorithm",
+    name="diffusion_grpo",
+    target="diffusionrl.algorithms.grpo.DiffusionGRPO",
+)
+@dataclass
+class DiffusionGRPOConfig(BaseAlgorithmConfig):
+    stage_attr: str = "diffusion"
+    conditions_cls: str = ""
+    clip_range: float = 1e-4
+    clip_schedule: str = "constant"
+    params: Any = dc_field(default=None)
+
+
+@register_config(
+    group="algorithm",
+    name="ar_grpo",
+    target="diffusionrl.algorithms.grpo.ARGRPO",
+)
+@dataclass
+class ARGRPOConfig(BaseAlgorithmConfig):
+    stage_attr: str = "ar"
+    conditions_cls: str = ""
+    clip_range: float = 1e-4
+    clip_schedule: str = "constant"
 
 
 def _resolve_clip_range_from_schedule(clip_range: float, schedule: str, progress: float) -> float:

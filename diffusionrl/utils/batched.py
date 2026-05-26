@@ -356,6 +356,44 @@ def _slice_value(value: Any, start: int, end: int, batch_size: int) -> Any:
     return value
 
 
+def _repeat_interleave_value(value: Any, n: int, batch_size: int) -> Any:
+    """Replicate a per-sample value ``n`` times along the batch axis (group-by-parent)."""
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        if value.dim() > 0 and int(value.shape[0]) == batch_size:
+            return value.repeat_interleave(n, dim=0)
+        return value
+    if isinstance(value, list) and len(value) == batch_size:
+        return [v for v in value for _ in range(n)]
+    if isinstance(value, tuple) and len(value) == batch_size:
+        return tuple(v for v in value for _ in range(n))
+    if isinstance(value, dict):
+        return {k: _repeat_interleave_value(v, n, batch_size) for k, v in value.items()}
+    if isinstance(value, Batched):
+        return value.repeat_interleave(n)
+    return value
+
+
+def _repeat_interleave_value(value: Any, n: int, batch_size: int) -> Any:
+    """Replicate a per-sample value ``n`` times along the batch axis (group-by-parent)."""
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        if value.dim() > 0 and int(value.shape[0]) == batch_size:
+            return value.repeat_interleave(n, dim=0)
+        return value
+    if isinstance(value, list) and len(value) == batch_size:
+        return [v for v in value for _ in range(n)]
+    if isinstance(value, tuple) and len(value) == batch_size:
+        return tuple(v for v in value for _ in range(n))
+    if isinstance(value, dict):
+        return {k: _repeat_interleave_value(v, n, batch_size) for k, v in value.items()}
+    if isinstance(value, Batched):
+        return value.repeat_interleave(n)
+    return value
+
+
 def _move_value(value: Any, device: Union[str, torch.device]) -> Any:
     """Move tensors in a value tree to *device*."""
     if value is None:
@@ -479,6 +517,76 @@ def _select_packed_data(
         return value[:0].clone()
     chunks = [value[int(cu[i].item()) : int(cu[i + 1].item())] for i in indices]
     return torch.cat(chunks, dim=0)
+
+
+def _repeat_interleave_packed_data(
+    value: Optional[torch.Tensor],
+    n: int,
+    cu: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    """Repeat each per-sample chunk ``n`` times along dim 0 (group-by-parent order)."""
+    if value is None:
+        return None
+    if cu is None:
+        raise ValueError(
+            "packed_field repeat_interleave requires _packed_cu_seqlens to be populated; "
+            "construct via the regular dataclass __init__ with per-sample lists."
+        )
+    if n <= 0:
+        return value[:0].clone()
+    if n == 1:
+        return value.clone()
+    chunks: List[torch.Tensor] = []
+    for i in range(int(cu.numel()) - 1):
+        chunk = value[int(cu[i].item()) : int(cu[i + 1].item())]
+        for _ in range(n):
+            chunks.append(chunk)
+    return torch.cat(chunks, dim=0) if chunks else value[:0].clone()
+
+
+def _repeat_interleave_cu_seqlens(cu: torch.Tensor, n: int) -> torch.Tensor:
+    """Rebuild cu_seqlens after repeating each chunk ``n`` times (group-by-parent order)."""
+    sizes = (cu[1:] - cu[:-1]).tolist()
+    new_sizes = [s for s in sizes for _ in range(n)]
+    cu_list = [0]
+    for s in new_sizes:
+        cu_list.append(cu_list[-1] + s)
+    return torch.tensor(cu_list, dtype=cu.dtype, device=cu.device)
+
+
+def _repeat_interleave_packed_data(
+    value: Optional[torch.Tensor],
+    n: int,
+    cu: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    """Repeat each per-sample chunk ``n`` times along dim 0 (group-by-parent order)."""
+    if value is None:
+        return None
+    if cu is None:
+        raise ValueError(
+            "packed_field repeat_interleave requires _packed_cu_seqlens to be populated; "
+            "construct via the regular dataclass __init__ with per-sample lists."
+        )
+    if n <= 0:
+        return value[:0].clone()
+    if n == 1:
+        return value.clone()
+    chunks: List[torch.Tensor] = []
+    for i in range(int(cu.numel()) - 1):
+        chunk = value[int(cu[i].item()) : int(cu[i + 1].item())]
+        for _ in range(n):
+            chunks.append(chunk)
+    return torch.cat(chunks, dim=0) if chunks else value[:0].clone()
+
+
+def _repeat_interleave_cu_seqlens(cu: torch.Tensor, n: int) -> torch.Tensor:
+    """Rebuild cu_seqlens after repeating each chunk ``n`` times (group-by-parent order)."""
+    sizes = (cu[1:] - cu[:-1]).tolist()
+    new_sizes = [s for s in sizes for _ in range(n)]
+    cu_list = [0]
+    for s in new_sizes:
+        cu_list.append(cu_list[-1] + s)
+    return torch.tensor(cu_list, dtype=cu.dtype, device=cu.device)
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +800,49 @@ class Batched:
         instance = type(self)(**kwargs)
         if has_packed:
             new_cu = _slice_cu_seqlens(cu, start, end) if cu is not None else None
+            object.__setattr__(instance, "_packed_cu_seqlens", new_cu)
+        return instance
+
+    def repeat_interleave(self: T, n: int) -> T:
+        """Replicate each sample ``n`` times along the batch dimension (group-by-parent).
+
+        For each ``CONCAT`` field, applies ``torch.repeat_interleave(t, n,
+        dim=0)`` to tensors and equivalent list-replication to lists/dicts.
+        Recurses into nested ``Batched`` values. ``SHARED`` and reduction-kind
+        fields are untouched (their semantics are batch-shared metadata, which
+        stays identical across replicated samples).
+
+        For ``PACKED`` fields, each per-sample chunk is duplicated ``n`` times
+        along dim 0 in group-by-parent order (parent-0 children contiguous,
+        then parent-1, …) and ``cu_seqlens`` is rebuilt to reflect the
+        expanded chunk count. Mirrors the ``select`` / ``slice`` walker
+        pattern.
+
+        ``n == 1`` clones; ``n == 0`` returns an empty container.
+        """
+        if n < 0:
+            raise ValueError(f"repeat_interleave: n must be non-negative, got {n}")
+        if n == 1:
+            return self.clone()
+        bs = self.batch_size
+        cu = self._packed_cu_seqlens
+        has_packed = any(
+            _field_kind(f) is FieldKind.PACKED
+            for f in dc_fields(self)  # type: ignore[arg-type]
+        )
+        kwargs: Dict[str, Any] = {}
+        for f in dc_fields(self):  # type: ignore[arg-type]
+            val = getattr(self, f.name)
+            kind = _field_kind(f)
+            if kind is FieldKind.CONCAT:
+                kwargs[f.name] = _repeat_interleave_value(val, n, bs)
+            elif kind is FieldKind.PACKED:
+                kwargs[f.name] = _repeat_interleave_packed_data(val, n, cu)
+            else:
+                kwargs[f.name] = val
+        instance = type(self)(**kwargs)
+        if has_packed:
+            new_cu = _repeat_interleave_cu_seqlens(cu, n) if cu is not None else None
             object.__setattr__(instance, "_packed_cu_seqlens", new_cu)
         return instance
 

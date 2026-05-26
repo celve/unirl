@@ -212,7 +212,7 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
             top_p=float(sampling_params.top_p),
             top_k=int(sampling_params.top_k),
         )
-        max_new = int(sampling_params.max_tokens)
+        max_new = int(sampling_params.max_new_tokens)
 
         # Pre-build a ``HunyuanStaticCache`` sized for prompt + max_new_tokens,
         # mirroring upstream ``_prepare_model_inputs`` (hunyuan.py:2326-2333).

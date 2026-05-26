@@ -1,6 +1,7 @@
 """Index schedulers used by GRPO-style algorithms."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Type, Union
 
@@ -72,7 +73,7 @@ def normalize_timestep_fraction(
     timestep_fraction: Union[float, Tuple[float, float], List[float]],
 ) -> Tuple[float, float]:
     """Normalize timestep_fraction to a ``(start, end)`` tuple."""
-    if isinstance(timestep_fraction, (list, tuple)):
+    if isinstance(timestep_fraction, Sequence):
         if len(timestep_fraction) != 2:
             raise ValueError(f"timestep_fraction tuple must have exactly 2 elements, got {len(timestep_fraction)}")
         start, end = float(timestep_fraction[0]), float(timestep_fraction[1])

@@ -28,12 +28,12 @@ from diffusionrl.algorithms.rollout_control import (  # noqa: E402
     GRPORolloutControl,
     GRPORolloutControlConfig,
 )
-from diffusionrl.types.sampling import SamplingParams  # noqa: E402
+from diffusionrl.types.sampling import DiffusionSamplingParams  # noqa: E402
 
 
 def _make_ctrl(**overrides) -> GRPORolloutControl:
     cfg_kwargs = dict(
-        sampling=SamplingParams(num_inference_steps=10),
+        sampling=DiffusionSamplingParams(num_inference_steps=10),
         prompts_per_rollout=4,
         samples_per_prompt=8,
     )
@@ -67,7 +67,7 @@ def test_resolve_rollout_sde_indices_returns_set() -> None:
 
 def test_resolve_raises_on_zero_inference_steps() -> None:
     ctrl = _make_ctrl()
-    ctrl.sampling = SamplingParams(num_inference_steps=0)
+    ctrl.sampling = DiffusionSamplingParams(num_inference_steps=0)
     with pytest.raises(ValueError, match=r"num_inference_steps >= 1"):
         ctrl.resolve_rollout_sde_indices(current_step=0)
 
@@ -113,7 +113,7 @@ def test_config_rejects_kl_coef_gt_zero() -> None:
     """KL penalty is not implemented; ``kl_coef > 0`` must fail at config time."""
     with pytest.raises(ValueError, match=r"kl_coef"):
         GRPORolloutControlConfig(
-            sampling=SamplingParams(num_inference_steps=10),
+            sampling=DiffusionSamplingParams(num_inference_steps=10),
             kl_coef=0.01,
         )
 
@@ -126,7 +126,7 @@ def test_config_rejects_grpo_num_sde_steps_zero() -> None:
     with pytest.raises(ValueError, match=r"num_sde_steps=0"):
         GRPORolloutControl(
             config=GRPORolloutControlConfig(
-                sampling=SamplingParams(num_inference_steps=10),
+                sampling=DiffusionSamplingParams(num_inference_steps=10),
                 scheduler=SchedulerConfig(num_sde_steps=0),
             )
         )

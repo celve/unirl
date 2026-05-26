@@ -1,15 +1,21 @@
 """diffusionrl stage-driven training stack.
 
-Public surface for the ``models`` training contract. The trainable-module
-facade is the :class:`Policy` Protocol from :mod:`diffusionrl.training.policy`
-(FSDP / LoRA / EMA composed via :func:`compose_policy`).
+Wrap functions mutate the nn.Module tree at build time; handles (Shadow,
+EMA) give per-step access to installed state.  TrainTrack groups
+per-track objects; StageTrainStack drives the training loop.
 """
 
 from __future__ import annotations
 
-from .stack import StageTrainStack, TrainOptimizerStepResult
+from .ema import EMA
+from .shadow import Shadow
+from .stack import StageTrainStack, TrackMiniBatchResult
+from .train_track import TrainTrack
 
 __all__ = [
+    "EMA",
+    "Shadow",
     "StageTrainStack",
-    "TrainOptimizerStepResult",
+    "TrackMiniBatchResult",
+    "TrainTrack",
 ]

@@ -46,17 +46,23 @@ class UpdateWeightFromTensor(BucketedUpdateWeight):
     def update_weights(
         self,
         *,
+        model: Optional[object] = None,
         peft_config: Optional[dict] = None,
         base_sync_done: bool = False,
+        param_name_prefix: Optional[str] = None,
+        packed_modules: Optional[dict] = None,
+        track_prefix: str = "",
     ) -> None:
+        resolved_model = self._resolve_model(model)
+        resolved_prefix = self._resolve_prefix(param_name_prefix)
         if peft_config and base_sync_done:
-            # All FSDP ranks must materialize the LoRA DTensors so the
-            # underlying all_gathers complete; only the local gather source
-            # sends the resulting tensors to its rollout actor.
             lora_tensors = extract_lora_tensors(
-                self.model,
-                param_name_prefix=self._param_name_prefix,
+                resolved_model,
+                param_name_prefix=resolved_prefix,
+                packed_modules=packed_modules if packed_modules is not None else getattr(self, "_packed_modules", None),
             )
+            if track_prefix:
+                lora_tensors = {f"{track_prefix}.{k}": v for k, v in lora_tensors.items()}
             if self._ipc_engine is None or self._ipc_gather_src is None:
                 return
             if dist.get_rank() != self._ipc_gather_src:
@@ -70,7 +76,12 @@ class UpdateWeightFromTensor(BucketedUpdateWeight):
             )
             return
 
-        super().update_weights()
+        super().update_weights(
+            model=model,
+            param_name_prefix=param_name_prefix,
+            packed_modules=packed_modules,
+            track_prefix=track_prefix,
+        )
 
     def connect_rollout_engines(self) -> None:
         rollout_engines = list(self._rollout_runtime.get_rollout_actors())

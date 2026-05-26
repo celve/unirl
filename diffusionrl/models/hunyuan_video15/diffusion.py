@@ -60,7 +60,6 @@ design path does NOT import legacy code; spec sync is via review / test.
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
 from typing import ClassVar, Dict, List, Optional, Set, Tuple
 
 import torch
@@ -68,34 +67,13 @@ import torch
 from diffusionrl.models.types.diffusion import DiffusionStage, DiffusionStep
 from diffusionrl.models.types.replay_result import ReplayResult
 from diffusionrl.sde.kernels import StepStrategy
+from diffusionrl.types.sampling import DiffusionSamplingParams
 from diffusionrl.types.segments.latent import LatentSegment, make_video_segment
 from diffusionrl.types.trajectory_store import compute_trajectory_positions
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 from .bundle import HunyuanVideo15Bundle
 from .conditions import HunyuanVideo15Conditions
-
-
-@dataclass
-class HunyuanVideo15DiffusionParams:
-    """Per-request sampling knobs for HunyuanVideo-1.5 diffusion.
-
-    Strategy + precision knobs are *not* here — they live at
-    :class:`HunyuanVideo15DiffusionStage` construction since precision
-    is operator policy, not request shape.
-    """
-
-    num_inference_steps: int = 50
-    guidance_scale: float = 6.0
-    height: int = 480
-    width: int = 848
-    num_frames: int = 121
-    seed: int = 42
-    sde_indices: Optional[List[int]] = None
-    eta: float = 1.0
-    init_same_noise: bool = False
-    samples_per_prompt: int = 1
-    noise_group_ids: Optional[List[str]] = None
 
 
 class HunyuanVideo15DiffusionStep(DiffusionStep[HunyuanVideo15Bundle, HunyuanVideo15Conditions]):
@@ -454,7 +432,7 @@ class HunyuanVideo15DiffusionStage(DiffusionStage[HunyuanVideo15Conditions]):
         conditions: HunyuanVideo15Conditions,
         *,
         schedule: torch.Tensor,
-        params: HunyuanVideo15DiffusionParams,
+        params: DiffusionSamplingParams,
         initial_latents: Optional[torch.Tensor] = None,
     ) -> LatentSegment:
         """Run full HunyuanVideo-1.5 T2V sampling. Returns a ``LatentSegment``
@@ -592,7 +570,7 @@ class HunyuanVideo15DiffusionStage(DiffusionStage[HunyuanVideo15Conditions]):
         conditions: HunyuanVideo15Conditions,
         *,
         segment: LatentSegment,
-        params: HunyuanVideo15DiffusionParams,
+        params: DiffusionSamplingParams,
         step_indices: Optional[List[int]] = None,
     ) -> ReplayResult:
         """Segment-based log-prob replay over the rollout's SDE transitions.
@@ -683,7 +661,7 @@ class HunyuanVideo15DiffusionStage(DiffusionStage[HunyuanVideo15Conditions]):
         *,
         sample: torch.Tensor,
         sigma: torch.Tensor,
-        params: HunyuanVideo15DiffusionParams,
+        params: DiffusionSamplingParams,
     ) -> torch.Tensor:
         """Single ``(xt, sigma)`` model forward — no scheduler iteration.
 
@@ -711,7 +689,6 @@ class HunyuanVideo15DiffusionStage(DiffusionStage[HunyuanVideo15Conditions]):
 
 
 __all__ = [
-    "HunyuanVideo15DiffusionParams",
     "HunyuanVideo15DiffusionStage",
     "HunyuanVideo15DiffusionStep",
 ]

@@ -1,0 +1,67 @@
+# @package _global_
+# Minimal smoke recipe for the Composed PE rollout engine.
+#
+# Wires a ComposedRolloutEngine with two child engines:
+#   - ar:        SGLangLLMRolloutEngine (PE generator → TextSegment)
+#   - diffusion: SGLangRolloutEngine (image synthesis → LatentSegment)
+#
+# Each child is a single polymorphic field resolved against the
+# ``rollout/engine`` ConfigStore group.
+#
+# Usage (documentation only — end-to-end smoke deferred to a follow-up
+# scripts/smoke_composed_pe_engine.py with a real Ray + GPU cluster):
+#
+#   LLM_MODEL=/path/to/Qwen3-1.7B python -c "
+#   from hydra import compose, initialize_config_dir
+#   from diffusionrl.config import register_all_configs
+#   register_all_configs()
+#   with initialize_config_dir(config_dir='conf', version_base=None):
+#       cfg = compose(config_name='train', overrides=['+experiment=smoke_composed_pe'])
+#   "
+defaults:
+  - override /rollout/engine: composed_pe
+  - _self_
+
+# Top-level SD3 model config feeds the diffusion child via the actor's
+# ``model_config`` runtime kwarg (composed engine → diffusion child). The
+# LLM child carries its own ``pretrained_model_ckpt_path`` on its engine
+# config dict below — different schema, different wiring.
+model:
+  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,/root/diffusionrl/models/local/stable-diffusion-3.5-medium}
+
+rollout:
+  engine:
+    ar:
+      name: sglang_llm
+      pretrained_model_ckpt_path: ${oc.env:LLM_MODEL,/root/diffusionrl/models/local/Qwen3-1.7B}
+      tp_size: 1
+      max_new_tokens: 128
+      temperature: 0.7
+      top_p: 0.9
+      concurrency: 4
+      engine_kwargs:
+        mem_fraction_static: 0.4
+        skip_server_warmup: true
+        disable_cuda_graph: true
+        attention_backend: triton
+
+    diffusion:
+      name: sglang
+      sampling: ${sampling}
+      model_family: sd3
+      num_gpus: 1
+      tp_size: 1
+      local_mode: true
+      engine_kwargs:
+        mem_fraction_static: 0.4
+        skip_server_warmup: true
+        disable_cuda_graph: true
+        attention_backend: torch_sdpa
+
+    stage_id_map:
+      diffusion: 0
+      ar: 1
+    # See note above: sleep/wake of the diffusion child is disabled because
+    # sgl-diffusion's wake doesn't reliably restore the SD3 transformer.
+    # Both children stay resident on the 96 GB H20.
+    sleep_diffusion_on_start: false

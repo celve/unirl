@@ -28,7 +28,6 @@ from diffusionrl.models.hunyuan_image3.conditions import (
 )
 from diffusionrl.models.hunyuan_image3.config import HunyuanImage3PipelineConfig
 from diffusionrl.models.hunyuan_image3.diffusion import (
-    HunyuanImage3DiffusionParams,
     HunyuanImage3DiffusionStage,
     HunyuanImage3DiffusionStep,
 )
@@ -51,7 +50,6 @@ __all__ = [
     "HunyuanImage3ARStep",
     "HunyuanImage3Bundle",
     "HunyuanImage3DiffusionConditions",
-    "HunyuanImage3DiffusionParams",
     "HunyuanImage3DiffusionStage",
     "HunyuanImage3DiffusionStep",
     "HunyuanImage3FusedMultimodalCondition",

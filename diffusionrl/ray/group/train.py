@@ -24,47 +24,17 @@ from ray.actor import ActorHandle
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from diffusionrl.ray.group.base import ActorGroup
+from diffusionrl.training.sharding import shard_resp_per_actor
+from diffusionrl.training.validate import _validate_cfg_for_train
 from diffusionrl.types.rollout_resp import RolloutResp
 
 if TYPE_CHECKING:
     from diffusionrl.ray.placement import Placement
-    from diffusionrl.training import TrainOptimizerStepResult
+    from diffusionrl.training import TrackMiniBatchResult
 
 logger = logging.getLogger(__name__)
 
 _DETERMINISM_ENV_VARS = {"CUBLAS_WORKSPACE_CONFIG": ":4096:8"}
-
-
-def _validate_cfg_for_train(cfg: DictConfig) -> None:
-    """Fail-fast preflight: every leaf the train actor reads must be present."""
-    if cfg.model.get("_target_") is None:
-        raise ValueError("cfg.model must carry _target_ (use a registered pipeline preset)")
-    algorithms = cfg.get("algorithms")
-    if algorithms is None or len(algorithms) == 0:
-        raise ValueError(
-            "cfg.algorithms (plural) must be a non-empty slot-keyed dict of "
-            "StageAlgorithm presets. The train actor reads cfg.algorithms; "
-            "the singular cfg.algorithm is the driver-side rollout-control surface."
-        )
-    for slot, alg_node in algorithms.items():
-        if alg_node.get("_target_") is None:
-            raise ValueError(f"cfg.algorithms.{slot} must carry _target_ (use a registered StageAlgorithm preset)")
-    policies = cfg.training.get("policies")
-    if policies is None or len(policies) == 0:
-        raise ValueError(
-            "cfg.training.policies must be a non-empty list of policy presets "
-            "(e.g. [LoRAPolicyConfig, FSDPPolicyConfig, EMAPolicyConfig])"
-        )
-    for idx, node in enumerate(policies):
-        if node.get("_target_") is None:
-            raise ValueError(
-                f"cfg.training.policies[{idx}] must carry _target_ (use a registered training/policy preset)"
-            )
-    if cfg.training.get("policy_source") is None:
-        raise ValueError(
-            "cfg.training.policy_source must be set (the slot name on the "
-            'pipeline whose Stage anchors the Policy stack, e.g. "diffusion")'
-        )
 
 
 class TrainActorGroup(ActorGroup):
@@ -164,45 +134,47 @@ class TrainActorGroup(ActorGroup):
     # Data plane: train (balanced shard split)
     # ------------------------------------------------------------------
 
-    def train(self, rollout_id: int, training_resp: RolloutResp) -> "List[List[TrainOptimizerStepResult]]":
-        """Slice the RolloutResp across DP ranks and dispatch one shard per actor.
+    def train(self, rollout_id: int, training_resp: RolloutResp) -> "Dict[str, List[TrackMiniBatchResult]]":
+        """Shard a multi-track ``RolloutResp`` across DP ranks and dispatch one shard per actor.
 
-        Per-actor shard sizes use a balanced split: every actor receives at
-        least ``floor(batch_size / num_actors)`` samples, and the first
-        ``batch_size % num_actors`` actors each receive one extra sample.
-        ``batch_size >= num_actors`` is required so every FSDP rank gets at
-        least one sample (collectives deadlock if any rank is skipped).
+        Sharding strategy (see :func:`diffusionrl.training.sharding.shard_resp_per_actor`):
 
-        Returns ``List[List[TrainOptimizerStepResult]]`` — outer list is per
-        optimizer step (``num_updates_per_batch`` entries), inner list is
-        per actor. This lets the driver log metrics per optimizer step.
+        - Identify the unique root track (``parent_track is None``).
+        - Balanced-split root indices across actors using floor/remainder
+          (same allocation as the legacy single-track path).
+        - Per child track, build per-actor index sets by walking the
+          lineage tree downward — every leaf sample on actor A has its
+          full ancestor chain on actor A. Preserves the ``(n_groups,
+          branch)`` reshape invariance that ``RolloutTrack.compute_advantages``
+          relies on per actor.
+
+        Each actor receives a multi-track ``RolloutResp`` shard via
+        ``actor.train.remote(rollout_id, shard)`` and returns
+        ``Dict[str, TrackMiniBatchResult]`` (one per track). This function
+        transposes the per-actor list into ``Dict[track_name, List[result]]``
+        (per-track, per-actor) so downstream metric aggregation can iterate
+        cleanly per track.
+
+        Fail-fast on:
+
+        - Multi-root resps (ambiguous sharding choice).
+        - Root track's ``batch_size < num_train_actors`` (FSDP collectives
+          require all ranks to receive at least one sample).
         """
         n = self.num_actors
         if n == 1:
             refs = [a.train.remote(rollout_id, training_resp) for a in self._actors]
-            per_actor: List[List[Any]] = ray.get(refs)  # each actor returns List[Result]
         else:
-            batch_size = int(training_resp.batch_size)
-            if batch_size < n:
-                raise ValueError(
-                    f"RolloutResp.batch_size ({batch_size}) is smaller than "
-                    f"num_train_actors ({n}); every train actor must receive at "
-                    "least one sample (FSDP collectives require all ranks to "
-                    "participate)."
-                )
-            base = batch_size // n
-            remainder = batch_size % n
-            refs: List[ray.ObjectRef] = []
-            cursor = 0
-            for i, actor in enumerate(self._actors):
-                shard_size = base + (1 if i < remainder else 0)
-                refs.append(actor.train.remote(rollout_id, training_resp.slice(cursor, cursor + shard_size)))
-                cursor += shard_size
-            per_actor = ray.get(refs)  # List[List[Result]], per-actor × per-update
+            shards = shard_resp_per_actor(training_resp, n)
+            refs = [actor.train.remote(rollout_id, shard) for actor, shard in zip(self._actors, shards)]
+        per_actor: List[Dict[str, Any]] = ray.get(refs)
 
-        # Transpose: per-actor × per-update → per-update × per-actor
-        num_updates = len(per_actor[0]) if per_actor else 0
-        return [[per_actor[a][u] for a in range(n)] for u in range(num_updates)]
+        # Transpose: List[Dict[track_name, TrackMiniBatchResult]] →
+        # Dict[track_name, List[TrackMiniBatchResult]] (per-track, per-actor).
+        if not per_actor:
+            return {}
+        track_names = list(per_actor[0].keys())
+        return {name: [actor_result[name] for actor_result in per_actor] for name in track_names}
 
     # ------------------------------------------------------------------
     # Control plane
@@ -216,6 +188,7 @@ class TrainActorGroup(ActorGroup):
         rollout_runtime,
         param_name_prefix: str = "",
         packed_modules: dict | None = None,
+        track_sync_specs: dict | None = None,
     ) -> None:
         ray.get(
             [
@@ -225,6 +198,7 @@ class TrainActorGroup(ActorGroup):
                     rollout_runtime=rollout_runtime,
                     param_name_prefix=param_name_prefix,
                     packed_modules=packed_modules,
+                    track_sync_specs=track_sync_specs,
                 )
                 for a in self._actors
             ]

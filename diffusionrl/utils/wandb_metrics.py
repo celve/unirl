@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
-
-from diffusionrl.types.training_batch import TrainingBatch
 
 
 def _coerce_scalar(value: Any) -> Optional[float]:
@@ -48,16 +46,6 @@ def flatten_numeric_metrics(
     return output
 
 
-def _iter_batches(training_data: Any) -> Iterable[TrainingBatch]:
-    if isinstance(training_data, list):
-        for item in training_data:
-            if isinstance(item, TrainingBatch):
-                yield item
-        return
-    if isinstance(training_data, TrainingBatch):
-        yield training_data
-
-
 def _tensor_stats(prefix: str, tensor: Optional[torch.Tensor]) -> Dict[str, float]:
     if tensor is None or (not torch.is_tensor(tensor)) or tensor.numel() == 0:
         return {}
@@ -95,168 +83,63 @@ def _zero_std_group_counts_from_ids(
     return zero_std, len(ordered)
 
 
-def compute_rollout_batch_metrics(
-    *,
-    training_data: Any,
-) -> Dict[str, float]:
-    """Build rollout metrics from typed training batch (or partition list).
-
-    For multi-reward runs, also emits ``reward_<component>_{mean,std,min,max}``
-    per key in ``component_rewards``. Component names with ``/`` are flattened
-    to ``_`` so the keys stay leaf metrics under the ``rollout/`` prefix.
-    """
-    metrics: Dict[str, float] = {}
-
-    reward_tensors: List[torch.Tensor] = []
-    advantage_tensors: List[torch.Tensor] = []
-    component_tensors: Dict[str, List[torch.Tensor]] = {}
-    total_samples = 0
-    zero_std_groups = 0
-    total_groups = 0
-    sde_selected = 0
-    sde_total = 0
-
-    for batch in _iter_batches(training_data):
-        total_samples += int(getattr(batch, "batch_size", 0))
-
-        rewards = getattr(batch, "rewards", None)
-        if torch.is_tensor(rewards) and rewards.numel() > 0:
-            rewards_f = rewards.detach().to(dtype=torch.float32).reshape(-1).cpu()
-            reward_tensors.append(rewards_f)
-            zero_cnt, group_cnt = _zero_std_group_counts_from_ids(
-                rewards_f,
-                getattr(batch, "group_ids", None),
-            )
-            zero_std_groups += zero_cnt
-            total_groups += group_cnt
-
-        advantages = getattr(batch, "advantages", None)
-        if torch.is_tensor(advantages) and advantages.numel() > 0:
-            advantage_tensors.append(advantages.detach().to(dtype=torch.float32).reshape(-1).cpu())
-
-        component_rewards = getattr(batch, "component_rewards", None)
-        if isinstance(component_rewards, dict):
-            for name, tensor in component_rewards.items():
-                if not torch.is_tensor(tensor) or tensor.numel() == 0:
-                    continue
-                safe_name = str(name).replace("/", "_")
-                component_tensors.setdefault(safe_name, []).append(
-                    tensor.detach().to(dtype=torch.float32).reshape(-1).cpu()
-                )
-
-        if batch.has_trajectory_rl_data:
-            sde_selected += len(batch.sde_indices)
-            sde_total += max(int(batch.trajectory_store.total_positions) - 1, 0)
-
-    metrics["num_samples"] = float(total_samples)
-
-    if reward_tensors:
-        rewards_cat = torch.cat(reward_tensors, dim=0)
-        metrics.update(_tensor_stats("reward", rewards_cat))
-
-    for safe_name, tensors in component_tensors.items():
-        cat = tensors[0] if len(tensors) == 1 else torch.cat(tensors, dim=0)
-        metrics.update(_tensor_stats(f"reward_{safe_name}", cat))
-
-    if advantage_tensors:
-        advantages_cat = torch.cat(advantage_tensors, dim=0)
-        metrics.update(_tensor_stats("advantage", advantages_cat))
-
-    if total_groups > 0:
-        metrics["zero_std_group_ratio"] = float(zero_std_groups) / float(total_groups)
-        metrics["zero_std_group_count"] = float(zero_std_groups)
-        metrics["group_count"] = float(total_groups)
-
-    if sde_total > 0:
-        metrics["sde_selected_steps"] = float(sde_selected)
-        metrics["sde_total_steps"] = float(sde_total)
-        metrics["sde_selected_ratio"] = float(sde_selected) / float(sde_total)
-
-    return metrics
-
-
 def compute_rollout_resp_metrics(*, resp: Any) -> Dict[str, float]:
     """Build rollout metrics directly from a :class:`RolloutResp`.
 
-    Mirrors :func:`compute_rollout_batch_metrics` but consumes the
-    ``RolloutResp`` instead of a ``TrainingBatch``
-    (or list thereof). Emits the same wandb key shape under the
+    Walks ``resp.tracks`` and emits per-track metrics under the
     ``rollout/`` prefix:
 
-    - ``num_samples``
-    - ``reward_{mean,std,min,max}``
-    - ``advantage_{mean,std,min,max}``
-    - ``reward_<component>_{mean,std,min,max}`` per
-      ``resp.component_rewards`` entry (``/`` flattened to ``_``)
-    - ``group_count``, ``zero_std_group_ratio``,
-      ``zero_std_group_count`` when ``resp.group_ids`` is populated
+    - ``num_samples`` (sum across tracks for the resp batch_size)
+    - For each track: ``reward_{mean,std,min,max}``,
+      ``advantage_{mean,std,min,max}``,
+      ``reward_<component>_{mean,std,min,max}`` per
+      ``track.component_rewards`` entry (``/`` flattened to ``_``),
+      ``group_count``, ``zero_std_group_ratio``,
+      ``zero_std_group_count`` when the track's ``group_ids`` is
+      populated.
 
-    Skips the legacy ``has_trajectory_rl_data`` / ``sde_indices`` block
-    since neither concept exists on ``RolloutResp``.
+    For single-track resps (the common case today: one diffusion
+    track), keys are emitted unprefixed. For multi-track resps each
+    track's metrics are namespaced under its track name (e.g.
+    ``image_reward_mean``, ``refined_reward_mean``).
     """
     metrics: Dict[str, float] = {}
 
     metrics["num_samples"] = float(int(getattr(resp, "batch_size", 0)))
 
-    rewards = getattr(resp, "rewards", None)
-    if torch.is_tensor(rewards) and rewards.numel() > 0:
-        rewards_f = rewards.detach().to(dtype=torch.float32).reshape(-1).cpu()
-        metrics.update(_tensor_stats("reward", rewards_f))
-        zero_cnt, group_cnt = _zero_std_group_counts_from_ids(
-            rewards_f,
-            getattr(resp, "group_ids", None),
-        )
-        if group_cnt > 0:
-            metrics["zero_std_group_ratio"] = float(zero_cnt) / float(group_cnt)
-            metrics["zero_std_group_count"] = float(zero_cnt)
-            metrics["group_count"] = float(group_cnt)
+    tracks = getattr(resp, "tracks", None)
+    if not isinstance(tracks, dict):
+        return metrics
 
-    advantages = getattr(resp, "advantages", None)
-    if torch.is_tensor(advantages) and advantages.numel() > 0:
-        adv_f = advantages.detach().to(dtype=torch.float32).reshape(-1).cpu()
-        metrics.update(_tensor_stats("advantage", adv_f))
+    multi = len(tracks) > 1
+    for name, track in tracks.items():
+        prefix = f"{name}_" if multi else ""
+        rewards = getattr(track, "rewards", None)
+        if torch.is_tensor(rewards) and rewards.numel() > 0:
+            rewards_f = rewards.detach().to(dtype=torch.float32).reshape(-1).cpu()
+            metrics.update(_tensor_stats(f"{prefix}reward", rewards_f))
+            zero_cnt, group_cnt = _zero_std_group_counts_from_ids(
+                rewards_f,
+                getattr(track, "group_ids", None),
+            )
+            if group_cnt > 0:
+                metrics[f"{prefix}zero_std_group_ratio"] = float(zero_cnt) / float(group_cnt)
+                metrics[f"{prefix}zero_std_group_count"] = float(zero_cnt)
+                metrics[f"{prefix}group_count"] = float(group_cnt)
 
-    component_rewards = getattr(resp, "component_rewards", None)
-    if isinstance(component_rewards, dict):
-        for name, tensor in component_rewards.items():
-            if not torch.is_tensor(tensor) or tensor.numel() == 0:
-                continue
-            safe_name = str(name).replace("/", "_")
-            cat = tensor.detach().to(dtype=torch.float32).reshape(-1).cpu()
-            metrics.update(_tensor_stats(f"reward_{safe_name}", cat))
+        advantages = getattr(track, "advantages", None)
+        if torch.is_tensor(advantages) and advantages.numel() > 0:
+            adv_f = advantages.detach().to(dtype=torch.float32).reshape(-1).cpu()
+            metrics.update(_tensor_stats(f"{prefix}advantage", adv_f))
 
-    return metrics
-
-
-_BUFFER_CORE_KEYS = (
-    "queue_size",
-    "pushed_batches",
-    "popped_batches",
-    "pushed_samples",
-    "popped_samples",
-    "dropped_queue_items",
-    "dropped_batches",
-    "dropped_samples",
-)
-
-
-def build_buffer_metrics(
-    stats: Optional[Dict[str, Any]],
-    prefix: str = "buffer/",
-) -> Dict[str, float]:
-    """Extract numeric rollout-buffer health metrics."""
-    if not isinstance(stats, dict):
-        return {}
-
-    metrics: Dict[str, float] = {}
-    for key in _BUFFER_CORE_KEYS:
-        scalar = _coerce_scalar(stats.get(key))
-        if scalar is not None:
-            metrics[f"{prefix}{key}"] = scalar
-
-    plugins = stats.get("plugins")
-    if isinstance(plugins, dict):
-        metrics.update(flatten_numeric_metrics(plugins, prefix=f"{prefix}plugin/"))
+        component_rewards = getattr(track, "component_rewards", None)
+        if isinstance(component_rewards, dict):
+            for cname, tensor in component_rewards.items():
+                if not torch.is_tensor(tensor) or tensor.numel() == 0:
+                    continue
+                safe_name = str(cname).replace("/", "_")
+                cat = tensor.detach().to(dtype=torch.float32).reshape(-1).cpu()
+                metrics.update(_tensor_stats(f"{prefix}reward_{safe_name}", cat))
 
     return metrics
 

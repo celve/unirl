@@ -54,7 +54,6 @@ Math mirrors PR #104's ``qwen_image_sampler.py`` / ``forward_denoiser``.
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
 from typing import ClassVar, List, Optional, Set, Tuple
 
 import torch
@@ -62,43 +61,13 @@ import torch
 from diffusionrl.models.types.diffusion import DiffusionStage, DiffusionStep
 from diffusionrl.models.types.replay_result import ReplayResult
 from diffusionrl.sde.kernels import StepStrategy
+from diffusionrl.types.sampling import DiffusionSamplingParams
 from diffusionrl.types.segments.latent import LatentSegment
 from diffusionrl.types.trajectory_store import compute_trajectory_positions
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 from .bundle import QwenImageBundle
 from .conditions import QwenImageConditions
-
-
-@dataclass
-class QwenImageDiffusionParams:
-    """Per-request sampling knobs for Qwen-Image diffusion.
-
-    Strategy + precision knobs are *not* here — they live at
-    :class:`QwenImageDiffusionStage` construction since precision is
-    operator policy, not request shape.
-
-    ``distilled_guidance_scale`` is Qwen-Image-specific: when the
-    checkpoint's transformer carries ``guidance_embeds=True``, the
-    pipeline embeds a separate "distilled" guidance scalar into the
-    transformer via its guidance head (independent of the CFG
-    ``guidance_scale`` used to blend cond/uncond). Most Qwen-Image
-    checkpoints ship with ``guidance_embeds=False``, in which case
-    this field is ignored regardless of value.
-    """
-
-    num_inference_steps: int = 28
-    guidance_scale: float = 4.0
-    height: int = 1024
-    width: int = 1024
-    seed: int = 42
-    sde_indices: Optional[List[int]] = None
-    eta: float = 0.7
-    init_same_noise: bool = False
-    samples_per_prompt: int = 1
-    noise_group_ids: Optional[List[str]] = None
-    distilled_guidance_scale: Optional[float] = None
-
 
 # --------------------------------------------------------------------------
 # Pack / unpack helpers — module-level so unit tests can import them
@@ -441,7 +410,7 @@ class QwenImageDiffusionStage(DiffusionStage[QwenImageConditions]):
         conditions: QwenImageConditions,
         *,
         schedule: torch.Tensor,
-        params: QwenImageDiffusionParams,
+        params: DiffusionSamplingParams,
         initial_latents: Optional[torch.Tensor] = None,
     ) -> LatentSegment:
         """Run full Qwen-Image sampling. Returns a ``LatentSegment``.
@@ -576,7 +545,7 @@ class QwenImageDiffusionStage(DiffusionStage[QwenImageConditions]):
         conditions: QwenImageConditions,
         *,
         segment: LatentSegment,
-        params: QwenImageDiffusionParams,
+        params: DiffusionSamplingParams,
         step_indices: Optional[List[int]] = None,
     ) -> ReplayResult:
         """Segment-based log-prob replay over the rollout's SDE transitions.
@@ -668,7 +637,7 @@ class QwenImageDiffusionStage(DiffusionStage[QwenImageConditions]):
         *,
         sample: torch.Tensor,
         sigma: torch.Tensor,
-        params: QwenImageDiffusionParams,
+        params: DiffusionSamplingParams,
     ) -> torch.Tensor:
         """Single ``(xt, sigma)`` model forward — no scheduler iteration.
 
@@ -704,7 +673,6 @@ class QwenImageDiffusionStage(DiffusionStage[QwenImageConditions]):
 
 
 __all__ = [
-    "QwenImageDiffusionParams",
     "QwenImageDiffusionStage",
     "QwenImageDiffusionStep",
     "_pack_latents",

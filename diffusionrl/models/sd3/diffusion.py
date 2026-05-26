@@ -22,7 +22,6 @@ import legacy code).
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
 from typing import ClassVar, List, Optional, Set, Tuple
 
 import torch
@@ -30,34 +29,13 @@ import torch
 from diffusionrl.models.types.diffusion import DiffusionStage, DiffusionStep
 from diffusionrl.models.types.replay_result import ReplayResult
 from diffusionrl.sde.kernels import StepStrategy
+from diffusionrl.types.sampling import DiffusionSamplingParams
 from diffusionrl.types.segments.latent import LatentSegment
 from diffusionrl.types.trajectory_store import compute_trajectory_positions
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 from .bundle import SD3Bundle
 from .conditions import SD3Conditions
-
-
-@dataclass
-class SD3DiffusionParams:
-    """Per-request sampling knobs for SD3 diffusion.
-
-    Strategy + precision knobs are *not* here — they live at
-    ``SD3DiffusionStage`` construction since ``DPM2Strategy`` is stateful
-    and precision is operator policy, not request shape.
-    """
-
-    num_inference_steps: int = 28
-    guidance_scale: float = 7.0
-    height: int = 1024
-    width: int = 1024
-    seed: int = 42
-    sde_indices: Optional[List[int]] = None
-    eta: float = 0.7
-    init_same_noise: bool = False
-    samples_per_prompt: int = 1
-    noise_group_ids: Optional[List[str]] = None
-    max_sequence_length: int = 256
 
 
 class SD3DiffusionStep(DiffusionStep[SD3Bundle, SD3Conditions]):
@@ -292,7 +270,7 @@ class SD3DiffusionStage(DiffusionStage[SD3Conditions]):
         conditions: SD3Conditions,
         *,
         schedule: torch.Tensor,
-        params: SD3DiffusionParams,
+        params: DiffusionSamplingParams,
         initial_latents: Optional[torch.Tensor] = None,
     ) -> LatentSegment:
         """Run full SD3 sampling. Returns a ``LatentSegment``.
@@ -422,7 +400,7 @@ class SD3DiffusionStage(DiffusionStage[SD3Conditions]):
         conditions: SD3Conditions,
         *,
         segment: LatentSegment,
-        params: SD3DiffusionParams,
+        params: DiffusionSamplingParams,
         step_indices: Optional[List[int]] = None,
     ) -> ReplayResult:
         """Segment-based log-prob replay over the rollout's SDE transitions.
@@ -509,7 +487,7 @@ class SD3DiffusionStage(DiffusionStage[SD3Conditions]):
         *,
         sample: torch.Tensor,
         sigma: torch.Tensor,
-        params: SD3DiffusionParams,
+        params: DiffusionSamplingParams,
     ) -> torch.Tensor:
         """Single ``(xt, sigma)`` model forward — no scheduler iteration.
 
@@ -539,4 +517,4 @@ class SD3DiffusionStage(DiffusionStage[SD3Conditions]):
         return self.model.transformer
 
 
-__all__ = ["SD3DiffusionParams", "SD3DiffusionStage", "SD3DiffusionStep"]
+__all__ = ["SD3DiffusionStage", "SD3DiffusionStep"]

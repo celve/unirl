@@ -35,6 +35,8 @@ def build(cfg: DictConfig, **deps: Any) -> Any:
     """
     if cfg is None:
         return None
+    if not isinstance(cfg, DictConfig) and is_dataclass(cfg):
+        cfg = OmegaConf.structured(cfg)
     target_path = cfg.get("_target_")
     if target_path is None:
         full_key = cfg._get_full_key(None) or "<root>"

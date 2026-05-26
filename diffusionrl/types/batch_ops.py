@@ -5,8 +5,8 @@ pad / concat / reindex on mixed-type batch data (tensors, lists, tuples,
 nested dicts, or duck-typed objects with a ``.slice()`` method).
 
 The ``recursive`` and ``deep_clone`` parameters let callers opt in to
-dict-recursion and deep-copy semantics where needed (e.g. ``TrainingBatch.extras``
-may contain nested dicts of tensors).
+dict-recursion and deep-copy semantics where needed (nested dicts of
+tensors).
 """
 
 from __future__ import annotations

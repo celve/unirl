@@ -18,10 +18,8 @@ Generation:
     handle the kwargs build and the result → ``RolloutResp`` packing.
 
 Weight sync:
-    Five direct forwards to SGLang's scheduler request types — each accepts an
-    ignored ``stage_ids`` kwarg so the actor-side
-    :class:`RolloutWeightSyncMixin` can pass it uniformly to vllm-omni and
-    SGLang. ``update_weights_from_ipc`` raises ``NotImplementedError`` —
+    Five direct forwards to SGLang's scheduler request types.
+    ``update_weights_from_ipc`` raises ``NotImplementedError`` —
     SGLang has no bucketed-IPC receiver today.
 
 What this engine intentionally does NOT do (vs upstream SGLang at
@@ -38,8 +36,6 @@ What this engine intentionally does NOT do (vs upstream SGLang at
 - No ``supports_distributed`` / ``requires_external_service`` properties.
 - No ``get_last_weight_checksum`` / ``_verify_weight_checksum`` flag — use
   :meth:`loaded_param_checksums` on demand.
-- No ``ForwardContext`` build inside the engine — trainer-side replay
-  reconstructs typed conditions from ``resp.conditions``.
 """
 
 from __future__ import annotations
@@ -58,6 +54,7 @@ from diffusionrl.sde.noise import generate_latents
 from diffusionrl.sde.runtime import FlowMatchSchedulePolicy, ensure_req_sigmas
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.sampling import get_diffusion_params
 from diffusionrl.utils.dtypes import parse_torch_dtype
 from diffusionrl.utils.peft_merge import adapt_lora_for_sglang
 
@@ -295,9 +292,9 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         )
         results = list(raw_results) if isinstance(raw_results, list) else [raw_results]
 
-        diffusion = dict(req.stage_params.get("diffusion") or {})
-        num_steps = int(diffusion["num_inference_steps"])
-        sde_indices_raw = diffusion.get("sde_indices")
+        diffusion = get_diffusion_params(req.sampling_params)
+        num_steps = int(diffusion.num_inference_steps)
+        sde_indices_raw = diffusion.sde_indices
         sde_indices = sorted(int(v) for v in sde_indices_raw) if sde_indices_raw is not None else None
         use_native_logprob = self.cfg.logprob_source == "native" and sde_indices is not None
 
@@ -317,7 +314,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         1. Pre-shipped ``req.request_conditions['initial_latents'].latents`` →
            use verbatim (caller owns the tensor).
         2. ``cfg.init_same_noise=True`` → engine-internal Gaussian noise keyed
-           on ``req.group_ids`` + ``stage_params['diffusion']['seed']`` for
+           on ``req.group_ids`` + ``sampling_params.diffusion.seed`` for
            per-group determinism.
         3. Otherwise → ``None`` (SGLang draws its own; matches legacy semantic
            when ``init_same_noise=False`` and no pre-shipped tensor).
@@ -331,31 +328,29 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         if not bool(self.cfg.init_same_noise):
             return None
 
-        diffusion = dict(req.stage_params.get("diffusion") or {})
-        seed = diffusion.get("seed")
+        diffusion = get_diffusion_params(req.sampling_params)
         require(
-            seed is not None,
-            "SGLangRolloutEngine: init_same_noise=True requires req.stage_params['diffusion']['seed']",
+            diffusion is not None and diffusion.seed is not None,
+            "SGLangRolloutEngine: init_same_noise=True requires req.sampling_params diffusion seed",
         )
 
-        sp = self.cfg.sampling
         batch_size = int(req.batch_size)
         latent_shape = self._latent_shape(
-            height=int(diffusion["height"]),
-            width=int(diffusion["width"]),
-            num_frames=int(sp.num_frames),
+            height=int(diffusion.height),
+            width=int(diffusion.width),
+            num_frames=int(diffusion.num_frames),
             batch_size=batch_size,
         )
-        dtype = parse_torch_dtype(sp.autocast_precision, field_name="autocast_precision")
+        dtype = parse_torch_dtype(diffusion.autocast_precision, field_name="autocast_precision")
         return generate_latents(
             batch_size=batch_size,
             latent_shape=latent_shape,
             device=self._device,
             dtype=dtype,
             init_same_noise=True,
-            samples_per_prompt=int(diffusion.get("num_samples_per_prompt", 1)),
+            samples_per_prompt=int(diffusion.samples_per_prompt),
             noise_group_ids=[str(gid) for gid in req.group_ids],
-            base_seed=int(seed),
+            base_seed=int(diffusion.seed),
         )
 
     def _latent_shape(
@@ -382,6 +377,8 @@ class SGLangRolloutEngine(BaseRolloutEngine):
     # ------------------------------------------------------------------
 
     def sleep(self) -> None:
+        # single-stage engines ignore it (the parent ComposedRolloutEngine
+        # handles the routing).
         self._call_memory_api(
             "release_memory_occupation",
             tags=["transformer", "vae", "text_encoder"],
@@ -421,7 +418,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         self._generator = None
 
     # ------------------------------------------------------------------
-    # Weight sync — direct forwards (stage_ids accepted and ignored;
+    # Weight sync — direct forwards (no stage_ids needed;
     # SGLang is single-stage).
     # ------------------------------------------------------------------
 
@@ -432,7 +429,6 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         target_modules: Optional[List[str]] = None,
         load_format: Optional[str] = None,
         flush_cache: bool = True,
-        stage_ids: Optional[List[int]] = None,
     ) -> None:
         require(bool(serialized_named_tensors), "serialized_named_tensors must be non-empty")
         self._send_scheduler_request(
@@ -454,7 +450,6 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         world_size: int,
         group_name: str,
         backend: str = "nccl",
-        stage_ids: Optional[List[int]] = None,
     ) -> None:
         self._send_scheduler_request(
             self._runtime["InitWeightsUpdateGroupReqInput"](
@@ -477,7 +472,6 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         group_name: str,
         target_modules: Optional[List[str]] = None,
         flush_cache: bool = True,
-        stage_ids: Optional[List[int]] = None,
     ) -> None:
         require(bool(names), "names must be non-empty for distributed update")
         self._send_scheduler_request(
@@ -496,7 +490,6 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         self,
         *,
         group_name: str,
-        stage_ids: Optional[List[int]] = None,
     ) -> None:
         self._send_scheduler_request(
             self._runtime["DestroyWeightsUpdateGroupReqInput"](
@@ -511,7 +504,6 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         lora_tensors: Dict[str, torch.Tensor],
         *,
         peft_config: Optional[dict] = None,
-        stage_ids: Optional[List[int]] = None,
     ) -> None:
         # Senders (nccl.py, tensor.py) ship keys in canonical wire format:
         #   ``<pipeline_prefix><module>.lora_A.weight``
@@ -563,7 +555,6 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         peft_config: Optional[dict] = None,
         base_sync_done: bool = False,
         use_shm: bool = False,
-        stage_ids: Optional[List[int]] = None,
     ) -> None:
         """Bucketed-IPC weight sync is not implemented for SGLang.
 
@@ -585,7 +576,6 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         self,
         *,
         names: List[str],
-        stage_ids: Optional[List[int]] = None,
     ) -> Dict[int, List[Dict[str, str]]]:
         """Query SGLang for short SHA256 hashes of loaded parameter values.
 

@@ -37,20 +37,19 @@ populated when ``guidance_scale > 1.0``.
 
 from __future__ import annotations
 
-import dataclasses as _dc
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from diffusionrl.models.types.pipeline import Pipeline
 from diffusionrl.sde.kernels import DanceSDEStrategy, StepStrategy
 from diffusionrl.types.primitives import Texts
 from diffusionrl.types.rollout_req import RolloutReq
-from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
+from diffusionrl.types.sampling import DiffusionSamplingParams, get_diffusion_params
 
 from .bundle import HunyuanVideo15Bundle
 from .conditions import HunyuanVideo15Conditions
 from .config import HunyuanVideo15PipelineConfig
 from .diffusion import (
-    HunyuanVideo15DiffusionParams,
     HunyuanVideo15DiffusionStage,
     HunyuanVideo15DiffusionStep,
 )
@@ -74,8 +73,8 @@ class HunyuanVideo15Pipeline(Pipeline):
 
     - ``conditions["text_mllm" | "text_glyph" | optional
       "negative_text_*"]: TextEmbedCondition``.
-    - ``rollout_traces["video"]: LatentSegment``.
-    - ``decoded["video"]: Videos``.
+    - ``tracks["video"].segment: LatentSegment``.
+    - ``tracks["video"].decoded: Videos``.
     """
 
     def __init__(
@@ -215,13 +214,7 @@ class HunyuanVideo15Pipeline(Pipeline):
         else:
             negatives = None
 
-        # Filter stage_params["diffusion"] down to fields that
-        # HunyuanVideo15DiffusionParams actually accepts. Upstream drivers
-        # stash rollout-metadata keys here too (e.g. num_samples_per_prompt).
-        raw_dict: Dict[str, Any] = dict(req.stage_params.get("diffusion") or {})
-        allowed = {f.name for f in _dc.fields(HunyuanVideo15DiffusionParams)}
-        params_dict = {k: v for k, v in raw_dict.items() if k in allowed}
-        params = HunyuanVideo15DiffusionParams(**params_dict)
+        params: DiffusionSamplingParams = get_diffusion_params(req.sampling_params)
 
         # CFG empty negative: when CFG is on (``guidance_scale > 1``) and
         # caller didn't supply a negative, default to ``[""] * B``. When
@@ -261,11 +254,15 @@ class HunyuanVideo15Pipeline(Pipeline):
         videos = self.vae_decode.decode(latent_seg)
 
         return RolloutResp(
-            sample_ids=list(req.sample_ids),
-            group_ids=list(req.group_ids),
-            conditions=hv_conds.to_dict(),
-            rollout_traces={"video": latent_seg},
-            decoded={"video": videos},
+            tracks={
+                "video": RolloutTrack(
+                    sample_ids=list(req.sample_ids),
+                    parent_ids=list(req.group_ids),
+                    conditions=hv_conds.to_dict(),
+                    segment=latent_seg,
+                    decoded=videos,
+                ),
+            }
         )
 
 

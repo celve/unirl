@@ -34,10 +34,27 @@ class UpdateWeight(abc.ABC):
     def update_weights(
         self,
         *,
+        model: Optional[nn.Module] = None,
         peft_config: Optional[dict] = None,
         base_sync_done: bool = False,
+        param_name_prefix: Optional[str] = None,
+        packed_modules: Optional[dict] = None,
+        track_prefix: str = "",
     ) -> None:
         raise NotImplementedError
+
+    def _resolve_model(self, model: Optional[nn.Module] = None) -> nn.Module:
+        return model if model is not None else self.model
+
+    def _resolve_prefix(self, param_name_prefix: Optional[str] = None) -> str:
+        if param_name_prefix is not None:
+            return param_name_prefix
+        return getattr(self, "_param_name_prefix", "")
+
+    def _apply_track_prefix(self, name: str, track_prefix: str) -> str:
+        if track_prefix:
+            return f"{track_prefix}.{name}"
+        return name
 
 
 class BucketedUpdateWeight(UpdateWeight):
@@ -58,31 +75,30 @@ class BucketedUpdateWeight(UpdateWeight):
         self._update_weight_buffer_size = int(bucket_size) * 1024 * 1024
         self._flush_cache = bool(flush_cache)
         self._target_modules = list(target_modules)
-        # Prefix prepended to every ``raw_state_dict`` key before shipping.
-        # Needed when the trainer's ``self.model`` is a sub-module of the
-        # rollout-side pipeline (e.g. SD3: trainer holds the bare DiT, the
-        # vllm-omni pipeline holds it under ``transformer.*`` — set
-        # ``param_name_prefix="transformer."`` so the receiver finds the
-        # parameter on the pipeline). Empty (default) preserves the legacy
-        # "trainer keys == rollout keys" contract.
         self._param_name_prefix = str(param_name_prefix or "")
 
     def update_weights(
         self,
         *,
+        model: Optional[nn.Module] = None,
         peft_config: Optional[dict] = None,
         base_sync_done: bool = False,
+        param_name_prefix: Optional[str] = None,
+        packed_modules: Optional[dict] = None,
+        track_prefix: str = "",
     ) -> None:
-        del peft_config, base_sync_done
+        del peft_config, base_sync_done, packed_modules
+        resolved_model = self._resolve_model(model)
+        prefix = self._resolve_prefix(param_name_prefix)
         self.weight_version += 1
         bucket = []
         bucket_size = 0
-        prefix = self._param_name_prefix
-        for name, param in raw_state_dict(self.model):
+        for name, param in raw_state_dict(resolved_model):
             if name.endswith(".lora_A") or name.endswith(".lora_B"):
                 continue
             if prefix:
                 name = prefix + name
+            name = self._apply_track_prefix(name, track_prefix)
             param_size = param.numel() * param.element_size()
             if bucket and bucket_size + param_size >= self._update_weight_buffer_size:
                 self._flush_bucket(bucket, is_last_bucket=False)

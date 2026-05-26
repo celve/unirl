@@ -1,0 +1,32 @@
+# @package _global_
+# Minimal smoke recipe for the SGLang LLM engine.
+#
+# Documents the Hydra composition path; the smoke driver
+# (scripts/smoke_sglang_llm_engine.py) bypasses Hydra and instantiates the
+# engine directly to keep the smoke independent of train_new.yaml's full
+# defaults list. Use this file as a template for future end-to-end recipes.
+#
+# Usage:
+#   LLM_MODEL=/path/to/model python -c "
+#   from hydra import compose, initialize_config_dir
+#   from diffusionrl.config import register_all_configs
+#   register_all_configs()
+#   with initialize_config_dir(config_dir='conf', version_base=None):
+#       cfg = compose(config_name='train_new', overrides=['+experiment=smoke_sglang_llm'])
+#   "
+defaults:
+  - override /rollout/engine: sglang_llm
+  - _self_
+
+rollout:
+  engine:
+    pretrained_model_ckpt_path: ${oc.env:LLM_MODEL,/mnt/gz/share_305110755/hunyuan/public_models/Qwen3-1.7B}
+    tp_size: 1
+    max_new_tokens: 32
+    temperature: 0.7
+    top_p: 0.9
+    concurrency: 4
+    engine_kwargs:
+      mem_fraction_static: 0.7
+      skip_server_warmup: true
+      disable_cuda_graph: true

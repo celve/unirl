@@ -27,7 +27,7 @@ from diffusionrl.rollout.engine.trainside import (
 )
 from diffusionrl.types.primitives import Texts
 from diffusionrl.types.rollout_req import RolloutReq
-from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -81,11 +81,15 @@ class _FakePipeline:
             }
         )
         return RolloutResp(
-            sample_ids=list(req.sample_ids),
-            group_ids=list(req.group_ids),
-            conditions={},
-            rollout_traces={},
-            decoded={},
+            tracks={
+                "image": RolloutTrack(
+                    sample_ids=list(req.sample_ids),
+                    parent_ids=list(req.group_ids),
+                    conditions={},
+                    segment=None,
+                    decoded=None,
+                ),
+            }
         )
 
 
@@ -98,7 +102,6 @@ def _make_req(n: int = 2) -> RolloutReq:
         sample_ids=[f"s{i}" for i in range(n)],
         group_ids=[f"g{i}" for i in range(n)],
         primitives={"text": Texts(texts=[f"p{i}" for i in range(n)])},
-        stage_params={},
         sigmas=torch.linspace(1.0, 0.0, steps=4),
     )
 
@@ -128,8 +131,9 @@ def test_generate_returns_pipeline_response_verbatim() -> None:
     resp = engine.generate(req)
 
     assert isinstance(resp, RolloutResp)
-    assert list(resp.sample_ids) == list(req.sample_ids)
-    assert list(resp.group_ids) == list(req.group_ids)
+    track = resp.tracks["image"]
+    assert list(track.sample_ids) == list(req.sample_ids)
+    assert list(track.group_ids) == list(req.group_ids)
     assert len(pipeline.observations) == 1
 
 

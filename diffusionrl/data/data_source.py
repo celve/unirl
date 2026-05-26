@@ -15,6 +15,9 @@ from typing import Any, Dict, Iterator, List, Optional
 import torch
 from torch.utils.data import DataLoader
 
+from diffusionrl.types.primitives import Images, Texts
+from diffusionrl.types.prompts import RolloutInputs
+
 from .datasets import PromptExampleDataset, TextPromptDataset, normalize_prompt_example
 
 logger = logging.getLogger(__name__)
@@ -63,6 +66,19 @@ def _load_condition_images(media_refs: List[Any]) -> Optional[List[Any]]:
     return images_per_prompt
 
 
+def _validate_homogeneous_images(images: List[Any]) -> None:
+    """Reject batches where some prompts have condition images and others don't."""
+    populated = [img for img in images if img is not None]
+    if populated and len(populated) != len(images):
+        missing = [i for i, img in enumerate(images) if img is None]
+        raise ValueError(
+            f"Heterogeneous I2V batch — {len(missing)}/{len(images)} prompts "
+            f"are missing a condition image (e.g. prompt index {missing[0]}). "
+            f"Split into separate requests so each batch is either fully T2V or "
+            f"fully I2V; per-sample channel-concat is not supported."
+        )
+
+
 class MultimodalRLDataSource:
     """
     Multimodal runtime data source for RL training.
@@ -91,7 +107,7 @@ class MultimodalRLDataSource:
         self.data_path = args.run.data_path
         self.eval_data_path = args.run.eval_data_path
         self.seed = args.run.seed
-        self.prompts_per_rollout = args.algorithm.prompts_per_rollout
+        self.prompts_per_rollout = int(args.algorithm.prompts_per_rollout)
         self.drop_last = True
 
         # Training data and eval data are treated as separate prompt sources.
@@ -182,21 +198,29 @@ class MultimodalRLDataSource:
 
         self._iter = iter(self._dataloader)
 
-    def _collate_text(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _collate_text(self, batch: List[Dict[str, Any]]) -> RolloutInputs:
         """Collate function for text prompt dataset."""
         prompts = [item["prompt"] for item in batch]
         prompt_ids = self._resolve_prompt_ids(batch)
-        metadata = [item.get("metadata") for item in batch]
+        sample_ids = [f"prompt:{pid}:sample:0" for pid in prompt_ids]
+
+        from diffusionrl.rollout.pipeline import _reject_unsupported_media_refs
+
         media_refs = [item.get("media_refs", []) for item in batch]
-        result: Dict[str, Any] = {"prompts": prompts, "prompt_ids": prompt_ids}
-        if any(m is not None for m in metadata):
-            result["metadata"] = metadata
         if any(media_refs):
-            result["media_refs"] = media_refs
+            _reject_unsupported_media_refs({"media_refs": media_refs}, context="MultimodalRLDataSource._collate_text")
+
+        primitives: Dict[str, Any] = {"text": Texts(texts=prompts)}
         images = _load_condition_images(media_refs)
         if images is not None:
-            result["images"] = images
-        return result
+            _validate_homogeneous_images(images)
+            primitives["image"] = Images.from_list([img for img in images if img is not None])
+
+        return RolloutInputs(
+            primitives=primitives,
+            sample_ids=sample_ids,
+            group_ids=list(prompt_ids),
+        )
 
     @property
     def num_prompts(self) -> int:
@@ -205,22 +229,31 @@ class MultimodalRLDataSource:
             return len(self.train_dataset)
         return 0
 
-    def _prompt_examples_to_batch(self, prompt_examples: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Convert normalized prompt examples into a batch payload."""
-        result: Dict[str, Any] = {
-            "prompts": [item["prompt"] for item in prompt_examples],
-            "prompt_ids": self._resolve_prompt_ids(prompt_examples),
-        }
-        metadata = [item.get("metadata") for item in prompt_examples]
-        if any(m is not None for m in metadata):
-            result["metadata"] = metadata
+    def _prompt_examples_to_batch(self, prompt_examples: List[Dict[str, Any]]) -> RolloutInputs:
+        """Convert normalized prompt examples into a RolloutInputs."""
+        prompts = [item["prompt"] for item in prompt_examples]
+        prompt_ids = self._resolve_prompt_ids(prompt_examples)
+        sample_ids = [f"prompt:{pid}:sample:0" for pid in prompt_ids]
+
+        from diffusionrl.rollout.pipeline import _reject_unsupported_media_refs
+
         media_refs = [item.get("media_refs", []) for item in prompt_examples]
         if any(media_refs):
-            result["media_refs"] = media_refs
+            _reject_unsupported_media_refs(
+                {"media_refs": media_refs}, context="MultimodalRLDataSource._prompt_examples_to_batch"
+            )
+
+        primitives: Dict[str, Any] = {"text": Texts(texts=prompts)}
         images = _load_condition_images(media_refs)
         if images is not None:
-            result["images"] = images
-        return result
+            _validate_homogeneous_images(images)
+            primitives["image"] = Images.from_list([img for img in images if img is not None])
+
+        return RolloutInputs(
+            primitives=primitives,
+            sample_ids=sample_ids,
+            group_ids=list(prompt_ids),
+        )
 
     def _resolve_prompt_ids(self, prompt_examples: List[Dict[str, Any]]) -> List[str]:
         """Resolve deterministic prompt IDs even if a dataset forgot to provide them."""
@@ -233,16 +266,8 @@ class MultimodalRLDataSource:
                 prompt_ids.append(str(prompt_id))
         return prompt_ids
 
-    def get_samples(self, batch_size: int) -> Dict[str, Any]:
-        """
-        Get next batch of samples.
-
-        Args:
-            batch_size: Requested batch size (uses internal batch_size)
-
-        Returns:
-            Dict containing prompt text plus optional metadata.
-        """
+    def get_samples(self, batch_size: int) -> RolloutInputs:
+        """Get next batch of samples as a typed ``RolloutInputs``."""
         if self._iter is None:
             raise RuntimeError("MultimodalRLDataSource is not initialized. Training DataLoader is unavailable.")
 
@@ -320,13 +345,17 @@ class DefaultDataSource:
     def num_prompts(self) -> int:
         return len(self.prompts)
 
-    def get_samples(self, batch_size: int) -> Dict[str, List[str]]:
+    def get_samples(self, batch_size: int) -> RolloutInputs:
         """Get next batch of prompts."""
-        result = []
+        prompts = []
         for _ in range(batch_size):
-            result.append(self.prompts[self._index % len(self.prompts)])
+            prompts.append(self.prompts[self._index % len(self.prompts)])
             self._index += 1
-        return {"prompts": result}
+        return RolloutInputs(
+            primitives={"text": Texts(texts=prompts)},
+            sample_ids=[f"prompt:{i}:sample:0" for i in range(len(prompts))],
+            group_ids=[f"prompt:{i}" for i in range(len(prompts))],
+        )
 
     def get_eval_samples(self, batch_size: int) -> Dict[str, List[str]]:
         """Get a stable eval batch."""

@@ -92,5 +92,38 @@ class TextTokenCondition(Condition):
     input_ids: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
     attention_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
 
+    @classmethod
+    def concat(cls, items: Sequence["TextTokenCondition"]) -> "TextTokenCondition":
+        """Concat token-id conditions, right-padding variable lengths first.
+
+        SGLang's per-shard ``build_rollout_resp`` right-pads prompt
+        ``input_ids`` to that shard's in-batch max, so different rollout
+        actors carry different sequence lengths. The generic batch concat
+        uses plain ``torch.cat(dim=0)``; pad dim 1 to the global max with
+        zeros (attention_mask zeros the same positions out, so the pad
+        token value is masked at attend-time and the receiver is unaffected).
+        """
+        if not items or len(items) == 1:
+            return Batched.concat.__func__(cls, items)
+
+        seq_lens = [
+            int(t.shape[1])
+            for item in items
+            for t in (item.input_ids, item.attention_mask)
+            if isinstance(t, torch.Tensor) and t.dim() >= 2
+        ]
+        if not seq_lens or len(set(seq_lens)) <= 1:
+            return Batched.concat.__func__(cls, items)
+
+        target_seq_len = max(seq_lens)
+        padded = [
+            cls(
+                input_ids=_pad_text_tensor(item.input_ids, target_seq_len),
+                attention_mask=_pad_text_tensor(item.attention_mask, target_seq_len),
+            )
+            for item in items
+        ]
+        return Batched.concat.__func__(cls, padded)
+
 
 __all__ = ["TextEmbedCondition", "TextTokenCondition"]

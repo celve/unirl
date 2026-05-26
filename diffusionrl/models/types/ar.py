@@ -13,25 +13,14 @@ The legacy ``ARTrajectory`` type is deleted — ``TextSegment`` (in
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Protocol, Tuple, TypeVar, runtime_checkable
 
 import torch
 
+from diffusionrl.types.sampling import ARSamplingParams
 from diffusionrl.types.segments import TextSegment
 
 C = TypeVar("C")
-
-
-@dataclass
-class ARSamplingParams:
-    """Sampling configuration for an AR rollout call."""
-
-    max_tokens: int = 256
-    temperature: float = 1.0
-    top_p: float = 1.0
-    top_k: int = 0
-    stop_token_id: int | None = None
 
 
 @runtime_checkable

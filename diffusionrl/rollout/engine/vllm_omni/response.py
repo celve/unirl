@@ -7,13 +7,13 @@ Stage 1 DiT for image modalities) and packs into ``RolloutResp``.
 
 Produces:
 
-- ``resp.decoded["image"]`` (image modalities) — pixels ``[B, C, H, W]``
-  in [0, 1] from PIL outputs of the DiT stage.
-- ``resp.decoded["text"]`` (AR-only modalities) — ``Texts`` from
+- ``resp.tracks["image"].decoded`` (image modalities) — :class:`Images` with
+  pixels ``[B, C, H, W]`` in [0, 1] from PIL outputs of the DiT stage.
+- ``resp.tracks["ar"].decoded`` (modalities that run AR) — :class:`Texts` from
   ``request_output.outputs[0].text``.
-- ``resp.rollout_traces["image"]`` (image modalities) — ``LatentSegment`` from
+- ``resp.tracks["image"].segment`` (image modalities) — ``LatentSegment`` from
   the DiT stage's trajectory tensors.
-- ``resp.rollout_traces["ar"]`` (all modalities) — ``TextSegment`` packed by
+- ``resp.tracks["ar"].segment`` (all modalities) — ``TextSegment`` packed by
   ``hi3.ar_capture.extract_ar_segment``.
 - ``resp.conditions["fused"]`` (image modalities) —
   ``HunyuanImage3FusedMultimodalCondition`` built from per-request
@@ -49,7 +49,7 @@ from diffusionrl.types.conditions import Condition
 from diffusionrl.types.conditions.text import TextEmbedCondition
 from diffusionrl.types.primitives import Image, Images, Text, Texts
 from diffusionrl.types.rollout_req import RolloutReq
-from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
 from diffusionrl.types.segments.latent import make_image_segment
 
 
@@ -418,7 +418,9 @@ def _to_rollout_resp(
     if not per_request_outputs or not any(per_request_outputs):
         raise ValueError("_to_rollout_resp: empty per_request_outputs (Omni.generate returned nothing surfaceable).")
 
-    decoded: dict = {}
+    # Per-track decoded slots (at most one value per track, by modality).
+    decoded_image: Optional[Images] = None
+    decoded_text: Optional[Texts] = None
     rollout_traces: dict = {}
     conditions: Dict[str, Condition] = {}
 
@@ -449,7 +451,7 @@ def _to_rollout_resp(
                 "_to_rollout_resp: DiT outputs carry no PIL images; "
                 "check pipeline forward populated DiffusionOutput.output."
             )
-        decoded["image"] = _pil_list_to_images(pil_images)
+        decoded_image = _pil_list_to_images(pil_images)
         rollout_traces["image"] = _build_image_segment(
             diff_outputs,
             expected_sigmas=req.sigmas,
@@ -488,15 +490,15 @@ def _to_rollout_resp(
                 )
             conditions["fused"] = fused_cond
     elif modality in ("i2t", "t2t"):
-        decoded["text"] = _decoded_text_from_ar(per_request_outputs)
+        decoded_text = _decoded_text_from_ar(per_request_outputs)
     else:
         raise ValueError(f"_to_rollout_resp: unknown modality {modality!r}")
 
     # Surface AR-generated text for all modalities that run AR (Stage 0).
     # For t2i_think_recaption this is the CoT + recaption text.
-    if modality in ("t2i", "it2i", "t2i_think_recaption") and "text" not in decoded:
+    if modality in ("t2i", "it2i", "t2i_think_recaption") and decoded_text is None:
         try:
-            decoded["text"] = _decoded_text_from_ar(per_request_outputs)
+            decoded_text = _decoded_text_from_ar(per_request_outputs)
         except Exception:
             pass  # best-effort; don't break rollout if AR text extraction fails
 
@@ -505,16 +507,34 @@ def _to_rollout_resp(
     if ar_segment is not None:
         rollout_traces["ar"] = ar_segment
 
-    return RolloutResp(
-        sample_ids=list(req.sample_ids),
-        group_ids=list(req.group_ids),
-        conditions=conditions,
-        rollout_traces=rollout_traces,
-        decoded=decoded,
-        rewards=None,
-        advantages=None,
-        status=None,
-    )
+    # Tracks are one per ``rollout_traces`` segment-key, each carrying its
+    # own decoded value (or ``None``): the "image" track holds the DiT
+    # pixels, the "ar" track holds the AR-decoded text.
+    #
+    # ``conditions`` were resp-wide in the legacy shape (one dict shared
+    # across all modalities); keep that behavior by replicating onto every
+    # track. The trainer reads conditions per-track (see
+    # ``StageTrainStack.train_microbatch`` post-Step-5), and today the
+    # legacy single-image-track replay is the only consumer; any AR
+    # consumer that needs different conditions later can override after
+    # construction.
+    sample_ids = list(req.sample_ids)
+    parent_ids = list(req.group_ids)
+    decoded_for_track: Dict[str, Optional[Any]] = {
+        "image": decoded_image,
+        "ar": decoded_text,
+    }
+    tracks: Dict[str, RolloutTrack] = {}
+    for track_name, segment in rollout_traces.items():
+        tracks[track_name] = RolloutTrack(
+            sample_ids=list(sample_ids),
+            parent_ids=list(parent_ids),
+            conditions=dict(conditions),
+            segment=segment,
+            decoded=decoded_for_track.get(track_name),
+        )
+
+    return RolloutResp(tracks=tracks)
 
 
 __all__ = ["_to_rollout_resp", "group_by_request"]

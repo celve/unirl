@@ -28,6 +28,7 @@ from typing import Any, Dict
 from omegaconf import MISSING
 
 from diffusionrl.config.registration import register_config
+from diffusionrl.rollout.engine.base import BaseEngineConfig
 
 
 @register_config(
@@ -36,7 +37,7 @@ from diffusionrl.config.registration import register_config
     target="diffusionrl.rollout.engine.vllm_omni.engine.VLLMOmniRolloutEngine",
 )
 @dataclass
-class VLLMOmniEngineConfig:
+class VLLMOmniEngineConfig(BaseEngineConfig):
     # Required: HunyuanImage-3 checkpoint path. Set per experiment or via
     # ``cfg.rollout.engine.model_path=...`` on the CLI.
     model_path: str = MISSING

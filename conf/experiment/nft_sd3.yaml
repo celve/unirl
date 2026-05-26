@@ -76,47 +76,46 @@ algorithm:
     num_sde_steps: 0
   sde_config:
     eta: ${sampling.sde_config.eta}
-
-algorithms:
-  # Slot key = rollout response segment key (SD3 emits resp.rollout_traces["image"]).
-  # ``stage_attr: diffusion`` overrides the default pipeline-attribute
-  # lookup (SD3Pipeline exposes ``self.diffusion``, not ``self.image``).
-  # TrainActor injects ``nft_lora_policy=<NFTLoRAPolicy in chain>`` at
-  # instantiate time so the algorithm can call
-  # ``policy.with_old_adapter()`` for the reference forward.
-  image:
-    _target_: diffusionrl.algorithms.DiffusionNFT
-    stage_attr: diffusion
-    conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
-    # Production defaults from OLD nft_sd3.yaml ema + algorithm blocks.
-    # NEW collapses OLD's separate timestep_mode/shuffle/fraction into
-    # the three flat fields below; advanced modes (adv_mode != raw, etc.)
-    # fail fast in DiffusionNFT.__init__.
-    beta: 1.0
-    adv_clip_max: 5.0
-    adv_mode: raw
-    use_adaptive_weight: true
-    train_timestep_mode: all
-    shuffle_train_timesteps: true
-    apply_time_shift_in_loss: false
-    training_timestep_fraction: 0.99
-    kl_coef: 0.0
-    params:
-      _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
-      num_inference_steps: ${sampling.num_inference_steps}
-      guidance_scale: ${sampling.guidance_scale}
-      height: ${sampling.height}
-      width: ${sampling.width}
-      seed: ${run.seed}
-      # NFT rollout passes ``sde_indices=null`` (the engine reads this as
-      # "no SDE; forward-process path"); the algorithm's loss math picks
-      # its own ``t`` per sample inside ``compute_loss_and_backward``.
-      sde_indices: null
-      eta: ${sampling.sde_config.eta}
-      init_same_noise: ${sampling.init_same_noise}
-      samples_per_prompt: ${algorithm.samples_per_prompt}
-      noise_group_ids: null
-      max_sequence_length: 256
+  algorithms:
+    # Slot key = rollout response segment key (SD3 emits resp.rollout_traces["image"]).
+    # ``stage_attr: diffusion`` overrides the default pipeline-attribute
+    # lookup (SD3Pipeline exposes ``self.diffusion``, not ``self.image``).
+    # TrainActor injects ``nft_lora_policy=<NFTLoRAPolicy in chain>`` at
+    # instantiate time so the algorithm can call
+    # ``policy.with_old_adapter()`` for the reference forward.
+    diffusion:
+      name: diffusion_nft
+      stage_attr: diffusion
+      conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
+      # Production defaults from OLD nft_sd3.yaml ema + algorithm blocks.
+      # NEW collapses OLD's separate timestep_mode/shuffle/fraction into
+      # the three flat fields below; advanced modes (adv_mode != raw, etc.)
+      # fail fast in DiffusionNFT.__init__.
+      beta: 1.0
+      adv_clip_max: 5.0
+      adv_mode: raw
+      use_adaptive_weight: true
+      train_timestep_mode: all
+      shuffle_train_timesteps: true
+      apply_time_shift_in_loss: false
+      training_timestep_fraction: 0.99
+      kl_coef: 0.0
+      params:
+        _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
+        num_inference_steps: ${sampling.num_inference_steps}
+        guidance_scale: ${sampling.guidance_scale}
+        height: ${sampling.height}
+        width: ${sampling.width}
+        seed: ${run.seed}
+        # NFT rollout passes ``sde_indices=null`` (the engine reads this as
+        # "no SDE; forward-process path"); the algorithm's loss math picks
+        # its own ``t`` per sample inside ``compute_loss_and_backward``.
+        sde_indices: null
+        eta: ${sampling.sde_config.eta}
+        init_same_noise: ${sampling.init_same_noise}
+        samples_per_prompt: ${algorithm.samples_per_prompt}
+        noise_group_ids: null
+        max_sequence_length: 256
 
 placement:
   # Direct-sampling: train actors sample on their own GPUs; no separate
@@ -140,50 +139,35 @@ rollout:
     forward_batch_size: ${oc.decode:${oc.env:FBS,32}}
 
 training:
-  policy_source: diffusion
-  policies:
-    # NFTLoRAPolicy replaces LoRAPolicy: same peft target_modules list, +
-    # installs a second "old" adapter that tracks "default" via EMA.
-    # NOTE: ``compose_policy`` wraps inside-out, so NFTLoRAPolicy is the
-    # innermost adapter-management layer; FSDPPolicy outer-wraps the
-    # composite peft-injected module (both adapters get FSDP-sharded
-    # under the same tree).
-    - _target_: diffusionrl.training.nft_lora_policy.NFTLoRAPolicy
-      rank: 32
-      alpha: 64
-      dropout: 0.0
-      target_modules:
-        - attn.add_k_proj
-        - attn.add_q_proj
-        - attn.add_v_proj
-        - attn.to_add_out
-        - attn.to_k
-        - attn.to_out.0
-        - attn.to_q
-        - attn.to_v
-      bias: none
-      task_type: FEATURE_EXTRACTION
-      # Dual-adapter EMA — production OLD nft_sd3.yaml values (warmup decay,
-      # update at the rollout boundary). decay_type=warmup with flat_steps=0
-      # means: decay starts at 0 (= hard copy default→old on step 0) then
-      # climbs at ema_uprate per update toward ema_uphold.
-      old_adapter_name: old
-      ema_decay: 0.001
-      ema_decay_type: warmup
-      ema_flat_steps: 0
-      ema_uprate: 0.001
-      ema_uphold: 0.5
-      ema_update_timing: rollout_end
-    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
-      cpu_offload: false
-      param_dtype: bf16
-      mixed_precision: true
-      fsdp_mode: full
-      reshard_after_forward: true
-      # Activation checkpointing matters less for NFT (no SDE replay,
-      # so the loss is one forward + one no-grad forward); but enabled
-      # for parity with GRPO recipes on the same hardware.
-      activation_checkpointing: true
+  ema_lora:
+    rank: 32
+    alpha: 64
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    shadow_adapter: old
+    ema_decay: 0.001
+    ema_decay_type: warmup
+    ema_flat_steps: 0
+    ema_uprate: 0.001
+    ema_uphold: 0.5
+    timing: rollout_end
+    target_modules:
+      - attn.add_k_proj
+      - attn.add_q_proj
+      - attn.add_v_proj
+      - attn.to_add_out
+      - attn.to_k
+      - attn.to_out.0
+      - attn.to_q
+      - attn.to_v
+  fsdp:
+    cpu_offload: false
+    param_dtype: bf16
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: true
   materialize:
     with_aux: []
   plan:
@@ -224,7 +208,7 @@ reward:
   aggregation_method: mean
   base_device: cuda
   components:
-    - name: pickscore
+    pickscore:
       weight: 1.0
       batch_size: 8
 

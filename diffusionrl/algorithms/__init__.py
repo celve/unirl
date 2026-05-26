@@ -10,9 +10,7 @@ from .dppo import DiffusionDPPO
 from .grpo import ARGRPO, DiffusionGRPO
 from .nft import DiffusionNFT, DiffusionNFTConfig
 from .rollout_control import (
-    GRPORolloutControl,
     GRPORolloutControlConfig,
-    NFTRolloutControl,
     NFTRolloutControlConfig,
 )
 
@@ -23,9 +21,7 @@ __all__ = [
     "DiffusionGRPO",
     "DiffusionNFT",
     "DiffusionNFTConfig",
-    "GRPORolloutControl",
     "GRPORolloutControlConfig",
-    "NFTRolloutControl",
     "NFTRolloutControlConfig",
     "StageAlgorithm",
 ]

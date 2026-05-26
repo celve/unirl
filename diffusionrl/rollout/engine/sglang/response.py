@@ -7,9 +7,10 @@ sde_indices, use_native_logprob)`` produces:
   ``sigmas``, ``indices``, ``sample_indices`` always populated; ``sde_logp`` +
   ``sde_indices`` populated when ``use_native_logprob`` and the algorithm
   requested SDE log-probs.
-- ``resp.decoded['image']`` = :class:`Images` (``float32 [B, C, H, W]`` in
-  ``[0, 1]``) built from SGLang's per-result ``samples`` output. Video samples
-  surface as ``[C, T, H, W]`` and are deferred (TODO — first video consumer).
+- ``resp.tracks['image'].decoded`` = :class:`Images` (``float32 [B, C, H, W]``
+  in ``[0, 1]``) built from SGLang's per-result ``samples`` output, or ``None``
+  if SGLang returned no decoded samples. Video samples surface as
+  ``[C, T, H, W]`` and are deferred (TODO — first video consumer).
 - ``resp.conditions['text']`` + (when CFG active) ``resp.conditions[
   'negative_text']`` populated from SGLang's ``prompt_embeds`` /
   ``pooled_prompt_embeds`` / ``encoder_attention_mask`` / ``negative_*``
@@ -20,9 +21,8 @@ sde_indices, use_native_logprob)`` produces:
 
 Trajectory validation (T+1 invariant, sigma-schedule cross-check) and
 selective-trim heuristics (``compute_trajectory_positions``) port verbatim
-from legacy ``samplers/sglang/response.py``. Model-typed
-``ForwardContext`` build does NOT port over — trainer-side replay
-reconstructs the typed container from ``resp.conditions``.
+from legacy ``samplers/sglang/response.py``. Trainer-side replay
+reconstructs typed conditions from ``resp.tracks[slot].conditions``.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ from diffusionrl.rollout.engine.sigma_verify import verify_engine_used_sigmas
 from diffusionrl.types.conditions.text import TextEmbedCondition
 from diffusionrl.types.primitives import Images
 from diffusionrl.types.rollout_req import RolloutReq
-from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
 from diffusionrl.types.segments.latent import LatentSegment, make_image_segment
 from diffusionrl.types.trajectory_store import compute_trajectory_positions
 
@@ -65,7 +65,7 @@ def _derive_timestep_alignment(
 
     ``expected_sigmas`` is the σ schedule the engine pinned on
     ``RolloutReq.sigmas`` and forwarded via SGLang's
-    ``SamplingParams.sigmas`` → ``set_timesteps(sigmas=...)``. SGLang
+    ``DiffusionSamplingParams.sigmas`` → ``set_timesteps(sigmas=...)``. SGLang
     echoes the same values back via ``trajectory_timesteps`` per
     result; :func:`verify_engine_used_sigmas` asserts elementwise
     equality (with dynamic scale-normalization for sglang builds that
@@ -354,12 +354,7 @@ def _to_rollout_resp(
         use_native_logprob=use_native_logprob,
     )
 
-    rollout_traces = {"image": segment}
-
-    decoded: dict = {}
     decoded_images = _build_decoded_images(results)
-    if decoded_images is not None:
-        decoded["image"] = decoded_images
 
     conditions: dict = {}
     if cfg.populate_conditions:
@@ -370,11 +365,15 @@ def _to_rollout_resp(
             conditions["negative_text"] = neg_text_cond
 
     return RolloutResp(
-        sample_ids=list(req.sample_ids),
-        group_ids=list(req.group_ids),
-        conditions=conditions,
-        rollout_traces=rollout_traces,
-        decoded=decoded,
+        tracks={
+            "image": RolloutTrack(
+                sample_ids=list(req.sample_ids),
+                parent_ids=list(req.group_ids),
+                conditions=conditions,
+                segment=segment,
+                decoded=decoded_images,
+            ),
+        }
     )
 
 

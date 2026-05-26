@@ -127,7 +127,7 @@ def test_ar_stage_protocol_is_satisfied():
             return TextSegment.pack(
                 sample_indices=torch.arange(B),
                 positions=torch.zeros(B, dtype=torch.long),
-                tokens=[torch.zeros(sampling_params.max_tokens, dtype=torch.long) for _ in range(B)],
+                tokens=[torch.zeros(sampling_params.max_new_tokens, dtype=torch.long) for _ in range(B)],
             )
 
         def replay(
@@ -142,7 +142,7 @@ def test_ar_stage_protocol_is_satisfied():
     assert isinstance(stage, ARStage)
     out = stage.autoregress(
         {"text": TextEmbedCondition(embeds=torch.zeros(3, 8, 16))},
-        sampling_params=ARSamplingParams(max_tokens=4),
+        sampling_params=ARSamplingParams(max_new_tokens=4),
     )
     assert out.tokens.shape == (12,)
     assert out.cu_seqlens.tolist() == [0, 4, 8, 12]

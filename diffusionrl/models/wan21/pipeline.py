@@ -23,20 +23,21 @@ with the configured ``shift``. This mirrors legacy
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from diffusionrl.models.types.pipeline import Pipeline
 from diffusionrl.sde.kernels import DanceSDEStrategy, StepStrategy
 from diffusionrl.types.conditions import ImageEmbedCondition, ImageLatentCondition
 from diffusionrl.types.primitives import Images, Texts
 from diffusionrl.types.rollout_req import RolloutReq
-from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
+from diffusionrl.types.sampling import DiffusionSamplingParams, get_diffusion_params
 
 from .bundle import WAN21Bundle
 from .clip_vision_encode import WAN21CLIPVisionEncodeStage
 from .conditions import WAN21Conditions
 from .config import WAN21PipelineConfig
-from .diffusion import WAN21DiffusionParams, WAN21DiffusionStage, WAN21DiffusionStep
+from .diffusion import WAN21DiffusionStage, WAN21DiffusionStep
 from .image_encode import WAN21ImageLatentEncodeStage
 from .text_embed import WAN21TextEmbedStage
 from .vae import WAN21VAEDecodeStage
@@ -57,8 +58,8 @@ class WAN21Pipeline(Pipeline):
     - ``conditions["text"]: TextEmbedCondition``; plus
       ``conditions["negative_text"]: TextEmbedCondition`` when negative
       prompts were supplied.
-    - ``rollout_traces["video"]: LatentSegment``.
-    - ``decoded["video"]: Videos``.
+    - ``tracks["video"].segment: LatentSegment``.
+    - ``tracks["video"].decoded: Videos``.
     """
 
     def __init__(
@@ -147,17 +148,7 @@ class WAN21Pipeline(Pipeline):
                 f"WAN21Pipeline.generate: negative_text length {len(negatives.texts)} != text length {len(texts.texts)}"
             )
 
-        # Filter stage_params["diffusion"] down to fields that
-        # WAN21DiffusionParams actually accepts. Upstream drivers (e.g.
-        # RolloutPipeline) stash rollout-metadata keys here too — most
-        # notably ``num_samples_per_prompt`` — and the dataclass
-        # constructor rejects unknown kwargs. (Mirrors SD3Pipeline.)
-        import dataclasses as _dc
-
-        raw_dict: Dict[str, Any] = dict(req.stage_params.get("diffusion") or {})
-        allowed = {f.name for f in _dc.fields(WAN21DiffusionParams)}
-        params_dict = {k: v for k, v in raw_dict.items() if k in allowed}
-        params = WAN21DiffusionParams(**params_dict)
+        params: DiffusionSamplingParams = get_diffusion_params(req.sampling_params)
 
         text_cond = self.text_embed.embed(texts)
         # CFG negative encoding: WAN's training-time convention encodes
@@ -224,11 +215,15 @@ class WAN21Pipeline(Pipeline):
         videos = self.vae_decode.decode(latent_seg)
 
         return RolloutResp(
-            sample_ids=list(req.sample_ids),
-            group_ids=list(req.group_ids),
-            conditions=wan_conds.to_dict(),
-            rollout_traces={"video": latent_seg},
-            decoded={"video": videos},
+            tracks={
+                "video": RolloutTrack(
+                    sample_ids=list(req.sample_ids),
+                    parent_ids=list(req.group_ids),
+                    conditions=wan_conds.to_dict(),
+                    segment=latent_seg,
+                    decoded=videos,
+                ),
+            }
         )
 
 

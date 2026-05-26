@@ -7,9 +7,10 @@ import torch
 from diffusionrl.types.conditions.image import ImageLatentCondition
 from diffusionrl.types.primitives import Image, Images, Text, Texts
 from diffusionrl.types.rollout_req import RolloutReq
+from diffusionrl.types.sampling import DiffusionSamplingParams
 
 
-def _make_shard(sample_ids, group_ids, *, texts=None, images=None, stage_params=None):
+def _make_shard(sample_ids, group_ids, *, texts=None, images=None, sampling_params=None):
     primitives: dict = {}
     if texts is not None:
         primitives["text"] = Texts.from_list([Text(t) for t in texts])
@@ -19,21 +20,22 @@ def _make_shard(sample_ids, group_ids, *, texts=None, images=None, stage_params=
         sample_ids=list(sample_ids),
         group_ids=list(group_ids),
         primitives=primitives,
-        stage_params=stage_params or {},
+        sampling_params=sampling_params,
     )
 
 
 def test_construction_and_field_access():
+    params = DiffusionSamplingParams(num_inference_steps=28)
     req = _make_shard(
         sample_ids=["s0", "s1"],
         group_ids=["g0", "g0"],
         texts=["a", "b"],
-        stage_params={"diffusion": {"num_steps": 28}, "ar": {"max_tokens": 64}},
+        sampling_params=params,
     )
     assert req.batch_size == 2
     assert req.sample_ids == ["s0", "s1"]
     assert req.primitives["text"].texts == ["a", "b"]
-    assert req.stage_params["diffusion"]["num_steps"] == 28
+    assert req.sampling_params.num_inference_steps == 28
 
 
 def test_concat_extends_sample_id_lists():
@@ -68,12 +70,13 @@ def test_concat_merges_multimodal_primitives_by_key():
     assert torch.equal(merged.primitives["image"].pixels[1], img_one)
 
 
-def test_stage_params_shared_consistent_values_survive_concat():
-    a = _make_shard(["s0"], ["g0"], texts=["a"], stage_params={"diffusion": {"num_steps": 28}})
-    b = _make_shard(["s1"], ["g0"], texts=["b"], stage_params={"diffusion": {"num_steps": 28}})
+def test_sampling_params_shared_consistent_values_survive_concat():
+    params = DiffusionSamplingParams(num_inference_steps=28)
+    a = _make_shard(["s0"], ["g0"], texts=["a"], sampling_params=params)
+    b = _make_shard(["s1"], ["g0"], texts=["b"], sampling_params=params)
 
     merged = RolloutReq.concat([a, b])
-    assert merged.stage_params == {"diffusion": {"num_steps": 28}}
+    assert merged.sampling_params.num_inference_steps == 28
 
 
 def test_select_picks_subset_along_sample_axis():
@@ -97,7 +100,7 @@ def test_empty_primitives_dict_is_valid():
     assert req.batch_size == 1
     assert req.primitives == {}
     assert req.request_conditions == {}
-    assert req.stage_params == {}
+    assert req.sampling_params is None
 
 
 def test_request_conditions_slice_propagates_to_condition_tensors():

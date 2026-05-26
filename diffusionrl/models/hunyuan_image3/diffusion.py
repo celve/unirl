@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import sys
 from contextlib import nullcontext
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
@@ -43,6 +42,7 @@ import torch
 from diffusionrl.models.types.diffusion import DiffusionStage, DiffusionStep
 from diffusionrl.models.types.replay_result import ReplayResult
 from diffusionrl.sde.kernels import StepStrategy
+from diffusionrl.types.sampling import DiffusionSamplingParams
 from diffusionrl.types.segments.latent import LatentSegment
 from diffusionrl.types.trajectory_store import compute_trajectory_positions
 from diffusionrl.utils.dtypes import parse_torch_dtype
@@ -50,33 +50,6 @@ from diffusionrl.utils.dtypes import parse_torch_dtype
 from .bundle import HunyuanImage3Bundle
 from .conditions import HunyuanImage3DiffusionConditions
 from .diffusion_state import HunyuanImage3DiffusionState
-
-
-@dataclass
-class HunyuanImage3DiffusionParams:
-    """Per-request sampling knobs for HunyuanImage3 DiT-mode diffusion.
-
-    Strategy + precision knobs are NOT here — they live at
-    ``HunyuanImage3DiffusionStage`` construction since stateful strategies
-    (e.g. DPM2) and precision are operator policy, not request shape.
-    """
-
-    num_inference_steps: int = 50
-    guidance_scale: float = 2.5
-    height: int = 1024
-    width: int = 1024
-    seed: int = 42
-    sde_indices: Optional[List[int]] = None
-    eta: float = 0.0  # FlowMatch is deterministic by default; non-zero only for SDE replay
-    init_same_noise: bool = False
-    samples_per_prompt: int = 1
-    noise_group_ids: Optional[List[str]] = None
-
-    # Taylor-cache acceleration knobs (upstream HunyuanImage3 supports these
-    # as inference-time speedups; preserved as opaque pass-throughs to
-    # `predict_noise` for now).
-    taylor_cache_interval: Optional[int] = None
-    taylor_cache_order: Optional[int] = None
 
 
 class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage3DiffusionConditions]):
@@ -543,7 +516,7 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
         conditions: HunyuanImage3DiffusionConditions,
         *,
         schedule: torch.Tensor,
-        params: HunyuanImage3DiffusionParams,
+        params: DiffusionSamplingParams,
     ) -> LatentSegment:
         """Run full HunyuanImage3 DiT sampling. Returns a ``LatentSegment``.
 
@@ -667,7 +640,7 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
         conditions: HunyuanImage3DiffusionConditions,
         *,
         segment: LatentSegment,
-        params: HunyuanImage3DiffusionParams,
+        params: DiffusionSamplingParams,
         step_indices: Optional[List[int]] = None,
     ) -> ReplayResult:
         """Segment-based log-prob replay over the rollout's SDE transitions.
@@ -758,7 +731,7 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
         *,
         sample: torch.Tensor,
         sigma: torch.Tensor,
-        params: HunyuanImage3DiffusionParams,
+        params: DiffusionSamplingParams,
     ) -> torch.Tensor:
         """Single ``(xt, sigma)`` model forward — no scheduler iteration.
 
@@ -790,7 +763,6 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
 
 
 __all__ = [
-    "HunyuanImage3DiffusionParams",
     "HunyuanImage3DiffusionStage",
     "HunyuanImage3DiffusionStep",
 ]

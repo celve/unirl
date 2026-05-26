@@ -39,7 +39,6 @@ WAN-specific deviations from SD3 v2:
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Optional, Set, Tuple
 
 import torch
@@ -47,6 +46,7 @@ import torch
 from diffusionrl.models.types.diffusion import DiffusionStage, DiffusionStep
 from diffusionrl.models.types.replay_result import ReplayResult
 from diffusionrl.sde.kernels import StepStrategy
+from diffusionrl.types.sampling import DiffusionSamplingParams
 from diffusionrl.types.segments.latent import LatentSegment, make_video_segment
 from diffusionrl.types.trajectory_store import compute_trajectory_positions
 from diffusionrl.utils.dtypes import parse_torch_dtype
@@ -57,33 +57,6 @@ from .conditions import WAN21Conditions
 # WAN training-time timestep scale: sigma ∈ [0, 1] → timestep ∈ [0, 1000].
 # Matches ``WAN21ModelBundle.TIMESTEP_SCALE`` in ``models/wan21.py``.
 _WAN_TIMESTEP_SCALE: float = 1000.0
-
-
-@dataclass
-class WAN21DiffusionParams:
-    """Per-request sampling knobs for WAN 2.1 T2V diffusion.
-
-    Strategy + precision knobs are *not* here — they live at
-    ``WAN21DiffusionStage`` construction since stateful strategies
-    require a stable instance across the loop and precision is operator
-    policy, not request shape.
-
-    ``num_frames`` is the **pixel-space** video length; the latent
-    temporal dim is ``(num_frames - 1) // 4 + 1`` (WAN VAE temporal
-    downsampling factor is 4).
-    """
-
-    num_inference_steps: int = 30
-    guidance_scale: float = 5.0
-    height: int = 720
-    width: int = 1280
-    num_frames: int = 81
-    seed: int = 42
-    sde_indices: Optional[List[int]] = None
-    eta: float = 0.7
-    init_same_noise: bool = False
-    samples_per_prompt: int = 1
-    noise_group_ids: Optional[List[str]] = None
 
 
 class WAN21DiffusionStep(DiffusionStep[WAN21Bundle, WAN21Conditions]):
@@ -369,7 +342,7 @@ class WAN21DiffusionStage(DiffusionStage[WAN21Conditions]):
         conditions: WAN21Conditions,
         *,
         schedule: torch.Tensor,
-        params: WAN21DiffusionParams,
+        params: DiffusionSamplingParams,
         initial_latents: Optional[torch.Tensor] = None,
     ) -> LatentSegment:
         """Run full WAN 2.1 T2V sampling. Returns a ``LatentSegment``.
@@ -507,7 +480,7 @@ class WAN21DiffusionStage(DiffusionStage[WAN21Conditions]):
         conditions: WAN21Conditions,
         *,
         segment: LatentSegment,
-        params: WAN21DiffusionParams,
+        params: DiffusionSamplingParams,
         step_indices: Optional[List[int]] = None,
     ) -> ReplayResult:
         """Segment-based log-prob replay over the rollout's SDE transitions.
@@ -594,7 +567,7 @@ class WAN21DiffusionStage(DiffusionStage[WAN21Conditions]):
         *,
         sample: torch.Tensor,
         sigma: torch.Tensor,
-        params: WAN21DiffusionParams,
+        params: DiffusionSamplingParams,
     ) -> torch.Tensor:
         """Single ``(xt, sigma)`` model forward — no scheduler iteration.
 
@@ -623,4 +596,4 @@ class WAN21DiffusionStage(DiffusionStage[WAN21Conditions]):
         return self.model.transformer
 
 
-__all__ = ["WAN21DiffusionParams", "WAN21DiffusionStage", "WAN21DiffusionStep"]
+__all__ = ["WAN21DiffusionStage", "WAN21DiffusionStep"]

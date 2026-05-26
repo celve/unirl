@@ -32,11 +32,11 @@ from diffusionrl.rollout.engine.sglang.request import (
 from diffusionrl.types.conditions.image import ImageLatentCondition
 from diffusionrl.types.primitives import Texts
 from diffusionrl.types.rollout_req import RolloutReq
-from diffusionrl.types.sampling import SamplingParams, SDEConfig
+from diffusionrl.types.sampling import DiffusionSamplingParams
 
 
 def _make_cfg(*, sampler_kwargs: dict | None = None) -> SGLangEngineConfig:
-    sampling = SamplingParams(
+    sampling = DiffusionSamplingParams(
         num_inference_steps=4,
         guidance_scale=4.5,
         height=64,
@@ -44,7 +44,7 @@ def _make_cfg(*, sampler_kwargs: dict | None = None) -> SGLangEngineConfig:
         num_frames=1,
         seed=0,
         num_samples_per_prompt=1,
-        sde_config=SDEConfig(eta=0.7),
+        eta=0.7,
         sde_indices=None,
         sampler_kwargs=dict(sampler_kwargs or {}),
     )
@@ -68,16 +68,16 @@ def _make_req(
     sample_ids = [f"s{i}" for i in range(len(prompts))]
     if group_ids is None:
         group_ids = [f"g{i}" for i in range(len(prompts))]
-    diffusion = {
-        "height": 64,
-        "width": 64,
-        "num_inference_steps": 4,
-        "guidance_scale": 4.5,
-        "eta": 0.7,
-        "seed": 12345,
-        "sde_indices": sde_indices,
-        "num_samples_per_prompt": int(num_samples_per_prompt),
-    }
+    diffusion = DiffusionSamplingParams(
+        height=64,
+        width=64,
+        num_inference_steps=4,
+        guidance_scale=4.5,
+        eta=0.7,
+        seed=12345,
+        sde_indices=sde_indices,
+        samples_per_prompt=int(num_samples_per_prompt),
+    )
     rc: dict = {}
     if initial_latents is not None:
         rc["initial_latents"] = ImageLatentCondition(latents=initial_latents)
@@ -86,7 +86,7 @@ def _make_req(
         group_ids=group_ids,
         primitives={"text": Texts(texts=list(prompts))},
         request_conditions=rc,
-        stage_params={"diffusion": diffusion},
+        sampling_params=diffusion,
     )
 
 

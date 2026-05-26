@@ -22,18 +22,19 @@ engine loads once at startup.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from diffusionrl.models.types.pipeline import Pipeline
 from diffusionrl.sde.kernels import CPSSDEStrategy, StepStrategy
 from diffusionrl.types.primitives import Texts
 from diffusionrl.types.rollout_req import RolloutReq
-from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
+from diffusionrl.types.sampling import DiffusionSamplingParams, get_diffusion_params
 
 from .bundle import SD3Bundle
 from .conditions import SD3Conditions
 from .config import SD3PipelineConfig
-from .diffusion import SD3DiffusionParams, SD3DiffusionStage, SD3DiffusionStep
+from .diffusion import SD3DiffusionStage, SD3DiffusionStep
 from .text_embed import SD3TextEmbedStage
 from .vae import SD3VAEDecodeStage
 
@@ -49,13 +50,13 @@ class SD3Pipeline(Pipeline):
       :class:`SD3DiffusionParams`.
     - ``sigmas: Tensor[T+1]`` — pinned by the engine adapter (required).
 
-    Writes to ``RolloutResp``:
+    Writes to ``RolloutResp`` (single ``"image"`` track):
 
     - ``conditions["text"]: TextEmbedCondition``; plus
       ``conditions["negative_text"]: TextEmbedCondition`` when negative prompts
       were supplied.
-    - ``rollout_traces["image"]: LatentSegment``.
-    - ``decoded["image"]: Images``.
+    - ``segment: LatentSegment``.
+    - ``decoded: Images``.
     """
 
     def __init__(
@@ -144,17 +145,7 @@ class SD3Pipeline(Pipeline):
                 f"SD3Pipeline.generate: negative_text length {len(negatives.texts)} != text length {len(texts.texts)}"
             )
 
-        # Filter stage_params["diffusion"] down to fields that SD3DiffusionParams
-        # actually accepts. Upstream drivers (e.g. RolloutPipeline) stash
-        # rollout-metadata keys here too — most notably
-        # ``num_samples_per_prompt`` — and the dataclass constructor rejects
-        # unknown kwargs.
-        import dataclasses as _dc
-
-        raw_dict: Dict[str, Any] = dict(req.stage_params.get("diffusion") or {})
-        allowed = {f.name for f in _dc.fields(SD3DiffusionParams)}
-        params_dict = {k: v for k, v in raw_dict.items() if k in allowed}
-        params = SD3DiffusionParams(**params_dict)
+        params: DiffusionSamplingParams = get_diffusion_params(req.sampling_params)
 
         text_cond = self.text_embed.embed(texts)
         # CFG empty negative: SD3 upstream (diffusers v0.37.1
@@ -186,11 +177,15 @@ class SD3Pipeline(Pipeline):
         images = self.vae_decode.decode(latent_seg)
 
         return RolloutResp(
-            sample_ids=list(req.sample_ids),
-            group_ids=list(req.group_ids),
-            conditions=sd3_conds.to_dict(),
-            rollout_traces={"image": latent_seg},
-            decoded={"image": images},
+            tracks={
+                "image": RolloutTrack(
+                    sample_ids=list(req.sample_ids),
+                    parent_ids=list(req.group_ids),
+                    conditions=sd3_conds.to_dict(),
+                    segment=latent_seg,
+                    decoded=images,
+                ),
+            }
         )
 
 

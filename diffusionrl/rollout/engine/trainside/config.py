@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from diffusionrl.config.registration import register_config
+from diffusionrl.rollout.engine.base import BaseEngineConfig
 
 
 @register_config(
@@ -27,7 +28,7 @@ from diffusionrl.config.registration import register_config
     expand=True,
 )
 @dataclass
-class TrainsideEngineConfig:
+class TrainsideEngineConfig(BaseEngineConfig):
     """No static fields — pipeline/policy are runtime handles, not cfg leaves.
 
     ``expand=True`` so :func:`build` unpacks the (empty) field set as

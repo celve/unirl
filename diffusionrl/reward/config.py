@@ -1,13 +1,13 @@
 """Typed reward config: flat ``RewardConfig`` carrying recipe + runtime knob.
 
-Components are a polymorphic list dispatched by ``name:`` against the
+Components are a polymorphic dict dispatched by key against the
 ``reward/component`` ConfigStore group; each scorer registers its own typed
 Spec inheriting from :class:`BaseRewardComponentSpec`.
 """
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Dict
 
 from diffusionrl.config.polymorphic import polymorphic_field
 from diffusionrl.config.registration import register_config
@@ -25,9 +25,9 @@ class RewardConfig:
 
     aggregation_method: str = "weighted_sum"
     base_device: str = "cpu"
-    components: Tuple[BaseRewardComponentSpec, ...] = polymorphic_field(
+    components: Dict[str, BaseRewardComponentSpec] = polymorphic_field(
         group="reward/component",
-        default_factory=tuple,
+        default_factory=dict,
     )
 
     def __post_init__(self) -> None:

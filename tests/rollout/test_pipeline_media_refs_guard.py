@@ -1,12 +1,10 @@
 """Unit tests for the driver's media_refs filter.
 
-After Phase 4 the driver consumes ``(modality="image",
-role="condition")`` refs through ``Prompts.images`` →
-``RolloutReq.primitives["image"]: Images``. The
+The driver consumes ``(modality="image", role="condition")`` refs
+through ``RolloutInputs.primitives['image']: Images``. The
 :func:`_reject_unsupported_media_refs` helper raises
 ``NotImplementedError`` on any **unsupported** ``(modality, role)``
-combination (anything outside the supported allowlist) so misconfigured
-datasets fail loudly rather than silently degrading.
+combination so misconfigured datasets fail loudly.
 """
 
 from __future__ import annotations
@@ -37,8 +35,8 @@ def test_all_empty_per_prompt_lists_silently_ok() -> None:
 
 
 def test_supported_image_condition_refs_are_silently_ok() -> None:
-    """Phase 4 added I2V; ``(image, condition)`` refs flow through to
-    ``Prompts.images`` and must NOT raise from the guard layer."""
+    """``(image, condition)`` refs flow through to
+    ``RolloutInputs.primitives['image']`` and must NOT raise."""
     refs = [
         [MediaRef(modality="image", role="condition", uri="/data/a.png")],
         [],

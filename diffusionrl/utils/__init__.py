@@ -1,7 +1,6 @@
 """diffusionrl Utilities."""
 
 from .adapter_utils import switch_adapter
-from .ema import EMAModuleWrapper
 from .media import tensor_frame_to_pil, tensor_to_pil
 from .misc import clear_memory, configure_logger, flatten_dict, load_function, set_seed
 from .scheduler_utils import (
@@ -28,8 +27,6 @@ __all__ = [
     "configure_logger",
     "clear_memory",
     "flatten_dict",
-    # ema
-    "EMAModuleWrapper",
     # adapter_utils
     "switch_adapter",
     # wandb_logger

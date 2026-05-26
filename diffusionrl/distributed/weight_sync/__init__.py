@@ -26,6 +26,8 @@ from diffusionrl.distributed.weight_sync.tensor import (
     TensorPayloadSyncConfig,
     UpdateWeightFromTensor,
 )
+from diffusionrl.distributed.weight_sync.track_spec import TrackSyncSpec
+from diffusionrl.distributed.weight_sync.weight_sync import WeightSync
 
 __all__ = [
     "BucketedUpdateWeight",
@@ -33,9 +35,11 @@ __all__ = [
     "IPCBucketedSyncConfig",
     "NcclBroadcastSyncConfig",
     "TensorPayloadSyncConfig",
+    "TrackSyncSpec",
     "UpdateWeight",
     "UpdateWeightFromCheckpoint",
     "UpdateWeightFromDistributed",
     "UpdateWeightFromIPC",
     "UpdateWeightFromTensor",
+    "WeightSync",
 ]

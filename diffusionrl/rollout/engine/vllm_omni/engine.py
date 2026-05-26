@@ -351,7 +351,6 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         self._last_lora_name: Optional[str] = None
         self._last_lora_tensors: Optional[dict] = None
         self._last_peft_config: Optional[dict] = None
-        self._last_lora_stage_ids: Optional[list[int]] = None
 
     # ------------------------------------------------------------------
     # BaseRolloutEngine — generation
@@ -491,16 +490,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
     # ------------------------------------------------------------------
 
     def sleep(self) -> None:
-        """Fan ``handle_sleep_task`` to every stage's workers (level 2).
-
-        Level 2 frees weights, KV cache and CUDA graphs via vllm's
-        ``CuMemAllocator``. Requires ``enable_sleep_mode=True`` on each
-        stage's engine_args (set by ``__init__`` when
-        ``cfg.enable_sleep_mode`` is true). Mirrors
-        ``AsyncOmni.sleep`` (entrypoints/async_omni.py) without the async
-        ACK plumbing — ``collective_rpc`` blocks until each stage's workers
-        complete.
-        """
+        """Fan ``handle_sleep_task`` to every stage's workers (level 2)."""
         if self._omni is None:
             raise RuntimeError("VLLMOmniRolloutEngine: engine not initialized")
         if self._is_offloaded:
@@ -509,8 +499,8 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
 
         from vllm_omni.diffusion.data import OmniSleepTask
 
-        stage_ids = list(range(int(self._omni.engine.num_stages)))
-        for sid in stage_ids:
+        omni_stage_ids = list(range(int(self._omni.engine.num_stages)))
+        for sid in omni_stage_ids:
             self._omni.engine.collective_rpc(
                 method="handle_sleep_task",
                 args=(OmniSleepTask(level=1, task_id=str(uuid.uuid4())),),
@@ -528,8 +518,8 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
 
         from vllm_omni.diffusion.data import OmniWakeTask
 
-        stage_ids = list(range(int(self._omni.engine.num_stages)))
-        for sid in stage_ids:
+        stage_ids_internal = list(range(int(self._omni.engine.num_stages)))
+        for sid in stage_ids_internal:
             self._omni.engine.collective_rpc(
                 method="handle_wake_task",
                 args=(OmniWakeTask(tags=None, task_id=str(uuid.uuid4())),),
@@ -558,16 +548,14 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
 
             logger = logging.getLogger(__name__)
             logger.info(
-                "[LoRA-WAKE] Re-loading LoRA after sleep/wake. adapter_name=%s stage_ids=%s",
+                "[LoRA-WAKE] Re-loading LoRA after sleep/wake. adapter_name=%s",
                 self._last_lora_name,
-                self._last_lora_stage_ids,
             )
             try:
                 self.set_lora_from_tensors(
                     adapter_name=self._last_lora_name,
                     lora_tensors=self._last_lora_tensors,
                     peft_config=self._last_peft_config,
-                    stage_ids=self._last_lora_stage_ids,
                 )
                 logger.info("[LoRA-WAKE] LoRA re-loaded successfully.")
             except Exception as exc:
@@ -615,25 +603,12 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         peft_config: Optional[dict] = None,
         base_sync_done: bool = False,
         use_shm: bool = False,
-        stage_ids: Optional[list[int]] = None,
     ) -> None:
-        """Fan a state-dict update out to the per-stage worker subprocesses.
-
-        For each requested stage the worker extension's
-        ``update_weights_from_ipc`` is invoked via ``collective_rpc``. The
-        worker spins up a ``BucketedWeightReceiver`` on its per-rank ZMQ
-        socket; the trainer-side ``UpdateWeightFromIPC`` handler is
-        expected to be pumping the matching socket already.
-
-        Stages default to all stages this modality runs (HI3 t2i: 0+1).
-        """
+        """Fan a state-dict update out to the per-stage worker subprocesses."""
         if self._omni is None:
             raise RuntimeError("VLLMOmniRolloutEngine: engine not initialized")
 
-        # Resolve which stages to fan out to. ``self._omni.engine.num_stages``
-        # is the source of truth for the modality's stage count.
-        if stage_ids is None:
-            stage_ids = list(range(int(self._omni.engine.num_stages)))
+        stage_ids = list(range(int(self._omni.engine.num_stages)))
 
         kwargs = {
             "peft_config": peft_config,
@@ -674,13 +649,11 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         world_size: int,
         group_name: str,
         backend: str = "nccl",
-        stage_ids: Optional[list[int]] = None,
     ) -> None:
         """Bring up an NCCL group on the requested stages' workers."""
         if self._omni is None:
             raise RuntimeError("VLLMOmniRolloutEngine: engine not initialized")
-        if stage_ids is None:
-            stage_ids = list(range(int(self._omni.engine.num_stages)))
+        stage_ids = list(range(int(self._omni.engine.num_stages)))
         kwargs = {
             "master_address": str(master_address),
             "master_port": int(master_port),
@@ -706,13 +679,11 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         group_name: str,
         target_modules: Optional[list[str]] = None,
         flush_cache: bool = True,
-        stage_ids: Optional[list[int]] = None,
     ) -> None:
         """Receive a bucket of named tensors via NCCL on the requested stages."""
         if self._omni is None:
             raise RuntimeError("VLLMOmniRolloutEngine: engine not initialized")
-        if stage_ids is None:
-            stage_ids = list(range(int(self._omni.engine.num_stages)))
+        stage_ids = list(range(int(self._omni.engine.num_stages)))
         kwargs = {
             "names": list(names),
             "dtypes": list(dtypes),
@@ -733,12 +704,10 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         self,
         *,
         group_name: str,
-        stage_ids: Optional[list[int]] = None,
     ) -> None:
         if self._omni is None:
             return
-        if stage_ids is None:
-            stage_ids = list(range(int(self._omni.engine.num_stages)))
+        stage_ids = list(range(int(self._omni.engine.num_stages)))
         for sid in stage_ids:
             self._omni.engine.collective_rpc(
                 method="destroy_weights_update_group",
@@ -757,7 +726,6 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         lora_tensors: dict,
         *,
         peft_config: Optional[dict] = None,
-        stage_ids: Optional[list[int]] = None,
     ) -> None:
         """Hot-swap a LoRA adapter from in-memory tensors on each stage.
 
@@ -786,8 +754,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         if lora_tensors and not first_key.startswith("base_model.model."):
             lora_tensors = adapt_lora_for_vllm(lora_tensors)
 
-        if stage_ids is None:
-            stage_ids = list(range(int(self._omni.engine.num_stages)))
+        stage_ids = list(range(int(self._omni.engine.num_stages)))
 
         # Store LoRA state for re-loading after sleep/wake cycles.
         self._last_lora_name = adapter_name
@@ -798,7 +765,6 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         else:
             self._last_lora_tensors = lora_tensors
         self._last_peft_config = dict(peft_config or {})
-        self._last_lora_stage_ids = stage_ids
 
         # Drop existing adapter first if any — matches the receive-side
         # ``_diffrl_load_bucket`` ordering for IPC + LoRA mode.
@@ -866,7 +832,6 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         target_modules: Optional[list[str]] = None,
         load_format: Optional[str] = None,
         flush_cache: bool = True,
-        stage_ids: Optional[list[int]] = None,
     ) -> None:
         """Fan a SGLang-shape tensor-payload update out to per-stage workers.
 
@@ -876,8 +841,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         """
         if self._omni is None:
             raise RuntimeError("VLLMOmniRolloutEngine: engine not initialized")
-        if stage_ids is None:
-            stage_ids = list(range(int(self._omni.engine.num_stages)))
+        stage_ids = list(range(int(self._omni.engine.num_stages)))
         kwargs = {
             "serialized_named_tensors": list(serialized_named_tensors),
             "target_modules": list(target_modules) if target_modules else None,
@@ -904,7 +868,6 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         self,
         *,
         names: list[str],
-        stage_ids: Optional[list[int]] = None,
     ) -> dict:
         """Fan ``_diffrl_loaded_param_checksums`` across stages and ranks.
 
@@ -920,8 +883,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         """
         if self._omni is None:
             raise RuntimeError("VLLMOmniRolloutEngine: engine not initialized")
-        if stage_ids is None:
-            stage_ids = list(range(int(self._omni.engine.num_stages)))
+        stage_ids = list(range(int(self._omni.engine.num_stages)))
         out: dict = {}
         for sid in stage_ids:
             results = self._omni.engine.collective_rpc(
@@ -940,7 +902,6 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         *,
         adapter_id: int,
         names: Optional[list[str]] = None,
-        stage_ids: Optional[list[int]] = None,
     ) -> dict:
         """Fan ``_diffrl_loaded_lora_checksums`` across stages and ranks.
 
@@ -955,8 +916,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         """
         if self._omni is None:
             raise RuntimeError("VLLMOmniRolloutEngine: engine not initialized")
-        if stage_ids is None:
-            stage_ids = list(range(int(self._omni.engine.num_stages)))
+        stage_ids = list(range(int(self._omni.engine.num_stages)))
         out: dict = {}
         for sid in stage_ids:
             results = self._omni.engine.collective_rpc(

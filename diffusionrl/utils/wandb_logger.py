@@ -531,22 +531,22 @@ def aggregate_metrics(metrics_list: List[Dict[str, Any]]) -> Dict[str, float]:
 
 
 def aggregate_stage_results(results: List[Any]) -> Dict[str, float]:
-    """Average TrainOptimizerStepResult metrics across the per-actor list.
+    """Average :class:`TrackMiniBatchResult` metrics across the per-actor list.
 
-    ``TrainOptimizerStepResult.metrics`` is already namespaced per slot
-    (e.g. ``image/policy_loss``) and aggregated across micro-batches
-    inside the actor via ``aggregate_numeric_metrics`` (see
-    ``training/stack.py``). This helper:
+    Driver-side aggregator for ONE track's per-actor results
+    (``per_track_results[track_name]`` shape from ``train_group.train``).
+    Each :class:`TrackMiniBatchResult.metrics` is already aggregated
+    across micro-batches inside the actor via ``aggregate_numeric_metrics``
+    (see ``training/stack.py``). This helper:
 
     1. Stamps the scalar fields ``loss / grad_norm / lr / has_backward``
        onto each per-actor dict.
-    2. Forwards every ``<slot>/<key>`` metric the algorithm emitted
-       (e.g. ``image/ratio_mean``, ``image/clip_fraction``,
-       ``image/approx_kl``).
+    2. Forwards every algorithm-emitted metric key
+       (e.g. ``ratio_mean``, ``clip_fraction``, ``approx_kl``).
     3. Averages numerically via ``aggregate_numeric_metrics``.
 
-    Output keys match the dict shape legacy ``log_rollout`` /
-    ``log_step`` callsites in ``train.py`` produce.
+    The caller adds the ``<track>/`` namespace prefix when merging across
+    tracks (see ``train.py``'s per-track aggregation loop).
     """
     if not results:
         return {}

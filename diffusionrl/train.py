@@ -73,11 +73,11 @@ def _run_cross_component_validators(cfg: DictConfig) -> None:
 def _should_use_ema_rollout(cfg: DictConfig) -> bool:
     """Check whether any configured algorithm requires EMA weights during rollout.
 
-    Resolves each ``cfg.algorithms.<slot>._target_`` to its class and reads
+    Resolves each ``cfg.algorithm.algorithms.<slot>._target_`` to its class and reads
     the ``requires_ema_rollout`` class attribute. Returns True if ANY
     algorithm declares it (off-policy / NFT); False otherwise (on-policy / GRPO).
     """
-    for slot, alg_node in cfg.algorithms.items():
+    for slot, alg_node in cfg.algorithm.algorithms.items():
         target = str(alg_node.get("_target_") or "")
         if not target:
             continue
@@ -117,6 +117,7 @@ def train(cfg: DictConfig) -> None:
     from diffusionrl.ray.group.rollout import RolloutActorGroup
     from diffusionrl.ray.group.train import TrainActorGroup
     from diffusionrl.rollout.pipeline import RolloutPipeline
+    from diffusionrl.types.sampling import get_diffusion_params
     from diffusionrl.utils import configure_logger, load_function, set_seed
     from diffusionrl.utils.timing import PhaseTimings
     from diffusionrl.utils.wandb_logger import (
@@ -141,16 +142,48 @@ def train(cfg: DictConfig) -> None:
             "(no driver-side export_weights_to_path hook on the train actor)."
         )
 
-    control_algorithm = build(cfg.algorithm)
     sampling_spec = OmegaConf.to_object(cfg.sampling)
+
+    pe_rewrites = int(getattr(cfg.algorithm, "pe_rewrites_per_prompt", 1))
+    if pe_rewrites > 1:
+        from diffusionrl.types.sampling import ARSamplingParams, ComposedSamplingParams
+
+        ar_spec = ARSamplingParams(samples_per_prompt=pe_rewrites)
+        sampling_spec = ComposedSamplingParams(diffusion=sampling_spec, ar=ar_spec)
+
+    # Build SDE scheduler from algorithm config (None for NFT / forward-process).
+    sde_scheduler = None
+    _scheduler_cfg = getattr(cfg.algorithm, "scheduler", None)
+    if _scheduler_cfg is not None:
+        _num_sde = int(getattr(_scheduler_cfg, "num_sde_steps", -1))
+        if _num_sde != 0:
+            from diffusionrl.utils.scheduler_utils import create_indices_scheduler
+
+            sde_scheduler = create_indices_scheduler(
+                scheduler_config=_scheduler_cfg,
+                num_timesteps=get_diffusion_params(sampling_spec).num_inference_steps,
+            )
 
     logger.info("Starting diffusionRL training...")
     logger.info(
         "Sampling mode: %s",
         "direct (trainside)" if direct_sampling else "separate",
     )
-    logger.info("Model: %s", cfg.model.pretrained_model_ckpt_path)
-    logger.info("Algorithm: %s", cfg.algorithm._target_)
+    # Multi-track shape: model bundle lives under cfg.training.tracks.<name>.model.
+    # Resolve the primary track for driver-side model-path / weight-sync reads
+    # (per-track weight sync is a follow-up; today only the primary track's
+    # weights are pushed via TrainingWeightSyncMixin.self.model).
+    from diffusionrl.training.track_builder import _resolve_primary_track
+
+    primary_track = _resolve_primary_track(cfg)
+    primary_model_cfg = cfg.training.tracks[primary_track].model
+    logger.info(
+        "Tracks: %s (primary=%s)",
+        sorted(cfg.training.tracks.keys()),
+        primary_track,
+    )
+    logger.info("Model (primary track): %s", primary_model_cfg.pretrained_model_ckpt_path)
+    logger.info("Algorithm: %s", getattr(cfg.algorithm, "_target_", "inline"))
     logger.info("Rollout engine: %s", cfg.rollout.engine._target_)
     logger.info(
         "Offload train: %s, Offload rollout: %s",
@@ -226,7 +259,12 @@ def train(cfg: DictConfig) -> None:
         data_source_cls = load_function(str(cfg.run.data_source_dotpath))
         data_source = data_source_cls(cfg)
         prompt_batch_size = int(cfg.algorithm.prompts_per_rollout)
-        samples_per_prompt = int(getattr(control_algorithm, "samples_per_prompt", 1))
+        from diffusionrl.types.sampling import ComposedSamplingParams
+
+        if isinstance(sampling_spec, ComposedSamplingParams):
+            samples_per_prompt = 1
+        else:
+            samples_per_prompt = int(get_diffusion_params(sampling_spec).samples_per_prompt)
         logger.info(
             "Driver-side rollout config: prompt_batch_size=%s samples_per_prompt=%s",
             prompt_batch_size,
@@ -279,26 +317,34 @@ def train(cfg: DictConfig) -> None:
 
         # 4. Optional weight-sync setup (separate sampling only).
         if sync_enabled:
-            param_name_prefix = str(cfg.model.get("weight_sync_param_name_prefix", "") or "")
-            # OmegaConf DictConfig doesn't survive Ray serialization cleanly;
-            # convert to plain Python dicts/lists recursively.
-            _raw_packed = cfg.model.get("weight_sync_packed_modules", None)
+            param_name_prefix = str(primary_model_cfg.get("weight_sync_param_name_prefix", "") or "")
+            _raw_packed = primary_model_cfg.get("weight_sync_packed_modules", None)
             if _raw_packed:
                 packed_modules = OmegaConf.to_container(_raw_packed, resolve=True)
             else:
                 packed_modules = {}
+            track_sync_specs = {}
+            for track_name, track_cfg in cfg.training.tracks.items():
+                t_model_cfg = track_cfg.model
+                t_prefix = str(t_model_cfg.get("weight_sync_param_name_prefix", "") or "")
+                t_raw_packed = t_model_cfg.get("weight_sync_packed_modules", None)
+                t_packed = OmegaConf.to_container(t_raw_packed, resolve=True) if t_raw_packed else {}
+                track_sync_specs[track_name] = {
+                    "param_name_prefix": t_prefix,
+                    "packed_modules": t_packed,
+                }
             train_group.setup_weight_sync(
                 sync_cfg=sync_cfg,
                 placement_cfg=placement.config,
                 rollout_runtime=rollout_group,
                 param_name_prefix=param_name_prefix,
                 packed_modules=packed_modules,
+                track_sync_specs=track_sync_specs,
             )
             logger.info(
-                "[BOOTSTRAP] Weight sync configured: %s (param_name_prefix=%r, packed_modules=%d keys)",
+                "[BOOTSTRAP] Weight sync configured: %s (tracks=%s)",
                 sync_target,
-                param_name_prefix,
-                len(packed_modules),
+                sorted(track_sync_specs.keys()),
             )
 
         logger.info(
@@ -339,7 +385,7 @@ def train(cfg: DictConfig) -> None:
             if tq_runtime is not None and tq_actor_handles:
                 tq_runtime.reset_actors_zero_copy_buffer_free(tq_actor_handles)
 
-            # --- Rollout: 4 direct phase calls (skip convert_training_data) ---
+            # --- Rollout: 4 direct phase calls (load → plan → exec → aggregate) ---
             # EMA rollout gating: on-policy algorithms (GRPO) MUST sample
             # with base weights so the importance ratio equals 1 on the
             # first training step. Off-policy / forward-process algorithms
@@ -352,32 +398,25 @@ def train(cfg: DictConfig) -> None:
                     train_group.use_eval_ema() if (direct_sampling and _use_ema_rollout) else contextlib.nullcontext()
                 )
                 with ema_ctx:
-                    prompts = rollout_pipeline.load_prompts(
+                    inputs = rollout_pipeline.load_prompts(
                         data_source=data_source,
                         prompt_batch_size=prompt_batch_size,
                         samples_per_prompt=samples_per_prompt,
-                        init_same_noise=bool(getattr(sampling_spec, "init_same_noise", False)),
                     )
-                    # Pre-compute the per-sample x_T tensor on the driver so
-                    # rollouts in the same GRPO group draw distinct noise (and
-                    # rollout-side sampling matches what trainer replay sees in
-                    # ``segment.latents[:, 0, ...]``). For modalities we haven't
-                    # wired this for, returns ``None`` and the rollout engine
-                    # falls back to its internal RNG.
                     from diffusionrl.rollout.pipeline import compute_initial_noise_for_request
 
                     initial_noise = compute_initial_noise_for_request(
                         cfg=cfg,
-                        prompts=prompts,
-                        sampling_spec=sampling_spec,
+                        inputs=inputs,
+                        sampling_spec=get_diffusion_params(sampling_spec),
                         samples_per_prompt=samples_per_prompt,
                         rollout_id=rollout_id,
                     )
                     req, _sde_indices = rollout_pipeline.plan_requests(
-                        prompts=prompts,
+                        inputs=inputs,
                         sampling_spec=sampling_spec,
                         samples_per_prompt=samples_per_prompt,
-                        control_algorithm=control_algorithm,
+                        sde_scheduler=sde_scheduler,
                         rollout_id=rollout_id,
                         collect_media_preview=wandb_media_enabled,
                         media_max_items=wandb_media_max_items,
@@ -399,14 +438,14 @@ def train(cfg: DictConfig) -> None:
                 rollout_group.sleep()
                 _rollout_is_sleeping = True
 
-            # --- Train: feed RolloutResp directly (group does balanced split) ---
+            # --- Train: feed RolloutResp directly (group does multi-track shard-by-root split) ---
             with timings.measure("train"):
                 if cfg.training.execution.offload_train:
                     logger.info("[LOOP r=%d] Onloading train...", rollout_id)
                     train_group.onload()
-                # per_update_results: List[List[TrainOptimizerStepResult]]
-                #   outer = per optimizer step, inner = per actor
-                per_update_results = train_group.train(rollout_id, rollout_resp)
+                # per_track_results: Dict[track_name, List[TrackMiniBatchResult]]
+                #   one optimizer step per track per call; per-actor list across DP ranks.
+                per_track_results = train_group.train(rollout_id, rollout_resp)
                 if tq_runtime is not None:
                     tq_runtime.clear_partition()
 
@@ -463,13 +502,21 @@ def train(cfg: DictConfig) -> None:
                     train_group.clear_memory()
 
             # --- Metric aggregation + console scalar summary ---
-            # Flatten all per-update × per-actor results for the rollout-level summary.
-            all_results = [r for update in per_update_results for r in update]
+            # Flatten across tracks × actors for the rollout-level summary;
+            # per-track breakdowns go into the wandb panels below.
+            all_results = [r for track_results in per_track_results.values() for r in track_results]
             n = max(1, len(all_results))
             mean_loss = float(sum(r.loss for r in all_results) / n)
             mean_grad = float(sum(r.grad_norm for r in all_results) / n)
             mean_lr = float(sum(r.lr for r in all_results) / n) if all_results else 0.0
-            reward_mean = float(rollout_resp.rewards.mean().item()) if rollout_resp.rewards is not None else 0.0
+            # Aggregate the console reward summary across all tracks. Single-
+            # track resps (today's diffusion rollout) collapse to the legacy
+            # behavior; multi-track resps (PE-style prompt-enhancement) emit
+            # the mean of per-track means as the headline scalar.
+            track_reward_means = [
+                float(t.rewards.mean().item()) for t in rollout_resp.tracks.values() if t.rewards is not None
+            ]
+            reward_mean = sum(track_reward_means) / len(track_reward_means) if track_reward_means else 0.0
             rollout_s = timings.get("rollout")
             train_s = timings.get("train")
             sync_s = timings.get("sync")
@@ -494,21 +541,26 @@ def train(cfg: DictConfig) -> None:
             if wandb_logger is not None:
                 rollout_metrics = compute_rollout_resp_metrics(resp=rollout_resp)
 
-                # rollout/ panel — averaged training scalars + reward stats.
-                rollout_training_metrics = aggregate_stage_results(all_results)
+                # rollout/ panel — per-track aggregated training scalars
+                # plus reward stats. Per-track metrics are namespaced under
+                # ``<track>/<key>`` so wandb dashboards can break down by
+                # track (e.g. ``image/policy_loss``, ``refined/policy_loss``).
+                rollout_training_metrics: dict[str, object] = {}
+                for track_name, track_results in per_track_results.items():
+                    track_aggregated = aggregate_stage_results(track_results)
+                    rollout_training_metrics.update({f"{track_name}/{k}": v for k, v in track_aggregated.items()})
                 wandb_logger.log_rollout(
                     rollout_id,
                     {**rollout_training_metrics, **rollout_metrics},
                 )
 
-                # train/ panel — one entry PER optimizer step so ratio/loss
-                # curves have full num_updates_per_batch granularity.
-                for per_actor_results in per_update_results:
-                    step_count = sum(int(bool(r.has_backward)) for r in per_actor_results)
-                    if step_count > 0:
-                        global_optimizer_step += 1
-                        step_metrics = aggregate_stage_results(per_actor_results)
-                        wandb_logger.log_step(global_optimizer_step, step_metrics)
+                # train/ panel — one global_optimizer_step per rollout
+                # (each track contributes one step per train_group.train
+                # call; the per-track logging happens at the rollout
+                # boundary, namespaced).
+                if any(r.has_backward for r in all_results):
+                    global_optimizer_step += 1
+                    wandb_logger.log_step(global_optimizer_step, rollout_training_metrics)
 
                 # perf/ panel — driver-side timings + actor-reported
                 # reward_compute_s (which the rollout-phase guard can't see).
@@ -523,8 +575,16 @@ def train(cfg: DictConfig) -> None:
                         metrics={"sync/elapsed_s": sync_s},
                     )
 
-                if wandb_media_enabled and rollout_resp.media_preview is not None:
-                    wandb_logger.log_generated_media(rollout_id, rollout_resp.media_preview)
+                # Media preview: log every track's preview that has one.
+                # For today's single-track resp this is the diffusion track's
+                # preview (the legacy behavior). For multi-track resps, each
+                # track's preview is logged independently — the wandb key
+                # space already namespaces by track via the underlying
+                # logger when more than one preview exists.
+                if wandb_media_enabled:
+                    for track in rollout_resp.tracks.values():
+                        if track.media_preview is not None:
+                            wandb_logger.log_generated_media(rollout_id, track.media_preview)
     finally:
         if sync_enabled and train_group is not None:
             try:

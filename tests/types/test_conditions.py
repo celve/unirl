@@ -11,6 +11,7 @@ from diffusionrl.types.conditions import (
     ImageLatentCondition,
     Modality,
     TextEmbedCondition,
+    TextTokenCondition,
 )
 
 # ---------------------------------------------------------------------------
@@ -42,6 +43,59 @@ def test_text_condition_concat_across_shards():
     assert merged.embeds.shape == (5, 4, 8)
     assert torch.equal(merged.embeds[:2], torch.zeros(2, 4, 8))
     assert torch.equal(merged.embeds[2:], torch.ones(3, 4, 8))
+
+
+def test_text_token_condition_concat_pads_to_common_seq_len():
+    """Cross-shard concat right-pads variable seq_len to the global max.
+
+    SGLang's per-shard build_rollout_resp pads to each shard's in-batch
+    max — different shards yield different lengths. Without the
+    pad-aware concat, ``Batched.concat`` raises in ``torch.cat(dim=0)``
+    on the dim-1 mismatch (the bug that blocked pe_joint full training).
+    """
+    a = TextTokenCondition(
+        input_ids=torch.tensor([[1, 2, 3]], dtype=torch.long),
+        attention_mask=torch.ones((1, 3), dtype=torch.long),
+    )
+    b = TextTokenCondition(
+        input_ids=torch.tensor([[4, 5, 6, 7, 8]], dtype=torch.long),
+        attention_mask=torch.ones((1, 5), dtype=torch.long),
+    )
+    merged = TextTokenCondition.concat([a, b])
+    assert merged.input_ids.shape == (2, 5)
+    # a was padded: first 3 real tokens, then two zero pads.
+    assert merged.input_ids[0].tolist() == [1, 2, 3, 0, 0]
+    assert merged.input_ids[1].tolist() == [4, 5, 6, 7, 8]
+    # attention_mask zeroes the pad positions on a, full ones for b.
+    assert merged.attention_mask[0].tolist() == [1, 1, 1, 0, 0]
+    assert merged.attention_mask[1].tolist() == [1, 1, 1, 1, 1]
+
+
+def test_text_token_condition_concat_single_item_passthrough():
+    """One-element concat reduces to a passthrough (no spurious padding)."""
+    a = TextTokenCondition(
+        input_ids=torch.tensor([[1, 2, 3]], dtype=torch.long),
+        attention_mask=torch.ones((1, 3), dtype=torch.long),
+    )
+    merged = TextTokenCondition.concat([a])
+    assert merged.input_ids.shape == (1, 3)
+    assert torch.equal(merged.input_ids, a.input_ids)
+
+
+def test_text_token_condition_concat_same_length_no_pad():
+    """When all shards already share a seq_len, the fast path skips padding."""
+    a = TextTokenCondition(
+        input_ids=torch.tensor([[1, 2, 3]], dtype=torch.long),
+        attention_mask=torch.ones((1, 3), dtype=torch.long),
+    )
+    b = TextTokenCondition(
+        input_ids=torch.tensor([[4, 5, 6]], dtype=torch.long),
+        attention_mask=torch.ones((1, 3), dtype=torch.long),
+    )
+    merged = TextTokenCondition.concat([a, b])
+    assert merged.input_ids.shape == (2, 3)
+    assert merged.input_ids[0].tolist() == [1, 2, 3]
+    assert merged.input_ids[1].tolist() == [4, 5, 6]
 
 
 def test_text_condition_select_picks_correct_rows():

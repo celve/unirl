@@ -31,13 +31,11 @@ Scope (v1)
 from diffusionrl.models.hunyuan_video15.bundle import HunyuanVideo15Bundle
 from diffusionrl.models.hunyuan_video15.conditions import HunyuanVideo15Conditions
 from diffusionrl.models.hunyuan_video15.config import HunyuanVideo15PipelineConfig
-from diffusionrl.models.hunyuan_video15.diffusion import HunyuanVideo15DiffusionParams
 from diffusionrl.models.hunyuan_video15.pipeline import HunyuanVideo15Pipeline
 
 __all__ = [
     "HunyuanVideo15Bundle",
     "HunyuanVideo15Conditions",
-    "HunyuanVideo15DiffusionParams",
     "HunyuanVideo15Pipeline",
     "HunyuanVideo15PipelineConfig",
 ]

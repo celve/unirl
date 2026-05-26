@@ -33,7 +33,6 @@ from diffusionrl.models.wan22.config import (
     WAN22PipelineConfig,
 )
 from diffusionrl.models.wan22.diffusion import (
-    WAN22DiffusionParams,
     WAN22DiffusionStage,
     WAN22DiffusionStep,
 )
@@ -42,7 +41,6 @@ from diffusionrl.models.wan22.pipeline import WAN22Pipeline
 __all__ = [
     "DEFAULT_BOUNDARY_RATIO",
     "WAN22Bundle",
-    "WAN22DiffusionParams",
     "WAN22DiffusionStage",
     "WAN22DiffusionStep",
     "WAN22Pipeline",

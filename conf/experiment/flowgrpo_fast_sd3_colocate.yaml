@@ -53,28 +53,27 @@ algorithm:
     num_sde_steps: 3
   sde_config:
     eta: ${sampling.sde_config.eta}
-
-algorithms:
-  # Slot key = rollout response trace key (SD3 emits resp.rollout_traces["image"]).
-  image:
-    _target_: diffusionrl.algorithms.DiffusionGRPO
-    stage_attr: diffusion
-    conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
-    clip_range: 1.0e-4
-    clip_schedule: constant
-    params:
-      _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
-      num_inference_steps: ${sampling.num_inference_steps}
-      guidance_scale: ${sampling.guidance_scale}
-      height: ${sampling.height}
-      width: ${sampling.width}
-      seed: ${run.seed}
-      sde_indices: null
-      eta: ${sampling.sde_config.eta}
-      init_same_noise: ${sampling.init_same_noise}
-      samples_per_prompt: ${algorithm.samples_per_prompt}
-      noise_group_ids: null
-      max_sequence_length: 256
+  algorithms:
+    # Slot key = rollout response trace key (SD3 emits resp.rollout_traces["image"]).
+    diffusion:
+      name: diffusion_grpo
+      stage_attr: diffusion
+      conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
+      clip_range: 1.0e-4
+      clip_schedule: constant
+      params:
+        _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
+        num_inference_steps: ${sampling.num_inference_steps}
+        guidance_scale: ${sampling.guidance_scale}
+        height: ${sampling.height}
+        width: ${sampling.width}
+        seed: ${run.seed}
+        sde_indices: null
+        eta: ${sampling.sde_config.eta}
+        init_same_noise: ${sampling.init_same_noise}
+        samples_per_prompt: ${algorithm.samples_per_prompt}
+        noise_group_ids: null
+        max_sequence_length: 256
 
 model:
   pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
@@ -111,31 +110,28 @@ placement:
   allow_noset_multi_gpu_inference: true
 
 training:
-  policies:
-    # LoRA first, then FSDP wraps the adapted module.
-    - _target_: diffusionrl.training.lora_policy.LoRAPolicy
-      rank: 32
-      alpha: 64
-      dropout: 0.0
-      target_modules:
-        - attn.add_k_proj
-        - attn.add_q_proj
-        - attn.add_v_proj
-        - attn.to_add_out
-        - attn.to_k
-        - attn.to_out.0
-        - attn.to_q
-        - attn.to_v
-      bias: none
-      task_type: FEATURE_EXTRACTION
-    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
-      cpu_offload: false
-      param_dtype: bf16
-      mixed_precision: true
-      fsdp_mode: full
-      reshard_after_forward: true
-      activation_checkpointing: true
-  policy_source: diffusion
+  lora:
+    rank: 32
+    alpha: 64
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    target_modules:
+      - attn.add_k_proj
+      - attn.add_q_proj
+      - attn.add_v_proj
+      - attn.to_add_out
+      - attn.to_k
+      - attn.to_out.0
+      - attn.to_q
+      - attn.to_v
+  fsdp:
+    cpu_offload: false
+    param_dtype: bf16
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: true
   topology:
     actor_count: 8                    # 8 DP=8 train actors (was 4)
   plan:
@@ -173,7 +169,7 @@ reward:
   aggregation_method: mean
   base_device: cuda
   components:
-    - name: pickscore
+    pickscore:
       weight: 1.0
       batch_size: 8
 

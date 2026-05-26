@@ -8,8 +8,8 @@ import pytest
 pytest.importorskip("torch")
 
 from diffusionrl.data import MultimodalRLDataSource, TextPromptDataset
-from diffusionrl.types.media import MediaRef
-from diffusionrl.types.prompts import Prompts
+from diffusionrl.types.primitives import Images, Texts
+from diffusionrl.types.prompts import RolloutInputs
 
 
 def _write_prompt_file(tmp_path, prompts: list[str]):
@@ -42,12 +42,9 @@ def test_text_prompt_dataset_preserves_file_order_by_default(tmp_path):
     ]
 
 
-def test_multimodal_data_source_collates_typed_media_refs(tmp_path):
+def test_multimodal_data_source_returns_rollout_inputs_with_images(tmp_path):
     import PIL.Image
 
-    # Phase 4 turned the ``(image, condition)`` channel into an actual
-    # PIL load + tensor conversion (``Prompts.images``); test URIs must
-    # therefore resolve to real image files on disk.
     a_path = tmp_path / "a.png"
     b_path = tmp_path / "b.png"
     PIL.Image.new("RGB", (4, 4), color=(255, 0, 0)).save(a_path)
@@ -71,43 +68,32 @@ def test_multimodal_data_source_collates_typed_media_refs(tmp_path):
     )
 
     data_source = MultimodalRLDataSource(_args(path, seed=0, prompts_per_rollout=2))
-    batch = data_source.get_samples(2)
+    inputs = data_source.get_samples(2)
 
-    assert sorted(refs[0].uri for refs in batch["media_refs"]) == sorted([str(a_path), str(b_path)])
-    assert any(metadata == {"dataset": "toy"} for metadata in batch["metadata"])
-    # NEW-path image conditioning channel: per-prompt ``Image`` instances
-    # (the data layer eagerly converts (image, condition) MediaRefs to
-    # tensor primitives).
-    assert "images" in batch
-    assert len(batch["images"]) == 2
-    for img in batch["images"]:
-        assert img is not None
-        assert img.pixels.shape == (3, 4, 4)
-
-    eval_batch = data_source.get_eval_samples(2)
-    assert [refs[0] for refs in eval_batch["media_refs"]] == [
-        MediaRef(modality="image", role="condition", uri=str(a_path)),
-        MediaRef(modality="image", role="condition", uri=str(b_path)),
-    ]
-    assert "images" in eval_batch
-    assert len(eval_batch["images"]) == 2
+    assert isinstance(inputs, RolloutInputs)
+    assert isinstance(inputs.primitives["text"], Texts)
+    assert len(inputs.primitives["text"].texts) == 2
+    assert "image" in inputs.primitives
+    assert isinstance(inputs.primitives["image"], Images)
+    assert inputs.primitives["image"].pixels.shape == (2, 3, 4, 4)
+    assert len(inputs.sample_ids) == 2
+    assert len(inputs.group_ids) == 2
 
 
-def test_prompts_expand_preserves_sample_aligned_media_refs():
-    prompts = Prompts.from_unique_prompts(
-        ["a", "b"],
-        prompt_ids=["a-id", "b-id"],
-        media_refs=[
-            [MediaRef(modality="image", role="condition", uri="/shared/a.png")],
-            [MediaRef(modality="image", role="condition", uri="/shared/b.png")],
-        ],
+def test_rollout_inputs_expand_preserves_text_and_ids():
+    inputs = RolloutInputs(
+        primitives={"text": Texts(texts=["a", "b"])},
+        sample_ids=["prompt:a-id:sample:0", "prompt:b-id:sample:0"],
+        group_ids=["a-id", "b-id"],
     )
 
-    expanded = prompts.expand(2)
+    expanded = inputs.expand(2)
 
-    assert [refs[0].uri for refs in expanded.media_refs] == [
-        "/shared/a.png",
-        "/shared/a.png",
-        "/shared/b.png",
-        "/shared/b.png",
+    assert expanded.primitives["text"].texts == ["a", "a", "b", "b"]
+    assert expanded.sample_ids == [
+        "prompt:a-id:sample:0",
+        "prompt:a-id:sample:1",
+        "prompt:b-id:sample:0",
+        "prompt:b-id:sample:1",
     ]
+    assert expanded.group_ids == ["a-id", "a-id", "b-id", "b-id"]

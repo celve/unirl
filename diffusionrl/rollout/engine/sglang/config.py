@@ -35,7 +35,8 @@ from omegaconf import SI
 
 from diffusionrl.config.registration import register_config
 from diffusionrl.config.require import require
-from diffusionrl.types.sampling import SamplingParams
+from diffusionrl.rollout.engine.base import BaseEngineConfig
+from diffusionrl.types.sampling import DiffusionSamplingParams
 
 # Per-rank SGLang port layout for co-located actors on a single node. Each
 # rank reserves a stride-sized slice starting at ``base + rank * stride``:
@@ -54,11 +55,11 @@ _VALID_LOGPROB_SOURCES = ("replay", "native")
     target="diffusionrl.rollout.engine.sglang.engine.SGLangRolloutEngine",
 )
 @dataclass
-class SGLangEngineConfig:
+class SGLangEngineConfig(BaseEngineConfig):
     """Configuration for the SGLang rollout-side inference engine."""
 
     # --- Sampling (live interpolation back to top-level cfg.sampling) ---
-    sampling: SamplingParams = dc_field(default_factory=lambda: SI("${sampling}"))
+    sampling: DiffusionSamplingParams = dc_field(default_factory=lambda: SI("${sampling}"))
 
     # --- Required: model family for trainer-side typed-condition reconstruction ---
     model_family: str = "sd3"
