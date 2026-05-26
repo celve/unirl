@@ -6,10 +6,12 @@
 # Data plane (how rollout samples reach the trainer) is selected with DATA_PLANE:
 #   ray         (default) driver gathers rollouts over the Ray object store
 #   tq_simple   TransferQueue on Ray-backed host storage (off-driver, zero infra)
-#   tq_mooncake TransferQueue over mooncake — needs a LOCAL mooncake_master +
-#               http_metadata_server; set MOONCAKE_METADATA_URL / MOONCAKE_MASTER_ADDR
 #   keep_local  direct-sampling actors keep rollouts local; only light metadata
 #               crosses to the driver (no transfer at all)
+#
+# tq_mooncake (RDMA) is intentionally NOT offered here: it only pays off across
+# nodes and needs external mooncake services. On a single node use tq_simple;
+# for the mooncake data plane use scripts/run_experiment_multinode_taiji.sh.
 #
 # Example:
 #   bash scripts/run_experiment_single_node.sh flowgrpo_fast_sd3_colocate
@@ -79,25 +81,12 @@ case "${DATA_PLANE}" in
     tq_simple)
         CMD+=("+transfer_queue=simple")
         ;;
-    tq_mooncake)
-        if [ -z "${MOONCAKE_METADATA_URL:-}" ] || [ -z "${MOONCAKE_MASTER_ADDR:-}" ]; then
-            echo "DATA_PLANE=tq_mooncake needs MOONCAKE_METADATA_URL=http://<host>:<port>/metadata" >&2
-            echo "and MOONCAKE_MASTER_ADDR=<host>:<rpc_port> (start a local mooncake_master +" >&2
-            echo "http_metadata_server first)." >&2
-            exit 2
-        fi
-        CMD+=(
-            "+transfer_queue=mooncake_tuned"
-            "transfer_queue.protocol=${PROTOCOL:-rdma}"
-            "transfer_queue.metadata_server=${MOONCAKE_METADATA_URL}"
-            "transfer_queue.master_server_address=${MOONCAKE_MASTER_ADDR}"
-        )
-        ;;
     keep_local)
         CMD+=("training.execution.keep_local=true")
         ;;
     *)
-        echo "Unknown DATA_PLANE='${DATA_PLANE}' (use ray|tq_simple|tq_mooncake|keep_local)" >&2
+        echo "Unknown DATA_PLANE='${DATA_PLANE}' (single node: ray|tq_simple|keep_local;" >&2
+        echo "tq_mooncake is multi-node only — see run_experiment_multinode_taiji.sh)." >&2
         exit 2
         ;;
 esac
