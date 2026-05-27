@@ -1,4 +1,22 @@
 #!/usr/bin/env bash
+#
+# Single-node experiment launcher (cluster-agnostic — no platform env needed).
+# Starts a local Ray head on this machine and runs the training driver.
+#
+# Data plane (how rollout samples reach the trainer) is selected with DATA_PLANE:
+#   ray         (default) driver gathers rollouts over the Ray object store
+#   tq_simple   TransferQueue on Ray-backed host storage (off-driver, zero infra)
+#   keep_local  direct-sampling actors keep rollouts local; only light metadata
+#               crosses to the driver (no transfer at all)
+#
+# tq_mooncake (RDMA) is intentionally NOT offered here: it only pays off across
+# nodes and needs external mooncake services. On a single node use tq_simple;
+# for the mooncake data plane use scripts/run_experiment_multinode_taiji.sh.
+#
+# Example:
+#   bash scripts/run_experiment_single_node.sh flowgrpo_fast_sd3_colocate
+#   DATA_PLANE=tq_simple bash scripts/run_experiment_single_node.sh grpo_wan21_t2v
+#
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,6 +32,7 @@ if [ -z "${EXPERIMENT:-}" ]; then
     shift
 fi
 
+# --- Python env (optional) --------------------------------------------------
 if [ -n "${CONDA_ENV:-}" ]; then
     if [ -f "${CONDA_SH:-}" ]; then
         # shellcheck disable=SC1090
@@ -31,6 +50,7 @@ elif [ -n "${VENV_DIR:-}" ] && [ -f "${VENV_DIR}/bin/activate" ]; then
     source "${VENV_DIR}/bin/activate"
 fi
 
+# --- Path / logging defaults ------------------------------------------------
 export DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/pickscore/train.txt}"
 export EVAL_DATA_PATH="${EVAL_DATA_PATH:-${REPO_ROOT}/data/datasets/pickscore/test.txt}"
 export OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/${EXPERIMENT}}"
@@ -50,9 +70,30 @@ CMD=(
 if [ -n "${WANDB_ENTITY:-}" ]; then
     CMD+=("logging.entity=${WANDB_ENTITY}")
 fi
+
+# --- Data-plane selection (DATA_PLANE) --------------------------------------
+# Append the Hydra overrides that pick how rollout data reaches the trainer.
+DATA_PLANE="${DATA_PLANE:-ray}"
+case "${DATA_PLANE}" in
+    ray)
+        : # default driver gather — no override
+        ;;
+    tq_simple)
+        CMD+=("+transfer_queue=simple")
+        ;;
+    keep_local)
+        CMD+=("training.execution.keep_local=true")
+        ;;
+    *)
+        echo "Unknown DATA_PLANE='${DATA_PLANE}' (single node: ray|tq_simple|keep_local;" >&2
+        echo "tq_mooncake is multi-node only — see run_experiment_multinode_taiji.sh)." >&2
+        exit 2
+        ;;
+esac
+
 CMD+=("$@")
 
-echo "Command:"
+echo "Command (DATA_PLANE=${DATA_PLANE}):"
 printf '  %q' "${CMD[@]}"
 echo
 
@@ -64,12 +105,12 @@ if [ "${INSTALL_EDITABLE:-1}" = "1" ]; then
     pip install --no-deps -e .
 fi
 
-default_node_ip() {
-    hostname -I 2>/dev/null | awk '{print $1}' || true
-}
-
-GPUS_PER_NODE="${GPUS_PER_NODE:-${HOST_GPU_NUM:-8}}"
-NODE_IP="${NODE_IP:-${LOCAL_IP:-$(default_node_ip)}}"
+# --- Single-node Ray (local head) -------------------------------------------
+# GPU count: override with GPUS_PER_NODE, else autodetect, else assume 8.
+if [ -z "${GPUS_PER_NODE:-}" ]; then
+    GPUS_PER_NODE="$(nvidia-smi -L 2>/dev/null | wc -l || true)"
+    [ "${GPUS_PER_NODE:-0}" -gt 0 ] 2>/dev/null || GPUS_PER_NODE=8
+fi
 NODE_IP="${NODE_IP:-127.0.0.1}"
 RAY_PORT="${RAY_PORT:-6379}"
 
