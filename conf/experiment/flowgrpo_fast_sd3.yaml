@@ -18,13 +18,20 @@
 defaults:
   # Additive (sync not in base train.yaml defaults) must come BEFORE
   # override entries per Hydra ordering rules.
+  - /training/lora@training.lora: sd3_rank32
+  - /training/fsdp@training.fsdp: bf16_full_ac
   - /sync@sync: nccl_broadcast       # bind cfg.sync to NcclBroadcastSyncConfig
                                      # schema so build() honors expand=True
+  - /training/optimizer@training.optimizer: adam_3e-4
+  - /training/lr_scheduler@training.lr_scheduler: constant_10k
   - override /algorithm: grpo
-  - override /model: sd3          # new-pipeline preset; lacks LoRA fields
+  - override /model: sd3_bf16      # new-pipeline preset; lacks LoRA fields
                                      # (LoRA lives in training.policies below)
   - override /rollout/engine: vllm_omni
   - override /sampling/sde_strategy: flow
+  - override /sampling: sd3_512
+  - override /reward: pickscore
+  - override /training/execution: standard
   - _self_
 
 run:
@@ -35,31 +42,19 @@ run:
   weight_sync_interval: 1
 
 sampling:
-  num_inference_steps: 10
-  guidance_scale: 1.0
-  height: 512
-  width: 512
-  init_same_noise: false
-  sde_config:
-    eta: 0.7
+  samples_per_prompt: 8
 
 algorithm:
   # Driver-side singular: feeds prompt batching, SDE-index scheduling,
   # and sampling scalars. TrainActor reads the plural `algorithms`
   # block below; the two are kept aligned but distinct.
   prompts_per_rollout: 4
-  samples_per_prompt: 8
   adv_normalization_scope: group
   use_global_std: true
-  clip_range: 1.0e-4
-  clip_schedule: constant
-  use_kl_penalty: true
   kl_coef: 0.0
   scheduler:
     timestep_fraction: [0.0, 0.5]
     num_sde_steps: 3
-  sde_config:
-    eta: ${sampling.sde_config.eta}
   algorithms:
     # Slot key = rollout response segment key (SD3 emits resp.rollout_traces["image"]).
     # stage_attr overrides the default pipeline-attribute lookup (pipe.image
@@ -76,29 +71,6 @@ algorithm:
       conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
       clip_range: 1.0e-4
       clip_schedule: constant
-      params:
-        _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
-        num_inference_steps: ${sampling.num_inference_steps}
-        guidance_scale: ${sampling.guidance_scale}
-        height: ${sampling.height}
-        width: ${sampling.width}
-        seed: ${run.seed}
-        sde_indices: null               # algorithm reads from segment.sde_indices
-        eta: ${sampling.sde_config.eta}
-        init_same_noise: ${sampling.init_same_noise}
-        samples_per_prompt: ${algorithm.samples_per_prompt}
-        noise_group_ids: null
-        max_sequence_length: 256
-
-model:
-  # sd3 (SD3PipelineConfig) is weights+params only — LoRA, gradient
-  # checkpointing, and FSDP knobs live in training.policies below.
-  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
-  model_precision: bf16
-  autocast_precision: bf16
-  trajectory_precision: bf16
-  logprob_precision: fp32
-
 rollout:
   engine:
     model_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
@@ -127,9 +99,6 @@ placement:
 
 training:
   lora:
-    rank: 32
-    alpha: 64
-    dropout: 0.0
     bias: none
     task_type: FEATURE_EXTRACTION
     target_modules:
@@ -141,13 +110,6 @@ training:
       - attn.to_out.0
       - attn.to_q
       - attn.to_v
-  fsdp:
-    cpu_offload: false
-    param_dtype: bf16
-    mixed_precision: true
-    fsdp_mode: full
-    reshard_after_forward: true
-    activation_checkpointing: true
   topology:
     actor_count: 4
   plan:
@@ -161,30 +123,8 @@ training:
     local_mini_batch_size: 4
     local_batch_size: 8
     global_batch_size: 32
-  optimizer:
-    learning_rate: 3.0e-4
-    adam_beta1: 0.9
-    adam_beta2: 0.999
-    adam_epsilon: 1.0e-8
-    weight_decay: 0.0
-  lr_scheduler:
-    type: constant
-    warmup_steps: 0
-    total_steps: 10000
-  execution:
-    max_grad_norm: 1.0
-    offload_train: false
-    offload_rollout: false
   materialize:
     with_aux: []
-
-reward:
-  aggregation_method: mean
-  base_device: cuda
-  components:
-    pickscore:
-      weight: 1.0
-      batch_size: 8
 
 # Weight sync between train and rollout: the defaults list above binds
 # cfg.sync to the registered NcclBroadcastSyncConfig preset

@@ -8,9 +8,9 @@
 # carried over.
 defaults:
   - flowgrpo_fast_sd3_trainside
+  - override /placement: trainside_2x8
   - override /sampling/sde_strategy: flow
   - _self_
-
 run:
   seed: 42
   num_rollouts: 10000
@@ -18,13 +18,12 @@ run:
   eval_data_path: ${oc.env:EVAL_DATA_PATH,/mnt/bj/data/datasets/pickscore/test.txt}
 
 sampling:
+  samples_per_prompt: 16
   init_same_noise: true
-  sde_config:
-    eta: 0.7
+  eta: 0.7
 
 algorithm:
   prompts_per_rollout: 48
-  samples_per_prompt: 16
   skip_last_timestep: true
   scheduler:
     timestep_strategy: window
@@ -36,14 +35,6 @@ algorithm:
     roll_back: true
     max_iters_per_window: 10
     min_iters_per_window: 1
-  sde_config:
-    eta: ${sampling.sde_config.eta}
-
-placement:
-  num_rollout_nodes: 2
-  num_rollout_gpus_per_node: 8
-  num_train_nodes: 2
-  num_train_gpus_per_node: 8
 
 training:
   plan:

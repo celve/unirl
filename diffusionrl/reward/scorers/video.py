@@ -65,9 +65,14 @@ class VideoRewardScorer(BaseRewardScorer):
 
             for video, prompt in zip(videos, prompts):
                 frames = self._sample_frames(video)
+                from torchvision.transforms.functional import to_tensor
+
+                from diffusionrl.types.primitives import Images, Texts
+
+                frame_pixels = torch.stack([to_tensor(f) for f in frames])
                 frame_request = RewardRequest(
-                    images=frames,
-                    prompts=[prompt] * len(frames),
+                    primitives={"text": Texts(texts=[prompt] * len(frames))},
+                    generated={"image": Images(pixels=frame_pixels)},
                 )
                 frame_response = self.frame_scorer.compute_rewards(frame_request)
                 alignment_reward = sum(frame_response.rewards) / len(frame_response.rewards)

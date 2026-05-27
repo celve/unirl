@@ -1,0 +1,5 @@
+num_inference_steps: 12
+guidance_scale: 1.0
+height: 384
+width: 384
+eta: 0.7

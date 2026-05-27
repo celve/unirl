@@ -25,6 +25,4 @@ defaults:
   - evaluation: default
   - resume: default
 
-# Algorithm-side sampling defaults to a live interpolation of the canonical
-# top-level ``cfg.sampling`` (see ``BaseAlgorithmConfig.sampling``).
-# Experiments may override ``cfg.algorithm.sampling.*`` to diverge.
+# Sampling knobs live on the canonical top-level ``cfg.sampling``.

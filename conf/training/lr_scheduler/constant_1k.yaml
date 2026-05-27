@@ -1,0 +1,3 @@
+type: constant
+warmup_steps: 0
+total_steps: 1000

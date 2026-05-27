@@ -1,0 +1,6 @@
+cpu_offload: false
+param_dtype: bf16
+mixed_precision: true
+fsdp_mode: full
+reshard_after_forward: true
+activation_checkpointing: true

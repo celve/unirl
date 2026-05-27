@@ -94,10 +94,15 @@ class VideoPickScoreScorer(PickScoreRewardScorer):
 
     def _compute_model_rewards(self, request: RewardRequest) -> List[float]:
         if request.is_video:
-            images = [self._extract_first_frame(v) for v in request.videos]
+            from torchvision.transforms.functional import to_tensor
+
+            from diffusionrl.types.primitives import Images
+
+            pil_frames = [self._extract_first_frame(v) for v in request.videos]
+            frame_pixels = torch.stack([to_tensor(f) for f in pil_frames])
             request = RewardRequest(
-                images=images,
-                prompts=request.prompts,
+                primitives=dict(request.primitives),
+                generated={"image": Images(pixels=frame_pixels)},
                 prompt_ids=request.prompt_ids,
                 sample_ids=request.sample_ids,
                 group_ids=request.group_ids,

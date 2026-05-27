@@ -26,12 +26,19 @@
 #   # real RDMA validation (rank 0 auto-starts the mooncake services + derives MOONCAKE_* from CHIEF_IP):
 #   DATA_PLANE=tq_mooncake PROTOCOL=rdma bash scripts/run_experiment_multinode_taiji.sh grpo_flux2_klein9b_trainside_2x8
 defaults:
+  - /training/lora@training.lora: klein_rank16
+  - /training/fsdp@training.fsdp: bf16_full_ac
+  - /training/optimizer@training.optimizer: adam_5e-5
+  - /training/lr_scheduler@training.lr_scheduler: constant_10k
+  - override /placement: colocate_2x8
   - override /algorithm: grpo
-  - override /model: flux2_klein_v2
+  - override /model: flux2_klein_bf16
   - override /rollout/engine: trainside
   - override /sampling/sde_strategy: dance
+  - override /sampling: klein_512
+  - override /reward: pickscore
+  - override /training/execution: standard
   - _self_
-
 run:
   seed: 42
   num_rollouts: 10000
@@ -40,120 +47,37 @@ run:
   eval_data_path: ${oc.env:PICKSCORE_EVAL_DATA_PATH,/apdcephfs_zwfy8/share_305110755/hunyuan/rzhu/DiffusionRL/data/datasets/pickscore/test.txt}
 
 sampling:
-  num_inference_steps: 10
-  guidance_scale: 1.0
-  height: 512
-  width: 512
-  seed: 42
-  init_same_noise: true
-  sde_config:
-    eta: 0.7
+  samples_per_prompt: 16
 
 algorithm:
   prompts_per_rollout: 32
-  samples_per_prompt: 16
   adv_normalization_scope: group
   use_global_std: false
-  clip_range: 5.0e-3
-  clip_schedule: constant
-  use_kl_penalty: true
   kl_coef: 0.0
-  ema:
-    eval_ema_decay: 0.99
-    eval_ema_update_interval: 2
   scheduler:
     timestep_fraction: [0.0, 0.5]
     num_sde_steps: 3
-  sde_config:
-    eta: ${sampling.sde_config.eta}
-
-model:
-  pretrained_model_ckpt_path: ${oc.env:FLUX2_KLEIN_PATH,/apdcephfs_zwfy8/share_305110755/hunyuan/public_models/black-forest-labs/FLUX.2-klein-base-9B}
-  model_precision: bf16
-  autocast_precision: bf16
-  trajectory_precision: fp16
-  logprob_precision: fp32
-
+  algorithms:
+    image:
+      _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
+      stage_attr: diffusion
+      clip_range: 5.0e-3
+      clip_schedule: constant
+      conditions_cls: diffusionrl.models.flux2_klein.conditions.Flux2KleinConditions
 rollout:
   engine: {}
   plan:
     forward_batch_size: 16
 
-placement:
-  num_rollout_nodes: 2
-  num_rollout_gpus_per_node: 8
-  num_rollout_gpus_per_actor: 1
-  num_train_nodes: 2
-  num_train_gpus_per_node: 8
-  num_train_gpus_per_actor: 1
-  colocate: true
-  colocate_gpu_fraction: 0.9
-  strategy: PACK
-
 # ----------------------------------------------------------------------
 # New-stack training surface — Klein-specific GRPO algorithm subclass +
 # Klein-specific LoRA targets + single Qwen3 text encoder.
 # ----------------------------------------------------------------------
-algorithms:
-  image:
-    _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
-    stage_attr: diffusion
-    clip_range: 5.0e-3
-    clip_schedule: constant
-    conditions_cls: diffusionrl.models.flux2_klein.conditions.Flux2KleinConditions
-    params:
-      _target_: diffusionrl.models.flux2_klein.diffusion.Flux2KleinDiffusionParams
-      num_inference_steps: ${sampling.num_inference_steps}
-      guidance_scale: ${sampling.guidance_scale}
-      height: ${sampling.height}
-      width: ${sampling.width}
-      seed: ${sampling.seed}
-      eta: ${sampling.sde_config.eta}
-      init_same_noise: ${sampling.init_same_noise}
 
 training:
-  policy_source: diffusion
-  policies:
-    - _target_: diffusionrl.training.lora_policy.LoRAPolicy
-      rank: 16
-      alpha: 32
-      dropout: 0.0
-      # Klein canonical LoRA targets — mirrors
-      # ``Flux2ModelBundle.default_lora_target_modules()`` in the
-      # legacy codebase. PEFT silently drops any name that doesn't
-      # match a real submodule, so listing both un-fused and fused
-      # projection names is safe.
-      target_modules:
-        - to_q
-        - to_k
-        - to_v
-        - to_out.0
-        - proj_in
-        - proj_out
-        - qkv_proj
-        - ff_proj
-    - _target_: diffusionrl.training.fsdp_policy.FSDPPolicy
-      cpu_offload: false
-      # Klein's empirical-mu schedule is numerically sensitive; the
-      # legacy recipe uses ``FSDP_PRECISION=fp32`` for the master
-      # weights and bf16 mixed-precision for the forward.
-      #
-      # NOTE: on 2 nodes FSDP shards across 16 ranks (not 32), so each GPU
-      # holds ~2x the model/optimizer state of the 4x8 run. If this OOMs at
-      # TRAIN time (not at the gather), the quickest relief is
-      # param_dtype: bf16 (halves FSDP state) — acceptable for a validation
-      # run, but reward drifts after a few hundred rollouts per the comment
-      # above, so don't ship it.
-      param_dtype: fp32
-      mixed_precision: true
-      fsdp_mode: full
-      reshard_after_forward: true
-      # 9B transformer + LoRA + full replay graph is the hot path
-      # for activation memory; AC keeps the 80GB H20 envelope.
-      activation_checkpointing: true
-    - _target_: diffusionrl.training.ema_policy.EMAPolicy
-      decay: 0.99
-      update_step_interval: 2
+  ema:
+    decay: 0.99
+    update_step_interval: 2
   materialize:
     with_aux: [vae, text_encoder]
   plan:
@@ -168,31 +92,6 @@ training:
     global_batch_size: 512
   topology:
     actor_count: 16
-  optimizer:
-    learning_rate: 5.0e-5
-    adam_beta1: 0.9
-    adam_beta2: 0.999
-    adam_epsilon: 1.0e-8
-    weight_decay: 0.0
-  lr_scheduler:
-    type: constant
-    warmup_steps: 0
-    total_steps: 10000
-  execution:
-    max_grad_norm: 1.0
-    # Kept false to match the production memory profile so the gather is
-    # the only OOM variable. Do NOT flip these on for the TQ A/B test —
-    # offload_train=true would free FSDP state and mask the gather OOM.
-    offload_train: false
-    offload_rollout: false
-
-reward:
-  aggregation_method: mean
-  base_device: cuda
-  components:
-    - name: pickscore
-      weight: 1.0
-      batch_size: 8
 
 logging:
   logging_steps: 1

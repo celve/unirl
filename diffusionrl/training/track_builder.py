@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import hydra.utils
 import torch
@@ -70,6 +70,7 @@ def _build_algorithm_for_track(
     pipeline: object,
     stage: object,
     ema: Optional[EMA],
+    sampling_params: Optional[Any] = None,
 ) -> object:
     """Instantiate one track's :class:`StageAlgorithm` from its cfg node.
 
@@ -93,6 +94,14 @@ def _build_algorithm_for_track(
         inject_kwargs["conditions_cls"] = conditions_cls
 
     target = str(alg_node.get("_target_") or "")
+    if (
+        "params" not in inject_kwargs
+        and target.endswith((".DiffusionGRPO", ".DiffusionDPPO", ".DiffusionNFT"))
+        and alg_node.get("params") is None
+        and sampling_params is not None
+    ):
+        inject_kwargs["params"] = sampling_params
+
     if target.endswith(".DiffusionNFT"):
         if ema is None:
             raise RuntimeError(
@@ -154,7 +163,8 @@ def build_training_tracks(
         with_aux = tuple(materialize_cfg.get("with_aux", []) or ())
 
     shared_micro_batch_size = int(cfg.training.plan.micro_batch_size)
-    sde_strategy_cfg = get_diffusion_params(cfg.sampling).sde_strategy if cfg.get("sampling") is not None else None
+    diffusion_params = get_diffusion_params(cfg.sampling) if cfg.get("sampling") is not None else None
+    sde_strategy_cfg = diffusion_params.sde_strategy if diffusion_params is not None else None
 
     for track_name, track_cfg in cfg.training.tracks.items():
         # 1. Pipeline.
@@ -285,6 +295,7 @@ def build_training_tracks(
             pipeline=pipeline,
             stage=source_stage,
             ema=ema,
+            sampling_params=diffusion_params,
         )
 
         # 9. Per-track optimizer + scheduler.

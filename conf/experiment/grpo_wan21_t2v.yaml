@@ -16,12 +16,18 @@
 # Launch via:
 #   python -m diffusionrl.train +experiment=grpo_wan21_t2v
 defaults:
+  - /training/lora@training.lora: rank64
+  - /training/fsdp@training.fsdp: bf16_full_ac
+  - /training/optimizer@training.optimizer: adam_3e-4
+  - /training/lr_scheduler@training.lr_scheduler: constant_1k
   - override /algorithm: grpo
   - override /model: wan21
   - override /rollout/engine: trainside
   - override /sampling/sde_strategy: flow
+  - override /sampling: wan21_720p
+  - override /reward: video_pickscore
+  - override /training/execution: standard
   - _self_
-
 run:
   seed: 42
   num_rollouts: 1000
@@ -30,38 +36,15 @@ run:
   eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
 
 sampling:
-  num_inference_steps: 14
-  guidance_scale: 1.0
-  height: 720
-  width: 1280
-  # num_frames=5 maps to 2 latent frames (temporal_downsample=4, so
-  # T_lat = (5-1)//4 + 1 = 2) — fast iteration recipe that exercises the
-  # full T2V pipeline including the temporal axis without the cost of
-  # long videos. The WAN VAE requires ``(num_frames - 1) % 4 == 0``, so
-  # valid choices are 1, 5, 9, 13, 17, 21, … . Bump ``num_frames`` for
-  # actual video training.
-  num_frames: 5
-  seed: 42
-  init_same_noise: false
-  sde_config:
-    eta: 0.7
+  samples_per_prompt: 16
 
 algorithm:
   prompts_per_rollout: 48
-  samples_per_prompt: 16
   adv_normalization_scope: group
   use_global_std: true
-  clip_range: 1.0e-4
-  clip_schedule: constant
-  use_kl_penalty: false
   kl_coef: 0.0
-  ema:
-    eval_ema_decay: 0.9
-    eval_ema_update_interval: 1
   scheduler:
     timestep_fraction: [0.0, 0.5]
-  sde_config:
-    eta: ${sampling.sde_config.eta}
   algorithms:
     # Slot ``video`` matches RolloutResp.rollout_traces["video"] on WAN.
     # ``stage_attr: diffusion`` points the algorithm at the right stage on
@@ -72,23 +55,6 @@ algorithm:
       clip_range: 1.0e-4
       clip_schedule: constant
       conditions_cls: diffusionrl.models.wan21.conditions.WAN21Conditions
-      params:
-        # ALL request-shape params interpolate from the ``sampling`` block so
-        # a CLI override of e.g. ``+sampling.height=512`` propagates to BOTH
-        # rollout (which builds RolloutReq from sampling) AND replay (which
-        # reads these params to recompute log-probs). Hardcoding any of
-        # ``num_inference_steps`` / ``height`` / ``width`` / ``num_frames`` /
-        # ``seed`` here would silently let rollout and replay use different
-        # shapes → logprob recomputation mismatch → GRPO ratio drift.
-        _target_: diffusionrl.models.wan21.diffusion.WAN21DiffusionParams
-        num_inference_steps: ${sampling.num_inference_steps}
-        guidance_scale: ${sampling.guidance_scale}
-        height: ${sampling.height}
-        width: ${sampling.width}
-        num_frames: ${sampling.num_frames}
-        seed: ${run.seed}
-        eta: ${sampling.sde_config.eta}
-
 # ----------------------------------------------------------------------
 # Training surface (mirrors flowgrpo_fast_sd3_trainside.yaml)
 # ----------------------------------------------------------------------
@@ -105,17 +71,6 @@ rollout:
     forward_batch_size: 4
 
 training:
-  lora:
-    rank: 64
-    alpha: 128
-    dropout: 0.0
-  fsdp:
-    cpu_offload: false
-    param_dtype: bf16
-    mixed_precision: true
-    fsdp_mode: full
-    reshard_after_forward: true
-    activation_checkpointing: true
   materialize:
     # WAN21Bundle eager-loads; ``with_aux`` is a no-op here but kept for
     # parity with the SD3 / HI3 recipes — Bundle.from_config already
@@ -131,20 +86,6 @@ training:
     global_batch_size: 768
   topology:
     actor_count: 8
-  optimizer:
-    learning_rate: 3.0e-4
-    adam_beta1: 0.9
-    adam_beta2: 0.999
-    adam_epsilon: 1.0e-8
-    weight_decay: 0.0
-  lr_scheduler:
-    type: constant
-    warmup_steps: 0
-    total_steps: 1000
-  execution:
-    max_grad_norm: 1.0
-    offload_train: false
-    offload_rollout: false
 
 model:
   pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,Wan-AI/Wan2.1-T2V-1.3B-Diffusers}
@@ -154,22 +95,6 @@ model:
   logprob_precision: fp32
   shift: 5.0
   max_sequence_length: 512
-
-reward:
-  aggregation_method: mean
-  base_device: cuda
-  components:
-    # ``video`` wraps a frame-level scorer (pickscore by default) with a
-    # temporal-consistency term. ``sample_frames=1`` selects only the
-    # first frame for PickScore. Same convention as legacy
-    # ``grpo_wan_t2v.yaml``.
-    video:
-      weight: 1.0
-      batch_size: 8
-      inner_model_name: pickscore
-      temporal_weight: 0.3
-      alignment_weight: 0.7
-      sample_frames: 1
 
 logging:
   logging_steps: 1

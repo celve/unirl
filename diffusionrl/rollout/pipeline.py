@@ -216,6 +216,7 @@ class RolloutPipeline:
             sampling_params=sampling_params,
             collect_media_preview=bool(collect_media_preview),
             media_max_items=max(1, int(media_max_items)),
+            metadata=list(inputs.metadata) if inputs.metadata else [],
         )
         sde_indices_set = set(int(i) for i in sde_indices_list) if sde_indices_list is not None else None
         return req, sde_indices_set

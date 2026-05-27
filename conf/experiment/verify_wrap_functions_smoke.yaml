@@ -13,12 +13,14 @@
 defaults:
   - /training/track@training.tracks.image: default
   - /model@training.tracks.image.model: sd3
+  - override /placement: colocate_1x8
   - override /algorithm: grpo
   - override /model: sd3
   - override /rollout/engine: trainside
   - override /sampling/sde_strategy: flow
+  - override /sampling: sd3_512
+  - override /training/execution: standard
   - _self_
-
 run:
   seed: 42
   num_rollouts: 10
@@ -27,29 +29,16 @@ run:
   eval_data_path: ${oc.env:EVAL_DATA_PATH,/mnt/gz/data/datasets/pickscore/test.txt}
 
 sampling:
-  num_inference_steps: 10
-  guidance_scale: 1.0
-  height: 512
-  width: 512
-  seed: 42
-  init_same_noise: false
-  sde_config:
-    eta: 0.7
+  samples_per_prompt: 4
 
 algorithm:
   prompts_per_rollout: 4
-  samples_per_prompt: 4
   adv_normalization_scope: group
   use_global_std: true
-  clip_range: 1.0e-4
-  clip_schedule: constant
-  use_kl_penalty: false
   kl_coef: 0.0
   scheduler:
     timestep_fraction: [0.0, 0.5]
     num_sde_steps: 3
-  sde_config:
-    eta: ${sampling.sde_config.eta}
   algorithms:
     image:
       _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
@@ -57,15 +46,6 @@ algorithm:
       clip_range: 1.0e-4
       clip_schedule: constant
       conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
-      params:
-        _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
-        num_inference_steps: 10
-        guidance_scale: ${sampling.guidance_scale}
-        height: 512
-        width: 512
-        seed: 42
-        eta: ${sampling.sde_config.eta}
-
 model:
   pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,/root/diffusionrl/models/local/stable-diffusion-3.5-medium}
   model_precision: bf16
@@ -75,17 +55,6 @@ rollout:
   engine: {}
   plan:
     forward_batch_size: 4
-
-placement:
-  num_rollout_nodes: 1
-  num_rollout_gpus_per_node: 8
-  num_rollout_gpus_per_actor: 1
-  num_train_nodes: 1
-  num_train_gpus_per_node: 8
-  num_train_gpus_per_actor: 1
-  colocate: true
-  colocate_gpu_fraction: 0.9
-  strategy: PACK
 
 training:
   primary_track: image
@@ -141,16 +110,12 @@ training:
         type: constant
         warmup_steps: 0
         total_steps: 100
-  execution:
-    max_grad_norm: 1.0
-    offload_train: false
-    offload_rollout: false
 
 reward:
   aggregation_method: mean
   base_device: cuda
   components:
-    - name: pickscore
+    pickscore:
       weight: 1.0
       batch_size: 4
 

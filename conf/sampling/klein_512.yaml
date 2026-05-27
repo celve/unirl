@@ -1,0 +1,6 @@
+num_inference_steps: 10
+guidance_scale: 1.0
+height: 512
+width: 512
+eta: 0.7
+init_same_noise: true

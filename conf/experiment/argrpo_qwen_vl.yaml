@@ -25,16 +25,13 @@ run:
   eval_data_path: ${oc.env:EVAL_DATA_PATH,${run.data_path}}
 
 sampling:
+  samples_per_prompt: 4
   seed: 42
 
 algorithm:
   prompts_per_rollout: 4
-  samples_per_prompt: 4
   adv_normalization_scope: group
   use_global_std: true
-  clip_range: 1.0e-4
-  clip_schedule: constant
-  use_kl_penalty: false
   kl_coef: 0.0
   algorithms:
     ar:

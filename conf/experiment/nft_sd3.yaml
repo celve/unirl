@@ -33,12 +33,16 @@
 #   python -m diffusionrl.train +experiment=nft_sd3
 
 defaults:
+  - /training/fsdp@training.fsdp: bf16_full_ac
+  - /training/optimizer@training.optimizer: adam_3e-4_wd1e-4
+  - /training/lr_scheduler@training.lr_scheduler: constant_10k
   - override /algorithm: nft
-  - override /model: sd3
+  - override /model: sd3_bf16
   - override /rollout/engine: trainside
   - override /sampling/sde_strategy: flow
+  - override /reward: pickscore
+  - override /training/execution: standard
   - _self_
-
 run:
   seed: 42
   data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
@@ -47,35 +51,29 @@ run:
   eval_data_path: ${oc.env:EVAL_DATA_PATH,/root/diffusionrl/data/datasets/pickscore/test.txt}
 
 sampling:
+  samples_per_prompt: 16
   num_inference_steps: 10
   guidance_scale: 1.0
   height: 512
   width: 512
   init_same_noise: false
-  sde_config:
-    # NFT is forward-process — no SDE noise. Rollout engine sees
-    # ``num_sde_steps: 0`` in the schedule below and skips the SDE branch.
-    eta: 0.0
+  eta: 0.0
 
 algorithm:
   # Driver-side singular: ``NFTRolloutControl``. Schema-shape compatible
   # with ``GRPORolloutControlConfig``; the two recipes are interchangeable
   # at this layer (``override /algorithm: nft`` flips the registered target).
   prompts_per_rollout: 48
-  samples_per_prompt: 16
   adv_normalization_scope: group
   use_global_std: true
   # KL math deferred to Phase 2 (kl_coef > 0 fails fast in DiffusionNFT).
   kl_coef: 0.0
-  use_kl_penalty: false
   scheduler:
     # KEY: ``num_sde_steps: 0`` triggers the forward-process rollout path.
     # ``AllSDEScheduler`` returns an empty SDE index set; rollout engine
     # captures dense latents but no per-step log_prob.
     timestep_fraction: [0.0, 1.0]
     num_sde_steps: 0
-  sde_config:
-    eta: ${sampling.sde_config.eta}
   algorithms:
     # Slot key = rollout response segment key (SD3 emits resp.rollout_traces["image"]).
     # ``stage_attr: diffusion`` overrides the default pipeline-attribute
@@ -100,23 +98,6 @@ algorithm:
       apply_time_shift_in_loss: false
       training_timestep_fraction: 0.99
       kl_coef: 0.0
-      params:
-        _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
-        num_inference_steps: ${sampling.num_inference_steps}
-        guidance_scale: ${sampling.guidance_scale}
-        height: ${sampling.height}
-        width: ${sampling.width}
-        seed: ${run.seed}
-        # NFT rollout passes ``sde_indices=null`` (the engine reads this as
-        # "no SDE; forward-process path"); the algorithm's loss math picks
-        # its own ``t`` per sample inside ``compute_loss_and_backward``.
-        sde_indices: null
-        eta: ${sampling.sde_config.eta}
-        init_same_noise: ${sampling.init_same_noise}
-        samples_per_prompt: ${algorithm.samples_per_prompt}
-        noise_group_ids: null
-        max_sequence_length: 256
-
 placement:
   # Direct-sampling: train actors sample on their own GPUs; no separate
   # rollout actor pool. Matches OLD NFT layout (FSDP direct-sampling).
@@ -161,13 +142,6 @@ training:
       - attn.to_out.0
       - attn.to_q
       - attn.to_v
-  fsdp:
-    cpu_offload: false
-    param_dtype: bf16
-    mixed_precision: true
-    fsdp_mode: full
-    reshard_after_forward: true
-    activation_checkpointing: true
   materialize:
     with_aux: []
   plan:
@@ -182,35 +156,6 @@ training:
     global_batch_size: 768
   topology:
     actor_count: 8
-  optimizer:
-    learning_rate: 3.0e-4
-    adam_beta1: 0.9
-    adam_beta2: 0.999
-    adam_epsilon: 1.0e-8
-    weight_decay: 1.0e-4
-  lr_scheduler:
-    type: constant
-    warmup_steps: 0
-    total_steps: 10000
-  execution:
-    max_grad_norm: 1.0
-    offload_train: false
-    offload_rollout: false
-
-model:
-  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
-  model_precision: bf16
-  autocast_precision: bf16
-  trajectory_precision: bf16
-  logprob_precision: fp32
-
-reward:
-  aggregation_method: mean
-  base_device: cuda
-  components:
-    pickscore:
-      weight: 1.0
-      batch_size: 8
 
 logging:
   logging_steps: 1

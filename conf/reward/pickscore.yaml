@@ -1,0 +1,6 @@
+aggregation_method: mean
+base_device: cuda
+components:
+  pickscore:
+    weight: 1.0
+    batch_size: 8

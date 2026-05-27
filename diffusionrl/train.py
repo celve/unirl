@@ -58,6 +58,7 @@ def _run_cross_component_validators(cfg: DictConfig) -> None:
     from diffusionrl.config.validation import (
         validate_dynamic_dotpaths,
         validate_lora_target_modules,
+        validate_multi_track_mini_batch_geometry,
         validate_offload_contract,
         validate_training_batch_geometry,
         validate_weight_sync_contract,
@@ -66,6 +67,7 @@ def _run_cross_component_validators(cfg: DictConfig) -> None:
     validate_dynamic_dotpaths(cfg)
     validate_lora_target_modules(cfg)
     validate_training_batch_geometry(cfg)
+    validate_multi_track_mini_batch_geometry(cfg)
     validate_weight_sync_contract(cfg)
     validate_offload_contract(cfg)
 

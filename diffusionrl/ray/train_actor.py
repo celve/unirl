@@ -43,6 +43,7 @@ from diffusionrl.training.train_track import TrainTrack
 from diffusionrl.transfer.buffer import Buffer, BufferHandle
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.sampling import get_diffusion_params
 from diffusionrl.utils import clear_memory as _clear_gpu_memory
 
 logger = logging.getLogger(__name__)
@@ -131,7 +132,10 @@ class TrainActor(
         self._reward_pipeline: Optional[RewardPipeline] = None
         self._adv_scope = str(getattr(cfg.algorithm, "adv_normalization_scope", "group"))
         self._adv_use_global_std = bool(getattr(cfg.algorithm, "use_global_std", False))
-        self._adv_samples_per_prompt = max(1, int(getattr(cfg.algorithm, "samples_per_prompt", 1)))
+        self._adv_samples_per_prompt = max(
+            1,
+            int(get_diffusion_params(cfg.sampling).samples_per_prompt),
+        )
         if is_direct_sampling(cfg):
             only_track = next(iter(cfg.training.tracks))
             self.engine = build(
@@ -235,18 +239,21 @@ class TrainActor(
         num_updates = int(self._cfg.training.plan.get("num_updates_per_batch", 1))
         offload_train = bool(self._cfg.training.execution.get("offload_train", False))
 
-        root_bs = next(iter(resp.tracks.values())).batch_size
-        mini_size = root_bs // num_updates
+        mini_sizes = {name: track.batch_size // num_updates for name, track in resp.tracks.items()}
 
         results: Dict[str, TrackMiniBatchResult] = {}
         for track_name in self.tracks:
             self._onload_track(track_name)
             try:
                 for i in range(num_updates):
-                    start = i * mini_size
-                    end = start + mini_size
                     mini_resp = RolloutResp(
-                        tracks={name: track.slice(start, end) for name, track in resp.tracks.items()}
+                        tracks={
+                            name: track.slice(
+                                i * mini_sizes[name],
+                                (i + 1) * mini_sizes[name],
+                            )
+                            for name, track in resp.tracks.items()
+                        }
                     )
                     results[track_name] = self.train_stack.train_track(
                         mini_resp,
