@@ -231,6 +231,21 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         if full_mm_type_ids is not None:
             forward_kwargs["mm_token_type_ids"] = full_mm_type_ids
 
+        # Compute correct 4D position_ids for M-RoPE.
+        # Rollout uses prepare_inputs_for_generation which produces [4, bs, seq]:
+        #   row 0 = text positions (for causal mask), rows 1-3 = M-RoPE (temporal, height, width).
+        # Direct forward with position_ids=None only produces [3, bs, seq] (no text_position_ids),
+        # causing incorrect causal mask for multimodal inputs.
+        # Fix: call get_rope_index ourselves and prepend text_positions.
+        vision_pos, _ = self.model.transformer.model.get_rope_index(
+            full_ids,
+            image_grid_thw=conditions.image_grid_thw,
+            attention_mask=full_mask,
+        )  # [3, bs, seq]
+        text_pos = full_mask.long().cumsum(-1) - 1
+        text_pos.masked_fill_(full_mask == 0, 1)
+        forward_kwargs["position_ids"] = torch.cat([text_pos[None], vision_pos], dim=0)  # [4, bs, seq]
+
         out = self.model.transformer(**forward_kwargs)
         logits = out.logits
 
