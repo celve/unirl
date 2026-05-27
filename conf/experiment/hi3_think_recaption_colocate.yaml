@@ -25,7 +25,7 @@ defaults:
 
 run:
   data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
-  num_rollouts: 5
+  num_rollouts: 1000
   seed: 42
   data_path: /root/diffusionrl/data/datasets/pickscore/train.txt
   eval_data_path: /root/diffusionrl/data/datasets/pickscore/test.txt
@@ -33,7 +33,7 @@ run:
 
 sampling:
   samples_per_prompt: 8
-  num_inference_steps: 10
+  num_inference_steps: 16
   guidance_scale: 1.0
   height: 1024
   width: 1024
@@ -47,7 +47,7 @@ algorithm:
   kl_coef: 0.0
   scheduler:
     timestep_fraction: [0.0, 1.0]
-    num_sde_steps: 10
+    num_sde_steps: 16
   algorithms:
     image:
       name: diffusion_grpo
@@ -89,7 +89,7 @@ rollout:
     modality: t2i_think_recaption
     default_height: 1024
     default_width: 1024
-    default_num_inference_steps: 10
+    default_num_inference_steps: 16
     default_guidance_scale: 1.0
     default_eta: 1.0
     default_ar_max_tokens: 4096
