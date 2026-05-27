@@ -19,8 +19,27 @@ _ANSWER_PATTERN = re.compile(
 _STANDALONE_LETTER = re.compile(r"\b([A-D])\b")
 
 
+def _normalize_answer(answer: str) -> str:
+    """Normalize answer to A/B/C/D letter.
+
+    Handles: "A"/"B"/"C"/"D" → "A"/"B"/"C"/"D"
+                 "1"/"2"/"3"/"4" → "A"/"B"/"C"/"D"
+    """
+    a = answer.strip().upper()
+    # Numeric → letter
+    if len(a) == 1 and a in "1234":
+        return chr(ord("A") + ord(a) - ord("1"))
+    # Already a letter
+    if len(a) == 1 and a in "ABCD":
+        return a
+    return a  # fallback
+
+
 def _extract_answer_letter(text: str) -> str:
     text = text.strip()
+    # Handle numeric answers: "1"→"A", "2"→"B", "3"→"C", "4"→"D"
+    if len(text) == 1 and text in "1234":
+        return chr(ord("A") + ord(text) - ord("1"))
     if len(text) == 1 and text.upper() in "ABCD":
         return text.upper()
     match = _ANSWER_PATTERN.search(text)
@@ -56,7 +75,7 @@ class MCExactMatchRewardScorer(BaseLocalRewardScorer):
             if meta is None or "answer" not in meta:
                 rewards.append(0.0)
                 continue
-            gt = str(meta["answer"]).strip().upper()
+            gt = _normalize_answer(str(meta["answer"]))
             predicted = _extract_answer_letter(text)
             rewards.append(1.0 if predicted == gt else 0.0)
         return rewards
