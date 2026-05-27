@@ -21,13 +21,39 @@ def _validate_cfg_for_train(cfg: DictConfig) -> None:
     if algorithms is None or len(algorithms) == 0:
         raise ValueError("cfg.algorithm.algorithms must be a non-empty track-keyed dict of StageAlgorithm presets.")
 
-    track_keys = set(tracks.keys())
+    # Default: a track named X hosts one algorithm at slot X. A track may
+    # opt into hosting multiple algorithms via ``algorithm_keys``
+    # (HI3 shared-backbone case: training track "image" hosts both
+    # ``algorithms.image`` and ``algorithms.ar``). Every algorithm slot
+    # must be claimed by exactly one track; every claimed slot must exist.
     alg_keys = set(algorithms.keys())
-    if alg_keys != track_keys:
+
+    claimed_by_track: dict = {}  # alg_key -> track_name
+    for track_name, track_cfg in tracks.items():
+        claimed = track_cfg.get("algorithm_keys") if hasattr(track_cfg, "get") else None
+        keys_for_track = [str(k) for k in claimed] if claimed else [track_name]
+        for k in keys_for_track:
+            if k in claimed_by_track:
+                raise ValueError(
+                    f"cfg.algorithm.algorithms slot {k!r} is claimed by both "
+                    f"track {claimed_by_track[k]!r} and track {track_name!r}; "
+                    f"each algorithm may be hosted by exactly one training track."
+                )
+            claimed_by_track[k] = track_name
+
+    missing = sorted(set(claimed_by_track) - alg_keys)
+    if missing:
         raise ValueError(
-            f"cfg.algorithm.algorithms keys {sorted(alg_keys)} must match cfg.training.tracks "
-            f"keys {sorted(track_keys)} (every track needs exactly one algorithm; "
-            "the algorithm slot key IS the track name)."
+            f"cfg.training.tracks reference algorithm slots {missing} that "
+            f"have no entry in cfg.algorithm.algorithms (have {sorted(alg_keys)})."
+        )
+    orphaned = sorted(alg_keys - set(claimed_by_track))
+    if orphaned:
+        raise ValueError(
+            f"cfg.algorithm.algorithms slots {orphaned} are not hosted by any "
+            f"training track. List them in some track's algorithm_keys, or "
+            f"create matching training tracks. Hosted slots: "
+            f"{sorted(claimed_by_track)}."
         )
 
     for name, alg_node in algorithms.items():

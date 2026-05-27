@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import hydra.utils
 import torch
@@ -283,20 +283,31 @@ def build_training_tracks(
                 list(getattr(model, "peft_config", None) or {}),
             )
 
-        # 8. Per-track algorithm.
-        if track_name not in cfg.algorithm.algorithms:
-            raise ValueError(
-                f"TrainActor: cfg.algorithm.algorithms must define an entry for track "
-                f"{track_name!r}; got keys {sorted(cfg.algorithm.algorithms.keys())}."
+        # 8. Per-track algorithms.
+        # ``algorithm_keys`` lets one track host multiple algorithms (HI3
+        # shared-backbone). Absent / empty → fall back to [track_name]
+        # (preserves single-algo PE / SD3 behavior).
+        configured_keys = getattr(track_cfg, "algorithm_keys", None)
+        if configured_keys:
+            algorithm_keys: List[str] = [str(k) for k in configured_keys]
+        else:
+            algorithm_keys = [track_name]
+        algorithms: Dict[str, object] = {}
+        for alg_key in algorithm_keys:
+            if alg_key not in cfg.algorithm.algorithms:
+                raise ValueError(
+                    f"TrainActor: cfg.algorithm.algorithms must define an entry for "
+                    f"algorithm key {alg_key!r} (referenced by track {track_name!r}); "
+                    f"got keys {sorted(cfg.algorithm.algorithms.keys())}."
+                )
+            algorithms[alg_key] = _build_algorithm_for_track(
+                cfg.algorithm.algorithms[alg_key],
+                track_name=alg_key,
+                pipeline=pipeline,
+                stage=source_stage,
+                ema=ema,
+                sampling_params=diffusion_params,
             )
-        algorithm = _build_algorithm_for_track(
-            cfg.algorithm.algorithms[track_name],
-            track_name=track_name,
-            pipeline=pipeline,
-            stage=source_stage,
-            ema=ema,
-            sampling_params=diffusion_params,
-        )
 
         # 9. Per-track optimizer + scheduler.
         optimizer = build_optimizer(
@@ -324,7 +335,7 @@ def build_training_tracks(
             ema=ema,
             optimizer=optimizer,
             scheduler=scheduler,
-            algorithm=algorithm,
+            algorithms=algorithms,
             micro_batch_size=micro_bs,
         )
         artefacts.pipelines[track_name] = pipeline

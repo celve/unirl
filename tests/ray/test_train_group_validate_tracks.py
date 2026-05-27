@@ -93,13 +93,37 @@ def test_validator_rejects_missing_algorithms():
         _validate_cfg_for_train(cfg)
 
 
-def test_validator_rejects_key_mismatch_between_tracks_and_algorithms():
+def test_validator_rejects_track_referencing_missing_algorithm():
+    """A track that defaults to its own name as the algorithm slot must
+    find that slot in cfg.algorithm.algorithms."""
     cfg = _make_cfg(
         tracks={"image": _make_track(), "refined": _make_track(source_stage_attr="ar")},
         algorithms={"image": {"_target_": "x"}, "phantom": {"_target_": "y"}},
     )
-    with pytest.raises(ValueError, match="cfg.algorithm.algorithms keys.*must match cfg.training.tracks keys"):
+    with pytest.raises(ValueError, match=r"reference algorithm slots \['refined'\]"):
         _validate_cfg_for_train(cfg)
+
+
+def test_validator_rejects_orphaned_algorithm_slot():
+    """An algorithm slot that no training track claims is an orphan."""
+    cfg = _make_cfg(
+        tracks={"image": _make_track()},
+        algorithms={"image": {"_target_": "x"}, "phantom": {"_target_": "y"}},
+    )
+    with pytest.raises(ValueError, match=r"slots \['phantom'\] are not hosted"):
+        _validate_cfg_for_train(cfg)
+
+
+def test_validator_accepts_track_hosting_multiple_algorithms():
+    """HI3 single-track multi-algorithm: ``algorithm_keys`` lets one track claim
+    multiple algorithm slots."""
+    track = _make_track()
+    track["algorithm_keys"] = ["diffusion", "ar"]
+    cfg = _make_cfg(
+        tracks={"image": track},
+        algorithms={"diffusion": {"_target_": "x"}, "ar": {"_target_": "y"}},
+    )
+    _validate_cfg_for_train(cfg)  # must not raise
 
 
 def test_validator_rejects_algorithm_without_target():
