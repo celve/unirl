@@ -2,20 +2,15 @@
 # DiffusionNFT Qwen-Image, 4 nodes x 8 GPUs.
 defaults:
   - nft_qwen_image
+  - override /placement: trainside_4x8
   - _self_
 
 sampling:
+  samples_per_prompt: 12
   height: 256
   width: 256
 
 algorithm:
-  samples_per_prompt: 12
-
-placement:
-  num_rollout_nodes: 4
-  num_rollout_gpus_per_node: 8
-  num_train_nodes: 4
-  num_train_gpus_per_node: 8
 
 rollout:
   plan:

@@ -8,9 +8,9 @@
 # experiment and provide environment-dependent paths.
 defaults:
   - flowgrpo_fast_sd3_trainside
+  - override /placement: trainside_2x8
   - override /sampling/sde_strategy: dance
   - _self_
-
 run:
   seed: 42
   num_rollouts: 10000
@@ -18,23 +18,14 @@ run:
   eval_data_path: ${oc.env:EVAL_DATA_PATH,/mnt/bj/data/datasets/pickscore/test.txt}
 
 sampling:
-  sde_config:
-    eta: 0.7
+  samples_per_prompt: 16
+  eta: 0.7
 
 algorithm:
   prompts_per_rollout: 48
-  samples_per_prompt: 16
   scheduler:
     timestep_fraction: [0.0, 0.5]
     num_sde_steps: 3
-  sde_config:
-    eta: ${sampling.sde_config.eta}
-
-placement:
-  num_rollout_nodes: 2
-  num_rollout_gpus_per_node: 8
-  num_train_nodes: 2
-  num_train_gpus_per_node: 8
 
 training:
   plan:

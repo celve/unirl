@@ -5,7 +5,7 @@ The algorithm class is fed:
   ``param * sample`` so the leaf ``nn.Parameter`` is wired into the loss
   graph;
 - a fake :class:`NFTLoRAPolicy`-shaped mock that exposes a real
-  context-manager ``with_old_adapter()`` plus inert ``step`` /
+  context-manager ``use_shadow()`` plus inert ``step`` /
   ``on_rollout_end`` methods.
 
 No peft, no FSDP, no Ray. The :class:`NFTLoRAPolicy` itself is exercised
@@ -39,7 +39,7 @@ class _FakeNFTLoRAPolicy:
     """Pure-Python stand-in for :class:`NFTLoRAPolicy`.
 
     Records the active "adapter" so tests can assert that
-    ``with_old_adapter`` swaps and restores. ``step`` / ``on_rollout_end``
+    ``use_shadow`` swaps and restores. ``step`` / ``on_rollout_end``
     are inert counters — the algorithm doesn't call them; they only need
     to exist so ``DiffusionNFT.__init__`` passes its method-presence check.
     """
@@ -50,7 +50,7 @@ class _FakeNFTLoRAPolicy:
         self.rollout_end_calls = 0
 
     @contextmanager
-    def with_old_adapter(self):
+    def use_shadow(self):
         prev = self.active_adapter
         self.active_adapter = "old"
         try:
@@ -208,11 +208,11 @@ def test_nft_rejects_out_of_range_timestep_fraction() -> None:
 def test_nft_rejects_missing_lora_policy_surface() -> None:
     stage = _FakeDiffusionStage(lora_policy=_FakeNFTLoRAPolicy())
 
-    class _BadPolicy:  # missing with_old_adapter
+    class _BadPolicy:  # missing use_shadow
         def step(self, *_a, **_k): ...
         def on_rollout_end(self, *_a, **_k): ...
 
-    with pytest.raises(TypeError, match="with_old_adapter"):
+    with pytest.raises(TypeError, match="use_shadow"):
         _build_alg(lora_policy=_BadPolicy(), stage=stage)
 
 

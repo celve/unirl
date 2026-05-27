@@ -26,16 +26,13 @@ run:
   eval_data_path: ${oc.env:EVAL_DATA_PATH,/mnt/data/geo3k/val.jsonl}
 
 sampling:
+  samples_per_prompt: 8
   seed: 42
 
 algorithm:
   prompts_per_rollout: 16
-  samples_per_prompt: 8
   adv_normalization_scope: group
   use_global_std: true
-  clip_range: 1.0e-4
-  clip_schedule: constant
-  use_kl_penalty: false
   kl_coef: 0.0
   scheduler:
     num_sde_steps: 0

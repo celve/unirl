@@ -41,9 +41,8 @@ def _make_resp_with_k_groups(*, k: int, samples_per_group: int = 1) -> RolloutRe
     group_ids = [f"g{i // samples_per_group}" for i in range(total)]
     track = RolloutTrack(
         sample_ids=sample_ids,
-        parent_ids=None,
+        parent_ids=group_ids,
         parent_track=None,
-        group_ids=group_ids,
         segment=LatentSegment(
             sample_indices=torch.arange(total, dtype=torch.long),
             positions=torch.zeros(total, dtype=torch.long),

@@ -31,20 +31,22 @@
 # === Layout (1×8 H20 96GB, colocate) ===
 #   - 8 vllm-omni rollout actors (TP=1, 1 GPU each, DP rollout)
 #   - 8 FSDP DP=8 train actors (1 GPU each, colocated, ~40GB peak with AC)
-#
-# === Estimated throughput ===
-#   rollout: 768 images sharded over 8 TP=1 actors
-#   train:   2 updates × 48 accum-steps × ~0.3s ≈ 30s
-#   sync:    ~0.5s
-#   → rollout wall time should scale with available actor parallelism
 defaults:
   - /sync@sync: tensor_payload
   - /training/track@training.tracks.image: default
   - /model@training.tracks.image.model: sd3
+  - /training/lora@training.tracks.image.lora: sd3_rank32
+  - /training/fsdp@training.tracks.image.fsdp: bf16_full_ac
+  - /training/optimizer@training.tracks.image.optimizer: adam_3e-4
+  - /training/lr_scheduler@training.tracks.image.lr_scheduler: constant_10k
+  - override /placement: colocate_1x8_half
   - override /algorithm: grpo
-  - override /model: sd3
+  - override /model: sd3_bf16
   - override /rollout/engine: vllm_omni
   - override /sampling/sde_strategy: flow
+  - override /sampling: sd3_512
+  - override /reward: pickscore
+  - override /training/execution: standard
   - _self_
 
 run:
@@ -54,29 +56,14 @@ run:
   eval_data_path: /root/diffusionrl/data/datasets/pickscore/test.txt
   weight_sync_interval: 1
 
-# ── Sampling (identical to reference) ──
 sampling:
-  num_inference_steps: 10
-  guidance_scale: 1.0
-  height: 512
-  width: 512
-  init_same_noise: false
-  eta: 0.7
-  samples_per_prompt: ${algorithm.samples_per_prompt}
+  samples_per_prompt: 16
 
-# ── Algorithm (identical to reference) ──
 algorithm:
   prompts_per_rollout: 48
-  samples_per_prompt: 16
   adv_normalization_scope: group
   use_global_std: true
-  clip_range: 1.0e-4
-  clip_schedule: constant
-  use_kl_penalty: true
   kl_coef: 0.0
-  ema:
-    eval_ema_decay: 0.99
-    eval_ema_update_interval: 2
   scheduler:
     timestep_fraction: [0.0, 0.5]
     num_sde_steps: 3
@@ -87,30 +74,6 @@ algorithm:
       conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
       clip_range: 1.0e-4
       clip_schedule: constant
-      params:
-        _target_: diffusionrl.types.sampling.DiffusionSamplingParams
-        num_inference_steps: ${sampling.num_inference_steps}
-        guidance_scale: ${sampling.guidance_scale}
-        height: ${sampling.height}
-        width: ${sampling.width}
-        seed: ${run.seed}
-        sde_indices: null
-        eta: ${sampling.eta}
-        init_same_noise: ${sampling.init_same_noise}
-        samples_per_prompt: ${algorithm.samples_per_prompt}
-        noise_group_ids: null
-        max_sequence_length: 256
-
-# ── Algorithms (per-slot config) ──
-# ── Model (identical to reference) ──
-model:
-  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
-  model_precision: bf16
-  autocast_precision: bf16
-  trajectory_precision: bf16
-  logprob_precision: fp32
-
-# ── Rollout engine (vllm-omni) ──
 rollout:
   engine:
     model_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
@@ -123,34 +86,13 @@ rollout:
   plan:
     forward_batch_size: ${oc.decode:${oc.env:FBS,48}}
 
-# ── Placement (1×8 H20, colocate) ──
-placement:
-  num_rollout_nodes: 1
-  num_rollout_gpus_per_node: 8
-  num_rollout_gpus_per_actor: 1       # 8 vllm-omni actors (TP=1, DP over 8)
-  num_train_nodes: 1
-  num_train_gpus_per_node: 8
-  num_train_gpus_per_actor: 1         # 8 FSDP DP=8 train actors
-  colocate: true
-  colocate_gpu_fraction: 0.5
-  strategy: PACK
-  allow_noset_multi_gpu_inference: true
-
-# ── Training (adapted for 8 actors; same effective gradient as 16-actor ref) ──
 training:
   tracks:
     image:
       model:
         pretrained_model_ckpt_path: ${model.pretrained_model_ckpt_path}
-        model_precision: bf16
-        autocast_precision: bf16
-        trajectory_precision: bf16
-        logprob_precision: fp32
       source_stage_attr: diffusion
       lora:
-        rank: 32
-        alpha: 64
-        dropout: 0.0
         bias: none
         task_type: FEATURE_EXTRACTION
         target_modules:
@@ -162,72 +104,26 @@ training:
           - attn.to_out.0
           - attn.to_q
           - attn.to_v
-      fsdp:
-        cpu_offload: false
-        param_dtype: bf16
-        mixed_precision: true
-        fsdp_mode: full
-        reshard_after_forward: true
-        activation_checkpointing: true
-      optimizer:
-        learning_rate: 3.0e-4
-        adam_beta1: 0.9
-        adam_beta2: 0.999
-        adam_epsilon: 1.0e-8
-        weight_decay: 0.0
-      lr_scheduler:
-        type: constant
-        warmup_steps: 0
-        total_steps: 10000
   topology:
-    actor_count: 8                    # 1 node × 8 GPUs (reference: 16)
+    actor_count: 8
   plan:
-    # global = 48 × 16 = 768 (identical to reference)
-    # local = 768 / 8 = 96 (reference: 768/16=48)
-    # local_mini = 96 / 2 = 48 (reference: 48/2=24)
-    # micro = 1 (reference: 8) — more grad-accum, same effective update
     micro_batch_size: 1
     num_updates_per_batch: 2
     local_mini_batch_size: 48
     local_batch_size: 96
     global_batch_size: 768
-  execution:
-    max_grad_norm: 1.0
-    offload_train: false
-    offload_rollout: false
   materialize:
     with_aux: []
 
-# ── Reward (identical to reference) ──
-reward:
-  aggregation_method: mean
-  base_device: cuda
-  components:
-    pickscore:
-      weight: 1.0
-      batch_size: 8
-
-# ── Logging (full reproduce-grade) ──
-# WandB panels logged by train.py:
-#   rollout/  — reward_{mean,std,min,max}, advantage_{mean,std,min,max},
-#               num_samples, zero_std_group_{ratio,count}, group_count,
-#               + per-slot training metrics (image/policy_loss, image/ratio_mean,
-#               image/clip_fraction, image/approx_kl, etc.)
-#   train/    — loss, grad_norm, lr, has_backward,
-#               + same per-slot metrics keyed by optimizer step
-#   perf/     — rollout_s, train_s, sync_s, reward_compute_s,
-#               samples_per_s, step_s
-#   sync/     — elapsed_s
-#   media     — generated_media (images + prompts + rewards)
 logging:
   logging_steps: 1
   log_media: true
-  media_max_items: 48                 # log up to 48 images per rollout (1 per prompt)
+  media_max_items: 48
   report_to_wandb: true
   project_name: diffusionrl-flowgrpo
-  run_name: null                      # auto-generated by wandb
+  run_name: null
   tags: ["reproduce", "sd3.5-medium", "vllm-omni", "colocate", "lora-r32", "1x8-h20"]
-  entity: null                        # uses default entity from wandb login
+  entity: null
 
 evaluation:
   eval_steps: 0

@@ -119,6 +119,31 @@ def test_build_algorithm_for_track_strips_control_keys_from_instantiate():
     )
 
 
+def test_build_algorithm_for_track_injects_sampling_params_for_diffusion_algorithm():
+    class _Pipeline:
+        pass
+
+    pipeline = _Pipeline()
+    pipeline.image = _FakeDiffusionStage()
+    sampling_params = object()
+
+    alg_node = OmegaConf.create(
+        {
+            "_target_": "diffusionrl.algorithms.grpo.DiffusionGRPO",
+            "clip_range": 0.2,
+        }
+    )
+    alg = _build_algorithm_for_track(
+        alg_node,
+        track_name="image",
+        pipeline=pipeline,
+        stage=pipeline.image,
+        ema=None,
+        sampling_params=sampling_params,
+    )
+    assert alg.params is sampling_params
+
+
 def test_build_algorithm_for_track_nft_requires_ema():
     pipeline = MagicMock()
     pipeline.image = _FakeDiffusionStage()

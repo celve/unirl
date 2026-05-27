@@ -1,0 +1,9 @@
+num_rollout_nodes: 2
+num_rollout_gpus_per_node: 4
+num_rollout_gpus_per_actor: 1
+num_train_nodes: 2
+num_train_gpus_per_node: 4
+num_train_gpus_per_actor: 1
+colocate: false
+strategy: PACK
+allow_noset_multi_gpu_inference: true

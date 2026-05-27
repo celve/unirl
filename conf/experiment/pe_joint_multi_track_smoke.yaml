@@ -37,9 +37,12 @@ defaults:
   - /training/track@training.tracks.ar: default
   - /model@training.tracks.diffusion.model: sd3
   - /model@training.tracks.ar.model: qwen3_v2
+  - override /placement: colocate_1x8_half
   - override /algorithm: grpo
   - override /rollout/engine: composed_pe
   - override /sampling/sde_strategy: flow
+  - override /reward: pickscore
+  - override /training/execution: standard
   - _self_
 
 run:
@@ -76,13 +79,9 @@ algorithm:
   # rollout request; the composed engine receives 2*P=8 prompts and
   # branches each by N*M=4, producing 32 diffusion samples per rollout
   # (vs the 16 we'd get without pre-expansion). Acceptable for the smoke.
-  samples_per_prompt: 2
   pe_rewrites_per_prompt: 2           # N — forwarded into stage_params['ar']['n'] by C7
   adv_normalization_scope: group
   use_global_std: true
-  clip_range: 1.0e-4
-  clip_schedule: constant
-  use_kl_penalty: true
   kl_coef: 0.0                        # reference-model KL is a follow-up
   scheduler:
     timestep_fraction: [0.0, 0.5]
@@ -109,22 +108,6 @@ algorithm:
       clip_range: 1.0e-4
       clip_schedule: constant
       # SD3Pipeline doesn't expose pipe.diffusion_params; must inline params.
-      params:
-        _target_: diffusionrl.types.sampling.DiffusionSamplingParams
-        num_inference_steps: ${sampling.num_inference_steps}
-        guidance_scale: ${sampling.guidance_scale}
-        height: ${sampling.height}
-        width: ${sampling.width}
-        seed: ${run.seed}
-        sde_indices: null
-        eta: ${sampling.eta}
-        init_same_noise: ${sampling.init_same_noise}
-        # M = 2: per-PE-rewrite, the diffusion engine generates 2 samples.
-        # Total diffusion samples per rollout = P * N * M = 4 * 2 * 2 = 16.
-        samples_per_prompt: 2
-        noise_group_ids: null
-        max_sequence_length: 256
-
 # Top-level model block: read by the composed engine's diffusion child
 # via the actor's ``model_config`` runtime kwarg (parity with
 # smoke_composed_pe.yaml).
@@ -163,18 +146,6 @@ rollout:
         disable_cuda_graph: true
         attention_backend: torch_sdpa
     sleep_diffusion_on_start: false
-
-placement:
-  num_rollout_nodes: 1
-  num_rollout_gpus_per_node: 8
-  num_rollout_gpus_per_actor: 1
-  num_train_nodes: 1
-  num_train_gpus_per_node: 8
-  num_train_gpus_per_actor: 1
-  colocate: true
-  colocate_gpu_fraction: 0.5
-  strategy: PACK
-  allow_noset_multi_gpu_inference: true
 
 training:
   primary_track: diffusion
@@ -272,27 +243,8 @@ training:
     local_mini_batch_size: 2
     local_batch_size: 2
     global_batch_size: 16
-  execution:
-    max_grad_norm: 1.0
-    # H20 96GB can hold both rollout (Qwen3 1.5GB + SD3.5 24GB) AND train
-    # (2x FSDP shards ~3GB/GPU). Enable offload only if OOM during launch.
-    offload_train: false
-    offload_rollout: false
   materialize:
     with_aux: []
-
-reward:
-  aggregation_method: mean
-  base_device: cuda
-  components:
-    pickscore:
-      weight: 1.0
-      batch_size: 8
-  # Note: switched from image_reward → pickscore because the ImageReward
-  # PyPI package bundles a stale BLIP/transformers import path
-  # (apply_chunking_to_forward) that fails on transformers >= 4.40.
-  # pickscore is what the canonical flowgrpo_fast_sd3 recipes use; well
-  # exercised on the same SD3.5 + GZ pod stack.
 
 logging:
   logging_steps: 1

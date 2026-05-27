@@ -22,13 +22,18 @@
 #   - 32 vllm-omni rollout actors (TP=1, 1 GPU each, DP rollout)
 #   - 32 FSDP DP=32 train actors (1 GPU each, colocated)
 defaults:
+  - /training/lora@training.lora: sd3_rank32
+  - /training/fsdp@training.fsdp: bf16_full_ac
   - /sync@sync: tensor_payload
+  - /training/optimizer@training.optimizer: adam_3e-4
+  - /training/lr_scheduler@training.lr_scheduler: constant_10k
   - override /algorithm: grpo
-  - override /model: sd3
+  - override /model: sd3_bf16
   - override /rollout/engine: vllm_omni
   - override /sampling/sde_strategy: flow
+  - override /sampling: sd3_512
+  - override /training/execution: standard
   - _self_
-
 run:
   data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
   num_rollouts: 10000
@@ -36,34 +41,18 @@ run:
   eval_data_path: /apdcephfs_zwfy8/share_305110755/hunyuan/haonan/mmgrpo/DiffusionRL_main/data/datasets/pickscore/test.txt
   weight_sync_interval: 1
 
-# -- Sampling (identical to reference) --
-sampling:
-  num_inference_steps: 10
-  guidance_scale: 1.0
-  height: 512
-  width: 512
-  init_same_noise: false
-  sde_config:
-    eta: 0.7
-
 # -- Algorithm (identical to reference) --
+sampling:
+  samples_per_prompt: 16
+
 algorithm:
   prompts_per_rollout: 96
-  samples_per_prompt: 16
   adv_normalization_scope: group
   use_global_std: true
-  clip_range: 1.0e-4
-  clip_schedule: constant
-  use_kl_penalty: true
   kl_coef: 0.0
-  ema:
-    eval_ema_decay: 0.99
-    eval_ema_update_interval: 2
   scheduler:
     timestep_fraction: [0.0, 0.5]
     num_sde_steps: 3
-  sde_config:
-    eta: ${sampling.sde_config.eta}
   algorithms:
     diffusion:
       name: diffusion_grpo
@@ -71,28 +60,10 @@ algorithm:
       conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
       clip_range: 1.0e-4
       clip_schedule: constant
-      params:
-        _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
-        num_inference_steps: ${sampling.num_inference_steps}
-        guidance_scale: ${sampling.guidance_scale}
-        height: ${sampling.height}
-        width: ${sampling.width}
-        seed: ${run.seed}
-        sde_indices: null
-        eta: ${sampling.sde_config.eta}
-        init_same_noise: ${sampling.init_same_noise}
-        samples_per_prompt: ${algorithm.samples_per_prompt}
-        noise_group_ids: null
-        max_sequence_length: 256
-
 # -- Algorithms (per-slot config) --
-# -- Model (identical to reference) --
+# -- Model (preset + path override) --
 model:
   pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,/apdcephfs_zwfy8/share_305110755/hunyuan/haonan/mmgrpo/diffusionRL/models/local/sd3.5-medium}
-  model_precision: bf16
-  autocast_precision: bf16
-  trajectory_precision: bf16
-  logprob_precision: fp32
 
 # -- Rollout engine (vllm-omni) --
 rollout:
@@ -123,9 +94,6 @@ placement:
 # -- Training (32 actors; same effective gradient as reference) --
 training:
   lora:
-    rank: 32
-    alpha: 64
-    dropout: 0.0
     bias: none
     task_type: FEATURE_EXTRACTION
     target_modules:
@@ -137,13 +105,6 @@ training:
       - attn.to_out.0
       - attn.to_q
       - attn.to_v
-  fsdp:
-    cpu_offload: false
-    param_dtype: bf16
-    mixed_precision: true
-    fsdp_mode: full
-    reshard_after_forward: true
-    activation_checkpointing: true
   topology:
     actor_count: 32                   # 4 nodes x 8 GPUs
   plan:
@@ -157,20 +118,6 @@ training:
     local_mini_batch_size: 24
     local_batch_size: 48
     global_batch_size: 1536
-  optimizer:
-    learning_rate: 3.0e-4
-    adam_beta1: 0.9
-    adam_beta2: 0.999
-    adam_epsilon: 1.0e-8
-    weight_decay: 0.0
-  lr_scheduler:
-    type: constant
-    warmup_steps: 0
-    total_steps: 10000
-  execution:
-    max_grad_norm: 1.0
-    offload_train: false
-    offload_rollout: false
   materialize:
     with_aux: []
 

@@ -1,0 +1,9 @@
+num_rollout_nodes: 4
+num_rollout_gpus_per_node: 8
+num_rollout_gpus_per_actor: 1
+num_train_nodes: 4
+num_train_gpus_per_node: 8
+num_train_gpus_per_actor: 1
+colocate: true
+colocate_gpu_fraction: 0.9
+strategy: PACK

@@ -10,23 +10,18 @@ defaults:
   - flowgrpo_fast_qwen_image
   - override /algorithm: nft
   - _self_
-
 sampling:
-  sde_config:
-    eta: 0.0
+  samples_per_prompt: 16
+  eta: 0.0
 
 algorithm:
   prompts_per_rollout: 48
-  samples_per_prompt: 16
   adv_normalization_scope: group
   use_global_std: true
-  use_kl_penalty: false
   kl_coef: 0.0
   scheduler:
     timestep_fraction: [0.0, 1.0]
     num_sde_steps: 0
-  sde_config:
-    eta: ${sampling.sde_config.eta}
   algorithms:
     diffusion:
       name: diffusion_nft
@@ -41,20 +36,6 @@ algorithm:
       apply_time_shift_in_loss: false
       training_timestep_fraction: 0.99
       kl_coef: 0.0
-      params:
-        _target_: diffusionrl.models.qwen_image.diffusion.QwenImageDiffusionParams
-        num_inference_steps: ${sampling.num_inference_steps}
-        guidance_scale: ${sampling.guidance_scale}
-        height: ${sampling.height}
-        width: ${sampling.width}
-        seed: ${run.seed}
-        sde_indices: null
-        eta: ${sampling.sde_config.eta}
-        init_same_noise: ${sampling.init_same_noise}
-        samples_per_prompt: ${algorithm.samples_per_prompt}
-        noise_group_ids: null
-        distilled_guidance_scale: null
-
 training:
   ema_lora:
     rank: 64
@@ -82,13 +63,6 @@ training:
       - img_mlp.net.2
       - txt_mlp.net.0.proj
       - txt_mlp.net.2
-  fsdp:
-    cpu_offload: false
-    param_dtype: bf16
-    mixed_precision: true
-    fsdp_mode: full
-    reshard_after_forward: true
-    activation_checkpointing: true
   plan:
     micro_batch_size: 1
     num_updates_per_batch: 1

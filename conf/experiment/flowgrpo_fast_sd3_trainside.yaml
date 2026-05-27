@@ -15,12 +15,19 @@
 # Launch via:
 #   python -m diffusionrl.train +experiment=flowgrpo_fast_sd3
 defaults:
+  - /training/lora@training.lora: sd3_rank32
+  - /training/fsdp@training.fsdp: bf16_full_noac
+  - /training/optimizer@training.optimizer: adam_3e-4
+  - /training/lr_scheduler@training.lr_scheduler: constant_10k
+  - override /placement: colocate_1x8
   - override /algorithm: grpo
-  - override /model: sd3
+  - override /model: sd3_bf16_shift3
   - override /rollout/engine: trainside
   - override /sampling/sde_strategy: flow
+  - override /sampling: sd3_512
+  - override /reward: pickscore
+  - override /training/execution: standard
   - _self_
-
 run:
   seed: 42
   num_rollouts: 10000
@@ -31,32 +38,16 @@ run:
   eval_data_path: /mnt/bj/data/datasets/pickscore/test.txt
 
 sampling:
-  num_inference_steps: 10
-  guidance_scale: 1.0
-  height: 512
-  width: 512
-  seed: 42
-  init_same_noise: false
-  sde_config:
-    eta: 0.7
+  samples_per_prompt: 16
 
 algorithm:
   prompts_per_rollout: 48
-  samples_per_prompt: 16
   adv_normalization_scope: group
   use_global_std: true
-  clip_range: 1.0e-4
-  clip_schedule: constant
-  use_kl_penalty: true
   kl_coef: 0.0
-  ema:
-    eval_ema_decay: 0.99
-    eval_ema_update_interval: 2
   scheduler:
     timestep_fraction: [0.0, 0.5]
     num_sde_steps: 3
-  sde_config:
-    eta: ${sampling.sde_config.eta}
   algorithms:
     # Slot ``image`` matches RolloutResp.rollout_traces["image"] on SD3.
     # ``stage_attr: diffusion`` points the algorithm at the right stage on
@@ -67,65 +58,21 @@ algorithm:
       clip_range: 1.0e-4
       clip_schedule: constant
       conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
-      params:
-        # ``guidance_scale`` / ``eta`` interpolate from sampling so replay
-        # (which reads both) tracks any CLI override on the rollout side.
-        _target_: diffusionrl.models.sd3.diffusion.SD3DiffusionParams
-        num_inference_steps: 10
-        guidance_scale: ${sampling.guidance_scale}
-        height: 512
-        width: 512
-        seed: 42
-        eta: ${sampling.sde_config.eta}
-        # sde_indices: null — resolved per-rollout by RolloutPipeline.
-        # plan_requests from algorithm.scheduler.{timestep_fraction,
-        # num_sde_steps} and stuffed into RolloutReq.stage_params.
-
 model:
-  # SD3.5-medium lives on Ceph at /mnt/bj/models/stable-diffusion-3.5-medium.
-  # Eager-load is one-shot per actor at startup; subsequent reads are
-  # in-process from device memory.
   pretrained_model_ckpt_path: ${oc.env:SD3_PATH,/mnt/bj/models/stable-diffusion-3.5-medium}
-  model_precision: bf16
-  autocast_precision: bf16
-  trajectory_precision: bf16
-  logprob_precision: fp32
-  shift: 3.0
 
 rollout:
   engine: {}
   plan:
     forward_batch_size: 8
 
-placement:
-  num_rollout_nodes: 1
-  num_rollout_gpus_per_node: 8
-  num_rollout_gpus_per_actor: 1
-  num_train_nodes: 1
-  num_train_gpus_per_node: 8
-  num_train_gpus_per_actor: 1
-  colocate: true
-  colocate_gpu_fraction: 0.9
-  strategy: PACK
-
 # ----------------------------------------------------------------------
 # Training surface
 # ----------------------------------------------------------------------
 training:
-  lora:
-    rank: 32
-    alpha: 64
-    dropout: 0.0
   ema:
     decay: 0.99
     update_step_interval: 2
-  fsdp:
-    cpu_offload: false
-    param_dtype: bf16
-    mixed_precision: true
-    fsdp_mode: full
-    reshard_after_forward: true
-    activation_checkpointing: false
   materialize:
     with_aux: [vae, text_encoder, text_encoder_2, text_encoder_3]
   plan:
@@ -136,28 +83,6 @@ training:
     global_batch_size: 768
   topology:
     actor_count: 8
-  optimizer:
-    learning_rate: 3.0e-4
-    adam_beta1: 0.9
-    adam_beta2: 0.999
-    adam_epsilon: 1.0e-8
-    weight_decay: 0.0
-  lr_scheduler:
-    type: constant
-    warmup_steps: 0
-    total_steps: 10000
-  execution:
-    max_grad_norm: 1.0
-    offload_train: false
-    offload_rollout: false
-
-reward:
-  aggregation_method: mean
-  base_device: cuda
-  components:
-    pickscore:
-      weight: 1.0
-      batch_size: 8
 
 logging:
   logging_steps: 1

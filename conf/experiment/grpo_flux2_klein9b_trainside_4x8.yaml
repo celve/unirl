@@ -42,19 +42,33 @@
 #   logprob_precision   = fp32   (PPO ratio stability)
 #   trajectory_precision = fp16  (rollout cache fits in 30GB / actor)
 #
-# Migrated to the LIN-287 multi-track shape (cfg.training.tracks.<name>.*
-# replacing the flat training.policies list; cfg.algorithm.algorithms.<name>
-# replacing the top-level algorithms block; cfg.reward.components as
-# polymorphic dict). Modeled after flowgrpo_fast_sd3_colocate_reproduce.yaml.
+# Multi-track shape (LIN-287): one ``image`` track holds the Klein bundle.
+# ``cfg.training.tracks.image.*`` carries model/lora/fsdp/optimizer/scheduler;
+# ``cfg.algorithm.algorithms.image`` carries the StageAlgorithm (resolved by
+# the ``name:`` discriminator, not a raw ``_target_``). Diffusion replay
+# params come from canonical ``cfg.sampling`` via the track_builder injection
+# (no inline ``params:`` block), and ``cfg.sampling`` is the single source of
+# truth for ``samples_per_prompt`` (never re-derived from ``algorithm.*``).
+#
+# Launch via the matching shell script:
+#
+#   bash reproduce_scripts/train_grpo_flux2_klein9b_4x8_multinode.sh
 defaults:
   - /training/track@training.tracks.image: default
   - /model@training.tracks.image.model: flux2_klein_v2
+  - /training/lora@training.tracks.image.lora: klein_rank16
+  - /training/fsdp@training.tracks.image.fsdp: fp32_full_ac
+  - /training/optimizer@training.tracks.image.optimizer: adam_5e-5
+  - /training/lr_scheduler@training.tracks.image.lr_scheduler: constant_10k
+  - override /placement: colocate_4x8
   - override /algorithm: grpo
   - override /model: flux2_klein_v2
   - override /rollout/engine: trainside
   - override /sampling/sde_strategy: dance
+  - override /sampling: klein_512
+  - override /reward: pickscore
+  - override /training/execution: standard
   - _self_
-
 run:
   seed: 42
   num_rollouts: 10000
@@ -62,54 +76,32 @@ run:
   data_path: ${oc.env:PICKSCORE_DATA_PATH,/apdcephfs_zwfy8/share_305110755/hunyuan/rzhu/DiffusionRL/data/datasets/pickscore/train.txt}
   eval_data_path: ${oc.env:PICKSCORE_EVAL_DATA_PATH,/apdcephfs_zwfy8/share_305110755/hunyuan/rzhu/DiffusionRL/data/datasets/pickscore/test.txt}
 
+# ``cfg.sampling`` is the single source of truth (klein_512 carries
+# num_inference_steps/guidance_scale/height/width/eta/init_same_noise; only
+# samples_per_prompt is recipe-specific here).
 sampling:
-  num_inference_steps: 10
-  guidance_scale: 1.0
-  height: 512
-  width: 512
-  seed: 42
-  init_same_noise: true
-  eta: 0.7
-  samples_per_prompt: ${algorithm.samples_per_prompt}
+  samples_per_prompt: 16
 
 algorithm:
   prompts_per_rollout: 64
-  samples_per_prompt: 16
   adv_normalization_scope: group
   use_global_std: false
-  clip_range: 5.0e-3
-  clip_schedule: constant
-  use_kl_penalty: true
   kl_coef: 0.0
-  ema:
-    eval_ema_decay: 0.99
-    eval_ema_update_interval: 2
   scheduler:
     timestep_fraction: [0.0, 0.5]
     num_sde_steps: 3
   algorithms:
-    # Slot ``image`` matches RolloutResp.rollout_traces["image"] emitted
-    # by Flux2KleinPipeline.generate. ``stage_attr: diffusion`` matches
-    # the Pipeline's attribute name. ``conditions_cls`` reconstructs the
-    # typed ``Flux2KleinConditions`` from the generic Conditions dict
-    # carried on the response, so the replay path sees the same
-    # ``text`` / ``negative_text`` shape as the rollout path saw.
+    # Slot ``image`` matches RolloutResp.tracks["image"] emitted by
+    # Flux2KleinPipeline.generate. ``stage_attr: diffusion`` matches the
+    # pipeline attribute; ``conditions_cls`` reconstructs the typed
+    # ``Flux2KleinConditions`` so replay sees the same shape as rollout.
+    # No ``params:`` block — track_builder injects canonical ``cfg.sampling``.
     image:
       name: diffusion_grpo
       stage_attr: diffusion
       conditions_cls: diffusionrl.models.flux2_klein.conditions.Flux2KleinConditions
       clip_range: 5.0e-3
       clip_schedule: constant
-      params:
-        _target_: diffusionrl.models.flux2_klein.diffusion.Flux2KleinDiffusionParams
-        num_inference_steps: ${sampling.num_inference_steps}
-        guidance_scale: ${sampling.guidance_scale}
-        height: ${sampling.height}
-        width: ${sampling.width}
-        seed: ${run.seed}
-        eta: ${sampling.eta}
-        init_same_noise: ${sampling.init_same_noise}
-        samples_per_prompt: ${algorithm.samples_per_prompt}
 
 model:
   pretrained_model_ckpt_path: ${oc.env:FLUX2_KLEIN_PATH,/apdcephfs_zwfy8/share_305110755/hunyuan/public_models/black-forest-labs/FLUX.2-klein-base-9B}
@@ -123,21 +115,10 @@ rollout:
   plan:
     forward_batch_size: 16
 
-placement:
-  num_rollout_nodes: 4
-  num_rollout_gpus_per_node: 8
-  num_rollout_gpus_per_actor: 1
-  num_train_nodes: 4
-  num_train_gpus_per_node: 8
-  num_train_gpus_per_actor: 1
-  colocate: true
-  colocate_gpu_fraction: 0.9
-  strategy: PACK
-
 # ----------------------------------------------------------------------
 # Multi-track training surface — one ``image`` track holding the Klein
-# bundle, Klein-specific LoRA targets, fp32 FSDP master, and a plain EMA
-# mirror over the LoRA-injected trainable params.
+# bundle, Klein-specific LoRA targets (klein_rank16), fp32 FSDP master
+# (fp32_full_ac), and a plain EMA mirror over the LoRA-injected params.
 # ----------------------------------------------------------------------
 training:
   primary_track: image
@@ -145,63 +126,17 @@ training:
     image:
       model:
         pretrained_model_ckpt_path: ${model.pretrained_model_ckpt_path}
-        model_precision: bf16
-        autocast_precision: bf16
-        trajectory_precision: fp16
-        logprob_precision: fp32
+        model_precision: ${model.model_precision}
+        autocast_precision: ${model.autocast_precision}
+        trajectory_precision: ${model.trajectory_precision}
+        logprob_precision: ${model.logprob_precision}
       source_stage_attr: diffusion
-      lora:
-        # Klein canonical LoRA targets — mirrors
-        # ``Flux2ModelBundle.default_lora_target_modules()`` in the
-        # legacy codebase. PEFT silently drops any name that doesn't
-        # match a real submodule, so listing both un-fused and fused
-        # projection names is safe.
-        rank: 16
-        alpha: 32
-        dropout: 0.0
-        bias: none
-        task_type: FEATURE_EXTRACTION
-        target_modules:
-          - to_q
-          - to_k
-          - to_v
-          - to_out.0
-          - proj_in
-          - proj_out
-          - qkv_proj
-          - ff_proj
       ema:
-        # Plain EMA mirrors the LoRA-injected trainable params. The
-        # legacy ``EMAPolicy(decay=0.99, update_step_interval=2)`` maps
-        # to ``target_decay=0.99`` here; the new shape uses a warmup
-        # schedule (1+t)/(10+t) capped at target_decay (see
-        # ``training/ema.py:make_decay_fn``) and steps every optimizer
-        # step (the 2-step interval was a micro-opt; not worth
-        # re-introducing).
+        # Legacy ``EMAPolicy(decay=0.99, update_step_interval=2)`` maps to
+        # ``target_decay=0.99`` here; the new shape steps every optimizer
+        # step (the 2-step interval was a micro-opt, not re-introduced).
         target_decay: 0.99
         timing: optimizer_step
-      fsdp:
-        # Klein's empirical-mu schedule is numerically sensitive; the
-        # legacy recipe uses ``FSDP_PRECISION=fp32`` for the master
-        # weights and bf16 mixed-precision for the forward.
-        cpu_offload: false
-        param_dtype: fp32
-        mixed_precision: true
-        fsdp_mode: full
-        reshard_after_forward: true
-        # 9B transformer + LoRA + full replay graph is the hot path
-        # for activation memory; AC keeps the 80GB H20 envelope.
-        activation_checkpointing: true
-      optimizer:
-        learning_rate: 5.0e-5
-        adam_beta1: 0.9
-        adam_beta2: 0.999
-        adam_epsilon: 1.0e-8
-        weight_decay: 0.0
-      lr_scheduler:
-        type: constant
-        warmup_steps: 0
-        total_steps: 10000
   topology:
     actor_count: 32
   plan:
@@ -214,20 +149,8 @@ training:
     local_mini_batch_size: 16
     local_batch_size: 32
     global_batch_size: 1024
-  execution:
-    max_grad_norm: 1.0
-    offload_train: false
-    offload_rollout: false
   materialize:
     with_aux: [vae, text_encoder]
-
-reward:
-  aggregation_method: mean
-  base_device: cuda
-  components:
-    pickscore:
-      weight: 1.0
-      batch_size: 8
 
 logging:
   logging_steps: 1

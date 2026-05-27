@@ -43,6 +43,7 @@ from diffusionrl.training.train_track import TrainTrack
 from diffusionrl.transfer.buffer import Buffer, BufferHandle
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.sampling import get_diffusion_params
 from diffusionrl.utils import clear_memory as _clear_gpu_memory
 
 logger = logging.getLogger(__name__)
@@ -131,7 +132,10 @@ class TrainActor(
         self._reward_pipeline: Optional[RewardPipeline] = None
         self._adv_scope = str(getattr(cfg.algorithm, "adv_normalization_scope", "group"))
         self._adv_use_global_std = bool(getattr(cfg.algorithm, "use_global_std", False))
-        self._adv_samples_per_prompt = max(1, int(getattr(cfg.algorithm, "samples_per_prompt", 1)))
+        self._adv_samples_per_prompt = max(
+            1,
+            int(get_diffusion_params(cfg.sampling).samples_per_prompt),
+        )
         if is_direct_sampling(cfg):
             only_track = next(iter(cfg.training.tracks))
             self.engine = build(

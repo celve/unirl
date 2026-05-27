@@ -38,9 +38,11 @@ defaults:
   - /training/track@training.tracks.ar: default
   - /model@training.tracks.diffusion.model: sd3
   - /model@training.tracks.ar.model: qwen3_v2
+  - override /placement: colocate_1x8_half
   - override /algorithm: grpo
   - override /rollout/engine: composed_pe
   - override /sampling/sde_strategy: flow
+  - override /training/execution: offload_both
   - _self_
 
 run:
@@ -68,13 +70,9 @@ sampling:
 
 algorithm:
   prompts_per_rollout: 6              # P
-  samples_per_prompt: 16              # M (images per rewrite)
   pe_rewrites_per_prompt: 4           # N (rewrites per prompt)
   adv_normalization_scope: global
   use_global_std: true
-  clip_range: 1.0e-4
-  clip_schedule: constant
-  use_kl_penalty: true
   kl_coef: 0.0                        # reference-model KL is a follow-up
   scheduler:
     timestep_fraction: [0.0, 1.0]
@@ -94,20 +92,6 @@ algorithm:
       conditions_cls: diffusionrl.models.sd3.conditions.SD3Conditions
       clip_range: 1.0e-4
       clip_schedule: constant
-      params:
-        _target_: diffusionrl.types.sampling.DiffusionSamplingParams
-        num_inference_steps: ${sampling.num_inference_steps}
-        guidance_scale: ${sampling.guidance_scale}
-        height: ${sampling.height}
-        width: ${sampling.width}
-        seed: ${run.seed}
-        sde_indices: null
-        eta: ${sampling.eta}
-        init_same_noise: ${sampling.init_same_noise}
-        samples_per_prompt: 16          # M (smoke: 2)
-        noise_group_ids: null
-        max_sequence_length: 256
-
 model:
   pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,/root/diffusionrl/models/local/stable-diffusion-3.5-medium}
 
@@ -152,21 +136,6 @@ rollout:
     # forward_batch_size=4 sgl-diff peaked at 74 GB; halving to 2
     # should approximately halve the per-chunk SD3 + VAE-decode peak.
     forward_batch_size: 1
-
-placement:
-  num_rollout_nodes: 1
-  num_rollout_gpus_per_node: 8
-  num_rollout_gpus_per_actor: 1
-  num_train_nodes: 1
-  num_train_gpus_per_node: 8
-  num_train_gpus_per_actor: 1
-  colocate: true
-  # 2-role colocate (rollout actor + train actor); the composed engine
-  # handles the 4-phase sleep/wake (LLM-gen → SD-gen → SD-train → LLM-train)
-  # internally. 0.5 fraction per role evenly splits the 8 GPUs.
-  colocate_gpu_fraction: 0.5
-  strategy: PACK
-  allow_noset_multi_gpu_inference: true
 
 training:
   primary_track: diffusion
@@ -262,15 +231,6 @@ training:
     local_mini_batch_size: 48
     local_batch_size: 96
     global_batch_size: 768
-  execution:
-    max_grad_norm: 1.0
-    # Time-slice train and rollout memory via offload. With offload=false
-    # the smoke fits at small scale (M=2), but the first OOM attempt
-    # showed train actor sits at 12.93 GB during rollout phase even with
-    # offload, so we still need it to drain peak when sgl engines and
-    # SD3 forward all compete for the 95 GB.
-    offload_train: true
-    offload_rollout: true
   materialize:
     with_aux: []
 

@@ -25,7 +25,6 @@ def test_training_track_config_registered_under_training_track_group():
     assert {
         "model",
         "source_stage_attr",
-        "policies",
         "optimizer",
         "lr_scheduler",
         "plan_overrides",
@@ -36,7 +35,6 @@ def test_training_track_config_registered_under_training_track_group():
     instance = TrainingTrackConfig(
         model={"_target_": "fake.Pipeline"},
         source_stage_attr="diffusion",
-        policies=[{"_target_": "fake.LoRAPolicy"}],
         optimizer=None,  # type: ignore[arg-type] — schema accepts; runtime expects OptimizerConfig
         lr_scheduler=None,  # type: ignore[arg-type]
     )
@@ -58,7 +56,7 @@ def test_training_track_config_required_fields_are_positional():
     import pytest
 
     with pytest.raises(TypeError):
-        # Missing model, source_stage_attr, policies, optimizer, lr_scheduler.
+        # Missing model, source_stage_attr, optimizer, lr_scheduler.
         TrainingTrackConfig()  # type: ignore[call-arg]
 
 
@@ -67,7 +65,6 @@ def test_training_track_config_plan_overrides_optional():
     cfg = TrainingTrackConfig(
         model={"_target_": "fake.Pipeline"},
         source_stage_attr="diffusion",
-        policies=[{"_target_": "fake.LoRAPolicy"}],
         optimizer=None,  # type: ignore[arg-type]
         lr_scheduler=None,  # type: ignore[arg-type]
         plan_overrides=TrackPlanOverrides(micro_batch_size=8),
