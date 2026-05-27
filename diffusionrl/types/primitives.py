@@ -157,7 +157,25 @@ class Images(Batch):
     def from_list(cls, items: List[Image]) -> "Images":
         if not items:
             raise ValueError("Cannot build Images from an empty list")
-        stacked = torch.stack([img.pixels for img in items], dim=0)
+        pixels_list = [img.pixels for img in items]
+        # Handle variable-size images (e.g. VLM training) by padding to max size
+        if len(set(p.shape for p in pixels_list)) != 1:
+            max_h = max(p.shape[-2] for p in pixels_list)
+            max_w = max(p.shape[-1] for p in pixels_list)
+            padded = []
+            for p in pixels_list:
+                if p.shape[-2] == max_h and p.shape[-1] == max_w:
+                    padded.append(p)
+                else:
+                    c, h, w = p.shape
+                    pad_h = max_h - h
+                    pad_w = max_w - w
+                    padded_p = torch.nn.functional.pad(
+                        p, (0, pad_w, 0, pad_h), mode="constant", value=0
+                    )
+                    padded.append(padded_p)
+            pixels_list = padded
+        stacked = torch.stack(pixels_list, dim=0)
         return cls(pixels=stacked)
 
     def to_list(self) -> List[Image]:
