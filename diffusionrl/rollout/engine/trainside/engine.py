@@ -69,17 +69,22 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
                 f"TrainsideRolloutEngine.forward_batch_size must be >= 1 when set; got {forward_batch_size!r}"
             )
         self.forward_batch_size = forward_batch_size
-        if hasattr(pipeline, "build_schedule_policy"):
-            self.schedule_policy = pipeline.build_schedule_policy()
+        if isinstance(stage, DiffusionStage):
+            if hasattr(pipeline, "build_schedule_policy"):
+                self.schedule_policy = pipeline.build_schedule_policy()
+            else:
+                self.schedule_policy = FlowMatchSchedulePolicy.from_pretrained(
+                    getattr(pipeline.bundle, "pretrained_path", None),
+                    shift=float(pipeline.shift),
+                )
         else:
-            self.schedule_policy = FlowMatchSchedulePolicy.from_pretrained(
-                getattr(pipeline.bundle, "pretrained_path", None),
-                shift=float(pipeline.shift),
-            )
+            # AR stage — no diffusion schedule needed
+            self.schedule_policy = None
 
     @distributed(dispatch_mode=Dispatch.DP_ALL)
     def generate(self, req: RolloutReq) -> RolloutResp:
-        ensure_req_sigmas(req, self.schedule_policy)
+        if self.schedule_policy is not None:
+            ensure_req_sigmas(req, self.schedule_policy)
         was_training = self._model.training
         self._model.eval()
         try:
