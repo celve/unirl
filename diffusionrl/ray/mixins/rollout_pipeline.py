@@ -380,7 +380,19 @@ class RolloutPipelineMixin:
                 n = int(t.rewards.shape[0])
                 t.advantages = all_advantages[offset : offset + n]
                 offset += n
-        return _responses_to_cpu(responses)
+
+        cpu_responses = _responses_to_cpu(responses)
+        if getattr(self, "_keep_local", False):
+            # Keep-local data plane (direct sampling): stash this actor's heavy
+            # multi-track rollout locally and hand the driver only a per-track
+            # light view. Producer == consumer, so ``TrainActor.train_local``
+            # later pops this cache and trains in place — the driver never
+            # gathers/concats the heavy tracks. Advantages were just written onto
+            # the tracks above, so the cached (CPU) resp carries them for training.
+            # ``@tqbridge(put=True)`` no-ops because keep_local requires TQ off.
+            self._kept_rollout = cpu_responses
+            return [r.metadata_only() for r in cpu_responses]
+        return cpu_responses
 
     def run_eval_pipeline(self, req: "RolloutReq") -> List["RolloutResp"]:
         """Eval pipeline: generate + reward, no advantages."""

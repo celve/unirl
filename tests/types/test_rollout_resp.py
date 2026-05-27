@@ -485,3 +485,82 @@ def _make_track(name, sample_ids, *, parent_ids=None, parent_track=None, n_segs=
             latents=torch.zeros(n, 2, 4, 4, 4),
         ),
     )
+
+
+# ---- keep-local light view (metadata_only) ---------------------------------
+
+
+def test_metadata_only_drops_heavy_keeps_light_per_track():
+    """``RolloutResp.metadata_only`` recurses into tracks: each track drops its
+    heavy transport payload (conditions/segment/decoded) but keeps the light
+    per-track metadata + lineage the driver logs; the source stays intact (the
+    actor still holds the heavy payload to train on)."""
+    resp = _make_shard(
+        sample_ids=["s0", "s1"],
+        text_embeds=torch.zeros(2, 4, 8),
+        image_seg_sample_indices=torch.tensor([0, 1]),
+        image_seg_positions=torch.tensor([0, 0]),
+        image_latents=torch.zeros(2, 2, 4, 4, 4),
+        decoded_pixels=[torch.zeros(3, 4, 4), torch.zeros(3, 4, 4)],
+        rewards=torch.tensor([0.5, 0.7]),
+    )
+    resp.tracks["image_latent"].advantages = torch.tensor([-0.1, 0.1])
+
+    light = resp.metadata_only()
+    lt = light.tracks["image_latent"]
+    # Heavy transport fields dropped.
+    assert lt.conditions == {}
+    assert lt.segment is None
+    assert lt.decoded is None
+    # Light + lineage metadata preserved.
+    assert lt.sample_ids == ["s0", "s1"]
+    assert lt.parent_ids == ["g", "g"]
+    assert torch.equal(lt.rewards, torch.tensor([0.5, 0.7]))
+    assert torch.equal(lt.advantages, torch.tensor([-0.1, 0.1]))
+    # Source untouched — the actor keeps the heavy payload locally.
+    src = resp.tracks["image_latent"]
+    assert src.segment is not None
+    assert "text" in src.conditions
+    assert src.decoded is not None
+
+
+def test_keep_local_light_aggregate_matches_full_gather_metrics():
+    """Keep-local invariant: identical rollout metrics whether the driver gathers
+    the full heavy shards or only the light per-track ``metadata_only`` views."""
+    from diffusionrl.utils.wandb_metrics import compute_rollout_resp_metrics
+
+    shards = [
+        _make_shard(
+            sample_ids=["s0", "s1"],
+            text_embeds=torch.zeros(2, 4, 8),
+            image_seg_sample_indices=torch.tensor([0, 1]),
+            image_seg_positions=torch.tensor([0, 0]),
+            image_latents=torch.zeros(2, 2, 4, 4, 4),
+            decoded_pixels=[torch.zeros(3, 4, 4), torch.zeros(3, 4, 4)],
+            rewards=torch.tensor([0.5, 0.7]),
+        ),
+        _make_shard(
+            sample_ids=["s2", "s3"],
+            text_embeds=torch.ones(2, 4, 8),
+            image_seg_sample_indices=torch.tensor([0, 1]),
+            image_seg_positions=torch.tensor([0, 0]),
+            image_latents=torch.ones(2, 2, 4, 4, 4),
+            decoded_pixels=[torch.ones(3, 4, 4), torch.ones(3, 4, 4)],
+            rewards=torch.tensor([0.2, 0.9]),
+        ),
+    ]
+    for i, s in enumerate(shards):
+        s.tracks["image_latent"].advantages = torch.tensor([-0.3 + i, 0.3 + i])
+
+    full = RolloutResp.concat(shards)
+    light = RolloutResp.concat([s.metadata_only() for s in shards])
+
+    ft = full.tracks["image_latent"]
+    ltk = light.tracks["image_latent"]
+    assert ltk.sample_ids == ft.sample_ids
+    assert torch.equal(ltk.rewards, ft.rewards)
+    assert torch.equal(ltk.advantages, ft.advantages)
+    assert compute_rollout_resp_metrics(resp=light) == compute_rollout_resp_metrics(resp=full)
+    assert ltk.segment is None
+    assert ltk.conditions == {}
+    assert ltk.decoded is None

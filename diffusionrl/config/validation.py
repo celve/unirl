@@ -163,6 +163,53 @@ def validate_offload_contract(cfg: DictConfig) -> None:
     )
 
 
+def validate_keep_local_contract(cfg: DictConfig) -> None:
+    """Keep-local data plane is direct-sampling-only and excludes TransferQueue.
+
+    ``cfg.training.execution.keep_local=True`` makes each train actor cache the
+    rollout it produced and train on it in place, so heavy tensors never reach the
+    driver. That requires producer==consumer (direct sampling), and is mutually
+    exclusive with TransferQueue — the other off-driver data plane.
+
+    It is byte-equivalent to the gathered path only when the rollout's prompt
+    groups divide evenly across the train actors (enforced below); otherwise the
+    per-actor partition — and hence the FSDP-averaged gradient — differs, so
+    keep-local would be a distinct training run rather than a transparent
+    optimization.
+    """
+    if not bool(cfg.training.execution.get("keep_local", False)):
+        return
+    require(
+        is_direct_sampling(cfg),
+        "cfg.training.execution.keep_local=True requires direct sampling "
+        "(rollout/engine=trainside): in separate-sampling mode the rollout "
+        "producer is not the train consumer, so payloads cannot stay local.",
+    )
+    require(
+        cfg.get("transfer_queue") is None,
+        "cfg.training.execution.keep_local=True is mutually exclusive with "
+        "transfer_queue (both move data off the driver); enable exactly one.",
+    )
+    # Keep-local shards each rollout by prompt-group across the train actors
+    # (RolloutPlan.shard_grouped_req); the gathered path instead re-balances
+    # samples evenly on the driver. The two partitions — and thus each rank's
+    # mean loss and the FSDP-averaged gradient — coincide only when the prompt
+    # groups split evenly across actors, so require that here.
+    actor_count = cfg.training.topology.get("actor_count", None)
+    if actor_count is not None:
+        n = int(actor_count)
+        prompts = int(getattr(cfg.algorithm, "prompts_per_rollout", 1))
+        require(
+            n <= 0 or prompts % n == 0,
+            "cfg.training.execution.keep_local=True requires "
+            f"cfg.algorithm.prompts_per_rollout ({prompts}) divisible by "
+            f"cfg.training.topology.actor_count ({n}): keep-local shards rollouts "
+            "by prompt-group across train actors, so an indivisible split gives "
+            "unequal per-actor batches and a different gradient than the gathered "
+            "path.",
+        )
+
+
 def validate_lora_target_modules(cfg: DictConfig) -> None:
     """Materialize ``cfg.model.lora_target_modules`` from the bundle's class default.
 

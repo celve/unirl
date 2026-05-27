@@ -136,6 +136,11 @@ class TrainActor(
             1,
             int(get_diffusion_params(cfg.sampling).samples_per_prompt),
         )
+        # Keep-local data plane (direct sampling only): run_rollout_pipeline stashes
+        # this actor's heavy rollout on ``_kept_rollout`` and returns only a light
+        # view to the driver; ``train_local`` pops it and trains in place.
+        self._keep_local = bool(cfg.training.execution.get("keep_local", False))
+        self._kept_rollout = None
         if is_direct_sampling(cfg):
             only_track = next(iter(cfg.training.tracks))
             self.engine = build(
@@ -228,6 +233,33 @@ class TrainActor(
     ) -> Dict[str, TrackMiniBatchResult]:
         resp: RolloutResp = ray.get(handle.actor_handle.pop_buffer.remote(handle))
         resp = resolve_batch_from_tq(resp)
+        return self._train_resp(rollout_step, resp)
+
+    def train_local(self, rollout_step: int) -> Dict[str, TrackMiniBatchResult]:
+        """Train on this actor's locally-cached rollout (keep-local data plane).
+
+        Direct-sampling keep-local: ``run_rollout_pipeline`` stashed the heavy
+        multi-track rollout this actor produced on ``self._kept_rollout`` and
+        returned only a light per-track view to the driver. Pop that cache,
+        concat the per-group shards into this actor's training resp, and run the
+        normal train path — the heavy tracks never round-tripped through the
+        driver. Advantages were attached upstream, so the cached resp is
+        training-ready. No ``resolve_batch_from_tq``: keep_local and
+        transfer_queue are mutually exclusive.
+        """
+        kept = self._kept_rollout
+        self._kept_rollout = None  # pop: never train the same cache twice
+        if not kept:
+            raise RuntimeError(
+                "TrainActor.train_local: no cached rollout for this actor. "
+                "keep_local requires run_rollout_pipeline to have run on this "
+                "actor during the same rollout step (direct sampling only)."
+            )
+        resp = RolloutResp.concat(kept)
+        if int(resp.batch_size) == 0:
+            raise RuntimeError(
+                "TrainActor.train_local: cached rollout is empty; every FSDP rank must train on >=1 sample."
+            )
         return self._train_resp(rollout_step, resp)
 
     def _train_resp(self, rollout_step: int, resp: RolloutResp) -> Dict[str, TrackMiniBatchResult]:
