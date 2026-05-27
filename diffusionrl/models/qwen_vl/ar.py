@@ -183,7 +183,21 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         prompt_mask = conditions.prompt.attention_mask
         device = prompt_ids.device
         batch_size = int(prompt_ids.shape[0])
-        prompt_len = int(prompt_ids.shape[1])
+
+        # Strip right-padding introduced by TextTokenCondition.concat across
+        # rollout workers.  During rollout each worker pads to its own batch
+        # max; when tracks are concatenated for replay the global max adds
+        # extra pad tokens that shift the logit extraction window and corrupt
+        # position_ids for pad positions (text_pos=1 via masked_fill).
+        real_lens = prompt_mask.sum(dim=1).long()  # [batch_size]
+        max_real_len = int(real_lens.max().item())
+        prompt_ids = prompt_ids[:, :max_real_len]
+        prompt_mask = prompt_mask[:, :max_real_len]
+        prompt_len = max_real_len
+
+        mm_type_ids = None
+        if conditions.mm_token_type_ids is not None:
+            mm_type_ids = conditions.mm_token_type_ids[:, :max_real_len]
 
         # Reset stale rope_deltas — critical for correct M-RoPE position IDs
         self.model.transformer.model.rope_deltas = None
@@ -209,14 +223,14 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
             full_mask = prompt_mask
 
         full_mm_type_ids = None
-        if conditions.mm_token_type_ids is not None:
+        if mm_type_ids is not None:
             if T_max > 0:
                 response_types = torch.zeros(
-                    (batch_size, T_max), dtype=conditions.mm_token_type_ids.dtype, device=device
+                    (batch_size, T_max), dtype=mm_type_ids.dtype, device=device
                 )
-                full_mm_type_ids = torch.cat([conditions.mm_token_type_ids, response_types], dim=1)
+                full_mm_type_ids = torch.cat([mm_type_ids, response_types], dim=1)
             else:
-                full_mm_type_ids = conditions.mm_token_type_ids
+                full_mm_type_ids = mm_type_ids
 
         forward_kwargs: Dict[str, Any] = {
             "input_ids": full_ids,
@@ -252,16 +266,27 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         if T_max == 0:
             return torch.zeros(0, dtype=torch.float32, device=device)
 
-        pred_logits = logits[:, prompt_len - 1 : prompt_len - 1 + T_max, :]
-        log_probs_full = F.log_softmax(pred_logits.float(), dim=-1)
-        per_token = log_probs_full.gather(-1, response_tokens.unsqueeze(-1)).squeeze(-1)
-
+        # Per-sample logit extraction using real prompt lengths.
+        # With right-padding, the logit at position (real_len_b - 1) correctly
+        # predicts the first generated token (same context & position encoding
+        # as rollout).  Subsequent generated-token logits are at contiguous
+        # positions starting from max_real_len.  Positions real_len_b ..
+        # max_real_len-1 are per-sample pad tokens with incorrect position
+        # encoding, so their logits must be skipped.
         flat: List[torch.Tensor] = []
         for b in range(batch_size):
             n = lengths[b]
             if n == 0:
                 continue
-            flat.append(per_token[b, :n])
+            real_len_b = int(real_lens[b].item())
+            # First generated token: logit from last real prompt token
+            first_logit = logits[b, real_len_b - 1 : real_len_b, :]  # [1, V]
+            # Subsequent generated tokens: logits from generated-token positions
+            rest_logits = logits[b, max_real_len : max_real_len + n - 1, :] if n > 1 else logits[b, :0, :]
+            pred_logits_b = torch.cat([first_logit, rest_logits], dim=0)  # [n, V]
+            log_probs_full = F.log_softmax(pred_logits_b.float(), dim=-1)
+            per_token = log_probs_full.gather(-1, response_tokens[b, :n].unsqueeze(-1)).squeeze(-1)
+            flat.append(per_token)
         if not flat:
             return torch.zeros(0, dtype=torch.float32, device=device)
         return torch.cat(flat, dim=0)
