@@ -179,17 +179,32 @@ class SGLangRolloutEngine(BaseRolloutEngine):
                 f"{type(model_config).__name__}. Use a registered model preset "
                 f"(e.g. ``sd3``, ``wan21``, ``hunyuan_image3``)."
             )
+        # Per-model schedule-policy factory hook. Some models (FLUX.2-Klein)
+        # require a SchedulePolicy subclass with a model-specific
+        # ``compute_mu`` override that the generic
+        # ``FlowMatchSchedulePolicy.from_pretrained`` path cannot
+        # synthesize from ``scheduler_config.json``. When the model_config
+        # exposes ``build_schedule_policy()`` we delegate to it (mirrors
+        # the trainside engine's ``pipeline.build_schedule_policy()``
+        # branch); otherwise fall back to the generic constructor that
+        # works for SD3 / Wan / Qwen-Image / etc.
+        #
         # Same use_dynamic_shifting hook as vllm_omni engine. Generic —
         # any model config that declares it (Qwen-Image, future dynamic
         # models) gets the right policy without engine-side dispatch.
-        require_dynamic = bool(getattr(model_config, "use_dynamic_shifting", False))
-        dynamic_overrides = getattr(model_config, "dynamic_shift_overrides", None)
-        self.schedule_policy = FlowMatchSchedulePolicy.from_pretrained(
-            model_config.pretrained_model_ckpt_path,
-            shift=float(model_config.shift),
-            require_dynamic=require_dynamic,
-            dynamic_overrides=dynamic_overrides,
-        )
+        if hasattr(model_config, "build_schedule_policy") and callable(
+            getattr(model_config, "build_schedule_policy", None)
+        ):
+            self.schedule_policy = model_config.build_schedule_policy()
+        else:
+            require_dynamic = bool(getattr(model_config, "use_dynamic_shifting", False))
+            dynamic_overrides = getattr(model_config, "dynamic_shift_overrides", None)
+            self.schedule_policy = FlowMatchSchedulePolicy.from_pretrained(
+                model_config.pretrained_model_ckpt_path,
+                shift=float(model_config.shift),
+                require_dynamic=require_dynamic,
+                dynamic_overrides=dynamic_overrides,
+            )
 
     # ------------------------------------------------------------------
     # Strategy → SGLang SDE kernel label mapping
@@ -202,6 +217,20 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         Mirrors legacy ``samplers/sglang/engine.py:_resolve_rollout_sde_type``.
         Returns ``None`` when strategy is missing — ODE-mode callers (eval,
         NFT) won't hit the SDE branch in the request translator anyway.
+
+        The returned string is the value of SGLang's ``rollout_sde_type``
+        kwarg in the per-request kwargs (see ``request.py``). For each
+        strategy below the SGLang fork must register a matching kernel
+        whose update math is bit-for-bit identical to the DiffusionRL
+        kernel in :mod:`diffusionrl.sde.kernels`; otherwise iter-0
+        importance ratios drift and the trainer-side replay diverges.
+
+        - ``flow`` → ``"sde"`` — flow-GRPO (SD3, Wan, Qwen-Image, etc.)
+        - ``cps``  → ``"cps"`` — coefficient-preserving sampling
+        - ``dance`` → ``"dance"`` — DanceGRPO (FLUX.2-Klein). Assumes the
+          SGLang fork registers the Dance kernel under the string
+          ``"dance"``; if the fork uses a different identifier
+          (e.g. ``"flux2_dance"``), adjust this branch.
         """
         if strategy is None:
             return None
@@ -210,8 +239,10 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             return "sde"
         if canonical == "cps":
             return "cps"
+        if canonical == "dance":
+            return "dance"
         raise ValueError(
-            f"SGLang rollout currently supports only sde_type in {{'flow', 'cps'}} "
+            f"SGLang rollout currently supports only sde_type in {{'flow', 'cps', 'dance'}} "
             f"(those have a verified SGLang-side kernel that matches DiffusionRL's math); "
             f"got canonical={canonical!r}. Either switch the SDE strategy on this engine, "
             f"or add an explicit mapping after verifying the SGLang-side kernel is "

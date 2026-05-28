@@ -20,9 +20,10 @@ from diffusionrl.models.flux2_klein.diffusion import (
     Flux2KleinDiffusionStage,
     Flux2KleinDiffusionStep,
 )
-from diffusionrl.models.flux2_klein.pipeline import (
-    Flux2KleinPipeline,
+from diffusionrl.models.flux2_klein.pipeline import Flux2KleinPipeline
+from diffusionrl.models.flux2_klein.schedule import (
     Flux2KleinSchedulePolicy,
+    build_flux2_klein_schedule_policy,
 )
 from diffusionrl.models.flux2_klein.text_embed import Flux2KleinTextEmbedStage
 from diffusionrl.models.flux2_klein.vae import Flux2KleinVAEDecodeStage
@@ -38,4 +39,5 @@ __all__ = [
     "Flux2KleinSchedulePolicy",
     "Flux2KleinTextEmbedStage",
     "Flux2KleinVAEDecodeStage",
+    "build_flux2_klein_schedule_policy",
 ]

@@ -37,12 +37,10 @@ models, Klein included.
 from __future__ import annotations
 
 import dataclasses as _dc
-from dataclasses import dataclass
 from typing import Any, Optional
 
 from diffusionrl.models.types.pipeline import Pipeline
 from diffusionrl.sde.kernels import DanceSDEStrategy, StepStrategy
-from diffusionrl.sde.runtime import FlowMatchSchedulePolicy
 from diffusionrl.types.primitives import Texts
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
@@ -56,27 +54,9 @@ from .diffusion import (
     Flux2KleinDiffusionStage,
     Flux2KleinDiffusionStep,
 )
-from .flux2_klein_utils import compute_empirical_mu
+from .schedule import Flux2KleinSchedulePolicy, build_flux2_klein_schedule_policy
 from .text_embed import Flux2KleinTextEmbedStage
 from .vae import Flux2KleinVAEDecodeStage
-
-
-@dataclass
-class Flux2KleinSchedulePolicy(FlowMatchSchedulePolicy):
-    """Policy subclass with FLUX.2-klein empirical-μ shifting.
-
-    Klein's μ depends on both ``image_seq_len`` AND ``num_inference_steps``
-    (diffusers' ``Flux2KleinPipeline.compute_empirical_mu``: piecewise
-    linear in ``num_steps`` for ``image_seq_len ≤ 4300``, single line
-    otherwise). The base linear ``calculate_dynamic_mu`` only depends on
-    ``image_seq_len``, so we override :meth:`compute_mu` with the empirical
-    formula. Everything else — base grid + diffusers time-shift +
-    terminal zero — is unchanged and stays shared in
-    :meth:`diffusionrl.sde.runtime.FlowMatchSchedulePolicy.compute_sigma`.
-    """
-
-    def compute_mu(self, image_seq_len: int, num_inference_steps: int) -> float:
-        return compute_empirical_mu(image_seq_len, num_inference_steps)
 
 
 class Flux2KleinPipeline(Pipeline):
@@ -136,13 +116,7 @@ class Flux2KleinPipeline(Pipeline):
         dynamic-shift path. ``time_shift_type`` must match the checkpoint's
         ``scheduler_config.json`` (FLUX.2 uses ``"exponential"``).
         """
-        return Flux2KleinSchedulePolicy(
-            shift=float(self.shift),
-            use_dynamic_shifting=True,
-            vae_scale_factor=8,
-            patch_size=2,
-            time_shift_type="exponential",
-        )
+        return build_flux2_klein_schedule_policy(self.shift)
 
     @classmethod
     def latent_shape(cls, *, model_config: Any, sampling_spec: Any) -> tuple:
@@ -275,4 +249,4 @@ class Flux2KleinPipeline(Pipeline):
         )
 
 
-__all__ = ["Flux2KleinPipeline", "Flux2KleinSchedulePolicy"]
+__all__ = ["Flux2KleinPipeline", "Flux2KleinSchedulePolicy", "build_flux2_klein_schedule_policy"]
