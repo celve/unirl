@@ -1,3 +1,7 @@
+defaults:
+  - default
+  - _self_
+
 learning_rate: 5.0e-5
 adam_beta1: 0.9
 adam_beta2: 0.999

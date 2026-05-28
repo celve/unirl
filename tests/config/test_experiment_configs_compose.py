@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import glob
 import os
+from dataclasses import is_dataclass
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,64 @@ _ADV_GROUP_SIZE_CASES = {
 # track design and should not be treated as train-entry green by shape alone.
 _TRAIN_ENTRY_CASES = ["flowgrpo_fast_sd3_colocate_reproduce"]
 
+_EXTRACTED_PRESET_CASES = [
+    ("model", "sd3_bf16", "model", True),
+    ("model", "sd3_bf16_shift3", "model", True),
+    ("model", "flux2_klein_bf16", "model", True),
+    ("sampling", "klein_512", "sampling", False),
+    ("sampling", "qwen_384", "sampling", False),
+    ("sampling", "sd3_512", "sampling", False),
+    ("sampling", "wan21_720p", "sampling", False),
+    ("placement", "colocate_1x8", "placement", True),
+    ("placement", "colocate_1x8_half", "placement", True),
+    ("placement", "colocate_2x8", "placement", True),
+    ("placement", "colocate_2x8_half", "placement", True),
+    ("placement", "colocate_4x8", "placement", True),
+    ("placement", "separate_2x8_half", "placement", True),
+    ("placement", "trainside_2x8", "placement", True),
+    ("placement", "trainside_4x8", "placement", True),
+    ("reward", "pickscore", "reward", False),
+    ("reward", "video_pickscore", "reward", False),
+    ("training/execution", "offload_both", "training.execution", False),
+    ("training/execution", "standard", "training.execution", False),
+    ("training/lora", "klein_rank16", "training.lora", False),
+    ("training/lora", "rank64", "training.lora", False),
+    ("training/lora", "sd3_rank32", "training.lora", False),
+    ("training/fsdp", "bf16_full_ac", "training.fsdp", False),
+    ("training/fsdp", "bf16_full_noac", "training.fsdp", False),
+    ("training/fsdp", "fp32_full_ac", "training.fsdp", False),
+    ("training/optimizer", "adam_3e-4", "training.optimizer", False),
+    ("training/optimizer", "adam_3e-4_wd1e-4", "training.optimizer", False),
+    ("training/optimizer", "adam_5e-5", "training.optimizer", False),
+    ("training/lr_scheduler", "constant_10k", "training.lr_scheduler", False),
+    ("training/lr_scheduler", "constant_1k", "training.lr_scheduler", False),
+]
+
+_ROOT_SCHEMA_PATHS = ("model", "sampling", "placement", "reward", "training.execution")
+_EXPERIMENT_PRESET_PATH_CASES = {
+    "flowgrpo_fast_sd3": (
+        "training.lora",
+        "training.fsdp",
+        "training.optimizer",
+        "training.lr_scheduler",
+    ),
+    "flowgrpo_fast_sd3_colocate_reproduce": (
+        "training.tracks.image.model",
+        "training.tracks.image.lora",
+        "training.tracks.image.fsdp",
+        "training.tracks.image.optimizer",
+        "training.tracks.image.lr_scheduler",
+    ),
+    "grpo_flux2_klein9b_trainside_4x8": (
+        "training.tracks.image.model",
+        "training.tracks.image.lora",
+        "training.tracks.image.fsdp",
+        "training.tracks.image.optimizer",
+        "training.tracks.image.lr_scheduler",
+    ),
+    "hi3_think_recaption_colocate": ("training.fsdp",),
+}
+
 
 @pytest.fixture(scope="module", autouse=True)
 def _registered_configs():
@@ -72,13 +131,64 @@ def _compose(experiment: str):
         return compose(config_name="train", overrides=[f"+experiment={experiment}"])
 
 
+def _compose_raw(overrides: list[str]):
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(version_base=None, config_dir=_CONF_DIR):
+        return compose(config_name=None, overrides=overrides)
+
+
+def _assert_structured_node(node, path: str) -> None:
+    cls = OmegaConf.get_type(node)
+    assert cls is not None and cls is not dict and is_dataclass(cls), (
+        f"{path} must remain a structured dataclass node; got {cls!r}"
+    )
+
+
+def _assert_structured_path(cfg, path: str, *, require_target: bool = False) -> None:
+    node = OmegaConf.select(cfg, path)
+    assert node is not None, f"{path} is missing"
+    _assert_structured_node(node, path)
+    if require_target:
+        assert node.get("_target_") is not None, f"{path} must retain _target_"
+
+
+def _assert_experiment_preserves_selected_schemas(cfg, experiment: str) -> None:
+    for path in _ROOT_SCHEMA_PATHS:
+        _assert_structured_path(cfg, path, require_target=(path in {"model", "placement"}))
+
+    for path in _EXPERIMENT_PRESET_PATH_CASES.get(experiment, ()):
+        _assert_structured_path(cfg, path, require_target=path.endswith(".model"))
+
+
 @pytest.mark.parametrize("experiment", _EXPERIMENTS)
 def test_experiment_composes_and_resolves(experiment: str):
     """Every maintained recipe composes and fully resolves under struct mode."""
     if experiment in _KNOWN_BROKEN:
         pytest.skip(f"{experiment}: pre-existing non-preset schema issue (tracked separately)")
     cfg = _compose(experiment)
+    OmegaConf.resolve(cfg)
+    _assert_experiment_preserves_selected_schemas(cfg, experiment)
     OmegaConf.to_container(cfg, resolve=True)  # force interpolation resolution
+
+
+@pytest.mark.parametrize(("group", "name", "path", "require_target"), _EXTRACTED_PRESET_CASES)
+def test_extracted_yaml_presets_inherit_structured_schema(
+    group: str,
+    name: str,
+    path: str,
+    require_target: bool,
+):
+    """YAML presets selected from registered groups must not shed their schema."""
+    cfg = _compose_raw([f"+{group}={name}"])
+    OmegaConf.resolve(cfg)
+    _assert_structured_path(cfg, path, require_target=require_target)
+
+
+def test_sglang_sampling_interpolation_resolves_as_snapshot():
+    """SGLang's cfg snapshot of ${sampling} resolves without field-type rejection."""
+    cfg = _compose("flowgrpo_sd3_sglang_replay_separate")
+    OmegaConf.resolve(cfg)
+    assert OmegaConf.select(cfg, "rollout.engine.sampling") is not None
 
 
 @pytest.mark.parametrize("experiment", _REPRESENTATIVE)

@@ -1,3 +1,7 @@
+defaults:
+  - default
+  - _self_
+
 cpu_offload: false
 param_dtype: fp32
 mixed_precision: true
