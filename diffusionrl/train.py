@@ -267,7 +267,11 @@ def train(cfg: DictConfig) -> None:
 
         if isinstance(sampling_spec, ComposedSamplingParams):
             # For composed configs (e.g. VLM with AR track), read from algorithm config
-            samples_per_prompt = int(getattr(cfg.algorithm, "samples_per_prompt", 1))
+            try:
+                samples_per_prompt = int(cfg.algorithm.samples_per_prompt)
+            except Exception:
+                samples_per_prompt = int(getattr(cfg.algorithm, "samples_per_prompt", 1))
+            logger.info("ComposedSamplingParams branch: samples_per_prompt=%d", samples_per_prompt)
         else:
             samples_per_prompt = int(get_diffusion_params(sampling_spec).samples_per_prompt)
             # Fallback to algorithm.samples_per_prompt if sampling config doesn't specify it

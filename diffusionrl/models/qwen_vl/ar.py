@@ -181,7 +181,8 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
                 _local_done = torch.tensor([1], device=device)
             else:
                 _local_done = torch.tensor([0], device=device)
-            dist.all_reduce(_local_done, op=dist.ReduceOp.MIN)
+            if dist.is_initialized():
+                dist.all_reduce(_local_done, op=dist.ReduceOp.MIN)
             if _local_done.item() == 1:
                 break
 
