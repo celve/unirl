@@ -1,3 +1,7 @@
+defaults:
+  - default
+  - _self_
+
 num_inference_steps: 14
 guidance_scale: 1.0
 height: 720

@@ -1,3 +1,7 @@
+defaults:
+  - default
+  - _self_
+
 max_grad_norm: 1.0
 offload_train: false
 offload_rollout: false

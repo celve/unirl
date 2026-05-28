@@ -1,3 +1,7 @@
+defaults:
+  - flux2_klein_v2
+  - _self_
+
 pretrained_model_ckpt_path: ${oc.env:FLUX2_KLEIN_PATH,/apdcephfs_zwfy8/share_305110755/hunyuan/public_models/black-forest-labs/FLUX.2-klein-base-9B}
 model_precision: bf16
 autocast_precision: bf16

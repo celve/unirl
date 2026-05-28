@@ -36,6 +36,32 @@ belong in YAML.
 | `evaluation` | evaluation cadence and eval data path |
 | `debug` | debug mode selector; argparse debug runner is retired |
 
+## Preset Schema Rule
+
+YAML presets under registered ConfigStore groups must inherit their structured
+schema before applying local values. For example, a sampling preset selected
+with:
+
+```yaml
+defaults:
+  - override /sampling: sd3_512
+```
+
+replaces the root `sampling/default` choice with `sampling/sd3_512`. Therefore
+`conf/sampling/sd3_512.yaml` must begin with:
+
+```yaml
+defaults:
+  - default
+  - _self_
+```
+
+This keeps `cfg.sampling` a `DiffusionSamplingParams` node and then overlays
+the preset fields. Without that inheritance, Hydra composes a plain dict and
+downstream `OmegaConf.to_object`, `materialize`, or `build` calls lose schema
+defaults and `_target_` metadata. Model presets that refine another model use
+the concrete base, such as `sd3` or `flux2_klein_v2`, instead of `default`.
+
 ## Where Knobs Belong
 
 Use this rule when adding or moving config:

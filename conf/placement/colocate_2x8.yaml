@@ -1,3 +1,7 @@
+defaults:
+  - default
+  - _self_
+
 num_rollout_nodes: 2
 num_rollout_gpus_per_node: 8
 num_rollout_gpus_per_actor: 1

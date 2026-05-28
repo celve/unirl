@@ -1,3 +1,7 @@
+defaults:
+  - default
+  - _self_
+
 type: constant
 warmup_steps: 0
 total_steps: 10000
