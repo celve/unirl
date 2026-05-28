@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Dict, Optional, Union
 
 import torch
 
@@ -19,13 +19,21 @@ class TrainTrack:
 
     Plain data — no delegation methods.  The training loop accesses
     ``track.stage``, ``track.ema``, ``track.optimizer`` directly.
+
+    ``algorithms`` is a slot-keyed dict so one track can host multiple
+    StageAlgorithm instances sharing the same optimizer / LoRA wrap.
+    Typical PE / SD3 case: one entry whose key equals the track name.
+    HI3 shared-backbone case: two entries (e.g. ``{"image":
+    DiffusionGRPO, "ar": ARGRPO}``) — both accumulate gradients on the
+    same backbone LoRA and a single ``optimizer.step()`` updates them
+    jointly (pre-#136 ``StageTrainStack`` semantic).
     """
 
     stage: Stage
     ema: Optional[EMA]
     optimizer: torch.optim.Optimizer
     scheduler: Optional[torch.optim.lr_scheduler.LRScheduler]
-    algorithm: StageAlgorithm
+    algorithms: Dict[str, StageAlgorithm]
     micro_batch_size: int
 
 

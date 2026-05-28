@@ -10,19 +10,11 @@
 #   - ipc_bucketed sync (ZMQ + cudaIpcGetMemHandle, no UUID dependency)
 #   - offload_rollout: true (sleep vllm-omni during train)
 #
-# Dual-algorithm training:
-#   - "image" slot: DiffusionGRPO over LatentSegment (diffusion trajectory)
-#   - "ar"    slot: ARGRPO over TextSegment (think+recaption tokens)
-# Both share the same underlying transformer (HI3 shared MoE backbone).
-#
-# LoRA target: [qkv_proj, o_proj] — full attention LoRA.
-# HI3 uses fused qkv_proj; peft_merge.py GQA-interleaved split handles
-# the fused→split conversion for vLLM's per-projection LoRA format.
-#
-# Usage:
-#   python -m diffusionrl.train +experiment=hi3_think_recaption_colocate
+# Single track ("image") hosts both DiffusionGRPO + ARGRPO on a shared LoRA.
 defaults:
-  - /training/fsdp@training.fsdp: bf16_full_ac
+  - /training/track@training.tracks.image: default
+  - /model@training.tracks.image.model: hunyuan_image3
+  - /training/fsdp@training.tracks.image.fsdp: bf16_full_ac
   - /sync@sync: ipc_bucketed
   - override /algorithm: grpo
   - override /model: hunyuan_image3
@@ -30,30 +22,26 @@ defaults:
   - override /sampling/sde_strategy: flow
   - override /training/execution: offload_both
   - _self_
+
 run:
   data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
-  num_rollouts: 5
+  num_rollouts: 1000
   seed: 42
   data_path: /root/diffusionrl/data/datasets/pickscore/train.txt
   eval_data_path: /root/diffusionrl/data/datasets/pickscore/test.txt
   weight_sync_interval: 1
 
 sampling:
-  samples_per_prompt: 1
+  samples_per_prompt: 8
   num_inference_steps: 16
-  guidance_scale: 2.5
+  guidance_scale: 1.0
   height: 1024
   width: 1024
   init_same_noise: false
   eta: 1.0
-    # NOTE: ``shift`` was removed from ``SDEConfig`` (see
-    # ``types/sampling.py:22``) — the canonical σ shift now lives
-    # **only** on ``model.shift`` (FlowMatchSchedulePolicy). Keeping a
-    # stale ``sampling.sde_config.shift`` here would be a dead override
-    # that misleads readers into thinking it controls anything.
 
 algorithm:
-  prompts_per_rollout: 8
+  prompts_per_rollout: 1
   adv_normalization_scope: global
   use_global_std: true
   kl_coef: 0.0
@@ -61,12 +49,24 @@ algorithm:
     timestep_fraction: [0.0, 1.0]
     num_sde_steps: 16
   algorithms:
-    diffusion:
+    image:
       name: diffusion_grpo
       stage_attr: diffusion
       conditions_cls: diffusionrl.models.hunyuan_image3.conditions.HunyuanImage3DiffusionConditions
       clip_range: 1.0e-4
       clip_schedule: constant
+      params:
+        _target_: diffusionrl.types.sampling.DiffusionSamplingParams
+        num_inference_steps: ${sampling.num_inference_steps}
+        guidance_scale: ${sampling.guidance_scale}
+        height: ${sampling.height}
+        width: ${sampling.width}
+        seed: ${run.seed}
+        sde_indices: null
+        eta: ${sampling.eta}
+        init_same_noise: ${sampling.init_same_noise}
+        samples_per_prompt: ${sampling.samples_per_prompt}
+        noise_group_ids: null
     ar:
       name: ar_grpo
       stage_attr: ar
@@ -81,7 +81,7 @@ model:
   autocast_precision: bf16
   trajectory_precision: fp16
   logprob_precision: fp32
-  guidance_scale: 2.5
+  guidance_scale: 1.0
 
 rollout:
   engine:
@@ -90,7 +90,7 @@ rollout:
     default_height: 1024
     default_width: 1024
     default_num_inference_steps: 16
-    default_guidance_scale: 2.5
+    default_guidance_scale: 1.0
     default_eta: 1.0
     default_ar_max_tokens: 4096
     default_ar_temperature: 0.6
@@ -112,15 +112,38 @@ placement:
   allow_noset_multi_gpu_inference: true
 
 training:
-  lora:
-    rank: 8
-    alpha: 16
-    dropout: 0.0
-    bias: none
-    task_type: FEATURE_EXTRACTION
-    target_modules:
-      - qkv_proj
-      - o_proj
+  primary_track: image
+  tracks:
+    image:
+      model:
+        _target_: diffusionrl.models.hunyuan_image3.HunyuanImage3Pipeline.from_meta_config
+        pretrained_model_ckpt_path: /root/HunyuanImage-3-Instruct
+        model_precision: bf16
+        autocast_precision: bf16
+        trajectory_precision: fp16
+        logprob_precision: fp32
+        guidance_scale: 1.0
+      source_stage_attr: diffusion
+      algorithm_keys: [image, ar]
+      lora:
+        rank: 8
+        alpha: 16
+        dropout: 0.0
+        bias: none
+        task_type: FEATURE_EXTRACTION
+        target_modules:
+          - qkv_proj
+          - o_proj
+      optimizer:
+        learning_rate: 1.0e-4
+        adam_beta1: 0.9
+        adam_beta2: 0.999
+        adam_epsilon: 1.0e-8
+        weight_decay: 0.0
+      lr_scheduler:
+        type: constant
+        warmup_steps: 0
+        total_steps: 100
   topology:
     actor_count: 8
   plan:
@@ -129,16 +152,6 @@ training:
     local_mini_batch_size: 1
     local_batch_size: 1
     global_batch_size: 8
-  optimizer:
-    learning_rate: 1.0e-4
-    adam_beta1: 0.9
-    adam_beta2: 0.999
-    adam_epsilon: 1.0e-8
-    weight_decay: 0.0
-  lr_scheduler:
-    type: constant
-    warmup_steps: 0
-    total_steps: 100
   materialize:
     with_aux: []
 

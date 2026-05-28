@@ -167,6 +167,24 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
         # caller doesn't pass an ARSamplingParams.
         self._default_step = step
 
+    def trainable_module(self) -> "torch.nn.Module":
+        """Return the bare HI3 decoder — the FSDP/LoRA wrap target.
+
+        Matches ``HunyuanImage3DiffusionStage.trainable_module`` (returns
+        the same ``self.model.transformer.model`` object). HI3 is a
+        unified MoE: AR (``mode='gen_text'``) and diffusion
+        (``mode='gen_image'``) share the SAME decoder, so the multi-track
+        builder's ``source_stage.trainable_module()`` resolves to the
+        same nn.Module either way — LoRA injected via one stage is
+        visible to the other.
+
+        The HF wrapper (``HunyuanImage3ForCausalMM``) owns frozen VAE +
+        ViT siblings that must NOT be FSDP-wrapped (mixed dtypes; not in
+        either forward path). Returning the bare decoder under the
+        wrapper avoids dragging those into the FSDP shard.
+        """
+        return self.model.transformer.model
+
     def autoregress(
         self,
         conditions: HunyuanImage3ARConditions,
