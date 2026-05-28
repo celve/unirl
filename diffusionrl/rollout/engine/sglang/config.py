@@ -44,7 +44,7 @@ _SGLANG_PORT_BASE = 33000
 _SGLANG_PORT_STRIDE = 100
 
 
-_VALID_MODEL_FAMILIES = ("sd3", "flux", "mochi", "hunyuan_video")
+_VALID_MODEL_FAMILIES = ("sd3", "flux", "flux2_klein", "mochi", "hunyuan_video")
 _VALID_LOGPROB_SOURCES = ("replay", "native")
 
 

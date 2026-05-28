@@ -88,5 +88,24 @@ class Flux2KleinPipelineConfig:
     def __post_init__(self) -> None:
         validate_precision_type(self.model_precision, field="Flux2KleinPipelineConfig.model_precision")
 
+    def build_schedule_policy(self):
+        """Build the Klein-specific schedule policy without a Pipeline instance.
+
+        Delegates to the same helper used by
+        :meth:`Flux2KleinPipeline.build_schedule_policy` so engines that hold
+        a config but never instantiate a Pipeline (SGLang / vLLM-Omni run the
+        model in a subprocess) can still get the empirical-μ schedule.
+
+        ``Flux2KleinSchedulePolicy(use_dynamic_shifting=True)`` overrides
+        :meth:`FlowMatchSchedulePolicy.compute_mu` with the FLUX.2
+        empirical formula; everything else (base grid, exponential time
+        shift, terminal zero) is the shared dynamic-shift path. The
+        static ``shift`` field is the documented static-fallback only
+        and is unused when dynamic shifting is active.
+        """
+        from diffusionrl.models.flux2_klein.schedule import build_flux2_klein_schedule_policy
+
+        return build_flux2_klein_schedule_policy(self.shift)
+
 
 __all__ = ["Flux2KleinPipelineConfig"]

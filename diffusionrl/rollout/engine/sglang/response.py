@@ -41,6 +41,7 @@ from diffusionrl.types.conditions.text import TextEmbedCondition
 from diffusionrl.types.primitives import Images
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
+from diffusionrl.types.sampling import get_diffusion_params
 from diffusionrl.types.segments.latent import LatentSegment, make_image_segment
 from diffusionrl.types.trajectory_store import compute_trajectory_positions
 
@@ -110,6 +111,75 @@ def _derive_timestep_alignment(
 # ---------------------------------------------------------------------------
 
 
+def _maybe_unpack_packed_trajectory(
+    trajectories: torch.Tensor,
+    *,
+    model_family: str,
+    height: Optional[int],
+    width: Optional[int],
+) -> torch.Tensor:
+    """Convert SGLang's packed sequence-style trajectory to the trainer's image-style.
+
+    FLUX.2-klein's SGLang pipeline emits trajectories in packed form
+    ``[B, T, H_pat * W_pat, C_packed]`` because Klein's transformer is a
+    pure sequence model that takes ``[B, S, C_packed]`` tokens (each token =
+    one 2x2 patch with channels concatenated). The trainer-side
+    ``Flux2KleinDiffusionStage.replay`` expects the same shape the trainside
+    pipeline emits — ``[B, T, C_packed, H_pat, W_pat]`` (5-D, with patchified
+    spatial dims preserved) — and fails fast on the 4-D packed shape with
+    ``expected latents [B, K, C, H_pat, W_pat]``.
+
+    Other model families (SD3 etc.) keep latents in image form throughout
+    the SGLang stack so their trajectories arrive 5-D and pass through
+    untouched. The 4-D → 5-D unpack only fires when the rollout-side fork
+    actually emits packed tokens AND the model family is one we know wants
+    image-form latents on the trainer side.
+    """
+    if trajectories.ndim == 5:
+        return trajectories
+    if trajectories.ndim != 4:
+        raise ValueError(
+            f"_maybe_unpack_packed_trajectory: SGLang trajectory has rank "
+            f"{trajectories.ndim}, want 4 (packed) or 5 (image-form); shape="
+            f"{tuple(trajectories.shape)}."
+        )
+    if model_family != "flux2_klein":
+        raise ValueError(
+            f"_maybe_unpack_packed_trajectory: 4-D trajectory only supported for "
+            f"model_family='flux2_klein' (Klein emits packed [B, T, H*W, C] from "
+            f"SGLang); got model_family={model_family!r}, shape="
+            f"{tuple(trajectories.shape)}."
+        )
+    if height is None or width is None:
+        raise ValueError(
+            "_maybe_unpack_packed_trajectory: need height/width from "
+            "req.sampling_params to unpack Klein's packed [B, T, H*W, C] "
+            "trajectory; both must be set."
+        )
+    # FLUX.2 patchified spatial size: pixel / (vae_scale_factor=8 * patchify_factor=2).
+    # Mirrors Flux2KleinDiffusionStage._patchified_shape.
+    _DOWNSAMPLE = 16
+    if height % _DOWNSAMPLE or width % _DOWNSAMPLE:
+        raise ValueError(
+            f"_maybe_unpack_packed_trajectory: Klein height ({height}) and width "
+            f"({width}) must be divisible by VAE x patchify downsample ({_DOWNSAMPLE})."
+        )
+    h_pat = height // _DOWNSAMPLE
+    w_pat = width // _DOWNSAMPLE
+    B, T, S, C_packed = trajectories.shape
+    if S != h_pat * w_pat:
+        raise ValueError(
+            f"_maybe_unpack_packed_trajectory: packed token count S={S} != "
+            f"h_pat * w_pat = {h_pat * w_pat} (derived from height={height}, "
+            f"width={width}). Schedule/recipe drift — fix the source rather than "
+            f"silently reshape to a wrong spatial layout."
+        )
+    from diffusionrl.models.flux2_klein.flux2_klein_utils import unpack_latents
+
+    flat = trajectories.reshape(B * T, S, C_packed)
+    return unpack_latents(flat, h_pat, w_pat).reshape(B, T, C_packed, h_pat, w_pat).contiguous()
+
+
 def _build_image_segment(
     results: Sequence["GenerationResult"],
     *,
@@ -117,6 +187,9 @@ def _build_image_segment(
     num_steps: int,
     sde_indices: Optional[List[int]],
     use_native_logprob: bool,
+    model_family: str,
+    height: Optional[int],
+    width: Optional[int],
 ) -> LatentSegment:
     """Pack per-result trajectory tensors into one batched ``LatentSegment``."""
     trajectory_items: List[torch.Tensor] = []
@@ -125,6 +198,12 @@ def _build_image_segment(
         require(traj is not None, "SGLang result missing trajectory_latents")
         trajectory_items.append(traj.detach().cpu())
     trajectories_tensor = torch.cat(trajectory_items, dim=0)
+    trajectories_tensor = _maybe_unpack_packed_trajectory(
+        trajectories_tensor,
+        model_family=model_family,
+        height=height,
+        width=width,
+    )
 
     sigmas, step_indices = _derive_timestep_alignment(
         trajectories_tensor=trajectories_tensor,
@@ -346,12 +425,22 @@ def _to_rollout_resp(
         "schedule the trainer will replay against.",
     )
 
+    # Pull spatial dims from per-request sampling params so families that emit
+    # packed sequence-style trajectories (Klein) can be unpacked back to the
+    # image-form ``[B, T, C, H_pat, W_pat]`` the trainer-side replay expects.
+    diffusion_params = get_diffusion_params(req.sampling_params)
+    req_height = int(diffusion_params.height) if diffusion_params.height is not None else None
+    req_width = int(diffusion_params.width) if diffusion_params.width is not None else None
+
     segment = _build_image_segment(
         results,
         expected_sigmas=req.sigmas,
         num_steps=num_steps,
         sde_indices=sde_indices,
         use_native_logprob=use_native_logprob,
+        model_family=str(cfg.model_family),
+        height=req_height,
+        width=req_width,
     )
 
     decoded_images = _build_decoded_images(results)
