@@ -524,11 +524,21 @@ def _to_rollout_resp(
         "image": decoded_image,
         "ar": decoded_text,
     }
+    # HI3 think_recaption: image is generated from AR output 1-to-1,
+    # so image.parent_track = "ar" and parent_ids align with ar.sample_ids.
+    has_ar = "ar" in rollout_traces
     tracks: Dict[str, RolloutTrack] = {}
     for track_name, segment in rollout_traces.items():
+        if track_name == "image" and has_ar:
+            parent: Optional[str] = "ar"
+            track_parent_ids = list(sample_ids)
+        else:
+            parent = None
+            track_parent_ids = list(parent_ids)
         tracks[track_name] = RolloutTrack(
             sample_ids=list(sample_ids),
-            parent_ids=list(parent_ids),
+            parent_ids=track_parent_ids,
+            parent_track=parent,
             conditions=dict(conditions),
             segment=segment,
             decoded=decoded_for_track.get(track_name),

@@ -248,7 +248,12 @@ class RolloutPipelineMixin:
         max_items = int(req_shard.media_max_items)
 
         score_t0 = time.perf_counter()
+        # Only score leaves; parent tracks (those referenced by another track's
+        # ``parent_track``) get their rewards from ``propagate_rewards`` below.
+        parent_names = {t.parent_track for t in resp.tracks.values() if t.parent_track}
         for _name, track in resp.tracks_with_segment_types(SCORER_BY_SEGMENT_TYPE.keys()):
+            if _name in parent_names:
+                continue
             self._ensure_reward_pipeline().score_and_attach(req=req_shard, track=track)
             if collect_media:
                 track.media_preview = build_media_preview_for_track(

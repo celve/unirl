@@ -22,7 +22,7 @@ Shape (Hydra-composed at runtime)::
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from diffusionrl.config.registration import register_config
 from diffusionrl.training.backends.base import LrSchedulerConfig, OptimizerConfig
@@ -54,6 +54,10 @@ class TrainingTrackConfig:
     ``lora`` and ``ema_lora`` are mutually exclusive (both inject LoRA
     adapters).  ``ema`` can combine with ``lora`` (mirrors the
     post-LoRA trainable parameter set).  ``fsdp`` is always present.
+
+    ``algorithm_keys`` lets one track host multiple algorithms sharing
+    the same LoRA / optimizer (HI3 shared-backbone case). Default
+    ``None`` → one algorithm, slot key == track name.
     """
 
     # Any: OmegaConf requires it for polymorphic Hydra config nodes.
@@ -67,6 +71,7 @@ class TrainingTrackConfig:
     ema: Optional[EmaFullConfig] = None
     fsdp: FSDPConfig = field(default_factory=FSDPConfig)
     plan_overrides: Optional[TrackPlanOverrides] = None
+    algorithm_keys: Optional[List[str]] = None
 
 
 __all__ = [

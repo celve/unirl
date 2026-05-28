@@ -96,44 +96,63 @@ class StageTrainStack:
         *,
         training_progress: float,
     ) -> TrackMiniBatchResult:
-        """Run one full optimizer step for the named track."""
+        """Run one full optimizer step for the named track.
+
+        When ``track.algorithms`` holds multiple entries (HI3 shared-
+        backbone case), each algorithm's gradients are accumulated under
+        a single ``zero_grad`` / ``step`` pair — replicating the pre-#136
+        ``StageTrainStack.train_microbatch`` "many algorithms, one
+        optimizer step" semantic.
+        """
         if track_name not in self.tracks:
             raise ValueError(
                 f"StageTrainStack.train_track: track {track_name!r} "
                 f"is not registered. Known tracks: {sorted(self.tracks)}."
             )
-        resp_track = resp.tracks.get(track_name)
-        if resp_track is None:
-            if track_name in self.optional_tracks:
-                return TrackMiniBatchResult(
-                    track_name=track_name,
-                    loss=0.0,
-                    grad_norm=0.0,
-                    lr=self._current_lr(track_name),
-                    has_backward=False,
-                    micros=[],
-                    metrics={},
+        track = self.tracks[track_name]
+
+        # Collect resp.tracks slot for each algorithm hosted by this track.
+        resp_slots: Dict[str, object] = {}
+        for alg_key in track.algorithms:
+            slot = resp.tracks.get(alg_key)
+            if slot is None:
+                if track_name in self.optional_tracks:
+                    continue
+                raise ValueError(
+                    f"StageTrainStack.train_track: track {track_name!r} "
+                    f"hosts algorithm slot {alg_key!r} but resp.tracks has "
+                    f"no entry for that slot (resp keys: "
+                    f"{sorted(resp.tracks.keys())}). Either ensure the "
+                    f"rollout pipeline emits the {alg_key!r} track, or opt "
+                    f"in to silent skipping via optional_tracks."
                 )
-            raise ValueError(
-                f"StageTrainStack.train_track: track {track_name!r} is "
-                f"registered but absent from resp.tracks (keys: "
-                f"{sorted(resp.tracks.keys())}). Either ensure the rollout "
-                f"pipeline emits the {track_name!r} track, or opt in to "
-                f"silent skipping via optional_tracks."
-            )
-        if resp_track.advantages is None:
-            raise ValueError(
-                f"StageTrainStack.train_track: track {track_name!r} "
-                "has advantages=None; the upstream advantage pipeline must "
-                "populate resp.tracks[name].advantages."
+            if slot.advantages is None:
+                raise ValueError(
+                    f"StageTrainStack.train_track: track {track_name!r} "
+                    f"algorithm slot {alg_key!r} has advantages=None; the "
+                    f"upstream advantage pipeline must populate "
+                    f"resp.tracks[{alg_key!r}].advantages."
+                )
+            resp_slots[alg_key] = slot
+
+        if not resp_slots:
+            return TrackMiniBatchResult(
+                track_name=track_name,
+                loss=0.0,
+                grad_norm=0.0,
+                lr=self._current_lr(track_name),
+                has_backward=False,
+                micros=[],
+                metrics={},
             )
 
-        track = self.tracks[track_name]
         model = track.stage.trainable_module()
 
         track.optimizer.zero_grad()
 
-        bs = int(resp_track.batch_size)
+        # All algorithm slots in this track share the same batch_size by
+        # construction (rollout pipeline emits 1:1 sample lineage).
+        bs = int(next(iter(resp_slots.values())).batch_size)
         micro_batch_size = int(track.micro_batch_size)
         micro_slices = _build_micro_batch_slices(
             total_size=bs,
@@ -144,24 +163,34 @@ class StageTrainStack:
 
         loss_scale = 1.0 / len(micro_slices)
         micros: List[AlgorithmStepResult] = []
+        per_alg_results: Dict[str, List[AlgorithmStepResult]] = {k: [] for k in resp_slots}
         total_loss = 0.0
         has_backward = False
-
         single_micro = len(micro_slices) == 1 and micro_slices[0] == (0, bs)
-        for start, end in micro_slices:
-            micro_track = resp_track if single_micro else resp_track.slice(start, end)
-            result = track.algorithm.compute_loss_and_backward(
-                conditions=micro_track.conditions,
-                segment=micro_track.segment,
-                advantages=micro_track.advantages,
-                training_progress=training_progress,
-                loss_scale=loss_scale,
-            )
-            micros.append(result)
-            total_loss += result.loss
-            has_backward = has_backward or result.has_backward
 
-        aggregated_metrics: Dict[str, object] = aggregate_numeric_metrics([r.metrics for r in micros if r.metrics])
+        for start, end in micro_slices:
+            for alg_key, slot in resp_slots.items():
+                micro = slot if single_micro else slot.slice(start, end)
+                result = track.algorithms[alg_key].compute_loss_and_backward(
+                    conditions=micro.conditions,
+                    segment=micro.segment,
+                    advantages=micro.advantages,
+                    training_progress=training_progress,
+                    loss_scale=loss_scale,
+                )
+                micros.append(result)
+                per_alg_results[alg_key].append(result)
+                total_loss += result.loss
+                has_backward = has_backward or result.has_backward
+
+        # Aggregate metrics per algorithm. Multi-algo case prefixes the slot
+        # name (image/policy_loss vs ar/policy_loss) to avoid key collision.
+        aggregated_metrics: Dict[str, object] = {}
+        multi_alg = len(per_alg_results) > 1
+        for alg_key, results in per_alg_results.items():
+            metrics = aggregate_numeric_metrics([r.metrics for r in results if r.metrics])
+            for k, v in metrics.items():
+                aggregated_metrics[f"{alg_key}/{k}" if multi_alg else k] = v
 
         if has_backward:
             params = list(trainable_params(model))

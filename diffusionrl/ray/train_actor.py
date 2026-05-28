@@ -300,11 +300,16 @@ class TrainActor(
         return results
 
     def _prepare_segments(self, resp: RolloutResp) -> None:
-        for track_name, track in self.tracks.items():
-            resp_track = resp.tracks.get(track_name)
-            if resp_track is None or resp_track.segment is None:
-                continue
-            track.algorithm.prepare_segment(conditions=resp_track.conditions, segment=resp_track.segment)
+        # A training track may host multiple algorithms (HI3 shared-backbone
+        # case: one "image" track with {"image": DiffusionGRPO, "ar": ARGRPO}).
+        # Each algorithm consumes its own resp-slot named the same as its
+        # algorithm key.
+        for track in self.tracks.values():
+            for alg_key, alg in track.algorithms.items():
+                resp_track = resp.tracks.get(alg_key)
+                if resp_track is None or resp_track.segment is None:
+                    continue
+                alg.prepare_segment(conditions=resp_track.conditions, segment=resp_track.segment)
 
     # ------------------------------------------------------------------
     # Eval-EMA swap
