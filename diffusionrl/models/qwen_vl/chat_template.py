@@ -70,7 +70,6 @@ class QwenVLChatTemplateStage:
 
         input_ids = torch.full((batch_size, max_len), pad_id, dtype=torch.long, device=device)
         attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
-        mm_token_type_ids = torch.zeros((batch_size, max_len), dtype=torch.int, device=device)
 
         for i, inp in enumerate(per_sample_inputs):
             ids = inp["input_ids"].squeeze(0)
@@ -78,26 +77,23 @@ class QwenVLChatTemplateStage:
             input_ids[i, :L] = ids[:L].to(device)
             mask = inp["attention_mask"].squeeze(0)
             attention_mask[i, :L] = mask[:L].to(device)
-            if "mm_token_type_ids" in inp and inp["mm_token_type_ids"] is not None:
-                mt = inp["mm_token_type_ids"].squeeze(0)
-                mm_token_type_ids[i, :L] = mt[:L].to(device)
 
-        pvs = []
-        gts = []
+        # Per-sample lists for pixel_values and image_grid_thw.
+        # Each list has batch_size elements (one per sample, possibly None).
+        # Using per-sample lists with FieldKind.CONCAT ensures correct
+        # concatenation when multiple rollout workers' conditions are merged.
+        pixel_values: List[Optional[torch.Tensor]] = []
+        image_grid_thw: List[Optional[torch.Tensor]] = []
         for inp in per_sample_inputs:
-            if "pixel_values" in inp and inp["pixel_values"] is not None:
-                pvs.append(inp["pixel_values"].to(device=device, dtype=dtype))
-            if "image_grid_thw" in inp and inp["image_grid_thw"] is not None:
-                gts.append(inp["image_grid_thw"].to(device=device))
-
-        pixel_values = torch.cat(pvs, dim=0) if pvs else None
-        image_grid_thw = torch.cat(gts, dim=0) if gts else None
+            pv = inp.get("pixel_values")
+            igt = inp.get("image_grid_thw")
+            pixel_values.append(pv.to(device=device, dtype=dtype) if pv is not None else None)
+            image_grid_thw.append(igt.to(device=device) if igt is not None else None)
 
         return QwenVLARConditions(
             prompt=TextTokenCondition(input_ids=input_ids, attention_mask=attention_mask),
-            pixel_values=pixel_values,
-            image_grid_thw=image_grid_thw,
-            mm_token_type_ids=mm_token_type_ids,
+            pixel_values=pixel_values if any(p is not None for p in pixel_values) else None,
+            image_grid_thw=image_grid_thw if any(g is not None for g in image_grid_thw) else None,
         )
 
 

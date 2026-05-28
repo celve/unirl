@@ -62,6 +62,22 @@ class QwenVLARStep(ARStep):
         return token_id, log_prob
 
 
+def _merge_pv(per_sample_pv: Optional[List[Optional[torch.Tensor]]]) -> Optional[torch.Tensor]:
+    """Cat per-sample pixel_values into a single flat tensor for the model."""
+    if per_sample_pv is None:
+        return None
+    parts = [pv for pv in per_sample_pv if pv is not None]
+    return torch.cat(parts, dim=0) if parts else None
+
+
+def _merge_igt(per_sample_igt: Optional[List[Optional[torch.Tensor]]]) -> Optional[torch.Tensor]:
+    """Cat per-sample image_grid_thw into a single flat tensor for the model."""
+    if per_sample_igt is None:
+        return None
+    parts = [igt for igt in per_sample_igt if igt is not None]
+    return torch.cat(parts, dim=0) if parts else None
+
+
 class QwenVLARStage(ARStage[QwenVLARConditions]):
     def __init__(self, *, model: QwenVLBundle) -> None:
         self.model = model
@@ -99,6 +115,10 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         )
         max_new = int(sampling_params.max_new_tokens)
 
+        # pixel_values / image_grid_thw: per-sample lists → merged tensors
+        pv = _merge_pv(conditions.pixel_values)
+        igt = _merge_igt(conditions.image_grid_thw)
+
         model_kwargs: Dict[str, Any] = {
             "attention_mask": attention_mask,
             "use_cache": True,
@@ -106,12 +126,10 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
             "cache_position": torch.arange(int(input_ids.shape[1]), device=device, dtype=torch.long),
         }
 
-        if conditions.pixel_values is not None:
-            model_kwargs["pixel_values"] = conditions.pixel_values
-        if conditions.image_grid_thw is not None:
-            model_kwargs["image_grid_thw"] = conditions.image_grid_thw
-        if conditions.mm_token_type_ids is not None:
-            model_kwargs["mm_token_type_ids"] = conditions.mm_token_type_ids
+        if pv is not None:
+            model_kwargs["pixel_values"] = pv
+        if igt is not None:
+            model_kwargs["image_grid_thw"] = igt
 
         cur_input_ids = input_ids
 
@@ -132,8 +150,6 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
                     prep_kwargs["pixel_values"] = model_kwargs["pixel_values"]
                 if "image_grid_thw" in model_kwargs:
                     prep_kwargs["image_grid_thw"] = model_kwargs["image_grid_thw"]
-                if "mm_token_type_ids" in model_kwargs:
-                    prep_kwargs["mm_token_type_ids"] = model_kwargs["mm_token_type_ids"]
                 prep_kwargs["is_first_iteration"] = True
             else:
                 prep_kwargs["is_first_iteration"] = False
@@ -184,6 +200,12 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         device = prompt_ids.device
         batch_size = int(prompt_ids.shape[0])
 
+        # pixel_values / image_grid_thw: per-sample lists → merged tensors
+        # The lists are already correctly sliced by Batched (CONCAT),
+        # so each entry corresponds to the matching prompt row.
+        pv = _merge_pv(conditions.pixel_values)
+        igt = _merge_igt(conditions.image_grid_thw)
+
         # Strip right-padding introduced by TextTokenCondition.concat across
         # rollout workers.  During rollout each worker pads to its own batch
         # max; when tracks are concatenated for replay the global max adds
@@ -194,10 +216,6 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         prompt_ids = prompt_ids[:, :max_real_len]
         prompt_mask = prompt_mask[:, :max_real_len]
         prompt_len = max_real_len
-
-        mm_type_ids = None
-        if conditions.mm_token_type_ids is not None:
-            mm_type_ids = conditions.mm_token_type_ids[:, :max_real_len]
 
         # Reset stale rope_deltas — critical for correct M-RoPE position IDs
         self.model.transformer.model.rope_deltas = None
@@ -222,28 +240,16 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
             full_ids = prompt_ids
             full_mask = prompt_mask
 
-        full_mm_type_ids = None
-        if mm_type_ids is not None:
-            if T_max > 0:
-                response_types = torch.zeros(
-                    (batch_size, T_max), dtype=mm_type_ids.dtype, device=device
-                )
-                full_mm_type_ids = torch.cat([mm_type_ids, response_types], dim=1)
-            else:
-                full_mm_type_ids = mm_type_ids
-
         forward_kwargs: Dict[str, Any] = {
             "input_ids": full_ids,
             "attention_mask": full_mask,
             "use_cache": False,
             "return_dict": True,
         }
-        if conditions.pixel_values is not None:
-            forward_kwargs["pixel_values"] = conditions.pixel_values
-        if conditions.image_grid_thw is not None:
-            forward_kwargs["image_grid_thw"] = conditions.image_grid_thw
-        if full_mm_type_ids is not None:
-            forward_kwargs["mm_token_type_ids"] = full_mm_type_ids
+        if pv is not None:
+            forward_kwargs["pixel_values"] = pv
+        if igt is not None:
+            forward_kwargs["image_grid_thw"] = igt
 
         # Compute correct 4D position_ids for M-RoPE.
         # Rollout uses prepare_inputs_for_generation which produces [4, bs, seq]:
@@ -253,7 +259,7 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         # Fix: call get_rope_index ourselves and prepend text_positions.
         vision_pos, _ = self.model.transformer.model.get_rope_index(
             full_ids,
-            image_grid_thw=conditions.image_grid_thw,
+            image_grid_thw=igt,
             attention_mask=full_mask,
         )  # [3, bs, seq]
         text_pos = full_mask.long().cumsum(-1) - 1
