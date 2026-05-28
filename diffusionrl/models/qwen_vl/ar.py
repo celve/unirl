@@ -5,6 +5,7 @@ from dataclasses import field as dc_field
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 
 from diffusionrl.models.types.ar import ARSamplingParams, ARStage, ARStep
@@ -172,7 +173,16 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
                 per_token_logps[b].append(float(log_prob[b].item()))
                 if tid in stop_ids:
                     finished[b] = True
+            # Synchronize finished status across all FSDP ranks.
+            # If any rank still has unfinished samples, all ranks must
+            # continue running forward passes (FSDP AllGather requires
+            # every rank to participate).
             if all(finished):
+                _local_done = torch.tensor([1], device=device)
+            else:
+                _local_done = torch.tensor([0], device=device)
+            dist.all_reduce(_local_done, op=dist.ReduceOp.MIN)
+            if _local_done.item() == 1:
                 break
 
             cur_input_ids = torch.cat([cur_input_ids, token_id.unsqueeze(-1)], dim=1)
