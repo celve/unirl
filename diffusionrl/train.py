@@ -266,9 +266,19 @@ def train(cfg: DictConfig) -> None:
         from diffusionrl.types.sampling import ComposedSamplingParams
 
         if isinstance(sampling_spec, ComposedSamplingParams):
-            samples_per_prompt = 1
+            # For composed configs (e.g. VLM with AR track), read from algorithm config
+            try:
+                samples_per_prompt = int(cfg.algorithm.samples_per_prompt)
+            except Exception:
+                samples_per_prompt = int(getattr(cfg.algorithm, "samples_per_prompt", 1))
+            logger.info("ComposedSamplingParams branch: samples_per_prompt=%d", samples_per_prompt)
         else:
             samples_per_prompt = int(get_diffusion_params(sampling_spec).samples_per_prompt)
+            # Fallback to algorithm.samples_per_prompt if sampling config doesn't specify it
+            if samples_per_prompt == 1:
+                algo_spp = int(getattr(cfg.algorithm, "samples_per_prompt", 1))
+                if algo_spp > 1:
+                    samples_per_prompt = algo_spp
         logger.info(
             "Driver-side rollout config: prompt_batch_size=%s samples_per_prompt=%s",
             prompt_batch_size,

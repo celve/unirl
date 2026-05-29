@@ -5,6 +5,7 @@ from dataclasses import field as dc_field
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 
 from diffusionrl.models.types.ar import ARSamplingParams, ARStage, ARStep
@@ -62,6 +63,22 @@ class QwenVLARStep(ARStep):
         return token_id, log_prob
 
 
+def _merge_pv(per_sample_pv: Optional[List[Optional[torch.Tensor]]]) -> Optional[torch.Tensor]:
+    """Cat per-sample pixel_values into a single flat tensor for the model."""
+    if per_sample_pv is None:
+        return None
+    parts = [pv for pv in per_sample_pv if pv is not None]
+    return torch.cat(parts, dim=0) if parts else None
+
+
+def _merge_igt(per_sample_igt: Optional[List[Optional[torch.Tensor]]]) -> Optional[torch.Tensor]:
+    """Cat per-sample image_grid_thw into a single flat tensor for the model."""
+    if per_sample_igt is None:
+        return None
+    parts = [igt for igt in per_sample_igt if igt is not None]
+    return torch.cat(parts, dim=0) if parts else None
+
+
 class QwenVLARStage(ARStage[QwenVLARConditions]):
     def __init__(self, *, model: QwenVLBundle) -> None:
         self.model = model
@@ -99,6 +116,10 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         )
         max_new = int(sampling_params.max_new_tokens)
 
+        # pixel_values / image_grid_thw: per-sample lists → merged tensors
+        pv = _merge_pv(conditions.pixel_values)
+        igt = _merge_igt(conditions.image_grid_thw)
+
         model_kwargs: Dict[str, Any] = {
             "attention_mask": attention_mask,
             "use_cache": True,
@@ -106,12 +127,10 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
             "cache_position": torch.arange(int(input_ids.shape[1]), device=device, dtype=torch.long),
         }
 
-        if conditions.pixel_values is not None:
-            model_kwargs["pixel_values"] = conditions.pixel_values
-        if conditions.image_grid_thw is not None:
-            model_kwargs["image_grid_thw"] = conditions.image_grid_thw
-        if conditions.mm_token_type_ids is not None:
-            model_kwargs["mm_token_type_ids"] = conditions.mm_token_type_ids
+        if pv is not None:
+            model_kwargs["pixel_values"] = pv
+        if igt is not None:
+            model_kwargs["image_grid_thw"] = igt
 
         cur_input_ids = input_ids
 
@@ -132,8 +151,6 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
                     prep_kwargs["pixel_values"] = model_kwargs["pixel_values"]
                 if "image_grid_thw" in model_kwargs:
                     prep_kwargs["image_grid_thw"] = model_kwargs["image_grid_thw"]
-                if "mm_token_type_ids" in model_kwargs:
-                    prep_kwargs["mm_token_type_ids"] = model_kwargs["mm_token_type_ids"]
                 prep_kwargs["is_first_iteration"] = True
             else:
                 prep_kwargs["is_first_iteration"] = False
@@ -156,7 +173,17 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
                 per_token_logps[b].append(float(log_prob[b].item()))
                 if tid in stop_ids:
                     finished[b] = True
+            # Synchronize finished status across all FSDP ranks.
+            # If any rank still has unfinished samples, all ranks must
+            # continue running forward passes (FSDP AllGather requires
+            # every rank to participate).
             if all(finished):
+                _local_done = torch.tensor([1], device=device)
+            else:
+                _local_done = torch.tensor([0], device=device)
+            if dist.is_initialized():
+                dist.all_reduce(_local_done, op=dist.ReduceOp.MIN)
+            if _local_done.item() == 1:
                 break
 
             cur_input_ids = torch.cat([cur_input_ids, token_id.unsqueeze(-1)], dim=1)
@@ -183,7 +210,22 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         prompt_mask = conditions.prompt.attention_mask
         device = prompt_ids.device
         batch_size = int(prompt_ids.shape[0])
-        prompt_len = int(prompt_ids.shape[1])
+
+        # pixel_values / image_grid_thw: per-sample lists → merged tensors
+        # The lists are already correctly sliced by Batched (CONCAT),
+        # so each entry corresponds to the matching prompt row.
+        pv = _merge_pv(conditions.pixel_values)
+        igt = _merge_igt(conditions.image_grid_thw)
+
+        # Strip right-padding introduced by TextTokenCondition.concat across
+        # rollout workers.  During rollout each worker pads to its own batch
+        # max; when tracks are concatenated for replay the global max adds
+        # extra pad tokens that shift the logit extraction window and corrupt
+        # position_ids for pad positions (text_pos=1 via masked_fill).
+        real_lens = prompt_mask.sum(dim=1).long()  # [batch_size]
+        max_real_len = int(real_lens.max().item())
+        prompt_ids = prompt_ids[:, :max_real_len]
+        prompt_mask = prompt_mask[:, :max_real_len]
 
         # Reset stale rope_deltas — critical for correct M-RoPE position IDs
         self.model.transformer.model.rope_deltas = None
@@ -208,28 +250,31 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
             full_ids = prompt_ids
             full_mask = prompt_mask
 
-        full_mm_type_ids = None
-        if conditions.mm_token_type_ids is not None:
-            if T_max > 0:
-                response_types = torch.zeros(
-                    (batch_size, T_max), dtype=conditions.mm_token_type_ids.dtype, device=device
-                )
-                full_mm_type_ids = torch.cat([conditions.mm_token_type_ids, response_types], dim=1)
-            else:
-                full_mm_type_ids = conditions.mm_token_type_ids
-
         forward_kwargs: Dict[str, Any] = {
             "input_ids": full_ids,
             "attention_mask": full_mask,
             "use_cache": False,
             "return_dict": True,
         }
-        if conditions.pixel_values is not None:
-            forward_kwargs["pixel_values"] = conditions.pixel_values
-        if conditions.image_grid_thw is not None:
-            forward_kwargs["image_grid_thw"] = conditions.image_grid_thw
-        if full_mm_type_ids is not None:
-            forward_kwargs["mm_token_type_ids"] = full_mm_type_ids
+        if pv is not None:
+            forward_kwargs["pixel_values"] = pv
+        if igt is not None:
+            forward_kwargs["image_grid_thw"] = igt
+
+        # Compute correct 4D position_ids for M-RoPE.
+        # Rollout uses prepare_inputs_for_generation which produces [4, bs, seq]:
+        #   row 0 = text positions (for causal mask), rows 1-3 = M-RoPE (temporal, height, width).
+        # Direct forward with position_ids=None only produces [3, bs, seq] (no text_position_ids),
+        # causing incorrect causal mask for multimodal inputs.
+        # Fix: call get_rope_index ourselves and prepend text_positions.
+        vision_pos, _ = self.model.transformer.model.get_rope_index(
+            full_ids,
+            image_grid_thw=igt,
+            attention_mask=full_mask,
+        )  # [3, bs, seq]
+        text_pos = full_mask.long().cumsum(-1) - 1
+        text_pos.masked_fill_(full_mask == 0, 1)
+        forward_kwargs["position_ids"] = torch.cat([text_pos[None], vision_pos], dim=0)  # [4, bs, seq]
 
         out = self.model.transformer(**forward_kwargs)
         logits = out.logits
@@ -237,16 +282,27 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         if T_max == 0:
             return torch.zeros(0, dtype=torch.float32, device=device)
 
-        pred_logits = logits[:, prompt_len - 1 : prompt_len - 1 + T_max, :]
-        log_probs_full = F.log_softmax(pred_logits.float(), dim=-1)
-        per_token = log_probs_full.gather(-1, response_tokens.unsqueeze(-1)).squeeze(-1)
-
+        # Per-sample logit extraction using real prompt lengths.
+        # With right-padding, the logit at position (real_len_b - 1) correctly
+        # predicts the first generated token (same context & position encoding
+        # as rollout).  Subsequent generated-token logits are at contiguous
+        # positions starting from max_real_len.  Positions real_len_b ..
+        # max_real_len-1 are per-sample pad tokens with incorrect position
+        # encoding, so their logits must be skipped.
         flat: List[torch.Tensor] = []
         for b in range(batch_size):
             n = lengths[b]
             if n == 0:
                 continue
-            flat.append(per_token[b, :n])
+            real_len_b = int(real_lens[b].item())
+            # First generated token: logit from last real prompt token
+            first_logit = logits[b, real_len_b - 1 : real_len_b, :]  # [1, V]
+            # Subsequent generated tokens: logits from generated-token positions
+            rest_logits = logits[b, max_real_len : max_real_len + n - 1, :] if n > 1 else logits[b, :0, :]
+            pred_logits_b = torch.cat([first_logit, rest_logits], dim=0)  # [n, V]
+            log_probs_full = F.log_softmax(pred_logits_b.float(), dim=-1)
+            per_token = log_probs_full.gather(-1, response_tokens[b, :n].unsqueeze(-1)).squeeze(-1)
+            flat.append(per_token)
         if not flat:
             return torch.zeros(0, dtype=torch.float32, device=device)
         return torch.cat(flat, dim=0)

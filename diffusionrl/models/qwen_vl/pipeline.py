@@ -90,7 +90,7 @@ class QwenVLPipeline(Pipeline):
 
         return RolloutResp(
             tracks={
-                "text": RolloutTrack(
+                "ar": RolloutTrack(
                     sample_ids=list(req.sample_ids),
                     parent_ids=list(req.group_ids),
                     conditions=conds.to_dict(),
