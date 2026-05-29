@@ -20,7 +20,7 @@ from diffusionrl.config.require import require
 class RunConfig:
     """Per-run driver inputs: seed, loop budget, data pipeline."""
 
-    seed: int = 42
+    seed: Optional[int] = 42
     num_rollouts: int = 1
     data_source_dotpath: str = "diffusionrl.data.DefaultDataSource"
     data_path: Optional[str] = None

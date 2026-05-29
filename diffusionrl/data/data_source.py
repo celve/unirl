@@ -117,7 +117,14 @@ class MultimodalRLDataSource:
         self._iter: Optional[Iterator] = None
         self._eval_dataset_ready = False
         self._shuffle_generator = torch.Generator()
-        self._shuffle_generator.manual_seed(int(self.seed))
+        # ``self.seed`` may be None (run.seed=null) — torch.Generator needs an
+        # int, so draw from OS entropy. Per-process shuffle order then becomes
+        # non-reproducible, matching the seed=null contract.
+        if self.seed is None:
+            _shuffle_seed = int.from_bytes(os.urandom(8), "big") & 0x7FFFFFFF
+        else:
+            _shuffle_seed = int(self.seed)
+        self._shuffle_generator.manual_seed(_shuffle_seed)
 
         if not self.data_path:
             raise ValueError("MultimodalRLDataSource requires args.run.data_path.")

@@ -11,13 +11,8 @@ DIFFRL=/path/to/diffusionrl
 cd /root/vllm-omni
 git apply $DIFFRL/patches/vllm_omni/0001-omni-py-lora_request-passthrough.patch
 
-VLLM_SITE=$(python -c "import vllm; print(vllm.__path__[0])")
-cd $(dirname $VLLM_SITE)
-patch -p1 < $DIFFRL/patches/vllm/0001-utils-skip-fp32-from-layer.patch
-
 # 2. Verify patches
 grep -c 'lora_request' /root/vllm-omni/vllm_omni/entrypoints/omni.py  # expect >= 7
-grep -c 'v44e' $VLLM_SITE/lora/utils.py                                # expect >= 1
 
 # 3. Launch training (from launcher pod)
 cd $DIFFRL
@@ -35,17 +30,17 @@ Key config knobs (override via CLI):
 
 # Third-party patches required for HI3-Instruct RL
 
-Two pod-local patches are currently required for HI3 / vLLM-Omni rollout
-workers. The in-repo `lora_hijack.py:VLLMOmniHijack.hijack()` handles
-runtime tensor-bag LoRA loading, but these two upstream changes still need
-to be applied in the external vLLM / vLLM-Omni checkouts used by the pod.
+One pod-local patch is currently required for HI3 / vLLM-Omni rollout
+workers. The in-repo `vllm_patches.py:VLLMOmniHijack.hijack()` handles
+runtime tensor-bag LoRA loading (and now the fp32 `from_layer` skip too,
+see "Previously required patches" below), but this upstream change still
+needs to be applied in the external vLLM-Omni checkout used by the pod.
 
 ## Patch list
 
 | dir | patch | applies to | base commit | status |
 |---|---|---|---|---|
 | `vllm_omni/` | `0001-omni-py-lora_request-passthrough.patch` | `/root/vllm-omni/vllm_omni/entrypoints/omni.py` | `4a24a51` | **REQUIRED** pod-local; cannot be monkey-patched (function signature change) |
-| `vllm/` | `0001-utils-skip-fp32-from-layer.patch` | `vllm/lora/utils.py` (site-packages) | vllm 0.10+ | **REQUIRED** pod-local; DiT worker subprocess loads model before extension hijack runs |
 
 ## Why this patch is pod-local (not in-repo monkey-patch)
 
@@ -61,17 +56,11 @@ On each pod (launcher AND every worker) that runs `train`:
 ```bash
 PATCHES=/apdcephfs_fsgm3/share_305110755/hunyuan/gxhe/project/diffusionrl-main-unified-base-hi3-instruct/diffusionrl/patches
 
-# 1. vllm-omni: lora_request passthrough
+# vllm-omni: lora_request passthrough
 cd /root/vllm-omni
 git apply $PATCHES/vllm_omni/0001-omni-py-lora_request-passthrough.patch
 # verify:
 grep -c 'lora_request' vllm_omni/entrypoints/omni.py  # expect >= 7
-
-# 2. vllm site-packages: fp32 from_layer skip
-cd /root/diffusionrl/.venv/lib/python3.12/site-packages
-patch -p1 < $PATCHES/vllm/0001-utils-skip-fp32-from-layer.patch
-# verify:
-python3 -c "import vllm.lora.utils, inspect; print('OK' if 'bfloat16' in inspect.getsource(vllm.lora.utils.from_layer) else 'FAIL')"
 ```
 
 ## How to verify before each training run
@@ -93,11 +82,4 @@ fi
 | patch | reason obsolete |
 |---|---|
 | `vllm_omni/0002-hunyuan_image3-fp32-gate-bypass-lora.patch` | Redundant once `from_layer` skips fp32 layers (gate stays raw `ReplicatedLinear`) |
-
-## Why vllm/0001 is still pod-local (not just in-repo monkey-patch)
-
-The in-repo `lora_hijack.py` monkey-patch works for the AR worker (extension
-`__new__` runs before model load). But the DiT stage is loaded inside a
-`StageDiffusionProc` subprocess that calls `from_layer()` during model init
-**before** the extension's `__new__` is invoked. The monkey-patch is therefore
-ineffective for DiT. A pod-local patch to site-packages is still required.
+| `vllm/0001-utils-skip-fp32-from-layer.patch` | Superseded by `vllm_patches.py:patch_fp32_skip()`. The DiT stage loads inside a `StageDiffusionProc` spawn subprocess, but `wrap_mp_process_for_children()` now propagates the hijack into those children so the in-repo monkey-patch reaches `from_layer()` before model init — no site-packages patch needed. |

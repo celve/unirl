@@ -20,7 +20,7 @@ from a worker-extension's ``__new__``).
 
 from __future__ import annotations
 
-import multiprocessing as mp
+from multiprocessing.process import BaseProcess as _MpBaseProcess
 
 from msgspec import field
 
@@ -74,11 +74,18 @@ _WRAP_SENTINEL = "_diffrl_target_wrapped"
 
 
 def wrap_mp_process_for_children() -> None:
-    """Replace ``mp.Process.__init__`` so spawned targets install patches first."""
-    if getattr(mp.Process, _WRAP_SENTINEL, False):
+    """Replace ``BaseProcess.__init__`` so spawned targets install patches first.
+
+    Patching ``mp.Process.__init__`` alone misses spawn-context Process classes
+    (vllm-omni's stage launcher uses ``get_mp_context().Process`` ==
+    ``SpawnProcess``, a sibling class, not a subclass). All context-specific
+    Process classes inherit from ``BaseProcess``, so patching the root catches
+    every context in one shot.
+    """
+    if getattr(_MpBaseProcess, _WRAP_SENTINEL, False):
         return
 
-    orig_init = mp.Process.__init__
+    orig_init = _MpBaseProcess.__init__
 
     def __init__(
         self,
@@ -102,8 +109,8 @@ def wrap_mp_process_for_children() -> None:
             daemon=daemon,
         )
 
-    mp.Process.__init__ = __init__
-    setattr(mp.Process, _WRAP_SENTINEL, True)
+    _MpBaseProcess.__init__ = __init__
+    setattr(_MpBaseProcess, _WRAP_SENTINEL, True)
 
 
 def patch_dit_lora_loader() -> None:
@@ -266,6 +273,23 @@ def patch_fp32_skip() -> None:
     _patched_from_layer._diffrl_fp32_skip = True  # type: ignore[attr-defined]
     _lora_utils.from_layer = _patched_from_layer
 
+    # Rebind stale references in modules that did `from vllm.lora.utils import
+    # from_layer` at top level before our patch ran.
+    import importlib as _importlib
+
+    for _modname in (
+        "vllm.lora.lora_model",
+        "vllm.lora.models",
+        "vllm.lora.model_manager",
+        "vllm.lora.worker_manager",
+    ):
+        try:
+            _mod = _importlib.import_module(_modname)
+        except ImportError:
+            continue
+        if getattr(_mod, "from_layer", None) is _orig_from_layer:
+            _mod.from_layer = _patched_from_layer
+
 
 def patch_lora_request_passthrough() -> None:
     """Forward ``lora_request`` through ``Omni.generate`` to ``engine.add_request``.
@@ -376,6 +400,134 @@ def patch_sigmas_passthrough() -> None:
         pass  # pipeline not available in this process; skip
 
 
+def patch_per_request_ar_seed() -> None:
+    """Stamp a fresh os.urandom seed onto every AR SamplingParams in add_request's
+    sampling_params_list. Without this, a GRPO group's N parallel requests all
+    re-seed from the same shared SamplingParams ref and collapse to byte-identical
+    AR tokens despite temperature > 0.
+    """
+    try:
+        import msgspec as _msgspec
+        from vllm import SamplingParams as VLLMSamplingParams
+        from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
+    except (ImportError, AttributeError):
+        return
+
+    _orig = AsyncOmniEngine.add_request
+    if getattr(_orig, "_diffrl_per_request_ar_seed", False):
+        return
+
+    import os as _os
+
+    def _patched(self, *args, sampling_params_list=None, _orig=_orig, **kwargs):
+        if sampling_params_list is not None:
+            # SamplingParams is a msgspec.Struct shared across the N add_request
+            # calls; ``structs.replace`` produces a brand-new instance per request
+            # so the worker queue does not see one object holding the last seed.
+            sampling_params_list = [
+                _msgspec.structs.replace(sp, seed=int.from_bytes(_os.urandom(4), "big"))
+                if isinstance(sp, VLLMSamplingParams) and getattr(sp, "seed", None) is None
+                else sp
+                for sp in sampling_params_list
+            ]
+        return _orig(self, *args, sampling_params_list=sampling_params_list, **kwargs)
+
+    _patched._diffrl_per_request_ar_seed = True  # type: ignore[attr-defined]
+    AsyncOmniEngine.add_request = _patched
+
+
+def patch_hi3_flow_alignment() -> None:
+    """Port of bjf-frz/fix-hi3-flow (vllm-omni eed27812) to v0.20.0's older
+    KV-cache API: store full 4-D first-step KV, then scatter live image KV by
+    absolute position_ids on subsequent steps. Silent skip on non-v0.20.0.
+
+    Threads position_ids through a thread-local so we only need to patch
+    `_save_image_kv_caches`, `_update_image_kv_caches` and a tiny wrapper
+    around `HunyuanImage3DecoderLayer.forward` (no need to reimplement
+    `ImageKVCacheManager.__call__` for the sake of one line).
+
+    Delete this function once vllm-omni upstream lands the fix in our pinned version.
+    """
+    try:
+        from vllm_omni.diffusion.models.hunyuan_image3 import (
+            hunyuan_image3_transformer as _trans,
+        )
+    except (ImportError, AttributeError):
+        return
+
+    _ImageKVCacheManager = _trans.ImageKVCacheManager
+    _DecoderLayer = _trans.HunyuanImage3DecoderLayer
+
+    if not hasattr(_ImageKVCacheManager, "_save_image_kv_caches"):
+        return
+
+    import threading as _threading
+
+    # Thread-local position_ids stash. Single denoise call chain (DecoderLayer.forward
+    # → self_attn → image_attn → _update_image_kv_caches) is synchronous in one
+    # thread, so the wrapper sets _tls.position_ids on entry and the patched
+    # _update reads it back down the stack.
+    _tls = _threading.local()
+
+    _orig_save = _ImageKVCacheManager._save_image_kv_caches
+    if not getattr(_orig_save, "_diffrl_hi3_flow_aligned", False):
+
+        def _patched_save_image_kv_caches(self, key, value, seq_len):
+            assert key.shape[1] == seq_len, f"first-step q_len({key.shape[1]}) != seq_len({seq_len})"
+            self.image_kv_cache_map = (key.contiguous(), value.contiguous())
+
+        _patched_save_image_kv_caches._diffrl_hi3_flow_aligned = True  # type: ignore[attr-defined]
+        _ImageKVCacheManager._save_image_kv_caches = _patched_save_image_kv_caches
+
+    _orig_update = _ImageKVCacheManager._update_image_kv_caches
+    if not getattr(_orig_update, "_diffrl_hi3_flow_aligned", False):
+
+        def _patched_update_image_kv_caches(self, key, value, seq_len, position_ids=None):
+            cached_key, cached_value = self.image_kv_cache_map
+            bs, q_len = key.shape[0], key.shape[1]
+            if position_ids is None:
+                position_ids = getattr(_tls, "position_ids", None)
+            assert cached_key.dim() == 4, (
+                f"patch_hi3_flow_alignment expects a 4-D cache from the patched "
+                f"_save_image_kv_caches; got dim={cached_key.dim()}."
+            )
+            assert position_ids is not None and position_ids.shape == (bs, q_len), (
+                f"position_ids missing or wrong shape: {None if position_ids is None else tuple(position_ids.shape)} "
+                f"!= ({bs}, {q_len})"
+            )
+            result_k = cached_key.clone()
+            result_v = cached_value.clone()
+            for b in range(bs):
+                result_k[b].index_copy_(0, position_ids[b], key[b])
+                result_v[b].index_copy_(0, position_ids[b], value[b])
+            return result_k.contiguous(), result_v.contiguous()
+
+        _patched_update_image_kv_caches._diffrl_hi3_flow_aligned = True  # type: ignore[attr-defined]
+        _ImageKVCacheManager._update_image_kv_caches = _patched_update_image_kv_caches
+
+    _orig_decoder = _DecoderLayer.forward
+    if not getattr(_orig_decoder, "_diffrl_hi3_flow_aligned", False):
+
+        def _patched_decoder_forward(
+            self,
+            hidden_states,
+            attention_mask=None,
+            position_ids=None,
+            *args,
+            _orig=_orig_decoder,
+            **kwargs,
+        ):
+            _prev = getattr(_tls, "position_ids", None)
+            _tls.position_ids = position_ids
+            try:
+                return _orig(self, hidden_states, attention_mask, position_ids, *args, **kwargs)
+            finally:
+                _tls.position_ids = _prev
+
+        _patched_decoder_forward._diffrl_hi3_flow_aligned = True  # type: ignore[attr-defined]
+        _DecoderLayer.forward = _patched_decoder_forward
+
+
 class VLLMOmniHijack:
     """Monkey-patches vllm-omni internals to support in-memory LoRA tensors.
 
@@ -404,7 +556,15 @@ class VLLMOmniHijack:
         patch_ar_lora_loader()
         patch_fp32_skip()
         patch_lora_request_passthrough()
+        patch_per_request_ar_seed()
         patch_sigmas_passthrough()
+        patch_hi3_flow_alignment()
 
 
-__all__ = ["OmniTensorLoRARequest", "VLLMOmniHijack", "patch_sigmas_passthrough"]
+__all__ = [
+    "OmniTensorLoRARequest",
+    "VLLMOmniHijack",
+    "patch_hi3_flow_alignment",
+    "patch_per_request_ar_seed",
+    "patch_sigmas_passthrough",
+]

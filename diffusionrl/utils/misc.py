@@ -50,12 +50,15 @@ def load_function(path: str) -> Any:
     return cls
 
 
-def set_seed(seed: int) -> None:
+def set_seed(seed: Optional[int]) -> None:
     """
     Set random seed for reproducibility.
 
     Args:
-        seed: Random seed value
+        seed: Random seed value. ``None`` means "draw a fresh seed from OS
+            entropy" — this run is internally deterministic (random.seed /
+            np.random.seed / torch.manual_seed all share the same drawn int)
+            but not reproducible across re-runs.
 
     Note:
         ``CUBLAS_WORKSPACE_CONFIG`` is set via ``setdefault`` as a
@@ -64,6 +67,8 @@ def set_seed(seed: int) -> None:
         torch (e.g., via Ray ``runtime_env={"env_vars": ...}``). Once
         cuBLAS has initialized, changing this env var has no effect.
     """
+    if seed is None:
+        seed = int.from_bytes(os.urandom(8), "big") & 0x7FFFFFFF
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     np.random.seed(seed)
