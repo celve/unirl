@@ -108,7 +108,7 @@ class RolloutActor(ConfigActor, RolloutWeightSyncMixin, DistributedMixin, Rollou
         self.gpu_ids = list(gpu_ids) if gpu_ids else []
         self._reward_pipeline: Optional[RewardPipeline] = None
 
-        set_seed(int(self._cfg.run.seed))
+        set_seed(self._cfg.run.seed)
         logger.info(
             "Rank %s: Initializing new rollout actor (num_gpus=%d)...",
             self.rank,

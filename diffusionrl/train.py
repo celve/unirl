@@ -131,7 +131,7 @@ def train(cfg: DictConfig) -> None:
     from diffusionrl.utils.wandb_metrics import compute_rollout_resp_metrics
 
     configure_logger()
-    set_seed(int(cfg.run.seed))
+    set_seed(cfg.run.seed)
 
     direct_sampling = is_direct_sampling(cfg)
     sync_cfg = cfg.get("sync")

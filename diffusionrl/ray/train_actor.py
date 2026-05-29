@@ -74,13 +74,13 @@ class TrainActor(
         rank: int,
         master_addr: Optional[str],
         master_port: Optional[int],
-        seed: int = 42,
+        seed: Optional[int] = 42,
     ) -> None:
         from diffusionrl.config.instantiate import build, materialize
         from diffusionrl.config.validation import is_direct_sampling
         from diffusionrl.utils import set_seed
 
-        set_seed(int(seed))
+        set_seed(seed)
 
         super().__init__(
             cfg=cfg,

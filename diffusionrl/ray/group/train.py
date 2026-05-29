@@ -62,7 +62,7 @@ class TrainActorGroup(ActorGroup):
             )
 
         master_addr, master_port = placement.train_master
-        seed = int(cfg.run.seed)
+        seed = cfg.run.seed
         runtime_env: Dict[str, Any] = {"env_vars": dict(_DETERMINISM_ENV_VARS)}
 
         # In colocate mode the train actor shares the bundle with a rollout
