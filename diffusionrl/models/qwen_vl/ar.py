@@ -226,7 +226,6 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         max_real_len = int(real_lens.max().item())
         prompt_ids = prompt_ids[:, :max_real_len]
         prompt_mask = prompt_mask[:, :max_real_len]
-        prompt_len = max_real_len
 
         # Reset stale rope_deltas — critical for correct M-RoPE position IDs
         self.model.transformer.model.rope_deltas = None

@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-import torch
-
 from diffusionrl.distributed.tensor.batch import Batch, FieldKind, field
 from diffusionrl.types.conditions import TextTokenCondition
 

@@ -170,9 +170,7 @@ class Images(Batch):
                     c, h, w = p.shape
                     pad_h = max_h - h
                     pad_w = max_w - w
-                    padded_p = torch.nn.functional.pad(
-                        p, (0, pad_w, 0, pad_h), mode="constant", value=0
-                    )
+                    padded_p = torch.nn.functional.pad(p, (0, pad_w, 0, pad_h), mode="constant", value=0)
                     padded.append(padded_p)
             pixels_list = padded
         stacked = torch.stack(pixels_list, dim=0)
