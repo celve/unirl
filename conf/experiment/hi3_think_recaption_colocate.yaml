@@ -39,6 +39,7 @@ sampling:
   width: 1024
   init_same_noise: false
   eta: 1.0
+  seed: null
 
 algorithm:
   prompts_per_rollout: 1
