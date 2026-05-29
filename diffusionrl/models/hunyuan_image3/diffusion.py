@@ -554,7 +554,7 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
             init_same_noise=bool(params.init_same_noise),
             samples_per_prompt=int(params.samples_per_prompt),
             noise_group_ids=params.noise_group_ids,
-            base_seed=int(params.seed),
+            base_seed=params.seed,
         )
 
         sde_set: Set[int] = set(int(i) for i in (params.sde_indices or []))
