@@ -22,16 +22,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from diffusionrl.distributed.transfer_queue.transportable import Transportable
+from diffusionrl.distributed.tensor.batch import Batch, FieldKind, field
 from diffusionrl.types.conditions import Condition, TextTokenCondition
-from diffusionrl.utils.batched import FieldKind, field
 
 
 @dataclass
-class Qwen3ARConditions(Transportable):
+class Qwen3ARConditions(Batch):
     """Typed conditions container for the Qwen3 AR stage."""
 
-    prompt: Optional[TextTokenCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    prompt: Optional[TextTokenCondition] = field(kind=FieldKind.CONCAT, default=None)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Condition]) -> "Qwen3ARConditions":

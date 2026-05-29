@@ -25,17 +25,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from diffusionrl.distributed.transfer_queue.transportable import Transportable
+from diffusionrl.distributed.tensor.batch import Batch, FieldKind, field
 from diffusionrl.types.conditions import Condition, TextEmbedCondition
-from diffusionrl.utils.batched import FieldKind, field
 
 
 @dataclass
-class Flux2KleinConditions(Transportable):
+class Flux2KleinConditions(Batch):
     """Typed conditions container for FLUX.2-klein-9B diffusion."""
 
-    text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    negative_text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
+    negative_text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Condition]) -> "Flux2KleinConditions":

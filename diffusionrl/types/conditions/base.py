@@ -1,7 +1,7 @@
 """Condition base class and Modality enum.
 
 A ``Condition`` is the modality-tagged, encoded input that an architecture's
-diffusion / AR stage consumes. The base contributes only ``Transportable``
+diffusion / AR stage consumes. The base contributes only ``Batch``
 round-trip semantics and the ``modality`` ClassVar used by generic dispatch
 (e.g. ``LatentSegment.as_condition`` for promotion). Concrete subclasses
 (``TextEmbedCondition``, ``ImageLatentCondition``, …) declare their payload
@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import ClassVar
 
-from diffusionrl.distributed.transfer_queue.transportable import Transportable
+from diffusionrl.distributed.tensor.batch import Batch
 
 
 class Modality(str, Enum):
@@ -30,11 +30,11 @@ class Modality(str, Enum):
 
 
 @dataclass
-class Condition(Transportable):
+class Condition(Batch):
     """Marker base for conditioning inputs.
 
     Subclasses declare their payload tensors and set the ``modality``
-    ClassVar. The base contributes only ``Transportable`` round-trip
+    ClassVar. The base contributes only ``Batch`` round-trip
     semantics and the modality discriminator.
     """
 

@@ -18,12 +18,13 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from diffusionrl.models.types.bundle import Bundle
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 from .config import SD3PipelineConfig
 
 
-class SD3Bundle:
+class SD3Bundle(Bundle):
     """SD3-family bundle: transformer + VAE + 3 text encoders + scheduler."""
 
     def __init__(
@@ -42,6 +43,7 @@ class SD3Bundle:
         device: torch.device,
         pretrained_path: str,
     ) -> None:
+        super().__init__()
         self.transformer = transformer
         self.vae = vae
         self.text_encoder = text_encoder

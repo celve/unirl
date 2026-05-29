@@ -26,12 +26,13 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 
+from diffusionrl.models.types.bundle import Bundle
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 from .config import WAN21PipelineConfig
 
 
-class WAN21Bundle:
+class WAN21Bundle(Bundle):
     """WAN 2.1 T2V / I2V bundle: transformer + VAE + UMT5 text encoder
     (+ optional CLIP vision tower for I2V).
     """
@@ -50,6 +51,7 @@ class WAN21Bundle:
         vision_encoder: Optional[nn.Module] = None,
         image_processor: Optional[Any] = None,
     ) -> None:
+        super().__init__()
         self.transformer = transformer
         self.vae = vae
         self.text_encoder = text_encoder

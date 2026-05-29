@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from diffusionrl.distributed.tensor.batch import Batch, concat_field
 from diffusionrl.types.rollout_req import PrimitiveValue
-from diffusionrl.utils.batched import Batched, concat_field
 
 
 @dataclass
-class RolloutInputs(Batched):
+class RolloutInputs(Batch):
     primitives: Dict[str, PrimitiveValue] = concat_field(default_factory=dict)
     sample_ids: List[str] = concat_field(default_factory=list)
     group_ids: List[str] = concat_field(default_factory=list)

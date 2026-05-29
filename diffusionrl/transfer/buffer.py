@@ -4,13 +4,13 @@ from typing import Dict
 
 from ray.actor import ActorHandle
 
-from diffusionrl.utils.batched import Batched
+from diffusionrl.distributed.tensor.batch import Batch
 
 
 @dataclass
 class BufferHandle:
     id: str
-    key: Batched
+    key: Batch
     actor_handle: ActorHandle
 
     def transfer_to(self, actor_handle: ActorHandle) -> None:
@@ -22,10 +22,10 @@ class BufferHandle:
 class Buffer:
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.mappings: Dict[str, Batched] = {}
+        self.mappings: Dict[str, Batch] = {}
         self.actor_handle: ActorHandle = None
 
-    def put_buffer(self, key: Batched, value: Batched) -> BufferHandle:
+    def put_buffer(self, key: Batch, value: Batch) -> BufferHandle:
         id = str(uuid.uuid4())
         self.mappings[id] = value
         return BufferHandle(id=id, key=key, actor_handle=self.actor_handle)
@@ -39,8 +39,8 @@ class Buffer:
         self.mappings[id] = value
         return BufferHandle(id=id, key=key, actor_handle=self.actor_handle)
 
-    def get_buffer(self, handle: BufferHandle) -> Batched:
+    def get_buffer(self, handle: BufferHandle) -> Batch:
         return self.mappings[handle.id]
 
-    def pop_buffer(self, handle: BufferHandle) -> Batched:
+    def pop_buffer(self, handle: BufferHandle) -> Batch:
         return self.mappings.pop(handle.id)

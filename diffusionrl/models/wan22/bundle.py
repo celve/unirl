@@ -35,6 +35,7 @@ from typing import Any, Dict
 import torch
 import torch.nn as nn
 
+from diffusionrl.models.types.bundle import Bundle
 from diffusionrl.models.wan21.bundle import WAN21Bundle
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
@@ -75,7 +76,7 @@ class WanDualTransformer(nn.Module):
         return target(**kwargs)
 
 
-class WAN22Bundle:
+class WAN22Bundle(Bundle):
     """WAN 2.2 T2V bundle: dual transformer + VAE + UMT5 text encoder."""
 
     def __init__(
@@ -95,6 +96,7 @@ class WAN22Bundle:
         guidance_scale_2: Any,
         num_train_timesteps: int,
     ) -> None:
+        super().__init__()
         self.transformer = transformer
         # Sub-transformer handles also exposed for hooks that need to
         # iterate them individually (e.g. checkpoint loading verifiers).

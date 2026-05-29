@@ -23,7 +23,7 @@ from __future__ import annotations
 from diffusionrl.models.types.bundle import Bundle
 
 
-class PEBundle:
+class PEBundle(Bundle):
     """PE bundle: a diffusion ``Bundle`` + an AR LLM ``Bundle``."""
 
     def __init__(
@@ -32,6 +32,7 @@ class PEBundle:
         diffusion: Bundle,
         llm: Bundle,
     ) -> None:
+        super().__init__()
         self.diffusion = diffusion
         self.llm = llm
 

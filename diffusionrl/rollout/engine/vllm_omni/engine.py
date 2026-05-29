@@ -28,6 +28,7 @@ from typing import Any, Optional
 import torch
 import yaml
 
+from diffusionrl.distributed.group.dispatch import Dispatch, distributed
 from diffusionrl.rollout.engine.base import BaseRolloutEngine
 from diffusionrl.rollout.engine.vllm_omni.config import VLLMOmniEngineConfig
 from diffusionrl.rollout.engine.vllm_omni.request import _to_omni_per_stage
@@ -356,6 +357,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
     # BaseRolloutEngine — generation
     # ------------------------------------------------------------------
 
+    @distributed(dispatch_mode=Dispatch.DP_ALL)
     def generate(self, req: RolloutReq) -> RolloutResp:
         if self._omni is None:
             raise RuntimeError("VLLMOmniRolloutEngine: engine not initialized")
@@ -489,6 +491,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
     # BaseRolloutEngine — runtime offload (vllm-omni level-2 sleep)
     # ------------------------------------------------------------------
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def sleep(self) -> None:
         """Fan ``handle_sleep_task`` to every stage's workers (level 2)."""
         if self._omni is None:
@@ -508,6 +511,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
             )
         self._is_offloaded = True
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def wake_up(self) -> None:
         """Fan ``handle_wake_task`` to every stage's workers."""
         if self._omni is None:

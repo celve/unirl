@@ -11,13 +11,22 @@ from diffusionrl.config.registration import register_config
 from diffusionrl.config.require import require
 
 
+@dataclass
 class BaseSamplingParams(ABC):
     """Marker base for all sampling config dataclasses.
 
     Used as the type annotation for polymorphic sampling config fields so that
     static type checkers see a meaningful type. At runtime, the annotation
     is erased to ``Any`` by ``erase_polymorphic_annotations``.
+
+    Holds the universal ``samples_per_prompt`` field — the per-prompt
+    rollout fanout. For atomic params (Diffusion, AR) this is the samples
+    generated per upstream input to that modality. For composed params it
+    is the multiplicative total across modalities, computed in
+    ``__post_init__``.
     """
+
+    samples_per_prompt: int = 1
 
 
 def get_diffusion_params(sampling: Any) -> "DiffusionSamplingParams":
@@ -52,13 +61,13 @@ class DiffusionSamplingParams(BaseSamplingParams):
     """
 
     # --- common (all diffusion models) ---
+    # samples_per_prompt is inherited from BaseSamplingParams.
     num_inference_steps: int = 50
     guidance_scale: float = 7.5
     height: int = 256
     width: int = 256
     num_frames: int = 16
     seed: Optional[int] = 42
-    samples_per_prompt: int = 1
     init_same_noise: bool = False
     noise_group_ids: Optional[List[str]] = None
 
@@ -104,21 +113,33 @@ class DiffusionSamplingParams(BaseSamplingParams):
 class ARSamplingParams(BaseSamplingParams):
     """AR (autoregressive) sampling parameters for LLM-based PE generation."""
 
+    # samples_per_prompt is inherited from BaseSamplingParams.
     temperature: float = 0.7
     max_new_tokens: int = 512
     top_p: float = 0.9
     top_k: int = 1024
     stop_token_id: int | None = None
-    samples_per_prompt: int = 1
 
 
 @register_config(group="sampling", name="composed")
-@dataclass
+@dataclass(kw_only=True)
 class ComposedSamplingParams(BaseSamplingParams):
-    """Composed sampling config with per-modality typed sampling params."""
+    """Composed sampling config with per-modality typed sampling params.
+
+    ``kw_only=True`` is required because the inherited
+    ``samples_per_prompt`` has a default while ``diffusion`` / ``ar``
+    do not — without kw-only ordering, Python's dataclass rule
+    "non-default after default" would fire.
+    """
 
     diffusion: BaseSamplingParams = polymorphic_field(group="sampling")
     ar: BaseSamplingParams = polymorphic_field(group="sampling")
+
+    def __post_init__(self) -> None:
+        # Per-prompt fanout for composed = product across modalities.
+        # Each prompt → ar.samples_per_prompt AR outputs, each AR output →
+        # diffusion.samples_per_prompt diffusion samples.
+        self.samples_per_prompt = int(self.diffusion.samples_per_prompt) * int(self.ar.samples_per_prompt)
 
 
 @dataclass(frozen=True)

@@ -4,7 +4,7 @@ RolloutTrack.fork_track — plus the full x*y*z prompt-enhancement tree shape.
 Covers:
 
 - Hierarchical sample_ids and parent_ids in group-by-parent order.
-- Conditions replicated via Batched.repeat_interleave(branch).
+- Conditions replicated via Batch.repeat_interleave(branch).
 - Lineage invariants enforced by RolloutResp.__post_init__ on tree assembly.
 - Two-level fan-out (req → refined → image) with the full x*y*z shape.
 - DP-shard concat round-trip with per-track sample_indices offset shift.

@@ -50,7 +50,7 @@ def test_text_token_condition_concat_pads_to_common_seq_len():
 
     SGLang's per-shard build_rollout_resp pads to each shard's in-batch
     max — different shards yield different lengths. Without the
-    pad-aware concat, ``Batched.concat`` raises in ``torch.cat(dim=0)``
+    pad-aware concat, ``Batch.concat`` raises in ``torch.cat(dim=0)``
     on the dim-1 mismatch (the bug that blocked pe_joint full training).
     """
     a = TextTokenCondition(

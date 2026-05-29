@@ -26,6 +26,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from diffusionrl.models.types.bundle import Bundle
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 from .config import Qwen3PipelineConfig
@@ -33,7 +34,7 @@ from .config import Qwen3PipelineConfig
 logger = logging.getLogger(__name__)
 
 
-class Qwen3Bundle:
+class Qwen3Bundle(Bundle):
     """Qwen3 bundle: causal-LM transformer + matching tokenizer."""
 
     def __init__(
@@ -45,6 +46,7 @@ class Qwen3Bundle:
         device: torch.device,
         pretrained_path: str,
     ) -> None:
+        super().__init__()
         self.transformer = transformer
         self.tokenizer = tokenizer
         self.dtype = dtype

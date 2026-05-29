@@ -21,9 +21,8 @@ from typing import Any, Callable, ClassVar, Optional
 
 import torch
 
-from diffusionrl.distributed.transfer_queue.transportable import Transportable
+from diffusionrl.distributed.tensor.batch import Batch, FieldKind, field
 from diffusionrl.types.conditions.base import Condition, Modality
-from diffusionrl.utils.batched import FieldKind, field
 
 
 class SegmentStatus(int, Enum):
@@ -34,7 +33,7 @@ class SegmentStatus(int, Enum):
 
 
 @dataclass
-class Segment(Transportable):
+class Segment(Batch):
     """SoA batched container for one modality's generation outputs.
 
     ``sample_indices[k]`` gives the sample index that segment ``k`` belongs
@@ -57,7 +56,7 @@ class Segment(Transportable):
 
     # Keep small routing metadata inline. The driver mutates/sample-offsets
     # these fields while aggregating per-actor RolloutResp shards; moving them
-    # behind TransferQueue would leave only TqMeta handles at that boundary.
+    # behind transport would leave only TensorMeta handles at that boundary.
     sample_indices: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
     positions: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
     status: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)

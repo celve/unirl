@@ -6,6 +6,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from diffusionrl.models.types.bundle import Bundle
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 from .config import QwenVLPipelineConfig
@@ -13,7 +14,7 @@ from .config import QwenVLPipelineConfig
 logger = logging.getLogger(__name__)
 
 
-class QwenVLBundle:
+class QwenVLBundle(Bundle):
     def __init__(
         self,
         *,
@@ -24,6 +25,7 @@ class QwenVLBundle:
         device: torch.device,
         pretrained_path: str,
     ) -> None:
+        super().__init__()
         self.transformer = transformer
         self.processor = processor
         self.tokenizer = tokenizer

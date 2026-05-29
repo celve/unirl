@@ -218,7 +218,7 @@ def train(cfg: DictConfig) -> None:
     tq_actor_handles = []
 
     if cfg.get("transfer_queue") is not None:
-        from diffusionrl.distributed.transfer_queue import TransferQueueRuntime
+        from diffusionrl.distributed.tensor.backend.transfer_queue import TransferQueueRuntime
 
         tq_runtime = TransferQueueRuntime().install()
         tq_handoffs = tq_runtime.init(cfg)

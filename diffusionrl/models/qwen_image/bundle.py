@@ -30,12 +30,13 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from diffusionrl.models.types.bundle import Bundle
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 from .config import QwenImagePipelineConfig
 
 
-class QwenImageBundle:
+class QwenImageBundle(Bundle):
     """Qwen-Image bundle: transformer + VAE + Qwen-VL text encoder + scheduler."""
 
     def __init__(
@@ -50,6 +51,7 @@ class QwenImageBundle:
         device: torch.device,
         pretrained_path: str,
     ) -> None:
+        super().__init__()
         self.transformer = transformer
         self.vae = vae
         self.text_encoder = text_encoder

@@ -24,6 +24,7 @@ class QwenVLPipeline(Pipeline):
         chat_template: QwenVLChatTemplateStage,
         ar: QwenVLARStage,
     ) -> None:
+        super().__init__()
         self.bundle = bundle
         self.chat_template = chat_template
         self.ar = ar

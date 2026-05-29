@@ -36,13 +36,12 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from diffusionrl.distributed.transfer_queue.transportable import Transportable
+from diffusionrl.distributed.tensor.batch import Batch, FieldKind, field
 from diffusionrl.types.conditions import (
     FusedMultimodalCondition,
     ImageEmbedCondition,
     ImageLatentCondition,
 )
-from diffusionrl.utils.batched import FieldKind, field
 
 
 @dataclass
@@ -73,19 +72,11 @@ class HunyuanImage3FusedMultimodalCondition(FusedMultimodalCondition):
     out.
     """
 
-    gen_image_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)  # [B, L] bool
-    gen_timestep_scatter_index: Optional[torch.Tensor] = field(
-        kind=FieldKind.CONCAT, transport=True, default=None
-    )  # [B, K] long
-    cond_vae_image_mask: Optional[torch.Tensor] = field(
-        kind=FieldKind.CONCAT, transport=True, default=None
-    )  # [B, L] bool
-    cond_vit_image_mask: Optional[torch.Tensor] = field(
-        kind=FieldKind.CONCAT, transport=True, default=None
-    )  # [B, L] bool
-    cond_timestep_scatter_index: Optional[torch.Tensor] = field(
-        kind=FieldKind.CONCAT, transport=True, default=None
-    )  # [B, K] long
+    gen_image_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)  # [B, L] bool
+    gen_timestep_scatter_index: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)  # [B, K] long
+    cond_vae_image_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)  # [B, L] bool
+    cond_vit_image_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)  # [B, L] bool
+    cond_timestep_scatter_index: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)  # [B, K] long
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "HunyuanImage3FusedMultimodalCondition":
@@ -127,10 +118,10 @@ class HunyuanImage3FusedMultimodalCondition(FusedMultimodalCondition):
 
     @classmethod
     def concat(cls, items: list) -> "HunyuanImage3FusedMultimodalCondition":
-        """Override ``Batched.concat`` to pad variable-length L dims before cat.
+        """Override ``Batch.concat`` to pad variable-length L dims before cat.
 
         In think_recaption mode, different prompts produce different AR token
-        counts → different fused sequence lengths L. The base ``Batched.concat``
+        counts → different fused sequence lengths L. The base ``Batch.concat``
         does a plain ``torch.cat(dim=0)`` on CONCAT fields, which fails when L
         differs across items (e.g. cross-actor merge).
 
@@ -138,18 +129,18 @@ class HunyuanImage3FusedMultimodalCondition(FusedMultimodalCondition):
         delegating to the base concat.
         """
         if not items or len(items) <= 1:
-            from diffusionrl.utils.batched import Batched
+            from diffusionrl.distributed.tensor.batch import Batch
 
-            return Batched.concat.__func__(cls, items)
+            return Batch.concat.__func__(cls, items)
 
         seq_lens = []
         for item in items:
             if item.input_ids is not None:
                 seq_lens.append(item.input_ids.shape[-1])
         if not seq_lens or len(set(seq_lens)) <= 1:
-            from diffusionrl.utils.batched import Batched
+            from diffusionrl.distributed.tensor.batch import Batch
 
-            return Batched.concat.__func__(cls, items)
+            return Batch.concat.__func__(cls, items)
 
         max_L = max(seq_lens)
 
@@ -206,13 +197,13 @@ class HunyuanImage3FusedMultimodalCondition(FusedMultimodalCondition):
             else:
                 padded_items.append(item)
 
-        from diffusionrl.utils.batched import Batched
+        from diffusionrl.distributed.tensor.batch import Batch
 
-        return Batched.concat.__func__(cls, padded_items)
+        return Batch.concat.__func__(cls, padded_items)
 
 
 @dataclass
-class HunyuanImage3DiffusionConditions(Transportable):
+class HunyuanImage3DiffusionConditions(Batch):
     """Typed conditions container for HunyuanImage3 DiT-mode diffusion.
 
     Composes the fused condition + cond-image primitives (it2i) + a few
@@ -230,17 +221,17 @@ class HunyuanImage3DiffusionConditions(Transportable):
                           on step 0 to drive the KV-cache gather-down
     """
 
-    fused: Optional[HunyuanImage3FusedMultimodalCondition] = field(kind=FieldKind.SHARED, transport=False, default=None)
-    cond_vae: Optional[ImageLatentCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    cond_vit: Optional[ImageEmbedCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    cond_timestep: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    fused: Optional[HunyuanImage3FusedMultimodalCondition] = field(kind=FieldKind.SHARED, default=None)
+    cond_vae: Optional[ImageLatentCondition] = field(kind=FieldKind.CONCAT, default=None)
+    cond_vit: Optional[ImageEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
+    cond_timestep: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
     # Opaque ``apply_chat_template`` output — used by the KV-cache path's
     # first ``_update_model_kwargs_for_generation`` call to drive the
     # gather-down from the full L sequence to the L' changed slice. Carries
     # ``joint_image_slices`` / ``gen_image_slices`` / etc. internally; we
     # treat it as opaque. Non-transportable; lives only for one diffuse()
     # call. ``None`` means the kernel falls back to the stateless path.
-    tokenizer_output: Optional[Any] = field(kind=FieldKind.SHARED, transport=False, default=None)
+    tokenizer_output: Optional[Any] = field(kind=FieldKind.SHARED, default=None)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "HunyuanImage3DiffusionConditions":
@@ -299,7 +290,7 @@ class HunyuanImage3DiffusionConditions(Transportable):
 
 
 @dataclass
-class HunyuanImage3ARConditions(Transportable):
+class HunyuanImage3ARConditions(Batch):
     """Typed conditions container for HunyuanImage3 AR-mode autoregress.
 
     Used by t2t / i2t / and the prefix passes inside t2i / it2i.
@@ -314,9 +305,9 @@ class HunyuanImage3ARConditions(Transportable):
                           for right-padded batches
     """
 
-    fused: Optional[HunyuanImage3FusedMultimodalCondition] = field(kind=FieldKind.SHARED, transport=False, default=None)
-    cond_vit: Optional[ImageEmbedCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    tokenizer_output: Optional[Any] = field(kind=FieldKind.SHARED, transport=False, default=None)
+    fused: Optional[HunyuanImage3FusedMultimodalCondition] = field(kind=FieldKind.SHARED, default=None)
+    cond_vit: Optional[ImageEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
+    tokenizer_output: Optional[Any] = field(kind=FieldKind.SHARED, default=None)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "HunyuanImage3ARConditions":

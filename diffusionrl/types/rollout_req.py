@@ -56,21 +56,20 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 
-from diffusionrl.distributed.transfer_queue.transportable import Transportable
+from diffusionrl.distributed.tensor.batch import Batch, FieldKind, concat_field, field, shared_field
 from diffusionrl.types.conditions.base import Condition
 from diffusionrl.types.primitives import Audios, Images, Texts, Videos
 from diffusionrl.types.sampling import BaseSamplingParams
-from diffusionrl.utils.batched import FieldKind, concat_field, field, shared_field
 
 PrimitiveValue = Union[Texts, Images, Videos, Audios]
 
 
 @dataclass
-class RolloutReq(Transportable):
+class RolloutReq(Batch):
     sample_ids: List[str] = concat_field(default_factory=list)
     group_ids: List[str] = concat_field(default_factory=list)
-    primitives: Dict[str, PrimitiveValue] = field(kind=FieldKind.CONCAT, transport=True, default_factory=dict)
-    request_conditions: Dict[str, Condition] = field(kind=FieldKind.CONCAT, transport=True, default_factory=dict)
+    primitives: Dict[str, PrimitiveValue] = field(kind=FieldKind.CONCAT, default_factory=dict)
+    request_conditions: Dict[str, Condition] = field(kind=FieldKind.CONCAT, default_factory=dict)
     sampling_params: Optional[BaseSamplingParams] = shared_field(default=None)
     stage_config: Dict[str, Any] = shared_field(default_factory=dict)
     collect_media_preview: bool = shared_field(default=False)
@@ -112,7 +111,7 @@ class RolloutReq(Transportable):
         :param decode_to_condition: Callable mapping ``self`` to a
             ``Dict[str, Condition]`` at request batch_size (one entry per
             request prompt). Each condition is replicated ``branch``× via
-            :meth:`Batched.repeat_interleave`. If ``None`` (default), uses
+            :meth:`Batch.repeat_interleave`. If ``None`` (default), uses
             ``self.request_conditions`` verbatim.
         :param new_segment: Optional initial segment to set on the new
             track. Most callers leave this ``None`` and let the rollout

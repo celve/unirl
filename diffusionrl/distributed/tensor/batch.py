@@ -1,7 +1,7 @@
 """Field-metadata-driven batch container with automatic concat/select/slice.
 
 Annotate dataclass fields with one of the field-kind constructors and the
-``Batched`` base class provides generic implementations of concat, select,
+``Batch`` base class provides generic implementations of concat, select,
 slice, to_device, and clone that dispatch on the field kind and value type.
 
 Field kinds:
@@ -20,13 +20,13 @@ Supported value types for concat fields:
   - ``torch.Tensor`` with batch dim at axis 0
   - ``list`` or ``tuple`` with ``len == batch_size``
   - ``dict`` containing tensors / lists / nested dicts (recursive)
-  - Nested ``Batched`` instances
+  - Nested ``Batch`` instances
   - ``None`` (optional fields)
 
 Example::
 
     @dataclass
-    class MyBatch(Batched):
+    class MyBatch(Batch):
         data: torch.Tensor = concat_field()
         labels: List[str] = concat_field(default_factory=list)
         schedule: torch.Tensor = shared_field()
@@ -36,7 +36,7 @@ Example::
 Packed-varlen example (``cu_seqlens`` is implicit, never declared)::
 
     @dataclass
-    class MyPackedBatch(Batched):
+    class MyPackedBatch(Batch):
         tokens: Optional[torch.Tensor] = packed_field(default=None)     # [total]
         log_probs: Optional[torch.Tensor] = packed_field(default=None)  # [total]
         sample_indices: Optional[torch.Tensor] = concat_field(default=None)  # [N]
@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import copy
 import inspect as _inspect
+import uuid as _uuid
 from dataclasses import field as _dc_field
 from dataclasses import fields as dc_fields
 from enum import Enum, auto
@@ -71,7 +72,7 @@ from typing import (
 
 import torch
 
-T = TypeVar("T", bound="Batched")
+T = TypeVar("T", bound="Batch")
 
 # Metadata key under which the field kind enum is stored. The string value is
 # also the kwarg name accepted by ``field()`` below — caller writes
@@ -110,7 +111,7 @@ def field(**kwargs: Any) -> Any:
     ``metadata``, ``kw_only``) pass through to the underlying call.
     Any other kwarg becomes an entry in the field's ``metadata`` dict.
 
-    Consumers (``Batched``, ``Transportable``, …) read the metadata keys
+    Consumers (``Batch``, ``TensorTransport``, …) read the metadata keys
     they recognize. Adding a new behavior axis is just a new kwarg + a
     consumer that reads its key — no proliferation of ``*_field`` helpers.
 
@@ -140,17 +141,17 @@ def packed_field(**kwargs: Any) -> Any:
     The field's stored value is a packed ``torch.Tensor`` of shape
     ``[total, ...]`` where ``total = sum(per_sample_sizes)``. The framework
     auto-derives and tracks the cumulative offsets (``cu_seqlens``) as
-    hidden instance state on the ``Batched`` container — the user neither
+    hidden instance state on the ``Batch`` container — the user neither
     declares a sibling cu_seqlens field nor sets one explicitly.
 
     Construction is via the regular ``@dataclass`` constructor: pass a
     ``Sequence[Tensor]`` of per-sample tensors and the framework's
-    ``Batched.__post_init__`` packs them and computes cu_seqlens. Multiple
+    ``Batch.__post_init__`` packs them and computes cu_seqlens. Multiple
     ``packed_field``s on the same dataclass must agree on per-sample sizes
     (they share the single instance-level cu_seqlens).
 
-    See :class:`Batched` for the auto-pack / propagation contract and
-    :attr:`Batched.cu_seqlens` / :attr:`Batched.lengths` for read access
+    See :class:`Batch` for the auto-pack / propagation contract and
+    :attr:`Batch.cu_seqlens` / :attr:`Batch.lengths` for read access
     to the metadata.
     """
     metadata = dict(kwargs.pop("metadata", None) or {})
@@ -205,7 +206,7 @@ def _infer_batch_size(value: Any) -> Optional[int]:
         return int(value.shape[0])
     if isinstance(value, (list, tuple)):
         return len(value)
-    if isinstance(value, Batched):
+    if isinstance(value, Batch):
         return value.batch_size
     if isinstance(value, dict):
         for v in value.values():
@@ -285,7 +286,7 @@ def _concat_value(values: List[Any], batch_sizes: List[int]) -> Any:
             for k in keys
         }
 
-    if all(isinstance(v, Batched) for v in non_none):
+    if all(isinstance(v, Batch) for v in non_none):
         return type(non_none[0]).concat(non_none)
 
     first = non_none[0]
@@ -332,7 +333,7 @@ def _select_value(
         return tuple(value[i] for i in _to_index_list(indices))
     if isinstance(value, dict):
         return {k: _select_value(v, indices, batch_size) for k, v in value.items()}
-    if isinstance(value, Batched):
+    if isinstance(value, Batch):
         return value.select(indices)
     return value
 
@@ -351,7 +352,7 @@ def _slice_value(value: Any, start: int, end: int, batch_size: int) -> Any:
         return tuple(value[start:end])
     if isinstance(value, dict):
         return {k: _slice_value(v, start, end, batch_size) for k, v in value.items()}
-    if isinstance(value, Batched):
+    if isinstance(value, Batch):
         return value.slice(start, end)
     return value
 
@@ -370,7 +371,7 @@ def _repeat_interleave_value(value: Any, n: int, batch_size: int) -> Any:
         return tuple(v for v in value for _ in range(n))
     if isinstance(value, dict):
         return {k: _repeat_interleave_value(v, n, batch_size) for k, v in value.items()}
-    if isinstance(value, Batched):
+    if isinstance(value, Batch):
         return value.repeat_interleave(n)
     return value
 
@@ -389,7 +390,7 @@ def _repeat_interleave_value(value: Any, n: int, batch_size: int) -> Any:
         return tuple(v for v in value for _ in range(n))
     if isinstance(value, dict):
         return {k: _repeat_interleave_value(v, n, batch_size) for k, v in value.items()}
-    if isinstance(value, Batched):
+    if isinstance(value, Batch):
         return value.repeat_interleave(n)
     return value
 
@@ -405,7 +406,7 @@ def _move_value(value: Any, device: Union[str, torch.device]) -> Any:
     if isinstance(value, (list, tuple)):
         moved = [_move_value(v, device) for v in value]
         return type(value)(moved)
-    if isinstance(value, Batched):
+    if isinstance(value, Batch):
         return value.to_device(device)
     return value
 
@@ -421,7 +422,7 @@ def _clone_value(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         cloned = [_clone_value(v) for v in value]
         return type(value)(cloned)
-    if isinstance(value, Batched):
+    if isinstance(value, Batch):
         return value.clone()
     return copy.deepcopy(value)
 
@@ -594,7 +595,7 @@ def _repeat_interleave_cu_seqlens(cu: torch.Tensor, n: int) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 
-class Batched:
+class Batch:
     """Mixin / base for ``@dataclass`` containers with concat/shared fields.
 
     Subclasses must be ``@dataclass``es whose fields are annotated with
@@ -620,6 +621,15 @@ class Batched:
     # ``concat`` / ``slice`` / ``select``.  Never set directly by user
     # code — read via :attr:`cu_seqlens` / :attr:`lengths`.
     _packed_cu_seqlens: Optional[torch.Tensor] = None
+
+    @property
+    def _eid(self) -> str:
+        """Lazily-assigned UUID for list-element wire-key disambiguation."""
+        eid = getattr(self, "__eid__", None)
+        if eid is None:
+            eid = _uuid.uuid4().hex[:12]
+            object.__setattr__(self, "__eid__", eid)
+        return eid
 
     @property
     def cu_seqlens(self) -> Optional[torch.Tensor]:
@@ -808,7 +818,7 @@ class Batched:
 
         For each ``CONCAT`` field, applies ``torch.repeat_interleave(t, n,
         dim=0)`` to tensors and equivalent list-replication to lists/dicts.
-        Recurses into nested ``Batched`` values. ``SHARED`` and reduction-kind
+        Recurses into nested ``Batch`` values. ``SHARED`` and reduction-kind
         fields are untouched (their semantics are batch-shared metadata, which
         stays identical across replicated samples).
 
@@ -886,7 +896,7 @@ class Batched:
 
 
 __all__ = [
-    "Batched",
+    "Batch",
     "FieldKind",
     "concat_field",
     "field",

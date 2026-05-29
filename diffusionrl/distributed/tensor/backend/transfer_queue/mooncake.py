@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 from diffusionrl.config.registration import register_config
 from diffusionrl.config.require import require
-from diffusionrl.distributed.transfer_queue.base import Backend
+from diffusionrl.distributed.tensor.backend.transfer_queue.base import Backend
 
 
 @dataclass
@@ -30,7 +30,7 @@ class MooncakeZeroCopyConfig:
 @register_config(
     group="transfer_queue",
     name="mooncake",
-    target="diffusionrl.distributed.transfer_queue.mooncake.MooncakeBackend",
+    target="diffusionrl.distributed.tensor.backend.transfer_queue.mooncake.MooncakeBackend",
     expand=True,
 )
 @dataclass

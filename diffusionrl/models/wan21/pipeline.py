@@ -71,6 +71,7 @@ class WAN21Pipeline(Pipeline):
         vae_decode: WAN21VAEDecodeStage,
         shift: float = 5.0,
     ) -> None:
+        super().__init__()
         self.bundle = bundle
         self.text_embed = text_embed
         self.diffusion = diffusion

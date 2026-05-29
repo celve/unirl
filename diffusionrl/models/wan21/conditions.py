@@ -27,24 +27,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from diffusionrl.distributed.transfer_queue.transportable import Transportable
+from diffusionrl.distributed.tensor.batch import Batch, FieldKind, field
 from diffusionrl.types.conditions import (
     Condition,
     ImageEmbedCondition,
     ImageLatentCondition,
     TextEmbedCondition,
 )
-from diffusionrl.utils.batched import FieldKind, field
 
 
 @dataclass
-class WAN21Conditions(Transportable):
+class WAN21Conditions(Batch):
     """Typed conditions container for WAN 2.1 T2V / I2V diffusion."""
 
-    text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    negative_text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    image_latent: Optional[ImageLatentCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    image_embed: Optional[ImageEmbedCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
+    negative_text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
+    image_latent: Optional[ImageLatentCondition] = field(kind=FieldKind.CONCAT, default=None)
+    image_embed: Optional[ImageEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Condition]) -> "WAN21Conditions":

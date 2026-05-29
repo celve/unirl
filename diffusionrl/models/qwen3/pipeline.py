@@ -71,6 +71,7 @@ class Qwen3Pipeline(Pipeline):
         chat_template: Qwen3ChatTemplateStage,
         ar: Qwen3ARStage,
     ) -> None:
+        super().__init__()
         self.bundle = bundle
         self.chat_template = chat_template
         self.ar = ar

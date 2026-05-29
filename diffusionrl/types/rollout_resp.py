@@ -20,7 +20,7 @@ Per-track invariants enforced in ``RolloutResp.__post_init__``:
   and ``parent_ids`` are set; foreign-key check).
 
 Concat: ``RolloutTrack.concat`` owns the ``segment.sample_indices`` offset
-shift (per-track). ``RolloutResp.concat`` is the default ``Batched.concat``
+shift (per-track). ``RolloutResp.concat`` is the default ``Batch.concat``
 (dict-union with per-value concat), which delegates to ``RolloutTrack.concat``
 for same-key tracks.
 
@@ -49,19 +49,18 @@ from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Seque
 
 import torch
 
-from diffusionrl.distributed.transfer_queue.transportable import Transportable
-from diffusionrl.types.conditions import Condition
-from diffusionrl.types.media_preview import MediaPreview
-from diffusionrl.types.primitives import Audios, Images, Texts, Videos
-from diffusionrl.types.segments import Segment
-from diffusionrl.utils.batched import (
-    Batched,
+from diffusionrl.distributed.tensor.batch import (
+    Batch,
     FieldKind,
     concat_field,
     field,
     max_field,
     shared_field,
 )
+from diffusionrl.types.conditions import Condition
+from diffusionrl.types.media_preview import MediaPreview
+from diffusionrl.types.primitives import Audios, Images, Texts, Videos
+from diffusionrl.types.segments import Segment
 
 TR = TypeVar("TR", bound="RolloutTrack")
 TT = TypeVar("TT", bound="RolloutResp")
@@ -70,7 +69,7 @@ Decoded = Union[Texts, Images, Videos, Audios]
 
 
 @dataclass
-class RolloutTrack(Transportable):
+class RolloutTrack(Batch):
     """SoA container for one coherent rollout — one modality, one lifecycle stage.
 
     Lineage is per-track: ``parent_track`` names this track's parent in the
@@ -93,9 +92,9 @@ class RolloutTrack(Transportable):
     parent_ids: Optional[List[str]] = concat_field(default=None)
     parent_track: Optional[str] = shared_field(default=None)
 
-    conditions: Dict[str, Condition] = field(kind=FieldKind.CONCAT, transport=True, default_factory=dict)
-    segment: Optional[Segment] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    decoded: Optional[Decoded] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    conditions: Dict[str, Condition] = field(kind=FieldKind.CONCAT, default_factory=dict)
+    segment: Optional[Segment] = field(kind=FieldKind.CONCAT, default=None)
+    decoded: Optional[Decoded] = field(kind=FieldKind.CONCAT, default=None)
     media_preview: Optional[MediaPreview] = concat_field(default=None)
 
     rewards: Optional[torch.Tensor] = concat_field(default=None)
@@ -108,6 +107,22 @@ class RolloutTrack(Transportable):
         if self.sample_ids:
             return len(self.sample_ids)
         return super().batch_size
+
+    def metadata_only(self) -> "RolloutTrack":
+        """Return a light copy with heavy payload fields reset to defaults.
+
+        Drops ``conditions``, ``segment``, and ``decoded`` — the heavy
+        per-sample data — while preserving lineage metadata
+        (``sample_ids``, ``parent_ids``, ``parent_track``), rewards,
+        advantages, and status.
+        """
+        import copy
+
+        light = copy.copy(self)
+        light.conditions = {}
+        light.segment = None
+        light.decoded = None
+        return light
 
     @property
     def group_ids(self) -> List[str]:
@@ -127,7 +142,7 @@ class RolloutTrack(Transportable):
 
         Mirrors the legacy resp-level remap, but per-track. The offset for
         shard ``k`` is the cumulative sample count over shards ``0..k-1``.
-        After remap, ``Batched.concat`` does the per-field merge.
+        After remap, ``Batch.concat`` does the per-field merge.
         """
         if not items:
             raise ValueError(f"Cannot concat empty sequence of {cls.__name__}")
@@ -140,18 +155,22 @@ class RolloutTrack(Transportable):
 
         shifted: List[TR] = []
         for shard, off in zip(items, offsets):
-            if off == 0 or shard.segment is None or shard.segment.sample_indices is None:
+            if shard.segment is None or shard.segment.sample_indices is None:
                 shifted.append(shard)
                 continue
+            # Always pass through _shift_track_segment_indices (even for
+            # off==0) so every shard's sample_indices ends up as a real
+            # Tensor — otherwise shard 0 keeps its TensorMeta and the
+            # downstream Batch.concat field merge crashes on mixed types.
             shifted.append(_shift_track_segment_indices(shard, off))
 
-        return Batched.concat.__func__(cls, shifted)
+        return Batch.concat.__func__(cls, shifted)
 
     def split(self) -> List["RolloutTrack"]:
         """Split into one ``RolloutTrack`` per group-id equivalence class.
 
         Reads :attr:`group_ids` (derived from ``parent_ids`` or
-        ``sample_ids``); per-group shards built via :meth:`Batched.select`.
+        ``sample_ids``); per-group shards built via :meth:`Batch.select`.
         """
         gids = self.group_ids
         if not gids:
@@ -194,7 +213,7 @@ class RolloutTrack(Transportable):
         :param decode_to_condition: Optional callable mapping ``self`` to a
             ``Dict[str, Condition]`` at self's batch_size (one entry per
             parent sample). Each condition is replicated ``branch``× via
-            :meth:`Batched.repeat_interleave`. If ``None``, the child track
+            :meth:`Batch.repeat_interleave`. If ``None``, the child track
             has empty conditions; the caller is expected to populate them
             later (e.g. once a real text encoder is run on this track's
             decoded outputs).
@@ -253,6 +272,11 @@ class RolloutTrack(Transportable):
         if n == 0:
             return self  # trivially nothing to do
 
+        # The reward service runs on workers; its returned ``rewards`` arrives
+        # at the driver as a TensorMeta proxy (Worker._pack_output dehydrates
+        # every Tensor leaf). Driver-side arithmetic below needs a real Tensor.
+        rewards_local = _hydrate_tensor_meta(self.rewards)
+
         # Root track (parent_ids is None) — each sample is its own group, so
         # advantage = 0 for every sample (a single-sample group's mean equals
         # itself; centered = 0).
@@ -260,7 +284,7 @@ class RolloutTrack(Transportable):
             return _track_with_field(
                 self,
                 "advantages",
-                torch.zeros_like(self.rewards, dtype=torch.float32),
+                torch.zeros_like(rewards_local, dtype=torch.float32),
             )
 
         # Detect uniform group sizes via group-by-parent contiguous ordering.
@@ -282,7 +306,7 @@ class RolloutTrack(Transportable):
                 "make_root_track), got interleaved ordering."
             )
 
-        rewards = self.rewards.to(torch.float32)
+        rewards = rewards_local.to(torch.float32)
         reshaped = rewards.view(n_groups, branch)
         mean = reshaped.mean(dim=1, keepdim=True)
         if normalize:
@@ -319,16 +343,47 @@ def _root_group_per_sample(resp: "RolloutResp", track_name: str) -> List[str]:
     return [parent_root_groups[parent_sid_to_idx[pid]] for pid in track.parent_ids]
 
 
+def _hydrate_tensor_meta(value: Any) -> Any:
+    """Driver-side hydrate of a ``TensorMeta`` proxy back to a real ``torch.Tensor``.
+
+    ``Worker._pack_output`` stores every ``torch.Tensor`` leaf in the return
+    value into the TensorStore, so fields like ``segment.sample_indices`` and
+    ``track.rewards`` arrive at the driver as ``TensorMeta`` proxies even
+    though downstream driver-side code (concat offset shift, advantage
+    computation) does arithmetic on them as if they were tensors. This helper
+    fetches the underlying tensor(s) via each handle's bound worker and cats
+    them. Returns the value unchanged when it is already a ``torch.Tensor``
+    or ``None``.
+    """
+    from diffusionrl.distributed.tensor.transport import TensorMeta
+
+    if not isinstance(value, TensorMeta):
+        return value
+    if not value.refs:
+        return None
+    tensors = [h.local() for h in value.refs]
+    if len(tensors) == 1:
+        return tensors[0]
+    return torch.cat(tensors, dim=0)
+
+
 def _shift_track_segment_indices(track: TR, offset: int) -> TR:
     """Return a copy of ``track`` whose segment's ``sample_indices`` are shifted by ``offset``.
 
     Clones the segment (so the input track stays untouched) and rebuilds the
-    track via the dataclass init so all other fields are preserved.
+    track via the dataclass init so all other fields are preserved. Hydrates
+    ``sample_indices`` first when it arrives as a transport proxy, so the
+    arithmetic and the subsequent ``Batch.concat`` field merge both see a
+    real ``torch.Tensor`` (mixed Tensor/TensorMeta across shards would break
+    the field-level concat).
     """
-    if offset == 0 or track.segment is None or track.segment.sample_indices is None:
+    if track.segment is None or track.segment.sample_indices is None:
         return track
     new_segment = track.segment.clone()
-    new_segment.sample_indices = new_segment.sample_indices + offset
+    sample_indices = _hydrate_tensor_meta(new_segment.sample_indices)
+    if offset != 0:
+        sample_indices = sample_indices + offset
+    new_segment.sample_indices = sample_indices
     kwargs: Dict[str, Any] = {f.name: getattr(track, f.name) for f in dc_fields(track)}
     kwargs["segment"] = new_segment
     return type(track)(**kwargs)
@@ -342,7 +397,7 @@ def _track_with_field(track: TR, field_name: str, value: Any) -> TR:
 
 
 @dataclass
-class RolloutResp(Transportable):
+class RolloutResp(Batch):
     """Top-level rollout response container — keyed dict of ``RolloutTrack``.
 
     See module docstring for the multi-track architecture. Each track's
@@ -350,7 +405,7 @@ class RolloutResp(Transportable):
     there is no resp-level shim that fans out to / aggregates from tracks.
     """
 
-    tracks: Dict[str, RolloutTrack] = field(kind=FieldKind.CONCAT, transport=True, default_factory=dict)
+    tracks: Dict[str, RolloutTrack] = field(kind=FieldKind.CONCAT, default_factory=dict)
     reward_compute_s: float = max_field(default=0.0)
 
     def __post_init__(self) -> None:
@@ -395,14 +450,11 @@ class RolloutResp(Transportable):
     def metadata_only(self) -> "RolloutResp":
         """Per-track metadata-only view (keep-local light data plane).
 
-        ``tracks`` is itself a ``transport=True`` field, so the inherited
-        :meth:`Transportable.metadata_only` would drop the whole dict — losing
-        the per-track light metadata (sample_ids / rewards / advantages) the
-        driver needs for logging. Override to recurse: keep the tracks dict but
-        replace each track with its own ``metadata_only`` (which drops that
-        track's heavy ``conditions`` / ``segment`` / ``decoded`` and keeps the
-        light + lineage fields). ``parent_track`` / ``parent_ids`` / ``sample_ids``
-        are preserved, so the per-track lineage invariants still hold.
+        Recurses into each track, replacing it with its own
+        ``metadata_only`` (which drops that track's heavy ``conditions`` /
+        ``segment`` / ``decoded`` and keeps the light + lineage fields).
+        ``parent_track`` / ``parent_ids`` / ``sample_ids`` are preserved,
+        so the per-track lineage invariants still hold.
         """
         return RolloutResp(
             tracks={name: track.metadata_only() for name, track in self.tracks.items()},

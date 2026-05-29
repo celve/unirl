@@ -5,9 +5,8 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from diffusionrl.distributed.transfer_queue.transportable import Transportable
+from diffusionrl.distributed.tensor.batch import Batch, FieldKind, field
 from diffusionrl.types.conditions import Condition, TextTokenCondition
-from diffusionrl.utils.batched import FieldKind, field
 
 _PIXEL_VALUES_KEY = "_qwen_vl_pixel_values"
 _IMAGE_GRID_THW_KEY = "_qwen_vl_image_grid_thw"
@@ -16,15 +15,15 @@ _MM_TOKEN_TYPE_IDS_KEY = "_qwen_vl_mm_token_type_ids"
 
 @dataclass
 class _TensorWrapper(Condition):
-    data: Optional[torch.Tensor] = field(kind=FieldKind.SHARED, transport=True, default=None)
+    data: Optional[torch.Tensor] = field(kind=FieldKind.SHARED, default=None)
 
 
 @dataclass
-class QwenVLARConditions(Transportable):
-    prompt: Optional[TextTokenCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    pixel_values: Optional[torch.Tensor] = field(kind=FieldKind.SHARED, transport=True, default=None)
-    image_grid_thw: Optional[torch.Tensor] = field(kind=FieldKind.SHARED, transport=True, default=None)
-    mm_token_type_ids: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+class QwenVLARConditions(Batch):
+    prompt: Optional[TextTokenCondition] = field(kind=FieldKind.CONCAT, default=None)
+    pixel_values: Optional[torch.Tensor] = field(kind=FieldKind.SHARED, default=None)
+    image_grid_thw: Optional[torch.Tensor] = field(kind=FieldKind.SHARED, default=None)
+    mm_token_type_ids: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "QwenVLARConditions":

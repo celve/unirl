@@ -3,7 +3,7 @@
 ``TransferQueueRuntime`` owns the per-process state — the TQ client plus the
 driver-only ``Backend`` and ``TransferQueueController`` anchors — and exposes
 it as instance methods. Exactly one runtime is "current" per process; the
-``tqbridge`` decorator path reaches it through ``TransferQueueRuntime.current()``.
+``TQTransport`` wraps the client for the ``TensorTransport`` interface.
 
 The driver instantiates one runtime, calls ``install()`` to bind it as
 current, then ``init(cfg)`` to spawn the controller and bootstrap the
@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from omegaconf import DictConfig
 
 from diffusionrl.config.instantiate import build
-from diffusionrl.distributed.transfer_queue.base import Backend
+from diffusionrl.distributed.tensor.backend.transfer_queue.base import Backend
 
 if TYPE_CHECKING:
     from ray.actor import ActorHandle
@@ -174,7 +174,7 @@ class TransferQueueRuntime:
             # See LIN-186/docs/mooncake_-800_diagnosis.md (probe G6).
             os.environ["MC_ENABLE_DEST_DEVICE_AFFINITY"] = "1"
             if not handoff.get("device_name"):
-                from diffusionrl.distributed.transfer_queue.topology import list_rdma_bonds
+                from diffusionrl.distributed.tensor.backend.transfer_queue.topology import list_rdma_bonds
 
                 bonds = list_rdma_bonds()
                 if not bonds:

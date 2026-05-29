@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict
 
 from diffusionrl.config.registration import register_config
 from diffusionrl.config.require import require
-from diffusionrl.distributed.transfer_queue.base import Backend
+from diffusionrl.distributed.tensor.backend.transfer_queue.base import Backend
 
 if TYPE_CHECKING:
     from ray.actor import ActorHandle
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 @register_config(
     group="transfer_queue",
     name="simple",
-    target="diffusionrl.distributed.transfer_queue.simple.SimpleBackend",
+    target="diffusionrl.distributed.tensor.backend.transfer_queue.simple.SimpleBackend",
     expand=True,
 )
 @dataclass

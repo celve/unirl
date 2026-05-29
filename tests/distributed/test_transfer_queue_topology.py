@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from diffusionrl.distributed.transfer_queue import topology
-from diffusionrl.distributed.transfer_queue.topology import list_rdma_bonds
+from diffusionrl.distributed.tensor.backend.transfer_queue import topology
+from diffusionrl.distributed.tensor.backend.transfer_queue.topology import list_rdma_bonds
 
 
 def _populate_sysfs(tmp_path, names):

@@ -4,8 +4,8 @@ Per-sample types (``Text``, ``Image``, ``Video``, ``Audio``) are plain
 dataclasses used at the user-facing boundary — input construction and
 per-sample iteration in reward functions.
 
-Batched types (``Texts``, ``Images``, ``Videos``, ``Audios``) are
-``Transportable`` SoA containers used in storage and transport. Round-trip
+Batch types (``Texts``, ``Images``, ``Videos``, ``Audios``) are
+``Batch`` SoA containers used in storage and transport. Round-trip
 helpers (``from_list`` / ``to_list``) bridge between the two forms.
 
 Tier in the four-tier pipeline:
@@ -21,14 +21,14 @@ axis"; for packed-along-time/length data dim 0 is the packed sequence axis
 instead, and the framework needs ``_packed_cu_seqlens`` metadata to know
 how to ``concat`` / ``select`` / ``slice`` such instances per-sample.
 
-Per the ``Batched`` protocol contract (see
-:class:`diffusionrl.utils.batched.Batched`), ``_packed_cu_seqlens`` is a
+Per the ``Batch`` protocol contract (see
+:class:`diffusionrl.distributed.tensor.batch.Batch`), ``_packed_cu_seqlens`` is a
 framework-managed hidden attribute:
 
-- Construct via :meth:`Batched.pack` (or a thin wrapper like ``from_list``
+- Construct via :meth:`Batch.pack` (or a thin wrapper like ``from_list``
   that delegates to ``pack``) with ``Sequence[Tensor]`` per packed field —
   the framework computes and attaches the cu_seqlens.
-- Read via the inherited :attr:`Batched.cu_seqlens` property. Each batched
+- Read via the inherited :attr:`Batch.cu_seqlens` property. Each batched
   primitive may also expose a domain alias (``Videos.cu_frames`` /
   ``Audios.cu_samples``) for readability at call sites — both point to
   the same framework-managed tensor.
@@ -53,8 +53,7 @@ from typing import List, Optional
 import PIL.Image
 import torch
 
-from diffusionrl.distributed.transfer_queue.transportable import Transportable
-from diffusionrl.utils.batched import FieldKind, concat_field, field
+from diffusionrl.distributed.tensor.batch import Batch, FieldKind, concat_field, field
 
 # ---------------------------------------------------------------------------
 # Per-sample primitives
@@ -124,13 +123,13 @@ class TextAndVideo:
 
 
 # ---------------------------------------------------------------------------
-# Batched (packed, Transportable) primitives
+# Batch (packed) primitives
 # ---------------------------------------------------------------------------
 
 
 @dataclass
-class Texts(Transportable):
-    """Batched text samples — list of strings, batch dim is ``len(texts)``."""
+class Texts(Batch):
+    """Batch text samples — list of strings, batch dim is ``len(texts)``."""
 
     texts: List[str] = concat_field(default_factory=list)
 
@@ -146,13 +145,13 @@ class Texts(Transportable):
 
 
 @dataclass
-class Images(Transportable):
-    """Batched images packed as a single ``[B, C, H, W]`` tensor.
+class Images(Batch):
+    """Batch images packed as a single ``[B, C, H, W]`` tensor.
 
     Assumes uniform shape within the batch.
     """
 
-    pixels: torch.Tensor = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    pixels: torch.Tensor = field(kind=FieldKind.CONCAT, default=None)
 
     @classmethod
     def from_list(cls, items: List[Image]) -> "Images":
@@ -169,24 +168,24 @@ class Images(Transportable):
 
 
 @dataclass
-class Videos(Transportable):
-    """Batched videos with ragged time dim, packed varlen along T.
+class Videos(Batch):
+    """Batch videos with ragged time dim, packed varlen along T.
 
     ``frames`` is concatenated along T for all samples: ``[total_T, C, H, W]``.
     Per-sample boundaries live on the framework-managed ``cu_seqlens``
-    (exposed by the inherited :attr:`Batched.cu_seqlens` property and the
+    (exposed by the inherited :attr:`Batch.cu_seqlens` property and the
     domain alias :attr:`cu_frames`). Sample ``i``'s frames are
     ``frames[cu_frames[i]:cu_frames[i+1]]``. ``cu_frames[B]`` equals
     ``total_T``.
 
-    Construct via :meth:`from_list` (or :meth:`Batched.pack` directly),
+    Construct via :meth:`from_list` (or :meth:`Batch.pack` directly),
     not by passing pre-packed tensors to ``__init__`` — the constructor
     path doesn't compute cu_seqlens. ``concat`` / ``select`` / ``slice``
     operate per-sample and rebuild ``_packed_cu_seqlens`` on the output;
     see module docstring for the protocol contract.
     """
 
-    frames: torch.Tensor = field(kind=FieldKind.PACKED, transport=True, default=None)
+    frames: torch.Tensor = field(kind=FieldKind.PACKED, default=None)
 
     @property
     def cu_frames(self) -> Optional[torch.Tensor]:
@@ -203,7 +202,7 @@ class Videos(Transportable):
     def from_list(cls, items: List[Video]) -> "Videos":
         if not items:
             raise ValueError("Cannot build Videos from an empty list")
-        # Delegate to ``Batched.pack`` so the framework computes and
+        # Delegate to ``Batch.pack`` so the framework computes and
         # attaches ``_packed_cu_seqlens``. ``pack`` ``torch.cat``s the
         # per-sample frames along dim 0 internally.
         return cls.pack(frames=[v.frames for v in items])
@@ -220,20 +219,20 @@ class Videos(Transportable):
 
 
 @dataclass
-class Audios(Transportable):
-    """Batched audio with ragged length dim, packed varlen along L.
+class Audios(Batch):
+    """Batch audio with ragged length dim, packed varlen along L.
 
     ``waveform`` is concatenated along L for all samples:
     ``[total_L, C]`` (or ``[total_L]``). Per-sample boundaries live on
     the framework-managed ``cu_seqlens`` (exposed by the inherited
-    :attr:`Batched.cu_seqlens` property and the domain alias
+    :attr:`Batch.cu_seqlens` property and the domain alias
     :attr:`cu_samples`).
 
-    Construct via :meth:`from_list` (or :meth:`Batched.pack` directly).
+    Construct via :meth:`from_list` (or :meth:`Batch.pack` directly).
     See module docstring for the varlen-primitive protocol contract.
     """
 
-    waveform: torch.Tensor = field(kind=FieldKind.PACKED, transport=True, default=None)
+    waveform: torch.Tensor = field(kind=FieldKind.PACKED, default=None)
 
     @property
     def cu_samples(self) -> Optional[torch.Tensor]:
@@ -244,7 +243,7 @@ class Audios(Transportable):
     def from_list(cls, items: List[Audio]) -> "Audios":
         if not items:
             raise ValueError("Cannot build Audios from an empty list")
-        # Delegate to ``Batched.pack`` so the framework computes and
+        # Delegate to ``Batch.pack`` so the framework computes and
         # attaches ``_packed_cu_seqlens``.
         return cls.pack(waveform=[a.waveform for a in items])
 

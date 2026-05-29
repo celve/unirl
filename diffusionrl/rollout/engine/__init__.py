@@ -19,8 +19,8 @@ def chunked_engine_generate_req(
 ) -> RolloutResp:
     """Call ``engine.generate`` over mini-batch chunks of *req* and concat outputs.
 
-    Slices the request via :meth:`Batched.slice` (which understands the
-    ``concat_field`` / ``transport=True`` annotations on ``RolloutReq``),
+    Slices the request via :meth:`Batch.slice` (which understands the
+    ``concat_field`` annotations on ``RolloutReq``),
     calls ``engine.generate`` per chunk, concatenates per-chunk responses
     via :meth:`RolloutResp.concat` (which performs the
     ``Segment.sample_indices`` offset remap).

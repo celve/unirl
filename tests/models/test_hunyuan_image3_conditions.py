@@ -84,7 +84,7 @@ def test_fused_subclass_is_a_fused_multimodal_condition():
 
 
 def test_fused_subclass_field_metadata_preserved():
-    """All tensor fields are CONCAT+transport=True; rope_cache is SHARED.
+    """All tensor fields are CONCAT; rope_cache is SHARED.
 
     Compares ``FieldKind`` by ``.name`` rather than identity since module
     reloads (e.g. under hydra-using sibling tests) can yield a fresh
@@ -103,10 +103,8 @@ def test_fused_subclass_field_metadata_preserved():
     ):
         kind = by_name[name].metadata.get("kind")
         assert kind is not None and kind.name == "CONCAT"
-        assert by_name[name].metadata.get("transport") is True
     rope_kind = by_name["rope_cache"].metadata.get("kind")
     assert rope_kind is not None and rope_kind.name == "SHARED"
-    assert by_name["rope_cache"].metadata.get("transport") is False
 
 
 def test_fused_subclass_to_dict_only_emits_set_fields():

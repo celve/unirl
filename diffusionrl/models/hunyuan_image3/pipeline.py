@@ -78,6 +78,7 @@ class HunyuanImage3Pipeline(Pipeline):
         vit_encode: HunyuanImage3VitEncodeStage,
         shift: float = 3.0,
     ) -> None:
+        super().__init__()
         self.bundle = bundle
         self.text_embed = text_embed
         self.diffusion = diffusion

@@ -51,10 +51,10 @@ class RolloutPlan:
         whole groups (required for per-actor advantage normalization to see
         complete groups).
 
-        Slicing delegates to :meth:`Batched.slice` (``utils/batched.py:408``),
+        Slicing delegates to :meth:`Batch.slice` (``distributed/tensor/batch.py``),
         which understands the ``concat_field`` annotations on ``RolloutReq``
         — ``sample_ids`` / ``group_ids`` slice as lists, ``primitives`` recurses
-        into the dict and slices each ``Batched`` primitive, ``stage_params``
+        into the dict and slices each ``Batch`` primitive, ``stage_params``
         is shared and copied as-is.
 
         Returns ``List[Optional[RolloutReq]]`` of length ``num_actors``;

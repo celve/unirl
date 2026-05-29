@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any, List, Mapping, Optional, Type
 
 import torch
 
+from diffusionrl.distributed.group.remote import Remote
+
 if TYPE_CHECKING:
     from diffusionrl.types.conditions import Condition
     from diffusionrl.types.segments.base import Segment
@@ -100,7 +102,7 @@ class BaseAlgorithmConfig(ABC):
     """
 
 
-class StageAlgorithm(ABC):
+class StageAlgorithm(Remote, ABC):
     """Pure (conditions, segment, advantages) → loss; holds its stage.
 
     Targets the four-tier pipeline contract (``models``). The algorithm

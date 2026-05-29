@@ -14,8 +14,8 @@ from typing import ClassVar, List, Optional, Tuple
 
 import torch
 
+from diffusionrl.distributed.tensor.batch import FieldKind, field, shared_field
 from diffusionrl.types.conditions.base import Condition, Modality
-from diffusionrl.utils.batched import FieldKind, field
 
 
 @dataclass
@@ -24,7 +24,7 @@ class ImageLatentCondition(Condition):
 
     modality: ClassVar[Modality] = Modality.IMAGE
 
-    latents: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    latents: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
 
 
 @dataclass
@@ -42,9 +42,9 @@ class ImageEmbedCondition(Condition):
 
     modality: ClassVar[Modality] = Modality.IMAGE
 
-    embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    attn_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    spatial_shapes: Optional[List[Tuple[int, int]]] = field(kind=FieldKind.SHARED, transport=False, default=None)
+    embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
+    attn_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
+    spatial_shapes: Optional[List[Tuple[int, int]]] = shared_field(default=None)
 
 
 __all__ = ["ImageEmbedCondition", "ImageLatentCondition"]

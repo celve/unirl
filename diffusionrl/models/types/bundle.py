@@ -9,11 +9,10 @@ switching, autocast) live outside the bundle.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from diffusionrl.distributed.group.remote import Remote
 
 
-@runtime_checkable
-class Bundle(Protocol):
+class Bundle(Remote):
     """Collection of related modules (transformer, VAE, encoders, scheduler, …)
     that a ``Pipeline``'s stages dispatch against."""
 

@@ -19,7 +19,7 @@ import ray
 import torch
 from omegaconf import DictConfig
 
-from diffusionrl.distributed.transfer_queue import resolve_batch_from_tq
+from diffusionrl.distributed.tensor.transport import TensorTransportRuntime
 from diffusionrl.ray.actor_config import ConfigActor
 from diffusionrl.ray.distributed import DistributedMixin
 from diffusionrl.ray.mixins import TrainingWeightSyncMixin
@@ -223,7 +223,9 @@ class TrainActor(
             resp: RolloutResp = ray.get(resp_or_handle)
         else:
             resp = resp_or_handle
-        resp = resolve_batch_from_tq(resp)
+        backend = TensorTransportRuntime.current()
+        if backend is not None:
+            backend.hydrate(resp)
         return self._train_resp(rollout_step, resp)
 
     def train_from_buffer(
@@ -232,7 +234,9 @@ class TrainActor(
         handle: BufferHandle,
     ) -> Dict[str, TrackMiniBatchResult]:
         resp: RolloutResp = ray.get(handle.actor_handle.pop_buffer.remote(handle))
-        resp = resolve_batch_from_tq(resp)
+        backend = TensorTransportRuntime.current()
+        if backend is not None:
+            backend.hydrate(resp)
         return self._train_resp(rollout_step, resp)
 
     def train_local(self, rollout_step: int) -> Dict[str, TrackMiniBatchResult]:
@@ -244,8 +248,8 @@ class TrainActor(
         concat the per-group shards into this actor's training resp, and run the
         normal train path — the heavy tracks never round-tripped through the
         driver. Advantages were attached upstream, so the cached resp is
-        training-ready. No ``resolve_batch_from_tq``: keep_local and
-        transfer_queue are mutually exclusive.
+        training-ready. No hydrate step needed: keep_local and tensor
+        transport are mutually exclusive.
         """
         kept = self._kept_rollout
         self._kept_rollout = None  # pop: never train the same cache twice

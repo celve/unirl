@@ -63,15 +63,29 @@ class SD3Pipeline(Pipeline):
         self,
         *,
         bundle: SD3Bundle,
-        text_embed: SD3TextEmbedStage,
-        diffusion: SD3DiffusionStage,
-        vae_decode: SD3VAEDecodeStage,
+        text_embed: Optional[SD3TextEmbedStage] = None,
+        diffusion: Optional[SD3DiffusionStage] = None,
+        vae_decode: Optional[SD3VAEDecodeStage] = None,
+        strategy: Optional[StepStrategy] = None,
         shift: float = 3.0,
+        autocast_precision: str = "bf16",
+        trajectory_precision: str = "fp16",
+        logprob_precision: str = "fp32",
     ) -> None:
+        super().__init__()
         self.bundle = bundle
-        self.text_embed = text_embed
+        self.text_embed = text_embed if text_embed is not None else SD3TextEmbedStage(bundle)
+        if diffusion is None:
+            diffusion = SD3DiffusionStage(
+                model=bundle,
+                step=SD3DiffusionStep(),
+                strategy=strategy if strategy is not None else CPSSDEStrategy(),
+                autocast_precision=autocast_precision,
+                trajectory_precision=trajectory_precision,
+                logprob_precision=logprob_precision,
+            )
         self.diffusion = diffusion
-        self.vae_decode = vae_decode
+        self.vae_decode = vae_decode if vae_decode is not None else SD3VAEDecodeStage(bundle)
         # ``shift`` is retained as an attribute so the hosting engine
         # (TrainsideRolloutEngine) can read it when constructing the
         # FlowMatchSchedulePolicy at startup. It is NOT used by
@@ -102,23 +116,13 @@ class SD3Pipeline(Pipeline):
         ``cfg.sampling.sde_strategy``.
         """
         bundle = SD3Bundle.from_config(config)
-        text_embed = SD3TextEmbedStage(bundle)
-        step = SD3DiffusionStep()
-        diffusion = SD3DiffusionStage(
-            model=bundle,
-            step=step,
-            strategy=strategy if strategy is not None else CPSSDEStrategy(),
+        return cls(
+            bundle=bundle,
+            strategy=strategy,
+            shift=float(config.shift),
             autocast_precision=config.autocast_precision,
             trajectory_precision=config.trajectory_precision,
             logprob_precision=config.logprob_precision,
-        )
-        vae_decode = SD3VAEDecodeStage(bundle)
-        return cls(
-            bundle=bundle,
-            text_embed=text_embed,
-            diffusion=diffusion,
-            vae_decode=vae_decode,
-            shift=float(config.shift),
         )
 
     def generate(self, req: RolloutReq) -> RolloutResp:

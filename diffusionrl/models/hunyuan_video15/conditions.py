@@ -32,26 +32,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from diffusionrl.distributed.transfer_queue.transportable import Transportable
+from diffusionrl.distributed.tensor.batch import Batch, FieldKind, field
 from diffusionrl.types.conditions import (
     Condition,
     ImageEmbedCondition,
     TextEmbedCondition,
 )
-from diffusionrl.utils.batched import FieldKind, field
 
 
 @dataclass
-class HunyuanVideo15Conditions(Transportable):
+class HunyuanVideo15Conditions(Batch):
     """Typed conditions container for HunyuanVideo-1.5 diffusion."""
 
-    text_mllm: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    text_glyph: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    negative_text_mllm: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    negative_text_glyph: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    text_mllm: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
+    text_glyph: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
+    negative_text_mllm: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
+    negative_text_glyph: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
     # I2V slot — v1 always None, T2V uses the zero-placeholder path inside
     # the diffusion stage.
-    vision: Optional[ImageEmbedCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    vision: Optional[ImageEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Condition]) -> "HunyuanVideo15Conditions":

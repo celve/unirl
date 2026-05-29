@@ -122,12 +122,19 @@ class DiffusionGRPO(StageAlgorithm):
     def __init__(
         self,
         *,
-        stage: Any,
         params: Any,
+        stage: Any = None,
+        pipeline: Any = None,
+        stage_attr: str = "diffusion",
         clip_range: float = 1e-4,
         clip_schedule: str = "constant",
         conditions_cls: Optional[Type[Any]] = None,
     ) -> None:
+        super().__init__()
+        if stage is None and pipeline is None:
+            raise ValueError("DiffusionGRPO: either `stage` or `pipeline` must be provided")
+        if stage is None:
+            stage = getattr(pipeline, stage_attr)
         self.stage = stage
         self.params = params
         self.clip_range = float(clip_range)
@@ -327,7 +334,7 @@ class ARGRPO(StageAlgorithm):
         Each sample's advantage is repeated across its ``lengths``-defined
         token span so that token positions in segment ``k`` all see
         ``advantages[k]``. ``lengths`` comes from
-        :attr:`Batched.lengths` on the segment (derived from the framework-
+        :attr:`Batch.lengths` on the segment (derived from the framework-
         managed cu_seqlens).
         """
         bs = int(advantages.shape[0])

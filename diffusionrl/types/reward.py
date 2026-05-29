@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 from PIL import Image
 
-from diffusionrl.utils.batched import Batched, concat_field, max_field
+from diffusionrl.distributed.tensor.batch import Batch, concat_field, max_field
 
 
 class RewardType(Enum):
@@ -94,7 +94,7 @@ class RewardRequest:
 
 
 @dataclass
-class RewardResponse(Batched):
+class RewardResponse(Batch):
     """
     Response from reward computation.
 

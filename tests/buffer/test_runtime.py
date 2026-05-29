@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 from omegaconf import OmegaConf
 
-from diffusionrl.distributed.transfer_queue import TransferQueueRuntime
+from diffusionrl.distributed.tensor.backend.transfer_queue import TransferQueueRuntime
 
 
 @pytest.fixture(autouse=True)
@@ -43,7 +43,7 @@ def test_clear_current_unbinds():
 
 def test_install_replacing_existing_warns(caplog):
     first = TransferQueueRuntime().install()
-    with caplog.at_level("WARNING", logger="diffusionrl.distributed.transfer_queue.runtime"):
+    with caplog.at_level("WARNING", logger="diffusionrl.distributed.tensor.backend.transfer_queue.runtime"):
         second = TransferQueueRuntime().install()
     assert TransferQueueRuntime.current() is second
     assert any("replacing existing current runtime" in rec.message for rec in caplog.records)
@@ -53,7 +53,7 @@ def test_install_replacing_existing_warns(caplog):
 def test_install_idempotent_for_same_instance(caplog):
     runtime = TransferQueueRuntime()
     runtime.install()
-    with caplog.at_level("WARNING", logger="diffusionrl.distributed.transfer_queue.runtime"):
+    with caplog.at_level("WARNING", logger="diffusionrl.distributed.tensor.backend.transfer_queue.runtime"):
         runtime.install()
     # Re-installing the same instance should not warn.
     assert not any("replacing existing current runtime" in rec.message for rec in caplog.records)

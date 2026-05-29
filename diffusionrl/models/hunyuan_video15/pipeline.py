@@ -86,6 +86,7 @@ class HunyuanVideo15Pipeline(Pipeline):
         vae_decode: HunyuanVideo15VAEDecodeStage,
         shift: float = 5.0,
     ) -> None:
+        super().__init__()
         self.bundle = bundle
         self.text_embed = text_embed
         self.diffusion = diffusion

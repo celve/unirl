@@ -7,8 +7,8 @@ Contract:
 - it must not own Ray actors, group construction, placement, or business workflow
 
 Re-exports are lazy via ``__getattr__`` so that importing a leaf module
-(e.g. ``diffusionrl.distributed.transfer_queue.transportable``) does NOT
-eagerly pull in ``weight_sync`` → ``rollout/engine`` → ``types/rollout_req``,
+(e.g. ``diffusionrl.distributed.tensor.transport``) does NOT eagerly
+pull in ``weight_sync`` → ``rollout/engine`` → ``types/rollout_req``,
 which would close the loop back on a mid-init ``types/conditions/base``.
 """
 

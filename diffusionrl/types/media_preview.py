@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Any, List, Optional
 
 import torch
 
+from diffusionrl.distributed.tensor.batch import Batch, concat_field
 from diffusionrl.types.primitives import Images, Videos
-from diffusionrl.utils.batched import Batched, concat_field
 
 if TYPE_CHECKING:
     from diffusionrl.types.rollout_req import RolloutReq
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class MediaPreview(Batched):
+class MediaPreview(Batch):
     """Per-rollout wandb media preview payload that stays wandb-agnostic.
 
     ``images`` carries PIL images (one per sample; image models or
@@ -35,8 +35,8 @@ class MediaPreview(Batched):
     dependency.
 
     Declaring the four parallel lists as ``concat_field`` lets
-    ``Batched.concat`` auto-merge per-shard previews (lists extended) and
-    ``Batched.slice(0, n)`` naturally cap the payload size.
+    ``Batch.concat`` auto-merge per-shard previews (lists extended) and
+    ``Batch.slice(0, n)`` naturally cap the payload size.
 
     Three valid states (enforced in ``__post_init__``):
 
@@ -48,7 +48,7 @@ class MediaPreview(Batched):
     Whichever side is non-empty defines the canonical batch size; every
     non-empty parallel list must agree with that size. ``__len__`` and
     ``batch_size`` mirror this — without the override, the default
-    ``Batched.batch_size`` anchors on the first concat field
+    ``Batch.batch_size`` anchors on the first concat field
     (``images``), which would silently leave ``videos`` un-sliced when
     ``len(videos) > 0`` and ``len(images) == 0``.
     """

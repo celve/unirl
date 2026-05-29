@@ -19,7 +19,7 @@ The strategy is **shard by root track**: identify the unique track with
 balanced-split its sample indices across actors using
 ``floor / remainder``, then walk the lineage tree downward to build
 per-actor index sets for every child track. ``RolloutTrack.select`` is
-the underlying primitive (inherited from ``Batched.select``).
+the underlying primitive (inherited from ``Batch.select``).
 
 Fail-fast on:
 
@@ -162,7 +162,7 @@ def shard_resp_per_actor(resp: RolloutResp, num_actors: int) -> List[RolloutResp
       the lineage up to root: a sample lands on actor A iff its root
       ancestor is one of actor A's root samples.
     - Per-actor ``RolloutResp`` is built via per-track
-      :meth:`RolloutTrack.select` (inherited from ``Batched.select``).
+      :meth:`RolloutTrack.select` (inherited from ``Batch.select``).
 
     Raises ``ValueError`` if:
 

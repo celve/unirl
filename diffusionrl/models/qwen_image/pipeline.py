@@ -80,6 +80,7 @@ class QwenImagePipeline(Pipeline):
         vae_decode: QwenImageVAEDecodeStage,
         shift: float = 3.0,
     ) -> None:
+        super().__init__()
         self.bundle = bundle
         self.text_embed = text_embed
         self.diffusion = diffusion

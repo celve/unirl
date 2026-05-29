@@ -16,6 +16,8 @@ from typing import Dict, List, Optional
 
 import torch
 
+from diffusionrl.distributed.group.dispatch import Dispatch, distributed
+from diffusionrl.distributed.group.remote import Remote
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp
 
@@ -29,7 +31,7 @@ class BaseEngineConfig(ABC):
     """
 
 
-class BaseRolloutEngine(ABC):
+class BaseRolloutEngine(Remote, ABC):
     """Rollout engine ABC. One-shot construction; new types only."""
 
     # ------------------------------------------------------------------
@@ -40,11 +42,22 @@ class BaseRolloutEngine(ABC):
     def shutdown(self) -> None:
         """Release worker subprocesses and any other engine-owned resources."""
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def sleep(self) -> None:
-        """Best-effort runtime offload. Default no-op."""
+        """Best-effort runtime offload. Default no-op.
 
+        Decorated so the driver-side ``Handle.sleep()`` dispatches to every
+        worker. Subclasses that override should re-apply ``@distributed``
+        on their override (Handle's method-binding sees the subclass's
+        attribute and won't pick up a base-class decorator alone).
+        """
+
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def wake_up(self) -> None:
-        """Restore runtime resources after ``sleep``. Default no-op."""
+        """Restore runtime resources after ``sleep``. Default no-op.
+
+        Same dispatch contract as :meth:`sleep`; see its docstring.
+        """
 
     def onload_weights(self, *, track_prefix: str = "") -> None:
         """Restore the resources needed to receive a weight update."""

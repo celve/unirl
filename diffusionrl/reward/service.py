@@ -9,6 +9,7 @@ from typing import List, Optional
 from omegaconf import DictConfig
 
 from diffusionrl.config.instantiate import build, materialize
+from diffusionrl.distributed.group.remote import Remote
 
 from .aggregation import aggregate
 from .base import BaseRewardExecutor, BaseRewardScorer, InProcessRewardExecutor, RewardRequest, RewardResponse
@@ -16,7 +17,7 @@ from .base import BaseRewardExecutor, BaseRewardScorer, InProcessRewardExecutor,
 logger = logging.getLogger(__name__)
 
 
-class RewardService:
+class RewardService(Remote):
     """Owns per-component executors for one runtime host; dispatches and aggregates."""
 
     def __init__(
@@ -24,6 +25,7 @@ class RewardService:
         executors: Optional[List[BaseRewardExecutor]] = None,
         aggregation_method: str = "weighted_sum",
     ) -> None:
+        super().__init__()
         self.executors: List[BaseRewardExecutor] = list(executors or [])
         self.reward_aggregation_method = str(aggregation_method)
 

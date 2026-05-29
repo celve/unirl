@@ -28,10 +28,10 @@ from typing import Optional
 
 import torch
 
+from diffusionrl.distributed.tensor.batch import FieldKind, field, shared_field
 from diffusionrl.types.conditions.base import Condition, Modality
 from diffusionrl.types.conditions.image import ImageLatentCondition
 from diffusionrl.types.segments.base import Segment
-from diffusionrl.utils.batched import FieldKind, field, shared_field
 
 
 @dataclass
@@ -39,8 +39,8 @@ class LatentSegment(Segment):
     """Diffusion-style latent trajectory across a sigma schedule.
 
     ``modality`` is a per-instance ``shared_field`` (NOT a ``ClassVar``) so
-    it survives :meth:`Batched.select` / :meth:`Batched.slice` /
-    :meth:`Batched.clone` / :meth:`Batched.concat`. Each of those ops
+    it survives :meth:`Batch.select` / :meth:`Batch.slice` /
+    :meth:`Batch.clone` / :meth:`Batch.concat`. Each of those ops
     rebuilds the instance via ``type(self)(**kwargs)`` walking declared
     dataclass fields; a ``ClassVar`` modality wouldn't appear in the
     field set and the rebuilt instance would silently revert to the
@@ -55,14 +55,14 @@ class LatentSegment(Segment):
 
     modality: Modality = shared_field(default=Modality.IMAGE)
 
-    latents: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    latents: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
     sigmas: Optional[torch.Tensor] = shared_field(default=None)
     indices: Optional[torch.Tensor] = shared_field(default=None)
-    sde_logp: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    sde_means: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    sde_logp: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
+    sde_means: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
     sde_indices: Optional[torch.Tensor] = shared_field(default=None)
-    log_probs: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    loss_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    log_probs: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
+    loss_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
 
     def as_condition(self) -> Optional[Condition]:
         """Promote the *final* step's latent into an ``ImageLatentCondition``.
@@ -99,9 +99,9 @@ def make_image_segment(**kwargs) -> LatentSegment:
 
     Convenience wrapper over the dataclass ctor: pre-fix this factory
     used ``object.__setattr__`` to stamp a ``ClassVar`` modality as an
-    instance attr, which was wiped on every ``Batched.select`` /
+    instance attr, which was wiped on every ``Batch.select`` /
     ``clone`` rebuild. Now ``modality`` is a real ``shared_field``, so
-    the dataclass ``__init__`` propagates it through all Batched ops
+    the dataclass ``__init__`` propagates it through all Batch ops
     without further help. ``make_*`` factories are still preferred at
     call sites for grep-ability ("which factory built this?") and
     forward compat (modality-specific construction logic can land

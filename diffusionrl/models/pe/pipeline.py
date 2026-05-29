@@ -93,6 +93,7 @@ class PEPipeline(Pipeline):
         diffusion_pipeline: Pipeline,
         llm_pipeline: Pipeline,
     ) -> None:
+        super().__init__()
         self.diffusion_pipeline = diffusion_pipeline
         self.llm_pipeline = llm_pipeline
         # Surfaces the composed bundle so downstream code (training-side

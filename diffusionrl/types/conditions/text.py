@@ -19,8 +19,8 @@ from typing import ClassVar, Optional, Sequence
 import torch
 import torch.nn.functional as F
 
+from diffusionrl.distributed.tensor.batch import Batch, FieldKind, field
 from diffusionrl.types.conditions.base import Condition, Modality
-from diffusionrl.utils.batched import Batched, FieldKind, field
 
 
 def _pad_text_tensor(value: Optional[torch.Tensor], target_seq_len: int) -> Optional[torch.Tensor]:
@@ -41,9 +41,9 @@ class TextEmbedCondition(Condition):
 
     modality: ClassVar[Modality] = Modality.TEXT
 
-    embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    pooled: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    attn_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    embeds: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
+    pooled: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
+    attn_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
 
     @classmethod
     def concat(cls, items: Sequence["TextEmbedCondition"]) -> "TextEmbedCondition":
@@ -55,7 +55,7 @@ class TextEmbedCondition(Condition):
         so shard merges preserve attention-mask semantics.
         """
         if not items or len(items) == 1:
-            return Batched.concat.__func__(cls, items)
+            return Batch.concat.__func__(cls, items)
 
         seq_lens = [
             int(t.shape[1])
@@ -64,7 +64,7 @@ class TextEmbedCondition(Condition):
             if isinstance(t, torch.Tensor) and t.dim() >= 2
         ]
         if not seq_lens or len(set(seq_lens)) <= 1:
-            return Batched.concat.__func__(cls, items)
+            return Batch.concat.__func__(cls, items)
 
         target_seq_len = max(seq_lens)
         padded = [
@@ -75,7 +75,7 @@ class TextEmbedCondition(Condition):
             )
             for item in items
         ]
-        return Batched.concat.__func__(cls, padded)
+        return Batch.concat.__func__(cls, padded)
 
 
 @dataclass
@@ -89,8 +89,8 @@ class TextTokenCondition(Condition):
 
     modality: ClassVar[Modality] = Modality.TEXT
 
-    input_ids: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    attention_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    input_ids: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
+    attention_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)
 
     @classmethod
     def concat(cls, items: Sequence["TextTokenCondition"]) -> "TextTokenCondition":
@@ -104,7 +104,7 @@ class TextTokenCondition(Condition):
         token value is masked at attend-time and the receiver is unaffected).
         """
         if not items or len(items) == 1:
-            return Batched.concat.__func__(cls, items)
+            return Batch.concat.__func__(cls, items)
 
         seq_lens = [
             int(t.shape[1])
@@ -113,7 +113,7 @@ class TextTokenCondition(Condition):
             if isinstance(t, torch.Tensor) and t.dim() >= 2
         ]
         if not seq_lens or len(set(seq_lens)) <= 1:
-            return Batched.concat.__func__(cls, items)
+            return Batch.concat.__func__(cls, items)
 
         target_seq_len = max(seq_lens)
         padded = [
@@ -123,7 +123,7 @@ class TextTokenCondition(Condition):
             )
             for item in items
         ]
-        return Batched.concat.__func__(cls, padded)
+        return Batch.concat.__func__(cls, padded)
 
 
 __all__ = ["TextEmbedCondition", "TextTokenCondition"]

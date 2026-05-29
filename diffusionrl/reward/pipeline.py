@@ -8,10 +8,12 @@ from typing import Any, Dict, List, Optional
 import torch
 from omegaconf import DictConfig
 
+from diffusionrl.distributed.group.dispatch import Dispatch, distributed
+from diffusionrl.distributed.group.remote import Remote
 from diffusionrl.reward.service import RewardService
 from diffusionrl.types.reward import RewardRequest
 from diffusionrl.types.rollout_req import PrimitiveValue, RolloutReq
-from diffusionrl.types.rollout_resp import RolloutTrack
+from diffusionrl.types.rollout_resp import RolloutTrack, _track_with_field
 from diffusionrl.types.sampling import get_ar_params, get_diffusion_params
 
 logger = logging.getLogger(__name__)
@@ -110,10 +112,11 @@ def _build_request_for_track(
 # ---------------------------------------------------------------------------
 
 
-class RewardPipeline:
+class RewardPipeline(Remote):
     """Actor-side reward adapter: scores one ``RolloutTrack`` with a ``RewardService``."""
 
     def __init__(self, reward_service: RewardService) -> None:
+        super().__init__()
         self.reward_service = reward_service
 
     @classmethod
@@ -131,13 +134,19 @@ class RewardPipeline:
             f"Got {preferred!r} from {type(self.reward_service).__name__}."
         )
 
-    def score_and_attach(self, *, req: RolloutReq, track: RolloutTrack) -> None:
-        """Score one track's decoded media and write rewards onto the track in-place.
+    @distributed(dispatch_mode=Dispatch.DP_ALL)
+    def score_and_attach(self, *, req: RolloutReq, track: RolloutTrack) -> RolloutTrack:
+        """Score one track's decoded media and return a copy with rewards attached.
 
         Copies ``req.primitives`` (input context) into the reward request and
         pairs with ``track.decoded`` (generated output). For PE-joint tracks
         where the request has fewer samples than the track (N×M expansion),
         each primitive is replicated by the expansion factor.
+
+        Returns a new :class:`RolloutTrack` with ``rewards`` and
+        ``component_rewards`` populated; the input track is left unchanged so
+        the result can flow back through Handle dispatch (pytree_merge across
+        DP shards) without relying on worker-local mutation.
 
         Fail-fast on per-sample failure flags so partial/corrupt rewards
         cannot silently enter advantage computation.
@@ -210,11 +219,13 @@ class RewardPipeline:
                 f"{len(reward_response.successes)} sample(s) as failure. First few: {failed[:3]}"
             )
 
-        track.rewards = torch.tensor(reward_response.rewards, dtype=torch.float32)
-        track.component_rewards = {
+        rewards = torch.tensor(reward_response.rewards, dtype=torch.float32)
+        component_rewards = {
             str(name): torch.tensor(list(values or []), dtype=torch.float32)
             for name, values in dict(reward_response.component_rewards or {}).items()
         }
+        track = _track_with_field(track, "rewards", rewards)
+        return _track_with_field(track, "component_rewards", component_rewards)
 
     def offload(self) -> None:
         self.reward_service.offload()

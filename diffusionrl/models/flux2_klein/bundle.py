@@ -41,6 +41,7 @@ from typing import Any, List, Tuple
 import torch
 import torch.nn as nn
 
+from diffusionrl.models.types.bundle import Bundle
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 from .config import Flux2KleinPipelineConfig
@@ -94,7 +95,7 @@ def _materialize_meta_tensors(module: nn.Module) -> List[str]:
     return materialized
 
 
-class Flux2KleinBundle:
+class Flux2KleinBundle(Bundle):
     """FLUX.2-klein-9B bundle: transformer + VAE + Qwen3 text encoder + scheduler."""
 
     def __init__(
@@ -109,6 +110,7 @@ class Flux2KleinBundle:
         device: torch.device,
         pretrained_path: str,
     ) -> None:
+        super().__init__()
         self.transformer = transformer
         self.vae = vae
         self.text_encoder = text_encoder

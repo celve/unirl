@@ -103,7 +103,7 @@ class DiffusionStage(Protocol[C]):
     the instance — so one stage can serve many configurations.
 
     The conditions type ``C`` is per-bundle: SD3 declares
-    ``SD3Conditions(Transportable)`` with ``text: TextEmbedCondition``; FLUX
+    ``SD3Conditions(Batch)`` with ``text: TextEmbedCondition``; FLUX
     would declare its own; etc.
 
     ``replay`` recomputes log-probs for the SDE transitions stored in a

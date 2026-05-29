@@ -35,17 +35,18 @@ verbatim. This makes σ ownership explicit:
 
 from __future__ import annotations
 
-from typing import Any, Protocol, Tuple, runtime_checkable
+from typing import Any, Protocol, Tuple
 
+from diffusionrl.distributed.group.remote import Remote
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp
 
 
-@runtime_checkable
-class Pipeline(Protocol):
+class Pipeline(Remote):
     """Generate-time pipeline: ``RolloutReq → RolloutResp`` for one bundle."""
 
-    def generate(self, req: RolloutReq) -> RolloutResp: ...
+    def generate(self, req: RolloutReq) -> RolloutResp:
+        raise NotImplementedError
 
 
 class LatentShapeProvider(Protocol):

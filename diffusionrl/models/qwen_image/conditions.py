@@ -24,17 +24,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from diffusionrl.distributed.transfer_queue.transportable import Transportable
+from diffusionrl.distributed.tensor.batch import Batch, FieldKind, field
 from diffusionrl.types.conditions import Condition, TextEmbedCondition
-from diffusionrl.utils.batched import FieldKind, field
 
 
 @dataclass
-class QwenImageConditions(Transportable):
+class QwenImageConditions(Batch):
     """Typed conditions container for Qwen-Image diffusion."""
 
-    text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
-    negative_text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, transport=True, default=None)
+    text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
+    negative_text: Optional[TextEmbedCondition] = field(kind=FieldKind.CONCAT, default=None)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Condition]) -> "QwenImageConditions":

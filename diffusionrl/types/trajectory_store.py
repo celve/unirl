@@ -1,5 +1,5 @@
 """
-Trajectory — compact trajectory storage as a Batched dataclass.
+Trajectory — compact trajectory storage as a Batch dataclass.
 TrajectoryBuilder — builder for collecting latents during denoising loops.
 """
 
@@ -10,8 +10,7 @@ from typing import List, Set, Tuple
 
 import torch
 
-from diffusionrl.distributed.transfer_queue.transportable import Transportable
-from diffusionrl.utils.batched import FieldKind, field, shared_field
+from diffusionrl.distributed.tensor.batch import Batch, FieldKind, field, shared_field
 
 
 def compute_trajectory_positions(sde_indices: Set[int], num_steps: int) -> List[int]:
@@ -33,7 +32,7 @@ def compute_trajectory_positions(sde_indices: Set[int], num_steps: int) -> List[
 
 
 @dataclass
-class Trajectory(Transportable):
+class Trajectory(Batch):
     """Compact trajectory storage with index map.
 
     Attributes:
@@ -46,7 +45,7 @@ class Trajectory(Transportable):
             trajectory (T+1).
     """
 
-    data: torch.Tensor = field(kind=FieldKind.CONCAT, transport=True)
+    data: torch.Tensor = field(kind=FieldKind.CONCAT)
     index_map: torch.Tensor = shared_field()
     total_positions: int = shared_field()
 
@@ -143,7 +142,7 @@ class Trajectory(Transportable):
     def stored_positions(self) -> List[int]:
         return sorted(int(i) for i in range(self.total_positions) if int(self.index_map[i].item()) >= 0)
 
-    # ---- batch ops (Batched provides concat/select/slice via fields) --------
+    # ---- batch ops (Batch provides concat/select/slice via fields) --------
 
     def select(self, indices: torch.Tensor) -> Trajectory:
         """Select samples by index along the batch dimension."""

@@ -7,11 +7,12 @@ from typing import Any, Optional, Tuple
 
 import torch.nn as nn
 
+from diffusionrl.distributed.group.remote import Remote
 from diffusionrl.ray.placement import PlacementConfig
 from diffusionrl.utils.peft_merge import merged_state_dict, raw_state_dict
 
 
-class UpdateWeight(abc.ABC):
+class UpdateWeight(Remote, abc.ABC):
     """Base class for weight-synchronization handlers."""
 
     def __init__(
@@ -21,6 +22,7 @@ class UpdateWeight(abc.ABC):
         rollout_runtime: Any,
         placement_cfg: PlacementConfig,
     ) -> None:
+        super().__init__()
         self.model = model
         self._rollout_runtime = rollout_runtime
         self._placement_cfg = placement_cfg

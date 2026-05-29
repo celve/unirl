@@ -67,10 +67,16 @@ class SD3DiffusionStep(DiffusionStep[SD3Bundle, SD3Conditions]):
         if conditions.text is None:
             raise ValueError("SD3DiffusionStep.predict_noise: conditions.text is None")
         text = conditions.text
-        prompt_embeds = text.embeds
-        pooled_prompt_embeds = text.pooled
-        if prompt_embeds is None:
+        if text.embeds is None:
             raise ValueError("SD3DiffusionStep.predict_noise: conditions.text.embeds is None")
+        # Pin every model input to the transformer's device. Dedicated-engine
+        # (vLLM-Omni) replay hands sample/conditions back on CPU; the trainside
+        # engine already has them on GPU (these ``.to`` calls are then no-ops).
+        dev = model.device
+        sample = sample.to(dev)
+        sigma = sigma.to(dev)
+        prompt_embeds = text.embeds.to(dev)
+        pooled_prompt_embeds = text.pooled.to(dev) if text.pooled is not None else None
 
         batch_size = sample.shape[0]
         timestep = sigma * 1000.0
@@ -82,8 +88,8 @@ class SD3DiffusionStep(DiffusionStep[SD3Bundle, SD3Conditions]):
         if guidance_scale > 1.0:
             neg = conditions.negative_text
             if neg is not None and neg.embeds is not None:
-                negative_prompt_embeds = neg.embeds
-                negative_pooled_prompt_embeds = neg.pooled
+                negative_prompt_embeds = neg.embeds.to(dev)
+                negative_pooled_prompt_embeds = neg.pooled.to(dev) if neg.pooled is not None else None
             else:
                 negative_prompt_embeds = torch.zeros_like(prompt_embeds)
                 negative_pooled_prompt_embeds = (
@@ -433,7 +439,11 @@ class SD3DiffusionStage(DiffusionStage[SD3Conditions]):
                 f"SD3DiffusionStage.replay: step_indices {bad} not in segment.sde_indices={sorted(sde_set)}"
             )
 
-        device = segment.latents.device
+        # Dedicated-engine (vLLM-Omni) rollouts hand the trajectory back on
+        # CPU; pin replay to the model's (CUDA) device so the forward and the
+        # autocast context match the transformer weights. Trainside segments
+        # are already on this device.
+        device = torch.device(self.model.device)
         sigmas = segment.sigmas.to(device)
         sigma_max = sigmas[1].float() if int(sigmas.shape[0]) > 1 else torch.tensor(0.99)
 
@@ -448,8 +458,8 @@ class SD3DiffusionStage(DiffusionStage[SD3Conditions]):
             for step_idx in target:
                 sigma = sigmas[step_idx].to(dtype=torch.float32)
                 sigma_next = sigmas[step_idx + 1].to(dtype=torch.float32)
-                sample = segment.latents_at(step_idx)
-                prev_sample = segment.latents_at(step_idx + 1)
+                sample = segment.latents_at(step_idx).to(device)
+                prev_sample = segment.latents_at(step_idx + 1).to(device)
                 _, log_prob, prev_mean = self.step.step_with_logp(
                     self.model,
                     conditions,

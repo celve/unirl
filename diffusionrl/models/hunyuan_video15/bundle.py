@@ -40,12 +40,13 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 
+from diffusionrl.models.types.bundle import Bundle
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 from .config import HunyuanVideo15PipelineConfig
 
 
-class HunyuanVideo15Bundle:
+class HunyuanVideo15Bundle(Bundle):
     """HunyuanVideo-1.5 bundle: transformer + 3D VAE + dual text encoders +
     optional SigLIP + scheduler."""
 
@@ -65,6 +66,7 @@ class HunyuanVideo15Bundle:
         device: torch.device,
         pretrained_path: str,
     ) -> None:
+        super().__init__()
         self.transformer = transformer
         self.vae = vae
         # MLLM (Qwen2.5-VL) stream.

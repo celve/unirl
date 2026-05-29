@@ -39,13 +39,14 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
 import torch.nn as nn
 
+from diffusionrl.models.types.bundle import Bundle
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
 from .conditions import HunyuanImage3FusedMultimodalCondition
 from .config import HunyuanImage3PipelineConfig
 
 
-class HunyuanImage3Bundle:
+class HunyuanImage3Bundle(Bundle):
     """HunyuanImage 3.0 bundle: shared MoE transformer + ViT + 3D-VAE + tokenizer + scheduler."""
 
     def __init__(
@@ -62,6 +63,7 @@ class HunyuanImage3Bundle:
         mrope_section: Tuple[int, int, int] = (0, 32, 32),
         vae_dtype: Optional[torch.dtype] = None,
     ) -> None:
+        super().__init__()
         self.transformer = transformer
         # ``vae`` / ``vit`` are exposed as ``@property`` over ``self._vae`` /
         # ``self._vit`` so :meth:`materialize` can flip them after meta-init

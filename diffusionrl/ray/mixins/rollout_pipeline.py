@@ -51,13 +51,14 @@ from diffusionrl.algorithms.normalizers import (
     require_expected_group_sizes,
     require_valid_group_ids,
 )
-from diffusionrl.distributed.transfer_queue import TransferQueueRuntime, tqbridge
+from diffusionrl.distributed.tensor.backend.transfer_queue import TransferQueueRuntime
+from diffusionrl.distributed.tensor.batch import Batch, concat_field
+from diffusionrl.distributed.tensor.transport import TensorTransportRuntime
 from diffusionrl.types.media_preview import build_media_preview_for_track
 from diffusionrl.types.sampling import get_ar_params, get_diffusion_params
 from diffusionrl.types.segments.base import Segment
 from diffusionrl.types.segments.latent import LatentSegment
 from diffusionrl.types.segments.text import TextSegment
-from diffusionrl.utils.batched import Batched, concat_field
 
 if TYPE_CHECKING:
     from diffusionrl.transfer.buffer import BufferHandle
@@ -85,7 +86,7 @@ the registry here is the caller-side dispatch policy that consults it.
 
 
 @dataclass
-class _RolloutRespMeta(Batched):
+class _RolloutRespMeta(Batch):
     """Per-handle key for buffered RolloutResp shards.
 
     Carried on ``BufferHandle.key`` for handle introspection and any
@@ -123,8 +124,8 @@ def _responses_to_cpu(responses: List["RolloutResp"]) -> List["RolloutResp"]:
     ``CUDA_VISIBLE_DEVICES`` isolation — so the driver gather + ``aggregate``
     OOMs as the global batch grows. Staging on CPU keeps that in host RAM;
     train actors move their shard back to device in ``_train_resp``. With TQ
-    on, ``@tqbridge(put=True)`` dehydrates these already-CPU payloads into the
-    store, so the two paths compose.
+    on, explicit ``dehydrate`` calls send these already-CPU payloads into the
+    transport backend, so the two paths compose.
     """
     return [response.to_device("cpu") for response in responses]
 
@@ -324,7 +325,6 @@ class RolloutPipelineMixin:
 
     # ---- fused pipelines ---------------------------------------------------
 
-    @tqbridge(get=False, put=True)
     def run_rollout_pipeline(self, req: "RolloutReq") -> List["RolloutResp"]:
         """Fused actor-side rollout: generate + reward + cross-shard advantages.
 
@@ -394,9 +394,13 @@ class RolloutPipelineMixin:
             # later pops this cache and trains in place — the driver never
             # gathers/concats the heavy tracks. Advantages were just written onto
             # the tracks above, so the cached (CPU) resp carries them for training.
-            # ``@tqbridge(put=True)`` no-ops because keep_local requires TQ off.
             self._kept_rollout = cpu_responses
             return [r.metadata_only() for r in cpu_responses]
+        backend = TensorTransportRuntime.current()
+        if backend is not None:
+            with backend.session() as sess:
+                for r in cpu_responses:
+                    sess.dehydrate(r)
         return cpu_responses
 
     def run_eval_pipeline(self, req: "RolloutReq") -> List["RolloutResp"]:

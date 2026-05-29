@@ -3,8 +3,8 @@
 ``tokens``, ``log_probs``, and ``loss_mask`` are :func:`packed_field`s with
 shape ``[total_tokens]`` along dim 0. The framework manages the
 ``cu_seqlens`` metadata behind a hidden ``_packed_cu_seqlens`` attribute on
-the instance — read it via the inherited :attr:`Batched.cu_seqlens` property
-and per-sample sizes via :attr:`Batched.lengths`. Segment ``k``'s tokens are
+the instance — read it via the inherited :attr:`Batch.cu_seqlens` property
+and per-sample sizes via :attr:`Batch.lengths`. Segment ``k``'s tokens are
 ``tokens[cu_seqlens[k]:cu_seqlens[k+1]]``.
 
 Construct via :meth:`TextSegment.pack` (the framework-provided constructor)
@@ -22,10 +22,10 @@ from typing import Any, Callable, ClassVar, Optional
 
 import torch
 
+from diffusionrl.distributed.tensor.batch import packed_field
 from diffusionrl.types.conditions.base import Condition, Modality
 from diffusionrl.types.conditions.text import TextEmbedCondition
 from diffusionrl.types.segments.base import Segment
-from diffusionrl.utils.batched import packed_field
 
 
 @dataclass
