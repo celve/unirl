@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from abc import ABC
 from dataclasses import dataclass, field, fields
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from diffusionrl.config.polymorphic import polymorphic_field
 from diffusionrl.config.registration import register_config
 from diffusionrl.config.require import require
+
+if TYPE_CHECKING:
+    from diffusionrl.utils.scheduler_utils import TimestepScheduler
 
 
 @dataclass
@@ -74,6 +77,7 @@ class DiffusionSamplingParams(BaseSamplingParams):
     # --- SDE ---
     eta: float = 1.0
     sde_strategy: Any = None
+    scheduler: Any = None  # TimestepScheduler
     sde_indices: Optional[List[int]] = None
 
     # --- engine knobs ---
@@ -106,6 +110,26 @@ class DiffusionSamplingParams(BaseSamplingParams):
             not shadowed,
             f"DiffusionSamplingParams.sampler_kwargs cannot contain reserved keys {sorted(shadowed)}; set them as fields instead",
         )
+
+    def resolve_sde_indices(self, rollout_id: int) -> List[int]:
+        """Resolve which denoising steps record SDE log-probs for ``rollout_id``.
+
+        Precedence: an explicit static ``sde_indices`` list wins; else a
+        ``scheduler`` instance (dynamic, keyed on ``rollout_id`` — window /
+        sparse curricula); else every step. Setting ``sde_indices`` thus
+        overrides any configured ``scheduler``.
+
+        Not resolved at construction: a ``scheduler`` returns a different set
+        per ``rollout_id``, so the result can't be frozen at init. The driver
+        calls this per rollout and stamps the result onto a per-request copy
+        (with ``scheduler=None``).
+        """
+        if self.sde_indices is not None:
+            return [int(i) for i in self.sde_indices]
+        scheduler: Optional[TimestepScheduler] = self.scheduler
+        if scheduler is not None:
+            return sorted(scheduler.get_sde_indices(int(rollout_id)))
+        return list(range(int(self.num_inference_steps)))
 
 
 @register_config(group="sampling", name="ar")

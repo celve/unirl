@@ -1,3 +1,4 @@
+import dataclasses
 import inspect
 import logging
 from typing import Optional, Tuple
@@ -71,20 +72,27 @@ class DiffusionTrainer(BaseTrainer):
             if sync_cfg is not None:
                 self.weight_sync = remote_hydra(sync_cfg, backend=self.backend, rollout=self.rollout)
 
-    def _build_req(self, inputs: RolloutInputs) -> RolloutReq:
+    def _build_req(self, inputs: RolloutInputs, rollout_id: int) -> RolloutReq:
         """Turn a data source batch into a typed :class:`RolloutReq`.
 
         Expands ``inputs`` by ``sampling_params.samples_per_prompt`` so each
         prompt produces an N-sample GRPO group (sibling samples consecutive,
         sample IDs ``prompt:<gid>:sample:<j>``).
+
+        ``rollout_id`` keys the SDE step scheduler (``get_sde_indices``): the
+        resolved indices are stamped onto a per-request copy of the sampling
+        params, and the schedule config itself is nulled so only the resolved
+        ``sde_indices`` ride to the engine.
         """
         inputs = inputs.expand(self.sampling_params.samples_per_prompt)
+        sde_indices = self.sampling_params.resolve_sde_indices(rollout_id)
+        sampling_params = dataclasses.replace(self.sampling_params, sde_indices=sde_indices, scheduler=None)
         return RolloutReq(
             sample_ids=list(inputs.sample_ids),
             group_ids=list(inputs.group_ids),
             primitives=dict(inputs.primitives),
             request_conditions={},
-            sampling_params=self.sampling_params,
+            sampling_params=sampling_params,
             metadata=list(inputs.metadata) if inputs.metadata else [],
         )
 
@@ -148,7 +156,7 @@ class DiffusionTrainer(BaseTrainer):
         for rollout_id in range(num_rollouts):
             training_progress = rollout_id / max(1, num_rollouts - 1)
             inputs = self.data_source.get_samples(self.batch_size)
-            req = self._build_req(inputs)
+            req = self._build_req(inputs, rollout_id)
             # Sync before generate; skip step 0 (nothing trained yet).
             sync_weights = rollout_id > 0 and rollout_id % interval == 0
             result, mean_reward = self.train_step(

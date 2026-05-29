@@ -152,11 +152,13 @@ sampling:
   autocast_precision: bf16
   trajectory_precision: bf16
   logprob_precision: fp32
-  # All 10 inference steps record SDE log-probs. The v2 trainer doesn't
-  # build a per-rollout sde_scheduler the way v1 plan_requests did, so we
-  # pin the full set here — DiffusionGRPO._resolve_target_steps then has a
-  # non-empty list and compute_loss_and_backward actually runs the backward.
-  sde_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  # SDE step schedule: which denoising steps record SDE log-probs.
+  # num_sde_steps: null = all steps; int = sparse subset; 0 = none (NFT).
+  # A static `sde_indices: [...]` overrides this. (WindowScheduler also available.)
+  scheduler:
+    _target_: diffusionrl.utils.scheduler_utils.AllSDEScheduler
+    num_timesteps: ${..num_inference_steps}
+    num_sde_steps: null
 
 # LoRA weight sync → vLLM-Omni rollout. Instantiated as a LoraSyncBridge
 # (sibling of backend + rollout) from this block's `_target_`, exactly like the
