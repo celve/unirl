@@ -116,7 +116,15 @@ def compute_initial_noise_for_request(
     except NotImplementedError:
         return None
 
-    base_seed = mix_rollout_base_seed(int(sampling_spec.seed), int(rollout_id))
+    if sampling_spec.seed is None:
+        # No yaml seed → fall back to OS entropy so driver-side noise gen still
+        # has an integer to feed torch.Generator. Per-rollout noise becomes
+        # non-reproducible across re-runs (intentional for seed=None semantics).
+        import os as _os
+
+        base_seed = int.from_bytes(_os.urandom(8), "big") & 0x7FFFFFFF
+    else:
+        base_seed = mix_rollout_base_seed(int(sampling_spec.seed), int(rollout_id))
     batch_size = len(inputs.sample_ids)
     if batch_size == 0:
         return None
@@ -176,7 +184,16 @@ class RolloutPipeline:
         diffusion_base = get_diffusion_params(sampling_spec)
         sde_indices = set(sde_scheduler.get_sde_indices(int(rollout_id))) if sde_scheduler is not None else None
         sde_indices_list = list(sde_indices) if sde_indices is not None else None
-        per_rollout_seed = mix_rollout_base_seed(int(diffusion_base.seed), int(rollout_id))
+        # ``seed=None`` is propagated down to the engine. Consumers must
+        # handle None themselves (vllm-omni's request.py only forwards
+        # ``diff_kwargs["seed"]`` when it's not None, so OmniSP.seed stays
+        # None → vllm-omni's prepare_seed falls back to per-request random,
+        # giving GRPO-group diversity without a deterministic anchor).
+        per_rollout_seed = (
+            mix_rollout_base_seed(int(diffusion_base.seed), int(rollout_id))
+            if diffusion_base.seed is not None
+            else None
+        )
 
         engine_spp = (
             int(diffusion_base.samples_per_prompt)

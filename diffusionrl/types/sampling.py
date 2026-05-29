@@ -57,7 +57,7 @@ class DiffusionSamplingParams(BaseSamplingParams):
     height: int = 256
     width: int = 256
     num_frames: int = 16
-    seed: int = 42
+    seed: Optional[int] = 42
     samples_per_prompt: int = 1
     init_same_noise: bool = False
     noise_group_ids: Optional[List[str]] = None
