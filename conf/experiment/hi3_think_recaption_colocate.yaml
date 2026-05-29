@@ -26,7 +26,7 @@ defaults:
 run:
   data_source_dotpath: diffusionrl.data.data_source.MultimodalRLDataSource
   num_rollouts: 1000
-  seed: 42
+  seed: null
   data_path: /root/diffusionrl/data/datasets/pickscore/train.txt
   eval_data_path: /root/diffusionrl/data/datasets/pickscore/test.txt
   weight_sync_interval: 1
