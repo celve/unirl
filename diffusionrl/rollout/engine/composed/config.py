@@ -15,6 +15,7 @@ config after ``expand_polymorphic_fields`` runs.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 from diffusionrl.config.polymorphic import polymorphic_field
 from diffusionrl.config.registration import register_config
@@ -34,6 +35,19 @@ class ComposedRolloutEngineConfig(BaseEngineConfig):
     diffusion: BaseEngineConfig = polymorphic_field(group="rollout/engine")
 
     sleep_diffusion_on_start: bool = True
+
+    # System instruction injected into the AR child's ``stage_config`` so
+    # the LLM rewrites the user's prompt (PE = prompt enhancement). ``None``
+    # forwards the bare user prompt to AR.
+    pe_instruction: Optional[str] = None
+
+    # If set (e.g. ``"Revised Prompt:"``), only the suffix after the LAST
+    # occurrence of the marker is forwarded to diffusion; off-format
+    # outputs fall back to the original user prompt.
+    pe_marker: Optional[str] = None
+
+    # Optional char cap applied AFTER marker extraction.
+    pe_max_chars: Optional[int] = None
 
 
 __all__ = ["ComposedRolloutEngineConfig"]

@@ -395,8 +395,8 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             except Exception:
                 advertise_host = host if host not in ("0.0.0.0", "") else "127.0.0.1"
         self._base_url = f"http://{advertise_host}:{self._port}"
-        self._lora_loaded = False
         self._concurrency = int(engine_kwargs.get("concurrency", self.cfg.concurrency))
+        self._weights_onloaded_for_sync = False
 
         base_gpu_id = int(engine_kwargs.get("base_gpu_id", 0))
         force_set_cuda = bool(engine_kwargs.get("force_set_cuda_visible_devices", False))
@@ -445,9 +445,6 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             "decode_attention_backend",
             "enable_memory_saver",
             "enable_weights_cpu_backup",
-            "enable_lora",
-            "max_lora_rank",
-            "lora_target_modules",
             "enable_multimodal",
         ):
             if key in engine_kwargs:
@@ -745,12 +742,6 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
                     "return_logprob": return_logprob,
                     "logprob_start_len": 0,
                 }
-            # TODO(LIN-287): AR LoRA activation causes SGLang scheduler hang
-            # (validate_lora_batch blocks indefinitely). Skip for now —
-            # diffusion LoRA still trains and syncs. Re-enable once
-            # SGLang's LoRA inference path is debugged.
-            # if self._lora_loaded:
-            #     payload["lora_path"] = "default"
             if has_image:
                 payload["image_data"] = _pil_to_base64(image)
             async with sem:
@@ -957,6 +948,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         target_modules: Optional[List[str]] = None,
         load_format: Optional[str] = None,
         flush_cache: bool = True,
+        track_prefix: str = "",
     ) -> None:
         """Update weights from serialized tensors via HTTP.
 
@@ -964,6 +956,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         default ``["transformer"]`` doesn't match LLM module naming. Omitting
         the field lets the SRT server accept all incoming weights correctly.
         """
+        del track_prefix
         payload: Dict[str, Any] = {
             "serialized_named_tensors": serialized_named_tensors,
             "flush_cache": flush_cache,
@@ -1051,48 +1044,6 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         self._check_update_response(resp, "update_weights_from_distributed")
 
     # ------------------------------------------------------------------
-    # Weight sync — LoRA tensor bag
-    # ------------------------------------------------------------------
-
-    def set_lora_from_tensors(
-        self,
-        adapter_name: str,
-        lora_tensors: Dict[str, torch.Tensor],
-        *,
-        peft_config: Optional[dict] = None,
-    ) -> None:
-        """Load a LoRA adapter from in-memory tensors via SGLang SRT HTTP API.
-
-        SGLang SRT exposes ``POST /load_lora_adapter_from_tensors`` which
-        accepts serialized LoRA tensors + a PEFT config dict and hot-loads
-        the adapter on all TP workers internally.
-
-        """
-        try:
-            from sglang.srt.utils import MultiprocessingSerializer
-        except ImportError:
-            from sglang.srt.utils.utils import MultiprocessingSerializer
-
-        serialized = MultiprocessingSerializer.serialize(lora_tensors, output_str=True)
-        try:
-            self._post("/unload_lora_adapter", {"lora_name": str(adapter_name)})
-        except Exception:
-            pass
-        payload = {
-            "lora_name": str(adapter_name),
-            "config_dict": dict(peft_config or {}),
-            "serialized_tensors": serialized,
-        }
-        resp = self._post("/load_lora_adapter_from_tensors", payload)
-        self._check_update_response(resp, "set_lora_from_tensors")
-        self._lora_loaded = True
-        logger.info(
-            "SGLangLLMRolloutEngine: LoRA adapter %r loaded (%d tensor keys)",
-            adapter_name,
-            len(lora_tensors),
-        )
-
-    # ------------------------------------------------------------------
     # Memory management
     # ------------------------------------------------------------------
 
@@ -1113,14 +1064,39 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         handles the routing; this child sees only the calls that actually
         target it.
         """
+        release_tags = None if tags is None or len(tags) == 0 else list(tags)
+        if release_tags is None and self._is_offloaded:
+            if not self._weights_onloaded_for_sync:
+                return
+            release_tags = ["weights"]
         if self._server_process is None or not self._server_process.is_alive():
             raise RuntimeError("Cannot sleep SGLangLLMRolloutEngine: SRT server is not alive.")
-        self._flush_cache()
+        if release_tags is None or "kv_cache" in release_tags:
+            self._flush_cache()
+
         payload: Dict[str, Any] = {}
-        if tags is not None:
-            payload["tags"] = list(tags)
+        if release_tags is not None:
+            payload["tags"] = release_tags
         self._post("/release_memory_occupation", payload)
         self._is_offloaded = True
+        self._weights_onloaded_for_sync = False
+
+    def onload_weights(self, *, track_prefix: str = "") -> None:
+        """Resume only model weights so tensor/NCCL sync can update them."""
+        del track_prefix
+        if not self._is_offloaded:
+            return
+        if self._weights_onloaded_for_sync:
+            return
+        if self._server_process is None or not self._server_process.is_alive():
+            raise RuntimeError("Cannot onload SGLangLLMRolloutEngine weights: SRT server is not alive.")
+        self._post("/resume_memory_occupation", {"tags": ["weights"]})
+        self._weights_onloaded_for_sync = True
+
+    def flush_cache(self, *, track_prefix: str = "") -> None:
+        """Force the SGLang scheduler to drain pending work (public alias)."""
+        del track_prefix
+        self._flush_cache()
 
     def _flush_cache(self) -> None:
         """Flush sglang scheduler cache; retry until 200.
@@ -1156,16 +1132,24 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         ``wake_up(tags=["kv_cache", "cuda_graph"])`` before generation.
 
         """
-        if tags is None and not self._is_offloaded:
-            return
+        full_wake = tags is None or len(tags) == 0
+        resume_tags = None if full_wake else list(tags)
+        if resume_tags is None:
+            if not self._is_offloaded:
+                return
+            if self._weights_onloaded_for_sync:
+                resume_tags = ["kv_cache", "cuda_graph"]
         if self._server_process is None or not self._server_process.is_alive():
             raise RuntimeError("Cannot wake SGLangLLMRolloutEngine: SRT server is not alive.")
         payload: Dict[str, Any] = {}
-        if tags is not None:
-            payload["tags"] = list(tags)
+        if resume_tags is not None:
+            payload["tags"] = resume_tags
         self._post("/resume_memory_occupation", payload)
-        if tags is None:
+        if full_wake:
             self._is_offloaded = False
+            self._weights_onloaded_for_sync = False
+        elif "weights" in payload["tags"]:
+            self._weights_onloaded_for_sync = True
 
     @property
     def is_offloaded(self) -> bool:

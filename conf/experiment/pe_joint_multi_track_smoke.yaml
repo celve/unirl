@@ -129,9 +129,7 @@ rollout:
         skip_server_warmup: true
         disable_cuda_graph: true
         attention_backend: triton
-        enable_lora: true
-        max_lora_rank: 16
-        lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+        enable_lora: false
 
     diffusion:
       name: sglang

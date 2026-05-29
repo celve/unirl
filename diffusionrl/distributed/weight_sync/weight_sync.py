@@ -113,6 +113,18 @@ class WeightSync:
         multi_track = len(self._tracks) > 1
         track_prefix = name if multi_track else ""
 
+        if spec.use_lora and spec.lora_materialization == "merged_dense":
+            # Folded ``base + α·B·A`` ride the normal bucket path; no LoRA
+            # pool involvement (avoids the SGLang LLM deadlock under PE).
+            self._handler.update_weights(
+                model=spec.model,
+                param_name_prefix=spec.param_name_prefix,
+                packed_modules=spec.packed_modules,
+                track_prefix=track_prefix,
+                use_merged=True,
+            )
+            return
+
         if spec.use_lora:
             peft_cfg = _peft_config_dict(spec.model)
             if not spec.base_sync_done:

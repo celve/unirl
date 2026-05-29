@@ -8,7 +8,7 @@ from typing import Any, Optional, Tuple
 import torch.nn as nn
 
 from diffusionrl.ray.placement import PlacementConfig
-from diffusionrl.utils.peft_merge import raw_state_dict
+from diffusionrl.utils.peft_merge import merged_state_dict, raw_state_dict
 
 
 class UpdateWeight(abc.ABC):
@@ -40,6 +40,7 @@ class UpdateWeight(abc.ABC):
         param_name_prefix: Optional[str] = None,
         packed_modules: Optional[dict] = None,
         track_prefix: str = "",
+        use_merged: bool = False,
     ) -> None:
         raise NotImplementedError
 
@@ -86,22 +87,25 @@ class BucketedUpdateWeight(UpdateWeight):
         param_name_prefix: Optional[str] = None,
         packed_modules: Optional[dict] = None,
         track_prefix: str = "",
+        use_merged: bool = False,
     ) -> None:
         del peft_config, base_sync_done, packed_modules
         resolved_model = self._resolve_model(model)
-        prefix = self._resolve_prefix(param_name_prefix)
+        # ``param_name_prefix`` (e.g. ``"transformer."``) maps PEFT-wrapped
+        # adapter keys onto the engine's expected layout. ``merged_state_dict``
+        # already yields HF-native keys, so the prefix is suppressed there.
+        prefix = "" if use_merged else self._resolve_prefix(param_name_prefix)
         self.weight_version += 1
-        bucket = []
+        bucket: list = []
         bucket_size = 0
-        for name, param in raw_state_dict(resolved_model):
-            if name.endswith(".lora_A") or name.endswith(".lora_B"):
-                continue
+
+        for name, param in self._iter_state_dict(resolved_model, use_merged=use_merged):
             if prefix:
                 name = prefix + name
             name = self._apply_track_prefix(name, track_prefix)
             param_size = param.numel() * param.element_size()
             if bucket and bucket_size + param_size >= self._update_weight_buffer_size:
-                self._flush_bucket(bucket, is_last_bucket=False)
+                self._flush_bucket(bucket, is_last_bucket=False, track_prefix=track_prefix)
                 bucket = []
                 bucket_size = 0
 
@@ -109,17 +113,40 @@ class BucketedUpdateWeight(UpdateWeight):
             bucket_size += param_size
 
         if bucket:
-            self._flush_bucket(bucket, is_last_bucket=True)
+            self._flush_bucket(bucket, is_last_bucket=True, track_prefix=track_prefix)
 
-    def _flush_bucket(self, bucket, is_last_bucket: bool = False) -> None:
+    @staticmethod
+    def _iter_state_dict(model: nn.Module, *, use_merged: bool):
+        """Yield ``(name, tensor)`` pairs for the bucket loop.
+
+        ``use_merged=True`` folds LoRA deltas into base weights via
+        :func:`merged_state_dict`. Otherwise yields the raw base weights and
+        skips LoRA params (they sync separately through ``set_lora_from_tensors``).
+        """
+        if use_merged:
+            yield from merged_state_dict(model)
+            return
+        for name, param in raw_state_dict(model):
+            if name.endswith(".lora_A") or name.endswith(".lora_B"):
+                continue
+            yield name, param
+
+    def _flush_bucket(self, bucket, is_last_bucket: bool = False, track_prefix: str = "") -> None:
         self.update_bucket_weights(
             bucket,
             weight_version=self.weight_version,
             is_last_bucket=is_last_bucket,
+            track_prefix=track_prefix,
         )
 
     @abc.abstractmethod
-    def update_bucket_weights(self, named_tensors, weight_version=None, is_last_bucket: bool = False) -> None:
+    def update_bucket_weights(
+        self,
+        named_tensors,
+        weight_version=None,
+        is_last_bucket: bool = False,
+        track_prefix: str = "",
+    ) -> None:
         raise NotImplementedError
 
 

@@ -52,6 +52,11 @@ class Qwen3PipelineConfig:
 
     weight_sync_param_name_prefix: str = "transformer."
 
+    # See ``TrackSyncSpec.lora_materialization``. ``merged_dense`` is the
+    # only path that survives the SGLang LLM LoRA-pool deadlock under
+    # composed (PE) rollouts, so it is the default for Qwen3.
+    lora_materialization: str = "merged_dense"
+
     use_lora: bool = False
     lora_target_modules: Optional[List[str]] = None
 

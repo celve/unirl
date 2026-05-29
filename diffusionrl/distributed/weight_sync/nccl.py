@@ -76,7 +76,13 @@ class UpdateWeightFromDistributed(BucketedUpdateWeight):
         param_name_prefix: Optional[str] = None,
         packed_modules: Optional[dict] = None,
         track_prefix: str = "",
+        use_merged: bool = False,
     ) -> None:
+        if track_prefix:
+            raise NotImplementedError(
+                "nccl_broadcast does not support multi-track composed routing. "
+                "Use sync=tensor_payload so each track is sent to the matching rollout child."
+            )
         resolved_model = self._resolve_model(model)
         resolved_prefix = self._resolve_prefix(param_name_prefix)
         if peft_config and base_sync_done:
@@ -105,6 +111,7 @@ class UpdateWeightFromDistributed(BucketedUpdateWeight):
             param_name_prefix=param_name_prefix,
             packed_modules=packed_modules,
             track_prefix=track_prefix,
+            use_merged=use_merged,
         )
 
     def connect_rollout_engines(self) -> None:
@@ -141,7 +148,9 @@ class UpdateWeightFromDistributed(BucketedUpdateWeight):
             )
             ray.get(refs)
 
-    def update_bucket_weights(self, named_tensors, weight_version=None, is_last_bucket: bool = False) -> None:
+    def update_bucket_weights(
+        self, named_tensors, weight_version=None, is_last_bucket: bool = False, track_prefix: str = ""
+    ) -> None:
         del weight_version
         if not self._is_src_rank or not named_tensors:
             return

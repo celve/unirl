@@ -46,6 +46,19 @@ class BaseRolloutEngine(ABC):
     def wake_up(self) -> None:
         """Restore runtime resources after ``sleep``. Default no-op."""
 
+    def onload_weights(self, *, track_prefix: str = "") -> None:
+        """Restore the resources needed to receive a weight update."""
+        del track_prefix
+        self.wake_up()
+
+    def flush_cache(self, *, track_prefix: str = "") -> None:
+        """Drain pending scheduler/cache work after a weight update.
+
+        ``track_prefix`` is a composed-engine routing hint. Single engines may
+        ignore it.
+        """
+        del track_prefix
+
     @property
     def is_offloaded(self) -> bool:
         """Whether the engine has released its runtime resources."""
@@ -149,8 +162,10 @@ class BaseRolloutEngine(ABC):
         target_modules: Optional[List[str]] = None,
         load_format: Optional[str] = None,
         flush_cache: bool = True,
+        track_prefix: str = "",
     ) -> None:
         """Receive a state-dict packed as a single SGLang-shape payload per TP rank."""
+        del track_prefix
         raise NotImplementedError
 
 

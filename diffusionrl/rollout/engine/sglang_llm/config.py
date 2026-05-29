@@ -84,6 +84,11 @@ class SGLangLLMEngineConfig(BaseEngineConfig):
             0.0 < self.top_p <= 1.0,
             f"SGLangLLMEngineConfig.top_p must be in (0, 1]; got {self.top_p!r}",
         )
+        require(
+            not bool(self.engine_kwargs.get("enable_lora", False)),
+            "SGLangLLMEngineConfig no longer supports SGLang LoRA pool mode. "
+            "Use Qwen3 lora_materialization='merged_dense' and keep rollout.engine.ar.engine_kwargs.enable_lora=false.",
+        )
 
 
 __all__ = ["SGLangLLMEngineConfig"]

@@ -9,6 +9,8 @@ from diffusionrl.distributed.weight_sync import ipc as ipc_mod
 from diffusionrl.distributed.weight_sync import nccl as nccl_mod
 from diffusionrl.distributed.weight_sync import tensor as tensor_mod
 from diffusionrl.distributed.weight_sync.base import BucketedUpdateWeight
+from diffusionrl.distributed.weight_sync.track_spec import TrackSyncSpec
+from diffusionrl.distributed.weight_sync.weight_sync import WeightSync
 from diffusionrl.ray.mixins.training_weight_sync import TrainingWeightSyncMixin
 from diffusionrl.utils import peft_merge
 
@@ -55,7 +57,14 @@ def test_bucketed_base_sync_filters_lora_keys(monkeypatch):
         def connect_rollout_engines(self) -> None:
             return None
 
-        def update_bucket_weights(self, named_tensors, weight_version=None, is_last_bucket: bool = False) -> None:
+        def update_bucket_weights(
+            self,
+            named_tensors,
+            weight_version=None,
+            is_last_bucket: bool = False,
+            track_prefix: str = "",
+        ) -> None:
+            del weight_version, is_last_bucket, track_prefix
             self.captured = list(named_tensors)
 
     handler = CaptureBuckets(
@@ -89,8 +98,8 @@ def test_training_weight_sync_lora_skips_base_sync_and_calls_lora_every_call():
         def __init__(self) -> None:
             self.calls = []
 
-        def update_weights(self, *, peft_config=None, base_sync_done=False) -> None:
-            self.calls.append((peft_config, base_sync_done))
+        def update_weights(self, **kwargs) -> None:
+            self.calls.append(kwargs)
 
     class Host(TrainingWeightSyncMixin):
         def __init__(self) -> None:
@@ -101,16 +110,20 @@ def test_training_weight_sync_lora_skips_base_sync_and_calls_lora_every_call():
 
     host = Host()
     handler = Handler()
-    host._update_weight_handler = handler
+    host._weight_sync = WeightSync(handler)
+    host._weight_sync.register_track(
+        "__primary__",
+        TrackSyncSpec(model=host.model, use_lora=True),
+    )
 
     host.sync_weights_to_rollout()
     host.sync_weights_to_rollout()
 
     assert len(handler.calls) == 2
-    assert handler.calls[0][0]["target_modules"] == ["to_q", "to_v"]
-    assert handler.calls[0][1] is True
-    assert handler.calls[1][0]["target_modules"] == ["to_q", "to_v"]
-    assert handler.calls[1][1] is True
+    assert handler.calls[0]["peft_config"]["target_modules"] == ["to_q", "to_v"]
+    assert handler.calls[0]["base_sync_done"] is True
+    assert handler.calls[1]["peft_config"]["target_modules"] == ["to_q", "to_v"]
+    assert handler.calls[1]["base_sync_done"] is True
 
 
 def test_ipc_orphan_rank_drains_iterator_without_sender(monkeypatch):
@@ -126,7 +139,8 @@ def test_ipc_orphan_rank_drains_iterator_without_sender(monkeypatch):
 
     calls = []
 
-    def iter_named_params(self, *, peft_config=None, base_sync_done=False):
+    def iter_named_params(self, *, peft_config=None, base_sync_done=False, **kwargs):
+        del kwargs
         calls.append((peft_config, base_sync_done))
         yield "name", torch.ones(1)
 
@@ -134,7 +148,7 @@ def test_ipc_orphan_rank_drains_iterator_without_sender(monkeypatch):
 
     handler.update_weights(peft_config={"r": 4}, base_sync_done=True)
 
-    assert calls == [({"r": 4}, True)]
+    assert calls == [({"r": 4}, True), ({"r": 4}, True)]
     assert handler.weight_version == 1
 
 
@@ -143,7 +157,9 @@ def test_nccl_lora_phase_materializes_on_non_source_rank(monkeypatch):
     monkeypatch.setattr(
         nccl_mod,
         "extract_lora_tensors",
-        lambda model, *, param_name_prefix: calls.append((model, param_name_prefix)) or {},
+        lambda model, *, param_name_prefix, packed_modules=None: (
+            calls.append((model, param_name_prefix, packed_modules)) or {}
+        ),
     )
 
     handler = object.__new__(nccl_mod.UpdateWeightFromDistributed)
@@ -153,7 +169,7 @@ def test_nccl_lora_phase_materializes_on_non_source_rank(monkeypatch):
 
     handler.update_weights(peft_config={"r": 4}, base_sync_done=True)
 
-    assert calls == [(handler.model, "transformer.")]
+    assert calls == [(handler.model, "transformer.", None)]
 
 
 def test_tensor_lora_phase_materializes_on_non_sender_rank(monkeypatch):
@@ -161,7 +177,9 @@ def test_tensor_lora_phase_materializes_on_non_sender_rank(monkeypatch):
     monkeypatch.setattr(
         tensor_mod,
         "extract_lora_tensors",
-        lambda model, *, param_name_prefix: calls.append((model, param_name_prefix)) or {},
+        lambda model, *, param_name_prefix, packed_modules=None: (
+            calls.append((model, param_name_prefix, packed_modules)) or {}
+        ),
     )
 
     handler = object.__new__(tensor_mod.UpdateWeightFromTensor)
@@ -172,4 +190,4 @@ def test_tensor_lora_phase_materializes_on_non_sender_rank(monkeypatch):
 
     handler.update_weights(peft_config={"r": 4}, base_sync_done=True)
 
-    assert calls == [(handler.model, "transformer.")]
+    assert calls == [(handler.model, "transformer.", None)]

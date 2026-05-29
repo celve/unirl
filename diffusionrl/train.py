@@ -303,13 +303,9 @@ def train(cfg: DictConfig) -> None:
             logger.info("[BOOTSTRAP] Creating train group...")
             train_group = TrainActorGroup(cfg=cfg, placement=placement)
             logger.info("[BOOTSTRAP] Train group created.")
-            if cfg.training.execution.offload_rollout:
-                if cfg.training.execution.offload_train:
-                    logger.info("[BOOTSTRAP] Offloading train before wake...")
-                    train_group.offload()
-                logger.info("[BOOTSTRAP] Waking rollout...")
-                rollout_group.wake_up()
-                logger.info("[BOOTSTRAP] Rollout waked up.")
+            _rollout_is_sleeping = bool(cfg.training.execution.offload_rollout)
+        if direct_sampling:
+            _rollout_is_sleeping = False
 
         if tq_runtime is not None and tq_actor_handoff is not None:
             if direct_sampling:
@@ -336,6 +332,7 @@ def train(cfg: DictConfig) -> None:
                 track_sync_specs[track_name] = {
                     "param_name_prefix": t_prefix,
                     "packed_modules": t_packed,
+                    "lora_materialization": str(t_model_cfg.get("lora_materialization", "") or "adapter_tensor"),
                 }
             train_group.setup_weight_sync(
                 sync_cfg=sync_cfg,
@@ -350,6 +347,18 @@ def train(cfg: DictConfig) -> None:
                 sync_target,
                 sorted(track_sync_specs.keys()),
             )
+            logger.info("[BOOTSTRAP] Initial weight sync...")
+            train_group.sync_weights_to_rollout()
+            logger.info("[BOOTSTRAP] Initial weight sync done.")
+            if cfg.training.execution.offload_rollout:
+                logger.info("[BOOTSTRAP] Sleeping rollout after initial sync...")
+                rollout_group.sleep()
+                _rollout_is_sleeping = True
+            if cfg.training.execution.offload_train:
+                logger.info("[BOOTSTRAP] Offloading train after initial sync...")
+                train_group.offload()
+            else:
+                train_group.clear_memory()
 
         logger.info(
             "Bootstrap complete; entering main loop (rollouts %d..%d)",
@@ -365,8 +374,6 @@ def train(cfg: DictConfig) -> None:
         global_optimizer_step = 0
 
         _use_ema_rollout = _should_use_ema_rollout(cfg) if direct_sampling else False
-
-        _rollout_is_sleeping = False
 
         # 5. Main loop
         for rollout_id in range(
@@ -460,9 +467,8 @@ def train(cfg: DictConfig) -> None:
             # checkpoint transport — all source-on-GPU). If we offload
             # train BEFORE sync, the source parameters are on CPU and the
             # sync either degrades to a slower path or transmits stale /
-            # wrong values silently. Sync first (with both train and
-            # rollout on-load), then offload both for the rollout phase
-            # of the next iter.
+            # wrong values silently. Sync first while train is still on
+            # GPU; rollout only needs its weights resumed for the update.
             #
             # Old order (broken):
             #   1. train.offload()    ← source on CPU
@@ -471,33 +477,25 @@ def train(cfg: DictConfig) -> None:
             #   4. rollout.sleep()
             #
             # New order:
-            #   1. rollout.wake_up()  (if offload_rollout)
-            #   2. train.sync_to_rollout()   ← source on GPU, fast path
-            #   3. rollout.sleep()    (if offload_rollout)
-            #   4. train.offload()    (if offload_train) — after sync done
+            #   1. train.sync_to_rollout()   ← source on GPU, fast path
+            #      (rollout actors onload weights internally when receiving updates)
+            #   2. rollout.sleep()    (if offload_rollout)
+            #   3. train.offload()    (if offload_train) — after sync done
             logger.info("[LOOP r=%d] Train done (%.1fs).", rollout_id, timings.get("train"))
 
             if sync_enabled and (rollout_id + 1) % int(cfg.run.weight_sync_interval) == 0:
-                # Offload train before sync so rollout wake_up has GPU room.
-                # sync_weights_to_rollout → _to_full_tensor will .cuda() each
-                # LoRA tensor back individually (few MB) for the all_gather +
-                # ZMQ send, so this is safe even with train offloaded.
+                with timings.measure("sync"):
+                    train_group.sync_weights_to_rollout()
+                    logger.info("[LOOP r=%d] Sync done.", rollout_id)
+
+                if cfg.training.execution.offload_rollout:
+                    rollout_group.sleep()
+                    _rollout_is_sleeping = True
+
                 if cfg.training.execution.offload_train:
                     train_group.offload()
                 else:
                     train_group.clear_memory()
-
-                with timings.measure("sync"):
-                    if cfg.training.execution.offload_rollout:
-                        logger.info("[LOOP r=%d] Waking rollout for sync...", rollout_id)
-                        rollout_group.wake_up()
-                        _rollout_is_sleeping = False
-                    train_group.sync_weights_to_rollout()
-                    logger.info("[LOOP r=%d] Sync done.", rollout_id)
-                    # Sleep rollout after sync (will be waked at next iter start).
-                    if cfg.training.execution.offload_rollout:
-                        rollout_group.sleep()
-                        _rollout_is_sleeping = True
             else:
                 # No sync this iter — still offload train for next rollout.
                 if cfg.training.execution.offload_train:

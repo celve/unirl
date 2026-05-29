@@ -832,6 +832,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         target_modules: Optional[list[str]] = None,
         load_format: Optional[str] = None,
         flush_cache: bool = True,
+        track_prefix: str = "",
     ) -> None:
         """Fan a SGLang-shape tensor-payload update out to per-stage workers.
 
@@ -839,6 +840,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         ``serialized_named_tensors`` list and picks ``[self.local_rank]``
         in its receive-side handler.
         """
+        del track_prefix
         if self._omni is None:
             raise RuntimeError("VLLMOmniRolloutEngine: engine not initialized")
         stage_ids = list(range(int(self._omni.engine.num_stages)))

@@ -81,6 +81,7 @@ class TrainingWeightSyncMixin:
                         use_lora=self._track_use_lora[name],
                         param_name_prefix=spec_cfg.get("param_name_prefix", ""),
                         packed_modules=spec_cfg.get("packed_modules", {}),
+                        lora_materialization=spec_cfg.get("lora_materialization", "adapter_tensor"),
                     ),
                 )
         else:

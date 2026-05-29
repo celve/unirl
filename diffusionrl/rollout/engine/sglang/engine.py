@@ -460,7 +460,9 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         target_modules: Optional[List[str]] = None,
         load_format: Optional[str] = None,
         flush_cache: bool = True,
+        track_prefix: str = "",
     ) -> None:
+        del track_prefix
         require(bool(serialized_named_tensors), "serialized_named_tensors must be non-empty")
         self._send_scheduler_request(
             self._runtime["UpdateWeightsFromTensorReqInput"](

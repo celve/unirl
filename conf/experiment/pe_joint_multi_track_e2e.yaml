@@ -38,7 +38,6 @@ defaults:
   - /training/track@training.tracks.ar: default
   - /model@training.tracks.diffusion.model: sd3
   - /model@training.tracks.ar.model: qwen3_v2
-  - override /placement: colocate_1x8_half
   - override /algorithm: grpo
   - override /rollout/engine: composed_pe
   - override /sampling/sde_strategy: flow
@@ -69,7 +68,7 @@ sampling:
   samples_per_prompt: 16
 
 algorithm:
-  prompts_per_rollout: 6              # P
+  prompts_per_rollout: 8              # P
   pe_rewrites_per_prompt: 4           # N (rewrites per prompt)
   adv_normalization_scope: global
   use_global_std: true
@@ -84,7 +83,7 @@ algorithm:
       name: ar_grpo
       stage_attr: ar
       conditions_cls: diffusionrl.models.qwen3.conditions.Qwen3ARConditions
-      clip_range: 1.0e-4
+      clip_range: 0.1
       clip_schedule: constant
     diffusion:
       name: diffusion_grpo
@@ -110,9 +109,7 @@ rollout:
         skip_server_warmup: true
         disable_cuda_graph: false
         attention_backend: triton
-        enable_lora: true
-        max_lora_rank: 16
-        lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+        enable_lora: false
 
     diffusion:
       name: sglang
@@ -136,6 +133,18 @@ rollout:
     # forward_batch_size=4 sgl-diff peaked at 74 GB; halving to 2
     # should approximately halve the per-chunk SD3 + VAE-decode peak.
     forward_batch_size: 1
+
+placement:
+  num_rollout_nodes: 1
+  num_rollout_gpus_per_node: 8
+  num_rollout_gpus_per_actor: 1
+  num_train_nodes: 1
+  num_train_gpus_per_node: 8
+  num_train_gpus_per_actor: 1
+  colocate: true
+  colocate_gpu_fraction: 0.5
+  strategy: PACK
+  allow_noset_multi_gpu_inference: true
 
 training:
   primary_track: diffusion
@@ -204,7 +213,7 @@ training:
         reshard_after_forward: true
         activation_checkpointing: true
       optimizer:
-        learning_rate: 1.0e-5
+        learning_rate: 5.0e-6
         adam_beta1: 0.9
         adam_beta2: 0.999
         adam_epsilon: 1.0e-8
@@ -223,14 +232,14 @@ training:
   topology:
     actor_count: 8
   plan:
-    # P*N*M = 6*4*16 = 384 diffusion samples per rollout
-    # P*N   = 6*4    = 24 LLM sequences per rollout
-    # Per-actor (DP=8): diffusion 48, llm 3.
+    # P*N*M = 8*4*8 = 256 diffusion samples per rollout
+    # P*N   = 8*4    = 32 LLM sequences per rollout
+    # Per-actor (DP=8): diffusion 64, llm 4.
     micro_batch_size: 4
-    num_updates_per_batch: 2
-    local_mini_batch_size: 48
-    local_batch_size: 96
-    global_batch_size: 768
+    num_updates_per_batch: 1
+    local_mini_batch_size: 64
+    local_batch_size: 64
+    global_batch_size: 256
   materialize:
     with_aux: []
 

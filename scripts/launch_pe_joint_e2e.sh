@@ -8,45 +8,42 @@
 # at rollout=0 (M=16 SD3 forward needed +12 GB activation on top of
 # resident sgl engines + ~13 GB Ray/CUDA overhead per actor).
 #
-# Required env vars (callers MUST set):
-#   WANDB_API_KEY        — wandb API key for the linyuwus entity
-#   PRETRAINED_MODEL     — pod-local path to SD3.5-medium
-#                          (e.g. /root/diffusionrl/models/local/stable-diffusion-3.5-medium)
-#   LLM_MODEL            — pod-local path to Qwen3-0.6B
-#                          (e.g. /root/diffusionrl/models/local/Qwen3-0.6B)
-#
 # Optional env vars (have sensible defaults below):
 #   LOCATION             — gz | bj | zw — Ceph location for log tee
 #                          (default: gz). Must match the pod's region.
+#   WANDB_API_KEY        — required only when REPORT_TO_WANDB=true
 #   WANDB_ENTITY         — wandb entity (default: linyuwus)
-#   REPORT_TO_WANDB      — true|false (default: true)
+#   REPORT_TO_WANDB      — true|false (default: false)
 #
 # Pre-conditions on pod (handled by the launch sequence in
 # /Users/linyu/.claude/plans/make-the-plan-enchanted-gem.md):
 #   - `source /etc/bashrc` already executed (proxy vars).
 #   - .venv activated; vllm == 0.20.0; sglang on diffusionrl branch.
-#   - SD3.5 + Qwen3-8B copied to /root/diffusionrl/models/local/.
+#   - SD3.5 + Qwen3-0.6B available under /apdcephfs_zwfy8/.../public_models.
 #   - pickscore HF cache pre-warmed (handled by the smoke's prior run).
 #
 # Usage on pod (inside tmux):
-#   export WANDB_API_KEY='...'
-#   export PRETRAINED_MODEL=/root/diffusionrl/models/local/stable-diffusion-3.5-medium
-#   export LLM_MODEL=/root/diffusionrl/models/local/Qwen3-8B
+#   # Optional:
+#   # export REPORT_TO_WANDB=true
+#   # export WANDB_API_KEY='...'
 #   bash scripts/launch_pe_joint_e2e.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# === Required env vars ===
-: "${WANDB_API_KEY:?WANDB_API_KEY required — set the linyuwus key before launch}"
-: "${PRETRAINED_MODEL:?PRETRAINED_MODEL required — pod-local SD3.5-medium path}"
-: "${LLM_MODEL:?LLM_MODEL required — pod-local Qwen3-0.6B path}"
-
 # === Optional env vars w/ defaults ===
-export LOCATION="${LOCATION:-gz}"
-export WANDB_ENTITY="${WANDB_ENTITY:-linyuwus}"
-export REPORT_TO_WANDB="${REPORT_TO_WANDB:-true}"
+export LOCATION="${LOCATION:-zw}"
+export REPORT_TO_WANDB="${REPORT_TO_WANDB:-false}"
+if [ "${REPORT_TO_WANDB}" = "true" ]; then
+    : "${WANDB_API_KEY:?WANDB_API_KEY required when REPORT_TO_WANDB=true}"
+    export WANDB_ENTITY="${WANDB_ENTITY:-linyuwus}"
+fi
+
+# === Model paths ===
+PUBLIC_MODELS_ROOT="/apdcephfs_zwfy8/share_305110755/hunyuan/public_models"
+export PRETRAINED_MODEL="${PUBLIC_MODELS_ROOT}/stable-diffusion-3.5-medium"
+export LLM_MODEL="${PUBLIC_MODELS_ROOT}/Qwen/Qwen3-0.6B"
 
 # === Proxy (libs that read env vars directly: wandb, transformers, HF) ===
 export http_proxy="${http_proxy:-http://star-proxy.oa.com:3128}"
@@ -57,7 +54,9 @@ export no_proxy="${no_proxy:-localhost,127.0.0.1,.tencent.com}"
 # First e2e attempt's OOM trace showed 8 GiB reserved-but-unallocated
 # despite the rollout/train cycle freeing. expandable_segments lets the
 # allocator reuse fragmented blocks instead of failing on a large alloc.
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+# NOTE: expandable_segments requires Linux kernel 5.6+ (pidfd_getfd) for
+# CUDA IPC used by SGLang weight sync. Disable if kernel doesn't support it.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False}"
 
 # === Log destination (Ceph per-region log dir) ===
 LOG_DIR="/mnt/${LOCATION}/logs"

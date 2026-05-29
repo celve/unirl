@@ -26,9 +26,17 @@ def merged_state_dict(
     model: torch.nn.Module,
     adapter_name: str = "default",
 ) -> Iterator[tuple[str, torch.Tensor]]:
-    """Yield `(name, tensor)` pairs with LoRA deltas folded into base weights."""
+    """Yield ``(name, tensor)`` pairs with LoRA deltas folded into base weights.
+
+    ``lm_head.weight`` is skipped when ``tie_word_embeddings=True``: SGLang
+    aliases it to ``model.embed_tokens.weight`` and rejects an explicit update.
+    """
+    skip_lm_head = bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False))
+
     if not hasattr(model, "peft_config"):
         for name, param in model.state_dict().items():
+            if skip_lm_head and name == "lm_head.weight":
+                continue
             yield (name, _to_full_tensor(param))
         return
 
@@ -63,16 +71,23 @@ def merged_state_dict(
     for original_name, group in lora_groups.items():
         if "base" not in group:
             continue
+        if skip_lm_head and original_name == "lm_head.weight":
+            continue
         base = _to_full_tensor(state_dict[group["base"]])
         if "lora_A" in group and "lora_B" in group:
             lora_a = _to_full_tensor(state_dict[group["lora_A"]])
             lora_b = _to_full_tensor(state_dict[group["lora_B"]])
-            yield (original_name, base + (lora_b @ lora_a) * scaling)
+            # Merge in fp32: bf16 base + bf16 delta rounds the LoRA update away.
+            merged = (base.float() + (lora_b.float() @ lora_a.float()) * scaling).to(base.dtype)
+            yield (original_name, merged)
         else:
             yield (original_name, base)
 
     for raw_name in regular_keys:
-        yield (_strip_peft_prefix(raw_name), _to_full_tensor(state_dict[raw_name]))
+        stripped = _strip_peft_prefix(raw_name)
+        if skip_lm_head and stripped == "lm_head.weight":
+            continue
+        yield (stripped, _to_full_tensor(state_dict[raw_name]))
 
 
 def raw_state_dict(

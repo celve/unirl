@@ -22,11 +22,23 @@ class RolloutWeightSyncMixin:
     engine: Optional[BaseRolloutEngine]
     rank: int
 
-    def _prepare_engine_for_weight_update(self) -> None:
+    def _prepare_engine_for_weight_update(self, *, track_prefix: str = "") -> None:
         if self.engine is None:
             logger.warning("No engine to update weights")
             return
-        self.engine.wake_up()
+        self.engine.onload_weights(track_prefix=track_prefix)
+
+    @staticmethod
+    def _infer_single_track_prefix(tensors: dict) -> str:
+        prefixes = set()
+        for name in tensors:
+            head, sep, _ = str(name).partition(".")
+            if not sep:
+                return ""
+            prefixes.add(head)
+            if len(prefixes) > 1:
+                return ""
+        return next(iter(prefixes), "")
 
     def update_weights_from_path(
         self,
@@ -66,16 +78,18 @@ class RolloutWeightSyncMixin:
         target_modules: Optional[List[str]] = None,
         load_format: Optional[str] = None,
         flush_cache: bool = True,
+        track_prefix: str = "",
     ) -> None:
         if self.engine is None:
             logger.warning("No engine to update weights")
             return
-        self._prepare_engine_for_weight_update()
+        self._prepare_engine_for_weight_update(track_prefix=track_prefix)
         self.engine.update_weights_from_tensor(
             serialized_named_tensors=serialized_named_tensors,
             target_modules=target_modules,
             load_format=load_format,
             flush_cache=flush_cache,
+            track_prefix=track_prefix,
         )
 
     def set_lora_from_tensors(
@@ -88,6 +102,7 @@ class RolloutWeightSyncMixin:
         if self.engine is None:
             logger.warning("No engine to set LoRA tensors")
             return
+        self._prepare_engine_for_weight_update(track_prefix=self._infer_single_track_prefix(lora_tensors))
         self.engine.set_lora_from_tensors(adapter_name, lora_tensors, peft_config=peft_config)
 
     def init_weights_update_group(

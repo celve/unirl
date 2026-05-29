@@ -251,6 +251,14 @@ class RolloutActor(ConfigActor, RolloutWeightSyncMixin, DistributedMixin, Rollou
             return False
         return self.engine.health_check()
 
+    def flush_cache(self, *, track_prefix: str = "") -> None:
+        """Drain pending work on the underlying engine (cross-process barrier)."""
+        if self.engine is None:
+            return
+        fn = getattr(self.engine, "flush_cache", None)
+        if callable(fn):
+            fn(track_prefix=track_prefix)
+
     def is_offloaded(self) -> bool:
         """Check if actor is currently offloaded to CPU."""
         if self.engine is None:

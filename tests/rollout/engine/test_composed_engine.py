@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 import torch
 
-from diffusionrl.rollout.engine.base import BaseRolloutEngine
+from diffusionrl.rollout.engine.base import BaseEngineConfig, BaseRolloutEngine
 from diffusionrl.rollout.engine.composed import (
     ComposedRolloutEngine,
     ComposedRolloutEngineConfig,
@@ -43,13 +43,15 @@ from diffusionrl.types.segments.text import TextSegment
 
 
 @dataclass
-class _FakeLLMConfig:
+class _FakeLLMConfig(BaseEngineConfig):
     model_path: str = "fake-llm"
+    _target_: str = f"{__name__}._FakeLLMEngine"
 
 
 @dataclass
-class _FakeDiffConfig:
+class _FakeDiffConfig(BaseEngineConfig):
     model_family: str = "sd3"
+    _target_: str = f"{__name__}._FakeDiffEngine"
 
 
 class _FakeChildEngine(BaseRolloutEngine):
@@ -153,15 +155,12 @@ class _FakeDiffEngine(_FakeChildEngine):
         super().__init__(config=config, **deps)
 
 
-_FAKE_LLM_TARGET = f"{__name__}._FakeLLMEngine"
-_FAKE_DIFF_TARGET = f"{__name__}._FakeDiffEngine"
-
-
-def _fake_children_dict() -> Dict[str, Any]:
-    return {
-        "llm": {"_target_": _FAKE_LLM_TARGET, "model_path": "fake-llm-path"},
-        "diffusion": {"_target_": _FAKE_DIFF_TARGET, "model_family": "sd3"},
-    }
+def _fake_composed_config(*, sleep_diffusion_on_start: bool = True) -> ComposedRolloutEngineConfig:
+    return ComposedRolloutEngineConfig(
+        ar=_FakeLLMConfig(model_path="fake-llm-path"),
+        diffusion=_FakeDiffConfig(model_family="sd3"),
+        sleep_diffusion_on_start=sleep_diffusion_on_start,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -228,10 +227,7 @@ def _make_diff_resp_factory(*, total: int):
 
 
 def _build_engine(*, sleep_diffusion_on_start: bool = True) -> ComposedRolloutEngine:
-    cfg = ComposedRolloutEngineConfig(
-        children=_fake_children_dict(),
-        sleep_diffusion_on_start=sleep_diffusion_on_start,
-    )
+    cfg = _fake_composed_config(sleep_diffusion_on_start=sleep_diffusion_on_start)
     return ComposedRolloutEngine(
         cfg,
         device=torch.device("cpu"),
@@ -260,44 +256,8 @@ def _build_req(*, prompts: List[str], n: int, m: int) -> RolloutReq:
 
 
 def test_config_target_resolves_to_engine():
-    cfg = ComposedRolloutEngineConfig(children=_fake_children_dict())
+    cfg = _fake_composed_config()
     assert getattr(cfg, "_target_").endswith("ComposedRolloutEngine")
-
-
-def test_config_post_init_requires_both_children():
-    with pytest.raises(Exception):
-        ComposedRolloutEngineConfig(children={"llm": {"_target_": _FAKE_LLM_TARGET}})
-
-
-def test_config_post_init_requires_target_in_each_child():
-    with pytest.raises(Exception):
-        ComposedRolloutEngineConfig(
-            children={
-                "llm": {"_target_": _FAKE_LLM_TARGET},
-                "diffusion": {"model_family": "sd3"},  # missing _target_
-            }
-        )
-
-
-def test_config_post_init_stage_id_map_matches_children():
-    with pytest.raises(Exception):
-        ComposedRolloutEngineConfig(
-            children=_fake_children_dict(),
-            stage_id_map={"diffusion": 0},  # missing 'llm'
-        )
-
-
-def test_config_post_init_unique_stage_ids():
-    with pytest.raises(Exception):
-        ComposedRolloutEngineConfig(
-            children=_fake_children_dict(),
-            stage_id_map={"diffusion": 0, "llm": 0},  # duplicate sid
-        )
-
-
-def test_config_stage_id_dict_property():
-    cfg = ComposedRolloutEngineConfig(children=_fake_children_dict())
-    assert cfg.stage_id_dict == {"diffusion": 0, "llm": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +266,7 @@ def test_config_stage_id_dict_property():
 
 
 def test_ctor_accepts_all_four_runtime_kwargs():
-    cfg = ComposedRolloutEngineConfig(children=_fake_children_dict())
+    cfg = _fake_composed_config()
     engine = ComposedRolloutEngine(
         cfg,
         device=torch.device("cpu"),
@@ -315,10 +275,10 @@ def test_ctor_accepts_all_four_runtime_kwargs():
         model_config={"key": "value"},
     )
     # Both children should have received their deps.
-    assert engine._llm.deps["device"] == torch.device("cpu")
-    assert engine._llm.deps["rank"] == 2
-    assert engine._llm.deps["strategy"] is None  # LLM gets strategy=None.
-    assert engine._llm.deps["model_config"] == {"key": "value"}
+    assert engine._ar.deps["device"] == torch.device("cpu")
+    assert engine._ar.deps["rank"] == 2
+    assert engine._ar.deps["strategy"] is None  # AR gets strategy=None.
+    assert engine._ar.deps["model_config"] == {"key": "value"}
     assert engine._diffusion.deps["device"] == torch.device("cpu")
     assert engine._diffusion.deps["strategy"] == "fake-strategy"
     assert engine._diffusion.deps["rank"] == 2
@@ -329,37 +289,31 @@ def test_ctor_sleeps_diffusion_on_start_when_flag_set():
     engine = _build_engine(sleep_diffusion_on_start=True)
     assert engine._diffusion.is_offloaded is True
     sleep_calls = [c for c in engine._diffusion.calls if c["name"] == "sleep"]
-    # Composed engine resolves stage_ids to the diffusion child, then calls
-    # child.sleep() without stage_ids (child is single-stage from its POV).
     assert len(sleep_calls) == 1
-    # LLM not slept.
-    assert not any(c["name"] == "sleep" for c in engine._llm.calls)
+    # AR not slept.
+    assert not any(c["name"] == "sleep" for c in engine._ar.calls)
 
 
 def test_ctor_does_not_sleep_diffusion_when_flag_unset():
     engine = _build_engine(sleep_diffusion_on_start=False)
     assert not any(c["name"] == "sleep" for c in engine._diffusion.calls)
-    assert not any(c["name"] == "sleep" for c in engine._llm.calls)
+    assert not any(c["name"] == "sleep" for c in engine._ar.calls)
 
 
 def test_build_child_inspect_recovers_typed_config():
     engine = _build_engine()
-    assert isinstance(engine._llm.config, _FakeLLMConfig)
-    assert engine._llm.config.model_path == "fake-llm-path"
+    assert isinstance(engine._ar.config, _FakeLLMConfig)
+    assert engine._ar.config.model_path == "fake-llm-path"
     assert isinstance(engine._diffusion.config, _FakeDiffConfig)
     assert engine._diffusion.config.model_family == "sd3"
 
 
 def test_build_child_rejects_missing_target():
-    cfg = ComposedRolloutEngineConfig(children=_fake_children_dict())
-    # Bypass the config's own __post_init__ via direct dict mutation post-validation.
+    cfg = _fake_composed_config()
     object.__setattr__(
         cfg,
-        "children",
-        {
-            "llm": {"model_path": "x"},  # no _target_
-            "diffusion": {"_target_": _FAKE_DIFF_TARGET},
-        },
+        "ar",
+        {"model_path": "x"},  # no _target_
     )
     with pytest.raises(Exception):
         ComposedRolloutEngine(cfg, device=torch.device("cpu"))
@@ -373,20 +327,20 @@ def test_build_child_rejects_missing_target():
 def test_generate_calls_llm_then_diffusion_in_order():
     P, N, M = 2, 3, 2
     engine = _build_engine()
-    engine._llm.gen_factory = _make_llm_resp_factory(p_times_n=P * N)
+    engine._ar.gen_factory = _make_llm_resp_factory(p_times_n=P * N)
     engine._diffusion.gen_factory = _make_diff_resp_factory(total=P * N * M)
 
     req = _build_req(prompts=["a", "b"], n=N, m=M)
     engine.generate(req)
 
     # LLM first, then diffusion.
-    llm_gen_idx = [i for i, c in enumerate(engine._llm.calls) if c["name"] == "generate"]
+    llm_gen_idx = [i for i, c in enumerate(engine._ar.calls) if c["name"] == "generate"]
     diff_gen_idx = [i for i, c in enumerate(engine._diffusion.calls) if c["name"] == "generate"]
     assert len(llm_gen_idx) == 1
     assert len(diff_gen_idx) == 1
 
     # LLM saw P prompts.
-    llm_gen_call = engine._llm.calls[llm_gen_idx[0]]
+    llm_gen_call = engine._ar.calls[llm_gen_idx[0]]
     assert llm_gen_call["sample_ids"] == ["p0", "p1"]
     assert llm_gen_call["primitives_text"] == ["a", "b"]
     assert llm_gen_call["sampling_params"].samples_per_prompt == N
@@ -400,34 +354,34 @@ def test_generate_calls_llm_then_diffusion_in_order():
 def test_generate_returns_two_track_resp_with_correct_lineage():
     P, N, M = 2, 3, 2
     engine = _build_engine()
-    engine._llm.gen_factory = _make_llm_resp_factory(p_times_n=P * N)
+    engine._ar.gen_factory = _make_llm_resp_factory(p_times_n=P * N)
     engine._diffusion.gen_factory = _make_diff_resp_factory(total=P * N * M)
 
     req = _build_req(prompts=["a", "b"], n=N, m=M)
     resp = engine.generate(req)
 
-    assert set(resp.tracks.keys()) == {"llm", "diffusion"}
-    assert resp.tracks["llm"].parent_track is None
-    assert resp.tracks["diffusion"].parent_track == "llm"
-    assert len(resp.tracks["llm"].sample_ids) == P * N
+    assert set(resp.tracks.keys()) == {"ar", "diffusion"}
+    assert resp.tracks["ar"].parent_track is None
+    assert resp.tracks["diffusion"].parent_track == "ar"
+    assert len(resp.tracks["ar"].sample_ids) == P * N
     assert len(resp.tracks["diffusion"].sample_ids) == P * N * M
     # Lineage FK passes (no exception from __post_init__).
-    # parent_ids of llm reference the request prompts.
-    assert resp.tracks["llm"].parent_ids == ["p0", "p0", "p0", "p1", "p1", "p1"]
-    # parent_ids of diffusion reference the llm sample_ids.
-    assert all(p in resp.tracks["llm"].sample_ids for p in resp.tracks["diffusion"].parent_ids)
+    # parent_ids of AR reference the request prompts.
+    assert resp.tracks["ar"].parent_ids == ["p0", "p0", "p0", "p1", "p1", "p1"]
+    # parent_ids of diffusion reference the AR sample_ids.
+    assert all(p in resp.tracks["ar"].sample_ids for p in resp.tracks["diffusion"].parent_ids)
 
 
 def test_generate_sleep_wake_transitions():
     P, N, M = 1, 2, 2
     engine = _build_engine(sleep_diffusion_on_start=False)  # clean slate
-    engine._llm.gen_factory = _make_llm_resp_factory(p_times_n=P * N)
+    engine._ar.gen_factory = _make_llm_resp_factory(p_times_n=P * N)
     engine._diffusion.gen_factory = _make_diff_resp_factory(total=P * N * M)
 
     engine.generate(_build_req(prompts=["a"], n=N, m=M))
 
     # Look at sleep/wake calls on each child relative to its generate call.
-    llm_seq = [c["name"] for c in engine._llm.calls]
+    llm_seq = [c["name"] for c in engine._ar.calls]
     diff_seq = [c["name"] for c in engine._diffusion.calls]
 
     # LLM: wake_up before generate, sleep after.
@@ -439,10 +393,10 @@ def test_generate_sleep_wake_transitions():
 def test_generate_uses_n_from_sampling_params_ar():
     P, N, M = 1, 4, 1
     engine = _build_engine()
-    engine._llm.gen_factory = _make_llm_resp_factory(p_times_n=P * N)
+    engine._ar.gen_factory = _make_llm_resp_factory(p_times_n=P * N)
     engine._diffusion.gen_factory = _make_diff_resp_factory(total=P * N * M)
     engine.generate(_build_req(prompts=["a"], n=N, m=M))
-    llm_gen = next(c for c in engine._llm.calls if c["name"] == "generate")
+    llm_gen = next(c for c in engine._ar.calls if c["name"] == "generate")
     assert llm_gen["sampling_params"].samples_per_prompt == N
 
 
@@ -450,7 +404,7 @@ def test_generate_propagates_pe_texts_via_primitives_text():
     """PE texts must ride on diffusion sub-request's primitives['text'], NOT conditions."""
     P, N, M = 1, 2, 3
     engine = _build_engine()
-    engine._llm.gen_factory = _make_llm_resp_factory(p_times_n=P * N)
+    engine._ar.gen_factory = _make_llm_resp_factory(p_times_n=P * N)
     engine._diffusion.gen_factory = _make_diff_resp_factory(total=P * N * M)
     engine.generate(_build_req(prompts=["a"], n=N, m=M))
     diff_gen = next(c for c in engine._diffusion.calls if c["name"] == "generate")
@@ -472,7 +426,7 @@ def test_generate_propagates_request_conditions_to_both_children():
 
     P, N, M = 1, 2, 1
     engine = _build_engine()
-    engine._llm.gen_factory = _make_llm_resp_factory(p_times_n=P * N)
+    engine._ar.gen_factory = _make_llm_resp_factory(p_times_n=P * N)
     engine._diffusion.gen_factory = _make_diff_resp_factory(total=P * N * M)
 
     seed_latents = torch.arange(P * N * M * 4, dtype=torch.float32).reshape(P * N * M, 1, 2, 2)
@@ -489,7 +443,7 @@ def test_generate_propagates_request_conditions_to_both_children():
     )
     engine.generate(req)
 
-    llm_gen = next(c for c in engine._llm.calls if c["name"] == "generate")
+    llm_gen = next(c for c in engine._ar.calls if c["name"] == "generate")
     diff_gen = next(c for c in engine._diffusion.calls if c["name"] == "generate")
     assert "initial_latents" in llm_gen["request_conditions"], "LLM child must receive caller conditions"
     assert "initial_latents" in diff_gen["request_conditions"], "diffusion child must receive caller conditions"
@@ -544,11 +498,11 @@ def test_generate_lifts_llm_child_conditions_onto_track():
         )
         return RolloutResp(tracks={"text": track})
 
-    engine._llm.gen_factory = llm_factory
+    engine._ar.gen_factory = llm_factory
     engine._diffusion.gen_factory = _make_diff_resp_factory(total=P * N * M)
 
     resp = engine.generate(_build_req(prompts=["a", "b"], n=N, m=M))
-    llm_track = resp.tracks["llm"]
+    llm_track = resp.tracks["ar"]
     assert "prompt" in llm_track.conditions
     prompt_cond = llm_track.conditions["prompt"]
     assert isinstance(prompt_cond, TextTokenCondition)
@@ -588,41 +542,36 @@ def test_generate_rejects_missing_text_primitive():
 def test_sleep_no_args_sleeps_both_children():
     engine = _build_engine(sleep_diffusion_on_start=False)
     engine.sleep()
-    assert any(c["name"] == "sleep" for c in engine._llm.calls)
+    assert any(c["name"] == "sleep" for c in engine._ar.calls)
     assert any(c["name"] == "sleep" for c in engine._diffusion.calls)
 
 
 def test_wake_up_no_args_wakes_both_children():
     engine = _build_engine(sleep_diffusion_on_start=False)
     engine.wake_up()
-    assert any(c["name"] == "wake_up" for c in engine._llm.calls)
+    assert any(c["name"] == "wake_up" for c in engine._ar.calls)
     assert any(c["name"] == "wake_up" for c in engine._diffusion.calls)
 
 
-def test_sleep_with_single_stage_id_targets_one_child():
+def test_onload_weights_without_track_prefix_wakes_both_children():
     engine = _build_engine(sleep_diffusion_on_start=False)
-    engine.sleep(stage_ids=[0])  # diffusion only
-    assert any(c["name"] == "sleep" for c in engine._diffusion.calls)
-    assert not any(c["name"] == "sleep" for c in engine._llm.calls)
+    engine.onload_weights()
+    assert any(c["name"] == "wake_up" for c in engine._ar.calls)
+    assert any(c["name"] == "wake_up" for c in engine._diffusion.calls)
 
 
-def test_sleep_with_unknown_stage_id_raises():
+def test_onload_weights_with_track_prefix_wakes_one_child():
     engine = _build_engine(sleep_diffusion_on_start=False)
-    with pytest.raises(ValueError):
-        engine.sleep(stage_ids=[42])
-
-
-def test_sleep_with_empty_list_raises():
-    engine = _build_engine(sleep_diffusion_on_start=False)
-    with pytest.raises(ValueError):
-        engine.sleep(stage_ids=[])
+    engine.onload_weights(track_prefix="ar")
+    assert any(c["name"] == "wake_up" for c in engine._ar.calls)
+    assert not any(c["name"] == "wake_up" for c in engine._diffusion.calls)
 
 
 # ---------------------------------------------------------------------------
 # Weight-sync routing tests
 # ---------------------------------------------------------------------------
 
-_WEIGHT_SYNC_METHODS = [
+_UNSUPPORTED_COMPOSED_SYNC_METHODS = [
     ("update_weights_from_ipc", {}),
     (
         "init_weights_update_group",
@@ -633,66 +582,57 @@ _WEIGHT_SYNC_METHODS = [
         dict(names=[], dtypes=[], shapes=[], group_name="g"),
     ),
     ("destroy_weights_update_group", dict(group_name="g")),
-    ("update_weights_from_tensor", dict(serialized_named_tensors=[])),
 ]
 
 
-@pytest.mark.parametrize("method,kwargs", _WEIGHT_SYNC_METHODS)
-def test_weight_sync_requires_stage_ids(method, kwargs):
+@pytest.mark.parametrize("method,kwargs", _UNSUPPORTED_COMPOSED_SYNC_METHODS)
+def test_composed_rejects_ipc_and_nccl_sync(method, kwargs):
     engine = _build_engine()
     fn = getattr(engine, method)
-    with pytest.raises(ValueError, match="stage_ids is required"):
+    with pytest.raises(NotImplementedError):
         fn(**kwargs)
 
 
-@pytest.mark.parametrize("method,kwargs", _WEIGHT_SYNC_METHODS)
-def test_weight_sync_rejects_multi_stage_lists(method, kwargs):
+def test_update_weights_from_tensor_requires_track_prefix():
     engine = _build_engine()
-    fn = getattr(engine, method)
-    with pytest.raises(ValueError, match="length 1"):
-        fn(stage_ids=[0, 1], **kwargs)
+    with pytest.raises(ValueError, match="track_prefix"):
+        engine.update_weights_from_tensor(serialized_named_tensors=[])
 
 
-@pytest.mark.parametrize("method,kwargs", _WEIGHT_SYNC_METHODS)
-def test_weight_sync_routes_stage_zero_to_diffusion(method, kwargs):
+def test_update_weights_from_tensor_routes_diffusion_track():
     engine = _build_engine()
-    fn = getattr(engine, method)
-    fn(stage_ids=[0], **kwargs)
-    assert any(c["name"] == method for c in engine._diffusion.calls)
-    assert not any(c["name"] == method for c in engine._llm.calls)
+    engine.update_weights_from_tensor(serialized_named_tensors=[], track_prefix="diffusion")
+    assert any(c["name"] == "update_weights_from_tensor" for c in engine._diffusion.calls)
+    assert not any(c["name"] == "update_weights_from_tensor" for c in engine._ar.calls)
 
 
-@pytest.mark.parametrize("method,kwargs", _WEIGHT_SYNC_METHODS)
-def test_weight_sync_routes_stage_one_to_llm(method, kwargs):
+def test_update_weights_from_tensor_routes_ar_track():
     engine = _build_engine()
-    fn = getattr(engine, method)
-    fn(stage_ids=[1], **kwargs)
-    assert any(c["name"] == method for c in engine._llm.calls)
-    assert not any(c["name"] == method for c in engine._diffusion.calls)
+    engine.update_weights_from_tensor(serialized_named_tensors=[], track_prefix="ar")
+    assert any(c["name"] == "update_weights_from_tensor" for c in engine._ar.calls)
+    assert not any(c["name"] == "update_weights_from_tensor" for c in engine._diffusion.calls)
 
 
-@pytest.mark.parametrize("method,kwargs", _WEIGHT_SYNC_METHODS)
-def test_weight_sync_unknown_stage_raises(method, kwargs):
+def test_update_weights_from_tensor_unknown_track_raises():
     engine = _build_engine()
-    fn = getattr(engine, method)
     with pytest.raises(ValueError, match="unknown"):
-        fn(stage_ids=[42], **kwargs)
+        engine.update_weights_from_tensor(serialized_named_tensors=[], track_prefix="unknown")
 
 
-def test_set_lora_from_tensors_routes_to_correct_child():
+def test_set_lora_from_tensors_routes_prefixed_tensors_to_correct_child():
     engine = _build_engine()
-    engine.set_lora_from_tensors("default", {"a": torch.zeros(1)}, stage_ids=[1])
-    llm_call = next(c for c in engine._llm.calls if c["name"] == "set_lora_from_tensors")
+    engine.set_lora_from_tensors("default", {"ar.a": torch.zeros(1)})
+    llm_call = next(c for c in engine._ar.calls if c["name"] == "set_lora_from_tensors")
     assert llm_call["adapter_name"] == "default"
     assert llm_call["n_tensors"] == 1
     # Diffusion never received it.
     assert not any(c["name"] == "set_lora_from_tensors" for c in engine._diffusion.calls)
 
 
-def test_set_lora_from_tensors_requires_stage_ids():
+def test_set_lora_from_tensors_requires_child_prefixes():
     engine = _build_engine()
-    with pytest.raises(ValueError, match="stage_ids is required"):
-        engine.set_lora_from_tensors("default", {})
+    with pytest.raises(ValueError, match="child-prefixed"):
+        engine.set_lora_from_tensors("default", {"a": torch.zeros(1)})
 
 
 # ---------------------------------------------------------------------------
@@ -725,15 +665,15 @@ def test_class_has_all_weight_sync_methods():
 def test_shutdown_calls_each_child_even_if_one_raises():
     engine = _build_engine(sleep_diffusion_on_start=False)
     # Make LLM child raise on shutdown.
-    original_shutdown = engine._llm.shutdown
+    original_shutdown = engine._ar.shutdown
 
     def boom() -> None:
         original_shutdown()
         raise RuntimeError("boom")
 
-    engine._llm.shutdown = boom  # type: ignore[method-assign]
+    engine._ar.shutdown = boom  # type: ignore[method-assign]
     engine.shutdown()  # must not propagate
-    assert any(c["name"] == "shutdown" for c in engine._llm.calls)
+    assert any(c["name"] == "shutdown" for c in engine._ar.calls)
     assert any(c["name"] == "shutdown" for c in engine._diffusion.calls)
 
 
@@ -747,7 +687,7 @@ def test_get_memory_info_sums_per_child():
 def test_health_check_all_must_be_healthy():
     engine = _build_engine()
     assert engine.health_check() is True
-    engine._llm._health = False  # type: ignore[attr-defined]
+    engine._ar._health = False  # type: ignore[attr-defined]
     assert engine.health_check() is False
 
 
@@ -756,5 +696,5 @@ def test_is_offloaded_reflects_all_children():
     assert engine.is_offloaded is False
     engine.sleep()
     assert engine.is_offloaded is True
-    engine.wake_up(stage_ids=[0])
-    assert engine.is_offloaded is False  # diffusion now awake; not all offloaded
+    engine.wake_up()
+    assert engine.is_offloaded is False

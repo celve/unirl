@@ -71,8 +71,9 @@ class UpdateWeightFromCheckpoint(UpdateWeight):
         param_name_prefix: str | None = None,
         packed_modules: dict | None = None,
         track_prefix: str = "",
+        use_merged: bool = False,
     ) -> None:
-        del peft_config, base_sync_done, param_name_prefix, packed_modules, track_prefix
+        del peft_config, base_sync_done, param_name_prefix, packed_modules, track_prefix, use_merged
         resolved_model = self._resolve_model(model)
         self.weight_version += 1
         is_rank0 = dist.get_rank() == 0

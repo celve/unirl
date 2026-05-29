@@ -80,7 +80,11 @@ class Qwen3Pipeline(Pipeline):
         """Build the full pipeline from a config."""
         bundle = Qwen3Bundle.from_config(config)
         chat_template = Qwen3ChatTemplateStage(bundle)
-        ar = Qwen3ARStage(model=bundle)
+        ar = Qwen3ARStage(
+            model=bundle,
+            autocast_precision=config.autocast_precision,
+            logprob_precision=config.logprob_precision,
+        )
         return cls(bundle=bundle, chat_template=chat_template, ar=ar)
 
     def generate(self, req: RolloutReq) -> RolloutResp:

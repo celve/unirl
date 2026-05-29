@@ -155,6 +155,8 @@ class RewardPipeline:
                 req_batch = len(v)
                 break
 
+        _expanded_metadata = None  # set in the expansion branch below if needed
+
         if req_batch > 0 and req_batch != len(sample_ids):
             # PE-joint expansion: req has P prompts, track has P*N*M samples.
             if len(sample_ids) % req_batch == 0:
@@ -172,6 +174,10 @@ class RewardPipeline:
                         f"(N={_N}, M={_M}). Sample alignment is ambiguous."
                     )
                 req_primitives = {k: v.repeat_interleave(factor) for k, v in req_primitives.items()}
+                # Expand metadata in sync with primitives so prompt_metadata
+                # aligns with sample_ids (one entry per sample).
+                if req.metadata:
+                    _expanded_metadata = [m for m in req.metadata for _ in range(factor)]
             else:
                 raise RuntimeError(
                     f"RewardPipeline.score_and_attach: req batch {req_batch} != "
@@ -181,6 +187,10 @@ class RewardPipeline:
 
         samples_per_prompt = max(1, len(sample_ids))
 
+        _final_metadata = (
+            _expanded_metadata if _expanded_metadata is not None else (list(req.metadata) if req.metadata else None)
+        )
+
         request = _build_request_for_track(
             reward_input_kind=self.preferred_input_kind,
             samples_per_prompt=samples_per_prompt,
@@ -189,7 +199,7 @@ class RewardPipeline:
             prompt_ids=[str(sid) for sid in sample_ids],
             sample_ids=sample_ids,
             group_ids=list(track.group_ids),
-            prompt_metadata=list(req.metadata) if req.metadata else None,
+            prompt_metadata=_final_metadata,
         )
         reward_response = self.reward_service.compute_rewards(request)
 

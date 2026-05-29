@@ -22,7 +22,7 @@ forwards each subset to the matching child with the prefix stripped.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -36,6 +36,34 @@ from diffusionrl.types.rollout_resp import RolloutResp, _track_with_field
 from diffusionrl.types.sampling import get_ar_params, get_diffusion_params
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_pe_text(raw_text: str, marker: str) -> str:
+    """Return the substring after the LAST occurrence of ``marker``.
+
+    Pre-strips an optional ``<think>...</think>`` reasoning preamble (Qwen3
+    chat output), then takes everything after the last ``marker`` and
+    removes a wrapping pair of quotes. Returns ``""`` when the marker is
+    absent so the caller can fall back to the original user prompt.
+    """
+    text = (raw_text or "").strip()
+    if not text:
+        return ""
+
+    think_close = text.rfind("</think>")
+    if think_close != -1:
+        text = text[think_close + len("</think>") :].strip()
+        if not text:
+            return ""
+
+    marker_idx = text.rfind(marker)
+    if marker_idx == -1:
+        return ""
+
+    pe_text = text[marker_idx + len(marker) :].strip()
+    if len(pe_text) >= 2 and pe_text[0] == pe_text[-1] and pe_text[0] in ('"', "'"):
+        pe_text = pe_text[1:-1].strip()
+    return pe_text
 
 
 class ComposedRolloutEngine(BaseRolloutEngine):
@@ -106,6 +134,17 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         for child in self._child_by_name.values():
             child.wake_up()
 
+    def onload_weights(self, *, track_prefix: str = "") -> None:
+        for child in self._children_for_track_prefix(track_prefix):
+            child.onload_weights()
+
+    def flush_cache(self, *, track_prefix: str = "") -> None:
+        children = self._children_for_track_prefix(track_prefix)
+        for child in children:
+            fn = getattr(child, "flush_cache", None)
+            if callable(fn):
+                fn()
+
     @property
     def is_offloaded(self) -> bool:
         return all(child.is_offloaded for child in self._child_by_name.values())
@@ -152,13 +191,23 @@ class ComposedRolloutEngine(BaseRolloutEngine):
             decode_to_condition=None,
         )
 
+        # AR sub-req stage_config: forward parent's "chat" + "ar" subsets
+        # and inject pe_instruction on both — ``sglang_llm`` reads "ar" while
+        # ``Qwen3Pipeline`` reads "chat".
+        ar_stage_config: Dict[str, Any] = {
+            key: dict(req.stage_config[key]) for key in ("chat", "ar") if key in req.stage_config
+        }
+        if self.cfg.pe_instruction:
+            for key in ("ar", "chat"):
+                ar_stage_config.setdefault(key, {})["system_instruction"] = self.cfg.pe_instruction
+
         ar_sub_req = RolloutReq(
             sample_ids=list(req.sample_ids),
             group_ids=list(req.group_ids),
             primitives={"text": text_primitive},
             request_conditions=dict(req.request_conditions),
             sampling_params=ar_params,
-            stage_config={k: v for k, v in req.stage_config.items() if k in ("chat",)},
+            stage_config=ar_stage_config,
             sigmas=None,
         )
         ar_resp = self._ar.generate(ar_sub_req)
@@ -195,6 +244,31 @@ class ComposedRolloutEngine(BaseRolloutEngine):
             f"length (expected {P * N}, got "
             f"{len(pe_texts.texts) if pe_texts is not None else 'None'})",
         )
+
+        # Optional marker-based PE extraction: keep only the substring after
+        # the marker so the diffusion child sees the rewritten prompt instead
+        # of the LLM's reasoning preamble. Off-format outputs fall back to
+        # the original user prompt to keep diffusion from collapsing to
+        # blank text. ``ar_track.decoded`` is rewritten in place so wandb
+        # / logging see the cleaned text.
+        if self.cfg.pe_marker:
+            cleaned_texts, stats = self._postprocess_pe_texts(
+                pe_texts.texts,
+                user_prompts=text_primitive.texts,
+                samples_per_prompt=N,
+            )
+            if any(stats.values()):
+                logger.info(
+                    "ComposedRolloutEngine: PE-extract — marker=%r, %d/%d empty, %d truncated, %d fallback_to_original",
+                    self.cfg.pe_marker,
+                    stats["empty"],
+                    len(pe_texts.texts),
+                    stats["truncated"],
+                    stats["fallback"],
+                )
+            pe_texts = Texts(texts=cleaned_texts)
+            ar_track = _track_with_field(ar_track, "decoded", pe_texts)
+
         expanded_texts = [t for t in pe_texts.texts for _ in range(M)]
         require(
             len(expanded_texts) == P * N * M,
@@ -247,6 +321,48 @@ class ComposedRolloutEngine(BaseRolloutEngine):
                 result[child_name] = subset
         return result
 
+    def _children_for_track_prefix(self, track_prefix: str) -> List[BaseRolloutEngine]:
+        """Resolve the tensor-payload track routing hint to child engines."""
+        if not track_prefix:
+            return list(self._child_by_name.values())
+        child = self._child_by_name.get(track_prefix)
+        if child is None:
+            raise ValueError(
+                f"ComposedRolloutEngine: unknown track_prefix {track_prefix!r}; "
+                f"expected one of {sorted(self._child_by_name)}."
+            )
+        return [child]
+
+    def _postprocess_pe_texts(
+        self,
+        raw_texts: List[str],
+        *,
+        user_prompts: List[str],
+        samples_per_prompt: int,
+    ) -> Tuple[List[str], Dict[str, int]]:
+        """Run marker extraction + truncation + empty-fallback over PE outputs.
+
+        ``raw_texts`` is PE-major over ``[P*N]``; the user prompt for slot
+        ``k`` is ``user_prompts[k // samples_per_prompt]``.
+        """
+        marker = self.cfg.pe_marker
+        max_chars = self.cfg.pe_max_chars
+        cleaned: List[str] = []
+        stats = {"empty": 0, "truncated": 0, "fallback": 0}
+        for k, raw in enumerate(raw_texts):
+            pe = _extract_pe_text(raw, marker)
+            if not pe:
+                stats["empty"] += 1
+            if max_chars is not None and len(pe) > int(max_chars):
+                pe = pe[: int(max_chars)]
+                stats["truncated"] += 1
+            if not pe.strip():
+                idx = k // max(1, samples_per_prompt)
+                pe = user_prompts[idx] if idx < len(user_prompts) else ""
+                stats["fallback"] += 1
+            cleaned.append(pe)
+        return cleaned, stats
+
     # ------------------------------------------------------------------
     # Weight sync — prefix-based demux
     # ------------------------------------------------------------------
@@ -258,12 +374,11 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         base_sync_done: bool = False,
         use_shm: bool = False,
     ) -> None:
-        for child in self._child_by_name.values():
-            child.update_weights_from_ipc(
-                peft_config=peft_config,
-                base_sync_done=base_sync_done,
-                use_shm=use_shm,
-            )
+        del peft_config, base_sync_done, use_shm
+        raise NotImplementedError(
+            "ComposedRolloutEngine supports multi-track weight sync only through tensor_payload. "
+            "Use sync=tensor_payload so each track is routed by track_prefix."
+        )
 
     def init_weights_update_group(
         self,
@@ -275,15 +390,11 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         group_name: str,
         backend: str = "nccl",
     ) -> None:
-        for child in self._child_by_name.values():
-            child.init_weights_update_group(
-                master_address=master_address,
-                master_port=master_port,
-                rank_offset=rank_offset,
-                world_size=world_size,
-                group_name=group_name,
-                backend=backend,
-            )
+        del master_address, master_port, rank_offset, world_size, group_name, backend
+        raise NotImplementedError(
+            "ComposedRolloutEngine does not support NCCL weight sync. "
+            "Use sync=tensor_payload; it routes one track to one child with track_prefix."
+        )
 
     def update_weights_from_distributed(
         self,
@@ -295,38 +406,22 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         target_modules: Optional[List[str]] = None,
         flush_cache: bool = True,
     ) -> None:
-        has_prefix = any(n.startswith(f"{cn}.") for n in names for cn in self._child_by_name)
-        if has_prefix:
-            for child_name, child in self._child_by_name.items():
-                prefix = f"{child_name}."
-                indices = [i for i, n in enumerate(names) if n.startswith(prefix)]
-                if indices:
-                    child.update_weights_from_distributed(
-                        names=[names[i][len(prefix) :] for i in indices],
-                        dtypes=[dtypes[i] for i in indices],
-                        shapes=[shapes[i] for i in indices],
-                        group_name=group_name,
-                        target_modules=target_modules,
-                        flush_cache=flush_cache,
-                    )
-        else:
-            for child in self._child_by_name.values():
-                child.update_weights_from_distributed(
-                    names=names,
-                    dtypes=dtypes,
-                    shapes=shapes,
-                    group_name=group_name,
-                    target_modules=target_modules,
-                    flush_cache=flush_cache,
-                )
+        del names, dtypes, shapes, group_name, target_modules, flush_cache
+        raise NotImplementedError(
+            "ComposedRolloutEngine does not support NCCL weight sync. "
+            "Use sync=tensor_payload; it routes one track to one child with track_prefix."
+        )
 
     def destroy_weights_update_group(
         self,
         *,
         group_name: str,
     ) -> None:
-        for child in self._child_by_name.values():
-            child.destroy_weights_update_group(group_name=group_name)
+        del group_name
+        raise NotImplementedError(
+            "ComposedRolloutEngine does not support NCCL weight sync. "
+            "Use sync=tensor_payload; it routes one track to one child with track_prefix."
+        )
 
     def set_lora_from_tensors(
         self,
@@ -339,18 +434,18 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         if demuxed:
             for child_name, child_tensors in demuxed.items():
                 child = self._child_by_name[child_name]
+                if child.is_offloaded:
+                    child.onload_weights()
                 child.set_lora_from_tensors(
                     adapter_name,
                     child_tensors,
                     peft_config=peft_config,
                 )
         else:
-            for child in self._child_by_name.values():
-                child.set_lora_from_tensors(
-                    adapter_name,
-                    lora_tensors,
-                    peft_config=peft_config,
-                )
+            raise ValueError(
+                "ComposedRolloutEngine.set_lora_from_tensors requires child-prefixed tensor keys; "
+                f"expected prefixes {sorted(self._child_by_name)}."
+            )
 
     def update_weights_from_tensor(
         self,
@@ -359,8 +454,15 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         target_modules: Optional[List[str]] = None,
         load_format: Optional[str] = None,
         flush_cache: bool = True,
+        track_prefix: str = "",
     ) -> None:
-        for child in self._child_by_name.values():
+        if not track_prefix:
+            raise ValueError(
+                "ComposedRolloutEngine.update_weights_from_tensor requires track_prefix "
+                f"so the update can be routed to one child; expected one of {sorted(self._child_by_name)}."
+            )
+        children = self._children_for_track_prefix(track_prefix)
+        for child in children:
             child.update_weights_from_tensor(
                 serialized_named_tensors=serialized_named_tensors,
                 target_modules=target_modules,

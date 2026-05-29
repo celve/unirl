@@ -17,6 +17,7 @@ Three classes:
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from typing import Any, List, Optional, Tuple
@@ -26,6 +27,7 @@ import torch.nn.functional as F
 
 from diffusionrl.models.types.ar import ARSamplingParams, ARStage, ARStep
 from diffusionrl.types.segments import TextSegment
+from diffusionrl.utils.dtypes import parse_torch_dtype
 
 from .bundle import Qwen3Bundle
 from .conditions import Qwen3ARConditions
@@ -110,8 +112,20 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
     ``(tokens, log_probs)`` into a varlen :class:`TextSegment`.
     """
 
-    def __init__(self, *, model: Qwen3Bundle) -> None:
+    def __init__(
+        self,
+        *,
+        model: Qwen3Bundle,
+        autocast_precision: str = "bf16",
+        logprob_precision: str = "fp32",
+    ) -> None:
         self.model = model
+        # ``replay`` runs the transformer forward under an explicit autocast
+        # scope so softmax / layer_norm stay FP32 (mirrors SD3DiffusionStage);
+        # ``logprob_dtype`` then forces the per-token log-prob into FP32 so
+        # the GRPO ratio / clip math starts from FP32.
+        self.autocast_dtype = parse_torch_dtype(autocast_precision, field_name="Qwen3ARStage.autocast_precision")
+        self.logprob_dtype = parse_torch_dtype(logprob_precision, field_name="Qwen3ARStage.logprob_precision")
 
     def trainable_module(self) -> "torch.nn.Module":
         """Return the HF causal LM module — the FSDP/LoRA wrap target.
@@ -211,15 +225,20 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
         conditions: Qwen3ARConditions,
         *,
         segment: TextSegment,
+        temperature: float = 1.0,
     ) -> torch.Tensor:
         """Per-token log-prob replay over a stored rollout segment.
 
         One teacher-forced forward over ``prompt + response`` (no KV
-        cache), gather full-softmax log-probs at the predicting positions
-        for each response token, return packed varlen ``[total_tokens]``
-        aligned with ``segment.log_probs``. Caller controls grad / no_grad
-        scope and ``.train()`` mode. Empty-response samples contribute
-        zero tokens to the output.
+        cache), gather log-probs at the predicting positions for each
+        response token, return packed varlen ``[total_tokens]`` aligned
+        with ``segment.log_probs``. Caller controls grad / no_grad scope
+        and ``.train()`` mode. Empty-response samples contribute zero
+        tokens to the output.
+
+        ``temperature`` divides ``pred_logits`` before ``log_softmax`` so
+        it matches SGLang's sampler (``log_softmax(logits/T)``). Default
+        ``1.0`` is a no-op.
         """
         if conditions.prompt is None or conditions.prompt.input_ids is None:
             raise ValueError("Qwen3ARStage.replay: conditions.prompt.input_ids is None")
@@ -250,6 +269,27 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
             response_tokens[b, :n] = segment.tokens[cu[b] : cu[b] + n].to(device=device, dtype=torch.long)
             response_mask[b, :n] = 1
 
+        # Re-pad RIGHT→LEFT so every sample's real prompt ends at index
+        # ``prompt_len - 1`` and the response starts at ``prompt_len``.
+        # Cross-actor concat in TextTokenCondition.concat right-pads to a
+        # global max; without re-padding, samples shorter than the global
+        # max have pad tokens between prompt and response, response RoPE
+        # positions shift by ``prompt_len - n_real``, and the prediction
+        # at ``logits[:, prompt_len - 1, :]`` reads a pad-position hidden
+        # state instead of the last-real-prompt one.
+        real_prompt_lens = prompt_mask.long().sum(dim=-1)  # [B]
+        if int(real_prompt_lens.min().item()) < prompt_len:
+            left_padded_ids = torch.full_like(prompt_ids, pad_id)
+            left_padded_mask = torch.zeros_like(prompt_mask)
+            for b in range(batch_size):
+                n_real = int(real_prompt_lens[b].item())
+                if n_real == 0:
+                    continue
+                left_padded_ids[b, prompt_len - n_real :] = prompt_ids[b, :n_real]
+                left_padded_mask[b, prompt_len - n_real :] = 1
+            prompt_ids = left_padded_ids
+            prompt_mask = left_padded_mask
+
         if T_max > 0:
             full_ids = torch.cat([prompt_ids, response_tokens], dim=1)
             full_mask = torch.cat([prompt_mask, response_mask], dim=1)
@@ -257,20 +297,41 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
             full_ids = prompt_ids
             full_mask = prompt_mask
 
-        out = self.model.transformer(
-            input_ids=full_ids,
-            attention_mask=full_mask,
-            use_cache=False,
-            return_dict=True,
+        # Cumsum-derived position_ids so RoPE matches SGLang's positions
+        # under any padding pattern. HF's modeling_qwen3 default falls back
+        # to ``arange(0, L)`` and ignores ``attention_mask``.
+        position_ids = (full_mask.long().cumsum(dim=-1) - 1).clamp(min=0)
+
+        # autocast scope mirrors SD3DiffusionStage.replay: matmul/linear stay
+        # in BF16 but softmax / layer_norm / log_softmax auto-promote to FP32
+        # in both forward and backward.  Without it, FSDP's ``param_dtype=bf16``
+        # forces every op to BF16 and backward NaNs after long LoRA drift.
+        autocast_ctx = (
+            torch.autocast("cuda", self.autocast_dtype)
+            if device.type == "cuda" and self.autocast_dtype in (torch.float16, torch.bfloat16)
+            else nullcontext()
         )
-        logits = out.logits
+        with autocast_ctx:
+            out = self.model.transformer(
+                input_ids=full_ids,
+                attention_mask=full_mask,
+                position_ids=position_ids,
+                use_cache=False,
+                return_dict=True,
+            )
+            logits = out.logits
 
         if T_max == 0:
-            return torch.zeros(0, dtype=torch.float32, device=device)
+            return torch.zeros(0, dtype=self.logprob_dtype, device=device)
 
         # logits[:, prompt_len - 1 + t, :] predicts response_tokens[:, t].
-        pred_logits = logits[:, prompt_len - 1 : prompt_len - 1 + T_max, :]
-        log_probs_full = F.log_softmax(pred_logits.float(), dim=-1)
+        # Divide by T so the returned logp matches SGLang's sampler
+        # (``log_softmax(logits/T)``); old_logp uses the same scaling.
+        # log_softmax stays in FP32 (outside the autocast scope) so the
+        # GRPO ratio / clip math starts from FP32, matching SD3.
+        pred_logits = logits[:, prompt_len - 1 : prompt_len - 1 + T_max, :].float()
+        T = float(temperature) if float(temperature) > 0.0 else 1.0
+        log_probs_full = F.log_softmax(pred_logits / T, dim=-1)
         per_token = log_probs_full.gather(-1, response_tokens.unsqueeze(-1)).squeeze(-1)
 
         flat: List[torch.Tensor] = []
@@ -280,8 +341,8 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
                 continue
             flat.append(per_token[b, :n])
         if not flat:
-            return torch.zeros(0, dtype=torch.float32, device=device)
-        return torch.cat(flat, dim=0)
+            return torch.zeros(0, dtype=self.logprob_dtype, device=device)
+        return torch.cat(flat, dim=0).to(dtype=self.logprob_dtype)
 
     def _resolve_stop_ids(
         self,

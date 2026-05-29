@@ -149,6 +149,7 @@ class UpdateWeightFromIPC(BucketedUpdateWeight):
         param_name_prefix: Optional[str] = None,
         packed_modules: Optional[dict] = None,
         track_prefix: str = "",
+        use_merged: bool = False,
     ) -> None:
         """Override the base bucket loop so receivers are wired up once per
         full update (not once per bucket)."""
@@ -159,6 +160,7 @@ class UpdateWeightFromIPC(BucketedUpdateWeight):
             param_name_prefix=param_name_prefix,
             packed_modules=packed_modules,
             track_prefix=track_prefix,
+            use_merged=use_merged,
         )
         if not self._rollout_actors:
             return
@@ -228,24 +230,26 @@ class UpdateWeightFromIPC(BucketedUpdateWeight):
         param_name_prefix: Optional[str] = None,
         packed_modules: Optional[dict] = None,
         track_prefix: str = "",
+        use_merged: bool = False,
     ):
         """Yield ``(name, tensor)`` pairs from the model state dict.
 
         The IPC handler overrides ``update_weights`` to manage per-stage
         receivers, so the base-class prefix application in
         ``BucketedUpdateWeight.update_weights`` never runs for this path —
-        we have to apply ``param_name_prefix`` here too.
+        we have to apply ``param_name_prefix`` here too. ``merged_state_dict``
+        produces HF-native keys, so its output skips the prefix.
         """
-        from diffusionrl.utils.peft_merge import adapt_lora_for_vllm, extract_lora_tensors, raw_state_dict
+        from diffusionrl.utils.peft_merge import adapt_lora_for_vllm, extract_lora_tensors
 
         resolved_model = self._resolve_model(model)
-        prefix = self._resolve_prefix(param_name_prefix)
+        prefix = "" if use_merged else self._resolve_prefix(param_name_prefix)
         resolved_packed = packed_modules if packed_modules is not None else getattr(self, "_packed_modules", None)
         if peft_config and base_sync_done:
             tensors = adapt_lora_for_vllm(
                 extract_lora_tensors(
                     resolved_model,
-                    param_name_prefix=prefix,
+                    param_name_prefix=self._resolve_prefix(param_name_prefix),
                     packed_modules=resolved_packed,
                 )
             )
@@ -253,9 +257,7 @@ class UpdateWeightFromIPC(BucketedUpdateWeight):
                 yield self._apply_track_prefix(k, track_prefix), v
             return
 
-        for name, param in raw_state_dict(resolved_model):
-            if name.endswith(".lora_A") or name.endswith(".lora_B"):
-                continue
+        for name, param in self._iter_state_dict(resolved_model, use_merged=use_merged):
             if prefix:
                 name = prefix + name
             yield self._apply_track_prefix(name, track_prefix), param
@@ -266,8 +268,10 @@ class UpdateWeightFromIPC(BucketedUpdateWeight):
 
     # The base class's abstract method — unused here because we override
     # ``update_weights`` directly; provide a no-op stub.
-    def update_bucket_weights(self, named_tensors, weight_version=None, is_last_bucket: bool = False) -> None:
-        del named_tensors, weight_version, is_last_bucket
+    def update_bucket_weights(
+        self, named_tensors, weight_version=None, is_last_bucket: bool = False, track_prefix: str = ""
+    ) -> None:
+        del named_tensors, weight_version, is_last_bucket, track_prefix
 
 
 __all__ = ["IPCBucketedSyncConfig", "UpdateWeightFromIPC"]

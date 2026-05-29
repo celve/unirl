@@ -63,6 +63,26 @@ def _detect_lora_on_model(model: object) -> bool:
     return False
 
 
+def _resolve_ar_sampling_temperature(cfg: DictConfig) -> Optional[float]:
+    """Single source of truth for the AR rollout sampling temperature.
+
+    Reads from ``cfg.rollout.engine.ar.temperature`` (composed PE engine)
+    or ``cfg.rollout.engine.temperature`` (direct AR engine). Returns
+    ``None`` when no AR engine is present so the algorithm falls back to
+    its own default.
+    """
+    if cfg.get("rollout") is None:
+        return None
+    rollout_eng = cfg.rollout.get("engine") if hasattr(cfg.rollout, "get") else None
+    if rollout_eng is None:
+        return None
+    ar_node = rollout_eng.get("ar") if hasattr(rollout_eng, "get") else None
+    candidate = ar_node.get("temperature") if ar_node is not None else None
+    if candidate is None:
+        candidate = rollout_eng.get("temperature") if hasattr(rollout_eng, "get") else None
+    return float(candidate) if candidate is not None else None
+
+
 def _build_algorithm_for_track(
     alg_node: object,
     *,
@@ -71,6 +91,7 @@ def _build_algorithm_for_track(
     stage: object,
     ema: Optional[EMA],
     sampling_params: Optional[Any] = None,
+    ar_sampling_temperature: Optional[float] = None,
 ) -> object:
     """Instantiate one track's :class:`StageAlgorithm` from its cfg node.
 
@@ -101,6 +122,9 @@ def _build_algorithm_for_track(
         and sampling_params is not None
     ):
         inject_kwargs["params"] = sampling_params
+
+    if target.endswith(".ARGRPO") and ar_sampling_temperature is not None:
+        inject_kwargs["sampling_temperature"] = ar_sampling_temperature
 
     if target.endswith(".DiffusionNFT"):
         if ema is None:
@@ -165,6 +189,7 @@ def build_training_tracks(
     shared_micro_batch_size = int(cfg.training.plan.micro_batch_size)
     diffusion_params = get_diffusion_params(cfg.sampling) if cfg.get("sampling") is not None else None
     sde_strategy_cfg = diffusion_params.sde_strategy if diffusion_params is not None else None
+    ar_sampling_temperature = _resolve_ar_sampling_temperature(cfg)
 
     for track_name, track_cfg in cfg.training.tracks.items():
         # 1. Pipeline.
@@ -307,6 +332,7 @@ def build_training_tracks(
                 stage=source_stage,
                 ema=ema,
                 sampling_params=diffusion_params,
+                ar_sampling_temperature=ar_sampling_temperature,
             )
 
         # 9. Per-track optimizer + scheduler.

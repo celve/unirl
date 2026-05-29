@@ -52,6 +52,7 @@ class UpdateWeightFromTensor(BucketedUpdateWeight):
         param_name_prefix: Optional[str] = None,
         packed_modules: Optional[dict] = None,
         track_prefix: str = "",
+        use_merged: bool = False,
     ) -> None:
         resolved_model = self._resolve_model(model)
         resolved_prefix = self._resolve_prefix(param_name_prefix)
@@ -81,6 +82,7 @@ class UpdateWeightFromTensor(BucketedUpdateWeight):
             param_name_prefix=param_name_prefix,
             packed_modules=packed_modules,
             track_prefix=track_prefix,
+            use_merged=use_merged,
         )
 
     def connect_rollout_engines(self) -> None:
@@ -103,7 +105,9 @@ class UpdateWeightFromTensor(BucketedUpdateWeight):
                 self._ipc_engine = engine
                 self.tp_rank = dist.get_rank() - start_rank
 
-    def update_bucket_weights(self, named_tensors, weight_version=None, is_last_bucket: bool = False) -> None:
+    def update_bucket_weights(
+        self, named_tensors, weight_version=None, is_last_bucket: bool = False, track_prefix: str = ""
+    ) -> None:
         del weight_version
         if self._ipc_gather_group is None or self._ipc_engine is None or self._ipc_gather_src is None:
             return
@@ -119,6 +123,12 @@ class UpdateWeightFromTensor(BucketedUpdateWeight):
             from sglang.srt.model_executor.model_runner import FlattenedTensorBucket  # type: ignore[import]
 
         monkey_patch_torch_reductions()
+
+        # ``track_prefix`` only routes the call to the right composed-engine
+        # child; the SGLang server itself wants clean parameter names.
+        if track_prefix:
+            strip = f"{track_prefix}."
+            named_tensors = [(n.removeprefix(strip), t) for n, t in named_tensors]
 
         named_tensors_by_dtype = {}
         for name, tensor in named_tensors:
@@ -153,8 +163,11 @@ class UpdateWeightFromTensor(BucketedUpdateWeight):
                     "load_format": "flattened_bucket",
                     "flush_cache": (self._flush_cache and is_last_bucket and i == num_dtypes - 1),
                     "target_modules": self._target_modules,
+                    "track_prefix": track_prefix,
                 }
                 ray.get(self._ipc_engine.update_weights_from_tensor.remote(**kwargs))
+            if is_last_bucket:
+                ray.get(self._ipc_engine.flush_cache.remote(track_prefix=track_prefix))
 
 
 __all__ = ["TensorPayloadSyncConfig", "UpdateWeightFromTensor"]

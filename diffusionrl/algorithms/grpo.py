@@ -242,6 +242,12 @@ class ARGRPO(StageAlgorithm):
             ``"cosine_decay"``.
         conditions_cls: Stage-typed conditions container with
             ``from_dict(Mapping[str, Condition])``.
+        sampling_temperature: AR rollout temperature, applied as a
+            ``logits / T`` scaling inside :meth:`ARStage.replay` so
+            replay's log-softmax matches SGLang's sampling distribution
+            (``log_softmax(logits / T)``). Injected at construction time
+            from the rollout engine config; falls back to
+            :class:`ARSamplingParams` default when no engine is configured.
     """
 
     def __init__(
@@ -251,11 +257,17 @@ class ARGRPO(StageAlgorithm):
         clip_range: float = 1e-4,
         clip_schedule: str = "constant",
         conditions_cls: Optional[Type[Any]] = None,
+        sampling_temperature: Optional[float] = None,
     ) -> None:
         self.stage = stage
         self.clip_range = float(clip_range)
         self.clip_schedule = str(clip_schedule)
         self.conditions_cls = conditions_cls
+        if sampling_temperature is None:
+            from diffusionrl.types.sampling import ARSamplingParams
+
+            sampling_temperature = ARSamplingParams.__dataclass_fields__["temperature"].default
+        self.sampling_temperature = float(sampling_temperature)
 
     def compute_loss_and_backward(
         self,
@@ -272,7 +284,9 @@ class ARGRPO(StageAlgorithm):
             return AlgorithmStepResult(loss=0.0, metrics={}, num_steps_or_tokens=0, has_backward=False)
 
         typed_conds = typed_conditions(conditions, self.conditions_cls)
-        new_logp = self.stage.replay(typed_conds, segment=segment)  # [total_tokens]
+        new_logp = self.stage.replay(
+            typed_conds, segment=segment, temperature=self.sampling_temperature
+        )  # [total_tokens]
         old_logp = segment.log_probs.to(dtype=new_logp.dtype, device=new_logp.device)
         adv_per_token = self._expand_advantages_to_tokens(
             advantages, segment.lengths, dtype=new_logp.dtype, device=new_logp.device
