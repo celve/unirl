@@ -9,7 +9,7 @@ worker subprocess and no weight sync are needed.
 
 from __future__ import annotations
 
-from typing import List, Optional, Union
+from typing import List, Optional, Sequence, Union
 
 import torch
 
@@ -31,12 +31,14 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
     Args:
         pipeline: A materialized ``models`` pipeline whose
             ``generate(req)`` populates ``RolloutResp``.
-        stage: Optional trainable stage whose ``trainable_module()`` is
-            the FSDP-wrapped model. Used to scope eval/train mode around
-            ``generate``. When omitted, resolved from
-            ``pipeline.<stage_attr>`` (default ``"diffusion"``).
-        stage_attr: Attribute on ``pipeline`` to read the stage from when
-            ``stage`` is not explicitly provided.
+        stage: Optional pre-resolved trainable stage whose
+            ``trainable_module()`` is the FSDP-wrapped model (the v1 train
+            actor passes one). Takes precedence over ``stage_attrs``.
+        stage_attrs: Stage attribute(s) to read off ``pipeline`` and
+            eval-scope around ``generate``. A list so composed pipelines can
+            drive more than one trainable module (e.g. PE's
+            ``["diffusion", "ar"]``); defaults to ``("diffusion",)`` for the
+            common single-diffusion engine.
         forward_batch_size: Optional intra-call chunk size for the
             ``pipeline.generate`` forward path. When set and the request
             exceeds this, ``generate`` slices the request via
@@ -57,19 +59,30 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
         *,
         pipeline: Pipeline,
         stage: Optional[Stage] = None,
-        stage_attr: str = "diffusion",
+        stage_attrs: Sequence[str] = ("diffusion",),
         forward_batch_size: Optional[int] = None,
     ) -> None:
         self.pipeline = pipeline
-        if stage is None:
-            stage = getattr(pipeline, stage_attr)
-        self._model = stage.trainable_module()
+        # Resolve the trainable module(s) to eval-scope around generate().
+        # A pre-resolved ``stage`` (the v1 train actor passes one) wins;
+        # otherwise resolve ``stage_attrs`` off the pipeline. ``stage_attrs``
+        # is a list so composed pipelines eval-scope more than one trainable
+        # module (e.g. PE's ["diffusion", "ar"]); the ("diffusion",) default
+        # keeps the common single-diffusion case.
+        if stage is not None:
+            stages = [stage]
+        else:
+            stages = [getattr(pipeline, a) for a in stage_attrs]
+        self._models = [s.trainable_module() for s in stages]
         if forward_batch_size is not None and forward_batch_size < 1:
             raise ValueError(
                 f"TrainsideRolloutEngine.forward_batch_size must be >= 1 when set; got {forward_batch_size!r}"
             )
         self.forward_batch_size = forward_batch_size
-        if isinstance(stage, DiffusionStage):
+        # Build a σ-schedule only when a diffusion stage is present (PE wraps
+        # both diffusion + ar, so check the resolved list, not the lone `stage`
+        # param which is None on the stage_attrs path); AR-only needs none.
+        if any(isinstance(s, DiffusionStage) for s in stages):
             if hasattr(pipeline, "build_schedule_policy"):
                 self.schedule_policy = pipeline.build_schedule_policy()
             else:
@@ -85,8 +98,9 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
     def generate(self, req: RolloutReq) -> RolloutResp:
         if self.schedule_policy is not None:
             ensure_req_sigmas(req, self.schedule_policy)
-        was_training = self._model.training
-        self._model.eval()
+        prev_modes = [m.training for m in self._models]
+        for m in self._models:
+            m.eval()
         try:
             with torch.no_grad():
                 fbs = self.forward_batch_size
@@ -100,7 +114,8 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
                     torch.cuda.empty_cache()
                 return RolloutResp.concat(outputs)
         finally:
-            self._model.train(was_training)
+            for m, mode in zip(self._models, prev_modes):
+                m.train(mode)
 
     def shutdown(self) -> None:
         pass
@@ -108,7 +123,7 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
     # sleep / wake_up inherit BaseRolloutEngine's @distributed no-op default.
 
     def health_check(self) -> bool:
-        return self.pipeline is not None and self._model is not None
+        return self.pipeline is not None and all(m is not None for m in self._models)
 
 
 __all__ = ["TrainsideRolloutEngine"]

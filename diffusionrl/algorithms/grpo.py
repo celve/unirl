@@ -260,12 +260,18 @@ class ARGRPO(StageAlgorithm):
     def __init__(
         self,
         *,
-        stage: Any,
+        stage: Any = None,
+        pipeline: Any = None,
+        stage_attr: str = "ar",
         clip_range: float = 1e-4,
         clip_schedule: str = "constant",
         conditions_cls: Optional[Type[Any]] = None,
         sampling_temperature: Optional[float] = None,
     ) -> None:
+        if stage is None and pipeline is None:
+            raise ValueError("ARGRPO: either `stage` or `pipeline` must be provided")
+        if stage is None:
+            stage = getattr(pipeline, stage_attr)
         self.stage = stage
         self.clip_range = float(clip_range)
         self.clip_schedule = str(clip_schedule)

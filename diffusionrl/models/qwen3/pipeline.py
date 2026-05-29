@@ -25,7 +25,7 @@ upstream for AR-only pipelines.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from diffusionrl.models.types.ar import ARSamplingParams
 from diffusionrl.models.types.pipeline import Pipeline
@@ -68,13 +68,24 @@ class Qwen3Pipeline(Pipeline):
         self,
         *,
         bundle: Qwen3Bundle,
-        chat_template: Qwen3ChatTemplateStage,
-        ar: Qwen3ARStage,
+        chat_template: Optional[Qwen3ChatTemplateStage] = None,
+        ar: Optional[Qwen3ARStage] = None,
+        autocast_precision: str = "bf16",
+        logprob_precision: str = "fp32",
     ) -> None:
         super().__init__()
         self.bundle = bundle
-        self.chat_template = chat_template
-        self.ar = ar
+        # Mirror SD3Pipeline: build the stages from the (shared) bundle when not
+        # supplied, so the v2 trainer can construct the pipeline via
+        # ``remote_hydra(pipeline_cfg, bundle=...)`` and share ONE bundle across
+        # the pipeline (rollout) and the FSDPBackend (training) — required for
+        # on-policy trainside PE. ``from_config`` still passes both explicitly.
+        self.chat_template = chat_template if chat_template is not None else Qwen3ChatTemplateStage(bundle)
+        self.ar = (
+            ar
+            if ar is not None
+            else Qwen3ARStage(model=bundle, autocast_precision=autocast_precision, logprob_precision=logprob_precision)
+        )
 
     @classmethod
     def from_config(cls, config: Qwen3PipelineConfig) -> "Qwen3Pipeline":

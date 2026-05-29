@@ -1,11 +1,12 @@
 """Tests for :class:`TrainsideRolloutEngine`.
 
-CPU-only. Uses fake ``Pipeline`` and ``Policy`` stand-ins to verify:
+CPU-only. Uses fake ``Pipeline`` / ``Stage`` stand-ins to verify:
 
 - ``generate(req)`` delegates to the wrapped pipeline's ``generate`` and
   returns the response verbatim.
-- The policy is flipped to ``eval()`` for the call duration and restored
-  to its prior training mode afterward.
+- The trainable module(s) are flipped to ``eval()`` for the call duration
+  and restored to their prior training mode afterward — for a single stage
+  (``stage_attr``) and for multiple stages (``stage_attrs``, e.g. PE).
 - ``torch.is_grad_enabled()`` is ``False`` inside the call.
 - Lifecycle methods are safe no-ops; weight-sync methods raise
   ``NotImplementedError`` from the base class.
@@ -34,48 +35,39 @@ from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
 # ---------------------------------------------------------------------------
 
 
-class _FakePolicy:
-    """Minimal Policy stand-in. Holds an ``nn.Module`` so ``.training`` is real."""
+class _FakeStage:
+    """Minimal stage stand-in exposing the trainable ``nn.Module``."""
 
-    def __init__(self, *, start_training: bool = True) -> None:
-        self.model = nn.Linear(2, 2)
-        self.model.train(bool(start_training))
-        self.train_calls: list = []
+    def __init__(self, model: nn.Module) -> None:
+        self._model = model
 
-    def train(self, mode: bool = True) -> None:
-        self.train_calls.append(("train", bool(mode)))
-        self.model.train(bool(mode))
-
-    def eval(self) -> None:
-        self.train_calls.append(("eval", False))
-        self.model.eval()
+    def trainable_module(self) -> nn.Module:
+        return self._model
 
 
 class _FakePipeline:
-    """Minimal Pipeline stand-in.
+    """Pipeline stand-in exposing named stages + recording eval/grad state.
 
-    Records whether the policy was in eval mode and whether grad was
-    disabled at the moment ``generate`` was invoked, so the engine's
-    scoping behavior can be asserted.
-
-    Satisfies the schedule-policy fallback contract on
-    :class:`TrainsideRolloutEngine.__init__`:
-    ``FlowMatchSchedulePolicy.from_pretrained(None, shift=...)`` returns
-    a static-only policy (no I/O), which is enough for unit tests that
-    pre-pin ``req.sigmas`` or whose paths don't read schedule fields.
+    ``bundle.pretrained_path=None`` + ``shift`` satisfy the engine's
+    schedule-policy fallback (``FlowMatchSchedulePolicy.from_pretrained(None,
+    shift=...)`` is static / no I/O). Each stage is exposed as an attribute
+    (e.g. ``self.diffusion``, ``self.ar``) so ``stage_attr`` / ``stage_attrs``
+    resolve via ``getattr``.
     """
 
     bundle = SimpleNamespace(pretrained_path=None)
     shift = 1.0
 
-    def __init__(self, *, policy: _FakePolicy) -> None:
-        self._policy = policy
+    def __init__(self, **stages: _FakeStage) -> None:
+        for name, st in stages.items():
+            setattr(self, name, st)
+        self._stages = stages
         self.observations: list = []
 
     def generate(self, req: RolloutReq) -> RolloutResp:
         self.observations.append(
             {
-                "model_training": self._policy.model.training,
+                "modes": {name: st.trainable_module().training for name, st in self._stages.items()},
                 "grad_enabled": torch.is_grad_enabled(),
                 "sample_ids": list(req.sample_ids),
             }
@@ -93,11 +85,16 @@ class _FakePipeline:
         )
 
 
+def _single_stage_pipeline(*, training: bool = True) -> tuple[_FakePipeline, nn.Module]:
+    model = nn.Linear(2, 2)
+    model.train(bool(training))
+    return _FakePipeline(diffusion=_FakeStage(model)), model
+
+
 def _make_req(n: int = 2) -> RolloutReq:
-    # Pre-pin σ schedule so ``TrainsideRolloutEngine.generate`` does not
-    # need to derive one via the schedule_policy (which would require a
-    # real pretrained checkpoint). Tests here cover engine wrapping
-    # semantics, not schedule policy logic.
+    # Pre-pin σ schedule so generate() does not derive one via the
+    # schedule_policy (which would require a real checkpoint). These tests
+    # cover engine wrapping semantics, not schedule-policy logic.
     return RolloutReq(
         sample_ids=[f"s{i}" for i in range(n)],
         group_ids=[f"g{i}" for i in range(n)],
@@ -112,20 +109,14 @@ def _make_req(n: int = 2) -> RolloutReq:
 
 
 def test_config_registration_target_resolves_to_engine() -> None:
-    """Hydra ``_target_`` on the registered dataclass points at the engine class.
-
-    ``register_config(..., target=...)`` synthesizes a dataclass subclass
-    with ``_target_: str = <target>`` as a kw-only field (see
-    ``diffusionrl/config/registration.py:148``).
-    """
+    """Hydra ``_target_`` on the registered dataclass points at the engine class."""
     inst = TrainsideEngineConfig()
     assert inst._target_.endswith("TrainsideRolloutEngine"), inst._target_
 
 
 def test_generate_returns_pipeline_response_verbatim() -> None:
-    policy = _FakePolicy()
-    pipeline = _FakePipeline(policy=policy)
-    engine = TrainsideRolloutEngine(pipeline=pipeline, policy=policy)
+    pipeline, _ = _single_stage_pipeline()
+    engine = TrainsideRolloutEngine(pipeline=pipeline, stage_attrs=["diffusion"])
 
     req = _make_req(n=3)
     resp = engine.generate(req)
@@ -138,64 +129,78 @@ def test_generate_returns_pipeline_response_verbatim() -> None:
 
 
 def test_generate_scopes_eval_no_grad_and_restores_train_mode() -> None:
-    policy = _FakePolicy(start_training=True)
-    pipeline = _FakePipeline(policy=policy)
-    engine = TrainsideRolloutEngine(pipeline=pipeline, policy=policy)
+    pipeline, model = _single_stage_pipeline(training=True)
+    engine = TrainsideRolloutEngine(pipeline=pipeline, stage_attrs=["diffusion"])
 
-    assert policy.model.training is True
-
+    assert model.training is True
     engine.generate(_make_req())
 
     # Inside the call: eval + no_grad.
     obs = pipeline.observations[0]
-    assert obs["model_training"] is False
+    assert obs["modes"]["diffusion"] is False
     assert obs["grad_enabled"] is False
-
     # After the call: training mode restored.
-    assert policy.model.training is True
-    # The engine should have called .eval() and then .train(True).
-    assert ("eval", False) in policy.train_calls
-    assert ("train", True) in policy.train_calls
+    assert model.training is True
 
 
-def test_generate_restores_eval_when_policy_started_in_eval_mode() -> None:
-    policy = _FakePolicy(start_training=False)
-    pipeline = _FakePipeline(policy=policy)
-    engine = TrainsideRolloutEngine(pipeline=pipeline, policy=policy)
+def test_generate_restores_eval_when_stage_started_in_eval_mode() -> None:
+    pipeline, model = _single_stage_pipeline(training=False)
+    engine = TrainsideRolloutEngine(pipeline=pipeline, stage_attrs=["diffusion"])
 
-    assert policy.model.training is False
-
+    assert model.training is False
     engine.generate(_make_req())
-
     # Final state should still be eval.
-    assert policy.model.training is False
-    # The engine restored to .train(False).
-    assert ("train", False) in policy.train_calls
+    assert model.training is False
 
 
 def test_generate_restores_train_mode_even_when_pipeline_raises() -> None:
-    policy = _FakePolicy(start_training=True)
+    model = nn.Linear(2, 2)
+    model.train(True)
 
     class _RaisingPipeline:
         bundle = SimpleNamespace(pretrained_path=None)
         shift = 1.0
 
+        def __init__(self) -> None:
+            self.diffusion = _FakeStage(model)
+
         def generate(self, req: RolloutReq) -> RolloutResp:
             raise RuntimeError("synthetic failure")
 
-    engine = TrainsideRolloutEngine(pipeline=_RaisingPipeline(), policy=policy)
+    engine = TrainsideRolloutEngine(pipeline=_RaisingPipeline(), stage_attrs=["diffusion"])
 
     with pytest.raises(RuntimeError, match="synthetic failure"):
         engine.generate(_make_req())
 
     # finally-block must have restored training mode.
-    assert policy.model.training is True
+    assert model.training is True
+
+
+def test_generate_eval_scopes_all_stages_for_multi_stage_pipeline() -> None:
+    """``stage_attrs`` eval-scopes every listed trainable module (PE: diffusion + ar)."""
+    m_diff = nn.Linear(2, 2)
+    m_ar = nn.Linear(2, 2)
+    m_diff.train(True)
+    m_ar.train(True)
+    pipeline = _FakePipeline(diffusion=_FakeStage(m_diff), ar=_FakeStage(m_ar))
+
+    engine = TrainsideRolloutEngine(pipeline=pipeline, stage_attrs=["diffusion", "ar"])
+    assert len(engine._models) == 2
+
+    engine.generate(_make_req())
+
+    # Both stages were in eval (and grad disabled) during generate.
+    obs = pipeline.observations[0]
+    assert obs["modes"] == {"diffusion": False, "ar": False}
+    assert obs["grad_enabled"] is False
+    # Both restored to train afterward.
+    assert m_diff.training is True
+    assert m_ar.training is True
 
 
 def test_lifecycle_methods_are_safe_noops() -> None:
-    policy = _FakePolicy()
-    pipeline = _FakePipeline(policy=policy)
-    engine = TrainsideRolloutEngine(pipeline=pipeline, policy=policy)
+    pipeline, _ = _single_stage_pipeline()
+    engine = TrainsideRolloutEngine(pipeline=pipeline, stage_attrs=["diffusion"])
 
     # None of these should raise.
     engine.sleep()
@@ -206,9 +211,8 @@ def test_lifecycle_methods_are_safe_noops() -> None:
 
 def test_weight_sync_methods_raise_not_implemented() -> None:
     """Direct sampling = sampler==trainer; weight sync is meaningless."""
-    policy = _FakePolicy()
-    pipeline = _FakePipeline(policy=policy)
-    engine = TrainsideRolloutEngine(pipeline=pipeline, policy=policy)
+    pipeline, _ = _single_stage_pipeline()
+    engine = TrainsideRolloutEngine(pipeline=pipeline, stage_attrs=["diffusion"])
 
     with pytest.raises(NotImplementedError):
         engine.update_weights_from_ipc()

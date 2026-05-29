@@ -1,17 +1,19 @@
 """PEPipeline — RolloutReq → RolloutResp end-to-end for Prompt Enhancement.
 
-Implements the two-phase composed flow::
+Implements the two-phase composed flow with sampling-param-driven
+fan-out (``N = ar.samples_per_prompt`` rewrites/prompt, ``M =
+diffusion.samples_per_prompt`` images/rewrite)::
 
-    Texts(raw) ──llm_pipeline.generate──▶ Texts(rewritten)
-                                              │
-                                              ▼
-                              ──diffusion_pipeline.generate──▶ Images
+    P prompts ──llm.generate──▶ P*N rewrites ──diffusion.generate──▶ P*N*M images
+                                 (track "ar")                         (track "diffusion")
 
 PE composes two child :class:`Pipeline` instances at the *pipeline*
 layer, not the stage layer. Each child remains a fully self-contained
 unit (its bundle, stages, CFG-empty-negative handling, etc.) and is
-reusable in non-PE pipelines. PE's job is request slicing, sequencing,
-and response merging.
+reusable in non-PE pipelines. PE's job is request fan-out, sequencing,
+lineage, and response merging. The child pipelines are 1:1 — PE
+replicates inputs (prompt ×N, each rewrite ×M) so the branch factors
+become lineage (``parent_ids`` / ``parent_track``) for GRPO grouping.
 
 Invocation pattern
 ------------------
@@ -40,21 +42,16 @@ diffusion sub-request unchanged.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict
-
 from omegaconf import DictConfig
 
 from diffusionrl.config.instantiate import build
 from diffusionrl.models.types.pipeline import Pipeline
 from diffusionrl.types.primitives import Texts
 from diffusionrl.types.rollout_req import RolloutReq
-from diffusionrl.types.rollout_resp import RolloutResp
+from diffusionrl.types.rollout_resp import RolloutResp, _track_with_field
 from diffusionrl.types.sampling import get_ar_params, get_diffusion_params
 
 from .bundle import PEBundle
-
-if TYPE_CHECKING:
-    from diffusionrl.types.rollout_req import PrimitiveValue
 
 
 class PEPipeline(Pipeline):
@@ -63,28 +60,28 @@ class PEPipeline(Pipeline):
     Reads from ``RolloutReq``:
 
     - ``primitives["text"]: Texts`` — raw user prompts, fed to the LLM.
-    - ``primitives[<other>]`` — forwarded to the diffusion child (e.g.
-      ``"negative_text"``, ``"image"``).
     - ``sampling_params: ComposedSamplingParams`` — decomposed into
-      ``ARSamplingParams`` for the LLM child and
-      ``DiffusionSamplingParams`` for the diffusion child.
+      ``ARSamplingParams`` (``samples_per_prompt = N`` rewrites/prompt) for
+      the LLM child and ``DiffusionSamplingParams``
+      (``samples_per_prompt = M`` images/rewrite) for the diffusion child.
     - ``stage_config["chat"]: dict`` (optional) — forwarded to the LLM
       chat-template stage as a per-request system-instruction override.
     - ``sigmas: Tensor[T+1]`` — engine-pinned; forwarded to the diffusion
       child only.
     - ``request_conditions: Dict[str, Condition]`` — forwarded to the
-      diffusion child (e.g. ``"initial_latents"``).
+      diffusion child verbatim. Non-text per-sample primitives (e.g.
+      ``"negative_text"``) are NOT forwarded under branching.
 
-    Writes to ``RolloutResp`` (track-dict union of both child responses;
-    no sample-axis shifting because both children operate on the *same*
-    sample set):
+    Writes a two-track ``RolloutResp`` with explicit lineage (sample
+    counts fan out by the sampling params — see :meth:`generate`):
 
-    - ``tracks["text"]: RolloutTrack`` — from the LLM:
-      ``segment=TextSegment``, ``decoded=Texts`` (LLM-rewritten prompts),
-      ``conditions={"prompt": TextTokenCondition, ...}``.
-    - ``tracks["image"]: RolloutTrack`` — from the diffusion:
-      ``segment=LatentSegment``, ``decoded=Images`` (final generated
-      images), ``conditions={"text": TextEmbedCondition, ...}``.
+    - ``tracks["ar"]: RolloutTrack`` — from the LLM (``parent_track=None``,
+      ``parent_ids=prompt`` → GRPO groups by prompt): ``segment=TextSegment``,
+      ``decoded=Texts`` (rewritten prompts), ``conditions={"prompt": ...}``.
+    - ``tracks["diffusion"]: RolloutTrack`` — from the diffusion
+      (``parent_track="ar"``, ``parent_ids=rewrite`` → GRPO groups by
+      rewrite): ``segment=LatentSegment``, ``decoded=Images``,
+      ``conditions={"text": TextEmbedCondition, ...}``.
     """
 
     def __init__(
@@ -103,6 +100,45 @@ class PEPipeline(Pipeline):
         self.bundle = PEBundle(
             diffusion=diffusion_pipeline.bundle,
             llm=llm_pipeline.bundle,
+        )
+
+    # ------------------------------------------------------------------
+    # Stage / schedule accessors (used by a trainside rollout engine)
+    # ------------------------------------------------------------------
+
+    @property
+    def diffusion(self):
+        """The trainable diffusion stage (delegates to the diffusion child).
+
+        Lets a trainside rollout engine resolve the diffusion module via
+        ``getattr(pe_pipeline, "diffusion").trainable_module()`` —
+        ``stage_attrs=["diffusion", "ar"]`` eval-scopes both PE models.
+        """
+        return self.diffusion_pipeline.diffusion
+
+    @property
+    def ar(self):
+        """The trainable AR stage (delegates to the LLM child)."""
+        return self.llm_pipeline.ar
+
+    def build_schedule_policy(self):
+        """σ-schedule policy for the diffusion track (delegates to the diffusion child).
+
+        PE forwards ``req.sigmas`` to the diffusion sub-request unchanged, so
+        the parent schedule *is* the diffusion child's. A trainside engine
+        calls this to pin sigmas on the parent request before ``generate``;
+        the composed ``PEBundle`` has no ``pretrained_path``/``shift`` of its
+        own, so we reach through to the diffusion child.
+        """
+        diff = self.diffusion_pipeline
+        builder = getattr(diff, "build_schedule_policy", None)
+        if callable(builder):
+            return builder()
+        from diffusionrl.sde.runtime import FlowMatchSchedulePolicy
+
+        return FlowMatchSchedulePolicy.from_pretrained(
+            getattr(diff.bundle, "pretrained_path", None),
+            shift=float(diff.shift),
         )
 
     @classmethod
@@ -127,88 +163,142 @@ class PEPipeline(Pipeline):
         )
 
     def generate(self, req: RolloutReq) -> RolloutResp:
-        # Phase 1: LLM expand — runs without sigmas / request_conditions.
-        llm_req = self._build_llm_req(req)
+        """Run the PE flow with two-level, sampling-param-driven fan-out.
+
+        ``ar.samples_per_prompt = N`` and ``diffusion.samples_per_prompt = M``
+        drive the branching::
+
+            P prompts ──make_root_track(N)──▶ P*N rewrites  (root "ar" track)
+                      ──fork_track(M)───────▶ P*N*M images   ("diffusion" track)
+
+        The child pipelines are 1:1 (they neither expand nor drop samples),
+        so PE replicates the inputs explicitly — the raw prompt repeated N×
+        for the LLM, each rewrite repeated M× for the diffusion child — and
+        the branch factors land as lineage (``parent_ids`` / ``parent_track``)
+        so GRPO groups by prompt on "ar" and by rewrite on "diffusion".
+        """
+        texts = req.primitives.get("text")
+        if not isinstance(texts, Texts):
+            raise TypeError(
+                "PEPipeline.generate: req.primitives['text'] must be a Texts primitive; "
+                f"got {type(texts).__name__ if texts is not None else 'None'}. "
+                "The LLM child requires the raw user prompt at primitives['text']."
+            )
+
+        ar_params = get_ar_params(req.sampling_params)
+        diff_params = get_diffusion_params(req.sampling_params)
+        n_rewrites = int(ar_params.samples_per_prompt) if ar_params is not None else 1
+        n_images = int(diff_params.samples_per_prompt)
+
+        # ── Level 1: P → P*N AR rewrites. Root track grouped by prompt
+        # (parent_track=None, parent_ids=prompt). Replicate each raw prompt
+        # N× so the 1:1 LLM child emits N independent rewrites per prompt.
+        ar_shell = req.make_root_track(track_name="ar", branch=n_rewrites)
+        llm_texts = Texts(texts=[t for t in texts.texts for _ in range(n_rewrites)])
+        llm_req = self._build_llm_req(
+            req, sample_ids=ar_shell.sample_ids, group_ids=ar_shell.parent_ids, texts=llm_texts
+        )
         llm_resp = self.llm_pipeline.generate(llm_req)
 
-        # The rewritten prompt lives on the LLM track's ``decoded`` field
-        # as a single :class:`Texts` primitive (flat post-Step-9 / 8f8d19f).
-        # Both Qwen3Pipeline and any future AR LLM following the new
-        # pipeline contract emit a track named ``"text"`` with
-        # ``decoded=Texts(...)``.
+        # The rewritten prompts live on the LLM track's ``decoded`` field as a
+        # single :class:`Texts`. Both Qwen3Pipeline and any future AR LLM
+        # following the pipeline contract emit a track named ``"text"``.
         llm_track = llm_resp.tracks.get("text")
-        rewritten_obj = llm_track.decoded if llm_track is not None else None
-        if not isinstance(rewritten_obj, Texts):
+        rewritten = llm_track.decoded if llm_track is not None else None
+        if not isinstance(rewritten, Texts):
             raise RuntimeError(
                 "PEPipeline.generate: LLM child returned tracks['text'].decoded of "
-                f"type {type(rewritten_obj).__name__ if rewritten_obj is not None else 'None'}; "
-                "expected Texts. The LLM pipeline must produce a Texts primitive on "
-                "tracks['text'].decoded so the diffusion child can consume it as "
-                "primitives['text']."
+                f"type {type(rewritten).__name__ if rewritten is not None else 'None'}; "
+                "expected Texts on tracks['text'].decoded so the diffusion child can "
+                "consume it as primitives['text']."
             )
-        if len(rewritten_obj.texts) != len(req.sample_ids):
+        if len(rewritten.texts) != len(ar_shell.sample_ids):
             raise RuntimeError(
-                f"PEPipeline.generate: LLM child returned {len(rewritten_obj.texts)} "
-                f"rewritten text(s) but the parent request has {len(req.sample_ids)} "
-                "sample(s). PE preserves a 1:1 sample mapping across children; the LLM "
-                "pipeline must not expand or drop samples."
+                f"PEPipeline.generate: LLM child returned {len(rewritten.texts)} rewritten "
+                f"text(s) but the AR track expects {len(ar_shell.sample_ids)} (= P*N). The "
+                "LLM child must be 1:1 over its (already N-replicated) request."
             )
+        ar_track = _track_with_field(ar_shell, "segment", llm_track.segment)
+        ar_track = _track_with_field(ar_track, "decoded", rewritten)
+        ar_track = _track_with_field(ar_track, "conditions", dict(llm_track.conditions))
 
-        # Phase 2: diffusion generate, with the rewritten prompt swapped into primitives["text"].
-        diff_req = self._build_diffusion_req(req, rewritten_obj)
+        # ── Level 2: P*N → P*N*M images. Fork from "ar" (parent_track="ar",
+        # parent_ids=rewrite). Replicate each rewrite M× for the 1:1 diffusion
+        # child; the rewritten prompt is swapped into primitives["text"].
+        diff_shell = ar_track.fork_track(parent_name="ar", child_name="diffusion", branch=n_images)
+        diff_texts = Texts(texts=[t for t in rewritten.texts for _ in range(n_images)])
+        diff_req = self._build_diffusion_req(
+            req, sample_ids=diff_shell.sample_ids, group_ids=diff_shell.parent_ids, texts=diff_texts
+        )
         diff_resp = self.diffusion_pipeline.generate(diff_req)
 
-        # Phase 3: track-dict union. Both children operate on the same
-        # sample set (sample_ids unchanged), so we do NOT call
-        # RolloutResp.concat — that's for sample-axis stacking of multiple
-        # shards and would double the sample count. Here we union by track
-        # name across the parallel responses. The LLM child contributes
-        # the ``"text"`` track; the diffusion child contributes
-        # ``"image"`` (and any future per-modality tracks).
-        return RolloutResp(tracks={**llm_resp.tracks, **diff_resp.tracks})
+        diff_inner = diff_resp.tracks.get("image")
+        if diff_inner is None:
+            raise RuntimeError(
+                "PEPipeline.generate: diffusion child returned no 'image' track "
+                f"(got {sorted(diff_resp.tracks.keys())})."
+            )
+        if len(diff_inner.sample_ids) != len(diff_shell.sample_ids):
+            raise RuntimeError(
+                f"PEPipeline.generate: diffusion child returned {len(diff_inner.sample_ids)} "
+                f"sample(s) but the diffusion track expects {len(diff_shell.sample_ids)} "
+                "(= P*N*M). The diffusion child must be 1:1 over its (already M-replicated) request."
+            )
+        diff_track = _track_with_field(diff_shell, "segment", diff_inner.segment)
+        diff_track = _track_with_field(diff_track, "decoded", diff_inner.decoded)
+        diff_track = _track_with_field(diff_track, "conditions", dict(diff_inner.conditions))
+        diff_track = _track_with_field(diff_track, "media_preview", diff_inner.media_preview)
+
+        return RolloutResp(tracks={"ar": ar_track, "diffusion": diff_track})
 
     # ------------------------------------------------------------------
     # Child-request construction
     # ------------------------------------------------------------------
 
-    def _build_llm_req(self, req: RolloutReq) -> RolloutReq:
-        """Construct the LLM-side child RolloutReq.
+    def _build_llm_req(
+        self,
+        req: RolloutReq,
+        *,
+        sample_ids: list[str],
+        group_ids: list[str],
+        texts: Texts,
+    ) -> RolloutReq:
+        """Construct the LLM-side child RolloutReq for the N-replicated set.
 
-        Forwards ``primitives["text"]`` and the AR sampling params.
-        Drops sigmas, request_conditions, non-text primitives, and
-        diffusion sampling params.
+        Carries the (N-replicated) prompts and the AR sampling params; drops
+        sigmas, request_conditions, non-text primitives, and diffusion params.
         """
-        text = req.primitives.get("text")
-        if not isinstance(text, Texts):
-            raise TypeError(
-                "PEPipeline.generate: req.primitives['text'] must be a Texts primitive; "
-                f"got {type(text).__name__ if text is not None else 'None'}. "
-                "The LLM child requires the raw user prompt at primitives['text']."
-            )
         return RolloutReq(
-            sample_ids=list(req.sample_ids),
-            group_ids=list(req.group_ids),
-            primitives={"text": text},
+            sample_ids=list(sample_ids),
+            group_ids=list(group_ids),
+            primitives={"text": texts},
             request_conditions={},
             sampling_params=get_ar_params(req.sampling_params),
             stage_config={k: v for k, v in req.stage_config.items() if k in ("chat",)},
             sigmas=None,
         )
 
-    def _build_diffusion_req(self, req: RolloutReq, rewritten: Texts) -> RolloutReq:
-        """Construct the diffusion-side child RolloutReq.
+    def _build_diffusion_req(
+        self,
+        req: RolloutReq,
+        *,
+        sample_ids: list[str],
+        group_ids: list[str],
+        texts: Texts,
+    ) -> RolloutReq:
+        """Construct the diffusion-side child RolloutReq for the M-replicated set.
 
-        Replaces ``primitives["text"]`` with ``rewritten``, forwards any
-        other primitives (negative_text, image, ...), forwards sigmas
-        and request_conditions verbatim, and extracts the diffusion
-        sampling params.
+        Carries the (M-replicated) rewritten prompts as primitives['text'],
+        forwards request_conditions + sigmas verbatim, and extracts the
+        diffusion sampling params. Non-text per-sample primitives are not
+        forwarded (matches ComposedRolloutEngine); SD3's empty-negative
+        default applies. Add typed replication here if a recipe needs e.g.
+        negative_text under branching.
         """
-        diffusion_primitives: Dict[str, "PrimitiveValue"] = dict(req.primitives)
-        diffusion_primitives["text"] = rewritten
         return RolloutReq(
-            sample_ids=list(req.sample_ids),
-            group_ids=list(req.group_ids),
-            primitives=diffusion_primitives,
+            sample_ids=list(sample_ids),
+            group_ids=list(group_ids),
+            primitives={"text": texts},
             request_conditions=dict(req.request_conditions),
             sampling_params=get_diffusion_params(req.sampling_params),
             sigmas=req.sigmas,

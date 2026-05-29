@@ -73,7 +73,7 @@ backend:
 
 rollout:
   _target_: diffusionrl.rollout.engine.trainside.engine.TrainsideRolloutEngine
-  stage_attr: diffusion
+  stage_attrs: [diffusion]
   # SD3 VAE decode on 96 fp32 latents at once (batch_size=48 × samples_per_prompt=16
   # / 8 devices) peaks ~24 GB on an H20 and OOMs alongside the resident text
   # encoders. Chunk forward into 16-sample groups (= samples_per_prompt so groups
