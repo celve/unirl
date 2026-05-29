@@ -481,6 +481,12 @@ def _concat_packed_data(values: List[Optional[torch.Tensor]]) -> Optional[torch.
     non_none = [v for v in values if v is not None]
     if not non_none:
         return None
+    if all(isinstance(v, Batch) for v in non_none):
+        # Transport placeholders (e.g. TensorMeta returned from a DP_ALL
+        # dispatch) carry routing handles, not real tensors — defer to their own
+        # concat, exactly like _concat_value's Batch branch. A raw torch.cat
+        # would choke on them ("expected Tensor ... but got TensorMeta").
+        return type(non_none[0]).concat(non_none)
     return torch.cat(non_none, dim=0)
 
 

@@ -77,8 +77,54 @@ class TensorMeta(Batch):
     def select(self, indices):
         raise NotImplementedError("TensorMeta does not support select — hydrate first")
 
-    def slice(self, start, end):
-        raise NotImplementedError("TensorMeta does not support slice — hydrate first")
+    def _slice_by_refs(self, start: int, end: int) -> "TensorMeta":
+        """Partition refs for the row range ``[start:end)`` — inverse of concat.
+
+        ``concat`` stacks per-source ref/size lists, so a range that lands on
+        ref boundaries hands the corresponding refs back untouched: the exact
+        structural inverse of the DP collect→re-dispatch round-trip that built
+        this handle. Both callers pass a range in the same unit as ``sizes``
+        (CONCAT: per-sample rows; PACKED: token offsets via ``cu_seqlens``), so
+        a round-trip range always aligns. An arbitrary intra-ref range has no
+        representation here — the data is remote and opaque — and still needs
+        hydration first.
+        """
+        start, end = int(start), int(end)
+        offsets = [0]
+        for s in self.sizes:
+            offsets.append(offsets[-1] + int(s))
+        try:
+            i0 = offsets.index(start)
+            i1 = offsets.index(end)
+        except ValueError:
+            raise NotImplementedError(
+                f"TensorMeta slice [{start}:{end}] does not align to ref boundaries "
+                f"{offsets}; intra-handle slicing requires hydration first."
+            )
+        refs = list(self.refs[i0:i1])
+        sizes = list(self.sizes[i0:i1])
+        total = sum(int(s) for s in sizes)
+        return TensorMeta(
+            refs=refs,
+            sizes=sizes,
+            shape=(total, *self.shape[1:]) if self.shape else None,
+            dtype=self.dtype,
+            device=self.device,
+        )
+
+    def slice(self, start, end) -> "TensorMeta":
+        # CONCAT path: Batch.slice → _slice_value → value.slice(start, end).
+        return self._slice_by_refs(start, end)
+
+    def __getitem__(self, key) -> "TensorMeta":
+        # PACKED path: _slice_packed_data does ``value[cu[start]:cu[end]]``.
+        if isinstance(key, slice):
+            if key.step not in (None, 1):
+                raise NotImplementedError("TensorMeta supports only contiguous (step=1) slicing")
+            lo = 0 if key.start is None else int(key.start)
+            hi = self.batch_size if key.stop is None else int(key.stop)
+            return self._slice_by_refs(lo, hi)
+        raise NotImplementedError(f"TensorMeta indexing supports slices only, got {type(key).__name__}")
 
     def transform(self, fn: Callable[[torch.Tensor], torch.Tensor]) -> "TensorMeta":
         backend = TensorTransportRuntime.current()
