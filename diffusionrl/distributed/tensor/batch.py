@@ -61,6 +61,7 @@ from dataclasses import fields as dc_fields
 from enum import Enum, auto
 from typing import (
     Any,
+    Callable,
     Dict,
     List,
     Optional,
@@ -764,6 +765,23 @@ class Batch:
         """Concatenate ``self`` with one or more other instances."""
         return type(self).concat([self, *others])
 
+    def chunk(self: T, n: int) -> List[T]:
+        """Split into ``n`` equal contiguous shards along the batch dimension.
+
+        Inverse of :meth:`concat`. Requires ``batch_size`` to be divisible by
+        ``n``. Each shard is produced via :meth:`slice`, so field-kind
+        semantics (CONCAT sliced, PACKED sliced via cu_seqlens, SHARED /
+        reduction fields passed through untouched) and ``cu_seqlens``
+        propagation are handled correctly.
+        """
+        if n <= 0:
+            raise ValueError(f"chunk: n must be positive, got {n}")
+        bs = self.batch_size
+        if bs % n != 0:
+            raise ValueError(f"chunk: batch_size={bs} not divisible by n={n}")
+        size = bs // n
+        return [self.slice(i * size, (i + 1) * size) for i in range(n)]
+
     def select(self: T, indices: torch.Tensor) -> T:
         """Re-index along the batch dimension (gather / shuffle / subsample)."""
         bs = self.batch_size
@@ -873,6 +891,24 @@ class Batch:
                 "_packed_cu_seqlens",
                 cu.to(device) if cu is not None else None,
             )
+        return instance
+
+    def map(self: T, fn: Callable[[Any], Any]) -> T:
+        """Rebuild a same-type instance by applying ``fn`` to each field value.
+
+        A structure-preserving map: ``fn`` transforms each field's value (the
+        caller drives any recursion into nested containers), and the rebuilt
+        instance carries over framework-managed instance metadata
+        (``_packed_cu_seqlens``) that the dataclass constructor never sees.
+
+        Use for representation-only leaf transforms that do not change the
+        batch dimension or per-sample lengths (e.g. swapping tensors for remote
+        handles). For batch-dimension changes use :meth:`slice` / :meth:`chunk`
+        / :meth:`select` instead, which recompute ``cu_seqlens``.
+        """
+        instance = type(self)(**{f.name: fn(getattr(self, f.name)) for f in dc_fields(self)})
+        if self._packed_cu_seqlens is not None:
+            object.__setattr__(instance, "_packed_cu_seqlens", self._packed_cu_seqlens)
         return instance
 
     def clone(self: T) -> T:

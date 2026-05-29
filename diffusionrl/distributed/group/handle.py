@@ -29,7 +29,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from dataclasses import fields as dc_fields
 from itertools import count
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type
 
@@ -341,7 +340,7 @@ class Handle:
                 h.rebind(worker_handle)
             return obj
         elif isinstance(obj, Batch):
-            return type(obj)(**{f.name: self._rebind_tree(getattr(obj, f.name), worker_handle) for f in dc_fields(obj)})
+            return obj.map(lambda v: self._rebind_tree(v, worker_handle))
         elif isinstance(obj, tuple):
             return tuple(self._rebind_tree(item, worker_handle) for item in obj)
         elif isinstance(obj, list):
@@ -434,7 +433,7 @@ class Handle:
         if isinstance(obj, TensorHandle):
             return obj
         if isinstance(obj, Batch):
-            return type(obj)(**{f.name: self._cat_multi(getattr(obj, f.name), dst_worker) for f in dc_fields(obj)})
+            return obj.map(lambda v: self._cat_multi(v, dst_worker))
         if isinstance(obj, tuple):
             return tuple(self._cat_multi(item, dst_worker) for item in obj)
         if isinstance(obj, list):
@@ -477,12 +476,7 @@ class Handle:
                 return routing
             return obj
         if isinstance(obj, Batch):
-            return type(obj)(
-                **{
-                    f.name: self._unwrap(getattr(obj, f.name), dst_worker_id, dst_device_id, foreign)
-                    for f in dc_fields(obj)
-                }
-            )
+            return obj.map(lambda v: self._unwrap(v, dst_worker_id, dst_device_id, foreign))
         if isinstance(obj, tuple):
             return tuple(self._unwrap(item, dst_worker_id, dst_device_id, foreign) for item in obj)
         if isinstance(obj, list):
@@ -499,7 +493,7 @@ class Handle:
             new_handles = [subs.get(id(h), h) for h in obj.refs]
             return TensorMeta.from_handles(new_handles)
         if isinstance(obj, Batch):
-            return type(obj)(**{f.name: self._substitute(getattr(obj, f.name), subs) for f in dc_fields(obj)})
+            return obj.map(lambda v: self._substitute(v, subs))
         if isinstance(obj, tuple):
             return tuple(self._substitute(item, subs) for item in obj)
         if isinstance(obj, list):

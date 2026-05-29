@@ -131,8 +131,13 @@ def _collect_batch_sizes(value, sizes: list) -> None:
         for v in value:
             _collect_batch_sizes(v, sizes)
     elif isinstance(value, Batch):
-        for f in dc_fields(value):
-            _collect_batch_sizes(getattr(value, f.name), sizes)
+        # Use the container's own batch_size: it counts per-sample CONCAT
+        # fields and packed cu_seqlens correctly, where recursing into raw
+        # fields would mis-count (packed tensors expose sum-of-lengths, not
+        # the sample count, and shared tensors expose unrelated dims).
+        bs = value.batch_size
+        if bs:
+            sizes.append(bs)
     elif isinstance(value, dict):
         for v in value.values():
             _collect_batch_sizes(v, sizes)

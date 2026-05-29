@@ -19,7 +19,6 @@ DP-aware dispatch (DP_ALL, DP_FIRST):
 
 from __future__ import annotations
 
-from dataclasses import fields as dc_fields
 from enum import Enum, auto
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional
@@ -156,8 +155,13 @@ def split_value(value, dp_size: int, batch_size: int) -> list:
         return [tuple(split_elems[j][i] for j in range(len(value))) for i in range(dp_size)]
 
     elif isinstance(value, Batch):
-        split_fields = {f.name: split_value(getattr(value, f.name), dp_size, batch_size) for f in dc_fields(value)}
-        return [type(value)(**{k: split_fields[k][i] for k in split_fields}) for i in range(dp_size)]
+        if value.batch_size != batch_size:
+            return [value] * dp_size  # not batch-aligned with dispatch → broadcast
+        if batch_size % dp_size != 0:
+            raise ValueError(f"batch_size={batch_size} not divisible by dp_size={dp_size}")
+        # Batch.chunk delegates to slice → field-kind-aware (CONCAT/PACKED/SHARED)
+        # and propagates cu_seqlens; inverse of the collect-side Batch.concat.
+        return value.chunk(dp_size)
 
     else:
         # int, float, str, None, etc. → broadcast

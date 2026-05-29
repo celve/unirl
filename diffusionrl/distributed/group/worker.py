@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import os
 import socket
-from dataclasses import fields as dc_fields
 from typing import Dict, List, Optional, Tuple
 
 import ray
@@ -239,7 +238,7 @@ class Worker:
         if transformed is not obj:
             return transformed
         if isinstance(obj, Batch):
-            return type(obj)(**{f.name: self._transform_tree(getattr(obj, f.name), leaf_fn) for f in dc_fields(obj)})
+            return obj.map(lambda v: self._transform_tree(v, leaf_fn))
         if isinstance(obj, tuple):
             return tuple(self._transform_tree(item, leaf_fn) for item in obj)
         if isinstance(obj, list):
