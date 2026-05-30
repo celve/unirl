@@ -30,16 +30,38 @@ class QwenVLPipeline(Pipeline):
         self.ar = ar
 
     @classmethod
+    def from_bundle(
+        cls,
+        bundle: QwenVLBundle,
+        *,
+        max_prompt_length: int = 4096,
+        pad_to_max_length: bool = False,
+    ) -> "QwenVLPipeline":
+        """Wire chat-template + AR stages around an already-loaded bundle.
+
+        The v2 trainer loads the bundle once and injects it
+        (``remote_hydra(pipeline_cfg, bundle=...)``); routing pipeline
+        construction through ``from_config`` instead would load a second copy
+        of the model. This factory shares the single bundle.
+
+        ``pad_to_max_length`` fixes the prompt sequence length to
+        ``max_prompt_length`` so DP rollout shards stay concat-compatible at
+        merge time (see :class:`QwenVLChatTemplateStage`).
+        """
+        chat_template = QwenVLChatTemplateStage(
+            bundle,
+            max_prompt_length=max_prompt_length,
+            pad_to_max_length=pad_to_max_length,
+        )
+        ar = QwenVLARStage(model=bundle)
+        return cls(bundle=bundle, chat_template=chat_template, ar=ar)
+
+    @classmethod
     def from_config(cls, config) -> "QwenVLPipeline":
         if isinstance(config, dict):
             config = QwenVLPipelineConfig(**{k: v for k, v in config.items() if k != "_target_"})
         bundle = QwenVLBundle.from_config(config)
-        chat_template = QwenVLChatTemplateStage(
-            bundle,
-            max_prompt_length=config.max_prompt_length,
-        )
-        ar = QwenVLARStage(model=bundle)
-        return cls(bundle=bundle, chat_template=chat_template, ar=ar)
+        return cls.from_bundle(bundle, max_prompt_length=config.max_prompt_length)
 
     def generate(self, req: RolloutReq) -> RolloutResp:
         texts = req.primitives.get("text")

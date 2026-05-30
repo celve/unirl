@@ -19,10 +19,17 @@ class QwenVLChatTemplateStage:
         *,
         system_instruction: Optional[str] = None,
         max_prompt_length: int = 4096,
+        pad_to_max_length: bool = False,
     ) -> None:
         self.bundle = bundle
         self.system_instruction = system_instruction
         self.max_prompt_length = int(max_prompt_length)
+        # When True, pad every prompt to a fixed `max_prompt_length` instead of
+        # the per-batch dynamic max. Required by the v2 DP trainer: shards from
+        # different rollout workers are concatenated (dim 0) at merge time, so
+        # input_ids/attention_mask must share one sequence length across shards.
+        # Default False preserves the v1 dynamic-pad behavior.
+        self.pad_to_max_length = bool(pad_to_max_length)
 
     def embed(
         self,
@@ -57,10 +64,13 @@ class QwenVLChatTemplateStage:
             )
             per_sample_inputs.append(inputs)
 
-        max_len = min(
-            max(inp["input_ids"].shape[-1] for inp in per_sample_inputs),
-            self.max_prompt_length,
-        )
+        if self.pad_to_max_length:
+            max_len = self.max_prompt_length
+        else:
+            max_len = min(
+                max(inp["input_ids"].shape[-1] for inp in per_sample_inputs),
+                self.max_prompt_length,
+            )
         pad_id = processor.tokenizer.pad_token_id
         if pad_id is None:
             raise RuntimeError(

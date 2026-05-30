@@ -268,6 +268,7 @@ class ARGRPO(StageAlgorithm):
         conditions_cls: Optional[Type[Any]] = None,
         sampling_temperature: Optional[float] = None,
     ) -> None:
+        super().__init__()
         if stage is None and pipeline is None:
             raise ValueError("ARGRPO: either `stage` or `pipeline` must be provided")
         if stage is None:

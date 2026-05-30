@@ -206,6 +206,7 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         conditions: QwenVLARConditions,
         *,
         segment: TextSegment,
+        temperature: float = 1.0,
     ) -> torch.Tensor:
         if conditions.prompt is None or conditions.prompt.input_ids is None:
             raise ValueError("QwenVLARStage.replay: conditions.prompt.input_ids is None")
@@ -308,7 +309,9 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
             # Subsequent generated tokens: logits from generated-token positions
             rest_logits = logits[b, max_real_len : max_real_len + n - 1, :] if n > 1 else logits[b, :0, :]
             pred_logits_b = torch.cat([first_logit, rest_logits], dim=0)  # [n, V]
-            log_probs_full = F.log_softmax(pred_logits_b.float(), dim=-1)
+            # ARGRPO injects the rollout sampling temperature so replay's
+            # log-softmax matches the sampling distribution (logits / T).
+            log_probs_full = F.log_softmax(pred_logits_b.float() / float(temperature), dim=-1)
             per_token = log_probs_full.gather(-1, response_tokens[b, :n].unsqueeze(-1)).squeeze(-1)
             flat.append(per_token)
         if not flat:

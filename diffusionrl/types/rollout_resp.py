@@ -247,7 +247,7 @@ class RolloutTrack(Batch):
 
     # ---- per-group advantage computation -----------------------------------
 
-    def compute_advantages(self, normalize: bool = True, eps: float = 1e-8) -> "RolloutTrack":
+    def compute_advantages(self, normalize: bool = True, eps: float = 1e-8, scope: str = "group") -> "RolloutTrack":
         """GRPO-style per-group advantage: ``(reward - group_mean) / (group_std + eps)``.
 
         Groups are equivalence classes of :attr:`group_ids` (i.e. ``parent_ids``,
@@ -260,6 +260,12 @@ class RolloutTrack(Batch):
             ``False`` returns ``reward - group_mean`` (mean-centering only).
         :param eps: Numerical floor on ``group_std`` to prevent division by
             zero on uniform-reward groups (e.g. all rewards equal).
+        :param scope: ``"group"`` (default) centers/normalizes within each
+            prompt's sibling group (textbook GRPO). ``"global"`` centers and
+            normalizes across the whole batch — ``(r - mean_all)/(std_all + eps)``
+            — matching the v1 ``adv_normalization_scope=global`` baseline. Global
+            scope gives every sample a nonzero signal vs the batch mean, whereas
+            group scope zeroes out all-correct/all-wrong prompts (std=0 → adv=0).
         :return: A new :class:`RolloutTrack` with ``advantages`` set.
 
         Population std (``unbiased=False``) is used so the math degenerates
@@ -276,6 +282,17 @@ class RolloutTrack(Batch):
         # at the driver as a TensorMeta proxy (Worker._pack_output dehydrates
         # every Tensor leaf). Driver-side arithmetic below needs a real Tensor.
         rewards_local = _hydrate_tensor_meta(self.rewards)
+
+        # Global scope: normalize across the whole batch, ignoring group
+        # structure (reproduces v1 normalize_global). std() is unbiased (Bessel)
+        # with eps added outside the sqrt, matching algorithms/normalizers.py.
+        if scope == "global":
+            rewards_g = rewards_local.to(torch.float32)
+            if normalize:
+                adv_g = (rewards_g - rewards_g.mean()) / (rewards_g.std() + eps)
+            else:
+                adv_g = rewards_g - rewards_g.mean()
+            return _track_with_field(self, "advantages", adv_g)
 
         # Root track (parent_ids is None) — each sample is its own group, so
         # advantage = 0 for every sample (a single-sample group's mean equals
