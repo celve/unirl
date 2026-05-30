@@ -12,7 +12,7 @@ this one is *not* constructed via the standard
 :func:`diffusionrl.config.instantiate.build` path: PE needs DictConfig
 access for the nested children, but ``build()`` materializes the cfg
 before dispatch — see :meth:`PEPipeline.from_config` for the canonical
-invocation pattern (mirroring ``RewardService.from_configs``).
+invocation pattern.
 """
 
 from __future__ import annotations

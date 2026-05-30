@@ -1,17 +1,19 @@
-"""Reward executor that calls a RewardService HTTP API.
+"""Remote reward backend: an HTTP client for the RewardService server.
 
 Bridges the DiffusionRL reward interface (flat images + prompts) with the
-RewardService wire format (history turns + required_rewards).  One executor
-instance handles *all* requested reward components in a single HTTP round
-trip because the server multiplexes them via ``required_rewards``.
+RewardService wire format (history turns + required_rewards). One client
+handles *all* requested reward models in a single HTTP round trip because the
+server multiplexes them via ``required_rewards``.
 
-Typical config::
+Configured as the backend on :class:`~diffusionrl.reward.service.RewardService`::
 
     reward:
-      aggregation_method: weighted_sum
-      base_device: cpu
-      components:
-        - name: reward_service
+      _target_: diffusionrl.reward.service.RewardService
+      backend:
+        _target_: diffusionrl.reward.remote.RemoteRewardBackend
+        base_device: cpu
+        config:
+          _target_: diffusionrl.reward.remote.RemoteRewardSpec
           base_url: http://reward-server:8080
           required_rewards: [hpsv2, clip]
           reward_weights: {hpsv2: 0.6, clip: 0.4}
@@ -31,7 +33,7 @@ from PIL import Image
 
 from diffusionrl.config.registration import register_config
 from diffusionrl.config.require import require
-from diffusionrl.reward.base import BaseRewardComponentSpec, BaseRewardExecutor
+from diffusionrl.reward.base import BaseRewardComponentSpec, RewardBackend
 from diffusionrl.types.reward import RewardRequest, RewardResponse
 
 logger = logging.getLogger(__name__)
@@ -125,12 +127,12 @@ def _encode_video_b64(
 
 
 # ---------------------------------------------------------------------------
-# RewardServiceExecutor
+# RemoteRewardBackend
 # ---------------------------------------------------------------------------
 
 
-class RewardServiceExecutor(BaseRewardExecutor):
-    """Executor that calls a remote RewardService ``POST /score`` endpoint.
+class RemoteRewardBackend(RewardBackend):
+    """HTTP client backend for the remote RewardService ``POST /score`` endpoint.
 
     Converts DiffusionRL's ``RewardRequest`` (flat images + prompts) into
     the RewardService wire format (list of per-sample history-turn requests),
@@ -141,20 +143,19 @@ class RewardServiceExecutor(BaseRewardExecutor):
     because the RewardService server multiplexes multiple reward models
     via the ``required_rewards`` field per request.
 
-    Constructed via :class:`RewardServiceSpec` through the polymorphic
+    Constructed via :class:`RemoteRewardSpec` through the polymorphic
     ``reward/component`` registry; ``base_device`` is accepted for interface
     uniformity with :func:`diffusionrl.config.instantiate.build` but ignored
-    (the executor is HTTP-only).
+    (the backend is HTTP-only).
     """
 
     _REDUCE_STRATEGIES = {"first", "mean", "max"}
     _AGGREGATION_METHODS = {"weighted_sum", "mean", "min", "max"}
 
-    def __init__(self, *, config: "RewardServiceSpec", base_device: str) -> None:
+    def __init__(self, *, config: "RemoteRewardSpec", base_device: str) -> None:
         del base_device  # HTTP backend, no device dependency
         super().__init__(
             model_name="reward_service",
-            weight=config.weight,
             batch_size=config.batch_size,
             timeout=config.timeout,
         )
@@ -178,7 +179,7 @@ class RewardServiceExecutor(BaseRewardExecutor):
         self._session.trust_env = False
 
     # ------------------------------------------------------------------
-    # Public interface (BaseRewardExecutor)
+    # Public interface (RewardBackend)
     # ------------------------------------------------------------------
 
     def compute_rewards(self, request: RewardRequest) -> RewardResponse:
@@ -211,11 +212,11 @@ class RewardServiceExecutor(BaseRewardExecutor):
         except Exception:
             if self.raise_on_failure:
                 raise
-            logger.exception("RewardServiceExecutor.compute_rewards failed (degraded mode)")
+            logger.exception("RemoteRewardBackend.compute_rewards failed (degraded mode)")
             return RewardResponse(
                 rewards=[0.0] * bs,
                 successes=[False] * bs,
-                errors=["RewardServiceExecutor failure (see logs)"] * bs,
+                errors=["RemoteRewardBackend failure (see logs)"] * bs,
                 compute_time=time.time() - start,
             )
 
@@ -252,11 +253,11 @@ class RewardServiceExecutor(BaseRewardExecutor):
         try:
             body = health_resp.json()
         except ValueError as e:
-            raise ValueError(f"RewardServiceExecutor: /health at {self.base_url} returned non-JSON body.") from e
+            raise ValueError(f"RemoteRewardBackend: /health at {self.base_url} returned non-JSON body.") from e
 
         if not isinstance(body, dict) or not isinstance(body.get("rewards"), dict):
             raise ValueError(
-                f"RewardServiceExecutor: /health at {self.base_url} returned unexpected shape: "
+                f"RemoteRewardBackend: /health at {self.base_url} returned unexpected shape: "
                 f"{body!r}. Expected {{'status': 'ok', 'rewards': {{<name>: [...]}}}}."
             )
 
@@ -265,14 +266,14 @@ class RewardServiceExecutor(BaseRewardExecutor):
         missing = [name for name in self.required_rewards if name not in available_set]
         if missing:
             raise ValueError(
-                f"RewardServiceExecutor: required_rewards={missing} not served by "
+                f"RemoteRewardBackend: required_rewards={missing} not served by "
                 f"{self.base_url}; server reports available={available}. "
                 f"Check REWARD_COMPONENTS for typos "
                 f"(e.g. 'unifiedreward' vs 'unified_reward')."
             )
 
         logger.info(
-            "RewardServiceExecutor: %s serves rewards=%s",
+            "RemoteRewardBackend: %s serves rewards=%s",
             self.base_url,
             available,
         )
@@ -336,11 +337,11 @@ class RewardServiceExecutor(BaseRewardExecutor):
         except Exception:
             if self.raise_on_failure:
                 raise
-            logger.exception("RewardServiceExecutor._compute_video_rewards failed (degraded mode)")
+            logger.exception("RemoteRewardBackend._compute_video_rewards failed (degraded mode)")
             return RewardResponse(
                 rewards=[0.0] * bs,
                 successes=[False] * bs,
-                errors=["RewardServiceExecutor video failure (see logs)"] * bs,
+                errors=["RemoteRewardBackend video failure (see logs)"] * bs,
                 compute_time=time.time() - start,
             )
 
@@ -388,14 +389,14 @@ class RewardServiceExecutor(BaseRewardExecutor):
             except http_requests.exceptions.Timeout as e:
                 last_exc = e
                 logger.warning(
-                    "RewardServiceExecutor: request timed out (attempt %d/%d)",
+                    "RemoteRewardBackend: request timed out (attempt %d/%d)",
                     attempt + 1,
                     self.max_retries,
                 )
             except http_requests.exceptions.RequestException as e:
                 last_exc = e
                 logger.warning(
-                    "RewardServiceExecutor: %s (attempt %d/%d)",
+                    "RemoteRewardBackend: %s (attempt %d/%d)",
                     e,
                     attempt + 1,
                     self.max_retries,
@@ -404,9 +405,7 @@ class RewardServiceExecutor(BaseRewardExecutor):
             if attempt < self.max_retries - 1:
                 time.sleep(self.retry_delay)
 
-        raise RuntimeError(
-            f"RewardServiceExecutor: failed after {self.max_retries} retries calling {url}"
-        ) from last_exc
+        raise RuntimeError(f"RemoteRewardBackend: failed after {self.max_retries} retries calling {url}") from last_exc
 
     # ------------------------------------------------------------------
     # Response conversion: RewardService wire format → DiffusionRL
@@ -535,9 +534,9 @@ class RewardServiceExecutor(BaseRewardExecutor):
 @register_config(
     group="reward/component",
     name="reward_service",
-    target="diffusionrl.reward.reward_service_executor.RewardServiceExecutor",
+    target="diffusionrl.reward.remote.RemoteRewardBackend",
 )
-class RewardServiceSpec(BaseRewardComponentSpec):
+class RemoteRewardSpec(BaseRewardComponentSpec):
     """Typed config for the remote RewardService backend.
 
     Registered as a polymorphic ``reward/component``; one instance multiplexes
@@ -547,7 +546,6 @@ class RewardServiceSpec(BaseRewardComponentSpec):
     base_url: str = ""
     required_rewards: Tuple[str, ...] = ()
     reward_weights: Optional[Dict[str, float]] = None
-    weight: float = 1.0
     batch_size: int = 8
     timeout: float = 120.0
     max_retries: int = 3
@@ -562,32 +560,32 @@ class RewardServiceSpec(BaseRewardComponentSpec):
     def __post_init__(self) -> None:
         require(
             bool(str(self.base_url).strip()),
-            "RewardServiceSpec.base_url must be non-empty",
+            "RemoteRewardSpec.base_url must be non-empty",
         )
         require(
             len(self.required_rewards) > 0,
-            "RewardServiceSpec.required_rewards must be non-empty",
+            "RemoteRewardSpec.required_rewards must be non-empty",
         )
         require(
             self.max_retries >= 1,
-            f"RewardServiceSpec.max_retries must be >= 1; got {self.max_retries!r}",
+            f"RemoteRewardSpec.max_retries must be >= 1; got {self.max_retries!r}",
         )
         require(
             self.retry_delay >= 0,
-            f"RewardServiceSpec.retry_delay must be >= 0; got {self.retry_delay!r}",
+            f"RemoteRewardSpec.retry_delay must be >= 0; got {self.retry_delay!r}",
         )
         require(
             self.sub_metric_reduce in {"first", "mean", "max"},
-            f"RewardServiceSpec.sub_metric_reduce must be one of first/mean/max; got {self.sub_metric_reduce!r}",
+            f"RemoteRewardSpec.sub_metric_reduce must be one of first/mean/max; got {self.sub_metric_reduce!r}",
         )
         require(
             self.aggregation_method in {"weighted_sum", "mean", "min", "max"},
-            f"RewardServiceSpec.aggregation_method must be one of "
+            f"RemoteRewardSpec.aggregation_method must be one of "
             f"weighted_sum/mean/min/max; got {self.aggregation_method!r}",
         )
 
 
 __all__ = [
-    "RewardServiceExecutor",
-    "RewardServiceSpec",
+    "RemoteRewardBackend",
+    "RemoteRewardSpec",
 ]

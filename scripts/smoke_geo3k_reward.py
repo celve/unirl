@@ -98,9 +98,9 @@ def main() -> int:
 
     # Phase 6: Reward scoring
     logger.info("== Phase 6: MC Exact-Match Reward ==")
-    from diffusionrl.reward.scorers.mc_exact_match import MCExactMatchRewardScorer, MCExactMatchSpec
+    from diffusionrl.reward.local.mc_exact_match import MCExactMatchRewardScorer, MCExactMatchSpec
 
-    scorer = MCExactMatchRewardScorer(config=MCExactMatchSpec(weight=1.0), base_device="cpu")
+    scorer = MCExactMatchRewardScorer(config=MCExactMatchSpec(), base_device="cpu")
     from diffusionrl.types.reward import RewardRequest
 
     reward_req = RewardRequest(
@@ -121,20 +121,14 @@ def main() -> int:
         100 * n_correct / len(reward_resp.rewards) if reward_resp.rewards else 0,
     )
 
-    # Phase 7: Validate reward pipeline integration
-    logger.info("== Phase 7: RewardPipeline.score_and_attach ==")
-    from diffusionrl.reward.base import InProcessRewardExecutor
-    from diffusionrl.reward.pipeline import RewardPipeline
+    # Phase 7: Validate reward service integration
+    logger.info("== Phase 7: RewardService.score_and_attach ==")
     from diffusionrl.reward.service import RewardService
 
-    executor = InProcessRewardExecutor(scorer, weight=1.0)
-    service = RewardService(executors=[executor], aggregation_method="mean")
-    reward_pipeline = RewardPipeline(service)
+    service = RewardService(backend=scorer)
 
-    assert reward_pipeline.preferred_input_kind == "text", (
-        f"Expected 'text', got {reward_pipeline.preferred_input_kind}"
-    )
-    reward_pipeline.score_and_attach(req=req, track=track)
+    assert service.preferred_input_kind == "text", f"Expected 'text', got {service.preferred_input_kind}"
+    service.score_and_attach(req=req, track=track)
 
     logger.info("track.rewards = %s", track.rewards.tolist())
     assert track.rewards is not None

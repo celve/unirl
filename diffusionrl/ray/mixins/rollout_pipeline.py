@@ -2,7 +2,7 @@
 
 Operates on ``RolloutResp`` directly. Reward scoring consumes each
 scorable track through
-:meth:`diffusionrl.reward.pipeline.RewardPipeline.score_and_attach`,
+:meth:`diffusionrl.reward.service.RewardService.score_and_attach`,
 which takes ``(req, track)`` and writes rewards onto the track in
 place.
 
@@ -17,7 +17,7 @@ The host must provide:
 - ``self._adv_samples_per_prompt`` — ``int``
 - ``self.generate(req: RolloutReq) → RolloutResp`` — provided by the host actor
 - ``self.put_buffer`` / ``self.get_buffer`` / ``self.pop_buffer`` (from ``Buffer``)
-- ``self._ensure_reward_pipeline()`` — returns ``RewardPipeline``
+- ``self._ensure_reward_service()`` — returns ``RewardService``
 
 Each ``generate_buffered`` call splits the resp by group and pairs each shard
 with a per-group ``RolloutReq`` shard. The pairing is held on a per-actor
@@ -75,7 +75,7 @@ SCORER_BY_SEGMENT_TYPE: Dict[Type[Segment], str] = {
 }
 """Maps a track's segment type to a scorer-registry key.
 
-Today the actor holds one ``RewardPipeline`` and the key ``"default"``
+Today the actor holds one ``RewardService`` and the key ``"default"``
 points at it; multi-service support (LLM-judge for refined, CLIP for
 image, …) is a follow-up that lifts the key into an actual service
 handle. Structural track-lookup ("which tracks have this segment type?")
@@ -220,8 +220,8 @@ class RolloutPipelineMixin:
         Iterates :meth:`RolloutResp.tracks_with_segment_types` against
         :data:`SCORER_BY_SEGMENT_TYPE` to find tracks whose segment type
         has a registered scorer (today: ``LatentSegment``). Each scorable
-        track is handed to :meth:`RewardPipeline.score_and_attach` along
-        with the per-shard ``RolloutReq``; the reward pipeline reads
+        track is handed to :meth:`RewardService.score_and_attach` along
+        with the per-shard ``RolloutReq``; the reward service reads
         texts off ``req.primitives['text']`` and writes
         ``rewards`` / ``component_rewards`` onto the track in place.
         After per-track scoring, :meth:`RolloutResp.propagate_rewards`
@@ -255,7 +255,7 @@ class RolloutPipelineMixin:
         for _name, track in resp.tracks_with_segment_types(SCORER_BY_SEGMENT_TYPE.keys()):
             if _name in parent_names:
                 continue
-            self._ensure_reward_pipeline().score_and_attach(req=req_shard, track=track)
+            self._ensure_reward_service().score_and_attach(req=req_shard, track=track)
             if collect_media:
                 track.media_preview = build_media_preview_for_track(
                     req=req_shard,

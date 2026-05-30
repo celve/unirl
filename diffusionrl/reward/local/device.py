@@ -1,10 +1,10 @@
 """Shared device resolver for reward Specs.
 
 A Spec's ``device: str`` field accepts ``"cpu"``, ``"cuda"``, or ``"auto"``.
-``"auto"`` defers to the parent ``RewardConfig.base_device`` (also
+``"auto"`` defers to the backend's ``base_device`` (also
 ``"cpu"``/``"cuda"``/``"auto"``); when that itself is ``"auto"``, fall back to
 ``"cuda"`` if available else ``"cpu"``. This lets per-component overrides win
-where set, while keeping a single cluster-level default on the reward config.
+where set, while keeping a single cluster-level default.
 """
 
 from __future__ import annotations

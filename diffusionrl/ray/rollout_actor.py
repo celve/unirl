@@ -32,7 +32,6 @@ from diffusionrl.ray.mixins import RolloutWeightSyncMixin
 from diffusionrl.ray.mixins.rollout_pipeline import RolloutPipelineMixin
 from diffusionrl.ray.utils.gpu import log_gpu_state, log_resource_ids
 from diffusionrl.ray.utils.net import get_free_port, get_node_ip
-from diffusionrl.reward.pipeline import RewardPipeline
 from diffusionrl.rollout.engine import chunked_engine_generate_req
 from diffusionrl.transfer.buffer import Buffer
 from diffusionrl.types.rollout_req import RolloutReq
@@ -73,9 +72,9 @@ class RolloutActor(ConfigActor, RolloutWeightSyncMixin, DistributedMixin, Rollou
         / ``cfg.model`` / ``cfg.sampling.sde_strategy`` / ``cfg.reward`` from
         the cfg ``ConfigActor`` installs into ``actor_config._current``.
         Algorithm + engine sections carry ``_target_`` and are materialized via
-        ``build()``; ``cfg.model`` is materialized via ``materialize``;
-        ``cfg.reward`` is kept as a ``DictConfig`` and forwarded into
-        ``RewardPipeline.from_configs``.
+        ``build()``; ``cfg.model`` is materialized via ``materialize``.
+        (V1 actor-side reward construction is retired; reward lives on the
+        v2 trainer path.)
 
         Engine construction is one-shot: ``device``, ``strategy``, ``rank``,
         ``model_config`` flow as ctor kwargs, and the engine is fully usable
@@ -106,7 +105,6 @@ class RolloutActor(ConfigActor, RolloutWeightSyncMixin, DistributedMixin, Rollou
         )
         self.num_gpus_allocated = num_gpus_allocated
         self.gpu_ids = list(gpu_ids) if gpu_ids else []
-        self._reward_pipeline: Optional[RewardPipeline] = None
 
         set_seed(self._cfg.run.seed)
         logger.info(
@@ -125,7 +123,6 @@ class RolloutActor(ConfigActor, RolloutWeightSyncMixin, DistributedMixin, Rollou
             1,
             int(get_diffusion_params(self._cfg.sampling).samples_per_prompt),
         )
-        self._reward_config = self._cfg.reward
         # One-shot engine construction. ``strategy`` rides as a ctor kwarg;
         # vllm-omni currently stores it as an attribute and does not consume
         # it (the SDE math lives in the worker subprocess), but the contract
@@ -203,10 +200,12 @@ class RolloutActor(ConfigActor, RolloutWeightSyncMixin, DistributedMixin, Rollou
             raise RuntimeError("Engine not constructed.")
         self.engine.wake_up()
 
-    def _ensure_reward_pipeline(self) -> RewardPipeline:
-        if self._reward_pipeline is None:
-            self._reward_pipeline = RewardPipeline.from_configs(self._reward_config)
-        return self._reward_pipeline
+    def _ensure_reward_service(self):
+        raise NotImplementedError(
+            "V1 actor-side reward construction retired with RewardConfig/from_configs. "
+            "Reward now lives on the v2 trainer path (RewardService via Hydra _target_); "
+            "this V1 actor reward hook is pending removal with the V1 actor path."
+        )
 
     def generate(self, req: RolloutReq) -> RolloutResp:
         """Generate one rollout. Chunks ``req`` at ``forward_batch_size`` and
@@ -231,8 +230,6 @@ class RolloutActor(ConfigActor, RolloutWeightSyncMixin, DistributedMixin, Rollou
         """Put engine into sleep mode to release runtime resources."""
         if self.engine is not None:
             self.engine.sleep()
-        if self._reward_pipeline is not None:
-            self._reward_pipeline.offload()
         logger.info(f"Rank {self.rank}: Engine entered sleep mode")
         self._log_gpu_state("inference_sleep")
 
@@ -240,8 +237,6 @@ class RolloutActor(ConfigActor, RolloutWeightSyncMixin, DistributedMixin, Rollou
         """Wake engine up for generation or weight update."""
         if self.engine is not None:
             self.engine.wake_up()
-        if self._reward_pipeline is not None:
-            self._reward_pipeline.onload()
         logger.info(f"Rank {self.rank}: Engine wake_up complete")
         self._log_gpu_state("inference_wake_up")
 

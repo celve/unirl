@@ -9,13 +9,13 @@ from PIL import Image
 
 from diffusionrl.config.registration import register_config
 from diffusionrl.reward.base import BaseRewardComponentSpec
-from diffusionrl.reward.scorers._device import resolve_device
-from diffusionrl.types.reward import RewardRequest, RewardType
+from diffusionrl.reward.local.device import resolve_device
+from diffusionrl.types.reward import RewardRequest
 
-from .base_local import BaseLocalRewardScorer
+from .base import LocalRewardBackend
 
 
-class ImageRewardScorer(BaseLocalRewardScorer):
+class ImageRewardScorer(LocalRewardBackend):
     """ImageReward human preference scorer (BLIP-based, ~300M).
 
     ImageReward is trained on 137k human preference annotations and outputs
@@ -43,7 +43,6 @@ class ImageRewardScorer(BaseLocalRewardScorer):
             self.model_kwargs.get("model_version", "ImageReward-v1.0"),
             device=self.device,
         )
-        self.reward_types = [RewardType.IMAGE_TEXT_ALIGNMENT]
 
     def _compute_model_rewards(self, request: RewardRequest) -> List[float]:
         images = request.images
@@ -69,7 +68,7 @@ class ImageRewardScorer(BaseLocalRewardScorer):
 @register_config(
     group="reward/component",
     name="image_reward",
-    target="diffusionrl.reward.scorers.image_reward.ImageRewardScorer",
+    target="diffusionrl.reward.local.image_reward.ImageRewardScorer",
 )
 class ImageRewardSpec(BaseRewardComponentSpec):
     """Typed config for the ImageReward (BLIP-based, ~300M) reward component.
@@ -77,6 +76,5 @@ class ImageRewardSpec(BaseRewardComponentSpec):
     ImageReward processes one image at a time, so no batch_size knob.
     """
 
-    weight: float = 1.0
     device: str = "auto"
     model_version: str = "ImageReward-v1.0"

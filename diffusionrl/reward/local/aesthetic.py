@@ -8,10 +8,10 @@ from diffusionrl.config.registration import register_config
 from diffusionrl.reward.base import BaseRewardComponentSpec
 from diffusionrl.types.reward import RewardRequest
 
-from .base_local import BaseLocalRewardScorer
+from .base import LocalRewardBackend
 
 
-class AestheticRewardScorer(BaseLocalRewardScorer):
+class AestheticRewardScorer(LocalRewardBackend):
     """Placeholder scorer for future aesthetic reward support."""
 
     canonical_model_name = "aesthetic"
@@ -31,9 +31,7 @@ class AestheticRewardScorer(BaseLocalRewardScorer):
 @register_config(
     group="reward/component",
     name="aesthetic",
-    target="diffusionrl.reward.scorers.aesthetic.AestheticRewardScorer",
+    target="diffusionrl.reward.local.aesthetic.AestheticRewardScorer",
 )
 class AestheticSpec(BaseRewardComponentSpec):
     """Placeholder Spec for the aesthetic reward component (unimplemented)."""
-
-    weight: float = 1.0

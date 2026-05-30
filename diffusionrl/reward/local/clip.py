@@ -8,13 +8,13 @@ import torch
 
 from diffusionrl.config.registration import register_config
 from diffusionrl.reward.base import BaseRewardComponentSpec
-from diffusionrl.reward.scorers._device import resolve_device
-from diffusionrl.types.reward import RewardRequest, RewardType
+from diffusionrl.reward.local.device import resolve_device
+from diffusionrl.types.reward import RewardRequest
 
-from .base_local import BaseLocalRewardScorer
+from .base import LocalRewardBackend
 
 
-class ClipRewardScorer(BaseLocalRewardScorer):
+class ClipRewardScorer(LocalRewardBackend):
     """CLIP similarity reward."""
 
     canonical_model_name = "clip"
@@ -61,7 +61,6 @@ class ClipRewardScorer(BaseLocalRewardScorer):
         self._clip_tform = T.Compose([resize, crop, normalise])
 
         self.model.eval()
-        self.reward_types = [RewardType.IMAGE_TEXT_ALIGNMENT]
 
     def _compute_model_rewards(self, request: RewardRequest) -> List[float]:
         import numpy as np
@@ -97,12 +96,11 @@ class ClipRewardScorer(BaseLocalRewardScorer):
 @register_config(
     group="reward/component",
     name="clip",
-    target="diffusionrl.reward.scorers.clip.ClipRewardScorer",
+    target="diffusionrl.reward.local.clip.ClipRewardScorer",
 )
 class ClipSpec(BaseRewardComponentSpec):
     """Typed config for the CLIP similarity reward component."""
 
-    weight: float = 1.0
     batch_size: int = 8
     device: str = "auto"
     model_id: str = "openai/clip-vit-large-patch14"

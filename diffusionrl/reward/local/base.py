@@ -8,11 +8,11 @@ from typing import List, Optional
 
 import torch
 
-from diffusionrl.reward.base import BaseRewardScorer
+from diffusionrl.reward.base import RewardBackend
 from diffusionrl.types.reward import RewardRequest, RewardResponse
 
 
-class BaseLocalRewardScorer(BaseRewardScorer):
+class LocalRewardBackend(RewardBackend):
     """Common lifecycle and error handling for local built-in scorers."""
 
     canonical_model_name: Optional[str] = None

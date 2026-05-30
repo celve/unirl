@@ -24,7 +24,6 @@ from diffusionrl.ray.actor_config import ConfigActor
 from diffusionrl.ray.distributed import DistributedMixin
 from diffusionrl.ray.mixins import TrainingWeightSyncMixin
 from diffusionrl.ray.mixins.rollout_pipeline import RolloutPipelineMixin
-from diffusionrl.reward.pipeline import RewardPipeline
 from diffusionrl.rollout.engine import chunked_engine_generate_req
 from diffusionrl.training import StageTrainStack, TrackMiniBatchResult
 from diffusionrl.training.fsdp_utils import (
@@ -128,8 +127,6 @@ class TrainActor(
         # ------------------------------------------------------------------
         self.engine = None
         self._rollout_plan = None
-        self._reward_config = None
-        self._reward_pipeline: Optional[RewardPipeline] = None
         self._adv_scope = str(getattr(cfg.algorithm, "adv_normalization_scope", "group"))
         self._adv_use_global_std = bool(getattr(cfg.algorithm, "use_global_std", False))
         self._adv_samples_per_prompt = max(
@@ -149,7 +146,6 @@ class TrainActor(
                 stage=self.tracks[only_track].stage,
             )
             self._rollout_plan = materialize(cfg.rollout.plan)
-            self._reward_config = cfg.reward
             logger.info(
                 "Rank %s: direct-sampling engine installed (%s) for track %r",
                 self.rank,
@@ -203,12 +199,12 @@ class TrainActor(
             chunk_size=self._rollout_plan.forward_batch_size,
         )
 
-    def _ensure_reward_pipeline(self) -> RewardPipeline:
-        if self._reward_pipeline is None:
-            if self._reward_config is None:
-                raise RuntimeError("TrainActor._ensure_reward_pipeline: cfg.reward not captured.")
-            self._reward_pipeline = RewardPipeline.from_configs(self._reward_config)
-        return self._reward_pipeline
+    def _ensure_reward_service(self):
+        raise NotImplementedError(
+            "V1 actor-side reward construction retired with RewardConfig/from_configs. "
+            "Reward now lives on the v2 trainer path (RewardService via Hydra _target_); "
+            "this V1 actor reward hook is pending removal with the V1 actor path."
+        )
 
     # ------------------------------------------------------------------
     # Train

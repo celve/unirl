@@ -1,4 +1,4 @@
-"""Regression test: ``BaseLocalRewardScorer.compute_rewards`` no longer swallows.
+"""Regression test: ``LocalRewardBackend.compute_rewards`` no longer swallows.
 
 Before the fail-fast fix, an exception inside ``_compute_model_rewards``
 was caught and silently turned into ``rewards=[0.0] * batch_size`` with
@@ -13,11 +13,11 @@ from typing import List
 
 import pytest
 
-from diffusionrl.reward.scorers.base_local import BaseLocalRewardScorer
+from diffusionrl.reward.local.base import LocalRewardBackend
 from diffusionrl.types.reward import RewardRequest
 
 
-class _DummyLocalScorer(BaseLocalRewardScorer):
+class _DummyLocalScorer(LocalRewardBackend):
     canonical_model_name = "dummy"
 
     def _load_model(self) -> None:

@@ -1,7 +1,7 @@
 """Built-in reward scorer implementations."""
 
 from .aesthetic import AestheticRewardScorer
-from .base_local import BaseLocalRewardScorer
+from .base import LocalRewardBackend
 from .clip import ClipRewardScorer
 from .hpsv2 import HPSv2RewardScorer
 from .hpsv3 import HPSv3RewardScorer
@@ -15,7 +15,7 @@ from .video_pickscore import VideoPickScoreScorer
 
 __all__ = [
     "AestheticRewardScorer",
-    "BaseLocalRewardScorer",
+    "LocalRewardBackend",
     "ClipRewardScorer",
     "HPSv2RewardScorer",
     "HPSv3RewardScorer",

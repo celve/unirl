@@ -108,17 +108,12 @@ rollout:
   forward_batch_size: 1
 
 reward:
-  _target_: diffusionrl.reward.service_new.RewardServiceNew
-  aggregation_method: mean
-  executors:
-    - _target_: diffusionrl.reward.base.InProcessRewardExecutor
-      weight: 1.0
-      scorer:
-        _target_: diffusionrl.reward.scorers.mc_exact_match.MCExactMatchRewardScorer
-        base_device: cpu
-        config:
-          _target_: diffusionrl.reward.scorers.mc_exact_match.MCExactMatchSpec
-          weight: 1.0
+  _target_: diffusionrl.reward.service.RewardService
+  backend:
+    _target_: diffusionrl.reward.local.mc_exact_match.MCExactMatchRewardScorer
+    base_device: cpu
+    config:
+      _target_: diffusionrl.reward.local.mc_exact_match.MCExactMatchSpec
 
 algorithm:
   _target_: diffusionrl.algorithms.grpo.ARGRPO

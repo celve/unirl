@@ -9,13 +9,13 @@ from PIL import Image
 
 from diffusionrl.config.registration import register_config
 from diffusionrl.reward.base import BaseRewardComponentSpec
-from diffusionrl.reward.scorers._device import resolve_device
-from diffusionrl.types.reward import RewardRequest, RewardType
+from diffusionrl.reward.local.device import resolve_device
+from diffusionrl.types.reward import RewardRequest
 
-from .base_local import BaseLocalRewardScorer
+from .base import LocalRewardBackend
 
 
-class HPSv2RewardScorer(BaseLocalRewardScorer):
+class HPSv2RewardScorer(LocalRewardBackend):
     """HPSv2 image-text alignment reward."""
 
     canonical_model_name = "hpsv2"
@@ -63,7 +63,6 @@ class HPSv2RewardScorer(BaseLocalRewardScorer):
         self._hpsv2_preprocess_val = preprocess_val
         self.model = model.to(self.device)
         self.model.eval()
-        self.reward_types = [RewardType.IMAGE_TEXT_ALIGNMENT]
 
     def _compute_model_rewards(self, request: RewardRequest) -> List[float]:
         images = request.images
@@ -104,12 +103,11 @@ class HPSv2RewardScorer(BaseLocalRewardScorer):
 @register_config(
     group="reward/component",
     name="hpsv2",
-    target="diffusionrl.reward.scorers.hpsv2.HPSv2RewardScorer",
+    target="diffusionrl.reward.local.hpsv2.HPSv2RewardScorer",
 )
 class HPSv2Spec(BaseRewardComponentSpec):
     """Typed config for the HPSv2 reward component."""
 
-    weight: float = 1.0
     batch_size: int = 8
     device: str = "auto"
     open_clip_path: str = "./hps_ckpt/open_clip_pytorch_model.bin"

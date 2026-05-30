@@ -102,21 +102,16 @@ rollout:
     enable_sleep_mode: true
 
 reward:
-  _target_: diffusionrl.reward.service_new.RewardServiceNew
-  aggregation_method: mean
-  executors:
-    - _target_: diffusionrl.reward.base.InProcessRewardExecutor
-      weight: 1.0
-      scorer:
-        _target_: diffusionrl.reward.scorers.pickscore.PickScoreRewardScorer
-        base_device: cuda
-        config:
-          _target_: diffusionrl.reward.scorers.pickscore.PickScoreSpec
-          weight: 1.0
-          batch_size: 8
-          device: auto
-          processor_id: laion/CLIP-ViT-H-14-laion2B-s32B-b79K
-          model_id: yuvalkirstain/PickScore_v1
+  _target_: diffusionrl.reward.service.RewardService
+  backend:
+    _target_: diffusionrl.reward.local.pickscore.PickScoreRewardScorer
+    base_device: cuda
+    config:
+      _target_: diffusionrl.reward.local.pickscore.PickScoreSpec
+      batch_size: 8
+      device: auto
+      processor_id: laion/CLIP-ViT-H-14-laion2B-s32B-b79K
+      model_id: yuvalkirstain/PickScore_v1
 
 algorithm:
   _target_: diffusionrl.algorithms.grpo.DiffusionGRPO

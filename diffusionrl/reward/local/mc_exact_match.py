@@ -7,9 +7,9 @@ from typing import List
 
 from diffusionrl.config.registration import register_config
 from diffusionrl.reward.base import BaseRewardComponentSpec
-from diffusionrl.types.reward import RewardRequest, RewardType
+from diffusionrl.types.reward import RewardRequest
 
-from .base_local import BaseLocalRewardScorer
+from .base import LocalRewardBackend
 
 _ANSWER_PATTERN = re.compile(
     r"(?:(?:answer|option)\s*(?:is|:)\s*)\(?([A-D])\)?",
@@ -51,7 +51,7 @@ def _extract_answer_letter(text: str) -> str:
     return ""
 
 
-class MCExactMatchRewardScorer(BaseLocalRewardScorer):
+class MCExactMatchRewardScorer(LocalRewardBackend):
     """Multiple-choice exact-match reward for VLM QA tasks."""
 
     canonical_model_name = "mc_exact_match"
@@ -63,7 +63,6 @@ class MCExactMatchRewardScorer(BaseLocalRewardScorer):
 
     def _load_model(self) -> None:
         self.model = "mc_exact_match"
-        self.reward_types = [RewardType.CUSTOM]
 
     def _compute_model_rewards(self, request: RewardRequest) -> List[float]:
         generated = request.texts
@@ -84,7 +83,7 @@ class MCExactMatchRewardScorer(BaseLocalRewardScorer):
 @register_config(
     group="reward/component",
     name="mc_exact_match",
-    target="diffusionrl.reward.scorers.mc_exact_match.MCExactMatchRewardScorer",
+    target="diffusionrl.reward.local.mc_exact_match.MCExactMatchRewardScorer",
 )
 class MCExactMatchSpec(BaseRewardComponentSpec):
-    weight: float = 1.0
+    """Config for the MC exact-match scorer."""

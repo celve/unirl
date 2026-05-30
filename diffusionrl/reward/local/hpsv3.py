@@ -9,13 +9,13 @@ from PIL import Image
 
 from diffusionrl.config.registration import register_config
 from diffusionrl.reward.base import BaseRewardComponentSpec
-from diffusionrl.reward.scorers._device import resolve_device
-from diffusionrl.types.reward import RewardRequest, RewardType
+from diffusionrl.reward.local.device import resolve_device
+from diffusionrl.types.reward import RewardRequest
 
-from .base_local import BaseLocalRewardScorer
+from .base import LocalRewardBackend
 
 
-class HPSv3RewardScorer(BaseLocalRewardScorer):
+class HPSv3RewardScorer(LocalRewardBackend):
     """HPSv3 image-text alignment reward (Qwen2-VL-7B based).
 
     HPSv3 is a 7B VLM reward model that outputs [mu, sigma] per image.
@@ -43,7 +43,6 @@ class HPSv3RewardScorer(BaseLocalRewardScorer):
             device=self.device,
         )
         self.model = self._hpsv3_inferencer.model
-        self.reward_types = [RewardType.IMAGE_TEXT_ALIGNMENT]
 
     def _compute_model_rewards(self, request: RewardRequest) -> List[float]:
         images = request.images
@@ -77,7 +76,7 @@ class HPSv3RewardScorer(BaseLocalRewardScorer):
 @register_config(
     group="reward/component",
     name="hpsv3",
-    target="diffusionrl.reward.scorers.hpsv3.HPSv3RewardScorer",
+    target="diffusionrl.reward.local.hpsv3.HPSv3RewardScorer",
 )
 class HPSv3Spec(BaseRewardComponentSpec):
     """Typed config for the HPSv3 reward component.
@@ -85,6 +84,5 @@ class HPSv3Spec(BaseRewardComponentSpec):
     HPSv3RewardInferencer self-loads its checkpoint, so no path knobs.
     """
 
-    weight: float = 1.0
     batch_size: int = 8
     device: str = "auto"

@@ -1,49 +1,50 @@
 # Reward Package
 
-`diffusionrl.reward` owns reward component construction, execution, and
-aggregation. Rollout engines generate media; reward components score it and
-return per-sample values that rollout control turns into advantages.
+`diffusionrl.reward` constructs and runs reward backends. Rollout engines
+generate media; a reward backend scores it and returns per-sample values that
+the trainer turns into advantages.
 
-## Key Files
+## Structure
+
+A reward is exactly one **backend** — either a local in-process scorer or the
+remote RewardService HTTP client — held by `RewardService`.
 
 | File | Purpose |
 |---|---|
-| `config.py` | `RewardConfig`, component list, aggregation method, base device |
-| `base.py` | scorer/executor interfaces and component spec base class |
-| `pipeline.py` | reward execution pipeline |
-| `service.py` | reward service construction from configs |
-| `reward_service_executor.py` | remote reward-service component |
-| `scorers/` | built-in local scorers such as PickScore, HPS, OCR, VideoPickScore |
+| `base.py` | `RewardBackend` ABC + `BaseRewardComponentSpec` |
+| `service.py` | `RewardService`: holds one backend; scores a `RolloutTrack` via `score_and_attach` |
+| `remote.py` | `RemoteRewardBackend`: HTTP client for the remote RewardService server |
+| `local/` | local in-process backends (`LocalRewardBackend` + PickScore, HPS, OCR, VideoPickScore, …) |
 
-## Config Shape
+## Config
 
-Reward config is component-based:
+A reward is wired via Hydra `_target_`:
 
 ```yaml
 reward:
-  aggregation_method: weighted_sum
-  base_device: cuda
-  components:
-    - name: pickscore
-      weight: 1.0
+  _target_: diffusionrl.reward.service.RewardService
+  backend:
+    _target_: diffusionrl.reward.local.pickscore.PickScoreRewardScorer
+    base_device: cuda
+    config:
+      _target_: diffusionrl.reward.local.pickscore.PickScoreSpec
       batch_size: 8
 ```
 
-`reward.components` is a polymorphic list. Each component registers a spec in
-the `reward/component` ConfigStore group, and the spec target constructs the
-runtime scorer or executor.
+For the remote backend, point `backend._target_` at
+`diffusionrl.reward.remote.RemoteRewardBackend` with a `RemoteRewardSpec`
+(`base_url`, `required_rewards`, …).
 
 ## Adding a Local Scorer
-
-Define a spec and scorer:
 
 ```python
 from diffusionrl.config.registration import register_config
 from diffusionrl.reward.base import BaseRewardComponentSpec
-from diffusionrl.reward.scorers.base_local import BaseLocalRewardScorer
+from diffusionrl.reward.local.base import LocalRewardBackend
 from diffusionrl.types.reward import RewardRequest
 
-class MyRewardScorer(BaseLocalRewardScorer):
+
+class MyRewardScorer(LocalRewardBackend):
     canonical_model_name = "my_reward"
 
     def __init__(self, *, config: "MyRewardSpec", base_device: str) -> None:
@@ -55,28 +56,15 @@ class MyRewardScorer(BaseLocalRewardScorer):
     def _compute_model_rewards(self, request: RewardRequest) -> list[float]:
         ...
 
+
 @register_config(
     group="reward/component",
     name="my_reward",
-    target="my_module.MyRewardScorer",
+    target="diffusionrl.reward.local.my_reward.MyRewardScorer",
 )
 class MyRewardSpec(BaseRewardComponentSpec):
-    weight: float = 1.0
     batch_size: int = 8
 ```
 
-Use it from YAML:
-
-```yaml
-reward:
-  aggregation_method: mean
-  base_device: cuda
-  components:
-    - name: my_reward
-      weight: 1.0
-      batch_size: 8
-```
-
-Prefer `BaseLocalRewardScorer` for in-process model scorers because it provides
-device, eager load, `offload()`, and `onload()` behavior. Use a custom executor
-or `reward_service_executor.py` when scoring happens out of process.
+`LocalRewardBackend` provides device resolution, eager load, `offload()`, and
+`onload()`. Use `remote.py` when scoring happens out of process.

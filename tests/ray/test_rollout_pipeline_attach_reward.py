@@ -1,10 +1,10 @@
 """Multi-track attach_reward path through RolloutPipelineMixin.
 
 Builds a minimal host class that satisfies the mixin's host contract
-(``get_buffer`` / ``_ensure_reward_pipeline`` / ``_handle_state``) and
+(``get_buffer`` / ``_ensure_reward_service`` / ``_handle_state``) and
 exercises :meth:`RolloutPipelineMixin.attach_reward` against a fabricated
 multi-track ``RolloutResp`` (refined root + image leaf). The mocked
-reward pipeline writes deterministic per-sample rewards onto the track
+reward service writes deterministic per-sample rewards onto the track
 so we can assert:
 
 - Only the scorable track (LatentSegment-bearing) is scored; the parent
@@ -41,8 +41,8 @@ class _FakeHandle:
     id: str
 
 
-class _FakeRewardPipeline:
-    """Mock RewardPipeline.
+class _FakeRewardService:
+    """Mock RewardService.
 
     Each call to ``score_and_attach`` stamps each sample with an
     incrementing reward derived from the call index so per-track and
@@ -74,16 +74,16 @@ class _MixinHost(RolloutPipelineMixin):
     generate path.
     """
 
-    def __init__(self, resp: RolloutResp, req: RolloutReq, reward_pipeline) -> None:
+    def __init__(self, resp: RolloutResp, req: RolloutReq, reward_service) -> None:
         self._buffer: Dict[str, RolloutResp] = {"h0": resp}
         self._handle_state: Dict[str, RolloutReq] = {"h0": req}
-        self._reward_pipeline = reward_pipeline
+        self._reward_service = reward_service
 
     def get_buffer(self, handle):
         return self._buffer[handle.id]
 
-    def _ensure_reward_pipeline(self):
-        return self._reward_pipeline
+    def _ensure_reward_service(self):
+        return self._reward_service
 
 
 def _make_image_track_with_decoded(parent_sids: List[str], z: int) -> RolloutTrack:
@@ -147,9 +147,9 @@ def _refined_image_resp(prompt_ids: List[str], y: int, z: int) -> Tuple[RolloutR
 
 
 def test_attach_reward_scores_only_latent_segment_track():
-    """The reward pipeline should be called once — for the image leaf."""
+    """The reward service should be called once — for the image leaf."""
     resp, req = _refined_image_resp(prompt_ids=["p0"], y=2, z=3)
-    pipeline = _FakeRewardPipeline()
+    pipeline = _FakeRewardService()
     host = _MixinHost(resp, req, pipeline)
     host.attach_reward(_FakeHandle(id="h0"))
     assert len(pipeline.calls) == 1
@@ -159,7 +159,7 @@ def test_attach_reward_scores_only_latent_segment_track():
 
 def test_attach_reward_writes_rewards_and_component_rewards_on_image():
     resp, req = _refined_image_resp(prompt_ids=["p0"], y=2, z=3)
-    host = _MixinHost(resp, req, _FakeRewardPipeline())
+    host = _MixinHost(resp, req, _FakeRewardService())
     host.attach_reward(_FakeHandle(id="h0"))
     image = resp.tracks["image"]
     assert image.rewards is not None
@@ -170,7 +170,7 @@ def test_attach_reward_writes_rewards_and_component_rewards_on_image():
 def test_attach_reward_propagates_mean_to_refined_parent():
     """Refined gets rewards = mean over each Z-sized group of image rewards."""
     resp, req = _refined_image_resp(prompt_ids=["p0"], y=2, z=3)
-    host = _MixinHost(resp, req, _FakeRewardPipeline())
+    host = _MixinHost(resp, req, _FakeRewardService())
     host.attach_reward(_FakeHandle(id="h0"))
     refined = resp.tracks["refined"]
     # mean of [0,1,2] = 1; mean of [3,4,5] = 4.
@@ -185,7 +185,7 @@ def test_attach_reward_media_preview_only_on_scored_leaf():
     resp, req = _refined_image_resp(prompt_ids=["p0"], y=2, z=2)
     req.collect_media_preview = True
     req.media_max_items = 8
-    host = _MixinHost(resp, req, _FakeRewardPipeline())
+    host = _MixinHost(resp, req, _FakeRewardService())
     host.attach_reward(_FakeHandle(id="h0"))
     assert resp.tracks["image"].media_preview is not None
     assert resp.tracks["refined"].media_preview is None
@@ -204,7 +204,7 @@ def test_attach_reward_single_track_regression_unchanged():
         collect_media_preview=False,
         media_max_items=8,
     )
-    host = _MixinHost(resp, req, _FakeRewardPipeline())
+    host = _MixinHost(resp, req, _FakeRewardService())
     host.attach_reward(_FakeHandle(id="h0"))
     assert resp.tracks["image"].rewards is not None
     assert resp.tracks["image"].rewards.shape == (4,)

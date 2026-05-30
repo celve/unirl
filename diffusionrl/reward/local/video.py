@@ -10,7 +10,7 @@ import torch
 from PIL import Image
 
 from diffusionrl.config.registration import register_config
-from diffusionrl.reward.base import BaseRewardComponentSpec, BaseRewardScorer
+from diffusionrl.reward.base import BaseRewardComponentSpec, RewardBackend
 from diffusionrl.types.reward import RewardRequest, RewardResponse
 
 from .registry import (
@@ -19,7 +19,7 @@ from .registry import (
 )
 
 
-class VideoRewardScorer(BaseRewardScorer):
+class VideoRewardScorer(RewardBackend):
     """Specialized reward scorer for video generation."""
 
     input_kind = "video"
@@ -152,7 +152,7 @@ class VideoRewardScorer(BaseRewardScorer):
 @register_config(
     group="reward/component",
     name="video",
-    target="diffusionrl.reward.scorers.video.VideoRewardScorer",
+    target="diffusionrl.reward.local.video.VideoRewardScorer",
 )
 class VideoSpec(BaseRewardComponentSpec):
     """Typed config for the Video reward component.
@@ -161,7 +161,6 @@ class VideoSpec(BaseRewardComponentSpec):
     blends frame-level alignment with temporal consistency.
     """
 
-    weight: float = 1.0
     batch_size: int = 8
     device: str = "auto"
     inner_model_name: str = "pickscore"

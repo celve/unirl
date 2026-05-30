@@ -116,7 +116,7 @@ class VideoPickScoreScorer(PickScoreRewardScorer):
 @register_config(
     group="reward/component",
     name="videopickscore",
-    target="diffusionrl.reward.scorers.video_pickscore.VideoPickScoreScorer",
+    target="diffusionrl.reward.local.video_pickscore.VideoPickScoreScorer",
 )
 class VideoPickScoreSpec(BaseRewardComponentSpec):
     """Typed config for the VideoPickScore reward component.
@@ -129,7 +129,6 @@ class VideoPickScoreSpec(BaseRewardComponentSpec):
     YAML reference this scorer as ``name: videopickscore``.
     """
 
-    weight: float = 1.0
     batch_size: int = 8
     device: str = "auto"
     processor_id: str = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"

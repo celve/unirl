@@ -10,13 +10,13 @@ from tqdm import tqdm
 
 from diffusionrl.config.registration import register_config
 from diffusionrl.reward.base import BaseRewardComponentSpec
-from diffusionrl.reward.scorers._device import resolve_device
-from diffusionrl.types.reward import RewardRequest, RewardType
+from diffusionrl.reward.local.device import resolve_device
+from diffusionrl.types.reward import RewardRequest
 
-from .base_local import BaseLocalRewardScorer
+from .base import LocalRewardBackend
 
 
-class PickScoreRewardScorer(BaseLocalRewardScorer):
+class PickScoreRewardScorer(LocalRewardBackend):
     """PickScore image-text alignment reward."""
 
     canonical_model_name = "pickscore"
@@ -41,7 +41,6 @@ class PickScoreRewardScorer(BaseLocalRewardScorer):
         self.processor = CLIPProcessor.from_pretrained(processor_path)
         self.model = CLIPModel.from_pretrained(model_path).eval().to(self.device)
         self.model = self.model.to(dtype=torch.float32)
-        self.reward_types = [RewardType.IMAGE_TEXT_ALIGNMENT]
 
     def _compute_model_rewards(self, request: RewardRequest) -> List[float]:
         images = request.images
@@ -106,12 +105,11 @@ class PickScoreRewardScorer(BaseLocalRewardScorer):
 @register_config(
     group="reward/component",
     name="pickscore",
-    target="diffusionrl.reward.scorers.pickscore.PickScoreRewardScorer",
+    target="diffusionrl.reward.local.pickscore.PickScoreRewardScorer",
 )
 class PickScoreSpec(BaseRewardComponentSpec):
     """Typed config for the PickScore reward component."""
 
-    weight: float = 1.0
     batch_size: int = 8
     device: str = "auto"
     processor_id: str = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"

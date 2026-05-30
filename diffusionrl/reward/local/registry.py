@@ -14,30 +14,30 @@ from __future__ import annotations
 import importlib
 from typing import Dict, Tuple, Type
 
-from diffusionrl.reward.base import BaseRewardComponentSpec, BaseRewardScorer
+from diffusionrl.reward.base import BaseRewardComponentSpec, RewardBackend
 
 _BUILTIN_SCORERS: Dict[str, Tuple[str, str]] = {
-    "aesthetic": ("diffusionrl.reward.scorers.aesthetic", "AestheticRewardScorer"),
-    "clip": ("diffusionrl.reward.scorers.clip", "ClipRewardScorer"),
-    "hpsv2": ("diffusionrl.reward.scorers.hpsv2", "HPSv2RewardScorer"),
-    "ocr": ("diffusionrl.reward.scorers.ocr", "OCRRewardScorer"),
-    "pickscore": ("diffusionrl.reward.scorers.pickscore", "PickScoreRewardScorer"),
-    "hpsv3": ("diffusionrl.reward.scorers.hpsv3", "HPSv3RewardScorer"),
-    "image_reward": ("diffusionrl.reward.scorers.image_reward", "ImageRewardScorer"),
-    "videopickscore": ("diffusionrl.reward.scorers.video_pickscore", "VideoPickScoreScorer"),
-    "mc_exact_match": ("diffusionrl.reward.scorers.mc_exact_match", "MCExactMatchRewardScorer"),
+    "aesthetic": ("diffusionrl.reward.local.aesthetic", "AestheticRewardScorer"),
+    "clip": ("diffusionrl.reward.local.clip", "ClipRewardScorer"),
+    "hpsv2": ("diffusionrl.reward.local.hpsv2", "HPSv2RewardScorer"),
+    "ocr": ("diffusionrl.reward.local.ocr", "OCRRewardScorer"),
+    "pickscore": ("diffusionrl.reward.local.pickscore", "PickScoreRewardScorer"),
+    "hpsv3": ("diffusionrl.reward.local.hpsv3", "HPSv3RewardScorer"),
+    "image_reward": ("diffusionrl.reward.local.image_reward", "ImageRewardScorer"),
+    "videopickscore": ("diffusionrl.reward.local.video_pickscore", "VideoPickScoreScorer"),
+    "mc_exact_match": ("diffusionrl.reward.local.mc_exact_match", "MCExactMatchRewardScorer"),
 }
 
 _BUILTIN_SPECS: Dict[str, Tuple[str, str]] = {
-    "aesthetic": ("diffusionrl.reward.scorers.aesthetic", "AestheticSpec"),
-    "clip": ("diffusionrl.reward.scorers.clip", "ClipSpec"),
-    "hpsv2": ("diffusionrl.reward.scorers.hpsv2", "HPSv2Spec"),
-    "ocr": ("diffusionrl.reward.scorers.ocr", "OCRSpec"),
-    "pickscore": ("diffusionrl.reward.scorers.pickscore", "PickScoreSpec"),
-    "hpsv3": ("diffusionrl.reward.scorers.hpsv3", "HPSv3Spec"),
-    "image_reward": ("diffusionrl.reward.scorers.image_reward", "ImageRewardSpec"),
-    "videopickscore": ("diffusionrl.reward.scorers.video_pickscore", "VideoPickScoreSpec"),
-    "mc_exact_match": ("diffusionrl.reward.scorers.mc_exact_match", "MCExactMatchSpec"),
+    "aesthetic": ("diffusionrl.reward.local.aesthetic", "AestheticSpec"),
+    "clip": ("diffusionrl.reward.local.clip", "ClipSpec"),
+    "hpsv2": ("diffusionrl.reward.local.hpsv2", "HPSv2Spec"),
+    "ocr": ("diffusionrl.reward.local.ocr", "OCRSpec"),
+    "pickscore": ("diffusionrl.reward.local.pickscore", "PickScoreSpec"),
+    "hpsv3": ("diffusionrl.reward.local.hpsv3", "HPSv3Spec"),
+    "image_reward": ("diffusionrl.reward.local.image_reward", "ImageRewardSpec"),
+    "videopickscore": ("diffusionrl.reward.local.video_pickscore", "VideoPickScoreSpec"),
+    "mc_exact_match": ("diffusionrl.reward.local.mc_exact_match", "MCExactMatchSpec"),
 }
 
 
@@ -66,13 +66,13 @@ def resolve_builtin_reward_scorer_path(model_name: str) -> str:
     return f"{module_name}.{attr_name}"
 
 
-def resolve_builtin_reward_scorer_class(model_name: str) -> Type[BaseRewardScorer]:
+def resolve_builtin_reward_scorer_class(model_name: str) -> Type[RewardBackend]:
     """Resolve a built-in reward scorer class by canonical model name."""
     module_name, attr_name = _resolve_builtin_reward_entry(model_name)
     module = importlib.import_module(module_name)
     scorer_cls = getattr(module, attr_name)
-    if not isinstance(scorer_cls, type) or not issubclass(scorer_cls, BaseRewardScorer):
-        raise TypeError(f"Configured scorer {module_name}.{attr_name} is not a BaseRewardScorer.")
+    if not isinstance(scorer_cls, type) or not issubclass(scorer_cls, RewardBackend):
+        raise TypeError(f"Configured scorer {module_name}.{attr_name} is not a RewardBackend.")
     return scorer_cls
 
 

@@ -10,12 +10,12 @@ from tqdm import tqdm
 
 from diffusionrl.config.registration import register_config
 from diffusionrl.reward.base import BaseRewardComponentSpec
-from diffusionrl.types.reward import RewardRequest, RewardType
+from diffusionrl.types.reward import RewardRequest
 
-from .base_local import BaseLocalRewardScorer
+from .base import LocalRewardBackend
 
 
-class OCRRewardScorer(BaseLocalRewardScorer):
+class OCRRewardScorer(LocalRewardBackend):
     """OCR reward for text rendering tasks."""
 
     canonical_model_name = "ocr"
@@ -52,7 +52,6 @@ class OCRRewardScorer(BaseLocalRewardScorer):
         )
         self._levenshtein_distance = levenshtein_distance
         self.model = "ocr"
-        self.reward_types = [RewardType.CUSTOM]
 
     def _compute_model_rewards(self, request: RewardRequest) -> List[float]:
         import numpy as np
@@ -124,7 +123,7 @@ class OCRRewardScorer(BaseLocalRewardScorer):
 @register_config(
     group="reward/component",
     name="ocr",
-    target="diffusionrl.reward.scorers.ocr.OCRRewardScorer",
+    target="diffusionrl.reward.local.ocr.OCRRewardScorer",
 )
 class OCRSpec(BaseRewardComponentSpec):
     """Typed config for the OCR (PaddleOCR) reward component.
@@ -133,5 +132,4 @@ class OCRSpec(BaseRewardComponentSpec):
     time, so neither ``device`` nor ``batch_size`` appear here.
     """
 
-    weight: float = 1.0
     lang: str = "en"

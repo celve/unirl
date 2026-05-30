@@ -16,7 +16,7 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     # sde
     "get_sigma_schedule": ("diffusionrl.sde", "get_sigma_schedule"),
     # reward
-    "BaseRewardScorer": ("diffusionrl.reward.base", "BaseRewardScorer"),
+    "RewardBackend": ("diffusionrl.reward.base", "RewardBackend"),
     # utils
     "load_function": ("diffusionrl.utils", "load_function"),
     "set_seed": ("diffusionrl.utils", "set_seed"),

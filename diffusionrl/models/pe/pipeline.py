@@ -24,8 +24,7 @@ access for the nested children so it can dispatch each child's own
 ``_target_`` via :func:`diffusionrl.config.instantiate.build`, but
 ``build()`` materializes its input before dispatch — collapsing
 ``Any``-typed nested fields to plain Python dicts and losing the
-DictConfig form. Canonical pattern: see
-:meth:`diffusionrl.reward.service.RewardService.from_configs`.
+DictConfig form.
 
 Concretely: callers should invoke ``PEPipeline.from_config(cfg.model)``
 directly (NOT ``build(cfg.model)``).
@@ -154,8 +153,7 @@ class PEPipeline(Pipeline):
         ``build`` materializes the cfg before dispatch, which collapses
         ``Any``-typed nested children to plain Python dicts and loses the
         DictConfig form required to call ``build()`` recursively on
-        each child. Call this directly (mirroring
-        :meth:`RewardService.from_configs`).
+        each child. Call this directly.
         """
         return cls(
             diffusion_pipeline=build(config.diffusion),

@@ -9,19 +9,17 @@ import types
 import torch
 
 # Stub the scorers package to avoid heavy-dep imports (tqdm, paddleocr).
-_SCORERS_PKG = "diffusionrl.reward.scorers"
+_SCORERS_PKG = "diffusionrl.reward.local"
 if _SCORERS_PKG not in sys.modules:
     import diffusionrl.reward
 
     _stub = types.ModuleType(_SCORERS_PKG)
-    _scorers_dir = os.path.join(os.path.dirname(diffusionrl.reward.__file__), "scorers")
+    _scorers_dir = os.path.join(os.path.dirname(diffusionrl.reward.__file__), "local")
     _stub.__path__ = [_scorers_dir]
     _stub.__package__ = _SCORERS_PKG
     sys.modules[_SCORERS_PKG] = _stub
 
-from diffusionrl.reward.base import InProcessRewardExecutor  # noqa: E402
-from diffusionrl.reward.pipeline import RewardPipeline  # noqa: E402
-from diffusionrl.reward.scorers.mc_exact_match import MCExactMatchRewardScorer, MCExactMatchSpec  # noqa: E402
+from diffusionrl.reward.local.mc_exact_match import MCExactMatchRewardScorer, MCExactMatchSpec  # noqa: E402
 from diffusionrl.reward.service import RewardService  # noqa: E402
 from diffusionrl.types.primitives import Texts  # noqa: E402
 from diffusionrl.types.rollout_req import RolloutReq  # noqa: E402
@@ -70,13 +68,11 @@ class TestTextsProperty:
         assert req.texts is None
 
 
-class TestTextRewardPipeline:
+class TestTextRewardService:
     def test_score_and_attach_mc(self):
-        scorer = MCExactMatchRewardScorer(config=MCExactMatchSpec(weight=1.0), base_device="cpu")
-        executor = InProcessRewardExecutor(scorer, weight=1.0)
-        service = RewardService(executors=[executor], aggregation_method="mean")
-        pipeline = RewardPipeline(service)
-        assert pipeline.preferred_input_kind == "text"
+        scorer = MCExactMatchRewardScorer(config=MCExactMatchSpec(), base_device="cpu")
+        service = RewardService(backend=scorer)
+        assert service.preferred_input_kind == "text"
 
         track = _make_text_track(["C", "A", "B"])
         req = _make_req(
@@ -88,8 +84,8 @@ class TestTextRewardPipeline:
             ],
         )
 
-        pipeline.score_and_attach(req=req, track=track)
+        scored = service.score_and_attach(req=req, track=track)
 
-        assert track.rewards is not None
-        rewards = track.rewards.tolist()
+        assert scored.rewards is not None
+        rewards = scored.rewards.tolist()
         assert rewards == [1.0, 0.0, 1.0]

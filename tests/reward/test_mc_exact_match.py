@@ -1,7 +1,7 @@
 """Tests for MCExactMatchRewardScorer and _extract_answer_letter.
 
 Uses ``sys.modules`` patching to load the mc_exact_match module without
-triggering the ``diffusionrl.reward.scorers`` package ``__init__`` (which
+triggering the ``diffusionrl.reward.local`` package ``__init__`` (which
 eagerly imports OCR/video scorers with heavy native deps like tqdm/paddleocr).
 """
 
@@ -16,17 +16,17 @@ import pytest
 # Stub the scorers package so Python doesn't execute __init__.py when
 # importing the mc_exact_match submodule. The __init__ eagerly imports
 # OCR/video scorers with heavy native deps (tqdm, paddleocr).
-_SCORERS_PKG = "diffusionrl.reward.scorers"
+_SCORERS_PKG = "diffusionrl.reward.local"
 if _SCORERS_PKG not in sys.modules:
     import diffusionrl.reward  # ensure parent is loaded
 
     _stub = types.ModuleType(_SCORERS_PKG)
-    _scorers_dir = os.path.join(os.path.dirname(diffusionrl.reward.__file__), "scorers")
+    _scorers_dir = os.path.join(os.path.dirname(diffusionrl.reward.__file__), "local")
     _stub.__path__ = [_scorers_dir]
     _stub.__package__ = _SCORERS_PKG
     sys.modules[_SCORERS_PKG] = _stub
 
-from diffusionrl.reward.scorers.mc_exact_match import (  # noqa: E402
+from diffusionrl.reward.local.mc_exact_match import (  # noqa: E402
     MCExactMatchRewardScorer,
     MCExactMatchSpec,
     _extract_answer_letter,
@@ -86,7 +86,7 @@ def _t(texts):
 class TestMCExactMatchScorer:
     @pytest.fixture
     def scorer(self):
-        spec = MCExactMatchSpec(weight=1.0)
+        spec = MCExactMatchSpec()
         return MCExactMatchRewardScorer(config=spec, base_device="cpu")
 
     def test_correct_answer(self, scorer):

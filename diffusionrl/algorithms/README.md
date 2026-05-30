@@ -66,7 +66,7 @@ the function name on the right to read the actual implementation:
 
 ```text
 [1] reward components on the rollout actor
-    diffusionrl.reward.RewardPipeline.score_and_attach
+    diffusionrl.reward.service.RewardService.score_and_attach
       -> resp.rewards : Tensor[B]
          resp.component_rewards   (per-component, for logging)
 
@@ -89,8 +89,7 @@ The knobs that control each step:
 
 | Config | Effect |
 |---|---|
-| `reward.components` | reward scorers to run, such as PickScore, HPS, OCR, VideoPickScore |
-| `reward.aggregation_method` | how component rewards become `resp.rewards` |
+| `reward.backend` | the reward backend — a local scorer (PickScore, HPS, OCR, …) or the remote RewardService client |
 | `algorithm.adv_normalization_scope` | `group` normalizes within each prompt group; `global` normalizes across the batch |
 | `algorithm.samples_per_prompt` | expected group size for grouped normalization |
 | `algorithm.use_global_std` | grouped normalization may share one global std |

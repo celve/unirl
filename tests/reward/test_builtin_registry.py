@@ -9,8 +9,8 @@ scorer to actually load weights.
 
 from __future__ import annotations
 
-from diffusionrl.reward.base import BaseRewardComponentSpec, BaseRewardScorer
-from diffusionrl.reward.scorers.registry import (
+from diffusionrl.reward.base import BaseRewardComponentSpec, RewardBackend
+from diffusionrl.reward.local.registry import (
     _BUILTIN_SCORERS,
     _BUILTIN_SPECS,
     available_builtin_reward_models,
@@ -31,7 +31,7 @@ def test_every_builtin_name_resolves_to_concrete_classes() -> None:
     for name in available_builtin_reward_models():
         scorer_cls = resolve_builtin_reward_scorer_class(name)
         spec_cls = resolve_builtin_reward_spec_class(name)
-        assert issubclass(scorer_cls, BaseRewardScorer), name
+        assert issubclass(scorer_cls, RewardBackend), name
         assert issubclass(spec_cls, BaseRewardComponentSpec), name
 
 
