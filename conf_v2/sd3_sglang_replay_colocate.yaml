@@ -1,0 +1,187 @@
+# SD3 + SGLang colocate, REPLAY logprob, v2 trainer, 2x8 H20 (matches v1 reference geometry).
+# Ported from conf/experiment/flowgrpo_sd3_sglang_replay_colocate.yaml.
+#
+# Same as sd3_sglang_native_colocate.yaml except:
+#   - rollout.config.logprob_source: replay
+#       Engine doesn't emit log-probs during generate; trainer recomputes them
+#       via stage.replay at update time using LatentSegment.sde_logp.
+#
+#   2x8:  bash run_experiment_multinode_v2.sh sd3_sglang_replay_colocate  (defaults to 2x8)
+
+num_devices: 16               # 2 nodes x 8 GPUs; launcher auto-overrides via NUM_NODES*GPUS_PER_NODE
+batch_size: 96                # prompts_per_rollout, matches v1 reference 2x8 baseline
+num_rollouts: 10000
+
+# Shared nodes: model_config + strategy defined once, referenced by
+# bundle / pipeline / rollout (SGLang needs both at init).
+model_config:
+  _target_: diffusionrl.models.sd3.config.SD3PipelineConfig
+  pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
+  model_precision: bf16
+  autocast_precision: bf16
+  trajectory_precision: bf16
+  logprob_precision: fp32
+  shift: 3.0
+  # SGLang builds its LoRA ServerArgs from these two fields.
+  use_lora: true
+  lora_target_modules:
+    - attn.add_k_proj
+    - attn.add_q_proj
+    - attn.add_v_proj
+    - attn.to_add_out
+    - attn.to_k
+    - attn.to_out.0
+    - attn.to_q
+    - attn.to_v
+
+# Shared SDE strategy; SGLang resolves its sde_label from it.
+strategy:
+  _target_: diffusionrl.sde.kernels.FlowSDEStrategy
+
+bundle:
+  _target_: diffusionrl.models.sd3.bundle.SD3Bundle.from_config
+  config: ${model_config}
+
+pipeline:
+  _target_: diffusionrl.models.sd3.pipeline.SD3Pipeline
+  shift: 3.0
+  autocast_precision: bf16
+  trajectory_precision: bf16
+  logprob_precision: fp32
+  strategy: ${strategy}
+
+backend:
+  _target_: diffusionrl.train.backend.fsdp.FSDPBackend
+  block_class_names: ["JointTransformerBlock"]
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: diffusionrl.train.configs.FSDPConfig
+    param_dtype: bf16
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: true
+    use_torch_compile: false
+  optimizer_cfg:
+    _target_: diffusionrl.train.backend.base.OptimizerConfig
+    learning_rate: 3.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  scheduler_cfg:
+    _target_: diffusionrl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 10000
+  lora_cfg:
+    _target_: diffusionrl.train.configs.LoraConfig
+    rank: 32
+    alpha: 64
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    target_modules:
+      - attn.add_k_proj
+      - attn.add_q_proj
+      - attn.add_v_proj
+      - attn.to_add_out
+      - attn.to_k
+      - attn.to_out.0
+      - attn.to_q
+      - attn.to_v
+
+rollout:
+  _target_: diffusionrl.rollout.engine.sglang.engine.SGLangRolloutEngine
+  config:
+    _target_: diffusionrl.rollout.engine.sglang.config.SGLangEngineConfig
+    model_family: sd3
+    # REPLAY mode: engine returns trajectories without log-probs; trainer
+    # recomputes them via stage.replay at update time. Diverges from native.
+    logprob_source: replay
+    populate_conditions: true
+    init_same_noise: ${sampling.init_same_noise}
+    num_gpus: 1
+    tp_size: 1
+    local_mode: true
+    target_modules:
+      - attn.add_k_proj
+      - attn.add_q_proj
+      - attn.add_v_proj
+      - attn.to_add_out
+      - attn.to_k
+      - attn.to_out.0
+      - attn.to_q
+      - attn.to_v
+    engine_kwargs:
+      model_type: sd3
+  # SGLang reads ckpt/LoRA off model_config and sde_label off strategy.
+  model_config: ${model_config}
+  strategy: ${strategy}
+
+reward:
+  _target_: diffusionrl.reward.service.RewardService
+  backend:
+    _target_: diffusionrl.reward.local.pickscore.PickScoreRewardScorer
+    base_device: cuda
+    config:
+      _target_: diffusionrl.reward.local.pickscore.PickScoreSpec
+      batch_size: 8
+      device: auto
+      processor_id: laion/CLIP-ViT-H-14-laion2B-s32B-b79K
+      model_id: yuvalkirstain/PickScore_v1
+
+algorithm:
+  _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
+  stage_attr: diffusion
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: diffusionrl.models.sd3.conditions.SD3Conditions
+  params: ${sampling}
+
+stack:
+  _target_: diffusionrl.train.stack.TrainStack
+  micro_batch_size: 1
+  max_grad_norm: 1.0
+
+data_source:
+  _target_: diffusionrl.data.data_source.DefaultDataSource
+  args: {}
+
+sampling:
+  _target_: diffusionrl.types.sampling.DiffusionSamplingParams
+  num_inference_steps: 10
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+  eta: 0.7
+  samples_per_prompt: 16
+  seed: 42
+  init_same_noise: false
+  autocast_precision: bf16
+  trajectory_precision: bf16
+  logprob_precision: fp32
+  sde_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+# LoRA weight-sync cadence (loop concern, read by DiffusionTrainer.train).
+# Every N rollouts the loop pushes the freshly-trained adapter into SGLang.
+# 1 = on-policy; >1 lags rollout weights (off-policy drift).
+weight_sync_interval: 1
+
+# LoRA weight sync → SGLang rollout. Same bridge that vllm-omni uses; the
+# trainer's `weight_sync_interval` drives cadence — every N rollouts it calls
+# bridge.sync() to push the freshly-trained LoRA adapter into the engine
+# (fused into the generate wake/sleep, so a synced step costs one wake instead
+# of two).
+sync:
+  _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
+  verify: true   # checksum read-back asserts the synced LoRA landed; set false once trusted
+  # Mirrors SD3PipelineConfig.weight_sync_param_name_prefix; must match the
+  # engine-side LoRA key naming (a wrong prefix yields wrong/zero loaded layers,
+  # which `verify` catches).
+  param_name_prefix: "transformer."
+  packed_modules: {}   # SD3 attn projections are not fused
+  adapter_name: default

@@ -75,16 +75,34 @@ class QwenImagePipeline(Pipeline):
         self,
         *,
         bundle: QwenImageBundle,
-        text_embed: QwenImageTextEmbedStage,
-        diffusion: QwenImageDiffusionStage,
-        vae_decode: QwenImageVAEDecodeStage,
+        text_embed: Optional[QwenImageTextEmbedStage] = None,
+        diffusion: Optional[QwenImageDiffusionStage] = None,
+        vae_decode: Optional[QwenImageVAEDecodeStage] = None,
+        strategy: Optional[StepStrategy] = None,
         shift: float = 3.0,
+        autocast_precision: str = "bf16",
+        trajectory_precision: str = "fp16",
+        logprob_precision: str = "fp32",
+        max_sequence_length: int = 512,
     ) -> None:
         super().__init__()
         self.bundle = bundle
-        self.text_embed = text_embed
+        self.text_embed = (
+            text_embed
+            if text_embed is not None
+            else QwenImageTextEmbedStage(bundle, max_sequence_length=max_sequence_length)
+        )
+        if diffusion is None:
+            diffusion = QwenImageDiffusionStage(
+                model=bundle,
+                step=QwenImageDiffusionStep(),
+                strategy=strategy if strategy is not None else FlowSDEStrategy(),
+                autocast_precision=autocast_precision,
+                trajectory_precision=trajectory_precision,
+                logprob_precision=logprob_precision,
+            )
         self.diffusion = diffusion
-        self.vae_decode = vae_decode
+        self.vae_decode = vae_decode if vae_decode is not None else QwenImageVAEDecodeStage(bundle)
         # ``shift`` is retained as an attribute so the hosting engine
         # (TrainsideRolloutEngine / VLLMOmniRolloutEngine /
         # SGLangRolloutEngine) can read it when constructing the

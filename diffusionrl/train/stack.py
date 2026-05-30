@@ -21,6 +21,8 @@ import logging
 from dataclasses import dataclass
 from typing import List, Mapping, Tuple
 
+import torch
+
 from diffusionrl.algorithms import AlgorithmStepResult, StageAlgorithm
 from diffusionrl.distributed.group.dispatch import Dispatch, distributed
 from diffusionrl.distributed.group.remote import Remote
@@ -64,6 +66,20 @@ def _build_micro_batch_slices(
         slices.append((start, end))
         start = end
     return tuple(slices)
+
+
+def _align_track_to_model(resp_track: RolloutTrack, *, device: torch.device) -> None:
+    """Move a track's training inputs onto the model's device — SGLang returns
+    them on CPU via Ray IPC. Uses :meth:`Batch.to_device` (recursive; carries
+    framework-managed ``_packed_cu_seqlens`` and tensors nested in tuples/dicts)
+    on the segment + conditions only, so heavy ``decoded`` / ``media_preview``
+    payloads stay off the GPU. dtype is left to the model, which casts what it
+    feeds the network (see SD3DiffusionStep.predict_noise)."""
+    if resp_track.segment is not None:
+        resp_track.segment = resp_track.segment.to_device(device)
+    resp_track.conditions = {k: v.to_device(device) for k, v in resp_track.conditions.items()}
+    if resp_track.advantages is not None:
+        resp_track.advantages = resp_track.advantages.to(device=device)
 
 
 class TrainStack(Remote):
@@ -185,10 +201,16 @@ class TrainStack(Remote):
         of ``resp_track``; per-shard loss/grad_norm/metrics merge back via
         ``pytree_merge``.
         """
+        self._align_track_inputs(resp_track)
         self.prepare_segment(resp_track)
         result = self.train(resp_track, training_progress=float(training_progress))
         self.on_rollout_end()
         return result
+
+    def _align_track_inputs(self, resp_track: RolloutTrack) -> None:
+        """Move the track onto the model's device; see :func:`_align_track_to_model`."""
+        device = next(self.fsdp_backend.trainable_module().parameters()).device
+        _align_track_to_model(resp_track, device=device)
 
     def _current_lr(self) -> float:
         optimizer = self.fsdp_backend.optimizer

@@ -271,13 +271,20 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         if self.cfg.enable_sleep_mode:
             self._sleep_yaml_tmp = _inject_enable_sleep_mode(yaml_path)
             yaml_path = self._sleep_yaml_tmp
-        if self.rank is not None:
-            base_port = _VLLM_OMNI_PORT_BASE + int(self.rank) * _VLLM_OMNI_PORT_STRIDE
-            new_tmp = _inject_master_port(yaml_path, base_port)
-            if self._sleep_yaml_tmp:
-                os.unlink(self._sleep_yaml_tmp)
-            self._sleep_yaml_tmp = new_tmp
-            yaml_path = new_tmp
+        # rank_info isn't available at __init__ (set in setup() later); fall
+        # back to the DevicePool-provided ``RANK`` env (device id, unique per
+        # node) to avoid vllm-omni's narrow random fallback colliding across
+        # actors. Mirrors sglang/engine.py:117-128.
+        port_rank = self.rank
+        if port_rank is None:
+            env_rank = os.environ.get("RANK")
+            port_rank = int(env_rank) if env_rank is not None and env_rank.isdigit() else 0
+        base_port = _VLLM_OMNI_PORT_BASE + int(port_rank) * _VLLM_OMNI_PORT_STRIDE
+        new_tmp = _inject_master_port(yaml_path, base_port)
+        if self._sleep_yaml_tmp:
+            os.unlink(self._sleep_yaml_tmp)
+        self._sleep_yaml_tmp = new_tmp
+        yaml_path = new_tmp
         self._is_offloaded: bool = False
 
         omni_kwargs: dict = dict(
