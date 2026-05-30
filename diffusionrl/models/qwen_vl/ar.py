@@ -34,14 +34,22 @@ class QwenVLARStep(ARStep):
         if logits.dim() != 2:
             raise ValueError(f"QwenVLARStep.step: expected logits shape [B, vocab], got {tuple(logits.shape)}")
 
-        log_probs_full = F.log_softmax(logits.float(), dim=-1)
-
         if self.temperature <= 0.0:
+            log_probs_full = F.log_softmax(logits.float(), dim=-1)
             token_id = log_probs_full.argmax(dim=-1)
             log_prob = log_probs_full.gather(-1, token_id.unsqueeze(-1)).squeeze(-1)
             return token_id, log_prob
 
         scaled = logits.float() / self.temperature
+        # Behavior log-prob under the temperature-scaled distribution, matching
+        # QwenVLARStage.replay's log_softmax(logits / T). MUST be computed from
+        # `scaled` BEFORE the top-k/top-p masking below: replay re-applies the
+        # temperature but NOT the truncation, so old_logp == replay new_logp on
+        # the on-policy update -> ratio == 1 -> surrogate loss ~ 0. The prior
+        # code stored the untempered log_softmax(logits), which only matched
+        # replay at T == 1; at T < 1 it made ratio != 1 and trained on a
+        # spurious ratio (e.g. T=0.7 drove reward 0.61 -> 0.27 in ~15 rollouts).
+        log_probs_full = F.log_softmax(scaled, dim=-1)
 
         if self.top_k > 0 and self.top_k < scaled.shape[-1]:
             topk_vals, _ = torch.topk(scaled, self.top_k, dim=-1)
