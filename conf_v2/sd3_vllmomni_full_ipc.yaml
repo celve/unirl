@@ -1,18 +1,11 @@
-# FlowGRPO-Fast SD3 colocate reproduce — v2 trainer variant.
-# Aligned with conf/experiment/flowgrpo_fast_sd3_colocate_reproduce.yaml
-# (1x8 H20 colocate baseline). Diverges only on:
-#   - activation_checkpointing: false (user request; reference uses bf16_full_ac)
-#   - rollout engine: TrainsideRolloutEngine (v2 in-process colocate; reference uses vllm-omni)
-#   - num_updates_per_batch is deferred (TrainStack is single-pass per rollout)
+# SD3 v2 trainer — LoRA training, MERGED full-weight sync via bucketed CUDA-IPC (COLOCATE).
+# Self-contained variant of sd3_vllmomni.yaml. Same as sd3_vllmomni_full_tensor
+# (LoRA training, sync.use_merged: true) except the transport is IPC (same-node
+# CUDA-IPC over ZMQ).
 
 num_devices: 8
 batch_size: 48 # prompts_per_rollout
-# samples_per_prompt lives inside `sampling` (DiffusionSamplingParams).
 
-# LoRA weight-sync cadence (loop concern, read by DiffusionTrainer.train — NOT
-# a LoraWeightSync field). Every N rollouts the loop pushes the freshly-trained
-# adapter into the rollout engine. 1 = on-policy; >1 lags rollout weights
-# (off-policy drift). Ignored when the `sync` block below is absent (trainside).
 weight_sync_interval: 1
 
 bundle:
@@ -46,7 +39,7 @@ backend:
     mixed_precision: true
     fsdp_mode: full
     reshard_after_forward: true
-    activation_checkpointing: false # diverges from reference (bf16_full_ac) per user request
+    activation_checkpointing: false
     use_torch_compile: false
   optimizer_cfg:
     _target_: diffusionrl.train.backend.base.OptimizerConfig
@@ -60,6 +53,8 @@ backend:
     type: constant
     warmup_steps: 0
     total_steps: 10000
+  # LoRA training — synced as a MERGED full model (sync.use_merged: true), so the
+  # rollout engine runs the merged weights without a separate adapter.
   lora_cfg:
     _target_: diffusionrl.train.configs.LoraConfig
     rank: 32
@@ -79,26 +74,16 @@ backend:
 
 rollout:
   _target_: diffusionrl.rollout.engine.vllm_omni.engine.VLLMOmniRolloutEngine
-  # model_config carries the σ-schedule `shift`; point it at the bundle's config
-  # so train + rollout share one source (worker materializes the nested _target_).
   model_config: ${bundle.config}
   config:
     _target_: diffusionrl.rollout.engine.vllm_omni.config.VLLMOmniEngineConfig
-    # Required; same checkpoint the bundle loads.
     model_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
-    # SD3 single-stage diffusion modality (matches the reference
-    # flowgrpo_fast_sd3_colocate_reproduce.yaml rollout.engine block).
     modality: sd35_t2i
-    # DiT-side defaults — aligned with sampling/sd3_512 (reference 1×8 reproduce).
     default_height: 512
     default_width: 512
     default_num_inference_steps: 10
     default_guidance_scale: 1.0
     default_eta: 0.7
-    # Required for colocate: trainer calls sleep()/wake_up() around the
-    # train phase, which is a no-op unless CuMemAllocator is enabled at
-    # vLLM-Omni init time (this knob flips ``enable_sleep_mode: True`` into
-    # each stage's engine_args).
     enable_sleep_mode: true
 
 reward:
@@ -126,8 +111,6 @@ algorithm:
   conditions_cls:
     _target_: hydra.utils.get_class
     path: diffusionrl.models.sd3.conditions.SD3Conditions
-  # Algorithm.compute_loss_and_backward needs guidance_scale / eta inside
-  # stage.replay; bind to the sampling block (matches sd3_trainside.yaml).
   params: ${sampling}
 
 stack:
@@ -137,7 +120,7 @@ stack:
 
 data_source:
   _target_: diffusionrl.data.data_source.DefaultDataSource
-  args: {} # DefaultDataSource ignores args; uses hardcoded prompts
+  args: {}
 
 sampling:
   _target_: diffusionrl.types.sampling.DiffusionSamplingParams
@@ -152,28 +135,23 @@ sampling:
   autocast_precision: bf16
   trajectory_precision: bf16
   logprob_precision: fp32
-  # SDE step schedule: which denoising steps record SDE log-probs.
-  # num_sde_steps: null = all steps; int = sparse subset; 0 = none (NFT).
-  # A static `sde_indices: [...]` overrides this. (WindowScheduler also available.)
   scheduler:
     _target_: diffusionrl.utils.scheduler_utils.AllSDEScheduler
     num_timesteps: ${..num_inference_steps}
     num_sde_steps: null
 
-# LoRA weight sync → vLLM-Omni rollout. Instantiated as a LoraWeightSync
-# (sibling of backend + rollout) from this block's `_target_`, exactly like the
-# blocks above. The train loop drives cadence via `weight_sync_interval` (top of
-# file): every N rollouts it calls sync() to push the freshly-trained
-# LoRA (set_lora_from_tensors) into the engine just before that rollout's
-# generate — fused into the generate wake/sleep, so a synced step costs one
-# wake+sleep, not two. Absent on conf_v2/sd3_trainside.yaml (trainside shares
-# the trained module — no sync).
+# LoRA → merged full-weight sync → vLLM-Omni rollout (colocate bucketed CUDA-IPC).
 sync:
-  _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
-  verify: true # checksum read-back asserts the synced LoRA landed; set false once trusted
-  # Mirrors SD3PipelineConfig.weight_sync_param_name_prefix; must match the
-  # engine-side LoRA key naming (a wrong prefix yields wrong/zero loaded layers,
-  # which `verify` catches).
+  _target_: diffusionrl.distributed.weight_sync.full.ipc.IPCWeightSync
+  # Fold the trained LoRA delta into the base weights and push the merged full
+  # model (we LoRA-train but serve a merged model — no separate adapter).
+  use_merged: true
+  # Buffer must fit the largest single tensor in one bucket.
+  bucket_size_mb: 2048
+  use_shm: false
+  flush_cache: true
+  target_modules: ["transformer"]
+  # Pipeline prefix for the trained submodule's bare keys (backend.model is the
+  # SD3 transformer); maps them under the receiver's transformer.* namespace.
+  # Applied on both the merged (use_merged=true) and raw paths.
   param_name_prefix: "transformer."
-  packed_modules: {} # SD3 attn projections are not fused
-  adapter_name: default

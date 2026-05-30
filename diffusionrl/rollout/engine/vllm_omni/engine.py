@@ -607,8 +607,14 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         peft_config: Optional[dict] = None,
         base_sync_done: bool = False,
         use_shm: bool = False,
+        replica_rank: Optional[int] = None,
     ) -> None:
-        """Fan a state-dict update out to the per-stage worker subprocesses."""
+        """Fan a state-dict update out to the per-stage worker subprocesses.
+
+        ``replica_rank`` (optional) overrides the worker-side
+        ``replica_rank_from_env()`` so colocated engines on one node use
+        distinct ZMQ socket paths; ``None`` preserves the env-based v1 behavior.
+        """
         if self._omni is None:
             raise RuntimeError("VLLMOmniRolloutEngine: engine not initialized")
 
@@ -618,6 +624,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
             "peft_config": peft_config,
             "base_sync_done": base_sync_done,
             "use_shm": use_shm,
+            "replica_rank": replica_rank,
         }
         for sid in stage_ids:
             # Pass the stage_id positionally so the worker extension's

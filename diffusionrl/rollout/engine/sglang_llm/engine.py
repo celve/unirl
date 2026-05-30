@@ -397,6 +397,13 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         self._base_url = f"http://{advertise_host}:{self._port}"
         self._concurrency = int(engine_kwargs.get("concurrency", self.cfg.concurrency))
         self._weights_onloaded_for_sync = False
+        # LoRA adapter activation state. ``set_lora_from_tensors`` flips
+        # ``_lora_loaded`` True after a successful push; ``generate`` then tags
+        # each ``/generate`` with ``lora_path``. Releasing weights (sleep) frees
+        # the SRT LoRA pool, so the flag is cleared there and the adapter must
+        # be re-pushed before it is referenced again.
+        self._lora_loaded = False
+        self._lora_adapter_name: Optional[str] = None
 
         base_gpu_id = int(engine_kwargs.get("base_gpu_id", 0))
         force_set_cuda = bool(engine_kwargs.get("force_set_cuda_visible_devices", False))
@@ -445,6 +452,11 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             "decode_attention_backend",
             "enable_memory_saver",
             "enable_weights_cpu_backup",
+            "enable_lora",
+            "max_lora_rank",
+            "lora_target_modules",
+            "max_loras_per_batch",
+            "max_loaded_loras",
             "enable_multimodal",
         ):
             if key in engine_kwargs:
@@ -742,6 +754,11 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
                     "return_logprob": return_logprob,
                     "logprob_start_len": 0,
                 }
+            # Activate the synced LoRA adapter for this request. Only set once
+            # an adapter has been pushed (and not since invalidated by a weight
+            # release); otherwise SRT serves the base model.
+            if self._lora_loaded and self._lora_adapter_name:
+                payload["lora_path"] = self._lora_adapter_name
             if has_image:
                 payload["image_data"] = _pil_to_base64(image)
             async with sem:
@@ -927,7 +944,8 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
     def _check_update_response(response: Any, operation: str) -> None:
         if isinstance(response, dict):
             if not response.get("success", True):
-                raise RuntimeError(f"SGLangLLMRolloutEngine.{operation} failed: {response.get('message', 'unknown')}")
+                detail = response.get("error_message") or response.get("message", "unknown")
+                raise RuntimeError(f"SGLangLLMRolloutEngine.{operation} failed: {detail}")
 
     # ------------------------------------------------------------------
     # Weight sync — HTTP POST to sglang SRT
@@ -1044,6 +1062,67 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         self._check_update_response(resp, "update_weights_from_distributed")
 
     # ------------------------------------------------------------------
+    # Weight sync — LoRA tensor bag
+    # ------------------------------------------------------------------
+
+    def set_lora_from_tensors(
+        self,
+        adapter_name: str,
+        lora_tensors: Dict[str, torch.Tensor],
+        *,
+        peft_config: Optional[dict] = None,
+    ) -> None:
+        """Load a LoRA adapter from in-memory tensors via SGLang SRT HTTP API.
+
+        SGLang SRT exposes ``POST /load_lora_adapter_from_tensors`` which
+        accepts serialized LoRA tensors + a PEFT config dict and hot-loads the
+        adapter on all TP workers internally (the LoRA backend slices for TP).
+
+        Tensor keys arrive in canonical wire format
+        (``<module>.lora_A.weight`` / ``.lora_B.weight``); SRT's
+        ``get_layer_id`` and ``get_target_module_name`` are prefix-agnostic, so
+        no key adaptation is needed for the (prefix-less) LLM model. Do NOT run
+        ``adapt_lora_for_sglang`` here — that targets the diffusion
+        ``multimodal_gen`` runtime's keyspace, not SRT.
+
+        ``peft_config`` is forwarded as ``config_dict``; SRT's ``LoRAConfig``
+        reads ``target_modules`` / ``r`` / ``lora_alpha`` from it. The adapter
+        is unloaded first because SRT rejects re-loading the same ``lora_name``
+        (``validate_new_adapter``).
+
+        Opt-in: only reachable when the SRT server was launched with
+        ``enable_lora=true`` and the AR track uses
+        ``lora_materialization='adapter_tensor'`` (the default for this engine
+        remains ``merged_dense``).
+        """
+        from sglang.srt.utils import MultiprocessingSerializer
+
+        serialized = MultiprocessingSerializer.serialize(lora_tensors, output_str=True)
+        # Drop any existing adapter with this name first; SRT raises on a
+        # duplicate ``lora_name``. Best-effort: the first push has nothing to
+        # unload (SRT returns HTTP 400 -> RuntimeError), which we swallow.
+        try:
+            self._post("/unload_lora_adapter", {"lora_name": str(adapter_name)})
+        except Exception:
+            pass
+        resp = self._post(
+            "/load_lora_adapter_from_tensors",
+            {
+                "lora_name": str(adapter_name),
+                "config_dict": dict(peft_config or {}),
+                "serialized_tensors": serialized,
+            },
+        )
+        self._check_update_response(resp, "set_lora_from_tensors")
+        self._lora_loaded = True
+        self._lora_adapter_name = str(adapter_name)
+        logger.info(
+            "SGLangLLMRolloutEngine: LoRA adapter %r loaded (%d tensor keys)",
+            adapter_name,
+            len(lora_tensors),
+        )
+
+    # ------------------------------------------------------------------
     # Memory management
     # ------------------------------------------------------------------
 
@@ -1080,6 +1159,10 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         self._post("/release_memory_occupation", payload)
         self._is_offloaded = True
         self._weights_onloaded_for_sync = False
+        # Releasing weights frees the SRT LoRA pool; the adapter must be
+        # re-pushed (set_lora_from_tensors) before it can be referenced again.
+        if release_tags is None or "weights" in release_tags:
+            self._lora_loaded = False
 
     def onload_weights(self, *, track_prefix: str = "") -> None:
         """Resume only model weights so tensor/NCCL sync can update them."""

@@ -1,21 +1,20 @@
-"""v2 LoRA weight-sync bridge: push the trained FSDP LoRA adapter into a
+"""v2 LoRA weight-sync handler: push the trained FSDP LoRA adapter into a
 co-located vLLM-Omni rollout engine.
 
 Used only by the v2 trainer
 (:class:`diffusionrl.trainer.diffusion.DiffusionTrainer`) in shared-process
 colocate, where the :class:`~diffusionrl.train.backend.fsdp.FSDPBackend` and the
 :class:`~diffusionrl.rollout.engine.vllm_omni.engine.VLLMOmniRolloutEngine` are
-sibling ``Remote`` instances on the same Worker. The bridge extracts the LoRA
+sibling ``Remote`` instances on the same Worker. It extracts the LoRA
 tensors from the local FSDP shard and hands them to the local engine's
 ``set_lora_from_tensors`` — the engine owns the Worker→Omni-subprocess transfer
 (serialize + ``collective_rpc``), so there is no separate ZMQ pump and no
 sender/receiver overlap to orchestrate.
 
-This deliberately does NOT reuse the ``UpdateWeight`` handler family
-(``ipc.py`` / ``tensor.py`` / ``nccl.py``): those assume v1's
-``rollout_runtime.get_rollout_actors()`` contract (direct Ray actor methods),
-which the v2 ``Handle`` / ``Worker.call`` dispatch model does not provide. The
-sibling-bridge is the v2-native equivalent for the shared-process colocate case.
+This deliberately does NOT reuse the full-weight handler family
+(``full/ipc.py`` / ``full/tensor.py`` / ``full/nccl.py``): for LoRA the engine's
+in-process ``set_lora_from_tensors`` already owns the transfer, so the
+sibling handoff is the v2-native equivalent for the shared-process colocate case.
 
 Scope: LoRA only. Full-weight / multi-stage (HI3) sync is a different path.
 
@@ -35,7 +34,7 @@ from diffusionrl.distributed.group.remote import Remote
 logger = logging.getLogger(__name__)
 
 
-class LoraSyncBridge(Remote):
+class LoraWeightSync(Remote):
     """Push the local FSDP LoRA adapter into the co-located vLLM-Omni engine.
 
     Constructed inside the trainer's ``placement(...)`` block with the
@@ -145,4 +144,4 @@ class LoraSyncBridge(Remote):
         )
 
 
-__all__ = ["LoraSyncBridge"]
+__all__ = ["LoraWeightSync"]

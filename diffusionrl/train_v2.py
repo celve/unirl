@@ -34,6 +34,8 @@ def main(cfg: DictConfig) -> None:
         data_source_cfg=cfg.data_source,
         sampling_cfg=cfg.sampling,
         sync_cfg=cfg.get("sync"),
+        layout=cfg.get("layout", "colocate"),
+        train_fraction=float(cfg.get("train_fraction", 0.5)),
     )
     trainer.train(
         num_rollouts=int(cfg.get("num_rollouts", 100)),

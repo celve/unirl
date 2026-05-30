@@ -41,11 +41,13 @@ What this engine intentionally does NOT do (vs upstream SGLang at
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 
 from diffusionrl.config.require import require
+from diffusionrl.distributed.group.dispatch import Dispatch, distributed
 from diffusionrl.rollout.engine.base import BaseRolloutEngine
 from diffusionrl.rollout.engine.sglang.config import SGLangEngineConfig
 from diffusionrl.rollout.engine.sglang.request import _to_sglang_kwargs
@@ -112,8 +114,18 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             model_config is not None and bool(model_config.pretrained_model_ckpt_path),
             "SGLangRolloutEngine requires model_config.pretrained_model_ckpt_path",
         )
-        if rank is not None:
-            config = config.with_sglang_ports(int(rank))
+        # Per-engine SGLang ports. In dedicated-rollout (separate) the engine is
+        # built with an explicit ``rank``; in colocate the Worker injects rank via
+        # setup() AFTER __init__, so ``rank`` is None here. SGLang still spawns a
+        # per-engine scheduler that binds a TCP dist-init port (master_port), so
+        # each colocated engine on a node needs a distinct port block — otherwise
+        # all 8 fall back to the same default and collide (EADDRINUSE). Fall back
+        # to the DevicePool-provided ``RANK`` env (device id, unique per node).
+        port_rank = rank
+        if port_rank is None:
+            env_rank = os.environ.get("RANK")
+            port_rank = int(env_rank) if env_rank is not None and env_rank.isdigit() else 0
+        config = config.with_sglang_ports(int(port_rank))
 
         self.cfg = config
         self.model_config = model_config
@@ -296,6 +308,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
     # Generation
     # ------------------------------------------------------------------
 
+    @distributed(dispatch_mode=Dispatch.DP_ALL)
     def generate(self, req: RolloutReq) -> RolloutResp:
         require(
             int(req.batch_size) > 0,
@@ -407,6 +420,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def sleep(self) -> None:
         # single-stage engines ignore it (the parent ComposedRolloutEngine
         # handles the routing).
@@ -418,6 +432,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         self._is_offloaded = True
         logger.info("SGLang engine entered sleep state via release_memory_occupation().")
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def wake_up(self) -> None:
         if not self._is_offloaded:
             return

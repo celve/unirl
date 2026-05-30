@@ -23,6 +23,15 @@ def test_engine_kwargs_none_becomes_empty_dict() -> None:
     assert cfg.engine_kwargs == {}
 
 
+def test_enable_lora_engine_kwarg_accepted() -> None:
+    """Native LoRA-pool mode is opt-in again; enable_lora must not be rejected."""
+    cfg = SGLangLLMEngineConfig(
+        pretrained_model_ckpt_path="/tmp/model",
+        engine_kwargs={"enable_lora": True, "max_lora_rank": 16, "lora_target_modules": ["q_proj"]},
+    )
+    assert cfg.engine_kwargs["enable_lora"] is True
+
+
 def test_missing_model_path_rejected() -> None:
     with pytest.raises(ValueError, match="pretrained_model_ckpt_path must be set"):
         SGLangLLMEngineConfig(pretrained_model_ckpt_path="")

@@ -42,9 +42,12 @@ class DiffusionTrainer(BaseTrainer):
         data_source_cfg: DictConfig,
         sampling_cfg: DictConfig,
         sync_cfg: Optional[DictConfig] = None,
+        layout: str = "colocated",
+        train_fraction: float = 0.5,
     ) -> None:
         super().__init__(num_devices=num_devices)
         self.batch_size = batch_size
+        self._layout = str(layout)
 
         # Driver-side data iterator (not a Remote).
         self.data_source = instantiate(data_source_cfg)
@@ -54,23 +57,96 @@ class DiffusionTrainer(BaseTrainer):
         # Set below from the `sync` block; None trainside (shares the module).
         self.weight_sync = None
 
-        with placement(self.pool, fraction=1.0, shared_workers=True):
-            self.bundle = remote_hydra(bundle_cfg)
-            self.pipeline = remote_hydra(pipeline_cfg, bundle=self.bundle)
-            self.backend = remote_hydra(backend_cfg, bundle=self.bundle)
+        # Construction (_build_train_side / _build_rollout) is shared; only the
+        # placement topology and the train→rollout sync wiring differ per layout.
+        train_cfgs = dict(
+            bundle_cfg=bundle_cfg,
+            pipeline_cfg=pipeline_cfg,
+            backend_cfg=backend_cfg,
+            reward_cfg=reward_cfg,
+            algorithm_cfg=algorithm_cfg,
+            stack_cfg=stack_cfg,
+        )
+        if self._layout == "separate":
+            # Two disjoint top-level slabs. A nested placement would carve a
+            # sub-slab of the parent (not a disjoint slab), so the train scope
+            # must fully exit before the rollout scope opens.
+            with placement(self.pool, fraction=train_fraction, shared_workers=True):
+                self._build_train_side(**train_cfgs)
+                if sync_cfg is not None:
+                    # NCCL handler: rollout is cross-slab, wired via the handshake below.
+                    self.weight_sync = remote_hydra(sync_cfg, backend=self.backend)
+            # Rollout slab = the rest. Top-level ``fraction`` is relative to the
+            # WHOLE pool (placement.py), so the remainder is ``1 - train_fraction``.
+            with placement(self.pool, fraction=1.0 - train_fraction, shared_workers=True):
+                self.rollout = self._build_rollout(rollout_cfg, allow_pipeline=False)
+            if self.weight_sync is not None:
+                self._connect_separate(train_fraction)
+        else:
+            # Single slab: train + rollout are siblings on one Worker.
+            with placement(self.pool, fraction=1.0, shared_workers=True):
+                self._build_train_side(**train_cfgs)
+                self.rollout = self._build_rollout(rollout_cfg, allow_pipeline=True)
+                if sync_cfg is not None:
+                    # Colocated handlers (tensor/ipc) take the engine as a local sibling.
+                    self.weight_sync = remote_hydra(sync_cfg, backend=self.backend, rollout=self.rollout)
 
-            rollout_parsed = parse_hydra_cfg(rollout_cfg)
-            if "pipeline" in inspect.signature(rollout_parsed["role_cls"]).parameters:
-                self.rollout = remote(**rollout_parsed, pipeline=self.pipeline)  # for direct sampling
-            else:
-                self.rollout = remote(**rollout_parsed)  # for vllm / sglang
+    def _build_train_side(
+        self,
+        *,
+        bundle_cfg,
+        pipeline_cfg,
+        backend_cfg,
+        reward_cfg,
+        algorithm_cfg,
+        stack_cfg,
+    ) -> None:
+        """Build the train-side remotes in the *currently active* placement scope.
 
-            self.reward = remote_hydra(reward_cfg)
-            self.algorithm = remote_hydra(algorithm_cfg, pipeline=self.pipeline)
-            self.stack = remote_hydra(stack_cfg, fsdp_backend=self.backend, algorithm=self.algorithm)
+        Scope-agnostic: ``remote_hydra`` lands each remote in whatever
+        ``placement(...)`` block is open, so both layouts reuse this.
+        """
+        self.bundle = remote_hydra(bundle_cfg)
+        self.pipeline = remote_hydra(pipeline_cfg, bundle=self.bundle)
+        self.backend = remote_hydra(backend_cfg, bundle=self.bundle)
+        self.reward = remote_hydra(reward_cfg)
+        self.algorithm = remote_hydra(algorithm_cfg, pipeline=self.pipeline)
+        self.stack = remote_hydra(stack_cfg, fsdp_backend=self.backend, algorithm=self.algorithm)
 
-            if sync_cfg is not None:
-                self.weight_sync = remote_hydra(sync_cfg, backend=self.backend, rollout=self.rollout)
+    def _build_rollout(self, rollout_cfg, *, allow_pipeline: bool):
+        """Build the rollout remote in the currently active placement scope.
+
+        The trainside direct-sampling engine takes ``pipeline`` as a local
+        sibling and is only valid colocated (``allow_pipeline=True``); vllm /
+        sglang engines take no pipeline and work in either layout.
+        """
+        rollout_parsed = parse_hydra_cfg(rollout_cfg)
+        if "pipeline" in inspect.signature(rollout_parsed["role_cls"]).parameters:
+            if not allow_pipeline:
+                raise ValueError(
+                    "layout='separate' requires a dedicated-rollout engine "
+                    "(vllm/sglang); the trainside direct-sampling engine needs "
+                    "the pipeline as a local sibling and cannot live on a "
+                    "separate slab."
+                )
+            return remote(**rollout_parsed, pipeline=self.pipeline)  # direct sampling
+        return remote(**rollout_parsed)  # vllm / sglang
+
+    def _connect_separate(self, train_fraction: float) -> None:
+        """One-time NCCL rendezvous: train rank 0 + all rollout Omni workers.
+
+        Driver-orchestrated because the rollout slab is cross-slab (not a
+        sibling): ``pick_master`` on rank 0, hand it the rollout Worker handles,
+        then ``connect`` (rank 0 fires the rollout joins non-blocking, then joins
+        the group itself).
+        """
+        addr, port = self.weight_sync.pick_master()[0]
+        self.weight_sync.set_rollout_targets(self.rollout.workers, self.rollout.role_name)
+        self.weight_sync.connect(
+            master_addr=addr,
+            master_port=port,
+            num_rollout_gpus=len(self.rollout.workers),
+        )
 
     def _build_req(self, inputs: RolloutInputs, rollout_id: int) -> RolloutReq:
         """Turn a data source batch into a typed :class:`RolloutReq`.

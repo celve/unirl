@@ -74,11 +74,19 @@ class BucketedIPCReceiveMixin:
         base_sync_done: bool = False,
         use_shm: bool = False,
         stage_id: int = 0,
+        replica_rank: Optional[int] = None,
     ) -> None:
         """Receive a state dict over the per-rank ZMQ socket.
 
         Trainer-side counterpart is ``UpdateWeightFromIPC`` in
-        ``diffusionrl.distributed.weight_sync.ipc``.
+        ``diffusionrl.distributed.weight_sync.ipc`` (v1) or
+        ``distributed.weight_sync.full.ipc.IPCWeightSync`` (v2).
+
+        ``replica_rank`` defaults to ``replica_rank_from_env()`` (v1 behavior);
+        the v2 colocated handler passes its train-rank explicitly so colocated
+        engines on one node don't collide on the same ZMQ socket path (the Omni
+        subprocess spawns before any per-Worker env can be injected, so env is
+        not a reliable per-replica discriminator there).
         """
         if peft_config and base_sync_done:
             try:
@@ -98,7 +106,7 @@ class BucketedIPCReceiveMixin:
             )
 
         handle = zmq_handle(
-            replica_rank=replica_rank_from_env(),
+            replica_rank=int(replica_rank) if replica_rank is not None else replica_rank_from_env(),
             stage_id=int(stage_id),
             local_rank=int(getattr(self, "local_rank", 0)),
         )

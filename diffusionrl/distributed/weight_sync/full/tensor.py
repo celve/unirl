@@ -1,0 +1,102 @@
+"""v2 full-weight tensor-payload sync (COLOCATE).
+
+Pushes the trained FSDP full base weights into a co-located vLLM-Omni rollout
+engine by serializing each bucket (SGLang ``FlattenedTensorBucket`` +
+``MultiprocessingSerializer``) and handing it to the local engine sibling's
+``update_weights_from_tensor`` — the engine owns the Worker→Omni-subprocess
+transfer (serialize already done; ``collective_rpc`` fans to the stage workers).
+
+Full-weight analogue of ``weight_sync/lora.py:LoraWeightSync`` and the v2
+transport-mate of v1 ``distributed/weight_sync/tensor.py``. Colocate only:
+``backend`` and ``rollout`` arrive as LOCAL siblings (same Worker process), so
+the v1 cross-rank ``gather_object``/gloo-subgroup logic is unnecessary — each
+train rank ships to its own co-located engine, and (TP=1) the worker picks
+``serialized_named_tensors[0]``.
+
+Scope: single-node, TP=1, single-stage (SD3). All model / sglang imports are
+deferred so the driver can import this module for ``remote(...)``.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Tuple
+
+from diffusionrl.distributed.group.dispatch import Dispatch, distributed
+from diffusionrl.distributed.weight_sync.full.base import FullWeightSync
+
+
+class TensorWeightSync(FullWeightSync):
+    """Colocate full-weight sync via serialized tensor payloads."""
+
+    def __init__(
+        self,
+        *,
+        backend: Any,
+        rollout: Any,
+        bucket_size_mb: int = 512,
+        param_name_prefix: str = "",
+        target_modules: Tuple[str, ...] = ("transformer",),
+        flush_cache: bool = True,
+        use_merged: bool = False,
+    ) -> None:
+        super().__init__(
+            backend=backend,
+            bucket_size_mb=bucket_size_mb,
+            param_name_prefix=param_name_prefix,
+            target_modules=target_modules,
+            flush_cache=flush_cache,
+            use_merged=use_merged,
+        )
+        self._rollout = rollout  # local vLLM-Omni engine sibling
+
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def sync(self) -> None:
+        """Serialize each bucket and load it into the local engine.
+
+        Runs on every train rank (``ONE_TO_ALL``); the ``raw_state_dict`` walk
+        all-gathers each shard on every rank in lockstep. Each rank talks to
+        its own co-located engine, so no cross-rank gather is needed.
+        """
+        try:
+            from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
+        except ImportError:
+            from sglang.srt.patch_torch import monkey_patch_torch_reductions
+        from sglang.srt.utils import MultiprocessingSerializer
+
+        try:
+            from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
+        except ImportError:
+            from sglang.srt.model_executor.model_runner import FlattenedTensorBucket
+
+        monkey_patch_torch_reductions()
+
+        for bucket, is_last in self._iter_buckets():
+            # Group by dtype, one FlattenedTensorBucket per dtype (matches the
+            # receiver's flattened_bucket load_format).
+            by_dtype: dict = {}
+            for name, tensor in bucket:
+                by_dtype.setdefault(tensor.dtype, []).append((name, tensor))
+
+            serialized = []
+            for grouped in by_dtype.values():
+                flat = FlattenedTensorBucket(named_tensors=grouped)
+                payload = {
+                    "flattened_tensor": flat.get_flattened_tensor(),
+                    "metadata": flat.get_metadata(),
+                }
+                serialized.append(MultiprocessingSerializer.serialize(payload, output_str=True))
+
+            n_dtypes = len(serialized)
+            for i, payload in enumerate(serialized):
+                # TP=1 → the worker picks serialized_named_tensors[0], so ship a
+                # single-element list. flush only on the very last payload.
+                self._rollout.update_weights_from_tensor(
+                    serialized_named_tensors=[payload],
+                    load_format="flattened_bucket",
+                    flush_cache=(self._flush_cache and is_last and i == n_dtypes - 1),
+                    target_modules=self._target_modules,
+                )
+        self.weight_version += 1
+
+
+__all__ = ["TensorWeightSync"]
