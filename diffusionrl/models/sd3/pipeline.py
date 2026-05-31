@@ -22,6 +22,7 @@ engine loads once at startup.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, Optional
 
 from diffusionrl.models.types.pipeline import Pipeline
@@ -150,6 +151,12 @@ class SD3Pipeline(Pipeline):
             )
 
         params: DiffusionSamplingParams = get_diffusion_params(req.sampling_params)
+        # init_same_noise shares the initial latent within each prompt group. The
+        # group key is the per-sample group id, which rides on the (already-sliced)
+        # req — surface it to the noise sampler when the driver didn't pre-ship
+        # noise_group_ids on sampling_params (a shared_field that isn't batch-sliced).
+        if bool(params.init_same_noise) and not params.noise_group_ids:
+            params = dataclasses.replace(params, noise_group_ids=list(req.group_ids))
 
         text_cond = self.text_embed.embed(texts)
         # CFG empty negative: SD3 upstream (diffusers v0.37.1

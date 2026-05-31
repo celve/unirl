@@ -50,6 +50,10 @@ class DiffusionTrainer(BaseTrainer):
         super().__init__(num_devices=num_devices, logging_cfg=logging_cfg)
         self.batch_size = batch_size
         self._layout = str(layout)
+        # Set in _build_train_side: True only for the NFT algorithm, which
+        # needs the EMA dual-adapter swap around rollout. Stays False for GRPO
+        # so its hot path is untouched.
+        self._uses_ema = False
 
         # Driver-side data iterator (not a Remote).
         self.data_source = instantiate(data_source_cfg)
@@ -112,7 +116,14 @@ class DiffusionTrainer(BaseTrainer):
         self.pipeline = remote_hydra(pipeline_cfg, bundle=self.bundle)
         self.backend = remote_hydra(backend_cfg, bundle=self.bundle)
         self.reward = remote_hydra(reward_cfg)
-        self.algorithm = remote_hydra(algorithm_cfg, pipeline=self.pipeline)
+        # NFT resolves its frozen reference adapter off ``backend.ema`` (the
+        # FSDPBackend owns the dual-adapter EMA), so it needs the backend sibling
+        # injected alongside ``pipeline``. GRPO takes neither and would reject the
+        # extra kwarg, so gate on the algorithm target.
+        algo_target = str(algorithm_cfg.get("_target_", ""))
+        self._uses_ema = algo_target.endswith("DiffusionNFT")
+        algo_extra = {"backend": self.backend} if self._uses_ema else {}
+        self.algorithm = remote_hydra(algorithm_cfg, pipeline=self.pipeline, **algo_extra)
         self.stack = remote_hydra(stack_cfg, fsdp_backend=self.backend, algorithm=self.algorithm)
 
     def _build_rollout(self, rollout_cfg, *, allow_pipeline: bool):
@@ -200,7 +211,15 @@ class DiffusionTrainer(BaseTrainer):
         self.rollout.wake_up()
         if sync_weights and self.weight_sync is not None:
             self.weight_sync.sync()
+        # NFT: sample under the EMA-smoothed ("old") adapter, then restore the
+        # trainable ("default") adapter before the loss. No-op for GRPO (gated).
+        # Only effective for colocate/trainside where rollout shares the train
+        # model; a separate sglang engine samples in its own process (see recipe).
+        if self._uses_ema:
+            self.backend.apply_eval_ema()
         resp = self.rollout.generate(req)
+        if self._uses_ema:
+            self.backend.restore_from_eval()
         self.rollout.sleep()
 
         for name, track in list(resp.tracks.items()):

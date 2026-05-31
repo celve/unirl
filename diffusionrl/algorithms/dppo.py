@@ -180,12 +180,20 @@ class DiffusionDPPO(StageAlgorithm):
     def __init__(
         self,
         *,
-        stage: Any,
         params: Any,
+        stage: Any = None,
+        pipeline: Any = None,
+        stage_attr: str = "diffusion",
         kl_mask_threshold: float = 1e-5,
         add_kl_coefficient: bool = True,
         conditions_cls: Optional[Type[Any]] = None,
     ) -> None:
+        # v1 (track_builder) passes `stage`; v2 (DiffusionTrainer) passes the
+        # `pipeline` sibling and the stage is resolved off it (mirrors DiffusionGRPO).
+        if stage is None and pipeline is not None:
+            stage = getattr(pipeline, stage_attr)
+        if stage is None:
+            raise ValueError("DiffusionDPPO: either `stage` or `pipeline` must be provided")
         self.stage = stage
         self.params = params
         self.kl_mask_threshold = float(kl_mask_threshold)

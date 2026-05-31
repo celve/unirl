@@ -63,16 +63,38 @@ class WAN22Pipeline(Pipeline):
         self,
         *,
         bundle: WAN22Bundle,
-        text_embed: WAN21TextEmbedStage,
-        diffusion: WAN22DiffusionStage,
-        vae_decode: WAN21VAEDecodeStage,
+        text_embed: Optional[WAN21TextEmbedStage] = None,
+        diffusion: Optional[WAN22DiffusionStage] = None,
+        vae_decode: Optional[WAN21VAEDecodeStage] = None,
+        strategy: Optional[StepStrategy] = None,
         shift: float = 5.0,
+        autocast_precision: str = "bf16",
+        trajectory_precision: str = "fp16",
+        logprob_precision: str = "fp32",
+        max_sequence_length: int = 512,
     ) -> None:
+        # Stages default to None and are built from the (trainer-injected)
+        # bundle — mirrors SD3Pipeline so the v2 trainer can construct the
+        # pipeline via ``remote_hydra(pipeline_cfg, bundle=self.bundle)`` without
+        # reloading the dual transformer. ``from_config`` still passes pre-built stages.
         super().__init__()
         self.bundle = bundle
-        self.text_embed = text_embed
+        self.text_embed = (
+            text_embed
+            if text_embed is not None
+            else WAN21TextEmbedStage(bundle, max_sequence_length=int(max_sequence_length))
+        )
+        if diffusion is None:
+            diffusion = WAN22DiffusionStage(
+                model=bundle,
+                step=WAN22DiffusionStep(),
+                strategy=strategy if strategy is not None else DanceSDEStrategy(),
+                autocast_precision=autocast_precision,
+                trajectory_precision=trajectory_precision,
+                logprob_precision=logprob_precision,
+            )
         self.diffusion = diffusion
-        self.vae_decode = vae_decode
+        self.vae_decode = vae_decode if vae_decode is not None else WAN21VAEDecodeStage(bundle)
         self.shift = shift
 
     @classmethod

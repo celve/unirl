@@ -137,9 +137,12 @@ class DiffusionNFT(StageAlgorithm):
     def __init__(
         self,
         *,
-        stage: Any,
         params: Any,
-        nft_lora_policy: Any,
+        stage: Any = None,
+        pipeline: Any = None,
+        stage_attr: str = "diffusion",
+        nft_lora_policy: Any = None,
+        backend: Any = None,
         beta: float = 1.0,
         adv_clip_max: float = 5.0,
         adv_mode: str = "raw",
@@ -155,6 +158,18 @@ class DiffusionNFT(StageAlgorithm):
         # attribute. The dataclass exists for typing / documentation; the
         # runtime accepts the fields directly so YAML recipes don't need
         # to nest a ``config:`` block.
+        #
+        # Two wiring paths converge here:
+        #   - v1 (track_builder) passes ``stage`` + ``nft_lora_policy=<EMA>``.
+        #   - v2 (DiffusionTrainer) passes ``pipeline`` + ``backend`` siblings;
+        #     resolve ``stage`` off the pipeline (mirrors DiffusionGRPO) and the
+        #     EMA off ``backend.ema`` (the FSDPBackend owns the dual-adapter EMA).
+        if stage is None and pipeline is not None:
+            stage = getattr(pipeline, stage_attr)
+        if stage is None:
+            raise ValueError("DiffusionNFT: either `stage` or `pipeline` must be provided")
+        if nft_lora_policy is None and backend is not None:
+            nft_lora_policy = getattr(backend, "ema", None)
         if adv_mode != "raw":
             raise ValueError(f"DiffusionNFT: adv_mode={adv_mode!r} not supported (only 'raw' is wired).")
         if train_timestep_mode not in ("all", "random"):

@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch import nn
 
+from diffusionrl.distributed.group.dispatch import Dispatch, distributed
 from diffusionrl.distributed.group.remote import Remote
 from diffusionrl.models.types.bundle import Bundle
 from diffusionrl.train.backend.base import LrSchedulerConfig, OptimizerConfig
@@ -213,12 +214,20 @@ class FSDPBackend(Remote):
     # Eval-EMA swap
     # ------------------------------------------------------------------
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def apply_eval_ema(self) -> None:
+        """Swap the EMA shadow ("old") adapter into live position for rollout.
+
+        Driver-callable (each worker swaps its own model); the NFT trainer
+        wraps ``rollout.generate`` with this + :meth:`restore_from_eval`.
+        No-op when ``ema is None`` (GRPO) or already swapped in.
+        """
         if self.ema is None or self._eval_ema_active:
             return
         self.ema.apply_shadow()
         self._eval_ema_active = True
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def restore_from_eval(self) -> None:
         if self.ema is None or not self._eval_ema_active:
             return

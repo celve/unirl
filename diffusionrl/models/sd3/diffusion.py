@@ -78,6 +78,19 @@ class SD3DiffusionStep(DiffusionStep[SD3Bundle, SD3Conditions]):
         prompt_embeds = text.embeds.to(dev)
         pooled_prompt_embeds = text.pooled.to(dev) if text.pooled is not None else None
 
+        # Cast latent/embeds to the transformer's param dtype before the bf16
+        # pos_embed conv — autocast doesn't reliably catch the first conv input
+        # under FSDP2 wrap (the NFT forward-process path hits this; GRPO/DPPO
+        # replay feeds already-bf16 latents). Idempotent when dtype matches.
+        try:
+            model_dtype = next(model.transformer.parameters()).dtype
+        except StopIteration:
+            model_dtype = sample.dtype
+        sample = sample.to(dtype=model_dtype)
+        prompt_embeds = prompt_embeds.to(dtype=model_dtype)
+        if pooled_prompt_embeds is not None:
+            pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=model_dtype)
+
         batch_size = sample.shape[0]
         timestep = sigma * 1000.0
         if timestep.dim() == 0:
