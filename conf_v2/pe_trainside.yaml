@@ -17,6 +17,13 @@
 num_devices: 8
 batch_size: 4                 # P prompts per rollout; PEPipeline fans out to P*N*M
 
+logging:
+  report_to_wandb: false        # flip to true to enable wandb (rank-0/driver only)
+  project_name: diffusionrl
+  run_name: null
+  entity: null
+  tags: null
+
 # ── Diffusion side (SD3) — copied from sd3_trainside.yaml ──────────────────
 diffusion:
   bundle:

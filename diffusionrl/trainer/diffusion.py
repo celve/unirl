@@ -1,6 +1,7 @@
 import dataclasses
 import inspect
 import logging
+import time
 from typing import Optional, Tuple
 
 import torch
@@ -42,10 +43,11 @@ class DiffusionTrainer(BaseTrainer):
         data_source_cfg: DictConfig,
         sampling_cfg: DictConfig,
         sync_cfg: Optional[DictConfig] = None,
+        logging_cfg: Optional[DictConfig] = None,
         layout: str = "colocated",
         train_fraction: float = 0.5,
     ) -> None:
-        super().__init__(num_devices=num_devices)
+        super().__init__(num_devices=num_devices, logging_cfg=logging_cfg)
         self.batch_size = batch_size
         self._layout = str(layout)
 
@@ -178,12 +180,14 @@ class DiffusionTrainer(BaseTrainer):
         *,
         training_progress: float = 0.0,
         sync_weights: bool = False,
+        rollout_id: int = 0,
     ) -> Tuple[TrainStepResult, float]:
         """One ``rollout → reward → advantage → optimizer step`` pass.
 
         ``training_progress`` in ``[0, 1]`` drives clip-range / LR schedules
         inside the algorithm. The reference trainer is stateless — the
-        outer training loop owns step counting.
+        outer training loop owns step counting; ``rollout_id`` only keys the
+        wandb panels (see :meth:`_log_rollout`).
 
         ``sync_weights`` pushes the latest LoRA into the engine between
         ``wake_up`` and ``generate`` — one wake/sleep instead of two, with this
@@ -192,6 +196,7 @@ class DiffusionTrainer(BaseTrainer):
         Returns ``(train_result, mean_reward)`` — the mean unnormalized
         per-sample reward of the single track (0.0 if none), for the log line.
         """
+        t0 = time.perf_counter()
         self.rollout.wake_up()
         if sync_weights and self.weight_sync is not None:
             self.weight_sync.sync()
@@ -206,8 +211,10 @@ class DiffusionTrainer(BaseTrainer):
         for track in resp.tracks.values():
             if track.rewards is None:
                 continue
-            rewards_local = _hydrate_tensor_meta(track.rewards)
-            mean_reward = float(rewards_local.to(torch.float32).mean().item())
+            # Hydrate in place so the wandb reward/advantage stats reuse this
+            # fetch instead of re-pulling the TensorMeta from the worker.
+            track.rewards = _hydrate_tensor_meta(track.rewards)
+            mean_reward = float(track.rewards.to(torch.float32).mean().item())
             break  # single-track for now; revisit if multi-track lands
 
         for name, track in list(resp.tracks.items()):
@@ -216,6 +223,7 @@ class DiffusionTrainer(BaseTrainer):
 
         (track,) = resp.tracks.values()
         result = self.stack.train_track(track, training_progress=float(training_progress))
+        self._log_rollout(rollout_id, result, resp, step_time_s=time.perf_counter() - t0)
         return result, mean_reward
 
     def train(self, *, num_rollouts: int, weight_sync_interval: int = 1) -> None:
@@ -226,26 +234,31 @@ class DiffusionTrainer(BaseTrainer):
 
         Deferred (out of scope for the first runnable trainer):
         ``num_updates_per_batch`` multi-epoch replay, checkpoint cadence,
-        evaluation cadence, structured logging.
+        evaluation cadence.
         """
         interval = max(1, weight_sync_interval)
-        for rollout_id in range(num_rollouts):
-            training_progress = rollout_id / max(1, num_rollouts - 1)
-            inputs = self.data_source.get_samples(self.batch_size)
-            req = self._build_req(inputs, rollout_id)
-            # Sync before generate; skip step 0 (nothing trained yet).
-            sync_weights = rollout_id > 0 and rollout_id % interval == 0
-            result, mean_reward = self.train_step(
-                req,
-                training_progress=training_progress,
-                sync_weights=sync_weights,
-            )
-            logger.info(
-                "rollout %d/%d  reward=%.4f  loss=%.4f  grad_norm=%.4f  lr=%.2e",
-                rollout_id + 1,
-                num_rollouts,
-                mean_reward,
-                result.loss,
-                result.grad_norm,
-                result.lr,
-            )
+        self._init_wandb(num_rollouts=num_rollouts)
+        try:
+            for rollout_id in range(num_rollouts):
+                training_progress = rollout_id / max(1, num_rollouts - 1)
+                inputs = self.data_source.get_samples(self.batch_size)
+                req = self._build_req(inputs, rollout_id)
+                # Sync before generate; skip step 0 (nothing trained yet).
+                sync_weights = rollout_id > 0 and rollout_id % interval == 0
+                result, mean_reward = self.train_step(
+                    req,
+                    training_progress=training_progress,
+                    sync_weights=sync_weights,
+                    rollout_id=rollout_id,
+                )
+                logger.info(
+                    "rollout %d/%d  reward=%.4f  loss=%.4f  grad_norm=%.4f  lr=%.2e",
+                    rollout_id + 1,
+                    num_rollouts,
+                    mean_reward,
+                    result.loss,
+                    result.grad_norm,
+                    result.lr,
+                )
+        finally:
+            self._finish_wandb()

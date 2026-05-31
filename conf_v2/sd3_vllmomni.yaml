@@ -15,6 +15,13 @@ batch_size: 48 # prompts_per_rollout
 # (off-policy drift). Ignored when the `sync` block below is absent (trainside).
 weight_sync_interval: 1
 
+logging:
+  report_to_wandb: false        # flip to true to enable wandb (rank-0/driver only)
+  project_name: diffusionrl
+  run_name: null
+  entity: null
+  tags: null
+
 bundle:
   _target_: diffusionrl.models.sd3.bundle.SD3Bundle.from_config
   config:

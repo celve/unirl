@@ -1,7 +1,7 @@
 import inspect
 import logging
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 from hydra.utils import instantiate
@@ -52,10 +52,8 @@ class VLMTrainer(BaseTrainer):
         logging_cfg: Optional[DictConfig] = None,
         adv_normalization_scope: str = "group",
     ) -> None:
-        super().__init__(num_devices=num_devices)
-        self.num_devices = num_devices
+        super().__init__(num_devices=num_devices, logging_cfg=logging_cfg)
         self.batch_size = batch_size
-        self.logging_cfg = logging_cfg
         # "group" (textbook GRPO, default) or "global" (v1 baseline parity).
         self.adv_normalization_scope = adv_normalization_scope
 
@@ -109,12 +107,15 @@ class VLMTrainer(BaseTrainer):
         *,
         training_progress: float = 0.0,
         sync_weights: bool = False,
+        rollout_id: int = 0,
     ) -> Tuple[TrainStepResult, float]:
         """One ``rollout → reward → advantage → optimizer step`` pass.
 
         Returns ``(train_result, mean_reward)`` — the mean unnormalized
         per-sample reward of the single track (0.0 if none), for the log line.
+        ``rollout_id`` only keys the wandb panels (see :meth:`_log_rollout`).
         """
+        t0 = time.perf_counter()
         self.rollout.wake_up()
         if sync_weights and self.weight_sync is not None:
             self.weight_sync.sync()
@@ -126,13 +127,13 @@ class VLMTrainer(BaseTrainer):
                 resp.tracks[name] = self.reward.score_and_attach(req=req, track=track)
 
         mean_reward = 0.0
-        std_reward = 0.0
         for track in resp.tracks.values():
             if track.rewards is None:
                 continue
-            rewards_local = _hydrate_tensor_meta(track.rewards).to(torch.float32)
-            mean_reward = float(rewards_local.mean().item())
-            std_reward = float(rewards_local.std().item()) if rewards_local.numel() > 1 else 0.0
+            # Hydrate in place so the wandb reward/advantage stats reuse this
+            # fetch instead of re-pulling the TensorMeta from the worker.
+            track.rewards = _hydrate_tensor_meta(track.rewards)
+            mean_reward = float(track.rewards.to(torch.float32).mean().item())
             break  # single-track for now; revisit if multi-track lands
 
         for name, track in list(resp.tracks.items()):
@@ -141,44 +142,8 @@ class VLMTrainer(BaseTrainer):
 
         (track,) = resp.tracks.values()
         result = self.stack.train_track(track, training_progress=float(training_progress))
-        return result, mean_reward, std_reward
-
-    def _init_wandb(self, *, num_rollouts: int):
-        """Init the (rank-0/driver) wandb run from the optional ``logging`` block.
-
-        Returns the logger or ``None`` (no-op when the block is absent or
-        reporting is off). The whole ``train`` loop runs in the driver, rank=0.
-        """
-        cfg = self.logging_cfg
-        if cfg is None:
-            return None
-        report = bool(cfg.get("report_to_wandb", False))
-        project = cfg.get("project_name")
-        if not report or not project:
-            return None
-
-        from diffusionrl.utils.wandb_logger import init_logger
-
-        raw_tags = cfg.get("tags")
-        tags = [str(t) for t in raw_tags] if raw_tags else None
-        run_config: Dict[str, Any] = {
-            "num_devices": self.num_devices,
-            "batch_size": self.batch_size,
-            "num_rollouts": num_rollouts,
-            "samples_per_prompt": getattr(self.sampling_params, "samples_per_prompt", None),
-            "adv_normalization_scope": self.adv_normalization_scope,
-        }
-        wb = init_logger(
-            project=str(project),
-            run_name=cfg.get("run_name"),
-            config=run_config,
-            rank=0,
-            tags=tags,
-            entity=cfg.get("entity") or None,
-        )
-        if wb.initialized:
-            logger.info("WandB initialized: project=%s run=%s", project, cfg.get("run_name"))
-        return wb
+        self._log_rollout(rollout_id, result, resp, step_time_s=time.perf_counter() - t0)
+        return result, mean_reward
 
     def train(self, *, num_rollouts: int, weight_sync_interval: int = 1) -> None:
         """Minimal training loop: ``num_rollouts`` iterations of ``train_step``.
@@ -187,10 +152,13 @@ class VLMTrainer(BaseTrainer):
         rollouts (fused into ``train_step``'s generate; no-op trainside).
 
         Deferred: ``num_updates_per_batch`` multi-epoch replay, checkpoint /
-        eval cadence, structured (wandb) logging.
+        eval cadence.
         """
         interval = max(1, weight_sync_interval)
-        wb = self._init_wandb(num_rollouts=num_rollouts)
+        self._init_wandb(
+            num_rollouts=num_rollouts,
+            extra={"adv_normalization_scope": self.adv_normalization_scope},
+        )
         try:
             for rollout_id in range(num_rollouts):
                 training_progress = rollout_id / max(1, num_rollouts - 1)
@@ -198,13 +166,12 @@ class VLMTrainer(BaseTrainer):
                 req = self._build_req(inputs, rollout_id)
                 # Sync before generate; skip step 0 (nothing trained yet).
                 sync_weights = rollout_id > 0 and rollout_id % interval == 0
-                t0 = time.perf_counter()
-                result, mean_reward, std_reward = self.train_step(
+                result, mean_reward = self.train_step(
                     req,
                     training_progress=training_progress,
                     sync_weights=sync_weights,
+                    rollout_id=rollout_id,
                 )
-                dt = time.perf_counter() - t0
                 logger.info(
                     "rollout %d/%d  reward=%.4f  loss=%.4f  grad_norm=%.4f  lr=%.2e",
                     rollout_id + 1,
@@ -214,18 +181,5 @@ class VLMTrainer(BaseTrainer):
                     result.grad_norm,
                     result.lr,
                 )
-                if wb is not None:
-                    step = rollout_id + 1
-                    wb.log_rollout(step, {"reward_mean": mean_reward, "reward_std": std_reward})
-                    train_metrics: Dict[str, Any] = {
-                        "loss": result.loss,
-                        "grad_norm": result.grad_norm,
-                        "lr": result.lr,
-                    }
-                    if result.metrics:
-                        train_metrics.update({str(k): v for k, v in dict(result.metrics).items()})
-                    wb.log_step(step, train_metrics)
-                    wb.log_perf(step, {"rollout_time_s": dt})
         finally:
-            if wb is not None:
-                wb.finish()
+            self._finish_wandb()

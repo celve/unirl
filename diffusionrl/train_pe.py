@@ -29,6 +29,7 @@ def main(cfg: DictConfig) -> None:
         data_source_cfg=cfg.data_source,
         sampling_cfg=cfg.sampling,
         sync_cfg=cfg.get("sync"),
+        logging_cfg=cfg.get("logging"),
         devices_per_node=int(cfg.get("devices_per_node", 8)),
     )
     trainer.train(

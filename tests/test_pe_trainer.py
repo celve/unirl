@@ -114,6 +114,7 @@ def test_train_step_scores_image_propagates_and_routes() -> None:
     trainer.reward = reward
     trainer.ar = SimpleNamespace(stack=ar_stack)
     trainer.diffusion = SimpleNamespace(stack=diff_stack)
+    trainer.wandb_logger = None  # train_step → _log_rollout no-ops without a run
 
     results, mean_reward = trainer.train_step(req, training_progress=0.5)
 

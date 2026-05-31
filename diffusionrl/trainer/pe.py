@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -72,9 +73,10 @@ class PETrainer(BaseTrainer):
         data_source_cfg: DictConfig,
         sampling_cfg: DictConfig,
         sync_cfg: Optional[DictConfig] = None,
+        logging_cfg: Optional[DictConfig] = None,
         devices_per_node: int = 8,
     ) -> None:
-        super().__init__(num_devices=num_devices, devices_per_node=devices_per_node)
+        super().__init__(num_devices=num_devices, devices_per_node=devices_per_node, logging_cfg=logging_cfg)
         self.batch_size = batch_size
 
         # Driver-side data iterator (not a Remote).
@@ -158,6 +160,7 @@ class PETrainer(BaseTrainer):
         *,
         training_progress: float = 0.0,
         sync_weights: bool = False,
+        rollout_id: int = 0,
     ) -> Tuple[Dict[str, TrainStepResult], float]:
         """One ``rollout → reward → credit-assign → advantage → step`` pass.
 
@@ -167,7 +170,9 @@ class PETrainer(BaseTrainer):
         ``sync_weights`` pushes each track's freshly-trained adapter into the
         engine between ``wake_up`` and ``generate`` — no-op trainside (the
         rollout shares the live FSDP modules, so the bridges are ``None``).
+        ``rollout_id`` only keys the wandb panels (see :meth:`_log_rollout`).
         """
+        t0 = time.perf_counter()
         self.rollout.wake_up()
         if sync_weights and self.diffusion_sync is not None:
             self.diffusion_sync.sync()
@@ -213,6 +218,7 @@ class PETrainer(BaseTrainer):
             name: getattr(self, name).stack.train_track(resp.tracks[name], training_progress=float(training_progress))
             for name in TRACK_NAMES
         }
+        self._log_rollout(rollout_id, results, resp, step_time_s=time.perf_counter() - t0)
         return results, mean_reward
 
     def train(self, *, num_rollouts: int, weight_sync_interval: int = 1) -> None:
@@ -222,27 +228,32 @@ class PETrainer(BaseTrainer):
         every N rollouts (fused into ``train_step``'s generate; no-op trainside).
         """
         interval = max(1, weight_sync_interval)
-        for rollout_id in range(num_rollouts):
-            training_progress = rollout_id / max(1, num_rollouts - 1)
-            inputs = self.data_source.get_samples(self.batch_size)
-            req = self._build_req(inputs)
-            # Sync before generate; skip step 0 (nothing trained yet).
-            sync_weights = rollout_id > 0 and rollout_id % interval == 0
-            results, mean_reward = self.train_step(
-                req,
-                training_progress=training_progress,
-                sync_weights=sync_weights,
-            )
-            ar, di = results["ar"], results["diffusion"]
-            logger.info(
-                "rollout %d/%d  reward=%.4f  ar[loss=%.4f gn=%.4f lr=%.2e]  diff[loss=%.4f gn=%.4f lr=%.2e]",
-                rollout_id + 1,
-                num_rollouts,
-                mean_reward,
-                ar.loss,
-                ar.grad_norm,
-                ar.lr,
-                di.loss,
-                di.grad_norm,
-                di.lr,
-            )
+        self._init_wandb(num_rollouts=num_rollouts)
+        try:
+            for rollout_id in range(num_rollouts):
+                training_progress = rollout_id / max(1, num_rollouts - 1)
+                inputs = self.data_source.get_samples(self.batch_size)
+                req = self._build_req(inputs)
+                # Sync before generate; skip step 0 (nothing trained yet).
+                sync_weights = rollout_id > 0 and rollout_id % interval == 0
+                results, mean_reward = self.train_step(
+                    req,
+                    training_progress=training_progress,
+                    sync_weights=sync_weights,
+                    rollout_id=rollout_id,
+                )
+                ar, di = results["ar"], results["diffusion"]
+                logger.info(
+                    "rollout %d/%d  reward=%.4f  ar[loss=%.4f gn=%.4f lr=%.2e]  diff[loss=%.4f gn=%.4f lr=%.2e]",
+                    rollout_id + 1,
+                    num_rollouts,
+                    mean_reward,
+                    ar.loss,
+                    ar.grad_norm,
+                    ar.lr,
+                    di.loss,
+                    di.grad_norm,
+                    di.lr,
+                )
+        finally:
+            self._finish_wandb()

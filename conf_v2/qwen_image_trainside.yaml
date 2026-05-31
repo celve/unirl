@@ -8,6 +8,13 @@ num_devices: 8
 batch_size: 48                # prompts_per_rollout
 num_rollouts: 10000
 
+logging:
+  report_to_wandb: false        # flip to true to enable wandb (rank-0/driver only)
+  project_name: diffusionrl
+  run_name: null
+  entity: null
+  tags: null
+
 bundle:
   _target_: diffusionrl.models.qwen_image.bundle.QwenImageBundle.from_config
   config:
