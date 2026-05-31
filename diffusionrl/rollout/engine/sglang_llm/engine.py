@@ -42,6 +42,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -113,6 +114,34 @@ def _pil_to_base64(image: Any) -> str:
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+@dataclass
+class MMEncoding:
+    """One VLM sample's multimodal input for the SRT rollout.
+
+    ``image`` (PIL) is always set for a VLM sample — it is what gets base64'd
+    into the ``/generate`` ``image_data`` so the server actually attends the
+    image. The remaining fields are populated only when the HF processor ran
+    (see :meth:`SGLangLLMRolloutEngine._encode_mm`):
+
+    - ``text``: the chat-templated string with a SINGLE ``<|image_pad|>`` — sent
+      to SRT, whose processor re-expands the placeholder. (Sending the
+      pre-expanded ``input_ids`` + ``image_data`` instead makes SRT return 500.)
+    - ``input_ids``: the processor's EXPANDED id sequence — stored as the replay
+      prompt so rollout and replay teacher-force over the identical token stream.
+    - ``pixel_values`` / ``image_grid_thw``: attached to the response conditions
+      so the replay teacher-forces over the IDENTICAL multimodal input.
+
+    When no processor is available these stay None and the plain chat-template
+    path runs (the image is still attended via ``image_data``).
+    """
+
+    image: Any = None
+    text: Optional[str] = None
+    input_ids: Optional[List[int]] = None
+    pixel_values: Any = None
+    image_grid_thw: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +235,7 @@ def build_rollout_resp(
     *,
     n_per_prompt: int,
     pad_token_id: int = 0,
+    mm_encs: Optional[List["MMEncoding"]] = None,
 ) -> RolloutResp:
     """Pack a list of per-candidate dicts into a typed ``RolloutResp``.
 
@@ -240,6 +270,11 @@ def build_rollout_resp(
     sample_indices: List[int] = []
     sample_ids: List[str] = []
     group_ids: List[str] = []
+    # VLM: per-sample pixel_values / image_grid_thw, replicated from the
+    # prompt-level processor encoding so each sibling sample carries the image
+    # condition its rollout was generated under (replay reads these back).
+    per_sample_pixel_values: List[Any] = []
+    per_sample_image_grid_thw: List[Any] = []
 
     has_req_sids = bool(req.sample_ids)
     has_req_gids = bool(req.group_ids)
@@ -248,6 +283,7 @@ def build_rollout_resp(
         base = prompt_idx * n_per_prompt
         req_sid = req.sample_ids[prompt_idx] if has_req_sids else f"s{prompt_idx}"
         req_gid = req.group_ids[prompt_idx] if has_req_gids else req_sid
+        enc = mm_encs[prompt_idx] if mm_encs is not None else None
         for k in range(n_per_prompt):
             r = raw_results[base + k]
             out_idx = base + k
@@ -261,6 +297,9 @@ def build_rollout_resp(
             sample_indices.append(out_idx)
             sample_ids.append(f"{req_sid}#{k}" if n_per_prompt > 1 else req_sid)
             group_ids.append(req_gid)
+            if enc is not None:
+                per_sample_pixel_values.append(enc.pixel_values)
+                per_sample_image_grid_thw.append(enc.image_grid_thw)
 
     text_segment = TextSegment.pack(
         tokens=per_sample_tokens,
@@ -283,6 +322,13 @@ def build_rollout_resp(
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
+
+    # VLM: attach per-sample pixel_values / image_grid_thw (mirrors
+    # QwenVLARConditions.to_dict()). Per-sample lists with FieldKind.CONCAT so
+    # they survive the DP split/merge and reach the replay aligned with prompt.
+    if per_sample_pixel_values and any(p is not None for p in per_sample_pixel_values):
+        conditions["pixel_values"] = per_sample_pixel_values
+        conditions["image_grid_thw"] = per_sample_image_grid_thw
 
     return RolloutResp(
         tracks={
@@ -399,8 +445,10 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         self._concurrency = int(engine_kwargs.get("concurrency", self.cfg.concurrency))
         self._weights_onloaded_for_sync = False
         self._lora_loaded = False
+        # Versioned LoRA pool: each sync loads a fresh ``{name}_v{N}`` so SRT
+        # never serves a stale adapter; ``generate`` tags the latest version.
         self._lora_version = 0
-        self._active_adapter = None
+        self._active_adapter: Optional[str] = None
 
         base_gpu_id = int(engine_kwargs.get("base_gpu_id", 0))
         force_set_cuda = bool(engine_kwargs.get("force_set_cuda_visible_devices", False))
@@ -462,6 +510,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             "enable_memory_saver",
             "enable_weights_cpu_backup",
             "enable_lora",
+            "lora_backend",
             "max_lora_rank",
             "lora_target_modules",
             "max_loras_per_batch",
@@ -505,6 +554,21 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
 
         self._tokenizer = AutoTokenizer.from_pretrained(self._model_path, trust_remote_code=True)
         logger.info("SGLangLLMRolloutEngine: loaded tokenizer from %s", self._model_path)
+
+        # VLM: load the AutoProcessor so multimodal prompts are encoded the SAME
+        # way the trainside replay does (processor.apply_chat_template expands the
+        # single <|image_pad|> to the per-image vision-token count and emits
+        # pixel_values / image_grid_thw). The plain tokenizer emits only ONE
+        # placeholder, which would leave both the SRT server and the replay blind
+        # to the image. Encoding here (rollout) + storing pixel_values/grid_thw on
+        # the response conditions keeps rollout and replay token-for-token aligned,
+        # so the importance ratio stays ~1.0 in native-logprob mode.
+        self._processor = None
+        if self.cfg.image_token is not None:
+            from transformers import AutoProcessor
+
+            self._processor = AutoProcessor.from_pretrained(self._model_path, trust_remote_code=True)
+            logger.info("SGLangLLMRolloutEngine: loaded AutoProcessor (VLM) from %s", self._model_path)
         logger.info("SGLang SRT server healthy at %s", self._base_url)
 
     # ------------------------------------------------------------------
@@ -690,7 +754,25 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             if key in stage_ar:
                 sampling[key] = stage_ar[key]
 
-        raw_results = self._run_async_gather(prompts, sampling, images=pil_images)
+        # VLM: processor-encode each (prompt, image) into an MMEncoding ONCE,
+        # here. The chat-templated text (single placeholder) + image_data go to
+        # SRT (which re-expands it, so the server sees the image); the expanded
+        # input_ids + pixel_values + image_grid_thw are stored on the response
+        # conditions so the replay teacher-forces over the IDENTICAL multimodal
+        # input -> the importance ratio stays consistent (cf. SD3's
+        # return_prompt_embeds). See MMEncoding for the field-level contract.
+        mm_encs: Optional[List[MMEncoding]] = None
+        if pil_images is not None:
+            if self._processor is not None:
+                mm_encs = [
+                    self._encode_mm(prompts[i], pil_images[i], sampling.get("system_instruction"))
+                    for i in range(len(prompts))
+                ]
+            else:
+                # No processor: carry the raw image so the plain chat-template
+                # path still attends it via image_data (no replay alignment).
+                mm_encs = [MMEncoding(image=img) for img in pil_images]
+        raw_results = self._run_async_gather(prompts, sampling, mm_encs=mm_encs)
         pad_id = getattr(self._tokenizer, "pad_token_id", None) or getattr(self._tokenizer, "eos_token_id", None) or 0
         return build_rollout_resp(
             req,
@@ -698,13 +780,14 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             raw_results,
             n_per_prompt=n,
             pad_token_id=int(pad_id),
+            mm_encs=mm_encs,
         )
 
     def _run_async_gather(
         self,
         prompts: List[str],
         sampling_params: Dict[str, Any],
-        images: Optional[List[Any]] = None,
+        mm_encs: Optional[List["MMEncoding"]] = None,
     ) -> List[Dict[str, Any]]:
         """Drive ``_generate_text_async`` from a fresh event loop."""
         if self._http_client is None:
@@ -714,7 +797,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         t0 = time.perf_counter()
         loop = asyncio.new_event_loop()
         try:
-            results = loop.run_until_complete(self._generate_text_async(prompts, sampling_params, images=images))
+            results = loop.run_until_complete(self._generate_text_async(prompts, sampling_params, mm_encs=mm_encs))
         finally:
             loop.close()
         elapsed = time.perf_counter() - t0
@@ -730,7 +813,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         self,
         prompts: List[str],
         sampling_params: Dict[str, Any],
-        images: Optional[List[Any]] = None,
+        mm_encs: Optional[List["MMEncoding"]] = None,
     ) -> List[Dict[str, Any]]:
         """All prompts sent in parallel via asyncio.gather + Semaphore."""
         params = dict(sampling_params)
@@ -753,13 +836,8 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             if key in params:
                 extra_sampling[key] = params[key]
 
-        async def _generate_one(prompt: str, image: Any = None) -> List[Dict[str, Any]]:
-            has_image = image is not None
-            prompt_token_ids = self._apply_chat_template(
-                prompt,
-                system_instruction,
-                has_image=has_image,
-            )
+        async def _generate_one(prompt: str, mm_enc: Optional["MMEncoding"] = None) -> List[Dict[str, Any]]:
+            has_image = mm_enc is not None and mm_enc.image is not None
             sampling_block = {
                 "temperature": temperature,
                 "max_new_tokens": max_new_tokens,
@@ -768,29 +846,51 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
                 "n": n,
                 **extra_sampling,
             }
-            if prompt_token_ids is not None:
+            if mm_enc is not None and mm_enc.text is not None:
+                # VLM (processor ran): send the chat-templated TEXT (single
+                # <|image_pad|>) + image_data so SRT's processor expands the
+                # placeholder and the model actually attends the image. (Sending
+                # the pre-expanded input_ids + image_data makes SRT return HTTP
+                # 500.) ``prompt_token_ids`` carries the processor's EXPANDED ids
+                # — used only for replay storage so the train-time teacher-forcing
+                # matches the server's generation context.
+                prompt_token_ids = mm_enc.input_ids
                 payload: Dict[str, Any] = {
-                    "input_ids": prompt_token_ids,
+                    "text": mm_enc.text,
                     "sampling_params": sampling_block,
                     "return_logprob": return_logprob,
                     "logprob_start_len": 0,
                 }
             else:
-                payload = {
-                    "text": prompt,
-                    "sampling_params": sampling_block,
-                    "return_logprob": return_logprob,
-                    "logprob_start_len": 0,
-                }
-            # AR LoRA activation: route generation through the loaded adapter
-            # once a LoRA bag has been synced in. (The LIN-287 validate_lora_batch
-            # hang was the SGLang LoRA pool; it is usable now.)
+                prompt_token_ids = self._apply_chat_template(
+                    prompt,
+                    system_instruction,
+                    has_image=has_image,
+                )
+                if prompt_token_ids is not None:
+                    payload = {
+                        "input_ids": prompt_token_ids,
+                        "sampling_params": sampling_block,
+                        "return_logprob": return_logprob,
+                        "logprob_start_len": 0,
+                    }
+                else:
+                    payload = {
+                        "text": prompt,
+                        "sampling_params": sampling_block,
+                        "return_logprob": return_logprob,
+                        "logprob_start_len": 0,
+                    }
+            # Activate the synced LoRA adapter for this request. Only set once
+            # an adapter has been pushed (and not since invalidated by a weight
+            # release); otherwise SRT serves the base model.
             if self._lora_loaded and self._active_adapter:
                 payload["lora_path"] = self._active_adapter
             if has_image:
-                payload["image_data"] = _pil_to_base64(image)
+                payload["image_data"] = _pil_to_base64(mm_enc.image)
             async with sem:
                 response = await self._apost("/generate", payload)
+
             parsed = _parse_one_response(response, prompt, prompt_token_ids, tokenizer=self._tokenizer)
             if not self._parse_response_logged_first and parsed:
                 self._parse_response_logged_first = True
@@ -808,8 +908,8 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
 
         tasks = []
         for i, p in enumerate(prompts):
-            img = images[i] if images is not None else None
-            tasks.append(_generate_one(p, img))
+            enc = mm_encs[i] if mm_encs is not None else None
+            tasks.append(_generate_one(p, enc))
         nested = await asyncio.gather(*tasks)
         return [item for sublist in nested for item in sublist]
 
@@ -851,6 +951,39 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
                 if response is not None:
                     await response.aclose()
         return {}  # unreachable
+
+    # ------------------------------------------------------------------
+    # Multimodal encoding (processor — VLM)
+    # ------------------------------------------------------------------
+
+    def _encode_mm(
+        self,
+        user_prompt: str,
+        image: Any,
+        system_instruction: Optional[str] = None,
+    ) -> "MMEncoding":
+        """Processor-encode one (prompt, image) into the model's native layout.
+
+        Returns a fully-populated :class:`MMEncoding`: ``input_ids`` already has
+        the image placeholder expanded to the per-image vision-token count. This
+        is the SAME encoding the trainside replay (``chat_template.embed``) uses,
+        so the rollout (sent to SRT as ``text`` + ``image_data``) and the replay
+        (teacher-forced over ``input_ids`` + ``pixel_values``) are token-for-token
+        identical.
+        """
+        messages: List[Dict[str, Any]] = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": [{"type": "image"}, {"type": "text", "text": user_prompt}]})
+        text = self._processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        enc = self._processor(text=[text], images=[image], return_tensors="pt")
+        return MMEncoding(
+            image=image,
+            text=text,
+            input_ids=enc["input_ids"][0].tolist(),
+            pixel_values=enc["pixel_values"],
+            image_grid_thw=enc["image_grid_thw"],
+        )
 
     # ------------------------------------------------------------------
     # Chat template
@@ -1118,25 +1251,31 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             from sglang.srt.utils.utils import MultiprocessingSerializer
 
         serialized = MultiprocessingSerializer.serialize(lora_tensors, output_str=True)
-        # Rotate to a fresh versioned name each sync. SRT rejects re-loading a
-        # duplicate name (HTTP 400 "already loaded"), and an explicit /unload of
-        # the live adapter stalls >=10 min under 8-way colocate (LIN-287). Loading
-        # a NEW name is the cheap, proven-fast path; generation points at the
-        # latest via self._active_adapter. Stale versions stay in the SRT registry.
+        # Rotate to a fresh VERSIONED name each sync (spo_v2 lora-pool approach).
+        # Re-loading the SAME ``lora_name`` is unreliable: SRT rejects a duplicate
+        # name (HTTP 400 "already loaded"), an explicit /unload of the live adapter
+        # can stall for minutes under colocate, and — the killer here — reusing the
+        # name can serve STALE weights, so the rollout policy never actually updates
+        # (reward stays flat while the FSDP model trains). Loading a NEW name forces
+        # fresh weights; generation points at the latest via ``_active_adapter``.
+        # Stale versions evict via SRT's LRU (``max_loaded_loras``).
         self._lora_version += 1
         versioned_name = f"{adapter_name}_v{self._lora_version}"
-        payload = {
-            "lora_name": versioned_name,
-            "config_dict": dict(peft_config or {}),
-            "serialized_tensors": serialized,
-        }
-        resp = self._post("/load_lora_adapter_from_tensors", payload)
+        resp = self._post(
+            "/load_lora_adapter_from_tensors",
+            {
+                "lora_name": versioned_name,
+                "config_dict": dict(peft_config or {}),
+                "serialized_tensors": serialized,
+            },
+        )
         self._check_update_response(resp, "set_lora_from_tensors")
         self._active_adapter = versioned_name
         self._lora_loaded = True
         logger.info(
-            "SGLangLLMRolloutEngine: LoRA adapter %r loaded (%d tensor keys)",
+            "SGLangLLMRolloutEngine: LoRA adapter %r loaded as %r (%d tensor keys)",
             adapter_name,
+            versioned_name,
             len(lora_tensors),
         )
 

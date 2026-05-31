@@ -77,6 +77,7 @@ class MCExactMatchRewardScorer(LocalRewardBackend):
             gt = _normalize_answer(str(meta["answer"]))
             predicted = _extract_answer_letter(text)
             rewards.append(1.0 if predicted == gt else 0.0)
+
         return rewards
 
 

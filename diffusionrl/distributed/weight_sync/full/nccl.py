@@ -30,7 +30,7 @@ the driver can import this module for ``remote(...)``.
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from diffusionrl.distributed.group.dispatch import Dispatch, Execute, distributed
 from diffusionrl.distributed.weight_sync.full.base import FullWeightSync
@@ -45,18 +45,16 @@ class NCCLWeightSync(FullWeightSync):
         backend: Any,
         group_name: str = "weight_sync",
         bucket_size_mb: int = 512,
-        param_name_prefix: str = "",
-        target_modules: Tuple[str, ...] = ("transformer",),
         flush_cache: bool = True,
-        use_merged: bool = False,
+        lora_merged: bool = False,
+        name_remap: Optional[Dict[str, Optional[str]]] = None,
     ) -> None:
         super().__init__(
             backend=backend,
             bucket_size_mb=bucket_size_mb,
-            param_name_prefix=param_name_prefix,
-            target_modules=target_modules,
             flush_cache=flush_cache,
-            use_merged=use_merged,
+            lora_merged=lora_merged,
+            name_remap=name_remap,
         )
         self._group_name = str(group_name)
         self._model_update_group = None  # set on rank 0 in connect()
@@ -166,7 +164,6 @@ class NCCLWeightSync(FullWeightSync):
                         "dtypes": dtypes,
                         "shapes": shapes,
                         "group_name": self._group_name,
-                        "target_modules": self._target_modules,
                         "flush_cache": (self._flush_cache and is_last),
                     },
                 )

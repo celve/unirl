@@ -92,7 +92,7 @@ class VLMTrainer(BaseTrainer):
         schedule to resolve (that is the diffusion trainer's job).
         """
         inputs = inputs.expand(self.sampling_params.samples_per_prompt)
-        return RolloutReq(
+        req = RolloutReq(
             sample_ids=list(inputs.sample_ids),
             group_ids=list(inputs.group_ids),
             primitives=dict(inputs.primitives),
@@ -100,6 +100,7 @@ class VLMTrainer(BaseTrainer):
             sampling_params=self.sampling_params,
             metadata=list(inputs.metadata) if inputs.metadata else [],
         )
+        return req
 
     def train_step(
         self,

@@ -2,7 +2,7 @@
 # SGLang twin of sd3_vllmomni_full_tensor.yaml: identical train side + sync, the
 # only swap is the rollout engine (SGLangRolloutEngine instead of vLLM-Omni).
 #   - LoRA training (lora_cfg kept), pushed as a MERGED full model each sync —
-#     sync.use_merged: true folds the LoRA delta into the base weights, so the
+#     sync.lora_merged: true folds the LoRA delta into the base weights, so the
 #     rollout engine runs the merged model with no separate adapter.
 #   - sync -> TensorWeightSync (colocate serialized-tensor handoff), driving
 #     SGLang's update_weights_from_tensor (load_format="flattened_bucket").
@@ -63,7 +63,7 @@ backend:
     type: constant
     warmup_steps: 0
     total_steps: 10000
-  # LoRA training — synced as a MERGED full model (sync.use_merged: true), so the
+  # LoRA training — synced as a MERGED full model (sync.lora_merged: true), so the
   # rollout engine runs the merged weights without a separate adapter.
   lora_cfg:
     _target_: diffusionrl.train.configs.LoraConfig
@@ -163,12 +163,12 @@ sync:
   _target_: diffusionrl.distributed.weight_sync.full.tensor.TensorWeightSync
   # Fold the trained LoRA delta into the base weights and push the merged full
   # model (we LoRA-train but serve a merged model — no separate adapter).
-  use_merged: true
+  lora_merged: true
   bucket_size_mb: 512
   flush_cache: true
-  target_modules: ["transformer"]
-  # Pipeline prefix for the trained submodule's bare keys (backend.model is the
-  # SD3 transformer, so merged_state_dict yields transformer_blocks.* etc.);
-  # maps them under the receiver's transformer.* namespace. Applied on both the
-  # merged (use_merged=true) and raw paths.
-  param_name_prefix: "transformer."
+  # Ordered first-match-wins name rewrite (see FullWeightSync._apply_name_remap):
+  # backend.model is the bare SD3 transformer (merged_state_dict yields
+  # transformer_blocks.* etc.), so the "*" catch-all nests every key under the
+  # receiver's transformer.* namespace. Applied on both the merged
+  # (lora_merged=true) and raw paths.
+  name_remap: {"*": "transformer.*"}

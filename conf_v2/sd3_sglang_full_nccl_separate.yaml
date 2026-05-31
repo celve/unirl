@@ -3,7 +3,7 @@
 # the only swap is the rollout engine (SGLangRolloutEngine instead of vLLM-Omni).
 #   - layout: separate — train on `train_fraction` of the pool, rollout on the rest.
 #   - LoRA training (lora_cfg kept), pushed as a MERGED full model each sync
-#     (sync.use_merged: true folds the LoRA delta into the base weights).
+#     (sync.lora_merged: true folds the LoRA delta into the base weights).
 #   - sync -> NCCLWeightSync (rank-0 broadcasts to all rollout GPUs), driving
 #     SGLang's init_weights_update_group + update_weights_from_distributed.
 
@@ -65,7 +65,7 @@ backend:
     type: constant
     warmup_steps: 0
     total_steps: 10000
-  # LoRA training — synced as a MERGED full model (sync.use_merged: true), so the
+  # LoRA training — synced as a MERGED full model (sync.lora_merged: true), so the
   # rollout engine runs the merged weights without a separate adapter.
   lora_cfg:
     _target_: diffusionrl.train.configs.LoraConfig
@@ -163,12 +163,12 @@ sync:
   _target_: diffusionrl.distributed.weight_sync.full.nccl.NCCLWeightSync
   # Fold the trained LoRA delta into the base weights and push the merged full
   # model (we LoRA-train but serve a merged model — no separate adapter).
-  use_merged: true
+  lora_merged: true
   group_name: weight_sync
   bucket_size_mb: 512
   flush_cache: true
-  target_modules: ["transformer"]
-  # Pipeline prefix for the trained submodule's bare keys (backend.model is the
-  # SD3 transformer); maps them under the receiver's transformer.* namespace.
-  # Applied on both the merged (use_merged=true) and raw paths.
-  param_name_prefix: "transformer."
+  # Ordered first-match-wins name rewrite (see FullWeightSync._apply_name_remap):
+  # backend.model is the bare SD3 transformer, so the "*" catch-all nests every
+  # key under the receiver's transformer.* namespace. Applied on both the merged
+  # (lora_merged=true) and raw paths.
+  name_remap: {"*": "transformer.*"}

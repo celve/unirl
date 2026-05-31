@@ -1,6 +1,6 @@
 # SD3 v2 trainer — LoRA training, MERGED full-weight sync via bucketed CUDA-IPC (COLOCATE).
 # Self-contained variant of sd3_vllmomni.yaml. Same as sd3_vllmomni_full_tensor
-# (LoRA training, sync.use_merged: true) except the transport is IPC (same-node
+# (LoRA training, sync.lora_merged: true) except the transport is IPC (same-node
 # CUDA-IPC over ZMQ).
 
 num_devices: 8
@@ -53,7 +53,7 @@ backend:
     type: constant
     warmup_steps: 0
     total_steps: 10000
-  # LoRA training — synced as a MERGED full model (sync.use_merged: true), so the
+  # LoRA training — synced as a MERGED full model (sync.lora_merged: true), so the
   # rollout engine runs the merged weights without a separate adapter.
   lora_cfg:
     _target_: diffusionrl.train.configs.LoraConfig
@@ -140,13 +140,13 @@ sync:
   _target_: diffusionrl.distributed.weight_sync.full.ipc.IPCWeightSync
   # Fold the trained LoRA delta into the base weights and push the merged full
   # model (we LoRA-train but serve a merged model — no separate adapter).
-  use_merged: true
+  lora_merged: true
   # Buffer must fit the largest single tensor in one bucket.
   bucket_size_mb: 2048
   use_shm: false
   flush_cache: true
-  target_modules: ["transformer"]
-  # Pipeline prefix for the trained submodule's bare keys (backend.model is the
-  # SD3 transformer); maps them under the receiver's transformer.* namespace.
-  # Applied on both the merged (use_merged=true) and raw paths.
-  param_name_prefix: "transformer."
+  # Ordered first-match-wins name rewrite (see FullWeightSync._apply_name_remap):
+  # backend.model is the bare SD3 transformer, so the "*" catch-all nests every
+  # key under the receiver's transformer.* namespace. Applied on both the merged
+  # (lora_merged=true) and raw paths.
+  name_remap: {"*": "transformer.*"}

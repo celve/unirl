@@ -19,9 +19,41 @@ methods so the driver can import this module to reference the class for
 
 from __future__ import annotations
 
-from typing import Iterator, List, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
+from diffusionrl.config.require import require
 from diffusionrl.distributed.group.remote import Remote
+
+
+def _one_star(s: object) -> bool:
+    """True if ``s`` is a string containing exactly one ``"*"``."""
+    return isinstance(s, str) and s.count("*") == 1
+
+
+def _validate_name_remap(
+    name_remap: Optional[Dict[str, Optional[str]]],
+) -> Dict[str, Optional[str]]:
+    """Validate + return the ordered ``name_remap`` rewrite rules (fail-closed)."""
+    rules = dict(name_remap or {})
+    keys = list(rules.keys())
+    for i, (key, value) in enumerate(rules.items()):
+        require(_one_star(key), f"name_remap key {key!r} needs one '*'.")
+        require(value is None or _one_star(value), f"name_remap[{key!r}] value: null or one '*'; got {value!r}.")
+        require(key != "*" or i == len(keys) - 1, f"name_remap '*' must be last; shadows {keys[i + 1 :]!r}.")
+    return rules
+
+
+def _apply_name_remap(name: str, name_remap: Dict[str, Optional[str]]) -> Optional[str]:
+    """Apply the ordered single-``*`` rewrite; return the new name or None to drop."""
+    for key, value in name_remap.items():
+        pre, _, post = key.partition("*")
+        # length guard: pre and post must not overlap inside name
+        if name.startswith(pre) and name.endswith(post) and len(name) >= len(pre) + len(post):
+            if value is None:
+                return None
+            vpre, _, vpost = value.partition("*")
+            return vpre + name[len(pre) : len(name) - len(post)] + vpost
+    return name
 
 
 class FullWeightSync(Remote):
@@ -31,7 +63,7 @@ class FullWeightSync(Remote):
     one-time connection setup their transport needs. ``backend`` is the FSDP
     backend sibling whose ``.model`` is the weight source.
 
-    ``use_merged`` selects what gets pushed: ``False`` (default) syncs the raw
+    ``lora_merged`` selects what gets pushed: ``False`` (default) syncs the raw
     base weights (meaningful for full fine-tuning); ``True`` folds the trained
     LoRA deltas into the base weights and pushes the merged full model
     (meaningful for a LoRA run served without a separate adapter).
@@ -42,18 +74,18 @@ class FullWeightSync(Remote):
         *,
         backend,
         bucket_size_mb: int = 512,
-        param_name_prefix: str = "",
-        target_modules: Tuple[str, ...] = ("transformer",),
         flush_cache: bool = True,
-        use_merged: bool = False,
+        lora_merged: bool = False,
+        name_remap: Optional[Dict[str, Optional[str]]] = None,
     ) -> None:
         super().__init__()
         self._backend = backend
         self._bucket_bytes = int(bucket_size_mb) * 1024 * 1024
-        self._param_name_prefix = str(param_name_prefix or "")
-        self._target_modules = list(target_modules)
         self._flush_cache = bool(flush_cache)
-        self._use_merged = bool(use_merged)
+        self._lora_merged = bool(lora_merged)
+        # Ordered, first-match-wins name rewrites (glob -> replacement, or None to
+        # drop); see _validate_name_remap / _apply_name_remap for the contract.
+        self._name_remap = _validate_name_remap(name_remap)
         self.weight_version = 0
 
     # ------------------------------------------------------------------
@@ -68,33 +100,35 @@ class FullWeightSync(Remote):
         on every train rank in lockstep; each yields a full (unsharded) CUDA
         tensor per param, in a deterministic order.
 
-        ``use_merged`` selects the walk (mirrors v1 ``BucketedUpdateWeight``):
+        ``lora_merged`` selects the walk (mirrors v1 ``BucketedUpdateWeight``):
           - ``True``  → ``merged_state_dict`` folds LoRA deltas into the base
             weights and yields the trained module's own keys (LoRA already
             absorbed, ``.base_layer.`` flattened away).
           - ``False`` → ``raw_state_dict`` base weights, skipping
             ``.lora_A``/``.lora_B``.
 
-        Both walks then get ``param_name_prefix`` applied. ``backend.model`` is
-        the trained submodule (e.g. the SD3 transformer), so its state-dict keys
-        are bare (``transformer_blocks.0...``). The rollout engine loads them
-        into the *full pipeline*, where that submodule lives under
-        ``transformer.`` — so the prefix (``"transformer."``) is what makes the
-        pushed names resolve on the receiver. It is orthogonal to LoRA-merging.
+        Each emitted name is then rewritten by ``name_remap`` (see
+        ``_apply_name_remap``): a ``None`` rule drops the param (e.g. a frozen
+        tower not in the receiver), and the ``"*"`` catch-all nests the trained
+        submodule's bare keys under the receiver's namespace (e.g.
+        ``transformer.``). It is orthogonal to LoRA-merging.
         """
         from diffusionrl.utils.peft_merge import merged_state_dict, raw_state_dict
 
-        prefix = self._param_name_prefix
-
-        if self._use_merged:
+        remap = self._name_remap
+        if self._lora_merged:
             for name, tensor in merged_state_dict(self._backend.model):
-                yield (prefix + name if prefix else name), tensor
+                out = _apply_name_remap(name, remap)
+                if out is not None:
+                    yield out, tensor
             return
 
         for name, tensor in raw_state_dict(self._backend.model):
             if name.endswith(".lora_A") or name.endswith(".lora_B"):
                 continue
-            yield (prefix + name if prefix else name), tensor
+            out = _apply_name_remap(name, remap)
+            if out is not None:
+                yield out, tensor
 
     def _iter_buckets(self) -> Iterator[Tuple[List[Tuple[str, "object"]], bool]]:
         """Yield ``(bucket, is_last)`` where ``bucket`` is a list of

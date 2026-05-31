@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any, Tuple
+from typing import Any, Dict, Optional
 
 from diffusionrl.distributed.group.dispatch import Dispatch, distributed
 from diffusionrl.distributed.weight_sync.full.base import FullWeightSync
@@ -41,21 +41,19 @@ class IPCWeightSync(FullWeightSync):
         backend: Any,
         rollout: Any,
         bucket_size_mb: int = 2048,
-        param_name_prefix: str = "",
-        target_modules: Tuple[str, ...] = ("transformer",),
         flush_cache: bool = True,
-        use_merged: bool = False,
+        lora_merged: bool = False,
         use_shm: bool = False,
+        name_remap: Optional[Dict[str, Optional[str]]] = None,
     ) -> None:
         # 2048 MB default: the buffer must fit the largest single tensor in one
         # bucket (BucketedWeightSender asserts this).
         super().__init__(
             backend=backend,
             bucket_size_mb=bucket_size_mb,
-            param_name_prefix=param_name_prefix,
-            target_modules=target_modules,
             flush_cache=flush_cache,
-            use_merged=use_merged,
+            lora_merged=lora_merged,
+            name_remap=name_remap,
         )
         self._rollout = rollout
         self._use_shm = bool(use_shm)

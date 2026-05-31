@@ -215,9 +215,14 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         if segment.tokens is None or segment.cu_seqlens is None or segment.lengths is None:
             raise ValueError("QwenVLARStage.replay: segment requires tokens with cu_seqlens")
 
-        prompt_ids = conditions.prompt.input_ids
-        prompt_mask = conditions.prompt.attention_mask
-        device = prompt_ids.device
+        # conditions.prompt (ids/mask) and pixel_values/image_grid_thw come back
+        # from the SGLang rollout engine on CPU, while the trainable transformer
+        # lives on this worker's CUDA device. Anchor on the model's device and
+        # move the rollout-side tensors onto it so the embedding/forward index
+        # ops don't hit a cpu-vs-cuda mismatch.
+        device = next(self.model.transformer.parameters()).device
+        prompt_ids = conditions.prompt.input_ids.to(device)
+        prompt_mask = conditions.prompt.attention_mask.to(device)
         batch_size = int(prompt_ids.shape[0])
 
         # pixel_values / image_grid_thw: per-sample lists → merged tensors
@@ -225,6 +230,10 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         # so each entry corresponds to the matching prompt row.
         pv = _merge_pv(conditions.pixel_values)
         igt = _merge_igt(conditions.image_grid_thw)
+        if pv is not None:
+            pv = pv.to(device)
+        if igt is not None:
+            igt = igt.to(device)
 
         # Strip right-padding introduced by TextTokenCondition.concat across
         # rollout workers.  During rollout each worker pads to its own batch

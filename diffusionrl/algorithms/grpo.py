@@ -313,6 +313,7 @@ class ARGRPO(StageAlgorithm):
             advantages=adv_per_token,
             clip_range=clip_range,
         )
+
         loss = loss_per_elem.mean()
         (loss * loss_scale).backward()
 

@@ -26,6 +26,7 @@ import torch
 from diffusionrl.algorithms import AlgorithmStepResult, StageAlgorithm
 from diffusionrl.distributed.group.dispatch import Dispatch, distributed
 from diffusionrl.distributed.group.remote import Remote
+from diffusionrl.distributed.tensor.batch import _move_value
 from diffusionrl.train.backend.fsdp import FSDPBackend
 from diffusionrl.types.rollout_resp import RolloutTrack
 from diffusionrl.utils.misc import aggregate_numeric_metrics
@@ -74,10 +75,18 @@ def _align_track_to_model(resp_track: RolloutTrack, *, device: torch.device) -> 
     framework-managed ``_packed_cu_seqlens`` and tensors nested in tuples/dicts)
     on the segment + conditions only, so heavy ``decoded`` / ``media_preview``
     payloads stay off the GPU. dtype is left to the model, which casts what it
-    feeds the network (see SD3DiffusionStep.predict_noise)."""
+    feeds the network (see SD3DiffusionStep.predict_noise).
+
+    Condition values are moved via ``_move_value`` (the same recursive mover
+    ``Batch.to_device`` uses) rather than assuming each value is a ``Batch``:
+    most are (e.g. ``TextTokenCondition``), but multimodal stages also carry
+    raw per-sample ``FieldKind.CONCAT`` lists of tensors (Qwen2.5-VL's
+    ``pixel_values`` / ``image_grid_thw``), which have no ``.to_device`` of
+    their own — ``_move_value`` handles Batch / tensor / list / dict / None
+    uniformly."""
     if resp_track.segment is not None:
         resp_track.segment = resp_track.segment.to_device(device)
-    resp_track.conditions = {k: v.to_device(device) for k, v in resp_track.conditions.items()}
+    resp_track.conditions = {k: _move_value(v, device) for k, v in resp_track.conditions.items()}
     if resp_track.advantages is not None:
         resp_track.advantages = resp_track.advantages.to(device=device)
 

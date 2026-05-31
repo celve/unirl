@@ -19,7 +19,7 @@ deferred so the driver can import this module for ``remote(...)``.
 
 from __future__ import annotations
 
-from typing import Any, Tuple
+from typing import Any, Dict, Optional
 
 from diffusionrl.distributed.group.dispatch import Dispatch, distributed
 from diffusionrl.distributed.weight_sync.full.base import FullWeightSync
@@ -34,18 +34,16 @@ class TensorWeightSync(FullWeightSync):
         backend: Any,
         rollout: Any,
         bucket_size_mb: int = 512,
-        param_name_prefix: str = "",
-        target_modules: Tuple[str, ...] = ("transformer",),
         flush_cache: bool = True,
-        use_merged: bool = False,
+        lora_merged: bool = False,
+        name_remap: Optional[Dict[str, Optional[str]]] = None,
     ) -> None:
         super().__init__(
             backend=backend,
             bucket_size_mb=bucket_size_mb,
-            param_name_prefix=param_name_prefix,
-            target_modules=target_modules,
             flush_cache=flush_cache,
-            use_merged=use_merged,
+            lora_merged=lora_merged,
+            name_remap=name_remap,
         )
         self._rollout = rollout  # local vLLM-Omni engine sibling
 
@@ -94,8 +92,15 @@ class TensorWeightSync(FullWeightSync):
                     serialized_named_tensors=[payload],
                     load_format="flattened_bucket",
                     flush_cache=(self._flush_cache and is_last and i == n_dtypes - 1),
-                    target_modules=self._target_modules,
                 )
+            # Release the all-gathered full tensors + IPC payloads for this bucket
+            # before gathering the next — else the full model (~13GB) accumulates
+            # in the caching allocator and OOMs the colocated SRT server.
+            del serialized, by_dtype, bucket
+            import torch as _t
+
+            if _t.cuda.is_available():
+                _t.cuda.empty_cache()
         self.weight_version += 1
 
 

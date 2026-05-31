@@ -62,6 +62,10 @@ class SGLangLLMEngineConfig(BaseEngineConfig):
     max_new_tokens: int = 512
     temperature: float = 0.7
     top_p: float = 0.9
+    # top_k truncation — must match the trainside ARSamplingParams default (1024)
+    # so the sglang rollout samples from the SAME distribution. Was never forwarded
+    # before (sglang defaulted to -1 = full vocab) → engine sampling mismatch.
+    top_k: int = 1024
 
     # --- Chat template ---
     # System message prepended to every prompt (e.g. "/no_think" to suppress
