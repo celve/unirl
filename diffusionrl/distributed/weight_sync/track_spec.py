@@ -23,9 +23,9 @@ class TrackSyncSpec:
       deltas shipped separately via ``set_lora_from_tensors``. Requires a
       LoRA pool on the engine (SGLang diffusion, vllm-omni).
     * ``"merged_dense"``: every sync ships ``base + α·B·A`` via the normal
-      bucket path; bypasses the engine's LoRA pool entirely. Required for
-      ``sglang_llm`` whose LoRA pool deadlocks after sleep/wake in composed
-      PE mode.
+      bucket path; bypasses the engine's LoRA pool entirely. A
+      full-parameter-transfer alternative for ``sglang_llm`` when not using
+      its LoRA pool / ``set_lora_from_tensors`` path.
     """
 
     model: nn.Module

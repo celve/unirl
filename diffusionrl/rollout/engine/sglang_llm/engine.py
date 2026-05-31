@@ -397,13 +397,9 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         self._base_url = f"http://{advertise_host}:{self._port}"
         self._concurrency = int(engine_kwargs.get("concurrency", self.cfg.concurrency))
         self._weights_onloaded_for_sync = False
-        # LoRA adapter activation state. ``set_lora_from_tensors`` flips
-        # ``_lora_loaded`` True after a successful push; ``generate`` then tags
-        # each ``/generate`` with ``lora_path``. Releasing weights (sleep) frees
-        # the SRT LoRA pool, so the flag is cleared there and the adapter must
-        # be re-pushed before it is referenced again.
         self._lora_loaded = False
-        self._lora_adapter_name: Optional[str] = None
+        self._lora_version = 0
+        self._active_adapter = None
 
         base_gpu_id = int(engine_kwargs.get("base_gpu_id", 0))
         force_set_cuda = bool(engine_kwargs.get("force_set_cuda_visible_devices", False))
@@ -754,11 +750,11 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
                     "return_logprob": return_logprob,
                     "logprob_start_len": 0,
                 }
-            # Activate the synced LoRA adapter for this request. Only set once
-            # an adapter has been pushed (and not since invalidated by a weight
-            # release); otherwise SRT serves the base model.
-            if self._lora_loaded and self._lora_adapter_name:
-                payload["lora_path"] = self._lora_adapter_name
+            # AR LoRA activation: route generation through the loaded adapter
+            # once a LoRA bag has been synced in. (The LIN-287 validate_lora_batch
+            # hang was the SGLang LoRA pool; it is usable now.)
+            if self._lora_loaded and self._active_adapter:
+                payload["lora_path"] = self._active_adapter
             if has_image:
                 payload["image_data"] = _pil_to_base64(image)
             async with sem:
@@ -918,9 +914,11 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
     def _post(self, path: str, payload: Dict[str, Any]) -> Any:
         """Synchronous POST JSON to sglang SRT server."""
         url = f"{self._base_url}{path}"
-        # Weight-update endpoints can stall on NCCL init / broadcast; longer
-        # timeout for them.
-        timeout = 600 if ("weights" in path or "update" in path) else 120
+        # Weight-update + LoRA hot-reload endpoints can stall server-side
+        # (NCCL init / broadcast, or SGLang's LoRA-pool unload+reload which
+        # takes ~2 min from the 2nd sync on — LIN-287). Give them the long
+        # timeout so a legitimately-slow-but-succeeding op isn't killed at 120s.
+        timeout = 600 if ("weights" in path or "update" in path or "lora" in path) else 120
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             url=url,
@@ -1076,46 +1074,32 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
 
         SGLang SRT exposes ``POST /load_lora_adapter_from_tensors`` which
         accepts serialized LoRA tensors + a PEFT config dict and hot-loads the
-        adapter on all TP workers internally (the LoRA backend slices for TP).
-
-        Tensor keys arrive in canonical wire format
-        (``<module>.lora_A.weight`` / ``.lora_B.weight``); SRT's
-        ``get_layer_id`` and ``get_target_module_name`` are prefix-agnostic, so
-        no key adaptation is needed for the (prefix-less) LLM model. Do NOT run
-        ``adapt_lora_for_sglang`` here — that targets the diffusion
-        ``multimodal_gen`` runtime's keyspace, not SRT.
-
-        ``peft_config`` is forwarded as ``config_dict``; SRT's ``LoRAConfig``
-        reads ``target_modules`` / ``r`` / ``lora_alpha`` from it. The adapter
-        is unloaded first because SRT rejects re-loading the same ``lora_name``
-        (``validate_new_adapter``).
-
-        Opt-in: only reachable when the SRT server was launched with
-        ``enable_lora=true`` and the AR track uses
-        ``lora_materialization='adapter_tensor'`` (the default for this engine
-        remains ``merged_dense``).
+        adapter on all TP workers internally. ``track_prefix`` routing is
+        handled by the parent :class:`ComposedRolloutEngine`; this child sees
+        only its own (prefix-stripped) tensors.
         """
-        from sglang.srt.utils import MultiprocessingSerializer
+        try:
+            from sglang.srt.utils import MultiprocessingSerializer
+        except ImportError:
+            from sglang.srt.utils.utils import MultiprocessingSerializer
 
         serialized = MultiprocessingSerializer.serialize(lora_tensors, output_str=True)
-        # Drop any existing adapter with this name first; SRT raises on a
-        # duplicate ``lora_name``. Best-effort: the first push has nothing to
-        # unload (SRT returns HTTP 400 -> RuntimeError), which we swallow.
-        try:
-            self._post("/unload_lora_adapter", {"lora_name": str(adapter_name)})
-        except Exception:
-            pass
-        resp = self._post(
-            "/load_lora_adapter_from_tensors",
-            {
-                "lora_name": str(adapter_name),
-                "config_dict": dict(peft_config or {}),
-                "serialized_tensors": serialized,
-            },
-        )
+        # Rotate to a fresh versioned name each sync. SRT rejects re-loading a
+        # duplicate name (HTTP 400 "already loaded"), and an explicit /unload of
+        # the live adapter stalls >=10 min under 8-way colocate (LIN-287). Loading
+        # a NEW name is the cheap, proven-fast path; generation points at the
+        # latest via self._active_adapter. Stale versions stay in the SRT registry.
+        self._lora_version += 1
+        versioned_name = f"{adapter_name}_v{self._lora_version}"
+        payload = {
+            "lora_name": versioned_name,
+            "config_dict": dict(peft_config or {}),
+            "serialized_tensors": serialized,
+        }
+        resp = self._post("/load_lora_adapter_from_tensors", payload)
         self._check_update_response(resp, "set_lora_from_tensors")
+        self._active_adapter = versioned_name
         self._lora_loaded = True
-        self._lora_adapter_name = str(adapter_name)
         logger.info(
             "SGLangLLMRolloutEngine: LoRA adapter %r loaded (%d tensor keys)",
             adapter_name,
@@ -1175,11 +1159,6 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             raise RuntimeError("Cannot onload SGLangLLMRolloutEngine weights: SRT server is not alive.")
         self._post("/resume_memory_occupation", {"tags": ["weights"]})
         self._weights_onloaded_for_sync = True
-
-    def flush_cache(self, *, track_prefix: str = "") -> None:
-        """Force the SGLang scheduler to drain pending work (public alias)."""
-        del track_prefix
-        self._flush_cache()
 
     def _flush_cache(self) -> None:
         """Flush sglang scheduler cache; retry until 200.

@@ -171,10 +171,27 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             server_args.disable_autocast = disable_autocast
 
         self._server_args = server_args
-        self._generator = self._runtime["DiffGenerator"].from_pretrained(
-            server_args=server_args,
-            local_mode=bool(self.cfg.local_mode),
-        )
+        # Each colocated rank spawns its own sglang-diffusion worker subprocess
+        # that brings up a dist group via ``env://`` (reads MASTER_PORT). In v2
+        # colocate every rank inherits the DevicePool training MASTER_PORT, so
+        # the subprocesses collide on it (EADDRINUSE). Point the spawn at this
+        # rank's dedicated port (from ``with_sglang_ports``) and restore after —
+        # the training FSDP group is already initialized, so it won't re-read env.
+        sglang_master_port = (self.cfg.engine_kwargs or {}).get("master_port")
+        _saved_master_port = os.environ.get("MASTER_PORT")
+        if sglang_master_port is not None:
+            os.environ["MASTER_PORT"] = str(sglang_master_port)
+        try:
+            self._generator = self._runtime["DiffGenerator"].from_pretrained(
+                server_args=server_args,
+                local_mode=bool(self.cfg.local_mode),
+            )
+        finally:
+            if sglang_master_port is not None:
+                if _saved_master_port is None:
+                    os.environ.pop("MASTER_PORT", None)
+                else:
+                    os.environ["MASTER_PORT"] = _saved_master_port
 
         # σ schedule policy — loaded once from the pretrained checkpoint
         # dir's JSONs (scheduler/transformer/vae configs). ``ensure_req_sigmas``

@@ -28,6 +28,7 @@ import torch
 
 from diffusionrl.config.instantiate import build
 from diffusionrl.config.require import require
+from diffusionrl.distributed.group.dispatch import Dispatch, distributed
 from diffusionrl.rollout.engine.base import BaseRolloutEngine
 from diffusionrl.rollout.engine.composed.config import ComposedRolloutEngineConfig
 from diffusionrl.types.primitives import Texts
@@ -119,6 +120,7 @@ class ComposedRolloutEngine(BaseRolloutEngine):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def shutdown(self) -> None:
         for name, child in self._child_by_name.items():
             try:
@@ -126,24 +128,20 @@ class ComposedRolloutEngine(BaseRolloutEngine):
             except Exception as exc:
                 logger.warning("Child %r shutdown raised: %s", name, exc)
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def sleep(self) -> None:
         for child in self._child_by_name.values():
             child.sleep()
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def wake_up(self) -> None:
         for child in self._child_by_name.values():
             child.wake_up()
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def onload_weights(self, *, track_prefix: str = "") -> None:
         for child in self._children_for_track_prefix(track_prefix):
             child.onload_weights()
-
-    def flush_cache(self, *, track_prefix: str = "") -> None:
-        children = self._children_for_track_prefix(track_prefix)
-        for child in children:
-            fn = getattr(child, "flush_cache", None)
-            if callable(fn):
-                fn()
 
     @property
     def is_offloaded(self) -> bool:
@@ -164,8 +162,16 @@ class ComposedRolloutEngine(BaseRolloutEngine):
     # Generation — PE serial flow
     # ------------------------------------------------------------------
 
+    @distributed(dispatch_mode=Dispatch.DP_ALL)
     def generate(self, req: RolloutReq) -> RolloutResp:
-        """Run PE serial flow: AR expansion → diffusion sampling → 2-track resp."""
+        """Run PE serial flow: AR expansion → diffusion sampling → 2-track resp.
+
+        Dispatched ``DP_ALL`` (like vllm-omni / trainside): the Handle shards the
+        req across DP workers (each owns its own sglang_llm + sglang subprocess),
+        every worker runs the serial flow on its prompt-shard, and ``_collect_dp``
+        merges the per-worker 2-track resps. (``ONE_TO_ALL`` would return a list
+        of per-worker resps via ``_collect_all`` and break the trainer.)
+        """
         require(int(req.batch_size) > 0, "ComposedRolloutEngine.generate: empty req")
         text_primitive = req.primitives.get("text")
         require(

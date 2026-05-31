@@ -11,6 +11,7 @@ import torch.distributed as dist
 from diffusionrl.config.registration import register_config
 from diffusionrl.config.require import require
 from diffusionrl.distributed.weight_sync.base import BucketedUpdateWeight
+from diffusionrl.distributed.weight_sync.serialize import serialize_named_tensors
 from diffusionrl.utils.peft_merge import extract_lora_tensors
 
 
@@ -111,37 +112,13 @@ class UpdateWeightFromTensor(BucketedUpdateWeight):
         del weight_version
         if self._ipc_gather_group is None or self._ipc_engine is None or self._ipc_gather_src is None:
             return
-        try:
-            from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions  # type: ignore[import]
-        except ImportError:
-            from sglang.srt.patch_torch import monkey_patch_torch_reductions  # type: ignore[import]
-        from sglang.srt.utils import MultiprocessingSerializer
-
-        try:
-            from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket  # type: ignore[import]
-        except ImportError:
-            from sglang.srt.model_executor.model_runner import FlattenedTensorBucket  # type: ignore[import]
-
-        monkey_patch_torch_reductions()
-
         # ``track_prefix`` only routes the call to the right composed-engine
         # child; the SGLang server itself wants clean parameter names.
         if track_prefix:
             strip = f"{track_prefix}."
             named_tensors = [(n.removeprefix(strip), t) for n, t in named_tensors]
 
-        named_tensors_by_dtype = {}
-        for name, tensor in named_tensors:
-            named_tensors_by_dtype.setdefault(tensor.dtype, []).append((name, tensor))
-
-        serialized_tensors = []
-        for grouped_named_tensors in named_tensors_by_dtype.values():
-            bucket = FlattenedTensorBucket(named_tensors=grouped_named_tensors)
-            payload = {
-                "flattened_tensor": bucket.get_flattened_tensor(),
-                "metadata": bucket.get_metadata(),
-            }
-            serialized_tensors.append(MultiprocessingSerializer.serialize(payload, output_str=True))
+        serialized_tensors = serialize_named_tensors(named_tensors)
 
         if self._ipc_gather_src == dist.get_rank():
             gathered_serialized_batches = [None for _ in range(dist.get_world_size(self._ipc_gather_group))]
@@ -166,8 +143,6 @@ class UpdateWeightFromTensor(BucketedUpdateWeight):
                     "track_prefix": track_prefix,
                 }
                 ray.get(self._ipc_engine.update_weights_from_tensor.remote(**kwargs))
-            if is_last_bucket:
-                ray.get(self._ipc_engine.flush_cache.remote(track_prefix=track_prefix))
 
 
 __all__ = ["TensorPayloadSyncConfig", "UpdateWeightFromTensor"]

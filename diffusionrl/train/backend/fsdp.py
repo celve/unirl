@@ -11,6 +11,7 @@ same shared bundle.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import Dict, List, Optional, Tuple
 
@@ -176,20 +177,33 @@ class FSDPBackend(Remote):
         on this backend's model (they share the bundle).  Caller must
         only invoke this when ``has_backward`` was True for the
         accumulated micro-batches.
+
+        Skips the whole step on a non-finite (NaN/Inf) clipped grad norm:
+        stepping would scale every parameter by the bad norm and poison the
+        weights, crashing the next rollout's sampling. The clipped norm is an
+        all-rank scalar so the skip is identical on every rank. This is the one
+        optimizer-step chokepoint every v2 trainer (PE / VLM / diffusion via
+        ``TrainStack``) routes through, so the guard covers all of them.
         """
         clipped = clip_grad_norm(list(trainable_params(self.model)), float(max_grad_norm))
+        grad_norm = float(clipped.item()) if isinstance(clipped, torch.Tensor) else float(clipped or 0.0)
+
+        if not math.isfinite(grad_norm):
+            logger.warning(
+                "FSDPBackend.optimizer_step: non-finite grad norm (%s) at step %d; skipping step.",
+                grad_norm,
+                self._optimizer_step_count,
+            )
+            self.optimizer.zero_grad(set_to_none=True)
+            return grad_norm
+
         self.optimizer.step()
         if self.scheduler is not None:
             self.scheduler.step()
         if self.ema is not None:
             self.ema.step(self._optimizer_step_count)
         self._optimizer_step_count += 1
-
-        if clipped is None:
-            return 0.0
-        if isinstance(clipped, torch.Tensor):
-            return float(clipped.item())
-        return float(clipped)
+        return grad_norm
 
     def on_rollout_end(self) -> None:
         if self.ema is not None:

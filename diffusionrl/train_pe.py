@@ -28,8 +28,13 @@ def main(cfg: DictConfig) -> None:
         reward_cfg=cfg.reward,
         data_source_cfg=cfg.data_source,
         sampling_cfg=cfg.sampling,
+        sync_cfg=cfg.get("sync"),
+        devices_per_node=int(cfg.get("devices_per_node", 8)),
     )
-    trainer.train(num_rollouts=int(cfg.get("num_rollouts", 100)))
+    trainer.train(
+        num_rollouts=int(cfg.get("num_rollouts", 100)),
+        weight_sync_interval=int(cfg.get("weight_sync_interval", 1)),
+    )
 
 
 if __name__ == "__main__":

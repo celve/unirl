@@ -50,14 +50,6 @@ export http_proxy="${http_proxy:-http://star-proxy.oa.com:3128}"
 export https_proxy="${https_proxy:-http://star-proxy.oa.com:3128}"
 export no_proxy="${no_proxy:-localhost,127.0.0.1,.tencent.com}"
 
-# === PyTorch allocator: reduce fragmentation across rollouts ===
-# First e2e attempt's OOM trace showed 8 GiB reserved-but-unallocated
-# despite the rollout/train cycle freeing. expandable_segments lets the
-# allocator reuse fragmented blocks instead of failing on a large alloc.
-# NOTE: expandable_segments requires Linux kernel 5.6+ (pidfd_getfd) for
-# CUDA IPC used by SGLang weight sync. Disable if kernel doesn't support it.
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:False}"
-
 # === Log destination (Ceph per-region log dir) ===
 LOG_DIR="/mnt/${LOCATION}/logs"
 mkdir -p "${LOG_DIR}"

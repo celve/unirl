@@ -1,0 +1,299 @@
+# PE (Prompt Enhancement) joint trainer — composed_pe DUAL-ENGINE (sglang), v2.
+#
+# Same two-track PE recipe as pe_trainside.yaml, but the rollout is a
+# ComposedRolloutEngine driving TWO separate-process SGLang engines:
+#   - ar:        SGLangLLMRolloutEngine (Qwen3 SRT)   → P*N rewrites
+#   - diffusion: SGLangRolloutEngine    (SD3 sglang)  → P*N*M images
+# Trained LoRA reaches each engine via a per-track LoraWeightSync, routed to the
+# matching child of the composed engine by ``track_prefix``:
+#   - diffusion: mode=lora → set_lora_from_tensors (SD3 sglang LoRA pool)
+#   - ar:        mode=lora → set_lora_from_tensors (SGLang LLM LoRA pool)
+# Sync runs every ``weight_sync_interval`` rollouts (skip step 0).
+#
+# Pairs with diffusionrl/train_pe.py:
+#   python -m diffusionrl.train_pe --config-name pe_sglang
+#
+# Format mirrors conf_v2/pe_trainside.yaml (v2); engine params mirror
+# conf/experiment/pe_joint_multi_track_e2e.yaml (v1). Set checkpoint paths via
+# the PRETRAINED_MODEL / LLM_MODEL env vars (see ${oc.env:...} defaults below).
+#
+# batch_size MUST be divisible by num_devices — the composed rollout dispatches
+# generate DP_ALL (Handle shards P across DP workers, then merges the per-worker
+# resps). Default P=8 on 8 GPUs → 1 prompt/worker × N=2 × M=2.
+# 1-GPU wiring smoke (bypasses the multi-GPU DP merge entirely — dp_size=1 returns
+# the single worker's resp with no cross-worker concat):
+#   python -m diffusionrl.train_pe --config-name pe_sglang num_devices=1 ++devices_per_node=1 batch_size=2 num_rollouts=3
+# Scale toward the v1 e2e (P=8 N=4 M=4) once green.
+#
+# VERIFY at smoke (engine-specific, can't be unit-checked):
+#   1. AR LoRA key format accepted by SGLang LLM /load_lora_adapter_from_tensors
+#      — sync.ar.param_name_prefix. "" sends HF-native keys (model.layers.*);
+#      if the server rejects, try "base_model.model." (PEFT envelope).
+#   2. SGLang diffusion LoRA target-module names (diffusion.bundle...lora_target_modules).
+#   3. per-engine mem_fraction_static budget on the colocated GPU.
+
+num_devices: 8
+batch_size: 8                 # P; MUST be divisible by num_devices (composed rollout = DP_ALL)
+
+# LoRA weight-sync cadence (read by PETrainer.train): push each track's adapter
+# into its engine every N rollouts. 1 = on-policy. Step 0 is skipped.
+weight_sync_interval: 1
+num_rollouts: 300
+
+# ── Diffusion side (SD3) — copied from pe_trainside.yaml ───────────────────
+diffusion:
+  bundle:
+    _target_: diffusionrl.models.sd3.bundle.SD3Bundle.from_config
+    config:
+      _target_: diffusionrl.models.sd3.config.SD3PipelineConfig
+      pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
+      model_precision: bf16
+      autocast_precision: bf16
+      trajectory_precision: bf16
+      logprob_precision: fp32
+      shift: 3.0
+      # SGLang diffusion rollout boots in (online) LoRA mode and wraps these
+      # modules. Trainside ignores these hints (FSDPBackend.lora_cfg injects
+      # the same target set). model_config is shared with the rollout via
+      # ``rollout.model_config: ${diffusion.bundle.config}``.
+      use_lora: true
+      lora_target_modules:
+        - attn.add_k_proj
+        - attn.add_q_proj
+        - attn.add_v_proj
+        - attn.to_add_out
+        - attn.to_k
+        - attn.to_out.0
+        - attn.to_q
+        - attn.to_v
+  pipeline:
+    _target_: diffusionrl.models.sd3.pipeline.SD3Pipeline
+    shift: 3.0
+    autocast_precision: bf16
+    trajectory_precision: bf16
+    logprob_precision: fp32
+    strategy:
+      _target_: diffusionrl.sde.kernels.FlowSDEStrategy
+  backend:
+    _target_: diffusionrl.train.backend.fsdp.FSDPBackend
+    block_class_names: ["JointTransformerBlock"]
+    trainable_attr: transformer
+    fsdp_cfg:
+      _target_: diffusionrl.train.configs.FSDPConfig
+      param_dtype: bf16
+      cpu_offload: false
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: false
+      use_torch_compile: false
+    optimizer_cfg:
+      _target_: diffusionrl.train.backend.base.OptimizerConfig
+      learning_rate: 3.0e-4
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_epsilon: 1.0e-8
+      weight_decay: 0.0
+    scheduler_cfg:
+      _target_: diffusionrl.train.backend.base.LrSchedulerConfig
+      type: constant
+      warmup_steps: 0
+      total_steps: 10000
+    lora_cfg:
+      _target_: diffusionrl.train.configs.LoraConfig
+      rank: 16
+      alpha: 32
+      dropout: 0.0
+      bias: none
+      task_type: FEATURE_EXTRACTION
+      target_modules:
+        - attn.add_k_proj
+        - attn.add_q_proj
+        - attn.add_v_proj
+        - attn.to_add_out
+        - attn.to_k
+        - attn.to_out.0
+        - attn.to_q
+        - attn.to_v
+  algorithm:
+    _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
+    stage_attr: diffusion
+    clip_range: 1.0e-4
+    clip_schedule: constant
+    conditions_cls:
+      _target_: hydra.utils.get_class
+      path: diffusionrl.models.sd3.conditions.SD3Conditions
+    params: ${sampling.diffusion}
+  stack:
+    _target_: diffusionrl.train.stack.TrainStack
+    micro_batch_size: 1
+    max_grad_norm: 1.0
+
+# ── AR side (Qwen3) — copied from pe_trainside.yaml ────────────────────────
+ar:
+  bundle:
+    _target_: diffusionrl.models.qwen3.bundle.Qwen3Bundle.from_config
+    config:
+      _target_: diffusionrl.models.qwen3.config.Qwen3PipelineConfig
+      pretrained_model_ckpt_path: ${oc.env:LLM_MODEL,Qwen/Qwen3-0.6B}
+      model_precision: bf16
+      autocast_precision: bf16
+      logprob_precision: fp32
+  pipeline:
+    _target_: diffusionrl.models.qwen3.pipeline.Qwen3Pipeline
+    autocast_precision: bf16
+    logprob_precision: fp32
+  backend:
+    _target_: diffusionrl.train.backend.fsdp.FSDPBackend
+    block_class_names: ["Qwen3DecoderLayer"]   # VERIFY at smoke: HF Qwen3 decoder-layer class
+    trainable_attr: transformer
+    fsdp_cfg:
+      _target_: diffusionrl.train.configs.FSDPConfig
+      param_dtype: bf16
+      cpu_offload: false
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: false
+      use_torch_compile: false
+    optimizer_cfg:
+      _target_: diffusionrl.train.backend.base.OptimizerConfig
+      learning_rate: 5.0e-6      # v1 e2e value (ARGRPO ratio is update-sensitive)
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_epsilon: 1.0e-8
+      weight_decay: 0.0
+    scheduler_cfg:
+      _target_: diffusionrl.train.backend.base.LrSchedulerConfig
+      type: constant
+      warmup_steps: 0
+      total_steps: 10000
+    lora_cfg:
+      _target_: diffusionrl.train.configs.LoraConfig
+      rank: 16
+      alpha: 32
+      dropout: 0.0
+      bias: none
+      task_type: CAUSAL_LM
+      target_modules: [q_proj, k_proj, v_proj, o_proj]
+  algorithm:
+    _target_: diffusionrl.algorithms.grpo.ARGRPO
+    stage_attr: ar
+    clip_range: 1.0e-4
+    clip_schedule: constant
+    conditions_cls:
+      _target_: hydra.utils.get_class
+      path: diffusionrl.models.qwen3.conditions.Qwen3ARConditions
+  stack:
+    _target_: diffusionrl.train.stack.TrainStack
+    micro_batch_size: 1
+    max_grad_norm: 1.0
+
+# ── Composed dual-engine rollout: sglang_llm (ar) + sglang (diffusion) ──────
+rollout:
+  _target_: diffusionrl.rollout.engine.composed.engine.ComposedRolloutEngine
+  # The diffusion child needs the SD3 model_config (path + shift + LoRA hints);
+  # the ar child receives it but ignores it (uses its own ckpt path).
+  model_config: ${diffusion.bundle.config}
+  # SDE strategy → SGLang kernel label for the diffusion child (flow → "sde").
+  strategy:
+    _target_: diffusionrl.sde.kernels.FlowSDEStrategy
+  config:
+    _target_: diffusionrl.rollout.engine.composed.config.ComposedRolloutEngineConfig
+    sleep_diffusion_on_start: false
+    pe_instruction: null        # set a rewrite instruction to enable real PE
+    pe_marker: null
+    ar:
+      _target_: diffusionrl.rollout.engine.sglang_llm.config.SGLangLLMEngineConfig
+      pretrained_model_ckpt_path: ${oc.env:LLM_MODEL,Qwen/Qwen3-0.6B}
+      tp_size: 1
+      max_new_tokens: 256
+      temperature: 0.7
+      top_p: 0.9
+      concurrency: 4
+      engine_kwargs:
+        mem_fraction_static: 0.05
+        skip_server_warmup: true
+        disable_cuda_graph: false
+        attention_backend: triton
+        enable_lora: true
+        max_lora_rank: 16
+        lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+    diffusion:
+      _target_: diffusionrl.rollout.engine.sglang.config.SGLangEngineConfig
+      model_family: sd3
+      tp_size: 1
+      local_mode: true
+      sampling: ${sampling.diffusion}
+      engine_kwargs:
+        mem_fraction_static: 0
+        skip_server_warmup: true
+        disable_cuda_graph: true
+        attention_backend: torch_sdpa
+
+reward:
+  _target_: diffusionrl.reward.service.RewardService
+  backend:
+    _target_: diffusionrl.reward.local.pickscore.PickScoreRewardScorer
+    base_device: cuda
+    config:
+      _target_: diffusionrl.reward.local.pickscore.PickScoreSpec
+      batch_size: 8
+      device: auto
+      processor_id: laion/CLIP-ViT-H-14-laion2B-s32B-b79K
+      model_id: yuvalkirstain/PickScore_v1
+
+data_source:
+  _target_: diffusionrl.data.data_source.DefaultDataSource
+  args: {}                      # DefaultDataSource ignores args; uses hardcoded prompts
+
+# ComposedSamplingParams drives PEPipeline's fan-out: ar.samples_per_prompt = N
+# rewrites, diffusion.samples_per_prompt = M images per rewrite.
+sampling:
+  _target_: diffusionrl.types.sampling.ComposedSamplingParams
+  ar:
+    _target_: diffusionrl.types.sampling.ARSamplingParams
+    samples_per_prompt: 4       # N rewrites per prompt
+    temperature: 0.7
+    max_new_tokens: 256
+    top_p: 0.9
+  diffusion:
+    _target_: diffusionrl.types.sampling.DiffusionSamplingParams
+    samples_per_prompt: 8       # M images per rewrite
+    num_inference_steps: 10
+    guidance_scale: 1.0
+    height: 512
+    width: 512
+    eta: 0.7
+    seed: 42
+    init_same_noise: false
+    autocast_precision: bf16
+    trajectory_precision: bf16
+    logprob_precision: fp32
+    sde_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+# ── Per-track LoRA weight-sync bridges (PETrainer builds one each) ──────────
+# Each pushes its track's trained LoRA into the matching composed-engine child,
+# routed by ``track_prefix``. ``verify`` is vLLM-Omni-only → false for SGLang.
+sync:
+  diffusion:
+    _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
+    track_prefix: diffusion
+    mode: lora
+    # Stripped engine-side by adapt_lora_for_sglang (reads model_config
+    # .weight_sync_param_name_prefix == "transformer.").
+    param_name_prefix: "transformer."
+    packed_modules: {}
+    adapter_name: default
+    verify: false
+  ar:
+    _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
+    track_prefix: ar
+    mode: lora                  # primary; set mode: merged for full-param transfer (rough, untested)
+    # SGLang LLM has no engine-side key stripping → send HF-native keys
+    # (model.layers.*). VERIFY #1: if /load_lora_adapter_from_tensors rejects,
+    # try "base_model.model." (PEFT envelope).
+    param_name_prefix: ""
+    packed_modules: {}
+    adapter_name: default
+    verify: false

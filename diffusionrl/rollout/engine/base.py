@@ -64,14 +64,6 @@ class BaseRolloutEngine(Remote, ABC):
         del track_prefix
         self.wake_up()
 
-    def flush_cache(self, *, track_prefix: str = "") -> None:
-        """Drain pending scheduler/cache work after a weight update.
-
-        ``track_prefix`` is a composed-engine routing hint. Single engines may
-        ignore it.
-        """
-        del track_prefix
-
     @property
     def is_offloaded(self) -> bool:
         """Whether the engine has released its runtime resources."""
