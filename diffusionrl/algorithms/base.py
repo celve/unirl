@@ -164,9 +164,8 @@ class StageAlgorithm(Remote, ABC):
         mode: SGLang emits the trajectory but not the per-step log-probs,
         so the trainer fills ``segment.sde_logp`` here via a ``torch.no_grad``
         ``stage.replay``. Because this hook fires ONCE per ``RolloutResp``
-        — before the ``num_updates_per_batch`` loop in
-        :meth:`diffusionrl.ray.train_actor.TrainActor._train_resp`
-        — the populated tensor is frozen at pre-update weights across all
+        — before the trainer's ``num_updates_per_batch`` train loop —
+        the populated tensor is frozen at pre-update weights across all
         N updates, matching the on-policy ratio semantics of PPO-style
         algorithms.
 

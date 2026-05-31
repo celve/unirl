@@ -78,9 +78,8 @@ class BucketedIPCReceiveMixin:
     ) -> None:
         """Receive a state dict over the per-rank ZMQ socket.
 
-        Trainer-side counterpart is ``UpdateWeightFromIPC`` in
-        ``diffusionrl.distributed.weight_sync.ipc`` (v1) or
-        ``distributed.weight_sync.full.ipc.IPCWeightSync`` (v2).
+        Trainer-side counterpart is
+        ``distributed.weight_sync.full.ipc.IPCWeightSync``.
 
         ``replica_rank`` defaults to ``replica_rank_from_env()`` (v1 behavior);
         the v2 colocated handler passes its train-rank explicitly so colocated
@@ -195,7 +194,7 @@ class BucketedIPCReceiveMixin:
         sglang's ``MultiprocessingSerializer`` + ``FlattenedTensorBucket``,
         then forwards the reconstructed ``[(name, tensor), ...]`` to
         ``self.load_weights``. Sender is
-        :class:`diffusionrl.distributed.weight_sync.tensor.UpdateWeightFromTensor`.
+        :class:`diffusionrl.distributed.weight_sync.full.tensor.TensorWeightSync`.
 
         Runtime dep: sglang must be installed in the worker subprocess for the
         ``FlattenedTensorBucket`` dataclass to round-trip the pickle. The pod

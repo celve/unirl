@@ -100,7 +100,7 @@ class FullWeightSync(Remote):
         on every train rank in lockstep; each yields a full (unsharded) CUDA
         tensor per param, in a deterministic order.
 
-        ``lora_merged`` selects the walk (mirrors v1 ``BucketedUpdateWeight``):
+        ``lora_merged`` selects the walk:
           - ``True``  → ``merged_state_dict`` folds LoRA deltas into the base
             weights and yields the trained module's own keys (LoRA already
             absorbed, ``.base_layer.`` flattened away).
@@ -134,9 +134,8 @@ class FullWeightSync(Remote):
         """Yield ``(bucket, is_last)`` where ``bucket`` is a list of
         ``(name, tensor)`` up to ``bucket_size_mb``.
 
-        Mirrors the accumulation in ``BucketedUpdateWeight.update_weights``
-        (``weight_sync/base.py``). ``is_last`` is True only for the final
-        bucket — used to drive ``flush_cache`` on the receiver.
+        ``is_last`` is True only for the final bucket — used to drive
+        ``flush_cache`` on the receiver.
         """
         bucket: List[Tuple[str, object]] = []
         nbytes = 0

@@ -71,7 +71,7 @@ the function name on the right to read the actual implementation:
          resp.component_rewards   (per-component, for logging)
 
 [2] fused pipeline aggregates one shard's responses
-    diffusionrl.ray.mixins.rollout_pipeline.RolloutPipelineMixin.run_rollout_pipeline
+    the rollout pipeline's run_rollout_pipeline
       -> all_rewards   = torch.cat([r.rewards for r in responses])
          all_group_ids = [gid for r in responses for gid in r.group_ids]
 
@@ -180,7 +180,7 @@ gate         _use_ema_rollout = _should_use_ema_rollout(cfg) if direct_sampling 
 
 rollout wrap with train_group.use_eval_ema() if _use_ema_rollout else nullcontext():
                  rollout_pipeline.generate(...)
-             TrainActorGroup.use_eval_ema                 (diffusionrl/ray/group/train.py)
+             (train-group eval-EMA scope)
 
 shadow swap  TrainActor.apply_eval_ema  ─►  EMAPolicy.apply_ema_to_model
              TrainActor.restore_from_eval ─► EMAPolicy.restore_from_ema

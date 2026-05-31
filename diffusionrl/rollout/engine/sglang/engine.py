@@ -27,7 +27,7 @@ What this engine intentionally does NOT do (vs upstream SGLang at
 
 - No ``initialize(device)`` step / ``_is_initialized`` flag — one-shot ctor.
 - No ``update_weights(state_dict)`` / ``update_weights_from_path`` — the
-  trainer-side ``UpdateWeightFromTensor`` handler packages and pushes via
+  trainer-side ``TensorWeightSync`` handler packages and pushes via
   ``update_weights_from_tensor`` directly.
 - No ``_infer_model_type`` substring match — ``cfg.model_family`` is an
   explicit enum.

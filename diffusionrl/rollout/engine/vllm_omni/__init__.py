@@ -4,11 +4,11 @@ Modality-keyed wrapper around vllm-omni's ``Omni`` orchestrator for
 HunyuanImage 3.0. Supports all four upstream modalities: t2i, it2i,
 i2t, t2t.
 
-Imports are lazy to avoid a circular dependency: the trainer-side
-``distributed.weight_sync.ipc`` needs ``weight_sync.bucketed_transfer``
-which lives under this package. Eager-importing ``engine`` here would
-pull ``rollout.engine.base`` which is still initializing when the import
-chain starts from ``base → types → distributed → weight_sync → ipc``.
+Imports are lazy to avoid a circular dependency: the trainer-side IPC
+weight-sync handler needs ``weight_sync.bucketed_transfer`` which lives
+under this package. Eager-importing ``engine`` here would pull
+``rollout.engine.base`` which is still initializing when the import
+chain starts from ``base → types → distributed → weight_sync → full.ipc``.
 """
 
 

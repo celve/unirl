@@ -99,7 +99,7 @@ class LoraWeightSync(Remote):
 
     def _sync_lora(self) -> None:
         """LoRA-adapter path: ``set_lora_from_tensors`` into the engine's pool."""
-        from diffusionrl.distributed.weight_sync.weight_sync import _peft_config_dict
+        from diffusionrl.distributed.weight_sync.payload import _peft_config_dict
         from diffusionrl.utils.peft_merge import extract_lora_tensors
 
         model = self._backend.model
@@ -137,7 +137,7 @@ class LoraWeightSync(Remote):
         pass, grouped by dtype. NOTE: no size bucketing yet — fine for small
         models (Qwen3-0.6B); add bucketing before promoting to large LLMs.
         """
-        from diffusionrl.distributed.weight_sync.serialize import serialize_named_tensors
+        from diffusionrl.distributed.weight_sync.payload import serialize_named_tensors
         from diffusionrl.utils.peft_merge import merged_state_dict
 
         model = self._backend.model

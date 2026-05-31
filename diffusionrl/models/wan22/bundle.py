@@ -207,19 +207,16 @@ class WAN22Bundle(Bundle):
             "high_noise."  -> "transformer."
             "low_noise."   -> "transformer_2."
 
-        **Current consumer status**: as of this PR, the standard
-        ``BucketedUpdateWeight.update_weights`` does prefix-prepend only
-        (``diffusionrl/distributed/weight_sync/base.py``); it does NOT
-        consume ``weight_sync_name_map``. So this method is a
-        forward-looking API surfaced on the bundle for the eventual
-        WAN22 separate-sampling (vllm-omni rollout) path. For trainside
-        rollout (rollout = train Policy stack), no cross-process sync
-        runs, so missing the substitution is harmless.
+        **Current consumer status**: the weight-sync handlers do
+        prefix-prepend only; they do NOT consume ``weight_sync_name_map``.
+        So this method is a forward-looking API surfaced on the bundle for
+        the eventual WAN22 separate-sampling (vllm-omni rollout) path. For
+        trainside rollout (rollout = train Policy stack), no cross-process
+        sync runs, so missing the substitution is harmless.
 
-        When wiring the consumer side:
-        ``BucketedUpdateWeight`` gains an optional
-        ``name_substitutions: Optional[Dict[str, str]]`` ctor field;
-        ``train.py::setup_weight_sync`` reads
+        When wiring the consumer side: the weight-sync handler gains an
+        optional ``name_substitutions: Optional[Dict[str, str]]`` ctor
+        field and the trainer's weight-sync setup reads
         ``getattr(self.bundle, "weight_sync_name_map", lambda: {})()``
         and passes it through to the sync config.
         """

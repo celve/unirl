@@ -3,8 +3,7 @@
 Registered under ``rollout/engine: sglang`` so it coexists with the legacy
 ``rollout/engine: sglang`` preset at ``diffusionrl/samplers/sglang/config.py``.
 Materialized via ``build(cfg.rollout.engine, device=..., strategy=...,
-rank=..., model_config=...)`` from
-:class:`diffusionrl.ray.rollout_actor.RolloutActor`.
+rank=..., model_config=...)`` from the rollout actor.
 
 Differences vs the legacy config:
 

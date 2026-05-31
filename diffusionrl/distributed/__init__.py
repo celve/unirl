@@ -17,38 +17,7 @@ from __future__ import annotations
 import importlib
 from typing import Dict, Tuple
 
-_LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
-    "BucketedUpdateWeight": ("diffusionrl.distributed.weight_sync", "BucketedUpdateWeight"),
-    "CheckpointSyncConfig": ("diffusionrl.distributed.weight_sync", "CheckpointSyncConfig"),
-    "IPCBucketedSyncConfig": ("diffusionrl.distributed.weight_sync", "IPCBucketedSyncConfig"),
-    "NcclBroadcastSyncConfig": ("diffusionrl.distributed.weight_sync", "NcclBroadcastSyncConfig"),
-    "TensorPayloadSyncConfig": ("diffusionrl.distributed.weight_sync", "TensorPayloadSyncConfig"),
-    "UpdateWeight": ("diffusionrl.distributed.weight_sync", "UpdateWeight"),
-    "UpdateWeightFromCheckpoint": ("diffusionrl.distributed.weight_sync", "UpdateWeightFromCheckpoint"),
-    "UpdateWeightFromDistributed": ("diffusionrl.distributed.weight_sync", "UpdateWeightFromDistributed"),
-    "UpdateWeightFromIPC": ("diffusionrl.distributed.weight_sync", "UpdateWeightFromIPC"),
-    "UpdateWeightFromTensor": ("diffusionrl.distributed.weight_sync", "UpdateWeightFromTensor"),
-    "checkpoint_ready_marker_path": (
-        "diffusionrl.distributed.weight_sync_checkpoint",
-        "checkpoint_ready_marker_path",
-    ),
-    "cleanup_published_checkpoint": (
-        "diffusionrl.distributed.weight_sync_checkpoint",
-        "cleanup_published_checkpoint",
-    ),
-    "publish_checkpoint_atomic": (
-        "diffusionrl.distributed.weight_sync_checkpoint",
-        "publish_checkpoint_atomic",
-    ),
-    "publish_sglang_transformer_checkpoint_atomic": (
-        "diffusionrl.distributed.weight_sync_checkpoint",
-        "publish_sglang_transformer_checkpoint_atomic",
-    ),
-    "wait_for_published_checkpoint": (
-        "diffusionrl.distributed.weight_sync_checkpoint",
-        "wait_for_published_checkpoint",
-    ),
-}
+_LAZY_ATTRS: Dict[str, Tuple[str, str]] = {}
 
 __all__ = list(_LAZY_ATTRS.keys())
 

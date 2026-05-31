@@ -1,8 +1,7 @@
 """Driver-side rollout pipeline for ``RolloutReq`` / ``RolloutResp``.
 
 Composes four phases — ``load_prompts → plan_requests → exec_request →
-aggregate``. Driven by a
-:class:`diffusionrl.ray.group.rollout.RolloutActorGroup` whose actors
+aggregate``. Driven by a rollout actor group whose actors
 expose ``run_rollout_pipeline(req: RolloutReq) → List[RolloutResp]``.
 
 The trainer-facing contract is ``RolloutResp`` end-to-end: the train
@@ -12,7 +11,7 @@ directly with no intermediate ``TrainingBatch`` translation.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import ray
 import torch
@@ -32,10 +31,6 @@ from diffusionrl.types.sampling import (
     get_diffusion_params,
 )
 from diffusionrl.utils.scheduler_utils import TimestepScheduler
-
-if TYPE_CHECKING:
-    from diffusionrl.ray.group.rollout import RolloutActorGroup
-
 
 _SUPPORTED_MEDIA_REF_ROLES: Set[Tuple[str, str]] = {("image", "condition")}
 
@@ -242,7 +237,7 @@ class RolloutPipeline:
         self,
         *,
         req: RolloutReq,
-        rollout_group: "RolloutActorGroup",
+        rollout_group: Any,
         samples_per_prompt: int,
     ) -> List[RolloutResp]:
         """Dispatch to actor(s) using the fused ``run_rollout_pipeline`` actor method.

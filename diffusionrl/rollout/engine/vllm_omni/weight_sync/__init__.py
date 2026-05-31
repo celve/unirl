@@ -6,7 +6,7 @@ Modules:
   for ZMQ + CUDA-IPC bucketed weight transport (lifted from upstream verl).
   Pure-Python — does NOT pull vllm-omni at import time.
 - ``ipc_dispatch``: shared constants + ZMQ-handle naming used by both the
-  driver-side ``UpdateWeightFromIPC`` and the rollout-side extensions.
+  driver-side IPC weight-sync handler and the rollout-side extensions.
   Pure-Python — does NOT pull vllm-omni at import time.
 - ``ipc_receive_mixin`` / ``nccl_receive_mixin``: receive-side mixins for
   the worker extensions. Light, but ``ipc_receive_mixin`` imports
@@ -17,7 +17,7 @@ Modules:
   vllm-omni base classes at import time — heaviest.
 
 Eager-export only the pure-Python pieces so the trainer side
-(``UpdateWeightFromIPC`` etc.) and the bucketed-transfer test can import
+(the IPC weight-sync handler etc.) and the bucketed-transfer test can import
 ``diffusionrl.rollout.engine.vllm_omni.weight_sync`` without a working
 vllm-omni install (which requires a CUDA-13-compatible driver). The
 extension classes are reachable via their fully-qualified module path —

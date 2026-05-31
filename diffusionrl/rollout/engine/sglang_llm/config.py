@@ -3,7 +3,7 @@
 Registered under ``rollout/engine: sglang_llm`` with ``_target_`` pointing at
 :class:`SGLangLLMRolloutEngine`. Materialized via
 ``build(cfg.rollout.engine, device=..., strategy=..., rank=..., model_config=...)``
-from :class:`diffusionrl.ray.new_rollout_actor.NewRolloutActor`.
+from the rollout actor.
 
 Unlike :class:`diffusionrl.rollout.engine.sglang.config.SGLangEngineConfig`
 (which delegates the model path to the per-actor ``model_config``), this

@@ -2,7 +2,7 @@
 
 Both the engine-side dispatch (``VLLMOmniRolloutEngine.update_weights_from_ipc``
 fan-out to per-stage workers via ``collective_rpc``) and the trainer-side
-handler (``UpdateWeightFromIPC.update_bucket_weights``) need to agree on:
+IPC weight-sync handler need to agree on:
 
 - The ZMQ socket layout (one socket per ``(replica, stage, rank)`` tuple).
 - The fixed LoRA identifier used for the single adapter we hot-swap.

@@ -1,11 +1,11 @@
 """Shared NCCL-broadcast receive mixin for HI3 worker-extension classes.
 
 Mirrors the SGLang-style ``init_weights_update_group`` +
-``update_weights_from_distributed`` pair already used by the actor's
-:class:`diffusionrl.ray.mixins.rollout_weight_sync.RolloutWeightSyncMixin`.
+``update_weights_from_distributed`` pair used on the rollout weight-sync
+receive path.
 
 Trainer-side counterpart is
-:class:`diffusionrl.distributed.weight_sync.nccl.UpdateWeightFromDistributed`.
+:class:`diffusionrl.distributed.weight_sync.full.nccl.NCCLWeightSync`.
 The trainer brings up an external process group (rank 0) and broadcasts
 each tensor; this mixin's ``update_weights_from_distributed`` allocates
 the matching receive-side process group, receives each named tensor in
@@ -18,9 +18,9 @@ doesn't have the ``weight_transfer_engine`` slot or the
 ``init_weight_transfer_engine`` / ``update_weights(update_info)`` methods
 upstream provides. Re-implementing the SLIME-style raw-NCCL broadcast
 here keeps the change scoped to our extension class (no upstream patch)
-and matches the contract the trainer's ``UpdateWeightFromDistributed``
-already drives via ``actor.{init_weights_update_group,
-update_weights_from_distributed}.remote(...)``.
+and matches the contract the trainer's ``NCCLWeightSync``
+already drives via ``init_weights_update_group`` /
+``update_weights_from_distributed``.
 """
 
 from __future__ import annotations
