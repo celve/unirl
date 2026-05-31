@@ -20,23 +20,25 @@
 # Cluster topology defaults to taiji's job env (see "Cluster topology" below);
 # set the explicit vars to run on any other cluster.
 #
-# Data plane (how rollout samples reach the trainer) is selected with DATA_PLANE:
-#   ray         (default) driver gathers rollouts over the Ray object store
-#   tq_simple   TransferQueue on Ray-backed host storage (off-driver, zero infra)
-#   tq_mooncake TransferQueue over mooncake RDMA (production) — the head auto-starts
-#               mooncake_master + http_metadata_server and derives MOONCAKE_* from
-#               CHIEF_IP (override MOONCAKE_* to point at external services)
-#   keep_local  direct-sampling actors keep rollouts local; only light metadata
-#               crosses to the driver (no transfer at all)
+# The driver is one of the Hydra entrypoints, selected with ENTRY:
+#   train_diffusion (default)  conf/sd3_*, wan2*, qwen_image_* (diffusion)
+#   train_vlm                  conf/argrpo_qwen_vl_*, ar_spo_dppo_qwen3_* (VLM / AR)
+#   train_pe                   conf/pe_* (prompt-enhancement joint diffusion+AR)
+#
+# The first positional arg is the conf/ config name (passed to Hydra as
+# --config-name); any extra args are forwarded verbatim as Hydra overrides. The
+# launcher sets num_devices to the whole cluster (NUM_NODES * GPUS_PER_NODE) so a
+# conf authored for a different size still runs here (an explicit num_devices=...
+# wins). Run settings (PRETRAINED_MODEL / DATA_PATH / WANDB_*) come from the conf
+# via ${oc.env:...}; export them to override a conf's own default.
 #
 # Examples:
 #   # SPMD batch (taiji lands this same line on every node):
-#   bash scripts/run_experiment_multinode_taiji.sh grpo_flux2_klein9b_trainside_2x8
-#   DATA_PLANE=tq_mooncake PROTOCOL=rdma \
-#     bash scripts/run_experiment_multinode_taiji.sh grpo_flux2_klein9b_trainside_2x8
+#   bash scripts/run_experiment_multinode_taiji.sh sd3_sglang_native_colocate
 #   # ssh fan-out (run once on the head only):
-#   LAUNCH=ssh DATA_PLANE=keep_local \
-#     bash scripts/run_experiment_multinode_taiji.sh grpo_flux2_klein9b_trainside_2x8
+#   LAUNCH=ssh bash scripts/run_experiment_multinode_taiji.sh sd3_sglang_native_colocate
+#   # VLM/AR recipe (4x8):
+#   ENTRY=train_vlm bash scripts/run_experiment_multinode_taiji.sh argrpo_qwen_vl_geo3k_mc_4x8
 #
 set -euo pipefail
 
@@ -46,7 +48,7 @@ cd "${REPO_ROOT}"
 
 if [ -z "${EXPERIMENT:-}" ]; then
     if [ "$#" -lt 1 ]; then
-        echo "Usage: $0 <experiment> [hydra overrides...]"
+        echo "Usage: $0 <config-name> [hydra overrides...]"
         exit 2
     fi
     EXPERIMENT="$1"
@@ -93,80 +95,10 @@ if [ "${RAY_JOIN_ONLY:-0}" = "1" ]; then
     exit 0
 fi
 
-# --- Path / logging defaults ------------------------------------------------
-export DATA_PATH="${DATA_PATH:-${REPO_ROOT}/datasets/pickscore/train.txt}"
-export EVAL_DATA_PATH="${EVAL_DATA_PATH:-${REPO_ROOT}/datasets/pickscore/test.txt}"
-export OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/${EXPERIMENT}}"
-export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${EXPERIMENT}}"
+# --- Run defaults (the conf reads these via ${oc.env:...}) ------------------
 export REPORT_TO_WANDB="${REPORT_TO_WANDB:-false}"
+export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${EXPERIMENT}}"
 export RAY_ADDRESS="${RAY_ADDRESS:-auto}"
-
-CMD=(
-    python -m diffusionrl.train
-    "+experiment=${EXPERIMENT}"
-    "run.data_path=${DATA_PATH}"
-    "run.eval_data_path=${EVAL_DATA_PATH}"
-    "resume.output_dir=${OUTPUT_DIR}"
-    "logging.run_name=${WANDB_RUN_NAME}"
-    "logging.report_to_wandb=${REPORT_TO_WANDB}"
-)
-if [ -n "${WANDB_ENTITY:-}" ]; then
-    CMD+=("logging.entity=${WANDB_ENTITY}")
-fi
-
-# --- Data-plane selection (DATA_PLANE) --------------------------------------
-# Append the Hydra overrides that pick how rollout data reaches the trainer.
-DATA_PLANE="${DATA_PLANE:-ray}"
-case "${DATA_PLANE}" in
-    ray)
-        : # default driver gather — no override
-        ;;
-    tq_simple)
-        CMD+=("+transfer_queue=simple")
-        ;;
-    tq_mooncake)
-        # Default the mooncake endpoints to the head (CHIEF_IP), where rank 0
-        # starts the services below; explicit MOONCAKE_* still win.
-        if [ -z "${MOONCAKE_MASTER_ADDR:-}" ] && [ -n "${CHIEF_IP:-}" ]; then
-            MOONCAKE_MASTER_ADDR="${CHIEF_IP}:50051"
-        fi
-        if [ -z "${MOONCAKE_METADATA_URL:-}" ] && [ -n "${CHIEF_IP:-}" ]; then
-            MOONCAKE_METADATA_URL="http://${CHIEF_IP}:8080/metadata"
-        fi
-        if [ -z "${MOONCAKE_METADATA_URL:-}" ] || [ -z "${MOONCAKE_MASTER_ADDR:-}" ]; then
-            echo "DATA_PLANE=tq_mooncake needs CHIEF_IP (taiji sets it) to derive the endpoints," >&2
-            echo "or explicit MOONCAKE_METADATA_URL + MOONCAKE_MASTER_ADDR." >&2
-            exit 2
-        fi
-        CMD+=(
-            "+transfer_queue=mooncake_tuned"
-            "transfer_queue.protocol=${PROTOCOL:-rdma}"
-            "transfer_queue.metadata_server=${MOONCAKE_METADATA_URL}"
-            "transfer_queue.master_server_address=${MOONCAKE_MASTER_ADDR}"
-        )
-        ;;
-    keep_local)
-        CMD+=("training.execution.keep_local=true")
-        ;;
-    *)
-        echo "Unknown DATA_PLANE='${DATA_PLANE}' (use ray|tq_simple|tq_mooncake|keep_local)" >&2
-        exit 2
-        ;;
-esac
-
-CMD+=("$@")
-
-echo "Command (DATA_PLANE=${DATA_PLANE}):"
-printf '  %q' "${CMD[@]}"
-echo
-
-if [ "${DRY_RUN:-0}" = "1" ]; then
-    exit 0
-fi
-
-if [ "${INSTALL_EDITABLE:-1}" = "1" ]; then
-    pip install --no-deps -e .
-fi
 
 # --- Cluster topology (taiji platform defaults) -----------------------------
 # Defaults come from taiji's multi-node job env (commented per line); the
@@ -195,32 +127,30 @@ NODE_IP="${NODE_IP:-127.0.0.1}"
 
 HEAD_IP="${HEAD_IP:-${CHIEF_IP:-${NODE_IP}}}"          # taiji CHIEF_IP:     head node IP
 
-# Mooncake binds its per-actor client to LOCAL_IP (transfer_queue/runtime.py); when
-# the platform did not set it, fall back to this node's routable IP so the client
-# does not bind a container-internal interface. Harmless for non-mooncake planes.
-export LOCAL_IP="${LOCAL_IP:-${NODE_IP}}"
+# --- Driver command ---------------------------------------------------------
+# num_devices spans the whole cluster; the conf's own value is overridden so one
+# recipe runs across node counts (an explicit num_devices=... in "$@" still wins).
+ENTRY="${ENTRY:-train_diffusion}"
+CMD=(
+    python -m "diffusionrl.${ENTRY}"
+    "--config-name=${EXPERIMENT}"
+    "num_devices=$((NUM_NODES * GPUS_PER_NODE))"
+)
+CMD+=("$@")
 
-# Head-only mooncake control plane: bring the services up so a single job
-# submission is self-contained. Idempotent (skips if already running); logs to
-# /tmp. Override MOONCAKE_* (above) to use external services instead.
-start_mooncake_services() {
-    if ! command -v mooncake_master >/dev/null 2>&1; then
-        echo "WARNING: mooncake_master not on PATH — start the mooncake services manually." >&2
-        return
-    fi
-    if ! pgrep -f mooncake_master >/dev/null 2>&1; then
-        echo "Starting mooncake_master (:50051) -> /tmp/mooncake_master.log"
-        nohup mooncake_master --port=50051 >/tmp/mooncake_master.log 2>&1 &
-    fi
-    if ! pgrep -f http_metadata_server >/dev/null 2>&1; then
-        echo "Starting mooncake http_metadata_server (:8080) -> /tmp/mooncake_metadata.log"
-        nohup python -m mooncake.http_metadata_server --port 8080 >/tmp/mooncake_metadata.log 2>&1 &
-    fi
-    sleep "${MOONCAKE_STARTUP_WAIT_S:-5}"
-}
+echo "Command (ENTRY=${ENTRY}, ${NUM_NODES}x${GPUS_PER_NODE}):"
+printf '  %q' "${CMD[@]}"
+echo
 
-# Start the Ray head on this node + bring up the mooncake control plane when the
-# mooncake data plane is selected. Used by both the SPMD rank-0 path and the ssh
+if [ "${DRY_RUN:-0}" = "1" ]; then
+    exit 0
+fi
+
+if [ "${INSTALL_EDITABLE:-1}" = "1" ]; then
+    pip install --no-deps -e .
+fi
+
+# Start the Ray head on this node. Used by both the SPMD rank-0 path and the ssh
 # head path.
 start_ray_head() {
     ray start --head \
@@ -228,12 +158,8 @@ start_ray_head() {
         --port="${RAY_PORT}" \
         --dashboard-host=0.0.0.0 \
         --num-gpus="${GPUS_PER_NODE}"
-    if [ "${DATA_PLANE}" = "tq_mooncake" ]; then
-        start_mooncake_services
-    fi
 }
 
-mkdir -p "${OUTPUT_DIR}"
 ray stop >/dev/null 2>&1 || true
 
 if [ "${LAUNCH}" = "ssh" ]; then
@@ -275,7 +201,7 @@ if [ "${LAUNCH}" = "ssh" ]; then
         ssh -f -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
             "${SSH_USER}@${w_ip}" \
             "cd '${REPO_ROOT}' && \
-             RAY_JOIN_ONLY=1 HEAD_IP='${HEAD_IP}' NODE_IP='${w_ip}' LOCAL_IP='${w_ip}' \
+             RAY_JOIN_ONLY=1 HEAD_IP='${HEAD_IP}' NODE_IP='${w_ip}' \
              GPUS_PER_NODE='${w_gpu}' RAY_PORT='${RAY_PORT}' \
              CONDA_ENV='${CONDA_ENV:-}' CONDA_SH='${CONDA_SH:-}' VENV_DIR='${VENV_DIR:-}' \
              ${ssh_nccl_env}\

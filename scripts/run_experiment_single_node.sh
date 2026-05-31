@@ -1,21 +1,29 @@
 #!/usr/bin/env bash
 #
 # Single-node experiment launcher (cluster-agnostic — no platform env needed).
-# Starts a local Ray head on this machine and runs the training driver.
+# Starts a local Ray head on this machine and runs the v2 training driver.
 #
-# Data plane (how rollout samples reach the trainer) is selected with DATA_PLANE:
-#   ray         (default) driver gathers rollouts over the Ray object store
-#   tq_simple   TransferQueue on Ray-backed host storage (off-driver, zero infra)
-#   keep_local  direct-sampling actors keep rollouts local; only light metadata
-#               crosses to the driver (no transfer at all)
+# The driver is one of the Hydra entrypoints, selected with ENTRY:
+#   train_diffusion (default)  conf/sd3_*, wan2*, qwen_image_* (diffusion)
+#   train_vlm                  conf/argrpo_qwen_vl_*, ar_spo_dppo_qwen3_* (VLM / AR)
+#   train_pe                   conf/pe_* (prompt-enhancement joint diffusion+AR)
 #
-# tq_mooncake (RDMA) is intentionally NOT offered here: it only pays off across
-# nodes and needs external mooncake services. On a single node use tq_simple;
-# for the mooncake data plane use scripts/run_experiment_multinode_taiji.sh.
+# The first positional arg is the conf/ config name (passed to Hydra as
+# --config-name); any extra args are forwarded verbatim as Hydra overrides.
+# The launcher sets num_devices to this node's GPU count so a conf authored for
+# a different node count still runs here (an explicit num_devices=... wins).
 #
-# Example:
-#   bash scripts/run_experiment_single_node.sh flowgrpo_fast_sd3_colocate
-#   DATA_PLANE=tq_simple bash scripts/run_experiment_single_node.sh grpo_wan21_t2v
+# Run settings come from the conf via ${oc.env:...}: model checkpoint
+# (PRETRAINED_MODEL / QWEN_VL_PATH / ...), data (DATA_PATH / EVAL_DATA_PATH —
+# read only by the VLM/AR recipes; diffusion recipes use their own data_source),
+# and W&B (REPORT_TO_WANDB / WANDB_RUN_NAME / WANDB_ENTITY / WANDB_PROJECT).
+# Export any of them before running to override a conf's own default.
+#
+# Examples:
+#   bash scripts/run_experiment_single_node.sh sd3_trainside
+#   REPORT_TO_WANDB=true bash scripts/run_experiment_single_node.sh qwen_image_trainside
+#   ENTRY=train_vlm bash scripts/run_experiment_single_node.sh argrpo_qwen_vl_geo3k_mc_4x8
+#   ENTRY=train_pe bash scripts/run_experiment_single_node.sh pe_trainside
 #
 set -euo pipefail
 
@@ -25,7 +33,7 @@ cd "${REPO_ROOT}"
 
 if [ -z "${EXPERIMENT:-}" ]; then
     if [ "$#" -lt 1 ]; then
-        echo "Usage: $0 <experiment> [hydra overrides...]"
+        echo "Usage: $0 <config-name> [hydra overrides...]"
         exit 2
     fi
     EXPERIMENT="$1"
@@ -50,50 +58,28 @@ elif [ -n "${VENV_DIR:-}" ] && [ -f "${VENV_DIR}/bin/activate" ]; then
     source "${VENV_DIR}/bin/activate"
 fi
 
-# --- Path / logging defaults ------------------------------------------------
-export DATA_PATH="${DATA_PATH:-${REPO_ROOT}/datasets/pickscore/train.txt}"
-export EVAL_DATA_PATH="${EVAL_DATA_PATH:-${REPO_ROOT}/datasets/pickscore/test.txt}"
-export OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/${EXPERIMENT}}"
-export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${EXPERIMENT}}"
+# --- Run defaults (the conf reads these via ${oc.env:...}) ------------------
 export REPORT_TO_WANDB="${REPORT_TO_WANDB:-false}"
+export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${EXPERIMENT}}"
 export RAY_ADDRESS="${RAY_ADDRESS:-auto}"
 
-CMD=(
-    python -m diffusionrl.train
-    "+experiment=${EXPERIMENT}"
-    "run.data_path=${DATA_PATH}"
-    "run.eval_data_path=${EVAL_DATA_PATH}"
-    "resume.output_dir=${OUTPUT_DIR}"
-    "logging.run_name=${WANDB_RUN_NAME}"
-    "logging.report_to_wandb=${REPORT_TO_WANDB}"
-)
-if [ -n "${WANDB_ENTITY:-}" ]; then
-    CMD+=("logging.entity=${WANDB_ENTITY}")
+# --- GPU count -> num_devices -----------------------------------------------
+# Override with GPUS_PER_NODE, else autodetect, else assume 8. num_devices is
+# the size of the v2 DevicePool, i.e. the GPUs on this node.
+if [ -z "${GPUS_PER_NODE:-}" ]; then
+    GPUS_PER_NODE="$(nvidia-smi -L 2>/dev/null | wc -l || true)"
+    [ "${GPUS_PER_NODE:-0}" -gt 0 ] 2>/dev/null || GPUS_PER_NODE=8
 fi
 
-# --- Data-plane selection (DATA_PLANE) --------------------------------------
-# Append the Hydra overrides that pick how rollout data reaches the trainer.
-DATA_PLANE="${DATA_PLANE:-ray}"
-case "${DATA_PLANE}" in
-    ray)
-        : # default driver gather — no override
-        ;;
-    tq_simple)
-        CMD+=("+transfer_queue=simple")
-        ;;
-    keep_local)
-        CMD+=("training.execution.keep_local=true")
-        ;;
-    *)
-        echo "Unknown DATA_PLANE='${DATA_PLANE}' (single node: ray|tq_simple|keep_local;" >&2
-        echo "tq_mooncake is multi-node only — see run_experiment_multinode_taiji.sh)." >&2
-        exit 2
-        ;;
-esac
-
+ENTRY="${ENTRY:-train_diffusion}"
+CMD=(
+    python -m "diffusionrl.${ENTRY}"
+    "--config-name=${EXPERIMENT}"
+    "num_devices=${GPUS_PER_NODE}"
+)
 CMD+=("$@")
 
-echo "Command (DATA_PLANE=${DATA_PLANE}):"
+echo "Command (ENTRY=${ENTRY}):"
 printf '  %q' "${CMD[@]}"
 echo
 
@@ -106,15 +92,9 @@ if [ "${INSTALL_EDITABLE:-1}" = "1" ]; then
 fi
 
 # --- Single-node Ray (local head) -------------------------------------------
-# GPU count: override with GPUS_PER_NODE, else autodetect, else assume 8.
-if [ -z "${GPUS_PER_NODE:-}" ]; then
-    GPUS_PER_NODE="$(nvidia-smi -L 2>/dev/null | wc -l || true)"
-    [ "${GPUS_PER_NODE:-0}" -gt 0 ] 2>/dev/null || GPUS_PER_NODE=8
-fi
 NODE_IP="${NODE_IP:-127.0.0.1}"
 RAY_PORT="${RAY_PORT:-6379}"
 
-mkdir -p "${OUTPUT_DIR}"
 ray stop >/dev/null 2>&1 || true
 ray start --head \
     --node-ip-address="${NODE_IP}" \
