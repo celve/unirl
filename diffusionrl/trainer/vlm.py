@@ -126,11 +126,13 @@ class VLMTrainer(BaseTrainer):
                 resp.tracks[name] = self.reward.score_and_attach(req=req, track=track)
 
         mean_reward = 0.0
+        std_reward = 0.0
         for track in resp.tracks.values():
             if track.rewards is None:
                 continue
-            rewards_local = _hydrate_tensor_meta(track.rewards)
-            mean_reward = float(rewards_local.to(torch.float32).mean().item())
+            rewards_local = _hydrate_tensor_meta(track.rewards).to(torch.float32)
+            mean_reward = float(rewards_local.mean().item())
+            std_reward = float(rewards_local.std().item()) if rewards_local.numel() > 1 else 0.0
             break  # single-track for now; revisit if multi-track lands
 
         for name, track in list(resp.tracks.items()):
@@ -139,7 +141,7 @@ class VLMTrainer(BaseTrainer):
 
         (track,) = resp.tracks.values()
         result = self.stack.train_track(track, training_progress=float(training_progress))
-        return result, mean_reward
+        return result, mean_reward, std_reward
 
     def _init_wandb(self, *, num_rollouts: int):
         """Init the (rank-0/driver) wandb run from the optional ``logging`` block.
@@ -197,7 +199,7 @@ class VLMTrainer(BaseTrainer):
                 # Sync before generate; skip step 0 (nothing trained yet).
                 sync_weights = rollout_id > 0 and rollout_id % interval == 0
                 t0 = time.perf_counter()
-                result, mean_reward = self.train_step(
+                result, mean_reward, std_reward = self.train_step(
                     req,
                     training_progress=training_progress,
                     sync_weights=sync_weights,
@@ -214,7 +216,7 @@ class VLMTrainer(BaseTrainer):
                 )
                 if wb is not None:
                     step = rollout_id + 1
-                    wb.log_rollout(step, {"reward_mean": mean_reward})
+                    wb.log_rollout(step, {"reward_mean": mean_reward, "reward_std": std_reward})
                     train_metrics: Dict[str, Any] = {
                         "loss": result.loss,
                         "grad_norm": result.grad_norm,

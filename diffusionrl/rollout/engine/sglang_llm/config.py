@@ -43,6 +43,15 @@ class SGLangLLMEngineConfig(BaseEngineConfig):
     # --- Concurrency / async ---
     concurrency: int = 8
 
+    # --- Sample expansion contract ---
+    # VLMTrainer pre-expands the request by samples_per_prompt (P prompts → P*N
+    # entries, one per GRPO sibling), so the engine must emit exactly ONE
+    # completion per entry (n=1) — matching the trainside pipeline, else samples
+    # double-count (P*N entries × N each). Standalone callers (e.g. the smoke
+    # driver) pass unexpanded prompts and want the engine to fan out
+    # n=samples_per_prompt itself; they leave this False.
+    samples_pre_expanded: bool = False
+
     # --- VLM multimodal ---
     # Image token placeholder injected into the chat template at image
     # positions.  Model-specific: e.g. "<|vision_start|><|image_pad|><|vision_end|>"
@@ -53,6 +62,17 @@ class SGLangLLMEngineConfig(BaseEngineConfig):
     max_new_tokens: int = 512
     temperature: float = 0.7
     top_p: float = 0.9
+
+    # --- Chat template ---
+    # System message prepended to every prompt (e.g. "/no_think" to suppress
+    # Qwen3's thinking mode), used as the fallback when a per-request stage
+    # config doesn't carry one. Must match the trainside pipeline's
+    # system_instruction so generation and replay see the same prompt.
+    system_instruction: Optional[str] = None
+    # Extra kwargs forwarded to tokenizer.apply_chat_template (e.g.
+    # {enable_thinking: false} for Qwen3 — without it the model emits a long
+    # <think> block that overruns max_new_tokens before reaching the answer).
+    chat_template_kwargs: Optional[Dict[str, Any]] = field(default_factory=dict)
 
     # --- Escape hatch for advanced ServerArgs / engine knobs ---
     engine_kwargs: Optional[Dict[str, Any]] = field(default_factory=dict)

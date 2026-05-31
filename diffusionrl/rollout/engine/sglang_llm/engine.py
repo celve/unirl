@@ -52,6 +52,7 @@ except ImportError:  # pragma: no cover - exercised only when httpx is missing
     httpx = None  # type: ignore[assignment]
 
 from diffusionrl.config.require import require
+from diffusionrl.distributed.group.dispatch import Dispatch, distributed
 from diffusionrl.rollout.engine.base import BaseRolloutEngine
 from diffusionrl.rollout.engine.sglang_llm._server import (
     find_free_port,
@@ -405,12 +406,24 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         force_set_cuda = bool(engine_kwargs.get("force_set_cuda_visible_devices", False))
         mem_fraction = float(engine_kwargs.get("mem_fraction_static", 0.88))
 
+        # Colocate: N engines share a node, each initializing its own (tp=1)
+        # torch.distributed env. SGLang leaves nccl_port=None → it calls
+        # get_free_port() at model-init time, so the instances that finish
+        # loading together race onto the *same* port → EADDRINUSE. Pin the port
+        # here instead: grab a free one at construction (de-synchronized across
+        # workers, exactly like self._port above, which doesn't collide across
+        # the 8 colocated HTTP servers) and hand it to SGLang explicitly so it
+        # never re-picks at the synchronized post-load moment.
+        nccl_port_override = engine_kwargs.get("nccl_port")
+        nccl_port = int(nccl_port_override) if nccl_port_override is not None else find_free_port()
+
         server_kwargs: Dict[str, Any] = {
             "model_path": self._model_path,
             "host": host,
             "port": self._port,
             "tp_size": self._tp_size,
             "mem_fraction_static": mem_fraction,
+            "nccl_port": nccl_port,
         }
 
         current_cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>")
@@ -611,6 +624,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
     # Generation — typed
     # ------------------------------------------------------------------
 
+    @distributed(dispatch_mode=Dispatch.DP_ALL)
     def generate(self, req: RolloutReq) -> RolloutResp:
         """Run text generation against the engine and return a typed response."""
         require(
@@ -651,14 +665,26 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
 
         ar = get_ar_params(req.sampling_params)
         stage_ar: Dict[str, Any] = dict(req.stage_config.get("ar") or {})
-        n = int(ar.samples_per_prompt if ar is not None else stage_ar.get("n", 1))
+        if self.cfg.samples_pre_expanded:
+            # The caller (VLMTrainer) already expanded the req to P*N entries,
+            # one per GRPO sibling, so emit exactly one completion per entry.
+            # samples_per_prompt was consumed by that expand; re-applying it
+            # here would generate N completions per already-expanded entry.
+            n = 1
+        else:
+            n = int(ar.samples_per_prompt if ar is not None else stage_ar.get("n", 1))
         sampling: Dict[str, Any] = {
             "n": n,
             "temperature": float(ar.temperature if ar is not None else self.cfg.temperature),
             "top_p": float(ar.top_p if ar is not None else self.cfg.top_p),
+            # top_k MUST be threaded through: without it SGLang falls back to the
+            # model generation_config default (top_k=20 for Qwen3), which peaks the
+            # sampling vs the trainer's top_k=0 (unrestricted) → low intra-group
+            # diversity → GRPO advantages collapse → the policy never learns.
+            "top_k": int(ar.top_k) if ar is not None else 0,
             "max_new_tokens": int(ar.max_new_tokens if ar is not None else self.cfg.max_new_tokens),
             "return_logprob": bool(stage_ar.get("return_logprob", True)),
-            "system_instruction": stage_ar.get("system_instruction"),
+            "system_instruction": stage_ar.get("system_instruction") or self.cfg.system_instruction,
         }
         for key in ("stop", "stop_token_ids", "skip_special_tokens"):
             if key in stage_ar:
@@ -712,6 +738,11 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         temperature = float(params.get("temperature", 0.7))
         max_new_tokens = int(params.get("max_new_tokens", 512))
         top_p = float(params.get("top_p", 0.9))
+        # Map the trainer's top_k=0 (unrestricted, HF convention) to SGLang's
+        # top_k=-1 (disabled); a positive value passes through. Omitting it lets
+        # SGLang use the model default (top_k=20) → over-peaked sampling.
+        _top_k = int(params.get("top_k", 0))
+        top_k = _top_k if _top_k > 0 else -1
         return_logprob = bool(params.get("return_logprob", True))
         system_instruction = params.pop("system_instruction", None)
 
@@ -733,6 +764,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
                 "temperature": temperature,
                 "max_new_tokens": max_new_tokens,
                 "top_p": top_p,
+                "top_k": top_k,
                 "n": n,
                 **extra_sampling,
             }
@@ -864,6 +896,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
                 messages,
                 add_generation_prompt=True,
                 tokenize=True,
+                **(self.cfg.chat_template_kwargs or {}),
             )
         except Exception as exc:
             # Fallback for tokenizers that don't support structured content
@@ -879,6 +912,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
                         messages_fb,
                         add_generation_prompt=True,
                         tokenize=True,
+                        **(self.cfg.chat_template_kwargs or {}),
                     )
                 except Exception as fb_exc:
                     if not self._chat_template_logged:
@@ -1110,6 +1144,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
     # Memory management
     # ------------------------------------------------------------------
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def sleep(
         self,
         tags: Optional[List[str]] = None,
@@ -1183,6 +1218,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             f"SGLangLLMRolloutEngine: /flush_cache did not return 200 after 60 attempts (last error: {last_err})"
         )
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def wake_up(
         self,
         tags: Optional[List[str]] = None,

@@ -280,13 +280,15 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
                 "cu_seqlens (construct via TextSegment.pack)"
             )
 
-        # Pin inputs to the transformer's device. Dedicated-engine (sglang_llm)
-        # replay hands conditions back on CPU (built by build_rollout_resp and
-        # transported via IPC); the trainside engine already has them on GPU, so
-        # these .to calls are then no-ops. Mirrors SD3DiffusionStage.replay —
-        # without it ``device`` follows the CPU input and the FSDP transformer
-        # (cuda) hits an index_select device mismatch in Embedding.
-        device = torch.device(self.model.device)
+        # Pin inputs to the transformer's parameter device. A decoupled rollout
+        # engine (SGLang) returns ray-serialized CPU tensors, so conditions land
+        # on CPU while the FSDP model is on cuda; without this the FSDP
+        # transformer hits an index_select cpu-vs-cuda mismatch in Embedding
+        # (trainside is already on-device, so these .to calls are no-ops).
+        # Use the live parameter device — not ``self.model.device``, a stored
+        # config device that can carry a fixed index — so each rank moves to its
+        # own shard. Mirrors SD3DiffusionStage.replay.
+        device = next(self.model.transformer.parameters()).device
         prompt_ids = conditions.prompt.input_ids.to(device)
         prompt_mask = conditions.prompt.attention_mask.to(device)
         batch_size = int(prompt_ids.shape[0])
