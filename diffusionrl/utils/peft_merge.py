@@ -138,7 +138,7 @@ def raw_state_dict(
 def extract_lora_tensors(
     model: torch.nn.Module,
     *,
-    param_name_prefix: str = "",
+    param_prefix: str = "",
     adapter_name: str = "default",
     packed_modules: dict | None = None,
 ) -> dict[str, torch.Tensor]:
@@ -158,7 +158,7 @@ def extract_lora_tensors(
     each sub-name and lora_B is sliced respecting the model's weight layout.
     """
     result: dict[str, torch.Tensor] = {}
-    prefix = str(param_name_prefix or "")
+    prefix = str(param_prefix or "")
     for raw_name, param in model.state_dict().items():
         name = _strip_peft_prefix(raw_name)
         for marker, suffix in ((".lora_A.", "lora_A"), (".lora_B.", "lora_B")):

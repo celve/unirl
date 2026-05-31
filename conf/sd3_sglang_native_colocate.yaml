@@ -178,6 +178,5 @@ sync:
   # Mirrors SD3PipelineConfig.weight_sync_param_name_prefix; must match the
   # engine-side LoRA key naming (a wrong prefix yields wrong/zero loaded layers,
   # which `verify` catches).
-  param_name_prefix: "transformer."
-  packed_modules: {}   # SD3 attn projections are not fused
+  param_prefix: "transformer."
   adapter_name: default

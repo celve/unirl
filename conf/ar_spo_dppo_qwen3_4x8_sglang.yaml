@@ -164,12 +164,11 @@ algorithm:
 # hot-load them into the SRT server as an adapter (POST
 # /load_lora_adapter_from_tensors); generation routes via lora_path. This is the
 # sync path that reproduces the trainside curve — the merged full-weight path
-# (TensorWeightSync) plateaus at ~0.2 (does NOT reproduce). param_name_prefix=""
+# (TensorWeightSync) plateaus at ~0.2 (does NOT reproduce). param_prefix=""
 # sends HF-native keys; verify is vLLM-Omni-only → false.
 sync:
   _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
-  param_name_prefix: ""
-  packed_modules: {}
+  param_prefix: ""
   adapter_name: default
   verify: false
 

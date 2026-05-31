@@ -15,8 +15,7 @@ indirection. Two families:
 ### LoRA — `lora.py`
 
 `LoraWeightSync` ships the trained LoRA adapter into a co-located engine via the
-engine's in-process `set_lora_from_tensors`. In `mode="merged"` it instead folds
-`base + α·B·A` and ships the full tensors via `update_weights_from_tensor`.
+engine's in-process `set_lora_from_tensors`.
 `track_prefix` routes a single track to one child of a `ComposedRolloutEngine`;
 multi-track training (e.g. PE: diffusion + ar) registers one `LoraWeightSync`
 per track.

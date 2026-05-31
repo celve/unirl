@@ -6,8 +6,8 @@
 #   - diffusion: SGLangRolloutEngine    (SD3 sglang)  → P*N*M images
 # Trained LoRA reaches each engine via a per-track LoraWeightSync, routed to the
 # matching child of the composed engine by ``track_prefix``:
-#   - diffusion: mode=lora → set_lora_from_tensors (SD3 sglang LoRA pool)
-#   - ar:        mode=lora → set_lora_from_tensors (SGLang LLM LoRA pool)
+#   - diffusion: set_lora_from_tensors (SD3 sglang LoRA pool)
+#   - ar:        set_lora_from_tensors (SGLang LLM LoRA pool)
 # Sync runs every ``weight_sync_interval`` rollouts (skip step 0).
 #
 # Pairs with diffusionrl/train_pe.py:
@@ -27,7 +27,7 @@
 #
 # VERIFY at smoke (engine-specific, can't be unit-checked):
 #   1. AR LoRA key format accepted by SGLang LLM /load_lora_adapter_from_tensors
-#      — sync.ar.param_name_prefix. "" sends HF-native keys (model.layers.*);
+#      — sync.ar.param_prefix. "" sends HF-native keys (model.layers.*);
 #      if the server rejects, try "base_model.model." (PEFT envelope).
 #   2. SGLang diffusion LoRA target-module names (diffusion.bundle...lora_target_modules).
 #   3. per-engine mem_fraction_static budget on the colocated GPU.
@@ -279,21 +279,17 @@ sync:
   diffusion:
     _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
     track_prefix: diffusion
-    mode: lora
     # Stripped engine-side by adapt_lora_for_sglang (reads model_config
     # .weight_sync_param_name_prefix == "transformer.").
-    param_name_prefix: "transformer."
-    packed_modules: {}
+    param_prefix: "transformer."
     adapter_name: default
     verify: false
   ar:
     _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
     track_prefix: ar
-    mode: lora                  # primary; set mode: merged for full-param transfer (rough, untested)
     # SGLang LLM has no engine-side key stripping → send HF-native keys
     # (model.layers.*). VERIFY #1: if /load_lora_adapter_from_tensors rejects,
     # try "base_model.model." (PEFT envelope).
-    param_name_prefix: ""
-    packed_modules: {}
+    param_prefix: ""
     adapter_name: default
     verify: false

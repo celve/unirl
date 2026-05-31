@@ -26,9 +26,8 @@ eagerly pulling torch-heavy or vLLM-only dependencies.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-from diffusionrl.config.require import require
 from diffusionrl.distributed.group.dispatch import Dispatch, distributed
 from diffusionrl.distributed.group.remote import Remote
 
@@ -36,20 +35,20 @@ logger = logging.getLogger(__name__)
 
 
 class LoraWeightSync(Remote):
-    """Push one track's trained FSDP weights into a co-located rollout engine.
+    """Push one track's trained FSDP LoRA adapter into a co-located rollout engine.
 
     Constructed inside the trainer's ``placement(...)`` block with the
     ``backend`` and ``rollout`` siblings; they arrive here as the LOCAL
     ``Remote`` instances (``HandleRef`` resolved by ``Worker.add_remote``), so
     method calls on them run in-process on this Worker.
 
-    ``mode="lora"`` (default) ships the LoRA adapter via
-    ``set_lora_from_tensors`` (vLLM-Omni, SGLang diffusion, SGLang LLM pool).
-    ``mode="merged"`` folds ``base + α·B·A`` and ships the full tensors via
-    ``update_weights_from_tensor`` (full-parameter transfer; bypasses the LoRA
-    pool). ``track_prefix`` (e.g. ``"ar"`` / ``"diffusion"``) routes the update
-    to one child of a :class:`ComposedRolloutEngine`; empty for a single-model
-    trainer. ``verify`` is vLLM-Omni-only and ignored for SGLang.
+    ``param_prefix`` is the pipeline prefix prepended to the canonical
+    keys (e.g. ``"transformer."``; stripped engine-side by
+    ``adapt_lora_for_sglang``). ``track_prefix`` (e.g. ``"ar"`` /
+    ``"diffusion"``) further prefixes the keys so a
+    :class:`~diffusionrl.rollout.engine.composed.engine.ComposedRolloutEngine`
+    can demux the update to one child; empty for a single-model trainer.
+    ``verify`` is vLLM-Omni-only and ignored for SGLang.
     """
 
     def __init__(
@@ -57,56 +56,37 @@ class LoraWeightSync(Remote):
         *,
         backend: Any,
         rollout: Any,
-        param_name_prefix: str = "",
-        packed_modules: Optional[Dict] = None,
+        param_prefix: str = "",
         adapter_name: str = "default",
         verify: bool = False,
         track_prefix: str = "",
-        mode: str = "lora",
-        flush_cache: bool = True,
     ) -> None:
         super().__init__()
         self._backend = backend
         self._rollout = rollout
-        self._param_name_prefix = str(param_name_prefix or "")
-        self._packed_modules = dict(packed_modules or {})
+        self._param_prefix = str(param_prefix or "")
         self._adapter_name = str(adapter_name or "default")
         self._verify = bool(verify)
         self._track_prefix = str(track_prefix or "")
-        self._mode = str(mode or "lora")
-        self._flush_cache = bool(flush_cache)
-        require(
-            self._mode in ("lora", "merged"),
-            f"LoraWeightSync.mode must be 'lora' or 'merged'; got {self._mode!r}",
-        )
 
     @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def sync(self) -> None:
-        """Extract the local FSDP weights and push them into the engine.
+        """Extract LoRA from the local FSDP model and load it into the engine.
 
-        Runs on every Worker (``ONE_TO_ALL``). Extraction
-        (``extract_lora_tensors`` / ``merged_state_dict``) redistributes each
-        DTensor shard to a full tensor — a collective across the train process
-        group, which lines up because every rank runs this together. The engine
-        must be awake (the caller wakes it before ``sync``). ``mode`` selects
-        the LoRA-adapter vs merged-full-weight path; ``track_prefix`` routes to
-        one child of a composed engine.
+        Runs on every Worker (``ONE_TO_ALL``). ``extract_lora_tensors`` walks
+        ``model.state_dict()`` and redistributes each DTensor shard to a full
+        tensor — a collective across the train process group, which lines up
+        because every rank runs this method together. The engine must be awake
+        (the caller wakes it before ``sync``); ``set_lora_from_tensors`` drops
+        any existing adapter and loads the new one on every stage's workers.
         """
-        if self._mode == "merged":
-            self._sync_merged()
-        else:
-            self._sync_lora()
-
-    def _sync_lora(self) -> None:
-        """LoRA-adapter path: ``set_lora_from_tensors`` into the engine's pool."""
         from diffusionrl.distributed.weight_sync.payload import _peft_config_dict
         from diffusionrl.utils.peft_merge import extract_lora_tensors
 
         model = self._backend.model
         lora_tensors = extract_lora_tensors(
             model,
-            param_name_prefix=self._param_name_prefix,
-            packed_modules=self._packed_modules,
+            param_prefix=self._param_prefix,
         )
         peft_config = _peft_config_dict(model, self._adapter_name)
         # Prefix keys so a ComposedRolloutEngine can demux to one child.
@@ -125,40 +105,8 @@ class LoraWeightSync(Remote):
             self._adapter_name,
             self._track_prefix or "<single>",
         )
-        # verify is vLLM-Omni-only (checksum read-back); skip for SGLang.
         if self._verify:
             self._verify_loaded(lora_tensors, peft_config)
-
-    def _sync_merged(self) -> None:
-        """Merged path: fold ``base + α·B·A`` and ship full weights.
-
-        Full-parameter transfer via ``update_weights_from_tensor`` for engines
-        without a usable LoRA pool. Sends the whole (merged) state dict in one
-        pass, grouped by dtype. NOTE: no size bucketing yet — fine for small
-        models (Qwen3-0.6B); add bucketing before promoting to large LLMs.
-        """
-        from diffusionrl.distributed.weight_sync.payload import serialize_named_tensors
-        from diffusionrl.utils.peft_merge import merged_state_dict
-
-        model = self._backend.model
-        named = list(merged_state_dict(model, self._adapter_name))
-        payloads = serialize_named_tensors(named)
-        for i, payload in enumerate(payloads):
-            is_last = i == len(payloads) - 1
-            self._rollout.update_weights_from_tensor(
-                serialized_named_tensors=[payload],
-                load_format="flattened_bucket",
-                flush_cache=(self._flush_cache and is_last),
-                track_prefix=self._track_prefix,
-            )
-        rank = self.rank_info.rank if self.rank_info is not None else 0
-        logger.info(
-            "[MERGED-SYNC] rank %s: pushed %d params (%d dtype-bucket(s)) to rollout (track=%s)",
-            rank,
-            len(named),
-            len(payloads),
-            self._track_prefix or "<single>",
-        )
 
     def _verify_loaded(self, lora_tensors: Dict[str, Any], peft_config: Dict) -> None:
         """Assert the engine's loaded LoRA matches what we just pushed.
@@ -171,7 +119,7 @@ class LoraWeightSync(Remote):
         ``lora_A`` hashes and the multiset of ``lora_B`` hashes. With distinct
         per-layer weights (always true after a step of training) multiset
         equality is a strong bit-equality proof, and it also catches a wrong
-        ``param_name_prefix`` (which yields wrong / zero loaded layers).
+        ``param_prefix`` (which yields wrong / zero loaded layers).
         """
         from diffusionrl.rollout.engine.vllm_omni.weight_sync.checksum import (
             compute_lora_checksums_post_optimize,
@@ -197,7 +145,7 @@ class LoraWeightSync(Remote):
                         f"lora_A / {len(exp_b)} lora_B hashes, engine loaded "
                         f"{len(act_a)} / {len(act_b)} (A_match={act_a == exp_a}, "
                         f"B_match={act_b == exp_b}). Likely a transport bug or a "
-                        f"param_name_prefix mismatch ({self._param_name_prefix!r})."
+                        f"param_prefix mismatch ({self._param_prefix!r})."
                     )
         logger.info(
             "[LoRA-SYNC] rank %s: verify OK (%d lora_A / %d lora_B layers match)",

@@ -111,8 +111,7 @@ rollout:
 # them into the colocated SRT server as a fresh versioned adapter each rollout.
 sync:
   _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
-  param_name_prefix: ""
-  packed_modules: {}
+  param_prefix: ""
   adapter_name: default
   verify: false
 
