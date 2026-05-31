@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import math
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -170,6 +171,9 @@ class RemoteRewardBackend(RewardBackend):
         self.raise_on_failure = config.raise_on_failure
         self.aggregation_method = config.aggregation_method
         self.video_fps = config.video_fps
+        # Instance attr overrides the RewardBackend.input_kind class default;
+        # RewardService reads it via preferred_input_kind to route image vs video.
+        self.input_kind = config.input_kind
 
         self._remote_rewards_validated = False
 
@@ -346,23 +350,34 @@ class RemoteRewardBackend(RewardBackend):
             )
 
     def _build_video_score_payload(self, request: RewardRequest) -> Dict[str, Any]:
-        """Convert a video ``RewardRequest`` into a JSON payload with base64 mp4.
+        """Convert a video ``RewardRequest`` into the RewardService ``ScoreRequest``
+        JSON payload.
 
-        Each sample ``(videos[i], prompts[i])`` is encoded to an mp4 file in
-        memory and base64-encoded for transmission.
+        Mirrors :meth:`_build_score_payload`: each sample ``(videos[i],
+        prompts[i])`` becomes one wire request whose single history turn carries
+        ``{"text": prompt, "video_b64": ...}``. The server's ``HistoryTurn``
+        schema requires a history list — a flat ``{"video_b64", "prompt"}`` body
+        is rejected with HTTP 422 — so video and image payloads share the same
+        history-turn shape.
+
+        Per-sample metadata from ``request.metadata`` is forwarded when present.
         """
         videos = request.videos or []
         prompts = request.prompts
+        metadata_list = request.metadata
         wire_requests: List[Dict[str, Any]] = []
 
         for idx in range(len(videos)):
             prompt = prompts[idx] if idx < len(prompts) else ""
             video_b64 = _encode_video_b64(videos[idx], fps=self.video_fps)
+            sample_metadata = None
+            if metadata_list is not None and idx < len(metadata_list):
+                sample_metadata = metadata_list[idx]
             wire_requests.append(
                 {
-                    "video_b64": video_b64,
-                    "prompt": prompt,
+                    "history": [{"text": prompt, "video_b64": video_b64}],
                     "required_rewards": list(self.required_rewards),
+                    "metadata": sample_metadata,
                 }
             )
 
@@ -461,6 +476,22 @@ class RemoteRewardBackend(RewardBackend):
             for reward_name in self.required_rewards:
                 if reward_name in sample_result:
                     sub_metrics = sample_result[reward_name]
+                    # Any non-finite sub-metric fails the whole reward for this
+                    # sample (a partially-broken output is suspect), even an axis
+                    # the reduction below would not select.
+                    non_finite = self._first_non_finite(sub_metrics)
+                    if non_finite is not None:
+                        # NaN/inf/null marks an unusable score: the scorer hit a
+                        # per-item failure (e.g. OCR could not read the image), or a
+                        # NaN serialized to JSON null on the wire. Flag the sample as
+                        # failed instead of feeding a non-finite value into advantage
+                        # normalization, where it would poison the whole group.
+                        metric_name, bad_value = non_finite
+                        component_rewards[reward_name].append(0.0)
+                        error_parts.append(
+                            f"{reward_name}: non-finite value {bad_value!r} for sub-metric {metric_name!r}"
+                        )
+                        continue
                     score = self._reduce_sub_metrics(sub_metrics)
                     component_rewards[reward_name].append(score)
                     scores.append(score)
@@ -511,6 +542,28 @@ class RemoteRewardBackend(RewardBackend):
         # "max"
         return max(scores)
 
+    @staticmethod
+    def _first_non_finite(sub_metrics: Dict[str, float]) -> Optional[Tuple[str, Any]]:
+        """Return the first ``(name, value)`` whose value is not a finite number.
+
+        Catches ``None`` (a server-side NaN that serialized to JSON ``null``),
+        ``NaN`` / ``inf`` floats, booleans, and non-numeric junk. Returns
+        ``None`` when every value is a finite number. Used to convert an
+        unusable reward into a sample failure before it reaches advantage
+        computation.
+        """
+        for name, value in sub_metrics.items():
+            # bool is an int subclass, so reject it explicitly before the numeric
+            # check — a True/False reward is junk, not a 1.0/0.0 score.
+            if (
+                value is None
+                or isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                return name, value
+        return None
+
     def _reduce_sub_metrics(self, sub_metrics: Dict[str, float]) -> float:
         """Collapse a reward's sub-metric dict into a single float.
 
@@ -547,7 +600,11 @@ class RemoteRewardSpec(BaseRewardComponentSpec):
     required_rewards: Tuple[str, ...] = ()
     reward_weights: Optional[Dict[str, float]] = None
     batch_size: int = 8
-    timeout: float = 120.0
+    # Per-attempt HTTP read timeout. Keep it above the RewardService server's
+    # per-reward score_timeout_s (ServerCfg default 120s) so a server-side reward
+    # timeout comes back as a structured errors[i][reward] instead of the client
+    # timing out first and re-POSTing the whole batch (burning the retry budget).
+    timeout: float = 300.0
     max_retries: int = 3
     retry_delay: float = 1.0
     sub_metric_reduce: str = "first"
@@ -555,6 +612,11 @@ class RemoteRewardSpec(BaseRewardComponentSpec):
     image_format: str = "JPEG"
     image_quality: int = 95
     video_fps: int = 8
+    # "image" (default) or "video": selects which decoded-media key
+    # RewardService.score_and_attach populates, hence whether compute_rewards
+    # builds an image or a video payload. A video reward (e.g. videoalign) is
+    # configured as its own component with input_kind: video.
+    input_kind: str = "image"
     raise_on_failure: bool = True
 
     def __post_init__(self) -> None:
@@ -582,6 +644,10 @@ class RemoteRewardSpec(BaseRewardComponentSpec):
             self.aggregation_method in {"weighted_sum", "mean", "min", "max"},
             f"RemoteRewardSpec.aggregation_method must be one of "
             f"weighted_sum/mean/min/max; got {self.aggregation_method!r}",
+        )
+        require(
+            self.input_kind in {"image", "video"},
+            f"RemoteRewardSpec.input_kind must be 'image' or 'video'; got {self.input_kind!r}",
         )
 
 

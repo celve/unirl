@@ -68,3 +68,53 @@ class MyRewardSpec(BaseRewardComponentSpec):
 
 `LocalRewardBackend` provides device resolution, eager load, `offload()`, and
 `onload()`. Use `remote.py` when scoring happens out of process.
+
+## Remote Backend: wire contract & failure semantics
+
+`RemoteRewardBackend` (`remote.py`) is an HTTP client for the standalone
+RewardService server (FastAPI + Ray, run on its own GPU node). One backend
+multiplexes every `required_rewards` in a single `POST /score` per rollout.
+
+```yaml
+reward:
+  _target_: diffusionrl.reward.service.RewardService
+  backend:
+    _target_: diffusionrl.reward.remote.RemoteRewardBackend
+    base_device: cpu          # ignored; the backend is HTTP-only
+    config:
+      _target_: diffusionrl.reward.remote.RemoteRewardSpec
+      base_url: ${oc.env:REWARD_SERVICE_URL,http://localhost:8080}
+      required_rewards: [hpsv2, clip, ocr]
+      reward_weights: {hpsv2: 0.5, clip: 0.3, ocr: 0.2}
+      input_kind: image        # "image" (default) or "video"
+```
+
+**Wire format.** The single source of truth is RewardService's
+`reward_service/schemas.py`. Media rides *inside a history turn* — image and
+video share the same shape:
+
+- image: `{"history": [{"text": prompt, "image_b64": ...}], "required_rewards": [...], "metadata": ...}`
+- video: `{"history": [{"text": prompt, "video_b64": ...}], ...}`
+
+The server rejects a flat `{"video_b64", "prompt"}` body with HTTP 422.
+`tests/reward/test_wire_contract.py` validates the built payloads against the
+server's Pydantic `ScoreRequest`, so caller and service cannot drift; it imports
+`reward_service.schemas` from the in-repo `RewardService/` subdir (the vendored
+reward service; skips if absent).
+
+**`input_kind`** selects the modality `score_and_attach` feeds the server. A
+video reward (e.g. `videoalign`) is configured as its own component with
+`input_kind: video`.
+
+**Failure semantics — loud, never silent.**
+
+- A reward whose value comes back non-finite (`NaN`/`inf`/bool) or `null` (a
+  server-side NaN that pydantic serialized to JSON `null`) is flagged as a
+  *sample failure* (`success=False`) by `_parse_score_response`, never fed into
+  advantage normalization.
+- `RewardService.score_and_attach` fail-fasts (raises) on any `success=False`,
+  so an infrastructure / inference failure stops the step naming the offending
+  reward + sample — it does not silently poison the GRPO group.
+- Server side: a scorer signals a *per-item* failure with `NaN` (one bad image
+  does not fail the whole batch) and a *whole-reward / config* failure by
+  raising.

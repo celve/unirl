@@ -1,5 +1,11 @@
 default_stages: [pre-commit, pre-push, manual]
 
+# RewardService/ is a vendored standalone sub-project (own pyproject + lint/test
+# tooling); excluded from this repo's hooks. Its vendored upstream model code
+# carries semantically-meaningful trailing whitespace (VideoAlign prompt
+# templates) that the whitespace/format hooks must not rewrite.
+exclude: ^RewardService/
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
