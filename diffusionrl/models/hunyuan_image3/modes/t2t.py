@@ -117,7 +117,7 @@ def generate(pipeline: "HunyuanImage3Pipeline", req: RolloutReq) -> RolloutResp:
 
     return RolloutResp(
         tracks={
-            "text": RolloutTrack(
+            "ar": RolloutTrack(
                 sample_ids=list(req.sample_ids),
                 parent_ids=list(req.group_ids),
                 conditions=ar_conds.to_dict(),

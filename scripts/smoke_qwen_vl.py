@@ -63,7 +63,7 @@ def main():
 
     print("\n--- Generate ---")
     resp = pipeline.generate(req)
-    track = resp.tracks["text"]
+    track = resp.tracks["ar"]
     segment = track.segment
     decoded = track.decoded
 

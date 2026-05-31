@@ -60,9 +60,9 @@ class HunyuanImage3Pipeline(Pipeline):
     Writes to ``RolloutResp``:
 
     - ``conditions``: per-task — see each ``modes/<task>.py``.
-    - ``tracks["text"].segment: TextSegment`` for AR-mode tasks.
+    - ``tracks["ar"].segment: TextSegment`` for AR-mode tasks.
     - ``tracks["image"].segment: LatentSegment`` for diffusion-mode tasks.
-    - ``tracks["text"].decoded: Texts`` (AR-mode) /
+    - ``tracks["ar"].decoded: Texts`` (AR-mode) /
       ``tracks["image"].decoded: Images`` (diffusion-mode).
     """
 

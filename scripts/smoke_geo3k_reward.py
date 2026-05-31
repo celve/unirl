@@ -86,9 +86,9 @@ def main() -> int:
     )
     resp = pipeline.generate(req)
 
-    track = resp.tracks.get("text")
+    track = resp.tracks.get("ar")
     if track is None:
-        logger.error("No 'text' track in response!")
+        logger.error("No 'ar' track in response!")
         return 2
 
     decoded = track.decoded
