@@ -1,13 +1,14 @@
 #!/usr/bin/env python
-"""diffusionRL v2 VLM/AR training entry point (Hydra-native).
+"""diffusionRL diffusion training entry point (Hydra-native).
 
-Thin wrapper around :class:`diffusionrl.trainer.vlm.VLMTrainer` — the AR path's
-sibling of ``train_diffusion.py`` (which drives the diffusion ``DiffusionTrainer``).
-Kept separate so the VLM path never routes through diffusion / SDE code.
+Thin wrapper around :class:`diffusionrl.trainer.diffusion.DiffusionTrainer`.
+The trainer owns the placement scope, sibling Remote wiring, and the
+``train_step → train`` loop; this module just maps the loaded Hydra
+config blocks to constructor kwargs.
 
-Launch (per node, SPMD; rank 0 owns the driver):
-  QWEN_VL_PATH=/path/to/Qwen2.5-VL-7B-Instruct DATA_PATH=/path/to/train.jsonl \
-  python -m diffusionrl.train_vlm --config-name=argrpo_qwen_vl_geo3k_mc_4x8
+Pairs with ``conf/sd3_trainside.yaml`` (default) and
+``conf/sd3_vllmomni.yaml``. Switch with
+``--config-name sd3_vllmomni`` on the CLI.
 """
 
 from __future__ import annotations
@@ -15,12 +16,12 @@ from __future__ import annotations
 import hydra
 from omegaconf import DictConfig
 
-from diffusionrl.trainer.vlm import VLMTrainer
+from diffusionrl.trainer.diffusion import DiffusionTrainer
 
 
-@hydra.main(version_base=None, config_path="../conf", config_name="argrpo_qwen_vl_geo3k_mc_4x8")
+@hydra.main(version_base=None, config_path="../conf", config_name="sd3_trainside")
 def main(cfg: DictConfig) -> None:
-    trainer = VLMTrainer(
+    trainer = DiffusionTrainer(
         num_devices=cfg.num_devices,
         batch_size=cfg.batch_size,
         bundle_cfg=cfg.bundle,
@@ -34,7 +35,8 @@ def main(cfg: DictConfig) -> None:
         sampling_cfg=cfg.sampling,
         sync_cfg=cfg.get("sync"),
         logging_cfg=cfg.get("logging"),
-        adv_normalization_scope=cfg.get("adv_normalization_scope", "group"),
+        layout=cfg.get("layout", "colocate"),
+        train_fraction=float(cfg.get("train_fraction", 0.5)),
     )
     trainer.train(
         num_rollouts=int(cfg.get("num_rollouts", 100)),

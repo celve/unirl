@@ -51,8 +51,8 @@ elif [ -n "${VENV_DIR:-}" ] && [ -f "${VENV_DIR}/bin/activate" ]; then
 fi
 
 # --- Path / logging defaults ------------------------------------------------
-export DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/datasets/pickscore/train.txt}"
-export EVAL_DATA_PATH="${EVAL_DATA_PATH:-${REPO_ROOT}/data/datasets/pickscore/test.txt}"
+export DATA_PATH="${DATA_PATH:-${REPO_ROOT}/datasets/pickscore/train.txt}"
+export EVAL_DATA_PATH="${EVAL_DATA_PATH:-${REPO_ROOT}/datasets/pickscore/test.txt}"
 export OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/${EXPERIMENT}}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${EXPERIMENT}}"
 export REPORT_TO_WANDB="${REPORT_TO_WANDB:-false}"

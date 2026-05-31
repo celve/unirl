@@ -1,7 +1,0 @@
-# Ignore everything (e.g. images/ downloaded by download.sh)
-*
-# Except these tracked files
-!.gitignore
-!download.sh
-!train.jsonl
-!test.jsonl

@@ -71,33 +71,9 @@ local/
 *.pkl
 *.log
 
-# Symlinked models and datasets (local only, not committed)
-models/local/*
-!models/local/.gitkeep
-!models/local/reward_models/
-models/local/reward_models/*
-!models/local/reward_models/.gitkeep
-data/datasets/*
-!data/datasets/pickscore
-!data/datasets/sharegpt4o_image_mini
-
-# Large model artifacts (defense-in-depth)
-models/**/*.bin
-models/**/*.pt
-models/**/*.pth
-models/**/*.ckpt
-models/**/*.safetensors
-
-# Local/dev tests only (not for open-source push)
-docs/*
-!docs/entry_map.md
-!docs/component_refactor_algorithm_centric.md
-!docs/Algorithm_Minimal_Template.md
-!docs/Loss_Minimal_Template.md
-!docs/Component_Architecture.md
-!docs/multimodal_model_bundle_design.md
-# !docs/Parameter_System_Guide.md
-!docs/GitHub_Issues_Workflow_Guide.md
+# Datasets: keep the committed pickscore prompts, ignore other (local-only) datasets
+datasets/*
+!datasets/pickscore
 
 # IDE / editor metadata
 .vscode/

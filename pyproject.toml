@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "diffusionrl"
 dynamic = ["version"]
 description = "Diffusion RL training framework"
-readme = "docs/Diffusion_RL_Design_Analysis.md"
+readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
@@ -74,16 +74,3 @@ known-first-party = ["diffusionrl"]
 
 [tool.ruff.format]
 quote-style = "double"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-norecursedirs = ["_dev"]
-pythonpath = ["."]
-# importlib mode avoids stdlib shadowing when subdirs use names like ``types``
-# that collide with Python's stdlib during diffusionrl.types submodule resolution.
-addopts = "--import-mode=importlib"
-markers = [
-  "e2e: heavy end-to-end tests that are skipped unless --run-e2e is provided",
-  "gpu: tests that require GPU resources",
-  "slow: tests that are slow to execute",
-]

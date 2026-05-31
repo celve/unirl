@@ -347,7 +347,7 @@ class ARSPODPPO(StageAlgorithm):
             raise ValueError(f"ARSPODPPO variant must be 'tv' or 'kl', got '{variant}'")
         # v2-only: the trainer injects the shared ``pipeline``
         # (remote_hydra(algorithm_cfg, pipeline=...)) and we resolve the stage
-        # from it. There is no v1 ``stage=`` path — ARSPODPPO is conf_v2 only.
+        # from it. There is no v1 ``stage=`` path — ARSPODPPO is v2-only.
         if pipeline is None:
             raise ValueError("ARSPODPPO: `pipeline` must be provided (the v2 trainer injects it)")
         self.stage = getattr(pipeline, stage_attr)
