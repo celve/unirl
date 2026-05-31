@@ -67,4 +67,52 @@ class ARStep(Protocol):
     def step(self, logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]: ...
 
 
-__all__ = ["ARSamplingParams", "ARStage", "ARStep"]
+def left_pad_prompt(
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    pad_id: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Re-pad a right-padded prompt batch to LEFT-padding for batched decode.
+
+    The chat-template stages right-pad prompts to the in-batch max (``[real |
+    pad]``). That breaks batched autoregressive generation when prompts differ
+    in length: the decode loop reads ``logits[:, -1, :]`` and appends the new
+    token at the end, but for a short row the last column is a PAD position (and
+    appended tokens land *after* the pad run), so it decodes from the wrong
+    context. Left-padding (``[pad | real]``) right-aligns every row's last real
+    token at the final column, so ``logits[:, -1]`` and end-append are correct
+    for all rows; HF's ``prepare_inputs_for_generation`` derives the right
+    ``position_ids`` from the (left-padded) ``attention_mask``.
+
+    Returns ``(left_padded_ids, left_padded_mask)`` trimmed to the in-batch max
+    *real* length (excess right-pad columns are dropped).
+
+    NO-OP for an equal-length batch — the validated same-prompt-group recipe
+    (``forward_batch_size == samples_per_prompt``) batches identical prompts, so
+    every row is already full-length and the output is byte-identical to the
+    input. Only mixed-length batches (currently mis-decoded) are rewritten.
+    """
+    real_lens = attention_mask.long().sum(dim=1)  # [B]
+    if real_lens.numel() == 0:
+        return input_ids, attention_mask
+    max_real = int(real_lens.max().item())
+    if max_real == 0:
+        return input_ids, attention_mask
+
+    batch = int(input_ids.shape[0])
+    device = input_ids.device
+    lp_ids = torch.full((batch, max_real), int(pad_id), dtype=input_ids.dtype, device=device)
+    lp_mask = torch.zeros((batch, max_real), dtype=attention_mask.dtype, device=device)
+    bool_mask = attention_mask.bool()
+    for b in range(batch):
+        n = int(real_lens[b].item())
+        if n == 0:
+            continue
+        # Gather row b's real tokens (mask==1, in order) and right-align them.
+        real_tokens = input_ids[b][bool_mask[b]][:max_real]
+        lp_ids[b, max_real - n :] = real_tokens
+        lp_mask[b, max_real - n :] = 1
+    return lp_ids, lp_mask
+
+
+__all__ = ["ARSamplingParams", "ARStage", "ARStep", "left_pad_prompt"]

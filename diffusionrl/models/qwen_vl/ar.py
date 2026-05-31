@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from diffusionrl.models.types.ar import ARSamplingParams, ARStage, ARStep
+from diffusionrl.models.types.ar import ARSamplingParams, ARStage, ARStep, left_pad_prompt
 from diffusionrl.types.segments import TextSegment
 
 from .bundle import QwenVLBundle
@@ -111,6 +111,17 @@ class QwenVLARStage(ARStage[QwenVLARConditions]):
         input_ids: torch.Tensor = conditions.prompt.input_ids
         attention_mask: torch.Tensor = conditions.prompt.attention_mask
         device = input_ids.device
+
+        # QwenVLChatTemplateStage right-pads prompts to the in-batch max. The
+        # decode loop reads ``logits[:, -1, :]`` and appends each new token at the
+        # end, which is only correct when the last column is a row's last *real*
+        # token — i.e. for an equal-length batch. Re-pad to LEFT so mixed-length
+        # batches decode correctly too (no-op when already equal length, e.g. the
+        # same-prompt-group recipe). The image placeholders shift with the real
+        # prompt; ``get_rope_index`` still locates them by token id + the
+        # left-padded ``attention_mask``.
+        pad_id = self.model.tokenizer.pad_token_id or 0
+        input_ids, attention_mask = left_pad_prompt(input_ids, attention_mask, pad_id)
         batch_size = int(input_ids.shape[0])
 
         # Reset stale rope_deltas from any prior forward/generate call

@@ -26,7 +26,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from diffusionrl.models.types.ar import ARSamplingParams, ARStage, ARStep
+from diffusionrl.models.types.ar import ARSamplingParams, ARStage, ARStep, left_pad_prompt
 from diffusionrl.types.segments import TextSegment
 from diffusionrl.utils.dtypes import parse_torch_dtype
 
@@ -168,16 +168,17 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
         input_ids: torch.Tensor = conditions.prompt.input_ids
         attention_mask: torch.Tensor = conditions.prompt.attention_mask
         device = input_ids.device
-        batch_size = int(input_ids.shape[0])
 
-        # LIMITATION: Qwen3ChatTemplateStage right-pads prompts to the in-batch
-        # max, and the decode loop below reads ``logits[:, -1, :]`` (the last
-        # position). That is the last *real* prompt token only when every prompt
-        # in the batch shares length; with mixed lengths the short prompts read a
-        # pad position (and appended tokens land after the pad run). The recipe
-        # avoids this by batching same-prompt groups (forward_batch_size ==
-        # samples_per_prompt). General mixed-length support needs left-padding —
-        # tracked as a follow-up.
+        # Qwen3ChatTemplateStage right-pads prompts to the in-batch max. The
+        # decode loop below reads ``logits[:, -1, :]`` and appends each new token
+        # at the end, which is only correct when the last column is a row's last
+        # *real* token — i.e. for an equal-length batch. Re-pad to LEFT here so
+        # mixed-length batches decode correctly too (no-op when already equal
+        # length, e.g. the same-prompt-group recipe). HF derives the right
+        # ``position_ids`` from the left-padded ``attention_mask``.
+        pad_id = self.model.tokenizer.pad_token_id or 0
+        input_ids, attention_mask = left_pad_prompt(input_ids, attention_mask, pad_id)
+        batch_size = int(input_ids.shape[0])
 
         stop_ids = self._resolve_stop_ids(params, sampling_params)
         step = Qwen3ARStep(
