@@ -38,8 +38,9 @@ class ReplayResult:
 
     logits: Optional[torch.Tensor] = None
     """Per-step token logits at each replayed position. Shape
-    ``[B, S', V]`` for AR. Reserved for future AR KL-penalty support;
-    currently not populated."""
+    ``[B, S', V]`` for AR. Reserved for future full-categorical KL
+    or entropy penalty support; not needed for Binary KL (which uses
+    only per-token log-probs). Currently not populated."""
 
 
 __all__ = ["ReplayResult"]

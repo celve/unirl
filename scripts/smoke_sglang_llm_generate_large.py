@@ -16,7 +16,7 @@ Assertions (any failure → non-zero exit):
 
 1. Total candidate count = ``n_prompts * n_per_prompt``.
 2. Every decoded text is non-empty.
-3. Every ``rollout_traces["text"]`` row has at least one token and
+3. Every ``tracks["ar"].segment`` row has at least one token and
    ``len(token_ids) == len(logprobs)`` (alignment is the most common silent-
    corruption signal — sglang has historically dropped logprobs on
    certain finish_reasons).
@@ -157,7 +157,7 @@ def _build_engine_remote_class():
             resp = self._engine.generate(req)
             elapsed_s = time.perf_counter() - t0
 
-            track = resp.tracks.get("text")
+            track = resp.tracks.get("ar")
             seg = track.segment if track is not None else None
             tokens = getattr(seg, "tokens", None) if seg is not None else None
             log_probs = getattr(seg, "log_probs", None) if seg is not None else None

@@ -54,6 +54,7 @@ class Qwen3ChatTemplateStage(EmbedStage[Texts, Qwen3ARConditions]):
             ids = tokenizer.apply_chat_template(
                 messages,
                 add_generation_prompt=True,
+                enable_thinking=False,
                 tokenize=True,
                 return_tensors="pt",
                 truncation=True,

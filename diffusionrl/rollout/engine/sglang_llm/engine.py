@@ -10,8 +10,8 @@ Speaks the typed ``RolloutReq`` / ``RolloutResp`` contract:
 - Reads prompts from ``req.primitives['text'].texts`` (typed :class:`Texts`).
 - Reads sampling overrides from ``req.stage_params.get('ar', {})`` (typed
   bag-of-options, falls back to config defaults).
-- Emits ``resp.tracks['text'].decoded: Texts`` (generated text, one per prompt × n).
-- Emits ``resp.rollout_traces['text']: TextSegment`` (packed varlen token ids
+- Emits ``resp.tracks['ar'].decoded: Texts`` (generated text, one per prompt × n).
+- Emits ``resp.rollout_traces['ar']: TextSegment`` (packed varlen token ids
   and per-token log-probs) keyed back to prompts via ``sample_indices``.
 - Echoes ``sample_ids`` / ``group_ids`` from the request; for ``n > 1`` the
   sample-id is mangled as ``f"{sid}#{k}"`` to keep uniqueness while group
@@ -213,7 +213,7 @@ def build_rollout_resp(
 
     ``raw_results`` is in prompt-major order: candidate ``k`` of prompt
     ``i`` is at index ``i * n_per_prompt + k``. The output's
-    ``tracks['text'].decoded`` / ``tracks['text'].segment`` rows are in the same
+    ``tracks['ar'].decoded`` / ``tracks['ar'].segment`` rows are in the same
     order, with ``sample_indices`` pointing each row at its own slot (so
     downstream ``Segment.slice`` reads the right tokens for sample ``j``).
 
@@ -285,7 +285,7 @@ def build_rollout_resp(
 
     return RolloutResp(
         tracks={
-            "text": RolloutTrack(
+            "ar": RolloutTrack(
                 sample_ids=sample_ids,
                 parent_ids=list(group_ids) if group_ids else None,
                 conditions=conditions,

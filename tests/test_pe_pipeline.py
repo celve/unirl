@@ -79,7 +79,7 @@ class _RecordingLLMPipeline:
         )
         return RolloutResp(
             tracks={
-                "text": RolloutTrack(
+                "ar": RolloutTrack(
                     sample_ids=list(req.sample_ids),
                     parent_ids=list(req.group_ids),
                     conditions={"prompt": prompt_cond},
@@ -370,7 +370,7 @@ def test_generate_rejects_sample_count_mismatch_from_llm() -> None:
 
 
 def test_generate_rejects_missing_decoded_text() -> None:
-    """If the LLM child's "text" track has no decoded Texts, PE raises a clear error."""
+    """If the LLM child's "ar" track has no decoded Texts, PE raises a clear error."""
 
     class _EmptyLLM:
         def __init__(self) -> None:
@@ -379,7 +379,7 @@ def test_generate_rejects_missing_decoded_text() -> None:
         def generate(self, req: RolloutReq) -> RolloutResp:
             return RolloutResp(
                 tracks={
-                    "text": RolloutTrack(
+                    "ar": RolloutTrack(
                         sample_ids=list(req.sample_ids),
                         parent_ids=list(req.group_ids),
                         conditions={},
@@ -391,7 +391,7 @@ def test_generate_rejects_missing_decoded_text() -> None:
 
     pe = PEPipeline(diffusion_pipeline=_RecordingDiffusionPipeline(), llm_pipeline=_EmptyLLM())
     parent = _make_parent_req()
-    with pytest.raises(RuntimeError, match=r"tracks\['text'\]\.decoded"):
+    with pytest.raises(RuntimeError, match=r"tracks\['ar'\]\.decoded"):
         pe.generate(parent)
 
 

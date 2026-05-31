@@ -13,9 +13,11 @@ from .rollout_control import (
     GRPORolloutControlConfig,
     NFTRolloutControlConfig,
 )
+from .spo_dppo import ARSPODPPO
 
 __all__ = [
     "ARGRPO",
+    "ARSPODPPO",
     "AlgorithmStepResult",
     "DiffusionDPPO",
     "DiffusionGRPO",

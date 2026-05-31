@@ -200,14 +200,14 @@ class PEPipeline(Pipeline):
 
         # The rewritten prompts live on the LLM track's ``decoded`` field as a
         # single :class:`Texts`. Both Qwen3Pipeline and any future AR LLM
-        # following the pipeline contract emit a track named ``"text"``.
-        llm_track = llm_resp.tracks.get("text")
+        # following the pipeline contract emit a track named ``"ar"``.
+        llm_track = llm_resp.tracks.get("ar")
         rewritten = llm_track.decoded if llm_track is not None else None
         if not isinstance(rewritten, Texts):
             raise RuntimeError(
-                "PEPipeline.generate: LLM child returned tracks['text'].decoded of "
+                "PEPipeline.generate: LLM child returned tracks['ar'].decoded of "
                 f"type {type(rewritten).__name__ if rewritten is not None else 'None'}; "
-                "expected Texts on tracks['text'].decoded so the diffusion child can "
+                "expected Texts on tracks['ar'].decoded so the diffusion child can "
                 "consume it as primitives['text']."
             )
         if len(rewritten.texts) != len(ar_shell.sample_ids):

@@ -34,7 +34,7 @@ track). For per-segment-row fields (like LatentSegment's latents)::
 For packed varlen fields (like TextSegment's tokens), use the framework-
 managed ``cu_seqlens`` to slice each sample's chunk::
 
-    track = resp.tracks["text"]
+    track = resp.tracks["ar"]
     cu = track.segment.cu_seqlens
     tokens_i = track.segment.tokens[cu[i]:cu[i + 1]]
 

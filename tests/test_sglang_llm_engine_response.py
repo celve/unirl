@@ -3,8 +3,8 @@
 Targets the pure :func:`build_rollout_resp` helper — no live sglang runtime
 needed. Pins:
 
-- ``RolloutResp.tracks["text"].decoded`` Texts ordering and content.
-- ``RolloutResp.tracks["text"].segment`` TextSegment packed-varlen shape:
+- ``RolloutResp.tracks["ar"].decoded`` Texts ordering and content.
+- ``RolloutResp.tracks["ar"].segment`` TextSegment packed-varlen shape:
   ``cu_seqlens``, ``sample_indices``, per-sample token row recovery via
   ``tokens[cu[i]:cu[i+1]]``.
 - ``sample_ids`` / ``group_ids`` echo and the ``n > 1`` mangling rule
@@ -75,7 +75,7 @@ def test_build_resp_single_prompt_n1() -> None:
 
     resp = build_rollout_resp(req, prompts, raw, n_per_prompt=1)
     assert isinstance(resp, RolloutResp)
-    track = resp.tracks["text"]
+    track = resp.tracks["ar"]
     assert track.decoded.texts == ["world"]
     assert track.sample_ids == ["s0"]
     assert track.group_ids == ["g0"]
@@ -106,7 +106,7 @@ def test_build_resp_n_greater_than_one_remaps_sample_ids() -> None:
     req = _make_req(prompts)
     resp = build_rollout_resp(req, prompts, raw, n_per_prompt=n)
 
-    track = resp.tracks["text"]
+    track = resp.tracks["ar"]
     assert track.decoded.texts == ["a0", "a1", "b0", "b1"]
     assert track.sample_ids == ["s0#0", "s0#1", "s1#0", "s1#1"]
     assert track.group_ids == ["g0"] * 4
@@ -128,7 +128,7 @@ def test_build_resp_per_sample_row_recovery() -> None:
     ]
     req = _make_req(prompts)
     resp = build_rollout_resp(req, prompts, raw, n_per_prompt=1)
-    seg = resp.tracks["text"].segment
+    seg = resp.tracks["ar"].segment
     cu = seg.cu_seqlens.tolist()
     expected = [[10], [20, 21], [30, 31, 32]]
     for i in range(3):
@@ -143,7 +143,7 @@ def test_build_resp_no_request_ids_synthesizes_them() -> None:
     ]
     req = _make_req(prompts, with_ids=False)
     resp = build_rollout_resp(req, prompts, raw, n_per_prompt=1)
-    track = resp.tracks["text"]
+    track = resp.tracks["ar"]
     assert track.sample_ids == ["s0", "s1"]
     assert track.group_ids == ["s0", "s1"]
 
@@ -156,7 +156,7 @@ def test_build_resp_empty_text_uses_text_fallback() -> None:
     ]
     req = _make_req(prompts)
     resp = build_rollout_resp(req, prompts, raw, n_per_prompt=1)
-    assert resp.tracks["text"].decoded.texts == ["non-empty"]
+    assert resp.tracks["ar"].decoded.texts == ["non-empty"]
 
 
 def test_build_resp_wrong_candidate_count_rejected() -> None:
@@ -194,7 +194,7 @@ def test_build_resp_packs_prompt_token_ids_into_conditions() -> None:
     req = _make_req(prompts)
     resp = build_rollout_resp(req, prompts, raw, n_per_prompt=1, pad_token_id=999)
 
-    track = resp.tracks["text"]
+    track = resp.tracks["ar"]
     assert "prompt" in track.conditions
     prompt_cond = track.conditions["prompt"]
     assert isinstance(prompt_cond, TextTokenCondition)
@@ -221,7 +221,7 @@ def test_build_resp_no_prompt_token_ids_yields_empty_conditions() -> None:
     ]
     req = _make_req(prompts)
     resp = build_rollout_resp(req, prompts, raw, n_per_prompt=1)
-    assert resp.tracks["text"].conditions == {}
+    assert resp.tracks["ar"].conditions == {}
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +323,7 @@ def test_end_to_end_parse_and_build() -> None:
     req = _make_req(prompts)
     resp = build_rollout_resp(req, prompts, parsed, n_per_prompt=1)
 
-    track = resp.tracks["text"]
+    track = resp.tracks["ar"]
     assert track.decoded.texts == ["hello world"]
     seg = track.segment
     assert torch.equal(seg.tokens, torch.tensor([100, 101, 102], dtype=torch.long))

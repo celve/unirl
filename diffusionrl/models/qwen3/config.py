@@ -60,6 +60,8 @@ class Qwen3PipelineConfig:
     use_lora: bool = False
     lora_target_modules: Optional[List[str]] = None
 
+    system_instruction: Optional[str] = None
+
     def __post_init__(self) -> None:
         validate_precision_type(self.model_precision, field="Qwen3PipelineConfig.model_precision")
 

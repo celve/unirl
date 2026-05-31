@@ -108,7 +108,7 @@ def _build_engine_remote_class():
             )
             resp = self._engine.generate(req)
 
-            track = resp.tracks.get("text")
+            track = resp.tracks.get("ar")
             seg = track.segment if track is not None else None
             tokens = getattr(seg, "tokens", None) if seg is not None else None
             cu = getattr(seg, "cu_seqlens", None) if seg is not None else None
@@ -304,7 +304,7 @@ def main() -> int:
     gen = ray.get(actor.generate.remote(_PROMPTS))
     logger.info("decoded texts: %s", gen["texts"])
     logger.info(
-        "rollout_traces[text]: %d segs, %d total tokens, cu_seqlens=%s",
+        "tracks[ar].segment: %d segs, %d total tokens, cu_seqlens=%s",
         gen["seg_count"],
         gen["n_tokens_total"],
         gen["cu_seqlens"],

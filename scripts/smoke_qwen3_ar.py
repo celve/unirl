@@ -80,8 +80,9 @@ def main() -> None:
     resp = pipe.generate(req)
     dt = time.time() - t0
 
-    seg = resp.rollout_traces["text"]
-    decoded = resp.decoded["text"]
+    track = resp.tracks["ar"]
+    seg = track.segment
+    decoded = track.decoded
     n_tok = int(seg.lengths.sum().item()) if seg.lengths is not None else 0
     print(f"[qwen3-smoke] generated {n_tok} tokens in {dt:.1f}s ({n_tok / max(dt, 1e-3):.2f} tok/s)")
     print(f"[qwen3-smoke] decoded: {decoded.texts[0]!r}")

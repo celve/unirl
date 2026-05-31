@@ -59,9 +59,9 @@ class Qwen3Pipeline(Pipeline):
 
     - ``conditions["prompt"]: TextTokenCondition`` — the chat-template
       output (``input_ids`` + ``attention_mask``).
-    - ``rollout_traces["text"]: TextSegment`` — the generated tokens +
+    - ``rollout_traces["ar"]: TextSegment`` — the generated tokens +
       full-softmax log-probs.
-    - ``decoded["text"]: Texts`` — detokenized response strings.
+    - ``decoded["ar"]: Texts`` — detokenized response strings.
     """
 
     def __init__(
@@ -88,10 +88,40 @@ class Qwen3Pipeline(Pipeline):
         )
 
     @classmethod
+    def from_bundle(
+        cls,
+        bundle: Qwen3Bundle,
+        *,
+        system_instruction: Optional[str] = None,
+        autocast_precision: str = "bf16",
+        logprob_precision: str = "fp32",
+    ) -> "Qwen3Pipeline":
+        """Wire chat-template + AR stages around an already-loaded bundle.
+
+        The v2 trainer loads the bundle once and injects it
+        (``remote_hydra(pipeline_cfg, bundle=...)``); ``from_config`` would load a
+        second copy. ``system_instruction`` (e.g. ``/no_think``) is applied to the
+        chat template here so it is not lost on the bundle-injected path.
+        """
+        chat_template = Qwen3ChatTemplateStage(bundle, system_instruction=system_instruction)
+        ar = Qwen3ARStage(
+            model=bundle,
+            autocast_precision=autocast_precision,
+            logprob_precision=logprob_precision,
+        )
+        return cls(
+            bundle=bundle,
+            chat_template=chat_template,
+            ar=ar,
+            autocast_precision=autocast_precision,
+            logprob_precision=logprob_precision,
+        )
+
+    @classmethod
     def from_config(cls, config: Qwen3PipelineConfig) -> "Qwen3Pipeline":
         """Build the full pipeline from a config."""
         bundle = Qwen3Bundle.from_config(config)
-        chat_template = Qwen3ChatTemplateStage(bundle)
+        chat_template = Qwen3ChatTemplateStage(bundle, system_instruction=config.system_instruction)
         ar = Qwen3ARStage(
             model=bundle,
             autocast_precision=config.autocast_precision,
@@ -147,7 +177,7 @@ class Qwen3Pipeline(Pipeline):
 
         return RolloutResp(
             tracks={
-                "text": RolloutTrack(
+                "ar": RolloutTrack(
                     sample_ids=list(req.sample_ids),
                     parent_ids=list(req.group_ids),
                     conditions=conds.to_dict(),

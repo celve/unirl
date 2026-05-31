@@ -117,7 +117,7 @@ def _build_engine_remote_class():
             )
             resp = self._engine.generate(req)
 
-            track = resp.tracks.get("text")
+            track = resp.tracks.get("ar")
             seg = track.segment if track is not None else None
             tokens = getattr(seg, "tokens", None) if seg is not None else None
             log_probs = getattr(seg, "log_probs", None) if seg is not None else None

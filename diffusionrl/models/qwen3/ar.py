@@ -23,6 +23,7 @@ from dataclasses import field as dc_field
 from typing import Any, List, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 
 from diffusionrl.models.types.ar import ARSamplingParams, ARStage, ARStep
@@ -53,9 +54,9 @@ class Qwen3ARStep(ARStep):
 
     Implements the ``ARStep`` Protocol: given logits over the vocabulary
     at the current position, sample the next token and return its
-    elementwise log-probability under the *full* softmax (so it's
-    directly comparable to a replay-time full-softmax log-prob without
-    filter masking).
+    elementwise log-probability under the *temperature-scaled* full
+    softmax (computed before top-k/top-p truncation), so it matches the
+    replay-time ``log_softmax(logits / T)`` without filter masking.
     """
 
     def __init__(
@@ -73,15 +74,21 @@ class Qwen3ARStep(ARStep):
         if logits.dim() != 2:
             raise ValueError(f"Qwen3ARStep.step: expected logits shape [B, vocab], got {tuple(logits.shape)}")
 
-        log_probs_full = F.log_softmax(logits.float(), dim=-1)
-
         if self.temperature <= 0.0:
-            # Greedy: argmax under the full softmax, log-prob from the same.
+            # Greedy: argmax under the full (untempered) softmax.
+            log_probs_full = F.log_softmax(logits.float(), dim=-1)
             token_id = log_probs_full.argmax(dim=-1)
             log_prob = log_probs_full.gather(-1, token_id.unsqueeze(-1)).squeeze(-1)
             return token_id, log_prob
 
         scaled = logits.float() / self.temperature
+
+        # Behavior log-prob under the temperature-scaled distribution, computed
+        # BEFORE top-k/top-p truncation so it matches Qwen3ARStage.replay's
+        # log_softmax(logits / T): old_logp == replay new_logp at the same
+        # weights. Storing the untempered log_softmax(logits) only matched when
+        # T == 1 (mirrors the QwenVL behavior-logprob fix in #165).
+        log_probs_full = F.log_softmax(scaled, dim=-1)
 
         if self.top_k > 0 and self.top_k < scaled.shape[-1]:
             topk_vals, _ = torch.topk(scaled, self.top_k, dim=-1)
@@ -163,6 +170,15 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
         device = input_ids.device
         batch_size = int(input_ids.shape[0])
 
+        # LIMITATION: Qwen3ChatTemplateStage right-pads prompts to the in-batch
+        # max, and the decode loop below reads ``logits[:, -1, :]`` (the last
+        # position). That is the last *real* prompt token only when every prompt
+        # in the batch shares length; with mixed lengths the short prompts read a
+        # pad position (and appended tokens land after the pad run). The recipe
+        # avoids this by batching same-prompt groups (forward_batch_size ==
+        # samples_per_prompt). General mixed-length support needs left-padding —
+        # tracked as a follow-up.
+
         stop_ids = self._resolve_stop_ids(params, sampling_params)
         step = Qwen3ARStep(
             temperature=float(sampling_params.temperature),
@@ -187,6 +203,11 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
         per_token_logps: List[List[float]] = [[] for _ in range(batch_size)]
         finished = [False] * batch_size
 
+        # NOTE: this decode loop runs plain forwards; it does not unshard FSDP
+        # itself. The recipe sets ``reshard_after_forward=false`` on the
+        # FSDPBackend so parameters stay gathered after the first forward — the
+        # remaining decode steps then reuse the gathered params instead of
+        # re-AllGathering each token, which is what makes AR rollout fast.
         for _ in range(max_new):
             model_inputs = transformer.prepare_inputs_for_generation(
                 cur_input_ids,
@@ -211,13 +232,22 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
                 per_token_logps[b].append(float(log_prob[b].item()))
                 if tid in stop_ids:
                     finished[b] = True
-            if all(finished):
+            # Synchronize finished status across all FSDP ranks. If any rank
+            # still has unfinished samples, all ranks must keep running forward
+            # passes (FSDP AllGather requires every rank to participate), so the
+            # collective runs every step under a real multi-rank group. With no
+            # process group (single-process / tests) the local view is final.
+            local_done = all(finished)
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                done = torch.tensor([1 if local_done else 0], device=device)
+                dist.all_reduce(done, op=dist.ReduceOp.MIN)
+                local_done = done.item() == 1
+            if local_done:
                 break
 
             cur_input_ids = torch.cat([cur_input_ids, token_id.unsqueeze(-1)], dim=1)
             model_kwargs = transformer._update_model_kwargs_for_generation(out, model_kwargs)
             model_kwargs["use_cache"] = True
-
         return _pack_text_segment(generated_tokens, per_token_logps, device=device)
 
     def replay(
