@@ -33,7 +33,13 @@ from diffusionrl.config.registration import register_config
 from diffusionrl.types.conditions import Condition
 from diffusionrl.types.segments.text import TextSegment
 
-from .base import AlgorithmStepResult, BaseAlgorithmConfig, StageAlgorithm, typed_conditions
+from .base import (
+    AlgorithmStepResult,
+    BaseAlgorithmConfig,
+    StageAlgorithm,
+    rollout_replay_logp_absdiff,
+    typed_conditions,
+)
 from .grpo import ARGRPO
 
 # ---------------------------------------------------------------------------
@@ -389,6 +395,11 @@ class ARSPODPPO(StageAlgorithm):
         new_logp = self.stage.replay(
             typed_conds, segment=segment, temperature=self.sampling_temperature
         )  # [total_tokens]
+        # NOTE(multi-epoch): old_logp is the rollout log-prob — correct only for a
+        # single on-policy update. Before enabling num_updates_per_batch>1 for AR,
+        # snapshot a frozen train-side old_logp here (mirror
+        # DiffusionGRPO.prepare_segment); reusing rollout logp across PPO epochs
+        # conflates the rollout-vs-train engine gap with real policy drift.
         old_logp = segment.log_probs.to(dtype=new_logp.dtype, device=new_logp.device)
 
         # Expand per-sample advantages to per-token
@@ -428,6 +439,7 @@ class ARSPODPPO(StageAlgorithm):
             "clip_divergence_low": self.clip_divergence_low,
             "clip_divergence_high": self.clip_divergence_high,
             "clip_ratio_c": self.clip_ratio_c,
+            **rollout_replay_logp_absdiff(new_logp, old_logp),
             **{k: float(v.item()) for k, v in ratio_metrics.items()},
         }
         return AlgorithmStepResult(

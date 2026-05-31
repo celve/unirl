@@ -118,7 +118,7 @@ reward:
 algorithm:
   _target_: diffusionrl.algorithms.grpo.ARGRPO
   stage_attr: ar # resolves stage from the trainer-injected pipeline (.ar)
-  clip_range: 1.0e-4
+  clip_range: 1.0e-2 # AR/LLM trust region — match the lora/sglang siblings (diffusion uses 1e-4)
   clip_schedule: constant
   conditions_cls:
     _target_: hydra.utils.get_class

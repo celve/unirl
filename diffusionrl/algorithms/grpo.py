@@ -22,7 +22,14 @@ from diffusionrl.types.conditions import Condition
 from diffusionrl.types.segments.latent import LatentSegment
 from diffusionrl.types.segments.text import TextSegment
 
-from .base import AlgorithmStepResult, BaseAlgorithmConfig, StageAlgorithm, gather_sde_field, typed_conditions
+from .base import (
+    AlgorithmStepResult,
+    BaseAlgorithmConfig,
+    StageAlgorithm,
+    gather_sde_field,
+    rollout_replay_logp_absdiff,
+    typed_conditions,
+)
 
 
 @register_config(
@@ -301,6 +308,11 @@ class ARGRPO(StageAlgorithm):
         new_logp = self.stage.replay(
             typed_conds, segment=segment, temperature=self.sampling_temperature
         )  # [total_tokens]
+        # NOTE(multi-epoch): old_logp is the rollout log-prob — correct only for a
+        # single on-policy update. Before enabling num_updates_per_batch>1 for AR,
+        # snapshot a frozen train-side old_logp here (mirror
+        # DiffusionGRPO.prepare_segment); reusing rollout logp across PPO epochs
+        # conflates the rollout-vs-train engine gap with real policy drift.
         old_logp = segment.log_probs.to(dtype=new_logp.dtype, device=new_logp.device)
         adv_per_token = self._expand_advantages_to_tokens(
             advantages, segment.lengths, dtype=new_logp.dtype, device=new_logp.device
@@ -320,6 +332,7 @@ class ARGRPO(StageAlgorithm):
         metrics: Dict[str, Any] = {
             "policy_loss": float(loss.detach().item()),
             "clip_range": float(clip_range),
+            **rollout_replay_logp_absdiff(new_logp, old_logp),
             **{k: float(v.item()) for k, v in ratio_metrics.items()},
         }
         return AlgorithmStepResult(

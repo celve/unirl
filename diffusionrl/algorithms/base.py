@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Mapping, Optional, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Type
 
 import torch
 
@@ -77,6 +77,29 @@ def gather_sde_field(
             f"gather_sde_field({field_name}): target steps {bad} not in sde_indices={sde_indices.tolist()}"
         )
     return tensor[:, positions.tolist()]
+
+
+def rollout_replay_logp_absdiff(new_logp: torch.Tensor, old_logp: torch.Tensor) -> Dict[str, float]:
+    """Per-token |Δlogp| between rollout and replay — AR train-rollout drift gauge.
+
+    ``old_logp`` is the rollout-time log-prob (SGLang / trainside autoregress)
+    and ``new_logp`` is the teacher-forced replay at the current weights. On a
+    single on-policy update the two differ only by the rollout-vs-replay *engine*
+    gap (a temperature/logprob misconfig, a broken SGLang weight sync, or bf16
+    KV-cache-vs-full-forward drift). ``mean|Δlogp|`` reports that gap directly and
+    symmetrically — more legible than the exp-biased ``ratio_mean``. AR-only: the
+    diffusion algorithms self-record or recompute ``old_logp`` with the same
+    model, so their gap is ~0 by construction and they do not emit this metric.
+
+    Assumes non-empty inputs, mirroring ``_grpo_clip_loss`` — the AR callers
+    early-return on a zero-token segment before this runs.
+    """
+    with torch.no_grad():
+        absdiff = (new_logp - old_logp).abs()
+    return {
+        "rollout_replay_logp_absdiff_mean": float(absdiff.mean()),
+        "rollout_replay_logp_absdiff_max": float(absdiff.max()),
+    }
 
 
 @dataclass(frozen=True)
@@ -185,4 +208,10 @@ class StageAlgorithm(Remote, ABC):
         ...
 
 
-__all__ = ["AlgorithmStepResult", "StageAlgorithm", "gather_sde_field", "typed_conditions"]
+__all__ = [
+    "AlgorithmStepResult",
+    "StageAlgorithm",
+    "gather_sde_field",
+    "rollout_replay_logp_absdiff",
+    "typed_conditions",
+]
