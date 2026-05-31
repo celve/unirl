@@ -2,7 +2,7 @@
 
 A ``Pipeline`` is the top-level entrypoint that maps a ``RolloutReq`` (typed
 inputs keyed by modality slot) into a ``RolloutResp`` (typed outputs:
-conditions used + rollout traces produced + decoded primitives). Concrete
+per-track conditions used + segments produced + decoded primitives). Concrete
 pipelines compose stage instances (``EmbedStage`` / ``EncodeStage`` /
 ``DiffusionStage`` / ``ARStage`` / ``DecodeStage``) for one model bundle.
 
@@ -11,11 +11,11 @@ The ``Pipeline`` Protocol itself is intentionally non-parametric — both
 across every bundle, so per-model conditions typing happens *inside* the
 pipeline (after ``RolloutReq.primitives`` are encoded into a typed
 container, and before that container is repacked into
-``RolloutResp.conditions``).
+``RolloutResp.tracks[<slot>].conditions``).
 
 Per-bundle contract documentation (which ``req.primitives`` keys are read,
-which ``req.stage_params`` keys, and which ``resp.{conditions, rollout_traces,
-decoded}`` keys are produced) lives in each concrete ``Pipeline``'s
+which ``req.stage_params`` keys, and which ``resp.tracks[<slot>].{conditions,
+segment, decoded}`` keys are produced) lives in each concrete ``Pipeline``'s
 docstring so multiple bundles don't drift on the same key names.
 
 σ schedule contract

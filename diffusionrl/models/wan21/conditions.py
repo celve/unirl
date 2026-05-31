@@ -9,7 +9,7 @@ mask+first-frame VAE latents for I2V (20-channel payload produced by
 The CFG negative branch is split into a sibling ``negative_text`` field
 (rather than nested under ``text.negative``) so the schema is honest
 about which slots travel on the wire — a reader of
-``RolloutResp.conditions`` sees ``"text"`` and ``"negative_text"`` as
+``RolloutResp.tracks["video"].conditions`` sees ``"text"`` and ``"negative_text"`` as
 two equal-status entries. This matches the SD3 convention exactly.
 
 WAN uses UMT5 (single encoder) so ``TextEmbedCondition.pooled`` is
@@ -86,7 +86,7 @@ class WAN21Conditions(Batch):
 
     def to_dict(self) -> Dict[str, Condition]:
         """Convert back to the generic ``Conditions`` dict shape for
-        packing into ``RolloutResp.conditions``.
+        packing into ``RolloutResp.tracks["video"].conditions``.
 
         Emits optional slots only when non-``None`` so the dict stays
         minimal for T2V / CFG-off rollouts.

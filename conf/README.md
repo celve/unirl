@@ -20,7 +20,7 @@ belong in YAML.
 | `run` | outer-loop seed, data path, data source, rollout count, eval cadence |
 | `model` | model bundle, checkpoint path, precision, LoRA target materialization |
 | `algorithm` | driver-side rollout control such as samples per prompt and SDE index scheduling |
-| `algorithms.<slot>` | train-side stage algorithms keyed by rollout trace slot |
+| `algorithms.<slot>` | train-side stage algorithms keyed by rollout track slot |
 | `sampling` | SDE strategy, step count, guidance, output shape, precision for trajectories/log-probs |
 | `reward` | reward components, aggregation, local/remote reward runtime knobs |
 | `rollout.engine` | trainside, SGLang, or vLLM-Omni rollout implementation |

@@ -50,7 +50,7 @@ class Qwen3ARConditions(Batch):
 
     def to_dict(self) -> Dict[str, Condition]:
         """Convert back to the generic ``Conditions`` dict shape for
-        packing into ``RolloutResp.conditions``.
+        packing into ``RolloutResp.tracks["ar"].conditions``.
         """
         if self.prompt is None:
             raise ValueError("Qwen3ARConditions.to_dict: prompt field is None")

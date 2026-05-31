@@ -104,7 +104,7 @@ class HunyuanVideo15Conditions(Batch):
 
     def to_dict(self) -> Dict[str, Condition]:
         """Convert back to the generic ``Conditions`` dict shape for
-        packing into ``RolloutResp.conditions``.
+        packing into ``RolloutResp.tracks["video"].conditions``.
 
         Emits the optional negative_* / vision keys only when populated
         so the dict shape stays minimal for CFG-off / T2V rollouts.

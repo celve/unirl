@@ -75,7 +75,7 @@ algorithm:
     timestep_fraction: [0.0, 1.0]
     num_sde_steps: 0
   algorithms:
-    # Slot key = rollout response segment key (SD3 emits resp.rollout_traces["image"]).
+    # Slot key = rollout response track key (SD3 emits resp.tracks["image"]).
     # ``stage_attr: diffusion`` overrides the default pipeline-attribute
     # lookup (SD3Pipeline exposes ``self.diffusion``, not ``self.image``).
     # TrainActor injects ``nft_lora_policy=<NFTLoRAPolicy in chain>`` at

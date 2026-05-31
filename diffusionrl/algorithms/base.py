@@ -148,9 +148,9 @@ class StageAlgorithm(Remote, ABC):
         algorithms.
 
         Args:
-            conditions: ``RolloutResp.conditions`` — stage-typed conditions
+            conditions: ``RolloutResp.tracks[slot].conditions`` — stage-typed conditions
                 are reconstructed inside the algorithm if needed.
-            segment: ``RolloutResp.rollout_traces[slot]`` for this algorithm's
+            segment: ``RolloutResp.tracks[slot].segment`` for this algorithm's
                 slot. Implementations may mutate field defaults that were
                 left ``None`` by the rollout (lazy initialization); they
                 must NOT mutate fields that the rollout already populated.
@@ -170,9 +170,9 @@ class StageAlgorithm(Remote, ABC):
         """Compute loss for one micro-batch and call ``.backward()``.
 
         Args:
-            conditions: ``RolloutResp.conditions`` — stage-typed conditions
+            conditions: ``RolloutResp.tracks[slot].conditions`` — stage-typed conditions
                 are reconstructed inside the algorithm if needed.
-            segment: ``RolloutResp.rollout_traces[slot]`` — diffusion algorithms
+            segment: ``RolloutResp.tracks[slot].segment`` — diffusion algorithms
                 read ``segment.sde_logp`` / ``segment.sde_indices`` /
                 ``segment.sigmas``; AR algorithms read ``segment.log_probs`` /
                 ``segment.cu_seqlens``.

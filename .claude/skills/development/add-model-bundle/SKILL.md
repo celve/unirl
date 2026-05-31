@@ -54,7 +54,7 @@ Keep package-specific logic under `diffusionrl/models/<model_name>/`. Put only c
 
 ## Conditions And Field Kinds
 
-`<Model>Conditions(Transportable)` is the typed container passed to diffusion or AR stages and serialized through `RolloutResp.conditions`. It owns conditioning slots only. Latents live in `LatentSegment`; sigma schedules live in `RolloutReq.sigmas` and segment metadata.
+`<Model>Conditions(Transportable)` is the typed container passed to diffusion or AR stages and serialized through `RolloutResp.tracks[<slot>].conditions`. It owns conditioning slots only. Latents live in `LatentSegment`; sigma schedules live in `RolloutReq.sigmas` and segment metadata.
 
 Use field kinds from `diffusionrl/utils/batched.py`:
 

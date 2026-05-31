@@ -95,7 +95,7 @@ def main() -> None:
     if args.temperature == 0.0 and n_tok > 0:
         from diffusionrl.models.qwen3.conditions import Qwen3ARConditions
 
-        conds = Qwen3ARConditions.from_dict(resp.conditions)
+        conds = Qwen3ARConditions.from_dict(track.conditions)
         with torch.no_grad():
             replay_logps = pipe.ar.replay(conds, segment=seg)
         max_abs_diff = (replay_logps - seg.log_probs).abs().max().item()

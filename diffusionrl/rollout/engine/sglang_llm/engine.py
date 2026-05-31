@@ -11,7 +11,7 @@ Speaks the typed ``RolloutReq`` / ``RolloutResp`` contract:
 - Reads sampling overrides from ``req.stage_params.get('ar', {})`` (typed
   bag-of-options, falls back to config defaults).
 - Emits ``resp.tracks['ar'].decoded: Texts`` (generated text, one per prompt × n).
-- Emits ``resp.rollout_traces['ar']: TextSegment`` (packed varlen token ids
+- Emits ``resp.tracks['ar'].segment: TextSegment`` (packed varlen token ids
   and per-token log-probs) keyed back to prompts via ``sample_indices``.
 - Echoes ``sample_ids`` / ``group_ids`` from the request; for ``n > 1`` the
   sample-id is mangled as ``f"{sid}#{k}"`` to keep uniqueness while group

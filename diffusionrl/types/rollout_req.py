@@ -8,7 +8,7 @@ Pairs with ``RolloutResp`` (in ``diffusionrl/types/rollout_resp.py``). Carries:
   generation.
 - ``request_conditions: Dict[str, Condition]`` — precomputed encoded inputs
   the engine should consume verbatim instead of (re-)deriving from
-  ``primitives``. Symmetric with ``RolloutResp.conditions``. Key convention:
+  ``primitives``. Symmetric with ``RolloutResp.tracks[<slot>].conditions``. Key convention:
   ``"initial_latents"`` → ``ImageLatentCondition(latents=x_T_or_init_img)``
   for engines that accept a precomputed start-of-denoising tensor (SGLang's
   ``Req.latents``, vllm-omni's per-stage init-latents). Future keys: other

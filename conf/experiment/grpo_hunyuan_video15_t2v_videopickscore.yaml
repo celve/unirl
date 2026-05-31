@@ -66,7 +66,7 @@ algorithm:
     timestep_fraction: [0.0, 0.6]
     num_sde_steps: 8
   algorithms:
-    # Slot ``video`` matches RolloutResp.rollout_traces["video"] emitted
+    # Slot ``video`` matches RolloutResp.tracks["video"] emitted
     # by HunyuanVideo15Pipeline.generate.
     video:
       name: diffusion_grpo

@@ -60,10 +60,10 @@ Rollout actors receive `RolloutReq` and return `RolloutResp`.
 - shared sampling parameters and per-request stage params;
 - metadata needed for sharding and deterministic noise.
 
-`RolloutResp` carries:
+`RolloutResp` carries one or more `tracks`; each `tracks[slot]` carries:
 
 - typed conditions used by train-side replay;
-- per-slot rollout traces such as diffusion or AR segments;
+- a rollout `segment` such as diffusion or AR trajectories;
 - rewards, advantages, and metrics;
 - optional media previews for logging.
 

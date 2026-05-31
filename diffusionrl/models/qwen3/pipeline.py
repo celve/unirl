@@ -55,13 +55,13 @@ class Qwen3Pipeline(Pipeline):
       stage; when absent the stage's compose-time ``system_instruction``
       is used.
 
-    Writes to ``RolloutResp``:
+    Writes ``RolloutResp.tracks["ar"]`` (one :class:`RolloutTrack`):
 
     - ``conditions["prompt"]: TextTokenCondition`` — the chat-template
       output (``input_ids`` + ``attention_mask``).
-    - ``rollout_traces["ar"]: TextSegment`` — the generated tokens +
+    - ``segment: TextSegment`` — the generated tokens +
       full-softmax log-probs.
-    - ``decoded["ar"]: Texts`` — detokenized response strings.
+    - ``decoded: Texts`` — detokenized response strings.
     """
 
     def __init__(

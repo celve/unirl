@@ -5,7 +5,7 @@
 - `cfg.algorithm`: driver-side rollout control. It decides rollout batch size,
   SDE step selection, and reward-to-advantage normalization.
 - `cfg.algorithms.<slot>`: train-side loss objects. They consume
-  `RolloutResp.rollout_traces[slot]` and call `backward()`.
+  `RolloutResp.tracks[slot]` and call `backward()`.
 
 Keep this split in mind when reading recipes. Most "algorithm" confusion comes
 from mixing these two layers.
@@ -37,23 +37,23 @@ build(cfg.algorithm)
   -> TrainActorGroup.train(...)
        shards RolloutResp across train actors
   -> StageTrainStack.train_optimizer_step(...)
-       dispatches each rollout_traces[slot] to cfg.algorithms.<slot>
+       dispatches each tracks[slot] to cfg.algorithms.<slot>
   -> StageAlgorithm.compute_loss_and_backward(...)
        replays the stage, computes loss, calls backward
 ```
 
-`RolloutResp` is the important boundary:
+`RolloutResp` is the important boundary; each `tracks[slot]` carries:
 
 - `conditions`: typed prompt/media conditions for train-side replay;
-- `rollout_traces[slot]`: diffusion or AR traces emitted by rollout;
+- `segment`: diffusion or AR traces emitted by rollout;
 - `rewards`: scalar reward per sample;
 - `advantages`: normalized reward signal used by train-side losses.
 
 Slot names must match:
 
 ```text
-cfg.algorithms.image -> resp.rollout_traces["image"]
-cfg.algorithms.ar    -> resp.rollout_traces["ar"]
+cfg.algorithms.image -> resp.tracks["image"]
+cfg.algorithms.ar    -> resp.tracks["ar"]
 ```
 
 Missing slots raise by default so a broken rollout cannot silently become a

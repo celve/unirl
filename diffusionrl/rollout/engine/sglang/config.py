@@ -11,7 +11,7 @@ Differences vs the legacy config:
 - ``model_family: Literal["sd3", "flux", "mochi", "hunyuan_video"]`` replaces
   the legacy substring-based ``_infer_model_type`` heuristic. Explicit field.
 - ``populate_conditions: bool`` opts the response translator into packing
-  ``RolloutResp.conditions["text"]`` (+ ``"negative_text"`` when CFG is on)
+  ``RolloutResp.tracks["image"].conditions["text"]`` (+ ``"negative_text"`` when CFG is on)
   from SGLang's emitted prompt embeddings.
 - ``init_same_noise: bool`` gates the engine-internal noise fallback that
   shares Gaussian noise across same-group samples when the caller did not

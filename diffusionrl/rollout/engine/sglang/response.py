@@ -3,7 +3,7 @@
 Single free function ``_to_rollout_resp(req, results, *, cfg, num_steps, shift,
 sde_indices, use_native_logprob)`` produces:
 
-- ``resp.rollout_traces['image']`` = :class:`LatentSegment` with ``latents``,
+- ``resp.tracks['image'].segment`` = :class:`LatentSegment` with ``latents``,
   ``sigmas``, ``indices``, ``sample_indices`` always populated; ``sde_logp`` +
   ``sde_indices`` populated when ``use_native_logprob`` and the algorithm
   requested SDE log-probs.
@@ -11,12 +11,12 @@ sde_indices, use_native_logprob)`` produces:
   in ``[0, 1]``) built from SGLang's per-result ``samples`` output, or ``None``
   if SGLang returned no decoded samples. Video samples surface as
   ``[C, T, H, W]`` and are deferred (TODO — first video consumer).
-- ``resp.conditions['text']`` + (when CFG active) ``resp.conditions[
-  'negative_text']`` populated from SGLang's ``prompt_embeds`` /
+- ``resp.tracks['image'].conditions['text']`` + (when CFG active)
+  ``resp.tracks['image'].conditions['negative_text']`` populated from SGLang's ``prompt_embeds`` /
   ``pooled_prompt_embeds`` / ``encoder_attention_mask`` / ``negative_*``
   outputs when ``cfg.populate_conditions=True``. The slot key
   ``"negative_text"`` matches the SD3 / Mochi typed-container convention so
-  trainer-side ``*DiffusionConditions.from_dict(resp.conditions)`` consumers
+  trainer-side ``*DiffusionConditions.from_dict(resp.tracks['image'].conditions)`` consumers
   pick up the negative branch automatically.
 
 Trajectory validation (T+1 invariant, sigma-schedule cross-check) and

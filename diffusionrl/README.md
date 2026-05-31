@@ -56,7 +56,7 @@ rollout engines, training policy composition, and algorithm loss math.
 1. `diffusionrl.train` composes config and runs validators.
 2. `placement` describes which Ray bundle each train/rollout actor should use.
 3. `RolloutActorGroup` dispatches typed `RolloutReq` objects to rollout actors.
-4. Rollout engines produce `RolloutResp` with conditions, traces, rewards, and media previews.
+4. Rollout engines produce `RolloutResp`, whose `tracks[slot]` carry conditions, segments, rewards, and media previews.
 5. `RolloutPipeline` aggregates responses and computes rollout-control outputs such as advantages.
 6. `TrainActorGroup.train(...)` shards `RolloutResp` across train actors.
 7. Each train actor owns a model bundle, a policy stack, stage algorithms, optimizer, and scheduler.

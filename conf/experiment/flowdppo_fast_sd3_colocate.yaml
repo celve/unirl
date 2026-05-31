@@ -54,7 +54,7 @@ algorithm:
     timestep_fraction: [0.0, 0.5]
     num_sde_steps: 3
   algorithms:
-    # Slot ``image`` matches RolloutResp.rollout_traces["image"] on SD3.
+    # Slot ``image`` matches RolloutResp.tracks["image"] on SD3.
     # ``stage_attr: diffusion`` points the algorithm at the right stage.
     diffusion:
       name: diffusion_dppo

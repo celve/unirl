@@ -15,7 +15,7 @@ Produces:
   the DiT stage's trajectory tensors.
 - ``resp.tracks["ar"].segment`` (all modalities) — ``TextSegment`` packed by
   ``hi3.ar_capture.extract_ar_segment``.
-- ``resp.conditions["fused"]`` (image modalities) —
+- ``resp.tracks["image"].conditions["fused"]`` (image modalities) —
   ``HunyuanImage3FusedMultimodalCondition`` built from per-request
   ``OmniRequestOutput.custom_output["fused_mm_capture"]`` (written by
   :class:`RLHunyuanImage3Pipeline` on the first per-request
@@ -30,7 +30,7 @@ Produces:
   regression, ...) — ``_to_rollout_resp`` raises at the rollout boundary
   rather than silently emitting empty conditions that would crash the
   trainer-side replay much later.
-- ``resp.conditions = {}`` (AR-only modalities) — no diffusion replay
+- ``resp.tracks["ar"].conditions = {}`` (AR-only modalities) — no diffusion replay
   in scope.
 """
 
@@ -50,6 +50,7 @@ from diffusionrl.types.conditions.text import TextEmbedCondition
 from diffusionrl.types.primitives import Image, Images, Text, Texts
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
+from diffusionrl.types.segments import Segment
 from diffusionrl.types.segments.latent import make_image_segment
 
 
@@ -290,7 +291,7 @@ def _build_fused_mm_condition(
     Returns ``None`` when any diff output is missing the capture (e.g. the
     worker side hasn't installed :class:`RLHunyuanImage3Pipeline`'s hook,
     or upstream's ``prepare_inputs_for_generation`` was bypassed). Callers
-    treat ``None`` as "no conditions surfaced" and emit ``resp.conditions = {}``,
+    treat ``None`` as "no conditions surfaced" and emit empty per-track ``conditions``,
     preserving the pre-patch contract.
 
     For think_recaption mode, different prompts produce different AR output
@@ -421,7 +422,7 @@ def _to_rollout_resp(
     # Per-track decoded slots (at most one value per track, by modality).
     decoded_image: Optional[Images] = None
     decoded_text: Optional[Texts] = None
-    rollout_traces: dict = {}
+    segments_for_track: Dict[str, Segment] = {}
     conditions: Dict[str, Condition] = {}
 
     if modality in ("t2i", "it2i", "sd35_t2i", "t2i_think_recaption"):
@@ -452,7 +453,7 @@ def _to_rollout_resp(
                 "check pipeline forward populated DiffusionOutput.output."
             )
         decoded_image = _pil_list_to_images(pil_images)
-        rollout_traces["image"] = _build_image_segment(
+        segments_for_track["image"] = _build_image_segment(
             diff_outputs,
             expected_sigmas=req.sigmas,
         )
@@ -505,9 +506,9 @@ def _to_rollout_resp(
     # AR segment is shared by all modalities (Stage 0 always runs).
     ar_segment = extract_ar_segment(per_request_outputs)
     if ar_segment is not None:
-        rollout_traces["ar"] = ar_segment
+        segments_for_track["ar"] = ar_segment
 
-    # Tracks are one per ``rollout_traces`` segment-key, each carrying its
+    # Tracks are one per ``segments_for_track`` key, each carrying its
     # own decoded value (or ``None``): the "image" track holds the DiT
     # pixels, the "ar" track holds the AR-decoded text.
     #
@@ -526,9 +527,9 @@ def _to_rollout_resp(
     }
     # HI3 think_recaption: image is generated from AR output 1-to-1,
     # so image.parent_track = "ar" and parent_ids align with ar.sample_ids.
-    has_ar = "ar" in rollout_traces
+    has_ar = "ar" in segments_for_track
     tracks: Dict[str, RolloutTrack] = {}
-    for track_name, segment in rollout_traces.items():
+    for track_name, segment in segments_for_track.items():
         if track_name == "image" and has_ar:
             parent: Optional[str] = "ar"
             track_parent_ids = list(sample_ids)

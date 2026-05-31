@@ -56,7 +56,7 @@ algorithm:
     timestep_fraction: [0.0, 0.5]
     num_sde_steps: 3
   algorithms:
-    # Slot key = rollout response segment key (SD3 emits resp.rollout_traces["image"]).
+    # Slot key = rollout response track key (SD3 emits resp.tracks["image"]).
     # stage_attr overrides the default pipeline-attribute lookup (pipe.image
     # doesn't exist; pipe.diffusion does — SD3's deliberate naming split).
     # params is built inline since SD3Pipeline doesn't expose

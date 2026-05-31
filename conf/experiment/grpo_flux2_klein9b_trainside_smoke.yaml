@@ -66,7 +66,7 @@ algorithm:
     timestep_fraction: [0.2, 0.8]
     num_sde_steps: 2
   algorithms:
-    # Slot ``image`` matches RolloutResp.rollout_traces["image"] emitted
+    # Slot ``image`` matches RolloutResp.tracks["image"] emitted
     # by Flux2KleinPipeline.generate. ``stage_attr: diffusion`` matches
     # the Pipeline's attribute name. ``conditions_cls`` reconstructs the
     # typed ``Flux2KleinConditions`` from the generic Conditions dict

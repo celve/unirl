@@ -24,7 +24,7 @@ concatenate per-row into the diffusionrl varlen ``TextSegment``.
 If the orchestrator returns nothing for Stage 0 (e.g. because the YAML
 patch didn't take effect or the AR worker doesn't surface its output),
 the extractor returns ``None`` and the caller can stamp an empty
-``TextSegment`` so the ``RolloutResp.rollout_traces["ar"]`` slot is at least
+``TextSegment`` so the ``RolloutResp.tracks["ar"]`` slot is at least
 present.
 """
 
@@ -109,7 +109,7 @@ def extract_ar_segment(per_request_outputs: Sequence[Sequence[Any]]) -> Optional
 
     Returns ``None`` when no Stage 0 output is found in any row — the
     caller should then either stamp an empty ``TextSegment`` or omit
-    ``rollout_traces["ar"]`` entirely.
+    ``tracks["ar"]`` entirely.
     """
     # Local import to keep this module importable without pulling
     # diffusionrl.types' torch dependency until it's actually used.

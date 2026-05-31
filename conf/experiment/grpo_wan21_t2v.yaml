@@ -46,7 +46,7 @@ algorithm:
   scheduler:
     timestep_fraction: [0.0, 0.5]
   algorithms:
-    # Slot ``video`` matches RolloutResp.rollout_traces["video"] on WAN.
+    # Slot ``video`` matches RolloutResp.tracks["video"] on WAN.
     # ``stage_attr: diffusion`` points the algorithm at the right stage on
     # WAN21Pipeline (which exposes ``self.diffusion``).
     video:

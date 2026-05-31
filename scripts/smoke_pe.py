@@ -17,7 +17,7 @@ populated ``.venv``:
 What it asserts (binary pass/fail, no quality bar on the image itself):
 - PEPipeline.from_config succeeds with nested _target_ children.
 - pe.generate(req) returns a RolloutResp that contains BOTH
-  decoded["text"] (LLM rewritten prompt) and decoded["image"]
+  tracks["ar"].decoded (LLM rewritten prompt) and tracks["diffusion"].decoded
   (final diffusion output).
 - The rewritten text is non-empty.
 - The output image has the expected ``[B, 3, H, W]`` shape and finite
@@ -190,17 +190,17 @@ def main() -> None:
         resp = pe.generate(req)
 
     # ----- LLM half checks -----
-    assert "text" in resp.decoded, "decoded['text'] missing — LLM child produced no output"
-    rewritten = resp.decoded["text"]
-    assert isinstance(rewritten, Texts), f"decoded['text'] wrong type: {type(rewritten).__name__}"
+    assert "ar" in resp.tracks, "tracks['ar'] missing — LLM child produced no output"
+    rewritten = resp.tracks["ar"].decoded
+    assert isinstance(rewritten, Texts), f"tracks['ar'].decoded wrong type: {type(rewritten).__name__}"
     assert len(rewritten.texts) == 1, f"expected 1 rewritten text, got {len(rewritten.texts)}"
     assert rewritten.texts[0].strip(), "rewritten text is empty/whitespace"
     rewritten_str = rewritten.texts[0]
     logger.info("LLM rewritten prompt: %r", rewritten_str)
 
     # ----- Diffusion half checks -----
-    assert "image" in resp.decoded, "decoded['image'] missing — diffusion child produced no output"
-    images = resp.decoded["image"]
+    assert "diffusion" in resp.tracks, "tracks['diffusion'] missing — diffusion child produced no output"
+    images = resp.tracks["diffusion"].decoded
     pixels = images.pixels
     assert pixels.dim() == 4, f"image pixels expected [B,C,H,W], got shape {tuple(pixels.shape)}"
     assert pixels.shape[0] == 1, f"expected batch=1, got {pixels.shape[0]}"
