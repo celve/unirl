@@ -13,7 +13,7 @@
 # ===========================================================================
 # Trained weights reach each engine via a per-track sync bridge, routed to the
 # matching child of the composed engine by ``track_prefix``:
-#   - diffusion: LoraWeightSync  mode=lora    → set_lora_from_tensors (SD3 sglang LoRA pool)
+#   - diffusion: LoraWeightSync                → set_lora_from_tensors (SD3 sglang LoRA pool)
 #   - ar:        TensorWeightSync lora_merged  → fold base+(α/r)·B·A → /update_weights_from_tensor
 #                              (full-weight-sync path; bypasses SGLang LLM LoRA pool)
 # Sync runs every ``weight_sync_interval`` rollouts (skip step 0).
@@ -21,7 +21,7 @@
 # Pairs with diffusionrl/train_pe.py:
 #   python -m diffusionrl.train_pe --config-name pe_sglang_full_merge
 #
-# Format mirrors conf_v2/pe_trainside.yaml (v2); engine params mirror
+# Format mirrors conf/pe_trainside.yaml (v2); engine params mirror
 # conf/experiment/pe_joint_multi_track_e2e.yaml (v1). Set checkpoint paths via
 # the PRETRAINED_MODEL / LLM_MODEL env vars (see ${oc.env:...} defaults below).
 #
@@ -46,7 +46,7 @@ batch_size: 8                 # P; MUST be divisible by num_devices (composed ro
 # LoRA weight-sync cadence (read by PETrainer.train): push each track's adapter
 # into its engine every N rollouts. 1 = on-policy. Step 0 is skipped.
 weight_sync_interval: 1
-num_rollouts: 200
+num_rollouts: 300
 
 # ── Diffusion side (SD3) — copied from pe_trainside.yaml ───────────────────
 diffusion:
@@ -136,6 +136,7 @@ diffusion:
     _target_: diffusionrl.train.stack.TrainStack
     micro_batch_size: 1
     max_grad_norm: 1.0
+    num_updates_per_batch: 2      # diffusion-side PPO mini-batches; ar stays 1 (ARGRPO is single-update only)
 
 # ── AR side (Qwen3) — copied from pe_trainside.yaml ────────────────────────
 ar:
@@ -187,7 +188,7 @@ ar:
   algorithm:
     _target_: diffusionrl.algorithms.ar_grpo.ARGRPO
     stage_attr: ar
-    clip_range: 1.0e-4
+    clip_range: 1.0e-2
     clip_schedule: constant
     conditions_cls:
       _target_: hydra.utils.get_class
@@ -243,10 +244,10 @@ rollout:
         skip_server_warmup: true
         disable_cuda_graph: false
         attention_backend: triton
-        # merged sync (sync.ar.mode: merged) pushes full merged weights via
-        # /update_weights_from_tensor and never calls set_lora → no LoRA pool.
-        # For lora-pool mode (sync.ar.mode: lora) set enable_lora: true and
-        # restore the two knobs below.
+        # This config syncs AR via full-weight-sync merge (sync.ar =
+        # TensorWeightSync lora_merged): /update_weights_from_tensor, never
+        # set_lora → no LoRA pool needed here. The LoRA-pool variant lives in
+        # pe_sglang_lora_pool.yaml (enable_lora: true + the two knobs below).
         enable_lora: false
         # max_lora_rank: 16
         # lora_target_modules: [q_proj, k_proj, v_proj, o_proj]

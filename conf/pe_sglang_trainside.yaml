@@ -4,21 +4,21 @@
 #  AR weight-sync MODE = trainside (NONE) — rollout samples the live FSDP
 #  modules directly via TrainsideRolloutEngine, so there is NO weight sync and
 #  NO separate SGLang engine. sglang variants of the same family:
-#    - conf_v2/pe_sglang_full_merge.yaml  (AR full-merge / lora_merged)
-#    - conf_v2/pe_sglang_lora_pool.yaml   (AR lora pool)
+#    - conf/pe_sglang_full_merge.yaml  (AR full-merge / lora_merged)
+#    - conf/pe_sglang_lora_pool.yaml   (AR lora pool)
 #  Same two-track training stacks / hyperparams as those → clean A/B baseline.
 # ===========================================================================
 #  PE rewriting = PASSTHROUGH. The pe_instruction/pe_marker rewrite+extraction
 #  path lives ONLY in the sglang ComposedRolloutEngine, not the trainside
 #  PEPipeline — so this config does no marker-based prompt rewriting (matches
-#  the original conf_v2/pe_trainside.yaml). Wiring real PE into trainside needs
+#  the original conf/pe_trainside.yaml). Wiring real PE into trainside needs
 #  a code change (marker extraction in PEPipeline).
 # ===========================================================================
 #
 # Pairs with diffusionrl/train_pe.py:
 #   python -m diffusionrl.train_pe --config-name pe_sglang_trainside
 #
-# Format mirrors conf_v2/pe_trainside.yaml (v2). Set checkpoint paths via the
+# Format mirrors conf/pe_trainside.yaml (v2). Set checkpoint paths via the
 # PRETRAINED_MODEL / LLM_MODEL env vars (see ${oc.env:...} defaults below).
 #
 # batch_size MUST be divisible by num_devices. 1-GPU wiring smoke:
@@ -105,6 +105,7 @@ diffusion:
     _target_: diffusionrl.train.stack.TrainStack
     micro_batch_size: 1
     max_grad_norm: 1.0
+    num_updates_per_batch: 2      # diffusion-side PPO mini-batches; ar stays 1 (ARGRPO is single-update only)
 
 # ── AR side (Qwen3) — copied from pe_trainside.yaml ────────────────────────
 ar:
@@ -156,7 +157,7 @@ ar:
   algorithm:
     _target_: diffusionrl.algorithms.ar_grpo.ARGRPO
     stage_attr: ar
-    clip_range: 1.0e-4
+    clip_range: 1.0e-2
     clip_schedule: constant
     conditions_cls:
       _target_: hydra.utils.get_class

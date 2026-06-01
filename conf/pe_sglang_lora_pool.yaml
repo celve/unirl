@@ -6,7 +6,7 @@
 #   - diffusion: SGLangRolloutEngine    (SD3 sglang)  → P*N*M images
 # ===========================================================================
 #  AR weight-sync MODE = lora-POOL   (set_lora_from_tensors → SGLang LLM pool)
-#  The full-merge variant is conf_v2/pe_sglang_full_merge.yaml.
+#  The full-merge variant is conf/pe_sglang_full_merge.yaml.
 #  NOTE (LIN-287): under 8-way colocate the pool's 2nd+ /unload can stall
 #  >=10min; merge avoids it. Watch the per-sync timing in the logs.
 # ===========================================================================
@@ -242,8 +242,9 @@ rollout:
         skip_server_warmup: true
         disable_cuda_graph: false
         attention_backend: triton
-        # lora-pool sync (sync.ar.mode: lora) calls set_lora_from_tensors → the
-        # engine needs a live LoRA pool. (the merge variant uses enable_lora: false.)
+        # This config syncs AR via the LoRA pool (sync.ar = LoraWeightSync):
+        # set_lora_from_tensors → the engine needs a live LoRA pool. The
+        # full-merge variant (pe_sglang_full_merge.yaml) uses enable_lora: false.
         enable_lora: true
         max_lora_rank: 16
         lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
