@@ -125,9 +125,14 @@ class HI3Trainer(BaseTrainer):
         sync_cfg: Optional[DictConfig] = None,
         dump_dir: Optional[str] = None,
         logging_cfg: Optional[DictConfig] = None,
+        enable_fsdp_offload: bool = True,
     ) -> None:
         super().__init__(num_devices=num_devices)
         self.batch_size = batch_size
+        # Colocate memory dance: offload the FSDP train state (base + grads +
+        # optimizer) to CPU during rollout so the awake engines fit, onload
+        # before the train backward. HI3's ~150GB base needs this → default True.
+        self._enable_fsdp_offload = bool(enable_fsdp_offload)
 
         # W&B reporting config (the top-level ``logging`` block). Logger is
         # lazily created in ``train`` on the driver (rank 0); None / disabled
@@ -182,7 +187,8 @@ class HI3Trainer(BaseTrainer):
             # its 4 cards at boot; with the FSDP base still resident (~19GB/card)
             # that overlaps to >78GB and OOMs. With the base on CPU the engines
             # boot on their disjoint cards (AR 0-3, DiT 4-7) with room to spare.
-            self.stack.offload()
+            if self._enable_fsdp_offload:
+                self.backend.offload()
 
             # Two standalone vLLM-Omni engines, each ONE multi-GPU actor anchored
             # on a DISTINCT worker (AR→device 0, DiT→device 4). The anchor is
@@ -373,9 +379,11 @@ class HI3Trainer(BaseTrainer):
         #      (~19GB/card) would OOM. extract() caches the adapter on rank 0
         #      (nothing returned); offload the base again right after.
         if sync_weights and self.weight_sync is not None:
-            self.stack.onload()
+            if self._enable_fsdp_offload:
+                self.backend.onload()
             self.weight_sync.extract()
-            self.stack.offload()
+            if self._enable_fsdp_offload:
+                self.backend.offload()
         #   2. Wake both engines (base on CPU → room; AR 0-3, DiT 4-7 disjoint),
         #      then PUSH the cached adapter from rank 0 into each engine's
         #      set_lora_from_tensors_copy (cross-process; engines are not siblings).
@@ -388,7 +396,8 @@ class HI3Trainer(BaseTrainer):
         resp = self.run_rollout(req)
         self.ar_rollout.sleep()
         self.dit_rollout.sleep()
-        self.stack.onload()
+        if self._enable_fsdp_offload:
+            self.backend.onload()
 
         # 1. Score the IMAGE track only — the AR track's TextSegment is not
         #    directly scorable; its reward is credit-assigned below.
@@ -444,7 +453,8 @@ class HI3Trainer(BaseTrainer):
 
         # 6. Back to steady state (base on CPU) so the next rollout's engines
         #    have room to wake.
-        self.stack.offload()
+        if self._enable_fsdp_offload:
+            self.backend.offload()
         return results, mean_reward
 
     def _dump_rollout(self, rollout_id: int, req: RolloutReq, resp: Any) -> None:

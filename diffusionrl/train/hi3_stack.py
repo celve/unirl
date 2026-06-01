@@ -147,21 +147,6 @@ class HI3TrainStack(Remote):
         """Per-rollout-boundary hook — delegates to the FSDPBackend's EMA."""
         self.fsdp_backend.on_rollout_end()
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def offload(self) -> None:
-        """Move the shared backbone (frozen base + optimizer state) to CPU.
-
-        The HI3 colocate trainer offloads the ~150GB base during the rollout
-        phase so the two awake vLLM-Omni engines (AR on GPUs 0-3, DiT on 4-7)
-        fit; it onloads again before the train backward. Driver-callable across
-        all DP workers (each offloads its own FSDP shard)."""
-        self.fsdp_backend.offload()
-
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def onload(self) -> None:
-        """Move the shared backbone back to GPU (inverse of :meth:`offload`)."""
-        self.fsdp_backend.onload()
-
     @distributed(dispatch_mode=Dispatch.DP_ALL)
     def train_track(
         self,

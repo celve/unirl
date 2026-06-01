@@ -267,14 +267,26 @@ class FSDPBackend(Remote):
     # Memory lifecycle
     # ------------------------------------------------------------------
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def onload(self) -> None:
+        """Move the FSDP train state (params + grads + optimizer) back to GPU.
+
+        Driver-callable across all DP workers (each onloads its own FSDP shard).
+        Inverse of :meth:`offload`; the colocate trainers call this before the
+        train backward (gated by ``enable_fsdp_offload``)."""
         fsdp_onload(self.model, self._device)
         for state in self.optimizer.state.values():
             for k, v in state.items():
                 if isinstance(v, torch.Tensor):
                     state[k] = v.to(self._device)
 
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def offload(self) -> None:
+        """Move the FSDP train state (params + grads + optimizer) to CPU.
+
+        Frees GPU memory during the rollout phase so a colocate vLLM/SGLang
+        engine fits. Driver-callable across all DP workers (each offloads its
+        own FSDP shard). Gated by the trainer's ``enable_fsdp_offload``."""
         fsdp_offload(self.model)
         for state in self.optimizer.state.values():
             for k, v in state.items():

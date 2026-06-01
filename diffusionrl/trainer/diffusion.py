@@ -46,10 +46,20 @@ class DiffusionTrainer(BaseTrainer):
         logging_cfg: Optional[DictConfig] = None,
         layout: str = "colocated",
         train_fraction: float = 0.5,
+        enable_fsdp_offload: bool = False,
     ) -> None:
         super().__init__(num_devices=num_devices, logging_cfg=logging_cfg)
         self.batch_size = batch_size
         self._layout = str(layout)
+        # Colocate memory dance: offload the FSDP train state (params + grads +
+        # optimizer) to CPU during the rollout's generate so a colocate
+        # vLLM/SGLang engine fits, onload before the train backward. Off by
+        # default; only safe (and only set true) for layout=="colocated" with a
+        # SEPARATE engine rollout under GRPO — gated again in train_step.
+        self._enable_fsdp_offload = bool(enable_fsdp_offload)
+        # Set in _build_rollout: True when the rollout is the trainside
+        # direct-sampling engine (it reuses the train model → must NOT offload).
+        self._rollout_is_trainside = False
         # Set in _build_train_side: True only for the NFT algorithm, which
         # needs the EMA dual-adapter swap around rollout. Stays False for GRPO
         # so its hot path is untouched.
@@ -142,6 +152,7 @@ class DiffusionTrainer(BaseTrainer):
                     "the pipeline as a local sibling and cannot live on a "
                     "separate slab."
                 )
+            self._rollout_is_trainside = True
             return remote(**rollout_parsed, pipeline=self.pipeline)  # direct sampling
         return remote(**rollout_parsed)  # vllm / sglang
 
@@ -216,6 +227,20 @@ class DiffusionTrainer(BaseTrainer):
         self.rollout.wake_up()
         if sync_weights and self.weight_sync is not None:
             self.weight_sync.sync()
+        # Colocate FSDP offload: free the train state (params+grads+optimizer)
+        # for the memory-heavy generate when a SEPARATE engine does the rollout.
+        # Gated off for the trainside rollout (reuses the train model → can't be
+        # offloaded) and for NFT (``_uses_ema``; its EMA adapter swap touches the
+        # backend around generate). Off by default. ``sync`` above needs the base
+        # onloaded, so offload only AFTER it.
+        _do_fsdp_offload = (
+            self._enable_fsdp_offload
+            and self._layout != "separate"
+            and not self._rollout_is_trainside
+            and not self._uses_ema  # _uses_ema == "is NFT"
+        )
+        if _do_fsdp_offload:
+            self.backend.offload()
         # NFT: sample under the EMA-smoothed ("old") adapter, then restore the
         # trainable ("default") adapter before the loss. No-op for GRPO (gated).
         # Only effective for colocate/trainside where rollout shares the train
@@ -226,6 +251,8 @@ class DiffusionTrainer(BaseTrainer):
         if self._uses_ema:
             self.backend.restore_from_eval()
         self.rollout.sleep()
+        if _do_fsdp_offload:
+            self.backend.onload()
 
         for name, track in list(resp.tracks.items()):
             if track.segment is not None:

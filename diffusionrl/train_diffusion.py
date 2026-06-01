@@ -37,6 +37,7 @@ def main(cfg: DictConfig) -> None:
         logging_cfg=cfg.get("logging"),
         layout=cfg.get("layout", "colocate"),
         train_fraction=float(cfg.get("train_fraction", 0.5)),
+        enable_fsdp_offload=cfg.get("enable_fsdp_offload", False),
     )
     trainer.train(
         num_rollouts=int(cfg.get("num_rollouts", 100)),
