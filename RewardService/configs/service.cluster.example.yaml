@@ -157,3 +157,41 @@ rewards:
 #
 # Scheduling order matters: multi-GPU actors are listed first so they
 # grab contiguous slots before spread 1-GPU actors fragment the cluster.
+
+# ─────────────── Qwen3.5 VLM reward — DEDICATED 16×GPU DEPLOYMENT ───────────────
+# Qwen3.5-35B-A3B MoE (~70GB bf16) as a generic VLM reward (WISE-style 3-metric
+# rubric: Consistency / Realism / Aesthetic Quality). Each replica fills 73% of
+# one 96GB GPU → only ~11GB KV cache, so max_concurrency MUST be 1 (concurrent
+# requests OOM the KV cache). 16 replicas (8 per node, scheduling: spread)
+# saturate the cluster; excess requests queue at the Ray level.
+#
+# Mutually exclusive with the rewards above: this single reward consumes the
+# whole 16-GPU cluster. Bump server.score_timeout_s to ~600s — first-request
+# cold start is slow on a 70GB model. Uncomment, then comment out everything
+# else.
+#
+# - name: qwen35_vlm
+#   scorer: qwen35_vlm
+#   runtime_env: envs/qwen35_vlm.txt
+#   num_replicas: 16
+#   num_gpus: 1
+#   num_cpus: 4
+#   max_concurrency: 1
+#   scheduling: spread          # split replicas across the two nodes
+#   params:
+#     model_name: Qwen/Qwen3.5-35B-A3B
+#     weights_path: /apdcephfs_fsgm3/share_305110755/hunyuan/public_models/Qwen/Qwen3.5-35B-A3B
+#     tensor_parallel_size: 1
+#     gpu_memory_utilization: 0.85
+#     max_model_len: 8192
+#     max_tokens: 512
+#     dtype: bfloat16
+#     enforce_eager: false
+#     swap_space: 4
+#     max_num_seqs: 32
+#     seed: null
+#     quantization: null
+#     trust_remote_code: true
+#     limit_mm_per_prompt: {image: 1}
+#     extra_llm_kwargs: {}
+#     enable_thinking: false

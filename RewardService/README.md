@@ -13,6 +13,7 @@
 | `hpsv3` | 官方 `hpsv3` pip 包 | 基于 Qwen2-VL |
 | `unified_reward` | vLLM | UnifiedReward-2.0-qwen3vl 2B/4B，解析文本取 Alignment/Coherence/Style |
 | `geneval2` | vLLM | VQAScore（配 `dataset_path` 时走 Soft-TIFA 多问题评分；未配时退化为单问模板） |
+| `qwen35_vlm` | vLLM | Qwen3.5-35B-A3B / 122B-A10B 等 MoE VLM 作 reward；默认子指标 Consistency / Realism / Aesthetic Quality（WISE-style 模板，可在 YAML 替换） |
 
 ## 架构
 
