@@ -121,7 +121,7 @@ reward:
       model_id: yuvalkirstain/PickScore_v1
 
 algorithm:
-  _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
+  _target_: diffusionrl.algorithms.diffusion_grpo.DiffusionGRPO
   stage_attr: diffusion
   clip_range: 1.0e-4
   clip_schedule: constant

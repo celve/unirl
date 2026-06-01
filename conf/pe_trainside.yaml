@@ -86,7 +86,7 @@ diffusion:
         - attn.to_q
         - attn.to_v
   algorithm:
-    _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
+    _target_: diffusionrl.algorithms.diffusion_grpo.DiffusionGRPO
     stage_attr: diffusion
     clip_range: 1.0e-4
     clip_schedule: constant
@@ -153,7 +153,7 @@ ar:
       target_modules: [q_proj, k_proj, v_proj, o_proj]
   algorithm:
     # ARGRPO has no `params` kwarg (token-level replay reads conditions.prompt).
-    _target_: diffusionrl.algorithms.grpo.ARGRPO
+    _target_: diffusionrl.algorithms.ar_grpo.ARGRPO
     stage_attr: ar
     clip_range: 1.0e-2 # AR track — diffusion track above keeps 1e-4
     clip_schedule: constant

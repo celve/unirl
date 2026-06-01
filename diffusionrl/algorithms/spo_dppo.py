@@ -33,6 +33,7 @@ from diffusionrl.config.registration import register_config
 from diffusionrl.types.conditions import Condition
 from diffusionrl.types.segments.text import TextSegment
 
+from .ar_grpo import ARGRPO
 from .base import (
     AlgorithmStepResult,
     BaseAlgorithmConfig,
@@ -40,7 +41,6 @@ from .base import (
     rollout_replay_logp_absdiff,
     typed_conditions,
 )
-from .grpo import ARGRPO
 
 # ---------------------------------------------------------------------------
 # Config

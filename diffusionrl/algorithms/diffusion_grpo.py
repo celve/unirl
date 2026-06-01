@@ -1,0 +1,189 @@
+"""Stage-driven ``DiffusionGRPO`` over a ``LatentSegment``.
+
+Implements :class:`StageAlgorithm` and shares the module-level
+``_grpo_clip_loss`` / ``_resolve_clip_range_from_schedule`` helpers (in
+:mod:`diffusionrl.algorithms.base`) with :class:`ARGRPO` so their loss math
+stays identical. CFG batching, predict_noise, SDE math, autocast, and per-step
+iteration are owned by ``stage.replay(...)``; the algorithm is ~20 lines of
+ratio-clip math.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from dataclasses import field as dc_field
+from typing import Any, Dict, List, Mapping, Optional, Type
+
+import torch
+
+from diffusionrl.config.registration import register_config
+from diffusionrl.types.conditions import Condition
+from diffusionrl.types.segments.latent import LatentSegment
+
+from .base import (
+    AlgorithmStepResult,
+    BaseAlgorithmConfig,
+    StageAlgorithm,
+    _grpo_clip_loss,
+    _resolve_clip_range_from_schedule,
+    gather_sde_field,
+    typed_conditions,
+)
+
+
+@register_config(
+    group="algorithm",
+    name="diffusion_grpo",
+    target="diffusionrl.algorithms.diffusion_grpo.DiffusionGRPO",
+)
+@dataclass
+class DiffusionGRPOConfig(BaseAlgorithmConfig):
+    stage_attr: str = "diffusion"
+    conditions_cls: str = ""
+    clip_range: float = 1e-4
+    clip_schedule: str = "constant"
+    params: Any = dc_field(default=None)
+
+
+class DiffusionGRPO(StageAlgorithm):
+    """GRPO over a diffusion ``LatentSegment`` via ``DiffusionStage.replay``.
+
+    The whole forward path (CFG batching, noise prediction, SDE math, autocast,
+    per-step iteration) is owned by :meth:`DiffusionStage.replay`; this class
+    is pure ratio-clip math against ``segment.sde_logp``.
+
+    Args:
+        stage: The :class:`DiffusionStage` whose ``replay`` produces new
+            log-probs aligned with ``segment.sde_logp[:, slot_for_steps]``.
+        params: The per-call params object the stage's ``replay`` consumes
+            (e.g. ``SD3DiffusionParams``). Held as algorithm state so the
+            dispatcher doesn't need to know it.
+        clip_range: PPO clip range epsilon.
+        clip_schedule: ``"constant"``, ``"linear_decay"``, or
+            ``"cosine_decay"`` — applied via ``training_progress``.
+        conditions_cls: Stage-typed conditions container with a
+            ``from_dict(Mapping[str, Condition])`` classmethod. ``None``
+            forwards the dict verbatim (unit-test path).
+    """
+
+    # prepare_segment freezes segment.sde_logp once, so the PPO ratio stays
+    # anchored across every num_updates_per_batch optimizer step.
+    supports_multi_update = True
+
+    def __init__(
+        self,
+        *,
+        params: Any,
+        stage: Any = None,
+        pipeline: Any = None,
+        stage_attr: str = "diffusion",
+        clip_range: float = 1e-4,
+        clip_schedule: str = "constant",
+        conditions_cls: Optional[Type[Any]] = None,
+    ) -> None:
+        super().__init__()
+        if stage is None and pipeline is None:
+            raise ValueError("DiffusionGRPO: either `stage` or `pipeline` must be provided")
+        if stage is None:
+            stage = getattr(pipeline, stage_attr)
+        self.stage = stage
+        self.params = params
+        self.clip_range = float(clip_range)
+        self.clip_schedule = str(clip_schedule)
+        self.conditions_cls = conditions_cls
+
+    def prepare_segment(
+        self,
+        *,
+        conditions: Mapping[str, "Condition"],
+        segment: "LatentSegment",
+    ) -> None:
+        """Lazy-initialize ``segment.sde_logp`` in SGLang replay-mode rollouts.
+
+        SGLang ``logprob_source='replay'`` emits the trajectory but no
+        per-step log-probs, leaving ``segment.sde_logp = None``. The trainer
+        fills it here via a ``torch.no_grad`` forward through
+        :meth:`DiffusionStage.replay`, producing log-probs at the
+        **pre-update** policy weights — frozen for all N
+        ``num_updates_per_batch`` micro-updates that follow.
+
+        No-op if ``segment.sde_logp`` is already populated (native mode,
+        or a previous ``prepare_segment`` call on the same segment) or if
+        the segment has no SDE-gated steps to train on.
+        """
+        if segment.sde_logp is not None or segment.sde_indices is None:
+            return
+        target_steps = self._resolve_target_steps(segment)
+        if not target_steps:
+            return
+        typed_conds = typed_conditions(conditions, self.conditions_cls)
+        with torch.no_grad():
+            result = self.stage.replay(typed_conds, segment=segment, params=self.params, step_indices=target_steps)
+        segment.sde_logp = result.log_probs.detach().cpu()
+
+    def compute_loss_and_backward(
+        self,
+        *,
+        conditions: Mapping[str, Condition],
+        segment: "LatentSegment",
+        advantages: torch.Tensor,
+        training_progress: float,
+        loss_scale: float,
+    ) -> AlgorithmStepResult:
+        target_steps = self._resolve_target_steps(segment)
+        if not target_steps:
+            return AlgorithmStepResult(loss=0.0, metrics={}, num_steps_or_tokens=0, has_backward=False)
+
+        typed_conds = typed_conditions(conditions, self.conditions_cls)
+
+        replay_result = self.stage.replay(
+            typed_conds,
+            segment=segment,
+            params=self.params,
+            step_indices=target_steps,
+        )
+        new_logp = replay_result.log_probs  # [B, S']
+
+        old_logp = gather_sde_field(segment.sde_logp, segment.sde_indices, target_steps, field_name="sde_logp").to(
+            dtype=new_logp.dtype, device=new_logp.device
+        )
+
+        clip_range = _resolve_clip_range_from_schedule(self.clip_range, self.clip_schedule, training_progress)
+        adv_b = advantages.detach().to(dtype=new_logp.dtype, device=new_logp.device).reshape(-1, 1).expand_as(new_logp)
+
+        loss_per_elem, ratio_metrics = _grpo_clip_loss(
+            new_logp=new_logp,
+            old_logp=old_logp,
+            advantages=adv_b,
+            clip_range=clip_range,
+        )
+        loss = loss_per_elem.mean()
+        (loss * loss_scale).backward()
+
+        metrics: Dict[str, Any] = {
+            "policy_loss": float(loss.detach().item()),
+            "clip_range": float(clip_range),
+            **{k: float(v.item()) for k, v in ratio_metrics.items()},
+        }
+        return AlgorithmStepResult(
+            loss=float(loss.detach().item()),
+            metrics=metrics,
+            num_steps_or_tokens=len(target_steps),
+            has_backward=True,
+        )
+
+    # -- helpers --------------------------------------------------------
+
+    def _resolve_target_steps(self, segment: "LatentSegment") -> List[int]:
+        """All SDE-recorded step indices on the segment.
+
+        Subclasses can override to apply skip-last / skip-initial filtering or
+        to honor a training-indices schedule; the default trains every step
+        the rollout recorded.
+        """
+        if segment.sde_indices is None:
+            return []
+        return [int(i) for i in segment.sde_indices.tolist()]
+
+
+__all__ = ["DiffusionGRPO", "DiffusionGRPOConfig"]

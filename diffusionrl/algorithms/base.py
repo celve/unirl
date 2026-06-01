@@ -9,9 +9,10 @@ the algorithm is pure ratio-clip math against the segment's stored log-probs.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple, Type
 
 import torch
 
@@ -100,6 +101,52 @@ def rollout_replay_logp_absdiff(new_logp: torch.Tensor, old_logp: torch.Tensor) 
         "rollout_replay_logp_absdiff_mean": float(absdiff.mean()),
         "rollout_replay_logp_absdiff_max": float(absdiff.max()),
     }
+
+
+def _resolve_clip_range_from_schedule(clip_range: float, schedule: str, progress: float) -> float:
+    """Schedule-aware clip range. Mirrors ``GRPOAlgorithm.get_clip_range``."""
+    if schedule == "linear_decay":
+        return clip_range * (1.0 - 0.5 * float(progress))
+    if schedule == "cosine_decay":
+        return clip_range * (0.5 * (1.0 + math.cos(math.pi * float(progress))))
+    return clip_range
+
+
+def _grpo_clip_loss(
+    *,
+    new_logp: torch.Tensor,
+    old_logp: torch.Tensor,
+    advantages: torch.Tensor,
+    clip_range: float,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """PPO-style clipped objective. Element-wise; reduction is the caller's job.
+
+    All inputs must be broadcastable to a common shape. Returns
+    ``(loss_per_element, ratio_metrics_dict)``. The metrics tensors are
+    detached scalars suitable for logging.
+    """
+    log_diff = new_logp - old_logp
+    ratio = torch.exp(log_diff)
+    adv = advantages.detach()
+    unclipped = -adv * ratio
+    clipped = -adv * torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
+    loss_per_elem = torch.maximum(unclipped, clipped)
+
+    if ratio.numel() > 1:
+        ratio_std = ratio.std()
+    else:
+        ratio_std = torch.zeros((), dtype=ratio.dtype, device=ratio.device)
+    metrics = {
+        "ratio_mean": ratio.mean().detach(),
+        "ratio_std": ratio_std.detach(),
+        "ratio_min": ratio.min().detach(),
+        "ratio_max": ratio.max().detach(),
+        "clip_fraction": ((ratio - 1.0).abs() > clip_range).float().mean().detach(),
+        "clipfrac_gt_one": (ratio - 1.0 > clip_range).float().mean().detach(),
+        "clipfrac_lt_one": (1.0 - ratio > clip_range).float().mean().detach(),
+        "approx_kl": (0.5 * log_diff.pow(2)).mean().detach(),
+    }
+    return loss_per_elem, metrics
 
 
 @dataclass(frozen=True)

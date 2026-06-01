@@ -5,9 +5,10 @@ Public surface for the ``models`` training contract.
 
 from __future__ import annotations
 
+from .ar_grpo import ARGRPO
 from .base import AlgorithmStepResult, StageAlgorithm
+from .diffusion_grpo import DiffusionGRPO
 from .dppo import DiffusionDPPO
-from .grpo import ARGRPO, DiffusionGRPO
 from .nft import DiffusionNFT, DiffusionNFTConfig
 from .rollout_control import (
     GRPORolloutControlConfig,

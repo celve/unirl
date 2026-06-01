@@ -80,7 +80,7 @@ the function name on the right to read the actual implementation:
       -> resp.advantages : Tensor[B]   (scope = group | global)
 
 [4] train actor expands advantages and applies the clipped ratio
-    diffusionrl.algorithms.grpo.DiffusionGRPO.compute_loss_and_backward
+    diffusionrl.algorithms.diffusion_grpo.DiffusionGRPO.compute_loss_and_backward
       -> adv_b = advantages.detach().reshape(-1, 1).expand_as(new_logp)
          loss  = _grpo_clip_loss(new_logp, old_logp, adv_b, clip_range)
 ```

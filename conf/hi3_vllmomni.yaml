@@ -166,7 +166,7 @@ reward:
 # cfg.algorithm.ar / cfg.algorithm.image.
 algorithm:
   ar:
-    _target_: diffusionrl.algorithms.grpo.ARGRPO
+    _target_: diffusionrl.algorithms.ar_grpo.ARGRPO
     stage_attr: ar
     clip_range: 0.2
     clip_schedule: constant
@@ -175,7 +175,7 @@ algorithm:
       path: diffusionrl.models.hunyuan_image3.conditions.HunyuanImage3ARConditions
     sampling_temperature: ${sampling.ar.temperature}
   image:
-    _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
+    _target_: diffusionrl.algorithms.diffusion_grpo.DiffusionGRPO
     stage_attr: diffusion
     clip_range: 0.2
     clip_schedule: constant
