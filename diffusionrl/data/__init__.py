@@ -10,7 +10,6 @@ from .datasets import (
     TextPromptDataset,
     normalize_prompt_example,
 )
-from .k_repeat_sampler import KRepeatSampler
 
 __all__ = [
     # Data sources
@@ -20,6 +19,4 @@ __all__ = [
     "PromptExampleDataset",
     "TextPromptDataset",
     "normalize_prompt_example",
-    # Samplers
-    "KRepeatSampler",
 ]
