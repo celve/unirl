@@ -137,8 +137,17 @@ stack:
   max_grad_norm: 1.0
 
 data_source:
-  _target_: diffusionrl.data.data_source.DefaultDataSource
-  args: {}
+  # Real prompts loaded from file: MultimodalRLDataSource reads TXT/JSON/JSONL
+  # via data_path and exposes get_samples(bs). (DefaultDataSource returns only
+  # 8 hardcoded prompts — smoke-test use; training on it over-optimizes/collapses.)
+  _target_: diffusionrl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: datasets/pickscore/train.txt        # relative to repo cwd (Hydra 1.3 no-chdir)
+      eval_data_path: datasets/pickscore/test.txt
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
 
 sampling:
   _target_: diffusionrl.types.sampling.DiffusionSamplingParams
@@ -156,7 +165,10 @@ sampling:
   scheduler:
     _target_: diffusionrl.utils.scheduler_utils.AllSDEScheduler
     num_timesteps: ${..num_inference_steps}
-    num_sde_steps: null
+    num_sde_steps: 3
+    # SDE-step window: [0,0.5] confines SDE noise to the early high-σ steps
+    # (the validated reproduce setting); [0,1] spreads it across all steps.
+    timestep_fraction: [0, 0.5]
 
 # LoRA → merged full-weight sync → SGLang rollout (colocate tensor-payload).
 sync:
