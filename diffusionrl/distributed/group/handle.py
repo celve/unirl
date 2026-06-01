@@ -95,6 +95,19 @@ def reset_role_name_counter() -> None:
     _role_name_counter.clear()
 
 
+def _check_batch_divisibility(dispatch_mode: Dispatch, batch_size: Optional[int], dp_size: int) -> None:
+    """Raise if a DP-split batch can't be divided evenly across dp ranks.
+
+    Only DP_ALL / DP_FIRST split the per-sample batch by dp_size, so only they
+    require divisibility. ONE_TO_ALL broadcasts and ALL_TO_ALL splits by
+    world_size — both ignore this precondition — so the check must NOT apply to
+    them (it would spuriously reject valid broadcast calls, e.g.
+    set_rollout_targets(rollout.workers, ...) when len(workers) % dp_size != 0).
+    """
+    if dispatch_mode in (Dispatch.DP_ALL, Dispatch.DP_FIRST) and batch_size is not None and batch_size % dp_size != 0:
+        raise ValueError(f"batch_size={batch_size} not divisible by dp_size={dp_size}")
+
+
 @dataclass(frozen=True)
 class HandleRef:
     """Serializable marker for a Handle.
@@ -273,8 +286,7 @@ class Handle:
                 input_metas = collect_leaves(args, TensorMeta) + collect_leaves(tuple(kwargs.values()), TensorMeta)
 
             batch_size = infer_and_validate_batch_size(args, kwargs)
-            if batch_size is not None and batch_size % self.dp_size != 0:
-                raise ValueError(f"batch_size={batch_size} not divisible by dp_size={self.dp_size}")
+            _check_batch_divisibility(dispatch_mode, batch_size, self.dp_size)
 
             shards = dispatch_fn(self, args, kwargs, batch_size)
             shards = self._ensure_local(shards)
