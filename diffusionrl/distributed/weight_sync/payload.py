@@ -1,22 +1,16 @@
-"""Payload helpers for :class:`~diffusionrl.distributed.weight_sync.lora.LoraWeightSync`.
+"""Payload helper for :class:`~diffusionrl.distributed.weight_sync.lora.LoraWeightSync`.
 
-Two pieces turn trainer-side state into what the rollout engine loads:
-
-- ``_peft_config_dict`` — a JSON/Ray-safe PEFT adapter config for the LoRA path
-  (``set_lora_from_tensors``).
-- ``serialize_named_tensors`` — SGLang ``FlattenedTensorBucket`` payloads (one
-  serialized string per dtype) for the merged-full-weight path
-  (``update_weights_from_tensor``).
+``_peft_config_dict`` turns trainer-side state into a JSON/Ray-safe PEFT adapter
+config for the LoRA path (``set_lora_from_tensors``).
 
 Imported lazily from ``lora.py`` so the driver can reference the handler class
-for ``remote(...)`` without eagerly pulling torch / SGLang.
+for ``remote(...)`` without eagerly pulling torch.
 """
 
 from __future__ import annotations
 
-from typing import Any, List, Sequence, Tuple
+from typing import Any
 
-import torch
 import torch.nn as nn
 
 
@@ -70,44 +64,3 @@ def _peft_config_dict(model: nn.Module, adapter_name: str = "default") -> dict:
             )
 
     return peft_dict
-
-
-def serialize_named_tensors(
-    named_tensors: Sequence[Tuple[str, torch.Tensor]],
-) -> List[str]:
-    """Pack ``(name, tensor)`` pairs into one serialized payload per dtype.
-
-    Groups by dtype (insertion order preserved), builds one
-    ``FlattenedTensorBucket`` per group, and serializes each via
-    ``MultiprocessingSerializer``. SGLang imports are deferred so a driver /
-    non-rollout process can import this module without pulling SGLang.
-    """
-    try:
-        from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions  # type: ignore[import]
-    except ImportError:
-        from sglang.srt.patch_torch import monkey_patch_torch_reductions  # type: ignore[import]
-    from sglang.srt.utils import MultiprocessingSerializer
-
-    try:
-        from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket  # type: ignore[import]
-    except ImportError:
-        from sglang.srt.model_executor.model_runner import FlattenedTensorBucket  # type: ignore[import]
-
-    monkey_patch_torch_reductions()
-
-    named_tensors_by_dtype: dict = {}
-    for name, tensor in named_tensors:
-        named_tensors_by_dtype.setdefault(tensor.dtype, []).append((name, tensor))
-
-    serialized: List[str] = []
-    for grouped_named_tensors in named_tensors_by_dtype.values():
-        bucket = FlattenedTensorBucket(named_tensors=grouped_named_tensors)
-        payload = {
-            "flattened_tensor": bucket.get_flattened_tensor(),
-            "metadata": bucket.get_metadata(),
-        }
-        serialized.append(MultiprocessingSerializer.serialize(payload, output_str=True))
-    return serialized
-
-
-__all__ = ["serialize_named_tensors"]

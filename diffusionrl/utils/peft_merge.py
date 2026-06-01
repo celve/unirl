@@ -140,7 +140,6 @@ def extract_lora_tensors(
     *,
     param_prefix: str = "",
     adapter_name: str = "default",
-    packed_modules: dict | None = None,
 ) -> dict[str, torch.Tensor]:
     """Extract LoRA tensors in canonical wire format.
 
@@ -151,11 +150,6 @@ def extract_lora_tensors(
     :func:`adapt_lora_for_vllm` re-adds the envelope for vllm-omni;
     :func:`adapt_lora_for_sglang` strips the prefix and injects ``.alpha``
     for SGLang.
-
-    ``packed_modules`` maps fused module names to their split sub-names,
-    e.g. ``{"qkv_proj": {"sub_names": ["q_proj", "k_proj", "v_proj"], ...}}``.
-    When a fused module is found in the LoRA tensors, lora_A is duplicated to
-    each sub-name and lora_B is sliced respecting the model's weight layout.
     """
     result: dict[str, torch.Tensor] = {}
     prefix = str(param_prefix or "")
@@ -171,79 +165,6 @@ def extract_lora_tensors(
             out_name = f"{prefix}{head}.{suffix}.weight"
             result[out_name] = _to_full_tensor(param).detach().cpu()
             break
-
-    # Split fused packed-module LoRA tensors into per-sub-layer keys.
-    # PEFT wraps a fused module (e.g. qkv_proj) as one LoRA pair:
-    #   lora_A: (rank, in_features) — shared across Q/K/V
-    #   lora_B: (total_out, rank) — fused, layout model-specific
-    # vLLM's MergedQKVParallelLinearWithLoRA.set_lora expects independent
-    # (lora_a, lora_b) pairs per sub-layer.
-    if packed_modules:
-        to_add: dict[str, torch.Tensor] = {}
-        to_remove: list[str] = []
-        for fused_name, cfg in packed_modules.items():
-            # Duck-type: OmegaConf DictConfig is NOT isinstance(cfg, dict).
-            # Accept both plain dict and DictConfig-like objects.
-            if hasattr(cfg, "get") and "sub_names" in cfg:
-                sub_names = list(cfg["sub_names"])
-                layout = cfg.get("layout", "block")
-                num_q_heads = cfg.get("num_q_heads")
-                num_kv_heads = cfg.get("num_kv_heads")
-                head_dim = cfg.get("head_dim")
-            else:
-                sub_names = list(cfg)
-                layout = "block"
-                num_q_heads = num_kv_heads = head_dim = None
-
-            fused_a = {k: v for k, v in result.items() if f".{fused_name}.lora_A." in k}
-            fused_b = {k: v for k, v in result.items() if f".{fused_name}.lora_B." in k}
-            for a_key in sorted(fused_a):
-                b_key = a_key.replace(".lora_A.", ".lora_B.")
-                if b_key not in fused_b:
-                    continue
-                A = fused_a[a_key]  # (rank, in_features)
-                B = fused_b[b_key]  # (total_out, rank)
-
-                if layout == "gqa_interleaved" and num_q_heads and num_kv_heads and head_dim:
-                    # HI3-style group-interleaved: B is laid out as
-                    # (num_kv_heads, kv_groups+2, head_dim, rank) where
-                    # kv_groups = num_q_heads // num_kv_heads.
-                    # Split on dim=1: [kv_groups, 1, 1] → Q, K, V
-                    kv_groups = num_q_heads // num_kv_heads
-                    expected_out = num_kv_heads * (kv_groups + 2) * head_dim
-                    rank = B.shape[1]
-                    assert B.shape[0] == expected_out, (
-                        f"extract_lora_tensors: B.shape[0]={B.shape[0]} != "
-                        f"expected {expected_out} for gqa_interleaved "
-                        f"(num_q={num_q_heads}, num_kv={num_kv_heads}, "
-                        f"head_dim={head_dim})"
-                    )
-                    B_4d = B.reshape(num_kv_heads, kv_groups + 2, head_dim, rank)
-                    B_q, B_k, B_v = torch.split(B_4d, [kv_groups, 1, 1], dim=1)
-                    split_tensors = [
-                        B_q.reshape(num_q_heads * head_dim, rank).contiguous(),
-                        B_k.reshape(num_kv_heads * head_dim, rank).contiguous(),
-                        B_v.reshape(num_kv_heads * head_dim, rank).contiguous(),
-                    ]
-                else:
-                    # Block layout: simple contiguous split
-                    n = len(sub_names)
-                    assert B.shape[0] % n == 0, (
-                        f"extract_lora_tensors: B.shape[0]={B.shape[0]} not "
-                        f"divisible by {n} for block split of {fused_name}."
-                    )
-                    step = B.shape[0] // n
-                    split_tensors = [B[i * step : (i + 1) * step, :].contiguous() for i in range(n)]
-
-                base_prefix = a_key.replace(f".{fused_name}.lora_A.weight", "")
-                for i, sub in enumerate(sub_names):
-                    to_add[f"{base_prefix}.{sub}.lora_A.weight"] = A.clone()
-                    to_add[f"{base_prefix}.{sub}.lora_B.weight"] = split_tensors[i]
-                to_remove.append(a_key)
-                to_remove.append(b_key)
-        for k in to_remove:
-            result.pop(k, None)
-        result.update(to_add)
 
     # Defensive dtype check: vllm punica kernel hard-asserts inputs.dtype in
     # {fp16, bf16}. Catch fp32 LoRA here in trainer (cheap) rather than

@@ -39,8 +39,8 @@ weights before pushing (LoRA-train, serve-merged). Subclasses pick a transport:
 | `full/tensor.py` | `TensorWeightSync` | serialized named-tensor payloads — colocate |
 | `full/ipc.py` | `IPCWeightSync` | bucketed CUDA-IPC over ZMQ — colocate, vLLM-Omni |
 
-`payload.py` holds `LoraWeightSync`'s helpers: the PEFT adapter-config dict and
-the SGLang `FlattenedTensorBucket` tensor packing (merged path).
+`payload.py` holds `LoraWeightSync`'s helper: the JSON/Ray-safe PEFT
+adapter-config dict.
 
 ## Trigger Path
 
@@ -54,7 +54,7 @@ DiffusionTrainer (inside a placement(...) block):
 ```
 
 The handler reads the trained weights from its `backend` sibling's `.model`. The
-LoRA and merged paths carry the PEFT config so the engine can reconstruct the
+LoRA path carries the PEFT config so the engine can reconstruct the
 adapter. `weight_version` increments inside the handler so a duplicate sync
 (e.g. after a resume) can be made a no-op on the receiver.
 

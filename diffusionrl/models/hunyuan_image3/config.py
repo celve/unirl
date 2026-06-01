@@ -9,7 +9,6 @@ outside (in the training and rollout actors).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from dataclasses import field as dc_field
 from typing import Any, Optional, Tuple
 
 from diffusionrl.config.registration import register_config
@@ -69,26 +68,6 @@ class HunyuanImage3PipelineConfig:
     # under ``self.model`` (weights at ``model.layers.X.*``). We prepend
     # ``"model."`` so the LoRA out_name resolves correctly on the rollout side.
     weight_sync_param_name_prefix: str = "model."
-
-    # Fused→split mapping for LoRA weight sync. HI3 uses fused qkv_proj
-    # (Q+K+V packed into one Linear) but vLLM's LoRA system expects split
-    # q_proj/k_proj/v_proj keys. This dict tells extract_lora_tensors to
-    # split fused LoRA tensors before sending to rollout.
-    #
-    # HI3 qkv_proj is GROUP-INTERLEAVED (not block [Q|K|V]):
-    #   reshape(num_kv_heads=8, kv_groups+2=6, head_dim=128, ...)
-    #   then split([kv_groups=4, 1, 1]) → Q, K, V
-    weight_sync_packed_modules: Optional[dict] = dc_field(
-        default_factory=lambda: {
-            "qkv_proj": {
-                "sub_names": ["q_proj", "k_proj", "v_proj"],
-                "layout": "gqa_interleaved",
-                "num_q_heads": 32,
-                "num_kv_heads": 8,
-                "head_dim": 128,
-            },
-        }
-    )
 
     def __post_init__(self) -> None:
         validate_precision_type(self.model_precision, field="HunyuanImage3PipelineConfig.model_precision")
