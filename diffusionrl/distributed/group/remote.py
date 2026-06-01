@@ -120,25 +120,25 @@ class Remote:
 
     # ── Auto-backward (framework-injected, not user-facing) ───────────────────
 
-    @distributed(dispatch_mode=Dispatch.DP_ALL)
+    @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def _auto_backward(
         self,
         call_id: str,
         out_grads: tuple,
         in_grads: tuple,
     ) -> tuple:
-        """Framework backward RPC, dispatched with DP_ALL by _run_auto_backward.
+        """Framework backward RPC, dispatched with DP_SCATTER by _run_auto_backward.
 
-        dispatch_mode = DP_ALL is intentional and covers all currently supported
+        dispatch_mode = DP_SCATTER is intentional and covers all currently supported
         forward dispatch modes:
 
-          DP_ALL  forward → DP_ALL  backward  (grad shards align with output shards)
-          DP_FIRST forward → DP_ALL backward  (all ranks must participate in backward,
+          DP_SCATTER  forward → DP_SCATTER  backward  (grad shards align with output shards)
+          DP_SCATTER_HEAD forward → DP_SCATTER backward  (all ranks must participate in backward,
                                                not just the primary ranks)
 
         !! IMPORTANT — adding a new forward dispatch_mode !!
         If you add a new Dispatch variant, check resolve_backward_dispatch_mode() in
-        dispatch.py to decide whether DP_ALL backward is still correct, or
+        dispatch.py to decide whether DP_SCATTER backward is still correct, or
         whether _auto_backward needs a new dispatch variant / a hard error.
 
         Args:
@@ -176,7 +176,7 @@ class Remote:
         torch.cuda.empty_cache()
         return result
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def _cleanup_all_grads(self) -> None:
         """Discard ALL saved grad tensors on this worker.
 

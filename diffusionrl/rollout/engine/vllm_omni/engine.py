@@ -434,7 +434,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
     # BaseRolloutEngine — generation
     # ------------------------------------------------------------------
 
-    @distributed(dispatch_mode=Dispatch.DP_ALL)
+    @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def generate(self, req: RolloutReq) -> RolloutResp:
         if self._omni is None:
             raise RuntimeError("VLLMOmniRolloutEngine: engine not initialized")
@@ -587,7 +587,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
     # BaseRolloutEngine — runtime offload (vllm-omni level-2 sleep)
     # ------------------------------------------------------------------
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def sleep(self) -> None:
         """Fan ``handle_sleep_task`` to every stage's workers (level 2)."""
         if self._omni is None:
@@ -607,7 +607,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
             )
         self._is_offloaded = True
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def wake_up(self) -> None:
         """Fan ``handle_wake_task`` to every stage's workers."""
         if self._omni is None:
@@ -942,7 +942,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         # ``None`` → deactivate, and the rollout silently runs base model).
         self._lora_loaded = True
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def set_lora_from_tensors_copy(
         self,
         adapter_name: str,

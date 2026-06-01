@@ -688,7 +688,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
     # Generation — typed
     # ------------------------------------------------------------------
 
-    @distributed(dispatch_mode=Dispatch.DP_ALL)
+    @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def generate(self, req: RolloutReq) -> RolloutResp:
         """Run text generation against the engine and return a typed response."""
         require(
@@ -1286,7 +1286,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
     # Memory management
     # ------------------------------------------------------------------
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def sleep(
         self,
         tags: Optional[List[str]] = None,
@@ -1360,7 +1360,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             f"SGLangLLMRolloutEngine: /flush_cache did not return 200 after 60 attempts (last error: {last_err})"
         )
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def wake_up(
         self,
         tags: Optional[List[str]] = None,

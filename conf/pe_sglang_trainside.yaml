@@ -25,7 +25,7 @@
 #   python -m diffusionrl.train_pe --config-name pe_sglang_trainside num_devices=1 ++devices_per_node=1 batch_size=2 num_rollouts=3
 
 num_devices: 8
-batch_size: 8                 # P; MUST be divisible by num_devices (composed rollout = DP_ALL)
+batch_size: 8                 # P; MUST be divisible by num_devices (composed rollout = DP_SCATTER)
 
 num_rollouts: 300
 

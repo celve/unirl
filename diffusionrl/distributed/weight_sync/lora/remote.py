@@ -64,7 +64,7 @@ class RemoteLoraWeightSync(LoraWeightSyncBase):
         # offload the base, wake the engines, then push.
         self._cached = None
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.RANK_ZERO)
+    @distributed(dispatch_mode=Dispatch.BROADCAST, execute_mode=Execute.RANK_ZERO)
     def set_rollout_targets(self, targets: List[tuple]) -> None:
         """Rank 0 caches the rollout engines' ``(role_name, worker_handles)`` pairs.
 
@@ -75,11 +75,11 @@ class RemoteLoraWeightSync(LoraWeightSyncBase):
         """
         self._targets = [(str(role), list(workers)) for role, workers in targets]
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def extract(self) -> None:
         """Gather the trained LoRA adapter and cache it on rank 0 (returns nothing).
 
-        Runs on every train rank (``ONE_TO_ALL``): the extract is a train-mesh
+        Runs on every train rank (``BROADCAST``): the extract is a train-mesh
         collective whose ``state_dict()`` gathers the full FSDP model to GPU, so a
         memory-constrained colocate trainer (HI3) MUST call this while its engines
         are asleep (base onloaded). The adapter stays inside the handler — cached on
@@ -88,7 +88,7 @@ class RemoteLoraWeightSync(LoraWeightSyncBase):
         """
         self._extract_to_cache()
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def push(self) -> None:
         """Ship the adapter cached by :meth:`extract` to every rollout engine.
 
@@ -99,7 +99,7 @@ class RemoteLoraWeightSync(LoraWeightSyncBase):
         """
         self._push_from_cache()
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def sync(self) -> None:
         """:meth:`extract` + :meth:`push` in one dispatch — for the no-dance case.
 

@@ -50,11 +50,11 @@ class TensorWeightSync(FullWeightSync):
         )
         self._rollout = rollout  # local engine sibling (single-model, or a ComposedRolloutEngine)
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def sync(self) -> None:
         """Serialize each bucket and load it into the local engine.
 
-        Runs on every train rank (``ONE_TO_ALL``); the ``raw_state_dict`` walk
+        Runs on every train rank (``BROADCAST``); the ``raw_state_dict`` walk
         all-gathers each shard on every rank in lockstep. Each rank talks to
         its own co-located engine, so no cross-rank gather is needed.
         """

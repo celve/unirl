@@ -182,7 +182,7 @@ class PETrainer(BaseTrainer):
 
         # 1. Score the IMAGE track only — the AR track's TextSegment is not
         #    directly scorable; its reward is credit-assigned below.
-        #    ``score_and_attach`` is DP_ALL: it shards the diffusion track
+        #    ``score_and_attach`` is DP_SCATTER: it shards the diffusion track
         #    (P*N*M) across workers, but the P-prompt ``req`` would broadcast
         #    whole, so each worker would see a (track-shard) vs P size
         #    mismatch. Expand the req prompt-major to the track size first
@@ -213,7 +213,7 @@ class PETrainer(BaseTrainer):
         for name in TRACK_NAMES:
             resp.tracks[name] = resp.tracks[name].compute_advantages(normalize=True)
 
-        # 5. Route each track to its own stack (each DP_ALL-sharded on dispatch).
+        # 5. Route each track to its own stack (each DP_SCATTER-sharded on dispatch).
         results: Dict[str, TrainStepResult] = {
             name: getattr(self, name).stack.train_track(resp.tracks[name], training_progress=float(training_progress))
             for name in TRACK_NAMES

@@ -60,7 +60,7 @@ class IPCWeightSync(FullWeightSync):
         self._rollout = rollout
         self._use_shm = bool(use_shm)
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def sync(self) -> None:
         """Pump full weights to the co-located engine over per-stage sockets.
 

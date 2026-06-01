@@ -48,11 +48,11 @@ class LocalLoraWeightSync(LoraWeightSyncBase):
         )
         self._rollout = rollout
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def sync(self) -> None:
         """Extract LoRA from the local FSDP model and load it into the engine.
 
-        Runs on every Worker (``ONE_TO_ALL``); the extract is a train-mesh
+        Runs on every Worker (``BROADCAST``); the extract is a train-mesh
         collective that lines up because every rank runs together. The engine must
         be awake (the caller wakes it before ``sync``); ``set_lora_from_tensors``
         drops any existing adapter and loads the new one on every stage's workers.

@@ -262,7 +262,7 @@ class TrainStack(Remote):
         """Per-rollout-boundary hook — delegates to the FSDPBackend's EMA."""
         self.fsdp_backend.on_rollout_end()
 
-    @distributed(dispatch_mode=Dispatch.DP_ALL)
+    @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def train_track(
         self,
         resp_track: RolloutTrack,
@@ -274,7 +274,7 @@ class TrainStack(Remote):
         Combines the steps so worker-side mutations
         (``segment.sde_logp`` populated by ``prepare_segment``) flow into
         the subsequent ``train`` call(s) without round-tripping through the
-        driver. Dispatched ``DP_ALL`` so each DP worker receives its shard
+        driver. Dispatched ``DP_SCATTER`` so each DP worker receives its shard
         of ``resp_track``; per-shard loss/grad_norm/metrics merge back via
         ``pytree_merge``.
 

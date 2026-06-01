@@ -214,7 +214,7 @@ class FSDPBackend(Remote):
     # Eval-EMA swap
     # ------------------------------------------------------------------
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def apply_eval_ema(self) -> None:
         """Swap the EMA shadow ("old") adapter into live position for rollout.
 
@@ -227,7 +227,7 @@ class FSDPBackend(Remote):
         self.ema.apply_shadow()
         self._eval_ema_active = True
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def restore_from_eval(self) -> None:
         if self.ema is None or not self._eval_ema_active:
             return
@@ -267,7 +267,7 @@ class FSDPBackend(Remote):
     # Memory lifecycle
     # ------------------------------------------------------------------
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def onload(self) -> None:
         """Move the FSDP train state (params + grads + optimizer) back to GPU.
 
@@ -280,7 +280,7 @@ class FSDPBackend(Remote):
                 if isinstance(v, torch.Tensor):
                     state[k] = v.to(self._device)
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def offload(self) -> None:
         """Move the FSDP train state (params + grads + optimizer) to CPU.
 

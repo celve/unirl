@@ -56,7 +56,7 @@ class RPCBackwardNode:
 
     role_proxy: "Handle"
     call_id: str  # key prefix for worker _grad_inputs/_grad_outputs
-    dispatch_mode: "Dispatch"  # backward dispatch mode (always DP_ALL currently)
+    dispatch_mode: "Dispatch"  # backward dispatch mode (always DP_SCATTER currently)
     input_metas: List["TensorMeta"]  # forward input TensorMetas, in traversal order
     output_metas: List["TensorMeta"]  # forward output TensorMetas, in traversal order
 
@@ -159,7 +159,7 @@ def _run_auto_backward(node: RPCBackwardNode) -> None:
 def _cleanup_all(ctx: GradContext) -> None:
     """Tell every role proxy involved in this context to clear all saved grad tensors.
 
-    Calls _cleanup_all_grads() on each unique role proxy once (ONE_TO_ALL RPC),
+    Calls _cleanup_all_grads() on each unique role proxy once (BROADCAST RPC),
     so every worker clears its _grad_inputs and _grad_outputs dicts entirely.
     Called both after successful backward and on forward exception.
     """

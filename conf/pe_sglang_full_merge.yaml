@@ -26,7 +26,7 @@
 # the PRETRAINED_MODEL / LLM_MODEL env vars (see ${oc.env:...} defaults below).
 #
 # batch_size MUST be divisible by num_devices — the composed rollout dispatches
-# generate DP_ALL (Handle shards P across DP workers, then merges the per-worker
+# generate DP_SCATTER (Handle shards P across DP workers, then merges the per-worker
 # resps). Default P=8 on 8 GPUs → 1 prompt/worker × N=2 × M=2.
 # 1-GPU wiring smoke (bypasses the multi-GPU DP merge entirely — dp_size=1 returns
 # the single worker's resp with no cross-worker concat):
@@ -41,7 +41,7 @@
 #   3. per-engine mem_fraction_static budget on the colocated GPU.
 
 num_devices: 8
-batch_size: 8                 # P; MUST be divisible by num_devices (composed rollout = DP_ALL)
+batch_size: 8                 # P; MUST be divisible by num_devices (composed rollout = DP_SCATTER)
 
 # LoRA weight-sync cadence (read by PETrainer.train): push each track's adapter
 # into its engine every N rollouts. 1 = on-policy. Step 0 is skipped.

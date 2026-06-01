@@ -31,7 +31,7 @@ def _extract_canonical_lora(backend: Any, *, param_prefix: str, adapter_name: st
 
     ``extract_lora_tensors`` redistributes each FSDP ``DTensor`` shard to a full
     tensor — a collective across the train process group — so the caller MUST run
-    this on every train rank in lockstep (``ONE_TO_ALL``).
+    this on every train rank in lockstep (``BROADCAST``).
     """
     from diffusionrl.distributed.weight_sync.payload import _peft_config_dict
     from diffusionrl.utils.peft_merge import extract_lora_tensors

@@ -325,7 +325,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
     # Generation
     # ------------------------------------------------------------------
 
-    @distributed(dispatch_mode=Dispatch.DP_ALL)
+    @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def generate(self, req: RolloutReq) -> RolloutResp:
         require(
             int(req.batch_size) > 0,
@@ -451,7 +451,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def sleep(self) -> None:
         # single-stage engines ignore it (the parent ComposedRolloutEngine
         # handles the routing).
@@ -463,7 +463,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         self._is_offloaded = True
         logger.info("SGLang engine entered sleep state via release_memory_occupation().")
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def wake_up(self) -> None:
         if not self._is_offloaded:
             return

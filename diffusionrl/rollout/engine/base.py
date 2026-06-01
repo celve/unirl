@@ -42,7 +42,7 @@ class BaseRolloutEngine(Remote, ABC):
     def shutdown(self) -> None:
         """Release worker subprocesses and any other engine-owned resources."""
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def sleep(self) -> None:
         """Best-effort runtime offload. Default no-op.
 
@@ -52,7 +52,7 @@ class BaseRolloutEngine(Remote, ABC):
         attribute and won't pick up a base-class decorator alone).
         """
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def wake_up(self) -> None:
         """Restore runtime resources after ``sleep``. Default no-op.
 

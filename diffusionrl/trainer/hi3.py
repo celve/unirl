@@ -402,7 +402,7 @@ class HI3Trainer(BaseTrainer):
         # 1. Score the IMAGE track only — the AR track's TextSegment is not
         #    directly scorable; its reward is credit-assigned below.
         #    Build a reward req aligned 1:1 with the image track (each image's
-        #    ORIGINAL prompt). score_and_attach is DP_ALL: it splits the track
+        #    ORIGINAL prompt). score_and_attach is DP_SCATTER: it splits the track
         #    across ranks but broadcasts the req, so a P-prompt req leaves each
         #    rank with req(P) > track(P*N*M/dp) → "not an integer multiple". A
         #    1:1 req shards together with the track (req==track per rank).

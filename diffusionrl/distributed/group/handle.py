@@ -98,13 +98,17 @@ def reset_role_name_counter() -> None:
 def _check_batch_divisibility(dispatch_mode: Dispatch, batch_size: Optional[int], dp_size: int) -> None:
     """Raise if a DP-split batch can't be divided evenly across dp ranks.
 
-    Only DP_ALL / DP_FIRST split the per-sample batch by dp_size, so only they
-    require divisibility. ONE_TO_ALL broadcasts and ALL_TO_ALL splits by
+    Only DP_SCATTER / DP_SCATTER_HEAD split the per-sample batch by dp_size, so only they
+    require divisibility. BROADCAST broadcasts and SCATTER splits by
     world_size — both ignore this precondition — so the check must NOT apply to
     them (it would spuriously reject valid broadcast calls, e.g.
     set_rollout_targets(rollout.workers, ...) when len(workers) % dp_size != 0).
     """
-    if dispatch_mode in (Dispatch.DP_ALL, Dispatch.DP_FIRST) and batch_size is not None and batch_size % dp_size != 0:
+    if (
+        dispatch_mode in (Dispatch.DP_SCATTER, Dispatch.DP_SCATTER_HEAD)
+        and batch_size is not None
+        and batch_size % dp_size != 0
+    ):
         raise ValueError(f"batch_size={batch_size} not divisible by dp_size={dp_size}")
 
 
@@ -299,7 +303,7 @@ class Handle:
             # Also wraps bare TensorHandle into TensorMeta.
             results = [self._rebind_tree(r, self.workers[i]) for i, r in enumerate(results)]
 
-            # Collect: merge primary rank results
+            # Collect: merge DP-head rank results
             collected = collect_fn(self, results)
 
             if ctx is not None:

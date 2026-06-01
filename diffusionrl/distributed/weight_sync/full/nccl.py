@@ -67,7 +67,7 @@ class NCCLWeightSync(FullWeightSync):
     # One-time setup (driver-called)
     # ------------------------------------------------------------------
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.RANK_ZERO)
+    @distributed(dispatch_mode=Dispatch.BROADCAST, execute_mode=Execute.RANK_ZERO)
     def pick_master(self) -> Tuple[str, int]:
         """Rank 0 returns its ``(node_ip, free_port)`` for the rendezvous."""
         import socket
@@ -80,7 +80,7 @@ class NCCLWeightSync(FullWeightSync):
             port = sock.getsockname()[1]
         return addr, int(port)
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.RANK_ZERO)
+    @distributed(dispatch_mode=Dispatch.BROADCAST, execute_mode=Execute.RANK_ZERO)
     def set_rollout_targets(self, actor_handles: List[Any], role_name: str) -> None:
         """Rank 0 caches the rollout slab's Worker actor handles + role name.
 
@@ -90,7 +90,7 @@ class NCCLWeightSync(FullWeightSync):
         self._rollout_targets = list(actor_handles)
         self._rollout_role = str(role_name)
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.RANK_ZERO)
+    @distributed(dispatch_mode=Dispatch.BROADCAST, execute_mode=Execute.RANK_ZERO)
     def connect(self, *, master_addr: str, master_port: int, num_rollout_gpus: int) -> None:
         """Bring up the broadcast group (rank 0 + all rollout workers).
 
@@ -137,7 +137,7 @@ class NCCLWeightSync(FullWeightSync):
     # Per-step sync
     # ------------------------------------------------------------------
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def sync(self) -> None:
         """Broadcast the current full weights into the rollout engines.
 

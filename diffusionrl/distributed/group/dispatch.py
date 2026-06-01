@@ -10,7 +10,7 @@ Design:
   - dispatch/collect functions take (wg, args, kwargs, batch_size) to access rank_info, dp_size, etc.
   - @distributed decorator marks Remote methods with their dispatch/execute modes
 
-DP-aware dispatch (DP_ALL, DP_FIRST):
+DP-aware dispatch (DP_SCATTER, DP_SCATTER_HEAD):
   - Input is split by dp_size (not world_size) using recursive split_value
   - Workers in the same DP group (varying TP/PP/SP rank) receive the SAME shard
   - Collect filters: only tp_rank==0, pp_last_stage, sp_rank==0 results are kept
@@ -50,10 +50,10 @@ def _unwrap_broadcast(args: tuple, kwargs: dict):
 class Dispatch(Enum):
     """How to distribute input to workers."""
 
-    ONE_TO_ALL = auto()  # Broadcast same data to all workers
-    ALL_TO_ALL = auto()  # Passthrough: caller already split per worker
-    DP_ALL = auto()  # Chunk by dp_size; all ranks get full data; collect merge
-    DP_FIRST = auto()  # Chunk by dp_size; non-primary ranks get empty; collect merge
+    BROADCAST = auto()  # Same data to every worker
+    SCATTER = auto()  # Split N ways across world (one shard per worker)
+    DP_SCATTER = auto()  # Chunk by dp_size; all ranks in DP group get the same shard; collect merge
+    DP_SCATTER_HEAD = auto()  # Chunk by dp_size; only DP head gets shard, others empty; collect merge
 
 
 class Execute(Enum):
@@ -229,16 +229,16 @@ def pytree_merge(results: list) -> Any:
 # ── Dispatch functions (wg, args, kwargs, batch_size) → List[(args_i, kwargs_i)] ──
 
 
-def _dispatch_one_to_all(wg, args: tuple, kwargs: dict, batch_size: Optional[int]) -> List:
+def _dispatch_broadcast(wg, args: tuple, kwargs: dict, batch_size: Optional[int]) -> List:
     """Broadcast same args/kwargs to all workers."""
     args, kwargs = _unwrap_broadcast(args, kwargs)
     return [(args, kwargs)] * wg.world_size
 
 
-def _dispatch_all_to_all(wg, args: tuple, kwargs: dict, batch_size: Optional[int]) -> List:
+def _dispatch_scatter(wg, args: tuple, kwargs: dict, batch_size: Optional[int]) -> List:
     """Split args/kwargs by world_size (treat every worker as its own DP rank).
 
-    Equivalent to DP_ALL with dp_size == world_size.
+    Equivalent to DP_SCATTER with dp_size == world_size.
     """
     if batch_size is None:
         args, kwargs = _unwrap_broadcast(args, kwargs)
@@ -253,7 +253,7 @@ def _dispatch_all_to_all(wg, args: tuple, kwargs: dict, batch_size: Optional[int
     ]
 
 
-def _dispatch_dp_all(wg, args: tuple, kwargs: dict, batch_size: Optional[int]) -> List:
+def _dispatch_dp_scatter(wg, args: tuple, kwargs: dict, batch_size: Optional[int]) -> List:
     """Split args/kwargs by dp_size, assign by dp_rank.
 
     Workers in the same DP group (different TP/PP/SP ranks) receive
@@ -283,17 +283,17 @@ def _dispatch_dp_all(wg, args: tuple, kwargs: dict, batch_size: Optional[int]) -
     return [dp_shards[wg.rank_infos[i].dp_rank] for i in range(wg.world_size)]
 
 
-def _dispatch_dp_first(wg, args: tuple, kwargs: dict, batch_size: Optional[int]) -> List:
-    """Like DP_ALL, but non-primary ranks receive empty args/kwargs.
+def _dispatch_dp_scatter_head(wg, args: tuple, kwargs: dict, batch_size: Optional[int]) -> List:
+    """Like DP_SCATTER, but non-head ranks receive empty args/kwargs.
 
-    Primary rank per DP group: tp_rank==0, pp_rank==0, sp_rank==0.
+    DP head rank per group: tp_rank==0, pp_rank==0, sp_rank==0.
     This saves RPC bandwidth when workers broadcast data internally.
     """
     dp_size = wg.dp_size
 
     if batch_size is None:
         args, kwargs = _unwrap_broadcast(args, kwargs)
-        return [(args, kwargs) if _is_primary(wg.rank_infos[i]) else ((), {}) for i in range(wg.world_size)]
+        return [(args, kwargs) if _is_dp_head(wg.rank_infos[i]) else ((), {}) for i in range(wg.world_size)]
 
     # Split into dp_size shards
     split_args = tuple(split_value(v, dp_size, batch_size) for v in args)
@@ -306,26 +306,26 @@ def _dispatch_dp_first(wg, args: tuple, kwargs: dict, batch_size: Optional[int])
         dp_shards.append((shard_args, shard_kwargs))
 
     return [
-        dp_shards[wg.rank_infos[i].dp_rank] if _is_primary(wg.rank_infos[i]) else ((), {}) for i in range(wg.world_size)
+        dp_shards[wg.rank_infos[i].dp_rank] if _is_dp_head(wg.rank_infos[i]) else ((), {}) for i in range(wg.world_size)
     ]
 
 
-def _is_primary(ri) -> bool:
+def _is_dp_head(ri) -> bool:
     return ri.tp_rank == 0 and ri.pp_rank == 0 and ri.sp_rank == 0
 
 
 # ── Collect functions (wg, results) → collected ──
 
 
-def _collect_all(wg, results: List) -> List:
+def _collect_passthrough(wg, results: List) -> List:
     """Return all results as list (raw)."""
     return results
 
 
-def _collect_dp(wg, results: List) -> Any:
-    """Collect only primary rank results per DP group, then merge.
+def _collect_dp_merge(wg, results: List) -> Any:
+    """Collect only DP-head results per DP group, then merge.
 
-    Primary rank: tp_rank==0, is_pipeline_last_stage, sp_rank==0.
+    DP head: tp_rank==0, is_pipeline_last_stage, sp_rank==0.
     Returns the pytree_merge'd result across DP ranks.
 
     Handles Execute.RANK_ZERO case where len(results) < world_size.
@@ -347,10 +347,10 @@ def _collect_dp(wg, results: List) -> Any:
 # ── Registry: Dispatch mode → paired (dispatch_fn, collect_fn) ──
 
 DISPATCH_MODE_REGISTRY: Dict[Dispatch, Dict[str, Callable]] = {
-    Dispatch.ONE_TO_ALL: {"dispatch_fn": _dispatch_one_to_all, "collect_fn": _collect_all},
-    Dispatch.ALL_TO_ALL: {"dispatch_fn": _dispatch_all_to_all, "collect_fn": _collect_all},
-    Dispatch.DP_ALL: {"dispatch_fn": _dispatch_dp_all, "collect_fn": _collect_dp},
-    Dispatch.DP_FIRST: {"dispatch_fn": _dispatch_dp_first, "collect_fn": _collect_dp},
+    Dispatch.BROADCAST: {"dispatch_fn": _dispatch_broadcast, "collect_fn": _collect_passthrough},
+    Dispatch.SCATTER: {"dispatch_fn": _dispatch_scatter, "collect_fn": _collect_passthrough},
+    Dispatch.DP_SCATTER: {"dispatch_fn": _dispatch_dp_scatter, "collect_fn": _collect_dp_merge},
+    Dispatch.DP_SCATTER_HEAD: {"dispatch_fn": _dispatch_dp_scatter_head, "collect_fn": _collect_dp_merge},
 }
 
 
@@ -365,17 +365,17 @@ def resolve_backward_dispatch_mode(
     """Return the dispatch mode for the backward RPC, or raise if unsupported.
 
     Rules:
-      DP_ALL  + pp_size==1 → DP_ALL   (grad shards align with output shards)
-      DP_FIRST + pp_size==1 → DP_ALL  (all ranks must participate in backward)
-      DP_ALL / DP_FIRST + pp_size>1 → Error (autograd graph broken across PP)
-      ONE_TO_ALL → Error
-      ALL_TO_ALL → Error
+      DP_SCATTER  + pp_size==1 → DP_SCATTER   (grad shards align with output shards)
+      DP_SCATTER_HEAD + pp_size==1 → DP_SCATTER  (all ranks must participate in backward)
+      DP_SCATTER / DP_SCATTER_HEAD + pp_size>1 → Error (autograd graph broken across PP)
+      BROADCAST → Error
+      SCATTER → Error
 
     !! IMPORTANT — adding a new Dispatch variant !!
-    Update this function to decide whether DP_ALL backward is correct,
+    Update this function to decide whether DP_SCATTER backward is correct,
     or a hard error is needed.  Also check Remote._auto_backward's dispatch_mode.
     """
-    if fwd_dispatch_mode in (Dispatch.ONE_TO_ALL, Dispatch.ALL_TO_ALL):
+    if fwd_dispatch_mode in (Dispatch.BROADCAST, Dispatch.SCATTER):
         raise ValueError(
             f"Method '{method_name}' uses dispatch_mode={fwd_dispatch_mode.name}, "
             f"which does not support auto-backward (no shared batch dimension). "
@@ -390,9 +390,9 @@ def resolve_backward_dispatch_mode(
             f"Do not call this method inside enable_grad()."
         )
 
-    # DP_FIRST → DP_ALL (all ranks must participate in backward)
-    # DP_ALL   → DP_ALL (unchanged)
-    return Dispatch.DP_ALL
+    # DP_SCATTER_HEAD → DP_SCATTER (all ranks must participate in backward)
+    # DP_SCATTER   → DP_SCATTER (unchanged)
+    return Dispatch.DP_SCATTER
 
 
 # ── @distributed decorator ──
@@ -403,13 +403,13 @@ DISTRIBUTED_CONFIG_ATTR = "_distributed_config"
 def distributed(
     _func: Callable = None,
     *,
-    dispatch_mode: Dispatch = Dispatch.DP_ALL,
+    dispatch_mode: Dispatch = Dispatch.DP_SCATTER,
     execute_mode: Execute = Execute.ALL,
 ) -> Callable:
     """Declare SPMD dispatch/execute mode on a Role method.
 
     Handle scans for this attribute and auto-generates proxy methods.
-    Default dispatch mode is DP_ALL.
+    Default dispatch mode is DP_SCATTER.
 
     Usage:
         class DiffusionRemote(Remote):
@@ -417,7 +417,7 @@ def distributed(
             def rollout(self, samples, prompts):
                 ...
 
-            @distributed(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.RANK_ZERO)
+            @distributed(dispatch_mode=Dispatch.BROADCAST, execute_mode=Execute.RANK_ZERO)
             def get_metrics(self):
                 ...
     """

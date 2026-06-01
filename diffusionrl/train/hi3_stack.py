@@ -147,7 +147,7 @@ class HI3TrainStack(Remote):
         """Per-rollout-boundary hook — delegates to the FSDPBackend's EMA."""
         self.fsdp_backend.on_rollout_end()
 
-    @distributed(dispatch_mode=Dispatch.DP_ALL)
+    @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def train_track(
         self,
         ar_track: RolloutTrack,
@@ -157,7 +157,7 @@ class HI3TrainStack(Remote):
     ) -> Dict[str, TrainStepResult]:
         """Driver-callable: prepare → backward(ar) + backward(image) → ONE step.
 
-        Both tracks arrive DP_ALL-sharded (each DP worker gets its shard of
+        Both tracks arrive DP_SCATTER-sharded (each DP worker gets its shard of
         both). ``prepare_segment`` (image only) populates ``segment.sde_logp``;
         the two ``compute_loss_and_backward`` calls accumulate gradients into the
         shared backbone's single LoRA adapter; one ``optimizer_step`` applies

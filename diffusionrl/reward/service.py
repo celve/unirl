@@ -129,7 +129,7 @@ class RewardService(Remote):
     def compute_rewards(self, request: RewardRequest) -> RewardResponse:
         return self.backend.compute_rewards(request)
 
-    @distributed(dispatch_mode=Dispatch.DP_ALL)
+    @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def score_and_attach(self, *, req: RolloutReq, track: RolloutTrack) -> RolloutTrack:
         """Score one track's decoded media and return a copy with rewards attached.
 

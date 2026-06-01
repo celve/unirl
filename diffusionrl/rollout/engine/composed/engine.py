@@ -120,7 +120,7 @@ class ComposedRolloutEngine(BaseRolloutEngine):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def shutdown(self) -> None:
         for name, child in self._child_by_name.items():
             try:
@@ -128,17 +128,17 @@ class ComposedRolloutEngine(BaseRolloutEngine):
             except Exception as exc:
                 logger.warning("Child %r shutdown raised: %s", name, exc)
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def sleep(self) -> None:
         for child in self._child_by_name.values():
             child.sleep()
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def wake_up(self) -> None:
         for child in self._child_by_name.values():
             child.wake_up()
 
-    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def onload_weights(self, *, track_prefix: str = "") -> None:
         for child in self._children_for_track_prefix(track_prefix):
             child.onload_weights()
@@ -162,15 +162,15 @@ class ComposedRolloutEngine(BaseRolloutEngine):
     # Generation — PE serial flow
     # ------------------------------------------------------------------
 
-    @distributed(dispatch_mode=Dispatch.DP_ALL)
+    @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def generate(self, req: RolloutReq) -> RolloutResp:
         """Run PE serial flow: AR expansion → diffusion sampling → 2-track resp.
 
-        Dispatched ``DP_ALL`` (like vllm-omni / trainside): the Handle shards the
+        Dispatched ``DP_SCATTER`` (like vllm-omni / trainside): the Handle shards the
         req across DP workers (each owns its own sglang_llm + sglang subprocess),
-        every worker runs the serial flow on its prompt-shard, and ``_collect_dp``
-        merges the per-worker 2-track resps. (``ONE_TO_ALL`` would return a list
-        of per-worker resps via ``_collect_all`` and break the trainer.)
+        every worker runs the serial flow on its prompt-shard, and ``_collect_dp_merge``
+        merges the per-worker 2-track resps. (``BROADCAST`` would return a list
+        of per-worker resps via ``_collect_passthrough`` and break the trainer.)
         """
         require(int(req.batch_size) > 0, "ComposedRolloutEngine.generate: empty req")
         text_primitive = req.primitives.get("text")

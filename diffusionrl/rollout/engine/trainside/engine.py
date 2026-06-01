@@ -90,7 +90,7 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
             # AR stage — no diffusion schedule needed
             self.schedule_policy = None
 
-    @distributed(dispatch_mode=Dispatch.DP_ALL)
+    @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def generate(self, req: RolloutReq) -> RolloutResp:
         if self.schedule_policy is not None:
             ensure_req_sigmas(req, self.schedule_policy)
