@@ -607,9 +607,9 @@ class WAN22DiffusionStage(DiffusionStage[WAN21Conditions]):
     def trainable_module(self) -> "torch.nn.Module":
         """Return the composite :class:`WanDualTransformer` for FSDP wrapping.
 
-        **FSDP wrapping policy** (matches
-        ``diffusionrl/training/fsdp_policy.py``):
-        :class:`FSDPPolicy` does NOT call ``fully_shard`` on the
+        **FSDP wrapping policy** (matches the v2 FSDP backend,
+        ``diffusionrl/train/backend/fsdp.py``):
+        the block-wrap policy does NOT call ``fully_shard`` on the
         composite root. It enumerates the ``WanTransformerBlock`` block
         instances inside ``self.model`` and runs ``fully_shard(layer)``
         on each individually (see ``fsdp_policy.py::_enumerate_block_instances``
@@ -621,7 +621,7 @@ class WAN22DiffusionStage(DiffusionStage[WAN21Conditions]):
         unwrapped, exactly like SD3 / HI3.
 
         **LoRA-on-composite assumption** (worth a GPU smoke):
-        :class:`diffusionrl.training.lora_policy.LoRAPolicy` calls
+        LoRA injection (``diffusionrl.train.inject``) calls
         :func:`peft.inject_adapter_in_model` on whatever
         ``trainable_module()`` returns, with a ``target_modules`` list of
         suffix strings (e.g. ``["attn1.to_q", "attn1.to_k", ...]``).

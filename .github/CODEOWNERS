@@ -16,7 +16,6 @@
 /conf/ @CjhHa1 @haonan3 @celve @Jayce-Ping
 
 # Core training and distributed runtime.
-/diffusionrl/training/ @CjhHa1 @haonan3 @celve @Jayce-Ping
 /diffusionrl/algorithms/ @CjhHa1 @haonan3 @celve @Jayce-Ping
 /diffusionrl/distributed/ @CjhHa1 @haonan3 @celve @Jayce-Ping
 

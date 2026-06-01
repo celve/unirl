@@ -30,10 +30,10 @@ Timestep set source:
 In both modes each iteration broadcasts one scalar ``t`` to the whole
 batch.
 
-The dual-adapter mechanics (install / EMA / switch) live in
-:class:`diffusionrl.training.nft_lora_policy.NFTLoRAPolicy`. The
-algorithm receives the policy via constructor injection (the actor
-wires ``nft_lora_policy=...``) and calls its ``with_old_adapter()``
+The dual-adapter mechanics (install / EMA / switch) live in the EMA
+policy owned by the FSDP backend. The algorithm receives the policy
+via constructor injection (``nft_lora_policy=...``, resolved off
+``backend.ema`` by the v2 trainer) and calls its ``with_old_adapter()``
 context manager to obtain :math:`old_pred`.
 """
 

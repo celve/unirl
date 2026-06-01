@@ -79,7 +79,7 @@ Read these files by task:
 | Understand the code architecture and module boundaries | `diffusionrl/README.md` |
 | Work on Ray actors, actor groups, placement, or colocate orchestration | `diffusionrl/ray/README.md` |
 | Work on rollout modes, rollout engines, or `RolloutReq` / `RolloutResp` flow | `diffusionrl/rollout/README.md` |
-| Work on train actors, policy composition, FSDP, LoRA, EMA, or NFT policies | `diffusionrl/training/README.md` |
+| Work on the v2 train stack — FSDP backend, train stack, LoRA/NFT inject, EMA shadow | `diffusionrl/train/readme.md` |
 | Add or debug GRPO / NFT-style loss logic | `diffusionrl/algorithms/README.md` |
 | Understand SDE step kernels, σ schedule, or initial noise | `diffusionrl/sde/README.md` |
 | Add or debug reward components | `diffusionrl/reward/README.md` |

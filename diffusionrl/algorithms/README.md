@@ -184,7 +184,6 @@ rollout wrap with train_group.use_eval_ema() if _use_ema_rollout else nullcontex
 
 shadow swap  TrainActor.apply_eval_ema  ─►  EMAPolicy.apply_ema_to_model
              TrainActor.restore_from_eval ─► EMAPolicy.restore_from_ema
-                                                          (diffusionrl/training/ema_policy.py)
 ```
 
 Three gotchas:

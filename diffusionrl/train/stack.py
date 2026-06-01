@@ -94,8 +94,7 @@ def _align_track_to_model(resp_track: RolloutTrack, *, device: torch.device) -> 
 class TrainStack(Remote):
     """Single-stage stage-driven train stack.
 
-    Mirrors :class:`diffusionrl.training.stack.StageTrainStack` shape
-    but for one stage only — no track-name dict, no optional-track
+    One stage only — no track-name dict, no optional-track
     semantics, no multi-track on_rollout_end fan-out.
 
     Created as a sibling ``Remote`` inside a placement block; takes

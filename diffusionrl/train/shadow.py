@@ -11,7 +11,7 @@ class Shadow:
     """How to access (live, shadow) parameter pairs on the model tree.
 
     Returned by ``inject_nft`` / ``inject_mirror``.  Consumed by
-    :class:`~diffusionrl.training.ema.EMA`.  The closures capture the
+    :class:`~diffusionrl.train.ema.EMA`.  The closures capture the
     model reference and the specifics of how shadows are stored.  EMA
     calls these without knowing whether shadows are peft adapters or
     mirror parameters.
