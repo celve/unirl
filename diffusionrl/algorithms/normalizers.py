@@ -85,7 +85,7 @@ def normalize_global(
 
 
 # ------------------------------------------------------------------
-# Group-index helpers (moved from rollout_control.py)
+# Group-index helpers
 # ------------------------------------------------------------------
 
 
