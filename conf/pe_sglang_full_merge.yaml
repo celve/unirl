@@ -4,16 +4,24 @@
 # ComposedRolloutEngine driving TWO separate-process SGLang engines:
 #   - ar:        SGLangLLMRolloutEngine (Qwen3 SRT)   → P*N rewrites
 #   - diffusion: SGLangRolloutEngine    (SD3 sglang)  → P*N*M images
-# Trained LoRA reaches each engine via a per-track LoraWeightSync, routed to the
+# ===========================================================================
+#  AR weight-sync MODE = FULL-MERGE  (full-weight-sync, lora_merged)
+#  Folds base+(α/r)·B·A and pushes the merged FULL weights via TensorWeightSync
+#  (the full-weight-sync / tensor-payload family), NOT via LoraWeightSync, which
+#  stays adapter/RPC-only. Sibling configs: pe_sglang_lora_pool.yaml (LoRA pool),
+#  pe_sglang_trainside.yaml (live-FSDP rollout, no sync).
+# ===========================================================================
+# Trained weights reach each engine via a per-track sync bridge, routed to the
 # matching child of the composed engine by ``track_prefix``:
-#   - diffusion: set_lora_from_tensors (SD3 sglang LoRA pool)
-#   - ar:        set_lora_from_tensors (SGLang LLM LoRA pool)
+#   - diffusion: LoraWeightSync  mode=lora    → set_lora_from_tensors (SD3 sglang LoRA pool)
+#   - ar:        TensorWeightSync lora_merged  → fold base+(α/r)·B·A → /update_weights_from_tensor
+#                              (full-weight-sync path; bypasses SGLang LLM LoRA pool)
 # Sync runs every ``weight_sync_interval`` rollouts (skip step 0).
 #
 # Pairs with diffusionrl/train_pe.py:
-#   python -m diffusionrl.train_pe --config-name pe_sglang
+#   python -m diffusionrl.train_pe --config-name pe_sglang_full_merge
 #
-# Format mirrors conf/pe_trainside.yaml (v2); engine params mirror
+# Format mirrors conf_v2/pe_trainside.yaml (v2); engine params mirror
 # conf/experiment/pe_joint_multi_track_e2e.yaml (v1). Set checkpoint paths via
 # the PRETRAINED_MODEL / LLM_MODEL env vars (see ${oc.env:...} defaults below).
 #
@@ -22,13 +30,13 @@
 # resps). Default P=8 on 8 GPUs → 1 prompt/worker × N=2 × M=2.
 # 1-GPU wiring smoke (bypasses the multi-GPU DP merge entirely — dp_size=1 returns
 # the single worker's resp with no cross-worker concat):
-#   python -m diffusionrl.train_pe --config-name pe_sglang num_devices=1 ++devices_per_node=1 batch_size=2 num_rollouts=3
+#   python -m diffusionrl.train_pe --config-name pe_sglang_full_merge num_devices=1 ++devices_per_node=1 batch_size=2 num_rollouts=3
 # Scale toward the v1 e2e (P=8 N=4 M=4) once green.
 #
 # VERIFY at smoke (engine-specific, can't be unit-checked):
-#   1. AR LoRA key format accepted by SGLang LLM /load_lora_adapter_from_tensors
-#      — sync.ar.param_prefix. "" sends HF-native keys (model.layers.*);
-#      if the server rejects, try "base_model.model." (PEFT envelope).
+#   1. AR merged-weight keys accepted by SGLang LLM /update_weights_from_tensor
+#      — sync.ar leaves name_remap unset (identity) → bare HF-native keys
+#      (model.layers.*), which is what the LLM expects (a "transformer." nesting mis-keys it).
 #   2. SGLang diffusion LoRA target-module names (diffusion.bundle...lora_target_modules).
 #   3. per-engine mem_fraction_static budget on the colocated GPU.
 
@@ -38,7 +46,7 @@ batch_size: 8                 # P; MUST be divisible by num_devices (composed ro
 # LoRA weight-sync cadence (read by PETrainer.train): push each track's adapter
 # into its engine every N rollouts. 1 = on-policy. Step 0 is skipped.
 weight_sync_interval: 1
-num_rollouts: 300
+num_rollouts: 200
 
 # ── Diffusion side (SD3) — copied from pe_trainside.yaml ───────────────────
 diffusion:
@@ -128,7 +136,6 @@ diffusion:
     _target_: diffusionrl.train.stack.TrainStack
     micro_batch_size: 1
     max_grad_norm: 1.0
-    num_updates_per_batch: 2      # diffusion-side PPO mini-batches; ar stays 1 (ARGRPO is single-update only)
 
 # ── AR side (Qwen3) — copied from pe_trainside.yaml ────────────────────────
 ar:
@@ -180,7 +187,7 @@ ar:
   algorithm:
     _target_: diffusionrl.algorithms.grpo.ARGRPO
     stage_attr: ar
-    clip_range: 1.0e-2 # AR track — diffusion track above keeps 1e-4
+    clip_range: 1.0e-4
     clip_schedule: constant
     conditions_cls:
       _target_: hydra.utils.get_class
@@ -202,8 +209,27 @@ rollout:
   config:
     _target_: diffusionrl.rollout.engine.composed.config.ComposedRolloutEngineConfig
     sleep_diffusion_on_start: false
-    pe_instruction: null        # set a rewrite instruction to enable real PE
-    pe_marker: null
+    # PE instruction (Siqi recipe, ported byte-for-byte from
+    # conf/experiment/pe_joint_multi_track_e2e_wise_24gpu.yaml). ComposedRolloutEngine
+    # injects this as system_instruction into BOTH the "ar" stage (sglang_llm
+    # generation) AND the "chat" stage (trainside Qwen3Pipeline replay), so
+    # generation and replay see the same prompt (engine.py:206-208).
+    pe_instruction: |
+      You are a Prompt Optimizer specializing in image generation models (e.g., MidJourney, Stable Diffusion). Your core task is to rewrite user-provided prompts into highly clear, easy-to-render versions.
+      When rewriting, prioritize the following principles:
+      1. Start from the user's prompt, do reasoning step by step to analyze the object or scene they want to generate.
+      2. Focus on describing the final visual appearance of the scene. Clarify elements like the main subject's shape, color, and state.
+      3. If you are confident about what the user wants to generate, directly point it out in your explanation and the final revised prompt.
+      4. If technical concepts are necessary but difficult for ordinary users to understand, translate them into intuitive visual descriptions.
+      5. Ensure the final revised prompt is consistent with the user's intent.
+
+      After receiving the user's prompt that needs rewriting, first explain your reasoning for optimization. Then, output the final revised prompt in the fixed format of "Revised Prompt:
+      ". Where the specific revised content is filled in the next line.
+
+      Prompt:
+    # Marker for stripping the LLM's reasoning preamble before feeding the cleaned
+    # PE text to diffusion; off-format / empty outputs fall back to the original prompt.
+    pe_marker: "Revised Prompt:"
     ar:
       _target_: diffusionrl.rollout.engine.sglang_llm.config.SGLangLLMEngineConfig
       pretrained_model_ckpt_path: ${oc.env:LLM_MODEL,Qwen/Qwen3-0.6B}
@@ -217,9 +243,13 @@ rollout:
         skip_server_warmup: true
         disable_cuda_graph: false
         attention_backend: triton
-        enable_lora: true
-        max_lora_rank: 16
-        lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+        # merged sync (sync.ar.mode: merged) pushes full merged weights via
+        # /update_weights_from_tensor and never calls set_lora → no LoRA pool.
+        # For lora-pool mode (sync.ar.mode: lora) set enable_lora: true and
+        # restore the two knobs below.
+        enable_lora: false
+        # max_lora_rank: 16
+        # lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
     diffusion:
       _target_: diffusionrl.rollout.engine.sglang.config.SGLangEngineConfig
       model_family: sd3
@@ -286,11 +316,14 @@ sync:
     adapter_name: default
     verify: false
   ar:
-    _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
-    track_prefix: ar
-    # SGLang LLM has no engine-side key stripping → send HF-native keys
-    # (model.layers.*). VERIFY #1: if /load_lora_adapter_from_tensors rejects,
-    # try "base_model.model." (PEFT envelope).
-    param_prefix: ""
-    adapter_name: default
-    verify: false
+    # Full-weight-sync merge: TensorWeightSync with lora_merged folds the trained
+    # LoRA delta into the base and pushes the merged FULL weights via the
+    # tensor-payload family (NOT via LoraWeightSync, which stays adapter/RPC-only).
+    _target_: diffusionrl.distributed.weight_sync.full.tensor.TensorWeightSync
+    track_prefix: ar            # route to the AR child of the ComposedRolloutEngine
+    lora_merged: true           # fold base+(α/r)·B·A → push the merged FULL weights
+    # sglang_llm wants bare HF-native keys (model.layers.*) → leave name_remap unset
+    # (identity), so keys pass through bare. A "transformer." nesting would mis-key
+    # the LLM update (suspected cause of the ar_spo TensorWeightSync ~0.2 plateau).
+    flush_cache: true
+    bucket_size_mb: 512         # splits the ~1.2GB Qwen3-0.6B push into size-bounded buckets

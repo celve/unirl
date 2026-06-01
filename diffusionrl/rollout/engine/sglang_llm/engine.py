@@ -1158,6 +1158,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         world_size: int,
         group_name: str,
         backend: str = "nccl",
+        track_prefix: str = "",
     ) -> None:
         resp = self._post(
             "/init_weights_update_group",
@@ -1182,6 +1183,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         self,
         *,
         group_name: str,
+        track_prefix: str = "",
     ) -> None:
         resp = self._post(
             "/destroy_weights_update_group",
@@ -1198,6 +1200,7 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         group_name: str,
         target_modules: Optional[List[str]] = None,
         flush_cache: bool = True,
+        track_prefix: str = "",
     ) -> None:
         """Receive weights via NCCL broadcast from training actors.
 

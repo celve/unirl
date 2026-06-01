@@ -379,12 +379,26 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         peft_config: Optional[dict] = None,
         base_sync_done: bool = False,
         use_shm: bool = False,
+        replica_rank: Optional[int] = None,
+        track_prefix: str = "",
     ) -> None:
-        del peft_config, base_sync_done, use_shm
-        raise NotImplementedError(
-            "ComposedRolloutEngine supports multi-track weight sync only through tensor_payload. "
-            "Use sync=tensor_payload so each track is routed by track_prefix."
-        )
+        """Route a bucketed-IPC weight push to one child via ``track_prefix``.
+
+        Only a vLLM-Omni child implements the IPC receiver (an SGLang child
+        raises). ``replica_rank`` is a vLLM-Omni-specific socket discriminator,
+        not part of the base IPC contract, so it is not propagated here.
+        """
+        if not track_prefix:
+            raise ValueError(
+                "ComposedRolloutEngine.update_weights_from_ipc requires track_prefix "
+                f"so the update can be routed to one child; expected one of {sorted(self._child_by_name)}."
+            )
+        for child in self._children_for_track_prefix(track_prefix):
+            child.update_weights_from_ipc(
+                peft_config=peft_config,
+                base_sync_done=base_sync_done,
+                use_shm=use_shm,
+            )
 
     def init_weights_update_group(
         self,
@@ -395,12 +409,23 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         world_size: int,
         group_name: str,
         backend: str = "nccl",
+        track_prefix: str = "",
     ) -> None:
-        del master_address, master_port, rank_offset, world_size, group_name, backend
-        raise NotImplementedError(
-            "ComposedRolloutEngine does not support NCCL weight sync. "
-            "Use sync=tensor_payload; it routes one track to one child with track_prefix."
-        )
+        """Route NCCL group setup to one child via ``track_prefix``."""
+        if not track_prefix:
+            raise ValueError(
+                "ComposedRolloutEngine.init_weights_update_group requires track_prefix "
+                f"so the group can be routed to one child; expected one of {sorted(self._child_by_name)}."
+            )
+        for child in self._children_for_track_prefix(track_prefix):
+            child.init_weights_update_group(
+                master_address=master_address,
+                master_port=master_port,
+                rank_offset=rank_offset,
+                world_size=world_size,
+                group_name=group_name,
+                backend=backend,
+            )
 
     def update_weights_from_distributed(
         self,
@@ -411,23 +436,38 @@ class ComposedRolloutEngine(BaseRolloutEngine):
         group_name: str,
         target_modules: Optional[List[str]] = None,
         flush_cache: bool = True,
+        track_prefix: str = "",
     ) -> None:
-        del names, dtypes, shapes, group_name, target_modules, flush_cache
-        raise NotImplementedError(
-            "ComposedRolloutEngine does not support NCCL weight sync. "
-            "Use sync=tensor_payload; it routes one track to one child with track_prefix."
-        )
+        """Route a NCCL-broadcast weight push to one child via ``track_prefix``."""
+        if not track_prefix:
+            raise ValueError(
+                "ComposedRolloutEngine.update_weights_from_distributed requires track_prefix "
+                f"so the update can be routed to one child; expected one of {sorted(self._child_by_name)}."
+            )
+        for child in self._children_for_track_prefix(track_prefix):
+            child.update_weights_from_distributed(
+                names=names,
+                dtypes=dtypes,
+                shapes=shapes,
+                group_name=group_name,
+                target_modules=target_modules,
+                flush_cache=flush_cache,
+            )
 
     def destroy_weights_update_group(
         self,
         *,
         group_name: str,
+        track_prefix: str = "",
     ) -> None:
-        del group_name
-        raise NotImplementedError(
-            "ComposedRolloutEngine does not support NCCL weight sync. "
-            "Use sync=tensor_payload; it routes one track to one child with track_prefix."
-        )
+        """Route NCCL group teardown to one child via ``track_prefix``."""
+        if not track_prefix:
+            raise ValueError(
+                "ComposedRolloutEngine.destroy_weights_update_group requires track_prefix "
+                f"so the teardown can be routed to one child; expected one of {sorted(self._child_by_name)}."
+            )
+        for child in self._children_for_track_prefix(track_prefix):
+            child.destroy_weights_update_group(group_name=group_name)
 
     def set_lora_from_tensors(
         self,

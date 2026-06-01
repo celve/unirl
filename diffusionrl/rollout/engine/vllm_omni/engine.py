@@ -714,6 +714,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         base_sync_done: bool = False,
         use_shm: bool = False,
         replica_rank: Optional[int] = None,
+        track_prefix: str = "",
     ) -> None:
         """Fan a state-dict update out to the per-stage worker subprocesses.
 
@@ -766,6 +767,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         world_size: int,
         group_name: str,
         backend: str = "nccl",
+        track_prefix: str = "",
     ) -> None:
         """Bring up an NCCL group on the requested stages' workers."""
         if self._omni is None:
@@ -796,6 +798,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         group_name: str,
         target_modules: Optional[list[str]] = None,
         flush_cache: bool = True,
+        track_prefix: str = "",
     ) -> None:
         """Receive a bucket of named tensors via NCCL on the requested stages."""
         if self._omni is None:
@@ -821,6 +824,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         self,
         *,
         group_name: str,
+        track_prefix: str = "",
     ) -> None:
         if self._omni is None:
             return

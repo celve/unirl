@@ -515,6 +515,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         world_size: int,
         group_name: str,
         backend: str = "nccl",
+        track_prefix: str = "",
     ) -> None:
         self._send_scheduler_request(
             self._runtime["InitWeightsUpdateGroupReqInput"](
@@ -537,6 +538,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         group_name: str,
         target_modules: Optional[List[str]] = None,
         flush_cache: bool = True,
+        track_prefix: str = "",
     ) -> None:
         require(bool(names), "names must be non-empty for distributed update")
         self._send_scheduler_request(
@@ -555,6 +557,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         self,
         *,
         group_name: str,
+        track_prefix: str = "",
     ) -> None:
         self._send_scheduler_request(
             self._runtime["DestroyWeightsUpdateGroupReqInput"](
@@ -620,6 +623,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         peft_config: Optional[dict] = None,
         base_sync_done: bool = False,
         use_shm: bool = False,
+        track_prefix: str = "",
     ) -> None:
         """Bucketed-IPC weight sync is not implemented for SGLang.
 

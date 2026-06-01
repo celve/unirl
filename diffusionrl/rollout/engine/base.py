@@ -100,6 +100,7 @@ class BaseRolloutEngine(Remote, ABC):
         peft_config: Optional[dict] = None,
         base_sync_done: bool = False,
         use_shm: bool = False,
+        track_prefix: str = "",
     ) -> None:
         """Receive a state dict over a per-rank ZMQ + CUDA-IPC channel."""
         raise NotImplementedError
@@ -117,6 +118,7 @@ class BaseRolloutEngine(Remote, ABC):
         world_size: int,
         group_name: str,
         backend: str = "nccl",
+        track_prefix: str = "",
     ) -> None:
         """Bring up a trainer-rollout NCCL process group on the engine side."""
         raise NotImplementedError
@@ -130,6 +132,7 @@ class BaseRolloutEngine(Remote, ABC):
         group_name: str,
         target_modules: Optional[List[str]] = None,
         flush_cache: bool = True,
+        track_prefix: str = "",
     ) -> None:
         """Receive a bucket of weights via the established NCCL group."""
         raise NotImplementedError
@@ -138,6 +141,7 @@ class BaseRolloutEngine(Remote, ABC):
         self,
         *,
         group_name: str,
+        track_prefix: str = "",
     ) -> None:
         """Tear down a previously-initialized NCCL update group."""
         raise NotImplementedError

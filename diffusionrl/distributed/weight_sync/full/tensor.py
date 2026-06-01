@@ -13,7 +13,8 @@ the v1 cross-rank ``gather_object``/gloo-subgroup logic is unnecessary — each
 train rank ships to its own co-located engine, and (TP=1) the worker picks
 ``serialized_named_tensors[0]``.
 
-Scope: single-node, TP=1, single-stage (SD3). All model / sglang imports are
+Scope: single-node, TP=1; a single-model engine, or one child of a
+``ComposedRolloutEngine`` (via ``track_prefix``). All model / sglang imports are
 deferred so the driver can import this module for ``remote(...)``.
 """
 
@@ -37,6 +38,7 @@ class TensorWeightSync(FullWeightSync):
         flush_cache: bool = True,
         lora_merged: bool = False,
         name_remap: Optional[Dict[str, Optional[str]]] = None,
+        track_prefix: str = "",
     ) -> None:
         super().__init__(
             backend=backend,
@@ -44,8 +46,9 @@ class TensorWeightSync(FullWeightSync):
             flush_cache=flush_cache,
             lora_merged=lora_merged,
             name_remap=name_remap,
+            track_prefix=track_prefix,
         )
-        self._rollout = rollout  # local vLLM-Omni engine sibling
+        self._rollout = rollout  # local engine sibling (single-model, or a ComposedRolloutEngine)
 
     @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
     def sync(self) -> None:
@@ -92,6 +95,7 @@ class TensorWeightSync(FullWeightSync):
                     serialized_named_tensors=[payload],
                     load_format="flattened_bucket",
                     flush_cache=(self._flush_cache and is_last and i == n_dtypes - 1),
+                    track_prefix=self._track_prefix,
                 )
             # Release the all-gathered full tensors + IPC payloads for this bucket
             # before gathering the next — else the full model (~13GB) accumulates

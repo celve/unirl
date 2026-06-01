@@ -67,6 +67,10 @@ class FullWeightSync(Remote):
     base weights (meaningful for full fine-tuning); ``True`` folds the trained
     LoRA deltas into the base weights and pushes the merged full model
     (meaningful for a LoRA run served without a separate adapter).
+
+    ``track_prefix`` routes the push to one child of a ``ComposedRolloutEngine``
+    (e.g. ``"ar"`` / ``"diffusion"``); empty (default) targets a single-model
+    engine. Each transport forwards it to the rollout so the receiver demuxes.
     """
 
     def __init__(
@@ -77,6 +81,7 @@ class FullWeightSync(Remote):
         flush_cache: bool = True,
         lora_merged: bool = False,
         name_remap: Optional[Dict[str, Optional[str]]] = None,
+        track_prefix: str = "",
     ) -> None:
         super().__init__()
         self._backend = backend
@@ -86,6 +91,9 @@ class FullWeightSync(Remote):
         # Ordered, first-match-wins name rewrites (glob -> replacement, or None to
         # drop); see _validate_name_remap / _apply_name_remap for the contract.
         self._name_remap = _validate_name_remap(name_remap)
+        # Routes the update to one child of a ComposedRolloutEngine; empty for
+        # a single-model engine. Forwarded by each transport's ``sync()``.
+        self._track_prefix = str(track_prefix or "")
         self.weight_version = 0
 
     # ------------------------------------------------------------------

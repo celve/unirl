@@ -48,6 +48,7 @@ class NCCLWeightSync(FullWeightSync):
         flush_cache: bool = True,
         lora_merged: bool = False,
         name_remap: Optional[Dict[str, Optional[str]]] = None,
+        track_prefix: str = "",
     ) -> None:
         super().__init__(
             backend=backend,
@@ -55,6 +56,7 @@ class NCCLWeightSync(FullWeightSync):
             flush_cache=flush_cache,
             lora_merged=lora_merged,
             name_remap=name_remap,
+            track_prefix=track_prefix,
         )
         self._group_name = str(group_name)
         self._model_update_group = None  # set on rank 0 in connect()
@@ -117,6 +119,7 @@ class NCCLWeightSync(FullWeightSync):
                     "world_size": world,
                     "group_name": self._group_name,
                     "backend": "nccl",
+                    "track_prefix": self._track_prefix,
                 },
             )
             for i, handle in enumerate(self._rollout_targets)
@@ -165,6 +168,7 @@ class NCCLWeightSync(FullWeightSync):
                         "shapes": shapes,
                         "group_name": self._group_name,
                         "flush_cache": (self._flush_cache and is_last),
+                        "track_prefix": self._track_prefix,
                     },
                 )
                 for handle in self._rollout_targets

@@ -45,6 +45,7 @@ class IPCWeightSync(FullWeightSync):
         lora_merged: bool = False,
         use_shm: bool = False,
         name_remap: Optional[Dict[str, Optional[str]]] = None,
+        track_prefix: str = "",
     ) -> None:
         # 2048 MB default: the buffer must fit the largest single tensor in one
         # bucket (BucketedWeightSender asserts this).
@@ -54,6 +55,7 @@ class IPCWeightSync(FullWeightSync):
             flush_cache=flush_cache,
             lora_merged=lora_merged,
             name_remap=name_remap,
+            track_prefix=track_prefix,
         )
         self._rollout = rollout
         self._use_shm = bool(use_shm)
@@ -90,6 +92,7 @@ class IPCWeightSync(FullWeightSync):
                     base_sync_done=False,
                     use_shm=self._use_shm,
                     replica_rank=replica_rank,
+                    track_prefix=self._track_prefix,
                 )
             except Exception as exc:  # surface, don't let the pump hang forever
                 recv_error["exc"] = exc
