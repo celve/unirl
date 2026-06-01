@@ -10,7 +10,7 @@ batch_size: 48 # prompts_per_rollout
 # samples_per_prompt lives inside `sampling` (DiffusionSamplingParams).
 
 # LoRA weight-sync cadence (loop concern, read by DiffusionTrainer.train — NOT
-# a LoraWeightSync field). Every N rollouts the loop pushes the freshly-trained
+# a LocalLoraWeightSync field). Every N rollouts the loop pushes the freshly-trained
 # adapter into the rollout engine. 1 = on-policy; >1 lags rollout weights
 # (off-policy drift). Ignored when the `sync` block below is absent (trainside).
 weight_sync_interval: 1
@@ -175,7 +175,7 @@ sampling:
     # (the validated reproduce setting); [0,1] spreads it across all steps.
     timestep_fraction: [0, 0.5]
 
-# LoRA weight sync → vLLM-Omni rollout. Instantiated as a LoraWeightSync
+# LoRA weight sync → vLLM-Omni rollout. Instantiated as a LocalLoraWeightSync
 # (sibling of backend + rollout) from this block's `_target_`, exactly like the
 # blocks above. The train loop drives cadence via `weight_sync_interval` (top of
 # file): every N rollouts it calls sync() to push the freshly-trained
@@ -184,7 +184,7 @@ sampling:
 # wake+sleep, not two. Absent on conf/sd3_trainside.yaml (trainside shares
 # the trained module — no sync).
 sync:
-  _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
+  _target_: diffusionrl.distributed.weight_sync.lora.LocalLoraWeightSync
   verify: true # checksum read-back asserts the synced LoRA landed; set false once trusted
   # Mirrors SD3PipelineConfig.weight_sync_param_name_prefix; must match the
   # engine-side LoRA key naming (a wrong prefix yields wrong/zero loaded layers,

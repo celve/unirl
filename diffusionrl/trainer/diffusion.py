@@ -87,7 +87,7 @@ class DiffusionTrainer(BaseTrainer):
             with placement(self.pool, fraction=1.0 - train_fraction, shared_workers=True):
                 self.rollout = self._build_rollout(rollout_cfg, allow_pipeline=False)
             if self.weight_sync is not None:
-                self._connect_separate(train_fraction)
+                self._connect_separate(sync_cfg)
         else:
             # Single slab: train + rollout are siblings on one Worker.
             with placement(self.pool, fraction=1.0, shared_workers=True):
@@ -145,21 +145,26 @@ class DiffusionTrainer(BaseTrainer):
             return remote(**rollout_parsed, pipeline=self.pipeline)  # direct sampling
         return remote(**rollout_parsed)  # vllm / sglang
 
-    def _connect_separate(self, train_fraction: float) -> None:
-        """One-time NCCL rendezvous: train rank 0 + all rollout Omni workers.
+    def _connect_separate(self, sync_cfg: DictConfig) -> None:
+        """One-time cross-slab handshake: hand rank 0 the rollout Worker handles.
 
         Driver-orchestrated because the rollout slab is cross-slab (not a
-        sibling): ``pick_master`` on rank 0, hand it the rollout Worker handles,
-        then ``connect`` (rank 0 fires the rollout joins non-blocking, then joins
-        the group itself).
+        sibling). The LoRA-over-Ray handler (``RemoteLoraWeightSync``) only needs
+        the rollout engine's ``(role, workers)`` to push adapters by Ray RPC.
+        ``NCCLWeightSync`` additionally rendezvous a broadcast group: ``pick_master``
+        on rank 0, hand it the rollout Worker handles, then ``connect`` (rank 0
+        fires the rollout joins non-blocking, then joins the group itself).
         """
-        addr, port = self.weight_sync.pick_master()[0]
-        self.weight_sync.set_rollout_targets(self.rollout.workers, self.rollout.role_name)
-        self.weight_sync.connect(
-            master_addr=addr,
-            master_port=port,
-            num_rollout_gpus=len(self.rollout.workers),
-        )
+        if str(sync_cfg.get("_target_", "")).endswith("NCCLWeightSync"):
+            addr, port = self.weight_sync.pick_master()[0]
+            self.weight_sync.set_rollout_targets(self.rollout.workers, self.rollout.role_name)
+            self.weight_sync.connect(
+                master_addr=addr,
+                master_port=port,
+                num_rollout_gpus=len(self.rollout.workers),
+            )
+        else:
+            self.weight_sync.set_rollout_targets([(self.rollout.role_name, self.rollout.workers)])
 
     def _build_req(self, inputs: RolloutInputs, rollout_id: int) -> RolloutReq:
         """Turn a data source batch into a typed :class:`RolloutReq`.

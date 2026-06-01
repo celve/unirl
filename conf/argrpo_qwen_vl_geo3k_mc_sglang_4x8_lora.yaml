@@ -5,7 +5,7 @@
 #   - argrpo_qwen_vl_geo3k_mc_sglang_4x8.yaml  (sglang + FULL-weight TensorWeightSync, reproduces mnti3se0)
 #   - argrpo_qwen_vl_geo3k_mc_4x8_lora.yaml    (trainside + LoRA, no sync)
 # Here the LLM decoder is trained as a rank-16 LoRA adapter and pushed into the
-# colocated SRT server's versioned LoRA pool each rollout via LoraWeightSync
+# colocated SRT server's versioned LoRA pool each rollout via LocalLoraWeightSync
 # (set_lora_from_tensors -> /load_lora_adapter_from_tensors, {name}_v{N}).
 
 num_devices: 32
@@ -110,7 +110,7 @@ rollout:
 # LoRA-pool weight sync: serialize the trained LoRA adapter tensors and load
 # them into the colocated SRT server as a fresh versioned adapter each rollout.
 sync:
-  _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
+  _target_: diffusionrl.distributed.weight_sync.lora.LocalLoraWeightSync
   param_prefix: ""
   adapter_name: default
   verify: false

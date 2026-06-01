@@ -192,7 +192,7 @@ weight_sync_interval: 1
 # (fused into the generate wake/sleep, so a synced step costs one wake instead
 # of two).
 sync:
-  _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
+  _target_: diffusionrl.distributed.weight_sync.lora.LocalLoraWeightSync
   verify: true   # checksum read-back asserts the synced LoRA landed; set false once trusted
   # Mirrors SD3PipelineConfig.weight_sync_param_name_prefix; must match the
   # engine-side LoRA key naming (a wrong prefix yields wrong/zero loaded layers,

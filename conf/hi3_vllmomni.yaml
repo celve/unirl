@@ -237,14 +237,18 @@ sampling:
       num_timesteps: ${..num_inference_steps}
       num_sde_steps: null
 
-# LoRA → vLLM-Omni rollout (cross-process driver push). The driver extracts the
-# adapter once (LoraDriverExtractSync.extract) and pushes it into EVERY stage's
-# workers (AR + DiT) via each engine's Handle (set_lora_from_tensors_copy).
+# LoRA → vLLM-Omni rollout (cross-process Ray push). RemoteLoraWeightSync.sync()
+# extracts the adapter on the train workers and pushes it from rank 0 into both
+# engines (AR + DiT) via each engine's set_lora_from_tensors_copy (the engines are
+# anchored on separate workers — wired in HI3Trainer via set_rollout_targets).
+# copy: true is required — the AR / DiT stages are TP>1, where the zero-copy LoRA
+# handle's one-shot fd breaks the collective_rpc broadcast to ranks 2..N.
 # param_prefix mirrors HunyuanImage3PipelineConfig.weight_sync_param_name_prefix.
 # The fused qkv is shipped WHOLE and split into q/k/v engine-side by vLLM's native
 # packed-modules mapping (post-#181: no trainer-side packed_modules block).
 sync:
-  _target_: diffusionrl.distributed.weight_sync.lora.LoraDriverExtractSync
+  _target_: diffusionrl.distributed.weight_sync.lora.RemoteLoraWeightSync
+  copy: true
   param_prefix: "model."
   adapter_name: default
 

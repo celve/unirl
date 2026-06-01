@@ -954,16 +954,16 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
 
         # DELETE-WHEN: the vLLM-Omni LoRA handle transport is TP>1-broadcast-safe
         #   (e.g. file_system sharing, or a per-rank re-register monkey-patch).
-        #   Then the driver-extract path can call :meth:`set_lora_from_tensors`
-        #   and this byte-copy fork (+ its worker mate
-        #   ``set_lora_from_tensor_dict_copy``) is dead. Only caller:
-        #   ``LoraDriverExtractSync`` (weight_sync/lora.py).
+        #   Then the caller can drop ``copy=True`` and use
+        #   :meth:`set_lora_from_tensors`, and this byte-copy fork (+ its worker
+        #   mate ``set_lora_from_tensor_dict_copy``) is dead. Only caller:
+        #   ``RemoteLoraWeightSync`` with ``copy=True`` (weight_sync/lora.py).
 
         Same effect as :meth:`set_lora_from_tensors`, but the transport is a
-        *data copy* instead of a zero-copy shared handle, and the call is
-        ``@distributed(ONE_TO_ALL)`` so the trainer can push from the driver via
-        the engine Handle: HI3 anchors its AR / DiT engines on separate workers
-        (disjoint GPU partition), so the LoRA sync can't reach them as
+        *data copy* instead of a zero-copy shared handle. The cross-process sender
+        (``RemoteLoraWeightSync`` with ``copy=True``) invokes this from train
+        rank 0 via ``Worker.call``: HI3 anchors its AR / DiT engines on separate
+        workers (disjoint GPU partition), so the LoRA sync can't reach them as
         same-worker siblings.
 
         Why a byte copy and not the SD3 ``MultiprocessingSerializer`` handle:

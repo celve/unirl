@@ -10,7 +10,7 @@
 #  NOTE (LIN-287): under 8-way colocate the pool's 2nd+ /unload can stall
 #  >=10min; merge avoids it. Watch the per-sync timing in the logs.
 # ===========================================================================
-# Trained weights reach each engine via a per-track LoraWeightSync, routed to the
+# Trained weights reach each engine via a per-track LocalLoraWeightSync, routed to the
 # matching child of the composed engine by ``track_prefix``:
 #   - diffusion: set_lora_from_tensors (SD3 sglang LoRA pool)
 #   - ar:        set_lora_from_tensors (SGLang LLM LoRA pool)
@@ -306,7 +306,7 @@ sampling:
 # routed by ``track_prefix``. ``verify`` is vLLM-Omni-only → false for SGLang.
 sync:
   diffusion:
-    _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
+    _target_: diffusionrl.distributed.weight_sync.lora.LocalLoraWeightSync
     track_prefix: diffusion
     # Stripped engine-side by adapt_lora_for_sglang (reads model_config
     # .weight_sync_param_name_prefix == "transformer.").
@@ -314,7 +314,7 @@ sync:
     adapter_name: default
     verify: false
   ar:
-    _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
+    _target_: diffusionrl.distributed.weight_sync.lora.LocalLoraWeightSync
     track_prefix: ar
     # set_lora_from_tensors → SGLang LLM LoRA pool (full-weight merge variant: pe_sglang_full_merge.yaml)
     # SGLang LLM has no engine-side key stripping → send HF-native keys

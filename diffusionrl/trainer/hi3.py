@@ -206,13 +206,17 @@ class HI3Trainer(BaseTrainer):
             self.dit_rollout.sleep()
 
             if sync_cfg is not None:
-                # LoRA sync gets ONLY the backend (a same-worker sibling). The
-                # two engines are anchored on separate workers, so they are NOT
-                # siblings here and can't be pushed to from inside the sync
-                # Remote — instead ``train_step`` calls ``extract()`` (collective,
-                # returns the adapter to the driver) and pushes to each engine
-                # via its Handle from the driver (cross-process).
+                # LoRA sync gets ONLY the backend (a same-worker sibling); the two
+                # engines are cross-slab. RemoteLoraWeightSync.sync() extracts on
+                # the train workers and pushes from rank 0 to each engine via a
+                # plain Ray RPC, so hand it both engines' (role, workers) here.
                 self.weight_sync = remote_hydra(sync_cfg, backend=self.backend)
+                self.weight_sync.set_rollout_targets(
+                    [
+                        (self.ar_rollout.role_name, self.ar_rollout.workers),
+                        (self.dit_rollout.role_name, self.dit_rollout.workers),
+                    ]
+                )
 
     def _wire_engine(self, cfg: DictConfig, *, anchor_device: int) -> Any:
         """Build ONE multi-GPU vLLM-Omni engine actor anchored on one worker.
@@ -361,40 +365,24 @@ class HI3Trainer(BaseTrainer):
         Returns ``(per_track_results, mean_reward)`` — ``mean_reward`` is the
         mean unnormalized image reward (for the log line).
         """
-        # Colocate memory dance (150GB base can't coexist with an awake engine
-        # on the same card). Steady state on entry: base offloaded, engines
-        # asleep.
-        #   1. SYNC-EXTRACT while engines ASLEEP + base ONLOADED — the LoRA
-        #      extract is a GPU collective (needs the base on GPU), and an awake
-        #      engine (~85GB) would overlap the onloaded base (~19GB/card) → OOM.
-        #      ``extract`` returns the adapter to the driver (rank-0 entry of the
-        #      ONE_TO_ALL result list); offload the base again right after.
-        lora_payload = None
+        # Colocate memory dance (150GB base can't coexist with an awake engine on
+        # the same card). Steady state on entry: base offloaded, engines asleep.
+        #   1. EXTRACT while engines ASLEEP + base ONLOADED — extract() runs a
+        #      train-mesh collective whose state_dict() gathers the full FSDP model
+        #      to GPU; an awake engine (~85GB) alongside the onloaded base
+        #      (~19GB/card) would OOM. extract() caches the adapter on rank 0
+        #      (nothing returned); offload the base again right after.
         if sync_weights and self.weight_sync is not None:
             self.stack.onload()
-            extracted = self.weight_sync.extract()
+            self.weight_sync.extract()
             self.stack.offload()
-            # ONE_TO_ALL collects per-rank returns into a list; only rank 0
-            # returned the adapter (others None). Tolerate a bare return too.
-            if not isinstance(extracted, list):
-                extracted = [extracted]
-            lora_payload = next((r for r in extracted if r is not None), None)
-            if lora_payload is None:
-                raise RuntimeError("HI3Trainer: weight_sync.extract() returned no adapter (rank-0 payload missing).")
-        #   2. Wake both engines (base on CPU → room). AR (GPUs 0-3) + DiT (GPUs
-        #      4-7) are disjoint cards (boot smoke gotcha C). Then PUSH the adapter
-        #      to each engine from the driver via its Handle — they're anchored on
-        #      separate workers, so this cross-process call (not a sibling push)
-        #      is the only way to reach both.
+        #   2. Wake both engines (base on CPU → room; AR 0-3, DiT 4-7 disjoint),
+        #      then PUSH the cached adapter from rank 0 into each engine's
+        #      set_lora_from_tensors_copy (cross-process; engines are not siblings).
         self.ar_rollout.wake_up()
         self.dit_rollout.wake_up()
-        if lora_payload is not None:
-            for engine in (self.ar_rollout, self.dit_rollout):
-                engine.set_lora_from_tensors_copy(
-                    lora_payload["adapter_name"],
-                    lora_payload["lora_tensors"],
-                    peft_config=lora_payload["peft_config"],
-                )
+        if sync_weights and self.weight_sync is not None:
+            self.weight_sync.push()
         #   3. Rollout (base offloaded), then sleep engines and onload the base
         #      for the train backward.
         resp = self.run_rollout(req)

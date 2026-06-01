@@ -167,7 +167,7 @@ algorithm:
 # (TensorWeightSync) plateaus at ~0.2 (does NOT reproduce). param_prefix=""
 # sends HF-native keys; verify is vLLM-Omni-only → false.
 sync:
-  _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
+  _target_: diffusionrl.distributed.weight_sync.lora.LocalLoraWeightSync
   param_prefix: ""
   adapter_name: default
   verify: false

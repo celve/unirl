@@ -6,7 +6,7 @@ engine by serializing each bucket (SGLang ``FlattenedTensorBucket`` +
 ``update_weights_from_tensor`` — the engine owns the Worker→Omni-subprocess
 transfer (serialize already done; ``collective_rpc`` fans to the stage workers).
 
-Full-weight analogue of ``weight_sync/lora.py:LoraWeightSync`` and the v2
+Full-weight analogue of ``weight_sync/lora/local.py:LocalLoraWeightSync`` and the v2
 transport-mate of v1 ``distributed/weight_sync/tensor.py``. Colocate only:
 ``backend`` and ``rollout`` arrive as LOCAL siblings (same Worker process), so
 the v1 cross-rank ``gather_object``/gloo-subgroup logic is unnecessary — each

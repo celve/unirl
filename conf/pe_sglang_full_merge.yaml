@@ -7,13 +7,13 @@
 # ===========================================================================
 #  AR weight-sync MODE = FULL-MERGE  (full-weight-sync, lora_merged)
 #  Folds base+(α/r)·B·A and pushes the merged FULL weights via TensorWeightSync
-#  (the full-weight-sync / tensor-payload family), NOT via LoraWeightSync, which
+#  (the full-weight-sync / tensor-payload family), NOT via LocalLoraWeightSync, which
 #  stays adapter/RPC-only. Sibling configs: pe_sglang_lora_pool.yaml (LoRA pool),
 #  pe_sglang_trainside.yaml (live-FSDP rollout, no sync).
 # ===========================================================================
 # Trained weights reach each engine via a per-track sync bridge, routed to the
 # matching child of the composed engine by ``track_prefix``:
-#   - diffusion: LoraWeightSync                → set_lora_from_tensors (SD3 sglang LoRA pool)
+#   - diffusion: LocalLoraWeightSync           → set_lora_from_tensors (SD3 sglang LoRA pool)
 #   - ar:        TensorWeightSync lora_merged  → fold base+(α/r)·B·A → /update_weights_from_tensor
 #                              (full-weight-sync path; bypasses SGLang LLM LoRA pool)
 # Sync runs every ``weight_sync_interval`` rollouts (skip step 0).
@@ -309,7 +309,7 @@ sampling:
 # routed by ``track_prefix``. ``verify`` is vLLM-Omni-only → false for SGLang.
 sync:
   diffusion:
-    _target_: diffusionrl.distributed.weight_sync.lora.LoraWeightSync
+    _target_: diffusionrl.distributed.weight_sync.lora.LocalLoraWeightSync
     track_prefix: diffusion
     # Stripped engine-side by adapt_lora_for_sglang (reads model_config
     # .weight_sync_param_name_prefix == "transformer.").
@@ -319,7 +319,7 @@ sync:
   ar:
     # Full-weight-sync merge: TensorWeightSync with lora_merged folds the trained
     # LoRA delta into the base and pushes the merged FULL weights via the
-    # tensor-payload family (NOT via LoraWeightSync, which stays adapter/RPC-only).
+    # tensor-payload family (NOT via LocalLoraWeightSync, which stays adapter/RPC-only).
     _target_: diffusionrl.distributed.weight_sync.full.tensor.TensorWeightSync
     track_prefix: ar            # route to the AR child of the ComposedRolloutEngine
     lora_merged: true           # fold base+(α/r)·B·A → push the merged FULL weights
