@@ -128,6 +128,7 @@ diffusion:
     _target_: diffusionrl.train.stack.TrainStack
     micro_batch_size: 1
     max_grad_norm: 1.0
+    num_updates_per_batch: 2      # diffusion-side PPO mini-batches; ar stays 1 (ARGRPO is single-update only)
 
 # ── AR side (Qwen3) — copied from pe_trainside.yaml ────────────────────────
 ar:

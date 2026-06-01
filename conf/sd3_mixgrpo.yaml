@@ -8,8 +8,8 @@
 # Faithful to v1 base flowgrpo_fast_sd3_trainside: activation_checkpointing OFF
 # (bf16_full_noac), forward_batch_size 8, micro_batch_size 8, init_same_noise true;
 # weight_decay 1e-4 (mixgrpo override).
-# Not carried over: algorithm.skip_last_timestep (legacy-only, no v2 equivalent),
-# num_updates_per_batch=2 (v2 single-pass), full-model eval EMA (decay 0.99).
+# num_updates_per_batch=2 restored (v2 TrainStack multi-update). Not carried over:
+# algorithm.skip_last_timestep (legacy-only, no v2 equivalent), full-model eval EMA (decay 0.99).
 
 num_devices: 16               # 2 nodes x 8 GPUs (v1 actor_count 16)
 batch_size: 48                # prompts_per_rollout
@@ -108,6 +108,7 @@ stack:
   _target_: diffusionrl.train.stack.TrainStack
   micro_batch_size: 8
   max_grad_norm: 1.0
+  num_updates_per_batch: 2      # PPO mini-batches per rollout (π_old frozen once); v1 parity
 
 data_source:
   _target_: diffusionrl.data.data_source.DefaultDataSource

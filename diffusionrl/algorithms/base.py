@@ -143,9 +143,22 @@ class StageAlgorithm(Remote, ABC):
             Off-policy / forward-process algorithms (NFT) override to
             True so the rollout uses EMA-smoothed weights for higher-
             quality trajectories.
+        supports_multi_update: Whether the algorithm is correct under
+            ``num_updates_per_batch > 1`` (the train stack splitting one
+            rollout into N optimizer steps over disjoint mini-batches).
+            True only for algorithms that freeze a pre-update policy anchor
+            in :meth:`prepare_segment`: ``DiffusionGRPO`` / ``DiffusionDPPO``
+            capture ``segment.sde_logp`` once, so the PPO ratio stays anchored
+            across all N steps. Default False — AR ``GRPO`` / ``SPO-DPPO`` reuse
+            the rollout log-prob as ``old_logp``, so >1 step would conflate the
+            rollout-vs-train engine gap with real policy drift (see the
+            ``NOTE(multi-epoch)`` in those losses), and NFT's multi-update path
+            is unvalidated. ``TrainStack`` raises when a False algorithm is
+            paired with ``num_updates_per_batch > 1``.
     """
 
     requires_ema_rollout: bool = False
+    supports_multi_update: bool = False
 
     def prepare_segment(
         self,

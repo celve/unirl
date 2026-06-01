@@ -9,7 +9,7 @@
 #
 # LoRA targets: WAN attn names (v1's generic q_proj default matched nothing).
 # Data: DefaultDataSource (built-in prompts) for out-of-box runs.
-# Not carried over (v2 minimal trainer): num_updates_per_batch=2 (single-pass).
+# num_updates_per_batch=2 restored (v2 TrainStack multi-update).
 
 num_devices: 8                # 1 node x 8 GPUs
 batch_size: 48                # prompts_per_rollout
@@ -112,6 +112,7 @@ stack:
   _target_: diffusionrl.train.stack.TrainStack
   micro_batch_size: 1
   max_grad_norm: 1.0
+  num_updates_per_batch: 2      # PPO mini-batches per rollout (π_old frozen once); v1 parity
 
 data_source:
   _target_: diffusionrl.data.data_source.DefaultDataSource

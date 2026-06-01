@@ -9,7 +9,7 @@
 # tensor_payload (full-tensor sync); this reuses the v2 vLLM-Omni LoRA bridge
 # (LoraWeightSync), matching sd3_vllmomni.yaml.
 # Faithful to v1 otherwise: activation_checkpointing ON (bf16_full_ac),
-# micro_batch_size 1. v1 num_updates_per_batch=2 is NOT honored (single-pass).
+# micro_batch_size 1. v1 num_updates_per_batch=2 restored (v2 TrainStack multi-update).
 
 num_devices: 8                # 1 node x 8 GPUs (v1 actor_count 8)
 batch_size: 48                # prompts_per_rollout
@@ -118,6 +118,7 @@ stack:
   _target_: diffusionrl.train.stack.TrainStack
   micro_batch_size: 1
   max_grad_norm: 1.0
+  num_updates_per_batch: 2      # PPO mini-batches per rollout (KL anchor frozen once); v1 parity
 
 data_source:
   _target_: diffusionrl.data.data_source.DefaultDataSource

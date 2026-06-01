@@ -13,8 +13,8 @@
 # micro_batch_size 8, forward_batch_size 8.
 # Not carried over: v1 training.ema (full-model decay-0.99 mirror) — it was an
 #   eval/export EMA; the minimal v2 trainer does no eval-EMA swap, so a mirror
-#   would only double model memory unused. v1 num_updates_per_batch=2 is also
-#   NOT honored (v2 TrainStack is single-pass per rollout).
+#   would only double model memory unused. v1 num_updates_per_batch=2 IS restored
+#   (v2 TrainStack multi-update; DPPO freezes its KL anchor in prepare_segment).
 
 num_devices: 8                # 1 node x 8 GPUs (v1 actor_count 8)
 batch_size: 48                # prompts_per_rollout
@@ -114,6 +114,7 @@ stack:
   _target_: diffusionrl.train.stack.TrainStack
   micro_batch_size: 8
   max_grad_norm: 1.0
+  num_updates_per_batch: 2      # PPO mini-batches per rollout (KL anchor frozen once); v1 parity
 
 data_source:
   _target_: diffusionrl.data.data_source.DefaultDataSource

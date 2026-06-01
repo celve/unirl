@@ -177,6 +177,10 @@ class DiffusionDPPO(StageAlgorithm):
         conditions_cls: Stage-typed conditions container.
     """
 
+    # prepare_segment freezes segment.sde_logp + sde_means once, so the ratio
+    # and KL anchor stay fixed across every num_updates_per_batch optimizer step.
+    supports_multi_update = True
+
     def __init__(
         self,
         *,

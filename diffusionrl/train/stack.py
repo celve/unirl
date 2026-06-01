@@ -5,7 +5,22 @@ scheduler + EMA) and one :class:`StageAlgorithm` (loss + backward
 against the bundle's trainable module) into a single-stage training
 driver.  One :class:`TrainStack` = one training track.
 
-Sequencing per :meth:`train` call::
+Sequencing per :meth:`train_track` call (one rollout)::
+
+    prepare_segment(resp_track)                  # once: freeze the π_old anchor
+    for (start, end) in mini_batch_slices(num_updates_per_batch):
+        train(resp_track.slice(start, end))      # one optimizer step each
+    on_rollout_end()                             # once: EMA / rollout boundary
+
+``num_updates_per_batch`` partitions the rollout batch into that many disjoint
+mini-batches and runs one optimizer step per mini-batch — the FlowGRPO /
+DanceGRPO schedule (``local_batch_size = local_mini_batch_size *
+num_updates_per_batch``). Because ``prepare_segment`` captures the pre-update
+policy once, every step shares the same PPO anchor; this is only correct for
+algorithms with ``supports_multi_update`` (the ctor enforces it). Defaults to 1
+— a single optimizer step over the whole batch, the prior behavior.
+
+Sequencing per :meth:`train` call (one optimizer step)::
 
     backend.zero_grad()
     for (start, end) in micro_slices(resp_track.batch_size):
@@ -69,6 +84,49 @@ def _build_micro_batch_slices(
     return tuple(slices)
 
 
+def _build_mini_batch_slices(*, total_size: int, num_updates: int) -> Tuple[Tuple[int, int], ...]:
+    """Partition ``[0, total_size)`` into ``num_updates`` equal contiguous slices.
+
+    One slice = one optimizer step. Even divisibility is required: the per-worker
+    batch is fixed (DP sharding is even) and a ragged final mini-batch would
+    silently drop samples and desync grad accumulation across DP ranks. Mirrors
+    v1's ``local_batch_size = local_mini_batch_size * num_updates_per_batch``.
+    """
+    total = _positive_int(name="total_size", value=total_size)
+    n = _positive_int(name="num_updates_per_batch", value=num_updates)
+    if total % n != 0:
+        raise ValueError(
+            f"num_updates_per_batch={n} must evenly divide the per-worker batch "
+            f"size ({total}); got remainder {total % n}. Adjust batch_size, "
+            f"samples_per_prompt, or num_updates_per_batch."
+        )
+    mini_batch_size = total // n
+    return tuple((i * mini_batch_size, (i + 1) * mini_batch_size) for i in range(n))
+
+
+def _aggregate_update_results(results: List["TrainStepResult"]) -> "TrainStepResult":
+    """Collapse one rollout's per-update results into a single summary.
+
+    Scalars are averaged across the N optimizer steps (``lr`` is the last,
+    post-step value), ``micros`` are concatenated, and algorithm metrics are
+    averaged via :func:`aggregate_numeric_metrics`. Downstream logging then
+    treats the whole rollout as one point, exactly as in the single-update path.
+    """
+    if len(results) == 1:
+        return results[0]
+    n = len(results)
+    micros: List[AlgorithmStepResult] = [m for r in results for m in r.micros]
+    metrics = aggregate_numeric_metrics([dict(r.metrics) for r in results if r.metrics])
+    return TrainStepResult(
+        loss=sum(r.loss for r in results) / n,
+        grad_norm=sum(r.grad_norm for r in results) / n,
+        lr=results[-1].lr,
+        has_backward=any(r.has_backward for r in results),
+        micros=micros,
+        metrics=metrics,
+    )
+
+
 def _align_track_to_model(resp_track: RolloutTrack, *, device: torch.device) -> None:
     """Move a track's training inputs onto the model's device — SGLang returns
     them on CPU via Ray IPC. Uses :meth:`Batch.to_device` (recursive; carries
@@ -109,12 +167,23 @@ class TrainStack(Remote):
         algorithm: StageAlgorithm,
         micro_batch_size: int,
         max_grad_norm: float,
+        num_updates_per_batch: int = 1,
     ) -> None:
         super().__init__()
         if int(micro_batch_size) < 1:
             raise ValueError(f"TrainStack.micro_batch_size must be >= 1; got {micro_batch_size}.")
         if float(max_grad_norm) <= 0.0:
             raise ValueError(f"TrainStack.max_grad_norm must be > 0; got {max_grad_norm}.")
+        self.num_updates_per_batch = _positive_int(name="TrainStack.num_updates_per_batch", value=num_updates_per_batch)
+        if self.num_updates_per_batch > 1 and not getattr(algorithm, "supports_multi_update", False):
+            raise ValueError(
+                f"num_updates_per_batch={self.num_updates_per_batch} requires an algorithm that "
+                f"freezes a pre-update policy anchor in prepare_segment (DiffusionGRPO / "
+                f"DiffusionDPPO). {type(algorithm).__name__} sets supports_multi_update=False: "
+                f"AR algorithms reuse the rollout log-prob as old_logp, so >1 optimizer step "
+                f"conflates the rollout-vs-train engine gap with real policy drift. Set "
+                f"num_updates_per_batch=1."
+            )
         self.fsdp_backend = fsdp_backend
         self.algorithm = algorithm
         self.micro_batch_size = int(micro_batch_size)
@@ -200,20 +269,53 @@ class TrainStack(Remote):
         *,
         training_progress: float,
     ) -> TrainStepResult:
-        """Driver-callable: prepare → train → on_rollout_end on the worker.
+        """Driver-callable: prepare → train (×N) → on_rollout_end on the worker.
 
-        Combines the three steps so worker-side mutations
+        Combines the steps so worker-side mutations
         (``segment.sde_logp`` populated by ``prepare_segment``) flow into
-        the subsequent ``train`` call without round-tripping through the
+        the subsequent ``train`` call(s) without round-tripping through the
         driver. Dispatched ``DP_ALL`` so each DP worker receives its shard
         of ``resp_track``; per-shard loss/grad_norm/metrics merge back via
         ``pytree_merge``.
+
+        ``prepare_segment`` runs once (freezing the π_old anchor for the whole
+        shard), then ``num_updates_per_batch`` optimizer steps run over disjoint
+        mini-batches, then ``on_rollout_end`` runs once — see
+        :meth:`_train_mini_batches`.
         """
         self._align_track_inputs(resp_track)
         self.prepare_segment(resp_track)
-        result = self.train(resp_track, training_progress=float(training_progress))
+        result = self._train_mini_batches(resp_track, training_progress=float(training_progress))
         self.on_rollout_end()
         return result
+
+    def _train_mini_batches(
+        self,
+        resp_track: RolloutTrack,
+        *,
+        training_progress: float,
+    ) -> TrainStepResult:
+        """Run ``num_updates_per_batch`` optimizer steps over disjoint mini-batches.
+
+        ``prepare_segment`` must already have frozen the π_old anchor on the full
+        ``resp_track`` so every mini-batch trains against the same pre-update
+        policy. ``num_updates_per_batch == 1`` (the default) is the single-step
+        fast path — the whole shard in one optimizer step, byte-for-byte the
+        prior behavior. Otherwise the shard is partitioned into N contiguous
+        mini-batches (one optimizer step each, reusing :meth:`train`'s
+        micro-batching within each) and the per-step results are reduced into one
+        summary (see :func:`_aggregate_update_results`).
+        """
+        if self.num_updates_per_batch == 1:
+            return self.train(resp_track, training_progress=training_progress)
+        slices = _build_mini_batch_slices(
+            total_size=int(resp_track.batch_size),
+            num_updates=self.num_updates_per_batch,
+        )
+        results = [
+            self.train(resp_track.slice(start, end), training_progress=training_progress) for (start, end) in slices
+        ]
+        return _aggregate_update_results(results)
 
     def _align_track_inputs(self, resp_track: RolloutTrack) -> None:
         """Move the track onto the model's device; see :func:`_align_track_to_model`."""

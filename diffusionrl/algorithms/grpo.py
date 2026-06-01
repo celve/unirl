@@ -126,6 +126,10 @@ class DiffusionGRPO(StageAlgorithm):
             forwards the dict verbatim (unit-test path).
     """
 
+    # prepare_segment freezes segment.sde_logp once, so the PPO ratio stays
+    # anchored across every num_updates_per_batch optimizer step.
+    supports_multi_update = True
+
     def __init__(
         self,
         *,
