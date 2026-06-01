@@ -195,6 +195,7 @@ class DiffusionGRPO(StageAlgorithm):
             return AlgorithmStepResult(loss=0.0, metrics={}, num_steps_or_tokens=0, has_backward=False)
 
         typed_conds = typed_conditions(conditions, self.conditions_cls)
+
         replay_result = self.stage.replay(
             typed_conds,
             segment=segment,

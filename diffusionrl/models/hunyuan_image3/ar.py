@@ -401,6 +401,7 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
         conditions: HunyuanImage3ARConditions,
         *,
         segment: TextSegment,
+        temperature: float = 1.0,
     ) -> torch.Tensor:
         """Per-token log-prob replay over a stored rollout segment.
 
@@ -427,102 +428,87 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
                 "framework-managed cu_seqlens (construct via TextSegment.pack)"
             )
 
-        prompt_ids = fused.input_ids
-        device = prompt_ids.device
-        batch_size = int(prompt_ids.shape[0])
-        prompt_len = int(prompt_ids.shape[1])
+        prompt_ids_padded = fused.input_ids  # [B, max_prompt_len], right-padded
+        # Drive the forward on the MODEL's device, not the conditions' device:
+        # the AR fused/segment come back from the engine via the transport store
+        # as CPU tensors (and DP-shard keeps them on CPU), while the trainable
+        # backbone lives on cuda. Using prompt_ids' device would feed CPU
+        # input_ids into a cuda embedding → index_select device mismatch.
+        device = self.model.transformer.model.wte.weight.device
+        batch_size = int(prompt_ids_padded.shape[0])
 
-        # 1. Pad varlen response tokens into [B, T_max].
-        lengths = [int(n) for n in segment.lengths.tolist()]
-        T_max = max(lengths) if lengths else 0
-        response_tokens = torch.zeros((batch_size, T_max), dtype=torch.long, device=device)
-        response_mask = torch.zeros((batch_size, T_max), dtype=torch.long, device=device)
-        cu = [int(c) for c in segment.cu_seqlens.tolist()]
-        for b in range(batch_size):
-            n = lengths[b]
-            if n == 0:
-                continue
-            response_tokens[b, :n] = segment.tokens[cu[b] : cu[b] + n].to(device=device, dtype=torch.long)
-            response_mask[b, :n] = 1
-
-        # 2. Concat prompt + response into a single token stream.
-        # Drive the forward with ``input_ids`` (not ``inputs_embeds``)
-        # because ``HunyuanImage3ForCausalMM.forward`` (the outer wrapper)
-        # does NOT expose ``inputs_embeds`` in its signature. It internally
-        # calls ``self.model.wte(input_ids)`` and handles rope + lm_head.
-        if T_max > 0:
-            full_ids = torch.cat([prompt_ids, response_tokens], dim=1)
+        # Per-sample TRUE prompt lengths. The two-engine AR rollout sends each
+        # prompt as its own vLLM request (no batch padding), so prompts differ
+        # in length; ``response._build_ar_fused_condition`` right-pads them and
+        # carries the per-sample TRUE length in ``fused.prompt_lengths`` [B].
+        # Using the real length per sample is REQUIRED — a single padded
+        # ``prompt_len`` would (1) let the response attend prompt-region pad,
+        # (2) shift rope/positions (forward derives them from arange over the
+        # padded length), and (3) slice the prediction logits at the wrong
+        # column. We therefore replay ONE sample at a time with no padding.
+        if fused.prompt_lengths is not None:
+            prompt_lengths = [int(n) for n in fused.prompt_lengths.tolist()]
         else:
-            full_ids = prompt_ids
-        L_full = int(full_ids.shape[1])
+            prompt_lengths = [int(prompt_ids_padded.shape[1])] * batch_size
 
-        # 3. Build the 4D attention mask the wrapper expects (``bsz x 1 x
-        # seqlen x seqlen``). Lower-triangular causal mask over L_full with
-        # padded response positions masked out.
-        wte_weight = self.model.transformer.model.wte.weight
-        param_dtype = wte_weight.dtype
-        neg_inf = torch.finfo(param_dtype).min
-        full_mask_4d = torch.full(
-            (batch_size, 1, L_full, L_full),
-            neg_inf,
-            dtype=param_dtype,
-            device=device,
-        )
-        causal = torch.tril(torch.ones((L_full, L_full), dtype=torch.bool, device=device))
-        full_mask_4d.masked_fill_(causal.unsqueeze(0).unsqueeze(0), 0.0)
-        if T_max > 0:
-            valid_pos = torch.ones((batch_size, L_full), dtype=torch.bool, device=device)
-            valid_pos[:, prompt_len:] = response_mask.bool()
-            invalid_q = ~valid_pos  # [B, L_full]
-            full_mask_4d.masked_fill_(invalid_q.unsqueeze(1).unsqueeze(-1), neg_inf)
-            full_mask_4d.masked_fill_(invalid_q.unsqueeze(1).unsqueeze(2), neg_inf)
+        resp_lengths = [int(n) for n in segment.lengths.tolist()]
+        cu = [int(c) for c in segment.cu_seqlens.tolist()]
 
-        # 4. Set the runtime attributes the wrapper forward reads off
-        # ``self``. MUST be unconditional overwrite — DiffusionGRPO
-        # predict_noise earlier in the same train step sets
-        # num_image_tokens=4096 (image gen). If we only set-when-missing,
-        # the AR replay inherits 4096 even though full_ids is pure text
-        # → image-aware attention / rope indexing OOB → 100% NaN logits.
         transformer = self.model.transformer
-        transformer.post_token_len = None
-        transformer.num_special_tokens = None
-        transformer.num_image_tokens = 0
-        transformer.use_taylor_cache = False
-        # Force cached_rope rebuild for text-only seq. Do NOT set
-        # cached_rope=None — CachedRoPE is a callable nn.Module, setting
-        # it to None causes TypeError. Reset internal cache fields instead.
-        if hasattr(transformer, "cached_rope") and transformer.cached_rope is not None:
-            for _rope_attr in ("seq_len", "rope_image_info", "cos_cache", "sin_cache"):
-                if hasattr(transformer.cached_rope, _rope_attr):
-                    setattr(transformer.cached_rope, _rope_attr, None)
+        param_dtype = transformer.model.wte.weight.dtype
+        neg_inf = torch.finfo(param_dtype).min
 
-        # 5. One teacher-forced forward through the outer wrapper.
-        out = transformer(
-            input_ids=full_ids,
-            attention_mask=full_mask_4d,
-            mode="gen_text",
-            past_key_values=None,
-            use_cache=False,
-            return_dict=True,
-        )
-        logits = getattr(out, "logits", None)
-        if logits is None:
-            raise RuntimeError("HunyuanImage3ARStage.replay: model output has no .logits")
-
-        # 6. logits[:, prompt_len - 1 + t, :] predicts response_tokens[:, t]
-        if T_max == 0:
-            return torch.zeros(0, dtype=torch.float32, device=device)
-        pred_logits = logits[:, prompt_len - 1 : prompt_len - 1 + T_max, :]
-        log_probs_full = F.log_softmax(pred_logits.float(), dim=-1)
-        per_token = log_probs_full.gather(-1, response_tokens.unsqueeze(-1)).squeeze(-1)  # [B, T_max], fp32
-
-        # 7. Pack to varlen [total_tokens] aligned with segment.log_probs.
         flat: List[torch.Tensor] = []
         for b in range(batch_size):
-            n = lengths[b]
-            if n == 0:
+            rl = resp_lengths[b]
+            if rl == 0:
                 continue
-            flat.append(per_token[b, :n])
+            pl = prompt_lengths[b]
+            prompt_b = prompt_ids_padded[b, :pl].to(device=device, dtype=torch.long)
+            resp_b = segment.tokens[cu[b] : cu[b] + rl].to(device=device, dtype=torch.long)
+            full_ids = torch.cat([prompt_b, resp_b], dim=0).unsqueeze(0)  # [1, pl+rl]
+            L_full = pl + rl
+
+            # Pure text-only causal mask over the real (un-padded) sequence.
+            causal = torch.tril(torch.ones((L_full, L_full), dtype=torch.bool, device=device))
+            mask_4d = torch.full((1, 1, L_full, L_full), neg_inf, dtype=param_dtype, device=device)
+            mask_4d.masked_fill_(causal.unsqueeze(0).unsqueeze(0), 0.0)
+
+            # Reset image/rope runtime state — DiffusionGRPO earlier in the same
+            # step sets num_image_tokens=4096; the text-only AR forward must run
+            # with 0 image tokens or rope/attention indexing goes OOB → NaN. Per
+            # forward because each sample's seq_len differs (forces rope rebuild).
+            transformer.post_token_len = None
+            transformer.num_special_tokens = None
+            transformer.num_image_tokens = 0
+            transformer.use_taylor_cache = False
+            if hasattr(transformer, "cached_rope") and transformer.cached_rope is not None:
+                for _rope_attr in ("seq_len", "rope_image_info", "cos_cache", "sin_cache"):
+                    if hasattr(transformer.cached_rope, _rope_attr):
+                        setattr(transformer.cached_rope, _rope_attr, None)
+
+            out = transformer(
+                input_ids=full_ids,
+                attention_mask=mask_4d,
+                mode="gen_text",
+                past_key_values=None,
+                use_cache=False,
+                return_dict=True,
+            )
+            logits = getattr(out, "logits", None)
+            if logits is None:
+                raise RuntimeError("HunyuanImage3ARStage.replay: model output has no .logits")
+
+            # logits[0, pl-1+t] predicts resp_b[t]. Use T=1 full-softmax to
+            # match vLLM's recorded π_old (the [RATIO-PROBE-AR] diagnosis showed
+            # vLLM logs T=1 logprobs; the old ``/temperature`` here added a
+            # systematic +log(ratio_mean)≈+0.067 offset → AR ratio≈1.07. T=1 both
+            # sides is the verl/OpenRLHF/TRL convention — temperature is a rollout
+            # exploration knob, not part of the policy-gradient logp).
+            raw_logits = logits[0, pl - 1 : pl - 1 + rl, :].float()
+            log_probs_full = F.log_softmax(raw_logits, dim=-1)
+            flat.append(log_probs_full.gather(-1, resp_b.unsqueeze(-1)).squeeze(-1))  # [rl], fp32
+
         if not flat:
             return torch.zeros(0, dtype=torch.float32, device=device)
         return torch.cat(flat, dim=0)

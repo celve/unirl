@@ -189,17 +189,57 @@ class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage
         if input_ids_in is not None and position_ids_in is not None:
             if input_ids_in.shape[1] != position_ids_in.shape[1]:
                 input_ids_in = torch.gather(input_ids_in, dim=1, index=position_ids_in)
+        # [ROPE-FIX] config.rope_type=="2d" needs a 2-D
+        # RoPE for image tokens, built from per-image (slice,(token_h,token_w)).
+        # The original replay passed EMPTY rope_image_info, so build_2d_rope gives
+        # image tokens plain 1-D sequential positions — wrong for a 2-D model and
+        # the confirmed cause of the ~40% vllm-vs-HF noise_pred divergence (image
+        # ratio 0.95 → 0.996 once fixed). We reconstruct per sample:
+        #   - slice: the contiguous image-token run from gen_image_mask.
+        #   - (token_h, token_w): the patchified token grid. Patchify uses uniform
+        #     square patches, so the token grid preserves the LATENT aspect ratio:
+        #     token_h/token_w == H_lat/W_lat and token_h*token_w == n. Solving:
+        #       token_w = round(sqrt(n * W_lat / H_lat)), token_h = n // token_w.
+        #     This is general (handles non-square aspect ratios) and self-contained
+        #     — no need to plumb (h,w) from the rollout capture. Square images
+        #     degenerate to token_h==token_w==isqrt(n). ``sample`` is
+        #     [n, C, H_lat, W_lat]; H_lat/W_lat are uniform across the batch.
+        # Then the transformer builds its native 128-dim 2-D rope (no tensor
+        # injection → no head-dim mismatch).
+        _B = int(fused.input_ids.shape[0])
+        rope_image_info_val: List[List[Any]] = [[] for _ in range(_B)]
+        if fused.gen_image_mask is not None:
+            _h_lat = int(sample.shape[-2])
+            _w_lat = int(sample.shape[-1])
+            _gm = fused.gen_image_mask
+            for _b in range(_B):
+                _idx = _gm[_b].nonzero(as_tuple=False).flatten()
+                if _idx.numel() == 0:
+                    continue
+                _start = int(_idx[0].item())
+                _n = int(_idx.numel())
+                _contig = (int(_idx[-1].item()) - _start + 1) == _n
+                if not _contig or _w_lat <= 0 or _h_lat <= 0:
+                    continue
+                _tw = int(round((_n * _w_lat / _h_lat) ** 0.5))
+                _th = _n // _tw if _tw > 0 else 0
+                if _tw > 0 and _th * _tw == _n:
+                    rope_image_info_val[_b] = [(slice(_start, _start + _n), (_th, _tw))]
         model_inputs = {
             "input_ids": input_ids_in,
             "attention_mask": attention_mask_in,
             "position_ids": position_ids_in,
             "past_key_values": past_kv_in,
-            "rope_image_info": [[] for _ in range(int(fused.input_ids.shape[0]))],
+            "rope_image_info": rope_image_info_val,
             "mode": "gen_image",
             "images": sample_2,
             "image_mask": fused.gen_image_mask,
             "timesteps": t_expand,
-            "timesteps_index": None,
+            # native sets timesteps_index = gen_timestep_scatter_index
+            # (modeling:2836) so instantiate_continuous_tokens injects the
+            # timestep token's continuous embedding (required for gen_image;
+            # passing None silently skips it and corrupts the noise_pred).
+            "timesteps_index": scatter_idx_in,
             "gen_timestep_scatter_index": scatter_idx_in,
             "cond_vae_images": cond_vae_images,
             "cond_vae_image_mask": cond_vae_image_mask,
@@ -209,9 +249,10 @@ class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage
             "cond_vit_image_mask": cond_vit_image_mask,
             "cond_vit_image_kwargs": vit_kwargs,
         }
-        # Bypass _check_inputs assertion that requires timesteps_index for
-        # first_step+gen_image. We skip instantiate_continuous_tokens by
-        # passing timesteps_index=None.
+        # Bypass _check_inputs: we build model_inputs by hand (not via
+        # prepare_inputs_for_generation), so the upstream first_step+gen_image
+        # assertions don't all line up with this hand-built dict. timesteps_index
+        # IS provided (scatter_idx_in above) so instantiate_continuous_tokens runs.
         _orig_check = getattr(transformer, "_check_inputs", None)
         transformer._check_inputs = lambda *a, **kw: None
 
@@ -244,8 +285,11 @@ class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage
             N_half = pred.shape[0] // 2
             pred_cond = pred[:N_half].contiguous()
             pred_uncond = pred[N_half:].contiguous()
-            return pred_uncond + guidance_scale * (pred_cond - pred_uncond)
-        return pred
+            result = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+        else:
+            result = pred
+
+        return result
 
     @staticmethod
     def _build_kv_cache(transformer, conditions: HunyuanImage3DiffusionConditions):
@@ -318,6 +362,12 @@ class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage
         # (slice L') and omits tokenizer_output.
         fused = conditions.fused
         assert fused is not None  # asserted by predict_noise before reaching here
+        # upstream _update_model_kwargs_for_generation reads model_kwargs[
+        # "rope_image_info"] unconditionally (modeling_hunyuan_image_3.py:2944)
+        # and just propagates it forward; predict_noise rebuilds it fresh each
+        # step (line ~197) so the value carried here is never consumed — it only
+        # needs to be PRESENT to avoid a KeyError. 1D rope => empty per-sample.
+        _rope_info = [[] for _ in range(int(fused.input_ids.shape[0]))]
         if is_first:
             mk: Dict[str, Any] = {
                 "mode": "gen_image",
@@ -326,6 +376,7 @@ class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage
                 "image_mask": fused.gen_image_mask,
                 "gen_timestep_scatter_index": fused.gen_timestep_scatter_index,
                 "custom_pos_emb": fused.rope_cache,
+                "rope_image_info": _rope_info,
             }
             if conditions.tokenizer_output is not None:
                 mk["tokenizer_output"] = conditions.tokenizer_output
@@ -337,6 +388,7 @@ class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage
                 "image_mask": fused.gen_image_mask,
                 "gen_timestep_scatter_index": state.gen_timestep_scatter_index,
                 "custom_pos_emb": fused.rope_cache,
+                "rope_image_info": _rope_info,
             }
         updated = transformer._update_model_kwargs_for_generation(output, mk)
         state.past_key_values = updated.get("past_key_values")

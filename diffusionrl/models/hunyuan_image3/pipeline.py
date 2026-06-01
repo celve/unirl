@@ -130,6 +130,25 @@ class HunyuanImage3Pipeline(Pipeline):
         )
 
     @classmethod
+    def from_bundle(
+        cls,
+        bundle: HunyuanImage3Bundle,
+        *,
+        config: HunyuanImage3PipelineConfig,
+        strategy: Optional[StepStrategy] = None,
+    ) -> "HunyuanImage3Pipeline":
+        """Assemble the pipeline from an ALREADY-built (possibly shared) bundle.
+
+        ``from_config`` / ``from_meta_config`` each build their own bundle; this
+        instead takes a bundle the caller already constructed. Trainers build ONE
+        bundle and share it across the FSDP backend and this pipeline, so replay
+        reads the trained weights — see :class:`~diffusionrl.trainer.hi3.`
+        ``HI3Trainer``, whose ``pipeline_cfg`` targets this with ``bundle=`` auto-
+        injected from the shared sibling.
+        """
+        return cls._assemble(bundle, config=config, strategy=strategy)
+
+    @classmethod
     def _assemble(
         cls,
         bundle: HunyuanImage3Bundle,

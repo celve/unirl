@@ -294,6 +294,56 @@ class BucketedIPCReceiveMixin:
         )
         return self.add_lora(request)
 
+    def set_lora_from_tensor_dict_copy(
+        self,
+        lora_name: str,
+        lora_int_id: int,
+        lora_path: str,
+        peft_config: dict,
+        lora_tensors_serialized: str,
+    ) -> bool:
+        """Byte-copy variant of :meth:`set_lora_from_tensor_dict` for HI3.
+
+        # DELETE-WHEN: the vLLM-Omni LoRA handle transport is TP>1-broadcast-safe
+        #   — then ``set_lora_from_tensor_dict`` serves every stage and this
+        #   byte-copy mate (+ engine-side ``set_lora_from_tensors_copy``) is dead.
+
+        :meth:`set_lora_from_tensor_dict` ships a zero-copy
+        ``MultiprocessingSerializer`` handle, whose one-shot ``file_descriptor``
+        ``resource_sharer`` pops after the first consumer — fine for the SD3
+        per-worker DP path (TP=1, single consumer) but it makes ranks 2..N of a
+        TP>1 stage raise ``KeyError`` / ``EOFError`` when a single
+        ``collective_rpc`` broadcasts the same handle to every worker. The HI3
+        AR / DiT stages are TP>1, so the driver pushes via
+        ``set_lora_from_tensors_copy``, which sends the LoRA as a *data copy*
+        (``torch.save`` bytes, base64-wrapped). Each worker ``torch.load``s its
+        own independent tensors, so the fan-out is unbounded. LoRA is tiny (tens
+        of MB), so copying per rank is free.
+        """
+        import base64
+        import io
+
+        raw = base64.b64decode(lora_tensors_serialized)
+        lora_tensors = torch.load(io.BytesIO(raw), map_location="cpu")
+        if not isinstance(lora_tensors, dict):
+            raise TypeError(
+                f"{type(self).__name__}.set_lora_from_tensor_dict_copy: "
+                f"deserialised lora_tensors expected dict, got "
+                f"{type(lora_tensors).__name__}"
+            )
+        from diffusionrl.rollout.engine.vllm_omni.vllm_patches import (
+            OmniTensorLoRARequest,
+        )
+
+        request = OmniTensorLoRARequest(
+            lora_name=str(lora_name),
+            lora_int_id=int(lora_int_id),
+            lora_path=str(lora_path),
+            peft_config=dict(peft_config or {}),
+            lora_tensors=lora_tensors,
+        )
+        return self.add_lora(request)
+
     # ------------------------------------------------------------------
     # Debug — parameter inspection (used by E2E test)
     # ------------------------------------------------------------------

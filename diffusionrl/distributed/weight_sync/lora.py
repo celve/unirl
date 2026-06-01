@@ -16,7 +16,11 @@ This deliberately does NOT reuse the full-weight handler family
 in-process ``set_lora_from_tensors`` already owns the transfer, so the
 sibling handoff is the v2-native equivalent for the shared-process colocate case.
 
-Scope: LoRA only. Full-weight / multi-stage (HI3) sync is a different path.
+Two senders live here, split by transport topology (NOT by LoRA semantics):
+:class:`LoraWeightSync` pushes to a same-Worker sibling engine (colocate);
+:class:`LoraDriverExtractSync` extracts on the train workers and returns the
+adapter to the driver for a cross-process fan-out (HI3's disjoint-Worker AR / DiT
+engines). Full-weight sync is a separate path (``full/``).
 
 All model / vLLM-touching imports are deferred into the methods so the driver
 can import this module (to reference the class for ``remote(...)``) without
@@ -34,6 +38,25 @@ from diffusionrl.distributed.group.remote import Remote
 logger = logging.getLogger(__name__)
 
 
+def _extract_canonical_lora(backend: Any, *, param_prefix: str, adapter_name: str):
+    """Extract canonical-format LoRA tensors + the PEFT config from the backend.
+
+    ``extract_lora_tensors`` redistributes each FSDP ``DTensor`` shard to a full
+    tensor — a collective across the train process group — so the caller MUST run
+    this on every train rank in lockstep (``ONE_TO_ALL``). Shared by the sibling
+    (:class:`LoraWeightSync`) and driver-extract (:class:`LoraDriverExtractSync`)
+    senders; the only difference between them is how the adapter then reaches the
+    engine, not how it is read off the model.
+    """
+    from diffusionrl.distributed.weight_sync.payload import _peft_config_dict
+    from diffusionrl.utils.peft_merge import extract_lora_tensors
+
+    model = backend.model
+    lora_tensors = extract_lora_tensors(model, param_prefix=param_prefix)
+    peft_config = _peft_config_dict(model, adapter_name)
+    return lora_tensors, peft_config
+
+
 class LoraWeightSync(Remote):
     """Push one track's trained FSDP LoRA adapter into a co-located rollout engine.
 
@@ -49,6 +72,10 @@ class LoraWeightSync(Remote):
     :class:`~diffusionrl.rollout.engine.composed.engine.ComposedRolloutEngine`
     can demux the update to one child; empty for a single-model trainer.
     ``verify`` is vLLM-Omni-only and ignored for SGLang.
+
+    ``rollout`` is the same-Worker sibling engine for the ``sync()`` push and is
+    REQUIRED. (HI3's cross-process driver push has no sibling engine and lives in
+    :class:`LoraDriverExtractSync`.)
     """
 
     def __init__(
@@ -80,15 +107,13 @@ class LoraWeightSync(Remote):
         (the caller wakes it before ``sync``); ``set_lora_from_tensors`` drops
         any existing adapter and loads the new one on every stage's workers.
         """
-        from diffusionrl.distributed.weight_sync.payload import _peft_config_dict
-        from diffusionrl.utils.peft_merge import extract_lora_tensors
+        self._sync_lora()
 
-        model = self._backend.model
-        lora_tensors = extract_lora_tensors(
-            model,
-            param_prefix=self._param_prefix,
+    def _sync_lora(self) -> None:
+        """LoRA-adapter path: ``set_lora_from_tensors`` into the engine's pool."""
+        lora_tensors, peft_config = _extract_canonical_lora(
+            self._backend, param_prefix=self._param_prefix, adapter_name=self._adapter_name
         )
-        peft_config = _peft_config_dict(model, self._adapter_name)
         # Prefix keys so a ComposedRolloutEngine can demux to one child.
         if self._track_prefix:
             lora_tensors = {f"{self._track_prefix}.{k}": v for k, v in lora_tensors.items()}
@@ -155,4 +180,66 @@ class LoraWeightSync(Remote):
         )
 
 
-__all__ = ["LoraWeightSync"]
+class LoraDriverExtractSync(Remote):
+    """Extract the trained LoRA adapter and RETURN it to the driver, for a
+    cross-process push to engines that are NOT same-Worker siblings.
+
+    Counterpart to :class:`LoraWeightSync` for HI3's two-engine trainer: the
+    shared backbone trains across all cards while the AR / DiT engines are
+    anchored on separate Workers (disjoint GPU partition), so the backend is not
+    a sibling of either engine and ``sync()``'s in-process push can't reach them.
+    The driver calls :meth:`extract` (a collective; rank 0 returns the full
+    adapter), then pushes the returned adapter into each engine via its Handle
+    (``engine.set_lora_from_tensors_copy``). ``verify`` (engine checksum
+    read-back) is not available here — there is no sibling ``rollout`` to query.
+
+    Transport only — the adapter is read off the model exactly as in
+    :class:`LoraWeightSync` (shared :func:`_extract_canonical_lora`).
+
+    # DELETE-WHEN: HI3's AR / DiT engines can be co-located as same-Worker
+    #   siblings of the FSDP backend (e.g. vLLM-Omni grows a colocate placement
+    #   that co-tenants the trainer shard and a TP>1 engine on one card). Then
+    #   HI3 uses ``LoraWeightSync.sync()`` like SD3 / PE and this class is dead:
+    #     1. delete this class + restore conf/hi3_vllmomni.yaml ``sync._target_``
+    #        to ``...lora.LoraWeightSync`` (passing ``rollout``).
+    #     2. delete the byte-copy receive mates (own DELETE-WHEN tags):
+    #        VLLMOmniRolloutEngine.set_lora_from_tensors_copy and
+    #        ipc_receive_mixin.BucketedIPCReceiveMixin.set_lora_from_tensor_dict_copy.
+    """
+
+    def __init__(
+        self,
+        *,
+        backend: Any,
+        param_prefix: str = "",
+        adapter_name: str = "default",
+    ) -> None:
+        super().__init__()
+        self._backend = backend
+        self._param_prefix = str(param_prefix or "")
+        self._adapter_name = str(adapter_name or "default")
+
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def extract(self):
+        """Extract the LoRA adapter and RETURN it to the driver (rank 0 only).
+
+        Runs on EVERY Worker (``ONE_TO_ALL``) because ``extract_lora_tensors``'
+        DTensor redistribute is a collective across the train process group; only
+        rank 0 returns the (full, identical) tensors so the driver gets a single
+        copy (the trainer takes the rank-0 entry of the ``ONE_TO_ALL`` list).
+
+        Ships the FUSED qkv adapter (no trainer-side ``packed_modules`` split);
+        the engine's vLLM-native packed-modules mapping unpacks q / k / v on
+        load, matching the single-engine HI3 path post-#181.
+        """
+        lora_tensors, peft_config = _extract_canonical_lora(
+            self._backend, param_prefix=self._param_prefix, adapter_name=self._adapter_name
+        )
+        rank = self.rank_info.rank if self.rank_info is not None else 0
+        if rank != 0:
+            return None
+        logger.info("[LoRA-SYNC] rank 0: extracted %d LoRA tensors for driver-side push", len(lora_tensors))
+        return {"lora_tensors": lora_tensors, "peft_config": peft_config, "adapter_name": self._adapter_name}
+
+
+__all__ = ["LoraWeightSync", "LoraDriverExtractSync"]

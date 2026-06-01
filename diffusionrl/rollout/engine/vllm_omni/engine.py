@@ -21,6 +21,8 @@ start method). There is no separate ``initialize(device)`` step.
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import os
 import tempfile
 from typing import Any, Optional
@@ -48,6 +50,10 @@ _LOCAL_YAML = {
     "t2i_think_recaption": "hunyuan_image3_t2i_think_recaption_rl.yaml",
     "it2i": "hunyuan_image3_it2i_rl.yaml",
     "sd35_t2i": "sd35_t2i_rl.yaml",
+    # Two-engine v2 trainer (trainer/hi3.py): AR-only think_recaption engine +
+    # standalone DiT engine that eats an externally-injected recaption.
+    "ar_recaption": "hunyuan_image3_ar_recaption_rl.yaml",
+    "dit_recaption": "hunyuan_image3_dit_recaption_rl.yaml",
 }
 _UPSTREAM_YAML = {
     "i2t": "hunyuan_image3_i2t.yaml",
@@ -87,13 +93,69 @@ _UPSTREAM_YAML = {
 #        ``patches/README.md``
 #   Alternative trigger: HI3-family modalities retire AND no other
 #   model adopts the AR-prelude LoRA path — same 3 deletions apply.
-_HI3_MODALITIES = frozenset({"t2i", "t2i_think_recaption", "it2i", "i2t", "t2t"})
+# ``ar_recaption`` is the AR-only think_recaption stage (it HAS an AR prelude
+# stage, so it needs the lora_request passthrough patch). ``dit_recaption`` is
+# pure-DiT (single diffusion stage) like sd35_t2i and is intentionally NOT here.
+_HI3_MODALITIES = frozenset({"t2i", "t2i_think_recaption", "it2i", "i2t", "t2t", "ar_recaption"})
+
+# Modalities whose request carries diffusion params and therefore needs a σ
+# schedule pinned (``ensure_req_sigmas``). AR-only modalities (``i2t`` / ``t2t``
+# / the two-engine ``ar_recaption``) carry ``ARSamplingParams`` with NO
+# diffusion sub-block, so ``ensure_req_sigmas`` would raise on them — gate it.
+_DIT_BEARING_MODALITIES = frozenset({"t2i", "t2i_think_recaption", "it2i", "sd35_t2i", "dit_recaption"})
+
+# HI3 modalities whose stage config requests tensor-parallel across multiple
+# physical GPUs (TP4 on the AR and/or DiT stage). Ray restricts each DevicePool
+# worker's ``CUDA_VISIBLE_DEVICES`` to its single reserved GPU, so vLLM-Omni's
+# ``set_stage_devices`` sees only 1 device and the TP4 stage cannot start
+# ("requested logical devices ['0','1','2','3'], but only 1 device available").
+# For these modalities we clear ``CUDA_VISIBLE_DEVICES`` before constructing
+# ``Omni`` so the engine sees all physical GPUs and vLLM-Omni pins each stage to
+# its yaml ``runtime.devices`` (AR→0-3, DiT→4-7). NOT applied to ``sd35_t2i``
+# (TP1, correctly pinned to its single reserved GPU — clearing would break the
+# SD3 colocate data-parallel path). The engine MUST therefore be wired as a
+# single multi-GPU actor (one worker), not replicated per device.
+#
+# ⚠️ COLOCATE LANDMINE: this anchor-on-one-worker + clear-CUDA_VISIBLE pattern is
+# safe ONLY when no training side shares the GPUs (e.g. the rollout-only boot
+# smoke). Under colocate training the engine anchored at worker-0 actually drives
+# physical GPUs 0-3, while DevicePool's workers 1/2/3 nominally own cards 1/2/3 —
+# so FSDP ranks 1/2/3 land on the SAME physical cards as the AR engine's TP
+# children → guaranteed OOM (the 42+51>95GB pitfall). For colocate the rollout
+# engines need a REAL GPU partition: reserve their cards out of the training pool
+# (e.g. a dedicated num_gpus=4 actor), NOT anchor+clear. Do not copy this into
+# the trainer.
+_HI3_MULTI_GPU_MODALITIES = frozenset(
+    {"t2i", "t2i_think_recaption", "it2i", "i2t", "t2t", "ar_recaption", "dit_recaption"}
+)
 
 # Per-rank port base for deterministic master_port assignment.
 # Stride of 200 gives headroom above vllm-omni's settle_port retry loop
 # (which scans up to 37 ports from master_port) and the random(0,100) offset.
 _VLLM_OMNI_PORT_BASE = 30200
 _VLLM_OMNI_PORT_STRIDE = 200
+
+
+def seed_from_sample_id(sample_id: str) -> int:
+    """Deterministic 31-bit diffusion seed for one image, keyed by sample_id.
+
+    The M images of a recaption MUST draw distinct noise (else the diffusion
+    GRPO advantage is identically 0 — the whole group collapses to the same
+    reward). We cannot vary the seed through ``OmniDiffusionSamplingParams``
+    because vllm-omni's ``resolve_sampling_params_list`` requires exactly one
+    sampling-params object PER STAGE (not per prompt) and the inline diffusion
+    client shares that single object across every prompt of a ``generate()``
+    call — ``OmniDiffusionRequest.__post_init__`` then assigns a random seed
+    only on the FIRST request (when ``seed`` is None) and the mutated object
+    poisons all the rest with that same seed. So ``generate()`` issues one call
+    per prompt with its own seed set HERE, derived from the unique sample_id
+    (e.g. ``p0/a0/i3``) so it is globally distinct AND reproducible (a fixed
+    sample_id always maps to the same noise — useful for debugging; GRPO replay
+    itself reuses the stored ``trajectory_latents`` rather than re-sampling).
+    ``< 2**31`` matches the range vllm-omni's own random-seed fallback uses.
+    """
+    digest = hashlib.sha256(sample_id.encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
 
 
 def _resolve_yaml_path(modality: str) -> str:
@@ -287,6 +349,14 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         yaml_path = new_tmp
         self._is_offloaded: bool = False
 
+        # Multi-GPU HI3 stages need to see ALL physical GPUs so vLLM-Omni can pin
+        # each stage to its yaml ``runtime.devices`` (AR→0-3, DiT→4-7). Ray pins
+        # this worker's CUDA_VISIBLE_DEVICES to its single reserved GPU; clear it
+        # so Omni's per-stage device assignment works. Safe only because this
+        # engine is wired as a single multi-GPU actor (see _HI3_MULTI_GPU_MODALITIES).
+        if self.cfg.modality in _HI3_MULTI_GPU_MODALITIES:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+
         omni_kwargs: dict = dict(
             model=self.cfg.model_path,
             stage_configs_path=yaml_path,
@@ -301,7 +371,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
             # before stage_init_timeout takes over per-stage.
             init_timeout=1800,
         )
-        if self.cfg.modality in ("t2i", "t2i_think_recaption", "it2i", "sd35_t2i"):
+        if self.cfg.modality in ("t2i", "t2i_think_recaption", "it2i", "sd35_t2i", "dit_recaption"):
             omni_kwargs["mode"] = "text-to-image"
         omni_kwargs.update(self.cfg.omni_extra)
         self._omni: Optional[Any] = Omni(**omni_kwargs)
@@ -375,8 +445,11 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         self._validate_request(req)
         # Main-repo SSOT for σ: pin once via the shared helper. Translator
         # forwards via ``OmniDiffusionSamplingParams.sigmas``; response
-        # handler asserts the worker echoed back what we sent.
-        ensure_req_sigmas(req, self.schedule_policy)
+        # handler asserts the worker echoed back what we sent. AR-only
+        # modalities have no diffusion params, so skip (ensure_req_sigmas
+        # would raise on a missing diffusion sub-block).
+        if self.cfg.modality in _DIT_BEARING_MODALITIES:
+            ensure_req_sigmas(req, self.schedule_policy)
         prompts, sampling_params_list = _to_omni_per_stage(
             req,
             self.cfg,
@@ -424,6 +497,22 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         generate_kwargs: dict = {"use_tqdm": False}
         if _lora_req_for_generate is not None and self.cfg.modality in _HI3_MODALITIES:
             generate_kwargs["lora_request"] = _lora_req_for_generate
+
+        # dit_recaption: one generate() per prompt so each image gets its own
+        # seed (see seed_from_sample_id — a single shared sampling-params object
+        # would make every image draw identical noise). Each single-prompt call
+        # yields exactly that request's final output(s), so its flat list IS the
+        # per-request group; no group_by_request needed.
+        if self.cfg.modality == "dit_recaption":
+            per_request: list = []
+            for sample_id, prompt in zip(req.sample_ids, prompts):
+                sp_for_prompt = copy.deepcopy(sampling_params_list)
+                seed = seed_from_sample_id(sample_id)
+                for sp in sp_for_prompt:
+                    if hasattr(sp, "seed"):
+                        sp.seed = seed
+                per_request.append(list(self._omni.generate([prompt], sp_for_prompt, **generate_kwargs)))
+            return _to_rollout_resp(req, per_request, modality=self.cfg.modality)
 
         flat_outputs = list(self._omni.generate(prompts, sampling_params_list, **generate_kwargs))
         per_request = group_by_request(flat_outputs, len(req.sample_ids))
@@ -563,11 +652,21 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
                 self._last_lora_name,
             )
             try:
-                self.set_lora_from_tensors(
-                    adapter_name=self._last_lora_name,
-                    lora_tensors=self._last_lora_tensors,
-                    peft_config=self._last_peft_config,
-                )
+                # HI3 two-engine stages are TP>1, so re-load via the byte-copy
+                # transport (a zero-copy handle crashes ranks 2..N — see
+                # set_lora_from_tensors_copy). SD3 / single-GPU stays on handle.
+                if self.cfg.modality in ("ar_recaption", "dit_recaption"):
+                    self.set_lora_from_tensors_copy(
+                        adapter_name=self._last_lora_name,
+                        lora_tensors=self._last_lora_tensors,
+                        peft_config=self._last_peft_config,
+                    )
+                else:
+                    self.set_lora_from_tensors(
+                        adapter_name=self._last_lora_name,
+                        lora_tensors=self._last_lora_tensors,
+                        peft_config=self._last_peft_config,
+                    )
                 logger.info("[LoRA-WAKE] LoRA re-loaded successfully.")
             except Exception as exc:
                 # Mark LoRA as no-longer-active and KEEP the engine in
@@ -837,6 +936,102 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         # the per-stage sampling params so the worker's
         # ``set_active_adapter`` finds it (otherwise vllm-omni defaults to
         # ``None`` → deactivate, and the rollout silently runs base model).
+        self._lora_loaded = True
+
+    @distributed(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_lora_from_tensors_copy(
+        self,
+        adapter_name: str,
+        lora_tensors: dict,
+        *,
+        peft_config: Optional[dict] = None,
+    ) -> None:
+        """Cross-process LoRA push for the HI3 two-engine trainer (byte copy).
+
+        # DELETE-WHEN: the vLLM-Omni LoRA handle transport is TP>1-broadcast-safe
+        #   (e.g. file_system sharing, or a per-rank re-register monkey-patch).
+        #   Then the driver-extract path can call :meth:`set_lora_from_tensors`
+        #   and this byte-copy fork (+ its worker mate
+        #   ``set_lora_from_tensor_dict_copy``) is dead. Only caller:
+        #   ``LoraDriverExtractSync`` (weight_sync/lora.py).
+
+        Same effect as :meth:`set_lora_from_tensors`, but the transport is a
+        *data copy* instead of a zero-copy shared handle, and the call is
+        ``@distributed(ONE_TO_ALL)`` so the trainer can push from the driver via
+        the engine Handle: HI3 anchors its AR / DiT engines on separate workers
+        (disjoint GPU partition), so the LoRA sync can't reach them as
+        same-worker siblings.
+
+        Why a byte copy and not the SD3 ``MultiprocessingSerializer`` handle:
+        that handle uses the ``file_descriptor`` strategy, whose one-shot fd
+        ``resource_sharer`` pops after the FIRST consumer. A single
+        ``collective_rpc`` broadcasts the same blob to every TP worker of a
+        stage, so for the HI3 TP>1 stages ranks 2..N would raise
+        ``KeyError`` / ``EOFError``. ``torch.save`` bytes (base64-wrapped for the
+        msgpack wire) have no shared resource — each worker ``torch.load``s its
+        own independent copy, so the fan-out is unbounded. LoRA is tiny (tens of
+        MB), so copying per rank is free.
+        """
+        if self._omni is None:
+            raise RuntimeError("VLLMOmniRolloutEngine: engine not initialized")
+
+        from diffusionrl.rollout.engine.vllm_omni.weight_sync.ipc_dispatch import (
+            DIFFRL_LORA_INT_ID,
+            DIFFRL_LORA_NAME,
+            DIFFRL_LORA_PATH,
+        )
+        from diffusionrl.utils.peft_merge import adapt_lora_for_vllm
+
+        first_key = next(iter(lora_tensors), "")
+        if lora_tensors and not first_key.startswith("base_model.model."):
+            lora_tensors = adapt_lora_for_vllm(lora_tensors)
+
+        stage_ids = list(range(int(self._omni.engine.num_stages)))
+
+        # Store LoRA state for re-loading after sleep/wake cycles.
+        self._last_lora_name = adapter_name
+        if isinstance(lora_tensors, dict):
+            self._last_lora_tensors = {
+                name: t.detach().clone() if isinstance(t, torch.Tensor) else t for name, t in lora_tensors.items()
+            }
+        else:
+            self._last_lora_tensors = lora_tensors
+        self._last_peft_config = dict(peft_config or {})
+
+        # Drop the existing adapter first (matches the receive-side ordering).
+        for sid in stage_ids:
+            try:
+                self._omni.engine.collective_rpc(
+                    method="remove_lora",
+                    args=(int(DIFFRL_LORA_INT_ID),),
+                    stage_ids=[int(sid)],
+                )
+            except Exception:
+                pass
+
+        # Byte copy (NOT a zero-copy handle): serialise once, fan out unbounded.
+        import base64 as _base64
+        import io as _io
+
+        _cpu_tensors = {
+            name: t.detach().to("cpu") if isinstance(t, torch.Tensor) else t for name, t in lora_tensors.items()
+        }
+        _buf = _io.BytesIO()
+        torch.save(_cpu_tensors, _buf)
+        lora_tensors_serialized = _base64.b64encode(_buf.getvalue()).decode("ascii")
+
+        for sid in stage_ids:
+            self._omni.engine.collective_rpc(
+                method="set_lora_from_tensor_dict_copy",
+                args=(
+                    str(adapter_name) or DIFFRL_LORA_NAME,
+                    int(DIFFRL_LORA_INT_ID),
+                    DIFFRL_LORA_PATH,
+                    dict(peft_config or {}),
+                    lora_tensors_serialized,
+                ),
+                stage_ids=[int(sid)],
+            )
         self._lora_loaded = True
 
     # ------------------------------------------------------------------

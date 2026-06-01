@@ -121,8 +121,30 @@ def clip_grad_norm(
 
 
 def fsdp_offload(model: nn.Module) -> None:
-    """Move FSDP-wrapped params + grads to CPU."""
-    model.cpu()
+    """Move FSDP-wrapped params + grads to CPU, leaving meta tensors untouched.
+
+    The 80B meta-init path materializes only the trained decoder + heads (aux
+    vae / vit stay on meta via ``with_aux=()``); a plain ``model.cpu()`` would
+    raise ``Cannot copy out of meta tensor`` on those. ``_apply`` is what
+    ``.cpu()`` delegates to (handles FSDP DTensor shards); skipping meta leaves
+    the never-materialized aux alone. No-op difference for fully-materialized
+    models (SD3).
+
+    META-PROBE: logs exactly which params stay on meta so the "only frozen aux"
+    assumption is verified, not assumed. If a TRAINED / forward-needed module
+    (``model.layers.*`` / ``lm_head`` / ``patch_embed`` / ``time_embed`` / heads)
+    appears here, materialize missed it and this guard would silently mask the
+    bug (deferred meta error or silent-NaN at forward). Expected meta set: only
+    ``vae.*`` / ``vision_model.*`` (intentionally never materialized)."""
+    meta_names = [n for n, p in model.named_parameters() if p.is_meta]
+    if meta_names:
+        logger.warning(
+            "[META-PROBE] fsdp_offload skipping %d meta params (must be frozen aux only): %s%s",
+            len(meta_names),
+            meta_names[:24],
+            " ..." if len(meta_names) > 24 else "",
+        )
+    model._apply(lambda t: t if t.is_meta else t.cpu())
     if torch.cuda.is_available():
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
@@ -130,8 +152,11 @@ def fsdp_offload(model: nn.Module) -> None:
 
 
 def fsdp_onload(model: nn.Module, device: torch.device) -> None:
-    """Move FSDP-wrapped params + grads back to device."""
-    model.to(device)
+    """Move FSDP-wrapped params + grads back to device, leaving meta untouched.
+
+    Mirror of :func:`fsdp_offload` — never-materialized meta aux stays on meta
+    (moving it to a device would raise; it carries no data to move)."""
+    model._apply(lambda t: t if t.is_meta else t.to(device))
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     logger.debug("fsdp_onload: onloaded params/grads to %s", device)

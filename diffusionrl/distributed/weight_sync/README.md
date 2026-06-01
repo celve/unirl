@@ -20,6 +20,12 @@ engine's in-process `set_lora_from_tensors`.
 multi-track training (e.g. PE: diffusion + ar) registers one `LoraWeightSync`
 per track.
 
+`LoraDriverExtractSync` is the same adapter, different transport topology: when
+the engines are NOT same-Worker siblings (HI3 anchors its AR / DiT engines on a
+disjoint GPU partition), the handler only `extract()`s the adapter to the driver,
+which fans it out to each engine via its Handle. It is a temporary patch for the
+TP>1 cross-Worker case (see its `DELETE-WHEN`).
+
 ### Full-weight — `full/`
 
 `FullWeightSync` (`full/base.py`) provides the transport-agnostic weight walk:

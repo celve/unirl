@@ -57,6 +57,13 @@ _TASK_DEFAULTS: Dict[str, Tuple[str, str, List[str]]] = {
     "it2i": ("it2i_think", "en_unified", ["image"]),
     "i2t": ("i2t", "en_unified", ["text"]),
     "t2t": ("t2t", "en_unified", ["text"]),
+    # Two-engine v2 trainer. ``ar_recaption`` builds the SAME prompt as
+    # t2i_think_recaption (task ``t2i_think`` → AR emits <think>…</think>
+    # <recaption>…) but is served by an AR-only stage (returns [ar_sampling]).
+    # ``dit_recaption`` is the standalone DiT (handled by _to_omni_dit_recaption,
+    # which only reads sys_type from here for use_system_prompt).
+    "ar_recaption": ("t2i_think", "en_unified", ["image"]),
+    "dit_recaption": ("t2i_think", "en_unified", ["image"]),
 }
 
 
@@ -239,6 +246,91 @@ def _to_omni_sd35_t2i(
     return prompts, [dit_sampling]
 
 
+def _to_omni_dit_recaption(
+    req: RolloutReq,
+    cfg: "VLLMOmniEngineConfig",
+    sampling_params_cls: Any,
+) -> Tuple[List[Any], List[Any]]:
+    """Standalone HI3 DiT builder — eats an externally-injected recaption.
+
+    The two-engine trainer (``trainer/hi3.py``) puts the AR-generated
+    recaption per sample on ``req.primitives['cot_text']`` (a ``Texts``
+    aligned 1:1 with ``primitives['text']``, the original prompts). Each
+    per-prompt dict carries ``extra['ar_generated_text'] = recaption`` —
+    exactly the key the upstream DiT ``forward`` reads as ``cot_text``
+    (``pipeline_hunyuan_image3.py:1293``) — plus ``use_system_prompt`` so the
+    DiT rebuilds the same system prefix the AR used. Height / width / seed
+    come off the ``OmniDiffusionSamplingParams`` (the forward reads
+    ``req.sampling_params.height/width``, NOT the prompt dict).
+
+    Seed is NOT set here. Per-image distinct seeds CANNOT travel through the
+    sampling params: vllm-omni's ``resolve_sampling_params_list`` requires one
+    params object per STAGE (not per prompt), and the inline diffusion client
+    shares that single object across all prompts of a ``generate()`` call —
+    ``OmniDiffusionRequest.__post_init__`` then assigns a random seed only on the
+    FIRST request and the mutated object poisons the rest with that same seed
+    (byte-identical images → diffusion advantage 0). The engine therefore issues
+    one ``generate()`` per prompt and sets a distinct per-image seed itself
+    (``engine.seed_from_sample_id``); this builder just omits it.
+    """
+    if req.primitives.get("image") is not None:
+        raise ValueError("modality='dit_recaption' does not accept req.primitives['image']")
+
+    texts = _texts_from_req(req)
+    cot = req.primitives.get("cot_text")
+    if not isinstance(cot, Texts):
+        raise TypeError(
+            "modality='dit_recaption' requires req.primitives['cot_text'] (Texts of recaptions); "
+            f"got {type(cot).__name__ if cot is not None else 'None'}."
+        )
+    if len(cot.texts) != len(texts.texts):
+        raise ValueError(f"dit_recaption: cot_text count {len(cot.texts)} != prompt count {len(texts.texts)}.")
+
+    _, sys_type, _ = _resolve_task("dit_recaption", req.stage_config or {})
+    diff_params = get_diffusion_params(req.sampling_params)
+    height = int(getattr(diff_params, "height", cfg.default_height))
+    width = int(getattr(diff_params, "width", cfg.default_width))
+
+    prompts: List[Any] = []
+    for text, recap in zip(texts.texts, cot.texts):
+        prompts.append(
+            {
+                "prompt": text,
+                "height": height,
+                "width": width,
+                "use_system_prompt": sys_type,
+                "extra": {"ar_generated_text": recap},
+            }
+        )
+
+    num_inference_steps = int(getattr(diff_params, "num_inference_steps", cfg.default_num_inference_steps))
+    diff_kwargs: Dict[str, Any] = dict(
+        height=height,
+        width=width,
+        num_inference_steps=num_inference_steps,
+        guidance_scale=float(getattr(diff_params, "guidance_scale", cfg.default_guidance_scale)),
+        guidance_scale_provided=True,
+        eta=float(getattr(diff_params, "eta", cfg.default_eta)),
+        return_trajectory_latents=True,
+        return_trajectory_decoded=False,
+        num_outputs_per_prompt=1,
+    )
+    sigmas = _sigmas_list_from_req(req, num_inference_steps)
+    if sigmas is not None:
+        diff_kwargs["sigmas"] = sigmas
+    # Deliberately NO seed (see docstring) — engine sets a distinct per-image
+    # seed via one generate() call per prompt.
+    extra_args: Dict[str, Any] = {}
+    sde_indices = getattr(diff_params, "sde_indices", None)
+    if sde_indices is not None:
+        extra_args["sde_indices"] = sorted({int(i) for i in sde_indices})
+    if extra_args:
+        diff_kwargs["extra_args"] = extra_args
+
+    dit_sampling = sampling_params_cls(**diff_kwargs)
+    return prompts, [dit_sampling]
+
+
 def _to_omni_per_stage(
     req: RolloutReq,
     cfg: "VLLMOmniEngineConfig",
@@ -261,6 +353,8 @@ def _to_omni_per_stage(
 
     if modality == "sd35_t2i":
         return _to_omni_sd35_t2i(req, cfg, OmniDiffusionSamplingParams)
+    if modality == "dit_recaption":
+        return _to_omni_dit_recaption(req, cfg, OmniDiffusionSamplingParams)
 
     from vllm import SamplingParams as VLLMSamplingParams
     from vllm_omni.diffusion.models.hunyuan_image3.prompt_utils import (
@@ -308,7 +402,7 @@ def _to_omni_per_stage(
                 # the DiT; harmless and matches end2end.py.
                 entry["height"] = pil.height
                 entry["width"] = pil.width
-        elif modality in ("t2i", "t2i_think_recaption"):
+        elif modality in ("t2i", "t2i_think_recaption", "ar_recaption"):
             entry["height"] = height
             entry["width"] = width
 
@@ -317,15 +411,22 @@ def _to_omni_per_stage(
     # AR sampling — applies to every modality (Stage 0 is always AR).
     # ``logprobs=1`` makes vLLM emit per-token logp on the sampled token
     # (read by ``ar_capture.extract_ar_segment``).
+    # ``ar_params`` is an ``ARSamplingParams`` dataclass (from get_ar_params) or
+    # ``{}`` when there is no AR sub-block — use getattr, which returns the
+    # dataclass field for the former and the default for the latter (a plain
+    # ``{}`` has no such attribute). NB the dataclass field is ``max_new_tokens``.
     ar_sampling = VLLMSamplingParams(
-        temperature=float(ar_params.get("temperature", cfg.default_ar_temperature)),
-        top_p=float(ar_params.get("top_p", cfg.default_ar_top_p)),
-        top_k=int(ar_params.get("top_k", cfg.default_ar_top_k)),
-        max_tokens=int(ar_params.get("max_tokens", cfg.default_ar_max_tokens)),
+        temperature=float(getattr(ar_params, "temperature", cfg.default_ar_temperature)),
+        top_p=float(getattr(ar_params, "top_p", cfg.default_ar_top_p)),
+        top_k=int(getattr(ar_params, "top_k", cfg.default_ar_top_k)),
+        max_tokens=int(getattr(ar_params, "max_new_tokens", cfg.default_ar_max_tokens)),
         logprobs=1,
     )
 
-    if modality in ("i2t", "t2t"):
+    if modality in ("i2t", "t2t", "ar_recaption"):
+        # AR-only stages (comprehension i2t/t2t and the two-engine
+        # ar_recaption think_recaption producer): no DiT stage, so the
+        # single AR sampling params is the whole list.
         return prompts, [ar_sampling]
 
     # Image modalities — DiT sampling. ``eta`` is a typed first-class

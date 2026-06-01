@@ -77,6 +77,12 @@ class HunyuanImage3FusedMultimodalCondition(FusedMultimodalCondition):
     cond_vae_image_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)  # [B, L] bool
     cond_vit_image_mask: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)  # [B, L] bool
     cond_timestep_scatter_index: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)  # [B, K] long
+    # Per-sample TRUE prompt length [B] long — set only on the two-engine AR
+    # path (``response._build_ar_fused_condition``), where ``input_ids`` is
+    # right-padded across variable-length per-request prompts. ``ARStage.replay``
+    # uses it to slice each sample's real prompt (no padding corruption). A plain
+    # 1D CONCAT field (cat, not _pad_attn) so it survives Batch merges.
+    prompt_lengths: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)  # [B] long
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "HunyuanImage3FusedMultimodalCondition":
@@ -92,6 +98,7 @@ class HunyuanImage3FusedMultimodalCondition(FusedMultimodalCondition):
             "cond_vae_image_mask",
             "cond_vit_image_mask",
             "cond_timestep_scatter_index",
+            "prompt_lengths",
         ):
             if name in d and d[name] is not None:
                 kwargs[name] = d[name]
@@ -110,6 +117,7 @@ class HunyuanImage3FusedMultimodalCondition(FusedMultimodalCondition):
             "cond_vae_image_mask",
             "cond_vit_image_mask",
             "cond_timestep_scatter_index",
+            "prompt_lengths",
         ):
             v = getattr(self, name)
             if v is not None:
@@ -192,6 +200,7 @@ class HunyuanImage3FusedMultimodalCondition(FusedMultimodalCondition):
                         if item.cond_vit_image_mask is not None
                         else None,
                         cond_timestep_scatter_index=item.cond_timestep_scatter_index,
+                        prompt_lengths=item.prompt_lengths,  # [B] — not L-padded
                     )
                 )
             else:

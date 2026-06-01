@@ -409,6 +409,49 @@ def _build_sd3_text_condition(
     )
 
 
+def _build_ar_fused_condition(per_request_outputs: Sequence[Sequence[Any]]) -> Optional[Any]:
+    """AR fused condition for ARGRPO replay: per-sample prompt token ids.
+
+    Each AR request's Stage-0 ``OmniRequestOutput`` carries ``prompt_token_ids``
+    (vLLM runs prompts per-request with no batch padding, so this is the
+    sample's TRUE, un-padded prompt). Right-pad to ``[B, max_len]`` and carry
+    each sample's true length in the dedicated 1D ``prompt_lengths`` [B] field
+    (NOT ``attention_mask`` — that's typed 4D and its concat does a 4D unpack).
+    The teacher-forced replay loops per-sample and slices
+    ``input_ids[b, :prompt_lengths[b]]``, so the right-pad never leaks into
+    attention / position / the prediction slice.
+
+    Returns ``None`` if no Stage-0 output carries prompt tokens.
+    """
+    from diffusionrl.models.hunyuan_image3.conditions import HunyuanImage3FusedMultimodalCondition
+
+    rows: List[List[int]] = []
+    for outputs in per_request_outputs:
+        ids = None
+        for out in outputs:
+            if getattr(out, "stage_id", None) == 0:
+                ids = getattr(out, "prompt_token_ids", None)
+                break
+        rows.append([int(t) for t in ids] if ids else [])
+
+    if not any(rows):
+        return None
+
+    bsz = len(rows)
+    max_len = max(len(r) for r in rows)
+    input_ids = torch.zeros((bsz, max_len), dtype=torch.long)
+    prompt_lengths = torch.zeros((bsz,), dtype=torch.long)
+    for b, r in enumerate(rows):
+        if r:
+            input_ids[b, : len(r)] = torch.tensor(r, dtype=torch.long)
+            prompt_lengths[b] = len(r)
+    # Carry the per-sample TRUE prompt length in the dedicated ``prompt_lengths``
+    # field (1D [B], plain-cat CONCAT) — NOT ``attention_mask`` (typed 4D
+    # [B,1,L,L], whose concat does a 4D unpack and would break on a 2D mask).
+    # ARStage.replay slices ``input_ids[b, :prompt_lengths[b]]`` per sample.
+    return HunyuanImage3FusedMultimodalCondition(input_ids=input_ids, prompt_lengths=prompt_lengths)
+
+
 def _to_rollout_resp(
     req: RolloutReq,
     per_request_outputs: Sequence[Sequence[Any]],
@@ -425,12 +468,13 @@ def _to_rollout_resp(
     segments_for_track: Dict[str, Segment] = {}
     conditions: Dict[str, Condition] = {}
 
-    if modality in ("t2i", "it2i", "sd35_t2i", "t2i_think_recaption"):
+    if modality in ("t2i", "it2i", "sd35_t2i", "t2i_think_recaption", "dit_recaption"):
         # Per-request DiT (image) output. For HI3 (t2i/it2i) it's Stage 1;
-        # for SD3.5 (sd35_t2i) the diffusion stage is the only stage so
-        # stage_id=0. Either way, ``_pick_stage_output`` matches by
-        # ``final_output_type='image'`` first and falls back to stage_id.
-        dit_stage_id = 0 if modality == "sd35_t2i" else 1
+        # for SD3.5 (sd35_t2i) and the standalone HI3 DiT (dit_recaption) the
+        # diffusion stage is the only stage so stage_id=0. Either way,
+        # ``_pick_stage_output`` matches by ``final_output_type='image'``
+        # first and falls back to stage_id.
+        dit_stage_id = 0 if modality in ("sd35_t2i", "dit_recaption") else 1
         diff_outputs: List[Any] = []
         pil_images: List[Any] = []
         for outputs in per_request_outputs:
@@ -490,8 +534,20 @@ def _to_rollout_resp(
                     "the stage YAML)."
                 )
             conditions["fused"] = fused_cond
-    elif modality in ("i2t", "t2t"):
+    elif modality in ("i2t", "t2t", "ar_recaption"):
+        # AR-only stages. ``ar_recaption`` (two-engine trainer) runs
+        # is_comprehension:false so the decoded text is the think/recaption
+        # the DiT engine later consumes as cot_text; ar_capture surfaces the
+        # token+logp TextSegment below for ARGRPO replay.
         decoded_text = _decoded_text_from_ar(per_request_outputs)
+        if modality == "ar_recaption":
+            # ARGRPO.replay teacher-forces over prompt+response; it needs the
+            # prompt token ids (conditions['fused'].input_ids). vLLM processes
+            # each request's prompt independently (no batch padding), so the
+            # output's prompt_token_ids is the sample's true, un-padded prompt.
+            ar_fused = _build_ar_fused_condition(per_request_outputs)
+            if ar_fused is not None:
+                conditions["fused"] = ar_fused
     else:
         raise ValueError(f"_to_rollout_resp: unknown modality {modality!r}")
 
