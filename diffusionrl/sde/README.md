@@ -21,7 +21,7 @@ controller) backed by `diffusionrl.utils.scheduler_utils` (`AllSDEScheduler`,
 |---|---|
 | `kernels.py` | `StepStrategy` base, `SDEStrategy` mixin, and four concrete kernels: `FlowSDEStrategy`, `DanceSDEStrategy`, `CPSSDEStrategy`, `DPM2Strategy`. Each `step(...)` returns `(prev_sample, prev_sample_mean, std_var)`; SDE variants also expose log-prob computation. |
 | `runtime.py` | `FlowMatchSchedulePolicy` (model-owned static **+** dynamic schedule config, incl. the `compute_mu` / `compute_sigma` methods — see the "σ Schedule Policy" section below), `get_sigma_schedule`, `ensure_req_sigmas` (pins σ onto each outbound `RolloutReq`). |
-| `noise.py` | Deterministic seed mixing and `generate_latents` / `generate_shared_noise` for per-group noise sharing across rollouts. |
+| `noise.py` | Deterministic per-group seed derivation + `generate_shared_noise` / `regen_initial_noise` (the driver-authored x_T recipe each engine regenerates) and the `generate_latents` engine-RNG fallback. |
 | `rules.py` | String-level `sde_type` normalization at engine wire boundaries (e.g. SGLang kwargs). Typed Python paths read `cfg.sampling.sde_strategy` directly. |
 
 ## Registered Strategies
@@ -105,22 +105,29 @@ checkpoint) samples on the same schedule the trainer will replay.
 
 ## Initial Noise
 
-`noise.py` produces deterministic per-rollout latents. The driver mixes
-`run.seed` with `rollout_id`, then derives one noise tensor per explicit
-`noise_group_id`:
+`noise.py` produces deterministic per-rollout x_T. The driver
+(`DiffusionTrainer._build_req`) does NOT materialize the tensor — it authors a
+small **recipe** on the `RolloutReq`: per-sample `init_noise_group_ids` (each
+keyed on `rollout_id` + the stable sample/group id, e.g.
+`f"r{rollout_id}:{sample_id}"`) plus `init_noise_latent_shape` (the pipeline's
+own `latent_shape`). Each engine regenerates the byte-identical x_T from it:
 
 ```text
-per_rollout_seed = mix_rollout_base_seed(run.seed, rollout_id)
-x_T = generate_shared_noise(..., base_seed=per_rollout_seed, noise_group_ids=...)
+x_T = regen_initial_noise(
+    noise_group_ids=req.init_noise_group_ids,   # per-sample, rollout-keyed
+    base_seed=sampling_params.seed,             # raw config seed (no rollout mix)
+    latent_shape=req.init_noise_latent_shape,   # = pipeline.latent_shape(...)
+)   # drawn on CPU-fp32, then moved/cast to the engine device
 ```
 
-- `base_seed` from `run.seed` is mixed with `rollout_id` so different
-  rollout steps draw different noise.
-- All samples in one GRPO group share noise if `sampling.init_same_noise=True`;
-  otherwise each sample draws an independent slice.
-- When supported by the rollout engine, the driver ships this tensor through
-  `RolloutReq.request_conditions["initial_latents"]` so rollout and train-side
-  replay see aligned trajectories.
+- Per-rollout variety comes from `rollout_id` *inside the group-id string*
+  (not a seed mix). CPU randn is bit-stable across machines for a fixed torch
+  version, so trainside / sglang / vllm-omni agree on x_T to the byte.
+- All samples in one GRPO group share noise if `sampling.init_same_noise=True`
+  (group-keyed ids); otherwise each sample draws an independent slice
+  (stable-sample-id-keyed, so a sample keeps its x_T under resume / re-shard).
+- `request_conditions["initial_latents"]` still takes precedence when present
+  (img2img / first-frame conditioning); the recipe only fills the t2i x_T.
 
 ## What Lives Elsewhere
 

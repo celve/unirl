@@ -94,7 +94,8 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         self._initial_latent: Optional[torch.Tensor] = None
         self._initial_timestep: Optional[torch.Tensor] = None
         # SDE-vs-ODE per-step gating, set by the pipeline subclass before
-        # each forward (sourced from the SDE scheduler via ``plan_requests``):
+        # each forward (sourced from the resolved ``sde_indices`` on the request,
+        # set at request construction in the trainer's ``_build_req``):
         #
         # - ``None`` / ``frozenset()`` — NO step runs SDE (forward-process
         #   / NFT path). Every step takes the Euler ODE branch and writes

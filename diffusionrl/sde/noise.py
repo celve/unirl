@@ -2,13 +2,16 @@
 
 Sibling of :mod:`diffusionrl.sde.runtime` (σ schedule + dynamic-shift μ):
 this module owns the *noise* side of the sampling loop — per-sample x_T
-generation, per-group noise sharing, and the deterministic seed mix
-used by the driver to vary noise across rollout steps.
+generation, per-group noise sharing, and the deterministic per-group seed
+derivation (``_derive_group_seed``) that keys each sample's x_T.
 
-Used by every NEW diffusion stage's ``generate_latents`` fallback path
-when ``RolloutReq.request_conditions['initial_latents']`` is absent,
-and by the rollout driver to derive driver-side per-sample
-x_T tensors that get shipped into the request.
+The driver (``DiffusionTrainer._build_req``) ships only a deterministic x_T
+RECIPE — per-sample ``init_noise_group_ids`` + ``init_noise_latent_shape`` on
+the ``RolloutReq`` — and every engine regenerates the byte-identical x_T from
+it via :func:`regen_initial_noise` (a CPU-fp32 wrapper over
+:func:`generate_shared_noise`). The plain ``generate_latents`` fallback runs
+only when neither a recipe nor ``request_conditions['initial_latents']`` is
+present, i.e. the engine draws its own noise.
 """
 
 import hashlib
@@ -22,17 +25,6 @@ MAX_TORCH_SEED = (1 << 63) - 1
 
 def _derive_group_seed(base_seed: int, group_id: str) -> int:
     payload = f"{int(base_seed)}::{str(group_id)}".encode("utf-8")
-    digest = hashlib.blake2b(payload, digest_size=8).digest()
-    return int.from_bytes(digest, byteorder="big", signed=False) % (MAX_TORCH_SEED + 1)
-
-
-def mix_rollout_base_seed(base_seed: int, rollout_id: int) -> int:
-    """Mix a config ``base_seed`` with ``rollout_id`` for per-rollout init-noise variety.
-
-    Same (base_seed, rollout_id) always yields the same int; different rollout_id
-    changes the effective base used with ``_derive_group_seed`` / group IDs.
-    """
-    payload = f"rollout::{int(base_seed)}::{int(rollout_id)}".encode("utf-8")
     digest = hashlib.blake2b(payload, digest_size=8).digest()
     return int.from_bytes(digest, byteorder="big", signed=False) % (MAX_TORCH_SEED + 1)
 
@@ -158,3 +150,38 @@ def generate_latents(
         device=device,
         dtype=dtype,
     )
+
+
+def regen_initial_noise(
+    noise_group_ids: List[str],
+    base_seed: int,
+    latent_shape: Tuple[int, ...],
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Engine-side x_T regeneration from a driver-shipped RECIPE (gids + seed).
+
+    Counterpart to the driver's :func:`generate_shared_noise` call: given the
+    same ``(noise_group_ids, base_seed, latent_shape)`` the driver authored,
+    every engine reproduces a BYTE-IDENTICAL x_T — so the driver is the single
+    source of initial noise and all engines start each rollout from the same
+    x_T (cross-engine-aligned and reproducible).
+
+    Determinism rests on a PINNED generation environment: noise is always drawn
+    on **CPU in fp32** with an explicit seeded ``torch.Generator`` (see
+    :func:`generate_shared_noise`), then moved/cast to the engine's device/dtype
+    as the LAST step. CPU randn is bit-stable across machines for a fixed torch
+    version (cuda randn is NOT — it varies by GPU arch), so CPU-gen is what makes
+    trainside / vllm / sglang agree to the byte. Verified across nodes+clusters
+    on torch 2.11.0 (sha256 match). The cast to a lower-precision ``dtype`` is
+    itself deterministic, so the result is reproducible end-to-end.
+    """
+    xt_cpu_fp32 = generate_shared_noise(
+        batch_size=len(noise_group_ids),
+        latent_shape=tuple(latent_shape),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        noise_group_ids=list(noise_group_ids),
+        base_seed=int(base_seed),
+    )
+    return xt_cpu_fp32.to(device=device, dtype=dtype)

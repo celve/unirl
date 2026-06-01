@@ -48,6 +48,7 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from diffusionrl.rollout.engine.vllm_omni._shared.flow_match_sde_scheduler import (
     FlowMatchSDEDiscreteScheduler,
 )
+from diffusionrl.sde.noise import regen_initial_noise
 
 
 def _detach_cpu(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
@@ -225,6 +226,33 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
         extra = getattr(req.sampling_params, "extra_args", None) or {}
         noise_batch = extra.get("initial_noise_batch")
         if noise_batch is None:
+            # Driver ships the x_T RECIPE — if it rode in, regenerate THIS request's
+            # row on CPU-fp32 (generate_shared_noise keys each gid by its own seeded
+            # generator, so regenerating only gids[idx] reproduces row idx exactly).
+            recipe_gids = extra.get("init_noise_group_ids")
+            if recipe_gids:
+                rid = str(getattr(req, "request_id", "") or "")
+                try:
+                    idx = int(rid.split("_", 1)[0])
+                except ValueError:
+                    raise RuntimeError(
+                        f"RLStableDiffusion3Pipeline._resolve_pending_noise: cannot "
+                        f"parse batch index from request_id={rid!r}. Expected "
+                        f"Omni's ``f'{{i}}_{{uuid}}'`` shape."
+                    )
+                if idx < 0 or idx >= len(recipe_gids):
+                    raise IndexError(
+                        f"RLStableDiffusion3Pipeline._resolve_pending_noise: index "
+                        f"{idx} out of bounds for init_noise_group_ids len={len(recipe_gids)}."
+                    )
+                self._pending_request_noise = regen_initial_noise(
+                    noise_group_ids=[str(recipe_gids[idx])],
+                    base_seed=int(extra.get("init_noise_seed", 0)),
+                    latent_shape=tuple(extra["init_noise_latent_shape"]),
+                    device=torch.device("cpu"),
+                    dtype=torch.float32,
+                )  # [1, C, H, W] — matches the noise_batch[idx:idx+1] slice shape
+                return
             self._pending_request_noise = None
             return
         rid = str(getattr(req, "request_id", "") or "")

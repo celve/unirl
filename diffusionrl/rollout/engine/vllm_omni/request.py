@@ -239,6 +239,20 @@ def _to_omni_sd35_t2i(
         # the worker pipeline does the device move right before
         # ``prepare_latents`` returns.
         extra_args["initial_noise_batch"] = initial_noise
+    elif req.init_noise_group_ids and req.init_noise_latent_shape:
+        # Driver shipped the x_T RECIPE — pass it so the worker regenerates x_T
+        # row-by-row. ``init_noise_group_ids`` is a CONCAT field, so it arrives
+        # already sliced to THIS shard (aligned to texts.texts); the worker's
+        # ``_resolve_pending_noise`` picks its row by the request_id index and
+        # regenerates that single gid's noise on CPU-fp32.
+        if len(req.init_noise_group_ids) != len(texts.texts):
+            raise RuntimeError(
+                f"_to_omni_sd35_t2i: init_noise_group_ids len {len(req.init_noise_group_ids)} "
+                f"!= prompt count {len(texts.texts)} after sharding."
+            )
+        extra_args["init_noise_group_ids"] = [str(g) for g in req.init_noise_group_ids]
+        extra_args["init_noise_latent_shape"] = [int(x) for x in req.init_noise_latent_shape]
+        extra_args["init_noise_seed"] = int(diff_params.seed) if getattr(diff_params, "seed", None) is not None else 0
     if extra_args:
         diff_kwargs["extra_args"] = extra_args
 
@@ -471,8 +485,9 @@ def _to_omni_per_stage(
             f"consume request_conditions['initial_latents']. To enable "
             f"driver-side x_T injection on HI3, add a ``prepare_latents`` "
             f"override on RLHunyuanImage3Pipeline (mirroring the SD3 "
-            f"override at rollout/engine/vllm_omni/sd3/pipeline.py) and "
-            f"teach the driver-side initial-noise path the HI3 latent shape."
+            f"override at rollout/engine/vllm_omni/sd3/pipeline.py) and give "
+            f"the HI3 pipeline a ``latent_shape`` classmethod so the driver "
+            f"x_T recipe (init_noise_latent_shape) covers its geometry."
         )
 
     if extra_args:

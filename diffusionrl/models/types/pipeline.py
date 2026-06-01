@@ -54,13 +54,13 @@ class LatentShapeProvider(Protocol):
     driver-side noise pre-computation.
 
     The driver calls :meth:`latent_shape` BEFORE any actor is alive
-    (during driver-side initial-noise computation) to produce a
-    ``(C, *spatial)`` or ``(C, T, *spatial)`` tuple. The driver uses
-    that to build a deterministic seed-shared noise tensor that's
-    pinned to ``RolloutReq.request_conditions["initial_latents"]`` and
-    consumed by the engine / stage. This is the canonical path for
-    GRPO group noise + resume determinism + rollout/replay consistency
-    across actors.
+    (in ``DiffusionTrainer._resolve_noise_latent_shape``, once at init) to
+    produce a ``(C, *spatial)`` or ``(C, T, *spatial)`` tuple. That shape
+    becomes the x_T RECIPE's ``RolloutReq.init_noise_latent_shape``; each
+    engine then regenerates a byte-identical, seed-shared x_T from the recipe
+    (``regen_initial_noise``) rather than the driver shipping a materialized
+    tensor. This is the canonical path for GRPO group noise + resume
+    determinism + rollout/replay consistency across engines.
 
     Pipelines that haven't been wired for driver-side noise pre-
     computation MUST raise ``NotImplementedError`` (driver then falls

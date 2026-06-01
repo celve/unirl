@@ -1,11 +1,12 @@
 import dataclasses
 import inspect
 import logging
+import os
 import time
 from typing import Optional, Tuple
 
 import torch
-from hydra.utils import instantiate
+from hydra.utils import get_class, instantiate
 from omegaconf import DictConfig
 
 from diffusionrl.distributed.group.placement import placement, remote
@@ -69,6 +70,28 @@ class DiffusionTrainer(BaseTrainer):
         self.data_source = instantiate(data_source_cfg)
 
         self.sampling_params: BaseSamplingParams = instantiate(sampling_cfg)
+
+        # Per-sample latent shape for the driver-authored x_T recipe (see
+        # _build_req), resolved ONCE here via the pipeline's framework-level
+        # ``latent_shape`` classmethod — each model contributes its OWN geometry
+        # instead of a hardcoded SD3 shape.
+        #
+        # SCOPE CAVEAT: a recipe is AUTHORED for every pipeline that implements
+        # ``latent_shape`` (all of them today), but recipe CONSUMPTION is wired
+        # end-to-end only for SD3 (``SD3Pipeline.diffuse`` trainside + the SD3
+        # vllm path + the model-agnostic sglang engine). A non-SD3 model gets a
+        # correctly-shaped recipe that today only the sglang engine consumes — no
+        # crash and no within-run divergence (trainside replays the rollout's
+        # returned trajectory), but it does NOT yet get the full cross-engine x_T
+        # guarantee. To extend a model: wire recipe consumption into its trainside
+        # pipeline + vllm translator (mirroring SD3). ``None`` ⇒ no recipe
+        # (DISABLE_DRIVER_XT, or ``latent_shape`` raised ``NotImplementedError``)
+        # and every engine falls back to its own RNG.
+        self._noise_latent_shape: Optional[list] = (
+            None
+            if os.environ.get("DISABLE_DRIVER_XT")
+            else self._resolve_noise_latent_shape(pipeline_cfg=pipeline_cfg, model_cfg=bundle_cfg)
+        )
 
         # Set below from the `sync` block; None trainside (shares the module).
         self.weight_sync = None
@@ -177,6 +200,38 @@ class DiffusionTrainer(BaseTrainer):
         else:
             self.weight_sync.set_rollout_targets([(self.rollout.role_name, self.rollout.workers)])
 
+    def _resolve_noise_latent_shape(self, *, pipeline_cfg: DictConfig, model_cfg: DictConfig) -> Optional[list]:
+        """Per-sample latent shape for the driver-authored x_T recipe, or ``None``.
+
+        Delegates to the pipeline's ``latent_shape`` classmethod — the framework's
+        driver-side :class:`~diffusionrl.models.types.pipeline.LatentShapeProvider`
+        contract — so each model returns its OWN geometry (SD3 ``(16, H/8, W/8)``,
+        WAN a 5D video shape, Flux a 128-ch packed shape, …) and no model-specific
+        shape is baked into this generic trainer. A pipeline opts out of
+        driver-authored noise by raising ``NotImplementedError`` (→ ``None`` →
+        engines draw their own x_T). Any OTHER exception (e.g. an invalid frame
+        count) propagates — that is a real config error, not an opt-out.
+
+        In practice every shipped pipeline returns a shape, so a recipe is
+        authored for all models; recipe *consumption* is currently SD3-only (see
+        the scope caveat in ``__init__``).
+        """
+        target = getattr(pipeline_cfg, "_target_", None)
+        if not isinstance(target, str):
+            return None
+        try:
+            pipeline_cls = get_class(target)
+        except Exception:
+            return None
+        latent_shape_fn = getattr(pipeline_cls, "latent_shape", None)
+        if latent_shape_fn is None:
+            return None
+        try:
+            shape = latent_shape_fn(model_config=model_cfg, sampling_spec=self.sampling_params)
+        except NotImplementedError:
+            return None
+        return [int(x) for x in shape]
+
     def _build_req(self, inputs: RolloutInputs, rollout_id: int) -> RolloutReq:
         """Turn a data source batch into a typed :class:`RolloutReq`.
 
@@ -192,6 +247,33 @@ class DiffusionTrainer(BaseTrainer):
         inputs = inputs.expand(self.sampling_params.samples_per_prompt)
         sde_indices = self.sampling_params.resolve_sde_indices(rollout_id)
         sampling_params = dataclasses.replace(self.sampling_params, sde_indices=sde_indices, scheduler=None)
+        # Driver-authoritative x_T, shipped as a deterministic RECIPE. The driver
+        # is the single source of initial noise: it authors per-sample noise group
+        # ids keyed on (rollout_id, STABLE sample/group id); base_seed rides on
+        # sampling_params.seed and the latent shape is the pipeline's own geometry
+        # (self._noise_latent_shape, resolved once in __init__). Each engine
+        # regenerates the BYTE-IDENTICAL x_T from this recipe via regen_initial_noise
+        # (generate_shared_noise pinned to CPU-fp32, then moved to the engine device
+        # — CPU randn is bit-stable across machines for a fixed torch version, which
+        # is what makes trainside / vllm / sglang agree to the byte; verified across
+        # nodes+clusters on torch 2.11.0).
+        # So x_T is:
+        #   - per-rollout-VARYING (rollout_id in the key) → genuine exploration,
+        #   - per-sample-UNIQUE   (stable sample id in the key) → diverse GRPO groups,
+        #   - IDENTICAL across engines for a given (seed, rollout) → curves align,
+        #   - reproducible under resume / re-shard / re-batch (ids are STABLE, not a
+        #     positional batch index, so a sample keeps its x_T wherever it lands).
+        # ``init_same_noise=True`` keys by prompt group instead (siblings share).
+        # Root cause this fixes: each engine used to draw its OWN x_T from independent
+        # RNG → divergent reward curves; a single driver-authored x_T removes that.
+        # Opt out with DISABLE_DRIVER_XT=1 (resolved in __init__ → shape None here).
+        init_noise_group_ids: list = []
+        init_noise_latent_shape = self._noise_latent_shape
+        if init_noise_latent_shape is not None:
+            if bool(getattr(self.sampling_params, "init_same_noise", False)):
+                init_noise_group_ids = [f"r{rollout_id}:{g}" for g in inputs.group_ids]
+            else:
+                init_noise_group_ids = [f"r{rollout_id}:{s}" for s in inputs.sample_ids]
         return RolloutReq(
             sample_ids=list(inputs.sample_ids),
             group_ids=list(inputs.group_ids),
@@ -199,6 +281,8 @@ class DiffusionTrainer(BaseTrainer):
             request_conditions={},
             sampling_params=sampling_params,
             metadata=list(inputs.metadata) if inputs.metadata else [],
+            init_noise_group_ids=init_noise_group_ids,
+            init_noise_latent_shape=init_noise_latent_shape,
         )
 
     def train_step(

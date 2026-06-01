@@ -34,8 +34,8 @@ Pairs with ``RolloutResp`` (in ``diffusionrl/types/rollout_resp.py``). Carries:
   schedule rather than computing its own, and the response handler
   asserts the schedule the engine actually used (echoed back via
   ``LatentSegment.sigmas``) matches what was sent. ``None`` only at
-  request-construction time (driver-side ``plan_requests``); engines
-  populate it before forwarding. Shape ``[T+1]`` (length includes the
+  request-construction time (driver-side, in the trainer's ``_build_req``);
+  engines populate it before forwarding. Shape ``[T+1]`` (length includes the
   terminal 0), values in ``[0, 1]``, ``float32``, host-device-agnostic
   (engines move to worker device when serializing).
 - ``sample_ids`` / ``group_ids`` — mirror ``RolloutResp`` so request and
@@ -77,9 +77,23 @@ class RolloutReq(Batch):
     # σ schedule is shared across all samples in the request — every
     # sample runs the same num_inference_steps / shift / dynamic-shift μ
     # by construction (geometry varies per-sample only via height/width,
-    # but plan_requests / driver fix those per-batch). Hence ``shared_field``.
+    # but the driver fixes those per-batch at request construction). Hence ``shared_field``.
     sigmas: Optional[torch.Tensor] = shared_field(default=None)
     metadata: List[Optional[Dict[str, Any]]] = concat_field(default_factory=list)
+    # Driver-authored x_T RECIPE: per-sample INITIAL-noise group ids (rollout-keyed
+    # on the STABLE sample id, e.g. "r5:prompt:42:sample:3") + the latent shape.
+    # Each engine regenerates the same x_T via generate_shared_noise(CPU-fp32) keyed
+    # on these; base_seed rides on sampling_params.seed. This makes the driver the
+    # single source of initial noise, so every engine starts each rollout from a
+    # byte-identical x_T (otherwise each engine draws its own RNG → cross-engine
+    # divergence). Named ``init_noise_*`` to stay distinct from the SGLang on-wire
+    # ``noise_group_ids`` kwarg, which groups per-STEP SDE noise (sourced from
+    # ``group_ids``), NOT the initial latent. CONCAT so per-sample ids slice per DP
+    # shard exactly like sample_ids (the id string keys noise deterministically, so
+    # sharding is order-independent). Empty/None ⇒ no driver recipe (engine draws
+    # its own).
+    init_noise_group_ids: List[str] = concat_field(default_factory=list)
+    init_noise_latent_shape: Optional[List[int]] = shared_field(default=None)
 
     @property
     def batch_size(self) -> int:

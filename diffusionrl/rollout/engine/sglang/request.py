@@ -110,7 +110,7 @@ def _to_sglang_kwargs(
     diffusion = get_diffusion_params(req.sampling_params)
     require(
         diffusion is not None,
-        "_to_sglang_kwargs: req.sampling_params must contain diffusion params (set by the rollout driver)",
+        "_to_sglang_kwargs: req.sampling_params must contain diffusion params (set at request construction)",
     )
 
     num_inference_steps = int(diffusion.num_inference_steps)
@@ -186,8 +186,13 @@ def _to_sglang_kwargs(
             # encodes the (optional) group-sharing pattern.
             "init_same_noise": False,
             # Output shape policy: latents + prompt embeds, no per-step decoded
-            # frames, no scheduler-emitted seed.
-            "seed": None,
+            # frames. Pass the sampling seed (not None): when ``initial_noise`` is
+            # supplied it still determines x_T verbatim, so the seed only feeds
+            # SGLang's per-step SDE noise — and SGLang derives that deterministically
+            # (its ``_make_step_generators``, keyed on noise_group_ids) ONLY when
+            # ``seed is not None``; a None seed silently falls back to global RNG and
+            # breaks per-step reproducibility / cross-engine alignment.
+            "seed": int(diffusion.seed) if getattr(diffusion, "seed", None) is not None else 0,
             "save_output": False,
             "return_file_paths_only": False,
             "return_trajectory_latents": True,
