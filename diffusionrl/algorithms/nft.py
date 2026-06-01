@@ -232,8 +232,7 @@ class DiffusionNFT(StageAlgorithm):
             raise ValueError(
                 "DiffusionNFT requires segment.latents (clean final latent at "
                 "the last trajectory position); got None. Forward-process "
-                "rollout must populate the dense latents path "
-                "(rollout/pipeline.py:725-746)."
+                "rollout must populate the dense latents path."
             )
         x0 = segment.latents[:, -1]  # [B, ...latent_shape]
         if x0.numel() == 0:

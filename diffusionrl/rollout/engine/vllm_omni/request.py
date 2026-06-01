@@ -472,7 +472,7 @@ def _to_omni_per_stage(
             f"driver-side x_T injection on HI3, add a ``prepare_latents`` "
             f"override on RLHunyuanImage3Pipeline (mirroring the SD3 "
             f"override at rollout/engine/vllm_omni/sd3/pipeline.py) and "
-            f"teach compute_initial_noise_for_request the HI3 latent shape."
+            f"teach the driver-side initial-noise path the HI3 latent shape."
         )
 
     if extra_args:

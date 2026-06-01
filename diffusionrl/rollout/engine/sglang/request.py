@@ -110,7 +110,7 @@ def _to_sglang_kwargs(
     diffusion = get_diffusion_params(req.sampling_params)
     require(
         diffusion is not None,
-        "_to_sglang_kwargs: req.sampling_params must contain diffusion params (set by RolloutPipeline)",
+        "_to_sglang_kwargs: req.sampling_params must contain diffusion params (set by the rollout driver)",
     )
 
     num_inference_steps = int(diffusion.num_inference_steps)

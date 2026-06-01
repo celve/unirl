@@ -7,7 +7,7 @@ used by the driver to vary noise across rollout steps.
 
 Used by every NEW diffusion stage's ``generate_latents`` fallback path
 when ``RolloutReq.request_conditions['initial_latents']`` is absent,
-and by ``rollout/pipeline.py`` to derive driver-side per-sample
+and by the rollout driver to derive driver-side per-sample
 x_T tensors that get shipped into the request.
 """
 

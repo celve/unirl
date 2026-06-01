@@ -54,7 +54,7 @@ class LatentShapeProvider(Protocol):
     driver-side noise pre-computation.
 
     The driver calls :meth:`latent_shape` BEFORE any actor is alive
-    (during ``compute_initial_noise_for_request``) to produce a
+    (during driver-side initial-noise computation) to produce a
     ``(C, *spatial)`` or ``(C, T, *spatial)`` tuple. The driver uses
     that to build a deterministic seed-shared noise tensor that's
     pinned to ``RolloutReq.request_conditions["initial_latents"]`` and

@@ -445,8 +445,8 @@ def ensure_req_sigmas(req: Any, policy: FlowMatchSchedulePolicy) -> None:
     All three keys are **required** —  silent ``height=1024`` /
     ``width=1024`` defaults would mis-derive μ for dynamic-shift models
     when the request actually rendered at a different resolution
-    (e.g. WAN T2V at 480×832). Drivers (``RolloutPipeline.plan_requests``)
-    always set all three; absence means a wiring bug.
+    (e.g. WAN T2V at 480×832). The rollout driver always sets all three;
+    absence means a wiring bug.
     """
     if req.sigmas is not None:
         return

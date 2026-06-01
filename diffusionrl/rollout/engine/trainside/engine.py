@@ -44,12 +44,8 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
             exceeds this, ``generate`` slices the request via
             :meth:`RolloutReq.slice`, runs ``pipeline.generate`` per chunk,
             and concatenates results via :meth:`RolloutResp.concat`.
-            Mirrors :attr:`diffusionrl.rollout.plan.RolloutPlan.forward_batch_size`,
-            which the v1 driver feeds to
-            :func:`diffusionrl.rollout.engine.chunked_engine_generate_req`
-            for the same purpose — bounding stage peak memory (e.g. SD3
-            VAE decode) when there is no external inference runtime to
-            chunk for us.
+            Bounds stage peak memory (e.g. SD3 VAE decode) when there is
+            no external inference runtime to chunk for us.
     """
 
     _component_name = "trainside"

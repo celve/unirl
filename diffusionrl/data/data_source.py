@@ -10,7 +10,7 @@ pipelines, not provided by the external dataset.
 
 import logging
 import os
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 import torch
 from torch.utils.data import DataLoader
@@ -77,6 +77,48 @@ def _validate_homogeneous_images(images: List[Any]) -> None:
             f"Split into separate requests so each batch is either fully T2V or "
             f"fully I2V; per-sample channel-concat is not supported."
         )
+
+
+_SUPPORTED_MEDIA_REF_ROLES: Set[Tuple[str, str]] = {("image", "condition")}
+
+
+def _reject_unsupported_media_refs(batch: Dict[str, Any], *, context: str) -> None:
+    """Fail loud when a dataset hands unsupported media_refs to the driver.
+
+    The ``media_refs`` channel (``MediaRef(uri, modality, role)`` URI
+    list) was originally OLD-only. The driver now consumes the
+    ``(image, condition)`` (modality, role) pair via
+    :func:`_load_condition_images`
+    → ``RolloutInputs.primitives['image']: Images``;
+    all other (modality, role) combinations are still untyped on NEW and
+    would be silently dropped (degrading I2V/V2V/text-conditioned jobs
+    into a misconfigured run).
+
+    Supported set: see :data:`_SUPPORTED_MEDIA_REF_ROLES`. Anything else
+    raises ``NotImplementedError`` with a per-prompt index of the first
+    offending entry so debugging is straightforward.
+    """
+    refs = batch.get("media_refs")
+    if not refs:
+        return
+    if not isinstance(refs, list):
+        raise TypeError(
+            f"{context}: media_refs must be a list of per-prompt MediaRef lists, got {type(refs).__name__}."
+        )
+    bad: List[Tuple[int, Any]] = []
+    for i, per_prompt in enumerate(refs or []):
+        for r in per_prompt or []:
+            modality = getattr(r, "modality", None)
+            role = getattr(r, "role", None)
+            if (modality, role) not in _SUPPORTED_MEDIA_REF_ROLES:
+                bad.append((i, r))
+    if not bad:
+        return
+    raise NotImplementedError(
+        f"{context}: media_refs include {len(bad)} unsupported (modality, role) "
+        f"entries; the driver currently consumes only (image, condition). "
+        f"First bad entry: prompt={bad[0][0]}, ref={bad[0][1]!r}."
+    )
 
 
 class MultimodalRLDataSource:
@@ -211,8 +253,6 @@ class MultimodalRLDataSource:
         prompt_ids = self._resolve_prompt_ids(batch)
         sample_ids = [f"prompt:{pid}:sample:0" for pid in prompt_ids]
 
-        from diffusionrl.rollout.pipeline import _reject_unsupported_media_refs
-
         media_refs = [item.get("media_refs", []) for item in batch]
         if any(media_refs):
             _reject_unsupported_media_refs({"media_refs": media_refs}, context="MultimodalRLDataSource._collate_text")
@@ -244,8 +284,6 @@ class MultimodalRLDataSource:
         prompts = [item["prompt"] for item in prompt_examples]
         prompt_ids = self._resolve_prompt_ids(prompt_examples)
         sample_ids = [f"prompt:{pid}:sample:0" for pid in prompt_ids]
-
-        from diffusionrl.rollout.pipeline import _reject_unsupported_media_refs
 
         media_refs = [item.get("media_refs", []) for item in prompt_examples]
         if any(media_refs):

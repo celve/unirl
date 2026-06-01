@@ -190,8 +190,8 @@ def validate_keep_local_contract(cfg: DictConfig) -> None:
         "cfg.training.execution.keep_local=True is mutually exclusive with "
         "transfer_queue (both move data off the driver); enable exactly one.",
     )
-    # Keep-local shards each rollout by prompt-group across the train actors
-    # (RolloutPlan.shard_grouped_req); the gathered path instead re-balances
+    # Keep-local shards each rollout by prompt-group across the train actors;
+    # the gathered path instead re-balances
     # samples evenly on the driver. The two partitions — and thus each rank's
     # mean loss and the FSDP-averaged gradient — coincide only when the prompt
     # groups split evenly across actors, so require that here.
