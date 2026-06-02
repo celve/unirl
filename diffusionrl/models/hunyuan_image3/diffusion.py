@@ -42,6 +42,7 @@ import torch
 from diffusionrl.models.types.diffusion import DiffusionStage, DiffusionStep
 from diffusionrl.models.types.replay_result import ReplayResult
 from diffusionrl.sde.kernels import StepStrategy
+from diffusionrl.types.noise_recipe import NoiseRecipe
 from diffusionrl.types.sampling import DiffusionSamplingParams
 from diffusionrl.types.segments.latent import LatentSegment
 from diffusionrl.types.trajectory_store import compute_trajectory_positions
@@ -597,17 +598,35 @@ class HunyuanImage3DiffusionStage(DiffusionStage[HunyuanImage3DiffusionCondition
 
         latent_h = int(params.height) // int(self.vae_scale_factor)
         latent_w = int(params.width) // int(self.vae_scale_factor)
-        # latents: [B, C, H, W]
-        latents = generate_latents(
-            batch_size=batch_size,
-            latent_shape=(int(self.latent_channels), latent_h, latent_w),
-            device=device,
-            dtype=self.trajectory_dtype,
-            init_same_noise=bool(params.init_same_noise),
-            samples_per_prompt=int(params.samples_per_prompt),
-            noise_group_ids=params.noise_group_ids,
-            base_seed=params.seed,
-        )
+        per_sample_shape = (int(self.latent_channels), latent_h, latent_w)
+        # latents: [B, C, H, W]. Driver-authoritative x_T via the shared
+        # ``NoiseRecipe`` — the SAME ``for_batch(...).resolve(...)`` path the
+        # vLLM worker (RLHunyuanImage3Pipeline) takes, so trainside and rollout
+        # regenerate a BYTE-IDENTICAL x_T from the recipe (gids + seed) on
+        # CPU-fp32. The shape is AR-known only here, so it's filled via
+        # ``for_batch``. Falls back to engine-drawn noise when no recipe gids
+        # were shipped (e.g. DISABLE_DRIVER_XT).
+        latents = None
+        if params.noise_group_ids:
+            latents = (
+                NoiseRecipe(
+                    noise_group_ids=[str(g) for g in params.noise_group_ids],
+                    base_seed=int(params.seed),
+                )
+                .for_batch(batch_size, latent_shape=per_sample_shape)
+                .resolve(device=device, dtype=self.trajectory_dtype)
+            )
+        if latents is None:
+            latents = generate_latents(
+                batch_size=batch_size,
+                latent_shape=per_sample_shape,
+                device=device,
+                dtype=self.trajectory_dtype,
+                init_same_noise=bool(params.init_same_noise),
+                samples_per_prompt=int(params.samples_per_prompt),
+                noise_group_ids=params.noise_group_ids,
+                base_seed=params.seed,
+            )
 
         sde_set: Set[int] = set(int(i) for i in (params.sde_indices or []))
         sde_sorted: List[int] = sorted(sde_set)

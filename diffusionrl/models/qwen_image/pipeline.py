@@ -35,6 +35,7 @@ from typing import Any, Optional
 
 from diffusionrl.models.types.pipeline import Pipeline
 from diffusionrl.sde.kernels import FlowSDEStrategy, StepStrategy
+from diffusionrl.types.noise_recipe import NoiseRecipe
 from diffusionrl.types.primitives import Texts
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
@@ -257,8 +258,9 @@ class QwenImagePipeline(Pipeline):
 
         schedule = req.sigmas.to(self.bundle.device)
 
-        initial_cond = (req.request_conditions or {}).get("initial_latents")
-        initial_latents = getattr(initial_cond, "latents", None) if initial_cond is not None else None
+        # Driver-authoritative x_T via the model-aware recipe (NoiseRecipe); a
+        # pre-shipped initial_latents tensor (img2img / i2v first-frame) still wins.
+        initial_latents = NoiseRecipe.from_rollout_req(req).resolve()
 
         latent_seg = self.diffusion.diffuse(
             qwen_conds, schedule=schedule, params=params, initial_latents=initial_latents

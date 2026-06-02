@@ -52,8 +52,9 @@ from diffusionrl.rollout.engine.base import BaseRolloutEngine
 from diffusionrl.rollout.engine.sglang.config import SGLangEngineConfig
 from diffusionrl.rollout.engine.sglang.request import _to_sglang_kwargs
 from diffusionrl.rollout.engine.sglang.response import _to_rollout_resp
-from diffusionrl.sde.noise import generate_latents, regen_initial_noise
+from diffusionrl.sde.noise import generate_latents
 from diffusionrl.sde.runtime import FlowMatchSchedulePolicy, ensure_req_sigmas
+from diffusionrl.types.noise_recipe import NoiseRecipe
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp
 from diffusionrl.types.sampling import get_diffusion_params
@@ -409,24 +410,12 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         3. Otherwise → ``None`` (SGLang draws its own; matches legacy semantic
            when ``init_same_noise=False`` and no pre-shipped tensor).
         """
-        # Path 1: pre-shipped
-        cond = req.request_conditions.get("initial_latents")
-        if cond is not None and getattr(cond, "latents", None) is not None:
-            return cond.latents
-
-        # Path 1.5: driver shipped the x_T RECIPE (per-sample gids + latent shape;
-        # base_seed off sampling_params). Regenerate the byte-identical x_T on
-        # CPU-fp32 (the recipe is the driver's authoritative initial noise).
-        if req.init_noise_group_ids and req.init_noise_latent_shape:
-            diffusion = get_diffusion_params(req.sampling_params)
-            seed = int(diffusion.seed) if diffusion is not None and getattr(diffusion, "seed", None) is not None else 0
-            return regen_initial_noise(
-                noise_group_ids=[str(g) for g in req.init_noise_group_ids],
-                base_seed=seed,
-                latent_shape=tuple(req.init_noise_latent_shape),
-                device=torch.device("cpu"),
-                dtype=torch.float32,
-            )
+        # Path 1: driver-authoritative x_T — a pre-shipped initial_latents tensor
+        # (img2img) OR the lightweight recipe (gids+shape) regenerated on CPU-fp32.
+        # Both handled by NoiseRecipe.resolve() (returns None if neither present).
+        xt = NoiseRecipe.from_rollout_req(req).resolve()
+        if xt is not None:
+            return xt
 
         # Path 2: engine-computed (same-group sharing)
         if not bool(self.cfg.init_same_noise):

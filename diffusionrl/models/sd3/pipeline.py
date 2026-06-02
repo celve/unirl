@@ -25,11 +25,9 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Optional
 
-import torch
-
 from diffusionrl.models.types.pipeline import Pipeline
 from diffusionrl.sde.kernels import CPSSDEStrategy, StepStrategy
-from diffusionrl.sde.noise import regen_initial_noise
+from diffusionrl.types.noise_recipe import NoiseRecipe
 from diffusionrl.types.primitives import Texts
 from diffusionrl.types.rollout_req import RolloutReq
 from diffusionrl.types.rollout_resp import RolloutResp, RolloutTrack
@@ -182,19 +180,9 @@ class SD3Pipeline(Pipeline):
 
         schedule = req.sigmas.to(self.bundle.device)
 
-        initial_cond = (req.request_conditions or {}).get("initial_latents")
-        initial_latents = getattr(initial_cond, "latents", None) if initial_cond is not None else None
-        # Driver shipped the x_T RECIPE (gids + shape): regenerate the byte-identical
-        # x_T here on CPU-fp32 (diffuse moves it on). request_conditions['initial_latents']
-        # still wins when present (img2img / first-frame conditioning).
-        if initial_latents is None and req.init_noise_group_ids and req.init_noise_latent_shape:
-            initial_latents = regen_initial_noise(
-                noise_group_ids=list(req.init_noise_group_ids),
-                base_seed=int(params.seed) if getattr(params, "seed", None) is not None else 0,
-                latent_shape=tuple(req.init_noise_latent_shape),
-                device=torch.device("cpu"),
-                dtype=torch.float32,
-            )
+        # Driver-authoritative x_T via the model-aware recipe (NoiseRecipe); a
+        # pre-shipped initial_latents tensor (img2img / i2v first-frame) still wins.
+        initial_latents = NoiseRecipe.from_rollout_req(req).resolve()
 
         latent_seg = self.diffusion.diffuse(
             sd3_conds, schedule=schedule, params=params, initial_latents=initial_latents

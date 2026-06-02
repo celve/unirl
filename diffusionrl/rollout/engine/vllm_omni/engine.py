@@ -505,12 +505,24 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         # per-request group; no group_by_request needed.
         if self.cfg.modality == "dit_recaption":
             per_request: list = []
-            for sample_id, prompt in zip(req.sample_ids, prompts):
+            recipe_gids = list(req.init_noise_group_ids or [])
+            for idx, (sample_id, prompt) in enumerate(zip(req.sample_ids, prompts)):
                 sp_for_prompt = copy.deepcopy(sampling_params_list)
                 seed = seed_from_sample_id(sample_id)
+                gid = recipe_gids[idx] if idx < len(recipe_gids) else None
                 for sp in sp_for_prompt:
                     if hasattr(sp, "seed"):
                         sp.seed = seed
+                    # Each single-prompt generate runs with batch_size=1 in the
+                    # worker, so ship ONLY this sample's x_T recipe gid. The deepcopy
+                    # carries the whole batch's gids; left untouched, the worker's
+                    # NoiseRecipe.for_batch(1) would slice gids[:1] and hand gids[0]
+                    # to EVERY image — collapsing all per-rollout x_T to the first
+                    # sample's noise (GRPO group-diversity loss). Mirrors the
+                    # per-sample seed override above.
+                    ea = getattr(sp, "extra_args", None)
+                    if gid is not None and isinstance(ea, dict) and ea.get("init_noise_group_ids"):
+                        ea["init_noise_group_ids"] = [str(gid)]
                 per_request.append(list(self._omni.generate([prompt], sp_for_prompt, **generate_kwargs)))
             return _to_rollout_resp(req, per_request, modality=self.cfg.modality)
 

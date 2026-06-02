@@ -338,6 +338,19 @@ def _to_omni_dit_recaption(
     sde_indices = getattr(diff_params, "sde_indices", None)
     if sde_indices is not None:
         extra_args["sde_indices"] = sorted({int(i) for i in sde_indices})
+    # Driver-authoritative x_T RECIPE: ship the WHOLE batch's per-image gids + the
+    # x_T regen base seed. That base seed is DISTINCT from the per-image SAMPLING
+    # seed the engine sets via ``seed_from_sample_id`` (one generate() per prompt,
+    # see above) — they don't conflict, and per-image x_T variety comes from the
+    # gid (``r{rollout}:{sample_id}``), not this seed. The engine's per-prompt
+    # dit_recaption loop slices each single-prompt (batch_size=1) call down to its
+    # own gid; the worker's ``prepare_latents`` hook then regenerates the
+    # byte-identical x_T. No ``init_noise_latent_shape`` — HI3's DiT latent shape is
+    # AR-dynamic and is resolved in the worker. Without this the recipe never
+    # reaches the worker and HI3 falls back to upstream RNG (frozen-noise overfit).
+    if req.init_noise_group_ids:
+        extra_args["init_noise_group_ids"] = [str(g) for g in req.init_noise_group_ids]
+        extra_args["init_noise_seed"] = int(diff_params.seed) if getattr(diff_params, "seed", None) is not None else 0
     if extra_args:
         diff_kwargs["extra_args"] = extra_args
 
@@ -471,24 +484,23 @@ def _to_omni_per_stage(
     if sde_indices is not None:
         extra_args["sde_indices"] = sorted({int(i) for i in sde_indices})
 
-    # HI3 does NOT support driver-supplied initial latents today: the
-    # latent shape on the DiT stage depends on the AR-emitted token count
-    # (only known after stage 0 finishes), and ``RLHunyuanImage3Pipeline``
-    # does not override ``prepare_latents`` to consume an injected x_T.
-    # If we silently pass the tensor through, the worker would draw its
-    # own noise via upstream RNG anyway — which is the exact "set on
-    # rollout, ignored on rollout" silent-fallback class of bug. Fail
-    # fast at the translator boundary instead.
+    # HI3's DiT latent shape is AR-dynamic (only known in-worker after stage 0),
+    # so the driver cannot ship a materialized x_T tensor — still reject one.
     if (req.request_conditions or {}).get("initial_latents") is not None:
         raise NotImplementedError(
-            f"_to_omni_per_stage: modality={modality!r} does not currently "
-            f"consume request_conditions['initial_latents']. To enable "
-            f"driver-side x_T injection on HI3, add a ``prepare_latents`` "
-            f"override on RLHunyuanImage3Pipeline (mirroring the SD3 "
-            f"override at rollout/engine/vllm_omni/sd3/pipeline.py) and give "
-            f"the HI3 pipeline a ``latent_shape`` classmethod so the driver "
-            f"x_T recipe (init_noise_latent_shape) covers its geometry."
+            f"_to_omni_per_stage: modality={modality!r} cannot consume a "
+            f"pre-materialized request_conditions['initial_latents'] tensor "
+            f"(HI3 DiT latent shape is AR-dynamic). Ship the x_T RECIPE via "
+            f"req.init_noise_group_ids instead."
         )
+
+    # Driver-authoritative x_T RECIPE: per-image, rollout-keyed gids (+ seed; NO
+    # shape — RLHunyuanImage3Pipeline's prepare_latents hook fills the AR-resolved
+    # shape and regenerates the byte-identical x_T via NoiseRecipe.for_batch).
+    # HI3Trainer authors these on the dit_req; forward them through extra_args.
+    if req.init_noise_group_ids:
+        extra_args["init_noise_group_ids"] = [str(g) for g in req.init_noise_group_ids]
+        extra_args["init_noise_seed"] = int(seed) if seed is not None else 0
 
     if extra_args:
         diff_kwargs["extra_args"] = extra_args

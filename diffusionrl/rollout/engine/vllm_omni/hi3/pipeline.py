@@ -65,6 +65,7 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from diffusionrl.rollout.engine.vllm_omni.hi3.sde_scheduler import (
     FlowMatchSDEDiscreteScheduler,
 )
+from diffusionrl.types.noise_recipe import NoiseRecipe
 
 
 def _detach_cpu(t: Any) -> Any:
@@ -103,6 +104,11 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
         # per pipeline instance.
         self._fused_capture: Optional[Dict[str, Any]] = None
         self._prepare_inputs_patched: bool = False
+        # Driver-authored x_T recipe (seed + per-sample gids) for THIS request,
+        # set at the top of forward() from sampling_params.extra_args. The
+        # prepare_latents hook regenerates x_T from it. None → upstream RNG.
+        self._pending_noise_recipe: Optional[NoiseRecipe] = None
+        self._prepare_latents_patched: bool = False
 
     def _ensure_scheduler_for_eta(self, eta: float) -> None:
         """Install our trajectory-capturing scheduler regardless of ``eta``.
@@ -202,6 +208,81 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
         transformer.prepare_inputs_for_generation = wrapped
         self._prepare_inputs_patched = True
 
+    def _install_prepare_latents_hook(self) -> None:
+        """Idempotently wrap ``transformer.prepare_latents`` to inject the
+        driver-authored x_T recipe.
+
+        HI3's DiT latent shape is dynamic (depends on AR-emitted tokens, so it
+        is only known when upstream calls ``prepare_latents`` with the resolved
+        ``image_size`` / ``latent_channel``). The driver therefore cannot ship a
+        materialized x_T tensor — it ships only a RECIPE (seed + per-sample
+        gids) via ``sampling_params.extra_args``. This hook recomputes the
+        per-sample latent shape EXACTLY as upstream does (mirrors
+        ``hunyuan_image3_transformer.py:2489`` — ``latent_scale_factor`` applied
+        to ``image_size``), regenerates the byte-identical noise via
+        ``NoiseRecipe.for_batch(...).resolve(...)`` (CPU-fp32 → device, the shared
+        :func:`regen_initial_noise` under the hood), and feeds it in as
+        ``latents`` so upstream skips its own RNG draw. When no recipe is set
+        (``_pending_noise_recipe is None``) it is a pass-through.
+
+        Mirrors :meth:`_install_prepare_inputs_hook` (same wrap-once pattern).
+        """
+        if self._prepare_latents_patched:
+            return
+        _ = self.pipeline
+        # prepare_latents lives on the INNER t2i pipeline (HunyuanImage3Text2ImagePipeline,
+        # hunyuan_image3_transformer.py:2489), called as self.prepare_latents(...) at
+        # :2707 — NOT on self._pipeline.model (the MoE backbone, which holds
+        # prepare_inputs_for_generation). latent_scale_factor is also on the t2i
+        # pipeline. Setting the instance attribute shadows the bound method.
+        inner = self._pipeline
+        orig = inner.prepare_latents
+        pipeline_self = self
+
+        def wrapped(batch_size, latent_channel, image_size, dtype, device, generator, latents=None):
+            recipe = pipeline_self._pending_noise_recipe
+            if latents is None and recipe is not None:
+                # HI3-specific: resolve the per-sample latent shape from the
+                # (post-AR) prepare_latents args, mirroring upstream's own
+                # arithmetic — (latent_channel, *[image_size // latent_scale_factor]).
+                lsf = getattr(inner, "latent_scale_factor", None)
+                if lsf is None:
+                    factors = (1,) * len(image_size)
+                elif isinstance(lsf, int):
+                    factors = (lsf,) * len(image_size)
+                else:
+                    factors = tuple(lsf)
+                per_sample_shape = (
+                    int(latent_channel),
+                    *[int(s) // int(f) for s, f in zip(image_size, factors)],
+                )
+                # The recipe must arrive already aligned to THIS call's batch: the
+                # engine ships one gid per single-prompt dit_recaption generate
+                # (batch_size=1) and one gid per prompt for batched modalities
+                # (batch_size=N). ``batch_size`` here is the un-doubled prompt count
+                # (any CFG expansion happens later, inside the denoise loop), so a
+                # length mismatch means the engine dispatch forwarded the wrong gid
+                # slice — fail loud rather than let for_batch silently slice gids[0]
+                # onto every image (the x_T-collapse class of bug).
+                gids = recipe.noise_group_ids
+                if gids and len(gids) != batch_size:
+                    raise RuntimeError(
+                        f"RLHunyuanImage3Pipeline.prepare_latents: x_T recipe carries "
+                        f"{len(gids)} gid(s) but this DiT call has batch_size={batch_size}. "
+                        f"The engine must ship gids aligned to the per-call batch (see "
+                        f"VLLMOmniRolloutEngine.generate's dit_recaption per-prompt slice)."
+                    )
+                # Fill the post-AR shape; gids already match the batch (asserted),
+                # so for_batch is a no-op slice. Resolution is shared with the
+                # trainside pipelines — only the shape's fill site differs.
+                latents = recipe.for_batch(batch_size, latent_shape=per_sample_shape).resolve(
+                    device=device, dtype=dtype
+                )
+            return orig(batch_size, latent_channel, image_size, dtype, device, generator, latents=latents)
+
+        inner.prepare_latents = wrapped
+        self._prepare_latents_patched = True
+
     def forward(self, req: OmniDiffusionRequest, **kwargs) -> DiffusionOutput:
         # Read eta off the typed field (``OmniDiffusionSamplingParams.eta``,
         # data.py:252). ``_ensure_scheduler_for_eta`` installs our scheduler
@@ -227,6 +308,20 @@ class RLHunyuanImage3Pipeline(HunyuanImage3Pipeline):
         # ``_ensure_scheduler_for_eta`` call).
         self._fused_capture = None
         self._install_prepare_inputs_hook()
+
+        # Stash THIS request's x_T recipe (seed + per-sample gids) for the
+        # prepare_latents hook. Shipped by the driver via _build_req →
+        # vllm_omni/request.py extra_args. Absent → upstream RNG (no injection).
+        _extra = getattr(req.sampling_params, "extra_args", None) or {}
+        _gids = _extra.get("init_noise_group_ids")
+        # latent_shape stays None here (HI3's DiT shape is AR-dynamic); the hook
+        # fills it via NoiseRecipe.for_batch once prepare_latents reveals it.
+        self._pending_noise_recipe = (
+            NoiseRecipe(noise_group_ids=[str(g) for g in _gids], base_seed=int(_extra.get("init_noise_seed", 0)))
+            if _gids
+            else None
+        )
+        self._install_prepare_latents_hook()
 
         # Delegate everything else (prompt construction, system prompt,
         # AR-bridged cot_text, batch_cond_image_info, prepare_model_inputs,

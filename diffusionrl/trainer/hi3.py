@@ -323,12 +323,27 @@ class HI3Trainer(BaseTrainer):
         n_ar = len(ar_shell.sample_ids)
         dit_prompts = Texts(texts=[prompts[i // n_recaptions] for i in range(n_ar) for _ in range(n_images)])
         dit_cot = Texts(texts=[recaptions.texts[i] for i in range(n_ar) for _ in range(n_images)])
+        # Driver-authoritative x_T RECIPE (per-IMAGE, ROLLOUT-keyed gids). HI3's
+        # DiT latent shape is AR-dynamic, so we ship only the recipe (no shape);
+        # the worker's prepare_latents hook fills the shape post-AR and regenerates
+        # the byte-identical x_T (NoiseRecipe). Keying on (rollout_id, image
+        # sample_id) makes x_T per-rollout-VARYING — overriding the engine's
+        # seed_from_sample_id, which is keyed on the rollout-STABLE sample_id alone
+        # and so reused the SAME x_T every rollout (frozen-noise overfit, the bug
+        # this fixes). ``_dump_rollout_id`` is set to the current rollout_id by the
+        # train loop just before train_step. Opt out via DISABLE_DRIVER_XT.
+        dit_noise_gids = (
+            []
+            if os.environ.get("DISABLE_DRIVER_XT")
+            else [f"r{int(self._dump_rollout_id)}:{sid}" for sid in img_shell.sample_ids]
+        )
         dit_req = RolloutReq(
             sample_ids=list(img_shell.sample_ids),
             group_ids=list(img_shell.parent_ids),
             primitives={"text": dit_prompts, "cot_text": dit_cot},
             request_conditions={},
             sampling_params=diff_params,
+            init_noise_group_ids=dit_noise_gids,
         )
         dit_resp = self.dit_rollout.generate(dit_req)
         img_inner = dit_resp.tracks.get(IMAGE_TRACK)

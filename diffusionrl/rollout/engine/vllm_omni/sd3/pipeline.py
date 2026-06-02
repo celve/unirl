@@ -48,7 +48,7 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from diffusionrl.rollout.engine.vllm_omni._shared.flow_match_sde_scheduler import (
     FlowMatchSDEDiscreteScheduler,
 )
-from diffusionrl.sde.noise import regen_initial_noise
+from diffusionrl.types.noise_recipe import NoiseRecipe
 
 
 def _detach_cpu(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
@@ -245,13 +245,11 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                         f"RLStableDiffusion3Pipeline._resolve_pending_noise: index "
                         f"{idx} out of bounds for init_noise_group_ids len={len(recipe_gids)}."
                     )
-                self._pending_request_noise = regen_initial_noise(
+                self._pending_request_noise = NoiseRecipe(
                     noise_group_ids=[str(recipe_gids[idx])],
                     base_seed=int(extra.get("init_noise_seed", 0)),
                     latent_shape=tuple(extra["init_noise_latent_shape"]),
-                    device=torch.device("cpu"),
-                    dtype=torch.float32,
-                )  # [1, C, H, W] — matches the noise_batch[idx:idx+1] slice shape
+                ).resolve()  # [1, C, H, W] — matches the noise_batch[idx:idx+1] slice shape
                 return
             self._pending_request_noise = None
             return
