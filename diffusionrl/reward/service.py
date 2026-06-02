@@ -208,6 +208,31 @@ class RewardService(Remote):
             )
 
         rewards = torch.tensor(reward_response.rewards, dtype=torch.float32)
+
+        # Zero reward for AR generations that hit max_new_tokens without
+        # terminating (sglang finish == "length"). A non-terminating trace whose
+        # text happens to contain a matching answer (e.g. a mid-reasoning
+        # \boxed{}) must not be rewarded, else training learns to ramble up to the
+        # token cap — a real failure mode at long max_new_tokens (32k thinking).
+        # response_length >= max_new_tokens is the truncation signal; segment
+        # lengths and rewards are shard-aligned (one entry per sample).
+        ar_params = get_ar_params(req.sampling_params)
+        if ar_params is not None and track.segment is not None:
+            seg_lengths = getattr(track.segment, "lengths", None)
+            if seg_lengths is not None and seg_lengths.numel() == rewards.numel():
+                truncated = seg_lengths.to(rewards.device) >= int(ar_params.max_new_tokens)
+                rewards = torch.where(truncated, torch.zeros_like(rewards), rewards)
+            elif seg_lengths is not None:
+                # Mismatched counts are expected when the AR segment is not 1:1 with
+                # rewards (e.g. composed PE: N AR segments vs N*M rewards), so we skip
+                # rather than crash. But in a pure-AR run a mismatch means truncation
+                # zeroing silently did nothing — log it so the skip is discoverable.
+                logger.debug(
+                    "RewardService: skipped AR truncation-zeroing (seg_lengths=%d != rewards=%d).",
+                    seg_lengths.numel(),
+                    rewards.numel(),
+                )
+
         component_rewards = {
             str(name): torch.tensor(list(values or []), dtype=torch.float32)
             for name, values in dict(reward_response.component_rewards or {}).items()

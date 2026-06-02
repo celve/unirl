@@ -25,6 +25,7 @@ from typing import Any, List, Optional, Tuple
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from diffusionrl.models.types.ar import ARSamplingParams, ARStage, ARStep, left_pad_prompt
 from diffusionrl.types.segments import TextSegment
@@ -350,28 +351,55 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
             if device.type == "cuda" and self.autocast_dtype in (torch.float16, torch.bfloat16)
             else nullcontext()
         )
+        # Run the model BODY only (no lm_head) so we never materialize the full
+        # [B, L, vocab] logits. At 32k that tensor is ~10 GiB (forward) + ~10 GiB
+        # (grad) and is the dominant replay-memory term; last_hidden_state is
+        # [B, L, H] (H=2048, ~75x smaller). Safe under this FSDP setup: only the
+        # Qwen3DecoderLayers are sharded (they gather via their own hooks when the
+        # body runs); embed/norm/lm_head are full params, so .model(...) and
+        # .lm_head(...) work called directly.
         with autocast_ctx:
-            out = self.model.transformer(
+            body_out = self.model.transformer.model(
                 input_ids=full_ids,
                 attention_mask=full_mask,
                 position_ids=position_ids,
                 use_cache=False,
                 return_dict=True,
             )
-            logits = out.logits
+            hidden = body_out.last_hidden_state  # [B, L, H]
 
         if T_max == 0:
             return torch.zeros(0, dtype=self.logprob_dtype, device=device)
 
-        # logits[:, prompt_len - 1 + t, :] predicts response_tokens[:, t].
-        # Divide by T so the returned logp matches SGLang's sampler
-        # (``log_softmax(logits/T)``); old_logp uses the same scaling.
-        # log_softmax stays in FP32 (outside the autocast scope) so the
-        # GRPO ratio / clip math starts from FP32, matching SD3.
-        pred_logits = logits[:, prompt_len - 1 : prompt_len - 1 + T_max, :].float()
+        # Apply lm_head only to response positions, chunked over the time dim, with
+        # the identity  log_softmax(x)[tok] = x[tok] - logsumexp(x)  so we never
+        # materialize a full [B, T_max, vocab] tensor (FP32 that is ~18.5 GiB at
+        # 32k). Gradient-checkpoint each chunk so the per-chunk lm_head + FP32
+        # upcast is recomputed in backward rather than held. log_softmax stays FP32
+        # (outside the autocast scope) so the GRPO ratio / clip math starts from
+        # FP32, matching SD3. Divide by T so the returned logp matches SGLang's
+        # sampler (log_softmax(logits/T)); old_logp uses the same scaling.
+        # Numerically identical (value + gradient) to dense lm_head + log_softmax
+        # + gather, since logits == lm_head(last_hidden_state).
         T = float(temperature) if float(temperature) > 0.0 else 1.0
-        log_probs_full = F.log_softmax(pred_logits / T, dim=-1)
-        per_token = log_probs_full.gather(-1, response_tokens.unsqueeze(-1)).squeeze(-1)
+        lm_head = self.model.transformer.lm_head
+        resp_hidden = hidden[:, prompt_len - 1 : prompt_len - 1 + T_max, :]  # [B, T_max, H]
+
+        def _logp_chunk(h: torch.Tensor, tok: torch.Tensor) -> torch.Tensor:
+            lf = lm_head(h).float() / T  # [B, chunk, vocab] FP32
+            chosen = lf.gather(-1, tok.unsqueeze(-1)).squeeze(-1)
+            return chosen - torch.logsumexp(lf, dim=-1)
+
+        chunk = 2048  # ~1.2 GiB FP32 transient per chunk (chunk x vocab x 4B)
+        parts: List[torch.Tensor] = []
+        for s in range(0, T_max, chunk):
+            h = resp_hidden[:, s : s + chunk, :]
+            tok = response_tokens[:, s : s + chunk]
+            if torch.is_grad_enabled() and h.requires_grad:
+                parts.append(checkpoint(_logp_chunk, h, tok, use_reentrant=False))
+            else:
+                parts.append(_logp_chunk(h, tok))
+        per_token = torch.cat(parts, dim=1)
 
         flat: List[torch.Tensor] = []
         for b in range(batch_size):
