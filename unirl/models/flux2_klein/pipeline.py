@@ -37,7 +37,7 @@ models, Klein included.
 from __future__ import annotations
 
 import dataclasses as _dc
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from unirl.models.types.pipeline import Pipeline
 from unirl.sde.kernels import DanceSDEStrategy, StepStrategy
@@ -87,16 +87,45 @@ class Flux2KleinPipeline(Pipeline):
         self,
         *,
         bundle: Flux2KleinBundle,
-        text_embed: Flux2KleinTextEmbedStage,
-        diffusion: Flux2KleinDiffusionStage,
-        vae_decode: Flux2KleinVAEDecodeStage,
+        text_embed: Optional[Flux2KleinTextEmbedStage] = None,
+        diffusion: Optional[Flux2KleinDiffusionStage] = None,
+        vae_decode: Optional[Flux2KleinVAEDecodeStage] = None,
+        strategy: Optional[StepStrategy] = None,
         shift: float = 1.0,
+        autocast_precision: str = "bf16",
+        trajectory_precision: str = "fp16",
+        logprob_precision: str = "fp32",
+        max_sequence_length: int = 512,
+        qwen3_extraction_layers: Tuple[int, ...] = (9, 18, 27),
     ) -> None:
         super().__init__()
         self.bundle = bundle
-        self.text_embed = text_embed
+        # Optional-stages constructor (mirrors SD3Pipeline / QwenImagePipeline):
+        # the trainer instantiates the pipeline via
+        # ``remote_hydra(pipeline_cfg, bundle=self.bundle)``, so the flat conf
+        # ``pipeline:`` block carries strategy / precision / text-embed knobs and
+        # the trainer injects ``bundle=``. text_embed/diffusion/vae_decode are
+        # built from the bundle here when not supplied.
+        self.text_embed = (
+            text_embed
+            if text_embed is not None
+            else Flux2KleinTextEmbedStage(
+                bundle,
+                max_sequence_length=max_sequence_length,
+                extraction_layers=tuple(qwen3_extraction_layers),
+            )
+        )
+        if diffusion is None:
+            diffusion = Flux2KleinDiffusionStage(
+                model=bundle,
+                step=Flux2KleinDiffusionStep(),
+                strategy=strategy if strategy is not None else DanceSDEStrategy(),
+                autocast_precision=autocast_precision,
+                trajectory_precision=trajectory_precision,
+                logprob_precision=logprob_precision,
+            )
         self.diffusion = diffusion
-        self.vae_decode = vae_decode
+        self.vae_decode = vae_decode if vae_decode is not None else Flux2KleinVAEDecodeStage(bundle)
         # ``shift`` is retained as an attribute for the hosting engine
         # to read when constructing the σ policy. For Klein, the
         # empirical-μ schedule fully replaces static shifting at
@@ -210,6 +239,14 @@ class Flux2KleinPipeline(Pipeline):
         allowed = {f.name for f in _dc.fields(Flux2KleinDiffusionParams)}
         params_dict = {k: getattr(sampling, k) for k in allowed if hasattr(sampling, k)}
         params = Flux2KleinDiffusionParams(**params_dict)
+        # init_same_noise shares the initial latent within each prompt group. The
+        # group key is the per-sample group id, which rides on the (already-sliced)
+        # req — surface it to the noise sampler when the driver didn't pre-ship
+        # noise_group_ids on sampling_params (a shared_field that isn't batch-sliced).
+        # Mirrors SD3Pipeline.generate; without it generate_latents asserts on the
+        # missing noise_group_ids when init_same_noise=True.
+        if bool(params.init_same_noise) and not params.noise_group_ids:
+            params = _dc.replace(params, noise_group_ids=list(req.group_ids))
 
         text_cond = self.text_embed.embed(texts)
         # CFG empty negative: Klein's canonical training-script setting is

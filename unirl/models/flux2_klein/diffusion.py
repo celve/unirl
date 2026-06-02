@@ -281,14 +281,15 @@ class Flux2KleinDiffusionStage(DiffusionStage[Flux2KleinConditions]):
     boundary lives in :class:`Flux2KleinDiffusionStep`.
 
     ``_no_split_modules`` is the model-side fallback used by
-    FSDPPolicy: Klein's transformer block class is
-    ``Flux2TransformerBlock`` (single-stream) plus
-    ``Flux2JointTransformerBlock`` (dual-stream).
+    FSDPPolicy: Klein's transformer block classes are
+    ``Flux2TransformerBlock`` (dual-stream) plus
+    ``Flux2SingleTransformerBlock`` (single-stream). These match the
+    installed diffusers ``Flux2Transformer2DModel._no_split_modules``.
     """
 
     _no_split_modules: ClassVar[Tuple[str, ...]] = (
         "Flux2TransformerBlock",
-        "Flux2JointTransformerBlock",
+        "Flux2SingleTransformerBlock",
     )
 
     # FLUX.2-klein VAE spatial downsample (8×) and patchify factor (2×)

@@ -457,8 +457,21 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         """Resolve the per-sample latent shape via SGLang's pipeline_config."""
         from types import SimpleNamespace
 
+        pcfg = self._server_args.pipeline_config
+        # SGLang populates ``arch_config.vae_scale_factor`` lazily in
+        # ``vae_config.post_init()`` (its own comfyui_* pipelines call it
+        # explicitly during load). Our standalone prepare_latent_shape call here
+        # — only reached on the init_same_noise pre-noise path — can run before
+        # that hook fired on this config instance, so ensure it's populated.
+        # Guarded + idempotent: only acts when the field is absent and a
+        # post_init() hook exists (e.g. FLUX.2's Flux2VAEConfig).
+        vae_cfg = getattr(pcfg, "vae_config", None)
+        arch = getattr(vae_cfg, "arch_config", None)
+        if arch is not None and not hasattr(arch, "vae_scale_factor") and hasattr(vae_cfg, "post_init"):
+            vae_cfg.post_init()
+
         batch_stub = SimpleNamespace(height=height, width=width, num_frames=num_frames)
-        full_shape = self._server_args.pipeline_config.prepare_latent_shape(
+        full_shape = pcfg.prepare_latent_shape(
             batch_stub,
             batch_size,
             num_frames,
