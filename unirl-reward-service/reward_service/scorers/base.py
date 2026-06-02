@@ -74,7 +74,7 @@ class BaseScorer(ABC):
         * **Per-item failure** (e.g. the model could not read one image): put
           ``float("nan")`` in that item's sub-metric instead of a fabricated
           number. NaN is the in-band "value unavailable" marker — the consumer
-          (DiffusionRL_main) treats any non-finite reward as a sample failure
+          (UniRL) treats any non-finite reward as a sample failure
           and drops it via fail-fast, so a NaN never enters the training signal
           as a real score. Raising instead would fail the whole batch, because
           one ``score()`` call serves the entire reward bucket.

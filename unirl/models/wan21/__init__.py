@@ -1,15 +1,8 @@
-"""WAN 2.1 T2V / I2V pipeline — new four-tier architecture.
+"""WAN 2.1 T2V / I2V pipeline on the typed four-tier architecture.
 
-Re-expression of :class:`unirl.models.wan21.WAN21ModelBundle`
-against the typed ``Bundle`` / ``Pipeline`` / ``EmbedStage`` /
-``DiffusionStage`` / ``DecodeStage`` protocols. Legacy WAN 2.1 keeps
-serving production GRPO (via ``train.py`` + ``model: wan21``); this
-package provides the equivalent pipeline (via ``train.py``
-+ ``model: wan21``).
-
-This is the framework direction — ``unirl/models/`` is being
-deprecated. The legacy bundle stays in tree for the active recipes that
-have not migrated, and to keep the merge surface with ``main`` small.
+Implements the ``Bundle`` / ``Pipeline`` / ``EmbedStage`` /
+``DiffusionStage`` / ``DecodeStage`` protocols. Sibling of
+:mod:`unirl.models.sd3` and :mod:`unirl.models.wan22` (text-to-video peer).
 
 I2V is wired through two optional ``EncodeStage`` siblings:
 :class:`WAN21ImageLatentEncodeStage` (``Images`` → 20-channel mask + VAE

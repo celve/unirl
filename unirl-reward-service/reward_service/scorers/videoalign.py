@@ -58,7 +58,7 @@ def _resolve_torch_dtype(name: str) -> torch.dtype:
 class VideoAlignScorer(BaseScorer):
     name = "videoalign"
     # Overall (= VQ + MQ + TA) is listed first so the default consumer reduction
-    # (DiffusionRL_main's sub_metric_reduce="first") trains on the headline score
+    # (UniRL's sub_metric_reduce="first") trains on the headline score
     # rather than Visual Quality alone. Callers wanting a single axis set
     # sub_metric_reduce or read the named sub-metric explicitly.
     sub_metric_names = ("Overall", "VQ", "MQ", "TA")

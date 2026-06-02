@@ -1,10 +1,8 @@
-"""Qwen-Image pipeline on the new four-tier typed architecture.
+"""Qwen-Image pipeline on the typed four-tier architecture.
 
-Re-expression of ``unirl/models/qwen_image.py`` +
-``unirl/samplers/fsdp/qwen_image_sampler.py`` (the PR #104 OLD
-implementation) against the typed ``Bundle`` / ``Pipeline`` /
-``EmbedStage`` / ``DiffusionStage`` / ``DecodeStage`` protocols. Sibling
-of :mod:`unirl.models.sd3` and :mod:`unirl.models.wan21`.
+Implements the typed ``Bundle`` / ``Pipeline`` / ``EmbedStage`` /
+``DiffusionStage`` / ``DecodeStage`` protocols. Sibling of
+:mod:`unirl.models.sd3` and :mod:`unirl.models.wan21`.
 
 Imports from this package have side effects (Hydra ``register_config``
 calls in ``config.py``), so importing ``unirl.models.qwen_image``

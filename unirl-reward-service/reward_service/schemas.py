@@ -8,7 +8,7 @@ A turn must carry at least one media field — text-only turns are
 rejected.
 
 This module is the **single source of truth** for the RewardService wire
-protocol. The training repo (DiffusionRL_main) builds its HTTP payloads to
+protocol. The training repo (UniRL) builds its HTTP payloads to
 match these models but does not import this package at runtime; a contract
 test there (``tests/reward/test_wire_contract.py``) validates its payloads
 against ``ScoreRequest``, so the two sides cannot drift silently. Any change

@@ -73,7 +73,9 @@ Invoke an entrypoint directly:
 python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside num_devices=8
 ```
 
-Validate a recipe without launching Ray work:
+Compose and resolve a recipe without launching Ray work — checks that the
+config composes and every `${oc.env:...}` resolves (it does not instantiate
+`_target_`s, so it won't catch a bad target):
 
 ```bash
 python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside --cfg job --resolve
@@ -118,10 +120,10 @@ _global_` header so its keys compose at the config root. At startup an entrypoin
 
 1. registers Hydra config dataclasses from the `unirl` package;
 2. composes the chosen `recipes/<bucket>/<recipe>.yaml`;
-3. validates cross-component contracts (e.g. weight-sync and LoRA targets);
-4. builds the trainer, which acquires a Ray `DevicePool` and constructs the
-   rollout and train workers;
-5. runs the rollout → reward → advantage → train → optional weight-sync loop.
+3. builds the trainer, which constructs the typed config objects (whose
+   `__post_init__` checks validate per-field invariants), acquires a Ray
+   `DevicePool`, and constructs the rollout and train workers;
+4. runs the rollout → reward → advantage → train → optional weight-sync loop.
 
 Deployment modes — set by the rollout engine `_target_` and the optional `sync:`
 section:

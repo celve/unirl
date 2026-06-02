@@ -20,7 +20,7 @@ logging:
   report_to_wandb: true
   project_name: unirl-flowgrpo-newstac
   run_name: argrpo_qwen_vl_trainside_lora_4x8
-  entity: diffusionrl-reproduce
+  entity: ${oc.env:WANDB_ENTITY,null}
   tags: [argrpo, qwen-vl, geo3k-mc, 4x8, v2, vlmtrainer, trainside, lora]
 
 bundle:

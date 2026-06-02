@@ -85,12 +85,11 @@ _SUPPORTED_MEDIA_REF_ROLES: Set[Tuple[str, str]] = {("image", "condition")}
 def _reject_unsupported_media_refs(batch: Dict[str, Any], *, context: str) -> None:
     """Fail loud when a dataset hands unsupported media_refs to the driver.
 
-    The ``media_refs`` channel (``MediaRef(uri, modality, role)`` URI
-    list) was originally OLD-only. The driver now consumes the
-    ``(image, condition)`` (modality, role) pair via
-    :func:`_load_condition_images`
+    The ``media_refs`` channel carries a ``MediaRef(uri, modality, role)``
+    URI list. The driver consumes the ``(image, condition)`` (modality,
+    role) pair via :func:`_load_condition_images`
     → ``RolloutInputs.primitives['image']: Images``;
-    all other (modality, role) combinations are still untyped on NEW and
+    all other (modality, role) combinations are not yet typed and
     would be silently dropped (degrading I2V/V2V/text-conditioned jobs
     into a misconfigured run).
 

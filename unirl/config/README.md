@@ -50,8 +50,10 @@ Validation is split into two layers:
 - cross-component validators in `validation.py` for contracts spanning
   rollout engine, sync, training geometry, LoRA, offload, and dotpaths.
 
-`unirl.train` runs cross-component validators before any Ray actor is
-created. This keeps config mistakes cheap to catch.
+The per-dataclass checks run automatically when config objects are
+constructed. The cross-component validators in `validation.py` are not
+currently invoked by the training entrypoints; call the relevant
+`validate_*(cfg)` explicitly where you need them.
 
 ## Mutable Config
 

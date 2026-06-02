@@ -78,7 +78,7 @@ sender (`full/*` or `lora`) pairs with the matching receiver on the engine.
 
 ## Transfer Queue — Separate Concern
 
-`unirl.distributed.transfer_queue` is **not** part of weight sync. It is a
+`unirl.distributed.tensor.backend.transfer_queue` is **not** part of weight sync. It is a
 data-plane bus for bulky rollout outputs (conditions, latents, rewards) flowing
 from rollout actors back to the trainer in separate-deployment mode. Weight sync
 is trainer→rollout; transfer queue is rollout→trainer. Don't conflate them when

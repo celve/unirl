@@ -8,13 +8,13 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
-### Changed (2026-05-31) — cross-repo reward calling contract (with DiffusionRL_main)
+### Changed (2026-05-31) — cross-repo reward calling contract (with UniRL)
 
 - **Failure contract made explicit.** `BaseScorer.score` docstring now defines
   the protocol: per-item failures return `float("nan")` (one bad item must not
   fail the batch, since one `score()` call serves the whole reward bucket);
   whole-reward / config failures `raise` (captured in `errors[i][reward]`). The
-  consumer (DiffusionRL_main) treats any non-finite reward as a sample failure
+  consumer (UniRL) treats any non-finite reward as a sample failure
   and fail-fasts, so a NaN never reaches the RL signal as a real score. `ocr`'s
   NaN-on-failure comment reworded to match (no logic change).
 - **`geneval` raises on missing metadata** (was a silent `{"geneval": 0.0}`). A
@@ -24,7 +24,7 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
   the consumer's default `sub_metric_reduce="first"` trains on Overall, not
   Visual Quality alone.
 - **`schemas.py` declared the single source of truth** for the wire protocol.
-  DiffusionRL_main's `RemoteRewardBackend` builds payloads to match it, and a
+  UniRL's `RemoteRewardBackend` builds payloads to match it, and a
   contract test there (`tests/reward/test_wire_contract.py`) validates them
   against `ScoreRequest`. This fixes a latent drift: the caller's video payload
   used a flat `{video_b64, prompt}` body this schema rejects with HTTP 422 — it

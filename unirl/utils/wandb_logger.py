@@ -68,7 +68,7 @@ class UniRLWandBLogger:
             rank: Process rank (only rank 0 logs)
             image_log_interval: How often to log images (in rollouts)
             enabled: Whether to enable logging
-            tags: List of tags for the WandB run. Defaults to ['diffusionrl-reproduce'] if not provided.
+            tags: List of tags for the WandB run. Defaults to ['unirl'] if not provided.
             entity: WandB entity (team or username). If None, uses the default entity.
             require_success: Raise immediately if WandB is unavailable or init fails.
         """
@@ -473,7 +473,7 @@ def init_logger(
         run_name: WandB run name
         config: Training configuration
         rank: Process rank
-        tags: List of tags for the WandB run. Defaults to ['diffusionrl-reproduce'] if not provided.
+        tags: List of tags for the WandB run. Defaults to ['unirl'] if not provided.
         entity: WandB entity (team or username). If None, uses the default entity.
         require_success: Raise immediately if WandB init fails.
         **kwargs: Additional arguments for UniRLWandBLogger

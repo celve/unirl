@@ -35,7 +35,7 @@ logging:
   report_to_wandb: true
   project_name: unirl-spo-dppo
   run_name: ar_spo_dppo_qwen3-8b_4x8_v2_sglang
-  entity: diffusionrl-reproduce
+  entity: ${oc.env:WANDB_ENTITY,null}
   tags: [spo-dppo, qwen3, gsm8k, 4x8, v2, sglang]
 
 bundle:

@@ -1,15 +1,9 @@
-"""HunyuanVideo-1.5 pipeline on the new four-tier typed architecture.
+"""HunyuanVideo-1.5 pipeline on the typed four-tier architecture.
 
-Re-expression of ``unirl/models/hunyuan_veido1p5.py`` +
-``unirl/samplers/fsdp/hunyuan_veido1p5_sampler.py`` (the PR #101
-OLD implementation) against the typed ``Bundle`` / ``Pipeline`` /
-``EmbedStage`` / ``DiffusionStage`` / ``DecodeStage`` protocols.
-Sibling of :mod:`unirl.models.wan21` (text-to-video peer)
-and :mod:`unirl.models.hunyuan_image3` (Hunyuan-family peer).
-
-The ``hunyuan_veido1p5`` typo is dropped here; the package is
-named ``hunyuan_video15`` (canonical). OLD will be deleted in a
-follow-up PR, so the typo is contained to OLD's death-rattle window.
+Implements the typed ``Bundle`` / ``Pipeline`` / ``EmbedStage`` /
+``DiffusionStage`` / ``DecodeStage`` protocols. Sibling of
+:mod:`unirl.models.wan21` (text-to-video peer) and
+:mod:`unirl.models.hunyuan_image3` (Hunyuan-family peer).
 
 Imports from this package have side effects (Hydra ``register_config``
 calls in ``config.py``), so importing
