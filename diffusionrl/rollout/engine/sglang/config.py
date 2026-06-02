@@ -85,6 +85,15 @@ class SGLangEngineConfig(BaseEngineConfig):
     local_mode: bool = True
     disable_autocast: bool = False
 
+    # --- Forward chunking ---
+    # Intra-call chunk size for the DiffGenerator forward path. When set and a
+    # request exceeds it, ``generate`` slices the request into ``forward_batch_size``
+    # -sample sub-batches, runs one SGLang forward per chunk, and concatenates —
+    # bounding DiT-forward / VAE-decode peak memory (SGLang's memory-saver pool
+    # reabsorbs freed space, so the per-forward activation is otherwise bounded
+    # only by the whole batch). ``None`` = whole batch in a single forward.
+    forward_batch_size: Optional[int] = None
+
     # --- Weight sync ---
     target_modules: Optional[Tuple[str, ...]] = None
 
@@ -124,6 +133,10 @@ class SGLangEngineConfig(BaseEngineConfig):
         require(
             self.sp_degree is None or self.sp_degree >= 1,
             f"SGLangEngineConfig.sp_degree must be >= 1 when set; got {self.sp_degree!r}",
+        )
+        require(
+            self.forward_batch_size is None or self.forward_batch_size >= 1,
+            f"SGLangEngineConfig.forward_batch_size must be >= 1 when set; got {self.forward_batch_size!r}",
         )
         require(
             self.local_mode or (self.host is not None and self.scheduler_port is not None),

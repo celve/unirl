@@ -335,8 +335,37 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         # Main-repo SSOT for σ: pin once via the shared helper. Request
         # translator reads ``req.sigmas`` (no recompute) and forwards to
         # SGLang; response handler asserts SGLang echoed back what we sent.
+        # ``sigmas`` is a shared field, so the ``req.slice`` below keeps it
+        # intact and every chunk reuses this one schedule.
         ensure_req_sigmas(req, self.schedule_policy)
 
+        # ``forward_batch_size`` bounds the per-forward activation: slice the
+        # request into chunks, run one SGLang forward each, and concat. Noise is
+        # resolved per chunk (not sliced from a full-batch tensor) so both the
+        # pre-shipped ``initial_latents`` path (sliced by ``req.slice``) and the
+        # ``init_same_noise`` group-keyed path stay correct; ``RolloutResp.concat``
+        # remaps ``segment.sample_indices`` so the reassembled response matches an
+        # unchunked call. Determinism caveat: when neither pre-shipped latents nor
+        # ``init_same_noise`` is set, SGLang draws its own initial noise and a
+        # different chunk size can change its batch layout (and thus sampling).
+        fbs = self.cfg.forward_batch_size
+        bs = int(req.batch_size)
+        if fbs is None or bs <= fbs:
+            return self._generate_batch(req)
+
+        outputs: List[RolloutResp] = []
+        for start in range(0, bs, fbs):
+            end = min(start + fbs, bs)
+            outputs.append(self._generate_batch(req.slice(start, end)))
+            torch.cuda.empty_cache()
+        return RolloutResp.concat(outputs)
+
+    def _generate_batch(self, req: RolloutReq) -> RolloutResp:
+        """Run one SGLang forward over an already-σ-pinned request.
+
+        Assumes ``ensure_req_sigmas`` has populated ``req.sigmas`` (the chunking
+        wrapper in :meth:`generate` does this once before slicing).
+        """
         initial_noise = self._resolve_initial_noise(req)
 
         kwargs = _to_sglang_kwargs(
