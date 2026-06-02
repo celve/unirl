@@ -5,11 +5,28 @@ UniRL. Each folder pairs a focused, annotated config extract with a README that
 explains *what* the algorithm optimizes, *the math*, and *where it lives in the
 code*.
 
+If you are new to this codebase, read this page first, then read
+[`flowGRPO/`](flowGRPO/) before the other two. flowGRPO establishes the common
+reverse-process RL vocabulary: SDE rollout, per-step log-prob, old/new policy
+ratio, and group-relative advantage. flowDPPO changes only the trust-region rule.
+diffusionNFT is the different one: it does not optimize the reverse trajectory
+likelihood at all.
+
 | Tutorial | Algorithm | Code | Canonical recipe |
 |---|---|---|---|
 | [`flowGRPO/`](flowGRPO/) | `DiffusionGRPO` — PPO-style ratio clipping on per-step SDE log-probs | [`unirl/algorithms/diffusion_grpo.py`](../unirl/algorithms/diffusion_grpo.py) | [`recipes/diffusion_rl/sd3_trainside.yaml`](../recipes/diffusion_rl/sd3_trainside.yaml) |
-| [`diffusionNFT/`](diffusionNFT/) | `DiffusionNFT` — forward-process, dual positive/negative reconstruction | [`unirl/algorithms/nft.py`](../unirl/algorithms/nft.py) | [`recipes/diffusion_rl/sd3_nft.yaml`](../recipes/diffusion_rl/sd3_nft.yaml) |
-| [`flowDPPO/`](flowDPPO/) | `DiffusionDPPO` — KL-divergence masking instead of clipping | [`unirl/algorithms/dppo.py`](../unirl/algorithms/dppo.py) | [`recipes/diffusion_rl/sd3_flowdppo.yaml`](../recipes/diffusion_rl/sd3_flowdppo.yaml) |
+| [`flowDPPO/`](flowDPPO/) | `DiffusionDPPO` — same SDE rollout, KL-ADV masking instead of clipping | [`unirl/algorithms/dppo.py`](../unirl/algorithms/dppo.py) | [`recipes/diffusion_rl/sd3_flowdppo.yaml`](../recipes/diffusion_rl/sd3_flowdppo.yaml) |
+| [`diffusionNFT/`](diffusionNFT/) | `DiffusionNFT` — forward-process dual positive/negative reconstruction | [`unirl/algorithms/nft.py`](../unirl/algorithms/nft.py) | [`recipes/diffusion_rl/sd3_nft.yaml`](../recipes/diffusion_rl/sd3_nft.yaml) |
+
+## Quick mental model
+
+| Question | flowGRPO | flowDPPO | diffusionNFT |
+|---|---|---|---|
+| What is trained? | Probability of sampled SDE denoising steps | Same probabilities, but with a KL-aware mask | Flow-matching denoising prediction on re-noised clean latents |
+| Needs SDE log-probs? | Yes | Yes | No |
+| Uses old/new ratio? | Yes | Yes | No |
+| Main safety mechanism | PPO clip range | KL threshold + advantage-direction mask | EMA "old" adapter in a dual positive/negative objective |
+| Best first read? | Yes | After flowGRPO | After understanding why reverse-process RL is expensive |
 
 ## How they relate
 
@@ -21,7 +38,7 @@ All three share the same scaffold — a `StageAlgorithm`
 ```mermaid
 flowchart TD
     R["Rollout: denoise x_T → x_0"] --> Rw["Reward model<br/>(PickScore)"]
-    Rw --> Adv["Group-normalized advantage A<br/>(per-prompt mean/std)"]
+    Rw --> Adv["Group-centered advantage A<br/>(per-prompt mean; group or global std)"]
     Adv --> G["flowGRPO<br/>clip ratio·A"]
     Adv --> N["diffusionNFT<br/>r = remap(A) ∈ [0,1]<br/>positive/negative MSE"]
     Adv --> D["flowDPPO<br/>KL-mask ratio·A"]
@@ -30,14 +47,31 @@ flowchart TD
     D --> Opt
 ```
 
-- **flowGRPO** and **flowDPPO** are *on-policy*: they replay the SDE trajectory the
-  rollout sampled and compare new vs. old per-step log-probs. They differ in how
-  they keep updates trust-region-safe — GRPO **clips** the ratio; DPPO **masks**
-  updates by their per-step Gaussian KL.
+- **flowGRPO** and **flowDPPO** are reverse-process policy-gradient methods. They
+  replay the SDE trajectory the rollout sampled and compare new vs. old per-step
+  log-probs. They differ in how they keep updates trust-region-safe: GRPO
+  **clips** the ratio; DPPO **masks** high KL-score updates that are already
+  moving too aggressively in the reward-improving direction.
 - **diffusionNFT** is *off-policy* (`requires_ema_rollout = True`): it never runs an
   SDE rollout for the loss. It re-noises the rollout's clean latent at many
   timesteps and trains a dual adapter (trainable vs. EMA-frozen) toward a
   reward-weighted blend of "positive" and "negative" predictions.
+
+Advantage normalization is shared by all three through
+[`RolloutTrack.compute_advantages`](../unirl/types/rollout_resp.py). The default is
+GRPO-style per-prompt centering and per-prompt standardization. The shipped
+flowDPPO recipe sets `adv_use_global_std: true`, which still subtracts each
+prompt's group mean but divides by one batch-wide reward std; the tutorials call
+out that recipe-specific difference where it matters.
+
+## External references
+
+- Flow-GRPO paper: [arXiv:2505.05470](https://arxiv.org/abs/2505.05470) /
+  [NeurIPS 2025 proceedings](https://proceedings.neurips.cc/paper_files/paper/2025/hash/3a10c46572628d58cb44fb705f25cbbf-Abstract-Conference.html)
+- Flow-GRPO official implementation: [yifan123/flow_grpo](https://github.com/yifan123/flow_grpo)
+- DiffusionNFT paper: [arXiv:2509.16117](https://arxiv.org/abs/2509.16117)
+- DiffusionNFT project/code: [NVIDIA project page](https://research.nvidia.com/labs/cosmos-lab/diffusionnft/) /
+  [NVlabs/DiffusionNFT](https://github.com/NVlabs/DiffusionNFT)
 
 ## Running a tutorial
 

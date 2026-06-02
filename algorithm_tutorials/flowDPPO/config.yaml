@@ -16,11 +16,14 @@ algorithm:
     path: unirl.models.sd3.conditions.SD3Conditions
   params: ${sampling}
   # ── Flow-DPPO loss hyperparameters ──
-  kl_mask_threshold: 1.0e-5     # per-sample KL(new‖old) below this ⇒ update passes
-                                 # freely (no clipping). Above it, the advantage-aware
-                                 # mask may zero the update (see README).
-  add_kl_coefficient: true       # normalize the KL by σ_t = std_dev_t·√(-dt), the
-                                 # flow-matching step noise scale. false ⇒ raw MSE.
+  kl_mask_threshold: 1.0e-5     # per-sample KL-style score below this ⇒ update
+                                 # passes freely (no clipping). Above it, the
+                                 # advantage-aware mask may zero the update
+                                 # (see README).
+  add_kl_coefficient: true       # normalize the mean-shift score by
+                                 # σ_t = std_dev_t·√(-dt), the flow-matching
+                                 # step noise scale. false ⇒ raw squared mean
+                                 # shift / 2 (still mean-reduced).
 
 # Same SDE rollout as flowGRPO (eta>0, SDE steps recorded). DPPO additionally needs
 # the per-step Gaussian transition means (prev_sample_means) — replay() emits them.
@@ -41,4 +44,7 @@ sampling:
     timestep_fraction: [0.0, 0.5]
 
 # Trust region (from the full recipe):
-#   stack.num_updates_per_batch: 2   # KL anchor frozen once, then 2 mini-epochs
+#   stack.num_updates_per_batch: 2   # KL anchor frozen once, then 2 optimizer mini-batches
+# Advantage scale (from the full recipe):
+#   adv_use_global_std: true         # subtract per-prompt group mean, divide by
+#                                   # one batch-wide reward std
