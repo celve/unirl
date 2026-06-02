@@ -458,6 +458,30 @@ class Handle:
             return {k: self._cat_multi(v, dst_worker) for k, v in obj.items()}
         return obj
 
+    def _with_ipc(self, handle: TensorHandle) -> TensorHandle:
+        """Return a copy of *handle* with its CUDA IPC handle populated.
+
+        ``TensorStore.put()`` no longer exports IPC handles eagerly — that pinned
+        every stored block in the caching allocator and leaked on the colocate hot
+        path (LIN-361). When a foreign handle is about to be opened over IPC by a
+        same-device sibling, fetch the handle from the owning worker on demand. A
+        handle that already carries one, or a CPU (``object_ref``) handle, passes
+        through unchanged.
+        """
+        if handle.ipc_handle is not None or handle.object_ref is not None:
+            return handle
+        ipc = ray.get(self.pool.get_worker(handle.worker_id).get_ipc_handle.remote(handle.store_key))
+        return TensorHandle(
+            handle.store_key,
+            handle.worker_id,
+            handle.shape,
+            handle.dtype,
+            handle.device,
+            ipc_handle=ipc,
+            stride=handle.stride,
+            offset=handle.offset,
+        )
+
     def _unwrap(self, obj, dst_worker_id: str, dst_device_id: int, foreign: dict):
         """Pass 1: unwrap TensorMeta → TensorHandle or multi-handle TensorMeta.
 
@@ -477,16 +501,23 @@ class Handle:
             if obj.worker_id != dst_worker_id:
                 src_device_id = self.pool.device_id_of(obj.worker_id)
                 if src_device_id == dst_device_id:
-                    return obj
+                    # Same physical GPU, different slot → the consumer opens this
+                    # tensor over CUDA IPC. put() no longer exports eagerly (it
+                    # leaked — LIN-361), so export the handle lazily now.
+                    return self._with_ipc(obj)
+                # Cross-device → NCCL. When the source lives on a sibling slot, the
+                # slot0 sender opens it over IPC and needs the lazily-exported
+                # handle; a slot0 source is read by its own worker via store.get.
+                src = self._with_ipc(obj) if self.pool.slot_of(obj.worker_id) > 0 else obj
                 routing = TensorHandle(
-                    obj.store_key,
-                    obj.worker_id,
-                    obj.shape,
-                    obj.dtype,
-                    obj.device,
-                    ipc_handle=obj.ipc_handle,
-                    stride=obj.stride,
-                    offset=obj.offset,
+                    src.store_key,
+                    src.worker_id,
+                    src.shape,
+                    src.dtype,
+                    src.device,
+                    ipc_handle=src.ipc_handle,
+                    stride=src.stride,
+                    offset=src.offset,
                 )
                 foreign[(src_device_id, dst_device_id)].append(routing)
                 return routing

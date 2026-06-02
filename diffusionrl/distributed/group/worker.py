@@ -303,6 +303,14 @@ class Worker:
     def ref_count_tensor(self, key: str) -> int:
         return self.store.ref_count(key)
 
+    def get_ipc_handle(self, store_key: str) -> tuple:
+        """Lazily export this worker's CUDA IPC handle for a stored key.
+
+        Called by the controller (Handle._with_ipc) only when a same-device
+        sibling needs to open the tensor over IPC — see TensorStore.ensure_ipc_handle.
+        """
+        return self.store.ensure_ipc_handle(store_key)
+
     def get_tensor_cpu(self, handle: TensorHandle) -> Tensor:
         """Fetch tensor described by handle to CPU, restoring the exact view."""
         return self.store.get(handle).cpu()

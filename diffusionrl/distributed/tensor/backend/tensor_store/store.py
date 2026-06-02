@@ -118,7 +118,7 @@ class TensorStore:
                     shape=tuple(tensor.shape),
                     dtype=tensor.dtype,
                     device=str(tensor.device),
-                    ipc_handle=self._ipc_handles[existing_key],
+                    ipc_handle=None,  # exported lazily — see ensure_ipc_handle()
                     stride=tensor.stride(),
                     offset=tensor.storage_offset(),
                 )
@@ -129,37 +129,60 @@ class TensorStore:
             self._store[key] = tensor.detach()
             self._ref_counts[key] = 1
             self._storage_ptr_to_key[storage_ptr] = key
+            self._ipc_handles[key] = None  # exported lazily — see ensure_ipc_handle()
 
-        # _share_cuda_() outside the lock (it's a CUDA op, no need to hold lock).
-        # Expandable-segments (VMM) allocations produce non-standard IPC handles
-        # that cannot be opened cross-process on kernels lacking pidfd_getfd.
-        # cuda_ipc_needs_clone() detects this via handle length and returns the
-        # probe handle so we avoid a second _share_cuda_() call.
-        probe, needs_clone = cuda_ipc_needs_clone(tensor.untyped_storage())
-        if needs_clone:
-            torch.cuda.memory._set_allocator_settings("expandable_segments:False")
-            tensor = tensor.clone()
-            torch.cuda.memory._set_allocator_settings("expandable_segments:True")
-            new_ptr = tensor.untyped_storage().data_ptr()
-            with self._lock:
-                self._storage_ptr_to_key.pop(storage_ptr, None)
-                self._storage_ptr_to_key[new_ptr] = key
-                self._store[key] = tensor.detach()
-            probe, _ = cuda_ipc_needs_clone(tensor.untyped_storage())
-        ipc_handle = probe
-        with self._lock:
-            self._ipc_handles[key] = ipc_handle
-
+        # No eager _share_cuda_() here. Exporting a CUDA IPC handle hands the block
+        # to a CudaIPCSentData that pins it in the caching allocator until a consumer
+        # releases it; a same-process reader never imports it (sibling reads use
+        # store.get), so an eager export would dangle forever and never be reclaimed
+        # (LIN-361 leak). The handle is exported on demand in ensure_ipc_handle(),
+        # called only when a same-device sibling actually opens this tensor over IPC.
         return TensorHandle(
             store_key=key,
             worker_id=self.worker_id,
             shape=tuple(tensor.shape),
             dtype=tensor.dtype,
             device=str(tensor.device),
-            ipc_handle=ipc_handle,
+            ipc_handle=None,
             stride=tensor.stride(),
             offset=tensor.storage_offset(),
         )
+
+    def ensure_ipc_handle(self, key: str) -> tuple:
+        """Lazily export (and cache) the CUDA IPC handle for a stored key.
+
+        This is the ONLY place ``_share_cuda_()`` runs. ``put()`` no longer
+        exports eagerly: ``cudaIpcGetMemHandle`` pins the block in the caching
+        allocator until a consumer releases it, and in a colocate single-worker
+        layout no sibling ever imports the handle, so the export would dangle and
+        leak (LIN-361). The controller calls this (via ``Handle._with_ipc``) only
+        when a same-device sibling actually needs to open the tensor over IPC.
+
+        Idempotent — returns the cached handle once exported. Preserves the old
+        eager behavior, including the expandable-segments (VMM) clone-and-remap so
+        the export always operates on a process-local cudaMalloc allocation.
+        """
+        with self._lock:
+            cached = self._ipc_handles.get(key)
+            if cached is not None:
+                return cached
+            tensor = self._store[key]
+
+        probe, needs_clone = cuda_ipc_needs_clone(tensor.untyped_storage())
+        if needs_clone:
+            old_ptr = tensor.untyped_storage().data_ptr()
+            torch.cuda.memory._set_allocator_settings("expandable_segments:False")
+            tensor = tensor.clone()
+            torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+            probe, _ = cuda_ipc_needs_clone(tensor.untyped_storage())
+            with self._lock:
+                self._storage_ptr_to_key.pop(old_ptr, None)
+                self._storage_ptr_to_key[tensor.untyped_storage().data_ptr()] = key
+                self._store[key] = tensor.detach()
+
+        with self._lock:
+            self._ipc_handles[key] = probe
+        return probe
 
     def get(self, handle: TensorHandle) -> Tensor:
         """Return the tensor described by handle, restoring shape/stride/offset.
