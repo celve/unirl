@@ -1,7 +1,5 @@
 # @package _global_
 # SD3.5 + DiffusionNFT, v2 trainer — SGLang SEPARATE-mode variant.
-# Ported from conf/experiment/nft_sd3_sglang.yaml (structure mirrors the v2
-# GRPO twin sd3_sglang_full_nccl_separate.yaml).
 #
 # ⚠️ KNOWN LIMITATION — NOT FULLY RUNNABLE AS A FAITHFUL NFT RECIPE ⚠️
 # NFT is meant to roll out under the EMA-smoothed "old" adapter

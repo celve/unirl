@@ -1,6 +1,5 @@
 # @package _global_
 # SD3.5 + DiffusionNFT trainside, v2 trainer — remote RewardService variant.
-# Ported from conf/experiment/nft_sd3_reward_service.yaml.
 #
 # Identical to sd3_nft.yaml except the reward backend: instead of the local
 # PickScore scorer, a single RemoteRewardBackend calls an HTTP service that

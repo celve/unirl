@@ -1,6 +1,5 @@
 # @package _global_
 # Flow-DPPO SD3.5 trainside (FSDP) colocate, v2 trainer, 1x8.
-# Ported from conf/experiment/flowdppo_fast_sd3_colocate.yaml.
 #
 # Flow-DPPO replaces PPO ratio clipping with KL-divergence-based masking:
 #   - algorithm._target_ = DiffusionDPPO (vs DiffusionGRPO).

@@ -1,6 +1,5 @@
 # @package _global_
 # GRPO WAN 2.1 T2V trainside (FSDP) colocate, v2 trainer, 1x8.
-# Ported from conf/experiment/grpo_wan21_t2v.yaml.
 #
 # Video diffusion GRPO: same trainside shape as sd3_trainside but the WAN 2.1
 # T2V pipeline (3D VAE, UMT5 text encoder) + video_pickscore reward.

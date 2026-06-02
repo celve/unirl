@@ -6,28 +6,28 @@ description: Compose and launch a UniRL experiment recipe.
 Start by composing a recipe before launching Ray work. This catches missing paths, invalid Hydra overrides, and cross-component contract errors early.
 
 ```bash
-python -m unirl.train_diffusion --config-name=sd3_trainside --cfg job --resolve
+python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside --cfg job --resolve
 ```
 
 ## Single Node
 
-Use the generic single-node launcher when you want the scripts to prepare local Ray runtime defaults. The first argument is a recipe name from `conf/`:
+Use the generic single-node launcher when you want the scripts to prepare local Ray runtime defaults. The first argument is a bucketed recipe name (`<bucket>/<recipe>`):
 
 ```bash
-bash scripts/run_experiment_single_node.sh sd3_trainside
+bash scripts/run_experiment_single_node.sh diffusion_rl/sd3_trainside
 ```
 
 The diffusion entrypoint is the default; select another with `ENTRY`:
 
 ```bash
-ENTRY=train_vlm bash scripts/run_experiment_single_node.sh argrpo_qwen_vl_geo3k_mc_4x8
-ENTRY=train_pe  bash scripts/run_experiment_single_node.sh pe_trainside
+ENTRY=train_vlm bash scripts/run_experiment_single_node.sh vlm_rl/argrpo_qwen_vl_geo3k_mc_4x8
+ENTRY=train_pe  bash scripts/run_experiment_single_node.sh pe_rl/pe_trainside_pickscore
 ```
 
 For a dry run:
 
 ```bash
-DRY_RUN=1 bash scripts/run_experiment_single_node.sh sd3_trainside
+DRY_RUN=1 bash scripts/run_experiment_single_node.sh diffusion_rl/sd3_trainside
 ```
 
 ## Multi Node
@@ -35,7 +35,7 @@ DRY_RUN=1 bash scripts/run_experiment_single_node.sh sd3_trainside
 Use the role-aware launcher for multinode jobs:
 
 ```bash
-bash scripts/run_experiment_multinode_taiji.sh sd3_sglang_native_colocate
+bash scripts/run_experiment_multinode_taiji.sh diffusion_rl/sd3_sglang_native_colocate
 ```
 
 ## Direct Hydra Invocation
@@ -44,7 +44,7 @@ You can invoke an entrypoint directly and override fields inline:
 
 ```bash
 python -m unirl.train_diffusion \
-  --config-name=sd3_trainside \
+  --config-name=diffusion_rl/sd3_trainside \
   num_devices=8
 ```
 
@@ -63,5 +63,5 @@ For real runs, point environment variables or CLI overrides to absolute data, mo
 ```bash
 DATA_PATH=/abs/path/train.json \
 OUTPUT_DIR=/abs/path/outputs/run1 \
-bash scripts/run_experiment_single_node.sh wan21_t2v
+bash scripts/run_experiment_single_node.sh diffusion_rl/wan21_t2v
 ```

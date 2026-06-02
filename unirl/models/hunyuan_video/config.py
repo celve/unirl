@@ -1,6 +1,6 @@
 """Construction config for the typed HunyuanVideo-1.0 pipeline.
 
-Sibling of :class:`diffusionrl.models.hunyuan_video1p5.HunyuanVideo1p5PipelineConfig`.
+Sibling of :class:`unirl.models.hunyuan_video15.HunyuanVideo15PipelineConfig`.
 Carries weights+precision knobs only; LoRA injection, FSDP wrapping,
 gradient checkpointing, and offload control all live in
 ``cfg.training.policies`` (``LoRAPolicy`` / ``FSDPPolicy``) -- the bundle
@@ -34,7 +34,7 @@ from unirl.config.validation import validate_precision_type
 @register_config(
     group="model",
     name="hunyuan_video",
-    target="diffusionrl.models.hunyuan_video.HunyuanVideoPipeline.from_config",
+    target="unirl.models.hunyuan_video.HunyuanVideoPipeline.from_config",
     mutable=True,
 )
 @dataclass

@@ -12,7 +12,7 @@ modules HunyuanVideo-1.0 ships with:
     - ``CLIPTextModel`` + ``CLIPTokenizer`` (pooled, 768-dim)
 - 1x ``FlowMatchEulerDiscreteScheduler``
 
-Diverges from :class:`diffusionrl.models.hunyuan_video1p5.HunyuanVideo1p5Bundle`
+Diverges from :class:`unirl.models.hunyuan_video15.HunyuanVideo15Bundle`
 mainly in the text-encoder pair (LLaMA + CLIP vs Qwen-VL + ByT5), the
 absence of a vision encoder (no I2V slot), and the transformer signature
 (no channel-dim packing, uses ``guidance`` kwarg instead of CFG).

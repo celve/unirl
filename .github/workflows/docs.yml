@@ -6,12 +6,8 @@ on:
     paths:
       - "README.md"
       - "docs/**"
-      - "conf/README.md"
-      - "data/README.md"
-      - "diffusionrl/**/README.md"
-      - "models/README.md"
-      - "patches/README.md"
-      - "scripts/README.md"
+      - "recipes/README.md"
+      - "unirl/**/README.md"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -28,7 +24,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      NEXT_PUBLIC_BASE_PATH: /DiffusionRL
+      NEXT_PUBLIC_BASE_PATH: /UniRL
       SOURCE_COMMIT: ${{ github.sha }}
     defaults:
       run:

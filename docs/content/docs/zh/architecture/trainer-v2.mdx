@@ -65,7 +65,7 @@ single-controller 层（`unirl/distributed/group/`：`Remote`、`placement`、`R
 
 ## 配置形态
 
-`conf/*.yaml` 是扁平目录；每个 recipe 用 `_target_` 实例化各 sibling（没有 Hydra config-group 覆盖）：
+`recipes/*/*.yaml` 是按训练域分桶的目录树；每个 recipe 用 `_target_` 实例化各 sibling（没有 Hydra config-group 覆盖）：
 
 ```yaml
 backend:

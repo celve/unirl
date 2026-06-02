@@ -10,8 +10,7 @@
 #
 # Pairs with unirl/train_hi3.py (HI3Trainer). Modeled on
 # sd3_vllmomni_full_ipc.yaml (single-backbone v2 + vllm-omni + colocate sync)
-# and pe_trainside_pickscore.yaml (two-algorithm shape), with hi3-specific params from
-# conf/experiment/hi3_think_recaption_colocate.yaml.
+# and pe_trainside_pickscore.yaml (two-algorithm shape).
 #
 # Confirm at smoke time (GPU-specific, can't be unit-checked):
 #   - backend.block_class_names: the HF HunyuanImage3 decoder-layer class name.
@@ -94,8 +93,7 @@ backend:
     type: constant
     warmup_steps: 0
     total_steps: 10000
-  # Single shared LoRA adapter — both AR and DiT algorithms train it (matches
-  # conf/experiment/hi3_think_recaption_colocate.yaml's shared-backbone LoRA).
+  # Single shared LoRA adapter — both AR and DiT algorithms train it.
   lora_cfg:
     _target_: unirl.train.configs.LoraConfig
     rank: 8

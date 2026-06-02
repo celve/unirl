@@ -15,16 +15,16 @@ UniRL 是一个面向统一多模态生成模型的分布式强化学习框架�
 每个领域都有自己的入口，驱动方式一致：
 
 ```bash
-python -m unirl.train_diffusion --config-name=<recipe>   # diffusion 图像/视频
-python -m unirl.train_vlm       --config-name=<recipe>   # 自回归 VLM / LLM
-python -m unirl.train_pe        --config-name=<recipe>   # prompt-enhancer (PE)
-python -m unirl.train_hi3       --config-name=<recipe>   # HunyuanImage3（AR + diffusion 混合）
+python -m unirl.train_diffusion --config-name=<bucket>/<recipe>   # diffusion 图像/视频
+python -m unirl.train_vlm       --config-name=<bucket>/<recipe>   # 自回归 VLM / LLM
+python -m unirl.train_pe        --config-name=<bucket>/<recipe>   # prompt-enhancer (PE)
+python -m unirl.train_hi3       --config-name=<bucket>/<recipe>   # HunyuanImage3（AR + diffusion 混合）
 ```
 
-`<recipe>` 是扁平 `conf/` 目录下的一个自包含 YAML 文件名（不含 `.yaml`），例如：
+`<recipe>` 是分桶的 `recipes/` 目录树下的一个自包含 YAML 文件名（按 `<bucket>/<recipe>` 寻址，不含 `.yaml`），例如：
 
 ```bash
-python -m unirl.train_diffusion --config-name=sd3_trainside
+python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside
 ```
 
 任意字段都可用 Hydra 的 `key=value` 语法在命令行覆盖，例如 `num_devices=8`。每个 recipe 都是 model、algorithm、rollout engine、placement、reward、sync 和 batch geometry 的 source of truth。

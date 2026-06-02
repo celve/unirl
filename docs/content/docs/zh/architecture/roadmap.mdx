@@ -51,7 +51,7 @@ description: 框架 Infra、算法 Algorithm、模型 Model 三条线的近期�
 
 ### `[ ]` `P0` VeOmni Training Backend
 
-- **现状。** trainer 已将 `backend:` 抽象为可替换的配置块（见 `conf/*.yaml`），
+- **现状。** trainer 已将 `backend:` 抽象为可替换的配置块（见 `recipes/*/*.yaml`），
   当前唯一实现是原生的 `FSDPBackend`（`unirl/train/backend/fsdp.py`：FSDP2 wrap，叠加
   LoRA / NFT / EMA 注入、offload、checkpoint）。`TrainTopology` 中已经预留了
   `dp / tp / pp / sp / ep / cp` 字段，但目前只有 DP / FSDP 是 topology-driven；`train/inject.py`

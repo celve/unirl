@@ -22,8 +22,7 @@
 # Pairs with unirl/train_pe.py:
 #   python -m unirl.train_pe --config-name pe_sglang_full_pickscore
 #
-# Format mirrors recipes/pe_rl/pe_trainside_pickscore.yaml (v2); engine params mirror
-# conf/experiment/pe_joint_multi_track_e2e.yaml (v1). Set checkpoint paths via
+# Format mirrors recipes/pe_rl/pe_trainside_pickscore.yaml (v2). Set checkpoint paths via
 # the PRETRAINED_MODEL / LLM_MODEL env vars (see ${oc.env:...} defaults below).
 #
 # batch_size MUST be divisible by num_devices — the composed rollout dispatches
@@ -211,8 +210,7 @@ rollout:
   config:
     _target_: unirl.rollout.engine.composed.config.ComposedRolloutEngineConfig
     sleep_diffusion_on_start: false
-    # PE instruction (Siqi recipe, ported byte-for-byte from
-    # conf/experiment/pe_joint_multi_track_e2e_wise_24gpu.yaml). ComposedRolloutEngine
+    # PE instruction (Siqi recipe). ComposedRolloutEngine
     # injects this as system_instruction into BOTH the "ar" stage (sglang_llm
     # generation) AND the "chat" stage (trainside Qwen3Pipeline replay), so
     # generation and replay see the same prompt (engine.py:206-208).

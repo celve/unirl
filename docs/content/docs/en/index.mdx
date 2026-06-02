@@ -15,16 +15,16 @@ This documentation site has two audiences:
 Each domain has its own entrypoint, all driven the same way:
 
 ```bash
-python -m unirl.train_diffusion --config-name=<recipe>   # diffusion image/video
-python -m unirl.train_vlm       --config-name=<recipe>   # autoregressive VLM / LLM
-python -m unirl.train_pe        --config-name=<recipe>   # prompt-enhancer (PE)
-python -m unirl.train_hi3       --config-name=<recipe>   # HunyuanImage3 (mixed AR + diffusion)
+python -m unirl.train_diffusion --config-name=<bucket>/<recipe>   # diffusion image/video
+python -m unirl.train_vlm       --config-name=<bucket>/<recipe>   # autoregressive VLM / LLM
+python -m unirl.train_pe        --config-name=<bucket>/<recipe>   # prompt-enhancer (PE)
+python -m unirl.train_hi3       --config-name=<bucket>/<recipe>   # HunyuanImage3 (mixed AR + diffusion)
 ```
 
-`<recipe>` is a self-contained YAML filename (without `.yaml`) in the flat `conf/` directory — for example:
+`<recipe>` is a self-contained YAML filename (without `.yaml`) in the bucketed `recipes/` tree, addressed as `<bucket>/<recipe>` — for example:
 
 ```bash
-python -m unirl.train_diffusion --config-name=sd3_trainside
+python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside
 ```
 
 Override any field inline with Hydra's `key=value` syntax, e.g. `num_devices=8`. Each recipe is the source of truth for model, algorithm, rollout engine, placement, reward, sync, and batch geometry.

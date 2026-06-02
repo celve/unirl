@@ -1,6 +1,6 @@
 """HunyuanVideo-1.0 diffusion: per-step kernel + rollout-level stage.
 
-Two classes mirror :mod:`diffusionrl.models.hunyuan_video1p5.diffusion`:
+Two classes mirror :mod:`unirl.models.hunyuan_video15.diffusion`:
 
 - :class:`HunyuanVideoDiffusionStep` -- stateless per-step kernel.
   :meth:`predict_noise` passes latents directly (no channel-dim packing),
@@ -12,7 +12,7 @@ Two classes mirror :mod:`diffusionrl.models.hunyuan_video1p5.diffusion`:
   loop bookkeeping, latent shape derivation.
 
 Per-request sampling knobs are read from
-:class:`diffusionrl.types.sampling.DiffusionSamplingParams`
+:class:`unirl.types.sampling.DiffusionSamplingParams`
 
 Latent geometry
 ---------------

@@ -1,6 +1,5 @@
 # @package _global_
 # Qwen-Image + DiffusionNFT trainside (FSDP) colocate, v2 trainer, 1x8.
-# Ported from conf/experiment/nft_qwen_image.yaml.
 #
 # NFT = forward-process diffusion RL with a dual-adapter EMA reference:
 #   - backend.ema_lora_cfg installs the "default" (trainable) + "old" (EMA)

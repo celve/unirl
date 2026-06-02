@@ -1,6 +1,5 @@
 # @package _global_
 # GRPO WAN 2.2 T2V 14B trainside (FSDP) colocate, v2 trainer, 1x8.
-# Ported from conf/experiment/grpo_wan22_t2v_14b.yaml.
 #
 # WAN 2.2 uses a dual WanTransformer3DModel (high_noise / low_noise) under a
 # WanDualTransformer composite, routed by `boundary_ratio`. FSDP wraps each

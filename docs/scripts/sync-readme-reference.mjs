@@ -127,7 +127,7 @@ function rewriteRelativeMarkdownLinks(entry, markdown) {
       const resolvedPath = path.posix.normalize(path.posix.join(sourceDir, targetPath));
       const resolvedAnchor = anchor ? `#${anchor}` : "";
 
-      return `[${label}](https://github.com/haonan3/DiffusionRL/blob/main/${resolvedPath}${resolvedAnchor})`;
+      return `[${label}](https://github.com/haonan3/UniRL/blob/main/${resolvedPath}${resolvedAnchor})`;
     },
   );
 }

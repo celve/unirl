@@ -14,7 +14,7 @@ description: 新增模型、rollout engine、train-side algorithm、reward、tra
 | 新增 train-side algorithm | `unirl/algorithms/` | 一个 `BaseAlgorithmConfig` 子类（用 `@register_config`），绑定到某 track 的 `algorithm:` 节点 |
 | 新增 reward scorer | `unirl/reward/local/` | `@register_config(group="reward/component", name=..., target=...)` |
 | 新增 training backend | `unirl/train/backend/` | `Remote` backend 契约（与 `FSDPBackend` 并列） |
-| 新增 recipe | `conf/<recipe>.yaml` | `--config-name=<recipe>` |
+| 新增 recipe | `recipes/<bucket>/<recipe>.yaml` | `--config-name=<bucket>/<recipe>` |
 
 ## 新增模型
 
@@ -22,7 +22,7 @@ description: 新增模型、rollout engine、train-side algorithm、reward、tra
 2. 注册 `model` group config。
 3. 实现 bundle，暴露训练和 rollout 需要的 stage。
 4. 按需添加 condition、text/vision、diffusion、VAE helper。
-5. 添加至少一个 `conf/<recipe>.yaml` recipe。
+5. 添加至少一个 `recipes/<bucket>/<recipe>.yaml` recipe。
 
 ## 新增 Rollout Engine
 

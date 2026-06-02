@@ -1,7 +1,7 @@
 # @package _global_
 # AR SPO-DPPO Qwen3-8B on GSM8K — v2 trainer (VLMTrainer / train_vlm), 4x8 = 32 GPU.
 #
-# v2 port of conf/experiment/ar_spo_dppo_qwen3_4x8.yaml (#155, v1). Same model
+# Same model
 # (Qwen3-8B), algorithm (ARSPODPPO, TV-divergence clip), reward
 # (gsm8k_exact_match numeric exact-match) and FSDP/LoRA knobs, driven by the
 # flat v2 trainside stack:

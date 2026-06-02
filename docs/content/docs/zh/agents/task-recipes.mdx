@@ -10,17 +10,17 @@ description: 常见 coding-agent 任务对应的文件、检查和风险。
 Read:
 
 - `unirl/config/README.md`
-- 最接近的 `conf/<recipe>.yaml`
+- 最接近的 `recipes/<bucket>/<recipe>.yaml`
 
 Edit:
 
-- `conf/<new_recipe>.yaml`
+- `recipes/<bucket>/<new_recipe>.yaml`
 - 若是维护中的 recipe，同步更新 `/zh/docs/configuration/experiments` 和英文对应页
 
 Check:
 
 ```bash
-python -m unirl.train_diffusion --config-name=<new_recipe> --cfg job --resolve
+python -m unirl.train_diffusion --config-name=<bucket>/<new_recipe> --cfg job --resolve
 ```
 
 Risk: placement、rollout batch size、train-stack batch geometry 不匹配。
@@ -37,7 +37,7 @@ Read:
 Edit:
 
 - `unirl/models/<model_name>/`
-- `conf/<recipe>.yaml`
+- `recipes/<bucket>/<recipe>.yaml`
 
 Check:
 
@@ -61,7 +61,7 @@ Edit:
 
 - `unirl/rollout/engine/<engine>/`
 - dedicated engine 需要时同步 weight sync backend
-- 至少一个 `conf/` recipe
+- 至少一个 `recipes/<bucket>/` 下的 recipe
 
 Check:
 
@@ -83,7 +83,7 @@ Read:
 Edit:
 
 - `unirl/distributed/weight_sync/`
-- 选择或调优 backend 时更新 `conf/<recipe>.yaml`
+- 选择或调优 backend 时更新 `recipes/<bucket>/<recipe>.yaml`
 
 Check:
 
@@ -146,7 +146,7 @@ See also: `unirl/reward/local/base.py`、`unirl/types/reward.py`。
 先运行：
 
 ```bash
-python -m unirl.train_diffusion --config-name=<recipe> --cfg job --resolve
+python -m unirl.train_diffusion --config-name=<bucket>/<recipe> --cfg job --resolve
 ```
 
 然后按顺序看：

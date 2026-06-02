@@ -1,6 +1,5 @@
 # @package _global_
 # MixGRPO SD3.5 trainside (FSDP) colocate, v2 trainer, 2x8.
-# Ported from conf/experiment/mixgrpo_sd35.yaml.
 #
 # MixGRPO = DiffusionGRPO + Flow SDE + a progressive sliding-window SDE-index
 # scheduler. The only difference from sd3_trainside (FlowGRPO) is the scheduler:

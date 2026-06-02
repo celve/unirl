@@ -1,6 +1,5 @@
 # @package _global_
 # GRPO WAN 2.2 I2V 14B trainside (FSDP) colocate, v2 trainer, 1x8.
-# Ported from conf/experiment/grpo_wan22_i2v.yaml.
 #
 # WAN 2.2 14B I2V (expand_timesteps=False path): image_dim == 0, so there is NO
 # CLIP vision tower — image conditioning flows through the VAE-latent + mask

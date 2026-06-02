@@ -1,6 +1,5 @@
 # @package _global_
 # Flow-DPPO SD3.5 — vLLM-Omni colocate variant, v2 trainer, 1x8.
-# Ported from conf/experiment/flowdppo_fast_sd3_colocate_vllm_omni.yaml.
 #
 # Same Flow-DPPO algorithm as sd3_flowdppo.yaml (KL-divergence masking), but the
 # rollout runs on a vLLM-Omni engine (separate sampler, LoRA weight-synced into

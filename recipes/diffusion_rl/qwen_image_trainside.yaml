@@ -1,6 +1,5 @@
 # @package _global_
 # Qwen-Image + trainside (FSDP) colocate, v2 trainer, GRPO.
-# Ported from conf/experiment/flowgrpo_fast_qwen_image*.yaml.
 #
 # Trainside = rollout runs in-process on the FSDP-wrapped training pipeline
 # (no separate rollout actor, no weight sync). Strongest colocate form.

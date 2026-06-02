@@ -1,6 +1,5 @@
 # @package _global_
 # SD3.5 + DiffusionNFT trainside (FSDP) colocate, v2 trainer, 1x8 H20.
-# Ported from conf/experiment/nft_sd3.yaml.
 #
 # NFT = forward-process diffusion RL with a dual-adapter EMA reference:
 #   - backend.ema_lora_cfg installs "default" (trainable) + "old" (EMA) LoRA

@@ -1,7 +1,7 @@
 # @package _global_
 # ARGRPO Qwen2.5-VL on Geometry3K-MC — v2 trainer (train_vlm), 4 nodes x 8 GPUs.
 #
-# v2 port of conf/experiment/argrpo_qwen_vl_geo3k_mc_4x8.yaml, modeled on the
+# v2 recipe, modeled on the
 # recipes/diffusion_rl/sd3_trainside.yaml layout. Trainside (in-process) colocate:
 # the training Qwen-VL pipeline IS the sampler, so no rollout actors and no
 # weight sync (the `sync` block is absent — trainside shares the module).

@@ -14,7 +14,7 @@ Use existing boundaries rather than adding cross-cutting glue. Most extensions n
 | Add a train-side algorithm | `unirl/algorithms/` | a `BaseAlgorithmConfig` subclass via `@register_config`, bound under a track's `algorithm:` node |
 | Add a reward scorer | `unirl/reward/local/` | `@register_config(group="reward/component", name=..., target=...)` |
 | Add a training backend | `unirl/train/backend/` | the `Remote` backend contract (alongside `FSDPBackend`) |
-| Add a recipe | `conf/<recipe>.yaml` | `--config-name=<recipe>` |
+| Add a recipe | `recipes/<bucket>/<recipe>.yaml` | `--config-name=<bucket>/<recipe>` |
 
 ## Adding a Model
 
@@ -22,7 +22,7 @@ Use existing boundaries rather than adding cross-cutting glue. Most extensions n
 2. Register the model config in the `model` group.
 3. Implement a bundle that exposes the trainable stages needed by training and rollout.
 4. Add condition, text/vision, diffusion, and VAE helpers as needed.
-5. Add at least one `conf/<recipe>.yaml` recipe.
+5. Add at least one `recipes/<bucket>/<recipe>.yaml` recipe.
 6. Document required external checkpoints through YAML env interpolation or launcher docs.
 
 ## Adding a Rollout Engine

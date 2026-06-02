@@ -1,5 +1,5 @@
 # @package _global_
-# PE joint trainer — WISE reward variant of conf/pe_sglang.yaml (composed_pe DUAL-ENGINE sglang).
+# PE joint trainer — WISE reward variant (composed_pe DUAL-ENGINE sglang).
 #
 # Same two-track PE recipe as pe_trainside_pickscore.yaml, but the rollout is a
 # ComposedRolloutEngine driving TWO separate-process SGLang engines:
@@ -15,8 +15,7 @@
 # Pairs with unirl/train_pe.py:
 #   python -m unirl.train_pe --config-name pe_sglang_full_wise
 #
-# Format mirrors recipes/pe_rl/pe_trainside_pickscore.yaml (v2); engine params mirror
-# conf/experiment/pe_joint_multi_track_e2e.yaml (v1). Set checkpoint paths via
+# Format mirrors recipes/pe_rl/pe_trainside_pickscore.yaml (v2). Set checkpoint paths via
 # the PRETRAINED_MODEL / LLM_MODEL env vars (see ${oc.env:...} defaults below).
 #
 # batch_size MUST be divisible by num_devices — the composed rollout dispatches
@@ -336,7 +335,7 @@ sync:
 
 # ── W&B logging — read via env; the launcher (run_experiment_single_node.sh)
 # exports REPORT_TO_WANDB / WANDB_PROJECT / WANDB_RUN_NAME / WANDB_ENTITY.
-# NOTE: base conf/pe_sglang.yaml has NO logging block (wandb stays off); this
+# NOTE: the base PE recipe has NO logging block (wandb stays off); this
 # WISE variant adds one so BaseTrainer._init_wandb actually opens a run — it
 # no-ops unless report_to_wandb=true AND project_name is set.
 logging:

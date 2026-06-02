@@ -55,7 +55,7 @@ they just get less coverage. Planning horizon: **2026 H1**.
 
 ### `[ ]` `P0` VeOmni Training Backend
 
-- **Baseline.** The trainer exposes a swappable `backend:` block (see `conf/*.yaml`);
+- **Baseline.** The trainer exposes a swappable `backend:` block (see `recipes/*/*.yaml`);
   today the only implementation is the native `FSDPBackend`
   (`unirl/train/backend/fsdp.py`: FSDP2 wrap plus LoRA / NFT / EMA injection, offload,
   checkpoint). `TrainTopology` already carries `dp / tp / pp / sp / ep / cp` fields, but only

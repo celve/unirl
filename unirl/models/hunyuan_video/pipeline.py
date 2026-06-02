@@ -14,7 +14,7 @@ sigma schedule contract
 -----------------------
 The hosting engine (``TrainsideRolloutEngine`` / ``SGLangRolloutEngine``
 / ``VLLMOmniRolloutEngine``) pins ``req.sigmas`` via
-:func:`diffusionrl.sde.runtime.ensure_req_sigmas` BEFORE calling
+:func:`unirl.sde.runtime.ensure_req_sigmas` BEFORE calling
 ``generate(req)``; this pipeline reads ``req.sigmas`` and uses it
 verbatim. HunyuanVideo-1.0 uses **static** flow-match shift (default
 5.0); the engine builds
@@ -191,7 +191,7 @@ class HunyuanVideoPipeline(Pipeline):
             raise ValueError(
                 "HunyuanVideoPipeline.generate: req.sigmas is None. The hosting "
                 "engine (Trainside / SGLang / VLLMOmni) must call "
-                "diffusionrl.sde.runtime.ensure_req_sigmas(req, policy) before "
+                "unirl.sde.runtime.ensure_req_sigmas(req, policy) before "
                 "invoking pipeline.generate."
             )
         texts = req.primitives.get("text")

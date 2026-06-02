@@ -3,10 +3,10 @@ title: Hydra 配置
 description: UniRL 如何组合、验证和覆盖运行时配置。
 ---
 
-UniRL 使用 Hydra。recipe 是扁平 `conf/` 目录下自包含的 YAML 文件；每次训练用 `--config-name` 选择一个：
+UniRL 使用 Hydra。recipe 是 `recipes/` 下按训练域分桶的自包含 YAML 文件（`diffusion_rl/`、`vlm_rl/`、`llm_rl/`、`pe_rl/`、`unified_model_rl/`）；每次训练用 `--config-name` 选择一个：
 
 ```bash
-python -m unirl.train_diffusion --config-name=<recipe>
+python -m unirl.train_diffusion --config-name=<bucket>/<recipe>
 ```
 
 ## 组合模型
@@ -15,7 +15,7 @@ recipe 用 `_target_` 直接实例化每个运行时组件（FSDP backend、trai
 
 ## 参数应该放哪里
 
-recipe 语义放在 `conf/<recipe>.yaml`。集群本地路径、模型挂载、输出目录和 WandB identity 放在 launcher env var 或 CLI override（recipe 用 `${oc.env:...}` 插值）。新增 typed runtime component 时，把 config dataclass 放在靠近实现的位置，并用 `@register_config` 注册。
+recipe 语义放在 `recipes/<bucket>/<recipe>.yaml`。集群本地路径、模型挂载、输出目录和 WandB identity 放在 launcher env var 或 CLI override（recipe 用 `${oc.env:...}` 插值）。新增 typed runtime component 时，把 config dataclass 放在靠近实现的位置，并用 `@register_config` 注册。
 
 Override 优先级：
 
@@ -32,5 +32,5 @@ Ray worker 创建前会运行 cross-component validators。实现细节和 valid
 大作业前先运行：
 
 ```bash
-python -m unirl.train_diffusion --config-name=<recipe> --cfg job --resolve
+python -m unirl.train_diffusion --config-name=<bucket>/<recipe> --cfg job --resolve
 ```

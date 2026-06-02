@@ -1,6 +1,5 @@
 # @package _global_
 # GRPO WAN 2.1 I2V trainside (FSDP) colocate, v2 trainer, 1x8.
-# Ported from conf/experiment/grpo_wan21_i2v.yaml.
 #
 # I2V variant of wan21_t2v: the WAN 2.1 I2V checkpoint declares image_dim > 0,
 # so the bundle loads a CLIP vision tower and conditions on an input image via

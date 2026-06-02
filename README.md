@@ -85,7 +85,7 @@ python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside --cfg j
 
 The Fumadocs site in `docs/` is the main narrative documentation surface:
 
-Published GitHub Pages build: [https://haonan3.github.io/DiffusionRL/](https://haonan3.github.io/DiffusionRL/)
+Published GitHub Pages build: [https://haonan3.github.io/UniRL/](https://haonan3.github.io/UniRL/)
 
 ```bash
 cd docs
@@ -116,7 +116,7 @@ Run `npm run sync:readmes` in `docs/` to expose these module READMEs in the
 Fumadocs README Reference section.
 
 For GitHub Pages project hosting, the workflow sets
-`NEXT_PUBLIC_BASE_PATH=/DiffusionRL` so Next.js generates links and assets for
+`NEXT_PUBLIC_BASE_PATH=/UniRL` so Next.js generates links and assets for
 the repository subpath instead of the domain root.
 
 ## Runtime Shape
@@ -178,7 +178,7 @@ pre-commit run --all-files
 @misc{unirl_github,
   title        = {UniRL: A Distributed RL Framework for Unified Multimodal Generative Models},
   year         = {2025},
-  howpublished = {\url{https://github.com/haonan3/DiffusionRL}},
+  howpublished = {\url{https://github.com/haonan3/UniRL}},
   note         = {GitHub repository},
 }
 ```

@@ -1,6 +1,5 @@
+# @package _global_
 # HunyuanVideo-1.0 T2V GRPO — v2 trainer, in-process (trainside) rollout.
-# Ported from feat/hunyuan-video-fsdp-training's
-# conf/experiment/grpo_hunyuan_video_t2v_videopickscore.yaml.
 #
 # Stack:
 #   - rollout engine: TrainsideRolloutEngine (colocated, no separate slab)
@@ -9,9 +8,8 @@
 #   - VideoPickScore reward (PickScore on first frame)
 # Layout: 1 node × 8 GPUs, all colocated; no weight sync section.
 #
-# Launch via run_experiment_multinode_v2.sh:
-#   EXPERIMENT=hunyuan_video_t2v_trainside \
-#     bash scripts/run_experiment_multinode_v2.sh
+# Launch (1 node x 8 GPUs):
+#   bash scripts/run_experiment_single_node.sh diffusion_rl/hunyuan_video_t2v_trainside
 
 num_devices: 8
 batch_size: 48                # prompts_per_rollout (v1: 48)

@@ -97,12 +97,12 @@ Time-lapse of clouds rolling over a desert canyon.
 # 2. 让 DATA_PATH 指向它，并启动一个数据源读文件的 recipe。
 DATA_PATH=/abs/path/prompts.json \
 OUTPUT_DIR=/abs/path/outputs/run1 \
-bash scripts/run_experiment_single_node.sh sd3_trainside
+bash scripts/run_experiment_single_node.sh diffusion_rl/sd3_trainside
 ```
 
 启动 Ray 作业前先做 compose check：
 
 ```bash
 DATA_PATH=/abs/path/prompts.json \
-python -m unirl.train_diffusion --config-name=sd3_trainside --cfg job --resolve
+python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside --cfg job --resolve
 ```

@@ -18,8 +18,8 @@ Do not add `/llms.txt` as a docs category. It is a root-level access path for to
 
 ## First Principles
 
-- Treat `python -m unirl.train_diffusion --config-name=<recipe>` (and `train_vlm` / `train_pe` / `train_hi3`) as the maintained runtime entry.
-- Treat the flat `conf/<recipe>.yaml` files as the authoritative configuration surface.
+- Treat `python -m unirl.train_diffusion --config-name=<bucket>/<recipe>` (and `train_vlm` / `train_pe` / `train_hi3`) as the maintained runtime entry.
+- Treat the bucketed `recipes/<bucket>/<recipe>.yaml` files as the authoritative configuration surface.
 - Treat package READMEs as local contracts near the code they describe.
 - Do not infer runtime behavior from stale scratch docs or ignored local files unless the user explicitly points to them.
 
@@ -29,7 +29,7 @@ Do not add `/llms.txt` as a docs category. It is a root-level access path for to
 |---|---|
 | Run or validate a recipe | `/en/docs/getting-started/first-run`, then the launchers in `scripts/` |
 | Understand configuration | `/en/docs/configuration/hydra`, then `unirl/config/README.md` |
-| Pick an experiment | `/en/docs/configuration/experiments`, then `conf/<name>.yaml` |
+| Pick an experiment | `/en/docs/configuration/experiments`, then `recipes/<bucket>/<name>.yaml` |
 | Understand runtime flow | `/en/docs/architecture/overview`, then `unirl/README.md` |
 | Work on rollout engines | `unirl/rollout/README.md` |
 | Work on the train stack or a training backend | `/en/docs/architecture/trainer-v2`, then `unirl/train/readme.md` |

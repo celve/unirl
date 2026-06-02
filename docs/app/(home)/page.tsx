@@ -125,7 +125,7 @@ export default function HomePage() {
             <div className="rounded-2xl bg-fd-muted p-4 font-mono text-xs leading-6 text-fd-muted-foreground">
               <p className="font-sans text-[0.7rem] font-medium uppercase tracking-wide text-fd-foreground">Quick start</p>
               <p className="mt-2">python -m unirl.train_diffusion \</p>
-              <p>&nbsp;&nbsp;--config-name=sd3_trainside \</p>
+              <p>&nbsp;&nbsp;--config-name=diffusion_rl/sd3_trainside \</p>
               <p>&nbsp;&nbsp;num_devices=8</p>
             </div>
           </div>

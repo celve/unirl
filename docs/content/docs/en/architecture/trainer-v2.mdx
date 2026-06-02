@@ -77,7 +77,7 @@ schemas, and `TrainTopology` — is documented in the generated
 
 ## Config shape
 
-`conf/*.yaml` is a flat directory; each recipe instantiates its siblings by
+`recipes/*/*.yaml` is a bucketed tree (one subdirectory per trainer domain); each recipe instantiates its siblings by
 `_target_` (no Hydra config-group overrides):
 
 ```yaml

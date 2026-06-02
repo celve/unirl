@@ -1,42 +1,29 @@
-# HunyuanVideo-1.5 T2V GRPO — v2 trainer, vllm-omni rollout, SEPARATE slabs.
-#
-# This is the v2 port of feat/hunyuan-video-fsdp-training's
-# conf/experiment/grpo_hunyuan_video15_t2v_vllm_omni_separate.yaml,
-# adapted to the flat conf_v2 schema and main's full-weight NCCL sync.
+# @package _global_
+# HunyuanVideo-1.5 T2V GRPO — v2 trainer, in-process (trainside) rollout.
+# DanceGRPO-aligned hyperparameters: steps=16, cfg=0, eta=0.25, shift=5.0,
+# lr=1e-5, weight_decay=1e-4, LoRA r64.
 #
 # Stack:
-#   - Layout: separate slabs (train_fraction split).
-#     train half — FSDPBackend (HunyuanVideo15TransformerBlock wrap)
-#     rollout half — vllm-omni "t2v" modality (single DiT stage)
-#   - LoRA r64 trained, MERGED full-weight pushed to rollout via NCCL
-#     broadcast (sync.use_merged: true folds the LoRA delta into base).
-#   - DanceGRPO-aligned hyperparameters: steps=16, cfg=0, eta=0.25,
-#     shift=5.0, lr=1e-5, weight_decay=1e-4.
-# Layout: 2 nodes × 8 GPUs, 8 train + 8 rollout (train_fraction=0.5).
+#   - rollout engine: TrainsideRolloutEngine (colocated, no separate slab)
+#   - backend: FSDPBackend wrapping HunyuanVideo15TransformerBlock
+#     (upstream diffusers class name; matches _no_split_modules in
+#     unirl.models.hunyuan_video15.diffusion)
+#   - LoRA r64 on attn + ff projections
+#   - VideoPickScore reward (PickScore on first frame)
+# Layout: 1 node × 8 GPUs, all colocated; no weight sync section.
 #
-# Why nccl_broadcast (not ipc_bucketed): the v1 ipc_bucketed sync deadlocked
-# 4h post-Train_done on the first GRPO step (separate, 2x8 H20). Switching
-# to nccl_broadcast cleared the hang. See feat-branch commit 0ec7774 +
-# notes for details.
-#
-# Launch via run_experiment_multinode_v2.sh:
-#   EXPERIMENT=hunyuan_video15_t2v_vllmomni_nccl_separate \
-#     bash scripts/run_experiment_multinode_v2.sh
+# Launch (1 node x 8 GPUs):
+#   bash scripts/run_experiment_single_node.sh diffusion_rl/hunyuan_video15_t2v_dancegrpo_trainside
 
-num_devices: 16                    # 2 nodes × 8 GPUs
-batch_size: 16                     # prompts_per_rollout
-
-layout: separate
-train_fraction: 0.5                # 8 train + 8 rollout
-
-weight_sync_interval: 1            # sync every rollout
+num_devices: 8
+batch_size: 48                # prompts_per_rollout (v1 dancegrpo: 48)
 
 logging:
   report_to_wandb: true
   project_name: ${oc.env:WANDB_PROJECT,unirl-grpo-t2v}
-  run_name: hunyuan_video15_t2v_vllmomni_nccl_separate
+  run_name: hunyuan_video15_t2v_dancegrpo_trainside
   entity: ${oc.env:WANDB_ENTITY,null}
-  tags: [hunyuan_video15, t2v, grpo, vllm-omni, separate, nccl, lora-r64, v2]
+  tags: [hunyuan_video15, t2v, grpo, dancegrpo, trainside, lora-r64, v2]
 
 bundle:
   _target_: unirl.models.hunyuan_video15.bundle.HunyuanVideo15Bundle.from_config
@@ -60,6 +47,8 @@ pipeline:
 
 backend:
   _target_: unirl.train.backend.fsdp.FSDPBackend
+  # Upstream diffusers class name; do NOT rename (HF auto-discovery probes
+  # this string against transformer.config._no_split_modules).
   block_class_names: ["HunyuanVideo15TransformerBlock"]
   trainable_attr: transformer
   fsdp_cfg:
@@ -69,8 +58,9 @@ backend:
     mixed_precision: true
     fsdp_mode: full
     reshard_after_forward: true
-    activation_checkpointing: true
+    activation_checkpointing: true   # HV1.5 needs AC under r64 LoRA on H20
     use_torch_compile: false
+  # DanceGRPO HV1.5 optimizer profile.
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
     learning_rate: 1.0e-5
@@ -105,25 +95,10 @@ backend:
       - ff_context.net.2
 
 rollout:
-  _target_: unirl.rollout.engine.vllm_omni.engine.VLLMOmniRolloutEngine
-  model_config: ${bundle.config}
-  config:
-    _target_: unirl.rollout.engine.vllm_omni.config.VLLMOmniEngineConfig
-    model_path: ${oc.env:PRETRAINED_MODEL,hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v}
-    modality: t2v
-    default_height: 480
-    default_width: 480
-    default_num_inference_steps: 16
-    default_guidance_scale: 0.0
-    default_eta: 0.25
-    # Separate slabs do not time-share GPUs, so sleep/wake is unnecessary.
-    enable_sleep_mode: false
-    # HV1.5 has ~30GB DiT shards on cephfs; checkpoint load alone takes
-    # ~28 min, which barely overruns the engine.py default
-    # init_timeout=1800. Bump to 1 hour for headroom.
-    omni_extra:
-      init_timeout: 3600
-      stage_init_timeout: 1800
+  _target_: unirl.rollout.engine.trainside.engine.TrainsideRolloutEngine
+  stage_attrs: [diffusion]
+  # HV1.5 VAE on 480x480 t=5 latents is heavy; keep forward groups small.
+  forward_batch_size: 1
 
 reward:
   _target_: unirl.reward.service.RewardService
@@ -151,12 +126,12 @@ stack:
   _target_: unirl.train.stack.TrainStack
   micro_batch_size: 1
   max_grad_norm: 1.0
-  # v1 vllm_omni separate ran num_updates_per_batch=2 (2 PPO mini-batch
-  # optimizer steps per rollout, π_old frozen once). Omitting it defaulted
-  # to 1 → a single on-policy update where new_logp==old_logp → ratio_mean≡1
-  # and a diluted GRPO signal.
-  # per-worker batch = samples_per_prompt(16) * prompts_per_rollout(16) /
-  # train_gpus(8) = 32; 32 % 2 == 0 → mini-batch 16 (matches v1).
+  # v1 dancegrpo ran num_updates_per_batch=2 (2 PPO mini-batch optimizer
+  # steps per rollout, π_old frozen once). Omitting it defaulted to 1 → a
+  # single on-policy update where new_logp==old_logp → ratio_mean≡1 and a
+  # diluted GRPO signal. sd3/wan dancegrpo v2 recipes all set 2.
+  # per-worker batch = samples_per_prompt(24) * prompts_per_rollout(48) /
+  # num_devices(8) = 144; 144 % 2 == 0 → mini-batch 72 (matches v1).
   num_updates_per_batch: 2
 
 data_source:
@@ -182,7 +157,7 @@ sampling:
   width: 480
   num_frames: 5
   eta: 0.25
-  samples_per_prompt: 16
+  samples_per_prompt: 24        # v1 dancegrpo: 24 samples per prompt
   seed: 42
   init_same_noise: false
   autocast_precision: bf16
@@ -191,24 +166,10 @@ sampling:
   scheduler:
     _target_: unirl.utils.scheduler_utils.AllSDEScheduler
     num_timesteps: ${..num_inference_steps}
-    # feat-branch v1 vllm_omni separate recipe: SDE candidate pool = first 60%
-    # of the schedule (steps 0..8 at T=16), then 8 of those are drawn as the
+    # feat-branch v1 dancegrpo recipe: SDE candidate pool = first 60% of the
+    # schedule (steps 0..8 at T=16), then 8 of those are drawn as the
     # stochastic / trainable steps. Dropping timestep_fraction + num_sde_steps
     # defaulted to SDE-on-all-16-steps, which diluted the GRPO signal (root
     # cause of the flat-reward curves).
     timestep_fraction: [0.0, 0.6]
     num_sde_steps: 8
-
-# Full base-weight sync → vLLM-Omni rollout (separate-slab NCCL broadcast).
-# Wired to the rollout slab by DiffusionTrainer's one-time handshake. Folds
-# the trained LoRA delta into the base weights and pushes the merged full
-# model so the rollout engine runs the merged weights without a separate
-# adapter (use_merged: true).
-sync:
-  _target_: unirl.distributed.weight_sync.full.nccl.NCCLWeightSync
-  use_merged: true
-  group_name: weight_sync
-  bucket_size_mb: 512
-  flush_cache: true
-  target_modules: ["transformer"]
-  param_name_prefix: "transformer."

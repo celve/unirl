@@ -10,17 +10,17 @@ Use this page as a routing table before editing the repository.
 Read:
 
 - `unirl/config/README.md`
-- closest `conf/<recipe>.yaml`
+- closest `recipes/<bucket>/<recipe>.yaml`
 
 Edit:
 
-- `conf/<new_recipe>.yaml`
+- `recipes/<bucket>/<new_recipe>.yaml`
 - this docs page and `/en/docs/configuration/experiments` if the recipe is maintained
 
 Check:
 
 ```bash
-python -m unirl.train_diffusion --config-name=<new_recipe> --cfg job --resolve
+python -m unirl.train_diffusion --config-name=<bucket>/<new_recipe> --cfg job --resolve
 ```
 
 Risk: mismatched placement, rollout batch size, and train-stack batch geometry.
@@ -37,7 +37,7 @@ Read:
 Edit:
 
 - `unirl/models/<model_name>/`
-- `conf/<recipe>.yaml`
+- `recipes/<bucket>/<recipe>.yaml`
 
 Check:
 
@@ -61,7 +61,7 @@ Edit:
 
 - `unirl/rollout/engine/<engine>/`
 - optional weight sync backend if the engine is dedicated
-- at least one recipe in `conf/`
+- at least one recipe under `recipes/<bucket>/`
 
 Check:
 
@@ -78,12 +78,12 @@ Read:
 
 - `unirl/distributed/weight_sync/README.md`
 - `unirl/rollout/README.md`
-- the recipe's `sync` selection in `conf/<recipe>.yaml`
+- the recipe's `sync` selection in `recipes/<bucket>/<recipe>.yaml`
 
 Edit:
 
 - `unirl/distributed/weight_sync/`
-- `conf/<recipe>.yaml` when selecting or tuning a backend
+- `recipes/<bucket>/<recipe>.yaml` when selecting or tuning a backend
 
 Check:
 
@@ -146,7 +146,7 @@ See also: `unirl/reward/local/base.py`, `unirl/types/reward.py`.
 Start with:
 
 ```bash
-python -m unirl.train_diffusion --config-name=<recipe> --cfg job --resolve
+python -m unirl.train_diffusion --config-name=<bucket>/<recipe> --cfg job --resolve
 ```
 
 Then inspect:

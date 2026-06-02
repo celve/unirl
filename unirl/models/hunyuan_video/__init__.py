@@ -3,7 +3,7 @@
 Implements the HunyuanVideo 1.0 (original) model using the typed
 ``Bundle`` / ``Pipeline`` / ``EmbedStage`` / ``DiffusionStage`` /
 ``DecodeStage`` protocols. Sibling of
-:mod:`diffusionrl.models.hunyuan_video1p5` (the 1.5 variant).
+:mod:`unirl.models.hunyuan_video15` (the 1.5 variant).
 
 Key differences vs HunyuanVideo-1.5:
 - Dual text encoders: LLaMA (3D: [B, seq, 4096]) + CLIP (2D pooled: [B, 768])
@@ -16,7 +16,7 @@ Key differences vs HunyuanVideo-1.5:
 
 Imports from this package have side effects (Hydra ``register_config``
 calls in ``config.py``), so importing
-``diffusionrl.models.hunyuan_video`` is enough to make
+``unirl.models.hunyuan_video`` is enough to make
 ``model/hunyuan_video`` resolvable in the ConfigStore.
 """
 

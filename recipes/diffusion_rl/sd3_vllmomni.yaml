@@ -1,7 +1,6 @@
 # @package _global_
 # FlowGRPO-Fast SD3 colocate reproduce — v2 trainer variant.
-# Aligned with conf/experiment/flowgrpo_fast_sd3_colocate_reproduce.yaml
-# (1x8 H20 colocate baseline). Diverges only on:
+# 1x8 H20 colocate baseline. Diverges only on:
 #   - activation_checkpointing: false (user request; reference uses bf16_full_ac)
 #   - rollout engine: TrainsideRolloutEngine (v2 in-process colocate; reference uses vllm-omni)
 #   - num_updates_per_batch: 2 — restored (v2 TrainStack multi-update; matches v1 base)

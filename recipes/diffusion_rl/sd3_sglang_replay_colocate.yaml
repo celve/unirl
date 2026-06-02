@@ -1,13 +1,12 @@
 # @package _global_
 # SD3 + SGLang colocate, REPLAY logprob, v2 trainer, 2x8 H20 (matches v1 reference geometry).
-# Ported from conf/experiment/flowgrpo_sd3_sglang_replay_colocate.yaml.
 #
 # Same as sd3_sglang_native_colocate.yaml except:
 #   - rollout.config.logprob_source: replay
 #       Engine doesn't emit log-probs during generate; trainer recomputes them
 #       via stage.replay at update time using LatentSegment.sde_logp.
 #
-#   2x8:  bash run_experiment_multinode_v2.sh sd3_sglang_replay_colocate  (defaults to 2x8)
+#   2x8:  bash scripts/run_experiment_multinode_taiji.sh diffusion_rl/sd3_sglang_replay_colocate
 
 num_devices: 16               # 2 nodes x 8 GPUs; launcher auto-overrides via NUM_NODES*GPUS_PER_NODE
 batch_size: 96                # prompts_per_rollout, matches v1 reference 2x8 baseline

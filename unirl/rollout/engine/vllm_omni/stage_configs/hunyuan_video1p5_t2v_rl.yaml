@@ -53,13 +53,13 @@ stage_args:
         use_hsdp: false
         hsdp_shard_size: -1
         hsdp_replicate_size: 1
-      # diffusionrl-specific: install RLHunyuanVideo1p5Pipeline so SDE-mode
+      # unirl-specific: install RLHunyuanVideo1p5Pipeline so SDE-mode
       # rollouts get a swappable scheduler, per-step trajectory capture
       # (latents, sigmas, log_probs), and dual-text-encoder condition
       # extraction (text_mllm + text_glyph from the dual-encoder architecture).
       custom_pipeline_args:
         pipeline_class: unirl.rollout.engine.vllm_omni.hv1p5.pipeline.RLHunyuanVideo1p5Pipeline
-      # diffusionrl-specific: install the weight-sync extension so the DiT
+      # unirl-specific: install the weight-sync extension so the DiT
       # worker exposes update_weights_from_ipc (bucketed CUDA-IPC) and
       # later init_weight_transfer_engine / update_weights (NCCL).
       # Must coexist with the custom pipeline above; vllm-omni's worker
