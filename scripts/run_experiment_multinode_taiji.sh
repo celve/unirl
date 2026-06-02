@@ -132,7 +132,7 @@ HEAD_IP="${HEAD_IP:-${CHIEF_IP:-${NODE_IP}}}"          # taiji CHIEF_IP:     hea
 # recipe runs across node counts (an explicit num_devices=... in "$@" still wins).
 ENTRY="${ENTRY:-train_diffusion}"
 CMD=(
-    python -m "diffusionrl.${ENTRY}"
+    python -m "unirl.${ENTRY}"
     "--config-name=${EXPERIMENT}"
     "num_devices=$((NUM_NODES * GPUS_PER_NODE))"
 )
@@ -206,10 +206,10 @@ if [ "${LAUNCH}" = "ssh" ]; then
              CONDA_ENV='${CONDA_ENV:-}' CONDA_SH='${CONDA_SH:-}' VENV_DIR='${VENV_DIR:-}' \
              ${ssh_nccl_env}\
              nohup bash scripts/run_experiment_multinode_taiji.sh '${EXPERIMENT}' \
-             >/tmp/diffusionrl_ray_worker_${worker_n}.log 2>&1 &" \
+             >/tmp/unirl_ray_worker_${worker_n}.log 2>&1 &" \
             || echo "[head] WARNING: ssh to ${w_ip} failed; that node will not join." >&2
     done
-    echo "[head] fanned out to ${worker_n} worker(s); they join /tmp/diffusionrl_ray_worker_*.log."
+    echo "[head] fanned out to ${worker_n} worker(s); they join /tmp/unirl_ray_worker_*.log."
 elif [ "${NODE_RANK}" = "0" ]; then
     # SPMD (default): the platform runs this script on every node; rank 0 is head.
     start_ray_head

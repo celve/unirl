@@ -7,7 +7,7 @@
 # (modality=t2i_think_recaption: Stage0 AR → Stage1 DiT); the trained LoRA is
 # synced back into both stages every rollout.
 #
-# Pairs with diffusionrl/train_hi3.py (HI3Trainer). Modeled on
+# Pairs with unirl/train_hi3.py (HI3Trainer). Modeled on
 # sd3_vllmomni_full_ipc.yaml (single-backbone v2 + vllm-omni + colocate sync)
 # and pe_trainside.yaml (two-algorithm shape), with hi3-specific params from
 # conf/experiment/hi3_think_recaption_colocate.yaml.
@@ -44,9 +44,9 @@ bundle:
   # decoder and calls bundle.materialize(), which loads each rank's shard via
   # DCP (~20GB/card). ``from_config`` (the .to(device) path) would try to put
   # the full ~160GB model on one GPU → OOM (see bundle.from_config docstring).
-  _target_: diffusionrl.models.hunyuan_image3.bundle.HunyuanImage3Bundle.from_meta_config
+  _target_: unirl.models.hunyuan_image3.bundle.HunyuanImage3Bundle.from_meta_config
   config:
-    _target_: diffusionrl.models.hunyuan_image3.config.HunyuanImage3PipelineConfig
+    _target_: unirl.models.hunyuan_image3.config.HunyuanImage3PipelineConfig
     pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,/root/HunyuanImage-3-Instruct}
     model_precision: bf16
     autocast_precision: bf16
@@ -62,18 +62,18 @@ pipeline:
   # come off the bundle config. (The raw __init__ would need all 6 stages
   # passed explicitly; from_config/from_meta_config would build a SECOND,
   # unshared bundle — wrong for colocate.)
-  _target_: diffusionrl.models.hunyuan_image3.pipeline.HunyuanImage3Pipeline.from_bundle
+  _target_: unirl.models.hunyuan_image3.pipeline.HunyuanImage3Pipeline.from_bundle
   config: ${bundle.config}
   strategy:
-    _target_: diffusionrl.sde.kernels.FlowSDEStrategy
+    _target_: unirl.sde.kernels.FlowSDEStrategy
 
 backend:
-  _target_: diffusionrl.train.backend.fsdp.FSDPBackend
+  _target_: unirl.train.backend.fsdp.FSDPBackend
   # VERIFY at smoke: HF HunyuanImage3 decoder-layer class name.
   block_class_names: ["HunyuanImage3DecoderLayer"]
   trainable_attr: transformer
   fsdp_cfg:
-    _target_: diffusionrl.train.configs.FSDPConfig
+    _target_: unirl.train.configs.FSDPConfig
     param_dtype: bf16
     cpu_offload: false
     mixed_precision: true
@@ -82,21 +82,21 @@ backend:
     activation_checkpointing: true
     use_torch_compile: false
   optimizer_cfg:
-    _target_: diffusionrl.train.backend.base.OptimizerConfig
+    _target_: unirl.train.backend.base.OptimizerConfig
     learning_rate: 1.0e-4
     adam_beta1: 0.9
     adam_beta2: 0.999
     adam_epsilon: 1.0e-8
     weight_decay: 0.0
   scheduler_cfg:
-    _target_: diffusionrl.train.backend.base.LrSchedulerConfig
+    _target_: unirl.train.backend.base.LrSchedulerConfig
     type: constant
     warmup_steps: 0
     total_steps: 10000
   # Single shared LoRA adapter — both AR and DiT algorithms train it (matches
   # conf/experiment/hi3_think_recaption_colocate.yaml's shared-backbone LoRA).
   lora_cfg:
-    _target_: diffusionrl.train.configs.LoraConfig
+    _target_: unirl.train.configs.LoraConfig
     rank: 8
     alpha: 16
     dropout: 0.0
@@ -116,10 +116,10 @@ backend:
 # Both run enable_sleep_mode so the trainer can sleep/wake them around the
 # colocate train phase. The two engines share ONE backbone/LoRA via sync.
 ar_rollout:
-  _target_: diffusionrl.rollout.engine.vllm_omni.engine.VLLMOmniRolloutEngine
+  _target_: unirl.rollout.engine.vllm_omni.engine.VLLMOmniRolloutEngine
   model_config: ${bundle.config}
   config:
-    _target_: diffusionrl.rollout.engine.vllm_omni.config.VLLMOmniEngineConfig
+    _target_: unirl.rollout.engine.vllm_omni.config.VLLMOmniEngineConfig
     model_path: ${oc.env:PRETRAINED_MODEL,/root/HunyuanImage-3-Instruct}
     # AR-only think/recaption stage (is_comprehension:false), GPUs 0-3.
     modality: ar_recaption
@@ -133,10 +133,10 @@ ar_rollout:
     enable_sleep_mode: true
 
 dit_rollout:
-  _target_: diffusionrl.rollout.engine.vllm_omni.engine.VLLMOmniRolloutEngine
+  _target_: unirl.rollout.engine.vllm_omni.engine.VLLMOmniRolloutEngine
   model_config: ${bundle.config}
   config:
-    _target_: diffusionrl.rollout.engine.vllm_omni.config.VLLMOmniEngineConfig
+    _target_: unirl.rollout.engine.vllm_omni.config.VLLMOmniEngineConfig
     model_path: ${oc.env:PRETRAINED_MODEL,/root/HunyuanImage-3-Instruct}
     # Standalone DiT stage that eats an externally-injected recaption, GPUs 4-7.
     modality: dit_recaption
@@ -150,12 +150,12 @@ dit_rollout:
 reward:
   # main reward API (#169): one RewardService over a single backend (the old
   # RewardServiceNew + executors[] / InProcessRewardExecutor wrapper was dropped).
-  _target_: diffusionrl.reward.service.RewardService
+  _target_: unirl.reward.service.RewardService
   backend:
-    _target_: diffusionrl.reward.local.pickscore.PickScoreRewardScorer
+    _target_: unirl.reward.local.pickscore.PickScoreRewardScorer
     base_device: cuda
     config:
-      _target_: diffusionrl.reward.local.pickscore.PickScoreSpec
+      _target_: unirl.reward.local.pickscore.PickScoreSpec
       batch_size: 4
       device: auto
       processor_id: ${oc.env:PICKSCORE_PROCESSOR,/root/yuvalkirstain/PickScore_v1}
@@ -166,34 +166,34 @@ reward:
 # cfg.algorithm.ar / cfg.algorithm.image.
 algorithm:
   ar:
-    _target_: diffusionrl.algorithms.ar_grpo.ARGRPO
+    _target_: unirl.algorithms.ar_grpo.ARGRPO
     stage_attr: ar
     clip_range: 0.2
     clip_schedule: constant
     conditions_cls:
       _target_: hydra.utils.get_class
-      path: diffusionrl.models.hunyuan_image3.conditions.HunyuanImage3ARConditions
+      path: unirl.models.hunyuan_image3.conditions.HunyuanImage3ARConditions
     sampling_temperature: ${sampling.ar.temperature}
   image:
-    _target_: diffusionrl.algorithms.diffusion_grpo.DiffusionGRPO
+    _target_: unirl.algorithms.diffusion_grpo.DiffusionGRPO
     stage_attr: diffusion
     clip_range: 0.2
     clip_schedule: constant
     conditions_cls:
       _target_: hydra.utils.get_class
-      path: diffusionrl.models.hunyuan_image3.conditions.HunyuanImage3DiffusionConditions
+      path: unirl.models.hunyuan_image3.conditions.HunyuanImage3DiffusionConditions
     # DiffusionGRPO.replay needs the same guidance_scale / eta the rollout
     # sampled with — bind to the diffusion sub-block of ComposedSamplingParams.
     params: ${sampling.diffusion}
 
 # One stack: single backend + both algorithms → one optimizer step.
 stack:
-  _target_: diffusionrl.train.hi3_stack.HI3TrainStack
+  _target_: unirl.train.hi3_stack.HI3TrainStack
   micro_batch_size: 1
   max_grad_norm: 1.0
 
 data_source:
-  _target_: diffusionrl.data.data_source.DefaultDataSource
+  _target_: unirl.data.data_source.DefaultDataSource
   args: {}                      # DefaultDataSource ignores args; uses hardcoded prompts
 
 # ComposedSamplingParams: intended hierarchy is
@@ -209,16 +209,16 @@ data_source:
 # num_images_per_prompt fan-out + response.py lineage for n images/AR (follow-up).
 # These small values are for the dump-first observe run.
 sampling:
-  _target_: diffusionrl.types.sampling.ComposedSamplingParams
+  _target_: unirl.types.sampling.ComposedSamplingParams
   ar:
-    _target_: diffusionrl.types.sampling.ARSamplingParams
+    _target_: unirl.types.sampling.ARSamplingParams
     samples_per_prompt: 2       # N AR trajectories per prompt (temperature-driven)
     temperature: 0.6            # >0 so the N trajectories actually differ
     max_new_tokens: 4096
     top_p: 0.95
     top_k: 1024
   diffusion:
-    _target_: diffusionrl.types.sampling.DiffusionSamplingParams
+    _target_: unirl.types.sampling.DiffusionSamplingParams
     samples_per_prompt: 2       # M images per AR trajectory (see NOTE above)
     num_inference_steps: 16
     guidance_scale: 1.0
@@ -233,7 +233,7 @@ sampling:
     trajectory_precision: fp16
     logprob_precision: fp32
     scheduler:
-      _target_: diffusionrl.utils.scheduler_utils.AllSDEScheduler
+      _target_: unirl.utils.scheduler_utils.AllSDEScheduler
       num_timesteps: ${..num_inference_steps}
       num_sde_steps: null
 
@@ -247,7 +247,7 @@ sampling:
 # The fused qkv is shipped WHOLE and split into q/k/v engine-side by vLLM's native
 # packed-modules mapping (post-#181: no trainer-side packed_modules block).
 sync:
-  _target_: diffusionrl.distributed.weight_sync.lora.RemoteLoraWeightSync
+  _target_: unirl.distributed.weight_sync.lora.RemoteLoraWeightSync
   copy: true
   param_prefix: "model."
   adapter_name: default

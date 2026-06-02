@@ -13,7 +13,7 @@ num_rollouts: 10000
 # Shared nodes: model_config + strategy defined once, referenced by
 # bundle / pipeline / rollout (SGLang needs both at init).
 model_config:
-  _target_: diffusionrl.models.sd3.config.SD3PipelineConfig
+  _target_: unirl.models.sd3.config.SD3PipelineConfig
   pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
   model_precision: bf16
   autocast_precision: bf16
@@ -34,14 +34,14 @@ model_config:
 
 # Shared SDE strategy; SGLang resolves its sde_label from it.
 strategy:
-  _target_: diffusionrl.sde.kernels.FlowSDEStrategy
+  _target_: unirl.sde.kernels.FlowSDEStrategy
 
 bundle:
-  _target_: diffusionrl.models.sd3.bundle.SD3Bundle.from_config
+  _target_: unirl.models.sd3.bundle.SD3Bundle.from_config
   config: ${model_config}
 
 pipeline:
-  _target_: diffusionrl.models.sd3.pipeline.SD3Pipeline
+  _target_: unirl.models.sd3.pipeline.SD3Pipeline
   shift: 3.0
   autocast_precision: bf16
   trajectory_precision: bf16
@@ -49,11 +49,11 @@ pipeline:
   strategy: ${strategy}
 
 backend:
-  _target_: diffusionrl.train.backend.fsdp.FSDPBackend
+  _target_: unirl.train.backend.fsdp.FSDPBackend
   block_class_names: ["JointTransformerBlock"]
   trainable_attr: transformer
   fsdp_cfg:
-    _target_: diffusionrl.train.configs.FSDPConfig
+    _target_: unirl.train.configs.FSDPConfig
     param_dtype: bf16
     cpu_offload: false
     mixed_precision: true
@@ -62,19 +62,19 @@ backend:
     activation_checkpointing: true
     use_torch_compile: false
   optimizer_cfg:
-    _target_: diffusionrl.train.backend.base.OptimizerConfig
+    _target_: unirl.train.backend.base.OptimizerConfig
     learning_rate: 3.0e-4
     adam_beta1: 0.9
     adam_beta2: 0.999
     adam_epsilon: 1.0e-8
     weight_decay: 0.0
   scheduler_cfg:
-    _target_: diffusionrl.train.backend.base.LrSchedulerConfig
+    _target_: unirl.train.backend.base.LrSchedulerConfig
     type: constant
     warmup_steps: 0
     total_steps: 10000
   lora_cfg:
-    _target_: diffusionrl.train.configs.LoraConfig
+    _target_: unirl.train.configs.LoraConfig
     rank: 32
     alpha: 64
     dropout: 0.0
@@ -91,9 +91,9 @@ backend:
       - attn.to_v
 
 rollout:
-  _target_: diffusionrl.rollout.engine.sglang.engine.SGLangRolloutEngine
+  _target_: unirl.rollout.engine.sglang.engine.SGLangRolloutEngine
   config:
-    _target_: diffusionrl.rollout.engine.sglang.config.SGLangEngineConfig
+    _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
     model_family: sd3
     logprob_source: native
     populate_conditions: true
@@ -121,29 +121,29 @@ rollout:
   strategy: ${strategy}
 
 reward:
-  _target_: diffusionrl.reward.service.RewardService
+  _target_: unirl.reward.service.RewardService
   backend:
-    _target_: diffusionrl.reward.local.pickscore.PickScoreRewardScorer
+    _target_: unirl.reward.local.pickscore.PickScoreRewardScorer
     base_device: cuda
     config:
-      _target_: diffusionrl.reward.local.pickscore.PickScoreSpec
+      _target_: unirl.reward.local.pickscore.PickScoreSpec
       batch_size: 8
       device: auto
       processor_id: laion/CLIP-ViT-H-14-laion2B-s32B-b79K
       model_id: yuvalkirstain/PickScore_v1
 
 algorithm:
-  _target_: diffusionrl.algorithms.diffusion_grpo.DiffusionGRPO
+  _target_: unirl.algorithms.diffusion_grpo.DiffusionGRPO
   stage_attr: diffusion
   clip_range: 1.0e-4
   clip_schedule: constant
   conditions_cls:
     _target_: hydra.utils.get_class
-    path: diffusionrl.models.sd3.conditions.SD3Conditions
+    path: unirl.models.sd3.conditions.SD3Conditions
   params: ${sampling}
 
 stack:
-  _target_: diffusionrl.train.stack.TrainStack
+  _target_: unirl.train.stack.TrainStack
   micro_batch_size: 1
   max_grad_norm: 1.0
 
@@ -151,7 +151,7 @@ data_source:
   # Real prompts loaded from file: MultimodalRLDataSource reads TXT/JSON/JSONL
   # via data_path and exposes get_samples(bs). (DefaultDataSource returns only
   # 8 hardcoded prompts — smoke-test use; training on it over-optimizes/collapses.)
-  _target_: diffusionrl.data.data_source.MultimodalRLDataSource
+  _target_: unirl.data.data_source.MultimodalRLDataSource
   args:
     run:
       data_path: datasets/pickscore/train.txt        # relative to repo cwd (Hydra 1.3 no-chdir)
@@ -161,7 +161,7 @@ data_source:
       prompts_per_rollout: ${batch_size}
 
 sampling:
-  _target_: diffusionrl.types.sampling.DiffusionSamplingParams
+  _target_: unirl.types.sampling.DiffusionSamplingParams
   num_inference_steps: 10
   guidance_scale: 1.0
   height: 512
@@ -174,7 +174,7 @@ sampling:
   trajectory_precision: bf16
   logprob_precision: fp32
   scheduler:
-    _target_: diffusionrl.utils.scheduler_utils.AllSDEScheduler
+    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
     num_timesteps: ${..num_inference_steps}
     num_sde_steps: 3
     # SDE-step window: [0,0.5] confines SDE noise to the early high-σ steps
@@ -192,7 +192,7 @@ weight_sync_interval: 1
 # (fused into the generate wake/sleep, so a synced step costs one wake instead
 # of two).
 sync:
-  _target_: diffusionrl.distributed.weight_sync.lora.LocalLoraWeightSync
+  _target_: unirl.distributed.weight_sync.lora.LocalLoraWeightSync
   verify: false  # SGLang engine lacks loaded_lora_checksums (only loaded_param_checksums); skip read-back
   # Mirrors SD3PipelineConfig.weight_sync_param_name_prefix; must match the
   # engine-side LoRA key naming (a wrong prefix yields wrong/zero loaded layers,

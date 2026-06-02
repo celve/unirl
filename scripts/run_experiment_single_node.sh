@@ -73,7 +73,7 @@ fi
 
 ENTRY="${ENTRY:-train_diffusion}"
 CMD=(
-    python -m "diffusionrl.${ENTRY}"
+    python -m "unirl.${ENTRY}"
     "--config-name=${EXPERIMENT}"
     "num_devices=${GPUS_PER_NODE}"
 )

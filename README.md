@@ -1,26 +1,30 @@
-# DiffusionRL
+# UniRL
 
-DiffusionRL is a distributed reinforcement learning framework for diffusion
-model optimization. It trains diffusion and multimodal generation models with
-Ray actor groups, Hydra experiment recipes, composable training policies, and
+UniRL is a distributed reinforcement learning framework for unified multimodal
+generative models. It trains diffusion and autoregressive models with Ray-based
+worker groups, Hydra experiment recipes, composable training stacks, and
 pluggable rollout engines.
 
 ```text
-   prompts ──▶ rollout actor group ──▶ rewards ──▶ advantages ──┐
-                  (samples x_T → x_0)                            │
-                                                                 ▼
-                                                          train actor group
-                                                          (policy stack +
-                                                           stage algorithms)
-                                                                 │
-                                          weight sync ◀──────────┘
-                                          (dedicated rollout only)
+   prompts ──▶ rollout workers ──▶ rewards ──▶ advantages ──┐
+                  (sample x_T → x_0)                         │
+                                                             ▼
+                                                      train workers
+                                                      (FSDP stack +
+                                                       loss algorithm)
+                                                             │
+                                       weight sync ◀─────────┘
+                                       (dedicated rollout only)
 ```
 
-| Domain | Models | Recipes |
+| Domain | Models | Algorithms |
 |---|---|---|
-| Image | Stable Diffusion 3, Qwen-Image, HunyuanImage3 | GRPO, FlowGRPO, DanceGRPO, MixGRPO, NFT |
-| Video | WAN 2.1 / 2.2, HunyuanVideo 1.5 | GRPO |
+| Image | Stable Diffusion 3, Qwen-Image, HunyuanImage3 | GRPO, DanceGRPO, MixGRPO, Flow-DPPO, NFT |
+| Video | WAN 2.1 / 2.2 | GRPO, DanceGRPO, MixGRPO |
+| Autoregressive (VLM / LLM) | Qwen-VL, Qwen3 | GRPO, SPO-DPPO |
+
+Additional model packages (e.g. FLUX.2-Klein, HunyuanVideo 1.5) live under
+`unirl/models/` without shipped recipes yet — see `unirl/models/README.md`.
 
 ## Start Here
 
@@ -37,35 +41,41 @@ For development tools:
 pip install -e ".[train,infer,eval,dev]" --no-build-isolation
 ```
 
-Toy prompt files are committed under `data/samples/`. For real data or model
-checkpoints, pass absolute paths through launcher env vars such as `DATA_PATH`,
-`EVAL_DATA_PATH`, `OUTPUT_DIR`, and `PRETRAINED_MODEL`.
+Recipes read data, checkpoint, and W&B settings from the environment via
+`${oc.env:...}`. Pass absolute paths through launcher env vars such as
+`PRETRAINED_MODEL`, `DATA_PATH`, and `EVAL_DATA_PATH`, plus the W&B knobs
+(`REPORT_TO_WANDB`, `WANDB_PROJECT`, `WANDB_ENTITY`). Sample prompt lists are
+committed under `datasets/`.
 
-Run a single-node recipe:
+Run a single-node recipe — the first argument is a recipe name from `conf/`:
 
 ```bash
-bash scripts/run_experiment_single_node.sh flowgrpo_fast_sd3_colocate
+bash scripts/run_experiment_single_node.sh sd3_trainside
+```
+
+The diffusion entrypoint is the default; select another with `ENTRY`:
+
+```bash
+ENTRY=train_vlm bash scripts/run_experiment_single_node.sh argrpo_qwen_vl_geo3k_mc_4x8
+ENTRY=train_pe  bash scripts/run_experiment_single_node.sh pe_trainside
 ```
 
 Run a multi-node recipe (taiji platform):
 
 ```bash
-bash scripts/run_experiment_multinode_taiji.sh flowgrpo_fast_qwen_image_2x8
+bash scripts/run_experiment_multinode_taiji.sh sd3_sglang_native_colocate
 ```
 
-Invoke the Hydra entrypoint directly:
+Invoke an entrypoint directly:
 
 ```bash
-python -m diffusionrl.train \
-    +experiment=flowgrpo_fast_sd3_colocate \
-    run.data_path=data/samples/prompts_toy.json \
-    resume.output_dir=outputs/my_experiment
+python -m unirl.train_diffusion --config-name=sd3_trainside num_devices=8
 ```
 
 Validate a recipe without launching Ray work:
 
 ```bash
-python -m diffusionrl.train +experiment=flowgrpo_fast_sd3_colocate --cfg job --resolve
+python -m unirl.train_diffusion --config-name=sd3_trainside --cfg job --resolve
 ```
 
 ## Documentation Map
@@ -74,20 +84,15 @@ Read these files by task:
 
 | Task | Read |
 |---|---|
-| Pick and launch a training recipe | `scripts/README.md` |
-| Understand Hydra config groups and where knobs belong | `conf/README.md` |
-| Understand the code architecture and module boundaries | `diffusionrl/README.md` |
-| Work on Ray actors, actor groups, placement, or colocate orchestration | `diffusionrl/ray/README.md` |
-| Work on rollout modes, rollout engines, or `RolloutReq` / `RolloutResp` flow | `diffusionrl/rollout/README.md` |
-| Work on the v2 train stack — FSDP backend, train stack, LoRA/NFT inject, EMA shadow | `diffusionrl/train/readme.md` |
-| Add or debug GRPO / NFT-style loss logic | `diffusionrl/algorithms/README.md` |
-| Understand SDE step kernels, σ schedule, or initial noise | `diffusionrl/sde/README.md` |
-| Add or debug reward components | `diffusionrl/reward/README.md` |
-| Add or debug a trainer→rollout weight-sync backend | `diffusionrl/distributed/weight_sync/README.md` |
-| Add or debug model code packages | `diffusionrl/models/README.md` |
-| Add or mount model artifacts | `models/README.md` |
-| Add or mount datasets | `data/README.md` |
-| Run HI3 / vLLM-Omni recipes that need external patches | `patches/README.md` |
+| Understand the code architecture and module boundaries | `unirl/README.md` |
+| Understand Hydra config groups and where knobs belong | `unirl/config/README.md` |
+| Work on rollout modes, rollout engines, or `RolloutReq` / `RolloutResp` flow | `unirl/rollout/README.md` |
+| Work on the train stack — FSDP backend, mini-batch loop, LoRA/NFT inject, EMA shadow | `unirl/train/readme.md` |
+| Add or debug GRPO / NFT / DPPO loss logic | `unirl/algorithms/README.md` |
+| Understand SDE step kernels, σ schedule, or initial noise | `unirl/sde/README.md` |
+| Add or debug reward components | `unirl/reward/README.md` |
+| Add or debug a trainer→rollout weight-sync backend | `unirl/distributed/weight_sync/README.md` |
+| Add or debug model code packages | `unirl/models/README.md` |
 
 This layout is intentional: the root README gives the shortest path to running
 the project, while module READMEs describe the contracts closest to the code
@@ -95,40 +100,46 @@ that owns them.
 
 ## Runtime Shape
 
-The maintained entrypoint is:
+Each domain has its own entrypoint, all driven the same way:
 
 ```bash
-python -m diffusionrl.train +experiment=<name>
+python -m unirl.train_diffusion --config-name=<recipe>   # diffusion image/video
+python -m unirl.train_vlm       --config-name=<recipe>   # autoregressive VLM / LLM
+python -m unirl.train_pe        --config-name=<recipe>   # prompt-enhancer (PE)
+python -m unirl.train_hi3       --config-name=<recipe>   # HunyuanImage3 (mixed AR + diffusion)
 ```
 
-At startup it:
+Recipes are self-contained YAML files in `conf/` (a flat directory) selected
+with `--config-name`. At startup an entrypoint:
 
-1. registers Hydra config dataclasses from the `diffusionrl` package;
-2. composes `conf/train.yaml` plus `conf/experiment/<name>.yaml`;
-3. validates cross-component contracts before Ray actors are created;
-4. creates placement, rollout actor group, and train actor group;
-5. runs rollout, reward, advantage, train, and optional weight-sync phases.
+1. registers Hydra config dataclasses from the `unirl` package;
+2. composes the chosen `conf/<recipe>.yaml`;
+3. validates cross-component contracts (e.g. weight-sync and LoRA targets);
+4. builds the trainer, which acquires a Ray `DevicePool` and constructs the
+   rollout and train workers;
+5. runs the rollout → reward → advantage → train → optional weight-sync loop.
 
-Deployment modes:
+Deployment modes — set by the rollout engine `_target_` and the optional `sync:`
+section:
 
 | Mode | Meaning |
 |---|---|
-| Direct sampling | `rollout/engine: trainside`; train actors also sample, so no `sync:` section is allowed |
-| Separate | rollout actors and train actors use different GPU pools; a `sync:` variant is required |
-| Colocate | rollout and train actors share GPU bundles with explicit offload/onload and weight sync |
+| Direct sampling | rollout uses the `trainside` engine; the train workers also sample, so no `sync:` section is allowed |
+| Separate | rollout and train workers use different GPU pools; a `sync:` variant is required |
+| Colocate | rollout and train workers share GPU bundles with explicit offload/onload and weight sync |
 
-Experiment YAMLs under `conf/experiment/` are the source of truth for model,
-algorithm, rollout engine, placement, reward, sync, and batch geometry.
-Launchers under `scripts/` should stay thin and only prepare the runtime.
+Each `conf/<recipe>.yaml` is the source of truth for model, algorithm, rollout
+engine, placement, reward, sync, and batch geometry. Launchers under `scripts/`
+stay thin and only prepare the runtime.
 
 ## Common Checks
 
 ```bash
 # Compose one recipe and print the resolved config
-python -m diffusionrl.train +experiment=<experiment> --cfg job --resolve
+python -m unirl.train_diffusion --config-name=<recipe> --cfg job --resolve
 
 # Python syntax check
-python -m compileall -q diffusionrl
+python -m compileall -q unirl
 
 # Shell launcher syntax check
 for f in scripts/*.sh; do bash -n "$f"; done
@@ -140,10 +151,10 @@ pre-commit run --all-files
 ## Citation
 
 ```bibtex
-@misc{diffusionrl_github,
-  title        = {DiffusionRL: A Distributed RL Framework for Diffusion Model Optimization},
+@misc{unirl_github,
+  title        = {UniRL: A Distributed RL Framework for Unified Multimodal Generative Models},
   year         = {2025},
-  howpublished = {\url{https://github.com/your-org/diffusionrl}},
+  howpublished = {\url{https://github.com/your-org/unirl}},
   note         = {GitHub repository},
 }
 ```

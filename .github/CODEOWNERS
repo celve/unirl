@@ -16,14 +16,14 @@
 /conf/ @CjhHa1 @haonan3 @celve @Jayce-Ping
 
 # Core training and distributed runtime.
-/diffusionrl/algorithms/ @CjhHa1 @haonan3 @celve @Jayce-Ping
-/diffusionrl/distributed/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/unirl/algorithms/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/unirl/distributed/ @CjhHa1 @haonan3 @celve @Jayce-Ping
 
 # Rollout, reward, SDE, and model integration.
-/diffusionrl/rollout/ @CjhHa1 @haonan3 @celve @Jayce-Ping
-/diffusionrl/reward/ @CjhHa1 @haonan3 @celve @Jayce-Ping
-/diffusionrl/sde/ @CjhHa1 @haonan3 @celve @Jayce-Ping
-/diffusionrl/models/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/unirl/rollout/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/unirl/reward/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/unirl/sde/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/unirl/models/ @CjhHa1 @haonan3 @celve @Jayce-Ping
 
 # Data, model artifacts, patches, and tests.
 /data/ @CjhHa1 @haonan3 @celve @Jayce-Ping

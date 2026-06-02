@@ -9,9 +9,9 @@
 #     each rollout (trainside shares the module; sglang needs an explicit push).
 #
 # Launch (single node, rank 0):
-#   TRAIN_MODULE=diffusionrl.train_vlm QWEN_VL_PATH=/root/sync/models/Qwen2.5-VL-7B-Instruct \
+#   TRAIN_MODULE=unirl.train_vlm QWEN_VL_PATH=/root/sync/models/Qwen2.5-VL-7B-Instruct \
 #   DATA_PATH=/root/sync/datasets/geo3k_mc/train.jsonl \
-#   python -m diffusionrl.train_vlm --config-name=argrpo_qwen_vl_geo3k_mc_sglang_1x8 num_devices=8
+#   python -m unirl.train_vlm --config-name=argrpo_qwen_vl_geo3k_mc_sglang_1x8 num_devices=8
 
 num_devices: 32
 batch_size: 32 # prompts_per_rollout
@@ -26,15 +26,15 @@ adv_normalization_scope: global
 
 logging:
   report_to_wandb: true
-  project_name: diffusionrl-flowgrpo-newstac
+  project_name: unirl-flowgrpo-newstac
   run_name: argrpo_qwen_vl_sglang_v2_4x8
   entity: diffusionrl-reproduce
   tags: [argrpo, qwen-vl, geo3k-mc, sglang, native, colocate, v2, 1x8]
 
 bundle:
-  _target_: diffusionrl.models.qwen_vl.bundle.QwenVLBundle.from_config
+  _target_: unirl.models.qwen_vl.bundle.QwenVLBundle.from_config
   config:
-    _target_: diffusionrl.models.qwen_vl.config.QwenVLPipelineConfig
+    _target_: unirl.models.qwen_vl.config.QwenVLPipelineConfig
     pretrained_model_ckpt_path: ${oc.env:QWEN_VL_PATH,/root/sync/models/Qwen2.5-VL-7B-Instruct}
     model_precision: bf16
     autocast_precision: bf16
@@ -44,15 +44,15 @@ bundle:
     max_prompt_length: 2048
 
 pipeline:
-  _target_: diffusionrl.models.qwen_vl.pipeline.QwenVLPipeline.from_bundle
+  _target_: unirl.models.qwen_vl.pipeline.QwenVLPipeline.from_bundle
   max_prompt_length: 2048
 
 backend:
-  _target_: diffusionrl.train.backend.fsdp.FSDPBackend
+  _target_: unirl.train.backend.fsdp.FSDPBackend
   block_class_names: ["Qwen2_5_VLDecoderLayer"]
   trainable_attr: transformer
   fsdp_cfg:
-    _target_: diffusionrl.train.configs.FSDPConfig
+    _target_: unirl.train.configs.FSDPConfig
     param_dtype: bf16
     cpu_offload: false
     mixed_precision: true
@@ -61,14 +61,14 @@ backend:
     activation_checkpointing: false
     use_torch_compile: false
   optimizer_cfg:
-    _target_: diffusionrl.train.backend.base.OptimizerConfig
+    _target_: unirl.train.backend.base.OptimizerConfig
     learning_rate: 5.0e-6
     adam_beta1: 0.9
     adam_beta2: 0.999
     adam_epsilon: 1.0e-8
     weight_decay: 0.0
   scheduler_cfg:
-    _target_: diffusionrl.train.backend.base.LrSchedulerConfig
+    _target_: unirl.train.backend.base.LrSchedulerConfig
     type: constant
     warmup_steps: 0
     total_steps: 2000
@@ -82,9 +82,9 @@ backend:
 # _target_ resolves to the engine class for remote(); the nested `config` block
 # is materialized worker-side into SGLangLLMEngineConfig.
 rollout:
-  _target_: diffusionrl.rollout.engine.sglang_llm.engine.SGLangLLMRolloutEngine
+  _target_: unirl.rollout.engine.sglang_llm.engine.SGLangLLMRolloutEngine
   config:
-    _target_: diffusionrl.rollout.engine.sglang_llm.config.SGLangLLMEngineConfig
+    _target_: unirl.rollout.engine.sglang_llm.config.SGLangLLMEngineConfig
     pretrained_model_ckpt_path: ${oc.env:QWEN_VL_PATH,/root/sync/models/Qwen2.5-VL-7B-Instruct}
     tp_size: 1
     # VLMTrainer pre-expands the req to prompts*samples_per_prompt entries (one
@@ -119,7 +119,7 @@ sync:
   # update_weights_from_tensor. name_remap (below) drops the frozen vision tower
   # and remaps model.language_model.*→model.*; tensor.py frees each bucket's
   # gathered tensors (empty_cache) so the ~13GB all-gather doesn't OOM the server.
-  _target_: diffusionrl.distributed.weight_sync.full.tensor.TensorWeightSync
+  _target_: unirl.distributed.weight_sync.full.tensor.TensorWeightSync
   lora_merged: false
   bucket_size_mb: 64
   flush_cache: true
@@ -131,30 +131,30 @@ sync:
   name_remap: {"model.visual.*": null, "model.language_model.*": "model.*"}
 
 reward:
-  _target_: diffusionrl.reward.service.RewardService
+  _target_: unirl.reward.service.RewardService
   backend:
-    _target_: diffusionrl.reward.local.mc_exact_match.MCExactMatchRewardScorer
+    _target_: unirl.reward.local.mc_exact_match.MCExactMatchRewardScorer
     base_device: cpu
     config:
-      _target_: diffusionrl.reward.local.mc_exact_match.MCExactMatchSpec
+      _target_: unirl.reward.local.mc_exact_match.MCExactMatchSpec
 
 algorithm:
-  _target_: diffusionrl.algorithms.ar_grpo.ARGRPO
+  _target_: unirl.algorithms.ar_grpo.ARGRPO
   stage_attr: ar
   clip_range: 1.0e-2
   clip_schedule: constant
   conditions_cls:
     _target_: hydra.utils.get_class
-    path: diffusionrl.models.qwen_vl.conditions.QwenVLARConditions
+    path: unirl.models.qwen_vl.conditions.QwenVLARConditions
   sampling_temperature: 0.7
 
 stack:
-  _target_: diffusionrl.train.stack.TrainStack
+  _target_: unirl.train.stack.TrainStack
   micro_batch_size: 2
   max_grad_norm: 1.0
 
 data_source:
-  _target_: diffusionrl.data.data_source.MultimodalRLDataSource
+  _target_: unirl.data.data_source.MultimodalRLDataSource
   args:
     run:
       data_path: ${oc.env:DATA_PATH,/root/sync/datasets/geo3k_mc/train.jsonl}
@@ -164,7 +164,7 @@ data_source:
       prompts_per_rollout: 32
 
 sampling:
-  _target_: diffusionrl.types.sampling.ARSamplingParams
+  _target_: unirl.types.sampling.ARSamplingParams
   samples_per_prompt: 16
   temperature: 0.7
   top_p: 0.9

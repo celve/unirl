@@ -18,15 +18,15 @@ adv_normalization_scope: global
 
 logging:
   report_to_wandb: true
-  project_name: diffusionrl-flowgrpo-newstac
+  project_name: unirl-flowgrpo-newstac
   run_name: argrpo_qwen_vl_sglang_lora_4x8
   entity: diffusionrl-reproduce
   tags: [argrpo, qwen-vl, geo3k-mc, sglang, lora, colocate, v2, 4x8]
 
 bundle:
-  _target_: diffusionrl.models.qwen_vl.bundle.QwenVLBundle.from_config
+  _target_: unirl.models.qwen_vl.bundle.QwenVLBundle.from_config
   config:
-    _target_: diffusionrl.models.qwen_vl.config.QwenVLPipelineConfig
+    _target_: unirl.models.qwen_vl.config.QwenVLPipelineConfig
     pretrained_model_ckpt_path: ${oc.env:QWEN_VL_PATH,/root/sync/models/Qwen2.5-VL-7B-Instruct}
     model_precision: bf16
     autocast_precision: bf16
@@ -36,15 +36,15 @@ bundle:
     max_prompt_length: 2048
 
 pipeline:
-  _target_: diffusionrl.models.qwen_vl.pipeline.QwenVLPipeline.from_bundle
+  _target_: unirl.models.qwen_vl.pipeline.QwenVLPipeline.from_bundle
   max_prompt_length: 2048
 
 backend:
-  _target_: diffusionrl.train.backend.fsdp.FSDPBackend
+  _target_: unirl.train.backend.fsdp.FSDPBackend
   block_class_names: ["Qwen2_5_VLDecoderLayer"]
   trainable_attr: transformer
   fsdp_cfg:
-    _target_: diffusionrl.train.configs.FSDPConfig
+    _target_: unirl.train.configs.FSDPConfig
     param_dtype: bf16
     cpu_offload: false
     mixed_precision: true
@@ -53,7 +53,7 @@ backend:
     activation_checkpointing: false
     use_torch_compile: false
   optimizer_cfg:
-    _target_: diffusionrl.train.backend.base.OptimizerConfig
+    _target_: unirl.train.backend.base.OptimizerConfig
     # LoRA LR (1e-4) — ~20x the full-FT 5e-6. At 5e-6 the LoRA adapter (lora_B=0
     # init) barely moved and reward stayed flat at the base ~0.55 (verified on the
     # trainside LoRA run); 1e-4 makes the policy actually move (approx_kl 1e-13->1e-5).
@@ -63,12 +63,12 @@ backend:
     adam_epsilon: 1.0e-8
     weight_decay: 0.0
   scheduler_cfg:
-    _target_: diffusionrl.train.backend.base.LrSchedulerConfig
+    _target_: unirl.train.backend.base.LrSchedulerConfig
     type: constant
     warmup_steps: 0
     total_steps: 2000
   lora_cfg:
-    _target_: diffusionrl.train.configs.LoraConfig
+    _target_: unirl.train.configs.LoraConfig
     rank: 16
     alpha: 32
     dropout: 0.0
@@ -81,9 +81,9 @@ backend:
       - o_proj
 
 rollout:
-  _target_: diffusionrl.rollout.engine.sglang_llm.engine.SGLangLLMRolloutEngine
+  _target_: unirl.rollout.engine.sglang_llm.engine.SGLangLLMRolloutEngine
   config:
-    _target_: diffusionrl.rollout.engine.sglang_llm.config.SGLangLLMEngineConfig
+    _target_: unirl.rollout.engine.sglang_llm.config.SGLangLLMEngineConfig
     pretrained_model_ckpt_path: ${oc.env:QWEN_VL_PATH,/root/sync/models/Qwen2.5-VL-7B-Instruct}
     tp_size: 1
     samples_pre_expanded: true
@@ -110,36 +110,36 @@ rollout:
 # LoRA-pool weight sync: serialize the trained LoRA adapter tensors and load
 # them into the colocated SRT server as a fresh versioned adapter each rollout.
 sync:
-  _target_: diffusionrl.distributed.weight_sync.lora.LocalLoraWeightSync
+  _target_: unirl.distributed.weight_sync.lora.LocalLoraWeightSync
   param_prefix: ""
   adapter_name: default
   verify: false
 
 reward:
-  _target_: diffusionrl.reward.service.RewardService
+  _target_: unirl.reward.service.RewardService
   backend:
-    _target_: diffusionrl.reward.local.mc_exact_match.MCExactMatchRewardScorer
+    _target_: unirl.reward.local.mc_exact_match.MCExactMatchRewardScorer
     base_device: cpu
     config:
-      _target_: diffusionrl.reward.local.mc_exact_match.MCExactMatchSpec
+      _target_: unirl.reward.local.mc_exact_match.MCExactMatchSpec
 
 algorithm:
-  _target_: diffusionrl.algorithms.ar_grpo.ARGRPO
+  _target_: unirl.algorithms.ar_grpo.ARGRPO
   stage_attr: ar
   clip_range: 1.0e-2
   clip_schedule: constant
   conditions_cls:
     _target_: hydra.utils.get_class
-    path: diffusionrl.models.qwen_vl.conditions.QwenVLARConditions
+    path: unirl.models.qwen_vl.conditions.QwenVLARConditions
   sampling_temperature: 0.7
 
 stack:
-  _target_: diffusionrl.train.stack.TrainStack
+  _target_: unirl.train.stack.TrainStack
   micro_batch_size: 2
   max_grad_norm: 1.0
 
 data_source:
-  _target_: diffusionrl.data.data_source.MultimodalRLDataSource
+  _target_: unirl.data.data_source.MultimodalRLDataSource
   args:
     run:
       data_path: ${oc.env:DATA_PATH,/root/sync/datasets/geo3k_mc/train.jsonl}
@@ -149,7 +149,7 @@ data_source:
       prompts_per_rollout: 32
 
 sampling:
-  _target_: diffusionrl.types.sampling.ARSamplingParams
+  _target_: unirl.types.sampling.ARSamplingParams
   samples_per_prompt: 16
   temperature: 0.7
   top_p: 0.9

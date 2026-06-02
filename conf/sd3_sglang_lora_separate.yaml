@@ -22,9 +22,9 @@ train_fraction: 0.5 # 4 train GPUs + 4 rollout GPUs on an 8-GPU pool.
 weight_sync_interval: 1
 
 bundle:
-  _target_: diffusionrl.models.sd3.bundle.SD3Bundle.from_config
+  _target_: unirl.models.sd3.bundle.SD3Bundle.from_config
   config:
-    _target_: diffusionrl.models.sd3.config.SD3PipelineConfig
+    _target_: unirl.models.sd3.config.SD3PipelineConfig
     pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
     model_precision: bf16
     autocast_precision: bf16
@@ -45,20 +45,20 @@ bundle:
       - attn.to_v
 
 pipeline:
-  _target_: diffusionrl.models.sd3.pipeline.SD3Pipeline
+  _target_: unirl.models.sd3.pipeline.SD3Pipeline
   shift: 3.0
   autocast_precision: bf16
   trajectory_precision: bf16
   logprob_precision: fp32
   strategy:
-    _target_: diffusionrl.sde.kernels.FlowSDEStrategy
+    _target_: unirl.sde.kernels.FlowSDEStrategy
 
 backend:
-  _target_: diffusionrl.train.backend.fsdp.FSDPBackend
+  _target_: unirl.train.backend.fsdp.FSDPBackend
   block_class_names: ["JointTransformerBlock"]
   trainable_attr: transformer
   fsdp_cfg:
-    _target_: diffusionrl.train.configs.FSDPConfig
+    _target_: unirl.train.configs.FSDPConfig
     param_dtype: bf16
     cpu_offload: false
     mixed_precision: true
@@ -67,21 +67,21 @@ backend:
     activation_checkpointing: false
     use_torch_compile: false
   optimizer_cfg:
-    _target_: diffusionrl.train.backend.base.OptimizerConfig
+    _target_: unirl.train.backend.base.OptimizerConfig
     learning_rate: 3.0e-4
     adam_beta1: 0.9
     adam_beta2: 0.999
     adam_epsilon: 1.0e-8
     weight_decay: 0.0
   scheduler_cfg:
-    _target_: diffusionrl.train.backend.base.LrSchedulerConfig
+    _target_: unirl.train.backend.base.LrSchedulerConfig
     type: constant
     warmup_steps: 0
     total_steps: 10000
   # LoRA training — synced as the bare adapter (RemoteLoraWeightSync), so the
   # rollout engine keeps the frozen base and only its adapter changes each sync.
   lora_cfg:
-    _target_: diffusionrl.train.configs.LoraConfig
+    _target_: unirl.train.configs.LoraConfig
     rank: 32
     alpha: 64
     dropout: 0.0
@@ -98,7 +98,7 @@ backend:
       - attn.to_v
 
 rollout:
-  _target_: diffusionrl.rollout.engine.sglang.engine.SGLangRolloutEngine
+  _target_: unirl.rollout.engine.sglang.engine.SGLangRolloutEngine
   # model_config carries the σ-schedule `shift` + checkpoint path + LoRA flags;
   # share the bundle's config (the worker materializes the nested _target_).
   model_config: ${bundle.config}
@@ -107,7 +107,7 @@ rollout:
   # the pipeline's strategy explicitly (vLLM-Omni doesn't need it; SGLang does).
   strategy: ${pipeline.strategy}
   config:
-    _target_: diffusionrl.rollout.engine.sglang.config.SGLangEngineConfig
+    _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
     # Explicit family for trainer-side typed-condition reconstruction.
     model_family: sd3
     tp_size: 1
@@ -134,38 +134,38 @@ rollout:
     # Separate slabs do not time-share GPUs, so no sleep/wake is issued.
 
 reward:
-  _target_: diffusionrl.reward.service.RewardService
+  _target_: unirl.reward.service.RewardService
   backend:
-    _target_: diffusionrl.reward.local.pickscore.PickScoreRewardScorer
+    _target_: unirl.reward.local.pickscore.PickScoreRewardScorer
     base_device: cuda
     config:
-      _target_: diffusionrl.reward.local.pickscore.PickScoreSpec
+      _target_: unirl.reward.local.pickscore.PickScoreSpec
       batch_size: 8
       device: auto
       processor_id: laion/CLIP-ViT-H-14-laion2B-s32B-b79K
       model_id: yuvalkirstain/PickScore_v1
 
 algorithm:
-  _target_: diffusionrl.algorithms.grpo.DiffusionGRPO
+  _target_: unirl.algorithms.grpo.DiffusionGRPO
   stage_attr: diffusion
   clip_range: 1.0e-4
   clip_schedule: constant
   conditions_cls:
     _target_: hydra.utils.get_class
-    path: diffusionrl.models.sd3.conditions.SD3Conditions
+    path: unirl.models.sd3.conditions.SD3Conditions
   params: ${sampling}
 
 stack:
-  _target_: diffusionrl.train.stack.TrainStack
+  _target_: unirl.train.stack.TrainStack
   micro_batch_size: 1
   max_grad_norm: 1.0
 
 data_source:
-  _target_: diffusionrl.data.data_source.DefaultDataSource
+  _target_: unirl.data.data_source.DefaultDataSource
   args: {}
 
 sampling:
-  _target_: diffusionrl.types.sampling.DiffusionSamplingParams
+  _target_: unirl.types.sampling.DiffusionSamplingParams
   num_inference_steps: 10
   guidance_scale: 1.0
   height: 512
@@ -178,7 +178,7 @@ sampling:
   trajectory_precision: bf16
   logprob_precision: fp32
   scheduler:
-    _target_: diffusionrl.utils.scheduler_utils.AllSDEScheduler
+    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
     num_timesteps: ${..num_inference_steps}
     num_sde_steps: null
 
@@ -187,7 +187,7 @@ sampling:
 # pick_master/connect). RemoteLoraWeightSync takes the backend sibling only
 # (rollout is cross-slab); rank 0 ships the adapter to each rollout Worker.
 sync:
-  _target_: diffusionrl.distributed.weight_sync.lora.RemoteLoraWeightSync
+  _target_: unirl.distributed.weight_sync.lora.RemoteLoraWeightSync
   # SGLang exposes no loaded_lora_checksums (the read-back is vLLM-Omni-only), so
   # the checksum verify path is unavailable here — keep verify: false.
   verify: false

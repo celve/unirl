@@ -3,16 +3,16 @@ from setuptools import find_packages, setup
 # Compatibility metadata for older pip/setuptools editable installs.
 # Newer tooling uses pyproject.toml as the source of truth.
 setup(
-    name="diffusionrl",
+    name="unirl",
     version="0.1.0",
-    description="Diffusion RL training framework",
+    description="Unified multimodal RL training framework",
     python_requires=">=3.10",
     include_package_data=True,
     packages=find_packages(
         where=".",
         include=(
-            "diffusionrl",
-            "diffusionrl.*",
+            "unirl",
+            "unirl.*",
         ),
     ),
     install_requires=[
