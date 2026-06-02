@@ -254,6 +254,10 @@ rollout:
       tp_size: 1
       local_mode: true
       sampling: ${sampling.diffusion}
+      # The diffusion stage runs at P*N*M samples (the largest fan-out in PE).
+      # Chunk generate into 8-sample sub-batches (= diffusion.samples_per_prompt)
+      # so sglang bounds its DiT-forward / VAE-decode peak memory.
+      forward_batch_size: 8
       engine_kwargs:
         mem_fraction_static: 0
         skip_server_warmup: true
