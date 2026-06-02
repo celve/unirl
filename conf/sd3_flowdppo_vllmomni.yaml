@@ -16,6 +16,10 @@ batch_size: 48                # prompts_per_rollout
 num_rollouts: 10000
 weight_sync_interval: 1
 
+# Group-mean advantages / single FULL-batch std (like v1 use_global_std=true, but
+# reduced over the full batch, not v1's per-actor shard); see sd3_flowdppo.yaml.
+adv_use_global_std: true
+
 bundle:
   _target_: diffusionrl.models.sd3.bundle.SD3Bundle.from_config
   config:

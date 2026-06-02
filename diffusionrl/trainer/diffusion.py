@@ -48,6 +48,7 @@ class DiffusionTrainer(BaseTrainer):
         layout: str = "colocated",
         train_fraction: float = 0.5,
         enable_fsdp_offload: bool = False,
+        adv_use_global_std: bool = False,
     ) -> None:
         super().__init__(num_devices=num_devices, logging_cfg=logging_cfg)
         self.batch_size = batch_size
@@ -58,6 +59,11 @@ class DiffusionTrainer(BaseTrainer):
         # default; only safe (and only set true) for layout=="colocated" with a
         # SEPARATE engine rollout under GRPO — gated again in train_step.
         self._enable_fsdp_offload = bool(enable_fsdp_offload)
+        # Flow-DPPO advantage parity: when True, RolloutTrack.compute_advantages
+        # keeps the per-group mean but divides by ONE batch-wide std (the v1
+        # ``use_global_std=True`` scale) instead of each prompt's own std. Off by
+        # default → unchanged per-group GRPO normalization for every other recipe.
+        self._adv_use_global_std = bool(adv_use_global_std)
         # Set in _build_rollout: True when the rollout is the trainside
         # direct-sampling engine (it reuses the train model → must NOT offload).
         self._rollout_is_trainside = False
@@ -357,7 +363,7 @@ class DiffusionTrainer(BaseTrainer):
 
         for name, track in list(resp.tracks.items()):
             if track.rewards is not None:
-                resp.tracks[name] = track.compute_advantages(normalize=True)
+                resp.tracks[name] = track.compute_advantages(normalize=True, use_global_std=self._adv_use_global_std)
 
         (track,) = resp.tracks.values()
         result = self.stack.train_track(track, training_progress=float(training_progress))

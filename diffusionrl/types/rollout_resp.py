@@ -247,7 +247,13 @@ class RolloutTrack(Batch):
 
     # ---- per-group advantage computation -----------------------------------
 
-    def compute_advantages(self, normalize: bool = True, eps: float = 1e-8, scope: str = "group") -> "RolloutTrack":
+    def compute_advantages(
+        self,
+        normalize: bool = True,
+        eps: float = 1e-8,
+        scope: str = "group",
+        use_global_std: bool = False,
+    ) -> "RolloutTrack":
         """GRPO-style per-group advantage: ``(reward - group_mean) / (group_std + eps)``.
 
         Groups are equivalence classes of :attr:`group_ids` (i.e. ``parent_ids``,
@@ -266,6 +272,18 @@ class RolloutTrack(Batch):
             — matching the v1 ``adv_normalization_scope=global`` baseline. Global
             scope gives every sample a nonzero signal vs the batch mean, whereas
             group scope zeroes out all-correct/all-wrong prompts (std=0 → adv=0).
+        :param use_global_std: Only meaningful with ``scope="group"``. When
+            ``True``, keep the per-group mean but divide every group by ONE
+            batch-wide std (unbiased/Bessel, ``eps`` outside the sqrt) instead of
+            each group's own std. Same *formula* as v1
+            ``normalize_grouped(use_global_std=True)`` (``algorithms/normalizers.py``),
+            but reduced over the **full** driver-side batch — NOT a bit-for-bit
+            reproduction of the v1 run. v1 computed advantages per rollout actor,
+            so its std spanned a single shard (``global_batch / actor_count``
+            prompts); the v2 single-controller reduces over all groups at once.
+            The two share an expectation (both estimate the population reward std),
+            but the full-batch scope is intentional — topology-independent and
+            lower-variance. Used by the Flow-DPPO recipe; left ``False`` elsewhere.
         :return: A new :class:`RolloutTrack` with ``advantages`` set.
 
         Population std (``unbiased=False``) is used so the math degenerates
@@ -327,9 +345,18 @@ class RolloutTrack(Batch):
         reshaped = rewards.view(n_groups, branch)
         mean = reshaped.mean(dim=1, keepdim=True)
         if normalize:
-            # Population std (unbiased=False) handles branch=1 cleanly: var=0,
-            # adv = 0 / sqrt(eps) = 0. unbiased=True would NaN on single samples.
-            std = (reshaped.var(dim=1, unbiased=False, keepdim=True) + eps).sqrt()
+            if use_global_std:
+                # ``use_global_std``: per-group mean, but ONE batch-wide std
+                # (unbiased/Bessel, eps OUTSIDE the sqrt) shared across groups, so
+                # every prompt stays on a single reward scale instead of being
+                # unit-normalized per group. Same formula as v1 normalize_grouped
+                # (algorithms/normalizers.py), but reduced over the full driver
+                # batch — not v1's per-actor shard. Scalar broadcasts [n_groups, branch].
+                std = rewards.std() + eps
+            else:
+                # Population std (unbiased=False) handles branch=1 cleanly: var=0,
+                # adv = 0 / sqrt(eps) = 0. unbiased=True would NaN on single samples.
+                std = (reshaped.var(dim=1, unbiased=False, keepdim=True) + eps).sqrt()
             adv = (reshaped - mean) / std
         else:
             adv = reshaped - mean
