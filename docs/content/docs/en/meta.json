@@ -1,0 +1,13 @@
+{
+  "title": "UniRL",
+  "pages": [
+    "index",
+    "getting-started",
+    "architecture",
+    "configuration",
+    "guides",
+    "reference",
+    "agents",
+    "others"
+  ]
+}

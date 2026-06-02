@@ -1,0 +1,5 @@
+{
+  "title": "指南",
+  "pages": ["data-and-models", "data-preparation", "rewards", "evaluation", "extending", "multinode", "geneval-mmcv-setup"],
+  "defaultOpen": true
+}

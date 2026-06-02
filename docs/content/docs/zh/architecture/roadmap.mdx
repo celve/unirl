@@ -1,0 +1,345 @@
+---
+title: Roadmap 路线图
+description: 框架 Infra、算法 Algorithm、模型 Model 三条线的近期方向：现状、目标与 TODO。
+---
+
+本路线图按三条线梳理近期方向：**框架 Infra**、**算法 Algorithm**、**模型 Model**。
+每一项均列出当前代码库中的现状（baseline）与待完成工作。
+
+本页为滚动更新的规划文档；未列出的方向并非被排除，仅表示当前关注度较低。规划周期：**2026 H1**。
+
+## 图例
+
+- **状态** —— `[ ]` 计划中 · `[~]` 进行中 · `[x]` 已完成。
+- **优先级**（仅针对已承诺项）—— `P0` 本周期必须完成 · `P1` 本周期目标 · `P2` 储备 / 下一周期。
+  *候选* 条目为探索性，刻意不排优先级。
+- **招募贡献** —— 🙋 标记范围清晰、欢迎认领的条目。
+- **追踪** —— 每个已承诺项都应有一个 `[Tracking]` issue（见
+  [GitHub Issues 工作流](/zh/docs/others/github-issues-workflow)）；`(RFC needed)` 表示尚无
+  tracking issue，可通过新建对应 issue 认领。负责人记录在各条目对应的 issue 上，而非内联在本页。
+
+## 本周期概览
+
+- **框架 Infra** —— 将训练 backend 改造为可插拔架构（新增 VeOmni backend，支持可组合的 FSDP / SP / EP），
+  补齐端到端 checkpoint / resume，加固 vLLM-Omni rollout、异步 reward 与跨 engine 一致性，并新增可微 reward（REFL）训练模式。
+- **算法 Algorithm** —— 补齐 policy-gradient / PPO 的能力缺口（critic + GAE、KL / reference policy、
+  reward credit assignment），并以 DR-Tune 为起点建设 REFL 家族。
+- **模型 Model** —— 围绕 Diffusers 重要模型族建设核心支持矩阵（SD3.5、Qwen-Image、FLUX、Wan / HunyuanVideo），
+  并支持下一代 HunyuanImage（3.5）的 RL 后训练。
+
+| 线 | 条目 | 优先级 | 状态 |
+|---|---|---|---|
+| 框架 Infra | VeOmni 训练 backend | `P0` | `[ ]` 计划中 |
+| 框架 Infra | REFL（可微 reward）infra | `P0` | `[ ]` 计划中 |
+| 框架 Infra | Checkpoint / Resume 端到端化 | `P1` | `[~]` 部分完成 |
+| 框架 Infra | vLLM-Omni rollout 扩展与加固 | `P1` | `[ ]` 计划中 |
+| 框架 Infra | Async Reward Overlap | `P1` | `[ ]` 计划中 |
+| 框架 Infra | Rollout engine 一致性矩阵 | `P2` 🙋 | `[ ]` 计划中 |
+| 框架 Infra | Benchmark / Profiling 样例与工具 | `P2` 🙋 | `[ ]` 计划中 |
+| 框架 Infra | UI / 可观测性 | `P1` 🙋 | `[ ]` 计划中 |
+| 算法 Algorithm | Policy-Gradient / PPO 家族 | `P1` | `[~]` 部分完成 |
+| 算法 Algorithm | KL / Reference Policy 控制 | `P1` | `[ ]` 计划中 |
+| 算法 Algorithm | Reward / Advantage credit assignment 整合 | `P2` | `[ ]` 计划中 |
+| 算法 Algorithm | Multi-track / shared-backbone RL | `P2` | `[ ]` 计划中 |
+| 算法 Algorithm | REFL 家族（先 DR-Tune） | `P0` | `[ ]` 计划中 |
+| 算法 Algorithm | 偏好 / forward-process（NFT） | — | `[x]` 已完成 |
+| 模型 Model | Core Image DiT 支持矩阵 | `P1` | `[ ]` 计划中 |
+| 模型 Model | Video RL 模型线 | `P2` | `[ ]` 计划中 |
+| 模型 Model | HunyuanImage 3.5 | `P1` | `[ ]` 计划中 |
+
+## 框架 Infra
+
+### `[ ]` `P0` VeOmni Training Backend
+
+- **现状。** trainer 已将 `backend:` 抽象为可替换的配置块（见 `conf/*.yaml`），
+  当前唯一实现是原生的 `FSDPBackend`（`unirl/train/backend/fsdp.py`：FSDP2 wrap，叠加
+  LoRA / NFT / EMA 注入、offload、checkpoint）。`TrainTopology` 中已经预留了
+  `dp / tp / pp / sp / ep / cp` 字段，但目前只有 DP / FSDP 是 topology-driven；`train/inject.py`
+  中存在一条 hybrid-FSDP（HSDP）mesh 路径，但仍为硬编码实现（shard size 8），尚未从 `TrainTopology` 映射。
+- **目标。** 在同一个 backend 契约下新增 `VeOmniBackend`，复用 VeOmni 的 model-centric
+  分布式 recipe（通过 high-level parallel-plan API 可组合的 FSDP / SP / EP）。
+- **追踪。** *(RFC needed)*
+- TODO：
+  - `[ ]` 实现 `unirl/train/backend/veomni.py`，满足 backend Remote 契约
+    （LoRA / NFT / EMA 注入、optimizer、scheduler、checkpoint、onload/offload）。
+  - `[ ]` 将 `TrainTopology` 映射到 VeOmni 的 parallel-plan API（FSDP / FSDP2、HSDP、
+    基于 DeepSpeed-Ulysses / Async-Ulysses 的 Sequence Parallelism、面向 MoE 的 Expert Parallelism）。
+  - `[ ]` 为长视频 / AR 长序列接通 SP，为 MoE backbone（HunyuanImage 3.x）接通 EP。
+  - `[ ]` Torch Distributed Checkpoint（sharded），与「Checkpoint / Resume 端到端化」项共享 save/resume 契约。
+  - `[ ]` 保证 Policy / Stage 与 weight-sync（LoRA IPC / NCCL）链路在新 backend 下保持兼容。
+
+### `[ ]` `P0` REFL 支持（可微 reward 训练模式）
+
+- **现状。** reward 在 rollout actor 上计算为标量后再转换为 advantage（`reward/`，随后进入
+  `algorithm.compute_advantages`），尚无从 reward model 反传回 denoiser 的梯度通路。
+  目前 train-side 算法都是 policy-gradient（`DiffusionGRPO` / `ARGRPO`，以及 `DiffusionDPPO`）
+  和 forward-process（`DiffusionNFT`）。
+- **目标。** 新增一条可微 reward 训练模式，使 reward 梯度能够穿过采样过程反传至模型。
+  这是 **REFL 算法家族**（DR-Tune 以及其他 reward-feedback 方法——见下方算法一节）的 infra 前置条件。
+- **追踪。** *(RFC needed)*
+- TODO：
+  - `[ ]` 在 train actor 上新增可微的 train-side reward scorer（现有 `reward/scorers`，例如
+    ImageReward / HPS / PickScore，均在 `torch.no_grad()` 下执行、仅返回标量）。
+  - `[ ]` 带 gradient checkpointing 的采样 replay，配合 denoiser 输入上的 stop-gradient hook，
+    实现显存可控的逐步反传。
+  - `[ ]` 一个 reward-backprop 的 `StageAlgorithm` 接口，与标量 reward→advantage 流水线分离。
+  - `[ ]` 接通 recipe 与 reward-service，并提供一个 SD3 smoke recipe。
+
+### `[~]` `P1` Checkpoint / Resume 端到端化
+
+- **现状。** 断点续训的*原语*已存在，但尚未在 v2 driver 中串成端到端链路：`cfg.resume`
+  （`config/resume_config.py`：`resume_from_checkpoint` / `start_rollout_id` / `output_dir` /
+  `save_steps`）、`FSDPBackend.save/load`、`TrainActor.save_model/load_checkpoint` 与
+  `TrainGroup` 同名包装、以及 `utils/train_utils.py` 的 `should_save` /
+  `maybe_restore_start_rollout_id_from_checkpoint` 均已实现。但主循环 `train.py` 只读取
+  `cfg.resume.start_rollout_id` 作为循环起点，**从不调用** `save_model` / `load_checkpoint` /
+  `should_save`；`global_optimizer_step = 0` 处也标注 "V3 resume work will thread
+  checkpoint-saved values through here"。此外 checkpoint 内容仍缺 EMA/shadow、
+  `_optimizer_step_count`、RNG / dataloader / sampler 位置，且 `FSDPBackend.save()` 为
+  gather-to-rank0 全量保存。
+- **目标。** 把已有原语在 driver 端串成端到端、可复现的 save/resume：周期保存、bootstrap 加载、
+  step / EMA / RNG 状态完整化，长 run 可中断续训。
+- **追踪。** *(RFC needed)*
+- TODO：
+  - `[ ]` `train.py` 主循环按 `should_save` 周期调用 `save_model`，并在 bootstrap 处理
+    `resume_from_checkpoint`（含 `maybe_restore_start_rollout_id_from_checkpoint`）。
+  - `[ ]` checkpoint 内容补全：EMA / shadow 状态、`_optimizer_step_count` /
+    `global_optimizer_step`、RNG 与 data sampler 位置，实现 bit-exact resume。
+  - `[ ]` 大模型 / MoE 的 sharded checkpoint（与 VeOmni 的 Torch Distributed Checkpoint
+    项共享 save/resume 契约，避免 gather-to-rank0 OOM）。
+  - `[ ]` resume smoke：保存→重启→续训的 SD3 recipe，校验 loss / step / EMA 连续性。
+
+### `[ ]` `P1` vLLM-Omni Rollout 扩展与加固
+
+- **现状。** rollout engine 已包含 `trainside` / `sglang` / `sglang_llm` /
+  `vllm_omni` / `composed` 多后端；基类已经定义 verl-omni 风格的 IPC / NCCL /
+  LoRA weight-sync 契约，`vllm_omni` 下也已有 SD3 与 HunyuanImage3 的 logprob /
+  latent capture 基础。
+- **目标。** 不重写 vLLM-Omni 内核，而是在 UniRL 内消费其高吞吐 multimodal rollout
+  能力，将已有 vLLM-Omni 路径扩展到更多核心模型，并建立与 trainside / SGLang 路径的行为一致性。
+- **追踪。** *(RFC needed)*
+- TODO：
+  - `[ ]` 将 per-step logprob、intermediate latent capture 与 denoising trajectory replay
+    扩展到 Qwen-Image、SD3.5 与 Wan2.2。
+  - `[ ]` 加固 LoRA / full-weight sync：checksum、dtype / shape fail-fast、bucketed transfer
+    指标，以及多 track / shared-backbone 的 sync target 规范。
+  - `[ ]` 接入或适配 vLLM-Omni 的 step-wise continuous batching、embedding cache 与 request scheduling
+    能力，避免在 UniRL 内重复实现服务端内核。
+  - `[ ]` 为 Qwen-Image、SD3.5、Wan2.2、HunyuanImage3 建立 vLLM-Omni 与 trainside /
+    SGLang 的 rollout parity test。
+
+### `[ ]` `P1` Async Reward Overlap
+
+- **现状。** `reward/scorers` 已包含 OCR、aesthetic、CLIP、HPS、PickScore、ImageReward、
+  VideoPickScore、rule-based exact match 等组件，也已有 reward service 执行路径；缺口主要是 reward
+  计算仍未作为独立调度阶段与 rollout / train 重叠。
+- **目标。** 参考 verl-omni 的 async reward 方向，将重型 reward model 独立为 actor / GPU，
+  通过 overlap 降低 step wall-clock，同时保持标量 reward→advantage 语义不变。
+- **追踪。** *(RFC needed)*
+- TODO：
+  - `[ ]` reward actor 独立 placement，支持 OCR / VLM judge / image reward / video reward 的异步提交与回收。
+  - `[ ]` 在 rollout 与 train 之间引入 reward future / queue 语义，记录 reward latency、queue depth、
+    staleness 与 GPU utilization。
+  - `[ ]` 对现有同步 reward service 保持兼容，并提供 Qwen-Image OCR 与 Wan / HunyuanVideo
+    video reward smoke recipe。
+
+### `[ ]` `P2` 🙋 Rollout Engine 一致性矩阵
+
+- **现状。** `RolloutReq` 已把 sigmas 作为跨 trainside / SGLang / vLLM-Omni 的 single source of truth，
+  `rollout/engine/sigma_verify.py` 提供校验；但各 engine 对 logprob source、latent capture、
+  initial latents、media refs 与 multi-track response 的覆盖仍不统一。
+- **目标。** 形成 model × rollout engine × algorithm 的 smoke / conformance matrix，把新增模型和算法接入时的
+  行为差异前置暴露。
+- **追踪。** *(RFC needed)*
+- TODO：
+  - `[ ]` 🙋 为 `trainside`、`sglang`、`sglang_llm`、`vllm_omni`、`composed`
+    维护能力矩阵：native/replay logprob、latent capture、initial latents、media refs、multi-track lineage。
+  - `[ ]` 扩展 sigma schedule parity、SDE-index scheduler parity 与 replay logprob parity tests。
+  - `[ ]` 将核心 recipe 纳入 compose + smoke 检查：SD3/SD3.5、Qwen-Image、FLUX.2 Klein、Wan2.2、
+    HunyuanVideo1.5、HunyuanImage3。
+
+### `[ ]` `P2` 🙋 Benchmark / Profiling 样例与工具
+
+- **现状。** 仓库已有零散的耗时字段与 smoke 输出（例如 tensor batch 的 `wall_clock`、SGLang LLM
+  smoke 中的 tokens/s、部分 recipe 注释里的吞吐说明），但还没有统一的测速入口、固定 workload
+  样例或可比较的报告格式。
+- **目标。** 建立可复现的训练 / rollout / reward 端到端测速工具，使 backend、rollout engine、reward
+  overlap、视频解码与 weight-sync 优化都有统一的 baseline 和回归检查。
+- **追踪。** *(RFC needed)*
+- TODO：
+  - `[ ]` 🙋 提供最小 benchmark recipe：SD3 / SD3.5 image、Qwen-Image OCR、Wan2.2 或 HunyuanVideo
+    video reward，覆盖 trainside、SGLang 与 vLLM-Omni 的常见路径。
+  - `[ ]` 🙋 增加 `scripts/benchmark_*` 或等价 CLI：固定 seed、prompt set、warmup、repeat、batch /
+    group size，并输出 samples/s、step wall-clock、GPU memory、rollout / reward / train 分段耗时。
+  - `[ ]` 统一 benchmark report schema（JSONL / wandb / Prometheus），记录环境、commit、model、engine、
+    topology、LoRA / FSDP / SP / EP 配置，便于跨 PR 和跨机器对比。
+  - `[ ]` 为 vLLM-Omni continuous batching、async reward overlap、视频 VAE decode / tiling 与 LoRA
+    weight-sync 提供专项 profiling 样例。
+
+### `[ ]` `P1` 🙋 UI-Interface 优化
+
+- **现状。** 日志能力目前仅包含 wandb（`utils/wandb_logger.py`、`wandb_metrics.py`）与 media preview；
+  尚未提供统一 dashboard、wandb 之外的 rollout 样本画廊，以及本地/离线的 run 查看器。
+- **目标。** 改善可观测性和实验追踪界面。
+- **追踪。** *(RFC needed)*
+- TODO：
+  - `[ ]` 🙋 可插拔的 tracking backend（wandb / SwanLab / TensorBoard）收敛到统一 logger 接口。
+  - `[ ]` rollout 样本画廊，补充 reward 曲线与 per-component reward 视图；为 composed recipe
+    提供 multi-track（image / AR）可视化。
+  - `[ ]` 基于 Prometheus / Grafana 的 rollout 监控，覆盖吞吐、队列深度、weight-sync 耗时。
+  - `[ ]` 🙋 面向没有 wandb 权限的 run 的本地/离线 media 与 config 查看器。
+
+- *候选。* 🙋 全异步 actor↔rollout↔reward↔train 流水线（仓库已带
+  TransferQueue / Mooncake / TensorStore 基础）；Ascend NPU 支持；可选的 Megatron-Core backend。
+
+## 算法 Algorithm
+
+UniRL 的 train-side 算法分为三大家族。下表列出当前支持情况，细节见后续章节。
+
+| 家族 | 优化方式 | 现已支持 | 计划中 |
+|---|---|---|---|
+| Policy-Gradient / PPO | rollout log-prob + advantage，使用 clip / KL 代理目标 | GRPO 家族（FlowGRPO / DanceGRPO / MixGRPO）、DPPO、ARGRPO、SPO-DPPO | DDPO、DPOK、KL / reference policy、带 critic + GAE 的完整 PPO |
+| REFL（reward-feedback） | 将可微 reward 沿采样链反传 | — | DR-Tune、ReFL、DRaFT、AlignProp |
+| 偏好 / forward-process | forward-process 或成对目标（不依赖 rollout log-prob） | NFT | — |
+
+### `[~]` `P1` Policy-Gradient / PPO 家族
+
+- **现状。** PPO 的*目标函数*已有部分支持：GRPO 家族使用 PPO 的 clipped-ratio 代理
+  （`diffusion_grpo.py` / `ar_grpo.py` 的 `_grpo_clip_loss`）；`DiffusionDPPO` 将 ratio-clip 替换为 KL-ADV masking；
+  `ARGRPO` 是文本 / VLM 变体。缺的是 critic-based 优势估计与扩散原生的 PPO recipe。
+- **追踪。** *(RFC needed)*
+- 计划类型：
+  - `[ ]` `P1` **完整 PPO（value critic + GAE）**——相对 GRPO 缺失的核心能力；需要在 latent / timestep
+    （扩散）或 token（AR / VLM）上增加 value head。优先在 AR / VLM 轨道实现。
+  - `[ ]` `P2` 🙋 **DDPO（Black et al. 2023）**——在去噪 MDP 上的 PPO-clipped policy gradient；
+    主要是在现有 clip 内核上调整优势估计与 recipe。
+  - `[ ]` `P2` 🙋 **DPOK（Fan et al. 2023）**——带 KL 正则的 policy gradient。
+- *候选。* 🙋 RLOO、REINFORCE++、GSPO、DAPO、Dr.GRPO、GRPO-Guard——多数是在现有
+  clip 内核上对优势 / 裁剪 / ratio 粒度的改动，增量成本相对较低。
+
+### `[ ]` `P1` KL / Reference Policy 控制
+
+- **现状。** rollout segment 已携带 old-policy logprob（用于 GRPO / DPPO ratio），但冻结 reference
+  policy 与 KL penalty 尚未实现。DPPO 已有 KL-ADV masking，但它不是通用 reference-policy KL 控制层。
+- **目标。** 为 PPO、DPOK、Diffusion-DPO、ARGRPO / GSPO 等方法补齐共享的 reference-policy
+  基础设施与 KL controller。
+- **追踪。** *(RFC needed)*
+- TODO：
+  - `[ ]` 冻结 reference policy 的加载、offload/onload、logprob replay 与缓存接口。
+  - `[ ]` per-track KL controller 与 adaptive KL coefficient，支持 diffusion timestep-level 与
+    AR token-level 统计。
+  - `[ ]` 将 KL 指标接入 wandb / tracking，并新增真正的 reference-policy KL loss term。
+  - `[ ]` 在 DPOK / Diffusion-DPO / full PPO recipe 中复用同一 reference-policy 契约。
+
+### `[ ]` `P2` Reward / Advantage Credit Assignment 整合
+
+- **现状。** `RolloutTrack.compute_advantages` 已支持 GRPO 风格 group advantage，
+  `RolloutResp.propagate_rewards` 已支持 mean / max / sum 的 parent-child reward 聚合；
+  `algorithms/normalizers.py` 与 `reward/aggregation.py` 也已有若干归一化 / 聚合工具。
+- **目标。** 把现有分散能力整合为算法共享层，避免每个 algorithm / recipe 重复处理 reward shaping。
+- **追踪。** *(RFC needed)*
+- TODO：
+  - `[ ]` best-of-N / rejection-style reward propagation，以及 component reward 的 weight / normalize /
+    schedule 配置。
+  - `[ ]` diffusion timestep-level advantage 与 AR token-level advantage expansion 的统一接口。
+  - `[ ]` multi-track parent / child reward credit 规范，覆盖 composed rollout 与 think→recaption→image 链路。
+  - `[ ]` reward component、advantage normalizer 与 clipping 统计统一进入 metrics。
+
+### `[ ]` `P2` Multi-track / Shared-backbone RL
+
+- **现状。** HunyuanImage3 与 PE composed recipe 已具备 AR + diffusion / multi-track 的基础链路，
+  多 track 训练为每个 track 用兄弟 `TrainStack` 承载一个 `StageAlgorithm`；但 shared-backbone 下的 loss balance、
+  update cadence 与 cross-modal reward credit 仍缺统一策略。
+- **目标。** 将 HunyuanImage3 的 think / recaption / image generation 联合训练路径沉淀为通用能力，
+  为后续 BAGEL、Qwen3-Omni 等 unified model 预留接口。
+- **追踪。** *(RFC needed)*
+- TODO：
+  - `[ ]` 多 `StageAlgorithm` 共享 backbone 时的 loss weight、gradient accumulation 与 optimizer step 策略。
+  - `[ ]` image track 与 AR track 的 joint update / alternating update recipe。
+  - `[ ]` cross-modal reward propagation：文本 / VLM reward 如何回传到 image 或 think track。
+  - `[ ]` 将 BAGEL、Qwen3-Omni 作为候选模型，不在当前周期承诺模型包实现。
+
+### `[ ]` `P0` REFL 家族（reward-feedback / 可微 reward）
+
+REFL 是 **reward-feedback learning** 的统称：将一个**可微 reward** 沿采样链反传进模型。它建立在
+REFL 训练 infra（见上方框架一节）之上，下面汇集若干算法类型。
+
+- **现状。** 相关算法尚未实现。
+- **追踪。** *(RFC needed)*
+- REFL 下的类型：
+  - `[ ]` `P0` **DR-Tune（Deep Reward Tuning，ECCV 2024）**——近期首要目标。将 reward 反传到 input
+    noise，对 denoiser 输入使用 stop-gradient（避免梯度爆炸），并仅在等间隔抽取的部分 step 上训练（降低显存占用）。
+  - `[ ]` `P2` 🙋 **ReFL（ImageReward，2023）**——最早的 reward-feedback 方法；在随机选中的较晚去噪步上进行 reward 反传。
+  - `[ ]` `P2` 🙋 **DRaFT / DRaFT-LV（2023）**——在（截断的）采样过程上配合 LoRA 反传；DRaFT-LV 使用多样本低方差梯度。
+  - `[ ]` `P2` 🙋 **AlignProp（2023）**——在完整采样过程上使用 gradient checkpointing 进行 reward 反传。
+- TODO：
+  - `[ ]` 在 REFL infra 之上实现一个共享的可微 reward `StageAlgorithm` 基类。
+  - `[ ]` 优先实现 DR-Tune（`unirl/algorithms/drtune.py`）：stop-gradient hook + 等间隔 step 子集选择（复用 SDE-index scheduler）。
+  - `[ ]` 以 HPSv2 / PickScore 为 reward target；SD3 与 Qwen-Image recipe；与 FlowGRPO baseline 对比。
+  - `[ ]` DR-Tune 实现后，在同一基类下补齐 REFL 其余类型。
+
+### `[x]` 偏好 / forward-process 家族
+
+- **现状。** `DiffusionNFT`（使用 default / old LoRA adapter 进行 forward-process 重建）已实现。
+- *候选。* 🙋 Diffusion-DPO——成对偏好优化（无需 reward model）。注意它与现有的
+  `DiffusionDPPO` 不同：后者是带 KL masking 的 policy optimization，不是偏好 DPO。
+
+## 模型 Model
+
+### `[ ]` `P1` Core Image DiT 支持矩阵
+
+- **现状。** 仓库已有 `sd3`、`qwen_image`、`flux2_klein` 模型包；`mixgrpo_sd35.yaml`
+  已把 SD3.5 作为 `sd3` 系列 checkpoint / recipe 变体接入，`grpo_flux2_klein9b_*`
+  recipe 也已存在。Diffusers 生态中，SD3.5、Qwen-Image（含 edit / inpaint）与 FLUX
+  是当前 image DiT / flow-matching 的核心模型族。
+- **目标。** 把已有 image DiT 支持从“可跑 recipe”提升为核心支持矩阵：明确每个模型的训练、rollout、
+  reward 与 smoke 覆盖面。
+- **追踪。** *(RFC needed)*
+- TODO：
+  - `[ ]` 为 SD3.5 确认其作为 `sd3` package checkpoint 变体的配置边界，并提级现有 `mixgrpo_sd35` recipe。
+  - `[ ]` 为 Qwen-Image 补齐 trainside / vLLM-Omni smoke、OCR / text-rendering reward baseline，
+    并记录 LoRA target 与 FSDP wrap hints。
+  - `[ ]` 将 FLUX.2 Klein 从已有 recipe 提升为核心支持；FLUX.1 dev / schnell / fill / control /
+    redux / kontext 先作为候选扩展，不与 FLUX.2 Klein 混同。
+  - `[ ]` 建立 `model × rollout engine × algorithm` 覆盖表：FlowGRPO / MixGRPO / DPPO / DPOK，
+    trainside / SGLang / vLLM-Omni。
+
+### `[ ]` `P2` Video RL 模型线
+
+- **现状。** 仓库已有 `wan21`、`wan22`、`hunyuan_video15` 模型包与
+  `grpo_wan21_*`、`grpo_wan22_*`、`grpo_hunyuan_video15_t2v_videopickscore`
+  recipe；Diffusers 中 Wan2.1 / Wan2.2、HunyuanVideo、CogVideoX 是主要视频 pipeline。
+- **目标。** 不从零支持视频模型，而是加固 Wan2.2 与 HunyuanVideo1.5 的长视频 RL 能力，
+  将 CogVideoX 保持为 P2 / 候选。
+- **追踪。** *(RFC needed)*
+- TODO：
+  - `[ ]` Wan2.2 TI2V、VACE / Animate 等 condition schema；保持 T2V / I2V recipe 可复现。
+  - `[ ]` DanceGRPO / FlowGRPO video recipe，补充 temporal consistency、VideoPickScore、
+    VLM-as-judge 等 reward baseline。
+  - `[ ]` 长视频 SP / USP、VAE tiling / offload 与 decode cost profiling。
+  - `[ ]` video media preview、per-component reward 与 temporal metrics 的可视化。
+
+### `[ ]` `P1` HunyuanImage 3.5
+
+- **现状。** HunyuanImage 3.0 已支持（`unirl/models/hunyuan_image3/`：
+  t2i / it2i / i2t / t2t 模式、AR + diffusion stage、think-recaption RL recipe，以及
+  vLLM-Omni rollout adapter）。HunyuanImage 3.0 是基于 Hunyuan-A13B backbone 的 80B MoE
+  （64 experts、每 token 约 13B 激活）自回归原生多模态模型。
+- **目标。** 支持下一代 HunyuanImage（暂记为 3.5，以实际发布为准）的 RL 后训练。
+- **追踪。** *(RFC needed；依赖 VeOmni backend 与 3.5 的发布)*
+- TODO：
+  - `[ ]` 3.5 的 model bundle 与 config；vLLM-Omni rollout adapter 与 stage config。
+  - `[ ]` 在 VeOmni backend 下训练（64-expert MoE 使用 EP，长多模态序列使用 SP）。
+  - `[ ]` 为 think / recaption 补充 RL recipe（MixGRPO / SRPO 风格），复用 HI3 的 multi-track 链路。
+  - `[ ]` 确认 3.5 的权重与发布；当前 package 面向的是 3.0。
+
+- *候选。* 🙋 BAGEL（unified understanding + generation，FlowGRPO 方向）；
+  Qwen3-Omni（Thinker / Talker MoE，依赖 AR / omni rollout、EP 与 GSPO）；
+  CogVideoX；Sana / PixArt（高效 T2I baseline）；Qwen-Image-Edit、FLUX Kontext / Control /
+  Fill / Redux、ControlNet-SD3 / SDXL 等编辑与可控生成模型。
+
+## 参与贡献
+
+认领任意 🙋 条目（或任意 `[ ]` 开放项）：请按 [GitHub Issues 工作流](/zh/docs/others/github-issues-workflow)
+新建一个 `[Tracking]` 或 `[RFC]` issue，并回链到本页，使本页保持高层索引的角色。本页未列出的方向并非被排除；
+可以通过 feature request 提出。

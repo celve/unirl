@@ -1,0 +1,5 @@
+{
+  "title": "Configuration",
+  "pages": ["hydra", "experiments", "readme-reference"],
+  "defaultOpen": true
+}

@@ -1,0 +1,36 @@
+---
+title: Hydra Configuration
+description: How UniRL composes, validates, and overrides runtime configuration.
+---
+
+UniRL uses Hydra. Recipes are self-contained YAML files in the flat `conf/` directory; each training run selects one with `--config-name`:
+
+```bash
+python -m unirl.train_diffusion --config-name=<recipe>
+```
+
+## Composition
+
+A recipe instantiates each runtime component directly by `_target_` (FSDP backend, train stack, rollout engine, reward service, algorithm, data source, …). The typed config dataclasses are registered by `@register_config` inside the `unirl` package. Use the generated [Config Package README](/en/docs/configuration/readme-reference/unirl-config) for the registration, instantiation, and validation contracts.
+
+## Where Knobs Belong
+
+Keep recipe-defining choices in `conf/<recipe>.yaml`. Keep cluster-local paths, model mounts, output directories, and WandB identity in launcher environment variables or CLI overrides (recipes interpolate them with `${oc.env:...}`). New typed runtime components should define their config dataclass near the implementation and register it with `@register_config`.
+
+Override precedence is:
+
+```text
+CLI Hydra override > launcher env var > YAML default
+```
+
+## Runtime Contracts
+
+Cross-component validators run before Ray worker creation. The implementation details and validator list live in the generated [Config Package README](/en/docs/configuration/readme-reference/unirl-config).
+
+`sync` and the tensor transport solve different problems. `sync` (`cfg.sync`) sends trainer weights back to dedicated rollout engines, while the tensor transport (`unirl/distributed/tensor/`) is the data plane for moving bulky rollout outputs between workers.
+
+Use a compose check before launching a large job:
+
+```bash
+python -m unirl.train_diffusion --config-name=<recipe> --cfg job --resolve
+```

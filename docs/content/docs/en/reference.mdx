@@ -1,0 +1,22 @@
+---
+title: Reference
+description: Generated and near-code reference material for UniRL.
+---
+
+Reference pages expose the contracts that live next to the code. The README reference is generated from repository README files, so the source README remains authoritative.
+
+## README Reference by Category
+
+Generated README reference pages are grouped under the docs section that owns the topic:
+
+- [Getting Started README Reference](/en/docs/getting-started/readme-reference): project root and docs-site maintenance.
+- [Architecture README Reference](/en/docs/architecture/readme-reference): runtime loop, rollout, train stack, algorithms, SDEs, and weight sync.
+- [Configuration README Reference](/en/docs/configuration/readme-reference): Hydra config composition and config package contracts.
+- [Guides README Reference](/en/docs/guides/readme-reference): model packages, rewards, and the standalone reward service.
+
+When changing behavior, edit the README next to the owning code first, then run:
+
+```bash
+cd docs
+npm run sync:readmes
+```

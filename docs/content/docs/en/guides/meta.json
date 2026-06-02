@@ -1,0 +1,5 @@
+{
+  "title": "Guides",
+  "pages": ["data-and-models", "data-preparation", "rewards", "evaluation", "extending", "multinode", "geneval-mmcv-setup", "readme-reference"],
+  "defaultOpen": true
+}

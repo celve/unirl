@@ -81,9 +81,24 @@ config composes and every `${oc.env:...}` resolves (it does not instantiate
 python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside --cfg job --resolve
 ```
 
-## Documentation Map
+## Documentation Site
 
-Read these files by task:
+The Fumadocs site in `docs/` is the main narrative documentation surface:
+
+Published GitHub Pages build: [https://haonan3.github.io/DiffusionRL/](https://haonan3.github.io/DiffusionRL/)
+
+```bash
+cd docs
+npm install
+npm run dev
+```
+
+Start with `/en/docs` for English, `/zh/docs` for Chinese, and
+`/en/docs/agents` for task-oriented reading order. After `npm run build`, agents
+can read `/llms.txt`, `/llms-full.txt`, or focused pages under
+`/md/<slug>/index.md` from the exported site.
+
+Module READMEs remain the source of truth for code-adjacent contracts:
 
 | Task | Read |
 |---|---|
@@ -97,9 +112,12 @@ Read these files by task:
 | Add or debug a trainer→rollout weight-sync backend | `unirl/distributed/weight_sync/README.md` |
 | Add or debug model code packages | `unirl/models/README.md` |
 
-This layout is intentional: the root README gives the shortest path to running
-the project, while module READMEs describe the contracts closest to the code
-that owns them.
+Run `npm run sync:readmes` in `docs/` to expose these module READMEs in the
+Fumadocs README Reference section.
+
+For GitHub Pages project hosting, the workflow sets
+`NEXT_PUBLIC_BASE_PATH=/DiffusionRL` so Next.js generates links and assets for
+the repository subpath instead of the domain root.
 
 ## Runtime Shape
 
@@ -160,7 +178,7 @@ pre-commit run --all-files
 @misc{unirl_github,
   title        = {UniRL: A Distributed RL Framework for Unified Multimodal Generative Models},
   year         = {2025},
-  howpublished = {\url{https://github.com/your-org/unirl}},
+  howpublished = {\url{https://github.com/haonan3/DiffusionRL}},
   note         = {GitHub repository},
 }
 ```

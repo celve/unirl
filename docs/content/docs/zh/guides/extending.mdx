@@ -1,0 +1,57 @@
+---
+title: 扩展 UniRL
+description: 新增模型、rollout engine、train-side algorithm、reward、training backend 和 recipe 的位置。
+---
+
+扩展时优先沿用已有边界：一个实现包、一个 registered config、一个 recipe，以及一个 focused check。
+
+## 扩展位置
+
+| 目标 | 主要位置 | 配置 |
+|---|---|---|
+| 新增模型 | `unirl/models/<model_name>/` | `@register_config(group="model", name="<model_name>", target=...)` |
+| 新增 rollout engine | `unirl/rollout/engine/<engine>/` | `@register_config(group="rollout/engine", name="<engine>", target=...)` |
+| 新增 train-side algorithm | `unirl/algorithms/` | 一个 `BaseAlgorithmConfig` 子类（用 `@register_config`），绑定到某 track 的 `algorithm:` 节点 |
+| 新增 reward scorer | `unirl/reward/local/` | `@register_config(group="reward/component", name=..., target=...)` |
+| 新增 training backend | `unirl/train/backend/` | `Remote` backend 契约（与 `FSDPBackend` 并列） |
+| 新增 recipe | `conf/<recipe>.yaml` | `--config-name=<recipe>` |
+
+## 新增模型
+
+1. 添加 `unirl/models/<model_name>/`。
+2. 注册 `model` group config。
+3. 实现 bundle，暴露训练和 rollout 需要的 stage。
+4. 按需添加 condition、text/vision、diffusion、VAE helper。
+5. 添加至少一个 `conf/<recipe>.yaml` recipe。
+
+## 新增 Rollout Engine
+
+1. 在 `unirl/rollout/engine/<engine>/` 下添加 typed config。
+2. 注册到 `rollout/engine` group。
+3. 实现 `unirl/rollout/engine/base.py` 中的 contract。
+4. 返回 canonical `RolloutResp`（填充 `tracks[name]`）。
+5. 如果是 dedicated engine，还要定义 trainer-to-rollout weight sync。
+
+## 新增 Train-Side Algorithm
+
+训练 loss 是每 track 一个 `StageAlgorithm`。只有当 loss 数学改变时才新增类（DanceGRPO / MixGRPO 这类 recipe 组合复用 `DiffusionGRPO`）。
+
+1. 继承 `StageAlgorithm`（`unirl/algorithms/base.py`）。
+2. 定义继承 `BaseAlgorithmConfig` 的 config，并用 `@register_config` 注册。
+3. 实现 `compute_loss_and_backward(...)`——replay stage、算 loss、`backward()`。
+4. 设置 `supports_multi_update`（loss 是否在一个 rollout shard 上多次 optimizer step 仍有效），`requires_ema_rollout` 只给需要 EMA 采样的 off-policy loss（NFT）。
+5. 在 recipe 中把该类绑定到 track 的 `algorithm:` 节点。
+
+完整契约见生成的 [Algorithms Package README](/en/docs/architecture/readme-reference/unirl-algorithms)。
+
+## 新增 Reward Scorer
+
+在 `unirl/reward/local/` 旁实现 spec 和 scorer。进程内模型 scorer 推荐从 `LocalRewardBackend` 开始，因为它提供 device 解析、eager load、`offload()` 和 `onload()`。用 `@register_config(group="reward/component", ...)` 注册 spec。进程外 scoring 则把 reward backend 指向远程 service。见 [Rewards](/zh/docs/guides/rewards)。
+
+## 训练 Backend 与并行
+
+新的**训练 backend** 或**并行**工作（新的 FSDP / SP / EP plan，或 VeOmni 式 backend）面向 `unirl/train/backend/` 下的 backend 契约：实现与 `FSDPBackend` 相同的 `Remote` 表面，并把 `TrainTopology` 映射到并行 plan，而不是硬编码 shard size。见 [Trainer 与训练栈](/zh/docs/architecture/trainer-v2) 与生成的 [Train Stack README](/en/docs/architecture/readme-reference/unirl-train)。
+
+## Agent 提示
+
+Agent 修改代码前，应先把任务映射到上表，再读对应 package README。

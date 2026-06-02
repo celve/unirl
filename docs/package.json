@@ -1,0 +1,39 @@
+{
+  "name": "unirl-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync:readmes": "node scripts/sync-readme-reference.mjs",
+    "clean:next-types": "node -e \"const fs = require('node:fs'); fs.rmSync('.next/types', { recursive: true, force: true }); fs.rmSync('.next/dev/types', { recursive: true, force: true });\"",
+    "typegen": "next typegen",
+    "prepare:typecheck": "npm run sync:readmes && fumadocs-mdx && npm run clean:next-types && npm run typegen",
+    "predev": "npm run sync:readmes",
+    "dev": "next dev --webpack",
+    "prebuild": "npm run sync:readmes",
+    "build": "next build --webpack",
+    "pretypecheck": "npm run prepare:typecheck",
+    "typecheck": "tsc --noEmit",
+    "start": "next start"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "dependencies": {
+    "@orama/tokenizers": "^3.1.18",
+    "@types/mdx": "^2.0.13",
+    "fumadocs-core": "^16.9.0",
+    "fumadocs-mdx": "^15.0.7",
+    "fumadocs-ui": "^16.9.0",
+    "next": "^16.2.6",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "tailwindcss": "^4.3.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.0",
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.2.15",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^6.0.3"
+  }
+}

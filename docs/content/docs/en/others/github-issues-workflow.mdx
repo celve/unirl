@@ -1,0 +1,104 @@
+---
+title: GitHub Issues Workflow
+description: Issue title, template, labeling, project board, and gh CLI conventions.
+---
+
+This page captures repository workflow conventions. It lives under `Others` because it is useful for project coordination, but it is not part of the UniRL runtime or API surface.
+
+## Issue Title Convention
+
+Use prefix tags to categorize issues clearly:
+
+| Prefix | Usage | Example |
+|---|---|---|
+| `[Feature]` | New feature | `[Feature] Add mixed precision training support` |
+| `[Bug]` | Bug fix | `[Bug] Gradient accumulation NaN in step 500+` |
+| `[Task]` | Concrete work item | `[Task] Refactor backward_train_step` |
+| `[RFC]` | Discussion before implementation | `[RFC] Async rollout pipeline design` |
+| `[Tracking]` | Parent issue that tracks sub-tasks | `[Tracking] Training Pipeline Optimization` |
+
+## Issue Template
+
+Every issue should include:
+
+```markdown
+## Background
+Why this needs to be done. 1-2 sentences.
+
+## Objective
+What specific outcome is expected.
+
+## Tasks
+- [ ] Sub-task 1
+- [ ] Sub-task 2
+- [ ] Sub-task 3
+
+## References
+- Related code path: `unirl/xxx/yyy.py`
+- Related paper or link
+
+## Acceptance Criteria
+How do we know this is done?
+```
+
+## Label System
+
+Recommended priority labels:
+
+| Label | Description |
+|---|---|
+| `priority: high` | Must be done ASAP |
+| `priority: medium` | Should be done this sprint |
+| `priority: low` | Nice to have |
+
+Recommended module labels:
+
+| Label | Description |
+|---|---|
+| `module: training` | Training pipeline related |
+| `module: inference` | Inference and rollout related |
+| `module: sampling` | Sampling strategy related |
+| `module: algorithm` | Algorithm related |
+| `module: infra` | Infrastructure and distributed related |
+
+## Workflow
+
+```text
+Create tracking issue
+  -> create sub-issues
+  -> assign owners
+  -> update progress in comments
+  -> submit PR with "Closes #xx"
+  -> code review
+  -> merge and auto-close issue
+```
+
+## CLI Quick Reference
+
+```bash
+gh issue create \
+  --title "[Task] Refactor backward_train_step gradient accumulation" \
+  --body "## Objective
+Optimize gradient accumulation logic.
+
+## Tasks
+- [ ] Analyze current implementation
+- [ ] Refactor code
+- [ ] Add tests" \
+  --assignee teammate-username \
+  --label "module: training,priority: high"
+
+gh issue list --assignee teammate-username --state open
+gh issue view 101
+gh issue close 101
+gh issue comment 101 --body "Progress update: completed step 1 and 2."
+```
+
+## Best Practices
+
+- Keep one clear owner per issue.
+- Break large tasks into issues that can be completed in one to three days.
+- Cross-reference related issues and PRs with `#issue_number`.
+- Update active issues regularly.
+- Use `Closes #xx` in PR descriptions for automatic tracking.
+- Use `[RFC]` issues for non-trivial design discussions before coding.

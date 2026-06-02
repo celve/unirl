@@ -1,0 +1,121 @@
+---
+title: Data Preparation
+description: Prompt file formats, the per-prompt schema, image/condition inputs, and how prompts expand into rollout groups.
+---
+
+UniRL training is prompt-first: a data file supplies prompts, and rollout
+engines generate media that reward components score. This page documents the
+accepted file formats and the per-prompt schema. For where datasets are mounted,
+see [Data and Models](/en/docs/guides/data-and-models).
+
+## File Formats
+
+Point a recipe's `data_source` at a prompt file via `DATA_PATH` (env, where the
+recipe interpolates it) or by overriding the `data_source` `data_path` (Hydra
+override). The reader (`unirl/data/datasets.py`) accepts three extensions;
+anything else raises:
+
+| Extension | Parsing |
+|---|---|
+| `.txt` | One prompt per non-empty line. Each line becomes `{"prompt": <line>}`. |
+| `.jsonl` | One JSON object per non-empty line. |
+| `.json` | A list of strings or objects, or a dict with a `prompts` list, a `caption`, or a configurable prompt key (default `prompt`). |
+
+Minimal JSON:
+
+```json
+[
+  {"prompt": "A watercolor landscape with snowy mountains at sunrise."},
+  {"prompt": "A cinematic portrait of a robot reading under warm light."}
+]
+```
+
+A plain `.txt` file (one prompt per line, like the committed
+`datasets/pickscore/train.txt`) works for text-to-video recipes too:
+
+```text
+A drone shot flying over a misty pine forest at dawn.
+Time-lapse of clouds rolling over a desert canyon.
+```
+
+## Per-Prompt Schema
+
+Each object is normalized to a prompt example:
+
+| Field | Required | Notes |
+|---|---|---|
+| `prompt` (or `caption`) | yes | Non-empty text. |
+| `prompt_id` | no | Auto-generated as `{filename}:{index}` if omitted. |
+| `metadata` | no | Free-form dict. If omitted, any extra top-level keys become metadata. |
+| `media` / `media_refs` | no | List of media references; each is `{modality, role, uri}`. |
+
+If `metadata` is omitted, extra top-level keys (anything other than `prompt`,
+`caption`, `media`, `media_refs`, `metadata`, `prompt_id`) are folded into it. If
+you pass an explicit `metadata` dict it is used as-is, so put any extra fields
+inside it. Legacy precomputed-embedding fields (for example `prompt_embed_path`,
+`prompt_embeds`) are rejected with a hard error — embeddings are computed at runtime.
+
+There is no `negative_prompt` or per-row `seed` in the data file. Guidance scale,
+seed, and resolution come from `cfg.sampling`, not from manifest rows.
+
+## Image-Conditioned and Edit/I2V Inputs
+
+For image-to-video, editing, or other conditioned recipes, attach a condition
+image through `media_refs`:
+
+```json
+{
+  "prompt": "Animate this scene with gentle falling snow.",
+  "media_refs": [
+    {"modality": "image", "role": "condition", "uri": "frames/scene_01.png"}
+  ]
+}
+```
+
+- Relative URIs resolve against the dataset file's directory.
+- Absolute paths and `http://`, `https://`, `s3://`, `gs://` URIs pass through unchanged.
+- Today the driver loads exactly one `(modality="image", role="condition")` ref
+  per prompt; other modality/role pairs raise `NotImplementedError`.
+- There is no video URI role in the data contract: text-to-video uses `.txt`
+  prompts, and image-to-video uses an image condition ref.
+
+## How Prompts Become Rollout Groups
+
+Two knobs control batch shape, and they apply at different stages:
+
+- `prompts_per_rollout` is the number of **distinct prompts** sampled per rollout
+  (the data loader's batch size). Prompts are not pre-duplicated.
+- `sampling.samples_per_prompt` repeats each prompt `k` times later, in the
+  rollout pipeline, to form an N-sample GRPO group. Siblings share a `group_id`
+  and get `sample_id`s like `prompt:<gid>:sample:<j>`.
+
+So one rollout produces `prompts_per_rollout × sampling.samples_per_prompt`
+samples.
+
+## Data Source Selection
+
+| Source | When | Selected by |
+|---|---|---|
+| `MultimodalRLDataSource` | real runs; reads the configured `data_path`, shuffles, drops the last partial batch | recipes set `data_source._target_: unirl.data.data_source.MultimodalRLDataSource` (the default) |
+| `DefaultDataSource` | smoke checks; ignores `data_path` and cycles a few built-in prompts | a recipe pointing `data_source._target_` at `unirl.data.data_source.DefaultDataSource` |
+
+`EVAL_DATA_PATH` points at a separate eval prompt file (loaded in deterministic
+order); training batches always come from the configured `data_path`. See
+[Evaluation](/en/docs/guides/evaluation) for the current status of the eval path.
+
+## Worked Example
+
+```bash
+# 1. Author prompts.json (a list of {"prompt": ...} objects).
+# 2. Point DATA_PATH at it and launch a recipe whose data source reads files.
+DATA_PATH=/abs/path/prompts.json \
+OUTPUT_DIR=/abs/path/outputs/run1 \
+bash scripts/run_experiment_single_node.sh sd3_trainside
+```
+
+Validate composition before launching Ray work:
+
+```bash
+DATA_PATH=/abs/path/prompts.json \
+python -m unirl.train_diffusion --config-name=sd3_trainside --cfg job --resolve
+```

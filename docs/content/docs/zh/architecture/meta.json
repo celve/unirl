@@ -1,0 +1,5 @@
+{
+  "title": "架构",
+  "pages": ["concepts", "overview", "trainer-v2", "roadmap"],
+  "defaultOpen": true
+}

@@ -1,0 +1,159 @@
+---
+title: Agent 任务配方
+description: 常见 coding-agent 任务对应的文件、检查和风险。
+---
+
+本页是修改仓库前的 routing table。
+
+## 新增训练 Recipe
+
+Read:
+
+- `unirl/config/README.md`
+- 最接近的 `conf/<recipe>.yaml`
+
+Edit:
+
+- `conf/<new_recipe>.yaml`
+- 若是维护中的 recipe，同步更新 `/zh/docs/configuration/experiments` 和英文对应页
+
+Check:
+
+```bash
+python -m unirl.train_diffusion --config-name=<new_recipe> --cfg job --resolve
+```
+
+Risk: placement、rollout batch size、train-stack batch geometry 不匹配。
+
+See also: `unirl/train/stack.py`、`unirl/config/`。
+
+## 新增模型
+
+Read:
+
+- `unirl/models/README.md`
+- 最接近的 `unirl/models/<existing_model>/`
+
+Edit:
+
+- `unirl/models/<model_name>/`
+- `conf/<recipe>.yaml`
+
+Check:
+
+- config registration imports
+- LoRA target materialization
+- rollout engine 期望的 prompt/condition contract
+
+Risk: 把模型特定假设泄漏到 generic rollout 或 training package。
+
+See also: `unirl/types/` 和最接近的现有 model package。
+
+## 新增 Rollout Engine
+
+Read:
+
+- `unirl/rollout/README.md`
+- `unirl/distributed/weight_sync/README.md`
+- existing `engine/trainside`、`engine/sglang` 或 `engine/vllm_omni`
+
+Edit:
+
+- `unirl/rollout/engine/<engine>/`
+- dedicated engine 需要时同步 weight sync backend
+- 至少一个 `conf/` recipe
+
+Check:
+
+- 所有 backend 输出都要转换成 canonical `RolloutResp`（`tracks[name]`）；
+- direct-vs-dedicated sync contract 通过 validation。
+
+Risk: 把 backend-specific object 直接穿过 rollout/training 边界。
+
+See also: `unirl/types/rollout_req.py`、`unirl/types/rollout_resp.py`。
+
+## 新增或调试 Weight Sync
+
+Read:
+
+- `unirl/distributed/weight_sync/README.md`
+- `unirl/rollout/README.md`
+- recipe 中的 `sync` selection
+
+Edit:
+
+- `unirl/distributed/weight_sync/`
+- 选择或调优 backend 时更新 `conf/<recipe>.yaml`
+
+Check:
+
+- dedicated rollout engine 必须配置一个支持的 `sync` backend；
+- direct sampling recipe 必须省略 `sync`；
+- CUDA-IPC sync 只用于 colocate 的 dedicated rollout。
+
+Risk: 混淆 trainer-to-rollout weight sync 和 rollout 输出的 tensor transport。
+
+See also: `unirl/distributed/tensor/`、`unirl/config/`。
+
+## 新增或调试 SDE
+
+Read:
+
+- `unirl/sde/README.md`
+- `unirl/algorithms/README.md`
+- recipe 的 `sampling` 和 `sampling/sde_strategy`
+
+Edit:
+
+- `unirl/sde/`
+- `unirl/models/<model_name>/` 下的模型特定 sigma override
+- 选择 strategy 或 step schedule 时更新 recipe YAML
+
+Check:
+
+- 训练用 strategy 必须提供 GRPO-style loss 需要的 log-probability path；
+- evaluation-only solver 不应被用于 train-side ratio objective；
+- old log-prob 在 `stack.num_updates_per_batch` 多更新中保持固定。
+
+Risk: 修改 sigma schedule 或 log-prob 行为，但没有同步 rollout/replay 假设。
+
+See also: `unirl/types/sampling.py`、`unirl/types/rollout_resp.py`、`unirl/algorithms/diffusion_grpo.py`。
+
+## 新增 Reward
+
+Read:
+
+- `/zh/docs/guides/rewards`
+- `unirl/reward/README.md`
+- 最接近的 `unirl/reward/local/` scorer
+
+Edit:
+
+- scorer implementation 和 spec config
+- recipe reward backend
+
+Check:
+
+- scorer batch size 和 device behavior；
+- scorer 持有模型时检查 offload/onload。
+
+Risk: 引入没有 batch control 的慢速 in-process scoring。
+
+See also: `unirl/reward/local/base.py`、`unirl/types/reward.py`。
+
+## 调试失败运行
+
+先运行：
+
+```bash
+python -m unirl.train_diffusion --config-name=<recipe> --cfg job --resolve
+```
+
+然后按顺序看：
+
+- config validation error；
+- `scripts/` 下的启动器；
+- `unirl/rollout/README.md`；
+- `unirl/train/readme.md`。
+
+Risk: 把 Hydra composition 已经编码的 invalid topology 误判成 Ray runtime root cause。

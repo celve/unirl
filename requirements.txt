@@ -24,6 +24,7 @@ ray[default]>=2.9,<3
 requests>=2.31
 safetensors>=0.4
 sglang[diffusion] @ git+https://github.com/celve/sglang.git@diffusionrl#subdirectory=python
+tensordict>=0.5
 torch>=2.1
 torchvision>=0.16
 transformers>=4.41

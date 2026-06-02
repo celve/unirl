@@ -1,0 +1,22 @@
+---
+title: Reference
+description: UniRL 的生成式参考文档和近代码文档入口。
+---
+
+Reference 页面用于暴露贴近代码的契约文档。README Reference 从仓库中的 README 文件生成，因此源码旁边的 README 仍然是权威来源。
+
+## 按主题归类的 README Reference
+
+生成的 README Reference 目前保持英文，并按所属文档主题归类：
+
+- [Getting Started README Reference](/en/docs/getting-started/readme-reference)：项目根 README 和文档站维护说明。
+- [Architecture README Reference](/en/docs/architecture/readme-reference)：runtime loop、rollout、train stack、algorithms、SDE 和 weight sync。
+- [Configuration README Reference](/en/docs/configuration/readme-reference)：Hydra 配置组合和 config package 契约。
+- [Guides README Reference](/en/docs/guides/readme-reference)：model package、reward 和独立的 reward service。
+
+修改行为时，先更新对应代码目录旁边的 README，然后运行：
+
+```bash
+cd docs
+npm run sync:readmes
+```

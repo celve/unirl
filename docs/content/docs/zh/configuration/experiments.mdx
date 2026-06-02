@@ -1,0 +1,66 @@
+---
+title: 实验配方
+description: 扁平 conf/ 目录下的 recipe，以及每个入口如何选择 recipe。
+---
+
+recipe 是扁平 `conf/` 目录下自包含的 YAML 文件。每个都是 model、algorithm、rollout engine、placement、reward、sync 和 batch geometry 的 source of truth。用 `--config-name=<recipe>`（不含 `.yaml`）选择。
+
+## 每个领域的入口
+
+recipe 所属家族决定用哪个入口运行：
+
+| 入口 | recipe 家族 |
+|---|---|
+| `python -m unirl.train_diffusion` | `sd3_*`、`qwen_image_*`、`wan21_*`、`wan22_*` |
+| `python -m unirl.train_vlm` | `argrpo_qwen_vl_*`、`ar_spo_dppo_qwen3_*` |
+| `python -m unirl.train_pe` | `pe_*` |
+| `python -m unirl.train_hi3` | `hi3_*` |
+
+## 维护中的家族
+
+| 家族 | recipe |
+|---|---|
+| SD3（trainside / GRPO） | `sd3_trainside`、`sd3_dancegrpo`、`sd3_mixgrpo` |
+| SD3 NFT | `sd3_nft`、`sd3_nft_reward_service`、`sd3_nft_sglang` |
+| SD3 Flow-DPPO | `sd3_flowdppo`、`sd3_flowdppo_vllmomni` |
+| SD3 SGLang | `sd3_sglang_native_colocate`、`sd3_sglang_replay_colocate`、`sd3_sglang_full_nccl_separate`、`sd3_sglang_full_tensor`、`sd3_sglang_lora_separate` |
+| SD3 vLLM-Omni | `sd3_vllmomni`、`sd3_vllmomni_full_ipc`、`sd3_vllmomni_full_nccl_separate`、`sd3_vllmomni_full_tensor`、`sd3_vllmomni_lora_separate` |
+| Qwen-Image | `qwen_image_trainside`、`qwen_image_dancegrpo`、`qwen_image_mixgrpo`、`qwen_image_nft` |
+| WAN 2.1 | `wan21_t2v`、`wan21_t2v_dancegrpo`、`wan21_t2v_mixgrpo`、`wan21_i2v` |
+| WAN 2.2 | `wan22_t2v_14b`、`wan22_t2v_14b_dancegrpo`、`wan22_t2v_14b_mixgrpo`、`wan22_i2v` |
+| HunyuanImage3 | `hi3_vllmomni` |
+| Qwen-VL ARGRPO（VLM） | `argrpo_qwen_vl_geo3k_mc_4x8`、`argrpo_qwen_vl_geo3k_mc_4x8_lora`、`argrpo_qwen_vl_geo3k_mc_sglang_4x8`、`argrpo_qwen_vl_geo3k_mc_sglang_4x8_lora` |
+| Qwen3 SPO-DPPO（LLM） | `ar_spo_dppo_qwen3_4x8`、`ar_spo_dppo_qwen3_4x8_sglang` |
+| PE（prompt enhancer，AR + diffusion） | `pe_trainside`、`pe_sglang_trainside`、`pe_sglang_full_merge`、`pe_sglang_lora_pool` |
+
+## 选择 Recipe
+
+```bash
+python -m unirl.train_diffusion --config-name=sd3_trainside
+```
+
+启动器传入同样的 recipe 名（`ENTRY` 选择非 diffusion 入口）：
+
+```bash
+bash scripts/run_experiment_single_node.sh sd3_trainside
+ENTRY=train_vlm bash scripts/run_experiment_single_node.sh argrpo_qwen_vl_geo3k_mc_4x8
+bash scripts/run_experiment_multinode_taiji.sh sd3_sglang_native_colocate
+```
+
+## 如何选择 Recipe
+
+当任务没有指定具体 recipe 时，按此顺序决定：
+
+1. 先选模态和模型：图像用 SD3 或 Qwen-Image；视频用 WAN 2.1 / 2.2；AR + diffusion 混合用 HunyuanImage3；VLM / LLM 用 Qwen-VL / Qwen3；prompt-enhancer 用 PE。
+2. 再选 rollout topology：`trainside` 是 direct sampling；SGLang/vLLM-Omni 是 dedicated rollout；`colocate` 表示 train 和 rollout 共享 GPU bundle（相对 `separate`）。
+3. 再选算法：GRPO / DanceGRPO / MixGRPO 是 on-policy ratio loss，Flow-DPPO 是 KL-masked policy optimization，NFT 是 off-policy forward-process training，SPO-DPPO 用于 AR 文本。
+4. 最后按硬件选择如 `4x8` 等变体。
+5. 启动 Ray 作业前先做 compose check。
+
+## 新增 Recipe
+
+1. 从最接近的 `conf/<recipe>.yaml` 复制。
+2. 把 model、reward、rollout engine、backend、stack、sync、placement、batch geometry 放在 YAML 中，每个用 `_target_` 实例化。
+3. 只把路径和 logging identity 这类部署相关值放到环境变量插值中。
+4. 运行 `python -m unirl.train_diffusion --config-name=<recipe> --cfg job --resolve`。
+5. 把该 recipe 补到本页。

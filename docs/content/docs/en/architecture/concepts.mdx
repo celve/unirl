@@ -1,0 +1,106 @@
+---
+title: Concepts & Glossary
+description: The core mental model and the domain terms used across UniRL docs and recipes.
+---
+
+Read this first if the rest of the docs use unfamiliar terms. It is a conceptual
+primer, not an API reference; code-adjacent contracts live under
+[README Reference](/en/docs/architecture/readme-reference).
+
+## The Core Loop
+
+Every run is one repeating loop:
+
+```text
+prompts -> rollout (sample media + record trajectories into tracks)
+        -> reward  (score media into per-sample rewards)
+        -> advantage (normalize rewards within/across groups)
+        -> train   (replay trajectories, compute loss, backward, optimizer step)
+        -> [optional] weight sync back to dedicated rollout engines
+```
+
+## One Algorithm per Track
+
+A rollout produces one or more **tracks** (`RolloutResp.tracks[name]`, keyed by a
+stage name such as `"diffusion"` or `"ar"`). Each track binds exactly **one**
+loss algorithm — `cfg.algorithm`, a `StageAlgorithm` that consumes the track,
+replays the stage, computes a loss, and calls `backward()`.
+
+There is no separate driver-side "rollout control" object. Reward→advantage
+shaping and SDE-index selection live on typed objects:
+
+| Concern | Where it lives |
+|---|---|
+| Loss | `cfg.algorithm` → a `StageAlgorithm` (e.g. `DiffusionGRPO`) |
+| Reward → advantage | `RolloutTrack.compute_advantages` (`unirl/types/rollout_resp.py`) |
+| Which inference steps run SDE | `DiffusionSamplingParams.resolve_sde_indices` (`unirl/types/sampling.py`) |
+
+A single-track recipe binds one top-level `cfg.algorithm`; a multi-track recipe
+(for example PE) nests one `algorithm:` node per track (`diffusion.algorithm`,
+`ar.algorithm`) and runs sibling `TrainStack`s.
+
+## Glossary
+
+### Orchestration
+
+| Term | Meaning |
+|---|---|
+| Driver | The process running the training loop: an entrypoint (`unirl.train_diffusion`, …) that builds a `<Domain>Trainer`. |
+| Trainer | `unirl/trainer/<domain>.py` — owns the placement block, builds rollout/train workers, and runs the loop. |
+| Remote / placement | Single-controller layer (`unirl/distributed/group/`): a `Remote` is a logical worker; a `placement` block colocates sibling Remotes and carries `RankInfo` (DP/TP/PP/SP/EP ranks). |
+| Bundle | A model package's trainable + frozen modules (transformer, VAE, text encoders) exposed to training and rollout. |
+| Pipeline | The model's sampling pipeline (denoising / generation) used to produce media and trajectories. |
+
+### Rollout
+
+| Term | Meaning |
+|---|---|
+| Rollout engine | The sampler backend: `trainside`, `sglang`, `sglang_llm`, `vllm_omni`, or `composed`. |
+| Direct sampling | `trainside`: the FSDP-wrapped training module IS the sampler; no separate engine, no weight sync. |
+| Dedicated sampling | A separate engine (SGLang / vLLM-Omni) holds its own weights and needs trainer→rollout weight sync. |
+| Colocate vs separate | Whether train and rollout share GPU bundles (`colocate`) or run on distinct GPU slabs (`separate`). |
+| `RolloutReq` / `RolloutResp` | The typed boundary between rollout and training. Engines adapt backend output into `RolloutResp`. |
+| Track / Segment | `RolloutResp.tracks[name]` holds a per-stage `segment` (e.g. a diffusion trajectory with per-step log-probs), rewards, and advantages. |
+| Group | The `sampling.samples_per_prompt` siblings of one prompt; advantages are normalized within a group. |
+
+### SDE & log-probs
+
+| Term | Meaning |
+|---|---|
+| SDE strategy | Per-step stochastic kernel that produces a step log-prob (`FlowSDEStrategy`, `DanceSDEStrategy`, ...). |
+| Sigma schedule | The σ values across denoising steps; pinned onto the request as a single source of truth. |
+| `old_logp` / `new_logp` | Rollout-time vs current-weights log-probs; their ratio drives GRPO's clipped objective. |
+| Log-prob replay | Recomputing log-probs at train time by replaying the stage; old log-probs stay fixed across updates. |
+
+### Training
+
+| Term | Meaning |
+|---|---|
+| Backend | The training-state `Remote` (`FSDPBackend`) owning structural injection + optimizer + scheduler + EMA. |
+| Stage / StageAlgorithm | A trainable stage and the loss object that replays it and runs forward/backward. |
+| Train stack | `TrainStack` — single-stage loss/backward driver; multi-track uses sibling stacks; HI3 uses `hi3_stack`. |
+| EMA rollout | Sampling rollouts with EMA-smoothed weights (NFT opts in; GRPO / DPPO must not). |
+| Batch geometry | `micro_batch_size`, `num_updates_per_batch`; multi-update freezes π_old once per rollout shard. |
+
+### Reward
+
+| Term | Meaning |
+|---|---|
+| RewardService | `unirl/reward/service.py` — holds one backend: local scorers or the remote HTTP client. |
+| Reward component / scorer | A unit that scores media (PickScore, HPS, OCR, GenEval2, VideoPickScore, ...). |
+| Advantage | The normalized reward signal the loss multiplies against. |
+
+### Data-plane vs weight-plane
+
+| Term | Meaning |
+|---|---|
+| Weight sync (`cfg.sync`) | Sends fresh **trainer weights** to dedicated rollout engines (NCCL broadcast, tensor, IPC). |
+| Tensor transport | The data plane (`unirl/distributed/tensor/`) for moving bulky **rollout outputs** between workers. |
+
+These solve opposite directions; do not conflate them.
+
+## Where to Go Next
+
+- Runtime map: [Overview](/en/docs/architecture/overview).
+- Algorithm loss math and the reward→advantage path: [Algorithms Package README](/en/docs/architecture/readme-reference/unirl-algorithms).
+- Picking a recipe: [Experiment Recipes](/en/docs/configuration/experiments).

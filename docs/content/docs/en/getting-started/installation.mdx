@@ -1,0 +1,57 @@
+---
+title: Installation
+description: Install UniRL and the optional documentation site.
+---
+
+UniRL requires Python 3.10 or newer. The validated training path uses editable installation with training, inference, and evaluation extras.
+
+## Python Package
+
+Install the core runtime:
+
+```bash
+pip install -e ".[train,infer,eval]" --no-build-isolation
+pip install flash-attn==2.7.4.post1 --no-build-isolation
+```
+
+Install development tools when you need tests, linting, and hooks:
+
+```bash
+pip install -e ".[train,infer,eval,dev]" --no-build-isolation
+pre-commit install
+```
+
+The main project metadata lives in `pyproject.toml`. Optional extras are:
+
+| Extra | Purpose |
+|---|---|
+| `train` | WandB and async runtime dependencies |
+| `infer` | inference-side helpers such as Accelerate |
+| `eval` | evaluation and reward-related dependencies |
+| `dev` | pytest, ruff, and pre-commit |
+
+Treat `pyproject.toml` as the dependency source of truth. `setup.py` exists for older editable-install tooling, and `requirements.txt` is a flat installation helper aligned with the recommended extras path.
+
+## Optional Model and Reward Dependencies
+
+`mmcv` and `mmdetection` are intentionally not installed by default. Install them only for Geneval/OpenMMLab workflows, following [Geneval MMCV Setup](/en/docs/guides/geneval-mmcv-setup).
+
+To run heavy reward models on their own GPU node instead of in-process, use the standalone remote reward service in `unirl-reward-service/` (it ships its own dependencies and README). See [Rewards](/en/docs/guides/rewards) for wiring the remote backend.
+
+## Documentation Site
+
+The Fumadocs site is isolated in `docs/` so Node dependencies do not affect the Python package:
+
+```bash
+cd docs
+npm install
+npm run dev
+```
+
+Build the static site:
+
+```bash
+npm run build
+```
+
+The exported static files are emitted by Next.js into `docs/out/`.

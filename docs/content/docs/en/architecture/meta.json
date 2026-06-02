@@ -1,0 +1,5 @@
+{
+  "title": "Architecture",
+  "pages": ["concepts", "overview", "trainer-v2", "roadmap", "readme-reference"],
+  "defaultOpen": true
+}

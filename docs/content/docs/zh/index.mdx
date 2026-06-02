@@ -1,0 +1,53 @@
+---
+title: UniRL 文档
+description: 面向研究人员和工程师的 UniRL 中文文档。
+---
+
+UniRL 是一个面向统一多模态生成模型的分布式强化学习框架。它用基于 Ray 的 worker group、Hydra 实验配方、可组合训练栈和可插拔 rollout engine 训练扩散与自回归模型。
+
+本站现在支持两类入口：
+
+- 人类阅读：英文页面在 `/en/docs`，中文页面在 `/zh/docs`。
+- Agent 阅读：先看 [Agent 索引](/zh/docs/agents) 判断任务该进入哪组文档、README 和源码。
+
+## 运行训练
+
+每个领域都有自己的入口，驱动方式一致：
+
+```bash
+python -m unirl.train_diffusion --config-name=<recipe>   # diffusion 图像/视频
+python -m unirl.train_vlm       --config-name=<recipe>   # 自回归 VLM / LLM
+python -m unirl.train_pe        --config-name=<recipe>   # prompt-enhancer (PE)
+python -m unirl.train_hi3       --config-name=<recipe>   # HunyuanImage3（AR + diffusion 混合）
+```
+
+`<recipe>` 是扁平 `conf/` 目录下的一个自包含 YAML 文件名（不含 `.yaml`），例如：
+
+```bash
+python -m unirl.train_diffusion --config-name=sd3_trainside
+```
+
+任意字段都可用 Hydra 的 `key=value` 语法在命令行覆盖，例如 `num_devices=8`。每个 recipe 都是 model、algorithm、rollout engine、placement、reward、sync 和 batch geometry 的 source of truth。
+
+`scripts/` 下的 shell 启动器应保持精简——只负责准备环境变量、启动 Ray、传入 recipe 名和 Hydra overrides，真正的 recipe 语义放在 YAML 中。规范示例见 `scripts/run_experiment_single_node.sh` 和 `scripts/run_experiment_multinode_taiji.sh`。
+
+更细的 runtime 和模块契约位于侧边栏各文档分区下的 README Reference 页面，来源于源码旁边的 README 文件。
+
+## Agent 如何使用本站
+
+`/llms.txt`、`/llms-full.txt` 和 `/md/<slug>/index.md` 是根级机器入口，不是新的文档分类。它们固定输出英文，避免中英混杂影响检索和上下文质量；人类在 docsite 里只需要从 [Agent 索引](/zh/docs/agents) 理解这些入口的职责。
+
+## 推荐阅读路径
+
+如果你是第一次使用：
+
+1. 阅读 [安装](/zh/docs/getting-started/installation)。
+2. 阅读 [首次运行](/zh/docs/getting-started/first-run)。
+3. 通过 [实验配方](/zh/docs/configuration/experiments) 选择 recipe。
+4. 修改代码前阅读 [Agent 索引](/zh/docs/agents)。
+
+## 阅读路径
+
+- 安装和启动：先读 [安装](/zh/docs/getting-started/installation) 和 [首次运行](/zh/docs/getting-started/first-run)。
+- 理解整体架构：读 [概览](/zh/docs/architecture/overview)。
+- 修改代码前：读 [Agent 索引](/zh/docs/agents)，再进入对应 README contract。

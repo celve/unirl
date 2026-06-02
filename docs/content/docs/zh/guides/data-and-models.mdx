@@ -1,0 +1,29 @@
+---
+title: 数据和模型
+description: Prompt 数据契约、本地数据集、模型代码包和 checkpoint 挂载。
+---
+
+## 数据契约
+
+用户数据以 prompt 为核心。已提交的 prompt 列表在 `datasets/` 下（如 `datasets/pickscore/train.txt`），更大的数据集建议挂载或 symlink 到 `datasets/`，并通过 `DATA_PATH` 或 recipe 的 `data_source` 块传入：
+
+```bash
+DATA_PATH=/abs/path/train.json \
+bash scripts/run_experiment_single_node.sh sd3_trainside
+```
+
+prompt 文件格式和单条 prompt schema 见 [数据准备](/zh/docs/guides/data-preparation)。
+
+## 模型代码
+
+模型实现包位于 `unirl/models/`。包结构和扩展契约以生成的 [Model Package README](/en/docs/guides/readme-reference/unirl-models) 为准。
+
+## 本地模型挂载
+
+仓库根目录的 `models/` 只用于本地 artifact（如 `models/local/`），不是 Python model code。Experiment YAML 和 model config 通过 Hydra 环境插值提供 HuggingFace 回退，例如：
+
+```yaml
+pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
+```
+
+不要提交 `.bin`、`.safetensors`、`.pt`、`.pth`、`.ckpt` 等大模型权重。

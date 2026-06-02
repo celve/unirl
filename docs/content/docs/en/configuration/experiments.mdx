@@ -1,0 +1,68 @@
+---
+title: Experiment Recipes
+description: Recipes in the flat conf/ directory and how to select one per entrypoint.
+---
+
+Recipes are self-contained YAML files in the flat `conf/` directory. Each one is the source of truth for model, algorithm, rollout engine, placement, reward, sync, and batch geometry. Select a recipe with `--config-name=<recipe>` (no `.yaml`).
+
+## Entrypoint per Domain
+
+The recipe family determines which entrypoint runs it:
+
+| Entrypoint | Recipe families |
+|---|---|
+| `python -m unirl.train_diffusion` | `sd3_*`, `qwen_image_*`, `wan21_*`, `wan22_*` |
+| `python -m unirl.train_vlm` | `argrpo_qwen_vl_*`, `ar_spo_dppo_qwen3_*` |
+| `python -m unirl.train_pe` | `pe_*` |
+| `python -m unirl.train_hi3` | `hi3_*` |
+
+## Maintained Families
+
+| Family | Recipes |
+|---|---|
+| SD3 (trainside / GRPO) | `sd3_trainside`, `sd3_dancegrpo`, `sd3_mixgrpo` |
+| SD3 NFT | `sd3_nft`, `sd3_nft_reward_service`, `sd3_nft_sglang` |
+| SD3 Flow-DPPO | `sd3_flowdppo`, `sd3_flowdppo_vllmomni` |
+| SD3 SGLang | `sd3_sglang_native_colocate`, `sd3_sglang_replay_colocate`, `sd3_sglang_full_nccl_separate`, `sd3_sglang_full_tensor`, `sd3_sglang_lora_separate` |
+| SD3 vLLM-Omni | `sd3_vllmomni`, `sd3_vllmomni_full_ipc`, `sd3_vllmomni_full_nccl_separate`, `sd3_vllmomni_full_tensor`, `sd3_vllmomni_lora_separate` |
+| Qwen-Image | `qwen_image_trainside`, `qwen_image_dancegrpo`, `qwen_image_mixgrpo`, `qwen_image_nft` |
+| WAN 2.1 | `wan21_t2v`, `wan21_t2v_dancegrpo`, `wan21_t2v_mixgrpo`, `wan21_i2v` |
+| WAN 2.2 | `wan22_t2v_14b`, `wan22_t2v_14b_dancegrpo`, `wan22_t2v_14b_mixgrpo`, `wan22_i2v` |
+| HunyuanImage3 | `hi3_vllmomni` |
+| Qwen-VL ARGRPO (VLM) | `argrpo_qwen_vl_geo3k_mc_4x8`, `argrpo_qwen_vl_geo3k_mc_4x8_lora`, `argrpo_qwen_vl_geo3k_mc_sglang_4x8`, `argrpo_qwen_vl_geo3k_mc_sglang_4x8_lora` |
+| Qwen3 SPO-DPPO (LLM) | `ar_spo_dppo_qwen3_4x8`, `ar_spo_dppo_qwen3_4x8_sglang` |
+| PE (prompt enhancer, AR + diffusion) | `pe_trainside`, `pe_sglang_trainside`, `pe_sglang_full_merge`, `pe_sglang_lora_pool` |
+
+## Selecting a Recipe
+
+```bash
+python -m unirl.train_diffusion --config-name=sd3_trainside
+```
+
+Launchers pass the same recipe name (and `ENTRY` selects a non-diffusion entrypoint):
+
+```bash
+bash scripts/run_experiment_single_node.sh sd3_trainside
+ENTRY=train_vlm bash scripts/run_experiment_single_node.sh argrpo_qwen_vl_geo3k_mc_4x8
+bash scripts/run_experiment_multinode_taiji.sh sd3_sglang_native_colocate
+```
+
+## How to Pick a Recipe
+
+Use this decision order when a task does not name a specific recipe:
+
+1. Pick the modality and model family first: SD3 or Qwen-Image for image; WAN 2.1 / 2.2 for video; HunyuanImage3 for mixed AR + diffusion; Qwen-VL / Qwen3 for VLM / LLM; PE for prompt-enhancer.
+2. Pick the rollout topology: `trainside` for direct sampling, SGLang or vLLM-Omni recipes for dedicated rollout, and `colocate` when train and rollout share GPU bundles (vs `separate`).
+3. Pick the algorithm: GRPO / DanceGRPO / MixGRPO for on-policy ratio losses, Flow-DPPO for KL-masked policy optimization, NFT for off-policy forward-process training, SPO-DPPO for AR text.
+4. Pick the cluster-size variant, such as `4x8`, only after matching the target hardware.
+5. Run a compose check before launching Ray work.
+
+## Editing Guidance
+
+When adding a recipe:
+
+1. Start from the closest existing `conf/<recipe>.yaml`.
+2. Keep model, reward, rollout engine, backend, stack, sync, placement, and batch geometry in YAML, each instantiated by `_target_`.
+3. Use environment interpolation only for deployment-specific paths and logging identity.
+4. Run `python -m unirl.train_diffusion --config-name=<recipe> --cfg job --resolve`.
+5. Add the recipe to this page.

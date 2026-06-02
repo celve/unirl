@@ -1,0 +1,161 @@
+---
+title: Agent Task Recipes
+description: Common coding-agent tasks mapped to files, checks, and likely risks.
+---
+
+Use this page as a routing table before editing the repository.
+
+## Add a New Training Recipe
+
+Read:
+
+- `unirl/config/README.md`
+- closest `conf/<recipe>.yaml`
+
+Edit:
+
+- `conf/<new_recipe>.yaml`
+- this docs page and `/en/docs/configuration/experiments` if the recipe is maintained
+
+Check:
+
+```bash
+python -m unirl.train_diffusion --config-name=<new_recipe> --cfg job --resolve
+```
+
+Risk: mismatched placement, rollout batch size, and train-stack batch geometry.
+
+See also: `unirl/train/stack.py`, `unirl/config/`.
+
+## Add a New Model
+
+Read:
+
+- `unirl/models/README.md`
+- closest model package under `unirl/models/`
+
+Edit:
+
+- `unirl/models/<model_name>/`
+- `conf/<recipe>.yaml`
+
+Check:
+
+- config registration imports
+- LoRA target materialization
+- prompt/condition contracts expected by rollout engines
+
+Risk: leaking model-specific assumptions into generic rollout or training packages.
+
+See also: `unirl/types/` and the closest existing model package.
+
+## Add a Rollout Engine
+
+Read:
+
+- `unirl/rollout/README.md`
+- `unirl/distributed/weight_sync/README.md`
+- existing `engine/trainside`, `engine/sglang`, or `engine/vllm_omni`
+
+Edit:
+
+- `unirl/rollout/engine/<engine>/`
+- optional weight sync backend if the engine is dedicated
+- at least one recipe in `conf/`
+
+Check:
+
+- all backend outputs adapt to canonical `RolloutResp` (`tracks[name]`)
+- direct-vs-dedicated sync contracts pass validation
+
+Risk: returning backend-specific objects across the rollout/training boundary.
+
+See also: `unirl/types/rollout_req.py`, `unirl/types/rollout_resp.py`.
+
+## Add or Debug Weight Sync
+
+Read:
+
+- `unirl/distributed/weight_sync/README.md`
+- `unirl/rollout/README.md`
+- the recipe's `sync` selection in `conf/<recipe>.yaml`
+
+Edit:
+
+- `unirl/distributed/weight_sync/`
+- `conf/<recipe>.yaml` when selecting or tuning a backend
+
+Check:
+
+- dedicated rollout engines configure exactly one supported `sync` backend;
+- direct sampling recipes omit `sync`;
+- CUDA-IPC sync is only used with colocated dedicated rollout.
+
+Risk: confusing trainer-to-rollout weight sync with the rollout-output tensor transport.
+
+See also: `unirl/distributed/tensor/`, `unirl/config/`.
+
+## Add or Debug SDE Logic
+
+Read:
+
+- `unirl/sde/README.md`
+- `unirl/algorithms/README.md`
+- the selected recipe's `sampling` and `sampling/sde_strategy` sections
+
+Edit:
+
+- `unirl/sde/`
+- model-specific sigma overrides under `unirl/models/<model_name>/`
+- recipe YAML when selecting strategy or step schedules
+
+Check:
+
+- trained strategies provide log-probability paths required by GRPO-style losses;
+- evaluation-only solvers are not used for train-side ratio objectives;
+- old log-probs remain fixed across `stack.num_updates_per_batch`.
+
+Risk: changing sigma schedules or log-prob behavior without updating rollout and replay assumptions.
+
+See also: `unirl/types/sampling.py`, `unirl/types/rollout_resp.py`, `unirl/algorithms/diffusion_grpo.py`.
+
+## Add a Reward
+
+Read:
+
+- `/en/docs/guides/rewards`
+- `unirl/reward/README.md`
+- closest scorer under `unirl/reward/local/`
+
+Edit:
+
+- scorer implementation and spec config
+- recipe reward backend
+
+Check:
+
+- scorer batch size and device behavior
+- offload/onload if the scorer holds a model
+
+Risk: introducing slow in-process scoring without batch controls.
+
+See also: `unirl/reward/local/base.py`, `unirl/types/reward.py`.
+
+## Debug a Failed Run
+
+Start with:
+
+```bash
+python -m unirl.train_diffusion --config-name=<recipe> --cfg job --resolve
+```
+
+Then inspect:
+
+- config validation errors first;
+- the launchers in `scripts/` for env handling;
+- `unirl/rollout/README.md` for engine mode and sync requirements;
+- `unirl/train/readme.md` for the train-step contract and batch geometry.
+
+Risk: treating a Ray runtime error as the root cause when Hydra composition already encoded an invalid topology.
+
+See also: `unirl/config/`.

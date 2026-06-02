@@ -1,0 +1,371 @@
+---
+title: Roadmap
+description: Near-term direction across the Infra, Algorithm, and Model tracks — baselines, goals, and TODOs.
+---
+
+This roadmap tracks near-term direction across three tracks — **Infra**, **Algorithm**, and
+**Model**. Each item lists its current baseline in this repository and the work remaining.
+
+This is a living document, updated as the project evolves; unlisted topics aren't excluded,
+they just get less coverage. Planning horizon: **2026 H1**.
+
+## Legend
+
+- **Status** — `[ ]` planned · `[~]` in progress · `[x]` done.
+- **Priority** (committed items only) — `P0` must-have this cycle · `P1` targeted this cycle ·
+  `P2` stretch / next. *Candidate* items are exploratory and intentionally
+  unprioritized.
+- **Help wanted** — 🙋 marks well-scoped items that are open to claim.
+- **Tracking** — each committed item should have a `[Tracking]` issue (see
+  [GitHub Issues Workflow](/en/docs/others/github-issues-workflow)); `(RFC needed)` means no
+  tracking issue exists yet — open one to claim it. Owners are tracked on the per-item issues
+  rather than inline here.
+
+## This cycle at a glance
+
+- **Infra** — make the training backend pluggable (a VeOmni backend for composable FSDP / SP /
+  EP), harden vLLM-Omni rollout, async reward, and cross-engine conformance, and add a
+  differentiable-reward (REFL) training mode.
+- **Algorithm** — close the policy-gradient / PPO gaps (critic + GAE, KL / reference policy,
+  reward credit assignment) and stand up the REFL family, starting with DR-Tune.
+- **Model** — build first-class support matrices around important Diffusers model families
+  (SD3.5, Qwen-Image, FLUX, Wan / HunyuanVideo) and bring up next-generation
+  HunyuanImage (3.5) for RL post-training.
+
+| Track | Item | Priority | Status |
+|---|---|---|---|
+| Infra | VeOmni training backend | `P0` | `[ ]` planned |
+| Infra | REFL (differentiable-reward) infra | `P0` | `[ ]` planned |
+| Infra | vLLM-Omni rollout expansion and hardening | `P1` | `[ ]` planned |
+| Infra | Async Reward Overlap | `P1` | `[ ]` planned |
+| Infra | Rollout engine conformance matrix | `P2` 🙋 | `[ ]` planned |
+| Infra | Benchmark / profiling examples and tools | `P2` 🙋 | `[ ]` planned |
+| Infra | UI / observability | `P1` 🙋 | `[ ]` planned |
+| Algorithm | Policy-Gradient / PPO family | `P1` | `[~]` partial |
+| Algorithm | KL / Reference Policy control | `P1` | `[ ]` planned |
+| Algorithm | Reward / Advantage credit assignment consolidation | `P2` | `[ ]` planned |
+| Algorithm | Multi-track / shared-backbone RL | `P2` | `[ ]` planned |
+| Algorithm | REFL family (DR-Tune first) | `P0` | `[ ]` planned |
+| Algorithm | Preference / forward-process (NFT) | — | `[x]` done |
+| Model | Core Image DiT support matrix | `P1` | `[ ]` planned |
+| Model | Video RL model track | `P2` | `[ ]` planned |
+| Model | HunyuanImage 3.5 | `P1` | `[ ]` planned |
+
+## Infra
+
+### `[ ]` `P0` VeOmni Training Backend
+
+- **Baseline.** The trainer exposes a swappable `backend:` block (see `conf/*.yaml`);
+  today the only implementation is the native `FSDPBackend`
+  (`unirl/train/backend/fsdp.py`: FSDP2 wrap plus LoRA / NFT / EMA injection, offload,
+  checkpoint). `TrainTopology` already carries `dp / tp / pp / sp / ep / cp` fields, but only
+  DP / FSDP are topology-driven today; a hybrid-FSDP (HSDP) mesh path exists in
+  `train/inject.py` but is hard-coded (shard size 8), not mapped from `TrainTopology`.
+- **Goal.** Add a `VeOmniBackend` behind the same backend contract to reuse VeOmni's
+  model-centric distributed recipes (composable FSDP / SP / EP via a high-level parallel-plan
+  API).
+- **Tracking.** *(RFC needed)*
+- TODO:
+  - `[ ]` Implement `unirl/train/backend/veomni.py` satisfying the backend Remote
+    contract (LoRA / NFT / EMA injection, optimizer, scheduler, checkpoint, onload/offload).
+  - `[ ]` Map `TrainTopology` onto the VeOmni parallel-plan API (FSDP / FSDP2, HSDP,
+    Sequence Parallelism via DeepSpeed-Ulysses / Async-Ulysses, Expert Parallelism for MoE).
+  - `[ ]` Enable SP for long video / AR sequences and EP for MoE backbones (HunyuanImage 3.x).
+  - `[ ]` Torch Distributed Checkpoint and resume parity with `FSDPBackend`.
+  - `[ ]` Keep the Policy / Stage and weight-sync (LoRA IPC / NCCL) paths working under the
+    new backend.
+
+### `[ ]` `P0` REFL Support (differentiable-reward training mode)
+
+- **Baseline.** Rewards are computed as scalars on rollout actors and turned into advantages
+  (`reward/` then `algorithm.compute_advantages`). There is no gradient path from a reward
+  model back into the denoiser. Train-side algorithms today are policy-gradient
+  (`DiffusionGRPO` / `ARGRPO`, plus `DiffusionDPPO`) and forward-process (`DiffusionNFT`).
+- **Goal.** Add a differentiable-reward training mode so reward gradients can back-propagate
+  through sampling into the model. This is the infra prerequisite for the **REFL algorithm
+  family** (DR-Tune and other reward-feedback methods — see Algorithm below).
+- **Tracking.** *(RFC needed)*
+- TODO:
+  - `[ ]` Add differentiable train-side reward scorers (today's `reward/scorers`, e.g.
+    ImageReward / HPS / PickScore, run under `torch.no_grad()` and return scalars).
+  - `[ ]` Gradient-checkpointed sampling replay plus stop-gradient hooks on denoiser inputs
+    for memory-bounded back-propagation through steps.
+  - `[ ]` A reward-backprop `StageAlgorithm` surface, separate from the scalar
+    reward-to-advantage pipeline.
+  - `[ ]` Recipe and reward-service wiring, with an SD3 smoke recipe.
+
+### `[ ]` `P1` vLLM-Omni Rollout Expansion and Hardening
+
+- **Baseline.** Rollout engines already include `trainside`, `sglang`, `sglang_llm`,
+  `vllm_omni`, and `composed`; the base engine defines a verl-omni-style IPC / NCCL /
+  LoRA weight-sync contract, and the `vllm_omni` path already has SD3 and HunyuanImage3
+  log-prob / latent-capture foundations.
+- **Goal.** Do not reimplement vLLM-Omni internals inside UniRL. Instead, consume its
+  high-throughput multimodal rollout capabilities, expand the existing vLLM-Omni path to more
+  core models, and keep behavior aligned with trainside / SGLang rollout.
+- **Tracking.** *(RFC needed)*
+- TODO:
+  - `[ ]` Extend per-step log-probs, intermediate latent capture, and denoising trajectory replay
+    to Qwen-Image, SD3.5, and Wan2.2.
+  - `[ ]` Harden LoRA / full-weight sync with checksum, dtype / shape fail-fast checks, bucketed
+    transfer metrics, and sync-target rules for multi-track / shared-backbone models.
+  - `[ ]` Integrate or adapt vLLM-Omni step-wise continuous batching, embedding cache, and request
+    scheduling without duplicating serving-engine kernels in UniRL.
+  - `[ ]` Add rollout parity tests across vLLM-Omni and trainside / SGLang for Qwen-Image, SD3.5,
+    Wan2.2, and HunyuanImage3.
+
+### `[ ]` `P1` Async Reward Overlap
+
+- **Baseline.** `reward/scorers` already includes OCR, aesthetic, CLIP, HPS, PickScore,
+  ImageReward, VideoPickScore, rule-based exact match, and related components, with a reward
+  service execution path. The remaining gap is scheduling reward computation as an independent
+  stage that overlaps rollout / training.
+- **Goal.** Follow the verl-omni async-reward direction by placing heavy reward models on
+  dedicated actors / GPUs, reducing step wall-clock while preserving the scalar
+  reward-to-advantage semantics.
+- **Tracking.** *(RFC needed)*
+- TODO:
+  - `[ ]` Independent reward actor placement with async submit / collect for OCR, VLM judges,
+    image rewards, and video rewards.
+  - `[ ]` Introduce reward futures / queues between rollout and training, and log reward latency,
+    queue depth, staleness, and GPU utilization.
+  - `[ ]` Keep the existing synchronous reward service compatible, with Qwen-Image OCR and Wan /
+    HunyuanVideo video-reward smoke recipes.
+
+### `[ ]` `P2` 🙋 Rollout Engine Conformance Matrix
+
+- **Baseline.** `RolloutReq` already treats sigmas as the single source of truth across
+  trainside / SGLang / vLLM-Omni, and `rollout/engine/sigma_verify.py` provides validation.
+  Coverage is still uneven for log-prob source, latent capture, initial latents, media refs,
+  and multi-track responses.
+- **Goal.** Create a model × rollout engine × algorithm smoke / conformance matrix so model and
+  algorithm additions surface engine-specific behavior early.
+- **Tracking.** *(RFC needed)*
+- TODO:
+  - `[ ]` 🙋 Maintain an engine capability matrix for `trainside`, `sglang`, `sglang_llm`,
+    `vllm_omni`, and `composed`: native/replay log-probs, latent capture, initial latents,
+    media refs, and multi-track lineage.
+  - `[ ]` Extend sigma schedule parity, SDE-index scheduler parity, and replay-logprob parity
+    tests.
+  - `[ ]` Add compose + smoke coverage for core recipes: SD3/SD3.5, Qwen-Image, FLUX.2 Klein,
+    Wan2.2, HunyuanVideo1.5, and HunyuanImage3.
+
+### `[ ]` `P2` 🙋 Benchmark / Profiling Examples and Tools
+
+- **Baseline.** The repo has scattered timing fields and smoke outputs (for example tensor-batch
+  `wall_clock`, tokens/s in the SGLang LLM smoke, and throughput notes in a few recipes), but no
+  unified benchmark entry point, fixed workload examples, or comparable report format.
+- **Goal.** Add reproducible end-to-end benchmark tooling for training, rollout, and reward so
+  backend, rollout-engine, reward-overlap, video-decode, and weight-sync optimizations share a
+  stable baseline and regression checks.
+- **Tracking.** *(RFC needed)*
+- TODO:
+  - `[ ]` 🙋 Provide minimal benchmark recipes: SD3 / SD3.5 image, Qwen-Image OCR, and Wan2.2 or
+    HunyuanVideo video reward, covering common trainside, SGLang, and vLLM-Omni paths.
+  - `[ ]` 🙋 Add `scripts/benchmark_*` or an equivalent CLI with fixed seeds, prompt sets, warmup,
+    repeats, batch / group size, and outputs for samples/s, step wall-clock, GPU memory, and
+    rollout / reward / train phase timing.
+  - `[ ]` Standardize a benchmark report schema (JSONL / wandb / Prometheus) with environment,
+    commit, model, engine, topology, LoRA / FSDP / SP / EP settings for comparison across PRs and
+    machines.
+  - `[ ]` Add focused profiling examples for vLLM-Omni continuous batching, async reward overlap,
+    video VAE decode / tiling, and LoRA weight sync.
+
+### `[ ]` `P1` 🙋 UI-Interface Optimization
+
+- **Baseline.** Logging is wandb-only (`utils/wandb_logger.py`, `wandb_metrics.py`) plus media
+  previews; there is no unified dashboard, no rollout-sample gallery beyond wandb, and no
+  local/offline run viewer.
+- **Goal.** Improve observability and the experiment-tracking interface.
+- **Tracking.** *(RFC needed)*
+- TODO:
+  - `[ ]` 🙋 Pluggable tracking backends (wandb / SwanLab / TensorBoard) behind one logger
+    interface.
+  - `[ ]` Rollout sample gallery plus reward-curve and per-component reward views; multi-track
+    (image / AR) visualization for composed recipes.
+  - `[ ]` Rollout monitoring with Prometheus / Grafana for throughput, queue depth,
+    and weight-sync time.
+  - `[ ]` 🙋 Local/offline media and config viewer for runs without wandb access.
+
+- *Candidate.* 🙋 Fully asynchronous actor↔rollout↔reward↔train pipeline (the repo already ships
+  TransferQueue / Mooncake / TensorStore foundations); Ascend NPU support; an optional
+  Megatron-Core backend for additional distributed-training options.
+
+## Algorithm
+
+UniRL's train-side algorithms group into three families. The table shows current support;
+details follow.
+
+| Family | Optimizes via | Supported now | Planned |
+|---|---|---|---|
+| Policy-Gradient / PPO | rollout log-probs + advantages through a clipped / KL surrogate | GRPO family (FlowGRPO / DanceGRPO / MixGRPO), DPPO, ARGRPO, SPO-DPPO | DDPO, DPOK, KL / reference policy, full PPO (critic + GAE) |
+| REFL (reward-feedback) | a differentiable reward back-propagated through sampling | — | DR-Tune, ReFL, DRaFT, AlignProp |
+| Preference / forward-process | forward-process or pairwise targets (no rollout log-prob) | NFT | — |
+
+### `[~]` `P1` Policy-Gradient / PPO family
+
+- **Baseline.** The PPO *objective* is already in use: the GRPO family is the PPO clipped-ratio
+  surrogate (`diffusion_grpo.py` / `ar_grpo.py` `_grpo_clip_loss`); `DiffusionDPPO` swaps the clip
+  for a KL-ADV masking criterion; `ARGRPO` is the text / VLM variant. What is missing is
+  critic-based advantage estimation and diffusion-native PPO recipes.
+- **Tracking.** *(RFC needed)*
+- Planned types:
+  - `[ ]` `P1` **Full PPO (value critic + GAE)** — the real gap versus GRPO; needs a value head
+    over latents / timesteps (diffusion) or tokens (AR / VLM). Prioritize the AR / VLM track
+    first.
+  - `[ ]` `P2` 🙋 **DDPO (Black et al. 2023)** — PPO-clipped policy gradient over the denoising
+    MDP; largely an advantage / recipe variation on the existing clipped core.
+  - `[ ]` `P2` 🙋 **DPOK (Fan et al. 2023)** — KL-regularized policy gradient.
+- *Candidate.* 🙋 RLOO, REINFORCE++, GSPO, DAPO, Dr.GRPO, GRPO-Guard — advantage /
+  clip / ratio-granularity tweaks on the existing clipped core, so lower incremental cost for
+  incremental support.
+
+### `[ ]` `P1` KL / Reference Policy Control
+
+- **Baseline.** Rollout segments already carry old-policy log-probs for GRPO / DPPO ratios, but
+  a frozen reference policy and KL penalty are not implemented yet. DPPO has KL-ADV masking, but
+  that is not a general reference-policy KL control layer.
+- **Goal.** Provide shared reference-policy infrastructure and KL controllers for PPO, DPOK,
+  Diffusion-DPO, ARGRPO / GSPO, and related methods.
+- **Tracking.** *(RFC needed)*
+- TODO:
+  - `[ ]` Frozen reference-policy loading, offload/onload, log-prob replay, and cache interfaces.
+  - `[ ]` Per-track KL controller and adaptive KL coefficient, with diffusion timestep-level and
+    AR token-level statistics.
+  - `[ ]` Wire KL metrics into wandb / tracking and add a real reference-policy KL loss term.
+  - `[ ]` Reuse the same reference-policy contract across DPOK / Diffusion-DPO / full PPO recipes.
+
+### `[ ]` `P2` Reward / Advantage Credit Assignment Consolidation
+
+- **Baseline.** `RolloutTrack.compute_advantages` already supports GRPO-style group advantages,
+  `RolloutResp.propagate_rewards` supports mean / max / sum parent-child reward aggregation, and
+  `algorithms/normalizers.py` plus `reward/aggregation.py` provide several normalization /
+  aggregation utilities.
+- **Goal.** Consolidate the existing pieces into a shared algorithm layer so algorithms and
+  recipes do not each reimplement reward shaping.
+- **Tracking.** *(RFC needed)*
+- TODO:
+  - `[ ]` Best-of-N / rejection-style reward propagation, plus component reward weight /
+    normalize / schedule configuration.
+  - `[ ]` One interface for diffusion timestep-level advantages and AR token-level advantage
+    expansion.
+  - `[ ]` Multi-track parent / child reward credit rules for composed rollout and
+    think→recaption→image chains.
+  - `[ ]` Unified metrics for reward components, advantage normalizers, and clipping statistics.
+
+### `[ ]` `P2` Multi-track / Shared-backbone RL
+
+- **Baseline.** HunyuanImage3 and PE composed recipes already provide AR + diffusion /
+  multi-track foundations, with one `StageAlgorithm` per track driven by sibling `TrainStack`s.
+  Shared-backbone loss balance, update cadence, and cross-modal reward credit are still ad hoc.
+- **Goal.** Turn the HunyuanImage3 think / recaption / image-generation joint-training path into
+  reusable infrastructure, while leaving room for later BAGEL and Qwen3-Omni support.
+- **Tracking.** *(RFC needed)*
+- TODO:
+  - `[ ]` Loss weights, gradient accumulation, and optimizer-step policy when multiple
+    `StageAlgorithm` instances share one backbone.
+  - `[ ]` Joint-update / alternating-update recipes for image and AR tracks.
+  - `[ ]` Cross-modal reward propagation: how text / VLM rewards credit image or think tracks.
+  - `[ ]` Keep BAGEL and Qwen3-Omni as candidate models, not committed model-package work in this
+    cycle.
+
+### `[ ]` `P0` REFL family (reward-feedback / differentiable reward)
+
+REFL is the umbrella for **reward-feedback learning**: a *differentiable* reward is
+back-propagated through the sampling chain into the model. The family sits on the REFL training
+infra (see Infra above) and collects several algorithm types.
+
+- **Baseline.** None implemented yet.
+- **Tracking.** *(RFC needed)*
+- Types under REFL:
+  - `[ ]` `P0` **DR-Tune (Deep Reward Tuning, ECCV 2024)** — primary near-term target. Back-props
+    the reward to the input noise with stop-gradient on denoiser inputs (avoids gradient
+    explosion) and trains on a subset of equally-spaced steps (memory efficient).
+  - `[ ]` `P2` 🙋 **ReFL (ImageReward, 2023)** — the original reward-feedback method; reward
+    backprop on a late, randomly-chosen denoising step.
+  - `[ ]` `P2` 🙋 **DRaFT / DRaFT-LV (2023)** — backprop through (truncated) sampling with LoRA;
+    DRaFT-LV adds low-variance multi-sample gradients.
+  - `[ ]` `P2` 🙋 **AlignProp (2023)** — reward backprop through full sampling with gradient
+    checkpointing.
+- TODO:
+  - `[ ]` A shared differentiable-reward `StageAlgorithm` base on top of the REFL infra.
+  - `[ ]` Implement DR-Tune first (`unirl/algorithms/drtune.py`): stop-gradient hook plus
+    equally-spaced step-subset selection (reuse the SDE-index scheduler).
+  - `[ ]` HPSv2 / PickScore reward targets; SD3 and Qwen-Image recipes; compare against the
+    FlowGRPO baseline.
+  - `[ ]` Add the remaining REFL types behind the same base once DR-Tune lands.
+
+### `[x]` Preference / forward-process family
+
+- **Baseline.** `DiffusionNFT` (forward-process reconstruction with default / old LoRA adapters)
+  is implemented.
+- *Candidate.* 🙋 Diffusion-DPO — pairwise preference optimization (no reward model).
+  Note this is distinct from the existing `DiffusionDPPO`, which is policy optimization with
+  KL masking, not preference DPO.
+
+## Model
+
+### `[ ]` `P1` Core Image DiT Support Matrix
+
+- **Baseline.** The repo already has `sd3`, `qwen_image`, and `flux2_klein` model packages;
+  `mixgrpo_sd35.yaml` brings in SD3.5 as an `sd3` checkpoint / recipe variant, and
+  `grpo_flux2_klein9b_*` recipes already exist. In the Diffusers ecosystem, SD3.5,
+  Qwen-Image (including edit / inpaint), and FLUX are the key image DiT / flow-matching
+  families.
+- **Goal.** Promote image DiT support from runnable recipes to a first-class support matrix that
+  makes training, rollout, reward, and smoke coverage explicit for each model.
+- **Tracking.** *(RFC needed)*
+- TODO:
+  - `[ ]` Confirm SD3.5's boundary as an `sd3` package checkpoint variant and promote the
+    existing `mixgrpo_sd35` recipe.
+  - `[ ]` Add Qwen-Image trainside / vLLM-Omni smoke coverage, OCR / text-rendering reward
+    baselines, and documented LoRA targets plus FSDP wrap hints.
+  - `[ ]` Promote FLUX.2 Klein from existing recipes to first-class support; keep FLUX.1 dev /
+    schnell / fill / control / redux / kontext as candidate extensions rather than conflating them
+    with FLUX.2 Klein.
+  - `[ ]` Maintain a `model × rollout engine × algorithm` coverage table for FlowGRPO / MixGRPO /
+    DPPO / DPOK across trainside / SGLang / vLLM-Omni.
+
+### `[ ]` `P2` Video RL Model Track
+
+- **Baseline.** The repo already has `wan21`, `wan22`, and `hunyuan_video15` packages plus
+  `grpo_wan21_*`, `grpo_wan22_*`, and `grpo_hunyuan_video15_t2v_videopickscore` recipes.
+  In Diffusers, Wan2.1 / Wan2.2, HunyuanVideo, and CogVideoX are the major video pipelines.
+- **Goal.** Harden long-video RL for Wan2.2 and HunyuanVideo1.5 rather than starting video
+  support from scratch; keep CogVideoX as a P2 / candidate target.
+- **Tracking.** *(RFC needed)*
+- TODO:
+  - `[ ]` Wan2.2 TI2V, VACE / Animate condition schemas while keeping T2V / I2V recipes
+    reproducible.
+  - `[ ]` DanceGRPO / FlowGRPO video recipes with temporal-consistency, VideoPickScore, and
+    VLM-as-judge reward baselines.
+  - `[ ]` Long-video SP / USP, VAE tiling / offload, and decode-cost profiling.
+  - `[ ]` Video media previews, per-component rewards, and temporal-metric visualization.
+
+### `[ ]` `P1` HunyuanImage 3.5
+
+- **Baseline.** HunyuanImage 3.0 is supported (`unirl/models/hunyuan_image3/`:
+  t2i / it2i / i2t / t2t modes, AR + diffusion stages, a think-recaption RL recipe, and a
+  vLLM-Omni rollout adapter). HunyuanImage 3.0 is an 80B MoE (64 experts, ~13B active per
+  token) autoregressive native-multimodal model on a Hunyuan-A13B backbone.
+- **Goal.** Bring up the next-generation HunyuanImage (3.5 if/when released) for RL post-training.
+- **Tracking.** *(RFC needed; gated on the VeOmni backend and on a 3.5 release)*
+- TODO:
+  - `[ ]` Model bundle and config for 3.5; vLLM-Omni rollout adapter and stage configs.
+  - `[ ]` Train it under the VeOmni backend (EP for the 64-expert MoE, SP for long multimodal
+    sequences).
+  - `[ ]` Think / recaption plus RL recipes (MixGRPO / SRPO style), reusing the multi-track HI3
+    plumbing.
+  - `[ ]` Confirm 3.5 weights and release; the package currently targets 3.0.
+
+- *Candidate.* 🙋 BAGEL (unified understanding + generation, FlowGRPO direction);
+  Qwen3-Omni (Thinker / Talker MoE, gated on AR / omni rollout, EP, and GSPO);
+  CogVideoX; Sana / PixArt as efficient T2I baselines; Qwen-Image-Edit, FLUX Kontext /
+  Control / Fill / Redux, and ControlNet-SD3 / SDXL for editing and controllable generation.
+
+## Contributing
+
+Pick up any 🙋 item (or any open `[ ]`): open a `[Tracking]` or `[RFC]` issue following the
+[GitHub Issues Workflow](/en/docs/others/github-issues-workflow), then link it back here so this
+page stays the high-level index. Anything not listed here isn't excluded — open a feature
+request to propose it.

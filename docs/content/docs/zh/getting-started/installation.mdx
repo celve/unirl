@@ -1,0 +1,55 @@
+---
+title: 安装
+description: 安装 UniRL 运行环境和可选文档站。
+---
+
+UniRL 要求 Python 3.10 或更新版本。推荐使用 editable install，并安装训练、推理、评估 extras。
+
+## Python 包
+
+安装核心运行依赖：
+
+```bash
+pip install -e ".[train,infer,eval]" --no-build-isolation
+pip install flash-attn==2.7.4.post1 --no-build-isolation
+```
+
+需要测试、lint 和 hooks 时安装开发依赖：
+
+```bash
+pip install -e ".[train,infer,eval,dev]" --no-build-isolation
+pre-commit install
+```
+
+`pyproject.toml` 是依赖声明的 source of truth。`setup.py` 主要兼容旧 editable install 工具，`requirements.txt` 是与推荐 extras 路径对齐的扁平安装辅助文件。
+
+| Extra | 用途 |
+|---|---|
+| `train` | WandB 和异步运行时依赖 |
+| `infer` | 推理侧辅助依赖 |
+| `eval` | 评估和 reward 相关依赖 |
+| `dev` | pytest、ruff、pre-commit |
+
+## 可选依赖
+
+`mmcv` 和 `mmdetection` 默认不安装。只有 Geneval/OpenMMLab workflow 需要时，才按 [Geneval MMCV 设置](/zh/docs/guides/geneval-mmcv-setup) 安装。
+
+如需把重型 reward model 放到独立 GPU 节点而非进程内运行，使用 `unirl-reward-service/` 下的独立远程 reward service（它自带依赖和 README）。远程 backend 的接线见 [奖励](/zh/docs/guides/rewards)。
+
+## 文档站
+
+Fumadocs 文档站放在 `docs/`，与 Python 包隔离：
+
+```bash
+cd docs
+npm install
+npm run dev
+```
+
+静态构建：
+
+```bash
+npm run build
+```
+
+构建产物位于 `docs/out/`。

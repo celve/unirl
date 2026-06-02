@@ -21,12 +21,15 @@ setup(
         "ray[default]>=2.9,<3",
         "sglang[diffusion] @ git+https://github.com/celve/sglang.git@diffusionrl#subdirectory=python",
         "diffusers>=0.30",
+        "hydra-core>=1.3",
+        "omegaconf>=2.3",
         "transformers>=4.41",
         "peft>=0.11",
         "safetensors>=0.4",
         "Pillow>=10",
         "requests>=2.31",
         "psutil>=5.9",
+        "tensordict>=0.5",
     ],
     extras_require={
         "train": [

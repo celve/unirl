@@ -1,0 +1,40 @@
+---
+title: Rewards
+description: Reward service, local and remote backends, and extension points.
+---
+
+`unirl.reward` constructs and runs reward backends. Rollout engines generate media; a reward backend scores it and returns per-sample values that the trainer turns into advantages.
+
+## Structure
+
+A reward is exactly one **backend**, held by `RewardService` (`unirl/reward/service.py`), which scores a `RolloutTrack` via `score_and_attach`:
+
+- a **local** in-process scorer (`unirl/reward/local/`: PickScore, HPS, OCR, GenEval2, VideoPickScore, …), or
+- the **remote** HTTP client (`RemoteRewardBackend`) talking to the standalone `unirl-reward-service/` server.
+
+The current YAML shape, component contract, and scorer extension workflow live in the generated [Reward Package README](/en/docs/guides/readme-reference/unirl-reward).
+
+## Config Shape
+
+A reward is wired via Hydra `_target_`:
+
+```yaml
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.pickscore.PickScoreRewardScorer
+    base_device: cuda
+    config:
+      _target_: unirl.reward.local.pickscore.PickScoreSpec
+      batch_size: 8
+```
+
+For out-of-process scoring, point `backend._target_` at `unirl.reward.remote.RemoteRewardBackend` with a `RemoteRewardSpec` (`base_url`, `required_rewards`, `reward_weights`, `input_kind`). The remote service runs from `unirl-reward-service/` on its own GPU node.
+
+## Failure Semantics
+
+Reward failures are loud, never silent: a non-finite or `null` reward is flagged as a sample failure, and `RewardService.score_and_attach` raises on any failure (naming the offending reward and sample) so an inference error stops the step rather than poisoning the GRPO group.
+
+## Adding a Local Scorer
+
+Add the spec and scorer near the reward implementation under `unirl/reward/local/`. Prefer `LocalRewardBackend` for in-process model scorers because it provides device resolution, eager load, `offload()`, and `onload()`. Register the spec with `@register_config(group="reward/component", ...)`. See the generated [Reward Package README](/en/docs/guides/readme-reference/unirl-reward) for the full example and the remote wire contract.
