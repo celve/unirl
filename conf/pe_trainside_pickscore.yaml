@@ -7,15 +7,15 @@
 # PEPipeline is driven as a trainside rollout (it samples the live FSDP modules)
 # so there is NO weight sync.
 #
-# Pairs with unirl/train_pe.py (PETrainer). Modest smoke geometry:
-# P=4 prompts × N=2 rewrites × M=2 images = 16 diffusion / 8 ar samples per rollout.
+# Pairs with unirl/train_pe.py (PETrainer). Full baseline geometry:
+# P=8 prompts × N=4 rewrites × M=8 images = 256 diffusion / 32 ar samples per rollout.
 #
 # Confirm at smoke time (GPU-specific, can't be unit-checked):
 #   - ar.backend.block_class_names: the HF Qwen3 decoder-layer class name.
 #   - checkpoint paths via PRETRAINED_MODEL / LLM_MODEL env vars.
 
 num_devices: 8
-batch_size: 4                 # P prompts per rollout; PEPipeline fans out to P*N*M
+batch_size: 8                 # P prompts per rollout; PEPipeline fans out to P*N*M
 
 logging:
   report_to_wandb: false        # flip to true to enable wandb (rank-0/driver only)
@@ -71,8 +71,8 @@ diffusion:
       total_steps: 10000
     lora_cfg:
       _target_: unirl.train.configs.LoraConfig
-      rank: 32
-      alpha: 64
+      rank: 16
+      alpha: 32
       dropout: 0.0
       bias: none
       task_type: FEATURE_EXTRACTION
@@ -133,7 +133,7 @@ ar:
       use_torch_compile: false
     optimizer_cfg:
       _target_: unirl.train.backend.base.OptimizerConfig
-      learning_rate: 1.0e-5      # ~30x smaller than diffusion: ARGRPO ratio is update-sensitive
+      learning_rate: 5.0e-6      # ~60x smaller than diffusion: ARGRPO ratio is update-sensitive
       adam_beta1: 0.9
       adam_beta2: 0.999
       adam_epsilon: 1.0e-8
@@ -198,13 +198,13 @@ sampling:
   _target_: unirl.types.sampling.ComposedSamplingParams
   ar:
     _target_: unirl.types.sampling.ARSamplingParams
-    samples_per_prompt: 2       # N rewrites per prompt
+    samples_per_prompt: 4       # N rewrites per prompt
     temperature: 0.7
-    max_new_tokens: 128
+    max_new_tokens: 512
     top_p: 0.9
   diffusion:
     _target_: unirl.types.sampling.DiffusionSamplingParams
-    samples_per_prompt: 2       # M images per rewrite
+    samples_per_prompt: 8       # M images per rewrite
     num_inference_steps: 10
     guidance_scale: 1.0
     height: 512
@@ -217,4 +217,4 @@ sampling:
     logprob_precision: fp32
     sde_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
-num_rollouts: 100
+num_rollouts: 300

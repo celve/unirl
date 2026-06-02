@@ -58,5 +58,5 @@ SCORER_MODULES: dict[str, str] = {
     "geneval": "reward_service.scorers.geneval",
     "ocr": "reward_service.scorers.ocr",
     "videoalign": "reward_service.scorers.videoalign",
-    "qwen35_vlm": "reward_service.scorers.qwen35_vlm",
+    "wise": "reward_service.scorers.wise",
 }

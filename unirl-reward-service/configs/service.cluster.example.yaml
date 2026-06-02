@@ -44,8 +44,8 @@ rewards:
     scheduling: pack      # keep TP=2 within one node
     params:
       model_name: Qwen/Qwen3-VL-8B-Instruct
-      weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/Qwen3-VL-8B-Instruct
-      dataset_path: /apdcephfs_nj10/share_301739632/qianqiu/hy-exploration/RewardService/datasets/geneval2
+      weights_path: /path/to/RewardModel/Qwen3-VL-8B-Instruct
+      dataset_path: /path/to/datasets/geneval2
       tensor_parallel_size: 2
       gpu_memory_utilization: 0.85
       max_model_len: 4096
@@ -68,7 +68,7 @@ rewards:
     scheduling: spread
     params:
       model_name: CodeGoat24/UnifiedReward-qwen-7b
-      weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/UnifiedReward-qwen-7b
+      weights_path: /path/to/RewardModel/UnifiedReward-qwen-7b
       tensor_parallel_size: 2
       gpu_memory_utilization: 0.85
       max_model_len: 8192
@@ -96,7 +96,7 @@ rewards:
     scheduling: spread
     params:
       model_name: openai/clip-vit-large-patch14
-      weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/CLIP-ViT-L-14
+      weights_path: /path/to/RewardModel/CLIP-ViT-L-14
       dtype: float32
 
   - name: pickscore
@@ -109,7 +109,7 @@ rewards:
     scheduling: spread
     params:
       model_name: yuvalkirstain/PickScore_v1
-      weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/PickScore_v1
+      weights_path: /path/to/RewardModel/PickScore_v1
       dtype: float32
 
   - name: imagereward
@@ -122,7 +122,7 @@ rewards:
     scheduling: spread
     params:
       model_name: ImageReward-v1.0
-      weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/ImageReward
+      weights_path: /path/to/RewardModel/ImageReward
       dtype: float32
 
   - name: hpsv2
@@ -134,7 +134,7 @@ rewards:
     scheduling: spread
     params:
       hps_version: "v2.1"
-      weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/HPSv2
+      weights_path: /path/to/RewardModel/HPSv2
 
   - name: hpsv3
     scorer: hpsv3
@@ -144,7 +144,7 @@ rewards:
     num_cpus: 4
     scheduling: spread
     params:
-      weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/HPSv3
+      weights_path: /path/to/RewardModel/HPSv3
       config_path: null
       max_batch_size: 4
 
@@ -170,9 +170,9 @@ rewards:
 # cold start is slow on a 70GB model. Uncomment, then comment out everything
 # else.
 #
-# - name: qwen35_vlm
-#   scorer: qwen35_vlm
-#   runtime_env: envs/qwen35_vlm.txt
+# - name: wise
+#   scorer: wise
+#   runtime_env: envs/wise.txt
 #   num_replicas: 16
 #   num_gpus: 1
 #   num_cpus: 4
@@ -180,18 +180,15 @@ rewards:
 #   scheduling: spread          # split replicas across the two nodes
 #   params:
 #     model_name: Qwen/Qwen3.5-35B-A3B
-#     weights_path: /apdcephfs_fsgm3/share_305110755/hunyuan/public_models/Qwen/Qwen3.5-35B-A3B
+#     weights_path: null
 #     tensor_parallel_size: 1
 #     gpu_memory_utilization: 0.85
 #     max_model_len: 8192
-#     max_tokens: 512
+#     max_tokens: 4096
 #     dtype: bfloat16
 #     enforce_eager: false
 #     swap_space: 4
-#     max_num_seqs: 32
-#     seed: null
-#     quantization: null
+#     max_num_seqs: 16
 #     trust_remote_code: true
 #     limit_mm_per_prompt: {image: 1}
-#     extra_llm_kwargs: {}
 #     enable_thinking: false

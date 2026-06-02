@@ -33,7 +33,7 @@ import requests
 
 # ── 默认视频路径（VideoAlign 仓库示例） ──────────────────────────
 _VIDEO_DIRS = [
-    Path("/apdcephfs_hldy/private_charlesswu/workspace/github_repo/VideoAlign/datasets/train/videos"),
+    Path("/path/to/VideoAlign/datasets/train/videos"),
     Path(__file__).resolve().parent.parent / "tests" / "assets",
 ]
 

@@ -1,4 +1,4 @@
-"""Generic Qwen3.5 VLM scorer via in-process vLLM.
+"""WISE reward scorer — Qwen3.5-VL judge via in-process vLLM (registered as ``wise``).
 
 Deploys a Qwen3.5 series VLM (dense or MoE) as a reward model. The default rubric
 mirrors WISE (WISE_legacy/gpt_eval.py): the judge rates the image on Consistency /
@@ -136,8 +136,8 @@ def _build_score_pattern(metric_names: tuple[str, ...]) -> re.Pattern:
     )
 
 
-class Qwen35VLMScorer(BaseScorer):
-    name = "qwen35_vlm"
+class WiseScorer(BaseScorer):
+    name = "wise"
 
     def __init__(
         self,
@@ -256,7 +256,7 @@ class Qwen35VLMScorer(BaseScorer):
             if key in found:
                 metrics[key] = found[key]
             else:
-                logger.warning("Qwen35VLM failed to parse %s from output: %r", key, text[:200])
+                logger.warning("Wise scorer failed to parse %s from output: %r", key, text[:200])
                 metrics[key] = math.nan
         if self._compute_wiscore:
             # wiscore first so it is the default reduction target.
@@ -264,4 +264,4 @@ class Qwen35VLMScorer(BaseScorer):
         return metrics
 
 
-register("qwen35_vlm", Qwen35VLMScorer)
+register("wise", WiseScorer)

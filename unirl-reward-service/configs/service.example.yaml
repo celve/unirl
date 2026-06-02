@@ -2,7 +2,7 @@
 #
 # Every reward (except geneval, see bottom) is enabled by default and points
 # at the locally-staged weights under
-# /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/. Each reward group
+# /path/to/RewardModel/. Each reward group
 # owns its GPUs exclusively (resource isolation); total GPU budget =
 # sum of (num_gpus * num_replicas). With the defaults below:
 #   CLIP / PickScore / ImageReward / HPSv2 / HPSv3 / UnifiedReward → 1 GPU each (6)
@@ -40,7 +40,7 @@ rewards:
     max_concurrency: 4
     params:
       model_name: openai/clip-vit-large-patch14
-      weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/CLIP-ViT-L-14
+      weights_path: /path/to/RewardModel/CLIP-ViT-L-14
       dtype: float32
 
   - name: pickscore
@@ -52,7 +52,7 @@ rewards:
     max_concurrency: 4
     params:
       model_name: yuvalkirstain/PickScore_v1
-      weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/PickScore_v1
+      weights_path: /path/to/RewardModel/PickScore_v1
       dtype: float32
 
   # Local dir contains ImageReward.pt + med_config.json; the scorer
@@ -66,7 +66,7 @@ rewards:
     max_concurrency: 4
     params:
       model_name: ImageReward-v1.0
-      weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/ImageReward
+      weights_path: /path/to/RewardModel/ImageReward
       dtype: float32
 
   # HPSv2: the scorer picks HPS_v2.1_compressed.pt from weights_path
@@ -83,7 +83,7 @@ rewards:
     num_cpus: 2
     params:
       hps_version: "v2.1"
-      weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/HPSv2
+      weights_path: /path/to/RewardModel/HPSv2
 
   - name: hpsv3
     scorer: hpsv3
@@ -93,7 +93,7 @@ rewards:
     num_cpus: 4
     params:
       # Directory containing HPSv3.safetensors; scorer auto-resolves it.
-      weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/HPSv3
+      weights_path: /path/to/RewardModel/HPSv3
       # Leave null to use the YAML packaged inside the hpsv3 library.
       config_path: null
       # Upper bound on samples per inferencer forward. Qwen2-VL-7B
@@ -129,7 +129,7 @@ rewards:
     num_cpus: 4
     params:
       model_name: CodeGoat24/UnifiedReward-qwen-7b
-      weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/UnifiedReward-qwen-7b
+      weights_path: /path/to/RewardModel/UnifiedReward-qwen-7b
       tensor_parallel_size: 1
       gpu_memory_utilization: 0.85
       max_model_len: 8192
@@ -160,8 +160,8 @@ rewards:
     num_cpus: 4
     params:
       model_name: Qwen/Qwen3-VL-8B-Instruct
-      weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/Qwen3-VL-8B-Instruct
-      dataset_path: /apdcephfs_nj10/share_301739632/qianqiu/hy-exploration/RewardService/datasets/geneval2
+      weights_path: /path/to/RewardModel/Qwen3-VL-8B-Instruct
+      dataset_path: /path/to/datasets/geneval2
       tensor_parallel_size: 2
       gpu_memory_utilization: 0.85
       max_model_len: 4096
@@ -240,7 +240,7 @@ rewards:
   #   num_cpus: 4
   #   max_concurrency: 1
   #   params:
-  #     weights_path: /apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/VideoReward
+  #     weights_path: /path/to/RewardModel/VideoReward
   #     checkpoint_step: -1         # -1/null = latest checkpoint-<n>
   #     dtype: bfloat16
   #     use_norm: true
@@ -261,27 +261,24 @@ rewards:
   # cold start is slow on a 70GB model. Uncomment, then comment out everything
   # else.
   #
-  # - name: qwen35_vlm
-  #   scorer: qwen35_vlm
-  #   runtime_env: envs/qwen35_vlm.txt
+  # - name: wise
+  #   scorer: wise
+  #   runtime_env: envs/wise.txt
   #   num_replicas: 8
   #   num_gpus: 1
   #   num_cpus: 4
   #   max_concurrency: 1
   #   params:
   #     model_name: Qwen/Qwen3.5-35B-A3B
-  #     weights_path: /apdcephfs_fsgm3/share_305110755/hunyuan/public_models/Qwen/Qwen3.5-35B-A3B
+  #     weights_path: null
   #     tensor_parallel_size: 1
   #     gpu_memory_utilization: 0.85
   #     max_model_len: 8192
-  #     max_tokens: 512
+  #     max_tokens: 4096
   #     dtype: bfloat16
   #     enforce_eager: false
   #     swap_space: 4
-  #     max_num_seqs: 32
-  #     seed: null
-  #     quantization: null
+  #     max_num_seqs: 16
   #     trust_remote_code: true
   #     limit_mm_per_prompt: {image: 1}
-  #     extra_llm_kwargs: {}
   #     enable_thinking: false

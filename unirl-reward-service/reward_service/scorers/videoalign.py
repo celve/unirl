@@ -65,7 +65,7 @@ class VideoAlignScorer(BaseScorer):
 
     def __init__(
         self,
-        weights_path: str = "/apdcephfs_zwfy2/share_303937731/qianqiu/RewardModel/VideoReward",
+        weights_path: str = "/path/to/RewardModel/VideoReward",
         checkpoint_step: int | None = -1,
         device: str = "cuda",
         dtype: str = "bfloat16",

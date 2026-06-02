@@ -57,7 +57,7 @@ The diffusion entrypoint is the default; select another with `ENTRY`:
 
 ```bash
 ENTRY=train_vlm bash scripts/run_experiment_single_node.sh argrpo_qwen_vl_geo3k_mc_4x8
-ENTRY=train_pe  bash scripts/run_experiment_single_node.sh pe_trainside
+ENTRY=train_pe  bash scripts/run_experiment_single_node.sh pe_trainside_pickscore
 ```
 
 Run a multi-node recipe (taiji platform):

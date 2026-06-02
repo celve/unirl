@@ -78,7 +78,7 @@ One diagram for the entire process structure:
 | ScorerActor | `reward_service/workers/actor.py` | `@ray.remote` thin shell: constructs the scorer, forwards `score()` |
 | BaseScorer | `reward_service/scorers/base.py` | The abstract contract: `score(items) -> list[dict]` + `sub_metric_names` |
 | Registry | `reward_service/scorers/registry.py` | `register(name, cls)` + optional-dep tolerance (`_try_import`) |
-| Concrete scorers | `reward_service/scorers/{clip,pickscore,imagereward,hpsv2_scorer,hpsv3_scorer,unified_reward,geneval2,geneval,ocr,qwen35_vlm,videoalign}.py` (+ vendored `_videoalign/`) | One module per reward; each ends with `register("name", Cls)` |
+| Concrete scorers | `reward_service/scorers/{clip,pickscore,imagereward,hpsv2_scorer,hpsv3_scorer,unified_reward,geneval2,geneval,ocr,wise,videoalign}.py` (+ vendored `_videoalign/`) | One module per reward; each ends with `register("name", Cls)` |
 
 ---
 
@@ -405,11 +405,11 @@ rewards:                               list[RewardModelCfg]
     num_cpus: 2                          .num_cpus         ─► ScorerActor.options(num_cpus=.)
     params:                              .params (dict)    ─► ScorerActor.remote(.scorer, .params)
       model_name: openai/…                                    → ClipScorer(**.params)
-      weights_path: /apdcephfs_zwfy2/…                      → resolved by resolve_model_path
+      weights_path: /path/to/…                      → resolved by resolve_model_path
       dtype: float32                                         → resolved by resolve_dtype
 ```
 
-For **vLLM-style scorers** (`unified_reward` / `geneval2` / `qwen35_vlm`), the `dtype / enforce_eager / swap_space / quantization / seed / max_num_seqs / limit_mm_per_prompt / extra_llm_kwargs` keys in `params` flow through `scorers/_common.py::build_vllm_llm_kwargs` and are ultimately passed to `vllm.LLM(**kwargs)`. See DEVELOPMENT_LOG §11.
+For **vLLM-style scorers** (`unified_reward` / `geneval2` / `wise`), the `dtype / enforce_eager / swap_space / quantization / seed / max_num_seqs / limit_mm_per_prompt / extra_llm_kwargs` keys in `params` flow through `scorers/_common.py::build_vllm_llm_kwargs` and are ultimately passed to `vllm.LLM(**kwargs)`. See DEVELOPMENT_LOG §11.
 
 ---
 
@@ -441,7 +441,7 @@ reward_service/
     ├── ocr.py           # ─┘
     ├── unified_reward.py# ─┐
     ├── geneval2.py      #  │ vLLM-style
-    ├── qwen35_vlm.py    # ─┘
+    ├── wise.py          # ─┘
     ├── geneval.py       #  mmdet/mmcv-style (disabled by default)
     └── videoalign.py    #  T2V reward (vendored _videoalign/)
 ```

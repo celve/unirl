@@ -14,7 +14,7 @@ A unified T2I reward inference service: a FastAPI gateway in front of Ray worker
 | `unified_reward` | vLLM | UnifiedReward VLM family (model set in YAML); parses the generated text into Alignment / Coherence / Style |
 | `geneval2` | vLLM | VQAScore via Qwen3-VL-8B-Instruct (Soft-TIFA multi-question scoring when `dataset_path` is set; falls back to a single-question template otherwise) |
 | `ocr` | transformers | GOT-OCR-2.0-hf; reward = edit-distance similarity between the recognized text and the target span in the prompt |
-| `qwen35_vlm` | vLLM | A MoE VLM (e.g. Qwen3.5-35B-A3B) used as a generic reward. Default sub-metrics follow the WISE rubric: a derived `wiscore` headline plus Consistency / Realism / Aesthetic Quality (template overridable in YAML) |
+| `wise` | vLLM | A MoE VLM (e.g. Qwen3.5-35B-A3B) used as a generic WISE-rubric reward judge. Default sub-metrics: a derived `wiscore` headline plus Consistency / Realism / Aesthetic Quality (template overridable in YAML) |
 | `geneval` | mmdet / mmcv | Compositional GenEval (Mask2Former detection + CLIP color classification). **Disabled by default** — its stack needs Python 3.10 and cannot run under this service's Python-3.13 Ray cluster (see `envs/geneval.txt`) |
 | `videoalign` | transformers (vendored `_videoalign/`) | T2V reward: scores generated **videos** along Overall / VQ / MQ / TA. Requires a video (`video_b64` or `video_path`) on the request. **Disabled by default** in the example config |
 

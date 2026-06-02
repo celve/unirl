@@ -1,27 +1,25 @@
 # PE (Prompt Enhancement) joint trainer — composed_pe DUAL-ENGINE (sglang), v2.
 #
-# Same two-track PE recipe as pe_trainside.yaml, but the rollout is a
+# Same two-track PE recipe as pe_trainside_pickscore.yaml, but the rollout is a
 # ComposedRolloutEngine driving TWO separate-process SGLang engines:
 #   - ar:        SGLangLLMRolloutEngine (Qwen3 SRT)   → P*N rewrites
 #   - diffusion: SGLangRolloutEngine    (SD3 sglang)  → P*N*M images
 # ===========================================================================
-#  AR weight-sync MODE = FULL-MERGE  (full-weight-sync, lora_merged)
-#  Folds base+(α/r)·B·A and pushes the merged FULL weights via TensorWeightSync
-#  (the full-weight-sync / tensor-payload family), NOT via LocalLoraWeightSync, which
-#  stays adapter/RPC-only. Sibling configs: pe_sglang_lora_pool.yaml (LoRA pool),
-#  pe_sglang_trainside.yaml (live-FSDP rollout, no sync).
+#  AR weight-sync MODE = lora-POOL   (set_lora_from_tensors → SGLang LLM pool)
+#  The full-merge variant is conf/pe_sglang_full_pickscore.yaml.
+#  NOTE (LIN-287): under 8-way colocate the pool's 2nd+ /unload can stall
+#  >=10min; merge avoids it. Watch the per-sync timing in the logs.
 # ===========================================================================
-# Trained weights reach each engine via a per-track sync bridge, routed to the
+# Trained weights reach each engine via a per-track LocalLoraWeightSync, routed to the
 # matching child of the composed engine by ``track_prefix``:
-#   - diffusion: LocalLoraWeightSync           → set_lora_from_tensors (SD3 sglang LoRA pool)
-#   - ar:        TensorWeightSync lora_merged  → fold base+(α/r)·B·A → /update_weights_from_tensor
-#                              (full-weight-sync path; bypasses SGLang LLM LoRA pool)
+#   - diffusion: set_lora_from_tensors (SD3 sglang LoRA pool)
+#   - ar:        set_lora_from_tensors (SGLang LLM LoRA pool)
 # Sync runs every ``weight_sync_interval`` rollouts (skip step 0).
 #
 # Pairs with unirl/train_pe.py:
-#   python -m unirl.train_pe --config-name pe_sglang_full_merge
+#   python -m unirl.train_pe --config-name pe_sglang_lora_pickscore
 #
-# Format mirrors conf/pe_trainside.yaml (v2); engine params mirror
+# Format mirrors conf/pe_trainside_pickscore.yaml (v2); engine params mirror
 # conf/experiment/pe_joint_multi_track_e2e.yaml (v1). Set checkpoint paths via
 # the PRETRAINED_MODEL / LLM_MODEL env vars (see ${oc.env:...} defaults below).
 #
@@ -30,13 +28,13 @@
 # resps). Default P=8 on 8 GPUs → 1 prompt/worker × N=2 × M=2.
 # 1-GPU wiring smoke (bypasses the multi-GPU DP merge entirely — dp_size=1 returns
 # the single worker's resp with no cross-worker concat):
-#   python -m unirl.train_pe --config-name pe_sglang_full_merge num_devices=1 ++devices_per_node=1 batch_size=2 num_rollouts=3
+#   python -m unirl.train_pe --config-name pe_sglang_lora_pickscore num_devices=1 ++devices_per_node=1 batch_size=2 num_rollouts=3
 # Scale toward the v1 e2e (P=8 N=4 M=4) once green.
 #
 # VERIFY at smoke (engine-specific, can't be unit-checked):
-#   1. AR merged-weight keys accepted by SGLang LLM /update_weights_from_tensor
-#      — sync.ar leaves name_remap unset (identity) → bare HF-native keys
-#      (model.layers.*), which is what the LLM expects (a "transformer." nesting mis-keys it).
+#   1. AR LoRA key format accepted by SGLang LLM /load_lora_adapter_from_tensors
+#      — sync.ar.param_prefix. "" sends HF-native keys (model.layers.*);
+#      if the server rejects, try "base_model.model." (PEFT envelope).
 #   2. SGLang diffusion LoRA target-module names (diffusion.bundle...lora_target_modules).
 #   3. per-engine mem_fraction_static budget on the colocated GPU.
 
@@ -48,7 +46,7 @@ batch_size: 8                 # P; MUST be divisible by num_devices (composed ro
 weight_sync_interval: 1
 num_rollouts: 300
 
-# ── Diffusion side (SD3) — copied from pe_trainside.yaml ───────────────────
+# ── Diffusion side (SD3) — copied from pe_trainside_pickscore.yaml ───────────────────
 diffusion:
   bundle:
     _target_: unirl.models.sd3.bundle.SD3Bundle.from_config
@@ -138,7 +136,7 @@ diffusion:
     max_grad_norm: 1.0
     num_updates_per_batch: 2      # diffusion-side PPO mini-batches; ar stays 1 (ARGRPO is single-update only)
 
-# ── AR side (Qwen3) — copied from pe_trainside.yaml ────────────────────────
+# ── AR side (Qwen3) — copied from pe_trainside_pickscore.yaml ────────────────────────
 ar:
   bundle:
     _target_: unirl.models.qwen3.bundle.Qwen3Bundle.from_config
@@ -188,7 +186,7 @@ ar:
   algorithm:
     _target_: unirl.algorithms.ar_grpo.ARGRPO
     stage_attr: ar
-    clip_range: 1.0e-2
+    clip_range: 1.0e-2 # AR track — diffusion track above keeps 1e-4
     clip_schedule: constant
     conditions_cls:
       _target_: hydra.utils.get_class
@@ -235,7 +233,7 @@ rollout:
       _target_: unirl.rollout.engine.sglang_llm.config.SGLangLLMEngineConfig
       pretrained_model_ckpt_path: ${oc.env:LLM_MODEL,Qwen/Qwen3-0.6B}
       tp_size: 1
-      max_new_tokens: 256
+      max_new_tokens: 512
       temperature: 0.7
       top_p: 0.9
       concurrency: 4
@@ -244,13 +242,12 @@ rollout:
         skip_server_warmup: true
         disable_cuda_graph: false
         attention_backend: triton
-        # This config syncs AR via full-weight-sync merge (sync.ar =
-        # TensorWeightSync lora_merged): /update_weights_from_tensor, never
-        # set_lora → no LoRA pool needed here. The LoRA-pool variant lives in
-        # pe_sglang_lora_pool.yaml (enable_lora: true + the two knobs below).
-        enable_lora: false
-        # max_lora_rank: 16
-        # lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+        # This config syncs AR via the LoRA pool (sync.ar = LoraWeightSync):
+        # set_lora_from_tensors → the engine needs a live LoRA pool. The
+        # full-merge variant (pe_sglang_full_pickscore.yaml) uses enable_lora: false.
+        enable_lora: true
+        max_lora_rank: 16
+        lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
     diffusion:
       _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
       model_family: sd3
@@ -297,7 +294,7 @@ sampling:
     _target_: unirl.types.sampling.ARSamplingParams
     samples_per_prompt: 4       # N rewrites per prompt
     temperature: 0.7
-    max_new_tokens: 256
+    max_new_tokens: 512
     top_p: 0.9
   diffusion:
     _target_: unirl.types.sampling.DiffusionSamplingParams
@@ -327,14 +324,12 @@ sync:
     adapter_name: default
     verify: false
   ar:
-    # Full-weight-sync merge: TensorWeightSync with lora_merged folds the trained
-    # LoRA delta into the base and pushes the merged FULL weights via the
-    # tensor-payload family (NOT via LocalLoraWeightSync, which stays adapter/RPC-only).
-    _target_: unirl.distributed.weight_sync.full.tensor.TensorWeightSync
-    track_prefix: ar            # route to the AR child of the ComposedRolloutEngine
-    lora_merged: true           # fold base+(α/r)·B·A → push the merged FULL weights
-    # sglang_llm wants bare HF-native keys (model.layers.*) → leave name_remap unset
-    # (identity), so keys pass through bare. A "transformer." nesting would mis-key
-    # the LLM update (suspected cause of the ar_spo TensorWeightSync ~0.2 plateau).
-    flush_cache: true
-    bucket_size_mb: 512         # splits the ~1.2GB Qwen3-0.6B push into size-bounded buckets
+    _target_: unirl.distributed.weight_sync.lora.LocalLoraWeightSync
+    track_prefix: ar
+    # set_lora_from_tensors → SGLang LLM LoRA pool (full-weight merge variant: pe_sglang_full_pickscore.yaml)
+    # SGLang LLM has no engine-side key stripping → send HF-native keys
+    # (model.layers.*). VERIFY #1: if /load_lora_adapter_from_tensors rejects,
+    # try "base_model.model." (PEFT envelope).
+    param_prefix: ""
+    adapter_name: default
+    verify: false

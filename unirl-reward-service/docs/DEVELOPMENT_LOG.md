@@ -966,14 +966,14 @@ PYTHONPATH=. PYTHONPYCACHEPREFIX=./.pycache python3.12 -m pytest \
 
 ```
 OSError: validate_socket_filename failed: AF_UNIX path length cannot exceed 107 bytes:
-/apdcephfs_nj10/share_301739632/qianqiu/hy-exploration/RewardService/.ray-tmp-TENCENT64.site/session_2026-04-28_11-20-51_444328_33190/sockets/plasma_store
+<project-root>/.ray-tmp-<host>/session_2026-04-28_11-20-51_444328_33190/sockets/plasma_store
 ```
 
 **字节数算一下**：
 
 ```
-/apdcephfs_nj10/share_301739632/qianqiu/hy-exploration/RewardService   = 66 字节
-/.ray-tmp-TENCENT64.site                                                = 23 字节
+<project-root>   = 66 字节
+/.ray-tmp-<host>                                                = 23 字节
 /session_2026-04-28_11-20-51_444328_33190                               = 40 字节
 /sockets/plasma_store                                                   = 20 字节
                                                              总计 = 149 字节   超限 42
@@ -1207,7 +1207,7 @@ TypeError: score() got an unexpected keyword argument 'cp...'
 ### 13.0 时间线
 
 - 用户指示：resume RewardService，第一优先级修 hpsv2 scorer 报错 `TypeError: score() got an unexpected keyword argument 'cp...'`
-- 探查阶段：发现环境中安装的 hpsv2 是从 `file:///data/ptm20_leo/images/ptm_runtimes/new-HPSv2` 本地安装的 fork 版（`__version__='1.2.0.1'`），API 签名与 GitHub main（PyPI 1.2.0）完全不同
+- 探查阶段：发现环境中安装的 hpsv2 是从 `file:///<local>/images/ptm_runtimes/new-HPSv2` 本地安装的 fork 版（`__version__='1.2.0.1'`），API 签名与 GitHub main（PyPI 1.2.0）完全不同
 - 决策：重装 PyPI 官方 hpsv2 1.2.0，按 GitHub main 的 API 重写 scorer
 - 关键发现：GitHub main 的 `img_score.score()` 每次调用都 `torch.load(cp) + model.load_state_dict()` —— 性能不可接受
 - 最终方案：`__init__` 一次性完成模型加载（`create_model_and_transforms` + `torch.load` + `load_state_dict` + `get_tokenizer`），`_score_single` / `_batch_score` 复用缓存模型做推理，推理逻辑（`torch.no_grad` → `unsqueeze(0)` → `torch.cuda.amp.autocast` → `features @ features.T` → `diagonal()[0]`）与 GitHub main 逐行对齐，保证数值完全一致
@@ -1225,7 +1225,7 @@ TypeError: score() got an unexpected keyword argument 'cp...'
 
 #### 13.2.1 重装 PyPI 官方 hpsv2，不沿用 fork
 
-环境中的 fork 版 (`1.2.0.1`) 来源不可控（`/data/ptm20_leo/.../new-HPSv2`，本机不可访问），且 `install.sh` 已经 `pip install --no-deps hpsv2` 装的是 PyPI 官方版。沿用 fork 意味着其他机器无法复现。
+环境中的 fork 版 (`1.2.0.1`) 来源不可控（`/<local>/.../new-HPSv2`，本机不可访问），且 `install.sh` 已经 `pip install --no-deps hpsv2` 装的是 PyPI 官方版。沿用 fork 意味着其他机器无法复现。
 
 #### 13.2.2 推理逻辑逐 item 循环而非 batch forward
 
@@ -1278,7 +1278,7 @@ PYTHONPATH=. PYTHONPYCACHEPREFIX=./.pycache python3.12 -m pytest -m "not gpu and
 
 ### 13.7 踩到的坑
 
-1. **环境装了 hpsv2 fork，不是官方版**：`pip show hpsv2` 显示 `Version: 1.2.0`，但 `direct_url.json` 暴露实际来源是 `file:///data/ptm20_leo/images/ptm_runtimes/new-HPSv2`。fork 的 `img_score.score()` 签名完全不同（`score(model, preprocess_val, tokenizer, img_path, prompt, device)`），没有 `cp` / `hps_version` 参数。
+1. **环境装了 hpsv2 fork，不是官方版**：`pip show hpsv2` 显示 `Version: 1.2.0`，但 `direct_url.json` 暴露实际来源是 `file:///<local>/images/ptm_runtimes/new-HPSv2`。fork 的 `img_score.score()` 签名完全不同（`score(model, preprocess_val, tokenizer, img_path, prompt, device)`），没有 `cp` / `hps_version` 参数。
 
 2. **GitHub main 的 `score()` 每次都 reload checkpoint**：`torch.load(cp, ...) + model.load_state_dict(...)` 出现在 `score()` 函数体内而非 `initialize_model()` 里，导致每次调用都从磁盘读几百 MB checkpoint。这是 upstream 设计问题。
 
@@ -1615,8 +1615,8 @@ PYTHONPATH=. PYTHONPYCACHEPREFIX=./.pycache python3.12 -m pytest tests/test_conf
 
 **刻意未改（附理由）**：
 - videoalign 的 `_resolve_torch_dtype`：与 `_common.resolve_dtype` 行为一致（已 raise）且有独立测试 `TestResolveDtype`——纯去重不值得破坏 tested 代码（与 ocr 不同：ocr 那处是 silent-default 的 correctness bug，才改）。
-- `weights_path` 默认值 = `qianqiu/RewardModel/VideoReward`：就是真实 staging 目录（与 GPU smoke 测试、其它 scorer 同源），保留。
-- scripts 的部署路径（start_videoalign.sh 含 charlesswu 私人路径）+ stop 的 pgrep 回退：属部署级，用户在真机自行设置；PID 文件是主路径。
+- `weights_path` 默认值 = `<staging>/RewardModel/VideoReward`：就是真实 staging 目录（与 GPU smoke 测试、其它 scorer 同源），保留。
+- scripts 的部署路径（start_videoalign.sh 含私人部署路径）+ stop 的 pgrep 回退：属部署级，用户在真机自行设置；PID 文件是主路径。
 
 **测试**：videoalign + ocr + geneval + registry + schemas + group → **61 passed / 11 skipped**（skip 全是缺 Levenshtein/GPU）。base.py 加 `videos` 字段未破坏图像 scorer。
 

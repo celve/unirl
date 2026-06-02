@@ -9,7 +9,7 @@
 #
 # Pairs with unirl/train_hi3.py (HI3Trainer). Modeled on
 # sd3_vllmomni_full_ipc.yaml (single-backbone v2 + vllm-omni + colocate sync)
-# and pe_trainside.yaml (two-algorithm shape), with hi3-specific params from
+# and pe_trainside_pickscore.yaml (two-algorithm shape), with hi3-specific params from
 # conf/experiment/hi3_think_recaption_colocate.yaml.
 #
 # Confirm at smoke time (GPU-specific, can't be unit-checked):
