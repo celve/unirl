@@ -141,6 +141,7 @@ class VLMTrainer(BaseTrainer):
             if track.rewards is not None:
                 resp.tracks[name] = track.compute_advantages(normalize=True, scope=self.adv_normalization_scope)
 
+        self._drop_decoded(resp)
         (track,) = resp.tracks.values()
         result = self.stack.train_track(track, training_progress=float(training_progress))
         self._log_rollout(rollout_id, result, resp, step_time_s=time.perf_counter() - t0)

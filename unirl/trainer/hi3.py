@@ -459,6 +459,8 @@ class HI3Trainer(BaseTrainer):
         for name in (AR_TRACK, IMAGE_TRACK):
             resp.tracks[name] = resp.tracks[name].compute_advantages(normalize=True)
 
+        # after the debug dump (which reads decoded), before training
+        self._drop_decoded(resp)
         # 5. Two backward (shared backbone) → one optimizer step.
         results: Dict[str, TrainStepResult] = self.stack.train_track(
             resp.tracks[AR_TRACK],

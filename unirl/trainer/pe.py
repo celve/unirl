@@ -213,6 +213,7 @@ class PETrainer(BaseTrainer):
         for name in TRACK_NAMES:
             resp.tracks[name] = resp.tracks[name].compute_advantages(normalize=True)
 
+        self._drop_decoded(resp)
         # 5. Route each track to its own stack (each DP_SCATTER-sharded on dispatch).
         results: Dict[str, TrainStepResult] = {
             name: getattr(self, name).stack.train_track(resp.tracks[name], training_progress=float(training_progress))

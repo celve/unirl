@@ -85,6 +85,23 @@ class BaseTrainer:
         if self.wandb_logger.initialized:
             logger.info("WandB initialized: project=%s run=%s", project, cfg.get("run_name"))
 
+    @staticmethod
+    def _drop_decoded(resp: Any) -> None:
+        """Free the reward-only ``decoded`` payload before training.
+
+        ``decoded`` (generated Images/Videos/Texts) is consumed upstream by
+        ``reward.score_and_attach`` and is never read by training (which uses
+        only segment/conditions/advantages). Nulling it on the driver ``resp``
+        before ``train_track`` releases the driver-held TensorStore handles so
+        the (often GPU-resident, trainside) storage can free before the
+        optimizer-step memory peak — worker-side nulling alone leaves the driver
+        refs alive through ``_log_rollout``. ``media_preview`` is left intact
+        for logging. Call after scoring / advantages (and any decoded-reading
+        debug dump), immediately before dispatching to ``train_track``.
+        """
+        for track in resp.tracks.values():
+            track.decoded = None
+
     def _log_rollout(
         self,
         rollout_id: int,
