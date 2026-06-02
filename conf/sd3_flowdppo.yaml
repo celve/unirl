@@ -123,8 +123,14 @@ stack:
   num_updates_per_batch: 2      # PPO mini-batches per rollout (KL anchor frozen once); v1 parity
 
 data_source:
-  _target_: unirl.data.data_source.DefaultDataSource
-  args: {}
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: datasets/pickscore/train.txt
+      eval_data_path: datasets/pickscore/test.txt
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
 
 sampling:
   _target_: unirl.types.sampling.DiffusionSamplingParams

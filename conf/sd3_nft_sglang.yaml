@@ -155,8 +155,14 @@ stack:
   max_grad_norm: 1.0
 
 data_source:
-  _target_: unirl.data.data_source.DefaultDataSource
-  args: {}
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: datasets/pickscore/train.txt
+      eval_data_path: datasets/pickscore/test.txt
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
 
 sampling:
   _target_: unirl.types.sampling.DiffusionSamplingParams

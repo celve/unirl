@@ -185,8 +185,14 @@ reward:
       model_id: yuvalkirstain/PickScore_v1
 
 data_source:
-  _target_: unirl.data.data_source.DefaultDataSource
-  args: {}                      # DefaultDataSource ignores args; uses hardcoded prompts
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: datasets/pickscore/train.txt
+      eval_data_path: datasets/pickscore/test.txt
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
 
 # ComposedSamplingParams drives PEPipeline's fan-out: ar.samples_per_prompt = N
 # rewrites, diffusion.samples_per_prompt = M images per rewrite.
