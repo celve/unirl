@@ -7,6 +7,7 @@ One knob (``modality``) drives YAML selection and request validation:
 - ``"i2t"``     — HI3, image+text → AR text. Single stage (AR only).
 - ``"t2t"``     — HI3, text → AR text. Single stage (AR only).
 - ``"sd3_t2i"`` — SD3, text → DiT denoise → image. Single diffusion stage.
+- ``"t2v"``     — HunyuanVideo-1.5, text → DiT denoise → video. Single diffusion stage.
 
 The image modalities install our ``RLHunyuanImage3Pipeline`` subclass via
 the static YAMLs in ``stage_configs/`` (per-stage
@@ -41,7 +42,7 @@ class VLLMOmniEngineConfig(BaseEngineConfig):
     # Required: HunyuanImage-3 checkpoint path. Set per experiment or via
     # ``cfg.rollout.engine.model_path=...`` on the CLI.
     model_path: str = MISSING
-    # Valid values: "t2i" | "t2i_think_recaption" | "it2i" | "i2t" | "t2t" | "sd3_t2i". Kept as ``str``
+    # Valid values: "t2i" | "t2i_think_recaption" | "it2i" | "i2t" | "t2t" | "sd3_t2i" | "t2v". Kept as ``str``
     # because OmegaConf structured configs reject ``Literal[...]`` annotations;
     # the engine ctor validates the string against the supported modality set.
     modality: str = "t2i"

@@ -50,6 +50,9 @@ _LOCAL_YAML = {
     "t2i_think_recaption": "hunyuan_image3_t2i_think_recaption_rl.yaml",
     "it2i": "hunyuan_image3_it2i_rl.yaml",
     "sd35_t2i": "sd35_t2i_rl.yaml",
+    # Single-stage pure-DiT, HunyuanVideo-1.5 (text → video). Analogous to
+    # sd35_t2i: no AR prelude, no driver-side tokenizer.
+    "t2v": "hunyuan_video1p5_t2v_rl.yaml",
     # Two-engine v2 trainer (trainer/hi3.py): AR-only think_recaption engine +
     # standalone DiT engine that eats an externally-injected recaption.
     "ar_recaption": "hunyuan_image3_ar_recaption_rl.yaml",
@@ -102,7 +105,7 @@ _HI3_MODALITIES = frozenset({"t2i", "t2i_think_recaption", "it2i", "i2t", "t2t",
 # schedule pinned (``ensure_req_sigmas``). AR-only modalities (``i2t`` / ``t2t``
 # / the two-engine ``ar_recaption``) carry ``ARSamplingParams`` with NO
 # diffusion sub-block, so ``ensure_req_sigmas`` would raise on them — gate it.
-_DIT_BEARING_MODALITIES = frozenset({"t2i", "t2i_think_recaption", "it2i", "sd35_t2i", "dit_recaption"})
+_DIT_BEARING_MODALITIES = frozenset({"t2i", "t2i_think_recaption", "it2i", "sd35_t2i", "dit_recaption", "t2v"})
 
 # HI3 modalities whose stage config requests tensor-parallel across multiple
 # physical GPUs (TP4 on the AR and/or DiT stage). Ray restricts each DevicePool
@@ -316,7 +319,10 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         # CLIP-G / T5 tokenizers under text_encoder_*) — and its single-
         # stage diffusion path doesn't call build_prompt_tokens anyway,
         # so skip the AutoTokenizer load entirely for that modality.
-        if self.cfg.modality == "sd35_t2i":
+        # HunyuanVideo-1.5 (t2v) is the same shape: tokenizers live in
+        # tokenizer/ + tokenizer_2/ subfolders, the worker loads them
+        # internally, and the driver-side translator needs none.
+        if self.cfg.modality in ("sd35_t2i", "t2v"):
             self._tokenizer = None
         else:
             self._tokenizer = AutoTokenizer.from_pretrained(self.cfg.model_path, trust_remote_code=True)
@@ -439,8 +445,9 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         if self._omni is None:
             raise RuntimeError("VLLMOmniRolloutEngine: engine not initialized")
         # SD3.5's single-stage path doesn't use a driver-side tokenizer;
-        # other modalities require it for build_prompt_tokens.
-        if self.cfg.modality != "sd35_t2i" and self._tokenizer is None:
+        # t2v (HunyuanVideo-1.5) is the same. Other modalities require it
+        # for build_prompt_tokens.
+        if self.cfg.modality not in ("sd35_t2i", "t2v") and self._tokenizer is None:
             raise RuntimeError("VLLMOmniRolloutEngine: tokenizer not initialized")
         self._validate_request(req)
         # Main-repo SSOT for σ: pin once via the shared helper. Translator
@@ -591,7 +598,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
     def health_check(self) -> bool:
         if self._omni is None:
             return False
-        if self.cfg.modality == "sd35_t2i":
+        if self.cfg.modality in ("sd35_t2i", "t2v"):
             return True
         return self._tokenizer is not None
 
@@ -1165,7 +1172,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
     def _validate_request(self, req: RolloutReq) -> None:
         has_image = req.primitives.get("image") is not None
         m = self.cfg.modality
-        if m in ("t2i", "sd35_t2i", "t2i_think_recaption") and has_image:
+        if m in ("t2i", "sd35_t2i", "t2i_think_recaption", "t2v") and has_image:
             raise ValueError(
                 f"VLLMOmniRolloutEngine: modality={m!r} rejects image-bearing "
                 "requests; use an image-conditioned modality instead."

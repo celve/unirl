@@ -81,16 +81,49 @@ class HunyuanVideo15Pipeline(Pipeline):
         self,
         *,
         bundle: HunyuanVideo15Bundle,
-        text_embed: HunyuanVideo15TextEmbedStage,
-        diffusion: HunyuanVideo15DiffusionStage,
-        vae_decode: HunyuanVideo15VAEDecodeStage,
+        text_embed: Optional[HunyuanVideo15TextEmbedStage] = None,
+        diffusion: Optional[HunyuanVideo15DiffusionStage] = None,
+        vae_decode: Optional[HunyuanVideo15VAEDecodeStage] = None,
+        strategy: Optional[StepStrategy] = None,
         shift: float = 5.0,
+        autocast_precision: str = "bf16",
+        trajectory_precision: str = "fp16",
+        logprob_precision: str = "fp32",
+        mllm_max_length: int = 1000,
+        mllm_crop_start: int = 108,
+        mllm_skip_layers: int = 2,
+        byt5_max_length: int = 256,
+        vision_num_semantic_tokens: int = 729,
+        vision_states_dim: int = 1152,
+        latent_channels: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.bundle = bundle
-        self.text_embed = text_embed
+        self.text_embed = (
+            text_embed
+            if text_embed is not None
+            else HunyuanVideo15TextEmbedStage(
+                bundle,
+                mllm_max_length=mllm_max_length,
+                mllm_crop_start=mllm_crop_start,
+                mllm_skip_layers=mllm_skip_layers,
+                byt5_max_length=byt5_max_length,
+            )
+        )
+        if diffusion is None:
+            diffusion = HunyuanVideo15DiffusionStage(
+                model=bundle,
+                step=HunyuanVideo15DiffusionStep(),
+                strategy=strategy if strategy is not None else DanceSDEStrategy(),
+                autocast_precision=autocast_precision,
+                trajectory_precision=trajectory_precision,
+                logprob_precision=logprob_precision,
+                vision_num_semantic_tokens=vision_num_semantic_tokens,
+                vision_states_dim=vision_states_dim,
+                latent_channels=latent_channels,
+            )
         self.diffusion = diffusion
-        self.vae_decode = vae_decode
+        self.vae_decode = vae_decode if vae_decode is not None else HunyuanVideo15VAEDecodeStage(bundle)
         # ``shift`` is retained as an attribute so the hosting engine can
         # build the FlowMatchSchedulePolicy at startup. Static shift only
         # (HunyuanVideo-1.5 doesn't use dynamic mu).

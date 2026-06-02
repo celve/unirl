@@ -47,7 +47,7 @@ from unirl.rollout.engine.sigma_verify import verify_engine_used_sigmas
 from unirl.rollout.engine.vllm_omni.hi3.ar_capture import extract_ar_segment
 from unirl.types.conditions import Condition
 from unirl.types.conditions.text import TextEmbedCondition
-from unirl.types.primitives import Image, Images, Text, Texts
+from unirl.types.primitives import Image, Images, Text, Texts, Video, Videos
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
 from unirl.types.segments import Segment
@@ -96,6 +96,31 @@ def _pil_list_to_images(pil_images: Sequence[Any]) -> Images:
         t = pil_to_tensor(pil).to(torch.float32) / 255.0
         items.append(Image(pixels=t))
     return Images.from_list(items)
+
+
+def _grouped_pils_to_videos(
+    pil_frames_per_prompt: Sequence[Sequence[Any]],
+) -> Videos:
+    """Group per-prompt PIL frame lists into ``Videos``.
+
+    Upstream HV1.5 ``post_process_func`` returns ``List[List[PIL.Image]]``
+    (one frame list per prompt). We reassemble each as a
+    ``Video(frames=[T, C, H, W])`` so the reward layer's
+    ``RewardRequest.videos`` (which calls ``v.frames.permute(1, 0, 2, 3)``)
+    gets the right shape.
+    """
+    if not pil_frames_per_prompt:
+        raise ValueError("_grouped_pils_to_videos: empty per-prompt frame lists")
+    from torchvision.transforms.functional import pil_to_tensor
+
+    items: List[Video] = []
+    for frames in pil_frames_per_prompt:
+        if not frames:
+            raise ValueError("_grouped_pils_to_videos: prompt has zero frames")
+        # Per-frame uint8 [C, H, W] / 255 → float32 [0, 1]; stack T along dim=0.
+        frame_tensors = [pil_to_tensor(f).to(torch.float32) / 255.0 for f in frames]
+        items.append(Video(frames=torch.stack(frame_tensors, dim=0)))
+    return Videos.from_list(items)
 
 
 def _pick_stage_output(
@@ -409,6 +434,73 @@ def _build_sd3_text_condition(
     )
 
 
+def _build_hv15_conditions(
+    diff_outputs: Sequence[Any],
+) -> Optional[Dict[str, Condition]]:
+    """Unpack per-request HunyuanVideo-1.5 conditions from worker-side capture.
+
+    Reads ``OmniRequestOutput.custom_output["text_capture"]`` — the flat dict
+    :class:`RLHunyuanVideo15Pipeline` writes after intercepting
+    ``encode_prompt``. The pipeline captures 8 tensors from the dual text
+    encoder (Qwen2.5-VL MLLM + ByT5 glyph):
+
+    - ``prompt_embeds`` / ``prompt_embeds_mask`` → text_mllm
+    - ``prompt_embeds_2`` / ``prompt_embeds_mask_2`` → text_glyph
+    - ``negative_prompt_embeds`` / ``negative_prompt_embeds_mask`` → negative_text_mllm
+    - ``negative_prompt_embeds_2`` / ``negative_prompt_embeds_mask_2`` → negative_text_glyph
+
+    Returns the conditions *dict* (keys aligned with
+    ``HunyuanVideo15Conditions.from_dict``), NOT the typed wrapper —
+    ``RolloutTrack.conditions`` is ``Dict[str, Condition]`` and the trainer
+    runs ``HunyuanVideo15Conditions.from_dict(track.conditions)`` itself.
+
+    Returns ``None`` when any diff output is missing the capture (signals the
+    worker-side hook didn't fire — surfaces as an explicit error at the call
+    site rather than a far-away ``from_dict({})`` failure).
+    """
+    if not diff_outputs:
+        return None
+
+    captures = [(getattr(d, "custom_output", None) or {}).get("text_capture") for d in diff_outputs]
+    if any(c is None for c in captures):
+        return None
+
+    def _cat_field(field_name: str) -> Optional[torch.Tensor]:
+        tensors = [c[field_name] for c in captures if c.get(field_name) is not None]
+        if not tensors:
+            return None
+        return torch.cat(tensors, dim=0)
+
+    prompt_embeds = _cat_field("prompt_embeds")
+    prompt_embeds_mask = _cat_field("prompt_embeds_mask")
+    prompt_embeds_2 = _cat_field("prompt_embeds_2")
+    prompt_embeds_mask_2 = _cat_field("prompt_embeds_mask_2")
+    negative_prompt_embeds = _cat_field("negative_prompt_embeds")
+    negative_prompt_embeds_mask = _cat_field("negative_prompt_embeds_mask")
+    negative_prompt_embeds_2 = _cat_field("negative_prompt_embeds_2")
+    negative_prompt_embeds_mask_2 = _cat_field("negative_prompt_embeds_mask_2")
+
+    cond_dict: Dict[str, Condition] = {}
+    if prompt_embeds is not None:
+        cond_dict["text_mllm"] = TextEmbedCondition(embeds=prompt_embeds, pooled=None, attn_mask=prompt_embeds_mask)
+    if prompt_embeds_2 is not None:
+        cond_dict["text_glyph"] = TextEmbedCondition(
+            embeds=prompt_embeds_2, pooled=None, attn_mask=prompt_embeds_mask_2
+        )
+    if negative_prompt_embeds is not None:
+        cond_dict["negative_text_mllm"] = TextEmbedCondition(
+            embeds=negative_prompt_embeds, pooled=None, attn_mask=negative_prompt_embeds_mask
+        )
+    if negative_prompt_embeds_2 is not None:
+        cond_dict["negative_text_glyph"] = TextEmbedCondition(
+            embeds=negative_prompt_embeds_2, pooled=None, attn_mask=negative_prompt_embeds_mask_2
+        )
+
+    if "text_mllm" not in cond_dict or "text_glyph" not in cond_dict:
+        return None
+    return cond_dict
+
+
 def _build_ar_fused_condition(per_request_outputs: Sequence[Sequence[Any]]) -> Optional[Any]:
     """AR fused condition for ARGRPO replay: per-sample prompt token ids.
 
@@ -464,31 +556,40 @@ def _to_rollout_resp(
 
     # Per-track decoded slots (at most one value per track, by modality).
     decoded_image: Optional[Images] = None
+    decoded_video: Optional[Videos] = None
     decoded_text: Optional[Texts] = None
     segments_for_track: Dict[str, Segment] = {}
     conditions: Dict[str, Condition] = {}
 
-    if modality in ("t2i", "it2i", "sd35_t2i", "t2i_think_recaption", "dit_recaption"):
-        # Per-request DiT (image) output. For HI3 (t2i/it2i) it's Stage 1;
-        # for SD3.5 (sd35_t2i) and the standalone HI3 DiT (dit_recaption) the
-        # diffusion stage is the only stage so stage_id=0. Either way,
-        # ``_pick_stage_output`` matches by ``final_output_type='image'``
+    if modality in ("t2i", "it2i", "sd35_t2i", "t2v", "t2i_think_recaption", "dit_recaption"):
+        # Per-request DiT (image/video) output. For HI3 (t2i/it2i) it's Stage 1;
+        # for SD3.5 (sd35_t2i), HV1.5 (t2v) and the standalone HI3 DiT
+        # (dit_recaption) the diffusion stage is the only stage so stage_id=0.
+        # Either way, ``_pick_stage_output`` matches by ``final_output_type``
         # first and falls back to stage_id.
-        dit_stage_id = 0 if modality in ("sd35_t2i", "dit_recaption") else 1
+        dit_stage_id = 0 if modality in ("sd35_t2i", "t2v", "dit_recaption") else 1
+        final_output_type = "video" if modality == "t2v" else "image"
+        # Track key matches training.tracks.<name>: video models use "video".
+        diffusion_track_key = "video" if modality == "t2v" else "image"
         diff_outputs: List[Any] = []
+        # t2v needs per-prompt frame groupings to pack into Videos; image
+        # modalities use a flat PIL list.
+        pil_frames_per_prompt: List[List[Any]] = []
         pil_images: List[Any] = []
         for outputs in per_request_outputs:
             diff_out = _pick_stage_output(
                 outputs,
-                final_output_type="image",
+                final_output_type=final_output_type,
                 stage_id=dit_stage_id,
             )
             if diff_out is None:
                 raise RuntimeError(
-                    f"_to_rollout_resp: no image output for request (modality={modality}); did the DiT stage fail?"
+                    f"_to_rollout_resp: no {final_output_type} output for request "
+                    f"(modality={modality}); did the DiT stage fail?"
                 )
             diff_outputs.append(diff_out)
             imgs = getattr(diff_out, "images", None) or []
+            pil_frames_per_prompt.append(list(imgs))
             pil_images.extend(imgs)
 
         if not pil_images:
@@ -496,8 +597,11 @@ def _to_rollout_resp(
                 "_to_rollout_resp: DiT outputs carry no PIL images; "
                 "check pipeline forward populated DiffusionOutput.output."
             )
-        decoded_image = _pil_list_to_images(pil_images)
-        segments_for_track["image"] = _build_image_segment(
+        if modality == "t2v":
+            decoded_video = _grouped_pils_to_videos(pil_frames_per_prompt)
+        else:
+            decoded_image = _pil_list_to_images(pil_images)
+        segments_for_track[diffusion_track_key] = _build_image_segment(
             diff_outputs,
             expected_sigmas=req.sigmas,
         )
@@ -522,6 +626,18 @@ def _to_rollout_resp(
                     "stage YAML)."
                 )
             conditions["text"] = text_cond
+        elif modality == "t2v":
+            hv_conds = _build_hv15_conditions(diff_outputs)
+            if hv_conds is None:
+                raise RuntimeError(
+                    "_to_rollout_resp: HV1.5 t2v rollout returned no 'text_capture' "
+                    "on DiffusionOutput.custom_output (or it lacked the dual-stream "
+                    "text_mllm/text_glyph embeds). Check that "
+                    "RLHunyuanVideo1p5Pipeline's encode_prompt hook ran in every DiT "
+                    "worker — verify custom_pipeline_args.pipeline_class in the stage "
+                    "YAML."
+                )
+            conditions.update(hv_conds)
         else:
             fused_cond = _build_fused_mm_condition(diff_outputs)
             if fused_cond is None:
@@ -578,6 +694,7 @@ def _to_rollout_resp(
     parent_ids = list(req.group_ids)
     decoded_for_track: Dict[str, Optional[Any]] = {
         "image": decoded_image,
+        "video": decoded_video,
         "ar": decoded_text,
     }
     # HI3 think_recaption: image is generated from AR output 1-to-1,
