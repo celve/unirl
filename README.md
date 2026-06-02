@@ -47,35 +47,36 @@ Recipes read data, checkpoint, and W&B settings from the environment via
 (`REPORT_TO_WANDB`, `WANDB_PROJECT`, `WANDB_ENTITY`). Sample prompt lists are
 committed under `datasets/`.
 
-Run a single-node recipe — the first argument is a recipe name from `conf/`:
+Run a single-node recipe — the first argument is a bucket-qualified recipe name
+from `recipes/`:
 
 ```bash
-bash scripts/run_experiment_single_node.sh sd3_trainside
+bash scripts/run_experiment_single_node.sh diffusion_rl/sd3_trainside
 ```
 
 The diffusion entrypoint is the default; select another with `ENTRY`:
 
 ```bash
-ENTRY=train_vlm bash scripts/run_experiment_single_node.sh argrpo_qwen_vl_geo3k_mc_4x8
-ENTRY=train_pe  bash scripts/run_experiment_single_node.sh pe_trainside_pickscore
+ENTRY=train_vlm bash scripts/run_experiment_single_node.sh vlm_rl/argrpo_qwen_vl_geo3k_mc_4x8
+ENTRY=train_pe  bash scripts/run_experiment_single_node.sh pe_rl/pe_trainside_pickscore
 ```
 
 Run a multi-node recipe (taiji platform):
 
 ```bash
-bash scripts/run_experiment_multinode_taiji.sh sd3_sglang_native_colocate
+bash scripts/run_experiment_multinode_taiji.sh diffusion_rl/sd3_sglang_native_colocate
 ```
 
 Invoke an entrypoint directly:
 
 ```bash
-python -m unirl.train_diffusion --config-name=sd3_trainside num_devices=8
+python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside num_devices=8
 ```
 
 Validate a recipe without launching Ray work:
 
 ```bash
-python -m unirl.train_diffusion --config-name=sd3_trainside --cfg job --resolve
+python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside --cfg job --resolve
 ```
 
 ## Documentation Map
@@ -103,17 +104,20 @@ that owns them.
 Each domain has its own entrypoint, all driven the same way:
 
 ```bash
-python -m unirl.train_diffusion --config-name=<recipe>   # diffusion image/video
-python -m unirl.train_vlm       --config-name=<recipe>   # autoregressive VLM / LLM
-python -m unirl.train_pe        --config-name=<recipe>   # prompt-enhancer (PE)
-python -m unirl.train_hi3       --config-name=<recipe>   # HunyuanImage3 (mixed AR + diffusion)
+python -m unirl.train_diffusion --config-name=diffusion_rl/<recipe>      # diffusion image/video
+python -m unirl.train_vlm       --config-name=vlm_rl/<recipe>            # autoregressive VLM (Qwen-VL)
+python -m unirl.train_vlm       --config-name=llm_rl/<recipe>            # autoregressive LLM (Qwen3)
+python -m unirl.train_pe        --config-name=pe_rl/<recipe>             # prompt-enhancer (PE)
+python -m unirl.train_hi3       --config-name=unified_model_rl/<recipe>  # HunyuanImage3 (unified AR + diffusion)
 ```
 
-Recipes are self-contained YAML files in `conf/` (a flat directory) selected
-with `--config-name`. At startup an entrypoint:
+Recipes are self-contained YAML files under `recipes/<bucket>/` selected with
+`--config-name=<bucket>/<recipe>`. The five buckets are `diffusion_rl`, `vlm_rl`,
+`llm_rl`, `pe_rl`, and `unified_model_rl`; each recipe carries a `# @package
+_global_` header so its keys compose at the config root. At startup an entrypoint:
 
 1. registers Hydra config dataclasses from the `unirl` package;
-2. composes the chosen `conf/<recipe>.yaml`;
+2. composes the chosen `recipes/<bucket>/<recipe>.yaml`;
 3. validates cross-component contracts (e.g. weight-sync and LoRA targets);
 4. builds the trainer, which acquires a Ray `DevicePool` and constructs the
    rollout and train workers;
@@ -128,7 +132,7 @@ section:
 | Separate | rollout and train workers use different GPU pools; a `sync:` variant is required |
 | Colocate | rollout and train workers share GPU bundles with explicit offload/onload and weight sync |
 
-Each `conf/<recipe>.yaml` is the source of truth for model, algorithm, rollout
+Each `recipes/<bucket>/<recipe>.yaml` is the source of truth for model, algorithm, rollout
 engine, placement, reward, sync, and batch geometry. Launchers under `scripts/`
 stay thin and only prepare the runtime.
 
@@ -136,7 +140,7 @@ stay thin and only prepare the runtime.
 
 ```bash
 # Compose one recipe and print the resolved config
-python -m unirl.train_diffusion --config-name=<recipe> --cfg job --resolve
+python -m unirl.train_diffusion --config-name=diffusion_rl/<recipe> --cfg job --resolve
 
 # Python syntax check
 python -m compileall -q unirl

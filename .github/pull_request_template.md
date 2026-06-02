@@ -63,7 +63,7 @@ GPU count, and dataset/checkpoint details for training or rollout changes.
 - `SKIP=no-commit-to-branch pre-commit run --all-files --show-diff-on-failure`
 - `pytest`
 - Hydra config validation, for example:
-  `python -m unirl.train_diffusion --config-name=<recipe> --cfg job --resolve`
+  `python -m unirl.train_diffusion --config-name=diffusion_rl/<recipe> --cfg job --resolve`
 - Training / rollout smoke test
 - Not run; reason:
 

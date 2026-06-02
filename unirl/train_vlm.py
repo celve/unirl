@@ -7,7 +7,10 @@ Kept separate so the VLM path never routes through diffusion / SDE code.
 
 Launch (per node, SPMD; rank 0 owns the driver):
   QWEN_VL_PATH=/path/to/Qwen2.5-VL-7B-Instruct DATA_PATH=/path/to/train.jsonl \
-  python -m unirl.train_vlm --config-name=argrpo_qwen_vl_geo3k_mc_4x8
+  python -m unirl.train_vlm --config-name=vlm_rl/argrpo_qwen_vl_geo3k_mc_4x8
+
+This AR entrypoint also serves pure-LLM recipes under ``recipes/llm_rl/``
+(e.g. ``--config-name=llm_rl/ar_spo_dppo_qwen3_4x8``).
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from omegaconf import DictConfig
 from unirl.trainer.vlm import VLMTrainer
 
 
-@hydra.main(version_base=None, config_path="../conf", config_name="argrpo_qwen_vl_geo3k_mc_4x8")
+@hydra.main(version_base=None, config_path="../recipes", config_name="vlm_rl/argrpo_qwen_vl_geo3k_mc_4x8")
 def main(cfg: DictConfig) -> None:
     trainer = VLMTrainer(
         num_devices=cfg.num_devices,

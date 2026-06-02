@@ -1,0 +1,51 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# diffusionNFT — annotated config EXTRACT (for reading, not launching).
+#
+# Lifted from the full runnable recipe:
+#     recipes/diffusion_rl/sd3_nft.yaml
+# Launch that recipe to actually train (see this folder's README.md). NFT is
+# off-policy and needs an EMA rollout — the backend's EMA handle supplies the
+# frozen "old" adapter (wired automatically by the trainer).
+# ─────────────────────────────────────────────────────────────────────────────
+
+algorithm:
+  _target_: unirl.algorithms.nft.DiffusionNFT
+  stage_attr: diffusion
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.sd3.conditions.SD3Conditions
+  params: ${sampling}
+  # ── NFT loss hyperparameters ──
+  beta: 1.0                      # dual-blend coefficient:
+                                 #   positive = β·new + (1-β)·old
+                                 #   negative = (1+β)·old - β·new
+  adv_clip_max: 5.0             # advantages clipped to ±this, then remapped to r∈[0,1];
+                                 # also multiplied back so gradient scale is ε-invariant
+  adv_mode: raw                  # only "raw" is wired (linear advantage→r remap)
+  use_adaptive_weight: true      # divide each per-sample MSE by its mean-abs-error so
+                                 # noise levels contribute on a comparable scale
+  train_timestep_mode: all       # "all" = train on the rollout's sampled σ schedule;
+                                 # "random" = draw B fresh uniforms each micro-step
+  shuffle_train_timesteps: true
+  apply_time_shift_in_loss: false
+  training_timestep_fraction: 0.99   # slice of the schedule kept (terminal t=0 dropped:
+                                     # t=0 collapses xt→x0 and gives no signal)
+  kl_coef: 0.0                   # KL-to-base penalty (not implemented; >0 fails fast)
+
+# NFT does NOT run an SDE rollout for the loss: eta=0 and num_sde_steps=0. The
+# rollout (under EMA weights) only needs to produce the clean final latent x0;
+# the loss re-noises x0 at each timestep t as xt = (1-t)·x0 + t·noise.
+sampling:
+  _target_: unirl.types.sampling.DiffusionSamplingParams
+  num_inference_steps: 10
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+  eta: 0.0                       # forward-process: no SDE noise injection at rollout
+  samples_per_prompt: 16
+  seed: 42
+  init_same_noise: false
+  scheduler:
+    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    num_timesteps: ${..num_inference_steps}
+    num_sde_steps: 0             # no SDE steps recorded — NFT trains the forward process

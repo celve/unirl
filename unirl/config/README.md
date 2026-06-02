@@ -2,7 +2,7 @@
 
 `unirl.config` owns the typed Hydra surface. Config dataclasses are
 registered near the code that consumes them, then imported by
-`register_all_configs()` before Hydra composes the chosen `conf/<recipe>.yaml`.
+`register_all_configs()` before Hydra composes the chosen `recipes/<bucket>/<recipe>.yaml`.
 
 ## Main APIs
 

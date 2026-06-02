@@ -80,7 +80,7 @@ Add a rollout engine by:
 2. registering it in group `rollout/engine`;
 3. implementing the engine contract from `engine/base.py`;
 4. returning canonical `RolloutResp` data;
-5. adding or updating recipes under `conf/`.
+5. adding or updating recipes under `recipes/<bucket>/`.
 
 If the engine uses a dedicated rollout process, also define how trainer weights
 reach that process through `distributed/weight_sync`.

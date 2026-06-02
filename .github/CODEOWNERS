@@ -13,7 +13,7 @@
 
 # Launch and configuration surface.
 /scripts/ @CjhHa1 @haonan3 @celve @Jayce-Ping
-/conf/ @CjhHa1 @haonan3 @celve @Jayce-Ping
+/recipes/ @CjhHa1 @haonan3 @celve @Jayce-Ping
 
 # Core training and distributed runtime.
 /unirl/algorithms/ @CjhHa1 @haonan3 @celve @Jayce-Ping

@@ -21,11 +21,12 @@
 # set the explicit vars to run on any other cluster.
 #
 # The driver is one of the Hydra entrypoints, selected with ENTRY:
-#   train_diffusion (default)  conf/sd3_*, wan2*, qwen_image_* (diffusion)
-#   train_vlm                  conf/argrpo_qwen_vl_*, ar_spo_dppo_qwen3_* (VLM / AR)
-#   train_pe                   conf/pe_* (prompt-enhancement joint diffusion+AR)
+#   train_diffusion (default)  recipes/diffusion_rl/ (sd3_*, wan2*, qwen_image_*)
+#   train_vlm                  recipes/vlm_rl/ (argrpo_qwen_vl_*) + recipes/llm_rl/ (ar_spo_dppo_qwen3_*)
+#   train_pe                   recipes/pe_rl/ (prompt-enhancement joint diffusion+AR)
+#   train_hi3                  recipes/unified_model_rl/ (HunyuanImage3, unified AR+diffusion)
 #
-# The first positional arg is the conf/ config name (passed to Hydra as
+# The first positional arg is the recipes/ config name, bucket-qualified (passed to Hydra as
 # --config-name); any extra args are forwarded verbatim as Hydra overrides. The
 # launcher sets num_devices to the whole cluster (NUM_NODES * GPUS_PER_NODE) so a
 # conf authored for a different size still runs here (an explicit num_devices=...
@@ -34,11 +35,11 @@
 #
 # Examples:
 #   # SPMD batch (taiji lands this same line on every node):
-#   bash scripts/run_experiment_multinode_taiji.sh sd3_sglang_native_colocate
+#   bash scripts/run_experiment_multinode_taiji.sh diffusion_rl/sd3_sglang_native_colocate
 #   # ssh fan-out (run once on the head only):
-#   LAUNCH=ssh bash scripts/run_experiment_multinode_taiji.sh sd3_sglang_native_colocate
+#   LAUNCH=ssh bash scripts/run_experiment_multinode_taiji.sh diffusion_rl/sd3_sglang_native_colocate
 #   # VLM/AR recipe (4x8):
-#   ENTRY=train_vlm bash scripts/run_experiment_multinode_taiji.sh argrpo_qwen_vl_geo3k_mc_4x8
+#   ENTRY=train_vlm bash scripts/run_experiment_multinode_taiji.sh vlm_rl/argrpo_qwen_vl_geo3k_mc_4x8
 #
 set -euo pipefail
 

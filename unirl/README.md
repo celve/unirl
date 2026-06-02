@@ -52,7 +52,7 @@ orchestration, rollout engines, the train stack, and algorithm loss math.
 
 ## Runtime Data Flow
 
-1. An entrypoint composes the flat `conf/<recipe>.yaml` and runs validators.
+1. An entrypoint composes the chosen `recipes/<bucket>/<recipe>.yaml` and runs validators.
 2. The `<Domain>Trainer` (e.g. `trainer/diffusion.py`) acquires a Ray `DevicePool` and builds the rollout and train workers.
 3. The trainer builds a typed `RolloutReq` and dispatches it to the rollout engine.
 4. The engine returns a `RolloutResp`, whose `tracks[name]` carry conditions, segments, rewards, and media previews.

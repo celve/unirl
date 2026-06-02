@@ -44,7 +44,7 @@ One ``train_step``::
     track.compute_advantages() per track         # ar groups by prompt, image by ar-sample
     hi3_stack.train_track(ar_track, image_track) # 2 backward → 1 optimizer step
 
-Pairs with ``conf/hi3_vllmomni.yaml`` and ``unirl/train_hi3.py``.
+Pairs with ``recipes/unified_model_rl/hi3_vllmomni.yaml`` and ``unirl/train_hi3.py``.
 Deferred (same as the reference trainers): multi-epoch replay, checkpoint /
 eval cadence, structured logging.
 """

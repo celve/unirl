@@ -55,7 +55,7 @@ go under `unirl/types` or `unirl/models/types`.
 2. Register its config with `@register_config(group="model", name="<model_name>", target=...)`.
 3. Implement a bundle that exposes the stages needed by training and rollout.
 4. Add condition, text / vision, diffusion and/or AR, and VAE helpers as needed.
-5. Add at least one recipe under `conf/`.
+5. Add at least one recipe under `recipes/<bucket>/`.
 6. Document required external checkpoints in the recipe YAML or launcher env docs.
 
 See `.claude/skills/development/add-model-bundle/SKILL.md` for the full

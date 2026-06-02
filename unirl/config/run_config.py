@@ -2,7 +2,7 @@
 
 Holds the scalars that define a single training run: RNG seed, loop
 budget, data pipeline dotpath and data paths. The ``run`` group name
-intentionally avoids ``experiment`` so ``conf/experiment/`` can host
+intentionally avoids ``experiment`` so ``recipes/experiment/`` can host
 Hydra ``@package _global_`` recipes without a defaults-list collision.
 """
 

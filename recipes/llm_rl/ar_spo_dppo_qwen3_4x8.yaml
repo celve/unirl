@@ -1,0 +1,134 @@
+# @package _global_
+# AR SPO-DPPO Qwen3-8B on GSM8K — v2 trainer (VLMTrainer / train_vlm), 4x8 = 32 GPU.
+#
+# v2 port of conf/experiment/ar_spo_dppo_qwen3_4x8.yaml (#155, v1). Same model
+# (Qwen3-8B), algorithm (ARSPODPPO, TV-divergence clip), reward
+# (gsm8k_exact_match numeric exact-match) and FSDP/LoRA knobs, driven by the
+# flat v2 trainside stack:
+# VLMTrainer (AR, no SDE) → trainside rollout → RewardService → ARSPODPPO.
+#
+# Run:
+#   QWEN3_PATH=/root/sync/models/Qwen3-8B DATA_PATH=/root/sync/datasets/gsm8k/train.jsonl \
+#   python -m unirl.train_vlm --config-name=ar_spo_dppo_qwen3_4x8 num_devices=32
+
+num_devices: 32
+batch_size: 32 # prompts_per_rollout
+num_rollouts: 100
+weight_sync_interval: 1 # ignored trainside
+
+# VLMTrainer advantage scope. v1 used group + use_global_std=true; the v2
+# RolloutTrack.compute_advantages has no use_global_std, so "group" = per-group
+# mean/std (closest match).
+adv_normalization_scope: group
+
+logging:
+  report_to_wandb: true
+  project_name: unirl-spo-dppo
+  run_name: ar_spo_dppo_qwen3-8b_4x8_v2
+  entity: diffusionrl-reproduce
+  tags: [spo-dppo, qwen3, gsm8k, 4x8, v2]
+
+bundle:
+  _target_: unirl.models.qwen3.bundle.Qwen3Bundle.from_config
+  config:
+    _target_: unirl.models.qwen3.config.Qwen3PipelineConfig
+    pretrained_model_ckpt_path: ${oc.env:QWEN3_PATH,/root/sync/models/Qwen3-8B}
+    model_precision: bf16
+    autocast_precision: bf16
+    logprob_precision: fp32
+    use_gradient_checkpointing: true
+
+pipeline:
+  # from_bundle shares the trainer-injected bundle (from_config would load a 2nd
+  # copy). system_instruction=/no_think suppresses Qwen3's thinking mode.
+  _target_: unirl.models.qwen3.pipeline.Qwen3Pipeline.from_bundle
+  system_instruction: /no_think
+  autocast_precision: bf16
+  logprob_precision: fp32
+
+backend:
+  _target_: unirl.train.backend.fsdp.FSDPBackend
+  block_class_names: ["Qwen3DecoderLayer"]
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    param_dtype: bf16
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: false # #155: params stay gathered → 16.7x rollout speedup
+    activation_checkpointing: true
+    use_torch_compile: false
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    learning_rate: 1.0e-5
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 1000
+  lora_cfg:
+    _target_: unirl.train.configs.LoraConfig
+    rank: 16
+    alpha: 32
+    dropout: 0.0
+    bias: none
+    task_type: CAUSAL_LM
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+
+rollout:
+  _target_: unirl.rollout.engine.trainside.engine.TrainsideRolloutEngine
+  stage_attrs: [ar]
+  forward_batch_size: 16
+
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.gsm8k_exact_match.GSM8KExactMatchRewardScorer
+    base_device: cpu
+    config:
+      _target_: unirl.reward.local.gsm8k_exact_match.GSM8KExactMatchSpec
+
+algorithm:
+  _target_: unirl.algorithms.spo_dppo.ARSPODPPO
+  stage_attr: ar # resolves stage from the trainer-injected pipeline (.ar)
+  variant: tv
+  clip_divergence: 0.2
+  clip_ratio_c: 20.0
+  # replay rescales logits by this temperature so its log-softmax matches the
+  # rollout sampling distribution; MUST equal sampling.temperature (0.7) below.
+  sampling_temperature: 0.7
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.qwen3.conditions.Qwen3ARConditions
+
+stack:
+  _target_: unirl.train.stack.TrainStack
+  micro_batch_size: 16 # per-worker shard = 512/32 = 16
+  max_grad_norm: 1.0
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: ${oc.env:DATA_PATH,/root/sync/datasets/gsm8k/train.jsonl}
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,/root/sync/datasets/gsm8k/train.jsonl}
+      seed: 42
+    algorithm:
+      prompts_per_rollout: 32 # 32 prompts x 16 samples = 512 / rollout
+
+sampling:
+  _target_: unirl.types.sampling.ARSamplingParams
+  samples_per_prompt: 16
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 0
+  max_new_tokens: 128
