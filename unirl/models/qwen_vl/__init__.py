@@ -3,7 +3,8 @@
 AR-only VLM pipeline: text+images in, text out. Supports GRPO training via
 ARStage.autoregress + ARStage.replay.
 
-Imports from this package trigger @register_config in config.py.
+Importing this package re-exports its bundle / pipeline / config classes;
+recipes wire them by ``_target_`` dotpath.
 """
 
 from unirl.models.qwen_vl.ar import (

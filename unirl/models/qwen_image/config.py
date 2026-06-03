@@ -20,7 +20,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from unirl.config.registration import register_config
 from unirl.config.validation import validate_precision_type
 
 
@@ -47,12 +46,6 @@ def _qwen_image_dynamic_overrides() -> Dict[str, Any]:
     }
 
 
-@register_config(
-    group="model",
-    name="qwen_image",
-    target="unirl.models.qwen_image.QwenImagePipeline.from_config",
-    mutable=True,
-)
 @dataclass
 class QwenImagePipelineConfig:
     """Construction args for ``QwenImagePipeline.from_config``.

@@ -22,16 +22,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
-from unirl.config.registration import register_config
 from unirl.config.validation import validate_precision_type
 
 
-@register_config(
-    group="model",
-    name="flux2_klein_v2",
-    target="unirl.models.flux2_klein.Flux2KleinPipeline.from_config",
-    mutable=True,
-)
 @dataclass
 class Flux2KleinPipelineConfig:
     """Construction args for ``Flux2KleinPipeline.from_config``.

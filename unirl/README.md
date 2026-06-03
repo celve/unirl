@@ -38,7 +38,7 @@ orchestration, rollout engines, the train stack, and algorithm loss math.
 |---|---|
 | `train_diffusion.py`, `train_vlm.py`, `train_pe.py`, `train_hi3.py` | Per-domain Hydra entrypoints |
 | `trainer/` | Per-domain training lifecycle (`base.py` + `diffusion`/`vlm`/`pe`/`hi3`): owns placement, builds workers, and runs the rollout→reward→advantage→train loop |
-| `config/` | ConfigStore registration, instantiation, readonly sealing, cross-component validation |
+| `config/` | Config dataclasses, `_target_` instantiation (`build`/`materialize`), cross-component validation |
 | `distributed/` | Ray worker base (`Remote`) + placement/dispatch (`group/`), tensor transport (`tensor/`), and weight sync (`weight_sync/`) |
 | `rollout/` | Rollout engine contracts and implementations (`engine/`: trainside, sglang, sglang_llm, vllm_omni, composed) |
 | `train/` | Train stack: `TrainStack`, FSDP backend, LoRA/NFT/mirror injection, EMA shadow, optimizer/lr |

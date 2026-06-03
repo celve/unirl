@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List
 
 import torch
 
-from unirl.config.registration import register_config
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.reward.local.device import resolve_device
 from unirl.types.reward import RewardRequest
@@ -93,11 +93,7 @@ class ClipRewardScorer(LocalRewardBackend):
         return all_rewards
 
 
-@register_config(
-    group="reward/component",
-    name="clip",
-    target="unirl.reward.local.clip.ClipRewardScorer",
-)
+@dataclass
 class ClipSpec(BaseRewardComponentSpec):
     """Typed config for the CLIP similarity reward component."""
 

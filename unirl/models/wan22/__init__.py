@@ -22,9 +22,8 @@ implementations verbatim — only the diffusion stage swaps in. This
 follows SD3's one-package-per-model convention; WAN 2.2 is NOT a
 subclass of WAN 2.1's pipeline.
 
-Imports from this package have side effects (Hydra ``register_config``
-in ``config.py``), so importing ``unirl.models.wan22`` is
-enough to make ``model/wan22`` resolvable in the ConfigStore.
+Importing this package re-exports its bundle / pipeline / config classes;
+recipes wire them by ``_target_`` dotpath.
 """
 
 from unirl.models.wan22.bundle import WAN22Bundle, WanDualTransformer

@@ -5,10 +5,8 @@ Implements the typed ``Bundle`` / ``Pipeline`` / ``EmbedStage`` /
 :mod:`unirl.models.wan21` (text-to-video peer) and
 :mod:`unirl.models.hunyuan_image3` (Hunyuan-family peer).
 
-Imports from this package have side effects (Hydra ``register_config``
-calls in ``config.py``), so importing
-``unirl.models.hunyuan_video15`` is enough to make
-``model/hunyuan_video15`` resolvable in the ConfigStore.
+Importing this package re-exports its bundle / pipeline / config classes;
+recipes wire them by ``_target_`` dotpath.
 
 Scope (v1)
 ----------

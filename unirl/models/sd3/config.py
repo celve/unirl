@@ -10,16 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
-from unirl.config.registration import register_config
 from unirl.config.validation import validate_precision_type
 
 
-@register_config(
-    group="model",
-    name="sd3",
-    target="unirl.models.sd3.SD3Pipeline.from_config",
-    mutable=True,
-)
 @dataclass
 class SD3PipelineConfig:
     """Construction args for ``SD3Pipeline.from_config``.

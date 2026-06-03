@@ -14,11 +14,10 @@ the static YAMLs in ``stage_configs/`` (per-stage
 ``engine_args.custom_pipeline_args``). The AR-only modalities use upstream
 YAMLs unchanged.
 
-Registered under ``rollout/engine: vllm_omni`` with ``_target_`` pointing at
-``VLLMOmniRolloutEngine`` so ``build(cfg.rollout.engine, device=..., strategy=...,
-rank=..., model_config=...)`` materializes the engine directly from its
-composed cfg section. Sits next to the legacy ``rollout/engine: sglang`` and
-``rollout/engine: fsdp`` presets — selected per experiment / CLI override.
+Consumed by ``VLLMOmniRolloutEngine``; the recipe wires ``rollout: {_target_:
+...VLLMOmniRolloutEngine, config: {_target_: ...VLLMOmniEngineConfig, ...}}`` and
+the rollout actor constructs the engine with ``config=<this>`` + ``device`` /
+``strategy`` / ``rank`` / ``model_config``.
 """
 
 from __future__ import annotations
@@ -28,17 +27,16 @@ from typing import Any, Dict
 
 from omegaconf import MISSING
 
-from unirl.config.registration import register_config
 from unirl.rollout.engine.base import BaseEngineConfig
 
 
-@register_config(
-    group="rollout/engine",
-    name="vllm_omni",
-    target="unirl.rollout.engine.vllm_omni.engine.VLLMOmniRolloutEngine",
-)
 @dataclass
 class VLLMOmniEngineConfig(BaseEngineConfig):
+    def make_engine(self, **deps: Any):
+        from unirl.rollout.engine.vllm_omni.engine import VLLMOmniRolloutEngine
+
+        return VLLMOmniRolloutEngine(config=self, **deps)
+
     # Required: HunyuanImage-3 checkpoint path. Set per experiment or via
     # ``cfg.rollout.engine.model_path=...`` on the CLI.
     model_path: str = MISSING

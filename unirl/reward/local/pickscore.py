@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import List
 
 import torch
 from tqdm import tqdm
 
-from unirl.config.registration import register_config
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.reward.local.device import resolve_device
 from unirl.types.reward import RewardRequest
@@ -102,11 +102,7 @@ class PickScoreRewardScorer(LocalRewardBackend):
         return all_rewards
 
 
-@register_config(
-    group="reward/component",
-    name="pickscore",
-    target="unirl.reward.local.pickscore.PickScoreRewardScorer",
-)
+@dataclass
 class PickScoreSpec(BaseRewardComponentSpec):
     """Typed config for the PickScore reward component."""
 

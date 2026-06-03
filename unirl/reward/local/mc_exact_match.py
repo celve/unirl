@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import List
 
-from unirl.config.registration import register_config
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.types.reward import RewardRequest
 
@@ -81,10 +81,6 @@ class MCExactMatchRewardScorer(LocalRewardBackend):
         return rewards
 
 
-@register_config(
-    group="reward/component",
-    name="mc_exact_match",
-    target="unirl.reward.local.mc_exact_match.MCExactMatchRewardScorer",
-)
+@dataclass
 class MCExactMatchSpec(BaseRewardComponentSpec):
     """Config for the MC exact-match scorer."""

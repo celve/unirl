@@ -9,8 +9,6 @@ from typing import ClassVar, List, Optional, Tuple
 
 import torch
 
-from unirl.config.registration import register_config
-
 # ---------------------------------------------------------------------------
 # Base class hierarchy
 # ---------------------------------------------------------------------------
@@ -517,41 +515,21 @@ class DPM2Strategy(StepStrategy):
         return result, None, None
 
 
-@register_config(
-    group="sampling/sde_strategy",
-    name="flow",
-    target="unirl.sde.kernels.FlowSDEStrategy",
-)
 @dataclass
 class FlowSpec:
     """Empty Spec: FlowSDEStrategy has no per-strategy config fields."""
 
 
-@register_config(
-    group="sampling/sde_strategy",
-    name="cps",
-    target="unirl.sde.kernels.CPSSDEStrategy",
-)
 @dataclass
 class CPSSpec:
     """Empty Spec: CPSSDEStrategy has no per-strategy config fields."""
 
 
-@register_config(
-    group="sampling/sde_strategy",
-    name="dance",
-    target="unirl.sde.kernels.DanceSDEStrategy",
-)
 @dataclass
 class DanceSpec:
     """Empty Spec: DanceSDEStrategy has no per-strategy config fields."""
 
 
-@register_config(
-    group="sampling/sde_strategy",
-    name="dpm2",
-    target="unirl.sde.kernels.DPM2Strategy",
-)
 @dataclass
 class DPM2Spec:
     """Empty Spec: DPM2Strategy has no per-strategy config fields."""

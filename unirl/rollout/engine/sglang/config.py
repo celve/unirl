@@ -1,9 +1,8 @@
 """SGLang rollout-engine configuration (new ``BaseRolloutEngine`` protocol).
 
-Registered under ``rollout/engine: sglang`` so it coexists with the legacy
-``rollout/engine: sglang`` preset at ``unirl/samplers/sglang/config.py``.
-Materialized via ``build(cfg.rollout.engine, device=..., strategy=...,
-rank=..., model_config=...)`` from the rollout actor.
+Consumed by ``SGLangRolloutEngine``; the rollout actor constructs the engine
+with ``config=<this>`` + ``device`` / ``strategy`` / ``rank`` / ``model_config``
+(as a composed-engine child, via :meth:`SGLangEngineConfig.make_engine`).
 
 Differences vs the legacy config:
 
@@ -32,7 +31,6 @@ from typing import Any, Dict, Optional, Tuple
 
 from omegaconf import SI
 
-from unirl.config.registration import register_config
 from unirl.config.require import require
 from unirl.rollout.engine.base import BaseEngineConfig
 
@@ -47,14 +45,14 @@ _VALID_MODEL_FAMILIES = ("sd3", "flux", "flux2_klein", "mochi", "hunyuan_video")
 _VALID_LOGPROB_SOURCES = ("replay", "native")
 
 
-@register_config(
-    group="rollout/engine",
-    name="sglang",
-    target="unirl.rollout.engine.sglang.engine.SGLangRolloutEngine",
-)
 @dataclass
 class SGLangEngineConfig(BaseEngineConfig):
     """Configuration for the SGLang rollout-side inference engine."""
+
+    def make_engine(self, **deps: Any):
+        from unirl.rollout.engine.sglang.engine import SGLangRolloutEngine
+
+        return SGLangRolloutEngine(config=self, **deps)
 
     # --- Sampling (live interpolation back to top-level cfg.sampling) ---
     # Snapshot of the top-level ``cfg.sampling`` interpolation. Keep this as

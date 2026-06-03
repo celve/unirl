@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List
 
-from unirl.config.registration import register_config
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.types.reward import RewardRequest
 
@@ -28,10 +28,6 @@ class AestheticRewardScorer(LocalRewardBackend):
         raise NotImplementedError("Aesthetic reward computation not yet implemented")
 
 
-@register_config(
-    group="reward/component",
-    name="aesthetic",
-    target="unirl.reward.local.aesthetic.AestheticRewardScorer",
-)
+@dataclass
 class AestheticSpec(BaseRewardComponentSpec):
     """Placeholder Spec for the aesthetic reward component (unimplemented)."""

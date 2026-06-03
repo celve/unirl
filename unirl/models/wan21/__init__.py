@@ -12,9 +12,8 @@ patch embeddings, forwarded as ``encoder_hidden_states_image``). Both
 fire only when the I2V checkpoint declares ``transformer.config.image_dim
 > 0``; T2V bundles skip them and the pipeline is unchanged.
 
-Imports from this package have side effects (Hydra ``register_config``
-calls in ``config.py``), so importing ``unirl.models.wan21``
-is enough to make ``model/wan21`` resolvable in the ConfigStore.
+Importing this package re-exports its bundle / pipeline / config classes;
+recipes wire them by ``_target_`` dotpath.
 """
 
 from unirl.models.wan21.bundle import WAN21Bundle

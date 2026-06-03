@@ -3,16 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
-from unirl.config.registration import register_config
 from unirl.config.validation import validate_precision_type
 
 
-@register_config(
-    group="model",
-    name="qwen_vl",
-    target="unirl.models.qwen_vl.QwenVLPipeline.from_config",
-    mutable=True,
-)
 @dataclass
 class QwenVLPipelineConfig:
     pretrained_model_ckpt_path: str

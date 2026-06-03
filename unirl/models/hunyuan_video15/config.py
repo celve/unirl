@@ -31,16 +31,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
-from unirl.config.registration import register_config
 from unirl.config.validation import validate_precision_type
 
 
-@register_config(
-    group="model",
-    name="hunyuan_video15",
-    target="unirl.models.hunyuan_video15.HunyuanVideo15Pipeline.from_config",
-    mutable=True,
-)
 @dataclass
 class HunyuanVideo15PipelineConfig:
     """Construction args for ``HunyuanVideo15Pipeline.from_config``.

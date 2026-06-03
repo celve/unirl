@@ -1,6 +1,6 @@
 ---
 name: add-model-bundle
-description: Add or update UniRL model package support. Use when adding diffusion or autoregressive model pipelines, Hydra register_config entries, Bundle/Pipeline/Stage/Conditions implementations, LoRA targets, FSDP wrapping hints, RolloutReq/RolloutResp plumbing, or multimodal text/image/video conditioning.
+description: Add or update UniRL model package support. Use when adding diffusion or autoregressive model pipelines, model config dataclasses, Bundle/Pipeline/Stage/Conditions implementations, LoRA targets, FSDP wrapping hints, RolloutReq/RolloutResp plumbing, or multimodal text/image/video conditioning.
 ---
 
 # Add Model Bundle
@@ -27,7 +27,7 @@ The current architecture is a typed pipeline:
 ## Implementation Checklist
 
 1. Create `unirl/models/<model_name>/` rather than a single file. Typical files are `__init__.py`, `config.py`, `bundle.py`, `pipeline.py`, `conditions.py`, `diffusion.py` or `ar.py`, plus `text_embed.py`, `vae.py`, and vision helpers as needed.
-2. In `config.py`, define `<Model>PipelineConfig` and decorate it with `@register_config(group="model", name="<key>", target="unirl.models.<model_name>.<Model>Pipeline.from_config", mutable=True)`. Keep the key lowercase and version-pinned, such as `wan21`, `qwen3_v2`, or `hunyuan_image3`.
+2. In `config.py`, define `<Model>PipelineConfig` as a plain `@dataclass`. Recipes reference it by `_target_: unirl.models.<model_name>.<Model>PipelineConfig` (nested under the bundle/pipeline `config:` block) — no registration.
 3. Include config fields that match the package's real needs: checkpoint paths, `model_precision`, auxiliary dtype fields, runtime `device`, `autocast_precision`, `trajectory_precision`, `logprob_precision`, schedule knobs such as `shift` for FlowMatch diffusion, `weight_sync_param_name_prefix`, `use_lora`, and `lora_target_modules`.
 4. In `bundle.py`, implement `<Model>Bundle` as a plain class with `from_config(config)`. Load transformer, VAE, text encoders, vision encoders, tokenizers, processors, and schedulers as needed. Use `parse_torch_dtype(..., field_name=...)` for dtype fields, place the trainable module on the requested device and dtype, and freeze auxiliary modules with `requires_grad_(False)`.
 5. In `conditions.py`, implement `<Model>Conditions(Batch)` with typed condition slots and `from_dict(d)` / `to_dict()`. Validate required slots, reject wrong types with actionable errors, and omit `None` optional slots from the outgoing dict.
@@ -38,15 +38,15 @@ The current architecture is a typed pipeline:
 10. In `vae.py` or equivalent, implement `DecodeStage[LatentSegment, Images | Videos]` and any required `EncodeStage[Images | Videos, ImageLatentCondition]`. Apply the model's VAE scale, shift, dtype, layout, frame, and clamp conventions.
 11. In `pipeline.py`, implement `<Model>Pipeline(Pipeline)` with `from_config(...)` and `generate(req)`. Validate required primitives and sampling params, require `req.sigmas` for diffusion pipelines, call stages in order, and return `RolloutResp(tracks={...})` with `RolloutTrack(sample_ids, parent_ids, conditions, segment, decoded)`.
 12. Add `latent_shape(cls, *, model_config, sampling_spec)` when the driver should precompute `request_conditions["initial_latents"]` for deterministic group noise or resume behavior.
-13. Update the package `__init__.py` to import and export public symbols from `config.py`, `bundle.py`, `pipeline.py`, and condition classes so importing `unirl.models.<model_name>` fires config registration side effects.
+13. Update the package `__init__.py` to import and export public symbols from `config.py`, `bundle.py`, `pipeline.py`, and condition classes so importing `unirl.models.<model_name>` re-exports them.
 14. Add at least one recipe YAML under `recipes/<bucket>/` (the v2 config dir, bucketed by trainer) and document external checkpoint requirements there or in launcher environment docs.
 
-## Registration Touchpoints
+## Wiring Touchpoints
 
-Built-in model packages register through Hydra config only:
+Model packages are wired into recipes by `_target_` dotpath (no ConfigStore):
 
-- Put `@register_config(group="model", name="<key>", target="unirl.models.<model_name>.<Model>Pipeline.from_config", mutable=True)` on `<Model>PipelineConfig`.
-- Ensure `unirl/models/<model_name>/__init__.py` imports `config.py` or the config class so the decorator runs when the package is imported.
+- Define `<Model>PipelineConfig` as a plain `@dataclass` in `config.py`.
+- Recipes set `bundle._target_: ...<Model>Bundle.from_config` with a nested `config._target_: ...<Model>PipelineConfig`; the worker walker constructs them.
 - Add new shared condition types under `unirl/types/conditions/` only when existing slots cannot express the semantics; export them from `unirl/types/conditions/__init__.py`.
 - Add or update rollout-engine model-family enums only when the model is served through an engine that explicitly enumerates families, such as SGLang or vLLM-Omni configs.
 
@@ -126,9 +126,8 @@ Adjust the command to real files before running. If the model is AR-only or pipe
 
 ## Review Before Finishing
 
-- Hydra `name=` key is lowercase, stable, and version-pinned when needed.
-- `@register_config(...)` is on `<Model>PipelineConfig`, and `target` points to a `from_config` classmethod.
-- The package `__init__.py` imports the config class so registration happens on import.
+- `<Model>PipelineConfig` is a plain `@dataclass`; recipes reference it (and `<Model>Pipeline.from_config`) by `_target_`.
+- The package `__init__.py` re-exports the config / pipeline classes.
 - `Pipeline.generate(req)` validates required primitives, stage params, negative prompt batch sizes, and `req.sigmas` for diffusion.
 - `RolloutResp.tracks` use the intended output key, such as `"image"`, `"video"`, or `"text"`, and include `conditions`, `segment`, and decoded primitives when available.
 - `<Model>Conditions.from_dict` and `to_dict` are symmetric and fail loudly for wrong or missing required slots.

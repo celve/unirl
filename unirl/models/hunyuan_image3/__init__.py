@@ -9,10 +9,8 @@ PR 2 (current) ships the bundle skeleton + t2i diffusion path. PR 3 lands
 the AR stage (t2t / i2t). PR 4 wires the full t2i with AR multi-pass.
 PR 5 adds it2i.
 
-Imports from this package have side effects (Hydra ``register_config``
-calls in ``config.py``), so importing
-``unirl.models.hunyuan_image3`` is enough to make
-``model/hunyuan_image3`` resolvable in the ConfigStore.
+Importing this package re-exports its bundle / pipeline / config classes;
+recipes wire them by ``_target_`` dotpath.
 """
 
 from unirl.models.hunyuan_image3.ar import (

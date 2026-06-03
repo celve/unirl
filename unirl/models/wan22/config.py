@@ -28,7 +28,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from unirl.config.registration import register_config
 from unirl.models.wan21.config import WAN21PipelineConfig
 
 # WAN 2.2 reference default: 0.875. Matches
@@ -36,12 +35,6 @@ from unirl.models.wan21.config import WAN21PipelineConfig
 DEFAULT_BOUNDARY_RATIO: float = 0.875
 
 
-@register_config(
-    group="model",
-    name="wan22",
-    target="unirl.models.wan22.WAN22Pipeline.from_config",
-    mutable=True,
-)
 @dataclass
 class WAN22PipelineConfig(WAN21PipelineConfig):
     """Construction args for ``WAN22Pipeline.from_config``.

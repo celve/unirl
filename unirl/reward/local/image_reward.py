@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List
 
 import torch
 from PIL import Image
 
-from unirl.config.registration import register_config
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.reward.local.device import resolve_device
 from unirl.types.reward import RewardRequest
@@ -65,11 +65,7 @@ class ImageRewardScorer(LocalRewardBackend):
         return all_rewards
 
 
-@register_config(
-    group="reward/component",
-    name="image_reward",
-    target="unirl.reward.local.image_reward.ImageRewardScorer",
-)
+@dataclass
 class ImageRewardSpec(BaseRewardComponentSpec):
     """Typed config for the ImageReward (BLIP-based, ~300M) reward component.
 

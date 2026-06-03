@@ -9,9 +9,9 @@ ground-truth answer (commas stripped). Used by the AR DRPO Qwen3 recipe.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import List
 
-from unirl.config.registration import register_config
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.types.reward import RewardRequest
 
@@ -69,10 +69,6 @@ class GSM8KExactMatchRewardScorer(LocalRewardBackend):
         return rewards
 
 
-@register_config(
-    group="reward/component",
-    name="gsm8k_exact_match",
-    target="unirl.reward.local.gsm8k_exact_match.GSM8KExactMatchRewardScorer",
-)
+@dataclass
 class GSM8KExactMatchSpec(BaseRewardComponentSpec):
     """Config for the GSM8K numeric exact-match scorer."""

@@ -166,9 +166,8 @@ class AlgorithmStepResult:
 class BaseAlgorithmConfig(ABC):
     """Marker base for all algorithm config dataclasses.
 
-    Used as the type annotation for polymorphic algorithm config fields so that
-    static type checkers see a meaningful type. At runtime, the annotation
-    is erased to ``Any`` by ``erase_polymorphic_annotations``.
+    Used as the type annotation / base class for the per-stage algorithm
+    config dataclasses.
     """
 
 

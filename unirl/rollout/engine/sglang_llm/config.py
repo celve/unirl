@@ -1,9 +1,8 @@
 """SGLang LLM rollout-engine configuration (new ``BaseRolloutEngine`` protocol).
 
-Registered under ``rollout/engine: sglang_llm`` with ``_target_`` pointing at
-:class:`SGLangLLMRolloutEngine`. Materialized via
-``build(cfg.rollout.engine, device=..., strategy=..., rank=..., model_config=...)``
-from the rollout actor.
+Consumed by :class:`SGLangLLMRolloutEngine`; the rollout actor (or, as a
+composed-engine child, :meth:`SGLangLLMEngineConfig.make_engine`) constructs it
+with ``config=<this>`` + ``device`` / ``strategy`` / ``rank`` / ``model_config``.
 
 Unlike :class:`unirl.rollout.engine.sglang.config.SGLangEngineConfig`
 (which delegates the model path to the per-actor ``model_config``), this
@@ -16,19 +15,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from unirl.config.registration import register_config
 from unirl.config.require import require
 from unirl.rollout.engine.base import BaseEngineConfig
 
 
-@register_config(
-    group="rollout/engine",
-    name="sglang_llm",
-    target="unirl.rollout.engine.sglang_llm.engine.SGLangLLMRolloutEngine",
-)
 @dataclass
 class SGLangLLMEngineConfig(BaseEngineConfig):
     """Configuration for the SGLang LLM (SRT) rollout engine."""
+
+    def make_engine(self, **deps: Any):
+        from unirl.rollout.engine.sglang_llm.engine import SGLangLLMRolloutEngine
+
+        return SGLangLLMRolloutEngine(config=self, **deps)
 
     # --- Model ---
     pretrained_model_ckpt_path: str = ""

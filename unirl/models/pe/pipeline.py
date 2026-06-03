@@ -15,20 +15,6 @@ lineage, and response merging. The child pipelines are 1:1 — PE
 replicates inputs (prompt ×N, each rewrite ×M) so the branch factors
 become lineage (``parent_ids`` / ``parent_track``) for GRPO grouping.
 
-Invocation pattern
-------------------
-``PEPipeline.from_config(cfg: DictConfig)`` takes the raw, un-materialized
-``cfg.model`` DictConfig. This is a deliberate deviation from the
-``SD3Pipeline.from_config(SD3PipelineConfig)`` style: PE needs DictConfig
-access for the nested children so it can dispatch each child's own
-``_target_`` via :func:`unirl.config.instantiate.build`, but
-``build()`` materializes its input before dispatch — collapsing
-``Any``-typed nested fields to plain Python dicts and losing the
-DictConfig form.
-
-Concretely: callers should invoke ``PEPipeline.from_config(cfg.model)``
-directly (NOT ``build(cfg.model)``).
-
 σ schedule contract
 -------------------
 Forwarded verbatim to the diffusion child. The LLM child never reads
@@ -41,9 +27,6 @@ diffusion sub-request unchanged.
 
 from __future__ import annotations
 
-from omegaconf import DictConfig
-
-from unirl.config.instantiate import build
 from unirl.models.types.pipeline import Pipeline
 from unirl.types.primitives import Texts
 from unirl.types.rollout_req import RolloutReq
@@ -138,26 +121,6 @@ class PEPipeline(Pipeline):
         return FlowMatchSchedulePolicy.from_pretrained(
             getattr(diff.bundle, "pretrained_path", None),
             shift=float(diff.shift),
-        )
-
-    @classmethod
-    def from_config(cls, config: DictConfig) -> "PEPipeline":
-        """Build PEPipeline from the raw ``cfg.model`` DictConfig.
-
-        ``config.diffusion`` and ``config.llm`` each carry their own
-        ``_target_`` pointing at a registered child Pipeline's
-        ``from_config`` classmethod; we dispatch each via
-        :func:`unirl.config.instantiate.build`.
-
-        Note: this method is NOT invocable via ``build(cfg.model)`` —
-        ``build`` materializes the cfg before dispatch, which collapses
-        ``Any``-typed nested children to plain Python dicts and loses the
-        DictConfig form required to call ``build()`` recursively on
-        each child. Call this directly.
-        """
-        return cls(
-            diffusion_pipeline=build(config.diffusion),
-            llm_pipeline=build(config.llm),
         )
 
     def generate(self, req: RolloutReq) -> RolloutResp:

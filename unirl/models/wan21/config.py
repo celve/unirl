@@ -18,16 +18,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from unirl.config.registration import register_config
 from unirl.config.validation import validate_precision_type
 
 
-@register_config(
-    group="model",
-    name="wan21",
-    target="unirl.models.wan21.WAN21Pipeline.from_config",
-    mutable=True,
-)
 @dataclass
 class WAN21PipelineConfig:
     """Construction args for ``WAN21Pipeline.from_config``.

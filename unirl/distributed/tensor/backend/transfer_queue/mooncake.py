@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from unirl.config.registration import register_config
 from unirl.config.require import require
 from unirl.distributed.tensor.backend.transfer_queue.base import Backend
 
@@ -27,12 +26,6 @@ class MooncakeZeroCopyConfig:
     manager_merge_to_tensordict: bool = False
 
 
-@register_config(
-    group="transfer_queue",
-    name="mooncake",
-    target="unirl.distributed.tensor.backend.transfer_queue.mooncake.MooncakeBackend",
-    expand=True,
-)
 @dataclass
 class MooncakeBackendConfig:
     """Mooncake storage backend configuration (with zero-copy embedded)."""

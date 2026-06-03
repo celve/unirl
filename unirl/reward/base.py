@@ -64,14 +64,12 @@ class RewardBackend(ABC):
 class BaseRewardComponentSpec(ABC):
     """Marker base for every reward backend spec.
 
-    Each backend registers a concrete ``<Name>Spec`` dataclass via
-    ``@register_config(group="reward/component", name="<short>", target=...)``
-    and inherits from this base. Kept as a plain ``ABC`` (not a ``@dataclass``)
-    so that ``register_config``'s auto-promotion processes each subclass's own
-    field annotations without ``is_dataclass(parent)`` short-circuiting.
+    Each backend defines a concrete ``<Name>Spec`` ``@dataclass`` inheriting
+    from this base. Kept as a plain ``ABC`` (not a ``@dataclass``) so each
+    subclass owns its own field set.
 
-    The Spec is pure data; ``target`` points at the backend constructor, which
-    :func:`unirl.config.instantiate.build` invokes per component.
+    The Spec is pure data; the recipe nests it under the backend's ``config:``
+    block and the backend's ``__init__`` takes ``config=<Spec>``.
     """
 
 

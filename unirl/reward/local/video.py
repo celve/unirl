@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import dataclasses
 import time
+from dataclasses import dataclass
 from typing import List
 
 import torch
 from PIL import Image
 
-from unirl.config.registration import register_config
 from unirl.reward.base import BaseRewardComponentSpec, RewardBackend
 from unirl.types.reward import RewardRequest, RewardResponse
 
@@ -149,11 +149,7 @@ class VideoRewardScorer(RewardBackend):
         self.frame_scorer.dispose()
 
 
-@register_config(
-    group="reward/component",
-    name="video",
-    target="unirl.reward.local.video.VideoRewardScorer",
-)
+@dataclass
 class VideoSpec(BaseRewardComponentSpec):
     """Typed config for the Video reward component.
 

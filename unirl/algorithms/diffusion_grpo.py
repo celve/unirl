@@ -16,7 +16,6 @@ from typing import Any, Dict, List, Mapping, Optional, Type
 
 import torch
 
-from unirl.config.registration import register_config
 from unirl.types.conditions import Condition
 from unirl.types.segments.latent import LatentSegment
 
@@ -31,11 +30,6 @@ from .base import (
 )
 
 
-@register_config(
-    group="algorithm",
-    name="diffusion_grpo",
-    target="unirl.algorithms.diffusion_grpo.DiffusionGRPO",
-)
 @dataclass
 class DiffusionGRPOConfig(BaseAlgorithmConfig):
     stage_attr: str = "diffusion"

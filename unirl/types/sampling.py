@@ -6,8 +6,6 @@ from abc import ABC
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from unirl.config.polymorphic import polymorphic_field
-from unirl.config.registration import register_config
 from unirl.config.require import require
 
 if TYPE_CHECKING:
@@ -18,9 +16,8 @@ if TYPE_CHECKING:
 class BaseSamplingParams(ABC):
     """Marker base for all sampling config dataclasses.
 
-    Used as the type annotation for polymorphic sampling config fields so that
-    static type checkers see a meaningful type. At runtime, the annotation
-    is erased to ``Any`` by ``erase_polymorphic_annotations``.
+    Used as the type annotation / base class for the per-modality sampling
+    config dataclasses.
 
     Holds the universal ``samples_per_prompt`` field — the per-prompt
     rollout fanout. For atomic params (Diffusion, AR) this is the samples
@@ -55,7 +52,6 @@ def get_ar_params(sampling: Any) -> Optional["ARSamplingParams"]:
     return None
 
 
-@register_config(group="sampling", name="default")
 @dataclass
 class DiffusionSamplingParams(BaseSamplingParams):
     """Canonical diffusion sampling params — single source of truth.
@@ -76,7 +72,7 @@ class DiffusionSamplingParams(BaseSamplingParams):
 
     # --- SDE ---
     eta: float = 1.0
-    sde_strategy: Any = None
+    sde_strategy: Any = None  # StepStrategy
     scheduler: Any = None  # TimestepScheduler
     sde_indices: Optional[List[int]] = None
 
@@ -132,7 +128,6 @@ class DiffusionSamplingParams(BaseSamplingParams):
         return list(range(int(self.num_inference_steps)))
 
 
-@register_config(group="sampling", name="ar")
 @dataclass
 class ARSamplingParams(BaseSamplingParams):
     """AR (autoregressive) sampling parameters for LLM-based PE generation."""
@@ -145,7 +140,6 @@ class ARSamplingParams(BaseSamplingParams):
     stop_token_id: int | None = None
 
 
-@register_config(group="sampling", name="composed")
 @dataclass(kw_only=True)
 class ComposedSamplingParams(BaseSamplingParams):
     """Composed sampling config with per-modality typed sampling params.
@@ -156,8 +150,8 @@ class ComposedSamplingParams(BaseSamplingParams):
     "non-default after default" would fire.
     """
 
-    diffusion: BaseSamplingParams = polymorphic_field(group="sampling")
-    ar: BaseSamplingParams = polymorphic_field(group="sampling")
+    diffusion: Any  # DiffusionSamplingParams
+    ar: Any  # ARSamplingParams
 
     def __post_init__(self) -> None:
         # Per-prompt fanout for composed = product across modalities.

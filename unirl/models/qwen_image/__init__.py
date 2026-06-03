@@ -4,9 +4,8 @@ Implements the typed ``Bundle`` / ``Pipeline`` / ``EmbedStage`` /
 ``DiffusionStage`` / ``DecodeStage`` protocols. Sibling of
 :mod:`unirl.models.sd3` and :mod:`unirl.models.wan21`.
 
-Imports from this package have side effects (Hydra ``register_config``
-calls in ``config.py``), so importing ``unirl.models.qwen_image``
-is enough to make ``model/qwen_image`` resolvable in the ConfigStore.
+Importing this package re-exports its bundle / pipeline / config classes;
+recipes wire them by ``_target_`` dotpath.
 """
 
 from unirl.models.qwen_image.bundle import QwenImageBundle

@@ -7,12 +7,9 @@ from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Type, Union
 
 import numpy as np
 
-from unirl.config.registration import register_config
-
 Strategy = Literal["all", "progressive", "random", "decay", "exp_decay"]
 
 
-@register_config(group="algorithm/scheduler", name="default")
 @dataclass
 class SchedulerConfig:
     """Typed view of the indices-scheduler options consumed by ``create_indices_scheduler``.

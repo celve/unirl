@@ -45,7 +45,6 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple, Type
 
 import torch
 
-from unirl.config.registration import register_config
 from unirl.types.conditions import Condition
 from unirl.types.segments.latent import LatentSegment
 from unirl.utils.misc import aggregate_numeric_metrics
@@ -54,12 +53,6 @@ from unirl.utils.scheduler_utils import normalize_timestep_fraction
 from .base import AlgorithmStepResult, BaseAlgorithmConfig, StageAlgorithm
 
 
-@register_config(
-    group="training/algorithm",
-    name="diffusion_nft",
-    target="unirl.algorithms.nft.DiffusionNFT",
-    mutable=True,
-)
 @dataclass
 class DiffusionNFTConfig(BaseAlgorithmConfig):
     """Per-call NFT loss hyperparameters.
@@ -94,15 +87,6 @@ class DiffusionNFTConfig(BaseAlgorithmConfig):
     # KL penalty against the un-adapted base model. Not implemented in
     # this revision; ``> 0`` raises so recipes can't silently drop the term.
     kl_coef: float = 0.0
-
-
-register_config(
-    DiffusionNFTConfig,
-    group="algorithm",
-    name="diffusion_nft",
-    target="unirl.algorithms.nft.DiffusionNFT",
-    mutable=True,
-)
 
 
 class DiffusionNFT(StageAlgorithm):

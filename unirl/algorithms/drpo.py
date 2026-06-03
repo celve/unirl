@@ -29,7 +29,6 @@ from typing import Any, Dict, Mapping, Optional, Tuple, Type
 
 import torch
 
-from unirl.config.registration import register_config
 from unirl.types.conditions import Condition
 from unirl.types.segments.text import TextSegment
 
@@ -47,11 +46,6 @@ from .base import (
 # ---------------------------------------------------------------------------
 
 
-@register_config(
-    group="algorithm",
-    name="ar_drpo",
-    target="unirl.algorithms.drpo.ARDRPO",
-)
 @dataclass
 class ARDRPOConfig(BaseAlgorithmConfig):
     """Config for :class:`ARDRPO`.

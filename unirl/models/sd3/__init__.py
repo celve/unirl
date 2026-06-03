@@ -6,9 +6,8 @@ typed ``Bundle`` / ``Pipeline`` / ``EmbedStage`` / ``DiffusionStage`` /
 this package proves the new contracts end-to-end before the algorithm /
 training-backend migration lands.
 
-Imports from this package have side effects (Hydra ``register_config`` calls
-in ``config.py``), so importing ``unirl.models.sd3`` is enough to
-make ``model/sd3`` resolvable in the ConfigStore.
+Importing this package re-exports its bundle / pipeline / config classes;
+recipes wire them by ``_target_`` dotpath.
 """
 
 from unirl.models.sd3.bundle import SD3Bundle

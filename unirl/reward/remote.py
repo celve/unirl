@@ -26,13 +26,13 @@ import io
 import logging
 import math
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import requests as http_requests
 import torch
 from PIL import Image
 
-from unirl.config.registration import register_config
 from unirl.config.require import require
 from unirl.reward.base import BaseRewardComponentSpec, RewardBackend
 from unirl.types.reward import RewardRequest, RewardResponse
@@ -144,9 +144,8 @@ class RemoteRewardBackend(RewardBackend):
     because the RewardService server multiplexes multiple reward models
     via the ``required_rewards`` field per request.
 
-    Constructed via :class:`RemoteRewardSpec` through the polymorphic
-    ``reward/component`` registry; ``base_device`` is accepted for interface
-    uniformity with :func:`unirl.config.instantiate.build` but ignored
+    Constructed by ``_target_`` with a :class:`RemoteRewardSpec` config;
+    ``base_device`` is accepted for backend-interface uniformity but ignored
     (the backend is HTTP-only).
     """
 
@@ -584,11 +583,7 @@ class RemoteRewardBackend(RewardBackend):
         return float(max(values))
 
 
-@register_config(
-    group="reward/component",
-    name="reward_service",
-    target="unirl.reward.remote.RemoteRewardBackend",
-)
+@dataclass
 class RemoteRewardSpec(BaseRewardComponentSpec):
     """Typed config for the remote RewardService backend.
 

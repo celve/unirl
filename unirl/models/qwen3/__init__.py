@@ -5,9 +5,8 @@ generic HF causal LM adapter that ``unirl-pe`` tested with Qwen3)
 into the typed ``Bundle`` / ``Pipeline`` / ``EmbedStage`` / ``ARStage``
 protocols. Sibling of :mod:`unirl.models.qwen_image`.
 
-Imports from this package have side effects (Hydra ``register_config``
-calls in ``config.py``), so importing ``unirl.models.qwen3`` is
-enough to make ``model/qwen3_v2`` resolvable in the ConfigStore.
+Importing this package re-exports its bundle / pipeline / config classes;
+recipes wire them by ``_target_`` dotpath.
 """
 
 from unirl.models.qwen3.ar import (

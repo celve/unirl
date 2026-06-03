@@ -298,8 +298,8 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
 
         self.cfg = config
         # `device`, `strategy`, `rank`, `model_config` are accepted to match
-        # the actor's `build(cfg.rollout.engine, device=..., strategy=...,
-        # rank=..., model_config=...)` call. The engine carries them as
+        # the engine construction contract `Engine(config=..., device=...,
+        # strategy=..., rank=..., model_config=...)`. The engine carries them as
         # attributes for subclass / extension use; the synchronous Omni
         # entrypoint does not consume them directly.
         self.device = device

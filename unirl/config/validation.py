@@ -1,4 +1,4 @@
-"""Shared validation helpers for registered component configs.
+"""Shared validation helpers for component configs.
 
 Two flavors of validator live here:
 
@@ -7,9 +7,8 @@ Two flavors of validator live here:
   kind of field validates it the same way.
 - **Cross-component validators** (``validate_weight_sync_contract``,
   ``validate_offload_contract``, ...) take the full ``cfg`` and enforce
-  rules that span multiple resolved sections. They are invoked from
-  ``train.py`` after ``validate(cfg)`` has materialized every registered
-  leaf.
+  rules that span multiple resolved sections. They run on the driver against
+  the composed ``cfg`` before Ray actors are created.
 """
 
 from __future__ import annotations

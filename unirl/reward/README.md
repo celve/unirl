@@ -38,7 +38,8 @@ For the remote backend, point `backend._target_` at
 ## Adding a Local Scorer
 
 ```python
-from unirl.config.registration import register_config
+from dataclasses import dataclass
+
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.reward.local.base import LocalRewardBackend
 from unirl.types.reward import RewardRequest
@@ -57,14 +58,13 @@ class MyRewardScorer(LocalRewardBackend):
         ...
 
 
-@register_config(
-    group="reward/component",
-    name="my_reward",
-    target="unirl.reward.local.my_reward.MyRewardScorer",
-)
+@dataclass
 class MyRewardSpec(BaseRewardComponentSpec):
     batch_size: int = 8
 ```
+
+Wire it in a recipe by `_target_` — `backend._target_` at the scorer, with a
+nested `config:` block whose `_target_` is `...MyRewardSpec`.
 
 `LocalRewardBackend` provides device resolution, eager load, `offload()`, and
 `onload()`. Use `remote.py` when scoring happens out of process.

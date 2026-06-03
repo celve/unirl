@@ -52,7 +52,7 @@ go under `unirl/types` or `unirl/models/types`.
 ## Adding a Model
 
 1. Add a package under `unirl/models/<model_name>/`.
-2. Register its config with `@register_config(group="model", name="<model_name>", target=...)`.
+2. Define its config as a plain `@dataclass` (recipes reference it by `_target_`).
 3. Implement a bundle that exposes the stages needed by training and rollout.
 4. Add condition, text / vision, diffusion and/or AR, and VAE helpers as needed.
 5. Add at least one recipe under `recipes/<bucket>/`.

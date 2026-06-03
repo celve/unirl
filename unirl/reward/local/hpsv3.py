@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List
 
 import torch
 from PIL import Image
 
-from unirl.config.registration import register_config
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.reward.local.device import resolve_device
 from unirl.types.reward import RewardRequest
@@ -73,11 +73,7 @@ class HPSv3RewardScorer(LocalRewardBackend):
         return all_rewards
 
 
-@register_config(
-    group="reward/component",
-    name="hpsv3",
-    target="unirl.reward.local.hpsv3.HPSv3RewardScorer",
-)
+@dataclass
 class HPSv3Spec(BaseRewardComponentSpec):
     """Typed config for the HPSv3 reward component.
 

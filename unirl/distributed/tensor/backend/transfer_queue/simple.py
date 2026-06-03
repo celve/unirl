@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict
 
-from unirl.config.registration import register_config
 from unirl.config.require import require
 from unirl.distributed.tensor.backend.transfer_queue.base import Backend
 
@@ -13,12 +12,6 @@ if TYPE_CHECKING:
     from ray.actor import ActorHandle
 
 
-@register_config(
-    group="transfer_queue",
-    name="simple",
-    target="unirl.distributed.tensor.backend.transfer_queue.simple.SimpleBackend",
-    expand=True,
-)
 @dataclass
 class SimpleBackendConfig:
     """In-memory async storage backend configuration.

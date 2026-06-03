@@ -1,63 +1,49 @@
 # Config Package
 
-`unirl.config` owns the typed Hydra surface. Config dataclasses are
-registered near the code that consumes them, then imported by
-`register_all_configs()` before Hydra composes the chosen `recipes/<bucket>/<recipe>.yaml`.
+`unirl.config` holds small helpers for the flat-recipe config flow. Config
+classes are plain `@dataclass`es defined next to the code that consumes them;
+recipes wire them by their `_target_` dotpath (no ConfigStore).
 
 ## Main APIs
 
 | API | Purpose |
 |---|---|
-| `register_config` | Register a dataclass schema or component target in Hydra ConfigStore |
-| `register_preset` | Register a preconfigured dataclass instance |
-| `validate` | Materialize structured config and fail fast on schema errors |
-| `build` | Instantiate a registered `_target_` component |
-| `freeze` | Seal composed config nodes except those explicitly marked mutable |
-| `require` | Small helper for readable validation errors |
+| `require` | One-line precondition helper for `__post_init__` |
+| `validate_*` / `PrecisionName` | Cross-component validators + precision helpers (`validation.py`) |
 
-## Registration Pattern
+## Config Pattern
 
-Use `@register_config` for typed component configs:
+Define a config as a plain dataclass and point the recipe's `_target_` at the
+component; the component takes `config=<ConfigCls>`:
 
 ```python
-from unirl.config.registration import register_config
+from dataclasses import dataclass
 
-@register_config(
-    group="rollout/engine",
-    name="my_engine",
-    target="my_pkg.MyRolloutEngine",
-)
+@dataclass
 class MyEngineConfig:
     batch_size: int = 8
-```
 
-The `target` class should follow the local constructor convention:
-
-```python
 class MyRolloutEngine:
     def __init__(self, *, config: MyEngineConfig, **deps) -> None:
         ...
 ```
 
-Set `expand=True` only for third-party classes that expect flat keyword
-arguments instead of `config=<ConfigCls>`.
+Recipe:
+
+```yaml
+rollout:
+  _target_: my_pkg.MyRolloutEngine
+  config:
+    _target_: my_pkg.MyEngineConfig
+    batch_size: 8
+```
+
+The worker walker (`distributed/group/worker.py::_resolve_init_kwargs`)
+constructs nested `_target_` blocks by `get_method(_target_)(**fields)`;
+`hydra.utils.instantiate` covers the driver-side cases.
 
 ## Validation Layers
 
-Validation is split into two layers:
-
 - per-dataclass `__post_init__` checks for local field invariants;
-- cross-component validators in `validation.py` for contracts spanning
-  rollout engine, sync, training geometry, LoRA, offload, and dotpaths.
-
-The per-dataclass checks run automatically when config objects are
-constructed. The cross-component validators in `validation.py` are not
-currently invoked by the training entrypoints; call the relevant
-`validate_*(cfg)` explicitly where you need them.
-
-## Mutable Config
-
-Most composed config is frozen after validation. Mark a schema
-`mutable=True` only when runtime materialization must write back into that
-node. The main example is model LoRA target materialization, where the chosen
-model bundle may fill `cfg.model.lora_target_modules` if YAML omitted it.
+- cross-component validators in `validation.py` for contracts spanning rollout
+  engine, sync, training geometry, LoRA, offload, and dotpaths.

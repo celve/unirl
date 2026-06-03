@@ -20,9 +20,9 @@ DAPO-Math DRPO recipe (long boxed-answer generations).
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import List, Optional
 
-from unirl.config.registration import register_config
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.types.reward import RewardRequest
 
@@ -151,10 +151,6 @@ class MathBoxedRewardScorer(LocalRewardBackend):
         return rewards
 
 
-@register_config(
-    group="reward/component",
-    name="math_boxed",
-    target="unirl.reward.local.math_boxed.MathBoxedRewardScorer",
-)
+@dataclass
 class MathBoxedSpec(BaseRewardComponentSpec):
     r"""Config for the ``\boxed{}`` numeric-match scorer."""

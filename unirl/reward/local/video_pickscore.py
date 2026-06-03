@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, List
 
 import torch
 
-from unirl.config.registration import register_config
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.types.reward import RewardRequest
 from unirl.utils.media import tensor_frame_to_pil
@@ -113,11 +113,7 @@ class VideoPickScoreScorer(PickScoreRewardScorer):
         return super()._compute_model_rewards(request)
 
 
-@register_config(
-    group="reward/component",
-    name="videopickscore",
-    target="unirl.reward.local.video_pickscore.VideoPickScoreScorer",
-)
+@dataclass
 class VideoPickScoreSpec(BaseRewardComponentSpec):
     """Typed config for the VideoPickScore reward component.
 

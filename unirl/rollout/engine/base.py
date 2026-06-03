@@ -12,7 +12,7 @@ built.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -25,10 +25,21 @@ from unirl.types.rollout_resp import RolloutResp
 class BaseEngineConfig(ABC):
     """Marker base for all rollout engine config dataclasses.
 
-    Used as the type annotation for polymorphic engine config fields so that
-    static type checkers see a meaningful type. At runtime, the annotation
-    is erased to ``Any`` by ``erase_polymorphic_annotations``.
+    Used as the type annotation / base class for the engine config dataclasses.
+    Each concrete engine config maps itself to its runtime engine class via
+    :meth:`make_engine`.
     """
+
+    def make_engine(self, **deps: Any) -> "BaseRolloutEngine":
+        """Construct the runtime engine declared by this config.
+
+        ``deps`` carry the runtime injections (``device``, ``strategy``,
+        ``rank``, ``model_config``); the engine ctor contract is uniformly
+        ``Engine(config=self, **deps)``. Subclasses override to import (lazily,
+        so config modules stay importable without the engine's heavy optional
+        deps) and return their engine class.
+        """
+        raise NotImplementedError(f"{type(self).__name__} must implement make_engine()")
 
 
 class BaseRolloutEngine(Remote, ABC):

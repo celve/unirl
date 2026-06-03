@@ -2,7 +2,7 @@
 
 Each backend variant registers a dataclass under Hydra group ``transfer_queue``
 whose ``_target_`` points at a ``Backend`` subclass; ``TransferQueueRuntime.init``
-calls ``build(cfg.transfer_queue)`` to instantiate it. Disabled =
+instantiates it via ``hydra.utils.instantiate(cfg.transfer_queue)``. Disabled =
 ``cfg.transfer_queue`` is absent (no defaults entry).
 """
 

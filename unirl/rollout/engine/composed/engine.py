@@ -9,10 +9,8 @@ them sequentially:
    (``parent_track="ar"`` on diffusion, ``parent_ids`` chains from
    prompt → PE → image).
 
-Children are single polymorphic fields on the config, resolved against the
-``rollout/engine`` ConfigStore group. After ``expand_polymorphic_fields``
-runs, each child's config is a typed dataclass — no runtime introspection
-needed.
+Each child config carries its own ``_target_``; ``__init__`` builds the child
+engine via ``config.<child>.make_engine(...)``.
 
 Weight sync uses prefix-based tensor routing: the training side prepends
 ``"{track_name}."`` to tensor keys; this engine demuxes by prefix and
@@ -26,7 +24,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from unirl.config.instantiate import build
 from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.rollout.engine.base import BaseRolloutEngine
@@ -97,16 +94,8 @@ class ComposedRolloutEngine(BaseRolloutEngine):
 
         deps = dict(device=device, rank=rank, model_config=model_config)
 
-        self._ar: BaseRolloutEngine = build(
-            config.ar,
-            strategy=None,
-            **deps,
-        )
-        self._diffusion: BaseRolloutEngine = build(
-            config.diffusion,
-            strategy=strategy,
-            **deps,
-        )
+        self._ar: BaseRolloutEngine = config.ar.make_engine(strategy=None, **deps)
+        self._diffusion: BaseRolloutEngine = config.diffusion.make_engine(strategy=strategy, **deps)
 
         self._child_by_name: Dict[str, BaseRolloutEngine] = {
             "ar": self._ar,

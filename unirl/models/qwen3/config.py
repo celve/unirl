@@ -19,16 +19,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
-from unirl.config.registration import register_config
 from unirl.config.validation import validate_precision_type
 
 
-@register_config(
-    group="model",
-    name="qwen3_v2",
-    target="unirl.models.qwen3.Qwen3Pipeline.from_config",
-    mutable=True,
-)
 @dataclass
 class Qwen3PipelineConfig:
     """Construction args for ``Qwen3Pipeline.from_config``.

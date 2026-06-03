@@ -14,10 +14,8 @@ Key differences vs HunyuanVideo-1.5:
 - Different VAE: spatial_compression=8, temporal_compression=4, latent_channels=16
   (vs spatial=16, temporal=4, latent_channels=32 in 1.5)
 
-Imports from this package have side effects (Hydra ``register_config``
-calls in ``config.py``), so importing
-``unirl.models.hunyuan_video`` is enough to make
-``model/hunyuan_video`` resolvable in the ConfigStore.
+Importing this package re-exports its bundle / pipeline / config classes;
+recipes wire them by ``_target_`` dotpath.
 """
 
 from unirl.models.hunyuan_video.bundle import HunyuanVideoBundle

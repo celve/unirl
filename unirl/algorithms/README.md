@@ -232,7 +232,7 @@ track name (`diffusion:` and `ar:`), each with its own `_target_`.
 ## Adding an Algorithm
 
 1. Subclass `StageAlgorithm` (`unirl/algorithms/base.py`).
-2. Define a config with `@register_config(...)` subclassing `BaseAlgorithmConfig`.
+2. Define a config `@dataclass` subclassing `BaseAlgorithmConfig` (recipes reference it by `_target_`).
 3. Implement `compute_loss_and_backward(...)` (replay the stage, compute loss, `backward()`).
 4. Override `prepare_segment(...)` only when old/reference fields need
    pre-update materialization (e.g. freezing π_old for multi-update).

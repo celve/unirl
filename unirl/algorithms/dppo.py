@@ -18,18 +18,12 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple, Type
 
 import torch
 
-from unirl.config.registration import register_config
 from unirl.types.conditions import Condition
 from unirl.types.segments.latent import LatentSegment
 
 from .base import AlgorithmStepResult, BaseAlgorithmConfig, StageAlgorithm, gather_sde_field, typed_conditions
 
 
-@register_config(
-    group="algorithm",
-    name="diffusion_dppo",
-    target="unirl.algorithms.dppo.DiffusionDPPO",
-)
 @dataclass
 class DiffusionDPPOConfig(BaseAlgorithmConfig):
     stage_attr: str = "diffusion"

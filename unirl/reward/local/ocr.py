@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import List
 
 from PIL import Image
 from tqdm import tqdm
 
-from unirl.config.registration import register_config
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.types.reward import RewardRequest
 
@@ -120,11 +120,7 @@ class OCRRewardScorer(LocalRewardBackend):
         return "".join(texts)
 
 
-@register_config(
-    group="reward/component",
-    name="ocr",
-    target="unirl.reward.local.ocr.OCRRewardScorer",
-)
+@dataclass
 class OCRSpec(BaseRewardComponentSpec):
     """Typed config for the OCR (PaddleOCR) reward component.
 
