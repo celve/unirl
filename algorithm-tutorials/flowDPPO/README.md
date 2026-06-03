@@ -26,18 +26,9 @@ is specifically the diffusion image-generation variant wired in
 [`unirl/algorithms/dppo.py`](../../unirl/algorithms/dppo.py): GRPO replay plus a
 KL-ADV mask.
 
-```mermaid
-flowchart LR
-    SDE["SDE replay → new_logp, new_means"] --> Ratio["ρ = exp(new_logp − old_logp)"]
-    SDE --> KL["kl_score = mean((new_means − old_means)² / (2 σ_t²))"]
-    KL --> M{"kl_score < threshold?"}
-    M -- yes --> Keep["keep update"]
-    M -- "no" --> Adv{"ρ·A aggressive?<br/>(ρ>1 & A>0) or (ρ<1 & A<0)"}
-    Adv -- yes --> Drop["mask → 0"]
-    Adv -- "no" --> Keep
-    Keep --> Loss["L = mean(−A·ρ · keep_mask)"]
-    Loss --> Bk["backward → optimizer step"]
-```
+![flowDPPO overview: the same SDE rollout as flowGRPO — denoise a prompt to an image, score it, and form a group-relative advantage A — then replay each SDE step for the new log-prob and the new Gaussian transition means. The trust region is a two-stage KL-ADV mask: if the per-step KL-style score on the mean shift is small the update always passes (the safe regime runs at full speed); only if the score is large AND the move is aggressive in the reward direction ((ρ>1 and A>0) or (ρ<1 and A<0)) is the update masked to 0. The loss is mean(−A·ρ·keep_mask), the policy anchor (old_logp and old_means) is frozen across the mini-batches, and the brake is applied only to the large, over-aggressive steps rather than uniformly clipping every step like GRPO.](assets/overview.png)
+
+The figure traces the cycle — **SDE rollout (same as GRPO) → group advantage `A` → replay each step for `new_logp` and `new_means` → ratio `ρ` and KL-style score → KL-masked loss → repeat** — with the **two-stage KL-ADV mask** as its centerpiece: low-divergence steps pass freely, and a step is braked only when its KL-style score is high *and* it is already over-pushing in the advantage's direction. Every stage maps to [`unirl/algorithms/dppo.py`](../../unirl/algorithms/dppo.py) and the knobs in [`config.yaml`](config.yaml); the score, mask, and loss are derived in **The math** below.
 
 > **Trajectory:** the rollout and which steps are SDE-gated are identical to
 > **[flowGRPO](../flowGRPO/)** (same `eta`, same `num_sde_steps` window — see its
@@ -119,6 +110,10 @@ checks.
 PRETRAINED_MODEL=stabilityai/stable-diffusion-3.5-medium \
 python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_flowdppo num_devices=8
 ```
+
+![flowDPPO training curve: rollout/reward_mean for SD3.5-medium rises from ~0.75 to ~0.89 over ~270 rollout steps.](assets/wandb.png)
+
+A healthy run climbs `rollout/reward_mean` quickly and then keeps inching up — here SD3.5-medium goes from ~0.75 to ~0.89 over ~270 steps.
 
 ## vs. the other tutorials
 

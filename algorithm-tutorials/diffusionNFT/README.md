@@ -34,17 +34,9 @@ Because the rollout only needs to produce a good `x_0`, NFT runs it under
 sampling, then restores the trainable adapter for the loss. That is the codebase's
 off-policy variant of the DiffusionNFT paper's forward-process idea.
 
-```mermaid
-flowchart LR
-    EMA["EMA rollout → clean latent x_0"] --> RN["re-noise:<br/>x_t = (1-t)·x_0 + t·ε"]
-    R["advantage A → r = clip(A)/(2·c) + 0.5 ∈ [0,1]"] --> Blend
-    RN --> New["trainable adapter → new_pred"]
-    RN --> Old["EMA 'old' adapter → old_pred (detached)"]
-    New --> Blend["positive / negative blend → reconstruct x̂_0"]
-    Old --> Blend
-    Blend --> Loss["r·MSE(x̂_0^+, x_0) + (1-r)·MSE(x̂_0^-, x_0)"]
-    Loss --> Bk["backward (scaled 1/K over K timesteps)"]
-```
+![DiffusionNFT overview: an off-policy rollout turns each sample's group-relative advantage into a weight r∈[0,1]; one clean latent x_0 is re-noised on the forward process and passed through a trainable "new" adapter and a frozen EMA "old" adapter that cross-merge into a positive and a negative reconstruction target, which a reward-weighted MSE is pulled toward (weight r) or away from (1−r) before minimizing over the trainable adapter; after the gradient step the old adapter EMA-tracks the new one, and a bottom inset contrasts this forward-process loss with GRPO/PPO's reverse-SDE per-step ratio.](assets/overview.png)
+
+The figure reads as three calm regions — a **flow strip** (off-policy EMA rollout → group advantage → weight `r ∈ [0,1]` → re-noise `x_0` to `x_t`), the **dual-adapter** centerpiece (the trainable `new` and frozen `old` adapters cross-merge into a **positive** target at weight `r` and a **negative** target at weight `1−r`, whose reward-weighted reconstruction MSE is **minimized over `new`**, after which `old` EMA-tracks it and the loop repeats), and a bottom **`vs GRPO / PPO`** inset contrasting NFT's forward-process loss with the reverse-SDE, per-step-ratio losses of GRPO/PPO. Each stage maps to [`unirl/algorithms/nft.py`](../../unirl/algorithms/nft.py) and the knobs in [`config.yaml`](config.yaml); the loss is derived in **The math** below.
 
 ## The math
 
@@ -137,6 +129,10 @@ python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_nft num_devices=8
 ```
 
 NFT requires the backend's EMA ("dual adapter"); the recipe wires it automatically.
+
+![diffusionNFT training curve: rollout/reward_mean for SD3.5-medium rises from ~0.76 to ~0.91 over ~270 rollout steps.](assets/wandb.png)
+
+A healthy run climbs `rollout/reward_mean` quickly and then keeps inching up — here SD3.5-medium goes from ~0.76 to ~0.91 over ~270 steps.
 
 ## vs. the other tutorials
 

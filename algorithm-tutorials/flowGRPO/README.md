@@ -29,16 +29,9 @@ probability of the SDE steps that produced good samples and pushes down the
 probability of steps that produced weak samples. PPO clipping keeps the ratio
 from moving too far in one optimizer step.
 
-```mermaid
-flowchart LR
-    xT["x_T ~ N(0, I)"] --> SDE["SDE denoise (FlowSDEStrategy)<br/>records log π(x_{t-1}|x_t) at SDE steps"]
-    SDE --> x0["x_0 (image)"]
-    x0 --> R["PickScore reward r"]
-    R --> A["A_i = (r_i - mean_g) / (std_g + ε)<br/>default per-prompt group of G"]
-    SDE -. old_logp (frozen) .-> L
-    A --> L["PPO clip loss<br/>per SDE step"]
-    L --> B["backward → optimizer step"]
-```
+![flowGRPO overview: a critic-free group-relative advantage with a PPO-clipped update. For one prompt the SDE sampler draws a group of G=16 images, PickScore rewards each, and the group is its own baseline — normalize A=(r−mean)/std over the prompt's own group (no value network), so above-mean samples get a positive advantage that pushes their SDE step's probability up and below-mean samples get a negative advantage that pushes it down. The update is kept small by a PPO clip that clamps the ratio r to [1−eps, 1+eps] with eps=1e-4, and only the early high-noise SDE steps (3 picked at random from steps 0–4) record log-probs and receive RL loss; the rest are ordinary sampling steps.](assets/overview.png)
+
+The figure puts flowGRPO's defining mechanic front and centre — the **group-relative advantage** (the "G" in GRPO): each prompt's own group of `G = samples_per_prompt` is the baseline, so no learned critic is needed. The two supporting cards below it are the **PPO clip** trust region on the ratio and the **sparse SDE gating** that decides which steps are trained. Every stage maps to [`unirl/algorithms/diffusion_grpo.py`](../../unirl/algorithms/diffusion_grpo.py) and the knobs in [`config.yaml`](config.yaml); the loss is derived in **The math** below.
 
 ## The math
 
@@ -131,6 +124,10 @@ python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside num_dev
 ```
 
 Compose-only check (no GPU work): append `--cfg job`.
+
+![flowGRPO training curve: rollout/reward_mean for SD3.5-medium rises from ~0.76 to ~0.90 over ~270 rollout steps.](assets/wandb.png)
+
+A healthy run climbs `rollout/reward_mean` quickly and then keeps inching up — here SD3.5-medium goes from ~0.76 to ~0.90 over ~270 steps.
 
 ## vs. the other tutorials
 

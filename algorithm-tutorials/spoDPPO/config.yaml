@@ -1,0 +1,77 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# spoDPPO — annotated config EXTRACT (for reading, not launching).
+#
+# Lifted from the full runnable SGLANG recipe:
+#     recipes/llm_rl/ar_spo_dppo_qwen3_4x8_sglang.yaml
+# Launch that recipe to actually train (see this folder's README.md):
+#     python -m unirl.train_vlm --config-name=ar_spo_dppo_qwen3_4x8_sglang num_devices=32
+#
+# Shown here: the algorithm + sampling blocks (what the loss does) and the
+# SGLang rollout + LoRA-sync blocks (the SGLang-specific wiring you asked about).
+# Omitted: bundle / pipeline / backend(FSDP+LoRA) / reward / stack / data_source
+# — model & infra, not algorithm. The full recipe is `# @package _global_`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── The algorithm: DPPO Binary-TV hard mask + Truncated Importance Sampling ──
+# (NOT the paper's smooth DRPO regularizer — see README "Paper vs. implementation".)
+algorithm:
+  _target_: unirl.algorithms.spo_dppo.ARSPODPPO
+  stage_attr: ar                 # resolve the AR stage from the trainer-injected pipeline (.ar)
+  variant: tv                    # tv = mask on |π−µ| (Total Variation); kl = mask on Binary-KL
+  clip_divergence: 0.2           # δ: trust-region threshold. TV ⇒ absolute prob shift; KL ⇒ nats.
+                                 #    (Asymmetric clip_divergence_low/high default to this.)
+  clip_ratio_c: 20.0             # TIS truncation bound C: truncated_ratio = clamp(r, max=C).detach()
+  sampling_temperature: 0.7      # MUST equal sampling.temperature below. Replay tempers logits
+                                 #   (log_softmax(logits / T)) so new_logp (π) and rollout logp (µ)
+                                 #   live on the same distribution ⇒ ratio_mean ≈ 1 on update 1.
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.qwen3.conditions.Qwen3ARConditions
+
+# AR sampling — no SDE scheduler (token-level, not diffusion). Group size drives
+# the critic-free GRPO advantage; temperature must match sampling_temperature above.
+sampling:
+  _target_: unirl.types.sampling.ARSamplingParams
+  samples_per_prompt: 16         # group size G for the per-prompt advantage normalization
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 0                       # 0 = disabled; the SGLang engine threads this through
+  max_new_tokens: 128
+
+# ── SGLang rollout engine (colocate): time-shares each GPU with the FSDP train
+# shard via sleep()/wake_up(). tp_size=1 ⇒ one single-GPU engine per rank,
+# data-parallel across the 32 ranks (mirrors the trainside engine). ──
+rollout:
+  _target_: unirl.rollout.engine.sglang_llm.engine.SGLangLLMRolloutEngine
+  config:
+    _target_: unirl.rollout.engine.sglang_llm.config.SGLangLLMEngineConfig
+    pretrained_model_ckpt_path: ${oc.env:QWEN3_PATH,/root/sync/models/Qwen3-8B}
+    tp_size: 1
+    max_new_tokens: 128
+    temperature: 0.7             # keep == sampling.temperature / sampling_temperature
+    top_p: 0.9
+    samples_pre_expanded: true   # trainer pre-expands req by samples_per_prompt (32→512); engine emits n=1
+    system_instruction: /no_think         # match trainside chat template EXACTLY, else Qwen3 emits a
+    chat_template_kwargs:                  #   long <think> block that overruns max_new_tokens before
+      enable_thinking: false               #   the "#### answer" ⇒ reward stuck near 0
+    engine_kwargs:
+      mem_fraction_static: 0.3   # colocate headroom on a 95 GiB card (FSDP holds ~54 GiB)
+      attention_backend: triton  # the LoRA-pool sync rides the triton attention path
+      enable_lora: true          # serve the trained LoRA adapter (hot-loaded each sync)
+      max_lora_rank: 16
+      lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+# ── Weight sync: extract the trained LoRA tensors from the FSDP model and
+# hot-load them into the SGLang server as an adapter (POST
+# /load_lora_adapter_from_tensors). This LoRA-pool path reproduces the trainside
+# curve; the merged full-weight path (TensorWeightSync) plateaus and does NOT. ──
+sync:
+  _target_: unirl.distributed.weight_sync.lora.LocalLoraWeightSync
+  param_prefix: ""               # send HF-native key names
+  adapter_name: default
+  verify: false                  # verify path is vLLM-Omni-only
+
+# Advantage scope (top-level _global_ key): group ⇒ per-prompt-group mean/std.
+#   adv_normalization_scope: group
+# Trust region is single-update: ARSPODPPO reuses the rollout logp as old_logp,
+# so stack.num_updates_per_batch must stay 1 (TrainStack raises otherwise).
