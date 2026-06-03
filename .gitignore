@@ -75,6 +75,8 @@ wandb/
 outputs/
 logs/
 local/
+!unirl/reward/local/
+!unirl/reward/local/**
 **/rollout_data/
 **/buffer_stats/
 *.out
@@ -84,6 +86,7 @@ local/
 # Datasets: keep the committed pickscore prompts, ignore other (local-only) datasets
 datasets/*
 !datasets/pickscore
+!datasets/geneval2
 
 # Large model artifacts (defense-in-depth)
 models/**/*.bin
