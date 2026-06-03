@@ -353,7 +353,7 @@ def _to_omni_dit_recaption(
 ) -> Tuple[List[Any], List[Any]]:
     """Standalone HI3 DiT builder — eats an externally-injected recaption.
 
-    The two-engine trainer (``trainer/hi3.py``) puts the AR-generated
+    The two-engine trainer (``trainer/unified_model.py``) puts the AR-generated
     recaption per sample on ``req.primitives['cot_text']`` (a ``Texts``
     aligned 1:1 with ``primitives['text']``, the original prompts). Each
     per-prompt dict carries ``extra['ar_generated_text'] = recaption`` —
@@ -585,7 +585,7 @@ def _to_omni_per_stage(
     # Driver-authoritative x_T RECIPE: per-image, rollout-keyed gids (+ seed; NO
     # shape — RLHunyuanImage3Pipeline's prepare_latents hook fills the AR-resolved
     # shape and regenerates the byte-identical x_T via NoiseRecipe.for_batch).
-    # HI3Trainer authors these on the dit_req; forward them through extra_args.
+    # UnifiedModelTrainer authors these on the dit_req; forward them through extra_args.
     if req.init_noise_group_ids:
         extra_args["init_noise_group_ids"] = [str(g) for g in req.init_noise_group_ids]
         extra_args["init_noise_seed"] = int(seed) if seed is not None else 0

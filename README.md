@@ -128,7 +128,7 @@ python -m unirl.train_diffusion --config-name=diffusion_rl/<recipe>      # diffu
 python -m unirl.train_vlm       --config-name=vlm_rl/<recipe>            # autoregressive VLM (Qwen-VL)
 python -m unirl.train_vlm       --config-name=llm_rl/<recipe>            # autoregressive LLM (Qwen3)
 python -m unirl.train_pe        --config-name=pe_rl/<recipe>             # prompt-enhancer (PE)
-python -m unirl.train_hi3       --config-name=unified_model_rl/<recipe>  # HunyuanImage3 (unified AR + diffusion)
+python -m unirl.train_unified_model       --config-name=unified_model_rl/<recipe>  # HunyuanImage3 (unified AR + diffusion)
 ```
 
 Recipes are self-contained YAML files under `recipes/<bucket>/` selected with

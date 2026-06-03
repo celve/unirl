@@ -18,7 +18,7 @@ Agent 应该把文档当成 routing layer，而不是源码替代品：
 
 ## 基本原则
 
-- 维护中的训练入口是 `python -m unirl.train_diffusion --config-name=<bucket>/<recipe>`（以及 `train_vlm` / `train_pe` / `train_hi3`）。
+- 维护中的训练入口是 `python -m unirl.train_diffusion --config-name=<bucket>/<recipe>`（以及 `train_vlm` / `train_pe` / `train_unified_model`）。
 - 分桶的 `recipes/<bucket>/<recipe>.yaml` 文件是权威配置面。
 - package README 是离代码最近的局部 contract。
 - 不要从 stale scratch docs 或 ignored local files 推断运行行为，除非用户明确指向它们。

@@ -13,7 +13,7 @@ Two `Remote` siblings split the work:
   multi-update optimizer loop. It is single-stage by design — one track, no
   track-name dict. Multi-track training (e.g. PE) uses sibling `TrainStack`s.
 
-HunyuanImage3's mixed AR + diffusion training uses `hi3_stack.py`, a multi-stage
+HunyuanImage3's mixed AR + diffusion training uses `unified_model_stack.py`, a multi-stage
 variant.
 
 ## Key Files
@@ -29,7 +29,7 @@ variant.
 | `configs.py` | `LoraConfig`, `EmaLoraConfig`, `EmaFullConfig`, `FSDPConfig` |
 | `factories.py` | `build_optimizer` (AdamW), `build_lr_scheduler` (constant / linear / cosine) |
 | `fsdp_utils.py` | FSDP2 helpers (block-class discovery, mesh) |
-| `hi3_stack.py` | Multi-stage train stack for HunyuanImage3 (AR + diffusion) |
+| `unified_model_stack.py` | Multi-stage train stack for HunyuanImage3 (AR + diffusion) |
 
 ## Train-Step Contract
 
@@ -88,5 +88,5 @@ EMA weights.
 `train_diffusion` / `train_vlm` / `train_pe` build the trainer
 (`unirl/trainer/*.py`), which constructs the `FSDPBackend`, the `StageAlgorithm`,
 and the `TrainStack` as sibling `Remote`s inside a placement block, then calls
-`train_track` each iteration. HunyuanImage3 (`train_hi3`) uses the multi-stage
-`hi3_stack.py`.
+`train_track` each iteration. HunyuanImage3 (`train_unified_model`) uses the multi-stage
+`unified_model_stack.py`.

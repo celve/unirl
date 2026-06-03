@@ -24,7 +24,7 @@
 #   train_diffusion (default)  recipes/diffusion_rl/ (sd3_*, wan2*, qwen_image_*)
 #   train_vlm                  recipes/vlm_rl/ (argrpo_qwen_vl_*) + recipes/llm_rl/ (ar_drpo_qwen3_*)
 #   train_pe                   recipes/pe_rl/ (prompt-enhancement joint diffusion+AR)
-#   train_hi3                  recipes/unified_model_rl/ (HunyuanImage3, unified AR+diffusion)
+#   train_unified_model                  recipes/unified_model_rl/ (HunyuanImage3, unified AR+diffusion)
 #
 # The first positional arg is the recipes/ config name, bucket-qualified (passed to Hydra as
 # --config-name); any extra args are forwarded verbatim as Hydra overrides. The

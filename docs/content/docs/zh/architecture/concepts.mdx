@@ -74,7 +74,7 @@ prompts -> rollout（采样 media + 把 trajectory 记入 tracks）
 |---|---|
 | Backend | training-state `Remote`（`FSDPBackend`），负责结构注入 + optimizer + scheduler + EMA。 |
 | Stage / StageAlgorithm | 可训练 stage，以及 replay 它并做 forward/backward 的 loss 对象。 |
-| Train stack | `TrainStack`——单 stage 的 loss/backward 驱动；多 track 用兄弟 stack；HI3 用 `hi3_stack`。 |
+| Train stack | `TrainStack`——单 stage 的 loss/backward 驱动；多 track 用兄弟 stack；HI3 用 `unified_model_stack`。 |
 | EMA rollout | 用 EMA 平滑权重采样 rollout（NFT 开启；GRPO / DPPO 不可）。 |
 | Batch geometry | `micro_batch_size`、`num_updates_per_batch`；多更新会在每个 rollout shard 上冻结一次 π_old。 |
 

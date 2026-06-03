@@ -21,7 +21,7 @@ of the name; drop the `.yaml`).
 | [`vlm_rl/`](vlm_rl/) | `python -m unirl.train_vlm` | Vision-language AR RL — Qwen-VL ARGRPO |
 | [`llm_rl/`](llm_rl/) | `python -m unirl.train_vlm` | Text-only AR RL — Qwen3 DRPO (shares the AR entrypoint with `vlm_rl/`) |
 | [`pe_rl/`](pe_rl/) | `python -m unirl.train_pe` | Prompt-enhancer (AR + diffusion) |
-| [`unified_model_rl/`](unified_model_rl/) | `python -m unirl.train_hi3` | Unified AR + diffusion — HunyuanImage3 |
+| [`unified_model_rl/`](unified_model_rl/) | `python -m unirl.train_unified_model` | Unified AR + diffusion — HunyuanImage3 |
 
 ## Launching
 

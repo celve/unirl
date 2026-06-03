@@ -7,7 +7,7 @@ description: 启动器、Ray 启动、集群 geometry 和启动前检查。
 
 ## 启动器
 
-单机作业使用 single-node launcher；多机作业使用 role-aware multinode launcher，让 worker 加入 Ray head 后再训练。第一个参数是 bucket 化的 recipe 名（`<bucket>/<recipe>`）；`ENTRY` 选择非 diffusion 入口（`train_vlm`、`train_pe`、`train_hi3`）。
+单机作业使用 single-node launcher；多机作业使用 role-aware multinode launcher，让 worker 加入 Ray head 后再训练。第一个参数是 bucket 化的 recipe 名（`<bucket>/<recipe>`）；`ENTRY` 选择非 diffusion 入口（`train_vlm`、`train_pe`、`train_unified_model`）。
 
 ```bash
 bash scripts/run_experiment_single_node.sh diffusion_rl/sd3_trainside

@@ -25,7 +25,7 @@ ${indexLines.join("\n").trim()}
 
 ## Authoritative Runtime Entry
 
-- Training entrypoints: \`python -m unirl.train_diffusion --config-name=<bucket>/<recipe>\` (also \`train_vlm\`, \`train_pe\`, \`train_hi3\`).
+- Training entrypoints: \`python -m unirl.train_diffusion --config-name=<bucket>/<recipe>\` (also \`train_vlm\`, \`train_pe\`, \`train_unified_model\`).
 - Recipes: self-contained \`recipes/<bucket>/<recipe>.yaml\` files in a bucketed \`recipes/\` tree (one subdirectory per trainer domain), selected with \`--config-name=<bucket>/<recipe>\`.
 `;
 }

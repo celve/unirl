@@ -18,7 +18,7 @@ Each domain has its own Hydra entrypoint and `<Domain>Trainer`
 | `python -m unirl.train_diffusion` | `trainer/diffusion.py` | Diffusion image / video |
 | `python -m unirl.train_vlm` | `trainer/vlm.py` | Autoregressive VLM / LLM |
 | `python -m unirl.train_pe` | `trainer/pe.py` | Prompt-enhancer (joint AR + diffusion) |
-| `python -m unirl.train_hi3` | `trainer/hi3.py` | HunyuanImage3 (mixed AR + diffusion) |
+| `python -m unirl.train_unified_model` | `trainer/unified_model.py` | HunyuanImage3 (mixed AR + diffusion) |
 
 The shared lifecycle lives in `trainer/base.py`: acquire a Ray `DevicePool`,
 build the rollout and train workers inside a placement block, then run the
@@ -63,7 +63,7 @@ Two `Remote` siblings split the training work:
 
 `TrainStack` is single-stage by design — one track, no track-name dict.
 **Multi-track training (for example PE) uses sibling `TrainStack`s**, one per
-track. HunyuanImage3's mixed AR + diffusion training uses `hi3_stack.py`, a
+track. HunyuanImage3's mixed AR + diffusion training uses `unified_model_stack.py`, a
 multi-stage variant.
 
 `num_updates_per_batch > 1` runs several PPO mini-batch updates on one rollout

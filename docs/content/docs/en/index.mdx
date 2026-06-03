@@ -18,7 +18,7 @@ Each domain has its own entrypoint, all driven the same way:
 python -m unirl.train_diffusion --config-name=<bucket>/<recipe>   # diffusion image/video
 python -m unirl.train_vlm       --config-name=<bucket>/<recipe>   # autoregressive VLM / LLM
 python -m unirl.train_pe        --config-name=<bucket>/<recipe>   # prompt-enhancer (PE)
-python -m unirl.train_hi3       --config-name=<bucket>/<recipe>   # HunyuanImage3 (mixed AR + diffusion)
+python -m unirl.train_unified_model       --config-name=<bucket>/<recipe>   # HunyuanImage3 (mixed AR + diffusion)
 ```
 
 `<recipe>` is a self-contained YAML filename (without `.yaml`) in the bucketed `recipes/` tree, addressed as `<bucket>/<recipe>` — for example:

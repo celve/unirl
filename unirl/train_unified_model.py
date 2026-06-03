@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 """UniRL v2 HunyuanImage3 training entry point (Hydra-native).
 
-Thin wrapper around :class:`unirl.trainer.hi3.HI3Trainer`. The trainer
+Thin wrapper around :class:`unirl.trainer.unified_model.UnifiedModelTrainer`. The trainer
 owns the placement scope, sibling Remote wiring, and the ``train_step → train``
 loop; this module just maps the loaded Hydra config blocks to constructor
 kwargs.
 
 Pairs with ``recipes/unified_model_rl/hi3_vllmomni.yaml``::
 
-    python -m unirl.train_hi3 --config-name unified_model_rl/hi3_vllmomni
+    python -m unirl.train_unified_model --config-name unified_model_rl/hi3_vllmomni
 """
 
 from __future__ import annotations
@@ -16,12 +16,12 @@ from __future__ import annotations
 import hydra
 from omegaconf import DictConfig
 
-from unirl.trainer.hi3 import HI3Trainer
+from unirl.trainer.unified_model import UnifiedModelTrainer
 
 
 @hydra.main(version_base=None, config_path="../recipes", config_name="unified_model_rl/hi3_vllmomni")
 def main(cfg: DictConfig) -> None:
-    trainer = HI3Trainer(
+    trainer = UnifiedModelTrainer(
         cfg=cfg,
         batch_size=cfg.batch_size,
         bundle_cfg=cfg.bundle,

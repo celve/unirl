@@ -39,7 +39,7 @@ from unirl.utils.misc import aggregate_numeric_metrics
 logger = logging.getLogger(__name__)
 
 
-class HI3TrainStack(Remote):
+class UnifiedModelTrainStack(Remote):
     """Single-backbone, multi-algorithm train stack.
 
     Holds one shared :class:`FSDPBackend` and a dict of named
@@ -63,9 +63,9 @@ class HI3TrainStack(Remote):
     ) -> None:
         super().__init__()
         if int(micro_batch_size) < 1:
-            raise ValueError(f"HI3TrainStack.micro_batch_size must be >= 1; got {micro_batch_size}.")
+            raise ValueError(f"UnifiedModelTrainStack.micro_batch_size must be >= 1; got {micro_batch_size}.")
         if float(max_grad_norm) <= 0.0:
-            raise ValueError(f"HI3TrainStack.max_grad_norm must be > 0; got {max_grad_norm}.")
+            raise ValueError(f"UnifiedModelTrainStack.max_grad_norm must be > 0; got {max_grad_norm}.")
         self.fsdp_backend = fsdp_backend
         # Order matters only for logging; gradients accumulate regardless.
         self.algorithms: Dict[str, StageAlgorithm] = {
@@ -101,14 +101,14 @@ class HI3TrainStack(Remote):
         """
         if resp_track.advantages is None:
             raise ValueError(
-                f"HI3TrainStack.train: track {name!r} has advantages=None; "
+                f"UnifiedModelTrainStack.train: track {name!r} has advantages=None; "
                 "upstream advantage pipeline must populate it before training."
             )
 
         bs = int(resp_track.batch_size)
         micro_slices = _build_micro_batch_slices(total_size=bs, micro_batch_size=int(self.micro_batch_size))
         if not micro_slices:
-            raise ValueError(f"HI3TrainStack.train: empty batch for track {name!r} (batch_size={bs}).")
+            raise ValueError(f"UnifiedModelTrainStack.train: empty batch for track {name!r} (batch_size={bs}).")
 
         algorithm = self.algorithms[name]
         loss_scale = 1.0 / len(micro_slices)
@@ -190,7 +190,9 @@ class HI3TrainStack(Remote):
             grad_norm = float(self.fsdp_backend.optimizer_step(max_grad_norm=float(self.max_grad_norm)))
         else:
             grad_norm = 0.0
-            logger.warning("HI3TrainStack.train_track: no algorithm reported backward; skipping optimizer step.")
+            logger.warning(
+                "UnifiedModelTrainStack.train_track: no algorithm reported backward; skipping optimizer step."
+            )
 
         self.on_rollout_end()
 
@@ -227,4 +229,4 @@ class HI3TrainStack(Remote):
         return 0.0
 
 
-__all__ = ["HI3TrainStack"]
+__all__ = ["UnifiedModelTrainStack"]

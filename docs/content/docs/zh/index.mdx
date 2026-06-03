@@ -18,7 +18,7 @@ UniRL 是一个面向统一多模态生成模型的分布式强化学习框架�
 python -m unirl.train_diffusion --config-name=<bucket>/<recipe>   # diffusion 图像/视频
 python -m unirl.train_vlm       --config-name=<bucket>/<recipe>   # 自回归 VLM / LLM
 python -m unirl.train_pe        --config-name=<bucket>/<recipe>   # prompt-enhancer (PE)
-python -m unirl.train_hi3       --config-name=<bucket>/<recipe>   # HunyuanImage3（AR + diffusion 混合）
+python -m unirl.train_unified_model       --config-name=<bucket>/<recipe>   # HunyuanImage3（AR + diffusion 混合）
 ```
 
 `<recipe>` 是分桶的 `recipes/` 目录树下的一个自包含 YAML 文件名（按 `<bucket>/<recipe>` 寻址，不含 `.yaml`），例如：

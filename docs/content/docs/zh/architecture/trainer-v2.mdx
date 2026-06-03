@@ -16,7 +16,7 @@ UniRL 运行在一套 trainer 架构上：single-controller 的 `Remote` / `plac
 | `python -m unirl.train_diffusion` | `trainer/diffusion.py` | Diffusion 图像 / 视频 |
 | `python -m unirl.train_vlm` | `trainer/vlm.py` | 自回归 VLM / LLM |
 | `python -m unirl.train_pe` | `trainer/pe.py` | Prompt-enhancer（AR + diffusion 联合） |
-| `python -m unirl.train_hi3` | `trainer/hi3.py` | HunyuanImage3（AR + diffusion 混合） |
+| `python -m unirl.train_unified_model` | `trainer/unified_model.py` | HunyuanImage3（AR + diffusion 混合） |
 
 共享生命周期在 `trainer/base.py`：申请 Ray `DevicePool`，在 placement 块里构建 rollout 与
 train worker，然后跑 rollout → reward → advantage → train → 可选 weight-sync 循环。
@@ -54,7 +54,7 @@ single-controller 层（`unirl/distributed/group/`：`Remote`、`placement`、`R
   `prepare_segment → mini-batch compute_loss_and_backward 循环 → optimizer_step`，返回 `TrainStepResult`。
 
 `TrainStack` 按设计是单 stage——一个 track、没有 track-name dict。**多 track 训练（如 PE）使用兄弟
-`TrainStack`**，每个 track 一个。HunyuanImage3 的 AR + diffusion 混合训练用 `hi3_stack.py`（多 stage 变体）。
+`TrainStack`**，每个 track 一个。HunyuanImage3 的 AR + diffusion 混合训练用 `unified_model_stack.py`（多 stage 变体）。
 
 `num_updates_per_batch > 1` 会在一个 rollout shard 上跑多次 PPO mini-batch 更新，
 π_old 由 `prepare_segment` 冻结一次；该能力由 `StageAlgorithm.supports_multi_update` 控制。

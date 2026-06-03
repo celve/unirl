@@ -78,7 +78,7 @@ A single-track recipe binds one top-level `cfg.algorithm`; a multi-track recipe
 |---|---|
 | Backend | The training-state `Remote` (`FSDPBackend`) owning structural injection + optimizer + scheduler + EMA. |
 | Stage / StageAlgorithm | A trainable stage and the loss object that replays it and runs forward/backward. |
-| Train stack | `TrainStack` — single-stage loss/backward driver; multi-track uses sibling stacks; HI3 uses `hi3_stack`. |
+| Train stack | `TrainStack` — single-stage loss/backward driver; multi-track uses sibling stacks; HI3 uses `unified_model_stack`. |
 | EMA rollout | Sampling rollouts with EMA-smoothed weights (NFT opts in; GRPO / DPPO must not). |
 | Batch geometry | `micro_batch_size`, `num_updates_per_batch`; multi-update freezes π_old once per rollout shard. |
 

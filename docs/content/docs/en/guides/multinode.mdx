@@ -12,7 +12,7 @@ plus Hydra overrides.
 Use the single-node launcher for local or one-node jobs, and the multinode
 launcher when workers need to join a Ray head before training starts. The first
 argument is a bucketed recipe name (`<bucket>/<recipe>`); `ENTRY` selects a non-diffusion
-entrypoint (`train_vlm`, `train_pe`, `train_hi3`).
+entrypoint (`train_vlm`, `train_pe`, `train_unified_model`).
 
 ```bash
 bash scripts/run_experiment_single_node.sh diffusion_rl/sd3_trainside

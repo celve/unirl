@@ -4,11 +4,11 @@
 # One shared HunyuanImage3 transformer (mode=gen_text for AR, mode=gen_image for
 # DiT) trained jointly by ARGRPO (AR TextSegment) + DiffusionGRPO (DiT
 # LatentSegment), both backward-accumulating into ONE LoRA adapter with a single
-# optimizer step (HI3TrainStack). Rollout is a 2-stage vLLM-Omni engine
+# optimizer step (UnifiedModelTrainStack). Rollout is a 2-stage vLLM-Omni engine
 # (modality=t2i_think_recaption: Stage0 AR → Stage1 DiT); the trained LoRA is
 # synced back into both stages every rollout.
 #
-# Pairs with unirl/train_hi3.py (HI3Trainer). Modeled on
+# Pairs with unirl/train_unified_model.py (UnifiedModelTrainer). Modeled on
 # sd3_vllmomni_full_ipc.yaml (single-backbone v2 + vllm-omni + colocate sync)
 # and pe_trainside_pickscore.yaml (two-algorithm shape).
 #
@@ -23,12 +23,12 @@ batch_size: 2                 # prompts per rollout; each expands to samples_per
 
 weight_sync_interval: 1
 
-# Intrusive debug dump (HI3Trainer._dump_rollout): per rollout, dump original
+# Intrusive debug dump (UnifiedModelTrainer._dump_rollout): per rollout, dump original
 # prompt + AR output text (the think/recaption fed into DiT) + decoded images +
 # image rewards. null = disabled (default); set to a writable path to enable.
 dump_dir: null
 
-# W&B reporting (HI3Trainer._init_wandb). Secrets stay in the env:
+# W&B reporting (UnifiedModelTrainer._init_wandb). Secrets stay in the env:
 # WANDB_API_KEY + WANDB_ENTITY (entity falls back to ${oc.env:WANDB_ENTITY}).
 # report_to_wandb=false → fully no-op. Override run_name per launch.
 logging:
@@ -108,7 +108,7 @@ backend:
 # Two standalone vLLM-Omni engines (the v2 two-engine design). The AR engine
 # (modality ar_recaption, single LLM stage, GPUs 0-3) emits N think/recaption
 # texts per prompt; the DiT engine (modality dit_recaption, single diffusion
-# stage, GPUs 4-7) renders M distinct-noise images per recaption. HI3Trainer
+# stage, GPUs 4-7) renders M distinct-noise images per recaption. UnifiedModelTrainer
 # wires both with remote() in the shared placement; each engine clears
 # CUDA_VISIBLE_DEVICES for its multi-GPU HI3 modality and its stage YAML's
 # runtime.devices pins the physical cards (a real partition, NOT anchor+pop).
@@ -161,13 +161,13 @@ reward:
       model_id: ${oc.env:PICKSCORE_MODEL,/root/yuvalkirstain/PickScore_v1}
 
 # Two algorithms over the one shared pipeline. ``ar`` resolves pipeline.ar,
-# ``image`` resolves pipeline.diffusion (via stage_attr). HI3Trainer reads
+# ``image`` resolves pipeline.diffusion (via stage_attr). UnifiedModelTrainer reads
 # cfg.algorithm.ar / cfg.algorithm.image.
 algorithm:
   ar:
     _target_: unirl.algorithms.ar_grpo.ARGRPO
     stage_attr: ar
-    clip_range: 0.2
+    clip_range: 1.0e-2            # AR/LLM trust region (matches vlm_rl ARGRPO; 0.2 never binds -> no clip)
     clip_schedule: constant
     conditions_cls:
       _target_: hydra.utils.get_class
@@ -176,7 +176,7 @@ algorithm:
   image:
     _target_: unirl.algorithms.diffusion_grpo.DiffusionGRPO
     stage_attr: diffusion
-    clip_range: 0.2
+    clip_range: 1.0e-4            # diffusion trust region (matches sd3/qwen_image; 0.2 never binds -> no clip on SDE-logprob ratio)
     clip_schedule: constant
     conditions_cls:
       _target_: hydra.utils.get_class
@@ -187,7 +187,7 @@ algorithm:
 
 # One stack: single backend + both algorithms → one optimizer step.
 stack:
-  _target_: unirl.train.hi3_stack.HI3TrainStack
+  _target_: unirl.train.unified_model_stack.UnifiedModelTrainStack
   micro_batch_size: 1
   max_grad_norm: 1.0
 
@@ -238,14 +238,17 @@ sampling:
     trajectory_precision: fp16
     logprob_precision: fp32
     scheduler:
+      # Sparse SDE (mirrors sd3_vllmomni / sd3_dancegrpo): record SDE log-probs at
+      # only a few steps, ODE elsewhere -> lower-variance GRPO gradient. null = all-SDE.
       _target_: unirl.utils.scheduler_utils.AllSDEScheduler
       num_timesteps: ${..num_inference_steps}
-      num_sde_steps: null
+      num_sde_steps: 3               # sparse subset (sd3.5 uses 3)
+      timestep_fraction: [0, 0.5]    # SDE steps drawn from the first-half high-σ steps
 
 # LoRA → vLLM-Omni rollout (cross-process Ray push). RemoteLoraWeightSync.sync()
 # extracts the adapter on the train workers and pushes it from rank 0 into both
 # engines (AR + DiT) via each engine's set_lora_from_tensors_copy (the engines are
-# anchored on separate workers — wired in HI3Trainer via set_rollout_targets).
+# anchored on separate workers — wired in UnifiedModelTrainer via set_rollout_targets).
 # copy: true is required — the AR / DiT stages are TP>1, where the zero-copy LoRA
 # handle's one-shot fd breaks the collective_rpc broadcast to ranks 2..N.
 # param_prefix mirrors HunyuanImage3PipelineConfig.weight_sync_param_name_prefix.

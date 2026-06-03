@@ -3,7 +3,7 @@
 This package is organized around one runtime loop:
 
 ```text
-unirl.train_diffusion | train_vlm | train_pe | train_hi3
+unirl.train_diffusion | train_vlm | train_pe | train_unified_model
   -> register and validate Hydra config
   -> <Domain>Trainer acquires a Ray DevicePool (placement)
   -> trainer builds the rollout workers and train workers
@@ -36,7 +36,7 @@ orchestration, rollout engines, the train stack, and algorithm loss math.
 
 | Path | Responsibility |
 |---|---|
-| `train_diffusion.py`, `train_vlm.py`, `train_pe.py`, `train_hi3.py` | Per-domain Hydra entrypoints |
+| `train_diffusion.py`, `train_vlm.py`, `train_pe.py`, `train_unified_model.py` | Per-domain Hydra entrypoints |
 | `trainer/` | Per-domain training lifecycle (`base.py` + `diffusion`/`vlm`/`pe`/`hi3`): owns placement, builds workers, and runs the rollout→reward→advantage→train loop |
 | `config/` | Config dataclasses, `_target_` instantiation (`build`/`materialize`), cross-component validation |
 | `distributed/` | Ray worker base (`Remote`) + placement/dispatch (`group/`), tensor transport (`tensor/`), and weight sync (`weight_sync/`) |

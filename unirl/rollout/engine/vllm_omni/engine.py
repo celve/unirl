@@ -53,7 +53,7 @@ _LOCAL_YAML = {
     # Single-stage pure-DiT, HunyuanVideo-1.5 (text → video). Analogous to
     # sd35_t2i: no AR prelude, no driver-side tokenizer.
     "t2v": "hunyuan_video15_t2v_rl.yaml",
-    # Two-engine v2 trainer (trainer/hi3.py): AR-only think_recaption engine +
+    # Two-engine v2 trainer (trainer/unified_model.py): AR-only think_recaption engine +
     # standalone DiT engine that eats an externally-injected recaption.
     "ar_recaption": "hunyuan_image3_ar_recaption_rl.yaml",
     "dit_recaption": "hunyuan_image3_dit_recaption_rl.yaml",

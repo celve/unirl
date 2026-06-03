@@ -4,7 +4,7 @@ One shared HunyuanImage3 backbone (a single MoE transformer that operates in
 ``mode="gen_text"`` for AR and ``mode="gen_image"`` for DiT) trained jointly by
 two algorithms — ``ARGRPO`` over the AR ``TextSegment`` and ``DiffusionGRPO``
 over the DiT ``LatentSegment`` — both backward-accumulating into ONE LoRA
-adapter with a single optimizer step (see :class:`HI3TrainStack`).
+adapter with a single optimizer step (see :class:`UnifiedModelTrainStack`).
 
 Two-engine design (mirrors :class:`~unirl.models.pe.pipeline.PEPipeline`'s
 two-level fan-out but with the backbone shared). PE composes two in-process
@@ -21,7 +21,7 @@ The trainer assembles the lineage itself (``make_root_track(N)`` /
 are independent Remotes, not a composed pipeline. Reward routing then matches
 :class:`~unirl.trainer.pe.PETrainer`: score the image track, credit-assign
 the mean image reward up to the AR track, per-track GRPO advantages, then ONE
-:class:`HI3TrainStack` step (ar.loss + image.loss → one optimizer step on the
+:class:`UnifiedModelTrainStack` step (ar.loss + image.loss → one optimizer step on the
 single shared LoRA).
 
 GPU partition: each engine is ONE multi-GPU actor anchored on a distinct worker
@@ -42,9 +42,9 @@ One ``train_step``::
     reward.score_and_attach(image track)         # only the image track is scorable
     resp.propagate_rewards("mean")               # image reward → ar track
     track.compute_advantages() per track         # ar groups by prompt, image by ar-sample
-    hi3_stack.train_track(ar_track, image_track) # 2 backward → 1 optimizer step
+    unified_model_stack.train_track(ar_track, image_track) # 2 backward → 1 optimizer step
 
-Pairs with ``recipes/unified_model_rl/hi3_vllmomni.yaml`` and ``unirl/train_hi3.py``.
+Pairs with ``recipes/unified_model_rl/hi3_vllmomni.yaml`` and ``unirl/train_unified_model.py``.
 Deferred (same as the reference trainers): multi-epoch replay, checkpoint /
 eval cadence, structured logging.
 """
@@ -103,7 +103,7 @@ def deep_hydrate(obj: Any) -> Any:
     return obj
 
 
-class HI3Trainer(BaseTrainer):
+class UnifiedModelTrainer(BaseTrainer):
     """HunyuanImage3 unified-backbone joint trainer (AR + DiT, one LoRA)."""
 
     def __init__(
@@ -284,7 +284,7 @@ class HI3Trainer(BaseTrainer):
         """
         texts = req.primitives.get("text")
         if not isinstance(texts, Texts):
-            raise TypeError("HI3Trainer.run_rollout: req.primitives['text'] must be a Texts primitive.")
+            raise TypeError("UnifiedModelTrainer.run_rollout: req.primitives['text'] must be a Texts primitive.")
         prompts = list(texts.texts)
 
         ar_params = get_ar_params(req.sampling_params)
@@ -306,10 +306,10 @@ class HI3Trainer(BaseTrainer):
         ar_inner = ar_resp.tracks.get(AR_TRACK)
         recaptions = ar_inner.decoded if ar_inner is not None else None
         if not isinstance(recaptions, Texts):
-            raise RuntimeError("HI3Trainer.run_rollout: AR engine returned no decoded Texts on tracks['ar'].")
+            raise RuntimeError("UnifiedModelTrainer.run_rollout: AR engine returned no decoded Texts on tracks['ar'].")
         if len(recaptions.texts) != len(ar_shell.sample_ids):
             raise RuntimeError(
-                f"HI3Trainer.run_rollout: AR engine returned {len(recaptions.texts)} recaption(s) "
+                f"UnifiedModelTrainer.run_rollout: AR engine returned {len(recaptions.texts)} recaption(s) "
                 f"but the AR track expects {len(ar_shell.sample_ids)} (= P*N). The AR engine must be 1:1."
             )
         ar_track = _track_with_field(ar_shell, "segment", ar_inner.segment)
@@ -349,11 +349,11 @@ class HI3Trainer(BaseTrainer):
         img_inner = dit_resp.tracks.get(IMAGE_TRACK)
         if img_inner is None:
             raise RuntimeError(
-                f"HI3Trainer.run_rollout: DiT engine returned no 'image' track (got {sorted(dit_resp.tracks.keys())})."
+                f"UnifiedModelTrainer.run_rollout: DiT engine returned no 'image' track (got {sorted(dit_resp.tracks.keys())})."
             )
         if len(img_inner.sample_ids) != len(img_shell.sample_ids):
             raise RuntimeError(
-                f"HI3Trainer.run_rollout: DiT engine returned {len(img_inner.sample_ids)} image(s) "
+                f"UnifiedModelTrainer.run_rollout: DiT engine returned {len(img_inner.sample_ids)} image(s) "
                 f"but the image track expects {len(img_shell.sample_ids)} (= P*N*M). The DiT engine must be 1:1."
             )
         img_track = _track_with_field(img_shell, "segment", img_inner.segment)
@@ -673,4 +673,4 @@ class HI3Trainer(BaseTrainer):
             )
 
 
-__all__ = ["HI3Trainer"]
+__all__ = ["UnifiedModelTrainer"]
