@@ -49,19 +49,9 @@ further in the direction the advantage wants. `ARDRPO` implements exactly this,
 plus **Truncated Importance Sampling** (clamp `r` to `clip_ratio_c`, detached) so a
 runaway ratio on a rare token can't blow up the gradient.
 
-```mermaid
-flowchart LR
-    P["prompt"] --> RO["SGLang rollout<br/>behavior policy µ"]
-    RO --> Y["tokens y + rollout logp µ"]
-    Y --> RW["reward<br/>(boxed math, DAPO)"]
-    RW --> A["group advantage Â<br/>per-prompt mean/std"]
-    Y --> RP["replay at temp T<br/>new logp π"]
-    RP --> R["ratio r = π/µ<br/>shift π−µ"]
-    A --> L
-    R --> M{"divergence mask<br/>TV / KL, advantage-aware"}
-    M --> L["masked REINFORCE + TIS<br/>−Â · clamp(r,C) · logπ · mask"]
-    L --> B["backward → optimizer step"]
-```
+![drpo overview: the prompt → SGLang rollout (behavior policy µ) → group advantage Â → replay for new logp π → ratio r and TV shift |π−µ| → reweighted REINFORCE pipeline (single update), with the centerpiece contrast between DPPO's hard-mask step (full gradient, then a cliff to 0 at the threshold δ) and the paper's smooth, bounded DRPO weight that ramps down and crosses zero into a corrective region past δ.](assets/overview.png)
+
+The figure's top strip is the pipeline this folder runs (`ARDRPO.compute_loss_and_backward`): a **prompt** is rolled out by the behavior policy `µ` (SGLang), scored into a per-prompt **group advantage** `Â`, then the trainable policy is **replayed at the sampling temperature** for new log-probs `π` — yielding the ratio `r` and the **Binary-TV shift** `|π−µ|` that drive the reweighted REINFORCE loss, looped once per batch (single update). Its centerpiece is the load-bearing distinction the **⚠️ Variants** box above sets up: the **`tv`/`kl` hard mask** (full gradient, then a cliff to `0` at `δ`) versus the paper's **smooth DRPO weight** (the formula in [The math](#the-math) — attenuating to `0` at `δ` and *reversing* into a corrective signal beyond it); the shipped reproduction recipe instead runs the `pg_tv_penalty` soft-penalty form in that same TV spirit.
 
 ## The math
 
