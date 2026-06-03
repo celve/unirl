@@ -52,9 +52,9 @@ The transformer takes ``timestep = sigma * 1000`` (sigma ∈ [0, 1] →
 timestep ∈ [0, 1000]); ``TIMESTEP_SCALE`` is exposed on the step
 kernel so the test fake transformer can sanity-check it.
 
-Math mirrors ``samplers/fsdp/hunyuan_veido1p5_sampler.py`` and
-``models/hunyuan_veido1p5.py::forward_denoiser`` (PR #101). The new-
-design path does NOT import legacy code; spec sync is via review / test.
+Math mirrors the original HunyuanVideo-1.5 sampler and denoiser
+(PR #101). The new-design path does NOT import legacy code; spec sync
+is via review / test.
 """
 
 from __future__ import annotations

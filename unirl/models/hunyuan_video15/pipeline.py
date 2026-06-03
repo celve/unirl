@@ -175,8 +175,7 @@ class HunyuanVideo15Pipeline(Pipeline):
         """Build the full pipeline from a config.
 
         ``strategy`` is the SDE step strategy. Defaults to
-        :class:`DanceSDEStrategy` (legacy HunyuanVideo-1.5 default in
-        ``samplers/fsdp/hunyuan_veido1p5_sampler.py:64``); callers running
+        :class:`DanceSDEStrategy` (legacy HunyuanVideo-1.5 default); callers running
         GRPO with a different SDE family (Flow / CPS / DPM2) pass an
         explicit strategy built from ``cfg.sampling.sde_strategy``.
         """

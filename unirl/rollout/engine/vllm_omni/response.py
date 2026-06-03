@@ -633,7 +633,7 @@ def _to_rollout_resp(
                     "_to_rollout_resp: HV1.5 t2v rollout returned no 'text_capture' "
                     "on DiffusionOutput.custom_output (or it lacked the dual-stream "
                     "text_mllm/text_glyph embeds). Check that "
-                    "RLHunyuanVideo1p5Pipeline's encode_prompt hook ran in every DiT "
+                    "RLHunyuanVideo15Pipeline's encode_prompt hook ran in every DiT "
                     "worker — verify custom_pipeline_args.pipeline_class in the stage "
                     "YAML."
                 )

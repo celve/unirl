@@ -18,8 +18,7 @@ only in the un-normalization branch: HunyuanVideo-1.5's VAE config
 ships with a scalar ``scaling_factor`` only (no per-channel
 ``latents_mean`` / ``latents_std``), so we always take the scalar path.
 
-Math derived from
-``models/hunyuan_veido1p5.py::HunyuanVeido1p5ModelBundle.decode_latents``
+Math derived from the original HunyuanVideo-1.5 VAE decode path
 (PR #101). This module is self-contained.
 """
 

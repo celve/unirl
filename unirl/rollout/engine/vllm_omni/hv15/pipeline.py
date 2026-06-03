@@ -11,11 +11,11 @@ Three behaviors on top of upstream ``HunyuanVideo15Pipeline``
 3. Capture dual text-encoder embeddings (Qwen2.5-VL MLLM + ByT5 glyph)
    from the first ``encode_prompt`` call and stamp into
    ``DiffusionOutput.custom_output["text_capture"]`` for the trainer-side
-   ``HunyuanVideo1p5Conditions`` reconstruction.
+   ``HunyuanVideo15Conditions`` reconstruction.
 
 This class is loaded inside vLLM-Omni's worker subprocess via
 ``custom_pipeline_args.pipeline_class`` injected from
-``stage_configs/hunyuan_video1p5_t2v_rl.yaml``.
+``stage_configs/hunyuan_video15_t2v_rl.yaml``.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def _detach_cpu(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     return t.detach().to("cpu")
 
 
-class RLHunyuanVideo1p5Pipeline(HunyuanVideo15Pipeline):
+class RLHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
     """HunyuanVideo-1.5 pipeline with SDE trajectory + text-condition capture for RL rollout."""
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
@@ -131,11 +131,11 @@ class RLHunyuanVideo1p5Pipeline(HunyuanVideo15Pipeline):
             idx = int(rid.split("_", 1)[0])
         except ValueError:
             raise RuntimeError(
-                f"RLHunyuanVideo1p5Pipeline._resolve_pending_noise: cannot parse batch index from request_id={rid!r}."
+                f"RLHunyuanVideo15Pipeline._resolve_pending_noise: cannot parse batch index from request_id={rid!r}."
             )
         if idx < 0 or idx >= int(noise_batch.shape[0]):
             raise IndexError(
-                f"RLHunyuanVideo1p5Pipeline._resolve_pending_noise: index "
+                f"RLHunyuanVideo15Pipeline._resolve_pending_noise: index "
                 f"{idx} out of bounds for noise_batch.shape[0]="
                 f"{int(noise_batch.shape[0])}."
             )
@@ -237,4 +237,4 @@ class RLHunyuanVideo1p5Pipeline(HunyuanVideo15Pipeline):
         return out
 
 
-__all__ = ["RLHunyuanVideo1p5Pipeline"]
+__all__ = ["RLHunyuanVideo15Pipeline"]

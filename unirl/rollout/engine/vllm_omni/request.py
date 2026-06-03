@@ -269,7 +269,7 @@ def _to_omni_t2v(
 
     Mirrors :func:`_to_omni_sd35_t2i` (single-stage pure-DiT, no AR prelude)
     and adds the video-only ``num_frames`` knob. Per-prompt entries are the
-    dict shape ``RLHunyuanVideo1p5Pipeline.forward`` accepts; the sampling-
+    dict shape ``RLHunyuanVideo15Pipeline.forward`` accepts; the sampling-
     params list is single-element ``[dit_sampling]``.
     """
     if req.primitives.get("image") is not None:

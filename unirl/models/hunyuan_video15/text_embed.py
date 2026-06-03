@@ -21,10 +21,8 @@ rather than the strict :class:`EmbedStage` protocol — the dual output
 doesn't fit ``embed(p) -> C``. The pipeline calls them in pairs for the
 positive and negative branches.
 
-Math copied at the spec level from
-``models/hunyuan_veido1p5.py::HunyuanVeido1p5TextEncoderWrapper``
-(PR #101). Spec sync
-is via review / test.
+Math copied at the spec level from the original HunyuanVideo-1.5
+text-encoder wrapper (PR #101). Spec sync is via review / test.
 """
 
 from __future__ import annotations
