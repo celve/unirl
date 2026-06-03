@@ -13,6 +13,7 @@
 
 num_devices: 8                # 1 node x 8 GPUs
 batch_size: 48                # prompts_per_rollout
+adv_use_global_std: true     # advantage: divide by ONE batch-wide std (v1 parity), not per-group
 num_rollouts: 1000
 
 bundle:

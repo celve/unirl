@@ -6,6 +6,7 @@
 
 num_devices: 8
 batch_size: 48 # prompts_per_rollout
+adv_use_global_std: true     # advantage: divide by ONE batch-wide std (v1 parity), not per-group
 
 weight_sync_interval: 1
 

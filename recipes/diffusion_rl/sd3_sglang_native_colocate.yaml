@@ -8,6 +8,7 @@
 
 num_devices: 16               # 2 nodes x 8 GPUs; launcher auto-overrides via NUM_NODES*GPUS_PER_NODE
 batch_size: 96                # prompts_per_rollout, matches v1 reference 2x8 baseline
+adv_use_global_std: true     # advantage: divide by ONE batch-wide std (v1 parity), not per-group
 num_rollouts: 10000
 
 # Shared nodes: model_config + strategy defined once, referenced by

@@ -14,6 +14,7 @@ num_devices: 8
 # (~59 GB incl. its memory-saver pool), so the per-engine DiT-forward activation
 # must stay small. 16 prompts × 16 samples / 8 engines = 32 imgs/engine (~8 GB).
 batch_size: 16
+adv_use_global_std: true     # advantage: divide by ONE batch-wide std (v1 parity), not per-group
 
 # Every N rollouts the loop pushes the freshly-trained full weights into the
 # engine just before that rollout's generate.

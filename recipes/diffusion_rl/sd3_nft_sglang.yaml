@@ -21,6 +21,7 @@ num_devices: 16               # 2 nodes x 8 GPUs (v1: 4 train + 4 rollout / node
 # whole batch runs on the rollout slab only; reduce if SGLang's memory pool
 # leaves no room for the DiT forward (cf. the GRPO sglang configs at 16).
 batch_size: 48
+adv_use_global_std: true     # advantage: divide by ONE batch-wide std (v1 parity), not per-group
 
 # Layout: two sibling device slabs (8 train GPUs + 8 rollout GPUs).
 layout: separate

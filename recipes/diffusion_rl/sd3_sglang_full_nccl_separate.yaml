@@ -14,6 +14,7 @@ num_devices: 8
 # 48), and SGLang's memory-saver pool (~59 GB) leaves little room for the DiT-
 # forward activation. 16 prompts × 16 samples / 4 rollout GPUs = 64 imgs/GPU.
 batch_size: 16
+adv_use_global_std: true     # advantage: divide by ONE batch-wide std (v1 parity), not per-group
 
 # Layout: two sibling device slabs.
 layout: separate

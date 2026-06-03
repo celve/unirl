@@ -24,6 +24,7 @@
 
 num_devices: 16                    # 2 nodes × 8 GPUs
 batch_size: 16                     # prompts_per_rollout
+adv_use_global_std: true     # advantage: divide by ONE batch-wide std (v1 parity), not per-group
 
 layout: separate
 train_fraction: 0.5                # 8 train + 8 rollout
