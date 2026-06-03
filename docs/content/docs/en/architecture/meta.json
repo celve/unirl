@@ -1,5 +1,5 @@
 {
   "title": "Architecture",
-  "pages": ["concepts", "overview", "trainer-v2", "roadmap", "readme-reference"],
+  "pages": ["concepts", "overview", "trainer-v2", "roadmap", "readme-code-architecture", "readme-rollout", "readme-train-stack", "readme-algorithms", "readme-sde", "readme-weight-sync"],
   "defaultOpen": true
 }

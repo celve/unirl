@@ -1,5 +1,5 @@
 {
   "title": "指南",
-  "pages": ["data-and-models", "data-preparation", "rewards", "evaluation", "extending", "multinode", "geneval-mmcv-setup"],
+  "pages": ["data-and-models", "data-preparation", "rewards", "evaluation", "extending", "multinode", "geneval-mmcv-setup", "readme-reward-package", "readme-models", "readme-reward-service"],
   "defaultOpen": true
 }

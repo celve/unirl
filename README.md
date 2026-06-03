@@ -112,8 +112,8 @@ Module READMEs remain the source of truth for code-adjacent contracts:
 | Add or debug a trainer→rollout weight-sync backend | `unirl/distributed/weight_sync/README.md` |
 | Add or debug model code packages | `unirl/models/README.md` |
 
-Run `npm run sync:readmes` in `docs/` to expose these module READMEs in the
-Fumadocs README Reference section.
+Run `npm run sync:readmes` in `docs/` to embed these module READMEs as pages in
+the matching Fumadocs section.
 
 For GitHub Pages project hosting, the workflow sets
 `NEXT_PUBLIC_BASE_PATH=/UniRL` so Next.js generates links and assets for

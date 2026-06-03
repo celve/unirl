@@ -11,7 +11,7 @@ python -m unirl.train_diffusion --config-name=<bucket>/<recipe>
 
 ## Composition
 
-A recipe instantiates each runtime component directly by `_target_` (FSDP backend, train stack, rollout engine, reward service, algorithm, data source, …). The typed config dataclasses are registered by `@register_config` inside the `unirl` package. Use the generated [Config Package README](/en/docs/configuration/readme-reference/unirl-config) for the registration, instantiation, and validation contracts.
+A recipe instantiates each runtime component directly by `_target_` (FSDP backend, train stack, rollout engine, reward service, algorithm, data source, …). The typed config dataclasses are registered by `@register_config` inside the `unirl` package. Use the generated [Config Package README](/en/docs/configuration/readme-config-package) for the registration, instantiation, and validation contracts.
 
 ## Where Knobs Belong
 
@@ -25,7 +25,7 @@ CLI Hydra override > launcher env var > YAML default
 
 ## Runtime Contracts
 
-Cross-component validators run before Ray worker creation. The implementation details and validator list live in the generated [Config Package README](/en/docs/configuration/readme-reference/unirl-config).
+Cross-component validators run before Ray worker creation. The implementation details and validator list live in the generated [Config Package README](/en/docs/configuration/readme-config-package).
 
 `sync` and the tensor transport solve different problems. `sync` (`cfg.sync`) sends trainer weights back to dedicated rollout engines, while the tensor transport (`unirl/distributed/tensor/`) is the data plane for moving bulky rollout outputs between workers.
 

@@ -5,7 +5,7 @@ description: The main runtime loop, per-domain trainers, rollout engines, train 
 
 UniRL is organized around one Hydra-driven training loop. This page is a
 navigation overview; the code-adjacent contracts are generated from
-`unirl/README.md` and package READMEs under **Architecture → README Reference** in the sidebar.
+`unirl/README.md` and the package READMEs embedded as pages in each sidebar section.
 
 ```text
 unirl.train_diffusion | train_vlm | train_pe | train_unified_model
@@ -21,12 +21,12 @@ and the single-controller `Remote` / `placement` layer is now the only path.
 
 ## Main References
 
-- [Code Architecture README](/en/docs/architecture/readme-reference/unirl) for the module map and runtime data flow.
-- [Rollout Package README](/en/docs/architecture/readme-reference/unirl-rollout) for rollout modes and request/response contracts.
-- [Train Stack README](/en/docs/architecture/readme-reference/unirl-train) for the FSDP backend, the train-step contract, and structural injection.
-- [Algorithms Package README](/en/docs/architecture/readme-reference/unirl-algorithms) for per-track loss contracts and the reward→advantage path.
-- [SDE Package README](/en/docs/architecture/readme-reference/unirl-sde) for SDE strategy rules, schedules, and runtime kernels.
-- [Weight Sync README](/en/docs/architecture/readme-reference/unirl-weight-sync) for dedicated rollout synchronization.
+- [Code Architecture README](/en/docs/architecture/readme-code-architecture) for the module map and runtime data flow.
+- [Rollout Package README](/en/docs/architecture/readme-rollout) for rollout modes and request/response contracts.
+- [Train Stack README](/en/docs/architecture/readme-train-stack) for the FSDP backend, the train-step contract, and structural injection.
+- [Algorithms Package README](/en/docs/architecture/readme-algorithms) for per-track loss contracts and the reward→advantage path.
+- [SDE Package README](/en/docs/architecture/readme-sde) for SDE strategy rules, schedules, and runtime kernels.
+- [Weight Sync README](/en/docs/architecture/readme-weight-sync) for dedicated rollout synchronization.
 
 ## Data Flow
 
@@ -48,7 +48,7 @@ The trainer (`unirl/trainer/<domain>.py`) owns the placement block, worker
 construction, and phase ordering for rollout, reward, advantage, train, and sync.
 
 For deployment modes and engine-specific requirements, use the generated
-[Rollout Package README](/en/docs/architecture/readme-reference/unirl-rollout) as the
+[Rollout Package README](/en/docs/architecture/readme-rollout) as the
 source of truth.
 
 ## One Algorithm per Track

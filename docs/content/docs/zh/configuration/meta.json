@@ -1,5 +1,5 @@
 {
   "title": "配置",
-  "pages": ["hydra", "experiments"],
+  "pages": ["hydra", "experiments", "readme-config-package"],
   "defaultOpen": true
 }

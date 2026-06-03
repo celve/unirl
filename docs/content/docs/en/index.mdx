@@ -31,7 +31,7 @@ Override any field inline with Hydra's `key=value` syntax, e.g. `num_devices=8`.
 
 Shell launchers in `scripts/` should stay thin — they prepare environment variables, start Ray, and pass the recipe name plus Hydra overrides, while the recipe semantics live in YAML. See `scripts/run_experiment_single_node.sh` and `scripts/run_experiment_multinode_taiji.sh` for the canonical pattern.
 
-Detailed runtime and module contracts live in the README Reference pages under each docs section in the sidebar, sourced from README files next to the code.
+Detailed runtime and module contracts live in the package pages embedded in each docs section's sidebar, generated from the README files next to the code.
 
 ## How Agents Should Read This Site
 

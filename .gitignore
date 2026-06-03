@@ -66,7 +66,7 @@ docs/.source/
 docs/out/
 docs/node_modules/
 docs/tsconfig.tsbuildinfo
-docs/content/docs/en/**/readme-reference/
+docs/content/docs/**/readme-*.mdx
 docs/internal/
 docs/**/taiji*.md
 

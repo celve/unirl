@@ -4,8 +4,8 @@ description: UniRL 的主循环、各领域 trainer、rollout engine、train sta
 ---
 
 UniRL 围绕一个 Hydra 驱动的训练循环组织。本页只保留导航层说明；
-贴近代码的契约来自 `unirl/README.md` 和各 package README，并通过
-各文档分区侧边栏下的 README Reference 生成到站点中。
+贴近代码的契约来自 `unirl/README.md` 和各 package README，
+并以页面形式内嵌在各文档分区的侧边栏中。
 
 ```text
 unirl.train_diffusion | train_vlm | train_pe | train_unified_model
@@ -20,12 +20,12 @@ actor-group runtime 已退役，single-controller 的 `Remote` / `placement` 层
 
 ## 主要参考
 
-- [Code Architecture README](/en/docs/architecture/readme-reference/unirl)：模块地图和 runtime data flow。
-- [Rollout Package README](/en/docs/architecture/readme-reference/unirl-rollout)：rollout mode 和 request/response contract。
-- [Train Stack README](/en/docs/architecture/readme-reference/unirl-train)：FSDP backend、train-step 契约和结构注入。
-- [Algorithms Package README](/en/docs/architecture/readme-reference/unirl-algorithms)：每 track 的 loss contract 和 reward→advantage 路径。
-- [SDE Package README](/en/docs/architecture/readme-reference/unirl-sde)：SDE strategy、schedule 和 runtime kernel。
-- [Weight Sync README](/en/docs/architecture/readme-reference/unirl-weight-sync)：dedicated rollout 同步。
+- [Code Architecture README](/zh/docs/architecture/readme-code-architecture)：模块地图和 runtime data flow。
+- [Rollout Package README](/zh/docs/architecture/readme-rollout)：rollout mode 和 request/response contract。
+- [Train Stack README](/zh/docs/architecture/readme-train-stack)：FSDP backend、train-step 契约和结构注入。
+- [Algorithms Package README](/zh/docs/architecture/readme-algorithms)：每 track 的 loss contract 和 reward→advantage 路径。
+- [SDE Package README](/zh/docs/architecture/readme-sde)：SDE strategy、schedule 和 runtime kernel。
+- [Weight Sync README](/zh/docs/architecture/readme-weight-sync)：dedicated rollout 同步。
 
 ## 数据流
 
@@ -44,7 +44,7 @@ actor-group runtime 已退役，single-controller 的 `Remote` / `placement` 层
 trainer（`unirl/trainer/<domain>.py`）负责 placement 块、worker 构建，以及 rollout、reward、advantage、train、sync 的阶段顺序。
 
 部署模式和 engine-specific 要求以生成的
-[Rollout Package README](/en/docs/architecture/readme-reference/unirl-rollout) 为准。
+[Rollout Package README](/zh/docs/architecture/readme-rollout) 为准。
 
 ## 每 track 一个算法
 

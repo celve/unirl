@@ -12,9 +12,10 @@ npm run build
 npm run typecheck
 ```
 
-`npm run sync:readmes` regenerates the README Reference pages from the
-repository README files. It also runs automatically before `dev`, `build`, and
-`typecheck`.
+`npm run sync:readmes` regenerates the embedded package pages from the
+repository README files, writing one page per README into its owning docs
+section (under both `en` and `zh`). It also runs automatically before `dev`,
+`build`, and `typecheck`.
 
 `npm run build` statically exports the site to `out/`. The build also generates `.source/`, which backs the `collections/server` import used by Fumadocs MDX.
 
@@ -28,7 +29,7 @@ repository README files. It also runs automatically before `dev`, `build`, and
 | `lib/get-llm-text.ts` | Markdown conversion for agent endpoints |
 | `components/mdx.tsx` | MDX component mapping |
 | `source.config.ts` | Fumadocs MDX collection config |
-| `scripts/sync-readme-reference.mjs` | Generates README Reference pages from near-code README files |
+| `scripts/sync-readme-reference.mjs` | Generates embedded package pages from near-code README files |
 
 ## Agent Endpoints
 
@@ -39,7 +40,7 @@ Static builds expose:
 - `/md/<slug>/index.md` for one page as Markdown, for example `/md/configuration/hydra/index.md`.
 - `/api/search.json` for the static search index consumed by Fumadocs UI.
 
-Generated README Reference pages are included in these outputs after
+Generated package pages are included in these outputs after
 `npm run sync:readmes`.
 
 Keep these routes extension-safe so static hosts can infer MIME types without custom server configuration.
@@ -77,3 +78,4 @@ English is the source of truth and fallback language. If a Chinese page is missi
 - Node `>=20.19.0` is declared because current transitive file-watcher dependencies require it. Older Node versions may still build but will warn during install.
 - `includeProcessedMarkdown` is enabled in `source.config.ts`; do not remove it unless `/llms-full.txt` and `/md/<slug>/index.md` are replaced with another Markdown source.
 - Generated directories `.next/`, `.source/`, `out/`, and `node_modules/` are ignored by the repository.
+- Generated package pages `content/docs/{en,zh}/<section>/readme-*.mdx` come from `npm run sync:readmes` and are git-ignored; edit the source README, not these files.

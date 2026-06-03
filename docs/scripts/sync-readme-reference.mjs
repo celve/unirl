@@ -1,115 +1,112 @@
-import { mkdir, rm, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const docsRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(docsRoot, "..");
-const legacyOutputRoot = path.join(docsRoot, "content/docs/en/reference/readmes");
+const contentRoot = path.join(docsRoot, "content/docs");
 
-const categories = {
-  architecture: {
-    title: "Architecture README Reference",
-    description: "Generated runtime and package architecture reference pages.",
-  },
-  configuration: {
-    title: "Configuration README Reference",
-    description: "Generated Hydra and config package reference pages.",
-  },
-  guides: {
-    title: "Guides README Reference",
-    description: "Generated guide, launcher, patching, data, model, and reward reference pages.",
-  },
-  "getting-started": {
-    title: "Getting Started README Reference",
-    description: "Generated project and docs-site reference pages.",
-  },
-};
+const languages = ["en", "zh"];
+const githubBlobBase = "https://github.com/haonan3/UniRL/blob/main";
 
+// Output locations from the previous "README Reference" layout. They are removed
+// on every run so the old nested section never lingers next to the new flat pages.
+const legacyDirs = [
+  path.join(contentRoot, "en/reference/readmes"),
+  ...["architecture", "configuration", "guides", "getting-started"].map((section) =>
+    path.join(contentRoot, "en", section, "readme-reference"),
+  ),
+];
+
+// Each README is promoted to a normal page inside its owning section. The page
+// file is `readme-<slug>.mdx`, which keeps a single git-ignore glob while the
+// sidebar label comes from the `title` frontmatter.
 const readmes = [
   {
     source: "README.md",
-    slug: "root",
-    title: "Root README",
+    section: "getting-started",
+    slug: "project",
+    title: "Project README",
     description: "Project quick start, documentation entry points, checks, and citation.",
-    category: "getting-started",
   },
   {
     source: "docs/README.md",
-    slug: "docs",
+    section: "getting-started",
+    slug: "docs-site",
     title: "Docs Site README",
     description: "Fumadocs site commands, structure, and maintenance notes.",
-    category: "getting-started",
   },
   {
     source: "unirl/config/README.md",
-    slug: "unirl-config",
-    title: "Config Package README",
+    section: "configuration",
+    slug: "config-package",
+    title: "Config Package",
     description: "Config registration, instantiation, validation, and extension contracts.",
-    category: "configuration",
   },
   {
     source: "unirl/README.md",
-    slug: "unirl",
-    title: "Code Architecture README",
+    section: "architecture",
+    slug: "code-architecture",
+    title: "Code Architecture",
     description: "Runtime loop, module map, data flow, and package boundaries.",
-    category: "architecture",
   },
   {
     source: "unirl/rollout/README.md",
-    slug: "unirl-rollout",
-    title: "Rollout Package README",
+    section: "architecture",
+    slug: "rollout",
+    title: "Rollout",
     description: "Rollout modes, engines, request planning, and response contracts.",
-    category: "architecture",
   },
   {
     source: "unirl/train/readme.md",
-    slug: "unirl-train",
-    title: "Train Stack README",
-    description: "v2 single-stage train stack: FSDPBackend, TrainStack, structural injection, EMA shadow, and the train-step contract.",
-    category: "architecture",
+    section: "architecture",
+    slug: "train-stack",
+    title: "Train Stack",
+    description:
+      "v2 single-stage train stack: FSDPBackend, TrainStack, structural injection, EMA shadow, and the train-step contract.",
   },
   {
     source: "unirl/algorithms/README.md",
-    slug: "unirl-algorithms",
-    title: "Algorithms Package README",
+    section: "architecture",
+    slug: "algorithms",
+    title: "Algorithms",
     description: "Train-side loss algorithm contracts and the reward-to-gradient path.",
-    category: "architecture",
   },
   {
     source: "unirl/sde/README.md",
-    slug: "unirl-sde",
-    title: "SDE Package README",
+    section: "architecture",
+    slug: "sde",
+    title: "SDE",
     description: "SDE strategy rules, schedules, kernels, and log-probability paths.",
-    category: "architecture",
   },
   {
     source: "unirl/distributed/weight_sync/README.md",
-    slug: "unirl-weight-sync",
-    title: "Weight Sync README",
+    section: "architecture",
+    slug: "weight-sync",
+    title: "Weight Sync",
     description: "Trainer-to-rollout weight synchronization backends and contracts.",
-    category: "architecture",
   },
   {
     source: "unirl/reward/README.md",
-    slug: "unirl-reward",
-    title: "Reward Package README",
+    section: "guides",
+    slug: "reward-package",
+    title: "Reward Package",
     description: "Reward service, backends, scorers, and the reward extension workflow.",
-    category: "guides",
   },
   {
     source: "unirl/models/README.md",
-    slug: "unirl-models",
-    title: "Model Package README",
+    section: "guides",
+    slug: "models",
+    title: "Models",
     description: "Model bundle, stage, condition, and per-model package contracts.",
-    category: "guides",
   },
   {
     source: "unirl-reward-service/README.md",
-    slug: "unirl-reward-service",
-    title: "Reward Service README",
+    section: "guides",
+    slug: "reward-service",
+    title: "Reward Service",
     description: "Standalone remote reward service: scorers, HTTP API, and deployment.",
-    category: "guides",
   },
 ];
 
@@ -127,7 +124,7 @@ function rewriteRelativeMarkdownLinks(entry, markdown) {
       const resolvedPath = path.posix.normalize(path.posix.join(sourceDir, targetPath));
       const resolvedAnchor = anchor ? `#${anchor}` : "";
 
-      return `[${label}](https://github.com/haonan3/UniRL/blob/main/${resolvedPath}${resolvedAnchor})`;
+      return `[${label}](${githubBlobBase}/${resolvedPath}${resolvedAnchor})`;
     },
   );
 }
@@ -137,84 +134,65 @@ function frontmatterValue(value) {
 }
 
 function renderPage(entry, body) {
+  const content = stripTopLevelHeading(rewriteRelativeMarkdownLinks(entry, body)).trim();
+  const sourceUrl = `${githubBlobBase}/${entry.source}`;
+
   return `---
 title: ${frontmatterValue(entry.title)}
 description: ${frontmatterValue(entry.description)}
 ---
 
-{/* This file is generated by docs/scripts/sync-readme-reference.mjs. Do not edit directly. */}
+{/* Generated from ${entry.source} by docs/scripts/sync-readme-reference.mjs. Edit the source README, not this file. */}
 
-Source README: \`${entry.source}\`
+${content}
 
-${stripTopLevelHeading(rewriteRelativeMarkdownLinks(entry, body)).trim()}
+> Source: [\`${entry.source}\`](${sourceUrl}) — edit the README next to the code, then run \`npm run sync:readmes\` from \`docs/\`.
 `;
 }
 
-function getOutputRoot(category) {
-  return path.join(docsRoot, "content/docs/en", category, "readme-reference");
-}
+async function removeGeneratedPages(dir) {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
 
-function getEntriesForCategory(category) {
-  return readmes.filter((entry) => entry.category === category);
-}
-
-function renderIndex(category, entries) {
-  const categoryInfo = categories[category];
-  const rows = entries
-    .map((entry) => `| [${entry.title}](./${entry.slug}) | \`${entry.source}\` | ${entry.description} |`)
-    .join("\n");
-
-  return `---
-title: ${frontmatterValue(categoryInfo.title)}
-description: ${frontmatterValue(categoryInfo.description)}
----
-
-{/* This file is generated by docs/scripts/sync-readme-reference.mjs. Do not edit directly. */}
-
-These pages are generated from README files that live next to the code they describe. Edit the source README, then run \`npm run sync:readmes\` from \`docs/\`.
-
-| Page | Source | Description |
-|---|---|---|
-${rows}
-`;
-}
-
-function renderMeta(entries) {
-  return `${JSON.stringify(
-    {
-      title: "README Reference",
-      pages: ["index", ...entries.map((entry) => entry.slug)],
-      defaultOpen: false,
-    },
-    null,
-    2,
-  )}\n`;
+  await Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && entry.name.startsWith("readme-") && entry.name.endsWith(".mdx"))
+      .map((entry) => unlink(path.join(dir, entry.name))),
+  );
 }
 
 async function main() {
-  await rm(legacyOutputRoot, { recursive: true, force: true });
+  for (const dir of legacyDirs) {
+    await rm(dir, { recursive: true, force: true });
+  }
 
-  let generatedPageCount = 0;
-
-  for (const category of Object.keys(categories)) {
-    const entries = getEntriesForCategory(category);
-    const outputRoot = getOutputRoot(category);
-
-    await rm(outputRoot, { recursive: true, force: true });
-    await mkdir(outputRoot, { recursive: true });
-
-    await writeFile(path.join(outputRoot, "index.mdx"), renderIndex(category, entries));
-    await writeFile(path.join(outputRoot, "meta.json"), renderMeta(entries));
-
-    for (const entry of entries) {
-      const sourcePath = path.join(repoRoot, entry.source);
-      const body = await readFile(sourcePath, "utf8");
-      await writeFile(path.join(outputRoot, `${entry.slug}.mdx`), renderPage(entry, body));
-      generatedPageCount += 1;
+  const sections = new Set(readmes.map((entry) => entry.section));
+  for (const lang of languages) {
+    for (const section of sections) {
+      await removeGeneratedPages(path.join(contentRoot, lang, section));
     }
   }
 
-  console.log(`Generated ${generatedPageCount + Object.keys(categories).length} README reference pages across topical sections`);
+  let count = 0;
+  for (const entry of readmes) {
+    const body = await readFile(path.join(repoRoot, entry.source), "utf8");
+    const page = renderPage(entry, body);
+
+    for (const lang of languages) {
+      const dir = path.join(contentRoot, lang, entry.section);
+      await mkdir(dir, { recursive: true });
+      await writeFile(path.join(dir, `readme-${entry.slug}.mdx`), page);
+      count += 1;
+    }
+  }
+
+  console.log(
+    `Generated ${count} embedded README pages (${readmes.length} READMEs x ${languages.length} languages)`,
+  );
 }
 
 main().catch((error) => {

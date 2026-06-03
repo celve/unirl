@@ -1,5 +1,5 @@
 {
   "title": "快速开始",
-  "pages": ["installation", "first-run"],
+  "pages": ["installation", "first-run", "readme-project", "readme-docs-site"],
   "defaultOpen": true
 }

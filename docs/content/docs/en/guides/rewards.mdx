@@ -12,7 +12,7 @@ A reward is exactly one **backend**, held by `RewardService` (`unirl/reward/serv
 - a **local** in-process scorer (`unirl/reward/local/`: PickScore, HPS, OCR, GenEval2, VideoPickScore, …), or
 - the **remote** HTTP client (`RemoteRewardBackend`) talking to the standalone `unirl-reward-service/` server.
 
-The current YAML shape, component contract, and scorer extension workflow live in the generated [Reward Package README](/en/docs/guides/readme-reference/unirl-reward).
+The current YAML shape, component contract, and scorer extension workflow live in the generated [Reward Package README](/en/docs/guides/readme-reward-package).
 
 ## Config Shape
 
@@ -37,4 +37,4 @@ Reward failures are loud, never silent: a non-finite or `null` reward is flagged
 
 ## Adding a Local Scorer
 
-Add the spec and scorer near the reward implementation under `unirl/reward/local/`. Prefer `LocalRewardBackend` for in-process model scorers because it provides device resolution, eager load, `offload()`, and `onload()`. Register the spec with `@register_config(group="reward/component", ...)`. See the generated [Reward Package README](/en/docs/guides/readme-reference/unirl-reward) for the full example and the remote wire contract.
+Add the spec and scorer near the reward implementation under `unirl/reward/local/`. Prefer `LocalRewardBackend` for in-process model scorers because it provides device resolution, eager load, `offload()`, and `onload()`. Register the spec with `@register_config(group="reward/component", ...)`. See the generated [Reward Package README](/en/docs/guides/readme-reward-package) for the full example and the remote wire contract.

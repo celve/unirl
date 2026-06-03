@@ -11,7 +11,7 @@ python -m unirl.train_diffusion --config-name=<bucket>/<recipe>
 
 ## 组合模型
 
-recipe 用 `_target_` 直接实例化每个运行时组件（FSDP backend、train stack、rollout engine、reward service、algorithm、data source 等）。typed config dataclass 由 `unirl` 包内的 `@register_config` 注册。注册、实例化和验证契约以生成的 [Config Package README](/en/docs/configuration/readme-reference/unirl-config) 为准。
+recipe 用 `_target_` 直接实例化每个运行时组件（FSDP backend、train stack、rollout engine、reward service、algorithm、data source 等）。typed config dataclass 由 `unirl` 包内的 `@register_config` 注册。注册、实例化和验证契约以生成的 [Config Package README](/zh/docs/configuration/readme-config-package) 为准。
 
 ## 参数应该放哪里
 
@@ -25,7 +25,7 @@ CLI Hydra override > launcher env var > YAML default
 
 ## 运行时契约
 
-Ray worker 创建前会运行 cross-component validators。实现细节和 validator 清单见生成的 [Config Package README](/en/docs/configuration/readme-reference/unirl-config)。
+Ray worker 创建前会运行 cross-component validators。实现细节和 validator 清单见生成的 [Config Package README](/zh/docs/configuration/readme-config-package)。
 
 `sync` 和 tensor transport 解决不同问题：`sync`（`cfg.sync`）把 trainer 权重同步回 dedicated rollout engine，tensor transport（`unirl/distributed/tensor/`）是把大型 rollout 输出在 worker 间搬运的数据通道。
 

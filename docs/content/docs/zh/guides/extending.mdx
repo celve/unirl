@@ -42,7 +42,7 @@ description: 新增模型、rollout engine、train-side algorithm、reward、tra
 4. 设置 `supports_multi_update`（loss 是否在一个 rollout shard 上多次 optimizer step 仍有效），`requires_ema_rollout` 只给需要 EMA 采样的 off-policy loss（NFT）。
 5. 在 recipe 中把该类绑定到 track 的 `algorithm:` 节点。
 
-完整契约见生成的 [Algorithms Package README](/en/docs/architecture/readme-reference/unirl-algorithms)。
+完整契约见生成的 [Algorithms Package README](/zh/docs/architecture/readme-algorithms)。
 
 ## 新增 Reward Scorer
 
@@ -50,7 +50,7 @@ description: 新增模型、rollout engine、train-side algorithm、reward、tra
 
 ## 训练 Backend 与并行
 
-新的**训练 backend** 或**并行**工作（新的 FSDP / SP / EP plan，或 VeOmni 式 backend）面向 `unirl/train/backend/` 下的 backend 契约：实现与 `FSDPBackend` 相同的 `Remote` 表面，并把 `TrainTopology` 映射到并行 plan，而不是硬编码 shard size。见 [Trainer 与训练栈](/zh/docs/architecture/trainer-v2) 与生成的 [Train Stack README](/en/docs/architecture/readme-reference/unirl-train)。
+新的**训练 backend** 或**并行**工作（新的 FSDP / SP / EP plan，或 VeOmni 式 backend）面向 `unirl/train/backend/` 下的 backend 契约：实现与 `FSDPBackend` 相同的 `Remote` 表面，并把 `TrainTopology` 映射到并行 plan，而不是硬编码 shard size。见 [Trainer 与训练栈](/zh/docs/architecture/trainer-v2) 与生成的 [Train Stack README](/zh/docs/architecture/readme-train-stack)。
 
 ## Agent 提示
 

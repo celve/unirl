@@ -8,6 +8,8 @@ on:
       - "docs/**"
       - "recipes/README.md"
       - "unirl/**/README.md"
+      - "unirl/**/readme.md"
+      - "unirl-reward-service/**/README.md"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 

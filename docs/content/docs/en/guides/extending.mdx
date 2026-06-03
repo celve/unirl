@@ -43,7 +43,7 @@ The training loss is a per-track `StageAlgorithm`. Add a new class only when the
 4. Set `supports_multi_update` to match whether the loss is valid across multiple optimizer steps on one rollout shard, and `requires_ema_rollout` only for off-policy losses that need EMA sampling (NFT).
 5. Bind the class under the track's `algorithm:` node in a recipe.
 
-See the generated [Algorithms Package README](/en/docs/architecture/readme-reference/unirl-algorithms) for the full contract.
+See the generated [Algorithms Package README](/en/docs/architecture/readme-algorithms) for the full contract.
 
 ## Adding a Reward Scorer
 
@@ -51,7 +51,7 @@ Add the spec and scorer near the reward implementation under `unirl/reward/local
 
 ## Training Backends and Parallelism
 
-New **training-backend** or **parallelism** work (a new FSDP / SP / EP plan, or a VeOmni-style backend) targets the backend contract under `unirl/train/backend/`: implement the same `Remote` surface as `FSDPBackend` and map `TrainTopology` onto a parallel plan rather than hardcoding shard sizes. See [Trainer & Training Stack](/en/docs/architecture/trainer-v2) and the generated [Train Stack README](/en/docs/architecture/readme-reference/unirl-train).
+New **training-backend** or **parallelism** work (a new FSDP / SP / EP plan, or a VeOmni-style backend) targets the backend contract under `unirl/train/backend/`: implement the same `Remote` surface as `FSDPBackend` and map `TrainTopology` onto a parallel plan rather than hardcoding shard sizes. See [Trainer & Training Stack](/en/docs/architecture/trainer-v2) and the generated [Train Stack README](/en/docs/architecture/readme-train-stack).
 
 ## Agent Tip
 
