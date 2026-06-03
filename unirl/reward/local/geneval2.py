@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
 from PIL import Image
 
-from unirl.config.registration import register_config
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.reward.local.device import resolve_device
 from unirl.types.reward import RewardRequest
@@ -256,11 +256,7 @@ class GenEval2RewardScorer(LocalRewardBackend):
         return rewards
 
 
-@register_config(
-    group="reward/component",
-    name="geneval2",
-    target="unirl.reward.local.geneval2.GenEval2RewardScorer",
-)
+@dataclass
 class GenEval2Spec(BaseRewardComponentSpec):
     """Typed config for the GenEval2 Soft-TIFA reward component.
 
