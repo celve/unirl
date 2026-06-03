@@ -170,13 +170,6 @@ class HI3TrainStack(Remote):
         # One to_device here covers both algorithms' replays (AR teacher-force +
         # diffusion step) and their conditions — no per-replay device juggling.
         device = self.fsdp_backend._device
-        # ``decoded`` is a reward-only payload (scored upstream by
-        # ``reward.score_and_attach``); training reads only
-        # segment/conditions/advantages. Drop it before ``to_device`` so the
-        # heavy AR text / image pixels neither ride H2D nor occupy GPU through
-        # the optimizer step. ``media_preview`` is left intact for logging.
-        ar_track.decoded = None
-        image_track.decoded = None
         ar_track = ar_track.to_device(device)
         image_track = image_track.to_device(device)
 

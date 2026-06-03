@@ -141,20 +141,12 @@ def _align_track_to_model(resp_track: RolloutTrack, *, device: torch.device) -> 
     raw per-sample ``FieldKind.CONCAT`` lists of tensors (Qwen2.5-VL's
     ``pixel_values`` / ``image_grid_thw``), which have no ``.to_device`` of
     their own — ``_move_value`` handles Batch / tensor / list / dict / None
-    uniformly.
-
-    ``decoded`` is additionally dropped here: it is a reward-only payload
-    (consumed upstream by ``reward.score_and_attach``) that training never
-    reads. For a trainside rollout it is produced on the train GPU, so nulling
-    it before the optimizer step frees that GPU memory during the
-    training-compute peak; for an off-GPU (SGLang) rollout it simply frees the
-    CPU copy. ``media_preview`` is left intact for driver-side logging."""
+    uniformly."""
     if resp_track.segment is not None:
         resp_track.segment = resp_track.segment.to_device(device)
     resp_track.conditions = {k: _move_value(v, device) for k, v in resp_track.conditions.items()}
     if resp_track.advantages is not None:
         resp_track.advantages = resp_track.advantages.to(device=device)
-    resp_track.decoded = None
 
 
 class TrainStack(Remote):
