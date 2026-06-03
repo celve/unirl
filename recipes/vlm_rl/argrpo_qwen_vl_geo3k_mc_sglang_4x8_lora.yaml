@@ -1,13 +1,17 @@
 # @package _global_
-# ARGRPO Qwen2.5-VL on Geometry3K-MC — v2 VLM trainer (train_vlm / VLMTrainer)
+# ARGRPO Qwen2.5-VL on Geometry3K-MC — train_vlm (VLMTrainer)
 # with the SGLang LLM rollout engine (colocate) + LoRA-POOL weight sync.
 #
 # Third path alongside:
-#   - argrpo_qwen_vl_geo3k_mc_sglang_4x8.yaml  (sglang + FULL-weight TensorWeightSync, reproduces mnti3se0)
+#   - argrpo_qwen_vl_geo3k_mc_sglang_4x8.yaml  (sglang + FULL-weight TensorWeightSync)
 #   - argrpo_qwen_vl_geo3k_mc_4x8_lora.yaml    (trainside + LoRA, no sync)
 # Here the LLM decoder is trained as a rank-16 LoRA adapter and pushed into the
 # colocated SRT server's versioned LoRA pool each rollout via LocalLoraWeightSync
 # (set_lora_from_tensors -> /load_lora_adapter_from_tensors, {name}_v{N}).
+#
+# Data prep + paths: same as argrpo_qwen_vl_geo3k_mc_4x8.yaml — build the local
+# jsonl once with `python -m unirl.utils.prepare_geo3k_mc --out-dir data/geo3k_mc`,
+# then set DATA_PATH=data/geo3k_mc/train.jsonl (QWEN_VL_PATH defaults to the HF id).
 
 num_devices: 32
 batch_size: 32
@@ -22,13 +26,13 @@ logging:
   project_name: unirl-flowgrpo-newstac
   run_name: argrpo_qwen_vl_sglang_lora_4x8
   entity: ${oc.env:WANDB_ENTITY,null}
-  tags: [argrpo, qwen-vl, geo3k-mc, sglang, lora, colocate, v2, 4x8]
+  tags: [argrpo, qwen-vl, geo3k-mc, sglang, lora, colocate, 4x8]
 
 bundle:
   _target_: unirl.models.qwen_vl.bundle.QwenVLBundle.from_config
   config:
     _target_: unirl.models.qwen_vl.config.QwenVLPipelineConfig
-    pretrained_model_ckpt_path: ${oc.env:QWEN_VL_PATH,/root/sync/models/Qwen2.5-VL-7B-Instruct}
+    pretrained_model_ckpt_path: ${oc.env:QWEN_VL_PATH,Qwen/Qwen2.5-VL-7B-Instruct}
     model_precision: bf16
     autocast_precision: bf16
     logprob_precision: fp32
@@ -56,8 +60,8 @@ backend:
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
     # LoRA LR (1e-4) — ~20x the full-FT 5e-6. At 5e-6 the LoRA adapter (lora_B=0
-    # init) barely moved and reward stayed flat at the base ~0.55 (verified on the
-    # trainside LoRA run); 1e-4 makes the policy actually move (approx_kl 1e-13->1e-5).
+    # init) barely moves and reward stays flat at the base; 1e-4 makes the policy
+    # actually move (approx_kl 1e-13->1e-5).
     learning_rate: 1.0e-4
     adam_beta1: 0.9
     adam_beta2: 0.999
@@ -85,7 +89,7 @@ rollout:
   _target_: unirl.rollout.engine.sglang_llm.engine.SGLangLLMRolloutEngine
   config:
     _target_: unirl.rollout.engine.sglang_llm.config.SGLangLLMEngineConfig
-    pretrained_model_ckpt_path: ${oc.env:QWEN_VL_PATH,/root/sync/models/Qwen2.5-VL-7B-Instruct}
+    pretrained_model_ckpt_path: ${oc.env:QWEN_VL_PATH,Qwen/Qwen2.5-VL-7B-Instruct}
     tp_size: 1
     samples_pre_expanded: true
     image_token: "<|vision_start|><|image_pad|><|vision_end|>"
@@ -143,8 +147,8 @@ data_source:
   _target_: unirl.data.data_source.MultimodalRLDataSource
   args:
     run:
-      data_path: ${oc.env:DATA_PATH,/root/sync/datasets/geo3k_mc/train.jsonl}
-      eval_data_path: ${oc.env:EVAL_DATA_PATH,/root/sync/datasets/geo3k_mc/val.jsonl}
+      data_path: ${oc.env:DATA_PATH}            # local jsonl; build with unirl/utils/prepare_geo3k_mc.py
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
       seed: 42
     algorithm:
       prompts_per_rollout: 32
