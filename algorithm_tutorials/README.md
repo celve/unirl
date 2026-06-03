@@ -1,32 +1,38 @@
 # Algorithm Tutorials
 
-Short, code-grounded walkthroughs of the three core **diffusion-RL** algorithms in
-UniRL. Each folder pairs a focused, annotated config extract with a README that
+Short, code-grounded walkthroughs of the core RL algorithms in UniRL: three
+**diffusion** (image) algorithms and one **LLM/VLM** (autoregressive, token-level)
+algorithm. Each folder pairs a focused, annotated config extract with a README that
 explains *what* the algorithm optimizes, *the math*, and *where it lives in the
 code*.
 
-If you are new to this codebase, read this page first, then read
-[`flowGRPO/`](flowGRPO/) before the other two. flowGRPO establishes the common
-reverse-process RL vocabulary: SDE rollout, per-step log-prob, old/new policy
+If you are new to this codebase, read this page first. For the **diffusion** track,
+read [`flowGRPO/`](flowGRPO/) before the other two: it establishes the common
+reverse-process RL vocabulary — SDE rollout, per-step log-prob, old/new policy
 ratio, and group-relative advantage. flowDPPO changes only the trust-region rule.
 diffusionNFT is the different one: it does not optimize the reverse trajectory
-likelihood at all.
+likelihood at all. The **LLM/VLM** track is [`spoDPPO/`](spoDPPO/), a token-level
+divergence-masked trust region — the autoregressive analogue of flowDPPO; it reads
+independently of the diffusion three.
 
 | Tutorial | Algorithm | Code | Canonical recipe |
 |---|---|---|---|
 | [`flowGRPO/`](flowGRPO/) | `DiffusionGRPO` — PPO-style ratio clipping on per-step SDE log-probs | [`unirl/algorithms/diffusion_grpo.py`](../unirl/algorithms/diffusion_grpo.py) | [`recipes/diffusion_rl/sd3_trainside.yaml`](../recipes/diffusion_rl/sd3_trainside.yaml) |
 | [`flowDPPO/`](flowDPPO/) | `DiffusionDPPO` — same SDE rollout, KL-ADV masking instead of clipping | [`unirl/algorithms/dppo.py`](../unirl/algorithms/dppo.py) | [`recipes/diffusion_rl/sd3_flowdppo.yaml`](../recipes/diffusion_rl/sd3_flowdppo.yaml) |
 | [`diffusionNFT/`](diffusionNFT/) | `DiffusionNFT` — forward-process dual positive/negative reconstruction | [`unirl/algorithms/nft.py`](../unirl/algorithms/nft.py) | [`recipes/diffusion_rl/sd3_nft.yaml`](../recipes/diffusion_rl/sd3_nft.yaml) |
+| [`spoDPPO/`](spoDPPO/) | `ARSPODPPO` — **LLM/VLM (AR)** token-level divergence mask (DPPO Binary-TV/KL + TIS) | [`unirl/algorithms/spo_dppo.py`](../unirl/algorithms/spo_dppo.py) | [`recipes/llm_rl/ar_spo_dppo_qwen3_4x8_sglang.yaml`](../recipes/llm_rl/ar_spo_dppo_qwen3_4x8_sglang.yaml) |
 
 ## Quick mental model
 
-| Question | flowGRPO | flowDPPO | diffusionNFT |
-|---|---|---|---|
-| What is trained? | Probability of sampled SDE denoising steps | Same probabilities, but with a KL-aware mask | Flow-matching denoising prediction on re-noised clean latents |
-| Needs SDE log-probs? | Yes | Yes | No |
-| Uses old/new ratio? | Yes | Yes | No |
-| Main safety mechanism | PPO clip range | KL threshold + advantage-direction mask | EMA "old" adapter in a dual positive/negative objective |
-| Best first read? | Yes | After flowGRPO | After understanding why reverse-process RL is expensive |
+The first three are diffusion (image); spoDPPO is the LLM/VLM (token-level) entry.
+
+| Question | flowGRPO | flowDPPO | diffusionNFT | spoDPPO (LLM/AR) |
+|---|---|---|---|---|
+| What is trained? | Probability of sampled SDE denoising steps | Same probabilities, but with a KL-aware mask | Flow-matching denoising prediction on re-noised clean latents | Probability of sampled tokens, divergence-masked |
+| Needs SDE log-probs? | Yes | Yes | No | No (token log-probs) |
+| Uses old/new ratio? | Yes | Yes | No | Yes (TIS-truncated) |
+| Main safety mechanism | PPO clip range | KL threshold + advantage-direction mask | EMA "old" adapter in a dual positive/negative objective | Binary-TV/KL hard mask on \|π−µ\| |
+| Best first read? | Yes | After flowGRPO | After understanding why reverse-process RL is expensive | LLM track (independent); akin to flowDPPO |
 
 ## How they relate
 
@@ -56,8 +62,13 @@ flowchart TD
   SDE rollout for the loss. It re-noises the rollout's clean latent at many
   timesteps and trains a dual adapter (trainable vs. EMA-frozen) toward a
   reward-weighted blend of "positive" and "negative" predictions.
+- **spoDPPO** is the **LLM/VLM (AR)** entry, a token-level analogue of flowDPPO: it
+  replays the sampled tokens and **zeroes** a token's update when its probability
+  shift `|π−µ|` crosses a threshold in the reward-improving direction (DPPO's hard
+  mask). Kept tokens train a TIS-corrected REINFORCE loss. *(The bundled DRPO paper's
+  smooth-regularizer successor is not yet implemented — see [`spoDPPO/`](spoDPPO/).)*
 
-Advantage normalization is shared by all three through
+Advantage normalization is shared by all four through
 [`RolloutTrack.compute_advantages`](../unirl/types/rollout_resp.py). The default is
 GRPO-style per-prompt centering and per-prompt standardization. The shipped
 flowDPPO recipe sets `adv_use_global_std: true`, which still subtracts each
@@ -72,6 +83,9 @@ out that recipe-specific difference where it matters.
 - DiffusionNFT paper: [arXiv:2509.16117](https://arxiv.org/abs/2509.16117)
 - DiffusionNFT project/code: [NVIDIA project page](https://research.nvidia.com/labs/cosmos-lab/diffusionnft/) /
   [NVlabs/DiffusionNFT](https://github.com/NVlabs/DiffusionNFT)
+- DPPO — the Binary-TV/KL hard mask `spoDPPO` actually implements: [arXiv:2602.04879](https://arxiv.org/abs/2602.04879)
+- SPO — smooth ratio regularizer in the lineage: [arXiv:2401.16025](https://arxiv.org/abs/2401.16025)
+- DRPO — the smooth-regularizer successor discussed in [`spoDPPO/`](spoDPPO/) (bundled paper; *not yet implemented*)
 
 ## Running a tutorial
 
@@ -79,8 +93,13 @@ The config in each folder is an **annotated extract** for reading. To actually
 train, launch the full canonical recipe (see each README):
 
 ```bash
+# diffusion (flowGRPO / flowDPPO / diffusionNFT)
 PRETRAINED_MODEL=stabilityai/stable-diffusion-3.5-medium \
 python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside num_devices=8
+
+# LLM/VLM (spoDPPO) — note the train_vlm entrypoint
+QWEN3_PATH=/root/sync/models/Qwen3-8B DATA_PATH=/root/sync/datasets/gsm8k/train.jsonl \
+python -m unirl.train_vlm --config-name=ar_spo_dppo_qwen3_4x8_sglang num_devices=32
 ```
 
 > Figures: diagrams here are GitHub-rendered [Mermaid](https://mermaid.js.org/).
