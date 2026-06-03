@@ -2,7 +2,7 @@ r"""Boxed-answer numeric-match reward scorer for math RL (competition-style).
 
 Sibling of :mod:`gsm8k_exact_match`. That scorer was authored for GSM8K's
 ``#### <number>`` convention and falls back to "last number in the text" — both
-mismatch how Qwen3 (and datasets like DPAO_filter) actually emit answers: a
+mismatch how Qwen3 (and datasets like DAPO-Math) actually emit answers: a
 ``\boxed{...}`` at the end of the solution. This scorer:
 
 1. extracts the LAST ``\boxed{...}`` (balanced braces; tolerant of truncation),
@@ -13,8 +13,8 @@ mismatch how Qwen3 (and datasets like DPAO_filter) actually emit answers: a
    the last number in the text (a false-positive source on rambling / truncated
    output); with no parseable boxed/#### answer the reward is 0.
 
-No new dependencies — uses sympy (already in the env). Used by the Qwen3-1.7B
-DPAO_filter SPO-DPPO recipe (thinking mode, long generations).
+No new dependencies — uses sympy (already in the env). Used by the Qwen3-4B-Base
+DAPO-Math DRPO recipe (long boxed-answer generations).
 """
 
 from __future__ import annotations

@@ -23,7 +23,7 @@ shaping and SDE-index selection live on typed objects (`RolloutTrack` and
 | DanceGRPO / MixGRPO | `DiffusionGRPO` | diffusion | GRPO with an `sde_strategy` / windowed-scheduler swap (recipe composition, same loss class) |
 | Flow-DPPO | `unirl.algorithms.dppo.DiffusionDPPO` | diffusion | KL-divergence-masked DPPO objective |
 | NFT | `unirl.algorithms.nft.DiffusionNFT` | diffusion | Forward-process loss with dual `default`/`old` (EMA) adapters |
-| SPO-DPPO | `unirl.algorithms.spo_dppo.ARSPODPPO` | AR | TV/KL trust-region objective for text traces |
+| DRPO | `unirl.algorithms.drpo.ARDRPO` | AR | TV/KL trust-region objective for text traces |
 
 DanceGRPO and MixGRPO are recipe compositions around the same `DiffusionGRPO`
 class (a different `sampling.sde_strategy` or `algorithm/scheduler`). Add a new
@@ -185,7 +185,7 @@ SDE-index scheduler.
 `stack.num_updates_per_batch` partitions one rollout shard into N disjoint
 mini-batches (one optimizer step each), with π_old frozen once by
 `prepare_segment`. This is gated on `StageAlgorithm.supports_multi_update`:
-`DiffusionGRPO` / `DiffusionDPPO` support it; `ARGRPO` / `ARSPODPPO` are
+`DiffusionGRPO` / `DiffusionDPPO` support it; `ARGRPO` / `ARDRPO` are
 single-update-only and `TrainStack` raises if a recipe sets `> 1` for them.
 
 ## YAML Shape

@@ -21,7 +21,7 @@ pluggable rollout engines.
 |---|---|---|
 | Image | Stable Diffusion 3, Qwen-Image, HunyuanImage3 | GRPO, DanceGRPO, MixGRPO, Flow-DPPO, NFT |
 | Video | WAN 2.1 / 2.2 | GRPO, DanceGRPO, MixGRPO |
-| Autoregressive (VLM / LLM) | Qwen-VL, Qwen3 | GRPO, SPO-DPPO |
+| Autoregressive (VLM / LLM) | Qwen-VL, Qwen3 | GRPO, DRPO |
 
 Additional model packages (e.g. FLUX.2-Klein, HunyuanVideo 1.5) live under
 `unirl/models/` without shipped recipes yet — see `unirl/models/README.md`.

@@ -10,7 +10,7 @@ Launch (per node, SPMD; rank 0 owns the driver):
   python -m unirl.train_vlm --config-name=vlm_rl/argrpo_qwen_vl_geo3k_mc_4x8
 
 This AR entrypoint also serves pure-LLM recipes under ``recipes/llm_rl/``
-(e.g. ``--config-name=llm_rl/ar_spo_dppo_qwen3_4x8``).
+(e.g. ``--config-name=llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang``).
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ def main(cfg: DictConfig) -> None:
         sync_cfg=cfg.get("sync"),
         logging_cfg=cfg.get("logging"),
         adv_normalization_scope=cfg.get("adv_normalization_scope", "group"),
+        normalize_adv_by_std=bool(cfg.get("normalize_adv_by_std", True)),
     )
     trainer.train(
         num_rollouts=int(cfg.get("num_rollouts", 100)),

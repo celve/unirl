@@ -9,12 +9,12 @@ from .ar_grpo import ARGRPO
 from .base import AlgorithmStepResult, StageAlgorithm
 from .diffusion_grpo import DiffusionGRPO
 from .dppo import DiffusionDPPO
+from .drpo import ARDRPO
 from .nft import DiffusionNFT, DiffusionNFTConfig
-from .spo_dppo import ARSPODPPO
 
 __all__ = [
     "ARGRPO",
-    "ARSPODPPO",
+    "ARDRPO",
     "AlgorithmStepResult",
     "DiffusionDPPO",
     "DiffusionGRPO",

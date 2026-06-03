@@ -3,7 +3,7 @@
 Sibling of :mod:`mc_exact_match` (which is letter-only A-D). Here the answer is
 a number: extraction prefers the GSM8K ``#### <answer>`` marker, then falls back
 to the last numeric value in the text; the prediction is string-compared to the
-ground-truth answer (commas stripped). Used by the AR SPO-DPPO Qwen3 recipe.
+ground-truth answer (commas stripped). Used by the AR DRPO Qwen3 recipe.
 """
 
 from __future__ import annotations

@@ -68,7 +68,7 @@ backend:
     warmup_steps: 0
     total_steps: 10000
   # LoRA rank-16 on the LLM decoder attention projections (vision tower frozen
-  # by the bundle). Mirrors the trainside Qwen3 lora_cfg (ar_spo_dppo_qwen3_4x8).
+  # by the bundle). Mirrors the trainside Qwen3 lora_cfg (ar_drpo_qwen3_4b_base_dpao_sglang).
   lora_cfg:
     _target_: unirl.train.configs.LoraConfig
     rank: 16

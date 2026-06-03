@@ -12,7 +12,7 @@ The recipe family determines which entrypoint runs it:
 | Entrypoint | Bucket | Recipe families |
 |---|---|---|
 | `python -m unirl.train_diffusion` | `diffusion_rl/` | `sd3_*`, `qwen_image_*`, `flux2_klein_*`, `wan21_*`, `wan22_*`, `hunyuan_video*` |
-| `python -m unirl.train_vlm` | `vlm_rl/`, `llm_rl/` | `argrpo_qwen_vl_*`, `ar_spo_dppo_qwen3_*` |
+| `python -m unirl.train_vlm` | `vlm_rl/`, `llm_rl/` | `argrpo_qwen_vl_*`, `ar_drpo_qwen3_*` |
 | `python -m unirl.train_pe` | `pe_rl/` | `pe_*` |
 | `python -m unirl.train_hi3` | `unified_model_rl/` | `hi3_*` |
 
@@ -32,7 +32,7 @@ The recipe family determines which entrypoint runs it:
 | HunyuanVideo | `hunyuan_video_t2v_trainside`, `hunyuan_video15_t2v_dancegrpo_trainside`, `hunyuan_video15_t2v_vllmomni_nccl_separate` |
 | HunyuanImage3 | `hi3_vllmomni` |
 | Qwen-VL ARGRPO (VLM) | `argrpo_qwen_vl_geo3k_mc_4x8`, `argrpo_qwen_vl_geo3k_mc_4x8_lora`, `argrpo_qwen_vl_geo3k_mc_sglang_4x8`, `argrpo_qwen_vl_geo3k_mc_sglang_4x8_lora` |
-| Qwen3 SPO-DPPO (LLM) | `ar_spo_dppo_qwen3_4x8`, `ar_spo_dppo_qwen3_4x8_sglang` |
+| Qwen3 DRPO (LLM) | `ar_drpo_qwen3_4b_base_dpao_sglang` |
 | PE (prompt enhancer, AR + diffusion) | `pe_trainside_pickscore`, `pe_sglang_full_pickscore`, `pe_sglang_full_wise`, `pe_sglang_lora_pickscore` |
 
 ## Selecting a Recipe
@@ -55,7 +55,7 @@ Use this decision order when a task does not name a specific recipe:
 
 1. Pick the modality and model family first: SD3 or Qwen-Image for image; WAN 2.1 / 2.2 for video; HunyuanImage3 for mixed AR + diffusion; Qwen-VL / Qwen3 for VLM / LLM; PE for prompt-enhancer.
 2. Pick the rollout topology: `trainside` for direct sampling, SGLang or vLLM-Omni recipes for dedicated rollout, and `colocate` when train and rollout share GPU bundles (vs `separate`).
-3. Pick the algorithm: GRPO / DanceGRPO / MixGRPO for on-policy ratio losses, Flow-DPPO for KL-masked policy optimization, NFT for off-policy forward-process training, SPO-DPPO for AR text.
+3. Pick the algorithm: GRPO / DanceGRPO / MixGRPO for on-policy ratio losses, Flow-DPPO for KL-masked policy optimization, NFT for off-policy forward-process training, DRPO for AR text.
 4. Pick the cluster-size variant, such as `4x8`, only after matching the target hardware.
 5. Run a compose check before launching Ray work.
 

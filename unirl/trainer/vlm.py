@@ -51,11 +51,16 @@ class VLMTrainer(BaseTrainer):
         sync_cfg: Optional[DictConfig] = None,
         logging_cfg: Optional[DictConfig] = None,
         adv_normalization_scope: str = "group",
+        normalize_adv_by_std: bool = True,
     ) -> None:
         super().__init__(cfg=cfg, logging_cfg=logging_cfg)
         self.batch_size = batch_size
         # "group" (textbook GRPO, default) or "global" (v1 baseline parity).
         self.adv_normalization_scope = adv_normalization_scope
+        # True (default) = standard GRPO: divide the group-relative advantage by the
+        # group std. False = mean-center only (reward - group_mean), NO std division —
+        # removes the difficulty bias that over-amplifies low-std (hard) prompts.
+        self.normalize_adv_by_std = normalize_adv_by_std
 
         # Driver-side data iterator (not a Remote).
         self.data_source = instantiate(data_source_cfg)
@@ -139,7 +144,9 @@ class VLMTrainer(BaseTrainer):
 
         for name, track in list(resp.tracks.items()):
             if track.rewards is not None:
-                resp.tracks[name] = track.compute_advantages(normalize=True, scope=self.adv_normalization_scope)
+                resp.tracks[name] = track.compute_advantages(
+                    normalize=self.normalize_adv_by_std, scope=self.adv_normalization_scope
+                )
 
         self._drop_decoded(resp)
         (track,) = resp.tracks.values()

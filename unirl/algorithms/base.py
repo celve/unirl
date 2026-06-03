@@ -196,7 +196,7 @@ class StageAlgorithm(Remote, ABC):
             True only for algorithms that freeze a pre-update policy anchor
             in :meth:`prepare_segment`: ``DiffusionGRPO`` / ``DiffusionDPPO``
             capture ``segment.sde_logp`` once, so the PPO ratio stays anchored
-            across all N steps. Default False — AR ``GRPO`` / ``SPO-DPPO`` reuse
+            across all N steps. Default False — AR ``GRPO`` / ``DRPO`` reuse
             the rollout log-prob as ``old_logp``, so >1 step would conflate the
             rollout-vs-train engine gap with real policy drift (see the
             ``NOTE(multi-epoch)`` in those losses), and NFT's multi-update path

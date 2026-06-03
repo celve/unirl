@@ -19,7 +19,7 @@ of the name; drop the `.yaml`).
 |---|---|---|
 | [`diffusion_rl/`](diffusion_rl/) | `python -m unirl.train_diffusion` | Diffusion image/video RL — SD3, Qwen-Image, Flux.2-Klein, WAN 2.1/2.2, HunyuanVideo |
 | [`vlm_rl/`](vlm_rl/) | `python -m unirl.train_vlm` | Vision-language AR RL — Qwen-VL ARGRPO |
-| [`llm_rl/`](llm_rl/) | `python -m unirl.train_vlm` | Text-only AR RL — Qwen3 SPO-DPPO (shares the AR entrypoint with `vlm_rl/`) |
+| [`llm_rl/`](llm_rl/) | `python -m unirl.train_vlm` | Text-only AR RL — Qwen3 DRPO (shares the AR entrypoint with `vlm_rl/`) |
 | [`pe_rl/`](pe_rl/) | `python -m unirl.train_pe` | Prompt-enhancer (AR + diffusion) |
 | [`unified_model_rl/`](unified_model_rl/) | `python -m unirl.train_hi3` | Unified AR + diffusion — HunyuanImage3 |
 
@@ -82,7 +82,7 @@ Bucket-specific trailing qualifiers extend the chain:
 - AR buckets append the cluster shape `<N>x<G>` (nodes × GPUs): `..._4x8`.
 
 **Known deviation:** the AR recipes in `vlm_rl/`/`llm_rl/` predate this schema and
-lead with the algorithm (`argrpo_qwen_vl_…`, `ar_spo_dppo_qwen3_…`) rather than the
+lead with the algorithm (`argrpo_qwen_vl_…`, `ar_drpo_qwen3_…`) rather than the
 model. They are kept as-is; new recipes should follow the model-first order above.
 
 ## Adding a recipe

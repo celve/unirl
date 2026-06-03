@@ -12,7 +12,7 @@ recipe 所属家族决定用哪个入口运行：
 | 入口 | bucket | recipe 家族 |
 |---|---|---|
 | `python -m unirl.train_diffusion` | `diffusion_rl/` | `sd3_*`、`qwen_image_*`、`flux2_klein_*`、`wan21_*`、`wan22_*`、`hunyuan_video*` |
-| `python -m unirl.train_vlm` | `vlm_rl/`、`llm_rl/` | `argrpo_qwen_vl_*`、`ar_spo_dppo_qwen3_*` |
+| `python -m unirl.train_vlm` | `vlm_rl/`、`llm_rl/` | `argrpo_qwen_vl_*`、`ar_drpo_qwen3_*` |
 | `python -m unirl.train_pe` | `pe_rl/` | `pe_*` |
 | `python -m unirl.train_hi3` | `unified_model_rl/` | `hi3_*` |
 
@@ -32,7 +32,7 @@ recipe 所属家族决定用哪个入口运行：
 | HunyuanVideo | `hunyuan_video_t2v_trainside`、`hunyuan_video15_t2v_dancegrpo_trainside`、`hunyuan_video15_t2v_vllmomni_nccl_separate` |
 | HunyuanImage3 | `hi3_vllmomni` |
 | Qwen-VL ARGRPO（VLM） | `argrpo_qwen_vl_geo3k_mc_4x8`、`argrpo_qwen_vl_geo3k_mc_4x8_lora`、`argrpo_qwen_vl_geo3k_mc_sglang_4x8`、`argrpo_qwen_vl_geo3k_mc_sglang_4x8_lora` |
-| Qwen3 SPO-DPPO（LLM） | `ar_spo_dppo_qwen3_4x8`、`ar_spo_dppo_qwen3_4x8_sglang` |
+| Qwen3 DRPO（LLM） | `ar_drpo_qwen3_4b_base_dpao_sglang` |
 | PE（prompt enhancer，AR + diffusion） | `pe_trainside_pickscore`、`pe_sglang_full_pickscore`、`pe_sglang_full_wise`、`pe_sglang_lora_pickscore` |
 
 ## 选择 Recipe
@@ -55,7 +55,7 @@ bash scripts/run_experiment_multinode_taiji.sh diffusion_rl/sd3_sglang_native_co
 
 1. 先选模态和模型：图像用 SD3 或 Qwen-Image；视频用 WAN 2.1 / 2.2；AR + diffusion 混合用 HunyuanImage3；VLM / LLM 用 Qwen-VL / Qwen3；prompt-enhancer 用 PE。
 2. 再选 rollout topology：`trainside` 是 direct sampling；SGLang/vLLM-Omni 是 dedicated rollout；`colocate` 表示 train 和 rollout 共享 GPU bundle（相对 `separate`）。
-3. 再选算法：GRPO / DanceGRPO / MixGRPO 是 on-policy ratio loss，Flow-DPPO 是 KL-masked policy optimization，NFT 是 off-policy forward-process training，SPO-DPPO 用于 AR 文本。
+3. 再选算法：GRPO / DanceGRPO / MixGRPO 是 on-policy ratio loss，Flow-DPPO 是 KL-masked policy optimization，NFT 是 off-policy forward-process training，DRPO 用于 AR 文本。
 4. 最后按硬件选择如 `4x8` 等变体。
 5. 启动 Ray 作业前先做 compose check。
 

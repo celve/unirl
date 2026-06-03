@@ -1,9 +1,9 @@
-"""SPO-DPPO (AR): divergence-based trust-region masking for token-level RL.
+"""DRPO (AR): divergence-based trust-region masking for token-level RL.
 
 Implements the DPPO-Binary-TV and DPPO-Binary-KL policy losses from
 "Rethinking the Trust Region in LLM Reinforcement Learning"
 (https://arxiv.org/pdf/2602.04879) for autoregressive (token-level,
-discrete) policies. ``ARSPODPPO`` applies trust-region masking per-token
+discrete) policies. ``ARDRPO`` applies trust-region masking per-token
 over packed-varlen ``TextSegment`` data.
 
 Two divergence variants:
@@ -13,7 +13,7 @@ Two divergence variants:
     token probabilities, computed from per-token log-probs only (no
     full-vocabulary logits required).
 
-(AR-only by design; a diffusion SPO-DPPO sibling can be added in its own PR.)
+(AR-only by design; a diffusion DRPO sibling can be added in its own PR.)
 
 Both variants share:
   1. Truncated Importance Sampling (TIS): ``truncated_ratio = clamp(ratio, max=C).detach()``
@@ -49,12 +49,12 @@ from .base import (
 
 @register_config(
     group="algorithm",
-    name="ar_spo_dppo",
-    target="unirl.algorithms.spo_dppo.ARSPODPPO",
+    name="ar_drpo",
+    target="unirl.algorithms.drpo.ARDRPO",
 )
 @dataclass
-class ARSPODPPOConfig(BaseAlgorithmConfig):
-    """Config for :class:`ARSPODPPO`.
+class ARDRPOConfig(BaseAlgorithmConfig):
+    """Config for :class:`ARDRPO`.
 
     Attributes:
         stage_attr: Which stage slot to bind to (``"ar"``).
@@ -80,11 +80,18 @@ class ARSPODPPOConfig(BaseAlgorithmConfig):
 
     stage_attr: str = "ar"
     conditions_cls: str = ""
-    variant: str = "tv"  # "tv" or "kl"
+    variant: str = "tv"  # "tv" | "kl" | "pg_tv_penalty"
     clip_divergence: float = 0.2
     clip_divergence_low: Optional[float] = None
     clip_divergence_high: Optional[float] = None
     clip_ratio_c: float = 20.0
+    # pg_tv_penalty (reference run_qwen3_4b.sh default): L = -A*logp + penalty_coef*|ratio-1|.
+    # penalty_coef is the reference's actor.clip_ratio used as the TV-penalty coefficient (0.15).
+    penalty_coef: float = 0.15
+    # "token-mean" (current) or "seq-mean-token-sum-norm" (reference: per-seq token-SUM / horizon,
+    # then mean over sequences). horizon = max response length (the fixed normalizer).
+    loss_agg_mode: str = "token-mean"
+    horizon: int = 8192
     sampling_temperature: Optional[float] = None
 
 
@@ -93,7 +100,7 @@ class ARSPODPPOConfig(BaseAlgorithmConfig):
 # ---------------------------------------------------------------------------
 
 
-def _ar_spo_dppo_tv_loss(
+def _ar_drpo_tv_loss(
     *,
     new_logp: torch.Tensor,
     old_logp: torch.Tensor,
@@ -102,14 +109,14 @@ def _ar_spo_dppo_tv_loss(
     clip_divergence_high: float,
     clip_ratio_c: float,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    """SPO-DPPO TV-variant loss for AR token-level policies.
+    """DRPO TV-variant loss for AR token-level policies.
 
     Operates on packed-varlen ``[total_tokens]`` tensors (the natural
-    setting for the SPO-DPPO paper, which was designed for discrete
+    setting for the DRPO paper, which was designed for discrete
     token-level policies).
 
     Uses |π_θ(a|s) - π_old(a|s)| as the divergence measure — the true
-    Total Variation distance from the SPO-DPPO paper. For discrete tokens
+    Total Variation distance from the DRPO paper. For discrete tokens
     the chosen-token probability is a well-defined scalar in [0, 1], so the
     absolute difference is the correct TV (not a ratio-based proxy).
 
@@ -142,7 +149,7 @@ def _ar_spo_dppo_tv_loss(
     truncated_ratio = torch.clamp(ratio, max=clip_ratio_c).detach()
 
     # True TV divergence: |π_θ(a|s) - π_old(a|s)|
-    # This is the original SPO-DPPO paper formulation, not |ratio-1|.
+    # This is the original DRPO paper formulation, not |ratio-1|.
     prob = torch.exp(new_logp)
     old_prob = torch.exp(old_logp)
     prob_delta = prob - old_prob
@@ -179,7 +186,7 @@ def _ar_spo_dppo_tv_loss(
     return pg_losses, metrics
 
 
-def _ar_spo_dppo_kl_loss(
+def _ar_drpo_kl_loss(
     *,
     new_logp: torch.Tensor,
     old_logp: torch.Tensor,
@@ -188,11 +195,11 @@ def _ar_spo_dppo_kl_loss(
     clip_divergence_high: float,
     clip_ratio_c: float,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    """SPO-DPPO KL-variant loss for AR token-level policies.
+    """DRPO KL-variant loss for AR token-level policies.
 
     Operates on packed-varlen ``[total_tokens]`` tensors. Uses Binary KL
     as the divergence measure — the natural discrete analogue from the
-    SPO-DPPO paper for token-level policies.
+    DRPO paper for token-level policies.
 
     Binary KL treats each token position as a Bernoulli distribution
     parameterised by the probability of the chosen token under the old
@@ -204,7 +211,7 @@ def _ar_spo_dppo_kl_loss(
     This requires only per-token log-probs of the *chosen* token — no
     full-vocabulary logits needed.
 
-    Trust-region mask (asymmetric, advantage-aware, mirrors SPO-DPPO
+    Trust-region mask (asymmetric, advantage-aware, mirrors DRPO
     Binary-KL logic):
       - adv > 0: keep if binary_kl <= clip_divergence_high OR ratio <= 1
         (prob decreasing = conservative update, always safe)
@@ -249,7 +256,7 @@ def _ar_spo_dppo_kl_loss(
     # Clamp KL to avoid inf from numerical edge cases
     binary_kl = torch.clamp(binary_kl, min=0.0, max=1e6)
 
-    # Advantage-aware asymmetric mask (mirrors SPO-DPPO Binary-KL logic)
+    # Advantage-aware asymmetric mask (mirrors DRPO Binary-KL logic)
     valid_positive_mask = (binary_kl <= clip_divergence_high) | (ratio <= 1.0)
     valid_negative_mask = (binary_kl <= clip_divergence_low) | (ratio >= 1.0)
     valid_mask = torch.where(adv > 0, valid_positive_mask, valid_negative_mask)
@@ -285,15 +292,50 @@ def _ar_spo_dppo_kl_loss(
     return pg_losses, metrics
 
 
+def _ar_pg_tv_penalty_loss(
+    *,
+    new_logp: torch.Tensor,
+    old_logp: torch.Tensor,
+    advantages: torch.Tensor,
+    penalty_coef: float,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Reference ``pg_tv_penalty`` loss (MaxwellJryao/DRPO core_algos.py).
+
+    Verbatim form::
+
+        ratio   = exp(new_logp - old_logp)
+        L_t     = -A_t * new_logp_t  +  penalty_coef * |ratio_t - 1|
+
+    Plain REINFORCE (no importance-sampling weight, no trust-region mask) plus a
+    soft TV penalty that continuously pulls the ratio toward 1 — the reference's
+    only regularizer. ``penalty_coef`` is the reference ``actor.clip_ratio`` (0.15).
+    """
+    log_diff = torch.clamp(new_logp - old_logp, min=-20.0, max=20.0)
+    ratio = torch.exp(log_diff)
+    adv = advantages.detach()
+
+    tv_penalty = penalty_coef * torch.abs(ratio - 1.0)
+    pg_losses = -adv * new_logp + tv_penalty
+
+    approx_kl = (-log_diff).mean()  # reference ppo_kl = masked_mean(old-new)
+    metrics = {
+        "ratio_mean": ratio.mean().detach(),
+        "ratio_max": ratio.max().detach(),
+        "approx_kl": approx_kl.detach(),
+        "tv_penalty_mean": tv_penalty.mean().detach(),
+    }
+    return pg_losses, metrics
+
+
 # ---------------------------------------------------------------------------
 # Algorithm class — AR (token-level)
 # ---------------------------------------------------------------------------
 
 
-class ARSPODPPO(StageAlgorithm):
-    """SPO-DPPO trust-region masking for AR token-level policies.
+class ARDRPO(StageAlgorithm):
+    """DRPO trust-region masking for AR token-level policies.
 
-    The original SPO-DPPO paper (https://arxiv.org/pdf/2602.04879) targets
+    The original DRPO paper (https://arxiv.org/pdf/2602.04879) targets
     discrete token-level policies — this is the natural setting.
 
     Two variants:
@@ -345,17 +387,20 @@ class ARSPODPPO(StageAlgorithm):
         clip_divergence_low: Optional[float] = None,
         clip_divergence_high: Optional[float] = None,
         clip_ratio_c: float = 20.0,
+        penalty_coef: float = 0.15,
+        loss_agg_mode: str = "token-mean",
+        horizon: int = 8192,
         sampling_temperature: Optional[float] = None,
         conditions_cls: Optional[Type[Any]] = None,
     ) -> None:
         super().__init__()
-        if variant not in ("tv", "kl"):
-            raise ValueError(f"ARSPODPPO variant must be 'tv' or 'kl', got '{variant}'")
+        if variant not in ("tv", "kl", "pg_tv_penalty"):
+            raise ValueError(f"ARDRPO variant must be 'tv', 'kl', or 'pg_tv_penalty', got '{variant}'")
         # v2-only: the trainer injects the shared ``pipeline``
         # (remote_hydra(algorithm_cfg, pipeline=...)) and we resolve the stage
-        # from it. There is no v1 ``stage=`` path — ARSPODPPO is v2-only.
+        # from it. There is no v1 ``stage=`` path — ARDRPO is v2-only.
         if pipeline is None:
-            raise ValueError("ARSPODPPO: `pipeline` must be provided (the v2 trainer injects it)")
+            raise ValueError("ARDRPO: `pipeline` must be provided (the v2 trainer injects it)")
         self.stage = getattr(pipeline, stage_attr)
         self.variant = variant
         self.clip_divergence = float(clip_divergence)
@@ -366,6 +411,9 @@ class ARSPODPPO(StageAlgorithm):
             float(clip_divergence_high) if clip_divergence_high is not None else self.clip_divergence
         )
         self.clip_ratio_c = float(clip_ratio_c)
+        self.penalty_coef = float(penalty_coef)
+        self.loss_agg_mode = str(loss_agg_mode)
+        self.horizon = int(horizon)
         # replay rescales logits by this temperature so its log-softmax matches
         # the rollout sampling distribution (log_softmax(logits / T)); MUST equal
         # sampling.temperature. Mirrors ARGRPO. Falls back to the ARSamplingParams
@@ -408,7 +456,7 @@ class ARSPODPPO(StageAlgorithm):
         )
 
         if self.variant == "tv":
-            loss_per_elem, ratio_metrics = _ar_spo_dppo_tv_loss(
+            loss_per_elem, ratio_metrics = _ar_drpo_tv_loss(
                 new_logp=new_logp,
                 old_logp=old_logp,
                 advantages=adv_per_token,
@@ -416,8 +464,15 @@ class ARSPODPPO(StageAlgorithm):
                 clip_divergence_high=self.clip_divergence_high,
                 clip_ratio_c=self.clip_ratio_c,
             )
+        elif self.variant == "pg_tv_penalty":
+            loss_per_elem, ratio_metrics = _ar_pg_tv_penalty_loss(
+                new_logp=new_logp,
+                old_logp=old_logp,
+                advantages=adv_per_token,
+                penalty_coef=self.penalty_coef,
+            )
         else:  # kl
-            loss_per_elem, ratio_metrics = _ar_spo_dppo_kl_loss(
+            loss_per_elem, ratio_metrics = _ar_drpo_kl_loss(
                 new_logp=new_logp,
                 old_logp=old_logp,
                 advantages=adv_per_token,
@@ -431,7 +486,14 @@ class ARSPODPPO(StageAlgorithm):
             mask = segment.loss_mask.to(dtype=loss_per_elem.dtype, device=loss_per_elem.device)
             loss_per_elem = loss_per_elem * mask
 
-        loss = loss_per_elem.mean()
+        if self.loss_agg_mode == "seq-mean-token-sum-norm" and segment.lengths is not None:
+            # Reference seq-mean-token-sum-norm: per-sequence token-SUM / horizon, then
+            # mean over the micro-batch's sequences. The stack's loss_scale=1/num_micros
+            # then averages across micro-batches, giving the overall mean-over-sequences.
+            parts = torch.split(loss_per_elem, segment.lengths.tolist())
+            loss = torch.stack([p.sum() for p in parts]).mean() / float(self.horizon)
+        else:
+            loss = loss_per_elem.mean()
         (loss * loss_scale).backward()
 
         metrics: Dict[str, Any] = {
@@ -450,4 +512,4 @@ class ARSPODPPO(StageAlgorithm):
         )
 
 
-__all__ = ["ARSPODPPO"]
+__all__ = ["ARDRPO"]

@@ -198,7 +198,7 @@ UniRL 的 train-side 算法分为三大家族。下表列出当前支持情况�
 
 | 家族 | 优化方式 | 现已支持 | 计划中 |
 |---|---|---|---|
-| Policy-Gradient / PPO | rollout log-prob + advantage，使用 clip / KL 代理目标 | GRPO 家族（FlowGRPO / DanceGRPO / MixGRPO）、DPPO、ARGRPO、SPO-DPPO | DDPO、DPOK、KL / reference policy、带 critic + GAE 的完整 PPO |
+| Policy-Gradient / PPO | rollout log-prob + advantage，使用 clip / KL 代理目标 | GRPO 家族（FlowGRPO / DanceGRPO / MixGRPO）、DPPO、ARGRPO、DRPO | DDPO、DPOK、KL / reference policy、带 critic + GAE 的完整 PPO |
 | REFL（reward-feedback） | 将可微 reward 沿采样链反传 | — | DR-Tune、ReFL、DRaFT、AlignProp |
 | 偏好 / forward-process | forward-process 或成对目标（不依赖 rollout log-prob） | NFT | — |
 

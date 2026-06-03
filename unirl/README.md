@@ -42,7 +42,7 @@ orchestration, rollout engines, the train stack, and algorithm loss math.
 | `distributed/` | Ray worker base (`Remote`) + placement/dispatch (`group/`), tensor transport (`tensor/`), and weight sync (`weight_sync/`) |
 | `rollout/` | Rollout engine contracts and implementations (`engine/`: trainside, sglang, sglang_llm, vllm_omni, composed) |
 | `train/` | Train stack: `TrainStack`, FSDP backend, LoRA/NFT/mirror injection, EMA shadow, optimizer/lr |
-| `algorithms/` | Per-track loss algorithms (GRPO, NFT, DPPO, SPO-DPPO) |
+| `algorithms/` | Per-track loss algorithms (GRPO, NFT, DPPO, DRPO) |
 | `models/` | Per-model bundles, pipelines, stages, conditions; text/vision/vae helpers |
 | `reward/` | `RewardService` holding one backend — local scorers or the remote HTTP client |
 | `sde/` | SDE step kernels, σ schedule/shift, initial-noise recipe |
