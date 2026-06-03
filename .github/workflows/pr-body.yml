@@ -13,7 +13,7 @@ jobs:
     name: Validate PR body sections
     runs-on: ubuntu-latest
     steps:
-      - name: Require template sections and completed checklist
+      - name: Require summary and test plan
         run: |
           python3 <<'PY'
           import json
@@ -24,7 +24,12 @@ jobs:
           with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as event_file:
               event = json.load(event_file)
 
-          body = event["pull_request"].get("body") or ""
+          pull_request = event["pull_request"]
+          if pull_request.get("draft"):
+              print("Draft PR: skipping PR body validation.")
+              sys.exit(0)
+
+          body = pull_request.get("body") or ""
           errors = []
 
           def get_section(heading: str) -> str:
@@ -35,21 +40,16 @@ jobs:
                   return ""
               return match.group("content")
 
-          summary = re.sub(r"(?s)<!--.*?-->", "", get_section("## Summary")).strip()
+          def visible_content(markdown: str) -> str:
+              return re.sub(r"(?s)<!--.*?-->", "", markdown).strip()
+
+          summary = visible_content(get_section("## Summary"))
           if not summary:
               errors.append("The Summary section must describe the change.")
 
-          get_section("## Test Plan")
-          checklist = get_section("## Checklist")
-          checklist_items = re.findall(r"(?im)^\s*-\s+\[([ xX])\]\s+(.+?)\s*$", checklist)
-
-          if not checklist_items:
-              errors.append("The Checklist section must contain checklist items.")
-
-          unchecked = [text for marker, text in checklist_items if marker == " "]
-          if unchecked:
-              errors.append("All final Checklist items must be checked:")
-              errors.extend(f"- {item}" for item in unchecked)
+          test_plan = visible_content(get_section("## Test Plan"))
+          if not test_plan:
+              errors.append('The Test Plan section must describe validation, or say "Not run; reason: ...".')
 
           if errors:
               print("\n".join(errors), file=sys.stderr)
