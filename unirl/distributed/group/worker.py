@@ -1,47 +1,64 @@
 """Worker — physical GPU Ray actor.
 
-Each GPU runs exactly one Worker. It holds a TensorStore and
-hosts multiple Remote instances (colocated logical workers).
+Each GPU slot runs exactly one Worker. It owns a ``TensorTransport`` (chosen by
+config) and hosts multiple ``Remote`` instances (colocated logical workers).
 
-Worker is the ONLY Ray actor in the system. Remotes are
-plain Python objects living inside Worker's process.
+The Worker is transport-agnostic: ``call()`` does the generic arg/result
+tree-walk and routes every tensor through ``transport.get_batch`` (resolve) and
+``transport.put_batch`` (pack); GC / NCCL / remote-compute RPCs delegate to the
+transport. The transport delegates to the underlying store (in-process
+``TensorStore`` for colocate, a per-GPU ``TensorWorker`` actor for gpu, the
+queue client for transfer_queue).
 """
 
 from __future__ import annotations
 
 import os
 import socket
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 import ray
 import torch
 from torch import Tensor
 
 from unirl.distributed.group.remote import RankInfo, Remote
-from unirl.distributed.tensor.backend.tensor_store.handle import TensorHandle
-from unirl.distributed.tensor.backend.tensor_store.store import TensorStore
-from unirl.distributed.tensor.batch import Batch
+from unirl.distributed.tensor.factory import build_transport
+from unirl.distributed.tensor.transport import TensorMeta, TensorTransport, TensorTransportRuntime, map_tree
 from unirl.distributed.utils import collect_leaves
 
 
 class Worker:
-    """Physical worker: one per GPU.
+    """Physical worker: one per GPU slot.
 
-    In Ray mode, this class is wrapped with @ray.remote(num_gpus=1).
+    In Ray mode, this class is wrapped with @ray.remote(num_gpus=...).
     For unit testing, use _init_local() to skip GPU/Ray setup.
     """
 
-    def __init__(self, device_id: int, slot: int = 0, nccl_rank: Optional[int] = None, world_size: int = 1) -> None:
-        """Called as Ray remote actor. Auto-initializes GPU + TensorStore.
+    def __init__(
+        self,
+        device_id: int,
+        slot: int = 0,
+        nccl_rank: Optional[int] = None,
+        world_size: int = 1,
+        transport_kind: str = "colocate_store",
+        tq_handoff: Optional[dict] = None,
+    ) -> None:
+        """Ray remote actor entry point. Sets up the device and the transport.
 
         Args:
-            device_id:  Physical GPU index (same for all slots on a GPU).
-            slot:       Slot index on this device (0 = primary, 1+ = colocated).
-            nccl_rank:  NCCL rank for slot0 workers (= device_id); None for slot1+.
-            world_size: Total number of slot0 workers (= num_devices).
+            device_id:      Physical GPU index (same for all slots on a GPU).
+            slot:           Slot index on this device (0 = primary, 1+ = colocated).
+            nccl_rank:      Global NCCL rank for slot0 workers (= device_id); None for slot1+.
+            world_size:     Total number of slot0 workers (= num_devices).
+            transport_kind: Which TensorTransport backend to install.
+            tq_handoff:     Driver's TransferQueue handoff (transfer_queue backend only);
+                            consumed by build_transport to bootstrap this process's client.
         """
         self.device_id = device_id
         self.slot = slot
+        self.nccl_rank = nccl_rank
+        self.world_size = world_size
+        self.transport_kind = transport_kind or "colocate_store"
 
         # GPU setup: Ray PlacementGroup sets CUDA_VISIBLE_DEVICES
         if torch.cuda.is_available():
@@ -50,36 +67,100 @@ class Worker:
         else:
             self.device = "cpu"
 
-        worker_id = f"dw{device_id}" if slot == 0 else f"dw{device_id}_s{slot}"
+        self.worker_id = f"dw{device_id}" if slot == 0 else f"dw{device_id}_s{slot}"
 
-        # slot0: participates in NCCL (nccl_rank = device_id)
-        # slot1+: IPC only, no NCCL PG
-        self.store = TensorStore(
-            worker_id=worker_id,
-            device=self.device,
-            global_rank=nccl_rank,
-            global_world_size=world_size if nccl_rank is not None else None,
-        )
+        # Backend dependencies: tw (gpu) is injected after spawn via
+        # set_tensor_worker(); tq_handoff (transfer_queue) arrives here in the
+        # constructor from DevicePool. Both are consumed by build_transport.
+        self.tw = None
+        self.tq_handoff = tq_handoff
+        # Typed as the base TensorTransport (matches build_transport's return);
+        # _install_transport enforces at runtime that it is a WorkerLocalTransport.
+        self.transport: Optional[TensorTransport] = None
 
         self._roles: Dict[str, Remote] = {}
-
-        # Port reservation: held sockets to prevent reuse
         self._reserved_sockets: Dict[int, socket.socket] = {}
 
-    def _init_local(self, device_id: int = 0, slot: int = 0, global_rank: int = 0, world_size: int = 1) -> None:
-        """Initialize without GPU for unit testing."""
+        # colocate + transfer_queue build immediately — their deps are ready at
+        # construction (in-process store / the driver handoff). gpu defers until
+        # DevicePool injects the shared per-GPU TensorWorker via set_tensor_worker().
+        if self.transport_kind in ("colocate_store", "colocate", "transfer_queue", "tq"):
+            self.build_and_install_transport()
+
+    def _init_local(self, device_id: int = 0, slot: int = 0, transport=None) -> None:
+        """Initialize without GPU/Ray for unit testing.
+
+        Defaults to an in-process colocate transport on CPU; pass ``transport``
+        to inject a custom backend (e.g. InMemoryTransport).
+        """
         self.device_id = device_id
         self.slot = slot
         self.device = "cpu"
-        worker_id = f"dw{device_id}" if slot == 0 else f"dw{device_id}_s{slot}"
-        self.store = TensorStore(
-            worker_id=worker_id,
-            device="cpu",
-            global_rank=global_rank if slot == 0 else None,
-            global_world_size=world_size if slot == 0 else None,
-        )
+        self.nccl_rank = 0
+        self.world_size = 1
+        self.transport_kind = "colocate_store"
+        self.worker_id = f"dw{device_id}" if slot == 0 else f"dw{device_id}_s{slot}"
+        self.tw = None
+        self.tq_handoff = None
         self._roles = {}
         self._reserved_sockets = {}
+        if transport is None:
+            self.build_and_install_transport()
+        else:
+            self._install_transport(transport)
+
+    def set_tensor_worker(self, tw_handle) -> None:
+        """Inject the per-GPU TensorWorker actor handle (gpu backend). Called by DevicePool."""
+        self.tw = tw_handle
+
+    def build_and_install_transport(self):
+        """Build the configured transport and install it as the process backend.
+
+        Runs from __init__ for colocate (in-process store) and transfer_queue
+        (the driver handoff arrives via the constructor). gpu_store must run
+        after set_tensor_worker(), so DevicePool calls it explicitly there.
+        """
+        self._install_transport(
+            build_transport(
+                self.transport_kind,
+                worker_id=self.worker_id,
+                device=self.device,
+                device_id=self.device_id,
+                tw=self.tw,
+                tq_handoff=self.tq_handoff,
+                global_rank=self.nccl_rank,
+                world_size=self.world_size,
+            )
+        )
+        # No return: the transport is not Ray-serializable (holds locks / actor
+        # handles); DevicePool calls this via RPC and must not receive it.
+
+    def _install_transport(self, transport: TensorTransport) -> None:
+        """Install the Worker's transport as the process backend.
+
+        Any TensorTransport works — the Worker is backend-blind (it only uses
+        get_batch/put_batch/end_call). Worker-local capabilities (incref/decref,
+        NCCL, tensor_op/cat/get_cpu) are reached only by the controller, and only
+        when the backend is a WorkerLocalTransport.
+        """
+        self.transport = transport
+        TensorTransportRuntime.install(transport)
+
+    def reset_zero_copy_buffer_free(self) -> None:
+        """Reclaim this process's mooncake zero-copy buffer free-lists (per-rollout).
+
+        Delegates to the process-global TransferQueueRuntime installed during
+        ``build_transport``; a no-op when TQ is not the active backend (``current()``
+        is ``None``) or the backend has no zero-copy buffers. The driver fans this
+        across all Workers between rollouts (see
+        ``DevicePool.reset_transfer_queue_buffers``) so the registered RDMA buffers
+        don't exhaust over a run.
+        """
+        from unirl.distributed.tensor.backend.transfer_queue.runtime import TransferQueueRuntime
+
+        rt = TransferQueueRuntime.current()
+        if rt is not None:
+            rt.reset_zero_copy_buffer_free()
 
     # ── Port reservation ──
 
@@ -134,7 +215,7 @@ class Worker:
         resolved_kwargs = self._resolve_init_kwargs(init_kwargs or {})
         role = role_cls(**resolved_kwargs)
         role.setup(
-            store=self.store,
+            transport=self.transport,
             device=self.device,
             rank_info=rank_info,
             dist_env=dist_env,
@@ -169,7 +250,7 @@ class Worker:
             except KeyError:
                 raise RuntimeError(
                     f"Cannot resolve sibling Handle '{obj.role_name}' on "
-                    f"Worker {self.store.worker_id}: not registered on this "
+                    f"Worker {self.worker_id}: not registered on this "
                     f"Worker. Likely cause: the sibling lives on a different "
                     f"device slab (separate placement scope) or a different slot."
                 )
@@ -194,187 +275,102 @@ class Worker:
     def call(self, role_name: str, method_name: str, args: tuple, kwargs: dict, grad_mode: bool = False, call_id=None):
         """Generic RPC entry point.
 
-        Recursively resolves inputs (TensorHandle → Tensor from store) and
-        packs outputs (Tensor → TensorHandle via store.put).
-        Non-tensor args/kwargs/results are passed through unchanged.
+        Resolves inputs (TensorMeta → Tensor via transport.get_batch) and packs
+        outputs (Tensor → TensorMeta via transport.put_batch). Non-tensor
+        args/kwargs/results pass through unchanged.
 
-        grad_mode and call_id are passed as dedicated parameters (not via kwargs)
-        so dispatch internals remain unaware of grad state.
-
-        When grad_mode=True, additionally:
-          - Saves resolved input tensors (as detached leaves) for backward.
-          - Saves output tensors (before detach) for backward.
-        Both saved under role._grad_inputs[call_id] / role._grad_outputs[call_id].
+        grad_mode and call_id are dedicated parameters (not via kwargs) so
+        dispatch internals remain unaware of grad state. When grad_mode=True:
+          - resolved input tensors are marked grad-tracked leaves for backward.
+          - output tensors are saved (before detach) for backward.
+        Saved under role._grad_inputs[call_id] / role._grad_outputs[call_id].
         """
         role = self._roles[role_name]
 
-        resolved_args = self._transform_tree(args, self._resolve_input)
-        resolved_kwargs = self._transform_tree(kwargs, self._resolve_input)
+        # Resolve: collect TensorMeta leaves (tree order), batch-fetch, substitute.
+        # Keys are positional indices so get_batch results align with the walk.
+        in_metas = self._collect(args, TensorMeta) + self._collect(kwargs, TensorMeta)
+        fetched = self.transport.get_batch({str(i): m for i, m in enumerate(in_metas)})
+        in_iter = iter(fetched[str(i)] for i in range(len(in_metas)))
 
-        if grad_mode:
-            # _resolve_input already returns .detach() copies, so the resolved
-            # tensors are fresh objects that don't alias TensorStore contents.
-            # Mark them as grad-tracked leaves directly — no _replace_tensors needed.
-            tensors = collect_leaves(resolved_args, Tensor) + collect_leaves(tuple(resolved_kwargs.values()), Tensor)
-            for t in tensors:
-                t.requires_grad_(True)
-                t.retain_grad()
-            role._grad_inputs[call_id] = tensors
+        def resolve(o):
+            return next(in_iter) if isinstance(o, TensorMeta) else o
 
-        result = getattr(role, method_name)(*resolved_args, **resolved_kwargs)
+        resolved_args = map_tree(args, resolve)
+        resolved_kwargs = map_tree(kwargs, resolve)
 
-        if grad_mode:
-            # Save output tensors BEFORE detach so backward can use grad_fn.
-            # All ranks save (not just primary) to support TP/SP backward.
-            role._grad_outputs[call_id] = collect_leaves(result, Tensor)
-
-        return self._transform_tree(result, self._pack_output)
-
-    # ── Tree transformation ──
-
-    def _transform_tree(self, obj, leaf_fn):
-        """Recursively apply leaf_fn to TensorHandle/Tensor nodes in a nested structure."""
-        transformed = leaf_fn(obj)
-        if transformed is not obj:
-            return transformed
-        if isinstance(obj, Batch):
-            return obj.map(lambda v: self._transform_tree(v, leaf_fn))
-        if isinstance(obj, tuple):
-            return tuple(self._transform_tree(item, leaf_fn) for item in obj)
-        if isinstance(obj, list):
-            return [self._transform_tree(item, leaf_fn) for item in obj]
-        if isinstance(obj, dict):
-            return {k: self._transform_tree(v, leaf_fn) for k, v in obj.items()}
-        return obj
-
-    def _resolve_input(self, obj):
-        """Resolve TensorHandle → Tensor.
-
-        Always returns a detached tensor so that TensorStore contents are never
-        polluted by grad state set inside any RPC (requires_grad, grad_fn, etc.).
-
-        IPC tensors from sibling workers are returned as-is (non-resizable view).
-        If the role passes such a tensor to put(), TensorStore detects the
-        non-resizable storage and clones it to local memory before storing.
-        Roles that only read the tensor (no put) avoid the clone entirely.
-        """
-        if isinstance(obj, TensorHandle):
-            if obj.object_ref is not None:
-                return ray.get(obj.object_ref).detach()
-            if obj.worker_id == self.store.worker_id:
-                return self.store.get(obj)
-            elif obj.ipc_handle is not None:
-                storage = torch.UntypedStorage._new_shared_cuda(*obj.ipc_handle)
-                t = torch.empty(0, dtype=obj.dtype, device=self.device)
-                t.set_(storage, obj.offset, obj.shape, obj.stride)
-                return t
-            else:
-                raise RuntimeError(
-                    f"Unresolved TensorHandle from worker '{obj.worker_id}': "
-                    f"not local and has no ipc_handle. "
-                    f"_ensure_local should have handled cross-device transfers."
+        try:
+            if grad_mode:
+                # get_batch returns detached views/copies, so resolved tensors are
+                # fresh objects that don't alias store contents — mark them directly.
+                tensors = collect_leaves(resolved_args, Tensor) + collect_leaves(
+                    tuple(resolved_kwargs.values()), Tensor
                 )
-        return obj
+                for t in tensors:
+                    t.requires_grad_(True)
+                    t.retain_grad()
+                role._grad_inputs[call_id] = tensors
 
-    def _pack_output(self, obj):
-        """Pack Tensor → TensorHandle into store.
+            result = getattr(role, method_name)(*resolved_args, **resolved_kwargs)
 
-        CPU tensors are stored in Ray plasma store (object_ref), not TensorStore.
-        CUDA tensors must be on this worker's device; wrong device raises.
+            if grad_mode:
+                # Save output tensors BEFORE pack so backward can use grad_fn.
+                role._grad_outputs[call_id] = collect_leaves(result, Tensor)
+
+            # Pack: collect tensor leaves (tree order), batch-store, substitute metas.
+            out_tensors = self._collect(result, Tensor)
+            stored = self.transport.put_batch({str(i): t for i, t in enumerate(out_tensors)})
+            out_iter = iter(stored[str(i)] for i in range(len(out_tensors)))
+
+            def pack(o):
+                return next(out_iter) if isinstance(o, Tensor) else o
+
+            return map_tree(result, pack)
+        finally:
+            # Release any per-call transport resources (gpu: close IPC views).
+            self.transport.end_call()
+
+    # ── Leaf collection ──
+
+    def _collect(self, obj, leaf_type) -> list:
+        """Collect leaves of leaf_type in the SAME order ``map_tree`` visits them.
+
+        Using ``map_tree`` for both collect and substitute guarantees the
+        get_batch/put_batch result lists align by index with the substitution pass.
         """
-        if isinstance(obj, Tensor):
-            if obj.is_cuda and str(obj.device) != self.device:
-                raise RuntimeError(
-                    f"Worker {self.store.worker_id} device={self.device}, "
-                    f"but output tensor is on {obj.device}. "
-                    f"Move the tensor to the correct device before returning."
-                )
-            return self.store.put(obj)
-        return obj
+        out: list = []
 
-    # ── GC helpers (called remotely by TensorHandle finalizer) ──
+        def visit(o):
+            if isinstance(o, leaf_type):
+                out.append(o)
+            return o
 
-    def decref_tensor(self, key: str) -> None:
-        self.store.decref(key)
+        map_tree(obj, visit)
+        return out
 
-    def incref_tensor(self, key: str) -> None:
-        self.store.incref(key)
+    # ── Transport relay (the Worker is the transport's addressable proxy) ──
 
-    def ref_count_tensor(self, key: str) -> int:
-        return self.store.ref_count(key)
+    def transport_op(self, method: str, *args, **kwargs):
+        """Relay a controller-side call into this Worker's transport.
 
-    def get_ipc_handle(self, store_key: str) -> tuple:
-        """Lazily export this worker's CUDA IPC handle for a stored key.
-
-        Called by the controller (Handle._with_ipc) only when a same-device
-        sibling needs to open the tensor over IPC — see TensorStore.ensure_ipc_handle.
+        The transport is a plain in-process object with no Ray address, so
+        TensorHandle GC/compute and Handle NCCL routing reach it through the
+        Worker actor. Restricted to the transport's REMOTE_OPS allowlist so the
+        relay can't be turned into an arbitrary-call gadget; a GLOBAL transport
+        (no REMOTE_OPS) cannot be relayed into.
         """
-        return self.store.ensure_ipc_handle(store_key)
-
-    def get_tensor_cpu(self, handle: TensorHandle) -> Tensor:
-        """Fetch tensor described by handle to CPU, restoring the exact view."""
-        return self.store.get(handle).cpu()
-
-    # ── Tensor operations (called remotely by TensorHandle/TensorMeta ops) ──
-
-    def tensor_op(self, handle: TensorHandle, op: str, *op_args) -> TensorHandle:
-        """Execute a tensor operation on a stored tensor, return new TensorHandle.
-
-        Accepts TensorHandle (may be CPU via object_ref or CUDA via store_key).
-        Uses store.get() to reconstruct the exact view before applying the op.
-        """
-        if handle.object_ref is not None:
-            t = ray.get(handle.object_ref)
-        else:
-            t = self.store.get(handle)
-
-        if op == "getitem":
-            result = t[op_args[0]]
-        elif op == "reshape":
-            result = t.reshape(op_args[0])
-        elif op == "permute":
-            result = t.permute(op_args[0])
-        else:
-            raise ValueError(f"Unknown tensor_op: '{op}'")
-
-        return self.store.put(result)
-
-    def cat_tensors(self, handles: List[TensorHandle]) -> TensorHandle:
-        """Cat multiple tensors along dim0, return new TensorHandle.
-
-        Handles may be local (same worker_id), CPU (object_ref),
-        or from a same-device sibling (opened via CUDA IPC).
-        """
-        tensors = []
-        for h in handles:
-            if h.object_ref is not None:
-                tensors.append(ray.get(h.object_ref))
-            elif h.worker_id == self.store.worker_id:
-                tensors.append(self.store.get(h))
-            else:
-                storage = torch.UntypedStorage._new_shared_cuda(*h.ipc_handle)
-                t = torch.empty(0, dtype=h.dtype, device=self.device)
-                t.set_(storage, h.offset, h.shape, h.stride)
-                tensors.append(t)
-        return self.store.put(torch.cat(tensors, dim=0))
-
-    # ── NCCL (private, called by WorkerGroup internally) ──
-
-    def _nccl_send(self, dst_rank: int, handles: List[TensorHandle]) -> None:
-        self.store._nccl_send(dst_rank, handles)
-
-    def _nccl_recv(
-        self,
-        src_global_rank: int,
-        shapes: List[Tuple[int, ...]],
-        dtypes: List[torch.dtype],
-    ) -> List[TensorHandle]:
-        return self.store._nccl_recv(src_global_rank, shapes, dtypes)
+        allowed = getattr(type(self.transport), "REMOTE_OPS", frozenset())
+        if method not in allowed:
+            raise AttributeError(f"transport_op: {method!r} is not a remote-callable transport op")
+        return getattr(self.transport, method)(*args, **kwargs)
 
     def setup_global_pg(self) -> None:
-        """Initialize NCCL process group for cross-worker transfers (slot0 only)."""
-        assert self.slot == 0, "setup_global_pg must only be called on slot0 workers"
-        self.store.setup_global_pg(self.store.global_rank, self.store.global_world_size)
+        """Initialize the cross-worker transfer group (slot0 only).
+
+        Not routed through transport_op: it injects Worker identity (rank /
+        world_size) that the controller does not pass.
+        """
+        self.transport.setup_transfer(self.nccl_rank, self.world_size)
 
     # ── Info queries ──
 

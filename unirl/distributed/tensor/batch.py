@@ -377,25 +377,6 @@ def _repeat_interleave_value(value: Any, n: int, batch_size: int) -> Any:
     return value
 
 
-def _repeat_interleave_value(value: Any, n: int, batch_size: int) -> Any:
-    """Replicate a per-sample value ``n`` times along the batch axis (group-by-parent)."""
-    if value is None:
-        return None
-    if isinstance(value, torch.Tensor):
-        if value.dim() > 0 and int(value.shape[0]) == batch_size:
-            return value.repeat_interleave(n, dim=0)
-        return value
-    if isinstance(value, list) and len(value) == batch_size:
-        return [v for v in value for _ in range(n)]
-    if isinstance(value, tuple) and len(value) == batch_size:
-        return tuple(v for v in value for _ in range(n))
-    if isinstance(value, dict):
-        return {k: _repeat_interleave_value(v, n, batch_size) for k, v in value.items()}
-    if isinstance(value, Batch):
-        return value.repeat_interleave(n)
-    return value
-
-
 def _move_value(value: Any, device: Union[str, torch.device]) -> Any:
     """Move tensors in a value tree to *device*."""
     if value is None:
@@ -525,41 +506,6 @@ def _select_packed_data(
         return value[:0].clone()
     chunks = [value[int(cu[i].item()) : int(cu[i + 1].item())] for i in indices]
     return torch.cat(chunks, dim=0)
-
-
-def _repeat_interleave_packed_data(
-    value: Optional[torch.Tensor],
-    n: int,
-    cu: Optional[torch.Tensor],
-) -> Optional[torch.Tensor]:
-    """Repeat each per-sample chunk ``n`` times along dim 0 (group-by-parent order)."""
-    if value is None:
-        return None
-    if cu is None:
-        raise ValueError(
-            "packed_field repeat_interleave requires _packed_cu_seqlens to be populated; "
-            "construct via the regular dataclass __init__ with per-sample lists."
-        )
-    if n <= 0:
-        return value[:0].clone()
-    if n == 1:
-        return value.clone()
-    chunks: List[torch.Tensor] = []
-    for i in range(int(cu.numel()) - 1):
-        chunk = value[int(cu[i].item()) : int(cu[i + 1].item())]
-        for _ in range(n):
-            chunks.append(chunk)
-    return torch.cat(chunks, dim=0) if chunks else value[:0].clone()
-
-
-def _repeat_interleave_cu_seqlens(cu: torch.Tensor, n: int) -> torch.Tensor:
-    """Rebuild cu_seqlens after repeating each chunk ``n`` times (group-by-parent order)."""
-    sizes = (cu[1:] - cu[:-1]).tolist()
-    new_sizes = [s for s in sizes for _ in range(n)]
-    cu_list = [0]
-    for s in new_sizes:
-        cu_list.append(cu_list[-1] + s)
-    return torch.tensor(cu_list, dtype=cu.dtype, device=cu.device)
 
 
 def _repeat_interleave_packed_data(
@@ -913,6 +859,22 @@ class Batch:
         / :meth:`select` instead, which recompute ``cu_seqlens``.
         """
         instance = type(self)(**{f.name: fn(getattr(self, f.name)) for f in dc_fields(self)})
+        if self._packed_cu_seqlens is not None:
+            object.__setattr__(instance, "_packed_cu_seqlens", self._packed_cu_seqlens)
+        return instance
+
+    def _rebuild(self: T, field_values: Dict[str, Any]) -> T:
+        """Reconstruct from precomputed field values, preserving hidden state.
+
+        The precomputed-values sibling of :meth:`map` (which takes a per-field
+        ``fn``). For the generic transport-layer tree-walkers that rebuild a
+        ``Batch`` from already-transformed field values — TensorMeta<->Tensor
+        swaps and ref rerouting, representation-only changes that don't alter the
+        batch dimension or per-sample lengths — so the framework-managed
+        ``_packed_cu_seqlens`` carries over unchanged. Without this carry, those
+        walkers silently drop it (the plain constructor never sees it).
+        """
+        instance = type(self)(**field_values)
         if self._packed_cu_seqlens is not None:
             object.__setattr__(instance, "_packed_cu_seqlens", self._packed_cu_seqlens)
         return instance

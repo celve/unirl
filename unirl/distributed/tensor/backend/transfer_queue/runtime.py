@@ -21,9 +21,9 @@ import os
 import threading
 from typing import TYPE_CHECKING, Any, Callable
 
+from hydra.utils import instantiate
 from omegaconf import DictConfig
 
-from unirl.config.instantiate import build
 from unirl.distributed.tensor.backend.transfer_queue.base import Backend
 
 if TYPE_CHECKING:
@@ -122,7 +122,12 @@ class TransferQueueRuntime:
 
         from transfer_queue import TransferQueueController, process_zmq_server_info
 
-        self.backend = build(tq_cfg)
+        # The `transfer_queue:` block is a standard Hydra _target_ config (the
+        # backend and its nested zero_copy both carry `_target_`), so instantiate
+        # it directly. Not config.instantiate.build — that field-expands only
+        # ConfigStore-registered (typed) configs and falls back to a `config=`
+        # kwarg for an inline block, which the backend ctors don't accept.
+        self.backend = instantiate(tq_cfg)
         self.controller = TransferQueueController.remote()
         controller_info = process_zmq_server_info(self.controller)
 

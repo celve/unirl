@@ -1,25 +1,18 @@
 """Miscellaneous utilities for the distributed controller.
 
-Network helpers used by DevicePool and RoleProxy, plus batch-size
-inference primitives used by the dispatch layer.
+Network helpers used by DevicePool and RoleProxy, plus the ``Broadcast``
+dispatch marker and the generic ``collect_leaves`` tree walker.
 """
 
 from __future__ import annotations
 
-import logging
 import socket
 from dataclasses import fields as dc_fields
-from typing import List, Optional, Tuple, Type
+from typing import Tuple, Type
 
-import numpy as np
 import torch
 
-from unirl.distributed.tensor.backend.tensor_store.handle import TensorHandle
 from unirl.distributed.tensor.batch import Batch
-from unirl.distributed.tensor.transport import TensorMeta
-
-logger = logging.getLogger(__name__)
-
 
 # ── CUDA IPC compatibility ──
 
@@ -53,12 +46,11 @@ class Broadcast:
 
         role.forward(images, lr=Broadcast(0.01), config=Broadcast(cfg_dict))
 
-    Most callers no longer need to wrap manually: the dispatch layer
-    auto-detects per-rollout metadata (tensors / lists whose ``shape[0]``
-    differs from the canonical batch size) and treats them as broadcast.
-    Use ``Broadcast(...)`` only when you want to suppress that
-    heuristic — e.g. when a real per-sample tensor happens to be smaller
-    than other per-sample fields in the same call.
+    Dispatch infers the batch size from the first batch-axis field it finds
+    (see ``pytree.infer_batch_size``) and splits every field whose leading
+    dim matches it, replicating the rest. Wrap a value in ``Broadcast(...)``
+    to force it to be replicated rather than split — e.g. per-rollout
+    metadata whose leading dim happens to coincide with the batch size.
     """
 
     __slots__ = ("value",)
@@ -103,95 +95,6 @@ def collect_leaves(x, leaf_type: Type) -> list:
     return result
 
 
-# ── Batch-size inference ──
-
-
-def _collect_batch_sizes(value, sizes: list) -> None:
-    """Recursively collect batch dimension sizes from a value.
-
-    Rules:
-      - Broadcast → skip
-      - Tensor/ndarray → shape[0]
-      - TensorHandle/TensorMeta → shape[0]
-      - list → len (treated as per-sample batch)
-      - tuple → recurse into elements (same as dict/Batch)
-      - dict/Batch → recurse into values
-      - other (int/float/str/None) → skip (broadcast)
-
-    Use Broadcast(x) to explicitly prevent a value from contributing batch size.
-    """
-    if isinstance(value, Broadcast):
-        return
-    elif isinstance(value, (torch.Tensor, np.ndarray, TensorHandle, TensorMeta)):
-        if len(value.shape) > 0:  # skip 0-dim scalars (no batch dimension)
-            sizes.append(value.shape[0])
-    elif isinstance(value, list):
-        sizes.append(len(value))
-    elif isinstance(value, tuple):
-        for v in value:
-            _collect_batch_sizes(v, sizes)
-    elif isinstance(value, Batch):
-        # Use the container's own batch_size: it counts per-sample CONCAT
-        # fields and packed cu_seqlens correctly, where recursing into raw
-        # fields would mis-count (packed tensors expose sum-of-lengths, not
-        # the sample count, and shared tensors expose unrelated dims).
-        bs = value.batch_size
-        if bs:
-            sizes.append(bs)
-    elif isinstance(value, dict):
-        for v in value.values():
-            _collect_batch_sizes(v, sizes)
-
-
-# Module-level state for warn-once-per-pattern: avoids spamming the log
-# when production training triggers the same outlier set every step.
-auto_broadcast_warned: set[tuple] = set()
-
-
-def infer_and_validate_batch_size(args: tuple, kwargs: dict) -> Optional[int]:
-    """Infer the canonical batch size from args/kwargs.
-
-    Walks the call payload and finds every indexable field's
-    ``shape[0]`` (or ``len`` for lists). When sizes disagree the
-    **largest** wins as the canonical per-sample batch size; any field
-    with a different size is treated as **per-rollout metadata** and
-    will be replicated (not split) by :func:`split_value` in
-    ``unirl.distributed.group.dispatch``.
-
-    A warning is logged the first time each outlier-set is encountered
-    so silent misclassification is auditable. Callers who want to
-    suppress the heuristic can wrap a value explicitly in
-    :class:`Broadcast`.
-
-    Returns ``None`` if no indexable field is found (pure broadcast call).
-    """
-    sizes: List[int] = []
-    for v in args:
-        _collect_batch_sizes(v, sizes)
-    for v in kwargs.values():
-        _collect_batch_sizes(v, sizes)
-
-    if not sizes:
-        return None
-
-    canonical = max(sizes)
-    outliers = tuple(sorted({s for s in sizes if s != canonical}))
-    if outliers:
-        signature = (canonical, outliers)
-        if signature not in auto_broadcast_warned:
-            auto_broadcast_warned.add(signature)
-            logger.info(
-                "Auto-broadcasting fields with shape[0] in %s "
-                "(canonical batch size = %d). These tensors / lists "
-                "will be replicated across DP shards instead of split. "
-                "Wrap explicitly in Broadcast(...) to suppress this "
-                "heuristic.",
-                outliers,
-                canonical,
-            )
-    return canonical
-
-
 # ── Network helpers ──
 
 
@@ -209,7 +112,7 @@ def get_node_ip_and_port(pg, bundle_index: int = 0) -> Tuple[str, int]:
     controller-vs-worker mismatch. Uses a lightweight probe actor.
     """
     import ray
-    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+    from ray.util.placement_group import PlacementGroupSchedulingStrategy
 
     @ray.remote(num_cpus=0)
     class _Probe:

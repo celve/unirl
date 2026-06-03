@@ -22,7 +22,7 @@ from unirl.trainer.hi3 import HI3Trainer
 @hydra.main(version_base=None, config_path="../recipes", config_name="unified_model_rl/hi3_vllmomni")
 def main(cfg: DictConfig) -> None:
     trainer = HI3Trainer(
-        num_devices=cfg.num_devices,
+        cfg=cfg,
         batch_size=cfg.batch_size,
         bundle_cfg=cfg.bundle,
         pipeline_cfg=cfg.pipeline,

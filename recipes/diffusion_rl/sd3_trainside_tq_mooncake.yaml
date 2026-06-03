@@ -1,29 +1,61 @@
 # @package _global_
-# FlowGRPO-Fast SD3 colocate reproduce — v2 trainer variant.
-# 1x8 H20 colocate baseline. Diverges only on:
-#   - activation_checkpointing: false (user request; reference uses bf16_full_ac)
-#   - rollout engine: TrainsideRolloutEngine (v2 in-process colocate; reference uses vllm-omni)
-#   - num_updates_per_batch: 2 — restored (v2 TrainStack multi-update; matches v1 base)
+# FlowGRPO-Fast SD3 colocate reproduce — TransferQueue + Mooncake variant.
+#
+# Identical to conf/sd3_trainside.yaml except the transport plane: it runs the
+# GLOBAL TransferQueue backend over Mooncake (zero-copy RDMA) instead of the
+# in-process colocate_store. Use as the end-to-end example for TQ + mooncake.
+#
+# Prerequisites (mooncake): an external `mooncake_master` must already be running
+# on the head node, and HEAD_IP must be exported (ports optional, defaulted
+# below). The per-rollout zero-copy buffer reclaim (DevicePool.reset_transfer_queue_buffers)
+# keeps the small PUT_TENSOR buffer from exhausting across rollouts, so the
+# default (small) buffer sizes below are sufficient.
+#
+# Run: python -m unirl.train_diffusion --config-name sd3_trainside_tq_mooncake
 
 num_devices: 8
-batch_size: 48                # prompts_per_rollout
+batch_size: 48 # prompts_per_rollout
 # samples_per_prompt lives inside `sampling` (DiffusionSamplingParams).
 
-# Distributed transport backend (DevicePool). Defaults below are also applied
-# when these keys are absent, so other recipes need not set them.
+# Distributed transport backend (DevicePool).
 #   colocate_store — one Worker per GPU, single-slot, leak-free (requires workers_per_device=1)
 #   gpu_store      — colocated multi-slot via a shared per-GPU TensorWorker (set workers_per_device>=2)
-#   transfer_queue — GLOBAL queue plane; also add a `transfer_queue:` block (example below)
-transport_kind: colocate_store
+#   transfer_queue — GLOBAL queue plane; requires a `transfer_queue:` block (below)
+transport_kind: transfer_queue
 workers_per_device: 1
-# To use transfer_queue: set transport_kind: transfer_queue and uncomment:
+transfer_queue:
+  _target_: unirl.distributed.tensor.backend.transfer_queue.mooncake.MooncakeBackend
+  # External mooncake_master endpoints: HTTP metadata + RPC. HEAD_IP is required;
+  # the ports default to mooncake_master's defaults when unset.
+  metadata_server: http://${oc.env:HEAD_IP}:${oc.env:TQ_MC_METADATA_SERVER_PORT,50041}/metadata
+  master_server_address: ${oc.env:HEAD_IP}:${oc.env:TQ_MC_RPC_PORT,50051}
+  protocol: rdma # 'rdma' (default) or 'tcp'
+  global_segment_size_gb: 64
+  local_buffer_size_gb: 10
+  client_name: MooncakeStorageClient
+  # null → auto-discover HCAs per process (topology.list_rdma_bonds + PIX affinity).
+  # Override only for ops debugging: transfer_queue.device_name=mlx5_bond_0.
+  device_name: null
+  zero_copy:
+    _target_: unirl.distributed.tensor.backend.transfer_queue.mooncake.MooncakeZeroCopyConfig
+    enable: true
+    # Small per-rollout buffers; the per-rollout reclaim frees them between
+    # rollouts so they don't need to be sized for a whole run.
+    tensor_buffer_size_gb: 2.0
+    bytes_buffer_size_gb: 2.0
+    # Controller/driver-only client buffer sizes (specialize_for_controller).
+    single_controller_tensor_buffer_size_gb: 10.0
+    single_controller_bytes_buffer_size_gb: 10.0
+
+# Hardware-free alternative (in-Ray, no RDMA / no mooncake_master): comment out the
+# mooncake `transfer_queue:` block above and use SimpleBackend instead.
 # transfer_queue:
 #   _target_: unirl.distributed.tensor.backend.transfer_queue.simple.SimpleBackend
-#   num_units: 16
-#   unit_size: 1024
+#   num_units: 64
+#   unit_size: 16384
 
 logging:
-  report_to_wandb: false        # flip to true to enable wandb (rank-0/driver only)
+  report_to_wandb: false # flip to true to enable wandb (rank-0/driver only)
   project_name: unirl
   run_name: null
   entity: null
@@ -60,7 +92,7 @@ backend:
     mixed_precision: true
     fsdp_mode: full
     reshard_after_forward: true
-    activation_checkpointing: false   # diverges 】om reference (bf16_full_ac) per user request
+    activation_checkpointing: false # diverges from reference (bf16_full_ac) per user request
     use_torch_compile: false
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
@@ -130,7 +162,7 @@ stack:
   _target_: unirl.train.stack.TrainStack
   micro_batch_size: 1
   max_grad_norm: 1.0
-  num_updates_per_batch: 2      # PPO mini-batches per rollout (π_old frozen once); v1 parity
+  num_updates_per_batch: 2 # PPO mini-batches per rollout (π_old frozen once); v1 parity
 
 data_source:
   # Real prompts loaded from file: MultimodalRLDataSource reads TXT/JSON/JSONL
@@ -139,7 +171,7 @@ data_source:
   _target_: unirl.data.data_source.MultimodalRLDataSource
   args:
     run:
-      data_path: datasets/pickscore/train.txt        # relative to repo cwd (Hydra 1.3 no-chdir)
+      data_path: datasets/pickscore/train.txt # relative to repo cwd (Hydra 1.3 no-chdir)
       eval_data_path: datasets/pickscore/test.txt
       seed: 42
     algorithm:

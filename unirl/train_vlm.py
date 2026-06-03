@@ -24,7 +24,7 @@ from unirl.trainer.vlm import VLMTrainer
 @hydra.main(version_base=None, config_path="../recipes", config_name="vlm_rl/argrpo_qwen_vl_geo3k_mc_4x8")
 def main(cfg: DictConfig) -> None:
     trainer = VLMTrainer(
-        num_devices=cfg.num_devices,
+        cfg=cfg,
         batch_size=cfg.batch_size,
         bundle_cfg=cfg.bundle,
         pipeline_cfg=cfg.pipeline,

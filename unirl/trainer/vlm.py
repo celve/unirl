@@ -37,7 +37,7 @@ class VLMTrainer(BaseTrainer):
     def __init__(
         self,
         *,
-        num_devices: int,
+        cfg: DictConfig,
         batch_size: int,
         bundle_cfg: DictConfig,
         pipeline_cfg: DictConfig,
@@ -52,7 +52,7 @@ class VLMTrainer(BaseTrainer):
         logging_cfg: Optional[DictConfig] = None,
         adv_normalization_scope: str = "group",
     ) -> None:
-        super().__init__(num_devices=num_devices, logging_cfg=logging_cfg)
+        super().__init__(cfg=cfg, logging_cfg=logging_cfg)
         self.batch_size = batch_size
         # "group" (textbook GRPO, default) or "global" (v1 baseline parity).
         self.adv_normalization_scope = adv_normalization_scope

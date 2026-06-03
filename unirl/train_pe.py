@@ -20,7 +20,7 @@ from unirl.trainer.pe import PETrainer
 @hydra.main(version_base=None, config_path="../recipes", config_name="pe_rl/pe_trainside_pickscore")
 def main(cfg: DictConfig) -> None:
     trainer = PETrainer(
-        num_devices=cfg.num_devices,
+        cfg=cfg,
         batch_size=cfg.batch_size,
         diffusion_cfg=cfg.diffusion,
         ar_cfg=cfg.ar,
@@ -30,7 +30,6 @@ def main(cfg: DictConfig) -> None:
         sampling_cfg=cfg.sampling,
         sync_cfg=cfg.get("sync"),
         logging_cfg=cfg.get("logging"),
-        devices_per_node=int(cfg.get("devices_per_node", 8)),
     )
     trainer.train(
         num_rollouts=int(cfg.get("num_rollouts", 100)),

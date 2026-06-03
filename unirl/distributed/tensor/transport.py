@@ -27,8 +27,9 @@ import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import fields as dc_fields
-from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
+from typing import Any, Callable, ClassVar, Dict, Iterator, List, Optional, Set, Tuple
 
+import ray
 import torch
 
 from unirl.distributed.tensor.batch import Batch, concat_field, shared_field
@@ -270,8 +271,25 @@ def _collect_list(
 # ---------------------------------------------------------------------------
 
 
+def _apply_tensor_op(t: torch.Tensor, op: str, *args) -> torch.Tensor:
+    """Apply a named tensor op. Shared by the default ``tensor_op`` round-trip."""
+    if op == "getitem":
+        return t[args[0]]
+    if op == "reshape":
+        return t.reshape(args[0])
+    if op == "permute":
+        return t.permute(args[0])
+    raise ValueError(f"Unknown tensor op: {op!r}")
+
+
 class TensorTransport(abc.ABC):
-    """Backend-agnostic tensor transport with dehydrate/hydrate."""
+    """Backend-agnostic tensor transport — the universal contract.
+
+    Store/fetch refs (``put``/``get``/``is_ref``), the batched + tree-walking
+    boundary helpers (``put_batch``/``get_batch``/``dehydrate``/``hydrate``/
+    ``session``), and the compute proxy (``transform``). Worker-resident
+    backends add storage-engine machinery via :class:`WorkerLocalTransport`.
+    """
 
     @abc.abstractmethod
     def put(self, tensor: torch.Tensor) -> Any:
@@ -326,6 +344,24 @@ class TensorTransport(abc.ABC):
             device=str(result.device),
         )
 
+    def end_call(self) -> None:
+        """Release any per-call resources (e.g. open IPC views). No-op default.
+
+        Called by the Worker after each call() completes; backends with per-call
+        state (gpu IPC views) override it.
+        """
+
+    @classmethod
+    def localize(cls, shards: list, pool: Any, device_ids: list, worker_ids: list) -> list:
+        """Make every ref in each shard resolvable on its target worker.
+
+        Base (GLOBAL) backends: identity — a ref resolves from any process, so no
+        controller-orchestrated transfer is needed. WorkerLocalTransport overrides
+        with the NCCL/IPC routing skeleton. ``pool`` (topology) and the per-shard
+        ``device_ids``/``worker_ids`` (dst identity) are unused here.
+        """
+        return shards
+
     # ---- dehydrate / hydrate ------------------------------------------------
 
     def dehydrate(self, value: Any) -> Any:
@@ -373,7 +409,7 @@ class TensorTransport(abc.ABC):
         filter_fn: Optional[Callable[[str], bool]] = None
         if fields is not None:
 
-            def filter_fn(key: str) -> bool:
+            def filter_fn(key):
                 return any(key == f or key.startswith(f + ".") for f in fields)
 
         meta_map: Dict[str, TensorMeta] = {}
@@ -403,6 +439,168 @@ class TensorTransport(abc.ABC):
             yield sess
         finally:
             sess._flush()
+
+
+def map_tree(obj: Any, leaf_fn: Callable[[Any], Any]) -> Any:
+    """Rebuild a value tree, applying ``leaf_fn`` to every node.
+
+    The single tree-walker shared by the transport layer's rewrite passes
+    (controller-side ``localize`` substitution and ``Handle._rebind_tree``,
+    worker-side resolve/pack in ``Worker.call``). ``leaf_fn`` runs on every node
+    first; if it returns a *different* object that replaces the node and recursion
+    stops there. Otherwise containers are rebuilt structurally — ``Batch`` via
+    :meth:`Batch._rebuild` (preserving framework-managed ``_packed_cu_seqlens``),
+    ``tuple`` / ``list`` / ``dict`` element-wise. ``TensorMeta`` is an atomic leaf
+    (never recursed into, despite being a ``Batch`` subclass); any other
+    non-container value passes through. Functional (returns new trees), so it works
+    on immutable tuples and lets each caller's ``leaf_fn`` decide what to swap.
+    """
+    new = leaf_fn(obj)
+    if new is not obj:
+        return new
+    if isinstance(obj, TensorMeta):
+        return obj
+    if isinstance(obj, Batch):
+        return obj._rebuild({f.name: map_tree(getattr(obj, f.name), leaf_fn) for f in dc_fields(obj)})
+    if isinstance(obj, tuple):
+        return tuple(map_tree(item, leaf_fn) for item in obj)
+    if isinstance(obj, list):
+        return [map_tree(item, leaf_fn) for item in obj]
+    if isinstance(obj, dict):
+        return {k: map_tree(v, leaf_fn) for k, v in obj.items()}
+    return obj
+
+
+class WorkerLocalTransport(TensorTransport):
+    """The V2 Worker/Handle storage contract — worker-resident backends only.
+
+    Adds the storage-engine machinery only a worker-resident store needs:
+    ref-count lifecycle (``incref``/``decref``), controller-orchestrated
+    cross-worker transfer (``setup_transfer``/``nccl_send``/``nccl_recv``), and
+    on-worker remote compute (``tensor_op``/``cat``/``get_cpu``). The universal
+    materialization surface (``get_batch``/``put_batch``/``end_call``) lives on
+    the base. GLOBAL backends (e.g. the transfer queue) are plain
+    :class:`TensorTransport` and implement none of this capability.
+
+    ``isinstance(t, WorkerLocalTransport)`` is the locality discriminator the
+    controller uses to decide whether cross-worker routing is required.
+    """
+
+    # Methods the controller may invoke on this transport via the Worker actor's
+    # ``transport_op`` relay (TensorHandle GC/compute + Handle NCCL routing).
+    # Adding a capability method below means adding its name here. Excludes
+    # setup_transfer, which the Worker injects identity into via setup_global_pg.
+    REMOTE_OPS: ClassVar[frozenset] = frozenset({"incref", "decref", "tensor_op", "get_cpu", "nccl_send", "nccl_recv"})
+
+    # ---- lifecycle (ref-counting) ------------------------------------------
+
+    def incref(self, key: Any) -> None:
+        """Increment the ref count for a stored tensor. No-op by default."""
+
+    def decref(self, key: Any) -> None:
+        """Decrement the ref count; free at zero. No-op by default."""
+
+    # ---- locality + cross-worker transfer (localize) -------------------
+
+    def setup_transfer(self, global_rank: int, world_size: int) -> None:
+        """Initialize the cross-worker transfer group."""
+
+    def nccl_send(self, dst_rank: int, handles: List[Any]) -> None:
+        raise NotImplementedError("transport does not support cross-worker send")
+
+    def nccl_recv(self, src_rank: int, shapes: List[tuple], dtypes: List[torch.dtype]) -> List[Any]:
+        raise NotImplementedError("transport does not support cross-worker recv")
+
+    @classmethod
+    def _is_local(cls, ref: Any, dst_worker_id: str, dst_device_id: int, pool: Any) -> bool:
+        """True if ``ref`` is already resolvable on the dst worker (no transfer needed).
+
+        The one per-backend locality decision. Base: a ref is local only if produced by
+        the dst worker (per-process store). gpu overrides to also accept same physical
+        device, since its per-GPU TensorWorker is shared across that GPU's slots.
+        """
+        return ref.source_id == dst_worker_id
+
+    @classmethod
+    def localize(cls, shards: list, pool: Any, device_ids: List[int], worker_ids: List[str]) -> list:
+        """Make every ref in each shard resolvable on its dst worker.
+
+        Shared skeleton for all worker-local backends; the only thing that varies is
+        ``_is_local`` (the locality predicate). A ref that is not already local and not
+        an object_ref (CPU/plasma resolves anywhere) is moved cross-device via one
+        batched NCCL hop between the two devices' slot0 workers, then substituted back
+        (id()-keyed). Names no backend type — works through ``ref.routing_copy`` /
+        ``ref.source_id`` / ``map_tree`` / the ``transport_op`` relay.
+        """
+        foreign: Dict[Tuple[int, int], List[Any]] = {}  # (src_device_id, dst_device_id) → [routing_copy, ...]
+
+        def route(ref: Any, dst_worker_id: str, dst_device_id: int) -> Any:
+            if getattr(ref, "object_ref", None) is not None:
+                return ref  # CPU/plasma → resolvable anywhere
+            if cls._is_local(ref, dst_worker_id, dst_device_id, pool):
+                return ref
+            src_device_id = pool.device_id_of(ref.source_id)
+            routing = ref.routing_copy()
+            foreign.setdefault((src_device_id, dst_device_id), []).append(routing)
+            return routing
+
+        def unwrap(obj: Any, dst_worker_id: str, dst_device_id: int) -> Any:
+            if isinstance(obj, TensorMeta):
+                return TensorMeta.from_handles([route(h, dst_worker_id, dst_device_id) for h in obj.refs])
+            return obj
+
+        routed: list = []
+        for i, (s_args, s_kwargs) in enumerate(shards):
+
+            def leaf(o, _w=worker_ids[i], _d=device_ids[i]):
+                return unwrap(o, _w, _d)
+
+            routed.append((map_tree(s_args, leaf), map_tree(s_kwargs, leaf)))
+
+        if not foreign:
+            return routed
+
+        keys = list(foreign.keys())
+        send_refs, recv_refs = [], []
+        for src_device_id, dst_device_id in keys:
+            handles = foreign[(src_device_id, dst_device_id)]
+            send_refs.append(pool.slot0_worker(src_device_id).transport_op.remote("nccl_send", dst_device_id, handles))
+            recv_refs.append(
+                pool.slot0_worker(dst_device_id).transport_op.remote(
+                    "nccl_recv", src_device_id, [h.shape for h in handles], [h.dtype for h in handles]
+                )
+            )
+        ray.get(send_refs)
+        recv_results = ray.get(recv_refs)
+
+        subs: Dict[int, Any] = {}
+        for (src_device_id, dst_device_id), new_handles in zip(keys, recv_results):
+            dst_worker = pool.slot0_worker(dst_device_id)
+            for old_h, new_h in zip(foreign[(src_device_id, dst_device_id)], new_handles):
+                new_h.rebind(dst_worker)
+                subs[id(old_h)] = new_h
+
+        def substitute(obj: Any) -> Any:
+            if isinstance(obj, TensorMeta):
+                return TensorMeta.from_handles([subs.get(id(h), h) for h in obj.refs])
+            return obj
+
+        return [(map_tree(a, substitute), map_tree(k, substitute)) for a, k in routed]
+
+    # ---- remote compute (controller-triggered) ----------------------------
+
+    def tensor_op(self, handle: Any, op: str, *op_args) -> Any:
+        """Apply a named op (getitem/reshape/permute) to a stored tensor.
+
+        Default: round-trip get -> op -> put. Backends with on-worker compute
+        override to avoid moving data.
+        """
+        result = _apply_tensor_op(self.get([handle]), op, *op_args).contiguous()
+        return self.put(result)
+
+    def get_cpu(self, handle: Any) -> torch.Tensor:
+        """Return the stored tensor as a CPU tensor."""
+        return self.get([handle]).cpu()
 
 
 class TransportSession:
@@ -467,4 +665,6 @@ __all__ = [
     "TensorTransport",
     "TensorTransportRuntime",
     "TransportSession",
+    "WorkerLocalTransport",
+    "map_tree",
 ]

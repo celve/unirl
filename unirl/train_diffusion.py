@@ -22,7 +22,7 @@ from unirl.trainer.diffusion import DiffusionTrainer
 @hydra.main(version_base=None, config_path="../recipes", config_name="diffusion_rl/sd3_trainside")
 def main(cfg: DictConfig) -> None:
     trainer = DiffusionTrainer(
-        num_devices=cfg.num_devices,
+        cfg=cfg,
         batch_size=cfg.batch_size,
         bundle_cfg=cfg.bundle,
         pipeline_cfg=cfg.pipeline,

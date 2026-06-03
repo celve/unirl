@@ -27,10 +27,9 @@ Usage:
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 from itertools import count
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type
 
 import ray
 
@@ -42,17 +41,14 @@ from unirl.distributed.group.dispatch import (
     resolve_backward_dispatch_mode,
 )
 from unirl.distributed.group.remote import RankInfo, Remote
-from unirl.distributed.tensor.backend.tensor_store.handle import TensorHandle
-from unirl.distributed.tensor.batch import Batch
+from unirl.distributed.tensor.backend.colocate_store.handle import TensorHandle
 from unirl.distributed.tensor.grad_context import (
     RPCBackwardNode,
     current_grad_context,
 )
-from unirl.distributed.tensor.transport import TensorMeta
-from unirl.distributed.utils import (
-    collect_leaves,
-    infer_and_validate_batch_size,
-)
+from unirl.distributed.tensor.pytree import infer_batch_size
+from unirl.distributed.tensor.transport import TensorMeta, WorkerLocalTransport, map_tree
+from unirl.distributed.utils import collect_leaves
 
 if TYPE_CHECKING:
     from unirl.distributed.group.device_pool import DevicePool
@@ -93,23 +89,6 @@ def _make_role_name(role_cls) -> str:
 def reset_role_name_counter() -> None:
     """Reset the role name counter. For testing only."""
     _role_name_counter.clear()
-
-
-def _check_batch_divisibility(dispatch_mode: Dispatch, batch_size: Optional[int], dp_size: int) -> None:
-    """Raise if a DP-split batch can't be divided evenly across dp ranks.
-
-    Only DP_SCATTER / DP_SCATTER_HEAD split the per-sample batch by dp_size, so only they
-    require divisibility. BROADCAST broadcasts and SCATTER splits by
-    world_size — both ignore this precondition — so the check must NOT apply to
-    them (it would spuriously reject valid broadcast calls, e.g.
-    set_rollout_targets(rollout.workers, ...) when len(workers) % dp_size != 0).
-    """
-    if (
-        dispatch_mode in (Dispatch.DP_SCATTER, Dispatch.DP_SCATTER_HEAD)
-        and batch_size is not None
-        and batch_size % dp_size != 0
-    ):
-        raise ValueError(f"batch_size={batch_size} not divisible by dp_size={dp_size}")
 
 
 @dataclass(frozen=True)
@@ -269,7 +248,7 @@ class Handle:
         collect_fn: Callable,
         execute_fn: Callable,
     ) -> Callable:
-        """Create handle method: dispatch → ensure_local → execute → collect → rebind.
+        """Create handle method: dispatch → localize → execute → collect → rebind.
 
         When a GradContext is active, wraps the call to record input/output
         TensorMetas and append an RPCBackwardNode for later auto-backward.
@@ -289,21 +268,35 @@ class Handle:
                 call_id = f"{method_name}_{next(self._grad_call_counter)}"
                 input_metas = collect_leaves(args, TensorMeta) + collect_leaves(tuple(kwargs.values()), TensorMeta)
 
-            batch_size = infer_and_validate_batch_size(args, kwargs)
-            _check_batch_divisibility(dispatch_mode, batch_size, self.dp_size)
+            batch_size = infer_batch_size(args, kwargs)
+            # Only DP_SCATTER/DP_SCATTER_HEAD split the per-sample batch by dp_size, so only
+            # they require divisibility; BROADCAST/SCATTER must not be rejected (main #202).
+            if (
+                dispatch_mode in (Dispatch.DP_SCATTER, Dispatch.DP_SCATTER_HEAD)
+                and batch_size is not None
+                and batch_size % self.dp_size != 0
+            ):
+                raise ValueError(f"batch_size={batch_size} not divisible by dp_size={self.dp_size}")
 
             shards = dispatch_fn(self, args, kwargs, batch_size)
-            shards = self._ensure_local(shards)
+            # Locality + cross-worker transfer is the transport's policy: its
+            # localize makes every ref resolvable on its dst worker (GLOBAL =
+            # identity; worker-local = NCCL/IPC routing). It needs controller
+            # topology + per-shard dst identity, passed directly.
+            transport_cls = self.pool.transport_cls
+            worker_local = issubclass(transport_cls, WorkerLocalTransport)
+            shards = transport_cls.localize(shards, self.pool, self.device_ids, self.worker_ids)
             # grad_mode/call_id passed as dedicated args, not mixed into kwargs
             refs = execute_fn(method_name, shards, grad_mode=ctx is not None, call_id=call_id)
             results = ray.get(refs)
 
             # Rebind before collect: results[i] comes from workers[i],
-            # so worker attribution is unambiguous at this point.
-            # Also wraps bare TensorHandle into TensorMeta.
-            results = [self._rebind_tree(r, self.workers[i]) for i, r in enumerate(results)]
+            # so worker attribution is unambiguous at this point. For worker-local
+            # this registers the decref GC finalizer; GLOBAL lifecycle is
+            # queue-managed, so skip rebind/GC there.
+            results = [self._rebind_tree(r, self.workers[i], worker_local=worker_local) for i, r in enumerate(results)]
 
-            # Collect: merge DP-head rank results
+            # Collect: merge primary rank results
             collected = collect_fn(self, results)
 
             if ctx is not None:
@@ -341,210 +334,25 @@ class Handle:
 
     # ── TensorHandle rebinding ──
 
-    def _rebind_tree(self, obj, worker_handle):
-        """Recursively rebind TensorHandle and wrap into TensorMeta.
+    def _rebind_tree(self, obj, worker_handle, *, worker_local: bool = True):
+        """Rebind every ref leaf onto ``worker_handle`` and wrap bare handles in TensorMeta.
 
-        Returns the transformed tree where every TensorHandle is:
-          1. Rebound with the given worker_handle (registers GC finalizer)
-          2. Wrapped into a single-handle TensorMeta
+        For worker-local backends, ``rebind`` attaches the worker actor handle and
+        registers the decref GC finalizer. For GLOBAL backends the refs resolve
+        anywhere and lifecycle is queue-managed, so no rebind/GC is done (and the
+        refs need not be TensorHandle). Only the per-leaf rebind policy lives here;
+        the tree recursion (Batch/tuple/list/dict, cu_seqlens preserved) is delegated
+        to the shared :func:`map_tree`.
         """
-        if isinstance(obj, TensorHandle):
-            obj.rebind(worker_handle)
-            return TensorMeta.from_handles([obj])
-        elif isinstance(obj, TensorMeta):
-            for h in obj.refs:
-                h.rebind(worker_handle)
-            return obj
-        elif isinstance(obj, Batch):
-            return obj.map(lambda v: self._rebind_tree(v, worker_handle))
-        elif isinstance(obj, tuple):
-            return tuple(self._rebind_tree(item, worker_handle) for item in obj)
-        elif isinstance(obj, list):
-            return [self._rebind_tree(item, worker_handle) for item in obj]
-        elif isinstance(obj, dict):
-            return {k: self._rebind_tree(v, worker_handle) for k, v in obj.items()}
-        return obj
 
-    # ── Prepare shards for execution: unwrap TensorMeta + NCCL transfer ──
+        def rebind_leaf(o):
+            if isinstance(o, TensorHandle):
+                if worker_local:
+                    o.rebind(worker_handle)
+                return TensorMeta.from_handles([o])
+            if isinstance(o, TensorMeta) and worker_local:
+                for h in o.refs:
+                    h.rebind(worker_handle)
+            return o
 
-    def _ensure_local(self, shards: List) -> List:
-        """Prepare shards for worker execution.
-
-        Pass 1 (_unwrap): TensorMeta → TensorHandle (single) or TensorMeta
-            (multi-handle kept as-is for later cat). Collect foreign handles.
-        NCCL: batch-transfer all foreign handles to their dst workers.
-        Pass 2 (_substitute): rebuild trees replacing routing handles with
-            NCCL recv handles.
-        Pass 3 (_cat_multi): for any multi-handle TensorMeta remaining in a
-            shard, remote-cat their handles on the dst worker → single TensorHandle.
-        """
-        # foreign: (src_device_id, dst_device_id) → [TensorHandle, ...]
-        foreign: Dict[Tuple[int, int], List] = defaultdict(list)
-
-        unwrapped_shards = []
-        for shard_idx, (s_args, s_kwargs) in enumerate(shards):
-            dst_device_id = self.device_ids[shard_idx]
-            dst_worker_id = self.worker_ids[shard_idx]
-            new_args = self._unwrap(s_args, dst_worker_id, dst_device_id, foreign)
-            new_kwargs = self._unwrap(s_kwargs, dst_worker_id, dst_device_id, foreign)
-            unwrapped_shards.append((new_args, new_kwargs))
-
-        if foreign:
-            # Batch NCCL transfer for each (src, dst) pair
-            group_keys = list(foreign.keys())
-            all_send_refs = []
-            all_recv_refs = []
-            for src_id, dst_id in group_keys:
-                handles = foreign[(src_id, dst_id)]
-                src_slot = self.pool.slot_of(handles[0].worker_id)
-                src_worker = (
-                    self.pool.slot0_worker(src_id) if src_slot > 0 else self.pool.get_worker(handles[0].worker_id)
-                )
-                dst_worker = self.pool.slot0_worker(dst_id)
-                all_send_refs.append(src_worker._nccl_send.remote(dst_id, handles))
-                all_recv_refs.append(
-                    dst_worker._nccl_recv.remote(src_id, [h.shape for h in handles], [h.dtype for h in handles])
-                )
-
-            ray.get(all_send_refs)
-            recv_results = ray.get(all_recv_refs)
-
-            # Build substitution map: id(routing_handle) → new_handle
-            subs: Dict[int, TensorHandle] = {}
-            for (src_id, dst_id), new_handles in zip(group_keys, recv_results):
-                dst_worker = self.pool.slot0_worker(dst_id)
-                old_handles = foreign[(src_id, dst_id)]
-                for old_h, new_h in zip(old_handles, new_handles):
-                    new_h.rebind(dst_worker)
-                    subs[id(old_h)] = new_h
-
-            # Pass 2: rebuild each shard substituting routing handles
-            unwrapped_shards = [
-                (self._substitute(args, subs), self._substitute(kwargs, subs)) for args, kwargs in unwrapped_shards
-            ]
-
-        # Pass 3: remote-cat any remaining multi-handle TensorMeta on dst worker
-        final_shards = []
-        for shard_idx, (s_args, s_kwargs) in enumerate(unwrapped_shards):
-            dst_worker = self.workers[shard_idx]
-            new_args = self._cat_multi(s_args, dst_worker)
-            new_kwargs = self._cat_multi(s_kwargs, dst_worker)
-            final_shards.append((new_args, new_kwargs))
-
-        return final_shards
-
-    def _cat_multi(self, obj, dst_worker):
-        """Pass 3: remote-cat multi-handle TensorMeta → single TensorHandle.
-
-        After NCCL, all handles in a TensorMeta shard are guaranteed to be on
-        dst_worker. Cat them into one tensor on dst_worker and return the handle.
-        Single-handle TensorMeta and plain TensorHandle are passed through.
-        """
-        if isinstance(obj, TensorMeta):
-            if len(obj.refs) == 1:
-                return obj.refs[0]
-            new_h = ray.get(dst_worker.cat_tensors.remote(obj.refs))
-            new_h.rebind(dst_worker)
-            return new_h
-        if isinstance(obj, TensorHandle):
-            return obj
-        if isinstance(obj, Batch):
-            return obj.map(lambda v: self._cat_multi(v, dst_worker))
-        if isinstance(obj, tuple):
-            return tuple(self._cat_multi(item, dst_worker) for item in obj)
-        if isinstance(obj, list):
-            return [self._cat_multi(item, dst_worker) for item in obj]
-        if isinstance(obj, dict):
-            return {k: self._cat_multi(v, dst_worker) for k, v in obj.items()}
-        return obj
-
-    def _with_ipc(self, handle: TensorHandle) -> TensorHandle:
-        """Return a copy of *handle* with its CUDA IPC handle populated.
-
-        ``TensorStore.put()`` no longer exports IPC handles eagerly — that pinned
-        every stored block in the caching allocator and leaked on the colocate hot
-        path (LIN-361). When a foreign handle is about to be opened over IPC by a
-        same-device sibling, fetch the handle from the owning worker on demand. A
-        handle that already carries one, or a CPU (``object_ref``) handle, passes
-        through unchanged.
-        """
-        if handle.ipc_handle is not None or handle.object_ref is not None:
-            return handle
-        ipc = ray.get(self.pool.get_worker(handle.worker_id).get_ipc_handle.remote(handle.store_key))
-        return TensorHandle(
-            handle.store_key,
-            handle.worker_id,
-            handle.shape,
-            handle.dtype,
-            handle.device,
-            ipc_handle=ipc,
-            stride=handle.stride,
-            offset=handle.offset,
-        )
-
-    def _unwrap(self, obj, dst_worker_id: str, dst_device_id: int, foreign: dict):
-        """Pass 1: unwrap TensorMeta → TensorHandle or multi-handle TensorMeta.
-
-        Single-handle TensorMeta: unwrapped to its TensorHandle.
-        Multi-handle TensorMeta: each handle processed individually; returned
-            as TensorMeta(routing_handles) so _cat_multi can later cat on dst.
-        Foreign handles get routing copies; local handles pass through.
-        """
-        if isinstance(obj, TensorMeta):
-            if len(obj.refs) == 1:
-                return self._unwrap(obj.refs[0], dst_worker_id, dst_device_id, foreign)
-            routed = [self._unwrap(h, dst_worker_id, dst_device_id, foreign) for h in obj.refs]
-            return TensorMeta.from_handles(routed)
-        if isinstance(obj, TensorHandle):
-            if obj.object_ref is not None:
-                return obj
-            if obj.worker_id != dst_worker_id:
-                src_device_id = self.pool.device_id_of(obj.worker_id)
-                if src_device_id == dst_device_id:
-                    # Same physical GPU, different slot → the consumer opens this
-                    # tensor over CUDA IPC. put() no longer exports eagerly (it
-                    # leaked — LIN-361), so export the handle lazily now.
-                    return self._with_ipc(obj)
-                # Cross-device → NCCL. When the source lives on a sibling slot, the
-                # slot0 sender opens it over IPC and needs the lazily-exported
-                # handle; a slot0 source is read by its own worker via store.get.
-                src = self._with_ipc(obj) if self.pool.slot_of(obj.worker_id) > 0 else obj
-                routing = TensorHandle(
-                    src.store_key,
-                    src.worker_id,
-                    src.shape,
-                    src.dtype,
-                    src.device,
-                    ipc_handle=src.ipc_handle,
-                    stride=src.stride,
-                    offset=src.offset,
-                )
-                foreign[(src_device_id, dst_device_id)].append(routing)
-                return routing
-            return obj
-        if isinstance(obj, Batch):
-            return obj.map(lambda v: self._unwrap(v, dst_worker_id, dst_device_id, foreign))
-        if isinstance(obj, tuple):
-            return tuple(self._unwrap(item, dst_worker_id, dst_device_id, foreign) for item in obj)
-        if isinstance(obj, list):
-            return [self._unwrap(item, dst_worker_id, dst_device_id, foreign) for item in obj]
-        if isinstance(obj, dict):
-            return {k: self._unwrap(v, dst_worker_id, dst_device_id, foreign) for k, v in obj.items()}
-        return obj
-
-    def _substitute(self, obj, subs: dict):
-        """Pass 2: rebuild tree replacing routing handles (by id) with new handles."""
-        if isinstance(obj, TensorHandle):
-            return subs.get(id(obj), obj)
-        if isinstance(obj, TensorMeta):
-            new_handles = [subs.get(id(h), h) for h in obj.refs]
-            return TensorMeta.from_handles(new_handles)
-        if isinstance(obj, Batch):
-            return obj.map(lambda v: self._substitute(v, subs))
-        if isinstance(obj, tuple):
-            return tuple(self._substitute(item, subs) for item in obj)
-        if isinstance(obj, list):
-            return [self._substitute(item, subs) for item in obj]
-        if isinstance(obj, dict):
-            return {k: self._substitute(v, subs) for k, v in obj.items()}
-        return obj
+        return map_tree(obj, rebind_leaf)

@@ -64,7 +64,7 @@ class PETrainer(BaseTrainer):
     def __init__(
         self,
         *,
-        num_devices: int,
+        cfg: DictConfig,
         batch_size: int,
         diffusion_cfg: DictConfig,
         ar_cfg: DictConfig,
@@ -74,9 +74,8 @@ class PETrainer(BaseTrainer):
         sampling_cfg: DictConfig,
         sync_cfg: Optional[DictConfig] = None,
         logging_cfg: Optional[DictConfig] = None,
-        devices_per_node: int = 8,
     ) -> None:
-        super().__init__(num_devices=num_devices, devices_per_node=devices_per_node, logging_cfg=logging_cfg)
+        super().__init__(cfg=cfg, logging_cfg=logging_cfg)
         self.batch_size = batch_size
 
         # Driver-side data iterator (not a Remote).

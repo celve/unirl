@@ -32,7 +32,7 @@ class DiffusionTrainer(BaseTrainer):
     def __init__(
         self,
         *,
-        num_devices: int,
+        cfg: DictConfig,
         batch_size: int,
         bundle_cfg: DictConfig,
         pipeline_cfg: DictConfig,
@@ -50,7 +50,7 @@ class DiffusionTrainer(BaseTrainer):
         enable_fsdp_offload: bool = False,
         adv_use_global_std: bool = False,
     ) -> None:
-        super().__init__(num_devices=num_devices, logging_cfg=logging_cfg)
+        super().__init__(cfg=cfg, logging_cfg=logging_cfg)
         self.batch_size = batch_size
         self._layout = str(layout)
         # Colocate memory dance: offload the FSDP train state (params + grads +

@@ -109,7 +109,7 @@ class HI3Trainer(BaseTrainer):
     def __init__(
         self,
         *,
-        num_devices: int,
+        cfg: DictConfig,
         batch_size: int,
         bundle_cfg: DictConfig,
         pipeline_cfg: DictConfig,
@@ -127,7 +127,7 @@ class HI3Trainer(BaseTrainer):
         logging_cfg: Optional[DictConfig] = None,
         enable_fsdp_offload: bool = True,
     ) -> None:
-        super().__init__(num_devices=num_devices)
+        super().__init__(cfg=cfg)
         self.batch_size = batch_size
         # Colocate memory dance: offload the FSDP train state (base + grads +
         # optimizer) to CPU during rollout so the awake engines fit, onload

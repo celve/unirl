@@ -15,7 +15,7 @@ import torch
 from unirl.distributed.group.dispatch import Dispatch, distributed
 
 if TYPE_CHECKING:
-    from unirl.distributed.tensor.backend.tensor_store.store import TensorStore
+    from unirl.distributed.tensor.transport import TensorTransport
 
 
 @dataclass
@@ -68,14 +68,14 @@ class Remote:
     Multiple Remotes can share the same Worker (colocated).
 
     Attributes set by Worker.add_remote():
-        store:     TensorStore (shared with Worker)
+        transport: TensorTransport (owned by the Worker)
         device:    GPU device string (e.g. "cuda:0")
         rank_info: RankInfo for this worker group
         dist_env:  Group-level dist env vars (MASTER_ADDR, MASTER_PORT, etc.)
     """
 
     def __init__(self) -> None:
-        self.store: Optional[TensorStore] = None
+        self.transport: Optional[TensorTransport] = None
         self.device: Optional[str] = None
         self.rank_info: Optional[RankInfo] = None
         self.dist_env: Dict[str, str] = {}
@@ -85,7 +85,7 @@ class Remote:
 
     def setup(
         self,
-        store: TensorStore,
+        transport: "TensorTransport",
         device: str,
         rank_info: RankInfo,
         dist_env: Optional[Dict[str, str]] = None,
@@ -95,7 +95,7 @@ class Remote:
 
         Writes dist_env to os.environ once for convenience (env:// init_method).
         """
-        self.store = store
+        self.transport = transport
         self.device = device
         self.rank_info = rank_info
         self.dist_env = dist_env or {}
@@ -113,7 +113,7 @@ class Remote:
         """User-facing init hook. Override to load models, create sub-PG, etc.
 
         Called explicitly by user via wg.initialize(*args, **kwargs).
-        At this point self.store, self.device, self.rank_info, self.dist_env
+        At this point self.transport, self.device, self.rank_info, self.dist_env
         are all available, and dist_env is already in os.environ.
         """
         pass
@@ -132,9 +132,9 @@ class Remote:
         dispatch_mode = DP_SCATTER is intentional and covers all currently supported
         forward dispatch modes:
 
-          DP_SCATTER  forward → DP_SCATTER  backward  (grad shards align with output shards)
+          DP_SCATTER      forward → DP_SCATTER backward  (grad shards align with output shards)
           DP_SCATTER_HEAD forward → DP_SCATTER backward  (all ranks must participate in backward,
-                                               not just the primary ranks)
+                                                          not just the DP head ranks)
 
         !! IMPORTANT — adding a new forward dispatch_mode !!
         If you add a new Dispatch variant, check resolve_backward_dispatch_mode() in
@@ -145,7 +145,7 @@ class Remote:
             call_id:   Matches the key in _grad_inputs/_grad_outputs.
             out_grads: tuple[Optional[Tensor], ...] — external grad for each
                        saved output tensor.  None means no gradient.
-                       Elements are split element-wise by split_value (tuple
+                       Elements are split element-wise by pytree_chunk (tuple
                        semantics), so each worker receives its own shard.
             in_grads:  tuple[Optional[Tensor], ...] — existing accumulated grad
                        for each saved input tensor (fan-out accumulation support).
@@ -154,7 +154,7 @@ class Remote:
         Returns:
             tuple[Optional[Tensor], ...] — new .grad for each saved input tensor.
             None at position i means input i has no gradient.
-            Elements are merged element-wise by pytree_merge across workers.
+            Elements are merged element-wise by pytree_cat across workers.
         """
         saved_out: List[torch.Tensor] = self._grad_outputs.pop(call_id, [])
         saved_in: List[torch.Tensor] = self._grad_inputs.pop(call_id, [])

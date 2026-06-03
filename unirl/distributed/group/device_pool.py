@@ -42,15 +42,39 @@ class DevicePool:
         bundle      = device_id %  devices_per_node
     """
 
-    def __init__(self, num_devices: int, devices_per_node: int = 8, workers_per_device: int = 2) -> None:
+    def __init__(
+        self,
+        num_devices: int,
+        devices_per_node: int = 8,
+        workers_per_device: int = 1,
+        transport_kind: str = "colocate_store",
+        tq_handoff: Optional[dict] = None,
+    ) -> None:
         if num_devices % devices_per_node != 0:
             raise ValueError(f"num_devices ({num_devices}) must be divisible by devices_per_node ({devices_per_node})")
         self.num_devices = num_devices
         self.devices_per_node = devices_per_node
         self.workers_per_device = workers_per_device
+        self.transport_kind = transport_kind or "colocate_store"
+        if self.transport_kind in ("colocate_store", "colocate") and self.workers_per_device != 1:
+            raise ValueError(
+                f"colocate_store supports one worker per device (got workers_per_device="
+                f"{self.workers_per_device}); use transport_kind='gpu_store' for colocated multi-slot."
+            )
+        # Driver's TransferQueue actor handoff; required when transport_kind is
+        # transfer_queue (fanned to each Worker before it builds its transport).
+        self.tq_handoff = tq_handoff
 
         # slot0 workers indexed by device_id (backward-compatible)
         self.workers: List[ray.actor.ActorHandle] = []
+
+        # Per-GPU TensorWorker actors (gpu_store backend only), keyed by device_id.
+        self._tw_by_device: Dict[int, Any] = {}
+
+        # MASTER_ADDR/PORT forwarded to TensorWorker actors so their cross-GPU NCCL
+        # PG can bind. Set in _create_workers; mirrors the slot0 Worker env injection.
+        self._master_addr: Optional[str] = None
+        self._master_port: Optional[str] = None
 
         self._pgs: List = []
         self._next_device: int = 0
@@ -71,11 +95,40 @@ class DevicePool:
     def num_gpus(self) -> int:
         return self.num_devices
 
+    @property
+    def transport_cls(self) -> type:
+        """The TensorTransport subclass for the configured kind (no live instance).
+
+        The controller (Handle) reads class-level policy off this — ``localize``
+        (locality + cross-worker transfer) and, via ``issubclass(..,
+        WorkerLocalTransport)``, whether to register decref GC. Worker-local
+        backends each implement ``localize``; GLOBAL (transfer_queue) inherits
+        the identity ``localize``.
+        """
+        kind = self.transport_kind
+        if kind in ("colocate_store", "colocate"):
+            from unirl.distributed.tensor.backend.colocate_store.transport import ColocateStoreTransport
+
+            return ColocateStoreTransport
+        if kind in ("gpu_store", "gpu"):
+            from unirl.distributed.tensor.backend.gpu_store.transport import GPUStoreTransport
+
+            return GPUStoreTransport
+        if kind in ("transfer_queue", "tq"):
+            from unirl.distributed.tensor.backend.transfer_queue.transport import TQTransport
+
+            return TQTransport
+        raise ValueError(f"unknown transport kind {kind!r}")
+
     def setup(self) -> None:
-        """Create PlacementGroups, Worker actors, and initialize global NCCL."""
+        """Create PlacementGroups, Worker actors, and (for worker-local backends) NCCL."""
+        from unirl.distributed.tensor.transport import WorkerLocalTransport
+
         self._create_placement_groups()
         self._create_workers()
-        if self.num_devices > 1:
+        # GLOBAL transports (transfer_queue) resolve refs from any process and have no
+        # cross-worker NCCL; only worker-local backends (colocate/gpu) need the global PG.
+        if self.num_devices > 1 and issubclass(self.transport_cls, WorkerLocalTransport):
             self._setup_nccl()
 
     def _create_placement_groups(self) -> None:
@@ -85,7 +138,9 @@ class DevicePool:
         even though slot1+ workers are created lazily.
         """
         num_nodes = self.num_devices // self.devices_per_node
-        bundles = [{"GPU": 1, "CPU": self.workers_per_device} for _ in range(self.devices_per_node)]
+        # gpu_store adds one CPU per bundle for the per-GPU TensorWorker actor.
+        extra_cpu = 1 if self.transport_kind in ("gpu_store", "gpu") else 0
+        bundles = [{"GPU": 1, "CPU": self.workers_per_device + extra_cpu} for _ in range(self.devices_per_node)]
         pgs = [placement_group(bundles, strategy="STRICT_PACK") for _ in range(num_nodes)]
         ray.get([pg.ready() for pg in pgs])
         self._pgs = pgs
@@ -96,6 +151,7 @@ class DevicePool:
         MASTER_ADDR/PORT are resolved from bundle 0 of PG 0 (node 0).
         """
         master_addr, master_port = get_node_ip_and_port(self._pgs[0], bundle_index=0)
+        self._master_addr, self._master_port = master_addr, str(master_port)
         env_vars_base = {
             "MASTER_ADDR": master_addr,
             "MASTER_PORT": str(master_port),
@@ -109,6 +165,11 @@ class DevicePool:
 
     def _spawn_worker(self, device_id: int, slot: int, env_vars: dict = None) -> ray.actor.ActorHandle:
         """Spawn a Worker actor and register it in internal mappings."""
+        if self.transport_kind in ("transfer_queue", "tq") and self.tq_handoff is None:
+            raise RuntimeError(
+                "transport_kind='transfer_queue' requires tq_handoff "
+                "(the driver's TransferQueueRuntime.init() actor handoff)."
+            )
         worker_id = f"dw{device_id}" if slot == 0 else f"dw{device_id}_s{slot}"
         pg = self._pgs[device_id // self.devices_per_node]
         bundle_index = device_id % self.devices_per_node
@@ -132,13 +193,65 @@ class DevicePool:
                 slot=slot,
                 nccl_rank=device_id if slot == 0 else None,
                 world_size=self.num_devices,
+                transport_kind=self.transport_kind,
+                tq_handoff=self.tq_handoff,
             )
         )
         self._device_to_workers[device_id].append(w)
         self._worker_by_id[worker_id] = w
         self._worker_id_to_device_id[worker_id] = device_id
         self._worker_id_to_slot[worker_id] = slot
+
+        # gpu_store defers its transport build: the shared per-GPU TensorWorker is
+        # created after the Worker exists, so inject it then build. colocate and
+        # transfer_queue build in Worker.__init__ (deps ready at construction).
+        if self.transport_kind in ("gpu_store", "gpu"):
+            tw = self._get_or_create_tw(device_id)
+            ray.get(w.set_tensor_worker.remote(tw))
+            ray.get(w.build_and_install_transport.remote())
         return w
+
+    def _get_or_create_tw(self, device_id: int) -> ray.actor.ActorHandle:
+        """Create (once) the per-GPU TensorWorker actor for the gpu_store backend.
+
+        One TensorWorker per physical GPU, shared by all slots on that GPU. Pinned
+        to the device's PG bundle (num_gpus=0; the bundle's GPU is already reserved
+        by the Worker fractions and shared via CUDA_VISIBLE_DEVICES).
+        """
+        tw = self._tw_by_device.get(device_id)
+        if tw is not None:
+            return tw
+        from unirl.distributed.tensor.backend.gpu_store.worker import TensorWorker
+
+        pg = self._pgs[device_id // self.devices_per_node]
+        bundle_index = device_id % self.devices_per_node
+        # The TensorWorker shares the bundle's physical GPU with the slot0 Worker(s).
+        # With num_gpus=0 Ray hides all GPUs from the actor (CUDA_VISIBLE_DEVICES="");
+        # disable that override and mirror the slot0 Worker's CUDA_VISIBLE_DEVICES so the
+        # TW sees exactly that one GPU as cuda:0. MASTER_ADDR/PORT let its cross-GPU NCCL
+        # ProcessGroup bind (slot0 Workers get these via _spawn_worker's env_vars).
+        cvd = ray.get(self.slot0_worker(device_id).get_cuda_visible_devices.remote())
+        tw = (
+            ray.remote(TensorWorker)
+            .options(
+                num_gpus=0,
+                runtime_env={
+                    "env_vars": {
+                        "MASTER_ADDR": self._master_addr,
+                        "MASTER_PORT": self._master_port,
+                        "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
+                        "CUDA_VISIBLE_DEVICES": cvd,
+                    }
+                },
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=pg,
+                    placement_group_bundle_index=bundle_index,
+                ),
+            )
+            .remote(device_id=device_id)
+        )
+        self._tw_by_device[device_id] = tw
+        return tw
 
     def _get_or_create_worker(self, device_id: int, slot: int) -> ray.actor.ActorHandle:
         """Return the worker for (device_id, slot), creating it lazily if needed.
@@ -176,6 +289,34 @@ class DevicePool:
         The slot must already exist (created via create_remote or _get_or_create_worker).
         """
         return [self._device_to_workers[d][slot] for d in device_ids]
+
+    def all_workers(self) -> List[ray.actor.ActorHandle]:
+        """Every created worker handle across all slots (slot0 + lazily-created slot1+).
+
+        ``self.workers`` is slot0-only; multi-slot transfer_queue workers each hold their
+        own TQ client, so per-process fan-outs (e.g. buffer reclaim) must reach every slot.
+        """
+        return [w for workers in self._device_to_workers.values() for w in workers]
+
+    def reset_transfer_queue_buffers(self) -> None:
+        """Reclaim mooncake zero-copy buffer free-lists across workers + driver.
+
+        Called once per rollout at a quiescent boundary. No-op unless the active backend
+        is transfer_queue. The worker fan-out (``reset_actors_zero_copy_buffer_free``)
+        no-ops internally for non-mooncake backends, and the driver's own reset is gated on
+        the mooncake manager_type here — so this is safe to call unconditionally (e.g. for
+        SimpleBackend runs, which register no zero-copy buffers).
+        """
+        if self.transport_kind not in ("transfer_queue", "tq"):
+            return
+        from unirl.distributed.tensor.backend.transfer_queue.runtime import TransferQueueRuntime
+
+        rt = TransferQueueRuntime.current()
+        if rt is None:
+            return
+        rt.reset_actors_zero_copy_buffer_free(self.all_workers())
+        if rt.backend is not None and rt.backend.manager_type == "MooncakeStorageManager":
+            rt.reset_zero_copy_buffer_free()  # the driver client's own registered buffers
 
     def get_worker(self, worker_id: str) -> ray.actor.ActorHandle:
         """Return the worker handle for the given worker_id."""
@@ -273,6 +414,8 @@ class DevicePool:
 
     def shutdown(self) -> None:
         """Kill all Worker actors and remove PlacementGroups."""
+        for tw in self._tw_by_device.values():
+            ray.kill(tw, no_restart=True)
         for w in self._worker_by_id.values():
             ray.kill(w, no_restart=True)
         for w in self._worker_by_id.values():
@@ -285,6 +428,7 @@ class DevicePool:
         self._device_to_workers.clear()
         self._worker_id_to_device_id.clear()
         self._worker_id_to_slot.clear()
+        self._tw_by_device.clear()
         self._next_device = 0
         self._claimed.clear()
         for pg in self._pgs:

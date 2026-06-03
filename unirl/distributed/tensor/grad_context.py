@@ -137,9 +137,9 @@ def _run_backward(ctx: GradContext) -> None:
 def _run_auto_backward(node: RPCBackwardNode) -> None:
     """Call _auto_backward proxy on workers using node's dispatch_mode.
 
-    out_grads and in_grads are tuples of Optional[TensorMeta].  split_value
+    out_grads and in_grads are tuples of Optional[TensorMeta].  pytree_chunk
     recurses into tuple elements, so each TensorMeta is chunked by dp_size
-    giving worker_i its own grad shard.  pytree_merge does the inverse on
+    giving worker_i its own grad shard.  pytree_cat does the inverse on
     return values.  No manual per-worker dispatch needed.
     """
     out_grads = tuple(tm.grad for tm in node.output_metas)

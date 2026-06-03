@@ -1,3 +1,4 @@
+import functools
 import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional, Union
 
@@ -9,6 +10,44 @@ if TYPE_CHECKING:
     from unirl.train.stack import TrainStepResult
 
 logger = logging.getLogger(__name__)
+
+
+def init_transfer_queue(cfg: DictConfig) -> Optional[dict]:
+    """Driver-side TransferQueue bootstrap for ``transport_kind=transfer_queue``.
+
+    Spins up the TransferQueue controller + storage backend from the ``cfg.transfer_queue``
+    block and returns the **actor** handoff to pass to ``DevicePool(tq_handoff=...)`` —
+    each Worker builds its own queue client from it (see ``build_transport``). The driver
+    also creates its own client and installs a driver ``TQTransport``: reward/advantage
+    materialization runs on the driver and hydrates TQ refs via
+    ``TQTensorHandle.local() -> TensorTransportRuntime.current()``. The TransferQueue is a
+    GLOBAL backend with no per-ref owning worker to RPC, so without a driver transport that
+    ``.local()`` would raise "no TensorTransport installed". ``install()`` binds the runtime
+    process-globally, keeping the controller/backend actors alive. Returns ``None`` for
+    non-tq backends (colocate/gpu).
+    """
+    if cfg.get("transport_kind", "colocate_store") not in ("transfer_queue", "tq"):
+        return None
+    from unirl.distributed.tensor.backend.transfer_queue import TransferQueueRuntime
+    from unirl.distributed.tensor.backend.transfer_queue.runtime import _DEFAULT_PARTITION_ID
+    from unirl.distributed.tensor.backend.transfer_queue.transport import TQTransport
+    from unirl.distributed.tensor.transport import TensorTransportRuntime
+
+    rt = TransferQueueRuntime().install()
+    handoffs = rt.init(cfg)
+    if handoffs is None:
+        raise RuntimeError(
+            "transport_kind='transfer_queue' requires a `transfer_queue:` config block, e.g.\n"
+            "  transfer_queue:\n"
+            "    _target_: unirl.distributed.tensor.backend.transfer_queue.simple.SimpleBackend\n"
+            "    num_units: 16\n    unit_size: 1024"
+        )
+    controller_handoff, actor_handoff = handoffs
+    # Driver client + transport: driver-side reward/advantage hydration resolves TQ refs
+    # through the process TensorTransport (TQTensorHandle.local() -> .current()).
+    rt.create_client("Driver", controller_handoff, sync=False)
+    TensorTransportRuntime.install(TQTransport(rt, partition_id=_DEFAULT_PARTITION_ID))
+    return actor_handoff
 
 
 class BaseTrainer:
@@ -24,16 +63,21 @@ class BaseTrainer:
     def __init__(
         self,
         *,
-        num_devices: int,
-        devices_per_node: int = 8,
-        workers_per_device: int = 2,
+        cfg: DictConfig,
         logging_cfg: Optional[DictConfig] = None,
     ) -> None:
-        self.num_devices = num_devices
+        # Device topology and tensor transport are driven entirely by top-level
+        # cfg keys (num_devices / devices_per_node / workers_per_device /
+        # transport_kind / transfer_queue), so the base owns the whole pool +
+        # TransferQueue bootstrap here. Subclasses never thread these through:
+        # they hand us ``cfg`` and get the configured pool for free.
+        self.num_devices = cfg.num_devices
         self.pool = DevicePool(
-            num_devices=num_devices,
-            devices_per_node=devices_per_node,
-            workers_per_device=workers_per_device,
+            num_devices=cfg.num_devices,
+            devices_per_node=int(cfg.get("devices_per_node", 8)),
+            workers_per_device=int(cfg.get("workers_per_device", 1)),
+            transport_kind=cfg.get("transport_kind", "colocate_store"),
+            tq_handoff=init_transfer_queue(cfg),
         )
         self.pool.setup()
 
@@ -43,6 +87,40 @@ class BaseTrainer:
         self.logging_cfg = logging_cfg
         self.wandb_logger = None
         self._optimizer_step = 0
+
+        # Reclaim per-rollout transport buffers after every train_step, centrally,
+        # so each subclass train loop doesn't have to remember to.
+        self._install_train_step_reset_hook()
+
+    # ---- transport buffer reclaim (shared by all v2 trainers) --------------
+
+    def _install_train_step_reset_hook(self) -> None:
+        """Wrap ``train_step`` so :meth:`_reset_transport_buffers` runs after each call.
+
+        Only installed for the transfer_queue backend; colocate/gpu_store keep their
+        ``train_step`` untouched (their reclaim is a no-op anyway). Every v2 trainer has
+        its own ``train`` loop but they all drive one ``train_step`` per rollout, so this
+        is the single seam that reclaims per-rollout TQ buffers without per-trainer edits.
+        The reset fires once ``train_step`` returns — rewards/advantages materialized, no
+        live ``TensorMeta`` ref into the queue's RDMA buffers remaining.
+        """
+        if self.pool.transport_kind not in ("transfer_queue", "tq"):
+            return
+        inner = getattr(self, "train_step", None)
+        if not callable(inner):
+            return
+
+        @functools.wraps(inner)
+        def _train_step(*args, **kwargs):
+            result = inner(*args, **kwargs)
+            self._reset_transport_buffers()
+            return result
+
+        self.train_step = _train_step
+
+    def _reset_transport_buffers(self) -> None:
+        """Reclaim per-rollout mooncake zero-copy buffers (no-op for other backends)."""
+        self.pool.reset_transfer_queue_buffers()
 
     # ---- wandb logging (shared by all v2 trainers) -------------------------
 

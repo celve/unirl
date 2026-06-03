@@ -17,8 +17,8 @@ Composition:
   (the "separate" layout).
 - Nested scopes carve a sub-slab of the parent's devices.
 
-The module-level ``_current`` is a deliberate module global — the trainer
-is single-process, so a ContextVar buys nothing.
+The module-level ``_current`` matches ``unirl/ray/actor_config.py``
+style — the trainer is single-process, so a ContextVar buys nothing.
 """
 
 from __future__ import annotations
