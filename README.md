@@ -61,10 +61,10 @@ ENTRY=train_vlm bash scripts/run_experiment_single_node.sh vlm_rl/argrpo_qwen_vl
 ENTRY=train_pe  bash scripts/run_experiment_single_node.sh pe_rl/pe_trainside_pickscore
 ```
 
-Run a multi-node recipe:
+Run a multi-node recipe (taiji platform):
 
 ```bash
-bash scripts/run_experiment_multinode.sh diffusion_rl/sd3_sglang_native_colocate
+bash scripts/run_experiment_multinode_taiji.sh diffusion_rl/sd3_sglang_native_colocate
 ```
 
 Invoke an entrypoint directly:
