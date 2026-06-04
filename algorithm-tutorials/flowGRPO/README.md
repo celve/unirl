@@ -10,6 +10,7 @@ per-step log-prob, old/new ratio, and the critic-free group advantage.
 - **Loss:** [`unirl/algorithms/diffusion_grpo.py`](../../unirl/algorithms/diffusion_grpo.py) · shared helper `_grpo_clip_loss` in [`unirl/algorithms/base.py`](../../unirl/algorithms/base.py)
 - **SDE transition math:** [`unirl/sde/kernels.py`](../../unirl/sde/kernels.py) (`FlowSDEStrategy`)
 - **Recipe:** [`recipes/diffusion_rl/sd3_trainside.yaml`](../../recipes/diffusion_rl/sd3_trainside.yaml) · **Config extract:** [`config.yaml`](config.yaml)
+- **Checkpoints:** [🤗 zhouzhuoxin/unirl-checkpoint](https://huggingface.co/zhouzhuoxin/unirl-checkpoint/tree/main)
 - **Paper:** *"Flow-GRPO: Training Flow Matching Models via Online RL"* — Liu et al., NeurIPS 2026 ([arXiv:2505.05470](https://arxiv.org/abs/2505.05470)).
 
 Read this tutorial first. flowDPPO reuses the same rollout/replay path and only

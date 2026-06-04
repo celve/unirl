@@ -9,6 +9,7 @@ reward-weighted **positive/negative** reconstruction objective with a dual adapt
 
 - **Loss:** [`unirl/algorithms/nft.py`](../../unirl/algorithms/nft.py)
 - **Recipe:** [`recipes/diffusion_rl/sd3_nft.yaml`](../../recipes/diffusion_rl/sd3_nft.yaml) · **Config extract:** [`config.yaml`](config.yaml)
+- **Checkpoints:** [🤗 zhouzhuoxin/unirl-checkpoint](https://huggingface.co/zhouzhuoxin/unirl-checkpoint/tree/main)
 - **Paper:** *"DiffusionNFT: Online Diffusion Reinforcement with Forward Process"* — Zheng et al., [arXiv:2509.16117](https://arxiv.org/abs/2509.16117) (ICLR 2026 Oral).
 
 This is the most different tutorial. flowGRPO/flowDPPO ask "how likely was the sampled

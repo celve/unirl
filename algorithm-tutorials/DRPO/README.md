@@ -9,6 +9,7 @@ control instead of ratio clipping — on discrete tokens rather than a continuou
 - **Loss:** [`unirl/algorithms/drpo.py`](../../unirl/algorithms/drpo.py) (`ARDRPO`; `_ar_drpo_tv_loss`, `_ar_drpo_kl_loss`, `_ar_pg_tv_penalty_loss`)
 - **Recipe (SGLang):** [`recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml`](../../recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml) — Qwen3-4B-Base on DAPO-Math
 - **Config extract:** [`config.yaml`](config.yaml)
+- **Checkpoints:** [🤗 zhouzhuoxin/unirl-checkpoint](https://huggingface.co/zhouzhuoxin/unirl-checkpoint/tree/main)
 - **Paper:** *"Rethinking the Divergence Regularization in LLM RL."* Related: DPPO — [arXiv:2602.04879](https://arxiv.org/abs/2602.04879).
 
 ## Read this first: paper DRPO vs repo variants

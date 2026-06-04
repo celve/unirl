@@ -9,6 +9,7 @@ pushes too aggressively in the reward-improving direction.
 - **Loss:** [`unirl/algorithms/dppo.py`](../../unirl/algorithms/dppo.py) (`_gaussian_kl_div`, `_dppo_kl_adv_loss`, `DiffusionDPPO`)
 - **SDE / replay path:** [`unirl/models/sd3/diffusion.py`](../../unirl/models/sd3/diffusion.py), [`unirl/sde/kernels.py`](../../unirl/sde/kernels.py)
 - **Recipe:** [`recipes/diffusion_rl/sd3_flowdppo.yaml`](../../recipes/diffusion_rl/sd3_flowdppo.yaml) · **Config extract:** [`config.yaml`](config.yaml)
+- **Checkpoints:** [🤗 zhouzhuoxin/unirl-checkpoint](https://huggingface.co/zhouzhuoxin/unirl-checkpoint/tree/main)
 - **Paper:** *"Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models."*
 
 Read **[flowGRPO](../flowGRPO/)** first — flowDPPO changes only the loss; the rollout,
