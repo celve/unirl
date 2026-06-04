@@ -9,10 +9,10 @@ pushes too aggressively in the reward-improving direction.
 - **Loss:** [`unirl/algorithms/dppo.py`](../../unirl/algorithms/dppo.py) (`_gaussian_kl_div`, `_dppo_kl_adv_loss`, `DiffusionDPPO`)
 - **SDE / replay path:** [`unirl/models/sd3/diffusion.py`](../../unirl/models/sd3/diffusion.py), [`unirl/sde/kernels.py`](../../unirl/sde/kernels.py)
 - **Recipe:** [`recipes/diffusion_rl/sd3_flowdppo.yaml`](../../recipes/diffusion_rl/sd3_flowdppo.yaml) · **Config extract:** [`config.yaml`](config.yaml)
-- **Checkpoints:** [🤗 zhouzhuoxin/unirl-checkpoint](https://huggingface.co/zhouzhuoxin/unirl-checkpoint/tree/main)
+- **Checkpoints:** [🤗 FlowDPPO](https://huggingface.co/zhouzhuoxin/sd3.5-flowdppo)
 - **Paper:** *"Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models."*
 
-Read **[flowGRPO](../flowGRPO/)** first — flowDPPO changes only the loss; the rollout,
+Read **[FlowGRPO](../FlowGRPO/)** first — flowDPPO changes only the loss; the rollout,
 the trained-step gating, and the advantage are identical, plus it additionally records
 the per-step Gaussian means.
 
@@ -70,7 +70,7 @@ loss = torch.where(~(pos_rm | neg_rm), -adv * ratio, 0.0).mean()
 Low-KL steps always pass. A high-KL step also passes when it is **corrective** — e.g.
 `A > 0` but `ρ < 1` — because the gradient is moving probability back toward the old
 policy. Like GRPO, the recipe sets `adv_use_global_std: true` (per-group mean, one
-batch-wide std; see [flowGRPO](../flowGRPO/#the-math)).
+batch-wide std; see [FlowGRPO](../FlowGRPO/#the-math)).
 
 ## Math → code map
 
@@ -160,9 +160,9 @@ SD3.5-medium goes from ~0.75 to ~0.89 over ~270 steps.
 
 ## vs. the other tutorials
 
-- **[flowGRPO](../flowGRPO/)** uses the same rollout fields but clips `ρ`; DPPO trusts
+- **[FlowGRPO](../FlowGRPO/)** uses the same rollout fields but clips `ρ`; DPPO trusts
   `ρ` for the gradient magnitude and uses Gaussian KL only as a mask.
-- **[diffusionNFT](../diffusionNFT/)** needs neither `sde_logp` nor `sde_means`; it
+- **[DiffusionNFT](../DiffusionNFT/)** needs neither `sde_logp` nor `sde_means`; it
   trains on re-noised clean latents.
 - **[DRPO](../DRPO/)** is the AR analogue of divergence masking, but token distributions
   require a Binary-TV/KL approximation; flow models get equal-covariance Gaussian KL

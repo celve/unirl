@@ -7,7 +7,6 @@ tokens, and applies the paper's smooth quadratic DRPO loss (Eq. 8).
 - **Loss:** [`unirl/algorithms/drpo.py`](../../unirl/algorithms/drpo.py) (`ARDRPO`, `_ar_drpo_loss`)
 - **Recipe (SGLang):** [`recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml`](../../recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml) — Qwen3-4B-Base on DAPO-Math
 - **Config extract:** [`config.yaml`](config.yaml)
-- **Checkpoints:** [🤗 zhouzhuoxin/unirl-checkpoint](https://huggingface.co/zhouzhuoxin/unirl-checkpoint/tree/main)
 - **Paper:** *"Rethinking the Divergence Regularization in LLM RL."* Related: DPPO — [arXiv:2602.04879](https://arxiv.org/abs/2602.04879).
 
 
@@ -183,13 +182,13 @@ modality-agnostic and shares the VLM trainer.)
 
 ## vs. the other tutorials
 
-- **[flowDPPO](../flowDPPO/)** is the closest conceptual sibling: both replace ratio
+- **[FlowDPPO](../FlowDPPO/)** is the closest conceptual sibling: both replace ratio
   clipping with divergence-aware control. flowDPPO has *exact* Gaussian KL over latent
   transitions; `ARDRPO` approximates token-distribution shift from chosen-token log-probs.
-- **[flowGRPO](../flowGRPO/)** and `ARGRPO` are the ratio-clipped baselines; `ARGRPO`
+- **[FlowGRPO](../FlowGRPO/)** and `ARGRPO` are the ratio-clipped baselines; `ARGRPO`
   ([`unirl/algorithms/ar_grpo.py`](../../unirl/algorithms/ar_grpo.py)) shares
   `_grpo_clip_loss` with diffusion GRPO.
-- **[diffusionNFT](../diffusionNFT/)** is not a likelihood-ratio method at all.
+- **[DiffusionNFT](../DiffusionNFT/)** is not a likelihood-ratio method at all.
 
 ## References
 

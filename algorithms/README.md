@@ -11,18 +11,18 @@ These tutorials do more than restate each paper. Each one answers three question
 3. **Where** — which trainer, algorithm class, stage method, and config knobs implement
    it, and what to watch when it misbehaves?
 
-If you are new here, read this page first, then **[`flowGRPO/`](flowGRPO/)** — it
+If you are new here, read this page first, then **[`FlowGRPO/`](FlowGRPO/)** — it
 establishes the diffusion reverse-process vocabulary (SDE rollout, per-step log-prob,
-old/new ratio, group-relative advantage). **[`flowDPPO/`](flowDPPO/)** changes only the
-trust-region rule. **[`diffusionNFT/`](diffusionNFT/)** is the different one — it does not
+old/new ratio, group-relative advantage). **[`FlowDPPO/`](FlowDPPO/)** changes only the
+trust-region rule. **[`DiffusionNFT/`](DiffusionNFT/)** is the different one — it does not
 optimize the reverse-trajectory likelihood at all. **[`DRPO/`](DRPO/)** is the LLM track
 and reads independently.
 
 | Tutorial | Domain | Main objective | Implementation | Canonical recipe |
 |---|---|---|---|---|
-| [`flowGRPO/`](flowGRPO/) | Diffusion / flow | PPO-style clipped ratio over sampled SDE transitions | [`unirl/algorithms/diffusion_grpo.py`](../unirl/algorithms/diffusion_grpo.py), loss in [`base.py`](../unirl/algorithms/base.py) | [`recipes/diffusion_rl/sd3_trainside.yaml`](../recipes/diffusion_rl/sd3_trainside.yaml) |
-| [`flowDPPO/`](flowDPPO/) | Diffusion / flow | Unclipped `−A·ratio`, masked only when exact Gaussian KL is high **and** the update is over-aggressive | [`unirl/algorithms/dppo.py`](../unirl/algorithms/dppo.py) | [`recipes/diffusion_rl/sd3_flowdppo.yaml`](../recipes/diffusion_rl/sd3_flowdppo.yaml) |
-| [`diffusionNFT/`](diffusionNFT/) | Diffusion / flow | Forward-process positive/negative reconstruction, weighted by reward-derived optimality | [`unirl/algorithms/nft.py`](../unirl/algorithms/nft.py) | [`recipes/diffusion_rl/sd3_nft.yaml`](../recipes/diffusion_rl/sd3_nft.yaml) |
+| [`FlowGRPO/`](FlowGRPO/) | Diffusion / flow | PPO-style clipped ratio over sampled SDE transitions | [`unirl/algorithms/diffusion_grpo.py`](../unirl/algorithms/diffusion_grpo.py), loss in [`base.py`](../unirl/algorithms/base.py) | [`recipes/diffusion_rl/sd3_trainside.yaml`](../recipes/diffusion_rl/sd3_trainside.yaml) |
+| [`FlowDPPO/`](FlowDPPO/) | Diffusion / flow | Unclipped `−A·ratio`, masked only when exact Gaussian KL is high **and** the update is over-aggressive | [`unirl/algorithms/dppo.py`](../unirl/algorithms/dppo.py) | [`recipes/diffusion_rl/sd3_flowdppo.yaml`](../recipes/diffusion_rl/sd3_flowdppo.yaml) |
+| [`DiffusionNFT/`](DiffusionNFT/) | Diffusion / flow | Forward-process positive/negative reconstruction, weighted by reward-derived optimality | [`unirl/algorithms/nft.py`](../unirl/algorithms/nft.py) | [`recipes/diffusion_rl/sd3_nft.yaml`](../recipes/diffusion_rl/sd3_nft.yaml) |
 | [`DRPO/`](DRPO/) | LLM / AR | Token-level importance-weighted PG + smooth advantage-weighted Binary-TV quadratic regularizer | [`unirl/algorithms/drpo.py`](../unirl/algorithms/drpo.py) | [`recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml`](../recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml) |
 
 ## Shared execution chain

@@ -9,7 +9,7 @@ reward-weighted **positive/negative** reconstruction objective with a dual adapt
 
 - **Loss:** [`unirl/algorithms/nft.py`](../../unirl/algorithms/nft.py)
 - **Recipe:** [`recipes/diffusion_rl/sd3_nft.yaml`](../../recipes/diffusion_rl/sd3_nft.yaml) · **Config extract:** [`config.yaml`](config.yaml)
-- **Checkpoints:** [🤗 zhouzhuoxin/unirl-checkpoint](https://huggingface.co/zhouzhuoxin/unirl-checkpoint/tree/main)
+- **Checkpoints:** [🤗 DiffusionNFT](https://huggingface.co/zhouzhuoxin/sd3.5-nft)
 - **Paper:** *"DiffusionNFT: Online Diffusion Reinforcement with Forward Process"* — Zheng et al., [arXiv:2509.16117](https://arxiv.org/abs/2509.16117) (ICLR 2026 Oral).
 
 This is the most different tutorial. flowGRPO/flowDPPO ask "how likely was the sampled
@@ -183,7 +183,7 @@ SD3.5-medium goes from ~0.76 to ~0.91 over ~270 steps.
 
 ## vs. the other tutorials
 
-- **[flowGRPO](../flowGRPO/)** / **[flowDPPO](../flowDPPO/)** optimize the probability of
+- **[FlowGRPO](../FlowGRPO/)** / **[FlowDPPO](../FlowDPPO/)** optimize the probability of
   sampled reverse SDE transitions and need `segment.sde_logp` (DPPO also `sde_means`);
   NFT ignores both and optimizes a forward-process reconstruction loss.
 - NFT is naturally off-policy (the loss is supervised-style with an EMA old adapter),

@@ -10,7 +10,7 @@ per-step log-prob, old/new ratio, and the critic-free group advantage.
 - **Loss:** [`unirl/algorithms/diffusion_grpo.py`](../../unirl/algorithms/diffusion_grpo.py) · shared helper `_grpo_clip_loss` in [`unirl/algorithms/base.py`](../../unirl/algorithms/base.py)
 - **SDE transition math:** [`unirl/sde/kernels.py`](../../unirl/sde/kernels.py) (`FlowSDEStrategy`)
 - **Recipe:** [`recipes/diffusion_rl/sd3_trainside.yaml`](../../recipes/diffusion_rl/sd3_trainside.yaml) · **Config extract:** [`config.yaml`](config.yaml)
-- **Checkpoints:** [🤗 zhouzhuoxin/unirl-checkpoint](https://huggingface.co/zhouzhuoxin/unirl-checkpoint/tree/main)
+- **Checkpoints:** [🤗 FlowGRPO](https://huggingface.co/zhouzhuoxin/sd3.5-flowgrpo)
 - **Paper:** *"Flow-GRPO: Training Flow Matching Models via Online RL"* — Liu et al., NeurIPS 2026 ([arXiv:2505.05470](https://arxiv.org/abs/2505.05470)).
 
 Read this tutorial first. flowDPPO reuses the same rollout/replay path and only
@@ -169,9 +169,9 @@ SD3.5-medium goes from ~0.76 to ~0.90 over ~270 steps.
 
 ## vs. the other tutorials
 
-- **[flowDPPO](../flowDPPO/)** keeps the same SDE rollout and ratio but replaces the
+- **[FlowDPPO](../FlowDPPO/)** keeps the same SDE rollout and ratio but replaces the
   PPO clip with an exact Gaussian-KL mask using `segment.sde_means`.
-- **[diffusionNFT](../diffusionNFT/)** drops the reverse-process log-prob path entirely
+- **[DiffusionNFT](../DiffusionNFT/)** drops the reverse-process log-prob path entirely
   and trains the forward process off-policy with a positive/negative reconstruction loss.
 - **[DRPO](../DRPO/)** is the AR analogue: actions are tokens and old log-probs are
   `TextSegment.log_probs`; its ratio-clip cousin `ARGRPO` shares this `_grpo_clip_loss`.
