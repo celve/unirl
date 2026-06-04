@@ -59,8 +59,8 @@ backend:
     cpu_offload: false
     mixed_precision: true
     fsdp_mode: full
-    reshard_after_forward: true
-    activation_checkpointing: true   # v1 nft_sd3 uses bf16_full_ac
+    reshard_after_forward: false  # SD3.5-medium is small (~5 GB bf16 full); keep params gathered, skip bwd re-gather
+    activation_checkpointing: false  # deliberately off (speed); v1 used bf16_full_ac
     use_torch_compile: false
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig

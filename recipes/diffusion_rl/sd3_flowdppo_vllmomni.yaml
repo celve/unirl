@@ -8,8 +8,9 @@
 # Diverges from the v1 recipe on the weight-sync mechanism: v1 used
 # tensor_payload (full-tensor sync); this reuses the v2 vLLM-Omni LoRA bridge
 # (LocalLoraWeightSync), matching sd3_vllmomni.yaml.
-# Faithful to v1 otherwise: activation_checkpointing ON (bf16_full_ac),
-# micro_batch_size 1. v1 num_updates_per_batch=2 restored (v2 TrainStack multi-update).
+# Faithful to v1 otherwise: micro_batch_size 1. v1 num_updates_per_batch=2 restored
+# (v2 TrainStack multi-update). Diverges also on activation_checkpointing: OFF
+# (v1 used bf16_full_ac; dropped for speed).
 
 num_devices: 8                # 1 node x 8 GPUs (v1 actor_count 8)
 batch_size: 48                # prompts_per_rollout
@@ -50,8 +51,8 @@ backend:
     cpu_offload: false
     mixed_precision: true
     fsdp_mode: full
-    reshard_after_forward: true
-    activation_checkpointing: true   # v1 uses bf16_full_ac
+    reshard_after_forward: false  # SD3.5-medium is small (~5 GB bf16 full); keep params gathered, skip bwd re-gather
+    activation_checkpointing: false  # deliberately off (speed); v1 used bf16_full_ac
     use_torch_compile: false
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig

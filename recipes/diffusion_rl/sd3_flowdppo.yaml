@@ -9,8 +9,8 @@
 #     pre-update weights to capture old means (the KL reference).
 # SDE indices: sparse over the first half (timestep_fraction [0.0, 0.5], 3 steps).
 #
-# Faithful to v1 (vs sd3_trainside): activation_checkpointing ON (bf16_full_ac),
-# micro_batch_size 8, forward_batch_size 8.
+# Faithful to v1 (vs sd3_trainside): micro_batch_size 8, forward_batch_size 8.
+# Diverges: activation_checkpointing OFF (v1 used bf16_full_ac; dropped for speed).
 # Not carried over: v1 training.ema (full-model decay-0.99 mirror) — it was an
 #   eval/export EMA; the minimal v2 trainer does no eval-EMA swap, so a mirror
 #   would only double model memory unused. v1 num_updates_per_batch=2 IS restored
@@ -56,8 +56,8 @@ backend:
     cpu_offload: false
     mixed_precision: true
     fsdp_mode: full
-    reshard_after_forward: true
-    activation_checkpointing: true   # v1 uses bf16_full_ac
+    reshard_after_forward: false  # SD3.5-medium is small (~5 GB bf16 full); keep params gathered, skip bwd re-gather
+    activation_checkpointing: false  # deliberately off (speed); v1 used bf16_full_ac
     use_torch_compile: false
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig

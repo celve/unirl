@@ -92,7 +92,7 @@ backend:
     cpu_offload: false
     mixed_precision: true
     fsdp_mode: full
-    reshard_after_forward: true
+    reshard_after_forward: false  # SD3.5-medium is small (~5 GB bf16 full); keep params gathered, skip bwd re-gather
     activation_checkpointing: false # diverges from reference (bf16_full_ac) per user request
     use_torch_compile: false
   optimizer_cfg:
