@@ -9,9 +9,7 @@ Recipes are **bucketed by trainer domain** — one subdirectory per entrypoint.
 Select one with `--config-name=<bucket>/<recipe>` (the bucket directory is part
 of the name; drop the `.yaml`).
 
-> This directory replaces the old flat top-level `conf/` tree. The docs site
-> ([Experiment Recipes](../docs/content/docs/en/configuration/experiments.mdx))
-> is the rendered, always-current index of maintained recipes.
+> This directory replaces the old flat top-level `conf/` tree.
 
 ## Layout
 
@@ -92,4 +90,3 @@ model. They are kept as-is; new recipes should follow the model-first order abov
 3. Keep every choice in YAML, instantiated by `_target_`; use `${oc.env:...}` only
    for deployment-specific paths and logging identity.
 4. Compose-check: `python -m unirl.train_<entry> --config-name=<bucket>/<recipe> --cfg job --resolve`.
-5. List it on the [Experiment Recipes](../docs/content/docs/en/configuration/experiments.mdx) page.

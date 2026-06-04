@@ -60,16 +60,6 @@ venv.bak/
 # Jupyter / notebooks
 .ipynb_checkpoints/
 
-# Fumadocs / Next.js documentation site
-docs/.next/
-docs/.source/
-docs/out/
-docs/node_modules/
-docs/tsconfig.tsbuildinfo
-docs/content/docs/**/readme-*.mdx
-docs/internal/
-docs/**/taiji*.md
-
 # Logs / experiment outputs
 wandb/
 outputs/
