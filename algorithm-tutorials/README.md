@@ -1,7 +1,7 @@
 # Algorithm Tutorials
 
 Short, code-grounded walkthroughs of the core RL algorithms in UniRL: three
-**diffusion** (image) algorithms and one **LLM/VLM** (autoregressive, token-level)
+**diffusion** (image) algorithms and one **LLM** (autoregressive, token-level)
 algorithm. Each folder pairs a focused, annotated config extract with a README that
 explains *what* the algorithm optimizes, *the math*, and *where it lives in the
 code*.
@@ -11,7 +11,7 @@ read [`flowGRPO/`](flowGRPO/) before the other two: it establishes the common
 reverse-process RL vocabulary — SDE rollout, per-step log-prob, old/new policy
 ratio, and group-relative advantage. flowDPPO changes only the trust-region rule.
 diffusionNFT is the different one: it does not optimize the reverse trajectory
-likelihood at all. The **LLM/VLM** track is [`DRPO/`](DRPO/), a token-level
+likelihood at all. The **LLM** track is [`DRPO/`](DRPO/), a token-level
 divergence-masked trust region — the autoregressive analogue of flowDPPO; it reads
 independently of the diffusion three.
 
@@ -20,11 +20,11 @@ independently of the diffusion three.
 | [`flowGRPO/`](flowGRPO/) | `DiffusionGRPO` — PPO-style ratio clipping on per-step SDE log-probs | [`unirl/algorithms/diffusion_grpo.py`](../unirl/algorithms/diffusion_grpo.py) | [`recipes/diffusion_rl/sd3_trainside.yaml`](../recipes/diffusion_rl/sd3_trainside.yaml) |
 | [`flowDPPO/`](flowDPPO/) | `DiffusionDPPO` — same SDE rollout, KL-ADV masking instead of clipping | [`unirl/algorithms/dppo.py`](../unirl/algorithms/dppo.py) | [`recipes/diffusion_rl/sd3_flowdppo.yaml`](../recipes/diffusion_rl/sd3_flowdppo.yaml) |
 | [`diffusionNFT/`](diffusionNFT/) | `DiffusionNFT` — forward-process dual positive/negative reconstruction | [`unirl/algorithms/nft.py`](../unirl/algorithms/nft.py) | [`recipes/diffusion_rl/sd3_nft.yaml`](../recipes/diffusion_rl/sd3_nft.yaml) |
-| [`DRPO/`](DRPO/) | `ARDRPO` — **LLM/VLM (AR)** token-level divergence mask (DPPO Binary-TV/KL + TIS; `tv`/`kl`/`pg_tv_penalty`) | [`unirl/algorithms/drpo.py`](../unirl/algorithms/drpo.py) | [`recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml`](../recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml) |
+| [`DRPO/`](DRPO/) | `ARDRPO` — **LLM (AR)** token-level divergence mask (DPPO Binary-TV/KL + TIS; `tv`/`kl`/`pg_tv_penalty`) | [`unirl/algorithms/drpo.py`](../unirl/algorithms/drpo.py) | [`recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml`](../recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml) |
 
 ## Quick mental model
 
-The first three are diffusion (image); DRPO is the LLM/VLM (token-level) entry.
+The first three are diffusion (image); DRPO is the LLM (token-level) entry.
 
 | Question | flowGRPO | flowDPPO | diffusionNFT | DRPO (LLM/AR) |
 |---|---|---|---|---|
@@ -62,7 +62,7 @@ flowchart TD
   SDE rollout for the loss. It re-noises the rollout's clean latent at many
   timesteps and trains a dual adapter (trainable vs. EMA-frozen) toward a
   reward-weighted blend of "positive" and "negative" predictions.
-- **DRPO** is the **LLM/VLM (AR)** entry, a token-level analogue of flowDPPO: it
+- **DRPO** is the **LLM (AR)** entry, a token-level analogue of flowDPPO: it
   replays the sampled tokens and **zeroes** a token's update when its probability
   shift `|π−µ|` crosses a threshold in the reward-improving direction (DPPO's hard
   mask). Kept tokens train a TIS-corrected REINFORCE loss. *(It also ships a
@@ -98,7 +98,7 @@ train, launch the full canonical recipe (see each README):
 PRETRAINED_MODEL=stabilityai/stable-diffusion-3.5-medium \
 python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside num_devices=8
 
-# LLM/VLM (DRPO) — note the train_vlm entrypoint
+# LLM (DRPO) — note the train_vlm entrypoint
 DATA_PATH=data/dapo_math/train.jsonl EVAL_DATA_PATH=data/dapo_math/aime_eval.jsonl \
 python -m unirl.train_vlm --config-name=llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang num_devices=64
 ```

@@ -1,4 +1,4 @@
-# drpo — divergence-masked trust region for LLM/VLM RL (AR, token-level)
+# DRPO — Divergence Regularized Policy Optimization
 
 `ARDRPO` is the repo's **autoregressive (token-level)** RL algorithm. Instead of
 PPO/GRPO's ratio-clip trust region, it enforces a **divergence-based hard mask** on
@@ -6,7 +6,7 @@ each sampled token: replay the trajectory, measure the sampled token's probabili
 shift between the new and old policy, and **zero** the update when that shift crosses
 a threshold `δ` *in the reward-improving direction*. The kept tokens train with a
 REINFORCE objective corrected by a **truncated importance ratio** (TIS). It is the
-LLM/VLM analogue of [flowDPPO](../flowDPPO/) — divergence mask instead of ratio clip —
+LLM analogue of [flowDPPO](../flowDPPO/) — divergence mask instead of ratio clip —
 but on discrete tokens rather than a continuous SDE trajectory.
 
 - **Code:** [`unirl/algorithms/drpo.py`](../../unirl/algorithms/drpo.py) (`ARDRPO`; loss helpers `_ar_drpo_tv_loss` / `_ar_drpo_kl_loss` / `_ar_pg_tv_penalty_loss`)
@@ -173,19 +173,14 @@ python -m unirl.train_vlm --config-name=llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang
 The model defaults to the HF id `Qwen/Qwen3-4B-Base`; set `QWEN3_PATH` to a local
 checkpoint dir to use a cache. Compose-only check (no GPU work): append `--cfg job`.
 
-For **VLM**: the loss operates on packed-varlen token log-probs and is
-modality-agnostic — point `bundle` / `pipeline` / `conditions_cls` at a
-vision-language AR stack (e.g. `qwen_vl`) and the same `ARDRPO` loss applies
-unchanged.
-
 ## vs. the other tutorials
 
 - **[flowDPPO](../flowDPPO/)** is the closest sibling: same "divergence mask instead of
   ratio clip" idea, but on a **diffusion** SDE trajectory (per-step Gaussian KL on
-  continuous latents) rather than discrete tokens. drpo masks per-**token**
+  continuous latents) rather than discrete tokens. DRPO masks per-**token**
   Binary-TV/KL.
 - **[flowGRPO](../flowGRPO/)** / **[diffusionNFT](../diffusionNFT/)** are diffusion
-  algorithms; drpo is the **LLM/VLM (AR, token-level)** entry. The AR ratio-clip
+  algorithms; DRPO is the **LLM (AR, token-level)** entry. The AR ratio-clip
   baseline is `ARGRPO` (`unirl/algorithms/ar_grpo.py`), which shares `_grpo_clip_loss`
   with flowGRPO.
 
