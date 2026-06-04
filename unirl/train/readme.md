@@ -44,7 +44,12 @@ variant.
 
 `num_updates_per_batch > 1` runs several PPO updates on one rollout shard with
 π_old frozen; only multi-update-capable algorithms may set it (see
-`unirl/algorithms/README.md`).
+`unirl/algorithms/README.md`). Each optimizer step's own metrics are carried on
+the result's `per_update` field (one mapping per update), and the trainer logs **one
+wandb point per optimizer step** (`train/step` is a real optimizer-step axis). So
+the on-policy first update and the off-policy later updates stay distinct series
+(`train/update0/ratio_mean`, `train/update1/ratio_mean`, …) instead of being
+collapsed into one misleading averaged `train/ratio_mean`.
 
 ## FSDP Backend
 

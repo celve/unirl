@@ -208,22 +208,44 @@ class BaseTrainer:
         wb.log_rollout(step, compute_rollout_resp_metrics(resp=resp))
 
         if isinstance(results, dict):
+            # PE multi-track: one optimizer step, metrics namespaced by track name.
             train_metrics: Dict[str, Any] = {
                 f"{name}/{key}": value
                 for name, result in results.items()
                 for key, value in aggregate_stage_results([result]).items()
             }
-            has_backward = any(bool(r.has_backward) for r in results.values())
+            if any(bool(r.has_backward) for r in results.values()):
+                self._optimizer_step += 1
+                wb.log_step(self._optimizer_step, train_metrics)
         else:
-            train_metrics = dict(aggregate_stage_results([results]))
-            has_backward = bool(results.has_backward)
-
-        if has_backward:
-            self._optimizer_step += 1
-            wb.log_step(self._optimizer_step, train_metrics)
+            self._log_train_per_step(results)
 
         if step_time_s is not None:
             wb.log_perf(step, {"rollout_time_s": float(step_time_s)})
+
+    def _log_train_per_step(self, result: "TrainStepResult") -> None:
+        """Log the ``train/`` panel one wandb point PER optimizer step.
+
+        With ``num_updates_per_batch > 1`` the train stack attaches each optimizer
+        step's own metrics on ``result.per_update`` (one Mapping per update, in
+        order). Emitting one ``log_step`` per update at its own ``_optimizer_step``
+        keeps ``train/step`` a real optimizer-step axis and keeps the on-policy
+        (``update0``) and off-policy (``update1``) ratios as distinct series —
+        never averaged into one misleading unprefixed ``ratio_mean``. A single
+        update logs the aggregate once, as before.
+        """
+        from unirl.utils.wandb_logger import aggregate_stage_results
+
+        wb = self.wandb_logger
+        if wb is None:
+            return
+        if len(result.per_update) > 1:
+            for i, metrics in enumerate(result.per_update):
+                self._optimizer_step += 1
+                wb.log_step(self._optimizer_step, {f"update{i}/{key}": value for key, value in metrics.items()})
+        elif result.has_backward:
+            self._optimizer_step += 1
+            wb.log_step(self._optimizer_step, dict(aggregate_stage_results([result])))
 
     def _finish_wandb(self) -> None:
         """Close the wandb run if one is open."""

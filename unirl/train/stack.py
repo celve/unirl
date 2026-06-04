@@ -33,7 +33,7 @@ Sequencing per :meth:`train` call (one optimizer step)::
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import List, Mapping, Tuple
 
 import torch
@@ -59,6 +59,10 @@ class TrainStepResult:
     has_backward: bool
     micros: List[AlgorithmStepResult]
     metrics: Mapping[str, object]
+    # Per-optimizer-step metrics when num_updates_per_batch > 1 (one Mapping per
+    # update, in order); empty for the single-update path. Lets the trainer log
+    # one wandb point per optimizer step instead of averaging the updates.
+    per_update: Tuple[Mapping[str, object], ...] = ()
 
 
 def _positive_int(*, name: str, value: object) -> int:
@@ -315,7 +319,17 @@ class TrainStack(Remote):
         results = [
             self.train(resp_track.slice(start, end), training_progress=training_progress) for (start, end) in slices
         ]
-        return _aggregate_update_results(results)
+        aggregated = _aggregate_update_results(results)
+        # Attach each optimizer step's own metrics (in order) so the trainer can
+        # log one wandb point per optimizer step — the on-policy update0 and the
+        # off-policy update1 stay distinct series instead of being averaged into
+        # one misleading ``ratio_mean``. Structured data on the result object,
+        # which the DP collect (``pytree_cat``) returns whole, so it rides along.
+        per_update = tuple(
+            {**dict(r.metrics), "loss": float(r.loss), "grad_norm": float(r.grad_norm), "lr": float(r.lr)}
+            for r in results
+        )
+        return replace(aggregated, per_update=per_update)
 
     def _align_track_inputs(self, resp_track: RolloutTrack) -> None:
         """Move the track onto the model's device; see :func:`_align_track_to_model`."""
