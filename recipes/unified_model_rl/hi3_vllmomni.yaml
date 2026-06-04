@@ -4,9 +4,9 @@
 # One shared HunyuanImage3 transformer (mode=gen_text for AR, mode=gen_image for
 # DiT) trained jointly by ARGRPO (AR TextSegment) + DiffusionGRPO (DiT
 # LatentSegment), both backward-accumulating into ONE LoRA adapter with a single
-# optimizer step (UnifiedModelTrainStack). Rollout is a 2-stage vLLM-Omni engine
-# (modality=t2i_think_recaption: Stage0 AR → Stage1 DiT); the trained LoRA is
-# synced back into both stages every rollout.
+# optimizer step (UnifiedModelTrainStack). Rollout is a two-engine vLLM-Omni setup
+# (modality=ar_recaption: AR think/recaption → modality=dit_recaption: DiT); the
+# trained LoRA is synced back into both engines every rollout.
 #
 # Pairs with unirl/train_unified_model.py (UnifiedModelTrainer). Modeled on
 # sd3_vllmomni_full_ipc.yaml (single-backbone v2 + vllm-omni + colocate sync)
@@ -206,8 +206,9 @@ data_source:
 #   think/recaption) → each trajectory → diffusion.samples_per_prompt images.
 #   AR GRPO groups by original prompt; image GRPO groups by AR trajectory.
 #
-# NOTE (current engine reality): vLLM-Omni t2i_think_recaption runs ONE AR + ONE
-# image per request (flat 1:1; num_images_per_prompt defaults to 1). So today
+# NOTE (current engine reality): the two-engine ar_recaption→dit_recaption flow
+# runs ONE AR + ONE image per request (flat 1:1; num_images_per_prompt defaults
+# to 1). So today
 # ar/diffusion samples_per_prompt simply multiply to G = N*M flat (AR, image)
 # pairs per prompt, each with its own temperature-sampled think/recaption and its
 # own seed. True 2-level "M images per AR trajectory" needs engine-side

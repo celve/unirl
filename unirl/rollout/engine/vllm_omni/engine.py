@@ -47,7 +47,6 @@ from unirl.types.rollout_resp import RolloutResp
 # own stage_configs directory.
 _LOCAL_YAML = {
     "t2i": "hunyuan_image3_t2i_rl.yaml",
-    "t2i_think_recaption": "hunyuan_image3_t2i_think_recaption_rl.yaml",
     "it2i": "hunyuan_image3_it2i_rl.yaml",
     "sd35_t2i": "sd35_t2i_rl.yaml",
     # Single-stage pure-DiT, HunyuanVideo-1.5 (text → video). Analogous to
@@ -99,13 +98,13 @@ _UPSTREAM_YAML = {
 # ``ar_recaption`` is the AR-only think_recaption stage (it HAS an AR prelude
 # stage, so it needs the lora_request passthrough patch). ``dit_recaption`` is
 # pure-DiT (single diffusion stage) like sd35_t2i and is intentionally NOT here.
-_HI3_MODALITIES = frozenset({"t2i", "t2i_think_recaption", "it2i", "i2t", "t2t", "ar_recaption"})
+_HI3_MODALITIES = frozenset({"t2i", "it2i", "i2t", "t2t", "ar_recaption"})
 
 # Modalities whose request carries diffusion params and therefore needs a σ
 # schedule pinned (``ensure_req_sigmas``). AR-only modalities (``i2t`` / ``t2t``
 # / the two-engine ``ar_recaption``) carry ``ARSamplingParams`` with NO
 # diffusion sub-block, so ``ensure_req_sigmas`` would raise on them — gate it.
-_DIT_BEARING_MODALITIES = frozenset({"t2i", "t2i_think_recaption", "it2i", "sd35_t2i", "dit_recaption", "t2v"})
+_DIT_BEARING_MODALITIES = frozenset({"t2i", "it2i", "sd35_t2i", "dit_recaption", "t2v"})
 
 # HI3 modalities whose stage config requests tensor-parallel across multiple
 # physical GPUs (TP4 on the AR and/or DiT stage). Ray restricts each DevicePool
@@ -128,9 +127,7 @@ _DIT_BEARING_MODALITIES = frozenset({"t2i", "t2i_think_recaption", "it2i", "sd35
 # engines need a REAL GPU partition: reserve their cards out of the training pool
 # (e.g. a dedicated num_gpus=4 actor), NOT anchor+clear. Do not copy this into
 # the trainer.
-_HI3_MULTI_GPU_MODALITIES = frozenset(
-    {"t2i", "t2i_think_recaption", "it2i", "i2t", "t2t", "ar_recaption", "dit_recaption"}
-)
+_HI3_MULTI_GPU_MODALITIES = frozenset({"t2i", "it2i", "i2t", "t2t", "ar_recaption", "dit_recaption"})
 
 # Per-rank port base for deterministic master_port assignment.
 # Stride of 200 gives headroom above vllm-omni's settle_port retry loop
@@ -377,7 +374,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
             # before stage_init_timeout takes over per-stage.
             init_timeout=1800,
         )
-        if self.cfg.modality in ("t2i", "t2i_think_recaption", "it2i", "sd35_t2i", "dit_recaption"):
+        if self.cfg.modality in ("t2i", "it2i", "sd35_t2i", "dit_recaption"):
             omni_kwargs["mode"] = "text-to-image"
         omni_kwargs.update(self.cfg.omni_extra)
         self._omni: Optional[Any] = Omni(**omni_kwargs)
@@ -1172,7 +1169,7 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
     def _validate_request(self, req: RolloutReq) -> None:
         has_image = req.primitives.get("image") is not None
         m = self.cfg.modality
-        if m in ("t2i", "sd35_t2i", "t2i_think_recaption", "t2v") and has_image:
+        if m in ("t2i", "sd35_t2i", "t2v") and has_image:
             raise ValueError(
                 f"VLLMOmniRolloutEngine: modality={m!r} rejects image-bearing "
                 "requests; use an image-conditioned modality instead."

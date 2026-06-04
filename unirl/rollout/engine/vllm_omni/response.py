@@ -561,7 +561,7 @@ def _to_rollout_resp(
     segments_for_track: Dict[str, Segment] = {}
     conditions: Dict[str, Condition] = {}
 
-    if modality in ("t2i", "it2i", "sd35_t2i", "t2v", "t2i_think_recaption", "dit_recaption"):
+    if modality in ("t2i", "it2i", "sd35_t2i", "t2v", "dit_recaption"):
         # Per-request DiT (image/video) output. For HI3 (t2i/it2i) it's Stage 1;
         # for SD3.5 (sd35_t2i), HV1.5 (t2v) and the standalone HI3 DiT
         # (dit_recaption) the diffusion stage is the only stage so stage_id=0.
@@ -668,8 +668,7 @@ def _to_rollout_resp(
         raise ValueError(f"_to_rollout_resp: unknown modality {modality!r}")
 
     # Surface AR-generated text for all modalities that run AR (Stage 0).
-    # For t2i_think_recaption this is the CoT + recaption text.
-    if modality in ("t2i", "it2i", "t2i_think_recaption") and decoded_text is None:
+    if modality in ("t2i", "it2i") and decoded_text is None:
         try:
             decoded_text = _decoded_text_from_ar(per_request_outputs)
         except Exception:

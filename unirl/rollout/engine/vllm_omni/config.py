@@ -40,7 +40,7 @@ class VLLMOmniEngineConfig(BaseEngineConfig):
     # Required: HunyuanImage-3 checkpoint path. Set per experiment or via
     # ``cfg.rollout.engine.model_path=...`` on the CLI.
     model_path: str = MISSING
-    # Valid values: "t2i" | "t2i_think_recaption" | "it2i" | "i2t" | "t2t" | "sd3_t2i" | "t2v". Kept as ``str``
+    # Valid values: "t2i" | "it2i" | "i2t" | "t2t" | "sd3_t2i" | "t2v". Kept as ``str``
     # because OmegaConf structured configs reject ``Literal[...]`` annotations;
     # the engine ctor validates the string against the supported modality set.
     modality: str = "t2i"

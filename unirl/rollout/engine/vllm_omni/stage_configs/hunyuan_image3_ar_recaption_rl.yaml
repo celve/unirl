@@ -1,16 +1,15 @@
 # AR-ONLY think_recaption stage config (two-engine v2 trainer).
 #
-# This is stage 0 of hunyuan_image3_t2i_think_recaption_rl.yaml made TERMINAL:
-# a single AR (LLM) stage that, in is_comprehension:false mode, generates
-# <think>...</think><recaption>...</recaption><answer><boi><img_size>... and
-# stops at EOS. The full AR text is the recaption the DiT engine consumes as
+# A single, TERMINAL AR (LLM) stage that, in is_comprehension:false mode,
+# generates <think>...</think><recaption>...</recaption><answer><boi><img_size>...
+# and stops at EOS. The full AR text is the recaption the DiT engine consumes as
 # cot_text (extra["ar_generated_text"]); per-token logp (logprobs=1) feeds
 # ar_capture.extract_ar_segment for ARGRPO replay.
 #
 # Differs from upstream i2t/t2t (which are is_comprehension:true comprehension
 # answers, NOT think/recaption) — see hi3_v2_IMPL_spec.md plan-correction #1.
 #
-# Differs from t2i_think_recaption_rl stage 0:
+# Terminal AR-stage specifics:
 #   - final_output_type stays text (terminal; no DiT downstream).
 #   - omni_kv_config.need_send_cache DROPPED (no DiT stage to receive KV).
 #

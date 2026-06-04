@@ -62,13 +62,14 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 from unirl.distributed.group.placement import placement
-from unirl.distributed.tensor.transport import TensorMeta, _collect_leaves
+from unirl.distributed.tensor.batch import Batch
+from unirl.distributed.tensor.transport import TensorMeta
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.base import BaseTrainer
 from unirl.types.primitives import Texts
 from unirl.types.prompts import RolloutInputs
 from unirl.types.rollout_req import RolloutReq
-from unirl.types.rollout_resp import RolloutResp, _hydrate_tensor_meta, _track_with_field
+from unirl.types.rollout_resp import RolloutResp, RolloutTrack, _hydrate_tensor_meta, _track_with_field
 from unirl.types.sampling import BaseSamplingParams, get_ar_params, get_diffusion_params
 from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
@@ -85,21 +86,43 @@ def deep_hydrate(obj: Any) -> Any:
     """Materialize every ``TensorMeta`` leaf in ``obj`` to a real tensor, in place.
 
     The anchored single-actor engines return each track as ONE transport handle
-    (a single ref spanning all samples), but the train side is 8-way DP and
+    (a single ref spanning all samples), but the train side is num_devices-way DP and
     slices each track into per-rank shards — a single ref can't be intra-handle
     sliced. Hydrating on the driver fixes the mismatch (the DP dispatch then
     re-shards real tensors), but the driver has no ``TensorTransportRuntime``
     installed, so ``TensorTransport.hydrate`` / ``TensorMeta.local`` are
     unavailable here. ``_hydrate_tensor_meta`` instead pulls each leaf through
     its ref's ``.local()`` (a plain ``ray.get`` from the owning worker's store),
-    which works from the driver — we just walk the nested Batch/dict structure
-    with ``_collect_leaves`` and apply it to every ``TensorMeta``.
+    which works from the driver — we walk the nested Batch/dict/list/TUPLE
+    structure and apply it to every ``TensorMeta``.
+
+    NB: this walks TUPLES too (rebuilding them), unlike ``_collect_leaves``
+    which skips them. HunyuanImage3's fused condition stores ``rope_cache`` as a
+    ``tuple`` of two TensorMeta; the DP scatter's driver-side
+    ``RolloutTrack.concat`` pads that rope (``conditions.concat`` → ``_pad_seq``
+    → ``t.ndim``), so the rope MUST be real tensors here. (dp=1 never concats on
+    the driver, so it never tripped on this.)
     """
-    meta_map: Dict[str, TensorMeta] = {}
-    setters: Dict[str, Any] = {}
-    _collect_leaves(obj, "", TensorMeta, meta_map, setters)
-    for key, meta in meta_map.items():
-        setters[key](_hydrate_tensor_meta(meta))
+    if isinstance(obj, TensorMeta):
+        return _hydrate_tensor_meta(obj)
+    if isinstance(obj, Batch):
+        for f in dataclasses.fields(obj):
+            v = getattr(obj, f.name)
+            if v is not None:
+                new = deep_hydrate(v)
+                if new is not v:
+                    setattr(obj, f.name, new)
+        return obj
+    if isinstance(obj, dict):
+        for k in list(obj.keys()):
+            obj[k] = deep_hydrate(obj[k])
+        return obj
+    if isinstance(obj, list):
+        for i in range(len(obj)):
+            obj[i] = deep_hydrate(obj[i])
+        return obj
+    if isinstance(obj, tuple):
+        return tuple(deep_hydrate(x) for x in obj)
     return obj
 
 
@@ -204,24 +227,68 @@ class UnifiedModelTrainer(BaseTrainer):
             # offloaded during rollout and the engines sleep during train (the
             # memory dance in train_step time-shares the cards — so this is NOT
             # the boot-smoke landmine of engine+FSDP residing simultaneously).
-            self.ar_rollout = self._wire_engine(ar_rollout_cfg, anchor_device=0)
-            self.dit_rollout = self._wire_engine(dit_rollout_cfg, anchor_device=4)
-            # Steady state between train_steps: engines asleep, base on CPU.
-            # train_step wakes/onloads in the right order (see its memory dance).
-            self.ar_rollout.sleep()
-            self.dit_rollout.sleep()
+            # DP over engine REPLICAS, one (AR, DiT) pair per node. dp = nodes
+            # (16 devices / 8 per node → dp=2; single node → dp=1, fully
+            # backward-compatible: range(1), anchors 0/4 = the original path).
+            # Replica r is anchored on node r (DevicePool is node-aware,
+            # node = device_id // devices_per_node): AR host-worker on device
+            # r*8+1, DiT on r*8+4; each engine still spans cards r*8..r*8+3 /
+            # r*8+4..r*8+7 via its stage YAML. AR is +1 (not r*8) to keep its host
+            # worker off the train rank-0 worker (device 0) — see the push
+            # self-deadlock note at the _wire_engine call below.
+            per_node = self.pool.devices_per_node
+            # Each replica pins ONE (AR 0-3, DiT 4-7) engine pair to a single
+            # node, anchored at base+1 / base+4 with base = r*per_node. That
+            # layout needs >= 8 cards on the node; with fewer, base+4 spills onto
+            # the next node and silently splits the pair cross-node. Fail loud.
+            if per_node < 8:
+                raise ValueError(
+                    "UnifiedModelTrainer: HI3 needs >= 8 devices/node for one "
+                    "(AR 0-3, DiT 4-7) engine pair per node; got "
+                    f"devices_per_node={per_node}."
+                )
+            self.dp = max(1, self.pool.num_devices // per_node)
+            self.ar_rollouts = []
+            self.dit_rollouts = []
+            for r in range(self.dp):
+                base = r * per_node
+                # SERIALIZE engine boot: build one engine, then immediately
+                # .sleep() it before building the next. Every @distributed Handle
+                # call is synchronous (ray.get) and the heavy boot is Omni(...) in
+                # the engine's __init__, so .sleep() blocks until THIS engine has
+                # finished booting. Booting all dp*2 engines concurrently deadlocks
+                # in the DiT warmup's kv_transfer_manager handshake (the 4-way-boot
+                # blocker), so the per-engine quiesce is load-bearing — and it also
+                # leaves every engine asleep, the steady state train_step expects.
+                # AR anchor is base+1, NOT base: weight_sync rank 0 lives on the
+                # train DP rank-0 worker = global device 0. If the AR engine were
+                # anchored there too (base==0 for replica 0), it shares that one
+                # worker PROCESS, and RemoteLoraWeightSync.push() — which runs on
+                # rank 0 and does ray.get([... set_lora on the AR engine ...]) —
+                # would block-call its own actor (the set_lora task queues behind
+                # the in-flight push) → self-deadlock (push never returns, AR
+                # set_lora never runs; DiT on device 4 is a separate process so it
+                # loads fine). base+1 keeps the AR host worker off device 0 while
+                # the engine still uses cards 0-3 via its stage YAML's runtime.devices.
+                ar = self._wire_engine(ar_rollout_cfg, anchor_device=base + 1)
+                ar.sleep()
+                self.ar_rollouts.append(ar)
+                dit = self._wire_engine(dit_rollout_cfg, anchor_device=base + 4)
+                dit.sleep()
+                self.dit_rollouts.append(dit)
+            # Back-compat aliases for replica 0 (single-node code paths, dump,
+            # debug, and any single-engine references still use these).
+            self.ar_rollout = self.ar_rollouts[0]
+            self.dit_rollout = self.dit_rollouts[0]
 
             if sync_cfg is not None:
-                # LoRA sync gets ONLY the backend (a same-worker sibling); the two
+                # LoRA sync gets ONLY the backend (a same-worker sibling); the
                 # engines are cross-slab. RemoteLoraWeightSync.sync() extracts on
-                # the train workers and pushes from rank 0 to each engine via a
-                # plain Ray RPC, so hand it both engines' (role, workers) here.
+                # the train workers and pushes from rank 0 to EACH engine via a
+                # plain Ray RPC, so hand it every replica's (role, workers) here.
                 self.weight_sync = remote_hydra(sync_cfg, backend=self.backend)
                 self.weight_sync.set_rollout_targets(
-                    [
-                        (self.ar_rollout.role_name, self.ar_rollout.workers),
-                        (self.dit_rollout.role_name, self.dit_rollout.workers),
-                    ]
+                    [(eng.role_name, eng.workers) for eng in self.ar_rollouts + self.dit_rollouts]
                 )
 
     def _wire_engine(self, cfg: DictConfig, *, anchor_device: int) -> Any:
@@ -267,7 +334,67 @@ class UnifiedModelTrainer(BaseTrainer):
         )
 
     def run_rollout(self, req: RolloutReq) -> RolloutResp:
-        """Two-engine PE-style fan-out → 2-track ``RolloutResp`` {"ar","image"}.
+        """DP rollout: scatter the P prompts across the ``dp`` engine replicas
+        (one (AR, DiT) pair per node), run each sub-batch on its replica, then
+        ``RolloutTrack.concat`` the per-replica tracks. ``dp<=1`` or ``P<=1``
+        falls back to the single-replica path (the original single-node rollout),
+        so this is a transparent wrapper when not multinode.
+
+        v1 runs the replicas SEQUENTIALLY — this validates placement + the
+        scatter/concat correctness; issuing the per-replica ``generate()`` as Ray
+        futures for true concurrent throughput is the follow-up (handoff §8).
+        """
+        texts = req.primitives.get("text")
+        if not isinstance(texts, Texts):
+            raise TypeError("UnifiedModelTrainer.run_rollout: req.primitives['text'] must be a Texts primitive.")
+        prompts = list(texts.texts)
+        n = len(prompts)
+        if self.dp <= 1 or n <= 1:
+            return self._run_rollout_one(self.ar_rollouts[0], self.dit_rollouts[0], req)
+
+        # Contiguous near-equal prompt bounds across the dp replicas.
+        bounds = [(n * r) // self.dp for r in range(self.dp + 1)]
+        shards: list[RolloutResp] = []
+        for r in range(self.dp):
+            lo, hi = bounds[r], bounds[r + 1]
+            if lo >= hi:
+                continue
+            # Only "text" is consumed downstream by _run_rollout_one; slice it
+            # to this replica's prompt range and rebuild a standalone sub-req.
+            sub_req = RolloutReq(
+                sample_ids=list(req.sample_ids[lo:hi]),
+                group_ids=list(req.group_ids[lo:hi]),
+                primitives={"text": Texts(texts=prompts[lo:hi])},
+                request_conditions=dict(req.request_conditions),
+                sampling_params=req.sampling_params,
+                metadata=list(req.metadata[lo:hi]) if req.metadata else [],
+            )
+            shards.append(self._run_rollout_one(self.ar_rollouts[r], self.dit_rollouts[r], sub_req))
+        # Merge per-replica tracks. RolloutTrack.concat owns the
+        # segment.sample_indices offset shift, so the AR/image segments stay
+        # globally consistent across replicas.
+        #
+        # CAVEAT — the fused condition's rope_cache is a ``shared_field``
+        # (FusedMultimodalCondition), so this concat keeps replica-0's tensor
+        # verbatim: the merged condition carries a rope_cache whose batch dim is
+        # replica-0's sample count, NOT the global P*N*M. Harmless TODAY because
+        # HI3 replay rebuilds rope from gen_image_mask + the real latent shape
+        # (diffusion.py ``predict_noise`` [ROPE-FIX]; ar.py likewise) and never
+        # reads the track's rope_cache — it only rides along in the KV-propagation
+        # kwargs. If a future change makes replay consume ``fused.rope_cache``,
+        # dp>1 would SILENTLY feed replica-0 rope to every sample (wrong gradient,
+        # no crash, reward unaffected); make rope_cache a tuple-aware CONCAT field
+        # before relying on it.
+        return RolloutResp(
+            tracks={name: RolloutTrack.concat([s.tracks[name] for s in shards]) for name in (AR_TRACK, IMAGE_TRACK)}
+        )
+
+    def _run_rollout_one(self, ar_engine: Any, dit_engine: Any, req: RolloutReq) -> RolloutResp:
+        """One (AR, DiT) engine pair: PE-style fan-out → 2-track ``RolloutResp`` {"ar","image"}.
+
+        Drives the given ``ar_engine`` / ``dit_engine`` pair (one replica). The
+        DP wrapper :meth:`run_rollout` calls this once per replica with that
+        node's engines; ``dp=1`` calls it once with replica 0.
 
         ::
 
@@ -302,7 +429,7 @@ class UnifiedModelTrainer(BaseTrainer):
             request_conditions={},
             sampling_params=ar_params,
         )
-        ar_resp = self.ar_rollout.generate(ar_req)
+        ar_resp = ar_engine.generate(ar_req)
         ar_inner = ar_resp.tracks.get(AR_TRACK)
         recaptions = ar_inner.decoded if ar_inner is not None else None
         if not isinstance(recaptions, Texts):
@@ -345,7 +472,7 @@ class UnifiedModelTrainer(BaseTrainer):
             sampling_params=diff_params,
             init_noise_group_ids=dit_noise_gids,
         )
-        dit_resp = self.dit_rollout.generate(dit_req)
+        dit_resp = dit_engine.generate(dit_req)
         img_inner = dit_resp.tracks.get(IMAGE_TRACK)
         if img_inner is None:
             raise RuntimeError(
@@ -362,7 +489,7 @@ class UnifiedModelTrainer(BaseTrainer):
         img_track = _track_with_field(img_track, "media_preview", img_inner.media_preview)
 
         # Each anchored engine returns its track as ONE transport handle (a single
-        # ref spanning all P*N / P*N*M samples). The train side is 8-way DP and
+        # ref spanning all P*N / P*N*M samples). The train side is num_devices-way DP and
         # slices each track into per-rank shards — but a single ref can't be
         # intra-handle-sliced ("does not align to ref boundaries"). Materialize
         # the tracks to real tensors on the driver here; the reward / advantage /
@@ -402,15 +529,15 @@ class UnifiedModelTrainer(BaseTrainer):
         #   2. Wake both engines (base on CPU → room; AR 0-3, DiT 4-7 disjoint),
         #      then PUSH the cached adapter from rank 0 into each engine's
         #      set_lora_from_tensors_copy (cross-process; engines are not siblings).
-        self.ar_rollout.wake_up()
-        self.dit_rollout.wake_up()
+        for _eng in self.ar_rollouts + self.dit_rollouts:
+            _eng.wake_up()
         if sync_weights and self.weight_sync is not None:
             self.weight_sync.push()
         #   3. Rollout (base offloaded), then sleep engines and onload the base
         #      for the train backward.
         resp = self.run_rollout(req)
-        self.ar_rollout.sleep()
-        self.dit_rollout.sleep()
+        for _eng in self.ar_rollouts + self.dit_rollouts:
+            _eng.sleep()
         if self._enable_fsdp_offload:
             self.backend.onload()
 

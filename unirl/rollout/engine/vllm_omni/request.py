@@ -53,15 +53,14 @@ if TYPE_CHECKING:
 # (default_task_key, default_sys_type, modalities) per modality.
 _TASK_DEFAULTS: Dict[str, Tuple[str, str, List[str]]] = {
     "t2i": ("t2i_think", "en_unified", ["image"]),
-    "t2i_think_recaption": ("t2i_think", "en_unified", ["image"]),
     "it2i": ("it2i_think", "en_unified", ["image"]),
     "i2t": ("i2t", "en_unified", ["text"]),
     "t2t": ("t2t", "en_unified", ["text"]),
-    # Two-engine v2 trainer. ``ar_recaption`` builds the SAME prompt as
-    # t2i_think_recaption (task ``t2i_think`` → AR emits <think>…</think>
-    # <recaption>…) but is served by an AR-only stage (returns [ar_sampling]).
-    # ``dit_recaption`` is the standalone DiT (handled by _to_omni_dit_recaption,
-    # which only reads sys_type from here for use_system_prompt).
+    # Two-engine v2 trainer. ``ar_recaption`` builds a think/recaption prompt
+    # (task ``t2i_think`` → AR emits <think>…</think><recaption>…) but is served
+    # by an AR-only stage (returns [ar_sampling]). ``dit_recaption`` is the
+    # standalone DiT (handled by _to_omni_dit_recaption, which only reads
+    # sys_type from here for use_system_prompt).
     "ar_recaption": ("t2i_think", "en_unified", ["image"]),
     "dit_recaption": ("t2i_think", "en_unified", ["image"]),
 }
@@ -81,7 +80,7 @@ def _resolve_task(modality: str, stage_config: Dict[str, Any]) -> Tuple[str, str
     sys_type = stage_config.get("sys_type") or default_sys
 
     bot_task = stage_config.get("bot_task")
-    if bot_task and modality in ("t2i", "it2i", "t2i_think_recaption"):
+    if bot_task and modality in ("t2i", "it2i"):
         # think / recaption / vanilla — translate to upstream task key.
         if bot_task == "vanilla" and modality == "t2i":
             return "t2i_vanilla", "en_vanilla", modalities
@@ -517,7 +516,7 @@ def _to_omni_per_stage(
                 # the DiT; harmless and matches end2end.py.
                 entry["height"] = pil.height
                 entry["width"] = pil.width
-        elif modality in ("t2i", "t2i_think_recaption", "ar_recaption"):
+        elif modality in ("t2i", "ar_recaption"):
             entry["height"] = height
             entry["width"] = width
 
