@@ -23,7 +23,7 @@ and reads independently.
 | [`flowGRPO/`](flowGRPO/) | Diffusion / flow | PPO-style clipped ratio over sampled SDE transitions | [`unirl/algorithms/diffusion_grpo.py`](../unirl/algorithms/diffusion_grpo.py), loss in [`base.py`](../unirl/algorithms/base.py) | [`recipes/diffusion_rl/sd3_trainside.yaml`](../recipes/diffusion_rl/sd3_trainside.yaml) |
 | [`flowDPPO/`](flowDPPO/) | Diffusion / flow | Unclipped `−A·ratio`, masked only when exact Gaussian KL is high **and** the update is over-aggressive | [`unirl/algorithms/dppo.py`](../unirl/algorithms/dppo.py) | [`recipes/diffusion_rl/sd3_flowdppo.yaml`](../recipes/diffusion_rl/sd3_flowdppo.yaml) |
 | [`diffusionNFT/`](diffusionNFT/) | Diffusion / flow | Forward-process positive/negative reconstruction, weighted by reward-derived optimality | [`unirl/algorithms/nft.py`](../unirl/algorithms/nft.py) | [`recipes/diffusion_rl/sd3_nft.yaml`](../recipes/diffusion_rl/sd3_nft.yaml) |
-| [`DRPO/`](DRPO/) | LLM / AR | Token-level divergence-masked REINFORCE + TIS (`tv`/`kl`), or the recipe's soft TV penalty | [`unirl/algorithms/drpo.py`](../unirl/algorithms/drpo.py) | [`recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml`](../recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml) |
+| [`DRPO/`](DRPO/) | LLM / AR | Token-level importance-weighted PG + smooth advantage-weighted Binary-TV quadratic regularizer | [`unirl/algorithms/drpo.py`](../unirl/algorithms/drpo.py) | [`recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml`](../recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml) |
 
 ## Shared execution chain
 
@@ -49,7 +49,7 @@ Only **steps 6–7** differ between algorithms. Given the per-sample advantage `
 | flowGRPO | `−min(ρA, clip(ρ,1±ε)A)` over the trained SDE steps | `sde_logp`, `sde_indices` |
 | flowDPPO | `−ρA`, **zeroed** when per-step Gaussian KL is high **and** over-aggressive | `sde_logp`, `sde_means`, `sigmas` |
 | diffusionNFT | remap `A → r ∈ [0,1]`, positive/negative reconstruction MSE (no `ρ`) | `latents` (clean `x_0`), `sigmas` |
-| DRPO (LLM) | `−Â·r̄·logπ`, **zeroed** when `\|π−µ\|` is high **and** over-aggressive | `tokens`, `log_probs`, `loss_mask` |
+| DRPO (LLM) | `−Â·r + \|Â\|·µ·(r−1)²/(2ε)`: smooth quadratic regularizer (paper Eq. 8) | `tokens`, `log_probs`, `loss_mask` |
 
 - **flowGRPO** / **flowDPPO** are reverse-process policy-gradient methods: they replay the
   SDE trajectory the rollout sampled and compare new vs. old per-step log-probs. GRPO
@@ -58,10 +58,11 @@ Only **steps 6–7** differ between algorithms. Given the per-sample advantage `
 - **diffusionNFT** is *off-policy* (`requires_ema_rollout = True`): no SDE rollout for the
   loss. It re-noises the clean latent at many timesteps and trains a dual adapter
   (trainable vs. EMA-frozen) toward a reward-weighted positive/negative blend.
-- **DRPO** is the LLM analogue of flowDPPO: it zeroes a token's update when its probability
-  shift `|π−µ|` crosses a threshold in the reward-improving direction (DPPO's hard mask),
-  with TIS on the kept tokens. *(The reproduction recipe runs the soft `pg_tv_penalty`
-  variant — see [`DRPO/`](DRPO/).)*
+- **DRPO** is the LLM analogue of flowDPPO: it replaces ratio-based clipping with a smooth
+  Binary-TV-aligned quadratic regularizer. The per-token loss is
+  `−Â·r + |Â|·µ·(r−1)²/(2ε)` (paper Eq. 8), whose gradient induces a bounded, continuous
+  weight that attenuates diverging updates and provides corrective signals beyond the
+  trust-region boundary — see [`DRPO/`](DRPO/).
 
 ## Core files
 
@@ -106,7 +107,7 @@ The trainable rollout data for AR is a packed `TextSegment`:
 | New probability via replay? | `stage.replay(...).log_probs` | `.log_probs` + `.prev_sample_means` | No log-prob; `predict_noise_at_step` | `stage.replay(..., temperature=...)` |
 | Old-policy anchor | Frozen in `prepare_segment` | Frozen `old_logp` + `old_means` | EMA/shadow adapter | Rollout log-prob only (single update) |
 | Advantage use | broadcast `[B]→[B, S]` | broadcast `[B]→[B, S]` | clip + remap to `r ∈ [0,1]` | expand `[B]→[total_tokens]` |
-| Trust region | PPO clip range | Exact Gaussian-KL mask | EMA old + positive/negative target | variant: hard `tv`/`kl` mask, or soft TV penalty |
+| Trust region | PPO clip range | Exact Gaussian-KL mask | EMA old + positive/negative target | Smooth Binary-TV quadratic regularizer (bounded weight `w_t`) |
 | `num_updates_per_batch > 1`? | Yes | Yes | No validated path | No (`TrainStack` raises) |
 
 ## Shared advantage normalization
@@ -135,13 +136,12 @@ differ in the **std**, via two different trainer knobs feeding the same method:
 - **DiffusionNFT** — *"DiffusionNFT: Online Diffusion Reinforcement with Forward Process"*,
   Zheng et al. ([arXiv:2509.16117](https://arxiv.org/abs/2509.16117); ICLR 2026 Oral).
   Optimizes the forward process; needs only clean images + rewards.
-- **DRPO** — *"Rethinking the Divergence Regularization in LLM RL."* Its exact DRPO is a
-  smooth Binary-TV quadratic regularizer (Table 1 weight `w_t`); the shipped recipe runs
-  the `pg_tv_penalty` approximation, so the [`DRPO/`](DRPO/) tutorial separates paper math
-  from recipe behavior.
-- **DPPO** (the LLM trust-region mask `ARDRPO`'s `tv`/`kl` variants implement) — Qi et al.,
-  *"Rethinking the Trust Region in LLM Reinforcement Learning"*
-  ([arXiv:2602.04879](https://arxiv.org/abs/2602.04879)).
+- **DRPO** — *"Rethinking the Divergence Regularization in LLM RL."* Replaces DPPO's hard
+  Binary-TV mask with a smooth advantage-weighted quadratic regularizer (objective Eq. 8,
+  gradient weight Table 1). The recipe implements the exact paper method:
+  `L_t = −Â·r + |Â|·µ·(r−1)²/(2ε)` with `ε = 12.5`.
+- **DPPO** (the hard-mask predecessor) — Qi et al., *"Rethinking the Trust Region in LLM
+  Reinforcement Learning"* ([arXiv:2602.04879](https://arxiv.org/abs/2602.04879)).
 - **SPO** (the smooth-regularizer ancestor in the lineage) — Xie et al., *"Simple Policy
   Optimization"* ([arXiv:2401.16025](https://arxiv.org/abs/2401.16025)).
 
