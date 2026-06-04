@@ -118,6 +118,23 @@ may emit trajectory data without `segment.sde_logp`; in that case
 `torch.no_grad()` replay before the multi-update loop, keeping π_old fixed
 across `stack.num_updates_per_batch`.
 
+**Anchor geometry contract.** bf16 forwards are batch-shape sensitive, so a π_old
+anchor recomputed at a different batch geometry than `new_logp` makes the on-policy
+ratio drift off 1 (and DPPO's on-policy KL off 0). Algorithms therefore declare two
+things and the train stack does the rest, with no hardcoded field names:
+
+- `anchor_fields` — the segment fields frozen as the anchor (`DiffusionGRPO`:
+  `("sde_logp",)`; `DiffusionDPPO`: `("sde_logp", "sde_means")`).
+- `recomputes_anchor()` — whether `prepare_segment` runs a replay. `DiffusionGRPO`
+  returns it for `old_logp_source == "replay"`; `DiffusionDPPO` always returns True
+  because it always replays `sde_means` for the KL term.
+
+When `recomputes_anchor()` is True, `TrainStack.prepare_segment` drives the anchor
+replay over the **same** mini/micro slices it will train on
+(`_optimizer_step_slices`), then reassembles each `anchor_field` — so old/new
+forwards match element-for-element. Cross-sample statistics (e.g. advantage
+mean/std) are computed on the full shard *before* this slicing, never per micro.
+
 ## NFT Loss
 
 `DiffusionNFT` is forward-process training. It does not use rollout SDE

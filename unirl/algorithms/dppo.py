@@ -180,6 +180,12 @@ class DiffusionDPPO(StageAlgorithm):
     # prepare_segment freezes segment.sde_logp + sde_means once, so the ratio
     # and KL anchor stay fixed across every num_updates_per_batch optimizer step.
     supports_multi_update = True
+    anchor_fields = ("sde_logp", "sde_means")
+
+    def recomputes_anchor(self) -> bool:
+        # DPPO always replays sde_means for the KL term (regardless of
+        # old_logp_source), so the anchor always needs train-time geometry.
+        return True
 
     def __init__(
         self,

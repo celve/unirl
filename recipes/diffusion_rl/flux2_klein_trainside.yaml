@@ -166,6 +166,7 @@ algorithm:
   # PPO ratio drifts past 1 +/- 1e-4 quickly.
   clip_range: 5.0e-3
   clip_schedule: constant
+  old_logp_source: replay
   conditions_cls:
     _target_: hydra.utils.get_class
     path: unirl.models.flux2_klein.conditions.Flux2KleinConditions

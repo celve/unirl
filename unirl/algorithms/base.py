@@ -205,6 +205,24 @@ class StageAlgorithm(Remote, ABC):
 
     requires_ema_rollout: bool = False
     supports_multi_update: bool = False
+    # Segment fields this algorithm freezes as the π_old anchor in
+    # :meth:`prepare_segment` (GRPO: ``("sde_logp",)``; DPPO:
+    # ``("sde_logp", "sde_means")``). When the anchor is recomputed
+    # (:meth:`recomputes_anchor`), the train stack re-slices and reassembles
+    # exactly these fields at train-time geometry — it never hardcodes them.
+    anchor_fields: Tuple[str, ...] = ()
+
+    def recomputes_anchor(self) -> bool:
+        """Whether :meth:`prepare_segment` runs a model replay to (re)compute the anchor.
+
+        True ⇒ the anchor MUST be frozen at the same ``(mini, micro)`` batch
+        geometry training uses — bf16 forwards are batch-shape sensitive — so the
+        train stack drives ``prepare_segment`` per micro-slice over those exact
+        slices (on-policy ratio = 1; DPPO on-policy KL = 0). False (default) ⇒ the
+        anchor is the rollout engine's own emission (no replay), geometry-independent,
+        so one full-segment call suffices.
+        """
+        return False
 
     def prepare_segment(
         self,

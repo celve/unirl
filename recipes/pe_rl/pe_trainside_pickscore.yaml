@@ -91,6 +91,11 @@ diffusion:
     stage_attr: diffusion
     clip_range: 1.0e-4
     clip_schedule: constant
+    # Rollout samples the whole shard in one forward (no forward_batch_size set)
+    # but trains at micro_batch_size=1; bf16 GEMMs are batch-shape sensitive, so
+    # the on-policy ratio is exactly 1 only when pi_old is replayed at the train
+    # micro-geometry. See sd3_trainside.yaml / TrainStack.prepare_segment.
+    old_logp_source: replay
     conditions_cls:
       _target_: hydra.utils.get_class
       path: unirl.models.sd3.conditions.SD3Conditions

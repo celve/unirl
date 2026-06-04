@@ -118,6 +118,13 @@ algorithm:
   stage_attr: diffusion
   clip_range: 1.0e-4
   clip_schedule: constant
+  # Trainside samples at forward_batch_size=16 but trains at micro_batch_size=1, and
+  # bf16 forwards are batch-shape sensitive, so the on-policy ratio is exactly 1 only
+  # when pi_old is recomputed at the train micro-geometry. `replay` does that (the
+  # train stack drives prepare_segment over the same slices it trains on; see
+  # TrainStack.prepare_segment). Recipes that already sample and train at the same
+  # batch (forward_batch_size == micro_batch_size) can keep the default `native`.
+  old_logp_source: replay
   conditions_cls:
     _target_: hydra.utils.get_class
     path: unirl.models.sd3.conditions.SD3Conditions

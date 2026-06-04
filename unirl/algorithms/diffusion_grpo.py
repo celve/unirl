@@ -68,6 +68,11 @@ class DiffusionGRPO(StageAlgorithm):
     # prepare_segment freezes segment.sde_logp once, so the PPO ratio stays
     # anchored across every num_updates_per_batch optimizer step.
     supports_multi_update = True
+    anchor_fields = ("sde_logp",)
+
+    def recomputes_anchor(self) -> bool:
+        # Only ``replay`` re-derives sde_logp; ``native`` keeps the engine's emission.
+        return self.old_logp_source == "replay"
 
     def __init__(
         self,

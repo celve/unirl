@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from typing import List, Mapping, Tuple
+from typing import Dict, List, Mapping, Tuple
 
 import torch
 
@@ -193,37 +193,99 @@ class TrainStack(Remote):
         self.micro_batch_size = int(micro_batch_size)
         self.max_grad_norm = float(max_grad_norm)
 
+    def _optimizer_step_slices(self, total: int) -> List[List[Tuple[int, int]]]:
+        """Single source of truth for how a rollout shard is sliced for training.
+
+        Returns one inner list of absolute ``(start, end)`` micro-batch slices per
+        optimizer step (one per ``num_updates_per_batch`` mini-batch). BOTH the
+        train loop (:meth:`_train_mini_batches` / :meth:`train`) AND
+        :meth:`prepare_segment` consume this, so the π_old anchor is frozen at
+        exactly the ``(mini, micro)`` geometry ``new_logp`` is later computed at —
+        the only way bf16 batch-shape sensitivity cancels and the on-policy ratio
+        is exactly 1 (DPPO on-policy KL exactly 0).
+
+        Invariant: any *cross-sample* statistic (e.g. advantage mean/std) must be
+        computed on the full shard BEFORE this slicing — the trainer does so in
+        ``compute_advantages`` ahead of ``train_track``. Slicing only governs the
+        per-sample forward geometry, never a batch statistic.
+        """
+        steps: List[List[Tuple[int, int]]] = []
+        for mini_start, mini_end in _build_mini_batch_slices(total_size=total, num_updates=self.num_updates_per_batch):
+            steps.append(
+                [
+                    (mini_start + ms, mini_start + me)
+                    for ms, me in _build_micro_batch_slices(
+                        total_size=mini_end - mini_start, micro_batch_size=self.micro_batch_size
+                    )
+                ]
+            )
+        return steps
+
     def prepare_segment(self, resp_track: RolloutTrack) -> None:
-        """Pre-step hook — call once per ``RolloutTrack`` before the
-        ``num_updates_per_batch`` loop.  No-op if ``segment`` is None."""
+        """Freeze the π_old anchor once, before the ``num_updates_per_batch`` loop.
+
+        No-op if ``segment`` is None. If the algorithm does NOT replay the anchor
+        (``recomputes_anchor() == False`` — e.g. native GRPO), the anchor is the
+        rollout engine's own emission, so one full-segment call suffices. If it DOES
+        replay (replay GRPO; DPPO always, for ``sde_means``), the recomputed
+        ``anchor_fields`` are computed at the SAME mini/micro geometry training will
+        use — driven by the shared :meth:`_optimizer_step_slices` — so the old/new
+        forwards match bf16-element-for-element on those fields. Concretely, the
+        on-policy PPO ratio is exactly 1 only where ``sde_logp`` is replayed (replay
+        GRPO, or DPPO under ``old_logp_source='replay'``), and the on-policy KL is
+        exactly 0 wherever ``sde_means`` is replayed (DPPO always). DPPO-native keeps
+        the engine's ``sde_logp``, so its KL is 0 on-policy but its ratio is not
+        pinned to 1. A single slice degenerates to one full-segment call; only the
+        algorithm's declared ``anchor_fields`` are re-sliced and reassembled (no
+        hardcoded field names).
+        """
         if resp_track.segment is None:
             return
-        self.algorithm.prepare_segment(
-            conditions=resp_track.conditions,
-            segment=resp_track.segment,
-        )
+        algorithm = self.algorithm
+        if not algorithm.recomputes_anchor():
+            algorithm.prepare_segment(conditions=resp_track.conditions, segment=resp_track.segment)
+            return
+        micro_slices = [sl for step in self._optimizer_step_slices(int(resp_track.batch_size)) for sl in step]
+        if len(micro_slices) == 1:
+            algorithm.prepare_segment(conditions=resp_track.conditions, segment=resp_track.segment)
+            return
+        collected: Dict[str, List[torch.Tensor]] = {field: [] for field in algorithm.anchor_fields}
+        for start, end in micro_slices:
+            micro = resp_track.slice(start, end)
+            algorithm.prepare_segment(conditions=micro.conditions, segment=micro.segment)
+            for field in collected:
+                value = getattr(micro.segment, field, None)
+                if value is None:
+                    raise RuntimeError(
+                        f"TrainStack.prepare_segment: {type(algorithm).__name__} declares anchor "
+                        f"field {field!r} but a micro-slice produced None."
+                    )
+                collected[field].append(value)
+        for field, parts in collected.items():
+            setattr(resp_track.segment, field, torch.cat(parts, dim=0))
 
     def train(
         self,
         resp_track: RolloutTrack,
         *,
+        micro_slices: List[Tuple[int, int]],
         training_progress: float,
     ) -> TrainStepResult:
-        """Run one full optimizer step for this stage."""
+        """Run one optimizer step over the given absolute ``micro_slices``.
+
+        ``micro_slices`` are absolute ``(start, end)`` ranges into ``resp_track``
+        for one optimizer step, produced by :meth:`_optimizer_step_slices` so the
+        forward geometry matches the π_old anchor frozen by :meth:`prepare_segment`.
+        """
         if resp_track.advantages is None:
             raise ValueError(
                 "TrainStack.train: resp_track.advantages is None; "
                 "upstream advantage pipeline must populate it before training."
             )
+        if not micro_slices:
+            raise ValueError("TrainStack.train: empty micro_slices.")
 
         bs = int(resp_track.batch_size)
-        micro_slices = _build_micro_batch_slices(
-            total_size=bs,
-            micro_batch_size=int(self.micro_batch_size),
-        )
-        if not micro_slices:
-            raise ValueError(f"TrainStack.train: empty batch (batch_size={bs}).")
-
         self.fsdp_backend.zero_grad()
 
         loss_scale = 1.0 / len(micro_slices)
@@ -301,24 +363,21 @@ class TrainStack(Remote):
     ) -> TrainStepResult:
         """Run ``num_updates_per_batch`` optimizer steps over disjoint mini-batches.
 
-        ``prepare_segment`` must already have frozen the π_old anchor on the full
-        ``resp_track`` so every mini-batch trains against the same pre-update
-        policy. ``num_updates_per_batch == 1`` (the default) is the single-step
-        fast path — the whole shard in one optimizer step, byte-for-byte the
-        prior behavior. Otherwise the shard is partitioned into N contiguous
-        mini-batches (one optimizer step each, reusing :meth:`train`'s
-        micro-batching within each) and the per-step results are reduced into one
-        summary (see :func:`_aggregate_update_results`).
+        The mini/micro slicing comes from the shared :meth:`_optimizer_step_slices`
+        — the same source :meth:`prepare_segment` froze the π_old anchor at — so
+        every step's ``new_logp`` is computed at exactly the anchor's geometry.
+        ``prepare_segment`` must already have frozen the anchor so all steps train
+        against the same pre-update policy. With a single optimizer step the result
+        passes through unchanged; otherwise the per-step results are reduced into one
+        summary and each step's own metrics are attached on ``per_update`` (see
+        :func:`_aggregate_update_results`).
         """
-        if self.num_updates_per_batch == 1:
-            return self.train(resp_track, training_progress=training_progress)
-        slices = _build_mini_batch_slices(
-            total_size=int(resp_track.batch_size),
-            num_updates=self.num_updates_per_batch,
-        )
         results = [
-            self.train(resp_track.slice(start, end), training_progress=training_progress) for (start, end) in slices
+            self.train(resp_track, micro_slices=micros, training_progress=training_progress)
+            for micros in self._optimizer_step_slices(int(resp_track.batch_size))
         ]
+        if len(results) == 1:
+            return results[0]
         aggregated = _aggregate_update_results(results)
         # Attach each optimizer step's own metrics (in order) so the trainer can
         # log one wandb point per optimizer step — the on-policy update0 and the
