@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple, Type
 
 import torch
 
+from unirl.config.require import require
 from unirl.types.conditions import Condition
 from unirl.types.segments.latent import LatentSegment
 
@@ -30,6 +31,7 @@ class DiffusionDPPOConfig(BaseAlgorithmConfig):
     conditions_cls: str = ""
     kl_mask_threshold: float = 1e-5
     add_kl_coefficient: bool = True
+    old_logp_source: str = "native"
     params: Any = dc_field(default=None)
 
 
@@ -168,6 +170,10 @@ class DiffusionDPPO(StageAlgorithm):
         add_kl_coefficient: If True, normalize KL by
             ``sigma_t = std_dev_t * sqrt(-dt)`` (flow-matching noise scale).
             If False, use unnormalized squared error.
+        old_logp_source: ``"native"`` (default) trusts the rollout engine's
+            emitted ``segment.sde_logp``; ``"replay"`` uses the replayed
+            log-probs. ``sde_means`` is always replayed regardless. See
+            :meth:`prepare_segment`.
         conditions_cls: Stage-typed conditions container.
     """
 
@@ -184,6 +190,7 @@ class DiffusionDPPO(StageAlgorithm):
         stage_attr: str = "diffusion",
         kl_mask_threshold: float = 1e-5,
         add_kl_coefficient: bool = True,
+        old_logp_source: str = "native",
         conditions_cls: Optional[Type[Any]] = None,
     ) -> None:
         # v1 (track_builder) passes `stage`; v2 (DiffusionTrainer) passes the
@@ -196,6 +203,11 @@ class DiffusionDPPO(StageAlgorithm):
         self.params = params
         self.kl_mask_threshold = float(kl_mask_threshold)
         self.add_kl_coefficient = bool(add_kl_coefficient)
+        self.old_logp_source = str(old_logp_source).strip().lower()
+        require(
+            self.old_logp_source in ("native", "replay"),
+            f"DiffusionDPPO: old_logp_source must be 'native' or 'replay'; got {old_logp_source!r}",
+        )
         self.conditions_cls = conditions_cls
 
     def prepare_segment(
@@ -204,25 +216,39 @@ class DiffusionDPPO(StageAlgorithm):
         conditions: Mapping[str, "Condition"],
         segment: "LatentSegment",
     ) -> None:
-        """Populate ``segment.sde_logp`` and ``segment.sde_means`` at pre-update weights.
+        """Establish the frozen π_old anchor (``segment.sde_logp``) and means
+        (``segment.sde_means``) at pre-update weights, before the
+        ``num_updates_per_batch`` loop.
 
-        Always runs ``stage.replay`` under ``torch.no_grad`` to capture the
-        old policy's ``prev_sample_means`` — these are frozen for all N
-        ``num_updates_per_batch`` micro-updates that follow.
+        ``stage.replay`` always runs under ``torch.no_grad`` — DPPO needs the
+        old policy's ``prev_sample_means`` for the KL term — so ``sde_means``
+        is always written from this pre-update replay. The log-prob anchor is
+        chosen by ``old_logp_source``:
 
-        If ``segment.sde_logp`` is already populated (native log-prob mode),
-        it is NOT overwritten. ``segment.sde_means`` is always written.
+        - ``"native"`` (default): keep the rollout engine's emitted
+          ``sde_logp``; raises if it is ``None`` (pin an emitting rollout
+          build, or set ``old_logp_source='replay'``).
+        - ``"replay"``: use the replayed log-probs, overwriting any engine value.
+
+        No-op if the segment has no SDE-gated steps to train on.
         """
         if segment.sde_indices is None:
             return
         target_steps = self._resolve_target_steps(segment)
         if not target_steps:
             return
+        if self.old_logp_source == "native" and segment.sde_logp is None:
+            raise RuntimeError(
+                "DiffusionDPPO.prepare_segment: old_logp_source='native' but the "
+                "rollout engine emitted no per-step log-probs (segment.sde_logp is "
+                "None). Pin a rollout build that emits trajectory log-probs, or set "
+                "old_logp_source='replay'."
+            )
         typed_conds = typed_conditions(conditions, self.conditions_cls)
         with torch.no_grad():
             result = self.stage.replay(typed_conds, segment=segment, params=self.params, step_indices=target_steps)
-        # Populate old log-probs if not already set (replay mode)
-        if segment.sde_logp is None:
+        # Log-prob anchor: replay overwrites; native keeps the engine's emission.
+        if self.old_logp_source == "replay":
             segment.sde_logp = result.log_probs.detach().cpu()
         # Always populate old means (core of DPPO)
         if result.prev_sample_means is None:

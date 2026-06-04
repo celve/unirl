@@ -156,14 +156,12 @@ class SGLangRolloutEngine(BaseRolloutEngine):
 
         logger.info(
             "Initializing SGLang engine (rank=%s, local_mode=%s, "
-            "target_modules=%s, model_family=%s, populate_conditions=%s, "
-            "logprob_source=%s)",
+            "target_modules=%s, model_family=%s, populate_conditions=%s)",
             rank,
             self.cfg.local_mode,
             self._target_modules,
             self.cfg.model_family,
             self.cfg.populate_conditions,
-            self.cfg.logprob_source,
         )
 
         disable_autocast = server_kwargs.get("disable_autocast")
@@ -387,7 +385,14 @@ class SGLangRolloutEngine(BaseRolloutEngine):
         num_steps = int(diffusion.num_inference_steps)
         sde_indices_raw = diffusion.sde_indices
         sde_indices = sorted(int(v) for v in sde_indices_raw) if sde_indices_raw is not None else None
-        use_native_logprob = self.cfg.logprob_source == "native" and sde_indices is not None
+        # Best-effort emit: whenever the rollout ran SDE-gated steps, try to
+        # land SGLang's native per-step log-probs on the segment. Whether they
+        # are *used* (vs trainer-side replay) is decided downstream by the
+        # algorithm's ``old_logp_source`` — not by the engine. An empty
+        # ``sde_indices`` (NFT / forward-process, num_sde_steps=0 resolves to [])
+        # has no per-step log-probs to emit, so skip the block entirely —
+        # matching the prior behavior for that path.
+        emit_native_logprob = sde_indices is not None and len(sde_indices) > 0
 
         return _to_rollout_resp(
             req,
@@ -395,7 +400,7 @@ class SGLangRolloutEngine(BaseRolloutEngine):
             cfg=self.cfg,
             num_steps=num_steps,
             sde_indices=sde_indices,
-            use_native_logprob=use_native_logprob,
+            emit_native_logprob=emit_native_logprob,
         )
 
     def _resolve_initial_noise(self, req: RolloutReq) -> Optional[torch.Tensor]:

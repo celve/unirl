@@ -14,10 +14,13 @@ log-prob; non-SDE steps simply aren't represented. This mirrors the
 reads ``sde_logp[:, s]`` and uses ``sde_indices[s]`` for the step lookup.
 
 ``sde_logp`` may be populated either at rollout time by a native log-prob
-source (SGLang ``logprob_source='native'``, vllm_omni) or lazily by the
-trainer via :meth:`StageAlgorithm.prepare_segment` (SGLang
-``logprob_source='replay'`` mode, where the rollout emits the trajectory
-but no log-probs). Both paths produce the same ``[N_segs, S]`` shape with
+source (the rollout engines best-effort emit it — SGLang, vllm_omni) or by
+the trainer via :meth:`StageAlgorithm.prepare_segment`. Which one is the
+authoritative π_old anchor is a training-layer decision
+(``algorithm.old_logp_source``): ``"native"`` keeps the engine's emission,
+``"replay"`` recomputes and overwrites it. When the engine emits nothing it
+leaves ``sde_logp = None`` and ``prepare_segment`` fills it (replay) or
+raises (native). Both paths produce the same ``[N_segs, S]`` shape with
 ``S == len(sde_indices)``.
 """
 

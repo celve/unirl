@@ -14,9 +14,10 @@ Differences vs the legacy config:
 - ``init_same_noise: bool`` gates the engine-internal noise fallback that
   shares Gaussian noise across same-group samples when the caller did not
   pre-ship one via ``req.request_conditions["initial_latents"]``.
-- ``logprob_source: Literal["replay", "native"]`` — default ``"replay"``.
-  ``"native"`` lands SGLang's ``trajectory_log_probs`` on
-  ``LatentSegment.sde_logp`` so trainer-side replay can skip recompute.
+- The engine always best-effort emits SGLang's ``trajectory_log_probs`` onto
+  ``LatentSegment.sde_logp`` (degrading to ``None`` when the build doesn't
+  return them). Whether those native log-probs are *used* or recomputed is a
+  training-layer decision (``algorithm.old_logp_source``), not an engine flag.
 - The legacy ``verify_weight_checksum`` flag is gone. Checksums are now an
   on-demand query via ``SGLangRolloutEngine.loaded_param_checksums(names)``
   (vllm-omni-shape return).
@@ -42,7 +43,6 @@ _SGLANG_PORT_STRIDE = 100
 
 
 _VALID_MODEL_FAMILIES = ("sd3", "flux", "flux2_klein", "mochi", "hunyuan_video")
-_VALID_LOGPROB_SOURCES = ("replay", "native")
 
 
 @dataclass
@@ -70,9 +70,6 @@ class SGLangEngineConfig(BaseEngineConfig):
     # --- Engine-internal noise fallback (only used when caller did not pre-ship
     # ``req.request_conditions["initial_latents"]``) ---
     init_same_noise: bool = False
-
-    # --- Log-prob policy ---
-    logprob_source: str = "replay"
 
     # --- Parallelism & GPU ---
     num_gpus: int = 1
@@ -113,12 +110,6 @@ class SGLangEngineConfig(BaseEngineConfig):
         require(
             self.model_family in _VALID_MODEL_FAMILIES,
             f"SGLangEngineConfig.model_family must be one of {set(_VALID_MODEL_FAMILIES)}; got {self.model_family!r}",
-        )
-        self.logprob_source = str(self.logprob_source or "replay").strip().lower()
-        require(
-            self.logprob_source in _VALID_LOGPROB_SOURCES,
-            f"SGLangEngineConfig.logprob_source must be one of "
-            f"{set(_VALID_LOGPROB_SOURCES)}; got {self.logprob_source!r}",
         )
         require(
             self.num_gpus >= 1,

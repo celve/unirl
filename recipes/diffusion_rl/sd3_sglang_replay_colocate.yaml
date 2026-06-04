@@ -2,9 +2,9 @@
 # SD3 + SGLang colocate, REPLAY logprob, v2 trainer, 2x8 H20 (matches v1 reference geometry).
 #
 # Same as sd3_sglang_native_colocate.yaml except:
-#   - rollout.config.logprob_source: replay
-#       Engine doesn't emit log-probs during generate; trainer recomputes them
-#       via stage.replay at update time using LatentSegment.sde_logp.
+#   - algorithm.old_logp_source: replay
+#       Trainer recomputes the π_old anchor via stage.replay at update time
+#       (the engine's best-effort native log-probs, if any, are ignored).
 #
 #   2x8:  bash scripts/run_experiment_multinode_taiji.sh diffusion_rl/sd3_sglang_replay_colocate
 
@@ -98,9 +98,6 @@ rollout:
   config:
     _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
     model_family: sd3
-    # REPLAY mode: engine returns trajectories without log-probs; trainer
-    # recomputes them via stage.replay at update time. Diverges from native.
-    logprob_source: replay
     populate_conditions: true
     init_same_noise: ${sampling.init_same_noise}
     # Chunk generate into 16-sample sub-batches so sglang bounds its DiT-forward
@@ -142,6 +139,9 @@ algorithm:
   stage_attr: diffusion
   clip_range: 1.0e-4
   clip_schedule: constant
+  # REPLAY mode: trainer recomputes the π_old anchor via stage.replay at update
+  # time (engine emits trajectories; its native log-probs, if any, are ignored).
+  old_logp_source: replay
   conditions_cls:
     _target_: hydra.utils.get_class
     path: unirl.models.sd3.conditions.SD3Conditions
@@ -199,7 +199,7 @@ weight_sync_interval: 1
 # of two).
 sync:
   _target_: unirl.distributed.weight_sync.lora.LocalLoraWeightSync
-  verify: true   # checksum read-back asserts the synced LoRA landed; set false once trusted
+  verify: false  # SGLang engine lacks loaded_lora_checksums (only loaded_param_checksums); skip read-back
   # Mirrors SD3PipelineConfig.weight_sync_param_name_prefix; must match the
   # engine-side LoRA key naming (a wrong prefix yields wrong/zero loaded layers,
   # which `verify` catches).

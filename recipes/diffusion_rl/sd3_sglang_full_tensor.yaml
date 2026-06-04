@@ -98,8 +98,6 @@ rollout:
     # Explicit family for trainer-side typed-condition reconstruction.
     model_family: sd3
     tp_size: 1
-    # Trainer-side replay recomputes log-probs (matches the GRPO algorithm).
-    logprob_source: replay
     populate_conditions: true
     init_same_noise: ${sampling.init_same_noise}
     # Chunk generate into 16-sample sub-batches so sglang bounds its DiT-forward
@@ -132,6 +130,8 @@ algorithm:
   stage_attr: diffusion
   clip_range: 1.0e-4
   clip_schedule: constant
+  # Trainer-side replay recomputes the π_old anchor (matches prior behaviour).
+  old_logp_source: replay
   conditions_cls:
     _target_: hydra.utils.get_class
     path: unirl.models.sd3.conditions.SD3Conditions

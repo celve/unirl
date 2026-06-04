@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Mapping, Optional, Type
 
 import torch
 
+from unirl.config.require import require
 from unirl.types.conditions import Condition
 from unirl.types.segments.latent import LatentSegment
 
@@ -36,6 +37,7 @@ class DiffusionGRPOConfig(BaseAlgorithmConfig):
     conditions_cls: str = ""
     clip_range: float = 1e-4
     clip_schedule: str = "constant"
+    old_logp_source: str = "native"
     params: Any = dc_field(default=None)
 
 
@@ -55,6 +57,9 @@ class DiffusionGRPO(StageAlgorithm):
         clip_range: PPO clip range epsilon.
         clip_schedule: ``"constant"``, ``"linear_decay"``, or
             ``"cosine_decay"`` — applied via ``training_progress``.
+        old_logp_source: ``"native"`` (default) trusts the rollout engine's
+            emitted ``segment.sde_logp``; ``"replay"`` recomputes it via
+            ``stage.replay`` at pre-update weights. See :meth:`prepare_segment`.
         conditions_cls: Stage-typed conditions container with a
             ``from_dict(Mapping[str, Condition])`` classmethod. ``None``
             forwards the dict verbatim (unit-test path).
@@ -73,6 +78,7 @@ class DiffusionGRPO(StageAlgorithm):
         stage_attr: str = "diffusion",
         clip_range: float = 1e-4,
         clip_schedule: str = "constant",
+        old_logp_source: str = "native",
         conditions_cls: Optional[Type[Any]] = None,
     ) -> None:
         super().__init__()
@@ -84,6 +90,11 @@ class DiffusionGRPO(StageAlgorithm):
         self.params = params
         self.clip_range = float(clip_range)
         self.clip_schedule = str(clip_schedule)
+        self.old_logp_source = str(old_logp_source).strip().lower()
+        require(
+            self.old_logp_source in ("native", "replay"),
+            f"DiffusionGRPO: old_logp_source must be 'native' or 'replay'; got {old_logp_source!r}",
+        )
         self.conditions_cls = conditions_cls
 
     def prepare_segment(
@@ -92,23 +103,33 @@ class DiffusionGRPO(StageAlgorithm):
         conditions: Mapping[str, "Condition"],
         segment: "LatentSegment",
     ) -> None:
-        """Lazy-initialize ``segment.sde_logp`` in SGLang replay-mode rollouts.
+        """Establish the frozen π_old anchor (``segment.sde_logp``) before the
+        ``num_updates_per_batch`` loop. The source is chosen by ``old_logp_source``:
 
-        SGLang ``logprob_source='replay'`` emits the trajectory but no
-        per-step log-probs, leaving ``segment.sde_logp = None``. The trainer
-        fills it here via a ``torch.no_grad`` forward through
-        :meth:`DiffusionStage.replay`, producing log-probs at the
-        **pre-update** policy weights — frozen for all N
-        ``num_updates_per_batch`` micro-updates that follow.
+        - ``"native"`` (default): trust the rollout engine's emitted
+          ``segment.sde_logp``. Raises if the engine emitted nothing
+          (``sde_logp is None``) — pin a rollout build that emits per-step
+          log-probs, or set ``old_logp_source='replay'``.
+        - ``"replay"``: recompute via a ``torch.no_grad``
+          :meth:`DiffusionStage.replay` at the **pre-update** weights and
+          **overwrite** ``sde_logp`` (ignoring any engine value). Frozen for
+          all N micro-updates that follow.
 
-        No-op if ``segment.sde_logp`` is already populated (native mode,
-        or a previous ``prepare_segment`` call on the same segment) or if
-        the segment has no SDE-gated steps to train on.
+        No-op if the segment has no SDE-gated steps to train on.
         """
-        if segment.sde_logp is not None or segment.sde_indices is None:
+        if segment.sde_indices is None:
             return
         target_steps = self._resolve_target_steps(segment)
         if not target_steps:
+            return
+        if self.old_logp_source == "native":
+            if segment.sde_logp is None:
+                raise RuntimeError(
+                    "DiffusionGRPO.prepare_segment: old_logp_source='native' but the "
+                    "rollout engine emitted no per-step log-probs (segment.sde_logp is "
+                    "None). Pin a rollout build that emits trajectory log-probs, or set "
+                    "old_logp_source='replay'."
+                )
             return
         typed_conds = typed_conditions(conditions, self.conditions_cls)
         with torch.no_grad():

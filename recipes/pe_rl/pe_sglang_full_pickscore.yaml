@@ -128,6 +128,10 @@ diffusion:
     stage_attr: diffusion
     clip_range: 1.0e-4
     clip_schedule: constant
+    # REPLAY: SGLang separate-worker rollout — recompute the diffusion π_old
+    # anchor trainer-side (restores the pre-#243 engine default for these PE
+    # recipes; avoids the fork-vs-replay engine gap in the GRPO ratio).
+    old_logp_source: replay
     conditions_cls:
       _target_: hydra.utils.get_class
       path: unirl.models.sd3.conditions.SD3Conditions

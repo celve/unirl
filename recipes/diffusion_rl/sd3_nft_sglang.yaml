@@ -108,9 +108,6 @@ rollout:
     _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
     model_family: sd3
     tp_size: 1
-    # NFT is forward-process and does not consume rollout log-probs; keep
-    # replay for parity with the GRPO-SGLang recipe.
-    logprob_source: replay
     populate_conditions: true
     init_same_noise: ${sampling.init_same_noise}
     # Chunk generate into 32-sample sub-batches so sglang bounds its DiT-forward

@@ -1,12 +1,14 @@
 """SGLang ``GenerationResult`` list → ``RolloutResp`` translator.
 
 Single free function ``_to_rollout_resp(req, results, *, cfg, num_steps, shift,
-sde_indices, use_native_logprob)`` produces:
+sde_indices, emit_native_logprob)`` produces:
 
 - ``resp.tracks['image'].segment`` = :class:`LatentSegment` with ``latents``,
-  ``sigmas``, ``indices``, ``sample_indices`` always populated; ``sde_logp`` +
-  ``sde_indices`` populated when ``use_native_logprob`` and the algorithm
-  requested SDE log-probs.
+  ``sigmas``, ``indices``, ``sample_indices`` always populated; ``sde_indices``
+  populated when the algorithm requested SDE log-probs. ``sde_logp`` is a
+  *best-effort* native emission: populated when ``emit_native_logprob`` and the
+  SGLang build returns ``trajectory_log_probs``, else left ``None`` (the trainer
+  decides whether to use it or replay — see ``algorithm.old_logp_source``).
 - ``resp.tracks['image'].decoded`` = :class:`Images` (``float32 [B, C, H, W]``
   in ``[0, 1]``) built from SGLang's per-result ``samples`` output, or ``None``
   if SGLang returned no decoded samples. Video samples surface as
@@ -186,7 +188,7 @@ def _build_image_segment(
     expected_sigmas: torch.Tensor,
     num_steps: int,
     sde_indices: Optional[List[int]],
-    use_native_logprob: bool,
+    emit_native_logprob: bool,
     model_family: str,
     height: Optional[int],
     width: Optional[int],
@@ -244,44 +246,43 @@ def _build_image_segment(
         else torch.arange(num_steps, dtype=torch.long)
     )
     sde_logp: Optional[torch.Tensor] = None
-    if use_native_logprob:
+    if emit_native_logprob:
         per_result_log_probs: List[Optional[torch.Tensor]] = [
             result.trajectory_log_probs.detach().cpu()
             if getattr(result, "trajectory_log_probs", None) is not None
             else None
             for result in results
         ]
-        missing = [i for i, lp in enumerate(per_result_log_probs) if lp is None]
-        if missing:
-            raise RuntimeError(
-                f"logprob_source='native' but SGLang did not return usable "
-                f"trajectory_log_probs for {len(missing)}/{len(results)} result(s) "
-                f"(first missing index={missing[0]}). Pin a SGLang build that emits "
-                f"trajectory_log_probs of shape [B, T] or switch logprob_source='replay'."
-            )
-        log_prob_tensor = torch.cat([lp for lp in per_result_log_probs if lp is not None], dim=0)
-        # trajectory_log_probs shape: [B, T] (one entry per SDE transition).
-        # When sde_indices is None (rollout SDE mode used full schedule), the
-        # second dim equals num_steps. When sde_indices is a subset, SGLang is
-        # supposed to emit log-probs at the requested transitions only — but
-        # some SGLang builds always emit the full schedule. Tolerate that case
-        # by selecting the requested columns; only fail on shapes that can't
-        # be reconciled either way.
-        s_dim = int(log_prob_tensor.shape[1])
-        expected_s = len(sde_indices) if sde_indices is not None else num_steps
-        if s_dim == num_steps and sde_indices is not None and expected_s < num_steps:
-            # Server emitted full schedule; slice down to the requested SDE indices.
-            keep_idx = torch.tensor(sorted(int(i) for i in sde_indices), dtype=torch.long)
-            log_prob_tensor = log_prob_tensor.index_select(1, keep_idx)
+        # Best-effort emit: if this build returned no per-step log-probs for any
+        # result, leave ``sde_logp = None`` and let the trainer decide — replay
+        # recomputes; native (``algorithm.old_logp_source='native'``) raises in
+        # ``prepare_segment`` with an actionable message. The engine stays silent:
+        # it can't know the intent, and for an intentional replay run a missing
+        # emission is expected, not a warning-worthy condition.
+        if all(lp is not None for lp in per_result_log_probs):
+            log_prob_tensor = torch.cat([lp for lp in per_result_log_probs if lp is not None], dim=0)
+            # trajectory_log_probs shape: [B, T] (one entry per SDE transition).
+            # When sde_indices is None (rollout SDE mode used full schedule), the
+            # second dim equals num_steps. When sde_indices is a subset, SGLang is
+            # supposed to emit log-probs at the requested transitions only — but
+            # some SGLang builds always emit the full schedule. Tolerate that case
+            # by selecting the requested columns; only fail on shapes that can't
+            # be reconciled either way.
             s_dim = int(log_prob_tensor.shape[1])
-        require(
-            s_dim == expected_s,
-            f"SGLang trajectory_log_probs shape {tuple(log_prob_tensor.shape)} second "
-            f"dim={s_dim} does not match expected SDE-step count {expected_s}. "
-            f"sigma_schedule / num_inference_steps / sde_indices drift — fix the "
-            f"source rather than fall back to replay silently.",
-        )
-        sde_logp = log_prob_tensor
+            expected_s = len(sde_indices) if sde_indices is not None else num_steps
+            if s_dim == num_steps and sde_indices is not None and expected_s < num_steps:
+                # Server emitted full schedule; slice down to the requested SDE indices.
+                keep_idx = torch.tensor(sorted(int(i) for i in sde_indices), dtype=torch.long)
+                log_prob_tensor = log_prob_tensor.index_select(1, keep_idx)
+                s_dim = int(log_prob_tensor.shape[1])
+            require(
+                s_dim == expected_s,
+                f"SGLang trajectory_log_probs shape {tuple(log_prob_tensor.shape)} second "
+                f"dim={s_dim} does not match expected SDE-step count {expected_s}. "
+                f"sigma_schedule / num_inference_steps / sde_indices drift — fix the "
+                f"source rather than emit a misaligned anchor.",
+            )
+            sde_logp = log_prob_tensor
 
     batch_size = int(trajectories_tensor.shape[0])
     return make_image_segment(
@@ -414,7 +415,7 @@ def _to_rollout_resp(
     cfg: SGLangEngineConfig,
     num_steps: int,
     sde_indices: Optional[List[int]],
-    use_native_logprob: bool,
+    emit_native_logprob: bool,
 ) -> RolloutResp:
     """Translate one SGLang batch result into the typed ``RolloutResp`` container."""
     require(bool(results), "_to_rollout_resp: SGLang returned no results")
@@ -437,7 +438,7 @@ def _to_rollout_resp(
         expected_sigmas=req.sigmas,
         num_steps=num_steps,
         sde_indices=sde_indices,
-        use_native_logprob=use_native_logprob,
+        emit_native_logprob=emit_native_logprob,
         model_family=str(cfg.model_family),
         height=req_height,
         width=req_width,

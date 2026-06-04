@@ -214,19 +214,18 @@ class StageAlgorithm(Remote, ABC):
     ) -> None:
         """Optional pre-step hook called once before the multi-update loop.
 
-        Default no-op. Algorithms whose log-prob source is rollout-native
-        (e.g. NFT, SFT, native-logprob GRPO) can ignore the hook entirely.
+        Default no-op. Algorithms with no π_old anchor to freeze (e.g. NFT, SFT)
+        can ignore the hook entirely.
 
-        Algorithms that need to lazily populate segment fields before
-        training override this. The canonical use case is
-        :class:`DiffusionGRPO` running in SGLang ``logprob_source='replay'``
-        mode: SGLang emits the trajectory but not the per-step log-probs,
-        so the trainer fills ``segment.sde_logp`` here via a ``torch.no_grad``
-        ``stage.replay``. Because this hook fires ONCE per ``RolloutResp``
-        — before the trainer's ``num_updates_per_batch`` train loop —
-        the populated tensor is frozen at pre-update weights across all
-        N updates, matching the on-policy ratio semantics of PPO-style
-        algorithms.
+        Algorithms that establish a frozen anchor override this. The canonical
+        use case is :class:`DiffusionGRPO` / :class:`DiffusionDPPO`, which here
+        set ``segment.sde_logp`` according to ``old_logp_source``: ``"native"``
+        keeps the rollout engine's best-effort emission (raising if it emitted
+        nothing); ``"replay"`` recomputes via a ``torch.no_grad``
+        ``stage.replay`` and overwrites it. Because this hook fires ONCE per
+        ``RolloutResp`` — before the trainer's ``num_updates_per_batch`` train
+        loop — the anchor is frozen at pre-update weights across all N updates,
+        matching the on-policy ratio semantics of PPO-style algorithms.
 
         Args:
             conditions: ``RolloutResp.tracks[slot].conditions`` — stage-typed conditions
