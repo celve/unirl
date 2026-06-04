@@ -30,6 +30,7 @@ def main(cfg: DictConfig) -> None:
         sampling_cfg=cfg.sampling,
         sync_cfg=cfg.get("sync"),
         logging_cfg=cfg.get("logging"),
+        enable_fsdp_offload=cfg.get("enable_fsdp_offload", False),
     )
     trainer.train(
         num_rollouts=int(cfg.get("num_rollouts", 100)),

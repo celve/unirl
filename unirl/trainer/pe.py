@@ -74,9 +74,15 @@ class PETrainer(BaseTrainer):
         sampling_cfg: DictConfig,
         sync_cfg: Optional[DictConfig] = None,
         logging_cfg: Optional[DictConfig] = None,
+        enable_fsdp_offload: bool = False,
     ) -> None:
         super().__init__(cfg=cfg, logging_cfg=logging_cfg)
         self.batch_size = batch_size
+        # Offload both tracks' FSDP train state to CPU during generate so the
+        # awake sglang engines have room; onload before the train backward.
+        # Never runs for trainside (it samples the live FSDP modules) — see train_step.
+        self._enable_fsdp_offload = bool(enable_fsdp_offload)
+        self._rollout_is_trainside = False
 
         # Driver-side data iterator (not a Remote).
         self.data_source = instantiate(data_source_cfg)
@@ -98,6 +104,8 @@ class PETrainer(BaseTrainer):
             # pipeline — trained weights reach the engine via the sync bridges.
             rollout_parsed = parse_hydra_cfg(rollout_cfg)
             takes_pipeline = "pipeline" in inspect.signature(rollout_parsed["role_cls"]).parameters
+            # Trainside samples the live FSDP modules → must not FSDP-offload.
+            self._rollout_is_trainside = bool(takes_pipeline)
             if takes_pipeline:
                 # Trainside: the composed PE pipeline shares both trained child
                 # pipelines in-process, so the rollout samples the live FSDP
@@ -176,8 +184,17 @@ class PETrainer(BaseTrainer):
         if sync_weights and self.diffusion_sync is not None:
             self.diffusion_sync.sync()
             self.ar_sync.sync()
+        # Free both tracks' train state during the separate-engine generate.
+        # Sync above reads the FSDP weights, so offload only after it.
+        do_fsdp_offload = self._enable_fsdp_offload and not self._rollout_is_trainside
+        if do_fsdp_offload:
+            self.diffusion.backend.offload()
+            self.ar.backend.offload()
         resp = self.rollout.generate(req)
         self.rollout.sleep()
+        if do_fsdp_offload:
+            self.diffusion.backend.onload()
+            self.ar.backend.onload()
 
         # 1. Score the IMAGE track only — the AR track's TextSegment is not
         #    directly scorable; its reward is credit-assigned below.
