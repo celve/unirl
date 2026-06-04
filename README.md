@@ -1,32 +1,96 @@
-# UniRL
+# Unified Reinforcement Learning Framework
 
-UniRL is a distributed reinforcement learning framework for unified multimodal
-generative models. It trains diffusion and autoregressive models with Ray-based
-worker groups, Hydra experiment recipes, composable training stacks, and
-pluggable rollout engines.
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/haonan3/UniRL?style=social)](https://github.com/haonan3/UniRL/stargazers)
+[![Documentation](https://img.shields.io/badge/docs-README-blue)](#getting-started)
+[![Open Issues](https://img.shields.io/github/issues/haonan3/UniRL)](https://github.com/haonan3/UniRL/issues)
 
-```text
-   prompts ──▶ rollout workers ──▶ rewards ──▶ advantages ──┐
-                  (sample x_T → x_0)                         │
-                                                             ▼
-                                                      train workers
-                                                      (FSDP stack +
-                                                       loss algorithm)
-                                                             │
-                                       weight sync ◀─────────┘
-                                       (dedicated rollout only)
+UniRL is a reinforcement learning framework for diffusion, autoregressive,
+prompt-enhancer, and unified models.
+
+[Getting Started](#getting-started) |
+[Examples](#examples) |
+[Algorithms](#algorithms) |
+[Pipeline](#pipeline) |
+[Development Checks](#development-checks) |
+[Contact Us](#contact-us) |
+[Acknowledgement](#acknowledgement)
+
+## News
+
+- **[2026-05]** **DRPO** released — *"Rethinking the Divergence Regularization in LLM Reinforcement Learning"* ([arXiv]()).
+- **[2026-05]** **FlowDPPO** released — *"Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models"* ([arXiv]()).
+
+## About
+
+UniRL follows the same high-level post-training pattern used by modern RL systems:
+generate samples, score them, compute advantages, update the policy, and optionally
+sync weights back to rollout workers. The framework applies that loop across
+multimodal model families instead of binding it to one model type or rollout
+backend.
+
+The core code is organized around typed model packages, Hydra example configs,
+Ray worker groups, FSDP train stacks, pluggable rollout engines, and reusable
+stage-level loss algorithms. Examples under `examples/` are the source of truth
+for each experiment.
+
+## Key Features
+
+- **Unified multimodal RL loop.** One trainer pattern covers diffusion, AR,
+  prompt-enhancer, and mixed AR + diffusion models.
+- **Flexible rollout engines.** Supports train-side sampling, SGLang, SGLang
+  LLM, vLLM-Omni, and composed rollout backends.
+- **Distributed by design.** Ray placement, FSDP workers, rollout pools,
+  offload/onload, and weight sync are first-class runtime pieces.
+- **Example-first experiments.** Hydra example configs define models, algorithms,
+  rollout, rewards, placement, sync, and batch geometry.
+- **Extensible model packages.** Model-specific bundles, pipelines,
+  conditions, AR/diffusion logic, and VAE code live behind shared contracts.
+
+## Supported Capabilities
+
+| Area | Example domain | Model dirs / current support |
+|---|---|---|
+| Image/video diffusion RL | `diffusion/` | `sd3/`, `qwen_image/`, `flux2_klein/`, `wan21/`, `wan22/`, `hunyuan_video/`, `hunyuan_video15/`; includes GRPO-style, FlowDPPO, NFT, DanceGRPO, and MixGRPO example configs where available. |
+| Vision-language AR RL | `vlm/` | `qwen_vl/`; Qwen-VL ARGRPO examples on Geo3K-style multiple-choice data, including SGLang and LoRA variants. |
+| Text-only AR RL | `llm/` | `qwen3/`; Qwen3 DRPO example coverage with SGLang rollout. |
+| Prompt-enhancer RL | `pe/` | `pe/`; train-side and SGLang prompt-enhancer examples with full/LoRA variants and PickScore/WISE reward choices. |
+| Mixed AR + diffusion RL | `unified_model/` | `hi3/`; HunyuanImage3 unified-model examples with vLLM-Omni rollout. |
+
+Select examples with `--config-name=<domain>/<model>/<example>` and launch
+them through the matching entrypoint (`train_diffusion`, `train_vlm`, `train_pe`,
+or `train_unified_model`). For example:
+
+```bash
+python -m unirl.train_diffusion --config-name=diffusion/sd3/sd3_trainside
 ```
 
-| Domain | Models | Algorithms |
+## Algorithms
+
+### Team-Proposed Algorithms
+
+This section highlights algorithms proposed by our team. You are recommended to try them in our framework!
+
+| Algorithm | Paper | Tutorial / example | Notes |
+|---|---|---|---|
+| FlowDPPO | *"Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models"* | `FlowDPPO/`, `examples/diffusion/sd3/sd3_flowdppo.yaml` | Diffusion/flow RL with an exact Gaussian-KL trust-region mask. |
+| DRPO | *"Rethinking the Divergence Regularization in LLM Reinforcement Learning"* | `DRPO/`, `examples/llm/qwen3/ar_drpo_qwen3_4b_base_dpao_sglang.yaml` | Token-level AR/LLM RL with a smooth Binary-TV quadratic regularizer. |
+
+### Public Algorithms
+
+Public/reference algorithms currently wired into UniRL examples and training code.
+
+| Algorithm | Coverage | Notes |
 |---|---|---|
-| Image | Stable Diffusion 3, Qwen-Image, HunyuanImage3 | GRPO, DanceGRPO, MixGRPO, Flow-DPPO, NFT |
-| Video | WAN 2.1 / 2.2 | GRPO, DanceGRPO, MixGRPO |
-| Autoregressive (VLM / LLM) | Qwen-VL, Qwen3 | GRPO, DRPO |
+| GRPO / ARGRPO | `examples/diffusion/`, `examples/vlm/`, `examples/pe/`, `examples/unified_model/`; `unirl/algorithms/{diffusion_grpo,ar_grpo}.py` | Group-relative PPO objective for diffusion and AR stages. |
+| NFT | `examples/diffusion/`; `unirl/algorithms/nft.py` | Forward-process diffusion fine-tuning. |
+| DanceGRPO | `examples/diffusion/`; `unirl/algorithms/diffusion_grpo.py`, `unirl/sde/kernels.py` | DiffusionGRPO with Dance SDE settings. |
+| MixGRPO | `examples/diffusion/`; `unirl/algorithms/diffusion_grpo.py`, `unirl/utils/scheduler_utils.py` | DiffusionGRPO with mixed/windowed timestep scheduling. |
 
-Additional model packages (e.g. FLUX.2-Klein, HunyuanVideo 1.5) live under
-`unirl/models/` without shipped recipes yet — see `unirl/models/README.md`.
+## Getting Started
 
-## Start Here
+### Install
 
 Install the core training, inference, and evaluation dependencies:
 
@@ -41,104 +105,91 @@ For development tools:
 pip install -e ".[train,infer,eval,dev]" --no-build-isolation
 ```
 
-Recipes read data, checkpoint, and W&B settings from the environment via
-`${oc.env:...}`. Pass absolute paths through launcher env vars such as
-`PRETRAINED_MODEL`, `DATA_PATH`, and `EVAL_DATA_PATH`, plus the W&B knobs
-(`REPORT_TO_WANDB`, `WANDB_PROJECT`, `WANDB_ENTITY`). Sample prompt lists are
-committed under `datasets/`.
+Examples read cluster-local paths, checkpoints, data, and W&B settings from
+environment variables through `${oc.env:...}`. Common variables include
+`PRETRAINED_MODEL`, `DATA_PATH`, `EVAL_DATA_PATH`, `REPORT_TO_WANDB`,
+`WANDB_PROJECT`, and `WANDB_ENTITY`. Small prompt lists are committed under
+`datasets/`.
 
-Run a single-node recipe — the first argument is a bucket-qualified recipe name
-from `recipes/`:
+### Quick Start
 
-```bash
-bash scripts/run_experiment_single_node.sh diffusion_rl/sd3_trainside
-```
-
-The diffusion entrypoint is the default; select another with `ENTRY`:
+Compose and resolve an example before launching a run:
 
 ```bash
-ENTRY=train_vlm bash scripts/run_experiment_single_node.sh vlm_rl/argrpo_qwen_vl_geo3k_mc_4x8
-ENTRY=train_pe  bash scripts/run_experiment_single_node.sh pe_rl/pe_trainside_pickscore
+python -m unirl.train_diffusion --config-name=diffusion/sd3/sd3_trainside --cfg job --resolve
 ```
 
-Run a multi-node recipe (taiji platform):
+Launch a single-node diffusion example:
 
 ```bash
-bash scripts/run_experiment_multinode_taiji.sh diffusion_rl/sd3_sglang_native_colocate
+bash scripts/run_experiment_single_node.sh diffusion/sd3/sd3_trainside
 ```
 
-Invoke an entrypoint directly:
+Select another domain entrypoint with `ENTRY`:
 
 ```bash
-python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside num_devices=8
+ENTRY=train_vlm bash scripts/run_experiment_single_node.sh vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8
+ENTRY=train_pe  bash scripts/run_experiment_single_node.sh pe/pe/pe_trainside_pickscore
 ```
 
-Compose and resolve a recipe without launching Ray work — checks that the
-config composes and every `${oc.env:...}` resolves (it does not instantiate
-`_target_`s, so it won't catch a bad target):
+Invoke an entrypoint directly when you do not need the shell launchers:
 
 ```bash
-python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside --cfg job --resolve
+python -m unirl.train_diffusion --config-name=diffusion/sd3/sd3_trainside num_devices=8
 ```
 
-## Documentation
+## Examples
 
-Module READMEs are the source of truth for code-adjacent contracts:
+Examples are self-contained YAML files selected with
+`--config-name=<domain>/<model>/<example>`:
 
-| Task | Read |
+| Domain | Example |
 |---|---|
-| Understand the code architecture and module boundaries | `unirl/README.md` |
-| Understand Hydra config groups and where knobs belong | `unirl/config/README.md` |
-| Work on rollout modes, rollout engines, or `RolloutReq` / `RolloutResp` flow | `unirl/rollout/README.md` |
-| Work on the train stack — FSDP backend, mini-batch loop, LoRA/NFT inject, EMA shadow | `unirl/train/readme.md` |
-| Add or debug GRPO / NFT / DPPO loss logic | `unirl/algorithms/README.md` |
-| Understand SDE step kernels, σ schedule, or initial noise | `unirl/sde/README.md` |
-| Add or debug reward components | `unirl/reward/README.md` |
-| Add or debug a trainer→rollout weight-sync backend | `unirl/distributed/weight_sync/README.md` |
-| Add or debug model code packages | `unirl/models/README.md` |
+| `diffusion/` | `diffusion/sd3/sd3_sglang_native_colocate` |
+| `vlm/` | `vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8` |
+| `llm/` | `llm/qwen3/ar_drpo_qwen3_4b_base_dpao_sglang` |
+| `pe/` | `pe/pe/pe_sglang_full_pickscore` |
+| `unified_model/` | `unified_model/hi3/hi3_vllmomni` |
 
-## Runtime Shape
+Every example starts with `# @package _global_`, so its keys compose at the Hydra
+config root. For layout responsibilities, naming conventions, and the process for
+adding an example, read `examples/README.md`.
 
-Each domain has its own entrypoint, all driven the same way:
+## Pipeline
 
-```bash
-python -m unirl.train_diffusion --config-name=diffusion_rl/<recipe>      # diffusion image/video
-python -m unirl.train_vlm       --config-name=vlm_rl/<recipe>            # autoregressive VLM (Qwen-VL)
-python -m unirl.train_vlm       --config-name=llm_rl/<recipe>            # autoregressive LLM (Qwen3)
-python -m unirl.train_pe        --config-name=pe_rl/<recipe>             # prompt-enhancer (PE)
-python -m unirl.train_unified_model       --config-name=unified_model_rl/<recipe>  # HunyuanImage3 (unified AR + diffusion)
+```text
+prompts
+  -> rollout workers
+       trainside | sglang | sglang_llm | vllm_omni | composed
+  -> rewards
+  -> advantages
+  -> train workers
+       model bundle + FSDP train stack + stage algorithm
+  -> optional weight sync
+       lora/full weights over nccl | tensor | ipc
 ```
 
-Recipes are self-contained YAML files under `recipes/<bucket>/` selected with
-`--config-name=<bucket>/<recipe>`. The five buckets are `diffusion_rl`, `vlm_rl`,
-`llm_rl`, `pe_rl`, and `unified_model_rl`; each recipe carries a `# @package
-_global_` header so its keys compose at the config root. At startup an entrypoint:
+At startup, an entrypoint composes the selected example, validates cross-component
+contracts, builds a domain trainer, acquires a Ray `DevicePool`, and constructs
+rollout and train workers. The trainer then runs the rollout -> reward ->
+advantage -> train -> optional weight-sync loop.
 
-1. loads the entrypoint's Hydra config and CLI overrides;
-2. composes the chosen `recipes/<bucket>/<recipe>.yaml`;
-3. validates cross-component contracts (e.g. weight-sync and LoRA targets);
-4. builds the trainer, which acquires a Ray `DevicePool` and constructs the
-   rollout and train workers;
-5. runs the rollout → reward → advantage → train → optional weight-sync loop.
+Deployment mode is controlled by the rollout engine and optional `sync:` section:
 
-Deployment modes — set by the rollout engine `_target_` and the optional `sync:`
-section:
+| Mode | Shape | Sync requirement |
+|---|---|---|
+| Train-side sampling | Train workers also sample | No `sync:` section |
+| Separate rollout | Rollout and training use different GPU pools | Required |
+| Colocated rollout | Rollout and training share GPU bundles with offload/onload | Required |
 
-| Mode | Meaning |
-|---|---|
-| Direct sampling | rollout uses the `trainside` engine; the train workers also sample, so no `sync:` section is allowed |
-| Separate | rollout and train workers use different GPU pools; a `sync:` variant is required |
-| Colocate | rollout and train workers share GPU bundles with explicit offload/onload and weight sync |
+## Development Checks
 
-Each `recipes/<bucket>/<recipe>.yaml` is the source of truth for model, algorithm, rollout
-engine, placement, reward, sync, and batch geometry. Launchers under `scripts/`
-stay thin and only prepare the runtime.
-
-## Common Checks
+Before submitting a change, run the checks
+that match the files you touched:
 
 ```bash
-# Compose one recipe and print the resolved config
-python -m unirl.train_diffusion --config-name=diffusion_rl/<recipe> --cfg job --resolve
+# Compose one changed or representative example and print the resolved config
+python -m unirl.train_diffusion --config-name=diffusion/sd3/sd3_trainside --cfg job --resolve
 
 # Python syntax check
 python -m compileall -q unirl
@@ -150,13 +201,16 @@ for f in scripts/*.sh; do bash -n "$f"; done
 pre-commit run --all-files
 ```
 
-## Citation
+## Contact Us
 
-```bibtex
-@misc{unirl_github,
-  title        = {UniRL: A Distributed RL Framework for Unified Multimodal Generative Models},
-  year         = {2025},
-  howpublished = {\url{https://github.com/haonan3/UniRL}},
-  note         = {GitHub repository},
-}
-```
+For questions, bug reports, and feature requests, please open an issue at
+[haonan3/UniRL](https://github.com/haonan3/UniRL/issues).
+
+## Acknowledgement
+
+UniRL builds on ideas and infrastructure from the open-source RL and inference
+ecosystem. We especially thank
+[vLLM](https://github.com/vllm-project/vllm),
+[SGLang](https://github.com/sgl-project/sglang),
+[slime](https://github.com/THUDM/slime), and
+[verl](https://github.com/volcengine/verl).

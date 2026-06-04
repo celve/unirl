@@ -6,9 +6,9 @@ owns the placement scope, sibling Remote wiring, and the ``train_step → train`
 loop; this module just maps the loaded Hydra config blocks to constructor
 kwargs.
 
-Pairs with ``recipes/unified_model_rl/hi3_vllmomni.yaml``::
+Pairs with ``examples/unified_model/hi3/hi3_vllmomni.yaml``::
 
-    python -m unirl.train_unified_model --config-name unified_model_rl/hi3_vllmomni
+    python -m unirl.train_unified_model --config-name unified_model/hi3/hi3_vllmomni
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from omegaconf import DictConfig
 from unirl.trainer.unified_model import UnifiedModelTrainer
 
 
-@hydra.main(version_base=None, config_path="../recipes", config_name="unified_model_rl/hi3_vllmomni")
+@hydra.main(version_base=None, config_path="../examples", config_name="unified_model/hi3/hi3_vllmomni")
 def main(cfg: DictConfig) -> None:
     trainer = UnifiedModelTrainer(
         cfg=cfg,

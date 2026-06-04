@@ -13,7 +13,7 @@ unirl.train_diffusion | train_vlm | train_pe | train_unified_model
 At a topological level:
 
 ```text
-        driver: unirl.train_{diffusion,vlm,pe,hi3} -> <Domain>Trainer
+        driver: unirl.train_{diffusion,vlm,pe,unified_model} -> <Domain>Trainer
                               │
             ┌─────────────────┴─────────────────┐
             ▼                                    ▼
@@ -52,7 +52,7 @@ orchestration, rollout engines, the train stack, and algorithm loss math.
 
 ## Runtime Data Flow
 
-1. An entrypoint composes the chosen `recipes/<bucket>/<recipe>.yaml` and runs validators.
+1. An entrypoint composes the chosen `examples/<domain>/<model>/<recipe>.yaml` and runs validators.
 2. The `<Domain>Trainer` (e.g. `trainer/diffusion.py`) acquires a Ray `DevicePool` and builds the rollout and train workers.
 3. The trainer builds a typed `RolloutReq` and dispatches it to the rollout engine.
 4. The engine returns a `RolloutResp`, whose `tracks[name]` carry conditions, segments, rewards, and media previews.

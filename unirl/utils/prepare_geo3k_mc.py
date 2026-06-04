@@ -28,7 +28,7 @@ Usage:
 
   QWEN_VL_PATH=Qwen/Qwen2.5-VL-7B-Instruct \
   DATA_PATH=data/geo3k_mc/train.jsonl EVAL_DATA_PATH=data/geo3k_mc/val.jsonl \
-  python -m unirl.train_vlm --config-name=vlm_rl/argrpo_qwen_vl_geo3k_mc_4x8 num_devices=32
+  python -m unirl.train_vlm --config-name=vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8 num_devices=32
 
 The HF id / split names below are sensible defaults; override with the flags if your
 source differs. The extractor is schema-tolerant (problem/question, ground_truth/answer).

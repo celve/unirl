@@ -21,13 +21,13 @@
 # set the explicit vars to run on any other cluster.
 #
 # The driver is one of the Hydra entrypoints, selected with ENTRY:
-#   train_diffusion (default)  recipes/diffusion_rl/ (sd3_*, wan2*, qwen_image_*)
-#   train_vlm                  recipes/vlm_rl/ (argrpo_qwen_vl_*) + recipes/llm_rl/ (ar_drpo_qwen3_*)
-#   train_pe                   recipes/pe_rl/ (prompt-enhancement joint diffusion+AR)
-#   train_unified_model                  recipes/unified_model_rl/ (HunyuanImage3, unified AR+diffusion)
+#   train_diffusion (default)  examples/diffusion/ (sd3_*, wan2*, qwen_image_*)
+#   train_vlm                  examples/vlm/ (argrpo_qwen_vl_*) + examples/llm/ (ar_drpo_qwen3_*)
+#   train_pe                   examples/pe/ (prompt-enhancement joint diffusion+AR)
+#   train_unified_model                  examples/unified_model/ (HunyuanImage3, unified AR+diffusion)
 #
-# The first positional arg is the recipes/ config name, bucket-qualified (passed to Hydra as
-# --config-name); any extra args are forwarded verbatim as Hydra overrides. The
+# The first positional arg is the examples/ config name, domain/model-qualified
+# (passed to Hydra as --config-name); any extra args are forwarded verbatim as Hydra overrides. The
 # launcher sets num_devices to the whole cluster (NUM_NODES * GPUS_PER_NODE) so a
 # conf authored for a different size still runs here (an explicit num_devices=...
 # wins). Run settings (PRETRAINED_MODEL / DATA_PATH / WANDB_*) come from the conf
@@ -35,11 +35,11 @@
 #
 # Examples:
 #   # SPMD batch (taiji lands this same line on every node):
-#   bash scripts/run_experiment_multinode_taiji.sh diffusion_rl/sd3_sglang_native_colocate
+#   bash scripts/run_experiment_multinode_taiji.sh diffusion/sd3/sd3_sglang_native_colocate
 #   # ssh fan-out (run once on the head only):
-#   LAUNCH=ssh bash scripts/run_experiment_multinode_taiji.sh diffusion_rl/sd3_sglang_native_colocate
+#   LAUNCH=ssh bash scripts/run_experiment_multinode_taiji.sh diffusion/sd3/sd3_sglang_native_colocate
 #   # VLM/AR recipe (4x8):
-#   ENTRY=train_vlm bash scripts/run_experiment_multinode_taiji.sh vlm_rl/argrpo_qwen_vl_geo3k_mc_4x8
+#   ENTRY=train_vlm bash scripts/run_experiment_multinode_taiji.sh vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8
 #
 set -euo pipefail
 

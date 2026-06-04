@@ -14,7 +14,7 @@ Usage:
   # → data/dapo_math/train.jsonl  (+ aime_eval.jsonl)
 
   DATA_PATH=data/dapo_math/train.jsonl EVAL_DATA_PATH=data/dapo_math/aime_eval.jsonl \
-  python -m unirl.train_vlm --config-name=llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang num_devices=64
+  python -m unirl.train_vlm --config-name=llm/qwen3/ar_drpo_qwen3_4b_base_dpao_sglang num_devices=64
 
 The HF ids below are sensible defaults; override with the flags if your source
 differs. The extractor handles the common verl RL schema (``prompt`` chat list +
