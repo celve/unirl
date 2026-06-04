@@ -228,11 +228,12 @@ class BaseTrainer:
 
         With ``num_updates_per_batch > 1`` the train stack attaches each optimizer
         step's own metrics on ``result.per_update`` (one Mapping per update, in
-        order). Emitting one ``log_step`` per update at its own ``_optimizer_step``
-        keeps ``train/step`` a real optimizer-step axis and keeps the on-policy
-        (``update0``) and off-policy (``update1``) ratios as distinct series —
-        never averaged into one misleading unprefixed ``ratio_mean``. A single
-        update logs the aggregate once, as before.
+        order). We emit one ``log_step`` per update at its own ``_optimizer_step``
+        with the metrics **unprefixed**, so each metric (e.g. ``train/ratio_mean``)
+        stays a single per-step series — truthful and never averaged across updates,
+        so it reads as a sawtooth (the on-policy step 1.0, the off-policy steps
+        drifting). One series regardless of ``num_updates_per_batch`` (no
+        ``update{i}/`` proliferation). A single update logs the aggregate once.
         """
         from unirl.utils.wandb_logger import aggregate_stage_results
 
@@ -240,9 +241,9 @@ class BaseTrainer:
         if wb is None:
             return
         if len(result.per_update) > 1:
-            for i, metrics in enumerate(result.per_update):
+            for metrics in result.per_update:
                 self._optimizer_step += 1
-                wb.log_step(self._optimizer_step, {f"update{i}/{key}": value for key, value in metrics.items()})
+                wb.log_step(self._optimizer_step, dict(metrics))
         elif result.has_backward:
             self._optimizer_step += 1
             wb.log_step(self._optimizer_step, dict(aggregate_stage_results([result])))
