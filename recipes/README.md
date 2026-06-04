@@ -31,7 +31,7 @@ python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_trainside
 # via the launchers — arg 1 is the bucketed recipe name; ENTRY picks a non-diffusion entrypoint
 bash scripts/run_experiment_single_node.sh diffusion_rl/sd3_trainside
 ENTRY=train_vlm bash scripts/run_experiment_single_node.sh vlm_rl/argrpo_qwen_vl_geo3k_mc_4x8
-bash scripts/run_experiment_multinode_taiji.sh diffusion_rl/sd3_sglang_native_colocate
+bash scripts/run_experiment_multinode.sh diffusion_rl/sd3_sglang_native_colocate
 ```
 
 Every recipe **must start with `# @package _global_`** on line 1. Recipes live in
