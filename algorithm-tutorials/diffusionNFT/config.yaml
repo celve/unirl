@@ -34,7 +34,9 @@ algorithm:
 
 # NFT does NOT run an SDE rollout for the loss: eta=0 and num_sde_steps=0. The
 # rollout (under EMA weights) only needs to produce the clean final latent x0 and
-# rewards/advantages; the loss re-noises x0 at each timestep t as
+# rewards/advantages. In the full recipe the advantage subtracts the per-prompt group
+# mean and divides by one batch-wide std (adv_use_global_std: true); the loss remaps that
+# advantage to r ∈ [0,1] and re-noises x0 at each timestep t as
 # xt = (1-t)·x0 + t·noise.
 sampling:
   _target_: unirl.types.sampling.DiffusionSamplingParams

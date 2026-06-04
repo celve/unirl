@@ -1,125 +1,168 @@
 # diffusionNFT — Negative-aware Fine-Tuning (forward-process diffusion RL)
 
-`DiffusionNFT` trains the policy **across the whole noise spectrum without running
-an SDE rollout for the loss**. Instead of replaying a trajectory, it re-noises the
-rollout's clean final latent at many timesteps and trains a *dual adapter* —
-a trainable adapter vs. an EMA-frozen "old" adapter — toward a reward-weighted blend
-of a **positive** and a **negative** prediction.
+`DiffusionNFT` is the forward-process alternative to GRPO-style diffusion RL. It still
+collects online samples and rewards, but the loss does **not** replay a reverse SDE
+trajectory and does **not** compute old/new likelihood ratios. It takes the rollout's
+clean final latent `x_0`, re-noises it on the forward process, and optimizes a
+reward-weighted **positive/negative** reconstruction objective with a dual adapter
+(trainable vs. EMA-frozen).
 
-- **Code:** [`unirl/algorithms/nft.py`](../../unirl/algorithms/nft.py)
-- **Recipe:** [`recipes/diffusion_rl/sd3_nft.yaml`](../../recipes/diffusion_rl/sd3_nft.yaml)
-- **Config extract:** [`config.yaml`](config.yaml)
+- **Loss:** [`unirl/algorithms/nft.py`](../../unirl/algorithms/nft.py)
+- **Recipe:** [`recipes/diffusion_rl/sd3_nft.yaml`](../../recipes/diffusion_rl/sd3_nft.yaml) · **Config extract:** [`config.yaml`](config.yaml)
+- **Paper:** *"DiffusionNFT: Online Diffusion Reinforcement with Forward Process"* — Zheng et al., [arXiv:2509.16117](https://arxiv.org/abs/2509.16117) (ICLR 2026 Oral).
 
-This is the most different tutorial. flowGRPO/flowDPPO ask "how likely was the
-sampled reverse SDE step under the new policy?" NFT asks "given the clean latent
-that the old policy produced, how should the model's forward-process denoising
-prediction move for good vs. bad samples?" There is no old/new log-prob ratio in
-the loss.
+This is the most different tutorial. flowGRPO/flowDPPO ask "how likely was the sampled
+reverse SDE step under the new policy?" NFT asks "given the clean latent the old policy
+produced, how should the model's *forward-process* denoising prediction move for good
+vs. bad samples?" There is no old/new log-prob ratio in the loss.
 
-## Intuition
+## What problem it solves
 
-GRPO/DPPO need a stochastic rollout so per-step log-probs exist. NFT sidesteps that:
-take the rollout's clean image latent `x_0`, re-noise it to `x_t` at a chosen
-timestep, and ask the model to denoise it. In this repo, the scalar used by the
-loss is not the raw reward; the rollout first computes a group-relative advantage
-`A`, then NFT clips and remaps that advantage to a weight `r ∈ [0,1]`. High-`r`
-samples are pulled toward a **positive** target (lean into the trainable adapter)
-and low-`r` samples toward a **negative** target (lean away). Sweeping many
-timesteps per micro-step updates the same clean sample across the rollout's noise
-schedule.
+Reverse-process RL needs tractable per-step transition probabilities, which forces the
+sampler onto an SDE path and requires storing/replaying a trajectory. DiffusionNFT
+avoids both: use online rewards to decide how a clean generated sample should influence
+training, then train with a supervised flow-matching objective on the *forward* noising
+process. The paper reports this is up to ~25× more sample-efficient than Flow-GRPO.
 
-Because the rollout only needs to produce a good `x_0`, NFT runs it under
-**EMA-smoothed weights** in this implementation. The algorithm class declares
-`requires_ema_rollout = True`, and the trainer swaps to the EMA/shadow adapter for
-sampling, then restores the trainable adapter for the loss. That is the codebase's
-off-policy variant of the DiffusionNFT paper's forward-process idea.
+| Paper claim | What it means here |
+|---|---|
+| No likelihood estimation | `DiffusionNFT` never reads `segment.sde_logp` and never forms a `ratio`. |
+| No reverse trajectory in the loss | The loss reads `segment.latents[:, -1]` as the clean `x_0`. |
+| Off-policy sampling | The rollout uses an EMA "old" policy; no importance-sampling correction. |
+| Forward-process consistency | Training builds `x_t` from `x_0` + fresh noise, then runs ordinary denoising prediction. |
 
-![DiffusionNFT overview: an off-policy rollout turns each sample's group-relative advantage into a weight r∈[0,1]; one clean latent x_0 is re-noised on the forward process and passed through a trainable "new" adapter and a frozen EMA "old" adapter that cross-merge into a positive and a negative reconstruction target, which a reward-weighted MSE is pulled toward (weight r) or away from (1−r) before minimizing over the trainable adapter; after the gradient step the old adapter EMA-tracks the new one, and a bottom inset contrasts this forward-process loss with GRPO/PPO's reverse-SDE per-step ratio.](assets/overview.png)
+The SD3 recipe sets `eta: 0.0` and `num_sde_steps: 0` on purpose: the rollout exists to
+produce clean images and rewards, not trainable SDE log-probs.
 
-The figure reads as three calm regions — a **flow strip** (off-policy EMA rollout → group advantage → weight `r ∈ [0,1]` → re-noise `x_0` to `x_t`), the **dual-adapter** centerpiece (the trainable `new` and frozen `old` adapters cross-merge into a **positive** target at weight `r` and a **negative** target at weight `1−r`, whose reward-weighted reconstruction MSE is **minimized over `new`**, after which `old` EMA-tracks it and the loop repeats), and a bottom **`vs GRPO / PPO`** inset contrasting NFT's forward-process loss with the reverse-SDE, per-step-ratio losses of GRPO/PPO. Each stage maps to [`unirl/algorithms/nft.py`](../../unirl/algorithms/nft.py) and the knobs in [`config.yaml`](config.yaml); the loss is derived in **The math** below.
+![DiffusionNFT overview: an off-policy EMA rollout turns each sample's group-relative advantage into a weight r in [0,1]; one clean latent x_0 is re-noised on the forward process and passed through a trainable new adapter and a frozen EMA old adapter that cross-merge into a positive and a negative reconstruction target, which a reward-weighted MSE is pulled toward (weight r) or away from (1-r) before minimizing over the trainable adapter; after the gradient step the old adapter EMA-tracks the new one, and a bottom inset contrasts this forward-process loss with GRPO/PPO's reverse-SDE per-step ratio.](assets/overview.png)
 
 ## The math
 
-Advantage → weight (advantages clipped to `±c = adv_clip_max`, linearly remapped):
+**The paper** converts a reward into an optimality probability `r ∈ [0,1]`, defines
+implicit positive/negative velocity predictors (β = `beta`), and minimizes a
+reward-weighted flow-matching loss:
 
-$$ r = \mathrm{clip}\!\Big(\tfrac{\mathrm{clip}(A,-c,c)}{2c} + \tfrac12,\ 0,\ 1\Big) $$
+$$ v_\theta^{+} = (1-\beta)\,v_\text{old} + \beta\,v_\theta, \qquad v_\theta^{-} = (1+\beta)\,v_\text{old} - \beta\,v_\theta $$
 
-For each of `K` timesteps `t`, with `x_t = (1-t)\,x_0 + t\,\varepsilon`, blend the
-trainable prediction `new` and the EMA prediction `old` (β = `beta`):
+$$ \mathcal{L} = \mathbb{E}_{c,x_0,t,\varepsilon}\Big[\, r\,\lVert v_\theta^{+} - v\rVert^2 + (1-r)\,\lVert v_\theta^{-} - v\rVert^2 \,\Big] $$
 
-$$ \text{pos} = \beta\,\text{new} + (1-\beta)\,\text{old}, \qquad \text{neg} = (1+\beta)\,\text{old} - \beta\,\text{new} $$
+with `x_t = α_t x_0 + σ_t ε` and `v` the flow-matching target; the old policy is updated
+softly by EMA.
 
-reconstruct `x̂_0 = x_t - t·pred` from each, and weight the two reconstruction MSEs
-by `r`:
-
-$$ \mathcal{L} = \mathbb{E}\Big[\, \tfrac{r}{\beta}\lVert \hat x_0^{+} - x_0\rVert^2 + \tfrac{1-r}{\beta}\lVert \hat x_0^{-} - x_0\rVert^2 \,\Big]\cdot c $$
-
-In code (`unirl/algorithms/nft.py` · `_compute_loss_at_t`; `c = adv_clip_max`,
-`mse` = per-sample mean over latent dims, casts elided):
+**The repo** implements the same positive/negative idea in SD3's rectified-flow `x_0`
+**reconstruction** space — using the velocity identity `x̂_0 = x_t − t·pred` (since
+`v = ε − x_0` gives `x_t − t·v = x_0`):
 
 ```python
-positive = beta * new_pred + (1 - beta) * old_pred    # β=1 → new_pred
-negative = (1 + beta) * old_pred - beta * new_pred     # β=1 → 2·old_pred − new_pred
-x0_pos = xt - t * positive                             # reconstruct x̂₀ from each branch
-x0_neg = xt - t * negative
-loss = (r * mse(x0_pos, x0) / beta + (1 - r) * mse(x0_neg, x0) / beta).mean() * c
+x0 = segment.latents[:, -1]
+xt = (1.0 - t) * x0 + t * noise
+
+new_pred = stage.predict_noise_at_step(...)          # trainable adapter
+with torch.no_grad(), nft_lora_policy.use_shadow():
+    old_pred = stage.predict_noise_at_step(...)      # EMA / shadow adapter
+
+positive_pred = beta * new_pred + (1.0 - beta) * old_pred
+negative_pred = (1.0 + beta) * old_pred - beta * new_pred
+x0_pos = xt - t * positive_pred
+x0_neg = xt - t * negative_pred
+loss = (r * mse(x0_pos, x0) / beta + (1.0 - r) * mse(x0_neg, x0) / beta).mean() * adv_clip_max
 ```
 
-With `use_adaptive_weight`, each per-sample MSE is divided by its mean-abs-error so
-noise levels contribute on a comparable scale. The `K` timesteps come from the
-rollout's own σ schedule (`train_timestep_mode: all`, terminal `t=0` dropped); each
-contributes one backward scaled by `1/K`.
+With the shipped `beta: 1.0` the branches read cleanly:
 
-```mermaid
-flowchart LR
-    x0(["x_0<br/>one clean latent"]) -->|"re-noise → t1"| a["x_{t1}"]:::n
-    x0 -->|"t2"| b["x_{t2}"]:::n
-    x0 -->|"tK"| c["x_{tK}"]:::n
-    a --> L["dual-adapter loss at each t<br/>backward ×1/K"]
-    b --> L
-    c --> L
-    classDef n fill:#e8f0ff,stroke:#3b73c4,color:#000;
-```
+| Branch | At `β = 1` | Interpretation |
+|---|---|---|
+| Positive | `positive_pred = new_pred` | high-`r` samples pull the trainable adapter toward reconstructing `x_0` |
+| Negative | `negative_pred = 2·old_pred − new_pred` | low-`r` samples train through a mirrored branch around the EMA adapter |
 
-No trajectory replay: the rollout's single clean `x_0` is re-noised to each of the
-`K` noise levels in its own σ schedule, and every level runs one dual-adapter
-forward/backward scaled by `1/K` — so one micro-step trains the sample across the
-whole noise spectrum.
+With `use_adaptive_weight: true`, each per-sample MSE is divided by a stop-gradient
+mean-abs-error, keeping different noise levels on a comparable scale (matches the paper's
+adaptive weighting).
 
-The positive/negative names are easiest to read at `beta = 1.0`, the shipped
-default: `pos = new`, while `neg = 2*old - new`. A high-advantage sample mostly
-trains the current adapter to reconstruct `x_0`; a low-advantage sample mostly
-trains against the mirrored negative branch.
+### Reward → `r`
 
-## Code map
+The full recipe sets `adv_use_global_std: true`, so the scalar the loss uses is a
+**bounded optimality weight derived from the normalized advantage**, not the raw reward:
 
-| Step | Where |
+1. Subtract each prompt group's mean reward; divide by one batch-wide std →
+   `track.advantages`.
+2. In `compute_loss_and_backward`, clip the advantage to `[−c, c]` (`c = adv_clip_max`)
+   and remap:
+
+$$ r = \mathrm{clip}\!\Big(\tfrac{A}{2c} + \tfrac12,\ 0,\ 1\Big) $$
+
+## Math → code map
+
+| Math object | Repo object |
 |---|---|
-| Advantage → `r ∈ [0,1]` | `DiffusionNFT.compute_loss_and_backward` (clamp + linear remap) |
-| Resolve the `K` timesteps | `DiffusionNFT._resolve_timesteps` (`all` ⇒ from `segment.sigmas`) |
-| Re-noise, dual forward, blend, reconstruct, MSE | `DiffusionNFT._compute_loss_at_t` |
-| Trainable vs. EMA "old" prediction | `stage.predict_noise_at_step(...)` + `nft_lora_policy.use_shadow()` |
-| EMA handle wiring | resolved off `backend.ema` by the trainer (see `__init__`) |
+| Clean sample `x_0` | `segment.latents[:, -1]` |
+| Forward noising `x_t` | `xt = (1 − t) * x0 + t * noise` in `_compute_loss_at_t` |
+| Training policy `v_θ` | `new_pred` from `stage.predict_noise_at_step` |
+| Old/data-collection policy `v_old` | `old_pred` under `nft_lora_policy.use_shadow()` |
+| Positive predictor `v_θ⁺` | `positive_pred = β·new + (1−β)·old` |
+| Negative predictor `v_θ⁻` | `negative_pred = (1+β)·old − β·new` |
+| Reconstruction `x̂_0` | `xt - t * pred` |
+| Optimality weight `r` | clipped/remapped `track.advantages` |
+| Adaptive loss weighting | `use_adaptive_weight` block in `_compute_loss_at_t` |
+| Soft old-policy update | `backend.ema`, advanced at the rollout boundary (`TrainStack.on_rollout_end`) |
+
+## From rollout to update
+
+1. The recipe installs `backend.ema_lora_cfg`, creating a trainable adapter and an EMA
+   "old" adapter.
+2. `DiffusionNFT.requires_ema_rollout = True`: the trainer applies the EMA adapter for
+   rollout (`backend.apply_eval_ema()`), then restores the trainable one
+   (`restore_from_eval()`) before the loss.
+3. Rollout uses `eta: 0.0`, `num_sde_steps: 0`, so no SDE log-probs are stored — the
+   `LatentSegment` carries the dense latent path and the σ schedule.
+4. Reward scoring + advantage computation run as in the other diffusion recipes.
+5. `TrainStack.train_track` calls `DiffusionNFT.compute_loss_and_backward`, which reads
+   `x_0 = segment.latents[:, -1]`, resolves the `K` timesteps from `segment.sigmas`, and
+   loops them — each constructs fresh `x_t`, predicts with both adapters, computes the
+   positive/negative loss, and backprops with scale `loss_scale / K`.
+6. After the optimizer step, `TrainStack.on_rollout_end` advances `backend.ema` so the
+   old adapter tracks the trainable one.
+
+## Timestep selection
+
+```
+                       ┌── re-noise → x_{t1} ──┐
+clean latent x_0  ─────┼── re-noise → x_{t2} ──┼──→ dual-adapter loss at each t,  backward × 1/K
+  (segment.latents)    │          ⋮            │
+                       └── re-noise → x_{tK} ──┘
+```
+
+With `train_timestep_mode: all`, `_resolve_timesteps` reads `segment.sigmas`, drops
+terminal `t = 0` (it collapses `x_t → x_0` and gives no signal), applies
+`training_timestep_fraction`, optionally shuffles, and trains every remaining scalar
+timestep — so one micro-step updates one clean latent across the whole noise spectrum.
+`train_timestep_mode: random` instead draws fresh uniforms.
 
 ## Key knobs ([`config.yaml`](config.yaml))
 
 | Knob | Meaning |
 |---|---|
-| `beta` | Dual-blend coefficient. `1.0` ⇒ positive = new, negative = `2·old − new`. |
-| `adv_clip_max` | Clip range `c` for the advantage→`r` remap (and the gradient-scale restore). |
-| `use_adaptive_weight` | Normalize each MSE by its mean-abs-error (matches the original NFT recipe). |
-| `train_timestep_mode` | `all` (rollout's σ schedule) or `random` (fresh uniforms per micro-step). |
-| `training_timestep_fraction` | Fraction of the schedule kept after dropping terminal `t=0`. |
-| `sampling.eta` / `num_sde_steps` | Both `0` — NFT does **not** record an SDE trajectory. |
-| `kl_coef` | KL-to-base penalty — not implemented; any `> 0` fails fast. |
+| `beta` | Positive/negative blend. `1.0` ⇒ `positive = new`, `negative = 2·old − new`. |
+| `adv_clip_max` | Clip range `c` for the advantage→`r` remap (multiplied back into the loss to preserve scale). |
+| `use_adaptive_weight` | Divide each MSE by a stop-gradient mean-abs-error per sample. |
+| `train_timestep_mode` | `all` (rollout's σ schedule) or `random` (fresh uniforms). |
+| `training_timestep_fraction` | Fraction of resolved timesteps kept after dropping terminal `t=0`. |
+| `sampling.eta` / `num_sde_steps` | Both `0` — NFT records no SDE trajectory. |
+| `kl_coef` | KL-to-base penalty — not implemented; any `> 0` raises. |
 
-## Common pitfalls
+## Debug checklist
 
-- NFT still uses online rewards, but the loss itself is not a policy-gradient
-  likelihood-ratio loss.
-- `eta: 0.0` is intentional here. Turning on SDE log-probs does not make NFT more
-  correct; it just changes the rollout path away from this recipe.
-- The `r` in the loss is a clipped/remapped advantage, not the raw PickScore value.
+| Symptom | First files / variables to check |
+|---|---|
+| Constructor error about `use_shadow` | `backend.ema_lora_cfg`, `backend.ema`, `nft_lora_policy` injection |
+| `segment.latents` missing | rollout must return the clean latent path; `LatentSegment.latents` |
+| No timesteps resolved (`K = 0`) | `segment.sigmas`, `train_timestep_mode`, `training_timestep_fraction` |
+| `r_mean` stuck near 0.5 | rewards may be uninformative — `track.rewards`, `track.advantages`, `adv_use_global_std` |
+| `prediction_deviation` blows up | trainable adapter drifting from EMA — EMA decay under `ema_lora_cfg`, LR |
+| Rollout quality regresses abruptly | EMA decay + rollout-end update timing (`on_rollout_end`) |
+
+Metric source: `r_mean`, `pos_loss_mean`, `neg_loss_mean`, `prediction_deviation`,
+`num_timesteps`, `t_value` are emitted by `_compute_loss_at_t`.
 
 ## Run it
 
@@ -128,16 +171,20 @@ PRETRAINED_MODEL=stabilityai/stable-diffusion-3.5-medium \
 python -m unirl.train_diffusion --config-name=diffusion_rl/sd3_nft num_devices=8
 ```
 
-NFT requires the backend's EMA ("dual adapter"); the recipe wires it automatically.
+NFT requires the backend EMA/shadow adapter; the recipe wires it through
+`backend.ema_lora_cfg` (the constructor raises if the EMA handle lacks `use_shadow`, so
+a mis-wired recipe fails loud rather than silently skipping EMA).
 
 ![diffusionNFT training curve: rollout/reward_mean for SD3.5-medium rises from ~0.76 to ~0.91 over ~270 rollout steps.](assets/wandb.png)
 
-A healthy run climbs `rollout/reward_mean` quickly and then keeps inching up — here SD3.5-medium goes from ~0.76 to ~0.91 over ~270 steps.
+A healthy run climbs `rollout/reward_mean` quickly and then keeps inching up — here
+SD3.5-medium goes from ~0.76 to ~0.91 over ~270 steps.
 
 ## vs. the other tutorials
 
-- **[flowGRPO](../flowGRPO/)** / **[flowDPPO](../flowDPPO/)** are on-policy and need
-  the SDE rollout's per-step log-probs; NFT is off-policy and trains the forward
-  process directly, so it has no ratio and no trajectory replay.
-
-<!-- Figures: drop PNG/SVG into ./assets/ and reference e.g. ![](assets/nft_dual_adapter.png) -->
+- **[flowGRPO](../flowGRPO/)** / **[flowDPPO](../flowDPPO/)** optimize the probability of
+  sampled reverse SDE transitions and need `segment.sde_logp` (DPPO also `sde_means`);
+  NFT ignores both and optimizes a forward-process reconstruction loss.
+- NFT is naturally off-policy (the loss is supervised-style with an EMA old adapter),
+  whereas GRPO/DPPO need old log-probs frozen against the same sampled trajectory.
+- **[DRPO](../DRPO/)** is the LLM track and unrelated to NFT's forward-process idea.

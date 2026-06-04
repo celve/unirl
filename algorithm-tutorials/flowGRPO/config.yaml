@@ -22,9 +22,10 @@ algorithm:
   params: ${sampling}            # GRPO replays with the SAME guidance_scale/eta the
                                  # rollout sampled with — so bind to the sampling block.
 
-# The sampling block defines the SDE rollout GRPO trains against. The advantage is
-# group-normalized per prompt; the loss is a PPO clip on the per-step SDE log-prob
-# ratio at the SDE-gated steps.
+# The sampling block defines the SDE rollout GRPO trains against. In the full recipe the
+# advantage subtracts each prompt group's mean reward and divides by ONE batch-wide std
+# (adv_use_global_std: true); the loss is a PPO clip on the per-step SDE log-prob ratio at
+# the SDE-gated steps.
 sampling:
   _target_: unirl.types.sampling.DiffusionSamplingParams
   num_inference_steps: 10
@@ -44,3 +45,5 @@ sampling:
 
 # Trust region is also shaped by the train stack (from the full recipe):
 #   stack.num_updates_per_batch: 2   # π_old frozen once, then 2 PPO mini-epochs
+# Advantage scale (from the full recipe):
+#   adv_use_global_std: true         # per-prompt group mean − one batch-wide std

@@ -1,164 +1,181 @@
-# DRPO — Divergence Regularized Policy Optimization
+# DRPO — Divergence-regularized token-level RL
 
-`ARDRPO` is the repo's **autoregressive (token-level)** RL algorithm. Instead of
-PPO/GRPO's ratio-clip trust region, it enforces a **divergence-based hard mask** on
-each sampled token: replay the trajectory, measure the sampled token's probability
-shift between the new and old policy, and **zero** the update when that shift crosses
-a threshold `δ` *in the reward-improving direction*. The kept tokens train with a
-REINFORCE objective corrected by a **truncated importance ratio** (TIS). It is the
-LLM analogue of [flowDPPO](../flowDPPO/) — divergence mask instead of ratio clip —
-but on discrete tokens rather than a continuous SDE trajectory.
+`ARDRPO` is the repo's **autoregressive (token-level)** RL algorithm for Qwen3-style
+token rollouts. It replays the sampled tokens, compares train-side log-probs against
+the rollout log-probs, expands sample-level advantages to tokens, and applies one of
+three implemented losses. It is the LLM analogue of [flowDPPO](../flowDPPO/) — divergence
+control instead of ratio clipping — on discrete tokens rather than a continuous SDE step.
 
-- **Code:** [`unirl/algorithms/drpo.py`](../../unirl/algorithms/drpo.py) (`ARDRPO`; loss helpers `_ar_drpo_tv_loss` / `_ar_drpo_kl_loss` / `_ar_pg_tv_penalty_loss`)
+- **Loss:** [`unirl/algorithms/drpo.py`](../../unirl/algorithms/drpo.py) (`ARDRPO`; `_ar_drpo_tv_loss`, `_ar_drpo_kl_loss`, `_ar_pg_tv_penalty_loss`)
 - **Recipe (SGLang):** [`recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml`](../../recipes/llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang.yaml) — Qwen3-4B-Base on DAPO-Math
 - **Config extract:** [`config.yaml`](config.yaml)
+- **Paper:** *"Rethinking the Divergence Regularization in LLM RL."* Related: DPPO — [arXiv:2602.04879](https://arxiv.org/abs/2602.04879).
 
-> **⚠️ Variants — read this first.** `ARDRPO` offers three losses via `variant`:
-> - **`tv`** / **`kl`** — the **DPPO hard mask**: zero the gradient when the sampled
->   token's divergence (`|π−µ|` for TV, Binary-KL for KL) crosses `δ` in the
->   reward-improving direction, with Truncated Importance Sampling on the kept tokens.
->   This is the *baseline* the sections below derive in detail.
-> - **`pg_tv_penalty`** — the reference `run_qwen3_4b.sh` loss: a **soft TV penalty**,
->   `L_t = -A_t·logp_t + penalty_coef·|ratio_t − 1|` (plain REINFORCE + a continuous
->   penalty pulling the ratio toward 1; no mask, no IS weight). **This is what the
->   reproduction recipe uses.**
->
-> The bundled paper *"Rethinking the Divergence Regularization in LLM RL"* proposes
-> **DRPO**, whose exact form is a smooth gradient *weight*
-> `w_t = 1 − sign(Â_t(r_t−1))·|π−µ|/δ`. `pg_tv_penalty` is the reference run's
-> penalty-form loss in the same TV spirit (smooth, no hard cutoff); the tv/kl variants
-> are the DPPO hard-mask baseline. Lineage: **PPO → GRPO → SPO → DPPO → DRPO**.
+## Read this first: paper DRPO vs repo variants
 
-## Intuition
+The DRPO paper proposes a *smooth* Binary-TV regularizer. The `ARDRPO` class
+hosts three variants — the class name is historical and broad, covering DRPO-family and
+DPPO-family token trust regions:
 
-LLM RL is almost always **off-policy**: the rollout engine (SGLang) and the training
-engine differ numerically, and one batch of rollouts is split into multiple gradient
-steps. So the policy being updated `π` is not exactly the behavior policy `µ` that
-generated the tokens — you need a trust region.
+| `variant` | What it implements | Shipped recipe? |
+|---|---|---|
+| `pg_tv_penalty` | Plain REINFORCE + a soft ratio-distance penalty: `−A·logp + penalty_coef·\|ratio−1\|` | **Yes** |
+| `tv` | DPPO-style Binary-TV hard mask + truncated importance sampling | No |
+| `kl` | DPPO-style Binary-KL hard mask + truncated importance sampling | No |
 
-PPO/GRPO build that trust region from the **importance ratio** `r = π/µ`. But for LLMs
-the ratio is a poor proxy for *distributional* shift: over a long-tailed vocabulary a
-tiny probability change on a rare token produces a huge ratio, while a large mass move
-on a common token produces only a modest ratio. A fixed ratio window therefore
-over-constrains rare tokens and under-constrains common ones.
+The canonical Qwen3 recipe uses `pg_tv_penalty`. It does **not** run the exact paper-DRPO
+quadratic objective, and it does **not** use the `tv`/`kl` hard masks. Lineage:
+**PPO → GRPO → SPO → DPPO → DRPO**.
 
-DPPO fixes the **geometry**: it measures the sampled token's **absolute probability
-shift** `|π−µ|` (the "Binary-TV" surrogate) and applies a **hard mask** — drop the
-gradient only when the shift exceeds `δ` *and* the update is pushing the policy
-further in the direction the advantage wants. `ARDRPO` implements exactly this,
-plus **Truncated Importance Sampling** (clamp `r` to `clip_ratio_c`, detached) so a
-runaway ratio on a rare token can't blow up the gradient.
+## Why divergence instead of PPO ratio clipping
 
-![drpo overview: the prompt → SGLang rollout (behavior policy µ) → group advantage Â → replay for new logp π → ratio r and TV shift |π−µ| → reweighted REINFORCE pipeline (single update), with the centerpiece contrast between DPPO's hard-mask step (full gradient, then a cliff to 0 at the threshold δ) and the paper's smooth, bounded DRPO weight that ramps down and crosses zero into a corrective region past δ.](assets/overview.png)
+LLM RL is almost always off-policy: the rollout engine (SGLang) and the training engine
+differ numerically, and one batch of rollouts is split into gradient steps, so the updated
+policy `π` is not the behavior policy `µ` that sampled the tokens. PPO/GRPO build the trust
+region from the ratio `r_t = π/µ`, but for a long-tailed vocabulary that is a poor proxy
+for distributional shift: a rare token gives a huge ratio after a tiny probability change,
+while a common token moves a lot of mass at a modest ratio. DPPO instead measures the
+sampled token's **absolute probability shift** `|π−µ|` (the "Binary-TV" surrogate).
 
-The figure's top strip is the pipeline this folder runs (`ARDRPO.compute_loss_and_backward`): a **prompt** is rolled out by the behavior policy `µ` (SGLang), scored into a per-prompt **group advantage** `Â`, then the trainable policy is **replayed at the sampling temperature** for new log-probs `π` — yielding the ratio `r` and the **Binary-TV shift** `|π−µ|` that drive the reweighted REINFORCE loss, looped once per batch (single update). Its centerpiece is the load-bearing distinction the **⚠️ Variants** box above sets up: the **`tv`/`kl` hard mask** (full gradient, then a cliff to `0` at `δ`) versus the paper's **smooth DRPO weight** (the formula in [The math](#the-math) — attenuating to `0` at `δ` and *reversing* into a corrective signal beyond it); the shipped reproduction recipe instead runs the `pg_tv_penalty` soft-penalty form in that same TV spirit.
+The reward here is **rule-based**: `MathBoxedRewardScorer`
+([`unirl/reward/local/math_boxed.py`](../../unirl/reward/local/math_boxed.py)) checks the
+`\boxed{}` answer against the DAPO-Math ground truth — exactly the verifiable reward the
+paper trains on, not a learned reward model.
 
-## The math
+![drpo overview: the prompt to SGLang rollout (behavior policy mu) to group advantage to replay for new logp pi to ratio r and TV shift |pi - mu| to reweighted REINFORCE pipeline (single update), with the centerpiece contrast between DPPO's hard-mask step (full gradient, then a cliff to 0 at the threshold delta) and the paper's smooth, bounded DRPO weight that ramps down and crosses zero into a corrective region past delta.](assets/overview.png)
 
-Per sampled token `y_t` with state `s_t`, ratio and (signed) Binary-TV shift:
+## Paper DRPO objective
 
-$$ r_t = \exp(\log\pi_\theta - \log\pi_{\theta_\text{old}}) = \frac{\pi(y_t|s_t)}{\mu(y_t|s_t)}, \qquad \Delta_t = \pi(y_t|s_t) - \mu(y_t|s_t) $$
+For each sampled token, the ratio and signed Binary-TV shift are:
 
-The trust region is an **asymmetric, advantage-aware hard mask** — keep the token
-unless it is moving the sampled probability too far in the direction the advantage
-pushes:
+$$ r_t = \frac{\pi_\theta(y_t|s_t)}{\mu(y_t|s_t)} = \exp(\log\pi_\theta - \log\mu), \qquad \Delta_t = \pi_\theta(y_t|s_t) - \mu(y_t|s_t) $$
 
-$$ m_t = \begin{cases} \mathbb{1}[\,\Delta_t \le \delta_\text{high}\,] & \hat A_t > 0 \quad(\text{push }\pi\uparrow)\\[2pt] \mathbb{1}[\,\Delta_t \ge -\delta_\text{low}\,] & \hat A_t \le 0 \quad(\text{push }\pi\downarrow) \end{cases} $$
+The paper keeps DPPO's Binary-TV trust region but replaces the hard mask with a smooth
+quadratic regularizer (its Eq. 8):
 
-With the truncated ratio `r̄_t = min(r_t, C)` (detached, TIS), the loss is a
-**masked REINFORCE** term:
+$$ L_\text{DRPO}(x,\pi) = \mathbb{E}_{y\sim\mu}\!\left[\sum_t r_t \hat A_t - \frac{|\hat A_t|}{2\delta}\,\mu(y_t|s_t)\,(r_t - 1)^2\right] $$
 
-$$ \mathcal{L} = -\,\mathbb{E}\big[\, \hat A_t \cdot \bar r_t \cdot \log\pi_\theta(y_t|s_t) \cdot m_t \,\big] $$
+whose gradient induces a continuous, **bounded** per-token weight (its Table 1):
 
-Because `r̄_t` is detached, the gradient flows only through `log π_θ`, giving
-`−Â_t·r̄_t·∇logπ` — the *same* policy gradient as differentiating PPO's surrogate
-`r_t·Â_t` (since `∇(r·Â)=Â·r·∇logπ`), but the TIS clamp caps the importance weight
-without bending the gradient direction.
+$$ w_t = 1 - \mathrm{sign}\big(\hat A_t (r_t - 1)\big)\,\frac{|\pi_\theta(y_t|s_t) - \mu(y_t|s_t)|}{\delta} \;\in\; \Big[1 - \tfrac1\delta,\; 1 + \tfrac1\delta\Big] $$
 
-The core is literally these lines (`unirl/algorithms/drpo.py` · `_ar_drpo_tv_loss`;
-log-clamp/metrics elided — the Code map below is the source of truth):
+For diverging updates the weight decays to 0 at the Binary-TV boundary and becomes
+*corrective* beyond it; for converging updates it increases. **This exact smooth-weight
+form is not wired as a variant in `drpo.py` today** — the sections below are what the code
+actually runs.
+
+## Repo variant: `pg_tv_penalty` (what the recipe runs)
+
+Instead of the hard mask, add a smooth TV penalty to plain REINFORCE (no mask, no
+importance weight). Its helper `_ar_pg_tv_penalty_loss`:
 
 ```python
-ratio = torch.exp(new_logp - old_logp)                    # r = π/µ
-trunc = torch.clamp(ratio, max=clip_ratio_c).detach()     # TIS — no grad through ratio
-prob_delta = torch.exp(new_logp) - torch.exp(old_logp)    # π − µ  (signed Binary-TV)
-valid = torch.where(adv > 0, prob_delta <= div_high,      # adv>0: block big prob ↑
-                             prob_delta >= -div_low)        # adv<0: block big prob ↓
-loss = (-adv * trunc * new_logp * valid.float()).mean()   # masked REINFORCE + TIS
+log_diff = torch.clamp(new_logp - old_logp, min=-20.0, max=20.0)
+ratio = torch.exp(log_diff)
+tv_penalty = penalty_coef * torch.abs(ratio - 1.0)
+pg_losses = -adv * new_logp + tv_penalty          # L_t = −A·logp + ε·|r−1|
 ```
 
-```mermaid
-flowchart TD
-    T["sampled token y_t<br/>shift π−µ, advantage Â"] --> Q{"Â > 0?"}
-    Q -- "yes · push π↑" --> H{"π−µ ≤ δ_high?"}
-    Q -- "no · push π↓" --> Lo{"π−µ ≥ −δ_low?"}
-    H -- yes --> K["keep gradient"]
-    H -- "no" --> D["mask → 0"]
-    Lo -- yes --> K
-    Lo -- "no" --> D
+This is plain token REINFORCE on `new_logp` plus a soft penalty pulling `ratio` toward 1
+(same TV spirit as the paper, but the penalty form, not the exact weight). The recipe also
+sets `loss_agg_mode: seq-mean-token-sum-norm`: per-token losses are summed per sequence,
+divided by `horizon`, then averaged over sequences.
+
+## Repo variants: `tv` and `kl` (DPPO hard mask)
+
+The `tv`/`kl` variants keep a token unless its sampled-token divergence is over threshold
+**in the advantage-improving direction** — an asymmetric, advantage-aware hard mask:
+
+| advantage | keep the gradient iff | mask → 0 when |
+|---|---|---|
+| `Â_t > 0` | `Δ_t ≤ δ_high` | `π` rose too far (`Δ_t > δ_high`) |
+| `Â_t ≤ 0` | `Δ_t ≥ −δ_low` | `π` fell too far (`Δ_t < −δ_low`) |
+
+With the truncated ratio `r̄_t = min(r_t, C)` detached (TIS), the loss is masked REINFORCE,
+`L_t = −Â_t·r̄_t·log π_θ·m_t`. Because `r̄_t` is detached, the gradient flows only through
+`log π_θ`, giving the *same* policy gradient as PPO's surrogate `r_t·Â_t` (since
+`∇(r·Â)=Â·r·∇logπ`) — the TIS clamp caps the importance weight without bending the
+direction. Helper `_ar_drpo_tv_loss`:
+
+```python
+ratio = torch.exp(new_logp - old_logp)
+truncated_ratio = torch.clamp(ratio, max=clip_ratio_c).detach()   # TIS
+prob_delta = torch.exp(new_logp) - torch.exp(old_logp)            # π − µ
+valid_mask = torch.where(adv > 0,
+                         prob_delta <= clip_divergence_high,       # adv>0: block big prob ↑
+                         prob_delta >= -clip_divergence_low)       # adv<0: block big prob ↓
+pg_losses = -adv * truncated_ratio * new_logp * valid_mask.float()
 ```
 
-**KL variant** (`variant: kl`): replaces `Δ_t` with the **Binary-KL** between the
-old/new Bernoulli token probabilities — `KL(Bern(µ_t)‖Bern(π_t))`, computed from the
-chosen token's log-probs only (no full-vocab logits). Its mask also "always allows a
-conservative update": a high-KL token is kept if the ratio moves *opposite* to the
-advantage (`ratio ≤ 1` for `Â>0`, `ratio ≥ 1` for `Â<0`).
+The `kl` variant replaces `Δ_t` with a **Binary-KL** between Bernoulli distributions over
+"chosen token vs. the rest" (computed from the chosen token's log-probs only):
 
-**`pg_tv_penalty` variant (reference loss, what the recipe runs).** Instead of the hard
-mask, add a *smooth* TV penalty to plain REINFORCE (no mask, no TIS weight):
+$$ D^{\text{BinKL}}_t = \mu_t(\log\mu_t - \log\pi_t) + (1-\mu_t)\log\frac{1-\mu_t}{1-\pi_t} $$
 
-$$ \mathcal{L}_t = -\,\hat A_t \,\log\pi_\theta(y_t|s_t) \;+\; \varepsilon\,|r_t - 1| $$
+Its mask also "always allows a conservative update": even at high KL, a token is kept if
+the ratio moves *opposite* to the advantage (`ratio ≤ 1` for `Â>0`, `ratio ≥ 1` for `Â<0`).
 
-with `ε = penalty_coef`. This is the `run_qwen3_4b.sh` loss. The paper's exact DRPO is a
-smooth gradient *weight* `w_t = 1 − sign(Â_t(r_t−1))·|π−µ|/δ ∈ [1−1/δ, 1+1/δ]` — same TV
-spirit (smooth, bounded, no hard cutoff); `pg_tv_penalty` is the penalty-form loss
-actually wired (`_ar_pg_tv_penalty_loss`).
+## Math → code map
 
-## Code map
-
-| Step | Where |
+| Math object | Repo object |
 |---|---|
-| Replay new per-token log-probs at sampling temperature | `ARDRPO.compute_loss_and_backward` → `stage.replay(segment, temperature=T)` → `[total_tokens]` |
-| `old_logp` = rollout log-prob `µ` | `segment.log_probs` (rollout-native; **single-update only**) |
-| Per-sample advantage → per-token | `ARGRPO._expand_advantages_to_tokens` (repeat over each sample's `lengths` span) |
-| TV divergence + asymmetric hard mask | `_ar_drpo_tv_loss` |
-| Binary-KL divergence + mask | `_ar_drpo_kl_loss` |
-| Soft TV penalty (reference loss) | `_ar_pg_tv_penalty_loss` |
-| TIS truncation | `torch.clamp(ratio, max=clip_ratio_c).detach()` |
-| Group advantage (per-prompt mean/std) | `RolloutTrack.compute_advantages` (`adv_normalization_scope: group`) |
-| Padding / eos token masking | `segment.loss_mask` |
+| State `s_t = (x, y_{<t})` | `track.conditions` + the packed prefix in `TextSegment` |
+| Sampled token `y_t` | `segment.tokens` |
+| Behavior log-prob `log µ(y_t\|s_t)` | `segment.log_probs` (emitted by SGLang) → `old_logp` |
+| New log-prob `log π_θ(y_t\|s_t)` | `stage.replay(segment, temperature=sampling_temperature)` → `new_logp` |
+| Ratio `r_t` | `torch.exp(new_logp − old_logp)` |
+| Chosen-token probs `π_t`, `µ_t` | `torch.exp(new_logp)`, `torch.exp(old_logp)` |
+| Sample-level advantage `Â` | `track.advantages` |
+| Token-level advantage | `ARGRPO._expand_advantages_to_tokens(advantages, segment.lengths, ...)` |
+| Padding/eos mask | `segment.loss_mask` |
+| `pg_tv_penalty` / `tv` / `kl` losses | `_ar_pg_tv_penalty_loss` / `_ar_drpo_tv_loss` / `_ar_drpo_kl_loss` |
+
+## From rollout to update
+
+1. `unirl.train_vlm` builds `VLMTrainer` for the text-only Qwen3 recipe.
+2. `SGLangLLMRolloutEngine` samples completions and returns an `"ar"` track with packed
+   `TextSegment.tokens`, `log_probs`, `lengths`, and masks.
+3. `MathBoxedRewardScorer` scores each completion correct/incorrect.
+4. `RolloutTrack.compute_advantages(normalize=False, scope="group")` mean-centers rewards
+   within each prompt group; the recipe sets `normalize_adv_by_std: false`, so there is **no
+   std division**.
+5. `TrainStack.train_track` calls `ARDRPO.compute_loss_and_backward`, which replays the
+   sampled tokens at `temperature=sampling_temperature`, reads `old_logp = segment.log_probs`,
+   expands advantages to tokens, applies the selected variant, applies `segment.loss_mask`,
+   reduces, and `backward()`s.
+
+Unlike diffusion GRPO/DPPO, `ARDRPO` does **not** freeze a train-side `old_logp` in
+`prepare_segment` — it reuses the rollout log-prob, so the recipe must keep
+`stack.num_updates_per_batch: 1` (`TrainStack` raises otherwise:
+`supports_multi_update = False`).
 
 ## Key knobs ([`config.yaml`](config.yaml))
 
 | Knob | Meaning |
 |---|---|
-| `variant` | `tv`/`kl` (DPPO hard mask) or `pg_tv_penalty` (soft TV penalty `-A·logp + penalty_coef·\|r−1\|`). **Recipe uses `pg_tv_penalty`.** |
-| `penalty_coef` | (`pg_tv_penalty`) TV-penalty coefficient `ε`. Default `0.15`. |
-| `loss_agg_mode` | `token-mean` (default) or `seq-mean-token-sum-norm` (per-seq Σ(token loss) / `horizon`, mean over seqs). |
-| `normalize_adv_by_std` | `true` (default, ÷ group std) or `false` (mean-center only). Recipe uses `false`. |
-| `clip_divergence` | (`tv`/`kl` only) Divergence threshold `δ`. Default `0.2`. **TV:** absolute probability shift; **KL:** nats. Not a ratio ε. |
-| `clip_divergence_low` / `clip_divergence_high` | Asymmetric thresholds for the `adv<0` / `adv>0` directions; each defaults to `clip_divergence`. |
-| `clip_ratio_c` | TIS truncation bound `C` for the importance ratio. Default `20.0` (large ⇒ low bias). |
-| `sampling_temperature` | **MUST equal `sampling.temperature`.** Replay tempers logits (`log_softmax(logits/T)`) so `π` and the rollout `µ` live on the same distribution (`ratio_mean ≈ 1` at update 1). |
-| `adv_normalization_scope` | `group` ⇒ per-prompt-group mean/std advantage (critic-free GRPO style). |
+| `variant` | `pg_tv_penalty` (recipe), `tv`, or `kl`. |
+| `penalty_coef` | `pg_tv_penalty` coefficient on `\|ratio − 1\|`. Default `0.15`. |
+| `clip_divergence` | `tv`/`kl` threshold `δ` (TV: absolute prob shift; KL: nats). Ignored by `pg_tv_penalty`. |
+| `clip_divergence_low` / `high` | Direction-specific thresholds for `adv<0` / `adv>0` in the hard-mask variants. |
+| `clip_ratio_c` | TIS truncation bound `C` (hard-mask variants). Default `20.0`. Ignored by `pg_tv_penalty`. |
+| `sampling_temperature` | **MUST equal `sampling.temperature`** (and the rollout engine's). Replay tempers logits so `π` and `µ` share a distribution (`ratio_mean ≈ 1`). |
+| `loss_agg_mode` | `token-mean`, or the recipe's `seq-mean-token-sum-norm`. |
+| `horizon` | Fixed normalizer for `seq-mean-token-sum-norm`; recipe `8192`. |
+| `normalize_adv_by_std` | Recipe `false` → mean-center only. |
 
-## Common pitfalls
+## Debug checklist
 
-- **Temperature must match.** If `sampling_temperature ≠ sampling.temperature`, replay
-  and rollout log-probs sit on different distributions and `r` is systematically off.
-  The reproduction recipe pins both to `1.0`; watch `ratio_mean ≈ 1` on the run.
-- **Single update only.** `ARDRPO` does **not** freeze a train-side `old_logp` — it
-  reuses the rollout log-prob. `num_updates_per_batch > 1` would conflate the
-  rollout-vs-train engine gap with real policy drift, so `TrainStack` raises for it
-  (`supports_multi_update = False`).
-- **`clip_divergence` is tv/kl-only.** It is a TV/KL threshold on an *absolute
-  probability shift*, not a PPO ratio window, and is ignored by `pg_tv_penalty` (which
-  uses `penalty_coef`). The paper's exact `w_t` weight form is not wired — `pg_tv_penalty`
-  is its penalty-form approximation.
-- **SGLang reproducibility (from the recipe).** Match the trainside chat template
-  exactly (`/no_think` + `enable_thinking: false`) or Qwen3 emits a long `<think>`
-  block that overruns `max_new_tokens` before the `#### answer`; and use the **LoRA-pool**
-  sync (`LocalLoraWeightSync`), not merged full-weight sync, which plateaus.
+| Symptom | First files / variables to check |
+|---|---|
+| `ratio_mean` far from 1 at first update | `sampling_temperature` vs. `sampling.temperature` vs. rollout `temperature`; SGLang logprob config |
+| Large `rollout_replay_logp_absdiff_mean` | train/rollout mismatch, weight sync, tokenization/chat-template mismatch |
+| No gradient on many tokens | `segment.loss_mask`; zero advantages from all-correct/all-wrong groups |
+| A variant knob seems ignored | check `variant` — `clip_divergence`/`clip_ratio_c` do nothing under `pg_tv_penalty` |
+| Completion misses the boxed answer | chat template `/no_think` + `enable_thinking: false` (Qwen3 overruns on `<think>`) |
+| SGLang serves stale weights | `LocalLoraWeightSync`, adapter name `default`, rollout wake/sleep logs |
+
+Metric source: `ratio_*`, `valid_fraction`, `clipfrac_lower`, `tv_penalty_mean`, and the
+AR-only `rollout_replay_logp_absdiff_mean` are emitted by the variant loss helpers.
 
 ## Run it
 
@@ -170,24 +187,25 @@ DATA_PATH=data/dapo_math/train.jsonl EVAL_DATA_PATH=data/dapo_math/aime_eval.jso
 python -m unirl.train_vlm --config-name=llm_rl/ar_drpo_qwen3_4b_base_dpao_sglang num_devices=64
 ```
 
-The model defaults to the HF id `Qwen/Qwen3-4B-Base`; set `QWEN3_PATH` to a local
-checkpoint dir to use a cache. Compose-only check (no GPU work): append `--cfg job`.
+The model defaults to `Qwen/Qwen3-4B-Base`; set `QWEN3_PATH` to a local checkpoint dir to
+avoid downloading at runtime. (Note the `train_vlm` entrypoint — the AR loss is
+modality-agnostic and shares the VLM trainer.)
 
 ## vs. the other tutorials
 
-- **[flowDPPO](../flowDPPO/)** is the closest sibling: same "divergence mask instead of
-  ratio clip" idea, but on a **diffusion** SDE trajectory (per-step Gaussian KL on
-  continuous latents) rather than discrete tokens. DRPO masks per-**token**
-  Binary-TV/KL.
-- **[flowGRPO](../flowGRPO/)** / **[diffusionNFT](../diffusionNFT/)** are diffusion
-  algorithms; DRPO is the **LLM (AR, token-level)** entry. The AR ratio-clip
-  baseline is `ARGRPO` (`unirl/algorithms/ar_grpo.py`), which shares `_grpo_clip_loss`
-  with flowGRPO.
+- **[flowDPPO](../flowDPPO/)** is the closest conceptual sibling: both replace ratio
+  clipping with divergence-aware control. flowDPPO has *exact* Gaussian KL over latent
+  transitions; `ARDRPO` approximates token-distribution shift from chosen-token log-probs.
+- **[flowGRPO](../flowGRPO/)** and `ARGRPO` are the ratio-clipped baselines; `ARGRPO`
+  ([`unirl/algorithms/ar_grpo.py`](../../unirl/algorithms/ar_grpo.py)) shares
+  `_grpo_clip_loss` with diffusion GRPO.
+- **[diffusionNFT](../diffusionNFT/)** is not a likelihood-ratio method at all.
 
-## External references
+## References
 
-- DRPO paper (bundled): *"Rethinking the Divergence Regularization in LLM RL"* — the smooth-weight DRPO; `pg_tv_penalty` is the reference run's penalty-form loss in the same spirit.
-- DPPO paper (what `ARDRPO` implements): Qi et al., *"Rethinking the Trust Region in LLM Reinforcement Learning"* — [arXiv:2602.04879](https://arxiv.org/abs/2602.04879).
-- SPO: Xie et al., *"Simple Policy Optimization"* — [arXiv:2401.16025](https://arxiv.org/abs/2401.16025).
-
-<!-- Figures: drop PNG/SVG into ./assets/ and reference e.g. ![](assets/drpo_mask.png) -->
+- DRPO — *"Rethinking the Divergence Regularization in LLM RL"*: the smooth weight is its
+  Table 1, the objective its Eq. 8.
+- DPPO (the `tv`/`kl` hard mask): Qi et al., *"Rethinking the Trust Region in LLM
+  Reinforcement Learning"* — [arXiv:2602.04879](https://arxiv.org/abs/2602.04879).
+- SPO (the smooth-regularizer ancestor): Xie et al., *"Simple Policy Optimization"* —
+  [arXiv:2401.16025](https://arxiv.org/abs/2401.16025).
