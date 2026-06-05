@@ -108,18 +108,15 @@ schema, and how to add a recipe.
 
 ## Getting Started ⚡
 
-```bash
-# install (full guide: INSTALL.md)
-pip install -e ".[train,infer,eval]" --no-build-isolation
-pip install flash-attn==2.7.4.post1 --no-build-isolation
+Install dependencies first — see [INSTALL.md](INSTALL.md).
 
+```bash
 # compose-check, then launch a single-node example
 python -m unirl.train_diffusion --config-name=diffusion/sd3_trainside --cfg job --resolve
 bash examples/run_experiment_single_node.sh diffusion/sd3_trainside
 ```
 
-- Full [installation guide](INSTALL.md) — dev tools, environment variables.
-- Full [launch guide](examples/README.md#running-a-recipe) — multi-node, every entrypoint, mooncake.
+Full [launch guide](examples/README.md#running-a-recipe) — multi-node, every entrypoint, mooncake.
 
 ## Roadmap 🗺️
 
