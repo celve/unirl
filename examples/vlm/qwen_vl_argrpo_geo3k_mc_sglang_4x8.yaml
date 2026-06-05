@@ -2,7 +2,7 @@
 # ARGRPO Qwen2.5-VL on Geometry3K-MC — train_vlm (VLMTrainer)
 # with the SGLang LLM rollout engine (native, colocate).
 #
-# Differs from the trainside config (argrpo_qwen_vl_geo3k_mc_4x8.yaml) only in:
+# Differs from the trainside config (qwen_vl_argrpo_geo3k_mc_4x8.yaml) only in:
 #   - rollout: SGLangLLMRolloutEngine (separate in-process SRT server) instead of
 #     TrainsideRolloutEngine.
 #   - sync: full-weight TensorWeightSync pushes the trained weights into the
@@ -17,7 +17,7 @@
 # `Qwen/Qwen2.5-VL-7B-Instruct`; set QWEN_VL_PATH to a local dir to use a cache.
 # DATA_PATH is required (local jsonl):
 #   DATA_PATH=data/geo3k_mc/train.jsonl EVAL_DATA_PATH=data/geo3k_mc/val.jsonl \
-#   python -m unirl.train_vlm --config-name=vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_sglang_4x8 num_devices=8
+#   python -m unirl.train_vlm --config-name=vlm/qwen_vl_argrpo_geo3k_mc_sglang_4x8 num_devices=8
 
 num_devices: 32
 batch_size: 32 # prompts_per_rollout
@@ -33,7 +33,7 @@ adv_normalization_scope: global
 logging:
   report_to_wandb: true
   project_name: unirl-flowgrpo-newstac
-  run_name: argrpo_qwen_vl_sglang_v2_4x8
+  run_name: qwen_vl_argrpo_sglang_v2_4x8
   entity: ${oc.env:WANDB_ENTITY,null}
   tags: [argrpo, qwen-vl, geo3k-mc, sglang, native, colocate, 4x8]
 

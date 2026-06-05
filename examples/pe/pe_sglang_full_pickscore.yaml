@@ -20,9 +20,9 @@
 # Sync runs every ``weight_sync_interval`` rollouts (skip step 0).
 #
 # Pairs with unirl/train_pe.py:
-#   python -m unirl.train_pe --config-name pe/pe/pe_sglang_full_pickscore
+#   python -m unirl.train_pe --config-name pe/pe_sglang_full_pickscore
 #
-# Format mirrors examples/pe/pe/pe_trainside_pickscore.yaml (v2). Set checkpoint paths via
+# Format mirrors examples/pe/pe_trainside_pickscore.yaml (v2). Set checkpoint paths via
 # the PRETRAINED_MODEL / LLM_MODEL env vars (see ${oc.env:...} defaults below).
 #
 # batch_size MUST be divisible by num_devices — the composed rollout dispatches
@@ -30,7 +30,7 @@
 # resps). Default P=8 on 8 GPUs → 1 prompt/worker × N=2 × M=2.
 # 1-GPU wiring smoke (bypasses the multi-GPU DP merge entirely — dp_size=1 returns
 # the single worker's resp with no cross-worker concat):
-#   python -m unirl.train_pe --config-name pe/pe/pe_sglang_full_pickscore num_devices=1 ++devices_per_node=1 batch_size=2 num_rollouts=3
+#   python -m unirl.train_pe --config-name pe/pe_sglang_full_pickscore num_devices=1 ++devices_per_node=1 batch_size=2 num_rollouts=3
 # Scale toward the v1 e2e (P=8 N=4 M=4) once green.
 #
 # VERIFY at smoke (engine-specific, can't be unit-checked):

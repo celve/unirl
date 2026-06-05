@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620" font-family="system-ui, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+      <path d="M0,0 L7,3.5 L0,7 Z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <rect width="900" height="620" fill="#f8fafc"/>
+  <text x="450" y="32" text-anchor="middle" font-size="18" font-weight="700" fill="#0f172a">UniRL Data Flow</text>
+
+  <!-- Row 1: inputs -->
+  <rect x="40" y="52" width="120" height="40" rx="8" fill="#e0f2fe" stroke="#0284c7"/>
+  <text x="100" y="77" text-anchor="middle" font-size="12" fill="#0c4a6e">YAML config</text>
+
+  <rect x="200" y="52" width="120" height="40" rx="8" fill="#e0f2fe" stroke="#0284c7"/>
+  <text x="260" y="77" text-anchor="middle" font-size="12" fill="#0c4a6e">Prompts</text>
+
+  <line x1="160" y1="72" x2="200" y2="72" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Driver -->
+  <rect x="360" y="52" width="180" height="40" rx="8" fill="#dbeafe" stroke="#2563eb"/>
+  <text x="450" y="77" text-anchor="middle" font-size="12" font-weight="600" fill="#1e3a8a">Trainer (driver)</text>
+
+  <line x1="320" y1="72" x2="360" y2="72" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <line x1="450" y1="92" x2="450" y2="116" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- RolloutReq -->
+  <rect x="330" y="116" width="240" height="40" rx="8" fill="#e0e7ff" stroke="#4f46e5"/>
+  <text x="450" y="141" text-anchor="middle" font-size="12" font-weight="600" fill="#312e81">RolloutReq</text>
+
+  <line x1="450" y1="156" x2="450" y2="176" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Rollout -->
+  <rect x="300" y="176" width="300" height="40" rx="8" fill="#dcfce7" stroke="#16a34a"/>
+  <text x="450" y="201" text-anchor="middle" font-size="12" font-weight="600" fill="#14532d">Rollout engine</text>
+
+  <line x1="450" y1="216" x2="450" y2="232" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Pipeline (compact, centered) -->
+  <g>
+    <rect x="252" y="232" width="396" height="52" rx="8" fill="#f3e8ff" stroke="#9333ea"/>
+    <g transform="translate(450, 258)">
+      <text y="-14" text-anchor="middle" font-size="10" fill="#581c87">Model pipeline</text>
+      <g transform="translate(-168, -7)">
+        <rect x="0" y="0" width="72" height="26" rx="5" fill="#fff" stroke="#c4b5fd"/>
+        <text x="36" y="17" text-anchor="middle" font-size="10" fill="#334155">encode</text>
+        <text x="80" y="16" text-anchor="middle" font-size="12" fill="#7c3aed">-&gt;</text>
+        <rect x="88" y="0" width="72" height="26" rx="5" fill="#fff" stroke="#c4b5fd"/>
+        <text x="124" y="17" text-anchor="middle" font-size="10" fill="#334155">sample</text>
+        <text x="168" y="16" text-anchor="middle" font-size="12" fill="#7c3aed">-&gt;</text>
+        <rect x="176" y="0" width="72" height="26" rx="5" fill="#fff" stroke="#c4b5fd"/>
+        <text x="212" y="17" text-anchor="middle" font-size="10" fill="#334155">decode</text>
+        <text x="256" y="16" text-anchor="middle" font-size="12" fill="#7c3aed">-&gt;</text>
+        <rect x="264" y="0" width="72" height="26" rx="5" fill="#fff" stroke="#c4b5fd"/>
+        <text x="300" y="17" text-anchor="middle" font-size="10" fill="#334155">segment</text>
+      </g>
+    </g>
+  </g>
+
+  <line x1="450" y1="284" x2="450" y2="320" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- RolloutResp -->
+  <rect x="330" y="320" width="240" height="40" rx="8" fill="#ffedd5" stroke="#ea580c"/>
+  <text x="450" y="345" text-anchor="middle" font-size="12" font-weight="600" fill="#7c2d12">RolloutResp</text>
+
+  <!-- Reward and advantage -->
+  <rect x="250" y="400" width="140" height="42" rx="8" fill="#fef9c3" stroke="#ca8a04"/>
+  <text x="320" y="426" text-anchor="middle" font-size="12" fill="#713f12">Reward</text>
+
+  <rect x="510" y="400" width="140" height="42" rx="8" fill="#fef9c3" stroke="#ca8a04"/>
+  <text x="580" y="426" text-anchor="middle" font-size="12" fill="#713f12">Advantage</text>
+
+  <line x1="450" y1="360" x2="320" y2="400" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="390" y1="421" x2="510" y2="421" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="580" y1="442" x2="450" y2="484" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Train -->
+  <rect x="300" y="484" width="300" height="42" rx="8" fill="#fee2e2" stroke="#dc2626"/>
+  <text x="450" y="510" text-anchor="middle" font-size="12" font-weight="600" fill="#7f1d1d">Train (FSDP + loss)</text>
+
+  <line x1="450" y1="526" x2="450" y2="544" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Weight sync (optional loop) -->
+  <rect x="300" y="544" width="300" height="42" rx="8" fill="#f1f5f9" stroke="#94a3b8" stroke-dasharray="5 3"/>
+  <text x="450" y="570" text-anchor="middle" font-size="12" fill="#475569">Weight sync (optional)</text>
+
+  <path d="M 600 565 C 760 565, 760 196, 600 196" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arr)"/>
+
+  <!-- PE note -->
+  <text x="450" y="604" text-anchor="middle" font-size="11" fill="#64748b">PE / composed: prompts -&gt; AR track -&gt; diffusion track (same loop)</text>
+</svg>

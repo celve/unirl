@@ -6,7 +6,7 @@ trainer owns the placement scope, wires the two sibling stacks (diffusion +
 ar), composes the PEPipeline, and runs the ``train_step → train`` loop; this
 module just maps the loaded Hydra config blocks to constructor kwargs.
 
-Pairs with ``examples/pe/pe/pe_trainside_pickscore.yaml``.
+Pairs with ``examples/pe/pe_trainside_pickscore.yaml``.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from omegaconf import DictConfig
 from unirl.trainer.pe import PETrainer
 
 
-@hydra.main(version_base=None, config_path="../examples", config_name="pe/pe/pe_trainside_pickscore")
+@hydra.main(version_base=None, config_path="../examples", config_name="pe/pe_trainside_pickscore")
 def main(cfg: DictConfig) -> None:
     trainer = PETrainer(
         cfg=cfg,

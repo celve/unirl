@@ -22,11 +22,11 @@
 #
 # The driver is one of the Hydra entrypoints, selected with ENTRY:
 #   train_diffusion (default)  examples/diffusion/ (sd3_*, wan2*, qwen_image_*)
-#   train_vlm                  examples/vlm/ (argrpo_qwen_vl_*) + examples/llm/ (ar_drpo_qwen3_*)
+#   train_vlm                  examples/vlm/ (qwen_vl_argrpo_*) + examples/llm/ (qwen3_ar_drpo_*)
 #   train_pe                   examples/pe/ (prompt-enhancement joint diffusion+AR)
 #   train_unified_model                  examples/unified_model/ (HunyuanImage3, unified AR+diffusion)
 #
-# The first positional arg is the examples/ config name, domain/model-qualified
+# The first positional arg is the examples/ config name, domain-qualified
 # (passed to Hydra as --config-name); any extra args are forwarded verbatim as Hydra overrides. The
 # launcher sets num_devices to the whole cluster (NUM_NODES * GPUS_PER_NODE) so a
 # conf authored for a different size still runs here (an explicit num_devices=...
@@ -35,11 +35,11 @@
 #
 # Examples:
 #   # SPMD batch (taiji lands this same line on every node):
-#   bash examples/run_experiment_multinode_taiji.sh diffusion/sd3/sd3_sglang_native_colocate
+#   bash examples/run_experiment_multinode_taiji.sh diffusion/sd3_sglang_native_colocate
 #   # ssh fan-out (run once on the head only):
-#   LAUNCH=ssh bash examples/run_experiment_multinode_taiji.sh diffusion/sd3/sd3_sglang_native_colocate
+#   LAUNCH=ssh bash examples/run_experiment_multinode_taiji.sh diffusion/sd3_sglang_native_colocate
 #   # VLM/AR recipe (4x8):
-#   ENTRY=train_vlm bash examples/run_experiment_multinode_taiji.sh vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8
+#   ENTRY=train_vlm bash examples/run_experiment_multinode_taiji.sh vlm/qwen_vl_argrpo_geo3k_mc_4x8
 #
 set -euo pipefail
 

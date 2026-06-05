@@ -1,6 +1,6 @@
 # @package _global_
 # FLUX.2-klein-9B GRPO — SGLang colocate, REPLAY logprob.
-# Mirrors examples/diffusion/sd3/sd3_sglang_replay_colocate.yaml in structure,
+# Mirrors examples/diffusion/sd3_sglang_replay_colocate.yaml in structure,
 # with Klein knobs (DanceSDE, empirical-mu, klein LoRA).
 #
 # SGLang = rollout runs in a separate per-actor worker process (DiffGenerator),
@@ -18,7 +18,7 @@
 # rollout kernels.
 #
 # Launch (4 nodes x 8 GPUs, taiji SPMD):
-#   bash examples/run_experiment_multinode_taiji.sh diffusion/flux2_klein/flux2_klein_sglang
+#   bash examples/run_experiment_multinode_taiji.sh diffusion/flux2_klein_sglang
 
 num_devices: 8                # launcher auto-overrides via NUM_NODES * GPUS_PER_NODE
 batch_size: 64                # prompts_per_rollout (64 x 16 samples = 1024 global)
@@ -292,7 +292,7 @@ sync:
   # skips sync via DiffusionTrainer.train's `rollout_id > 0` gate, which is why
   # single-node num_rollouts=1 smokes don't catch it). Matches every other working
   # actual-SGLang + LoRA config in the repo (pe_sglang_lora_pool / pe_sglang_full_merge /
-  # argrpo_qwen_vl_geo3k_mc_sglang_4x8_lora / ar_drpo_qwen3_4b_base_dpao_sglang). Flip
+  # qwen_vl_argrpo_geo3k_mc_sglang_4x8_lora / qwen3_ar_drpo_4b_base_dpao_sglang). Flip
   # back to true once SGLangRolloutEngine implements loaded_lora_checksums.
   verify: false
   # Mirrors Flux2KleinPipelineConfig.weight_sync_param_name_prefix; must match

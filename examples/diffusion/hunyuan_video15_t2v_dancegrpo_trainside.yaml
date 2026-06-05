@@ -1,32 +1,36 @@
 # @package _global_
-# HunyuanVideo-1.0 T2V GRPO — v2 trainer, in-process (trainside) rollout.
+# HunyuanVideo-1.5 T2V GRPO — v2 trainer, in-process (trainside) rollout.
+# DanceGRPO-aligned hyperparameters: steps=16, cfg=0, eta=0.25, shift=5.0,
+# lr=1e-5, weight_decay=1e-4, LoRA r64.
 #
 # Stack:
 #   - rollout engine: TrainsideRolloutEngine (colocated, no separate slab)
-#   - backend: FSDPBackend wrapping HunyuanVideoTransformerBlock
+#   - backend: FSDPBackend wrapping HunyuanVideo15TransformerBlock
+#     (upstream diffusers class name; matches _no_split_modules in
+#     unirl.models.hunyuan_video15.diffusion)
 #   - LoRA r64 on attn + ff projections
 #   - VideoPickScore reward (PickScore on first frame)
 # Layout: 1 node × 8 GPUs, all colocated; no weight sync section.
 #
 # Launch (1 node x 8 GPUs):
-#   bash examples/run_experiment_single_node.sh diffusion/hunyuan_video/hunyuan_video_t2v_trainside
+#   bash examples/run_experiment_single_node.sh diffusion/hunyuan_video15_t2v_dancegrpo_trainside
 
 num_devices: 8
-batch_size: 48                # prompts_per_rollout (v1: 48)
+batch_size: 48                # prompts_per_rollout (v1 dancegrpo: 48)
 adv_use_global_std: true     # advantage: divide by ONE batch-wide std (v1 parity), not per-group
 
 logging:
   report_to_wandb: true
   project_name: ${oc.env:WANDB_PROJECT,unirl-grpo-t2v}
-  run_name: hunyuan_video_t2v_trainside
+  run_name: hunyuan_video15_t2v_dancegrpo_trainside
   entity: ${oc.env:WANDB_ENTITY,null}
-  tags: [hunyuan_video, t2v, grpo, trainside, lora-r64, v2]
+  tags: [hunyuan_video15, t2v, grpo, dancegrpo, trainside, lora-r64, v2]
 
 bundle:
-  _target_: unirl.models.hunyuan_video.bundle.HunyuanVideoBundle.from_config
+  _target_: unirl.models.hunyuan_video15.bundle.HunyuanVideo15Bundle.from_config
   config:
-    _target_: unirl.models.hunyuan_video.config.HunyuanVideoPipelineConfig
-    pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,hunyuanvideo-community/HunyuanVideo}
+    _target_: unirl.models.hunyuan_video15.config.HunyuanVideo15PipelineConfig
+    pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v}
     model_precision: bf16
     autocast_precision: bf16
     trajectory_precision: bf16
@@ -34,7 +38,7 @@ bundle:
     shift: 5.0
 
 pipeline:
-  _target_: unirl.models.hunyuan_video.pipeline.HunyuanVideoPipeline
+  _target_: unirl.models.hunyuan_video15.pipeline.HunyuanVideo15Pipeline
   shift: 5.0
   autocast_precision: bf16
   trajectory_precision: bf16
@@ -44,23 +48,9 @@ pipeline:
 
 backend:
   _target_: unirl.train.backend.fsdp.FSDPBackend
-  # HV1.0's diffusers transformer has TWO main block stacks: ~20 dual-stream
-  # HunyuanVideoTransformerBlock + ~40 single-stream
-  # HunyuanVideoSingleTransformerBlock. main's fsdp_wrap only shards + AC-wraps
-  # the classes listed here (it does NOT walk diffusers' _no_split_modules
-  # like feat's FSDPPolicy did). Listing only the dual-stream block left all
-  # 40 single-stream blocks fully replicated per rank with live activations →
-  # ~83 GB constant footprint → OOM in attn.to_v LoRA forward regardless of
-  # resolution / sps / num_sde_steps (0531j/l/m all died at the same ~83 GB).
-  # Match diffusers' _no_split_modules for HunyuanVideoTransformer3DModel;
-  # the i2v-only TokenReplace variants are listed for completeness and are
-  # simply not enumerated when absent (t2v never instantiates them).
-  block_class_names: [
-    "HunyuanVideoTransformerBlock",
-    "HunyuanVideoSingleTransformerBlock",
-    "HunyuanVideoTokenReplaceTransformerBlock",
-    "HunyuanVideoTokenReplaceSingleTransformerBlock",
-  ]
+  # Upstream diffusers class name; do NOT rename (HF auto-discovery probes
+  # this string against transformer.config._no_split_modules).
+  block_class_names: ["HunyuanVideo15TransformerBlock"]
   trainable_attr: transformer
   fsdp_cfg:
     _target_: unirl.train.configs.FSDPConfig
@@ -69,20 +59,21 @@ backend:
     mixed_precision: true
     fsdp_mode: full
     reshard_after_forward: true
-    activation_checkpointing: true   # HV1.0 transformer is memory-heavy; AC keeps headroom for VAE decode
+    activation_checkpointing: true   # HV1.5 needs AC under r64 LoRA on H20
     use_torch_compile: false
+  # DanceGRPO HV1.5 optimizer profile.
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
-    learning_rate: 3.0e-4
+    learning_rate: 1.0e-5
     adam_beta1: 0.9
     adam_beta2: 0.999
     adam_epsilon: 1.0e-8
-    weight_decay: 0.0
+    weight_decay: 1.0e-4
   scheduler_cfg:
     _target_: unirl.train.backend.base.LrSchedulerConfig
     type: constant
     warmup_steps: 0
-    total_steps: 10000
+    total_steps: 1000
   lora_cfg:
     _target_: unirl.train.configs.LoraConfig
     rank: 64
@@ -107,7 +98,7 @@ backend:
 rollout:
   _target_: unirl.rollout.engine.trainside.engine.TrainsideRolloutEngine
   stage_attrs: [diffusion]
-  # T2V VAE decode is heavy; keep forward groups small.
+  # HV1.5 VAE on 480x480 t=5 latents is heavy; keep forward groups small.
   forward_batch_size: 1
 
 reward:
@@ -129,19 +120,19 @@ algorithm:
   clip_schedule: constant
   conditions_cls:
     _target_: hydra.utils.get_class
-    path: unirl.models.hunyuan_video.conditions.HunyuanVideoConditions
+    path: unirl.models.hunyuan_video15.conditions.HunyuanVideo15Conditions
   params: ${sampling}
 
 stack:
   _target_: unirl.train.stack.TrainStack
   micro_batch_size: 1
   max_grad_norm: 1.0
-  # v1 ran num_updates_per_batch=2 (2 PPO mini-batch optimizer steps per
-  # rollout, π_old frozen once). Omitting it defaulted to 1 → a single
-  # on-policy update where new_logp==old_logp → ratio_mean≡1 and a diluted
-  # GRPO signal.
-  # per-worker batch = samples_per_prompt(16) * prompts_per_rollout(48) /
-  # num_devices(8) = 96; 96 % 2 == 0 → mini-batch 48 (matches v1).
+  # v1 dancegrpo ran num_updates_per_batch=2 (2 PPO mini-batch optimizer
+  # steps per rollout, π_old frozen once). Omitting it defaulted to 1 → a
+  # single on-policy update where new_logp==old_logp → ratio_mean≡1 and a
+  # diluted GRPO signal. sd3/wan dancegrpo v2 recipes all set 2.
+  # per-worker batch = samples_per_prompt(24) * prompts_per_rollout(48) /
+  # num_devices(8) = 144; 144 % 2 == 0 → mini-batch 72 (matches v1).
   num_updates_per_batch: 2
 
 data_source:
@@ -158,18 +149,16 @@ data_source:
     algorithm:
       prompts_per_rollout: ${batch_size}
 
-# Aligned with feat/hunyuan-video-fsdp-training's
-# grpo_hunyuan_video_t2v_videopickscore: 20 steps, cfg=1.0, 480×832, eta=0.7,
-# shift=5.0; SDE on the first half (8 of the first 10 steps).
+# DanceGRPO-aligned for HV1.5 T2V: 16 steps, eta=0.25, shift=5.0, cfg=0.
 sampling:
   _target_: unirl.types.sampling.DiffusionSamplingParams
-  num_inference_steps: 20
-  guidance_scale: 1.0
+  num_inference_steps: 16
+  guidance_scale: 0.0
   height: 480
-  width: 832
+  width: 480
   num_frames: 5
-  eta: 0.7
-  samples_per_prompt: 16
+  eta: 0.25
+  samples_per_prompt: 24        # v1 dancegrpo: 24 samples per prompt
   seed: 42
   init_same_noise: false
   autocast_precision: bf16
@@ -178,12 +167,10 @@ sampling:
   scheduler:
     _target_: unirl.utils.scheduler_utils.AllSDEScheduler
     num_timesteps: ${..num_inference_steps}
-    # feat-branch v1 recipe: SDE candidate pool = first half of the schedule
-    # (steps 0..9 at T=20), then 8 of those are drawn as the stochastic /
-    # trainable steps. Dropping timestep_fraction defaulted the pool to the
-    # full [0,20) window AND num_sde_steps=null trained ALL 20 steps — that
-    # diluted the GRPO signal (root cause of the flat-reward curves). With
-    # num_sde_steps=8 the replay still only holds 8 transformer activations
-    # live, so the H20 replay footprint is bounded.
-    timestep_fraction: [0.0, 0.5]
+    # feat-branch v1 dancegrpo recipe: SDE candidate pool = first 60% of the
+    # schedule (steps 0..8 at T=16), then 8 of those are drawn as the
+    # stochastic / trainable steps. Dropping timestep_fraction + num_sde_steps
+    # defaulted to SDE-on-all-16-steps, which diluted the GRPO signal (root
+    # cause of the flat-reward curves).
+    timestep_fraction: [0.0, 0.6]
     num_sde_steps: 8

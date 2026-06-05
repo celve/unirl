@@ -3,13 +3,13 @@
 # with the SGLang LLM rollout engine (colocate) + LoRA-POOL weight sync.
 #
 # Third path alongside:
-#   - argrpo_qwen_vl_geo3k_mc_sglang_4x8.yaml  (sglang + FULL-weight TensorWeightSync)
-#   - argrpo_qwen_vl_geo3k_mc_4x8_lora.yaml    (trainside + LoRA, no sync)
+#   - qwen_vl_argrpo_geo3k_mc_sglang_4x8.yaml  (sglang + FULL-weight TensorWeightSync)
+#   - qwen_vl_argrpo_geo3k_mc_4x8_lora.yaml    (trainside + LoRA, no sync)
 # Here the LLM decoder is trained as a rank-16 LoRA adapter and pushed into the
 # colocated SRT server's versioned LoRA pool each rollout via LocalLoraWeightSync
 # (set_lora_from_tensors -> /load_lora_adapter_from_tensors, {name}_v{N}).
 #
-# Data prep + paths: same as argrpo_qwen_vl_geo3k_mc_4x8.yaml — build the local
+# Data prep + paths: same as qwen_vl_argrpo_geo3k_mc_4x8.yaml — build the local
 # jsonl once with `python -m unirl.utils.prepare_geo3k_mc --out-dir data/geo3k_mc`,
 # then set DATA_PATH=data/geo3k_mc/train.jsonl (QWEN_VL_PATH defaults to the HF id).
 
@@ -24,7 +24,7 @@ adv_normalization_scope: global
 logging:
   report_to_wandb: true
   project_name: unirl-flowgrpo-newstac
-  run_name: argrpo_qwen_vl_sglang_lora_4x8
+  run_name: qwen_vl_argrpo_sglang_lora_4x8
   entity: ${oc.env:WANDB_ENTITY,null}
   tags: [argrpo, qwen-vl, geo3k-mc, sglang, lora, colocate, 4x8]
 

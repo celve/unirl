@@ -55,7 +55,7 @@ go under `unirl/types` or `unirl/models/types`.
 2. Define its config as a plain `@dataclass` (recipes reference it by `_target_`).
 3. Implement a bundle that exposes the stages needed by training and rollout.
 4. Add condition, text / vision, diffusion and/or AR, and VAE helpers as needed.
-5. Add at least one recipe under `examples/<domain>/<model>/`.
+5. Add at least one recipe under `examples/<domain>/`.
 6. Document required external checkpoints in the recipe YAML or launcher env docs.
 
 See `.claude/skills/development/add-model-bundle/SKILL.md` for the full

@@ -1,5 +1,9 @@
 # Code Architecture
 
+<div align="center">
+  <img src="../assets/pipeline-dataflow.svg" alt="UniRL runtime loop" width="100%">
+</div>
+
 This package is organized around one runtime loop:
 
 ```text
@@ -10,27 +14,18 @@ unirl.train_diffusion | train_vlm | train_pe | train_unified_model
   -> loop: rollout -> reward -> advantage -> train -> optional weight sync
 ```
 
-At a topological level:
-
-```text
-        driver: unirl.train_{diffusion,vlm,pe,unified_model} -> <Domain>Trainer
-                              │
-            ┌─────────────────┴─────────────────┐
-            ▼                                    ▼
-      rollout workers                      train workers
-   (engine: trainside |                 (model Bundle + TrainStack
-    sglang | vllm_omni | ...)            + one loss algorithm + FSDP)
-            │                                    ▲
-            │   RolloutReq / RolloutResp         │
-            └──────────► reward ───► advantage ──┘
-                              │
-                              ▼ (dedicated rollout modes only)
-                       unirl.distributed.weight_sync
-                       (lora / full: nccl | tensor | ipc)
-```
-
 The code intentionally separates the per-domain trainer lifecycle, Ray worker
 orchestration, rollout engines, the train stack, and algorithm loss math.
+
+## Deployment modes
+
+The rollout engine and optional `sync:` section define how GPUs are used:
+
+| Mode | Layout | Sync |
+|---|---|---|
+| Train-side sampling | Training workers generate samples directly | Not used |
+| Separate rollout | Rollout and training use different GPU pools | Required |
+| Colocated rollout | Rollout and training share GPU bundles with offload/onload | Required |
 
 ## Module Map
 
@@ -52,7 +47,7 @@ orchestration, rollout engines, the train stack, and algorithm loss math.
 
 ## Runtime Data Flow
 
-1. An entrypoint composes the chosen `examples/<domain>/<model>/<recipe>.yaml` and runs validators.
+1. An entrypoint composes the chosen `examples/<domain>/<recipe>.yaml` and runs validators.
 2. The `<Domain>Trainer` (e.g. `trainer/diffusion.py`) acquires a Ray `DevicePool` and builds the rollout and train workers.
 3. The trainer builds a typed `RolloutReq` and dispatches it to the rollout engine.
 4. The engine returns a `RolloutResp`, whose `tracks[name]` carry conditions, segments, rewards, and media previews.
@@ -60,14 +55,6 @@ orchestration, rollout engines, the train stack, and algorithm loss math.
 6. `TrainStack.train_track(...)` shards the track across train workers and runs the mini-batch optimizer loop.
 7. Each train worker owns a model `Bundle`, an `FSDPBackend`, and one loss algorithm.
 8. Dedicated-rollout modes (separate / colocate) sync trainer weights back to the rollout workers.
-
-## Important Boundaries
-
-- The training loss is a single per-track `cfg.algorithm` (a `StageAlgorithm` such as `unirl.algorithms.diffusion_grpo.DiffusionGRPO`). There is no separate driver "rollout control" object: advantage z-scoring lives on `RolloutTrack.compute_advantages` (`types/rollout_resp.py`) and SDE-index selection on `DiffusionSamplingParams.resolve_sde_indices` (`types/sampling.py`).
-- `RolloutReq` and `RolloutResp` (in `unirl/types/`) are the rollout↔training boundary.
-- The model `Bundle` / `Pipeline` is wrapped by the train backend with LoRA, FSDP, EMA, or NFT behavior.
-- A rollout engine owns sampling-backend details; the rest of the system talks through typed request/response objects.
-- Config classes live near the implementation that consumes them.
 
 ## Deeper Module Docs
 

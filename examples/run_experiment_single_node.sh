@@ -5,11 +5,11 @@
 #
 # The driver is one of the Hydra entrypoints, selected with ENTRY:
 #   train_diffusion (default)  examples/diffusion/ (sd3_*, wan2*, qwen_image_*)
-#   train_vlm                  examples/vlm/ (argrpo_qwen_vl_*) + examples/llm/ (ar_drpo_qwen3_*)
+#   train_vlm                  examples/vlm/ (qwen_vl_argrpo_*) + examples/llm/ (qwen3_ar_drpo_*)
 #   train_pe                   examples/pe/ (prompt-enhancement joint diffusion+AR)
 #   train_unified_model                  examples/unified_model/ (HunyuanImage3, unified AR+diffusion)
 #
-# The first positional arg is the examples/ config name, domain/model-qualified
+# The first positional arg is the examples/ config name, domain-qualified
 # (passed to Hydra as --config-name); any extra args are forwarded verbatim as Hydra overrides.
 # The launcher sets num_devices to this node's GPU count so a conf authored for
 # a different node count still runs here (an explicit num_devices=... wins).
@@ -21,10 +21,10 @@
 # Export any of them before running to override a conf's own default.
 #
 # Examples:
-#   bash examples/run_experiment_single_node.sh diffusion/sd3/sd3_trainside
-#   REPORT_TO_WANDB=true bash examples/run_experiment_single_node.sh diffusion/qwen_image/qwen_image_trainside
-#   ENTRY=train_vlm bash examples/run_experiment_single_node.sh vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8
-#   ENTRY=train_pe bash examples/run_experiment_single_node.sh pe/pe/pe_trainside_pickscore
+#   bash examples/run_experiment_single_node.sh diffusion/sd3_trainside
+#   REPORT_TO_WANDB=true bash examples/run_experiment_single_node.sh diffusion/qwen_image_trainside
+#   ENTRY=train_vlm bash examples/run_experiment_single_node.sh vlm/qwen_vl_argrpo_geo3k_mc_4x8
+#   ENTRY=train_pe bash examples/run_experiment_single_node.sh pe/pe_trainside_pickscore
 #
 set -euo pipefail
 

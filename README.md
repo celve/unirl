@@ -37,9 +37,21 @@ backend. The runtime pieces are all first-class and composable:
 - **Extensible model packages.** Model-specific bundles, pipelines, conditions,
   AR/diffusion logic, and VAE code live behind shared contracts.
 
-## Algorithms
+<div align="center">
+  <img src="assets/UniRL_arch.png" alt="UniRL architecture" width="900">
+</div>
 
-### 🌟 Team-Proposed Algorithms
+UniRL is a layered, composable system. Each **entrypoint** (`train_diffusion`,
+`train_vlm`, `train_pe`, `train_unified_model`) loads a **Hydra example config**
+covering model, algorithm, rollout, reward, placement, and sync, then creates the
+matching domain **trainer** (`DiffusionTrainer`, `VLMTrainer`, `PETrainer`,
+`UnifiedModelTrainer`). The trainer coordinates the RL loop across pluggable
+**rollout engines**, **algorithms**, **model bundles**, **reward services**, and
+the shared **distributed runtime**: Ray `DevicePool`, FSDP, placement, transfer
+queue, and LoRA/full-weight sync. See [`unirl/README.md`](unirl/README.md) for the
+runtime loop, deployment modes, and module map.
+
+## Team-Proposed Algorithms 🌟
 
 > **🌟 These algorithms are proposed by our team — the highlight of UniRL.** Each
 > algorithm's folder holds a step-by-step tutorial, a runnable example recipe, and
@@ -50,148 +62,71 @@ backend. The runtime pieces are all first-class and composable:
 | **FlowDPPO** | *"Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models"* | [FlowDPPO/](FlowDPPO/) | Diffusion/flow RL with an exact Gaussian-KL trust-region mask. |
 | **DRPO** | *"Rethinking the Divergence Regularization in LLM Reinforcement Learning"* | [DRPO/](DRPO/) | Token-level AR/LLM RL with a smooth Binary-TV quadratic regularizer. |
 
-### Public Algorithms
-
-Public/reference algorithms currently wired into UniRL examples and training code.
-
-| Algorithm | Coverage | Notes |
-|---|---|---|
-| GRPO / ARGRPO | `examples/diffusion/`, `examples/vlm/`, `examples/pe/`, `examples/unified_model/`; `unirl/algorithms/{diffusion_grpo,ar_grpo}.py` | Group-relative PPO objective for diffusion and AR stages. |
-| NFT | `examples/diffusion/`; `unirl/algorithms/nft.py` | Forward-process diffusion fine-tuning. |
-| DanceGRPO | `examples/diffusion/`; `unirl/algorithms/diffusion_grpo.py`, `unirl/sde/kernels.py` | DiffusionGRPO with Dance SDE settings. |
-| MixGRPO | `examples/diffusion/`; `unirl/algorithms/diffusion_grpo.py`, `unirl/utils/scheduler_utils.py` | DiffusionGRPO with mixed/windowed timestep scheduling. |
+UniRL also wires in standard reference algorithms — **(AR)GRPO**, **DiffusionNFT**,
+**DanceGRPO**, and **MixGRPO** — in [`unirl/algorithms/`](unirl/algorithms/README.md).
 
 ## Model Support 🎨
 
 Model and algorithm support are **two independent dimensions** that compose within
-a domain: any diffusion algorithm (see [Algorithms](#algorithms)) runs on a diffusion
+a domain: any diffusion algorithm (see above) runs on a diffusion
 model, AR algorithms on AR models — so UniRL covers many more model × algorithm
 combinations than the shipped example recipes alone. The table below is the model
 dimension; maturity is ✅ stable · 🧪 experimental (1–2 recipes).
 
 | Model | Category | Modality | Status |
 |---|---|---|---|
-| Stable Diffusion 3 | Image diffusion | Text → Image | ✅ |
+| Stable Diffusion 3 / 3.5 | Image diffusion | Text → Image | ✅ |
 | Qwen-Image | Image diffusion | Text → Image | ✅ |
 | FLUX.2-Klein | Image diffusion | Text → Image | 🧪 |
 | WAN 2.1 | Video diffusion | Text / Image → Video | ✅ |
 | WAN 2.2 | Video diffusion | Text / Image → Video | ✅ |
-| HunyuanVideo | Video diffusion | Text → Video | 🧪 |
-| HunyuanVideo 1.5 | Video diffusion | Text → Video | 🧪 |
+| HunyuanVideo 1.0 / 1.5 | Video diffusion | Text → Video | 🧪 |
 | Qwen-VL | Vision-language AR | Text + Image → Text | ✅ |
 | Qwen3 | LLM AR | Text → Text | ✅ |
-| Prompt-enhancer | AR prompt rewriter | Text → Text → Image | ✅ |
+| Prompt-enhancer | LLM + diffusion | Text → Text → Image | ✅ |
 | HunyuanImage3 | Unified AR + diffusion | Text → Image | ✅ |
 
-Select a model's example with `--config-name=<domain>/<model>/<example>` and launch
-it through the matching entrypoint (`train_diffusion`, `train_vlm`, `train_pe`,
-or `train_unified_model`). For example:
+Each model maps to a domain entrypoint (`train_diffusion`, `train_vlm`, `train_pe`,
+`train_unified_model`); see **Getting Started** below to run any of them.
 
-```bash
-python -m unirl.train_diffusion --config-name=diffusion/sd3/sd3_trainside
-```
+## Training Modes 🧩
 
-## Getting Started 🚀
-
-### Install
-
-Install the core training, inference, and evaluation dependencies:
-
-```bash
-pip install -e ".[train,infer,eval]" --no-build-isolation
-pip install flash-attn==2.7.4.post1 --no-build-isolation
-```
-
-For development tools:
-
-```bash
-pip install -e ".[train,infer,eval,dev]" --no-build-isolation
-```
-
-Examples read cluster-local paths, checkpoints, data, and W&B settings from
-environment variables through `${oc.env:...}`. Common variables include
-`PRETRAINED_MODEL`, `DATA_PATH`, `EVAL_DATA_PATH`, `REPORT_TO_WANDB`,
-`WANDB_PROJECT`, and `WANDB_ENTITY`. Small prompt lists are committed under
-`datasets/`.
-
-### Quick Start
-
-Compose and resolve an example before launching a run:
-
-```bash
-python -m unirl.train_diffusion --config-name=diffusion/sd3/sd3_trainside --cfg job --resolve
-```
-
-Launch a single-node diffusion example:
-
-```bash
-bash examples/run_experiment_single_node.sh diffusion/sd3/sd3_trainside
-```
-
-Select another domain entrypoint with `ENTRY`:
-
-```bash
-ENTRY=train_vlm bash examples/run_experiment_single_node.sh vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8
-ENTRY=train_pe  bash examples/run_experiment_single_node.sh pe/pe/pe_trainside_pickscore
-```
-
-Invoke an entrypoint directly when you do not need the shell launchers:
-
-```bash
-python -m unirl.train_diffusion --config-name=diffusion/sd3/sd3_trainside num_devices=8
-```
-
-## Examples 📂
-
-UniRL covers five training modes, one Hydra example bucket and entrypoint each.
+UniRL unifies five training modes, one Hydra example bucket and entrypoint each.
 Examples are self-contained YAML files selected with
-`--config-name=<domain>/<model>/<example>`:
+`--config-name=<domain>/<example>`:
 
 | Domain | Trains | Entrypoint | Example |
 |---|---|---|---|
-| `diffusion/` | Image / video diffusion models | `train_diffusion` | `diffusion/sd3/sd3_sglang_native_colocate` |
-| `vlm/` | Vision-language autoregressive (VLM) models | `train_vlm` | `vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8` |
-| `llm/` | Text-only autoregressive (LLM) models | `train_vlm` | `llm/qwen3/ar_drpo_qwen3_4b_base_dpao_sglang` |
-| `pe/` | Prompt-enhancer (AR rewriter + diffusion reward) | `train_pe` | `pe/pe/pe_sglang_full_pickscore` |
-| `unified_model/` | Unified AR + diffusion models | `train_unified_model` | `unified_model/hi3/hi3_vllmomni` |
+| `diffusion/` | Image / video diffusion models | `train_diffusion` | `diffusion/sd3_sglang_native_colocate` |
+| `vlm/` | Vision-language autoregressive (VLM) models | `train_vlm` | `vlm/qwen_vl_argrpo_geo3k_mc_4x8` |
+| `llm/` | Text-only autoregressive (LLM) models | `train_vlm` | `llm/qwen3_ar_drpo_4b_base_dpao_sglang` |
+| `pe/` | Prompt-enhancer (AR rewriter + diffusion reward) | `train_pe` | `pe/pe_sglang_full_pickscore` |
+| `unified_model/` | Unified AR + diffusion models | `train_unified_model` | `unified_model/hi3_vllmomni` |
 
-Every example starts with `# @package _global_`, so its keys compose at the Hydra
-config root. For layout responsibilities, naming conventions, and the process for
-adding an example, read `examples/README.md`.
+See [`examples/README.md`](examples/README.md) for the full launch guide, naming
+schema, and how to add a recipe.
 
-## Pipeline 🔁
+## Getting Started ⚡
 
-```text
-prompts
-  -> rollout workers
-       trainside | sglang | sglang_llm | vllm_omni | composed
-  -> rewards
-  -> advantages
-  -> train workers
-       model bundle + FSDP train stack + stage algorithm
-  -> optional weight sync
-       lora/full weights over nccl | tensor | ipc
+```bash
+# install (full guide: INSTALL.md)
+pip install -e ".[train,infer,eval]" --no-build-isolation
+pip install flash-attn==2.7.4.post1 --no-build-isolation
+
+# compose-check, then launch a single-node example
+python -m unirl.train_diffusion --config-name=diffusion/sd3_trainside --cfg job --resolve
+bash examples/run_experiment_single_node.sh diffusion/sd3_trainside
 ```
 
-At startup, an entrypoint composes the selected example, validates cross-component
-contracts, builds a domain trainer, acquires a Ray `DevicePool`, and constructs
-rollout and train workers. The trainer then runs the rollout -> reward ->
-advantage -> train -> optional weight-sync loop.
-
-Deployment mode is controlled by the rollout engine and optional `sync:` section:
-
-| Mode | Shape | Sync requirement |
-|---|---|---|
-| Train-side sampling | Train workers also sample | No `sync:` section |
-| Separate rollout | Rollout and training use different GPU pools | Required |
-| Colocated rollout | Rollout and training share GPU bundles with offload/onload | Required |
+- Full [installation guide](INSTALL.md) — dev tools, environment variables.
+- Full [launch guide](examples/README.md#running-a-recipe) — multi-node, every entrypoint, mooncake.
 
 ## Roadmap 🗺️
 
 We are actively expanding model and algorithm coverage. Near-term directions:
 
-- Promote the experimental (🧪) models — FLUX.2-Klein, HunyuanVideo, and
-  HunyuanVideo 1.5 — to full algorithm coverage.
+- Promote the experimental (🧪) models — FLUX.2-Klein and HunyuanVideo 1.0 / 1.5 —
+  to full algorithm coverage.
 - Extend the team-proposed algorithms (FlowDPPO, DRPO) to more model families and
   release additional checkpoints.
 - Broaden reward backends and rollout-engine coverage across domains.
@@ -202,7 +137,7 @@ Want a model or algorithm prioritized? [Open an issue](https://github.com/haonan
 
 Contributions and questions are welcome. Before opening a pull request, read the
 repository conventions in [`AGENTS.md`](AGENTS.md), run the
-[development checks](examples/README.md#development-checks) for the files you
+[pre-PR checks](examples/README.md#adding-or-editing-a-recipe) for the files you
 touched, and fill in the [pull request template](.github/pull_request_template.md).
 For questions, bug reports, and feature requests,
 [open an issue](https://github.com/haonan3/UniRL/issues).
@@ -222,7 +157,7 @@ If you find UniRL helpful, please cite:
 
 ```bibtex
 @misc{unirl_github,
-  title        = {{UniRL: Unified Reinforcement Learning for Unified Models}},
+  title        = {{UniRL: A Reinforcement Learning Framework for Unified Multimodal Models}},
   author       = {Haonan Wang and Linyu Wu and Qian Qiu and Lewei Jin and Bowen Ping and Jianghai Chen and Yiheng Du and Guangxin He and Yu Shi and Yongguang Lin and Zhuoxin Zhou and Zhanchao Zhou and Keming Wu and Rizhen Hu and Xuefei Ning and Feiyu Hu and Xiangyan Liu and Siqi Kou and Jiarui Yao and Xiangxin Zhou and Liefeng Bo and Wenxi Zhu and Tianyu Pang},
   year         = {2026},
   howpublished = {\url{https://github.com/Tencent-Hunyuan/UniRL}},
