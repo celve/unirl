@@ -2,7 +2,9 @@
 
 # UniRL
 
-### Unified RL post-training for diffusion, autoregressive, prompt-enhancer, and unified models
+### A Reinforcement Learning Framework for Unified Multimodal Models
+
+**U**(you)·**ni**(need)·**RL** for unified multimodal intelligence
 
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
@@ -39,14 +41,14 @@ backend. The runtime pieces are all first-class and composable:
 
 ### 🌟 Team-Proposed Algorithms
 
-> **🌟 These algorithms are proposed by our team — the highlight of UniRL.** Each ships
-> with a step-by-step tutorial, a runnable example recipe, and (where available) a
-> released checkpoint. We highly recommend trying them in our framework!
+> **🌟 These algorithms are proposed by our team — the highlight of UniRL.** Each
+> algorithm's folder holds a step-by-step tutorial, a runnable example recipe, and
+> (where available) a released checkpoint. We highly recommend trying them in our framework!
 
-| Algorithm | Paper | Runnable example | Checkpoint | Notes |
-|---|---|---|---|---|
-| **FlowDPPO** | *"Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models"* | [walkthrough](FlowDPPO/) · [`sd3_flowdppo.yaml`](examples/diffusion/sd3/sd3_flowdppo.yaml) | [🤗 sd3.5-flowdppo](https://huggingface.co/zhouzhuoxin/sd3.5-flowdppo) | Diffusion/flow RL with an exact Gaussian-KL trust-region mask. |
-| **DRPO** | *"Rethinking the Divergence Regularization in LLM Reinforcement Learning"* | [walkthrough](DRPO/) · [`ar_drpo_qwen3_4b_base_dpao_sglang.yaml`](examples/llm/qwen3/ar_drpo_qwen3_4b_base_dpao_sglang.yaml) | — | Token-level AR/LLM RL with a smooth Binary-TV quadratic regularizer. |
+| Algorithm | Paper | Tutorial | Notes |
+|---|---|---|---|
+| **FlowDPPO** | *"Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models"* | [FlowDPPO/](FlowDPPO/) | Diffusion/flow RL with an exact Gaussian-KL trust-region mask. |
+| **DRPO** | *"Rethinking the Divergence Regularization in LLM Reinforcement Learning"* | [DRPO/](DRPO/) | Token-level AR/LLM RL with a smooth Binary-TV quadratic regularizer. |
 
 ### Public Algorithms
 
