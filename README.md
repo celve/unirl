@@ -125,14 +125,14 @@ python -m unirl.train_diffusion --config-name=diffusion/sd3/sd3_trainside --cfg 
 Launch a single-node diffusion example:
 
 ```bash
-bash scripts/run_experiment_single_node.sh diffusion/sd3/sd3_trainside
+bash examples/run_experiment_single_node.sh diffusion/sd3/sd3_trainside
 ```
 
 Select another domain entrypoint with `ENTRY`:
 
 ```bash
-ENTRY=train_vlm bash scripts/run_experiment_single_node.sh vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8
-ENTRY=train_pe  bash scripts/run_experiment_single_node.sh pe/pe/pe_trainside_pickscore
+ENTRY=train_vlm bash examples/run_experiment_single_node.sh vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8
+ENTRY=train_pe  bash examples/run_experiment_single_node.sh pe/pe/pe_trainside_pickscore
 ```
 
 Invoke an entrypoint directly when you do not need the shell launchers:
@@ -186,25 +186,6 @@ Deployment mode is controlled by the rollout engine and optional `sync:` section
 | Separate rollout | Rollout and training use different GPU pools | Required |
 | Colocated rollout | Rollout and training share GPU bundles with offload/onload | Required |
 
-## Development Checks 🧪
-
-Before submitting a change, run the checks
-that match the files you touched:
-
-```bash
-# Compose one changed or representative example and print the resolved config
-python -m unirl.train_diffusion --config-name=diffusion/sd3/sd3_trainside --cfg job --resolve
-
-# Python syntax check
-python -m compileall -q unirl
-
-# Shell launcher syntax check
-for f in scripts/*.sh; do bash -n "$f"; done
-
-# Lint and repository hooks
-pre-commit run --all-files
-```
-
 ## Roadmap 🗺️
 
 We are actively expanding model and algorithm coverage. Near-term directions:
@@ -219,15 +200,12 @@ Want a model or algorithm prioritized? [Open an issue](https://github.com/haonan
 
 ## Contributing 🤝
 
-Contributions are welcome. Before opening a pull request, read the repository
-conventions in [`AGENTS.md`](AGENTS.md), run the **Development Checks** that match
-the files you touched, and fill in the
-[pull request template](.github/pull_request_template.md).
-
-## Contact Us 💬
-
-For questions, bug reports, and feature requests, please open an issue at
-[haonan3/UniRL](https://github.com/haonan3/UniRL/issues).
+Contributions and questions are welcome. Before opening a pull request, read the
+repository conventions in [`AGENTS.md`](AGENTS.md), run the
+[development checks](examples/README.md#development-checks) for the files you
+touched, and fill in the [pull request template](.github/pull_request_template.md).
+For questions, bug reports, and feature requests,
+[open an issue](https://github.com/haonan3/UniRL/issues).
 
 ## Acknowledgement 🙏
 

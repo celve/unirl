@@ -35,11 +35,11 @@
 #
 # Examples:
 #   # SPMD batch (taiji lands this same line on every node):
-#   bash scripts/run_experiment_multinode_taiji.sh diffusion/sd3/sd3_sglang_native_colocate
+#   bash examples/run_experiment_multinode_taiji.sh diffusion/sd3/sd3_sglang_native_colocate
 #   # ssh fan-out (run once on the head only):
-#   LAUNCH=ssh bash scripts/run_experiment_multinode_taiji.sh diffusion/sd3/sd3_sglang_native_colocate
+#   LAUNCH=ssh bash examples/run_experiment_multinode_taiji.sh diffusion/sd3/sd3_sglang_native_colocate
 #   # VLM/AR recipe (4x8):
-#   ENTRY=train_vlm bash scripts/run_experiment_multinode_taiji.sh vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8
+#   ENTRY=train_vlm bash examples/run_experiment_multinode_taiji.sh vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8
 #
 set -euo pipefail
 
@@ -206,7 +206,7 @@ if [ "${LAUNCH}" = "ssh" ]; then
              GPUS_PER_NODE='${w_gpu}' RAY_PORT='${RAY_PORT}' \
              CONDA_ENV='${CONDA_ENV:-}' CONDA_SH='${CONDA_SH:-}' VENV_DIR='${VENV_DIR:-}' \
              ${ssh_nccl_env}\
-             nohup bash scripts/run_experiment_multinode_taiji.sh '${EXPERIMENT}' \
+             nohup bash examples/run_experiment_multinode_taiji.sh '${EXPERIMENT}' \
              >/tmp/unirl_ray_worker_${worker_n}.log 2>&1 &" \
             || echo "[head] WARNING: ssh to ${w_ip} failed; that node will not join." >&2
     done

@@ -21,10 +21,10 @@
 # Export any of them before running to override a conf's own default.
 #
 # Examples:
-#   bash scripts/run_experiment_single_node.sh diffusion/sd3/sd3_trainside
-#   REPORT_TO_WANDB=true bash scripts/run_experiment_single_node.sh diffusion/qwen_image/qwen_image_trainside
-#   ENTRY=train_vlm bash scripts/run_experiment_single_node.sh vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8
-#   ENTRY=train_pe bash scripts/run_experiment_single_node.sh pe/pe/pe_trainside_pickscore
+#   bash examples/run_experiment_single_node.sh diffusion/sd3/sd3_trainside
+#   REPORT_TO_WANDB=true bash examples/run_experiment_single_node.sh diffusion/qwen_image/qwen_image_trainside
+#   ENTRY=train_vlm bash examples/run_experiment_single_node.sh vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8
+#   ENTRY=train_pe bash examples/run_experiment_single_node.sh pe/pe/pe_trainside_pickscore
 #
 set -euo pipefail
 

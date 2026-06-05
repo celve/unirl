@@ -13,7 +13,7 @@
 # Layout: 1 node × 8 GPUs, all colocated; no weight sync section.
 #
 # Launch (1 node x 8 GPUs):
-#   bash scripts/run_experiment_single_node.sh diffusion/hunyuan_video15/hunyuan_video15_t2v_dancegrpo_trainside
+#   bash examples/run_experiment_single_node.sh diffusion/hunyuan_video15/hunyuan_video15_t2v_dancegrpo_trainside
 
 num_devices: 8
 batch_size: 48                # prompts_per_rollout (v1 dancegrpo: 48)

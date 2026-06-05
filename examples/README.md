@@ -22,16 +22,32 @@ Recipes are grouped by trainer domain, then model. Select one with
 
 ## Launching
 
-```bash
-# direct entrypoint (compose-check first with `--cfg job --resolve`)
-python -m unirl.train_diffusion --config-name=diffusion/sd3/sd3_trainside --cfg job --resolve
-python -m unirl.train_diffusion --config-name=diffusion/sd3/sd3_trainside
+The bash launchers live in this directory. The first argument is the
+domain/model-qualified recipe name (passed to Hydra as `--config-name`); any extra
+args are forwarded verbatim as Hydra overrides. `ENTRY` selects a non-diffusion
+entrypoint (`train_vlm` / `train_pe` / `train_unified_model`); the default is
+`train_diffusion`.
 
-# via the launchers — arg 1 is the domain/model-qualified recipe name; ENTRY picks a non-diffusion entrypoint
-bash scripts/run_experiment_single_node.sh diffusion/sd3/sd3_trainside
-ENTRY=train_vlm bash scripts/run_experiment_single_node.sh vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8
-bash scripts/run_experiment_multinode_taiji.sh diffusion/sd3/sd3_sglang_native_colocate
+```bash
+# 0. Compose-check first — verifies the config composes and every ${oc.env:...} resolves
+python -m unirl.train_diffusion --config-name=diffusion/sd3/sd3_trainside --cfg job --resolve
+
+# 1. Single node
+bash examples/run_experiment_single_node.sh diffusion/sd3/sd3_trainside
+ENTRY=train_vlm bash examples/run_experiment_single_node.sh vlm/qwen_vl/argrpo_qwen_vl_geo3k_mc_4x8
+ENTRY=train_pe  bash examples/run_experiment_single_node.sh pe/pe/pe_trainside_pickscore
+
+# 2. Multi-node (taiji)
+bash examples/run_experiment_multinode_taiji.sh diffusion/sd3/sd3_sglang_native_colocate
+
+# 3. Or invoke an entrypoint directly, without the launchers
+python -m unirl.train_diffusion --config-name=diffusion/sd3/sd3_trainside num_devices=8
 ```
+
+Pass cluster-local paths and W&B identity through env vars (`PRETRAINED_MODEL`,
+`DATA_PATH`, `EVAL_DATA_PATH`, `REPORT_TO_WANDB`, `WANDB_PROJECT`, `WANDB_ENTITY`).
+The mooncake-backed recipe (`*_tq_mooncake`) needs its metadata server up first —
+start it on the head node with `bash examples/mooncake_master.sh start` before launching.
 
 Every recipe **must start with `# @package _global_`** on line 1. Recipes live in
 subdirectories, so without it Hydra would nest the whole config under the domain
@@ -89,3 +105,21 @@ model. They are kept as-is; new recipes should follow the model-first order abov
 3. Keep every choice in YAML, instantiated by `_target_`; use `${oc.env:...}` only
    for deployment-specific paths and logging identity.
 4. Compose-check: `python -m unirl.train_<entry> --config-name=<domain>/<model>/<recipe> --cfg job --resolve`.
+
+## Development checks
+
+Before opening a PR, run the checks that match the files you touched:
+
+```bash
+# Compose one changed or representative recipe and print the resolved config
+python -m unirl.train_diffusion --config-name=diffusion/sd3/sd3_trainside --cfg job --resolve
+
+# Python syntax check
+python -m compileall -q unirl
+
+# Shell launcher syntax check
+for f in examples/*.sh; do bash -n "$f"; done
+
+# Lint and repository hooks
+pre-commit run --all-files
+```

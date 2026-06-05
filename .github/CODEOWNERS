@@ -11,7 +11,6 @@
 /.claude/ @CjhHa1 @haonan3 @celve @Jayce-Ping
 
 # Launch and configuration surface.
-/scripts/ @CjhHa1 @haonan3 @celve @Jayce-Ping
 /examples/ @CjhHa1 @haonan3 @celve @Jayce-Ping
 
 # Core training and distributed runtime.

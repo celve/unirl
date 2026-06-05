@@ -20,7 +20,7 @@
 # notes for details.
 #
 # Launch (2 nodes x 8 GPUs, taiji SPMD):
-#   bash scripts/run_experiment_multinode_taiji.sh diffusion/hunyuan_video15/hunyuan_video15_t2v_vllmomni_nccl_separate
+#   bash examples/run_experiment_multinode_taiji.sh diffusion/hunyuan_video15/hunyuan_video15_t2v_vllmomni_nccl_separate
 
 num_devices: 16                    # 2 nodes × 8 GPUs
 batch_size: 16                     # prompts_per_rollout

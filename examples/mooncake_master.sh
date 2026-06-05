@@ -4,9 +4,9 @@
 # only *points* at the master — it does not launch it — so bring this up on the
 # head node BEFORE launching training, and tear it down after.
 #
-#   bash scripts/mooncake_master.sh start     # HTTP metadata + RPC server
-#   bash scripts/mooncake_master.sh status
-#   bash scripts/mooncake_master.sh stop
+#   bash examples/mooncake_master.sh start     # HTTP metadata + RPC server
+#   bash examples/mooncake_master.sh status
+#   bash examples/mooncake_master.sh stop
 #
 # Ports — read from the SAME env vars the training config interpolates into
 # transfer_queue.metadata_server / .master_server_address, so master and client
