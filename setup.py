@@ -6,7 +6,7 @@ setup(
     name="unirl",
     version="0.1.0",
     description="Unified multimodal RL training framework",
-    python_requires=">=3.10",
+    python_requires=">=3.12",
     include_package_data=True,
     packages=find_packages(
         where=".",
