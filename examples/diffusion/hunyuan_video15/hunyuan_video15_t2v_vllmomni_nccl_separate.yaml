@@ -142,6 +142,13 @@ algorithm:
   stage_attr: diffusion
   clip_range: 1.0e-4
   clip_schedule: constant
+  # Separate-slab rollout (vllm-omni) computes log_probs via a different code
+  # path than the train-side replay (merged-weight forward vs LoRA-adapter
+  # forward, different scheduler impl). This causes ~1e-4 numerical drift in
+  # old_logp that trips the tight clip_range and wastes gradient signal.
+  # "replay" recomputes old_logp at pre-update weights on the train replica,
+  # ensuring the π_old anchor uses the exact same code path as new_logp.
+  old_logp_source: replay
   conditions_cls:
     _target_: hydra.utils.get_class
     path: unirl.models.hunyuan_video15.conditions.HunyuanVideo15Conditions
