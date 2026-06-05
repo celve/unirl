@@ -50,17 +50,20 @@ class BucketedIPCReceiveMixin:
         # accept tensor-bag requests (matches verl-omni utils.py:40-46
         # pattern). Safe to call repeatedly — the patch is idempotent.
         VLLMOmniHijack.hijack()
-        # The trainer pickles IPC handles whose rebuild fn is SGLang's
+        # The trainer pickles IPC handles whose rebuild fn is the vendored
         # ``_rebuild_cuda_tensor_modified``. Unpickling on this worker
         # imports the same function, which then calls
         # ``reductions._rebuild_cuda_tensor_original`` — only present
         # after ``monkey_patch_torch_reductions()`` has run here too.
         # Without this, the first IPC bucket trips an AttributeError
         # the moment ``rebuild_ipc`` invokes ``func(*list_args)``.
-        try:
-            from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions  # type: ignore[import]
-        except ImportError:
-            from sglang.srt.patch_torch import monkey_patch_torch_reductions  # type: ignore[import]
+        # Vendored (sgl_compat) so the vLLM-Omni env needs no sglang install;
+        # pickles reference the patch fns by module path, so trainer and
+        # worker must import the identical module.
+        from unirl.rollout.engine.vllm_omni.weight_sync.sgl_compat import (
+            monkey_patch_torch_reductions,
+        )
+
         monkey_patch_torch_reductions()
         return super().__new__(cls)
 
@@ -191,27 +194,16 @@ class BucketedIPCReceiveMixin:
         """Receive a SGLang-shape one-bag payload and load it.
 
         Picks ``serialized_named_tensors[self.local_rank]``, deserializes via
-        sglang's ``MultiprocessingSerializer`` + ``FlattenedTensorBucket``,
-        then forwards the reconstructed ``[(name, tensor), ...]`` to
-        ``self.load_weights``. Sender is
+        the vendored ``MultiprocessingSerializer`` + ``FlattenedTensorBucket``
+        (sgl_compat), then forwards the reconstructed
+        ``[(name, tensor), ...]`` to ``self.load_weights``. Sender is
         :class:`unirl.distributed.weight_sync.full.tensor.TensorWeightSync`.
-
-        Runtime dep: sglang must be installed in the worker subprocess for the
-        ``FlattenedTensorBucket`` dataclass to round-trip the pickle. The pod
-        venv that runs the rollout actor and the worker shares this dep.
         """
         del target_modules, flush_cache  # accepted for SGLang-shape parity
-        # Deferred import: keeps the mixin importable on hosts without sglang
-        # (the engine + bucketed-IPC paths don't need it).
-        try:
-            from sglang.srt.utils import MultiprocessingSerializer
-            from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
-        except ImportError as exc:
-            raise RuntimeError(
-                f"{type(self).__name__}.update_weights_from_tensor: sglang is "
-                f"not installed in this worker. Install sglang or use "
-                f"update_weights_from_ipc instead. ({exc})"
-            ) from exc
+        from unirl.rollout.engine.vllm_omni.weight_sync.sgl_compat import (
+            FlattenedTensorBucket,
+            MultiprocessingSerializer,
+        )
 
         local_rank = int(getattr(self, "local_rank", 0))
         if local_rank >= len(serialized_named_tensors):
@@ -263,19 +255,16 @@ class BucketedIPCReceiveMixin:
           Python lists, and ``LoRAModel.from_lora_tensors`` then trips
           ``'list' object has no attribute 'to'``.
 
-        So the engine ships LoRA tensors via SGLang's
+        So the engine ships LoRA tensors via the vendored
         ``MultiprocessingSerializer`` (same path B.2 uses); the worker
         deserialises into a real ``dict[str, torch.Tensor]`` and rebuilds
         the request locally.
         """
-        try:
-            from sglang.srt.utils import MultiprocessingSerializer
-        except ImportError as exc:
-            raise RuntimeError(
-                f"{type(self).__name__}.set_lora_from_tensor_dict: sglang is not installed in this worker. ({exc})"
-            ) from exc
         from unirl.rollout.engine.vllm_omni.vllm_patches import (
             OmniTensorLoRARequest,
+        )
+        from unirl.rollout.engine.vllm_omni.weight_sync.sgl_compat import (
+            MultiprocessingSerializer,
         )
 
         lora_tensors = MultiprocessingSerializer.deserialize(lora_tensors_serialized)

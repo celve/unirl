@@ -933,7 +933,9 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         # underlying storage hands the next stage a stale handle pointing
         # at the already-unlinked file. Cloning into fresh storages
         # forces new shm files per stage.
-        from sglang.srt.utils import MultiprocessingSerializer
+        from unirl.rollout.engine.vllm_omni.weight_sync.sgl_compat import (
+            MultiprocessingSerializer,
+        )
 
         for sid in stage_ids:
             cloned = {
