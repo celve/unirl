@@ -93,6 +93,13 @@ class QwenImagePipelineConfig:
     use_lora: bool = False
     lora_target_modules: Optional[List[str]] = None
 
+    # VeOmniBackend lifecycle: build the transformer on the meta device
+    # (architecture only, no weight allocation). VeOmni's parallelize
+    # asserts meta init, materializes storage via ``to_empty``, and the
+    # backend loads real weights from ``<pretrained>/transformer`` after
+    # sharding. FSDPBackend recipes leave this False (eager load).
+    meta_init_transformer: bool = False
+
     # Dynamic-shift declaration for vllm_omni / sglang engines that build
     # ``FlowMatchSchedulePolicy`` from the model_config alone (they don't
     # have a Pipeline instance at engine-init time). Qwen-Image was
