@@ -5,25 +5,47 @@ the qwen_image trainside recipes and asserts the VeOmni backend package
 imports without dragging in torch or veomni — the discipline that keeps
 Hydra ``_target_`` resolution cheap driver-side and keeps veomni's import
 side effects out of every process that never constructs the backend.
+
+The sys.modules assertions run in SUBPROCESSES: popping an already-imported
+torch in-process and re-importing it re-registers its TORCH_LIBRARY
+namespaces and crashes the interpreter.
 """
 
 from __future__ import annotations
 
-import importlib
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+EXAMPLES_DIR = REPO_ROOT / "examples"
+
+
+def _run_in_clean_interpreter(code: str) -> None:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        env=env,
+        timeout=120,
+    )
+    assert proc.returncode == 0, f"subprocess failed:\nstdout={proc.stdout}\nstderr={proc.stderr}"
+    assert "OK" in proc.stdout
 
 
 def test_veomni_package_imports_without_torch_or_veomni() -> None:
-    for mod in ("torch", "veomni"):
-        sys.modules.pop(mod, None)
-    importlib.import_module("unirl.train.backend.veomni")
-    assert "torch" not in sys.modules, "package import must stay torch-free (PEP 562 lazy re-export)"
-    assert "veomni" not in sys.modules, "veomni must only load inside _compat.load()"
+    _run_in_clean_interpreter(
+        "import sys; import unirl.train.backend.veomni; "
+        "assert 'torch' not in sys.modules, 'package import must stay torch-free'; "
+        "assert 'veomni' not in sys.modules, 'veomni must only load inside _compat.load()'; "
+        "print('OK')"
+    )
 
 
 @pytest.mark.parametrize(
@@ -47,9 +69,10 @@ def test_veomni_recipe_targets_resolve_lazily() -> None:
     (construction, not resolution, is what triggers _compat.load())."""
     pytest.importorskip("hydra", reason="hydra-core not installed")
     pytest.importorskip("torch", reason="class resolution imports the backend module (torch)")
-    from hydra.utils import get_class
-
-    sys.modules.pop("veomni", None)
-    cls = get_class("unirl.train.backend.veomni.VeOmniBackend")
-    assert cls.__name__ == "VeOmniBackend"
-    assert "veomni" not in sys.modules, "resolving the class must not import veomni"
+    _run_in_clean_interpreter(
+        "import sys; from hydra.utils import get_class; "
+        "cls = get_class('unirl.train.backend.veomni.VeOmniBackend'); "
+        "assert cls.__name__ == 'VeOmniBackend'; "
+        "assert 'veomni' not in sys.modules, 'resolving the class must not import veomni'; "
+        "print('OK')"
+    )

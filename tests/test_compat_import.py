@@ -43,9 +43,21 @@ def test_poisoned_inits_never_ran(api) -> None:
     # Root __init__ would have imported the ops/kernel registry.
     assert "veomni.ops" not in sys.modules, "veomni/__init__.py executed (ops registry imported)"
     # models __init__ would have pulled the transformers-5.9 model zoo.
-    zoo_modules = [m for m in sys.modules if m.startswith("veomni.models.") and m != "veomni.models.module_utils"]
+    # (Loader-support siblings of module_utils — e.g. checkpoint_tensor_loading
+    # — import through the stub parent WITHOUT executing the real __init__;
+    # the zoo signal is the modeling subpackages + the eager registry.)
+    zoo_prefixes = (
+        "veomni.models.transformers",
+        "veomni.models.diffusers",
+        "veomni.models.seed_omni",
+        "veomni.models.auto",
+        "veomni.models.loader",
+    )
+    zoo_modules = [m for m in sys.modules if m.startswith(zoo_prefixes)]
     assert not zoo_modules, f"veomni/models/__init__.py executed (zoo imported: {zoo_modules[:5]})"
-    # The stubs themselves are package-shaped but init-less.
+    # The stubs themselves are package-shaped but init-less — sys.modules
+    # still holding our loader-less stubs IS the proof neither real
+    # __init__ ever executed (a real import would have replaced them).
     assert sys.modules["veomni"].__spec__.loader is None
     assert sys.modules["veomni.models"].__spec__.loader is None
 
