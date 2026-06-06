@@ -83,6 +83,17 @@ def run_backend(mode: str, out_path: str) -> None:
     assert dtypes == {"torch.bfloat16"}, f"expected pure bf16 master weights, got {dtypes}"
     assert n_trainable > 0, "no trainable params (LoRA injection failed?)"
 
+    # Plain tensor ATTRIBUTES (not params/buffers — e.g. diffusers'
+    # QwenEmbedRope complex rope tables) are invisible to to_empty and
+    # named_parameters; a meta one only explodes at forward time.
+    meta_attrs = [
+        f"{mod_name}.{attr}"
+        for mod_name, mod in model.named_modules()
+        for attr, val in vars(mod).items()
+        if isinstance(val, torch.Tensor) and val.is_meta
+    ]
+    assert not meta_attrs, f"plain tensor attrs still on meta: {meta_attrs[:5]}"
+
     # Fingerprint a deterministic sample of BASE weights (shared names across
     # both backends): first N sorted non-trainable 2D+ params.
     base_names = sorted(n for n, p in params.items() if not p.requires_grad and p.ndim >= 2)

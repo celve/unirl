@@ -40,6 +40,36 @@ from .config import QwenImagePipelineConfig
 logger = logging.getLogger(__name__)
 
 
+def _rebuild_meta_rope_modules(transformer: nn.Module) -> int:
+    """Rebuild rope-embed modules whose tables were built on meta.
+
+    diffusers' ``QwenEmbedRope`` keeps its complex rope tables
+    (``pos_freqs`` / ``neg_freqs``) as PLAIN tensor attributes —
+    deliberately not buffers (upstream comment: registering complex
+    buffers drops the imaginary part) — so ``to_empty`` never
+    materializes them and they stay on meta. The module holds no
+    parameters, so re-instantiating it on CPU from its own ctor attrs
+    and swapping it in is shard-exempt; ``forward`` moves the tables to
+    the live device on use."""
+    count = 0
+    for name, mod in list(transformer.named_modules()):
+        pos_freqs = getattr(mod, "pos_freqs", None)
+        if not (isinstance(pos_freqs, torch.Tensor) and pos_freqs.is_meta):
+            continue
+        fresh = type(mod)(
+            theta=mod.theta,
+            axes_dim=list(mod.axes_dim),
+            scale_rope=getattr(mod, "scale_rope", False),
+        )
+        if "." in name:
+            parent_name, attr = name.rsplit(".", 1)
+            setattr(transformer.get_submodule(parent_name), attr, fresh)
+        else:
+            setattr(transformer, name, fresh)
+        count += 1
+    return count
+
+
 class QwenImageBundle(Bundle):
     """Qwen-Image bundle: transformer + VAE + Qwen-VL text encoder + scheduler."""
 
@@ -102,6 +132,9 @@ class QwenImageBundle(Bundle):
             transformer_config = QwenImageTransformer2DModel.load_config(path, subfolder="transformer")
             with torch.device("meta"):
                 transformer = QwenImageTransformer2DModel.from_config(transformer_config)
+            rebuilt = _rebuild_meta_rope_modules(transformer)
+            if rebuilt:
+                logger.info("meta_init_transformer: rebuilt %d rope module(s) on CPU", rebuilt)
             transformer = transformer.to(dtype)
             transformer.init_weights = lambda: None
             non_persistent = sorted(set(n for n, _ in transformer.named_buffers()) - set(transformer.state_dict()))
