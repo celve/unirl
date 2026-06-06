@@ -1,5 +1,5 @@
-"""FSDP2 model wrapping: per-block ``fully_shard``, block-class discovery,
-HSDP mesh, optional activation checkpointing / ``torch.compile``.
+"""FSDP2 model wrapping: per-block ``fully_shard``, HSDP mesh, optional
+activation checkpointing / ``torch.compile``.
 
 Runs in the backend constructor after structural injection
 (``unirl.train.lora`` / ``unirl.train.ema``) and before materialize.
@@ -20,9 +20,8 @@ logger = logging.getLogger(__name__)
 
 def fsdp_wrap(
     model: nn.Module,
-    stage: Optional[object] = None,
     *,
-    block_class_names: Optional[Tuple[str, ...]] = None,
+    block_class_names: Tuple[str, ...],
     param_dtype: str = "bf16",
     cpu_offload: bool = False,
     mixed_precision: bool = True,
@@ -34,10 +33,8 @@ def fsdp_wrap(
     """Apply FSDP2 wrapping to the model.  No handle returned — DTensors
     ARE the handle.  Ported from FSDPPolicy._wrap_model.
 
-    If ``block_class_names`` is supplied, it takes precedence and
-    ``stage`` is ignored for discovery.  Otherwise we fall back to
-    ``_discover_block_classes(model, stage)`` (model __mro__ then stage
-    source chain).
+    ``block_class_names`` lists the model block classes to ``fully_shard``
+    (the backend forwards it from config).
     """
     from torch.distributed.fsdp import (
         CPUOffloadPolicy,
@@ -62,8 +59,6 @@ def fsdp_wrap(
     if mesh is not None:
         fsdp_kwargs["mesh"] = mesh
 
-    if block_class_names is None:
-        block_class_names = _discover_block_classes(model, stage)
     block_instances = _enumerate_block_instances(model, block_class_names)
 
     casts = 0
@@ -113,28 +108,8 @@ def fsdp_wrap(
 
 
 # ------------------------------------------------------------------
-# Block-class discovery (ported from FSDPPolicy)
+# Block-instance enumeration
 # ------------------------------------------------------------------
-
-
-def _discover_block_classes(model: nn.Module, stage: object) -> Tuple[str, ...]:
-    for cls in type(model).__mro__:
-        attr = getattr(cls, "_no_split_modules", None)
-        if attr:
-            return tuple(str(n) for n in attr)
-    leaf_source = stage
-    while hasattr(leaf_source, "source"):
-        leaf_source = leaf_source.source
-    attr = getattr(type(leaf_source), "_no_split_modules", None)
-    if attr:
-        return tuple(str(n) for n in attr)
-    if _current_rank() == 0:
-        logger.warning(
-            "fsdp_wrap: no block classes discovered for %r (stage %r). Falling back to root-only wrap.",
-            type(model).__name__,
-            type(leaf_source).__name__,
-        )
-    return ()
 
 
 def _enumerate_block_instances(

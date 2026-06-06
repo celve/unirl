@@ -22,7 +22,7 @@ variant.
 |---|---|
 | `stack.py` | `TrainStack` (single-stage): `train_track` → `prepare_segment` → mini-batch `train` loop → `optimizer_step`; returns `TrainStepResult` |
 | `backend/fsdp/backend.py` | `FSDPBackend`: FSDP2-wraps the model, builds optim/sched/EMA, `optimizer_step` (grad-clip + step + sched + EMA, skips non-finite grads), `onload`/`offload`, `save`/`load`, `apply_eval_ema`/`restore_from_eval` |
-| `backend/fsdp/wrap.py` | `fsdp_wrap` — FSDP2 `fully_shard` per block, block-class discovery, HSDP mesh, activation checkpointing / `torch.compile` |
+| `backend/fsdp/wrap.py` | `fsdp_wrap` — FSDP2 `fully_shard` per configured block class, HSDP mesh, activation checkpointing / `torch.compile` |
 | `backend/fsdp/state.py` | Sharded-state helpers: state-dict gather/load (DCP), `clip_grad_norm`, `fsdp_offload`/`fsdp_onload` |
 | `backend/base.py` | Backend-agnostic schemas: `OptimizerConfig`, `LrSchedulerConfig` |
 | `lora.py` | `inject_lora` — plain LoRA adapter injection (no Shadow, no EMA) |
@@ -57,9 +57,9 @@ collapsed into one misleading averaged `train/ratio_mean`.
 `FSDPBackend` is constructed once and:
 
 - dispatches structural injection (`inject_lora` / `inject_nft` / `inject_mirror`)
-  then `fsdp_wrap` — FSDP2 `fully_shard` per discovered model block class, a
-  mixed-precision policy (compute dtype, fp32 reduce), and optional CPU offload /
-  activation checkpointing / `torch.compile` / HSDP mesh;
+  then `fsdp_wrap` — FSDP2 `fully_shard` per configured model block class
+  (`block_class_names`), a mixed-precision policy (compute dtype, fp32 reduce),
+  and optional CPU offload / activation checkpointing / `torch.compile` / HSDP mesh;
 - builds the optimizer and LR scheduler (and EMA when configured);
 - `optimizer_step` clips grads, steps, advances the scheduler, updates EMA, and
   skips the step on non-finite grads;
