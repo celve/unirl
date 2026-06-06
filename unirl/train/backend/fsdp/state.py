@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List
 
 import torch
 from torch import Tensor, nn
@@ -42,53 +42,8 @@ def load_model_state_dict(model: nn.Module, state_dict: StateDict) -> None:
         set_model_state_dict(model, state_dict)
 
 
-def local_view(tensor: Tensor) -> Tensor:
-    """DTensor -> local shard.  Identity for non-DTensors."""
-    if hasattr(tensor, "_local_tensor"):
-        return tensor._local_tensor
-    return tensor
-
-
-def is_materialized(model: nn.Module) -> bool:
-    return not any(p.is_meta for p in model.parameters())
-
-
 def trainable_params(model: nn.Module) -> Iterator[Parameter]:
     return (p for p in model.parameters() if p.requires_grad)
-
-
-def lora_state_dict(
-    model: nn.Module,
-    full_sd: Optional[StateDict] = None,
-) -> StateDict:
-    """Adapter-only state for inference export.
-
-    All ranks must call this (the DCP gather is a collective).  Returns
-    the filtered dict on rank 0, empty dict on other ranks.
-    """
-    if full_sd is None:
-        full_sd = gather_state_dict(model)
-    if _current_rank() != 0:
-        return {}
-    return {k: v for k, v in full_sd.items() if _is_lora_key(k)}
-
-
-def nft_state_dict(
-    model: nn.Module,
-    full_sd: Optional[StateDict] = None,
-    shadow_adapter: str = "old",
-) -> StateDict:
-    """Export the shadow ('old') adapter state for NFT checkpoint.
-
-    All ranks must call this (the DCP gather is a collective).  Returns
-    the filtered dict on rank 0, empty dict on other ranks.
-    """
-    if full_sd is None:
-        full_sd = gather_state_dict(model)
-    if _current_rank() != 0:
-        return {}
-    token = f".{shadow_adapter}."
-    return {k: v for k, v in full_sd.items() if ("lora_A" in k or "lora_B" in k) and token in k}
 
 
 def clip_grad_norm(
@@ -162,17 +117,6 @@ def fsdp_onload(model: nn.Module, device: torch.device) -> None:
     logger.debug("fsdp_onload: onloaded params/grads to %s", device)
 
 
-def infer_device(model: nn.Module) -> torch.device:
-    """First non-meta parameter's device, else current cuda, else cpu."""
-    for param in model.parameters():
-        if param.is_meta:
-            continue
-        return param.device
-    if torch.cuda.is_available():
-        return torch.device(f"cuda:{torch.cuda.current_device()}")
-    return torch.device("cpu")
-
-
 # ------------------------------------------------------------------
 # Internal helpers
 # ------------------------------------------------------------------
@@ -184,11 +128,6 @@ def _current_rank() -> int:
     if dist.is_available() and dist.is_initialized():
         return int(dist.get_rank())
     return 0
-
-
-def _is_lora_key(key: str) -> bool:
-    """True for default-adapter LoRA keys (excludes shadow/old adapter)."""
-    return ("lora_A" in key or "lora_B" in key) and ".old." not in key
 
 
 def _build_state_dict_options(**kwargs: object) -> object:
@@ -285,12 +224,7 @@ __all__ = [
     "clip_grad_norm",
     "gather_state_dict",
     "load_model_state_dict",
-    "local_view",
-    "is_materialized",
     "trainable_params",
-    "lora_state_dict",
-    "nft_state_dict",
     "fsdp_offload",
     "fsdp_onload",
-    "infer_device",
 ]
