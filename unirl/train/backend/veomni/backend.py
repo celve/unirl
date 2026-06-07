@@ -287,10 +287,19 @@ class VeOmniBackend(Remote):
         checkpoint_path = os.path.join(path, "checkpoint.pt")
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"VeOmniBackend.load: checkpoint not found: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self._device)
+        # map_location=cpu: loading straight to the live device would hold
+        # the full checkpoint alongside the resident model — at small world
+        # sizes (1-GPU smoke; large per-rank shards) that double-allocation
+        # OOMs. The broadcast load below moves weights into the DTensor
+        # shards; optimizer state is moved back to device explicitly.
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
         load_model_state_dict(self.model, checkpoint["policy_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        for state in self.optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(self._device)
         if self.scheduler is not None and "scheduler_state_dict" in checkpoint:
             self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
