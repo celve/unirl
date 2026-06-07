@@ -13,15 +13,20 @@ that future training backends will read directly off the bundle.
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any
 
 import torch
 import torch.nn as nn
 
 from unirl.models.types.bundle import Bundle
+from unirl.models.types.meta_init import stamp_init_state_restore
 from unirl.utils.dtypes import parse_torch_dtype
 
 from .config import SD3PipelineConfig
+
+logger = logging.getLogger(__name__)
 
 
 class SD3Bundle(Bundle):
@@ -80,7 +85,27 @@ class SD3Bundle(Bundle):
         te_raw = config.text_encoder_dtype if config.text_encoder_dtype is not None else config.model_precision
         te_dtype = parse_torch_dtype(te_raw, field_name="text_encoder_dtype")
 
-        transformer = SD3Transformer2DModel.from_pretrained(path, subfolder="transformer", torch_dtype=dtype).to(device)
+        if config.meta_init_transformer:
+            # VeOmniBackend lifecycle: architecture on the meta device (no
+            # weight allocation); real weights load post-parallelize from the
+            # stashed path. SD3's PatchEmbed registers its sincos pos_embed
+            # as a NON-PERSISTENT buffer — absent from checkpoints, clobbered
+            # by to_empty — so a throwaway CPU twin (SD3.5-medium ~2B params,
+            # transient) captures all init-computed state and stamps the
+            # deferred restore that the backend drains after the weight load.
+            transformer_config = SD3Transformer2DModel.load_config(path, subfolder="transformer")
+            with torch.device("meta"):
+                transformer = SD3Transformer2DModel.from_config(transformer_config)
+            cpu_twin = SD3Transformer2DModel.from_config(transformer_config)
+            captured = stamp_init_state_restore(transformer, cpu_twin)
+            del cpu_twin
+            logger.info("meta_init_transformer: stamped restore for %d init-computed tensor(s)", captured)
+            transformer = transformer.to(dtype)
+            transformer.init_weights = lambda: None
+        else:
+            transformer = SD3Transformer2DModel.from_pretrained(path, subfolder="transformer", torch_dtype=dtype).to(
+                device
+            )
 
         vae = AutoencoderKL.from_pretrained(path, subfolder="vae", torch_dtype=vae_dtype).to(device).eval()
         vae.requires_grad_(False)
@@ -108,7 +133,7 @@ class SD3Bundle(Bundle):
 
         scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(path, subfolder="scheduler")
 
-        return cls(
+        bundle = cls(
             transformer=transformer,
             vae=vae,
             text_encoder=text_encoder,
@@ -122,6 +147,10 @@ class SD3Bundle(Bundle):
             device=device,
             pretrained_path=path,
         )
+        if config.meta_init_transformer:
+            # Consumed by VeOmniBackend's post-parallelize weight load.
+            bundle._transformer_weights_path = os.path.join(path, "transformer")
+        return bundle
 
 
 __all__ = ["SD3Bundle"]

@@ -105,3 +105,30 @@ def test_eager_path_unchanged_when_flag_off(patched_components) -> None:
     assert not any(p.is_meta for p in bundle.transformer.parameters())
     assert not hasattr(bundle, "_transformer_weights_path")
     assert "init_weights" not in vars(bundle.transformer)  # no stamp on the eager path
+
+
+def test_init_state_restore_round_trip() -> None:
+    """meta-build -> to_empty -> deferred restore recovers init-computed state
+    (non-persistent buffers AND plain tensor attrs) — the SD3/Qwen hazard."""
+    from unirl.models.types.meta_init import stamp_init_state_restore
+    from unirl.train.deferred import apply_deferred_ops
+
+    class InitComputed(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = nn.Linear(4, 4)
+            self.register_buffer("pos_embed", torch.arange(8, dtype=torch.float32), persistent=False)
+            self.freqs = torch.full((3,), 7.0)  # plain attr (rope-table style)
+
+    with torch.device("meta"):
+        meta_model = InitComputed()
+    cpu_twin = InitComputed()
+    captured = stamp_init_state_restore(meta_model, cpu_twin)
+    assert captured == 2  # pos_embed buffer + freqs attr
+    del cpu_twin
+
+    meta_model.to_empty(device="cpu")  # garbage storage, like VeOmni's materialize
+    apply_deferred_ops(meta_model)
+
+    assert torch.equal(meta_model.pos_embed, torch.arange(8, dtype=torch.float32))
+    assert torch.equal(meta_model.freqs, torch.full((3,), 7.0))
