@@ -227,3 +227,90 @@ def test_flux2_zero_checkpoint_absent_params(tmp_path) -> None:
     assert torch.all(meta.guidance.weight == 0)
     assert torch.all(meta.guidance.bias == 0)
     assert torch.all(meta.kept.weight == 5.0)  # present in ckpt → not touched by the deferred op
+
+
+# ----------------------------------------------------------------------
+# AR / VL models build via accelerate.init_empty_weights + HF from_config, and
+# stash the *root* checkpoint dir (no transformer/ subfolder).
+# ----------------------------------------------------------------------
+
+
+class _FakeAutoConfig:
+    @classmethod
+    def from_pretrained(cls, path, trust_remote_code=False):
+        return {"path": path}
+
+
+def test_qwen3_meta_init(monkeypatch) -> None:
+    pytest.importorskip("accelerate", reason="meta-init uses accelerate.init_empty_weights")
+    import transformers
+
+    class _FakeCausalLM(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = nn.Linear(4, 4)
+
+        @classmethod
+        def from_config(cls, config, trust_remote_code=False):
+            return cls()
+
+        @classmethod
+        def from_pretrained(cls, path, torch_dtype=None, trust_remote_code=False):
+            m = cls()
+            return m.to(torch_dtype) if torch_dtype is not None else m
+
+    monkeypatch.setattr(transformers, "AutoConfig", _FakeAutoConfig, raising=False)
+    monkeypatch.setattr(transformers, "AutoModelForCausalLM", _FakeCausalLM, raising=False)
+    monkeypatch.setattr(transformers, "AutoTokenizer", _FakeTokenizer, raising=False)
+
+    from unirl.models.qwen3.bundle import Qwen3Bundle
+    from unirl.models.qwen3.config import Qwen3PipelineConfig
+
+    bundle = Qwen3Bundle.from_config(
+        Qwen3PipelineConfig(pretrained_model_ckpt_path="/ckpt/qwen3", device="cpu", meta_init_transformer=True)
+    )
+    assert all(p.is_meta for p in bundle.transformer.parameters())
+    assert all(p.dtype == torch.bfloat16 for p in bundle.transformer.parameters())
+    assert bundle.transformer.init_weights() is None
+    assert bundle._transformer_weights_path == "/ckpt/qwen3"  # AR: root, no /transformer
+
+
+def test_qwen_vl_meta_init(monkeypatch) -> None:
+    pytest.importorskip("accelerate", reason="meta-init uses accelerate.init_empty_weights")
+    import transformers
+
+    class _FakeVL(nn.Module):
+        def __init__(self, config=None) -> None:
+            super().__init__()
+            self.model = nn.Module()
+            self.model.visual = nn.Linear(2, 2)
+            self.lm_head = nn.Linear(2, 2)
+
+        @classmethod
+        def from_pretrained(cls, path, torch_dtype=None, trust_remote_code=False):
+            m = cls()
+            return m.to(torch_dtype) if torch_dtype is not None else m
+
+    class _FakeProcessor:
+        @classmethod
+        def from_pretrained(cls, path, trust_remote_code=False, min_pixels=None, max_pixels=None):
+            inst = cls()
+            inst.tokenizer = _FakeTokenizer()
+            return inst
+
+    monkeypatch.setattr(transformers, "AutoConfig", _FakeAutoConfig, raising=False)
+    monkeypatch.setattr(transformers, "Qwen2_5_VLForConditionalGeneration", _FakeVL, raising=False)
+    monkeypatch.setattr(transformers, "AutoProcessor", _FakeProcessor, raising=False)
+
+    from unirl.models.qwen_vl.bundle import QwenVLBundle
+    from unirl.models.qwen_vl.config import QwenVLPipelineConfig
+
+    bundle = QwenVLBundle.from_config(
+        QwenVLPipelineConfig(pretrained_model_ckpt_path="/ckpt/qwenvl", device="cpu", meta_init_transformer=True)
+    )
+    assert all(p.is_meta for p in bundle.transformer.parameters())
+    assert all(p.dtype == torch.bfloat16 for p in bundle.transformer.parameters())
+    assert bundle.transformer.init_weights() is None
+    assert bundle._transformer_weights_path == "/ckpt/qwenvl"  # VL: root, no /transformer
+    # Vision tower frozen by default (freeze_vision_tower=True).
+    assert not any(p.requires_grad for p in bundle.transformer.model.visual.parameters())
