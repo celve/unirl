@@ -18,13 +18,69 @@ green.
 from __future__ import annotations
 
 import glob
+import logging
 import os
 from typing import Dict
 
 import torch
 from torch import nn
 
+logger = logging.getLogger(__name__)
+
 StateDict = Dict[str, object]
+
+
+def load_trainable_weights(
+    model: nn.Module,
+    bundle: object,
+    *,
+    device: torch.device,
+    rank: int = 0,
+    with_aux: tuple[str, ...] = (),
+    eager_ok: bool,
+) -> None:
+    """Resolve a bundle's trainable-weight source and load it post-wrap.
+
+    Both backends call this immediately after wrapping the trainable module.
+    Dispatch order:
+
+    1. ``bundle._transformer_weights_path`` (meta-init "Pattern B"): load the
+       stashed safetensors dir into the wrapped module via :func:`load_sharded`
+       (its meta-gate ``to_empty``-materializes the still-meta FSDP module, then
+       broadcasts).
+    2. ``bundle.materialize(device, with_aux)`` (self-contained "Pattern A",
+       e.g. hunyuan_image3): the bundle materializes itself.
+    3. otherwise the bundle is eager — weights are already present. Tolerated
+       when ``eager_ok`` (FSDP's wrap shards in place, leaving them intact); an
+       error otherwise (VeOmni's ``parallelize`` already ``to_empty``'d the
+       module, so eager weights would have been clobbered).
+    """
+    weights_path = getattr(bundle, "_transformer_weights_path", None)
+    if weights_path is not None:
+        load_sharded(model, weights_path, device=device, strict=False)
+        logger.info("Rank %s: loaded trainable weights from %s", rank, weights_path)
+        return
+
+    materialize = getattr(bundle, "materialize", None)
+    if callable(materialize):
+        materialize(device=device, with_aux=tuple(with_aux))
+        return
+
+    if not eager_ok:
+        raise ValueError(
+            "sharded_load: trainable module has no weight source — a meta-init "
+            "bundle must stash `_transformer_weights_path` or provide "
+            "materialize(). Eagerly-loaded bundles are FSDP-only: this backend's "
+            "parallelize already materialized (to_empty) the module, so eager "
+            "weights would be clobbered."
+        )
+    if with_aux:
+        logger.info(
+            "Rank %s: bundle %s loads eagerly; ignoring with_aux=%s",
+            rank,
+            type(bundle).__name__,
+            tuple(with_aux),
+        )
 
 
 def load_sharded(
@@ -162,4 +218,4 @@ def _build_state_dict_options(**kwargs: object) -> object:
     return StateDictOptions()
 
 
-__all__ = ["load_sharded", "_load_state_dict_sharded", "StateDict"]
+__all__ = ["load_trainable_weights", "load_sharded", "_load_state_dict_sharded", "StateDict"]

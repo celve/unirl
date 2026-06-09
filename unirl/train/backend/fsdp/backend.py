@@ -31,6 +31,7 @@ from unirl.train.backend.fsdp.state import (
     trainable_params,
 )
 from unirl.train.backend.fsdp.wrap import fsdp_wrap
+from unirl.train.backend.sharded_load import load_trainable_weights
 from unirl.train.configs import (
     EmaFullConfig,
     EmaLoraConfig,
@@ -124,16 +125,18 @@ class FSDPBackend(Remote):
             use_torch_compile=fsdp_cfg.use_torch_compile,
         )
 
-        bundle_materialize = getattr(bundle, "materialize", None)
-        if callable(bundle_materialize):
-            bundle_materialize(device=self._device, with_aux=tuple(with_aux))
-        elif with_aux:
-            logger.info(
-                "Rank %s: bundle %s loads eagerly; ignoring with_aux=%s",
-                self._rank,
-                type(bundle).__name__,
-                tuple(with_aux),
-            )
+        # Real weights: meta-init bundles stash a safetensors dir (load_sharded
+        # to_empty-materializes the still-meta module then broadcasts); Pattern-A
+        # bundles (hi3) materialize themselves; eager bundles already hold real
+        # weights (fsdp_wrap sharded them in place), so eager_ok=True is a no-op.
+        load_trainable_weights(
+            model,
+            bundle,
+            device=self._device,
+            rank=self._rank,
+            with_aux=with_aux,
+            eager_ok=True,
+        )
 
         apply_deferred_ops(model)
 

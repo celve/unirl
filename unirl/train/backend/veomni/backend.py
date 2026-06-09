@@ -37,7 +37,7 @@ from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
 from unirl.models.types.bundle import Bundle
 from unirl.train.backend.base import LrSchedulerConfig, OptimizerConfig
-from unirl.train.backend.sharded_load import load_sharded
+from unirl.train.backend.sharded_load import load_trainable_weights
 from unirl.train.backend.veomni.state import (
     clip_grad_norm,
     gather_state_dict,
@@ -160,27 +160,18 @@ class VeOmniBackend(Remote):
             use_torch_compile=fsdp_cfg.use_torch_compile,
         )
 
-        # 7. Real weights: rank 0 reads the bundle-stashed safetensors dir,
-        # broadcast into the sharded module via the shared loader (strict=False
-        # — adapter params are absent from the base checkpoint by design). The
-        # loader's meta-gate is a no-op here: veomni_parallelize already
-        # ``to_empty``-materialized the root.
-        weights_path = getattr(bundle, "_transformer_weights_path", None)
-        if weights_path is not None:
-            load_sharded(model, weights_path, device=self._device, strict=False)
-            logger.info("Rank %s: loaded transformer weights from %s", self._rank, weights_path)
-        else:
-            bundle_materialize = getattr(bundle, "materialize", None)
-            if callable(bundle_materialize):
-                bundle_materialize(device=self._device, with_aux=tuple(with_aux))
-            else:
-                raise ValueError(
-                    "VeOmniBackend: trainable module has no weight source — the "
-                    "bundle must either set meta-init (stashing "
-                    "_transformer_weights_path) or provide materialize(). "
-                    "Eagerly-loaded bundles are FSDPBackend territory: VeOmni's "
-                    "parallelize would clobber their weights via to_empty()."
-                )
+        # 7. Real weights: load into the freshly-sharded module. Meta-init
+        # bundles stash a safetensors dir; Pattern-A bundles materialize
+        # themselves; eager bundles are rejected (eager_ok=False) — parallelize
+        # already to_empty'd, so their weights are gone (FSDPBackend territory).
+        load_trainable_weights(
+            model,
+            bundle,
+            device=self._device,
+            rank=self._rank,
+            with_aux=with_aux,
+            eager_ok=False,
+        )
 
         # 8. Post-materialize resets (LoRA adapter init, mirror copies).
         apply_deferred_ops(model)

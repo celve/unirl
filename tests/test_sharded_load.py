@@ -80,3 +80,63 @@ def test_remap_lora_base_keys_passthrough_when_no_wrap() -> None:
     remapped = _remap_lora_base_keys(ckpt, model)
 
     assert set(remapped) == {"weight", "bias"}
+
+
+# ----------------------------------------------------------------------
+# load_trainable_weights — the shared post-wrap dispatch both backends call.
+# (The full broadcast-load is mocked; only the branch selection is tested.)
+# ----------------------------------------------------------------------
+
+
+def test_load_trainable_weights_uses_stash_path(monkeypatch) -> None:
+    import unirl.train.backend.sharded_load as sl
+
+    calls: dict = {}
+    monkeypatch.setattr(
+        sl,
+        "load_sharded",
+        lambda model, weights_dir, *, device, strict=False: calls.update(
+            weights_dir=weights_dir, strict=strict
+        ),
+    )
+
+    class FakeBundle:
+        _transformer_weights_path = "/ckpt/transformer"
+
+    sl.load_trainable_weights(nn.Linear(2, 2), FakeBundle(), device=torch.device("cpu"), eager_ok=True)
+
+    assert calls == {"weights_dir": "/ckpt/transformer", "strict": False}
+
+
+def test_load_trainable_weights_calls_materialize(monkeypatch) -> None:
+    import unirl.train.backend.sharded_load as sl
+
+    monkeypatch.setattr(
+        sl, "load_sharded", lambda *a, **k: pytest.fail("load_sharded must not run for Pattern A")
+    )
+    seen: dict = {}
+
+    class FakeBundle:
+        def materialize(self, *, device, with_aux=()):
+            seen.update(device=device, with_aux=with_aux)
+
+    sl.load_trainable_weights(
+        nn.Linear(2, 2), FakeBundle(), device=torch.device("cpu"), with_aux=("vae",), eager_ok=False
+    )
+
+    assert seen == {"device": torch.device("cpu"), "with_aux": ("vae",)}
+
+
+def test_load_trainable_weights_eager_ok_is_noop() -> None:
+    import unirl.train.backend.sharded_load as sl
+
+    # No weight source + eager_ok (FSDP): weights already present → no-op, no raise.
+    sl.load_trainable_weights(nn.Linear(2, 2), object(), device=torch.device("cpu"), eager_ok=True)
+
+
+def test_load_trainable_weights_eager_rejected_when_not_ok() -> None:
+    import unirl.train.backend.sharded_load as sl
+
+    # No weight source + not eager_ok (VeOmni already to_empty'd) → hard error.
+    with pytest.raises(ValueError, match="no weight source"):
+        sl.load_trainable_weights(nn.Linear(2, 2), object(), device=torch.device("cpu"), eager_ok=False)
