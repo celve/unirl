@@ -103,14 +103,25 @@ def test_wan21_meta_init(monkeypatch) -> None:
     import diffusers
     import transformers
 
+    # diffusers class-replacement works (load_config/from_config are read off the
+    # patched class). But wan21 imports its text encoder under a try/except, and
+    # `from transformers import UMT5EncoderModel` re-imports the real lazy class,
+    # bypassing a class-level setattr — so patch from_pretrained on the resolved
+    # real classes instead.
     monkeypatch.setattr(diffusers, "WanTransformer3DModel", _FakeTransformer, raising=False)
     monkeypatch.setattr(diffusers, "AutoencoderKLWan", _FakeAux, raising=False)
-    # wan21's from_config has try/except import fallbacks — cover them too so the
-    # test is robust to whichever names the installed diffusers/transformers expose.
-    monkeypatch.setattr(diffusers, "AutoModel", _FakeTransformer, raising=False)
-    monkeypatch.setattr(transformers, "AutoTokenizer", _FakeFromPretrained, raising=False)
-    monkeypatch.setattr(transformers, "UMT5EncoderModel", _FakeAux, raising=False)
-    monkeypatch.setattr(transformers, "T5EncoderModel", _FakeAux, raising=False)
+    monkeypatch.setattr(diffusers, "AutoModel", _FakeTransformer, raising=False)  # try/except fallback
+    _fake_te = classmethod(lambda c, *a, **k: _FakeAux())
+    for _name in ("UMT5EncoderModel", "T5EncoderModel"):
+        _cls = getattr(transformers, _name, None)
+        if _cls is not None:
+            monkeypatch.setattr(_cls, "from_pretrained", _fake_te, raising=False)
+    monkeypatch.setattr(
+        transformers.AutoTokenizer,
+        "from_pretrained",
+        classmethod(lambda c, *a, **k: _FakeFromPretrained()),
+        raising=False,
+    )
 
     from unirl.models.wan21.bundle import WAN21Bundle
     from unirl.models.wan21.config import WAN21PipelineConfig
