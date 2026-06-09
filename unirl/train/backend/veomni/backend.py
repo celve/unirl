@@ -37,8 +37,8 @@ from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
 from unirl.models.types.bundle import Bundle
 from unirl.train.backend.base import LrSchedulerConfig, OptimizerConfig
+from unirl.train.backend.sharded_load import load_sharded
 from unirl.train.backend.veomni.state import (
-    StateDict,
     clip_grad_norm,
     gather_state_dict,
     load_model_state_dict,
@@ -161,14 +161,13 @@ class VeOmniBackend(Remote):
         )
 
         # 7. Real weights: rank 0 reads the bundle-stashed safetensors dir,
-        # broadcast into the sharded module. strict=False — adapter params
-        # are absent from the base checkpoint by design.
+        # broadcast into the sharded module via the shared loader (strict=False
+        # — adapter params are absent from the base checkpoint by design). The
+        # loader's meta-gate is a no-op here: veomni_parallelize already
+        # ``to_empty``-materialized the root.
         weights_path = getattr(bundle, "_transformer_weights_path", None)
         if weights_path is not None:
-            state_dict = _read_safetensors_dir(weights_path) if self._rank == 0 else {}
-            if self._rank == 0:
-                state_dict = _remap_lora_base_keys(state_dict, model)
-            load_model_state_dict(model, state_dict, strict=False)
+            load_sharded(model, weights_path, device=self._device, strict=False)
             logger.info("Rank %s: loaded transformer weights from %s", self._rank, weights_path)
         else:
             bundle_materialize = getattr(bundle, "materialize", None)
@@ -406,52 +405,6 @@ def _validate_fsdp_cfg(fsdp_cfg: FSDPConfig) -> None:
         raise ValueError("VeOmniBackend: cpu_offload=true unsupported in v1 (use FSDPBackend).")
     if not fsdp_cfg.mixed_precision:
         raise ValueError("VeOmniBackend: mixed_precision=false unsupported in v1 (bf16-parity mode is fixed).")
-
-
-def _read_safetensors_dir(weights_path: str) -> StateDict:
-    """Merge all ``*.safetensors`` shards in a (diffusers-layout) directory.
-
-    Loading every shard makes the index json unnecessary and covers both
-    single-file and sharded checkpoints."""
-    import glob
-
-    from safetensors.torch import load_file
-
-    if not os.path.isdir(weights_path):
-        raise FileNotFoundError(
-            f"VeOmniBackend: transformer weights dir not found: {weights_path!r}. "
-            "HF repo IDs are not supported here — point the recipe's checkpoint "
-            "path at a local download."
-        )
-    shards = sorted(glob.glob(os.path.join(weights_path, "*.safetensors")))
-    if not shards:
-        raise FileNotFoundError(f"VeOmniBackend: no *.safetensors files under {weights_path!r}")
-    state_dict: StateDict = {}
-    for shard in shards:
-        state_dict.update(load_file(shard, device="cpu"))
-    return state_dict
-
-
-def _remap_lora_base_keys(state_dict: StateDict, model: nn.Module) -> StateDict:
-    """Translate base-checkpoint keys for LoRA-injected modules.
-
-    ``peft.inject_adapter_in_model`` (via ``unirl.train.lora`` /
-    ``unirl.train.ema``) rewires target Linears in place, so their original
-    weight moves to ``<module>.base_layer.weight``.  The base checkpoint
-    still uses the original key — insert the ``base_layer`` hop where (and
-    only where) the model expects it."""
-    model_keys = {n for n, _ in model.named_parameters()}
-    model_keys.update(n for n, _ in model.named_buffers())
-    remapped: StateDict = {}
-    for key, value in state_dict.items():
-        if key not in model_keys:
-            stem, _, leaf = key.rpartition(".")
-            candidate = f"{stem}.base_layer.{leaf}" if stem else key
-            if candidate in model_keys:
-                remapped[candidate] = value
-                continue
-        remapped[key] = value
-    return remapped
 
 
 __all__ = ["VeOmniBackend"]
