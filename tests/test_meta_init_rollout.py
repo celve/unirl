@@ -161,3 +161,69 @@ def test_hunyuan_video15_meta_init(monkeypatch) -> None:
         )
     )
     _assert_meta_contract(bundle, "/ckpt/hv15/transformer")
+
+
+class _FakeTokenizer:
+    pad_token = None
+    eos_token = "</s>"
+
+    @classmethod
+    def from_pretrained(cls, path, subfolder=None):
+        return cls()
+
+
+def test_flux2_klein_meta_init(monkeypatch) -> None:
+    import diffusers
+    import diffusers.schedulers as diffusers_schedulers
+    import transformers
+
+    monkeypatch.setattr(diffusers, "Flux2Transformer2DModel", _FakeTransformer, raising=False)
+    monkeypatch.setattr(diffusers, "AutoencoderKLFlux2", _FakeAux, raising=False)
+    monkeypatch.setattr(diffusers_schedulers, "FlowMatchEulerDiscreteScheduler", _FakeFromPretrained, raising=False)
+    monkeypatch.setattr(transformers, "AutoModelForCausalLM", _FakeAux, raising=False)
+    monkeypatch.setattr(transformers, "AutoTokenizer", _FakeTokenizer, raising=False)
+
+    from unirl.models.flux2_klein.bundle import Flux2KleinBundle
+    from unirl.models.flux2_klein.config import Flux2KleinPipelineConfig
+
+    bundle = Flux2KleinBundle.from_config(
+        Flux2KleinPipelineConfig(pretrained_model_ckpt_path="/ckpt/flux2", device="cpu", meta_init_transformer=True)
+    )
+    _assert_meta_contract(bundle, "/ckpt/flux2/transformer")
+
+
+def test_flux2_zero_checkpoint_absent_params(tmp_path) -> None:
+    """The guidance-embedder quirk: params absent from the checkpoint are zeroed
+    post-load (deferred), not left as to_empty garbage."""
+    from safetensors.torch import save_file
+
+    from unirl.models.flux2_klein.bundle import _stamp_zero_checkpoint_absent_params
+    from unirl.train.deferred import apply_deferred_ops
+
+    class T(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.kept = nn.Linear(2, 2)
+            self.guidance = nn.Linear(2, 2)  # absent from the checkpoint
+
+    wdir = tmp_path / "transformer"
+    wdir.mkdir()
+    real = T()
+    save_file(
+        {"kept.weight": real.kept.weight.detach().contiguous(), "kept.bias": real.kept.bias.detach().contiguous()},
+        str(wdir / "diffusion_pytorch_model.safetensors"),
+    )
+
+    with torch.device("meta"):
+        meta = T()
+    _stamp_zero_checkpoint_absent_params(meta, str(wdir))
+
+    meta.to_empty(device="cpu")  # backend materialize: garbage storage for every param
+    with torch.no_grad():  # simulate the load filling everything, incl. absent garbage
+        for p in meta.parameters():
+            p.fill_(5.0)
+    apply_deferred_ops(meta)
+
+    assert torch.all(meta.guidance.weight == 0)
+    assert torch.all(meta.guidance.bias == 0)
+    assert torch.all(meta.kept.weight == 5.0)  # present in ckpt → not touched by the deferred op
