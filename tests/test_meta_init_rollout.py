@@ -61,15 +61,15 @@ class _FakeTransformer(nn.Module):
         self.config = _FakeCfg()
 
     @classmethod
-    def load_config(cls, path, subfolder=None):
-        return {"path": path, "subfolder": subfolder}
+    def load_config(cls, *args, **kwargs):
+        return {}
 
     @classmethod
-    def from_config(cls, config):
+    def from_config(cls, *args, **kwargs):
         return cls()
 
     @classmethod
-    def from_pretrained(cls, path, subfolder=None, torch_dtype=None):
+    def from_pretrained(cls, *args, torch_dtype=None, **kwargs):
         m = cls()
         return m.to(torch_dtype) if torch_dtype is not None else m
 
@@ -80,14 +80,14 @@ class _FakeAux(nn.Module):
         self.w = nn.Linear(2, 2)
 
     @classmethod
-    def from_pretrained(cls, path, subfolder=None, torch_dtype=None):
+    def from_pretrained(cls, *args, torch_dtype=None, **kwargs):
         m = cls()
         return m.to(torch_dtype) if torch_dtype is not None else m
 
 
 class _FakeFromPretrained:
     @classmethod
-    def from_pretrained(cls, path, subfolder=None):
+    def from_pretrained(cls, *args, **kwargs):
         return cls()
 
 
@@ -105,8 +105,12 @@ def test_wan21_meta_init(monkeypatch) -> None:
 
     monkeypatch.setattr(diffusers, "WanTransformer3DModel", _FakeTransformer, raising=False)
     monkeypatch.setattr(diffusers, "AutoencoderKLWan", _FakeAux, raising=False)
+    # wan21's from_config has try/except import fallbacks — cover them too so the
+    # test is robust to whichever names the installed diffusers/transformers expose.
+    monkeypatch.setattr(diffusers, "AutoModel", _FakeTransformer, raising=False)
     monkeypatch.setattr(transformers, "AutoTokenizer", _FakeFromPretrained, raising=False)
     monkeypatch.setattr(transformers, "UMT5EncoderModel", _FakeAux, raising=False)
+    monkeypatch.setattr(transformers, "T5EncoderModel", _FakeAux, raising=False)
 
     from unirl.models.wan21.bundle import WAN21Bundle
     from unirl.models.wan21.config import WAN21PipelineConfig
@@ -168,7 +172,7 @@ class _FakeTokenizer:
     eos_token = "</s>"
 
     @classmethod
-    def from_pretrained(cls, path, subfolder=None):
+    def from_pretrained(cls, *args, **kwargs):
         return cls()
 
 
