@@ -78,4 +78,37 @@ def stamp_init_state_restore(meta_model: nn.Module, cpu_twin: nn.Module) -> int:
     return len(buffers) + len(attrs)
 
 
-__all__ = ["stamp_init_state_restore"]
+def finalize_meta_init(transformer: nn.Module, *, dtype: torch.dtype) -> nn.Module:
+    """Finalize a transformer just built on the meta device for the backends'
+    ``load_sharded`` path (shared by every meta-init bundle):
+
+    * dtype-cast — on meta this only sets the dtype (no storage, no data move),
+      so the backend's ``to_empty`` later materializes directly in ``dtype``;
+    * stamp ``init_weights`` to a no-op — VeOmni's ``parallelize`` calls it
+      unconditionally after ``to_empty``; the real weights load afterwards;
+    * warn about non-persistent buffers absent from the checkpoint — if the
+      model relies on their init-time values they must be restored via
+      :func:`stamp_init_state_restore` (see SD3's sincos ``pos_embed`` and
+      Qwen-Image's rope tables).
+
+    ``nn.Module.to`` is in place and returns ``self``; callers rebind by
+    convention. Quirk fixes that must run *before* the cast (e.g. rebuilding
+    rope modules whose tables stay on meta) should be applied by the caller
+    before invoking this.
+    """
+    transformer = transformer.to(dtype)
+    transformer.init_weights = lambda: None
+    non_persistent = sorted(set(n for n, _ in transformer.named_buffers()) - set(transformer.state_dict()))
+    if non_persistent:
+        logger.warning(
+            "finalize_meta_init: %d non-persistent buffer(s) absent from the "
+            "checkpoint and NOT restored by the weight load: %s%s. If the model "
+            "relies on their init-time values, stamp stamp_init_state_restore.",
+            len(non_persistent),
+            non_persistent[:8],
+            " ..." if len(non_persistent) > 8 else "",
+        )
+    return transformer
+
+
+__all__ = ["stamp_init_state_restore", "finalize_meta_init"]
