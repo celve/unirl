@@ -61,11 +61,18 @@ class Qwen3ChatTemplateStage(EmbedStage[Texts, Qwen3ARConditions]):
                 add_generation_prompt=True,
                 enable_thinking=self.enable_thinking,
                 tokenize=True,
+                return_dict=False,
                 return_tensors="pt",
                 truncation=True,
                 max_length=self.max_prompt_length,
             )
-            # apply_chat_template returns [1, L]; squeeze the leading dim.
+            # transformers >=5 defaults apply_chat_template(tokenize=True) to
+            # return_dict=True -> a BatchEncoding whose ids[0] is a
+            # tokenizers.Encoding (no .to()). return_dict=False forces the bare
+            # [1, L] tensor; guard in case a kwarg re-enables the dict form.
+            if hasattr(ids, "input_ids"):
+                ids = ids.input_ids
+            # squeeze the leading dim.
             per_sample_ids.append(ids[0].to(device=device, dtype=torch.long))
 
         # Right-pad to the in-batch max so the AR loop can use a single tensor.
