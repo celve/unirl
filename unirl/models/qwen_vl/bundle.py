@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from unirl.models.types.bundle import Bundle
-from unirl.models.types.meta_init import finalize_meta_init
+from unirl.models.types.meta_init import finalize_meta_init, stamp_init_state_restore
 from unirl.utils.dtypes import parse_torch_dtype
 
 from .config import QwenVLPipelineConfig
@@ -59,6 +59,13 @@ class QwenVLBundle(Bundle):
             hf_config = AutoConfig.from_pretrained(path, trust_remote_code=bool(config.trust_remote_code))
             with init_empty_weights():
                 transformer = Qwen2_5_VLForConditionalGeneration(hf_config)
+            # HF rotary inv_freq is a non-persistent buffer (computed in __init__,
+            # absent from the checkpoint); to_empty leaves it uninitialized ->
+            # garbage RoPE. Restore it from a real CPU twin via a deferred op
+            # (drained post-load), mirroring qwen3 / sd3.
+            cpu_twin = Qwen2_5_VLForConditionalGeneration(hf_config)
+            stamp_init_state_restore(transformer, cpu_twin)
+            del cpu_twin
             transformer = finalize_meta_init(transformer, dtype=dtype)
         else:
             transformer = Qwen2_5_VLForConditionalGeneration.from_pretrained(

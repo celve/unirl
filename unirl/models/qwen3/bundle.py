@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 
 from unirl.models.types.bundle import Bundle
-from unirl.models.types.meta_init import finalize_meta_init
+from unirl.models.types.meta_init import finalize_meta_init, stamp_init_state_restore
 from unirl.utils.dtypes import parse_torch_dtype
 
 from .config import Qwen3PipelineConfig
@@ -83,6 +83,16 @@ class Qwen3Bundle(Bundle):
                 transformer = AutoModelForCausalLM.from_config(
                     hf_config, trust_remote_code=bool(config.trust_remote_code)
                 )
+            # HF rotary inv_freq / original_inv_freq are non-persistent buffers
+            # computed in __init__ and absent from the checkpoint, so to_empty
+            # leaves them uninitialized -> garbage RoPE. Capture them from a real
+            # CPU twin and stamp a deferred restore (drained post-load by
+            # apply_deferred_ops), mirroring sd3 / qwen_image.
+            cpu_twin = AutoModelForCausalLM.from_config(
+                hf_config, trust_remote_code=bool(config.trust_remote_code)
+            )
+            stamp_init_state_restore(transformer, cpu_twin)
+            del cpu_twin
             transformer = finalize_meta_init(transformer, dtype=dtype)
         else:
             transformer = AutoModelForCausalLM.from_pretrained(
