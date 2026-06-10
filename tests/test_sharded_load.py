@@ -140,3 +140,28 @@ def test_load_trainable_weights_eager_rejected_when_not_ok() -> None:
     # No weight source + not eager_ok (VeOmni already to_empty'd) → hard error.
     with pytest.raises(ValueError, match="no weight source"):
         sl.load_trainable_weights(nn.Linear(2, 2), object(), device=torch.device("cpu"), eager_ok=False)
+
+
+# ----------------------------------------------------------------------
+# resolve_trainable_module — backends hand over a nested submodule when the
+# bundle exposes trainable_module() (composite, e.g. hi3 decoder), else the attr.
+# ----------------------------------------------------------------------
+
+
+def test_resolve_trainable_module_prefers_bundle_method() -> None:
+    from unirl.train.backend.base import resolve_trainable_module
+
+    decoder = object()
+    wrapper = object()
+
+    class CompositeBundle:  # hi3-shaped: hands over the nested decoder
+        transformer = wrapper
+
+        def trainable_module(self):
+            return decoder
+
+    class SingleModuleBundle:  # sd3/qwen_image-shaped: no method → use the attr
+        transformer = wrapper
+
+    assert resolve_trainable_module(CompositeBundle(), "transformer") is decoder
+    assert resolve_trainable_module(SingleModuleBundle(), "transformer") is wrapper

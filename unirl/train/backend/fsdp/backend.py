@@ -21,7 +21,7 @@ from torch import nn
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
 from unirl.models.types.bundle import Bundle
-from unirl.train.backend.base import LrSchedulerConfig, OptimizerConfig
+from unirl.train.backend.base import LrSchedulerConfig, OptimizerConfig, resolve_trainable_module
 from unirl.train.backend.fsdp.state import (
     clip_grad_norm,
     fsdp_offload,
@@ -83,7 +83,7 @@ class FSDPBackend(Remote):
         self._rank = int(rank)
         self._device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        model = getattr(bundle, trainable_attr)
+        model = resolve_trainable_module(bundle, trainable_attr)
 
         shadow: Optional[Shadow] = None
 

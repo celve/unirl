@@ -84,7 +84,12 @@ Per-architecture init-computed state that `to_empty` destroys must be restored �
 
 Always confirm parity on a GPU pod: the meta build must load weights byte-identical to the eager path, on both backends.
 
-Composite trainables with *embedded* frozen aux (only `hunyuan_image3` today — `transformer.vae` / `transformer.vision_model` live inside the meta-built wrapper) are the exception: rather than stash a weights dir, they provide a self-contained `materialize(device, with_aux=())` that allocates + DCP-loads the decoder, the always-resident diffusion heads, and the opt-in aux in one pass; the backend calls it when no `_transformer_weights_path` is set. Single-transformer bundles whose aux are separate eager modules need none of that.
+Composite trainables with *embedded* frozen aux (only `hunyuan_image3` today — `transformer.vae` / `transformer.vision_model` live inside the meta-built wrapper) are the exception, and add two hooks on top of the contract:
+
+- `trainable_module()` returns the bare decoder (`transformer.model`). The backend resolves the module to wrap/optimize/checkpoint via `resolve_trainable_module(bundle, trainable_attr)` (`unirl/train/backend/base.py`), which prefers this method and otherwise falls back to the named attr. Handing the backend the single decoder — not the heterogeneous composite — keeps the frozen aux *outside* the wrap (on meta until materialized, off the optimizer/checkpoint), which is what lets the composite run under VeOmni (its `parallelize` root-shards + whole-root-`to_empty`s its input) and makes the `weight_sync_param_name_prefix` resolve correctly.
+- a self-contained `materialize(device, with_aux=())` allocates + DCP-loads the decoder, the always-resident diffusion heads, and the opt-in vae/vit in one collective (mixed DTensor decoder + plain heads/aux); the backend calls it when no `_transformer_weights_path` is stashed.
+
+Single-transformer bundles whose aux are separate eager modules need none of that.
 
 ## Conditions And Field Kinds
 

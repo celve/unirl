@@ -36,7 +36,7 @@ from torch import nn
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
 from unirl.models.types.bundle import Bundle
-from unirl.train.backend.base import LrSchedulerConfig, OptimizerConfig
+from unirl.train.backend.base import LrSchedulerConfig, OptimizerConfig, resolve_trainable_module
 from unirl.train.backend.sharded_load import load_trainable_weights
 from unirl.train.backend.veomni.state import (
     clip_grad_norm,
@@ -117,7 +117,7 @@ class VeOmniBackend(Remote):
         )
 
         self._bundle = bundle
-        model = getattr(bundle, trainable_attr)
+        model = resolve_trainable_module(bundle, trainable_attr)
 
         # 4-5. Structural injection on the meta module (the documented
         # unirl.train.deferred contract: mutate on meta, stamp resets).
