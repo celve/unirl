@@ -51,17 +51,20 @@ class Qwen3ChatTemplateStage(EmbedStage[Texts, Qwen3ARConditions]):
             if self.system_instruction is not None:
                 messages.append({"role": "system", "content": self.system_instruction})
             messages.append({"role": "user", "content": text})
-            ids = tokenizer.apply_chat_template(
+            enc = tokenizer.apply_chat_template(
                 messages,
                 add_generation_prompt=True,
                 enable_thinking=False,
                 tokenize=True,
+                return_dict=True,
                 return_tensors="pt",
                 truncation=True,
                 max_length=self.max_prompt_length,
             )
-            # apply_chat_template returns [1, L]; squeeze the leading dim.
-            per_sample_ids.append(ids[0].to(device=device, dtype=torch.long))
+            # return_dict=True -> BatchEncoding; input_ids is [1, L], squeeze the
+            # leading dim. (Without return_dict, this tokenizers version returns a
+            # BatchEncoding whose [0] is a tokenizers.Encoding, not a tensor.)
+            per_sample_ids.append(enc["input_ids"][0].to(device=device, dtype=torch.long))
 
         # Right-pad to the in-batch max so the AR loop can use a single tensor.
         max_len = max(int(t.shape[0]) for t in per_sample_ids)
