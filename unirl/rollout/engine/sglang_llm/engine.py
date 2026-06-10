@@ -436,7 +436,15 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         elif self.cfg.port is not None:
             self._port = int(self.cfg.port)
         else:
+            # sglang derives grpc_port = port + 10000 and rejects a derived port
+            # > 65535 (server_args.py __post_init__, which also overwrites any
+            # explicit grpc_port). OS ephemeral ports can sit above 55535, so
+            # re-roll the HTTP port until it leaves room for the +10000 grpc port.
             self._port = find_free_port()
+            for _ in range(50):
+                if self._port <= 55535:
+                    break
+                self._port = find_free_port()
 
         # Bind 0.0.0.0 so the SRT server accepts cross-node router connections.
         host = str(engine_kwargs.get("host") or self.cfg.host or "0.0.0.0")
