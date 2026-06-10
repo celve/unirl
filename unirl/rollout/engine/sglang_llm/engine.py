@@ -1057,13 +1057,19 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
         else:
             messages.append({"role": "user", "content": user_prompt})
 
+        # transformers >=5 defaults apply_chat_template(tokenize=True) to
+        # return_dict=True -> a BatchEncoding (not a bare List[int]), which then
+        # breaks len()/slicing below and JSON serialization into the sglang
+        # /generate payload. Force the list form and normalize any
+        # tensor / leading batch dim a kwarg might introduce.
+        template_kwargs: Dict[str, Any] = {
+            "add_generation_prompt": True,
+            "tokenize": True,
+            "return_dict": False,
+        }
+        template_kwargs.update(self.cfg.chat_template_kwargs or {})
         try:
-            input_ids = self._tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                tokenize=True,
-                **(self.cfg.chat_template_kwargs or {}),
-            )
+            input_ids = self._tokenizer.apply_chat_template(messages, **template_kwargs)
         except Exception:
             # Fallback for tokenizers that don't support structured content
             # parts: prepend the image_token as plain text.
@@ -1074,12 +1080,15 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
             if system_instruction:
                 messages_fb.append({"role": "system", "content": system_instruction})
             messages_fb.append({"role": "user", "content": fallback_text})
-            input_ids = self._tokenizer.apply_chat_template(
-                messages_fb,
-                add_generation_prompt=True,
-                tokenize=True,
-                **(self.cfg.chat_template_kwargs or {}),
-            )
+            input_ids = self._tokenizer.apply_chat_template(messages_fb, **template_kwargs)
+
+        if hasattr(input_ids, "input_ids"):  # BatchEncoding (a kwarg re-enabled dict form)
+            input_ids = input_ids["input_ids"]
+        if hasattr(input_ids, "tolist"):  # torch / numpy tensor (return_tensors)
+            input_ids = input_ids.tolist()
+        if input_ids and isinstance(input_ids[0], (list, tuple)):  # leading batch dim of 1
+            input_ids = input_ids[0]
+        input_ids = [int(t) for t in input_ids]
 
         if not self._chat_template_logged:
             self._chat_template_logged = True
