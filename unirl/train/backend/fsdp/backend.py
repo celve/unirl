@@ -1,6 +1,6 @@
 """FSDPBackend — single-track training-state Remote.
 
-Owns structural injection (LoRA / DiffusionNFT / mirror EMA / FSDP wrap) on the
+Owns structural injection (LoRA / NFT / mirror EMA / FSDP wrap) on the
 trainable module exposed by a :class:`Bundle`, plus the ongoing training
 state (optimizer, scheduler, EMA, eval-EMA swap, checkpoint, onload/
 offload).  Does NOT hold a ``Stage`` or an algorithm — the algorithm
@@ -22,16 +22,8 @@ from torch import nn
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
 from unirl.models.types.bundle import Bundle
-from unirl.train.backend.base import LrSchedulerConfig, OptimizerConfig
-from unirl.train.configs import (
-    EmaFullConfig,
-    EmaLoraConfig,
-    FSDPConfig,
-    LoraConfig,
-)
-from unirl.train.ema import EMA, make_decay_fn
-from unirl.train.factories import build_lr_scheduler, build_optimizer
-from unirl.train.fsdp_utils import (
+from unirl.train.backend.base import LrSchedulerConfig, OptimizerConfig, resolve_trainable_module
+from unirl.train.backend.fsdp.state import (
     _current_rank,
     clip_grad_norm,
     fsdp_offload,
@@ -42,14 +34,18 @@ from unirl.train.fsdp_utils import (
     load_optimizer_state_dict,
     trainable_params,
 )
-from unirl.train.inject import (
-    apply_deferred_ops,
-    fsdp_wrap,
-    inject_lora,
-    inject_mirror,
-    inject_nft,
+from unirl.train.backend.fsdp.wrap import fsdp_wrap
+from unirl.train.backend.sharded_load import load_trainable_weights
+from unirl.train.configs import (
+    EmaFullConfig,
+    EmaLoraConfig,
+    FSDPConfig,
+    LoraConfig,
 )
-from unirl.train.shadow import Shadow
+from unirl.train.deferred import apply_deferred_ops
+from unirl.train.ema import EMA, Shadow, inject_mirror, inject_nft, make_decay_fn
+from unirl.train.lora import inject_lora
+from unirl.train.optim import build_lr_scheduler, build_optimizer
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +79,7 @@ class FSDPBackend(Remote):
         if lora_cfg is not None and ema_lora_cfg is not None:
             raise ValueError(
                 "FSDPBackend: lora_cfg and ema_lora_cfg are mutually exclusive "
-                "(both inject LoRA adapters). Use ema_lora_cfg for DiffusionNFT-style "
+                "(both inject LoRA adapters). Use ema_lora_cfg for NFT-style "
                 "adapter EMA, or lora_cfg for plain LoRA."
             )
 
@@ -91,7 +87,7 @@ class FSDPBackend(Remote):
         self._rank = int(rank)
         self._device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        model = getattr(bundle, trainable_attr)
+        model = resolve_trainable_module(bundle, trainable_attr)
 
         shadow: Optional[Shadow] = None
 
@@ -136,16 +132,18 @@ class FSDPBackend(Remote):
             root_wrap=getattr(fsdp_cfg, "root_wrap", True),
         )
 
-        bundle_materialize = getattr(bundle, "materialize", None)
-        if callable(bundle_materialize):
-            bundle_materialize(device=self._device, with_aux=tuple(with_aux))
-        elif with_aux:
-            logger.info(
-                "Rank %s: bundle %s loads eagerly; ignoring with_aux=%s",
-                self._rank,
-                type(bundle).__name__,
-                tuple(with_aux),
-            )
+        # Real weights: meta-init bundles stash a safetensors dir (load_sharded
+        # to_empty-materializes the still-meta module then broadcasts); Pattern-A
+        # bundles (hi3) materialize themselves; eager bundles already hold real
+        # weights (fsdp_wrap sharded them in place), so eager_ok=True is a no-op.
+        load_trainable_weights(
+            model,
+            bundle,
+            device=self._device,
+            rank=self._rank,
+            with_aux=with_aux,
+            eager_ok=True,
+        )
 
         apply_deferred_ops(model)
 
@@ -295,7 +293,7 @@ class FSDPBackend(Remote):
     def apply_eval_ema(self) -> None:
         """Swap the EMA shadow ("old") adapter into live position for rollout.
 
-        Driver-callable (each worker swaps its own model); the DiffusionNFT trainer
+        Driver-callable (each worker swaps its own model); the NFT trainer
         wraps ``rollout.generate`` with this + :meth:`restore_from_eval`.
         No-op when ``ema is None`` (GRPO) or already swapped in.
         """
