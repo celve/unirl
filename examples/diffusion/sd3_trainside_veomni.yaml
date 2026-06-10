@@ -117,7 +117,7 @@ reward:
       model_id: yuvalkirstain/PickScore_v1
 
 algorithm:
-  _target_: unirl.algorithms.diffusion_grpo.DiffusionGRPO
+  _target_: unirl.algorithms.flowgrpo.FlowGRPO
   stage_attr: diffusion
   clip_range: 1.0e-4
   clip_schedule: constant
@@ -126,7 +126,7 @@ algorithm:
   # when pi_old is recomputed at the train micro-geometry. `replay` does that (the
   # train stack drives prepare_segment over the same slices it trains on; see
   # TrainStack.prepare_segment). Recipes that already sample and train at the same
-  # batch (forward_batch_size == micro_batch_size) can keep the default `native`.
+  # batch (forward_batch_size == micro_batch_size) can keep the default `rollout`.
   old_logp_source: replay
   conditions_cls:
     _target_: hydra.utils.get_class
