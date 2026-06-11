@@ -1,16 +1,20 @@
-"""BagelPipeline — RolloutReq → RolloutResp end-to-end for BAGEL-7B-MoT (T2I).
+"""BagelPipeline — RolloutReq → RolloutResp end-to-end for BAGEL-7B-MoT (T2I / it2i).
 
 Four-tier flow, per-sample (navit ``bs=1``)::
 
-    Texts ─build 3 KV contexts─▶ BagelDiffusionConditions ─diffuse─▶ LatentSegment ─vae_decode─▶ Images
+    Texts [+ Images] ─build 3 KV contexts─▶ BagelDiffusionConditions ─diffuse─▶ LatentSegment ─vae_decode─▶ Images
+
+Task routing (``_resolve_task``): explicit ``req.stage_config["task"]`` wins;
+otherwise image-out with an ``Images`` input ⇒ ``it2i`` (editing), else ``t2i``.
 
 Per prompt the pipeline builds the three KV-cache contexts the sampler needs
-(mirroring ``InterleaveInferencer.interleave_inference`` for plain T2I, ``think=False``,
-no input image):
+(mirroring ``InterleaveInferencer.interleave_inference``, ``think=False``;
+editing input order ``[image, text]``, vendor/inferencer.py:242-253):
 
-- ``gen``      = init + text(prompt)          (conditional)
-- ``cfg_text`` = init snapshot before the text (unconditional / text-CFG)
-- ``cfg_img``  = init + text(prompt)          (== gen for pure T2I)
+- t2i:  ``gen`` = init + text; ``cfg_text`` = init snapshot before the text
+  (unconditional); ``cfg_img`` = init + text (== gen — no image branch).
+- it2i: ``gen`` = init + image(VAE+ViT) + text; ``cfg_text`` = init + image
+  (drop-text branch); ``cfg_img`` = init + text (drop-image branch).
 
 then runs ``diffusion.diffuse`` once per sample, accumulates the per-sample latents
 into one batched ``LatentSegment``, decodes them, and packs one ``"image"`` track.
@@ -43,14 +47,14 @@ from unirl.models.types.pipeline import Pipeline
 from unirl.sde.kernels import FlowSDEStrategy, StepStrategy
 from unirl.sde.runtime import FlowMatchSchedulePolicy
 from unirl.types.noise_recipe import NoiseRecipe
-from unirl.types.primitives import Texts
+from unirl.types.primitives import Images, Texts
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
 from unirl.types.sampling import get_diffusion_params
 from unirl.types.segments.latent import LatentSegment
 
 from .conditions import BagelDiffusionConditions
-from .diffusion import BagelDiffusionParams, BagelDiffusionStage
+from .diffusion import BagelDiffusionParams, BagelDiffusionStage, _to_device
 from .vae import BagelVAEDecodeStage, bagel_latent_shape
 
 if TYPE_CHECKING:
@@ -148,24 +152,96 @@ class BagelPipeline(Pipeline):
             return torch.autocast("cuda", dtype)
         return nullcontext()
 
-    def _build_contexts(self, prompt: str) -> Tuple[Any, Any, Any]:
-        """Build (gen, cfg_text, cfg_img) KV contexts for a plain-T2I prompt.
+    def _update_context_image(self, image: Any, gen_context: Any, *, vae: bool, vit: bool) -> Any:
+        """Prefill one input image into a KV context (VAE and/or ViT branch).
 
-        Mirrors ``InterleaveInferencer.interleave_inference`` (think=False, no
-        image): ``cfg_text`` is the init snapshot taken *before* the prompt text
-        (unconditional); ``gen`` and ``cfg_img`` both ingest the prompt.
+        Mirrors the vendored ``InterleaveInferencer.update_context_image``
+        (vendor/inferencer.py:62-96) with explicit device pinning: the vendored
+        ``prepare_vae_images`` / ``prepare_vit_images`` build their tensors on
+        CPU and the bundle's VAE carries no accelerate hooks, so ``padded_images``
+        (and the packed index tensors) must be moved before the cache update.
+        ``image`` is already ``resize_transform``-ed. Caller owns no_grad+autocast.
+        """
+        bagel = self.bundle.model
+        device = torch.device(self.bundle.device)
+        ctx = gen_context
+        if vae:
+            gi, kv_lens, ropes = bagel.prepare_vae_images(
+                curr_kvlens=ctx["kv_lens"],
+                curr_rope=ctx["ropes"],
+                images=[image],
+                transforms=self.bundle.vae_transform,
+                new_token_ids=self.bundle.new_token_ids,
+            )
+            gi = _to_device(gi, device)
+            gi["padded_images"] = gi["padded_images"].to(dtype=self.bundle.vae_dtype)
+            past = bagel.forward_cache_update_vae(self.bundle.vae, ctx["past_key_values"], **gi)
+            ctx = {"kv_lens": kv_lens, "ropes": ropes, "past_key_values": past}
+        if vit:
+            gi, kv_lens, ropes = bagel.prepare_vit_images(
+                curr_kvlens=ctx["kv_lens"],
+                curr_rope=ctx["ropes"],
+                images=[image],
+                transforms=self.bundle.vit_transform,
+                new_token_ids=self.bundle.new_token_ids,
+            )
+            gi = _to_device(gi, device)
+            past = bagel.forward_cache_update_vit(ctx["past_key_values"], **gi)
+            ctx = {"kv_lens": kv_lens, "ropes": ropes, "past_key_values": past}
+        return ctx
+
+    def _build_contexts(self, prompt: str, image: Optional[Any] = None) -> Tuple[Any, Any, Any]:
+        """Build (gen, cfg_text, cfg_img) KV contexts for T2I or editing (it2i).
+
+        Mirrors ``InterleaveInferencer.interleave_inference`` exactly
+        (vendor/inferencer.py:242-253; editing input order ``[image, text]``)::
+
+            t2i  (image=None): gen      = init + text
+                               cfg_text = init                  (unconditional)
+                               cfg_img  = init + text           (no image branch)
+            it2i (image set):  gen      = init + image(VAE+ViT) + text
+                               cfg_text = init + image          (drop-text branch)
+                               cfg_img  = init + text           (drop-image branch)
+
+        ``image`` is a raw PIL image; preprocessing matches inferencer.py:249
+        (``pil_img2rgb`` + ``vae_transform.resize_transform``).
         """
         inf = self.bundle.inferencer
         gen = inf.init_gen_context()
         cfg_img = deepcopy(gen)
         with torch.no_grad(), self._autocast_ctx():
-            cfg_text = deepcopy(gen)  # snapshot before the prompt text → unconditional
+            if image is not None:
+                from .vendor.data.data_utils import pil_img2rgb
+
+                image = self.bundle.vae_transform.resize_transform(pil_img2rgb(image))
+                gen = self._update_context_image(image, gen, vae=True, vit=True)
+            cfg_text = deepcopy(gen)  # snapshot before the prompt text → drop-text branch
             gen = inf.update_context_text(prompt, gen)
             cfg_img = inf.update_context_text(prompt, cfg_img)
         return gen, cfg_text, cfg_img
 
+    @staticmethod
+    def _resolve_task(req: RolloutReq) -> str:
+        """Resolve the task mode: explicit ``stage_config["task"]`` wins, else infer.
+
+        Inference: an ``Images`` input primitive ⇒ ``it2i`` (editing), else
+        ``t2i``. Text-out tasks (t2t / i2t / it2t) ride the AR stage and must be
+        requested explicitly via ``stage_config["task"]``.
+        """
+        task = req.stage_config.get("task")
+        if task is not None:
+            return str(task)
+        return "it2i" if isinstance(req.primitives.get("image"), Images) else "t2i"
+
     def generate(self, req: RolloutReq) -> RolloutResp:
-        """Run BAGEL T2I per-sample and pack one ``"image"`` track."""
+        """Dispatch on the resolved task and pack one track per request."""
+        task = self._resolve_task(req)
+        if task in ("t2i", "it2i"):
+            return self._generate_image(req, task)
+        raise ValueError(f"BagelPipeline.generate: unsupported task {task!r}; expected 't2i' or 'it2i'.")
+
+    def _generate_image(self, req: RolloutReq, task: str) -> RolloutResp:
+        """Run BAGEL image-out (t2i / it2i) per-sample and pack one ``"image"`` track."""
         if req.sigmas is None:
             raise ValueError(
                 "BagelPipeline.generate: req.sigmas is None. The hosting engine must call "
@@ -186,6 +262,29 @@ class BagelPipeline(Pipeline):
 
         prompts = list(texts.texts)
         n = len(prompts)
+
+        # it2i: per-sample input images (qwen_vl pattern). The und ViT must be
+        # loaded — editing prefills the input image through BOTH the VAE branch
+        # (pixel fidelity) and the ViT branch (semantics).
+        pil_images: Optional[List[Any]] = None
+        if task == "it2i":
+            images_prim = req.primitives.get("image")
+            if not isinstance(images_prim, Images):
+                raise TypeError(
+                    "BagelPipeline.generate (it2i): req.primitives['image'] must be Images, "
+                    f"got {type(images_prim).__name__ if images_prim is not None else 'None'}"
+                )
+            if getattr(self.bundle.model, "vit_model", None) is None:
+                raise ValueError(
+                    "BagelPipeline.generate (it2i): the bundle was built without the und ViT; "
+                    "set BagelPipelineConfig.enable_vit=true for image-input tasks."
+                )
+            pil_images = [img.to_pil() for img in images_prim.to_list()]
+            if len(pil_images) != n:
+                raise ValueError(
+                    f"BagelPipeline.generate (it2i): image count {len(pil_images)} != prompt count {n}"
+                )
+
         sample_ids = list(req.sample_ids) if req.sample_ids else [f"s{i}" for i in range(n)]
         image_shape = (int(params.height), int(params.width))
         device = torch.device(self.bundle.device)
@@ -202,7 +301,9 @@ class BagelPipeline(Pipeline):
         shapes: List[Tuple[int, int]] = []
         segments: List[LatentSegment] = []
         for i, prompt in enumerate(prompts):
-            gen_ctx, cfg_text_ctx, cfg_img_ctx = self._build_contexts(prompt)
+            gen_ctx, cfg_text_ctx, cfg_img_ctx = self._build_contexts(
+                prompt, image=pil_images[i] if pil_images is not None else None
+            )
             cond_i = BagelDiffusionConditions.for_sample(
                 gen_context=gen_ctx,
                 cfg_text_context=cfg_text_ctx,

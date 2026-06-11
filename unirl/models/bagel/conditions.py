@@ -24,6 +24,15 @@ context is one list element).
 
 ``Condition`` subclass so it is a valid ``RolloutTrack.conditions`` dict value;
 ``to_dict`` emits it under a single ``"bagel"`` key, ``from_dict`` reads it back.
+
+Replay approximation (frozen contexts): the contexts are prefilled under
+``no_grad`` at rollout and reused verbatim by ``replay``. For T2I this is exact
+w.r.t. training — the text prefill routes through the frozen und experts. For
+it2i (editing) the input-image VAE prefill routes through the GEN experts
+(``mode="gen"``, vendor bagel.py:528-534) — the LoRA-trained surface — so the
+stored contexts carry no gradient and go stale across optimizer updates. Ratio
+consistency still holds because old and new log-probs replay against the SAME
+stored contexts; this matches the standard frozen-context treatment.
 """
 
 from __future__ import annotations

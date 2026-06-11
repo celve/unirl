@@ -11,8 +11,10 @@ consumed by the diffusion stage, the same split SD3 uses between its config and
 ``DiffusionSamplingParams``.
 
 Fixed BAGEL topology constants (``qk_norm``, ``tie_word_embeddings``,
-``layer_module``, ``connector_act``, ``visual_und``) are not exposed here — they
-are not tunable for this checkpoint and live as constants in the bundle.
+``layer_module``, ``connector_act``) are not exposed here — they are not tunable
+for this checkpoint and live as constants in the bundle. ``visual_und`` IS
+exposed (as ``enable_vit``): the und ViT tower is optional and only needed for
+image-input tasks.
 """
 
 from __future__ import annotations
@@ -43,7 +45,8 @@ class BagelPipelineConfig:
     BAGEL-7B-MoT is a single MoT transformer that runs both the und
     (understanding) and gen (image-generation) paths on shared weights; only the
     gen expert is trained. The bundle owns one transformer + one FLUX-style VAE +
-    one tokenizer; for text-to-image the und ViT is disabled (``visual_und=False``).
+    one tokenizer; for pure text-to-image the und ViT stays disabled
+    (``enable_vit=False`` → ``visual_und=False``), image-input tasks opt in.
 
     ``device`` may be runtime-injected by the actor after compose; the other
     fields are read once during bundle construction.
@@ -72,6 +75,13 @@ class BagelPipelineConfig:
     max_latent_size: int = 64
     vae_downsample: int = 8
     latent_channels: int = 16
+
+    # Load the und ViT tower (``visual_und=True``): SiglipVisionConfig from
+    # ``<ckpt>/vit_config.json`` + SiglipVisionModel/connector/vit_pos_embed
+    # weights from the same ``ema.safetensors``. Required for image-INPUT tasks
+    # (it2i editing / i2t / it2t); the default False keeps the T2I-only
+    # construction byte-identical to before.
+    enable_vit: bool = False
 
     # Trainable module is ``model.language_model`` (the MoT). Used only by
     # dedicated-sync modes; trainside performs no weight sync.
