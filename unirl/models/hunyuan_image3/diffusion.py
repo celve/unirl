@@ -376,6 +376,7 @@ class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage
                 "position_ids": fused.position_ids,
                 "image_mask": fused.gen_image_mask,
                 "gen_timestep_scatter_index": fused.gen_timestep_scatter_index,
+                "timesteps_index": fused.gen_timestep_scatter_index,
                 "custom_pos_emb": fused.rope_cache,
                 "rope_image_info": _rope_info,
             }
@@ -388,6 +389,7 @@ class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage
                 "position_ids": state.position_ids,
                 "image_mask": fused.gen_image_mask,
                 "gen_timestep_scatter_index": state.gen_timestep_scatter_index,
+                "timesteps_index": state.gen_timestep_scatter_index,
                 "custom_pos_emb": fused.rope_cache,
                 "rope_image_info": _rope_info,
             }

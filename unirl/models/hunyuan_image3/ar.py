@@ -289,6 +289,7 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
                 position_ids=model_kwargs["position_ids"],
                 custom_pos_emb=model_kwargs["custom_pos_emb"],
                 mode="gen_text",
+                rope_image_info=model_kwargs.get("rope_image_info"),
                 use_cache=True,
                 cond_vit_images=model_kwargs.get("cond_vit_images"),
                 cond_vit_image_mask=model_kwargs.get("cond_vit_image_mask"),
