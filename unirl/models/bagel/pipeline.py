@@ -4,8 +4,14 @@ Four-tier flow, per-sample (navit ``bs=1``)::
 
     Texts [+ Images] ─build 3 KV contexts─▶ BagelDiffusionConditions ─diffuse─▶ LatentSegment ─vae_decode─▶ Images
 
+Also serves the text-out modes (t2t / i2t / it2t, via :class:`BagelARStage`) and
+the composed **t2ti** (native think-then-generate: the AR und path plans a
+``<think>`` caption, then diffusion generates conditioned on it — one bundle, two
+linked tracks).
+
 Task routing (``_resolve_task``): explicit ``req.stage_config["task"]`` wins;
-otherwise image-out with an ``Images`` input ⇒ ``it2i`` (editing), else ``t2i``.
+else ``ComposedSamplingParams`` ⇒ ``t2ti``; ``ARSamplingParams`` ⇒ text-out; an
+``Images`` input ⇒ ``it2i`` (editing), else ``t2i``.
 
 Per prompt the pipeline builds the three KV-cache contexts the sampler needs
 (mirroring ``InterleaveInferencer.interleave_inference``, ``think=False``;
@@ -39,7 +45,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -50,7 +56,7 @@ from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.primitives import Images, Texts
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
-from unirl.types.sampling import ARSamplingParams, get_ar_params, get_diffusion_params
+from unirl.types.sampling import ARSamplingParams, ComposedSamplingParams, get_ar_params, get_diffusion_params
 from unirl.types.segments.latent import LatentSegment
 from unirl.types.segments.text import TextSegment
 
@@ -263,14 +269,16 @@ class BagelPipeline(Pipeline):
     def _resolve_task(req: RolloutReq) -> str:
         """Resolve the task mode: explicit ``stage_config["task"]`` wins, else infer.
 
-        Inference: ``ARSamplingParams`` ⇒ text-out (``it2t`` with an ``Images``
-        input, else ``t2t``; pure ``i2t`` — image, no prompt — must be explicit);
-        diffusion params ⇒ image-out (``it2i`` with an ``Images`` input, else
-        ``t2i``).
+        Inference: ``ComposedSamplingParams`` ⇒ ``t2ti`` (think-then-generate);
+        ``ARSamplingParams`` ⇒ text-out (``it2t`` with an ``Images`` input, else
+        ``t2t``; pure ``i2t`` — image, no prompt — must be explicit); diffusion
+        params ⇒ image-out (``it2i`` with an ``Images`` input, else ``t2i``).
         """
         task = req.stage_config.get("task")
         if task is not None:
             return str(task)
+        if isinstance(req.sampling_params, ComposedSamplingParams):
+            return "t2ti"
         has_image = isinstance(req.primitives.get("image"), Images)
         if isinstance(req.sampling_params, ARSamplingParams):
             return "it2t" if has_image else "t2t"
@@ -283,9 +291,11 @@ class BagelPipeline(Pipeline):
             return self._generate_image(req, task)
         if task in ("t2t", "i2t", "it2t"):
             return self._generate_text(req, task)
+        if task == "t2ti":
+            return self._generate_t2ti(req)
         raise ValueError(
             f"BagelPipeline.generate: unsupported task {task!r}; "
-            "expected one of 't2i', 'it2i', 't2t', 'i2t', 'it2t'."
+            "expected one of 't2i', 'it2i', 't2t', 'i2t', 'it2t', 't2ti'."
         )
 
     def _generate_image(self, req: RolloutReq, task: str) -> RolloutResp:
@@ -318,12 +328,46 @@ class BagelPipeline(Pipeline):
 
         sample_ids = list(req.sample_ids) if req.sample_ids else [f"s{i}" for i in range(n)]
         image_shape = (int(params.height), int(params.width))
+
+        contexts = [
+            self._build_contexts(prompt, image=pil_images[i] if pil_images is not None else None)
+            for i, prompt in enumerate(prompts)
+        ]
+        segment, conditions, images = self._diffuse_and_decode(
+            contexts, params=params, req=req, image_shape=image_shape
+        )
+
+        return RolloutResp(
+            tracks={
+                "image": RolloutTrack(
+                    sample_ids=sample_ids,
+                    parent_ids=list(req.group_ids) if req.group_ids else None,
+                    conditions=conditions.to_dict(),
+                    segment=segment,
+                    decoded=images,
+                ),
+            }
+        )
+
+    def _diffuse_and_decode(
+        self,
+        contexts: List[Tuple[Any, Any, Any]],
+        *,
+        params: BagelDiffusionParams,
+        req: RolloutReq,
+        image_shape: Tuple[int, int],
+    ) -> Tuple[LatentSegment, BagelDiffusionConditions, Images]:
+        """Diffuse per-sample over prebuilt ``(gen, cfg_text, cfg_img)`` contexts,
+        batch the latents, build the ``BagelDiffusionConditions``, and VAE-decode.
+
+        Shared by image-out (t2i / it2i) and think-then-generate (t2ti). x_T is
+        driver-authored per-sample via :class:`NoiseRecipe` (keyed on the request's
+        sample ids — engine draws its own when no driver recipe is present); the
+        three CFG contexts ride verbatim into the stored conditions for
+        frozen-context replay.
+        """
         device = torch.device(self.bundle.device)
         schedule = req.sigmas.to(device)
-
-        # Driver-authoritative per-sample x_T (NoiseRecipe), [n, seq, C] or None
-        # (engine draws its own — tests / no driver recipe). Per-sample-unique +
-        # per-rollout-fresh via the driver's r{rollout_id}:{sample_id} group ids.
         initial = NoiseRecipe.from_rollout_req(req).resolve(device=device, dtype=torch.float32)
 
         gen_list: List[Any] = []
@@ -331,10 +375,7 @@ class BagelPipeline(Pipeline):
         cfg_img_list: List[Any] = []
         shapes: List[Tuple[int, int]] = []
         segments: List[LatentSegment] = []
-        for i, prompt in enumerate(prompts):
-            gen_ctx, cfg_text_ctx, cfg_img_ctx = self._build_contexts(
-                prompt, image=pil_images[i] if pil_images is not None else None
-            )
+        for i, (gen_ctx, cfg_text_ctx, cfg_img_ctx) in enumerate(contexts):
             cond_i = BagelDiffusionConditions.for_sample(
                 gen_context=gen_ctx,
                 cfg_text_context=cfg_text_ctx,
@@ -357,18 +398,7 @@ class BagelPipeline(Pipeline):
             image_shapes=shapes,
         )
         images = self.vae_decode.decode(segment, image_shape=image_shape)
-
-        return RolloutResp(
-            tracks={
-                "image": RolloutTrack(
-                    sample_ids=sample_ids,
-                    parent_ids=list(req.group_ids) if req.group_ids else None,
-                    conditions=conditions.to_dict(),
-                    segment=segment,
-                    decoded=images,
-                ),
-            }
-        )
+        return segment, conditions, images
 
     @staticmethod
     def _batch_segments(segments: List[LatentSegment]) -> LatentSegment:
@@ -478,6 +508,125 @@ class BagelPipeline(Pipeline):
             toks = segment.tokens[cu[i] : cu[i + 1]].tolist()
             out.append(self.bundle.tokenizer.decode(toks).split("<|im_end|>")[0])
         return Texts(texts=out)
+
+    # ------------------------------------------------------------------
+    # Composed think-then-generate (t2ti)
+    # ------------------------------------------------------------------
+
+    def _build_think_contexts(self, system_prompt: str, prompt: str, think_text: str) -> Tuple[Any, Any, Any]:
+        """Build (gen, cfg_text, cfg_img) KV contexts for native think-gen (t2ti).
+
+        Mirrors ``interleave_inference(think=True, understanding_output=False)``
+        (vendor/inferencer.py:234-272)::
+
+            gen      = init + system + prompt + think_text
+            cfg_text = init + system                  (drop prompt + think)
+            cfg_img  = init + system + prompt         (drop think only — so
+                       cfg_img_scale weights the planning text's influence)
+
+        ``think_text`` is the AR-decoded planning string (stripped at
+        ``<|im_end|>``), re-encoded into the gen context exactly as the vendor's
+        ``update_context_text(gen_text, ...)`` step. The ``[system, prompt]``
+        prefix is byte-identical to the AR stage's prefill (both wrap as
+        ``[bos] + encode(text) + [eos]``), so the planning text the image
+        conditions on is the one the AR actually generated.
+        """
+        inf = self.bundle.inferencer
+        gen = inf.init_gen_context()
+        cfg_img = deepcopy(gen)
+        with torch.no_grad(), self._autocast_ctx():
+            gen = inf.update_context_text(system_prompt, gen)
+            cfg_img = inf.update_context_text(system_prompt, cfg_img)
+            cfg_text = deepcopy(gen)  # init + system → drop-prompt-and-think branch
+            gen = inf.update_context_text(prompt, gen)
+            cfg_img = inf.update_context_text(prompt, cfg_img)
+            gen = inf.update_context_text(think_text, gen)
+        return gen, cfg_text, cfg_img
+
+    def _generate_t2ti(self, req: RolloutReq) -> RolloutResp:
+        """BAGEL native think-then-generate (t2ti).
+
+        The AR und path plans a ``<think>`` caption from ``[system + prompt]``,
+        then diffusion generates the image conditioned on ``[system + prompt +
+        think]`` — one bundle, two stages. Emits two linked tracks: ``"ar"`` (the
+        planning text, grouped by prompt) and ``"image"`` (``parent_track="ar"``
+        → grouped by the rewrite, mirroring the PE composition's lineage). The
+        request carries :class:`ComposedSamplingParams` (``ar`` + ``diffusion``).
+        """
+        if req.sigmas is None:
+            raise ValueError(
+                "BagelPipeline.generate (t2ti): req.sigmas is None — the hosting engine must call "
+                "ensure_req_sigmas(req, pipeline.build_schedule_policy()) before generate."
+            )
+        ar_params = get_ar_params(req.sampling_params)
+        diff_params = get_diffusion_params(req.sampling_params)
+        if ar_params is None or not isinstance(diff_params, BagelDiffusionParams):
+            raise TypeError(
+                "BagelPipeline.generate (t2ti): sampling_params must be ComposedSamplingParams carrying "
+                f"ar=ARSamplingParams + diffusion=BagelDiffusionParams; got {type(req.sampling_params).__name__}."
+            )
+        texts = req.primitives.get("text")
+        if not isinstance(texts, Texts):
+            raise TypeError(
+                f"BagelPipeline.generate (t2ti): req.primitives['text'] must be Texts, "
+                f"got {type(texts).__name__ if texts is not None else 'None'}"
+            )
+
+        # Lazy: the vendor module hard-imports flash_attn; the bundle is loaded by now.
+        from .vendor.inferencer import GEN_THINK_SYSTEM_PROMPT
+
+        prompts = list(texts.texts)
+        n = len(prompts)
+        sample_ids = list(req.sample_ids) if req.sample_ids else [f"s{i}" for i in range(n)]
+        ar_sample_ids = [f"{sid}#think" for sid in sample_ids]
+        image_shape = (int(diff_params.height), int(diff_params.width))
+        ntk = self.bundle.new_token_ids
+        tokenizer = self.bundle.tokenizer
+
+        # Stage 1 — AR plans the think text from [system, prompt] (bos/eos-wrapped
+        # text splits, as the vendor's two update_context_text calls do).
+        ar_splits: List[List[Dict[str, Any]]] = []
+        for prompt in prompts:
+            sys_ids = [ntk["bos_token_id"]] + tokenizer.encode(GEN_THINK_SYSTEM_PROMPT) + [ntk["eos_token_id"]]
+            pr_ids = [ntk["bos_token_id"]] + tokenizer.encode(prompt) + [ntk["eos_token_id"]]
+            ar_splits.append(
+                [
+                    {"kind": "text", "ids": torch.tensor(sys_ids, dtype=torch.long)},
+                    {"kind": "text", "ids": torch.tensor(pr_ids, dtype=torch.long)},
+                ]
+            )
+        ar_conditions = BagelARConditions(prompt_splits=ar_splits)
+        ar_segment = self.ar.autoregress(ar_conditions, sampling_params=ar_params)
+        think_texts = self._detokenize(ar_segment)
+
+        # Stage 2 — diffusion conditioned on [system + prompt + think].
+        contexts = [
+            self._build_think_contexts(GEN_THINK_SYSTEM_PROMPT, prompts[i], think_texts.texts[i])
+            for i in range(n)
+        ]
+        segment, conditions, images = self._diffuse_and_decode(
+            contexts, params=diff_params, req=req, image_shape=image_shape
+        )
+
+        return RolloutResp(
+            tracks={
+                "ar": RolloutTrack(
+                    sample_ids=ar_sample_ids,
+                    parent_ids=list(req.group_ids) if req.group_ids else None,
+                    conditions=ar_conditions.to_dict(),
+                    segment=ar_segment,
+                    decoded=think_texts,
+                ),
+                "image": RolloutTrack(
+                    sample_ids=sample_ids,
+                    parent_track="ar",
+                    parent_ids=ar_sample_ids,
+                    conditions=conditions.to_dict(),
+                    segment=segment,
+                    decoded=images,
+                ),
+            }
+        )
 
 
 __all__ = ["BagelPipeline"]

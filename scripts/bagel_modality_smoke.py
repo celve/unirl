@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""BAGEL all-modality smoke test (t2t / i2t / it2t / t2i / it2i) + replay checks.
+"""BAGEL all-modality smoke test (t2t / i2t / it2t / t2i / it2i / t2ti) + replay checks.
 
 Loads the Bagel bundle ONCE (single device, ``enable_vit=True`` when any
 image-input mode is requested) and drives ``BagelPipeline.generate(req)`` per
@@ -27,13 +27,18 @@ contracts per mode:
     - REPLAY RATIO: diffusion replay over the SDE window, identical weights →
       max |new_logp - sde_logp| < 1e-4 (fp32 trajectory ⇒ ratio==1 regime)
 
+  composed (t2ti — native think-then-generate):
+    - two linked tracks ("ar" plan + "image", image.parent_track=="ar")
+    - non-empty <think> planning text; AR replay parity on it (median < 2e-2)
+    - diffusion replay ratio on the image (< 1e-4) + seeded determinism
+
 Env knobs:
     BAGEL_PATH         default ByteDance-Seed/BAGEL-7B-MoT (use a local copy)
     OUT_DIR            default /tmp/bagel_smoke_out
     BAGEL_STEPS        default 8     (diffusion steps; σ schedule = steps+1)
     BAGEL_HW           default 512   (square image side)
     BAGEL_MAX_TOKENS   default 64    (AR max_new_tokens)
-    BAGEL_MODES        default "t2t,i2t,it2t,t2i,it2i"
+    BAGEL_MODES        default "t2t,i2t,it2t,t2i,it2i,t2ti"
     BAGEL_GRAD_SMOKE   default "1"   (set "0" to skip the replay-backward check)
 """
 from __future__ import annotations
@@ -51,7 +56,7 @@ OUT_DIR = os.environ.get("OUT_DIR", "/tmp/bagel_smoke_out")
 STEPS = int(os.environ.get("BAGEL_STEPS", "8"))
 HW = int(os.environ.get("BAGEL_HW", "512"))
 MAX_TOKENS = int(os.environ.get("BAGEL_MAX_TOKENS", "64"))
-MODES = [m.strip() for m in os.environ.get("BAGEL_MODES", "t2t,i2t,it2t,t2i,it2i").split(",") if m.strip()]
+MODES = [m.strip() for m in os.environ.get("BAGEL_MODES", "t2t,i2t,it2t,t2i,it2i,t2ti").split(",") if m.strip()]
 GRAD_SMOKE = os.environ.get("BAGEL_GRAD_SMOKE", "1") == "1"
 
 AR_TEMPERATURE = 0.7
@@ -316,6 +321,87 @@ def run_image_mode(pipeline, task: str, results: dict) -> None:
         results[task] = ("FAIL", f"{type(e).__name__}: {e}")
 
 
+def run_t2ti_mode(pipeline, results: dict) -> None:
+    """Native think-then-generate: AR plans a <think> caption, diffusion renders it.
+
+    Verifies the composed contract: two linked tracks (ar + image, image's
+    parent_track=="ar"), non-empty planning text, AR replay parity on the think
+    segment, diffusion replay ratio on the image, and seeded determinism.
+    """
+    from unirl.models.bagel.conditions import BagelARConditions, BagelDiffusionConditions
+    from unirl.models.bagel.diffusion import BagelDiffusionParams
+    from unirl.sde.runtime import ensure_req_sigmas
+    from unirl.types.primitives import Texts
+    from unirl.types.rollout_req import RolloutReq
+    from unirl.types.sampling import ARSamplingParams, ComposedSamplingParams, get_diffusion_params
+
+    task = "t2ti"
+    prompt = "A red panda."
+    try:
+        log(f"=== {task} (native think-then-generate) ===")
+        params = ComposedSamplingParams(
+            ar=ARSamplingParams(temperature=AR_TEMPERATURE, max_new_tokens=MAX_TOKENS, top_p=0.9, top_k=1024),
+            diffusion=BagelDiffusionParams(
+                num_inference_steps=STEPS, height=HW, width=HW, seed=42, eta=1.0,
+                cfg_text_scale=4.0, cfg_img_scale=1.5, cfg_interval=(0.4, 1.0), sde_indices=[0, 1],
+            ),
+        )
+        req = RolloutReq(
+            sample_ids=[f"{task}:0"],
+            group_ids=[f"g_{task}"],
+            primitives={"text": Texts(texts=[prompt])},
+            sampling_params=params,
+            stage_config={"task": task},
+        )
+        ensure_req_sigmas(req, pipeline.build_schedule_policy())
+
+        torch.manual_seed(1234)
+        t0 = time.time()
+        with torch.no_grad():
+            resp = pipeline.generate(req)
+        ar_track = resp.tracks["ar"]
+        img_track = resp.tracks["image"]
+        think = ar_track.decoded.texts[0]
+        px = img_track.decoded.pixels
+        outp = os.path.join(OUT_DIR, "t2ti.png")
+        img_track.decoded.to_list()[0].to_pil().save(outp)
+        lineage_ok = img_track.parent_track == "ar"
+        log(f"{task} think ({time.time() - t0:.1f}s, {len(think)} chars): {think[:160]!r}")
+        log(f"{task} image pixels {tuple(px.shape)} -> {outp}; lineage parent_track={img_track.parent_track!r}")
+
+        # AR replay parity on the planning text (same bf16-aware bound as text modes).
+        ar_cond = BagelARConditions.from_dict(ar_track.conditions)
+        with torch.no_grad():
+            new_lp = pipeline.ar.replay(ar_cond, segment=ar_track.segment, temperature=AR_TEMPERATURE)
+        dt = (new_lp - ar_track.segment.log_probs.to(new_lp.device)).abs()
+        log(f"{task} AR replay parity: median={dt.median().item():.2e} max={dt.max().item():.2e}")
+
+        # Diffusion replay ratio on the image (fp32 trajectory ⇒ exact).
+        diff_cond = BagelDiffusionConditions.from_dict(img_track.conditions)
+        with torch.no_grad():
+            rep = pipeline.diffusion.replay(diff_cond, segment=img_track.segment, params=get_diffusion_params(params))
+        di = (rep.log_probs.to(img_track.segment.sde_logp.device) - img_track.segment.sde_logp).abs()
+        log(f"{task} diffusion replay ratio: max|new_logp - sde_logp| = {di.max().item():.3e}")
+
+        # Determinism: seeded re-run (AR multinomial + SDE noise) → bit-equal latents.
+        torch.manual_seed(1234)
+        with torch.no_grad():
+            resp2 = pipeline.generate(req)
+        same = torch.equal(img_track.segment.latents, resp2.tracks["image"].segment.latents)
+        log(f"{task} determinism (seeded re-run): {'bit-equal' if same else 'MISMATCH'}")
+
+        ok = (bool(think.strip()) and lineage_ok
+              and px.ndim == 4 and px.shape[0] == 1 and px.shape[1] == 3
+              and dt.median().item() < 2e-2 and dt.max().item() < 5e-1
+              and di.max().item() < 1e-4 and same)
+        results[task] = ("PASS" if ok else "FAIL",
+                         f"AR_med={dt.median().item():.2e} img_ratio={di.max().item():.2e} det={same} "
+                         f"lineage={lineage_ok} think={think[:40]!r}")
+    except Exception as e:  # noqa: BLE001
+        log(f"{task} FAILED: {e}\n{traceback.format_exc()}")
+        results[task] = ("FAIL", f"{type(e).__name__}: {e}")
+
+
 def run() -> int:
     log(f"torch {torch.__version__}; GPUs {torch.cuda.device_count()}; modes {MODES}")
     log(f"steps={STEPS} hw={HW} max_tokens={MAX_TOKENS} grad_smoke={GRAD_SMOKE}")
@@ -335,9 +421,11 @@ def run() -> int:
     for task in ("t2i", "it2i"):
         if task in MODES:
             run_image_mode(pipeline, task, results)
+    if "t2ti" in MODES:
+        run_t2ti_mode(pipeline, results)
 
     log("================ SUMMARY ================")
-    for m in ("t2t", "i2t", "it2t", "greedy-xcheck", "t2i", "it2i"):
+    for m in ("t2t", "i2t", "it2t", "greedy-xcheck", "t2i", "it2i", "t2ti"):
         if m in results:
             status, detail = results[m]
             log(f"{m:13s}: {status:5s} | {detail}")
