@@ -46,11 +46,15 @@ def veomni_parallelize(
     reshard_after_forward: bool = True,
     activation_checkpointing: bool = False,
     use_torch_compile: bool = False,
+    tie_word_embeddings: bool = False,
 ) -> None:
     """Parallelize ``model`` (on meta) in place via VeOmni FSDP2.
 
     ``block_class_names`` feeds VeOmni's ``basic_modules`` (its per-module
     ``fully_shard`` targets, unioned with the model's ``_no_split_modules``).
+    Word-embedding leaves (``wte`` / ``embed_tokens``) are unioned in too so
+    each gets its OWN ``fully_shard`` group (see :func:`_embedding_block_classes`);
+    ``tie_word_embeddings`` suppresses that for tied embed/lm_head models.
     """
     from unirl.train.backend.veomni import _compat
 
@@ -65,6 +69,17 @@ def veomni_parallelize(
     # materializes storage in the target dtype. Mirrors fsdp_wrap's cast.
     model.to(target_dtype)
 
+    # Give word-embedding leaves their OWN fully_shard group by unioning their
+    # class names into VeOmni's basic_modules (VeOmni wraps each target class
+    # BEFORE the root, torch_parallelize.py). HI3 looks up
+    # ``transformer.model.wte(input_ids)`` from the OUTER wrapper's forward,
+    # before the decoder's FSDP-managed forward — so without its own pre-forward
+    # all-gather hook the root-sharded embedding weight is still a DTensor at the
+    # lookup and ``aten.embedding`` raises "mixed torch.Tensor and DTensor".
+    # Gated on leaf-name, so diffusion DiTs are untouched (strict no-op).
+    embedding_classes = _embedding_block_classes(model, tie_word_embeddings)
+    basic_modules = list(block_class_names) + sorted(embedding_classes - set(block_class_names))
+
     mixed_precision = api.MixedPrecisionConfig(
         enable=True,
         param_dtype=dtype_name,
@@ -75,7 +90,7 @@ def veomni_parallelize(
         weights_path=None,
         enable_reshard_after_forward=bool(reshard_after_forward),
         mixed_precision=mixed_precision,
-        basic_modules=list(block_class_names),
+        basic_modules=basic_modules,
         init_device="meta",
         enable_fsdp_offload=False,
     )
@@ -103,15 +118,49 @@ def veomni_parallelize(
 
     if _current_rank() == 0:
         logger.info(
-            "veomni_parallelize: wrapped %d block(s) of class %r + root "
-            "(dtype=%s, reshard=%s, ac=%s, compile=%s)",
+            "veomni_parallelize: wrapped %d block(s) of class %r + %d embedding "
+            "group(s) %r + root (dtype=%s, reshard=%s, ac=%s, compile=%s, tie=%s)",
             len(block_instances),
             tuple(block_class_names),
+            len(embedding_classes),
+            tuple(sorted(embedding_classes)),
             dtype_name,
             reshard_after_forward,
             activation_checkpointing,
             use_torch_compile,
+            tie_word_embeddings,
         )
+
+
+def _embedding_block_classes(
+    model: nn.Module,
+    tie_word_embeddings: bool,
+) -> frozenset:
+    """Class names of word-embedding leaves that need their OWN fully_shard group.
+
+    HI3 builds ``inputs_embeds`` by calling ``transformer.model.wte(input_ids)``
+    from the OUTER wrapper's forward (``ar.py`` gen_text), BEFORE the wrapped
+    decoder's own FSDP-managed forward runs. If the embedding is only part of the
+    root group, its all-gather pre-forward hook has not fired at the lookup, so
+    the root-sharded weight is still a DTensor and ``aten.embedding`` raises "got
+    mixed torch.Tensor and DTensor". Wrapping the embedding as its own group
+    gives it a pre-forward hook that all-gathers it to a plain tensor on that
+    direct call (mirrors verl's ``_select_fsdp2_wrap_targets``).
+
+    Gated on leaf-name ``{"wte", "embed_tokens"}`` ONLY (not ``isinstance`` on
+    ``nn.Embedding``): diffusion DiTs have no such leaf — QwenImage's
+    ``addition_t_embedding`` is a different name — so this is a strict no-op for
+    them and their checksum parity is preserved. Returns empty when tied, since a
+    shared lm_head/embedding weight must not be split into a separate group.
+    """
+    if tie_word_embeddings:
+        return frozenset()
+    classes = set()
+    for name, mod in model.named_modules():
+        leaf = name.rsplit(".", 1)[-1] if "." in name else name
+        if leaf in {"wte", "embed_tokens"} and hasattr(mod, "weight"):
+            classes.add(type(mod).__name__)
+    return frozenset(classes)
 
 
 def _enumerate_block_instances(

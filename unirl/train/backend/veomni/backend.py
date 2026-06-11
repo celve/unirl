@@ -150,7 +150,15 @@ class VeOmniBackend(Remote):
             shadow = inject_mirror(model, prefix=ema_cfg.shadow_prefix)
 
         # 6. Shard + materialize (to_empty; init_weights is a bundle-stamped
-        # no-op). Root-wrapped by VeOmni — single-module trainables only.
+        # no-op). Root-wrapped by VeOmni; word-embedding leaves get their own
+        # group unless the model ties embed/lm_head (then the shared weight must
+        # stay in one group). The tie flag lives on the bundle WRAPPER config —
+        # the wrapped decoder has no ``.config`` — and degrades to False
+        # (= separate-wrap, the safe default for the embedding-DTensor bug).
+        tie_word_embeddings = bool(
+            getattr(getattr(self._bundle, "transformer", None), "config", None)
+            and getattr(self._bundle.transformer.config, "tie_word_embeddings", False)
+        )
         veomni_parallelize(
             model,
             block_class_names=tuple(block_class_names),
@@ -158,6 +166,7 @@ class VeOmniBackend(Remote):
             reshard_after_forward=fsdp_cfg.reshard_after_forward,
             activation_checkpointing=fsdp_cfg.activation_checkpointing,
             use_torch_compile=fsdp_cfg.use_torch_compile,
+            tie_word_embeddings=tie_word_embeddings,
         )
 
         # 7. Real weights: load into the freshly-sharded module. Meta-init
