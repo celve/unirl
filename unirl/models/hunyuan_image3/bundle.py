@@ -398,9 +398,14 @@ class HunyuanImage3Bundle(Bundle):
         # cond_vit_image_mask) and the cond-timestep scatter index.
         # ``None`` for vanilla t2i.
         cond_vae_image_mask = getattr(output, "cond_vae_image_mask", None)
+        if cond_vae_image_mask is None:
+            cond_vae_image_mask = getattr(output, "vae_image_mask", None)
         if cond_vae_image_mask is not None:
             cond_vae_image_mask = cond_vae_image_mask.to(device)
         cond_vit_image_mask = getattr(output, "cond_vit_image_mask", None)
+        if cond_vit_image_mask is None:
+            # Newer (Instruct) output names these vit_image_mask / vae_image_mask.
+            cond_vit_image_mask = getattr(output, "vit_image_mask", None)
         if cond_vit_image_mask is not None:
             cond_vit_image_mask = cond_vit_image_mask.to(device)
         cond_timestep_scatter_index = getattr(output, "cond_timestep_scatter_index", None)

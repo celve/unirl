@@ -179,6 +179,9 @@ class HunyuanImage3TextEmbedStage:
         # to scatter ViT patch embeds into ``inputs_embeds`` via
         # ``instantiate_vit_image_tokens``.
         cond_vit_image_mask = getattr(output, "cond_vit_image_mask", None)
+        if cond_vit_image_mask is None:
+            # Newer (Instruct) output names the cond-ViT scatter mask vit_image_mask.
+            cond_vit_image_mask = getattr(output, "vit_image_mask", None)
         if cond_vit_image_mask is not None:
             cond_vit_image_mask = cond_vit_image_mask.to(device)
 
