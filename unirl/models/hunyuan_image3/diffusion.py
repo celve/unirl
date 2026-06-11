@@ -187,9 +187,16 @@ class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage
         # method dispatch can strip **kwargs. Building the dict here is
         # equivalent and robust to FSDP wrapping.
         input_ids_in = fused.input_ids
+        # On decode steps (is_first=False) the checkpoint's _update shrinks
+        # position_ids to the changed slice (timestep + image tokens); gather
+        # input_ids AND gen_image_mask to that slice so they match the forward's
+        # hidden length (else masked_select sees full-L mask vs slice-L hidden).
+        image_mask_in = fused.gen_image_mask
         if input_ids_in is not None and position_ids_in is not None:
             if input_ids_in.shape[1] != position_ids_in.shape[1]:
                 input_ids_in = torch.gather(input_ids_in, dim=1, index=position_ids_in)
+                if image_mask_in is not None:
+                    image_mask_in = torch.gather(image_mask_in, dim=1, index=position_ids_in)
         # [ROPE-FIX] config.rope_type=="2d" needs a 2-D
         # RoPE for image tokens, built from per-image (slice,(token_h,token_w)).
         # The original replay passed EMPTY rope_image_info, so build_2d_rope gives
@@ -234,7 +241,7 @@ class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage
             "rope_image_info": rope_image_info_val,
             "mode": "gen_image",
             "images": sample_2,
-            "image_mask": fused.gen_image_mask,
+            "image_mask": image_mask_in,
             "timesteps": t_expand,
             # native sets timesteps_index = gen_timestep_scatter_index
             # (modeling:2836) so instantiate_continuous_tokens injects the
