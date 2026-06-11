@@ -233,6 +233,12 @@ class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage
                 _th = _n // _tw if _tw > 0 else 0
                 if _tw > 0 and _th * _tw == _n:
                     rope_image_info_val[_b] = [(slice(_start, _start + _n), (_th, _tw))]
+        # Forward-scatter index for the timestep continuous embedding: on is_first
+        # the model scatters into the full sequence; on decode steps it scatters
+        # into the [timestep, image] slice where the timestep is the first token
+        # (index 0). The full-sequence gen_timestep_scatter_index overflows the
+        # slice for long cond-image sequences (it2i) -> scatter index OOB.
+        timesteps_index_in = scatter_idx_in if is_first else torch.zeros_like(scatter_idx_in)
         model_inputs = {
             "input_ids": input_ids_in,
             "attention_mask": attention_mask_in,
@@ -247,7 +253,7 @@ class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage
             # (modeling:2836) so instantiate_continuous_tokens injects the
             # timestep token's continuous embedding (required for gen_image;
             # passing None silently skips it and corrupts the noise_pred).
-            "timesteps_index": scatter_idx_in,
+            "timesteps_index": timesteps_index_in,
             "gen_timestep_scatter_index": scatter_idx_in,
             "cond_vae_images": cond_vae_images,
             "cond_vae_image_mask": cond_vae_image_mask,
