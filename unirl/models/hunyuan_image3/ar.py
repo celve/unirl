@@ -301,6 +301,9 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
                 cond_vit_images=model_kwargs.get("cond_vit_images"),
                 cond_vit_image_mask=model_kwargs.get("cond_vit_image_mask"),
                 vit_kwargs=model_kwargs.get("vit_kwargs"),
+                # Newer (Instruct) forward reads the ViT attn/spatial kwargs under
+                # cond_vit_image_kwargs; older ones use vit_kwargs. Pass both.
+                cond_vit_image_kwargs=model_kwargs.get("vit_kwargs"),
             )
             with torch.no_grad():
                 out = transformer(**model_inputs, first_step=(step_idx == 0))
