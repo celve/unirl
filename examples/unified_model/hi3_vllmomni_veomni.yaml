@@ -73,6 +73,10 @@ backend:
   # VERIFY at smoke: HF HunyuanImage3 decoder-layer class name.
   block_class_names: ["HunyuanImage3DecoderLayer"]
   trainable_attr: transformer
+  # HI3's outer wrapper calls decoder root leaves (wte, ln_f) directly, outside
+  # the managed forward; give each its own fully_shard group so the mandatory
+  # root group owns nothing and each is all-gathered on its direct call.
+  wrap_root_leaves: true
   fsdp_cfg:
     _target_: unirl.train.configs.FSDPConfig
     param_dtype: bf16

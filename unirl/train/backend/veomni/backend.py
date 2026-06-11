@@ -82,6 +82,7 @@ class VeOmniBackend(Remote):
         device: Optional[torch.device] = None,
         rank: int = 0,
         trainable_attr: str = "transformer",
+        wrap_root_leaves: bool = False,
         lora_cfg: Optional[LoraConfig] = None,
         ema_lora_cfg: Optional[EmaLoraConfig] = None,
         ema_cfg: Optional[EmaFullConfig] = None,
@@ -167,6 +168,7 @@ class VeOmniBackend(Remote):
             activation_checkpointing=fsdp_cfg.activation_checkpointing,
             use_torch_compile=fsdp_cfg.use_torch_compile,
             tie_word_embeddings=tie_word_embeddings,
+            wrap_root_leaves=wrap_root_leaves,
         )
 
         # 7. Real weights: load into the freshly-sharded module. Meta-init

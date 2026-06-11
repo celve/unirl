@@ -47,14 +47,21 @@ def veomni_parallelize(
     activation_checkpointing: bool = False,
     use_torch_compile: bool = False,
     tie_word_embeddings: bool = False,
+    wrap_root_leaves: bool = False,
 ) -> None:
     """Parallelize ``model`` (on meta) in place via VeOmni FSDP2.
 
     ``block_class_names`` feeds VeOmni's ``basic_modules`` (its per-module
     ``fully_shard`` targets, unioned with the model's ``_no_split_modules``).
-    Word-embedding leaves (``wte`` / ``embed_tokens``) are unioned in too so
-    each gets its OWN ``fully_shard`` group (see :func:`_embedding_block_classes`);
-    ``tie_word_embeddings`` suppresses that for tied embed/lm_head models.
+
+    ``wrap_root_leaves`` (HI3 / outer-wrapper models): give each root-leaf module
+    that carries its own params (``wte``, ``ln_f``, …) its OWN ``fully_shard``
+    group BEFORE delegating to VeOmni, so VeOmni's mandatory root group owns no
+    params and each leaf is independently all-gathered when the outer wrapper
+    calls it outside the decoder's managed forward (see
+    :func:`_root_leaf_modules`). ``tie_word_embeddings`` excludes the embedding
+    from that (shared embed/lm_head weight must stay in one group). Off by
+    default so single-module (diffusion) trainables are byte-unchanged.
     """
     from unirl.train.backend.veomni import _compat
 
@@ -69,16 +76,34 @@ def veomni_parallelize(
     # materializes storage in the target dtype. Mirrors fsdp_wrap's cast.
     model.to(target_dtype)
 
-    # Give word-embedding leaves their OWN fully_shard group by unioning their
-    # class names into VeOmni's basic_modules (VeOmni wraps each target class
-    # BEFORE the root, torch_parallelize.py). HI3 looks up
-    # ``transformer.model.wte(input_ids)`` from the OUTER wrapper's forward,
-    # before the decoder's FSDP-managed forward — so without its own pre-forward
-    # all-gather hook the root-sharded embedding weight is still a DTensor at the
-    # lookup and ``aten.embedding`` raises "mixed torch.Tensor and DTensor".
-    # Gated on leaf-name, so diffusion DiTs are untouched (strict no-op).
-    embedding_classes = _embedding_block_classes(model, tie_word_embeddings)
-    basic_modules = list(block_class_names) + sorted(embedding_classes - set(block_class_names))
+    # Root-leaf own-group wrap. HI3's OUTER wrapper invokes root submodules of
+    # the wrapped decoder DIRECTLY, outside the decoder's managed forward: it
+    # builds inputs_embeds via ``transformer.model.wte(input_ids)`` (before the
+    # body) and applies ``transformer.model.ln_f`` to the output (after it).
+    # Under VeOmni's mandatory root ``fully_shard`` those leaves are sharded
+    # DTensors at the direct call site, so ``aten.embedding`` / ``aten.mul`` hit
+    # "mixed torch.Tensor and DTensor". Give EACH root-leaf-with-params its OWN
+    # group here (instance-level — class-name matching would over-match the
+    # per-layer norms), so its own pre-forward hook all-gathers it to a plain
+    # tensor on the direct call; VeOmni's later root ``fully_shard`` then owns no
+    # params (an empty container). Opt-in, so diffusion trainables are unchanged.
+    wrapped_leaves: list[str] = []
+    if wrap_root_leaves:
+        from torch.distributed._composable.fsdp import (
+            MixedPrecisionPolicy,
+            fully_shard,
+        )
+
+        leaf_mesh = api.get_parallel_state().fsdp_mesh
+        leaf_mp = MixedPrecisionPolicy(param_dtype=target_dtype, reduce_dtype=torch.float32)
+        for leaf_name, leaf in _root_leaf_modules(model, tie_word_embeddings):
+            fully_shard(
+                leaf,
+                mesh=leaf_mesh,
+                mp_policy=leaf_mp,
+                reshard_after_forward=bool(reshard_after_forward),
+            )
+            wrapped_leaves.append(leaf_name)
 
     mixed_precision = api.MixedPrecisionConfig(
         enable=True,
@@ -90,24 +115,21 @@ def veomni_parallelize(
         weights_path=None,
         enable_reshard_after_forward=bool(reshard_after_forward),
         mixed_precision=mixed_precision,
-        basic_modules=basic_modules,
+        basic_modules=list(block_class_names),
         init_device="meta",
         enable_fsdp_offload=False,
     )
 
-    # FSDP2 root pre-init. HI3 builds inputs_embeds by calling
-    # ``transformer.model.wte(input_ids)`` from the OUTER wrapper's forward,
-    # BEFORE the decoder root's own forward runs. FSDP2 marks "the 1st state to
-    # run forward" as the root (torch ..._fsdp_state._lazy_init), so wte-first
-    # latches ``_is_root=True`` on the embedding and the real root's later init
-    # raises "FSDP state has already been lazily initialized for wte ... requires
-    # running forward through the root module first". Pre-initializing the root
-    # here stamps every nested module a child (``_is_root=False``) up front, so a
-    # direct wte() call no-ops its lazy-init and just all-gathers via its own
-    # group's hook. Mirrors verl's post-wrap ``_lazy_init(model, model)``. Only
-    # needed when an embedding got its own group (a leaf invoked outside the root
-    # forward); skipped otherwise so the diffusion recipes stay byte-identical.
-    if embedding_classes:
+    # FSDP2 root pre-init. With root leaves in their own groups, the OUTER
+    # wrapper calls one (e.g. wte) BEFORE the decoder root's forward; FSDP2 marks
+    # "the 1st state to run forward" as the root (torch ..._fsdp_state._lazy_init),
+    # so leaf-first latches ``_is_root=True`` on the leaf and the real root's
+    # later init raises "FSDP state has already been lazily initialized ...
+    # requires running forward through the root module first". Pre-initializing
+    # the root here stamps every nested module a child (``_is_root=False``) up
+    # front, so a direct leaf call no-ops its lazy-init and just all-gathers via
+    # its own group's hook. Mirrors verl's post-wrap ``_lazy_init(model, model)``.
+    if wrapped_leaves:
         from torch.distributed.fsdp._fully_shard._fsdp_state import (
             _get_module_fsdp_state,
         )
@@ -116,7 +138,7 @@ def veomni_parallelize(
         if root_state is None:
             logger.warning(
                 "veomni_parallelize: no FSDP state on root after parallelize; "
-                "embedding lazy-init guard inactive (wte-before-root may crash)."
+                "root-leaf lazy-init guard inactive (leaf-before-root may crash)."
             )
         else:
             root_state._lazy_init()
@@ -144,12 +166,12 @@ def veomni_parallelize(
 
     if _current_rank() == 0:
         logger.info(
-            "veomni_parallelize: wrapped %d block(s) of class %r + %d embedding "
+            "veomni_parallelize: wrapped %d block(s) of class %r + %d root-leaf "
             "group(s) %r + root (dtype=%s, reshard=%s, ac=%s, compile=%s, tie=%s)",
             len(block_instances),
             tuple(block_class_names),
-            len(embedding_classes),
-            tuple(sorted(embedding_classes)),
+            len(wrapped_leaves),
+            tuple(wrapped_leaves),
             dtype_name,
             reshard_after_forward,
             activation_checkpointing,
@@ -158,35 +180,36 @@ def veomni_parallelize(
         )
 
 
-def _embedding_block_classes(
+def _root_leaf_modules(
     model: nn.Module,
     tie_word_embeddings: bool,
-) -> frozenset:
-    """Class names of word-embedding leaves that need their OWN fully_shard group.
+) -> "list[Tuple[str, nn.Module]]":
+    """Direct-child leaf modules of the wrapped root that carry their OWN params.
 
-    HI3 builds ``inputs_embeds`` by calling ``transformer.model.wte(input_ids)``
-    from the OUTER wrapper's forward (``ar.py`` gen_text), BEFORE the wrapped
-    decoder's own FSDP-managed forward runs. If the embedding is only part of the
-    root group, its all-gather pre-forward hook has not fired at the lookup, so
-    the root-sharded weight is still a DTensor and ``aten.embedding`` raises "got
-    mixed torch.Tensor and DTensor". Wrapping the embedding as its own group
-    gives it a pre-forward hook that all-gathers it to a plain tensor on that
-    direct call (mirrors verl's ``_select_fsdp2_wrap_targets``).
+    These are the root submodules HI3's OUTER wrapper invokes directly, outside
+    the decoder's managed forward — the word embedding ``wte`` (to build
+    inputs_embeds before the body) and the final norm ``ln_f`` (applied to the
+    output after it). Each needs its own ``fully_shard`` group so a direct call
+    all-gathers it to a plain tensor instead of meeting a root-sharded DTensor
+    (``aten.embedding`` / ``aten.mul`` "mixed torch.Tensor and DTensor").
 
-    Gated on leaf-name ``{"wte", "embed_tokens"}`` ONLY (not ``isinstance`` on
-    ``nn.Embedding``): diffusion DiTs have no such leaf — QwenImage's
-    ``addition_t_embedding`` is a different name — so this is a strict no-op for
-    them and their checksum parity is preserved. Returns empty when tied, since a
-    shared lm_head/embedding weight must not be split into a separate group.
+    Selected at the INSTANCE level (the caller ``fully_shard``s these objects)
+    rather than by class name, because the final norm shares its class with the
+    per-layer norms inside the decoder blocks — a class-name match would
+    over-wrap those. Container children (e.g. the decoder ``ModuleList``, whose
+    params live in the blocks wrapped via ``block_class_names``) carry no params
+    of their own and are skipped. The embedding (and any ``lm_head``) is skipped
+    when tied, since a shared weight must not be split into a separate group.
     """
-    if tie_word_embeddings:
-        return frozenset()
-    classes = set()
-    for name, mod in model.named_modules():
-        leaf = name.rsplit(".", 1)[-1] if "." in name else name
-        if leaf in {"wte", "embed_tokens"} and hasattr(mod, "weight"):
-            classes.add(type(mod).__name__)
-    return frozenset(classes)
+    skip_when_tied = {"wte", "embed_tokens", "lm_head"}
+    out: "list[Tuple[str, nn.Module]]" = []
+    for name, child in model.named_children():
+        if not any(True for _ in child.parameters(recurse=False)):
+            continue
+        if tie_word_embeddings and (isinstance(child, nn.Embedding) or name in skip_when_tied):
+            continue
+        out.append((name, child))
+    return out
 
 
 def _enumerate_block_instances(
