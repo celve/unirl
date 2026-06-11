@@ -358,7 +358,7 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
             # [B, H, q_len=1, kv_len] shape. Keep the cond_* / vit_kwargs
             # i2t/it2i pass-throughs alive across steps.
             new_kwargs: Dict[str, Any] = dict(updated)
-            for carry in ("cond_vit_images", "cond_vit_image_mask", "vit_kwargs"):
+            for carry in ("cond_vit_images", "cond_vit_image_mask", "vit_kwargs", "custom_pos_emb", "rope_image_info"):
                 if carry not in new_kwargs and carry in model_kwargs:
                     new_kwargs[carry] = model_kwargs[carry]
             new_kwargs["use_cache"] = True
