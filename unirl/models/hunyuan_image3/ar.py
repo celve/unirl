@@ -258,6 +258,10 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
         # right-padded batches).
         model_kwargs: Dict[str, Any] = {
             "mode": "gen_text",
+            # Newer checkpoints' _update_model_kwargs_for_generation reads
+            # model_kwargs["rope_image_info"] unconditionally; AR (gen_text) has
+            # no image tokens, so pass an empty per-sample list.
+            "rope_image_info": [[] for _ in range(batch_size)],
             "attention_mask": fused.attention_mask,  # [B, 1, L, L] bool
             "position_ids": fused.position_ids,  # [B, L] long
             "custom_pos_emb": fused.rope_cache,  # ([B, L, D], [B, L, D])

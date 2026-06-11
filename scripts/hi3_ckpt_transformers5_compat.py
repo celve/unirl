@@ -1,30 +1,31 @@
 #!/usr/bin/env python3
-"""Patch a HunyuanImage-3 (base) checkpoint's trust_remote_code files for
-transformers 5.x compatibility, so the unirl bundle's standalone
-``HunyuanImage3Pipeline.generate()`` path runs end-to-end.
+"""Patch a HunyuanImage-3 checkpoint's trust_remote_code files for transformers
+5.x compatibility, so the unirl bundle's standalone
+``HunyuanImage3Pipeline.generate()`` path runs end-to-end (found via
+scripts/hi3_modality_smoke.py, LIN-415).
 
-The checkpoint's vendored modeling/image-processor was written against
-transformers 4.x; on transformers 5.10.x three API drifts break the bundle's
-direct generate path (found via scripts/hi3_modality_smoke.py, LIN-415):
+Handles BOTH checkpoint snapshot styles:
+  - base ``HunyuanImage-3``           (modeling file ``hunyuan.py``)
+  - ``HunyuanImage-3-Instruct``       (modeling file ``modeling_hunyuan_image_3.py``)
 
-  A. hunyuan.py KV-cache: transformers 5.x ``StaticLayer.lazy_initialization``
-     now requires ``(key_states, value_states)``; the checkpoint calls it with
-     ``key_states`` only  -> TypeError on AR generation (t2t/i2t).
-  B. image_processor.py: the Siglip2 vision processor returns list-valued
-     ``pixel_values`` in transformers 5.x; ``.squeeze(0)`` then fails. Forcing
-     ``return_tensors="pt"`` restores tensor outputs (i2t/it2i).
-  C. hunyuan.py HunyuanImage3ForCausalMM.forward(): has no **kwargs and rejects
-     the ``rope_image_info`` kwarg the unirl diffusion stage passes. The forward
-     derives rope from ``custom_pos_emb`` (also passed), so accept+ignore it
-     (t2i/it2i).
+Patches:
+  A. KV-cache: transformers 5.x ``StaticLayer.lazy_initialization`` now requires
+     ``(key_states, value_states)``; the checkpoint calls it with ``key_states``
+     only. (both snapshots)
+  B. Siglip2 vision processor returns list-valued ``pixel_values`` in
+     transformers 5.x; ``.squeeze(0)`` then fails. Force ``return_tensors="pt"``.
+     (anchor differs: base ``vision_encoder_processor`` vs Instruct
+     ``vit_info.processor``)
+  C. base ``ForCausalMM.forward`` has no ``**kwargs`` and rejects the
+     ``rope_image_info`` kwarg unirl's diffusion passes; the forward derives rope
+     from ``custom_pos_emb`` so accept+ignore it. (base only — Instruct's forward
+     already declares ``rope_image_info``)
 
-Idempotent: re-running is a no-op once patched. Operates on a WRITABLE copy of
-the checkpoint (e.g. /dockerdata/HunyuanImage-3), not the read-only ceph share.
-
-Usage:
-    python hi3_ckpt_transformers5_compat.py [CKPT_DIR]   # default /dockerdata/HunyuanImage-3
+Idempotent. Operate on a WRITABLE copy (e.g. /dockerdata/...), not read-only ceph.
 After patching, clear the trust_remote_code cache so the patched files reload:
     rm -rf ~/.cache/huggingface/modules/transformers_modules/HunyuanImage*
+
+Usage: python hi3_ckpt_transformers5_compat.py [CKPT_DIR]   # default /dockerdata/HunyuanImage-3
 """
 import os
 import sys
@@ -32,54 +33,65 @@ import sys
 CKPT = sys.argv[1] if len(sys.argv) > 1 else "/dockerdata/HunyuanImage-3"
 
 
-def patch(path: str, old: str, new: str, label: str) -> bool:
+def patch(path: str, old: str, new: str, label: str):
     if not os.path.exists(path):
-        print(f"[compat] {label}: MISSING {path} — skip")
-        return False
+        return None
     s = open(path).read()
     if new in s and old not in s:
         print(f"[compat] {label}: already patched")
         return True
-    n = s.count(old)
-    if n == 0:
-        print(f"[compat] {label}: ANCHOR NOT FOUND in {os.path.basename(path)} — manual review needed")
+    if s.count(old) == 0:
+        print(f"[compat] {label}: anchor not found in {os.path.basename(path)}")
         return False
     open(path, "w").write(s.replace(old, new))
-    print(f"[compat] {label}: patched {n}x in {os.path.basename(path)}")
+    print(f"[compat] {label}: patched in {os.path.basename(path)}")
     return True
 
 
-H = os.path.join(CKPT, "hunyuan.py")
-IP = os.path.join(CKPT, "image_processor.py")
 print(f"[compat] patching checkpoint at {CKPT}")
+IP = os.path.join(CKPT, "image_processor.py")
 
-ok = True
+# Modeling file differs by snapshot.
+modeling = None
+for cand in ("hunyuan.py", "modeling_hunyuan_image_3.py"):
+    if os.path.exists(os.path.join(CKPT, cand)):
+        modeling = os.path.join(CKPT, cand)
+        break
+if modeling is None:
+    print("[compat] ERROR: no modeling file (hunyuan.py / modeling_hunyuan_image_3.py) found")
+    sys.exit(3)
+print(f"[compat] modeling file: {os.path.basename(modeling)}")
 
-# A — KV-cache lazy_initialization signature
-ok &= patch(
-    H,
+# A — KV-cache lazy_initialization (both snapshots)
+patch(
+    modeling,
     "self.layers[layer_idx].lazy_initialization(key_states)",
     "self.layers[layer_idx].lazy_initialization(key_states, value_states)",
     "A/kv-cache lazy_initialization",
 )
 
-# B — Siglip2 image processor list -> tensor
-ok &= patch(
+# B — Siglip2 image proc list -> tensor (whichever anchor the snapshot uses)
+patch(
     IP,
     "inputs = self.vision_encoder_processor(image)",
     'inputs = self.vision_encoder_processor(image, return_tensors="pt")',
-    "B/image-proc return_tensors",
+    "B/image-proc return_tensors (base)",
+)
+patch(
+    IP,
+    "inputs = self.vit_info.processor(image)",
+    'inputs = self.vit_info.processor(image, return_tensors="pt")',
+    "B/image-proc return_tensors (instruct)",
 )
 
-# C — forward() accept+ignore rope_image_info
-ok &= patch(
-    H,
+# C — base forward() accept+ignore rope_image_info (Instruct already declares it)
+patch(
+    modeling,
     "            first_step: Optional[bool] = None,\n            # for gen image",
     "            first_step: Optional[bool] = None,\n"
-    "            rope_image_info: Optional[Any] = None,  # accept+ignore: rope comes from custom_pos_emb\n"
+    "            rope_image_info: Optional[Any] = None,  # accept+ignore: rope from custom_pos_emb\n"
     "            # for gen image",
-    "C/forward accept rope_image_info",
+    "C/forward accept rope_image_info (base only)",
 )
 
-print("[compat] done" + ("" if ok else " (WITH UNRESOLVED ANCHORS — review above)"))
-sys.exit(0 if ok else 3)
+print("[compat] done")
