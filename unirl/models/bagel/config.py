@@ -37,6 +37,18 @@ BAGEL_MOE_GEN_LORA_TARGETS: Tuple[str, ...] = (
     "mlp_moe_gen.down_proj",
 )
 
+# LoRA targets for TEXT-out RL (t2t / i2t / it2t): the und/base projections the
+# MoT routes text (and ViT) tokens through. The gen experts stay frozen.
+BAGEL_UND_LORA_TARGETS: Tuple[str, ...] = (
+    "self_attn.q_proj",
+    "self_attn.k_proj",
+    "self_attn.v_proj",
+    "self_attn.o_proj",
+    "mlp.gate_proj",
+    "mlp.up_proj",
+    "mlp.down_proj",
+)
+
 
 @dataclass
 class BagelPipelineConfig:
@@ -96,4 +108,4 @@ class BagelPipelineConfig:
             self.lora_target_modules = tuple(self.lora_target_modules)
 
 
-__all__ = ["BAGEL_MOE_GEN_LORA_TARGETS", "BagelPipelineConfig"]
+__all__ = ["BAGEL_MOE_GEN_LORA_TARGETS", "BAGEL_UND_LORA_TARGETS", "BagelPipelineConfig"]

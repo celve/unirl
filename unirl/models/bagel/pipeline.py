@@ -50,10 +50,12 @@ from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.primitives import Images, Texts
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
-from unirl.types.sampling import get_diffusion_params
+from unirl.types.sampling import ARSamplingParams, get_ar_params, get_diffusion_params
 from unirl.types.segments.latent import LatentSegment
+from unirl.types.segments.text import TextSegment
 
-from .conditions import BagelDiffusionConditions
+from .ar import BagelARStage
+from .conditions import BagelARConditions, BagelDiffusionConditions
 from .diffusion import BagelDiffusionParams, BagelDiffusionStage, _to_device
 from .vae import BagelVAEDecodeStage, bagel_latent_shape
 
@@ -101,6 +103,13 @@ class BagelPipeline(Pipeline):
             )
         self.diffusion = diffusion
         self.vae_decode = vae_decode if vae_decode is not None else BagelVAEDecodeStage(bundle)
+        # AR (text-out) stage for t2t / i2t / it2t; resolvable via the trainside
+        # engine's ``stage_attrs=["ar"]``. Shares the bundle (same MoT root).
+        self.ar = BagelARStage(
+            model=bundle,
+            autocast_precision=autocast_precision,
+            logprob_precision=logprob_precision,
+        )
         self.autocast_precision = autocast_precision
         # FlowMatch time-shift for the σ schedule policy (read by the hosting engine
         # via build_schedule_policy → ensure_req_sigmas). Bagel uses static shift.
@@ -224,21 +233,30 @@ class BagelPipeline(Pipeline):
     def _resolve_task(req: RolloutReq) -> str:
         """Resolve the task mode: explicit ``stage_config["task"]`` wins, else infer.
 
-        Inference: an ``Images`` input primitive ⇒ ``it2i`` (editing), else
-        ``t2i``. Text-out tasks (t2t / i2t / it2t) ride the AR stage and must be
-        requested explicitly via ``stage_config["task"]``.
+        Inference: ``ARSamplingParams`` ⇒ text-out (``it2t`` with an ``Images``
+        input, else ``t2t``; pure ``i2t`` — image, no prompt — must be explicit);
+        diffusion params ⇒ image-out (``it2i`` with an ``Images`` input, else
+        ``t2i``).
         """
         task = req.stage_config.get("task")
         if task is not None:
             return str(task)
-        return "it2i" if isinstance(req.primitives.get("image"), Images) else "t2i"
+        has_image = isinstance(req.primitives.get("image"), Images)
+        if isinstance(req.sampling_params, ARSamplingParams):
+            return "it2t" if has_image else "t2t"
+        return "it2i" if has_image else "t2i"
 
     def generate(self, req: RolloutReq) -> RolloutResp:
         """Dispatch on the resolved task and pack one track per request."""
         task = self._resolve_task(req)
         if task in ("t2i", "it2i"):
             return self._generate_image(req, task)
-        raise ValueError(f"BagelPipeline.generate: unsupported task {task!r}; expected 't2i' or 'it2i'.")
+        if task in ("t2t", "i2t", "it2t"):
+            return self._generate_text(req, task)
+        raise ValueError(
+            f"BagelPipeline.generate: unsupported task {task!r}; "
+            "expected one of 't2i', 'it2i', 't2t', 'i2t', 'it2t'."
+        )
 
     def _generate_image(self, req: RolloutReq, task: str) -> RolloutResp:
         """Run BAGEL image-out (t2i / it2i) per-sample and pack one ``"image"`` track."""
@@ -367,6 +385,105 @@ class BagelPipeline(Pipeline):
             sde_logp=sde_logp,
             sde_indices=segments[0].sde_indices,
         )
+
+    # ------------------------------------------------------------------
+    # Text-out (t2t / i2t / it2t)
+    # ------------------------------------------------------------------
+
+    def _generate_text(self, req: RolloutReq, task: str) -> RolloutResp:
+        """Run BAGEL text-out per-sample and pack one ``"ar"`` track.
+
+        Builds per-sample RAW prompt splits (see :class:`BagelARConditions`)
+        mirroring the vendored understanding flow (inferencer.py:242-260,
+        ``understanding_output=True``): image ingested ViT-only, then the
+        prompt text; ``BagelARStage`` owns prefill + decode + replay.
+        """
+        ar_params = get_ar_params(req.sampling_params)
+        if ar_params is None:
+            raise TypeError(
+                f"BagelPipeline.generate ({task}): sampling_params must carry ARSamplingParams, "
+                f"got {type(req.sampling_params).__name__}"
+            )
+
+        texts = req.primitives.get("text")
+        prompts: Optional[List[str]] = list(texts.texts) if isinstance(texts, Texts) else None
+        if task in ("t2t", "it2t") and prompts is None:
+            raise TypeError(
+                f"BagelPipeline.generate ({task}): req.primitives['text'] must be Texts, "
+                f"got {type(texts).__name__ if texts is not None else 'None'}"
+            )
+
+        pil_images: Optional[List[Any]] = None
+        if task in ("i2t", "it2t"):
+            images_prim = req.primitives.get("image")
+            if not isinstance(images_prim, Images):
+                raise TypeError(
+                    f"BagelPipeline.generate ({task}): req.primitives['image'] must be Images, "
+                    f"got {type(images_prim).__name__ if images_prim is not None else 'None'}"
+                )
+            if getattr(self.bundle.model, "vit_model", None) is None:
+                raise ValueError(
+                    f"BagelPipeline.generate ({task}): the bundle was built without the und ViT; "
+                    "set BagelPipelineConfig.enable_vit=true for image-input tasks."
+                )
+            pil_images = [img.to_pil() for img in images_prim.to_list()]
+            if prompts is not None and len(pil_images) != len(prompts):
+                raise ValueError(
+                    f"BagelPipeline.generate ({task}): image count {len(pil_images)} != "
+                    f"prompt count {len(prompts)}"
+                )
+
+        n = len(prompts) if prompts is not None else len(pil_images)
+        sample_ids = list(req.sample_ids) if req.sample_ids else [f"s{i}" for i in range(n)]
+        ntk = self.bundle.new_token_ids
+        tokenizer = self.bundle.tokenizer
+
+        splits_per_sample: List[List[Dict[str, Any]]] = []
+        for i in range(n):
+            splits: List[Dict[str, Any]] = []
+            if pil_images is not None:
+                from .vendor.data.data_utils import pil_img2rgb
+
+                # Understanding preproc chain (inferencer.py:249-250, vae=False):
+                # rgb → vae resize → vit_transform; store the FINAL pixels so
+                # rollout and replay consume byte-identical inputs.
+                img = self.bundle.vae_transform.resize_transform(pil_img2rgb(pil_images[i]))
+                splits.append({"kind": "vit", "image": self.bundle.vit_transform(img)})
+            if prompts is not None:
+                # bos/eos (<|im_start|>/<|im_end|>) wrap, as prepare_prompts does
+                # (vendor bagel.py:246) — stored wrapped so replay is tokenizer-free.
+                ids = [ntk["bos_token_id"]] + tokenizer.encode(prompts[i]) + [ntk["eos_token_id"]]
+                splits.append({"kind": "text", "ids": torch.tensor(ids, dtype=torch.long)})
+            splits_per_sample.append(splits)
+
+        conditions = BagelARConditions(prompt_splits=splits_per_sample)
+        segment = self.ar.autoregress(conditions, sampling_params=ar_params)
+        decoded = self._detokenize(segment)
+
+        return RolloutResp(
+            tracks={
+                "ar": RolloutTrack(
+                    sample_ids=sample_ids,
+                    parent_ids=list(req.group_ids) if req.group_ids else None,
+                    conditions=conditions.to_dict(),
+                    segment=segment,
+                    decoded=decoded,
+                ),
+            }
+        )
+
+    def _detokenize(self, segment: TextSegment) -> Texts:
+        """Decode packed response tokens to strings, stripped at ``<|im_end|>``.
+
+        The segment holds SAMPLED tokens only (no leading bos — unlike the
+        vendored ``gen_text``, which also strips a leading ``<|im_start|>``).
+        """
+        cu = [int(c) for c in segment.cu_seqlens.tolist()]
+        out: List[str] = []
+        for i in range(len(cu) - 1):
+            toks = segment.tokens[cu[i] : cu[i + 1]].tolist()
+            out.append(self.bundle.tokenizer.decode(toks).split("<|im_end|>")[0])
+        return Texts(texts=out)
 
 
 __all__ = ["BagelPipeline"]
