@@ -82,6 +82,7 @@ class VeOmniBackend(Remote):
         device: Optional[torch.device] = None,
         rank: int = 0,
         trainable_attr: str = "transformer",
+        wrap_root_leaves: bool = False,
         lora_cfg: Optional[LoraConfig] = None,
         ema_lora_cfg: Optional[EmaLoraConfig] = None,
         ema_cfg: Optional[EmaFullConfig] = None,
@@ -150,7 +151,15 @@ class VeOmniBackend(Remote):
             shadow = inject_mirror(model, prefix=ema_cfg.shadow_prefix)
 
         # 6. Shard + materialize (to_empty; init_weights is a bundle-stamped
-        # no-op). Root-wrapped by VeOmni — single-module trainables only.
+        # no-op). Root-wrapped by VeOmni; word-embedding leaves get their own
+        # group unless the model ties embed/lm_head (then the shared weight must
+        # stay in one group). The tie flag lives on the bundle WRAPPER config —
+        # the wrapped decoder has no ``.config`` — and degrades to False
+        # (= separate-wrap, the safe default for the embedding-DTensor bug).
+        tie_word_embeddings = bool(
+            getattr(getattr(self._bundle, "transformer", None), "config", None)
+            and getattr(self._bundle.transformer.config, "tie_word_embeddings", False)
+        )
         veomni_parallelize(
             model,
             block_class_names=tuple(block_class_names),
@@ -158,6 +167,8 @@ class VeOmniBackend(Remote):
             reshard_after_forward=fsdp_cfg.reshard_after_forward,
             activation_checkpointing=fsdp_cfg.activation_checkpointing,
             use_torch_compile=fsdp_cfg.use_torch_compile,
+            tie_word_embeddings=tie_word_embeddings,
+            wrap_root_leaves=wrap_root_leaves,
         )
 
         # 7. Real weights: load into the freshly-sharded module. Meta-init
@@ -175,6 +186,24 @@ class VeOmniBackend(Remote):
 
         # 8. Post-materialize resets (LoRA adapter init, mirror copies).
         apply_deferred_ops(model)
+
+        # [mem-probe] One-shot OOM diagnosis: train-backbone weight footprint per
+        # rank, BEFORE any rollout/activations. params_local≈params_global/8 ⇒
+        # the 80B(-MoE) sharded to 1/8; alloc is the pure weight footprint. If a
+        # later train-step OOM sits far above alloc, the delta is activations
+        # (AC not biting); if alloc is already ~90GB, the model is not sharding.
+        if torch.cuda.is_available():
+            from torch.distributed.tensor import DTensor
+
+            g = sum(p.numel() for p in model.parameters())
+            local = sum((p.to_local().numel() if isinstance(p, DTensor) else p.numel()) for p in model.parameters())
+            print(
+                f"[mem-probe rank{self._rank}] post-load alloc="
+                f"{torch.cuda.memory_allocated() / 1e9:.1f}GB reserved="
+                f"{torch.cuda.memory_reserved() / 1e9:.1f}GB "
+                f"params_global={g / 1e9:.2f}B params_local={local / 1e9:.2f}B",
+                flush=True,
+            )
 
         # 9-10. EMA, optimizer, scheduler — identical to FSDPBackend.
         self.ema: Optional[EMA] = None
