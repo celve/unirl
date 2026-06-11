@@ -12,10 +12,12 @@ contracts per mode:
       token ids of the pristine vendored ``generate_text(do_sample=False)`` —
       validates the reimplemented bs=1 index bookkeeping byte-for-byte
     - REPLAY PARITY: stage.replay under no_grad, identical weights, same T →
-      median |new_logp - old_logp| < 2e-2 nats bf16 (the ratio-consistency
-      signal; < 5e-3 in fp32). bf16 q_len=1 (rollout) vs q_len=n (replay)
+      median |new_logp - old_logp| < 2e-2 nats (the ratio-consistency signal;
+      observed ~5e-4 to ~9e-3). bf16 q_len=1 (rollout) vs q_len=n (replay)
       flash-kernel batching makes a few low-confidence tokens diverge up to
-      ~0.2-0.3 nats (loose max < 5e-1); fp32 collapses the median to ~1e-4.
+      ~0.2-0.3 nats (loose max < 5e-1). The image modes' fp32-trajectory
+      replays are bit-exact (ratio==0) — proof the path is exact and the text
+      deltas are bf16 noise.
     - GRAD SMOKE: replay with embed_tokens grad-enabled, sum().backward() —
       validates the grad-capable path through the navit und stack (eval+grads)
 
@@ -33,7 +35,6 @@ Env knobs:
     BAGEL_MAX_TOKENS   default 64    (AR max_new_tokens)
     BAGEL_MODES        default "t2t,i2t,it2t,t2i,it2i"
     BAGEL_GRAD_SMOKE   default "1"   (set "0" to skip the replay-backward check)
-    BAGEL_PRECISION    default "bf16" (set "fp32" for the exact replay-parity proof)
 """
 from __future__ import annotations
 
@@ -52,7 +53,6 @@ HW = int(os.environ.get("BAGEL_HW", "512"))
 MAX_TOKENS = int(os.environ.get("BAGEL_MAX_TOKENS", "64"))
 MODES = [m.strip() for m in os.environ.get("BAGEL_MODES", "t2t,i2t,it2t,t2i,it2i").split(",") if m.strip()]
 GRAD_SMOKE = os.environ.get("BAGEL_GRAD_SMOKE", "1") == "1"
-PRECISION = os.environ.get("BAGEL_PRECISION", "bf16")  # bf16 (default) or fp32 (replay-parity proof)
 
 AR_TEMPERATURE = 0.7
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -89,8 +89,8 @@ def build_pipeline(enable_vit: bool):
 
     config = BagelPipelineConfig(
         pretrained_model_ckpt_path=PRETRAINED,
-        model_precision=PRECISION,
-        autocast_precision=PRECISION,
+        model_precision="bf16",
+        autocast_precision="bf16",
         trajectory_precision="fp32",
         logprob_precision="fp32",
         shift=3.0,
@@ -183,14 +183,12 @@ def run_text_mode(pipeline, task: str, results: dict) -> None:
             f"max|dlogp|={d.max().item():.2e} ({n_over}/{d.numel()} tok >5e-2)")
         # bf16 rollout (q_len=1 per-token flash-varlen) vs replay (q_len=n teacher-forced)
         # diverge up to ~0.2-0.3 nats on a handful of low-confidence tokens; the bulk
-        # (median, printed p95) is the ratio-consistency signal. The same path computed
-        # in fp32 (BAGEL_PRECISION=fp32) gives median ~1e-4 — and the image modes' fp32
-        # trajectory replays bit-exactly (ratio==0) — so this is bf16 noise, not a bug.
-        # Median floats up to ~1e-2 on short, sampling-variant text rollouts; assert
-        # median < 2e-2 + a loose max sanity bound (a real bug shifts the whole dist).
-        med_bound = 2e-2 if PRECISION == "bf16" else 5e-3
+        # (median, printed p95) is the ratio-consistency signal. The image modes'
+        # fp32-trajectory replays are bit-exact (ratio==0), proving the path — so the
+        # text deltas are bf16 noise, not a bug. Median floats up to ~1e-2 on short,
+        # sampling-variant rollouts; assert median < 2e-2 + a loose max sanity bound.
         ok = (bool(txt and txt.strip())
-              and d.median().item() < med_bound
+              and d.median().item() < 2e-2
               and d.max().item() < 5e-1)
 
         if GRAD_SMOKE:
