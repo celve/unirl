@@ -187,6 +187,24 @@ class VeOmniBackend(Remote):
         # 8. Post-materialize resets (LoRA adapter init, mirror copies).
         apply_deferred_ops(model)
 
+        # [mem-probe] One-shot OOM diagnosis: train-backbone weight footprint per
+        # rank, BEFORE any rollout/activations. params_local≈params_global/8 ⇒
+        # the 80B(-MoE) sharded to 1/8; alloc is the pure weight footprint. If a
+        # later train-step OOM sits far above alloc, the delta is activations
+        # (AC not biting); if alloc is already ~90GB, the model is not sharding.
+        if torch.cuda.is_available():
+            from torch.distributed.tensor import DTensor
+
+            g = sum(p.numel() for p in model.parameters())
+            local = sum((p.to_local().numel() if isinstance(p, DTensor) else p.numel()) for p in model.parameters())
+            print(
+                f"[mem-probe rank{self._rank}] post-load alloc="
+                f"{torch.cuda.memory_allocated() / 1e9:.1f}GB reserved="
+                f"{torch.cuda.memory_reserved() / 1e9:.1f}GB "
+                f"params_global={g / 1e9:.2f}B params_local={local / 1e9:.2f}B",
+                flush=True,
+            )
+
         # 9-10. EMA, optimizer, scheduler — identical to FSDPBackend.
         self.ema: Optional[EMA] = None
         if shadow is not None:
