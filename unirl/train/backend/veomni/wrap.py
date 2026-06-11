@@ -95,6 +95,32 @@ def veomni_parallelize(
         enable_fsdp_offload=False,
     )
 
+    # FSDP2 root pre-init. HI3 builds inputs_embeds by calling
+    # ``transformer.model.wte(input_ids)`` from the OUTER wrapper's forward,
+    # BEFORE the decoder root's own forward runs. FSDP2 marks "the 1st state to
+    # run forward" as the root (torch ..._fsdp_state._lazy_init), so wte-first
+    # latches ``_is_root=True`` on the embedding and the real root's later init
+    # raises "FSDP state has already been lazily initialized for wte ... requires
+    # running forward through the root module first". Pre-initializing the root
+    # here stamps every nested module a child (``_is_root=False``) up front, so a
+    # direct wte() call no-ops its lazy-init and just all-gathers via its own
+    # group's hook. Mirrors verl's post-wrap ``_lazy_init(model, model)``. Only
+    # needed when an embedding got its own group (a leaf invoked outside the root
+    # forward); skipped otherwise so the diffusion recipes stay byte-identical.
+    if embedding_classes:
+        from torch.distributed.fsdp._fully_shard._fsdp_state import (
+            _get_module_fsdp_state,
+        )
+
+        root_state = _get_module_fsdp_state(model)
+        if root_state is None:
+            logger.warning(
+                "veomni_parallelize: no FSDP state on root after parallelize; "
+                "embedding lazy-init guard inactive (wte-before-root may crash)."
+            )
+        else:
+            root_state._lazy_init()
+
     block_instances = _enumerate_block_instances(model, block_class_names)
 
     if activation_checkpointing:
