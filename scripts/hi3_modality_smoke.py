@@ -105,6 +105,13 @@ def build_pipeline():
         device_map="auto",
     )
     transformer.eval()
+    # The Instruct checkpoint's config has no ``model_version`` (base does), but
+    # its modeling.load_tokenizer reads ``self.config.model_version`` (the value
+    # is then ignored by Instruct's tokenizer). Default it so the attribute
+    # access doesn't AttributeError. Harmless on base (already set).
+    if not hasattr(transformer.config, "model_version") or getattr(transformer.config, "model_version", None) is None:
+        transformer.config.model_version = "HunyuanImage-3.0"
+        log("set config.model_version='HunyuanImage-3.0' (missing on Instruct ckpt)")
     dmap = getattr(transformer, "hf_device_map", {}) or {}
     n_dev = len(set(str(v) for v in dmap.values())) if dmap else 1
     log(f"transformer loaded in {time.time() - t0:.1f}s across {n_dev} device(s); {gpu_mem()}")
