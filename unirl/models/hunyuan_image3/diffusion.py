@@ -271,7 +271,10 @@ class HunyuanImage3DiffusionStep(DiffusionStep[HunyuanImage3Bundle, HunyuanImage
         transformer.post_token_len = None
         n_img = int(fused.gen_image_mask.sum(dim=-1).max().item()) if fused.gen_image_mask is not None else 0
         transformer.num_image_tokens = n_img
-        transformer.num_special_tokens = None
+        # ragged_final_layer at decode steps slices hidden_states[:, num_special_tokens:]
+        # to drop the leading timestep/special tokens before the image region; on
+        # is_first it uses image_mask instead (None is correct there).
+        transformer.num_special_tokens = None if is_first else (int(input_ids_in.shape[1]) - n_img)
 
         import os as _os
 
