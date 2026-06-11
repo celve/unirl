@@ -280,6 +280,13 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
         per_token_logps: List[List[float]] = [[] for _ in range(batch_size)]
         finished = [False] * batch_size
 
+        # Newer checkpoints' gen_text forward reads runtime attrs off ``self`` that a
+        # prior diffusion/FlowGRPO pass may leave stale (or never sets on this
+        # snapshot). Reset for text generation: zero image tokens.
+        transformer.post_token_len = None
+        transformer.num_image_tokens = 0
+        transformer.num_special_tokens = None
+
         for step_idx in range(max_new):
             model_inputs = transformer.prepare_inputs_for_generation(
                 cur_input_ids,
