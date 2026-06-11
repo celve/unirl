@@ -308,7 +308,11 @@ class HunyuanImage3Bundle(Bundle):
         # after ``from_pretrained``. Do it here so callers (the smoke script
         # and ``from_config``) don't need to remember.
         if getattr(transformer, "_tkwrapper", None) is None:
-            transformer.load_tokenizer(self.tokenizer)
+            # The checkpoint's ``load_tokenizer`` resolves its arg as a path via
+            # ``HunyuanImage3TokenizerFast.from_pretrained(arg, ...)`` — pass the
+            # checkpoint path, not the loaded tokenizer object (which would be
+            # str()-ed into an invalid repo id).
+            transformer.load_tokenizer(self.pretrained_path)
 
         # Tokenize + splice in special markers (<boi>, <img>, <timestep>,
         # <eoi>, ratio, plus cond-image <img> blocks for it2i). With

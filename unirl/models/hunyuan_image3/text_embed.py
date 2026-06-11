@@ -116,7 +116,9 @@ class HunyuanImage3TextEmbedStage:
         # Ensure the tokenizer wrapper is loaded -- AutoModelForCausalLM
         # leaves ``_tkwrapper`` as None until ``load_tokenizer`` is called.
         if getattr(transformer, "_tkwrapper", None) is None:
-            transformer.load_tokenizer(bundle.tokenizer)
+            # ``load_tokenizer`` resolves its arg as a path (from_pretrained),
+            # so pass the checkpoint path, not the tokenizer object.
+            transformer.load_tokenizer(bundle.pretrained_path)
 
         out = transformer._tkwrapper.apply_chat_template(
             batch_prompt=prompts,
