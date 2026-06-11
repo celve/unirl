@@ -621,7 +621,14 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         for sid in omni_stage_ids:
             self._omni.engine.collective_rpc(
                 method="handle_sleep_task",
-                args=(OmniSleepTask(level=1, task_id=str(uuid.uuid4())),),
+                # level=2 offloads base weights to CPU too (not just the KV
+                # cache), so the colocated train backbone gets the engine's
+                # full GPU partition during the train step. Required for HI3
+                # (80B) colocate on 95GiB cards: level=1 left ~5GiB of engine
+                # weights resident on GPU 0, tipping the train-step image replay
+                # 48MiB over. Weights reload from CPU on wake_up; the LoRA
+                # re-send below already re-applies the adapter post-wake.
+                args=(OmniSleepTask(level=2, task_id=str(uuid.uuid4())),),
                 stage_ids=[int(sid)],
             )
         self._is_offloaded = True
@@ -650,9 +657,9 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
             torch.cuda.synchronize()
 
         # Re-load LoRA after wake if it was previously loaded.
-        # sleep(level=1) preserves base weights but LoRA adapters may be
-        # discarded. Re-sending them after wake ensures rollout uses the
-        # correct adapted model.
+        # sleep(level=2) offloads base weights AND drops LoRA adapters; wake_up
+        # restores the base weights from CPU, but the adapter must be re-sent.
+        # Re-sending them after wake ensures rollout uses the correct adapted model.
         #
         # Fail-fast on reload failure: if ``_lora_loaded`` was true before
         # sleep, the rollout MUST have an active LoRA adapter after wake
