@@ -130,19 +130,6 @@ def forward_flow(model: Any, **kwargs: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-class _FallbackNaiveCache:
-    """Duck-typed ``NaiveCache`` stand-in for CPU fake-model tests.
-
-    Used only when the model's modeling module does not export ``NaiveCache``
-    (i.e. a fake — the real vendored module always has it). Same attribute
-    contract: per-layer ``key_cache`` / ``value_cache`` dicts.
-    """
-
-    def __init__(self, num_layers: int) -> None:
-        self.key_cache = {k: None for k in range(num_layers)}
-        self.value_cache = {k: None for k in range(num_layers)}
-
-
 def require_inference_dispatch(model: Any) -> None:
     """Raise unless the MoT is in eval() mode (the navit forward-dispatch contract).
 
@@ -166,12 +153,17 @@ def init_und_context(model: Any) -> Dict[str, Any]:
 
     Mirrors ``InterleaveInferencer.init_gen_context``. ``NaiveCache`` is resolved
     from the model's own modeling module (hi3 ``sys.modules`` trick) so this
-    module never imports the vendored modeling (flash-attn) itself; fakes without
-    a ``NaiveCache`` get the duck-typed fallback.
+    module never imports the vendored modeling (flash-attn) itself; fake models
+    must export a ``NaiveCache`` from their module (see bagel_ar_cpu_check.py).
     """
     lm_model = model.language_model.model
     num_layers = int(model.config.llm_config.num_hidden_layers)
-    cache_cls = getattr(sys.modules[type(lm_model).__module__], "NaiveCache", _FallbackNaiveCache)
+    cache_cls = getattr(sys.modules[type(lm_model).__module__], "NaiveCache", None)
+    if cache_cls is None:
+        raise RuntimeError(
+            f"bagel.rl_ops.init_und_context: module {type(lm_model).__module__!r} exports no "
+            "NaiveCache; fake models must define one (per-layer key_cache/value_cache dicts)."
+        )
     return {"kv_lens": [0], "ropes": [0], "past_key_values": cache_cls(num_layers)}
 
 
@@ -273,19 +265,26 @@ def decode_text(
     past = ctx["past_key_values"]
     stop_set = set(int(t) for t in stop_ids)
 
+    # Hoisted index pools — per-step values are views (kv indexes grow by one
+    # contiguous slot per token, so arange slices cover every step).
+    max_new = int(max_new_tokens)
+    all_indexes = torch.arange(kv_len + max_new, dtype=torch.long, device=device)
+    all_positions = torch.arange(pos, pos + max_new, dtype=torch.long, device=device)
+    all_kv_lens = torch.arange(kv_len, kv_len + max_new, dtype=torch.int, device=device)
+
     curr = torch.tensor([int(start_token_id)], dtype=torch.long, device=device)
     tokens: List[int] = []
     logps: List[float] = []
-    for _ in range(int(max_new_tokens)):
+    for j in range(max_new):
         emb = lm.model.embed_tokens(curr)
         out = lm.forward_inference(
             packed_query_sequence=emb,
             query_lens=torch.ones_like(curr),
-            packed_query_position_ids=torch.tensor([pos], dtype=torch.long, device=device),
-            packed_query_indexes=torch.tensor([kv_len], dtype=torch.long, device=device),
+            packed_query_position_ids=all_positions[j : j + 1],
+            packed_query_indexes=all_indexes[kv_len + j : kv_len + j + 1],
             past_key_values=past,
-            key_values_lens=torch.tensor([kv_len], dtype=torch.int, device=device),
-            packed_key_value_indexes=torch.arange(kv_len, dtype=torch.long, device=device),
+            key_values_lens=all_kv_lens[j : j + 1],
+            packed_key_value_indexes=all_indexes[: kv_len + j],
             update_past_key_values=True,
             is_causal=True,
             mode="und",
@@ -296,8 +295,6 @@ def decode_text(
         tid = int(token_id.item())
         tokens.append(tid)
         logps.append(float(log_prob.item()))
-        kv_len += 1
-        pos += 1
         if tid in stop_set:
             break
         curr = token_id.to(device=device, dtype=torch.long).reshape(1)

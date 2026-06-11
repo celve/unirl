@@ -56,7 +56,8 @@ from unirl.types.segments.text import TextSegment
 
 from .ar import BagelARStage
 from .conditions import BagelARConditions, BagelDiffusionConditions
-from .diffusion import BagelDiffusionParams, BagelDiffusionStage, _to_device
+from .diffusion import BagelDiffusionParams, BagelDiffusionStage
+from .rl_ops import _to_device
 from .vae import BagelVAEDecodeStage, bagel_latent_shape
 
 if TYPE_CHECKING:
@@ -161,6 +162,38 @@ class BagelPipeline(Pipeline):
             return torch.autocast("cuda", dtype)
         return nullcontext()
 
+    def _resize_input_image(self, image: Any) -> Any:
+        """Canonical input-image preproc (inferencer.py:249): rgb → aspect-preserving
+        stride-8 resize. Every image-input task funnels through this before the
+        VAE/ViT branches so the chain has one home."""
+        from .vendor.data.data_utils import pil_img2rgb
+
+        return self.bundle.vae_transform.resize_transform(pil_img2rgb(image))
+
+    def _extract_input_images(self, req: RolloutReq, task: str, *, n_prompts: Optional[int]) -> List[Any]:
+        """Validated per-sample input PILs for image-input tasks (it2i / i2t / it2t).
+
+        Requires an ``Images`` primitive, a ViT-loaded bundle (``enable_vit``),
+        and — when prompts are present — a matching per-sample count.
+        """
+        images_prim = req.primitives.get("image")
+        if not isinstance(images_prim, Images):
+            raise TypeError(
+                f"BagelPipeline.generate ({task}): req.primitives['image'] must be Images, "
+                f"got {type(images_prim).__name__ if images_prim is not None else 'None'}"
+            )
+        if getattr(self.bundle.model, "vit_model", None) is None:
+            raise ValueError(
+                f"BagelPipeline.generate ({task}): the bundle was built without the und ViT; "
+                "set BagelPipelineConfig.enable_vit=true for image-input tasks."
+            )
+        pil_images = [img.to_pil() for img in images_prim.to_list()]
+        if n_prompts is not None and len(pil_images) != n_prompts:
+            raise ValueError(
+                f"BagelPipeline.generate ({task}): image count {len(pil_images)} != prompt count {n_prompts}"
+            )
+        return pil_images
+
     def _update_context_image(self, image: Any, gen_context: Any, *, vae: bool, vit: bool) -> Any:
         """Prefill one input image into a KV context (VAE and/or ViT branch).
 
@@ -220,10 +253,7 @@ class BagelPipeline(Pipeline):
         cfg_img = deepcopy(gen)
         with torch.no_grad(), self._autocast_ctx():
             if image is not None:
-                from .vendor.data.data_utils import pil_img2rgb
-
-                image = self.bundle.vae_transform.resize_transform(pil_img2rgb(image))
-                gen = self._update_context_image(image, gen, vae=True, vit=True)
+                gen = self._update_context_image(self._resize_input_image(image), gen, vae=True, vit=True)
             cfg_text = deepcopy(gen)  # snapshot before the prompt text → drop-text branch
             gen = inf.update_context_text(prompt, gen)
             cfg_img = inf.update_context_text(prompt, cfg_img)
@@ -281,27 +311,10 @@ class BagelPipeline(Pipeline):
         prompts = list(texts.texts)
         n = len(prompts)
 
-        # it2i: per-sample input images (qwen_vl pattern). The und ViT must be
-        # loaded — editing prefills the input image through BOTH the VAE branch
-        # (pixel fidelity) and the ViT branch (semantics).
-        pil_images: Optional[List[Any]] = None
-        if task == "it2i":
-            images_prim = req.primitives.get("image")
-            if not isinstance(images_prim, Images):
-                raise TypeError(
-                    "BagelPipeline.generate (it2i): req.primitives['image'] must be Images, "
-                    f"got {type(images_prim).__name__ if images_prim is not None else 'None'}"
-                )
-            if getattr(self.bundle.model, "vit_model", None) is None:
-                raise ValueError(
-                    "BagelPipeline.generate (it2i): the bundle was built without the und ViT; "
-                    "set BagelPipelineConfig.enable_vit=true for image-input tasks."
-                )
-            pil_images = [img.to_pil() for img in images_prim.to_list()]
-            if len(pil_images) != n:
-                raise ValueError(
-                    f"BagelPipeline.generate (it2i): image count {len(pil_images)} != prompt count {n}"
-                )
+        # it2i: per-sample input images — editing prefills the input image
+        # through BOTH the VAE branch (pixel fidelity) and the ViT branch
+        # (semantics) in _build_contexts.
+        pil_images = self._extract_input_images(req, task, n_prompts=n) if task == "it2i" else None
 
         sample_ids = list(req.sample_ids) if req.sample_ids else [f"s{i}" for i in range(n)]
         image_shape = (int(params.height), int(params.width))
@@ -415,23 +428,9 @@ class BagelPipeline(Pipeline):
 
         pil_images: Optional[List[Any]] = None
         if task in ("i2t", "it2t"):
-            images_prim = req.primitives.get("image")
-            if not isinstance(images_prim, Images):
-                raise TypeError(
-                    f"BagelPipeline.generate ({task}): req.primitives['image'] must be Images, "
-                    f"got {type(images_prim).__name__ if images_prim is not None else 'None'}"
-                )
-            if getattr(self.bundle.model, "vit_model", None) is None:
-                raise ValueError(
-                    f"BagelPipeline.generate ({task}): the bundle was built without the und ViT; "
-                    "set BagelPipelineConfig.enable_vit=true for image-input tasks."
-                )
-            pil_images = [img.to_pil() for img in images_prim.to_list()]
-            if prompts is not None and len(pil_images) != len(prompts):
-                raise ValueError(
-                    f"BagelPipeline.generate ({task}): image count {len(pil_images)} != "
-                    f"prompt count {len(prompts)}"
-                )
+            pil_images = self._extract_input_images(
+                req, task, n_prompts=len(prompts) if prompts is not None else None
+            )
 
         n = len(prompts) if prompts is not None else len(pil_images)
         sample_ids = list(req.sample_ids) if req.sample_ids else [f"s{i}" for i in range(n)]
@@ -442,12 +441,10 @@ class BagelPipeline(Pipeline):
         for i in range(n):
             splits: List[Dict[str, Any]] = []
             if pil_images is not None:
-                from .vendor.data.data_utils import pil_img2rgb
-
                 # Understanding preproc chain (inferencer.py:249-250, vae=False):
                 # rgb → vae resize → vit_transform; store the FINAL pixels so
                 # rollout and replay consume byte-identical inputs.
-                img = self.bundle.vae_transform.resize_transform(pil_img2rgb(pil_images[i]))
+                img = self._resize_input_image(pil_images[i])
                 splits.append({"kind": "vit", "image": self.bundle.vit_transform(img)})
             if prompts is not None:
                 # bos/eos (<|im_start|>/<|im_end|>) wrap, as prepare_prompts does
