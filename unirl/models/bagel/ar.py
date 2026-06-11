@@ -183,13 +183,7 @@ class BagelARStage(ARStage[BagelARConditions]):
         if sampling_params.stop_token_id is not None:
             ids.append(int(sampling_params.stop_token_id))
         ids.append(int(self.model.new_token_ids["eos_token_id"]))  # <|im_end|>, as in the vendored gen_text
-        seen: set = set()
-        out: List[int] = []
-        for t in ids:
-            if t not in seen:
-                seen.add(t)
-                out.append(t)
-        return out
+        return list(dict.fromkeys(ids))
 
     # ------------------------------------------------------------------
     # Rollout
