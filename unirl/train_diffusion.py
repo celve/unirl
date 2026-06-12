@@ -34,16 +34,14 @@ def main(cfg: DictConfig) -> None:
         data_source_cfg=cfg.data_source,
         sampling_cfg=cfg.sampling,
         sync_cfg=cfg.get("sync"),
+        weight_sync_interval=int(cfg.get("weight_sync_interval", 1)),
         logging_cfg=cfg.get("logging"),
         layout=cfg.get("layout", "colocate"),
         train_fraction=float(cfg.get("train_fraction", 0.5)),
         enable_fsdp_offload=cfg.get("enable_fsdp_offload", False),
         adv_use_global_std=cfg.get("adv_use_global_std", False),
     )
-    trainer.train(
-        num_rollouts=int(cfg.get("num_rollouts", 100)),
-        weight_sync_interval=int(cfg.get("weight_sync_interval", 1)),
-    )
+    trainer.train(num_rollouts=int(cfg.get("num_rollouts", 100)))
 
 
 if __name__ == "__main__":

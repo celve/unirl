@@ -44,6 +44,7 @@ class DiffusionTrainer(BaseTrainer):
         data_source_cfg: DictConfig,
         sampling_cfg: DictConfig,
         sync_cfg: Optional[DictConfig] = None,
+        weight_sync_interval: int = 1,
         logging_cfg: Optional[DictConfig] = None,
         layout: str = "colocate",
         train_fraction: float = 0.5,
@@ -101,6 +102,10 @@ class DiffusionTrainer(BaseTrainer):
 
         # Set below from the `sync` block; None trainside (shares the module).
         self.weight_sync = None
+        # Cadence for the sync above: push weights into the engine every N
+        # rollouts (driven in ``train``; rollout 0 is skipped). ``max(1, …)`` so
+        # 0 / negative ⇒ sync every rollout.
+        self._weight_sync_interval = max(1, int(weight_sync_interval))
 
         # Construction (_build_train_side / _build_rollout) is shared; only the
         # placement topology and the train→rollout sync wiring differ per layout.
@@ -368,17 +373,19 @@ class DiffusionTrainer(BaseTrainer):
         self.wandb_logger.log_rollout_step(rollout_id, result, resp, step_time_s=time.perf_counter() - t0)
         return result, mean_reward
 
-    def train(self, *, num_rollouts: int, weight_sync_interval: int = 1) -> None:
+    def train(self, *, num_rollouts: int) -> None:
         """Minimal training loop: ``num_rollouts`` iterations of ``train_step``.
 
-        ``weight_sync_interval``: sync the adapter into the engine every N
-        rollouts (fused into ``train_step``'s generate; no-op trainside).
+        Weight-sync cadence is the construction-time ``weight_sync_interval``
+        (stored as ``self._weight_sync_interval``): sync the adapter into the
+        engine every N rollouts (fused into ``train_step``'s generate; no-op
+        trainside).
 
         Deferred (out of scope for the first runnable trainer):
         ``num_updates_per_batch`` multi-epoch replay, checkpoint cadence,
         evaluation cadence.
         """
-        interval = max(1, weight_sync_interval)
+        interval = self._weight_sync_interval
         self._init_wandb(num_rollouts=num_rollouts)
         try:
             for rollout_id in range(num_rollouts):

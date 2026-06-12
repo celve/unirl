@@ -36,14 +36,12 @@ def main(cfg: DictConfig) -> None:
         data_source_cfg=cfg.data_source,
         sampling_cfg=cfg.sampling,
         sync_cfg=cfg.get("sync"),
+        weight_sync_interval=int(cfg.get("weight_sync_interval", 1)),
         dump_dir=cfg.get("dump_dir"),
         logging_cfg=cfg.get("logging"),
         enable_fsdp_offload=cfg.get("enable_fsdp_offload", True),
     )
-    trainer.train(
-        num_rollouts=int(cfg.get("num_rollouts", 100)),
-        weight_sync_interval=int(cfg.get("weight_sync_interval", 1)),
-    )
+    trainer.train(num_rollouts=int(cfg.get("num_rollouts", 100)))
 
 
 if __name__ == "__main__":

@@ -147,6 +147,7 @@ class UnifiedModelTrainer(BaseTrainer):
         data_source_cfg: DictConfig,
         sampling_cfg: DictConfig,
         sync_cfg: Optional[DictConfig] = None,
+        weight_sync_interval: int = 1,
         dump_dir: Optional[str] = None,
         logging_cfg: Optional[DictConfig] = None,
         enable_fsdp_offload: bool = True,
@@ -177,6 +178,10 @@ class UnifiedModelTrainer(BaseTrainer):
 
         # Set below from the `sync` block; None means no sync (e.g. trainside).
         self.weight_sync = None
+        # Cadence for the sync above: push the adapter into the engine every N
+        # rollouts (driven in ``train``; rollout 0 is skipped unless HI3_SYNC_FIRST).
+        # ``max(1, …)`` so 0 / negative ⇒ sync every rollout.
+        self._weight_sync_interval = max(1, int(weight_sync_interval))
 
         # Single shared slab: train backbone + both algorithms + rollout +
         # reward are siblings on one Worker (colocate; mirrors DiffusionTrainer's
@@ -687,9 +692,13 @@ class UnifiedModelTrainer(BaseTrainer):
         except Exception as exc:  # noqa: BLE001 — dump must never break training
             logger.warning("[HI3-DUMP] rollout %d dump failed (non-fatal): %s", rollout_id, exc)
 
-    def train(self, *, num_rollouts: int, weight_sync_interval: int = 1) -> None:
-        """Minimal training loop: ``num_rollouts`` iterations of ``train_step``."""
-        interval = max(1, weight_sync_interval)
+    def train(self, *, num_rollouts: int) -> None:
+        """Minimal training loop: ``num_rollouts`` iterations of ``train_step``.
+
+        Weight-sync cadence is the construction-time ``weight_sync_interval``
+        (stored as ``self._weight_sync_interval``).
+        """
+        interval = self._weight_sync_interval
         self._init_wandb(num_rollouts=num_rollouts)
         try:
             for rollout_id in range(num_rollouts):

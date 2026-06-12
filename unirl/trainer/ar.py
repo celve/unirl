@@ -49,6 +49,7 @@ class ARTrainer(BaseTrainer):
         data_source_cfg: DictConfig,
         sampling_cfg: DictConfig,
         sync_cfg: Optional[DictConfig] = None,
+        weight_sync_interval: int = 1,
         logging_cfg: Optional[DictConfig] = None,
         adv_normalization_scope: str = "group",
         normalize_adv_by_std: bool = True,
@@ -79,6 +80,10 @@ class ARTrainer(BaseTrainer):
 
         # Set below from the `sync` block; None trainside (shares the module).
         self.weight_sync = None
+        # Cadence for the sync above: push the adapter into the engine every N
+        # rollouts (driven in ``train``; rollout 0 is skipped). ``max(1, …)`` so
+        # 0 / negative ⇒ sync every rollout.
+        self._weight_sync_interval = max(1, int(weight_sync_interval))
 
         with placement(self.pool, fraction=1.0, shared_workers=True):
             self.bundle = remote_hydra(bundle_cfg)
@@ -220,16 +225,18 @@ class ARTrainer(BaseTrainer):
         self.wandb_logger.log_eval(rollout_id + 1, {"acc": acc})
         return acc
 
-    def train(self, *, num_rollouts: int, weight_sync_interval: int = 1) -> None:
+    def train(self, *, num_rollouts: int) -> None:
         """Minimal training loop: ``num_rollouts`` iterations of ``train_step``.
 
-        ``weight_sync_interval``: sync the adapter into the engine every N
-        rollouts (fused into ``train_step``'s generate; no-op trainside).
+        Weight-sync cadence is the construction-time ``weight_sync_interval``
+        (stored as ``self._weight_sync_interval``): sync the adapter into the
+        engine every N rollouts (fused into ``train_step``'s generate; no-op
+        trainside).
 
         Deferred: ``num_updates_per_batch`` multi-epoch replay, checkpoint /
         eval cadence.
         """
-        interval = max(1, weight_sync_interval)
+        interval = self._weight_sync_interval
         self._init_wandb(
             num_rollouts=num_rollouts,
             extra={"adv_normalization_scope": self.adv_normalization_scope},

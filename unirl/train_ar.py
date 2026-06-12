@@ -37,6 +37,7 @@ def main(cfg: DictConfig) -> None:
         data_source_cfg=cfg.data_source,
         sampling_cfg=cfg.sampling,
         sync_cfg=cfg.get("sync"),
+        weight_sync_interval=int(cfg.get("weight_sync_interval", 1)),
         logging_cfg=cfg.get("logging"),
         adv_normalization_scope=cfg.get("adv_normalization_scope", "group"),
         normalize_adv_by_std=bool(cfg.get("normalize_adv_by_std", True)),
@@ -45,10 +46,7 @@ def main(cfg: DictConfig) -> None:
         eval_samples_per_prompt=int(cfg.get("eval_samples_per_prompt", 16)),
         eval_temperature=float(cfg.get("eval_temperature", 1.0)),
     )
-    trainer.train(
-        num_rollouts=int(cfg.get("num_rollouts", 100)),
-        weight_sync_interval=int(cfg.get("weight_sync_interval", 1)),
-    )
+    trainer.train(num_rollouts=int(cfg.get("num_rollouts", 100)))
 
 
 if __name__ == "__main__":

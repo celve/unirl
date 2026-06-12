@@ -73,6 +73,7 @@ class PETrainer(BaseTrainer):
         data_source_cfg: DictConfig,
         sampling_cfg: DictConfig,
         sync_cfg: Optional[DictConfig] = None,
+        weight_sync_interval: int = 1,
         logging_cfg: Optional[DictConfig] = None,
         enable_fsdp_offload: bool = False,
     ) -> None:
@@ -93,6 +94,10 @@ class PETrainer(BaseTrainer):
         # Per-track weight-sync bridges; None trainside (shares the modules).
         self.diffusion_sync = None
         self.ar_sync = None
+        # Cadence for the syncs above: push both tracks' adapters into the engine
+        # every N rollouts (driven in ``train``; rollout 0 is skipped). ``max(1,
+        # …)`` so 0 / negative ⇒ sync every rollout.
+        self._weight_sync_interval = max(1, int(weight_sync_interval))
 
         with placement(self.pool, fraction=1.0, shared_workers=True):
             self.diffusion = self._wire_side(diffusion_cfg)
@@ -246,13 +251,15 @@ class PETrainer(BaseTrainer):
         self.wandb_logger.log_rollout_step(rollout_id, results, resp, step_time_s=time.perf_counter() - t0)
         return results, mean_reward
 
-    def train(self, *, num_rollouts: int, weight_sync_interval: int = 1) -> None:
+    def train(self, *, num_rollouts: int) -> None:
         """Minimal training loop: ``num_rollouts`` iterations of ``train_step``.
 
-        ``weight_sync_interval``: push each track's adapter into the engine
-        every N rollouts (fused into ``train_step``'s generate; no-op trainside).
+        Weight-sync cadence is the construction-time ``weight_sync_interval``
+        (stored as ``self._weight_sync_interval``): push each track's adapter
+        into the engine every N rollouts (fused into ``train_step``'s generate;
+        no-op trainside).
         """
-        interval = max(1, weight_sync_interval)
+        interval = self._weight_sync_interval
         self._init_wandb(num_rollouts=num_rollouts)
         try:
             for rollout_id in range(num_rollouts):
