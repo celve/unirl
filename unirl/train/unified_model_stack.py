@@ -1,6 +1,6 @@
 """Unified-backbone multi-algorithm train stack (HunyuanImage3).
 
-Wraps ONE :class:`FSDPBackend` (a single shared transformer + optimizer +
+Wraps ONE :class:`TrainBackend` (a single shared transformer + optimizer +
 scheduler + EMA) and TWO :class:`StageAlgorithm` siblings — an ``ar`` algorithm
 over the ``TextSegment`` and an ``image`` algorithm over the ``LatentSegment`` —
 into a single training driver.  Both algorithms run forward/backward against the
@@ -31,7 +31,7 @@ from typing import Dict, List, Mapping
 from unirl.algorithms import AlgorithmStepResult, StageAlgorithm
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
-from unirl.train.backend.fsdp import FSDPBackend
+from unirl.train.backend.contract import TrainBackend
 from unirl.train.stack import TrainStepResult, _build_micro_batch_slices
 from unirl.types.rollout_resp import RolloutTrack
 from unirl.utils.misc import aggregate_numeric_metrics
@@ -42,20 +42,20 @@ logger = logging.getLogger(__name__)
 class UnifiedModelTrainStack(Remote):
     """Single-backbone, multi-algorithm train stack.
 
-    Holds one shared :class:`FSDPBackend` and a dict of named
+    Holds one shared :class:`TrainBackend` and a dict of named
     :class:`StageAlgorithm` siblings (``{"ar": GRPO, "image": FlowGRPO}``).
     Each algorithm trains its own track but backward-accumulates into the same
     shared transformer; one optimizer step applies all algorithms' gradients.
 
     Created as a sibling ``Remote`` inside a placement block; takes handles to
-    its ``FSDPBackend`` and ``StageAlgorithm`` siblings via sibling-handle
-    auto-resolve (same pattern as :class:`TrainStack`).
+    its ``TrainBackend`` and ``StageAlgorithm`` siblings as ctor kwargs
+    (same pattern as :class:`TrainStack`).
     """
 
     def __init__(
         self,
         *,
-        fsdp_backend: FSDPBackend,
+        backend: TrainBackend,
         ar_algorithm: StageAlgorithm,
         image_algorithm: StageAlgorithm,
         micro_batch_size: int,
@@ -66,7 +66,7 @@ class UnifiedModelTrainStack(Remote):
             raise ValueError(f"UnifiedModelTrainStack.micro_batch_size must be >= 1; got {micro_batch_size}.")
         if float(max_grad_norm) <= 0.0:
             raise ValueError(f"UnifiedModelTrainStack.max_grad_norm must be > 0; got {max_grad_norm}.")
-        self.fsdp_backend = fsdp_backend
+        self.backend = backend
         # Order matters only for logging; gradients accumulate regardless.
         self.algorithms: Dict[str, StageAlgorithm] = {
             "ar": ar_algorithm,
@@ -143,8 +143,8 @@ class UnifiedModelTrainStack(Remote):
         return partial, has_backward
 
     def on_rollout_end(self) -> None:
-        """Per-rollout-boundary hook — delegates to the FSDPBackend's EMA."""
-        self.fsdp_backend.on_rollout_end()
+        """Per-rollout-boundary hook — delegates to the backend's EMA."""
+        self.backend.on_rollout_end()
 
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def train_track(
@@ -169,7 +169,7 @@ class UnifiedModelTrainStack(Remote):
         # tokens / fused conditions arrive on CPU while the backbone is on cuda.
         # One to_device here covers both algorithms' replays (AR teacher-force +
         # diffusion step) and their conditions — no per-replay device juggling.
-        device = self.fsdp_backend._device
+        device = self.backend._device
         ar_track = ar_track.to_device(device)
         image_track = image_track.to_device(device)
 
@@ -177,7 +177,7 @@ class UnifiedModelTrainStack(Remote):
         for name in self.algorithms:
             self.prepare_segment(name, tracks[name])
 
-        self.fsdp_backend.zero_grad()
+        self.backend.zero_grad()
 
         results: Dict[str, TrainStepResult] = {}
         any_backward = False
@@ -187,7 +187,7 @@ class UnifiedModelTrainStack(Remote):
             any_backward = any_backward or has_backward
 
         if any_backward:
-            grad_norm = float(self.fsdp_backend.optimizer_step(max_grad_norm=float(self.max_grad_norm)))
+            grad_norm = float(self.backend.optimizer_step(max_grad_norm=float(self.max_grad_norm)))
         else:
             grad_norm = 0.0
             logger.warning(
@@ -211,11 +211,11 @@ class UnifiedModelTrainStack(Remote):
         return results
 
     def _current_lr(self) -> float:
-        optimizer = self.fsdp_backend.optimizer
+        optimizer = self.backend.optimizer
         param_groups = getattr(optimizer, "param_groups", None)
         if isinstance(param_groups, list) and param_groups:
             return float(param_groups[0]["lr"])
-        scheduler = self.fsdp_backend.scheduler
+        scheduler = self.backend.scheduler
         if scheduler is not None and hasattr(scheduler, "get_last_lr"):
             last = scheduler.get_last_lr()
             if isinstance(last, list) and last:

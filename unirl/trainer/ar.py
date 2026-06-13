@@ -93,7 +93,7 @@ class ARTrainer(BaseTrainer):
 
             self.reward = remote_hydra(reward_cfg)
             self.algorithm = remote_hydra(algorithm_cfg, pipeline=self.pipeline)
-            self.stack = remote_hydra(stack_cfg, fsdp_backend=self.backend, algorithm=self.algorithm)
+            self.stack = remote_hydra(stack_cfg, backend=self.backend, algorithm=self.algorithm)
 
             if sync_cfg is not None:
                 self.weight_sync = remote_hydra(sync_cfg, backend=self.backend, rollout=self.rollout)

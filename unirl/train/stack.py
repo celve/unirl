@@ -1,6 +1,6 @@
 """Single-stage train stack.
 
-Wraps one :class:`FSDPBackend` (training state: model + optimizer +
+Wraps one :class:`TrainBackend` (training state: model + optimizer +
 scheduler + EMA) and one :class:`StageAlgorithm` (loss + backward
 against the bundle's trainable module) into a single-stage training
 driver.  One :class:`TrainStack` = one training track.
@@ -42,7 +42,7 @@ from unirl.algorithms import AlgorithmStepResult, StageAlgorithm
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
 from unirl.distributed.tensor.batch import _move_value
-from unirl.train.backend.fsdp import FSDPBackend
+from unirl.train.backend.contract import TrainBackend
 from unirl.types.rollout_resp import RolloutTrack
 from unirl.utils.misc import aggregate_numeric_metrics
 
@@ -160,14 +160,14 @@ class TrainStack(Remote):
     semantics, no multi-track on_rollout_end fan-out.
 
     Created as a sibling ``Remote`` inside a placement block; takes
-    handles to its FSDPBackend and StageAlgorithm siblings via
-    sibling-handle auto-resolve.
+    handles to its ``TrainBackend`` and StageAlgorithm siblings as
+    ctor kwargs.
     """
 
     def __init__(
         self,
         *,
-        fsdp_backend: FSDPBackend,
+        backend: TrainBackend,
         algorithm: StageAlgorithm,
         micro_batch_size: int,
         max_grad_norm: float,
@@ -187,7 +187,7 @@ class TrainStack(Remote):
                 f"{type(algorithm).__name__} sets supports_multi_update=False, so >1 optimizer "
                 f"step would train against a moving anchor. Set num_updates_per_batch=1."
             )
-        self.fsdp_backend = fsdp_backend
+        self.backend = backend
         self.algorithm = algorithm
         self.micro_batch_size = int(micro_batch_size)
         self.max_grad_norm = float(max_grad_norm)
@@ -285,7 +285,7 @@ class TrainStack(Remote):
             raise ValueError("TrainStack.train: empty micro_slices.")
 
         bs = int(resp_track.batch_size)
-        self.fsdp_backend.zero_grad()
+        self.backend.zero_grad()
 
         loss_scale = 1.0 / len(micro_slices)
         micros: List[AlgorithmStepResult] = []
@@ -298,7 +298,7 @@ class TrainStack(Remote):
             # Defer the per-block gradient reduce-scatter to the last micro-batch
             # so it runs once per optimizer step instead of once per micro-batch
             # (no-op unless defer_grad_sync + ZeRO-2). Must precede the backward.
-            self.fsdp_backend.set_grad_sync(i == last_micro)
+            self.backend.set_grad_sync(i == last_micro)
             micro_track = resp_track if single_micro else resp_track.slice(start, end)
             result = self.algorithm.compute_loss_and_backward(
                 conditions=micro_track.conditions,
@@ -320,7 +320,7 @@ class TrainStack(Remote):
         # grads now, and the stale unsharded accumulation (which zero_grad
         # cannot reach) would leak into the NEXT step's reduce-scatter. Fail
         # fast instead — mirrors fsdp_wrap's stray-trainable guard.
-        if has_backward and not micros[-1].has_backward and self.fsdp_backend.grad_sync_deferred:
+        if has_backward and not micros[-1].has_backward and self.backend.grad_sync_deferred:
             raise RuntimeError(
                 "TrainStack.train: defer_grad_sync deferred the gradient reduce-scatter to the "
                 "last micro-batch, but it reported no backward (all-empty micro?) while earlier "
@@ -329,7 +329,7 @@ class TrainStack(Remote):
             )
 
         if has_backward:
-            grad_norm = float(self.fsdp_backend.optimizer_step(max_grad_norm=float(self.max_grad_norm)))
+            grad_norm = float(self.backend.optimizer_step(max_grad_norm=float(self.max_grad_norm)))
         else:
             grad_norm = 0.0
             logger.warning("TrainStack.train: no micro-batch reported backward; skipping optimizer step.")
@@ -344,8 +344,8 @@ class TrainStack(Remote):
         )
 
     def on_rollout_end(self) -> None:
-        """Per-rollout-boundary hook — delegates to the FSDPBackend's EMA."""
-        self.fsdp_backend.on_rollout_end()
+        """Per-rollout-boundary hook — delegates to the backend's EMA."""
+        self.backend.on_rollout_end()
 
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def train_track(
@@ -411,15 +411,15 @@ class TrainStack(Remote):
 
     def _align_track_inputs(self, resp_track: RolloutTrack) -> None:
         """Move the track onto the model's device; see :func:`_align_track_to_model`."""
-        device = next(self.fsdp_backend.trainable_module().parameters()).device
+        device = next(self.backend.trainable_module().parameters()).device
         _align_track_to_model(resp_track, device=device)
 
     def _current_lr(self) -> float:
-        optimizer = self.fsdp_backend.optimizer
+        optimizer = self.backend.optimizer
         param_groups = getattr(optimizer, "param_groups", None)
         if isinstance(param_groups, list) and param_groups:
             return float(param_groups[0]["lr"])
-        scheduler = self.fsdp_backend.scheduler
+        scheduler = self.backend.scheduler
         if scheduler is not None and hasattr(scheduler, "get_last_lr"):
             last = scheduler.get_last_lr()
             if isinstance(last, list) and last:

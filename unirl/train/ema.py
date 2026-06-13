@@ -8,7 +8,6 @@ from typing import Callable
 import torch
 
 from unirl.train.configs import EmaFullConfig, EmaLoraConfig
-from unirl.train.fsdp_utils import local_view
 from unirl.train.shadow import Shadow
 
 logger = logging.getLogger(__name__)
@@ -37,6 +36,11 @@ class EMA:
 
     @torch.no_grad()
     def _run(self, decay: float) -> None:
+        # Lazy import: ``state`` lives in the ``backend.fsdp`` package whose
+        # __init__ eagerly re-exports ``FSDPBackend`` (which imports this module),
+        # so importing ``local_view`` at module scope would create an import cycle.
+        from unirl.train.backend.fsdp.state import local_view
+
         if decay <= 0.0:
             for live, shd in self.shadow.iter_pairs():
                 local_view(shd).copy_(local_view(live))

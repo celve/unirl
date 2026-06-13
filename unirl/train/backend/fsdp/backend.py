@@ -23,15 +23,7 @@ from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
 from unirl.models.types.bundle import Bundle
 from unirl.train.backend.base import LrSchedulerConfig, OptimizerConfig
-from unirl.train.configs import (
-    EmaFullConfig,
-    EmaLoraConfig,
-    FSDPConfig,
-    LoraConfig,
-)
-from unirl.train.ema import EMA, make_decay_fn
-from unirl.train.factories import build_lr_scheduler, build_optimizer
-from unirl.train.fsdp_utils import (
+from unirl.train.backend.fsdp.state import (
     _current_rank,
     clip_grad_norm,
     fsdp_offload,
@@ -42,13 +34,18 @@ from unirl.train.fsdp_utils import (
     load_optimizer_state_dict,
     trainable_params,
 )
-from unirl.train.inject import (
-    apply_deferred_ops,
-    fsdp_wrap,
-    inject_lora,
-    inject_mirror,
-    inject_nft,
+from unirl.train.backend.fsdp.wrap import fsdp_wrap
+from unirl.train.configs import (
+    EmaFullConfig,
+    EmaLoraConfig,
+    FSDPConfig,
+    LoraConfig,
 )
+from unirl.train.deferred import apply_deferred_ops
+from unirl.train.ema import EMA, make_decay_fn
+from unirl.train.lora import inject_lora, inject_nft
+from unirl.train.mirror import inject_mirror
+from unirl.train.optim import build_lr_scheduler, build_optimizer
 from unirl.train.shadow import Shadow
 
 logger = logging.getLogger(__name__)

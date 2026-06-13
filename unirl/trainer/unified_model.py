@@ -195,7 +195,7 @@ class UnifiedModelTrainer(BaseTrainer):
             # One stack owns the single backend + both algorithms → one step.
             self.stack = remote_hydra(
                 stack_cfg,
-                fsdp_backend=self.backend,
+                backend=self.backend,
                 ar_algorithm=self.ar_algorithm,
                 image_algorithm=self.image_algorithm,
             )

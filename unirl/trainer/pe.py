@@ -141,7 +141,7 @@ class PETrainer(BaseTrainer):
         pipeline = remote_hydra(cfg.pipeline, bundle=bundle)
         backend = remote_hydra(cfg.backend, bundle=bundle)
         algorithm = remote_hydra(cfg.algorithm, pipeline=pipeline)
-        stack = remote_hydra(cfg.stack, fsdp_backend=backend, algorithm=algorithm)
+        stack = remote_hydra(cfg.stack, backend=backend, algorithm=algorithm)
         return _Side(bundle=bundle, pipeline=pipeline, backend=backend, algorithm=algorithm, stack=stack)
 
     def _build_req(self, inputs: RolloutInputs) -> RolloutReq:
