@@ -115,13 +115,9 @@ rollout:
   _target_: unirl.rollout.engine.trainside.engine.TrainsideRolloutEngine
   stage_attrs: [ar, diffusion]         # eval-scope BOTH trainable stages around generate
   forward_batch_size: 1                # navit bs=1; one sample per generate forward
-  # keep_gathered would hold the FSDP shards resident across the AR decode (the
-  # speed fix for the per-token re-gather), but it requires reshard_after_forward=
-  # False, which currently triggers a separate FSDP bug on bagel's und-path LoRA
-  # (unsharded buffer never populated → "setStorage ... storage size 0"). Left OFF
-  # until the und forward is routed through FSDP2's all-gather hooks. See
-  # docs/bagel-unified-training.md "Deep-fix attempt".
-  keep_gathered: false
+  keep_gathered: true                  # hold FSDP shards resident across the AR autoregressive
+                                       # decode (explicit unshard() populates buffers incl. und LoRA,
+                                       # so no per-token re-gather AND no "storage size 0"); no_grad only
 
 reward:
   _target_: unirl.reward.service.RewardService

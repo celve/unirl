@@ -132,7 +132,13 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
         # reshard + restore the policy in finally so training re-sharding is unchanged.
         fsdp_mods = self._fsdp_modules() if self.keep_gathered else []
         for sm in fsdp_mods:
+            # set_reshard_after_forward(False) keeps params resident; unshard()
+            # then EXPLICITLY all-gathers (allocates + fills the unsharded buffers,
+            # incl. LoRA) NOW — so the und forward, which bypasses FSDP2's
+            # pre-forward all-gather hook via rl_ops' direct call, still finds the
+            # buffers populated (otherwise: "setStorage ... storage size 0").
             sm.set_reshard_after_forward(False)
+            sm.unshard()
         try:
             with torch.no_grad():
                 fbs = self.forward_batch_size
