@@ -63,7 +63,12 @@ backend:
     mixed_precision: true
     fsdp_mode: full
     reshard_after_forward: true        # 7B base: reshard to keep resident memory low
-    activation_checkpointing: true     # 7B + AR teacher-force + diffusion replay
+    # AC is OFF for the unified bagel path: the AC recompute calls layer.forward
+    # directly, bypassing FSDP2's all-gather hook → the und path's RMSNorm hits a
+    # sharded DTensor (aten.mul mixed Tensor/DTensor). The und replay is one
+    # teacher-forced forward/sample at micro_batch_size=1, so non-AC activation
+    # memory is bounded. (Re-enabling AC needs an FSDP-aware checkpoint wrapper.)
+    activation_checkpointing: false
     use_torch_compile: false
     root_wrap: false                   # vendored bagel calls embed/lm_head outside a root forward
   optimizer_cfg:
@@ -110,6 +115,9 @@ rollout:
   _target_: unirl.rollout.engine.trainside.engine.TrainsideRolloutEngine
   stage_attrs: [ar, diffusion]         # eval-scope BOTH trainable stages around generate
   forward_batch_size: 1                # navit bs=1; one sample per generate forward
+  keep_gathered: true                  # hold FSDP shards resident across the AR autoregressive
+                                       # decode so it doesn't re-all-gather the MoT per token
+                                       # (the trainside-AR-under-FSDP speed fix); no_grad rollout only
 
 reward:
   _target_: unirl.reward.service.RewardService

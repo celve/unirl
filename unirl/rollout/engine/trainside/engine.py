@@ -57,6 +57,7 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
         stage: Optional[Stage] = None,
         stage_attrs: Sequence[str] = ("diffusion",),
         forward_batch_size: Optional[int] = None,
+        keep_gathered: bool = False,
     ) -> None:
         self.pipeline = pipeline
         # Resolve the trainable module(s) to eval-scope around generate().
@@ -75,6 +76,14 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
                 f"TrainsideRolloutEngine.forward_batch_size must be >= 1 when set; got {forward_batch_size!r}"
             )
         self.forward_batch_size = forward_batch_size
+        # Hold the FSDP-sharded backbone resident across a multi-forward rollout
+        # (e.g. autoregressive AR decode) so each forward does NOT re-all-gather
+        # the shards per token — the difference between a tractable and a
+        # pathologically slow trainside rollout for a big AR backbone. Opt-in
+        # (default off): composed unified rollouts with an AR-decode stage set it;
+        # single-/few-forward rollouts (SD3, PE) leave it off to keep rollout
+        # memory low. See :meth:`generate`.
+        self.keep_gathered = bool(keep_gathered)
         # Build a σ-schedule only when a diffusion stage is present (PE wraps
         # both diffusion + ar, so check the resolved list, not the lone `stage`
         # param which is None on the stage_attrs path); AR-only needs none.
@@ -90,6 +99,26 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
             # AR stage — no diffusion schedule needed
             self.schedule_policy = None
 
+    def _fsdp_modules(self) -> List[object]:
+        """All FSDP2 (``fully_shard``) submodules across the trainable models.
+
+        Used by ``keep_gathered`` to hold params resident across a multi-forward
+        rollout. Empty when torch lacks FSDP2 or the models aren't sharded
+        (single-GPU smoke) — keep_gathered then no-ops.
+        """
+        try:
+            from torch.distributed.fsdp import FSDPModule
+        except Exception:
+            return []
+        seen: set = set()
+        mods: List[object] = []
+        for m in self._models:
+            for sm in m.modules():
+                if isinstance(sm, FSDPModule) and id(sm) not in seen:
+                    seen.add(id(sm))
+                    mods.append(sm)
+        return mods
+
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def generate(self, req: RolloutReq) -> RolloutResp:
         if self.schedule_policy is not None:
@@ -97,6 +126,13 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
         prev_modes = [m.training for m in self._models]
         for m in self._models:
             m.eval()
+        # keep_gathered: hold the FSDP shards unsharded for the whole rollout so a
+        # multi-forward (autoregressive AR decode) path doesn't re-all-gather the
+        # backbone per token. Safe under no_grad (no backward reduce-scatter); we
+        # reshard + restore the policy in finally so training re-sharding is unchanged.
+        fsdp_mods = self._fsdp_modules() if self.keep_gathered else []
+        for sm in fsdp_mods:
+            sm.set_reshard_after_forward(False)
         try:
             with torch.no_grad():
                 fbs = self.forward_batch_size
@@ -113,6 +149,9 @@ class TrainsideRolloutEngine(BaseRolloutEngine):
                     # are reused, not leaked.
                 return RolloutResp.concat(outputs)
         finally:
+            for sm in fsdp_mods:
+                sm.reshard()
+                sm.set_reshard_after_forward(True)
             for m, mode in zip(self._models, prev_modes):
                 m.train(mode)
 
