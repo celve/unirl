@@ -45,6 +45,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import torch
@@ -55,7 +56,7 @@ from unirl.sde.runtime import FlowMatchSchedulePolicy
 from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.primitives import Images, Texts
 from unirl.types.rollout_req import RolloutReq
-from unirl.types.rollout_resp import RolloutResp, RolloutTrack
+from unirl.types.rollout_resp import RolloutResp, RolloutTrack, _track_with_field
 from unirl.types.sampling import ARSamplingParams, ComposedSamplingParams, get_ar_params, get_diffusion_params
 from unirl.types.segments.latent import LatentSegment
 from unirl.types.segments.text import TextSegment
@@ -544,14 +545,22 @@ class BagelPipeline(Pipeline):
         return gen, cfg_text, cfg_img
 
     def _generate_t2ti(self, req: RolloutReq) -> RolloutResp:
-        """BAGEL native think-then-generate (t2ti).
+        """BAGEL native think-then-generate (t2ti) with N×M fan-out.
 
-        The AR und path plans a ``<think>`` caption from ``[system + prompt]``,
-        then diffusion generates the image conditioned on ``[system + prompt +
-        think]`` — one bundle, two stages. Emits two linked tracks: ``"ar"`` (the
-        planning text, grouped by prompt) and ``"image"`` (``parent_track="ar"``
-        → grouped by the rewrite, mirroring the PE composition's lineage). The
-        request carries :class:`ComposedSamplingParams` (``ar`` + ``diffusion``).
+        The AR und path plans ``N = ar.samples_per_prompt`` ``<think>`` captions
+        per prompt from ``[system + prompt]``; diffusion then renders ``M =
+        diffusion.samples_per_prompt`` images per caption, conditioned on
+        ``[system + prompt + think]`` — one bundle, two stages. Emits two linked
+        tracks, built via ``make_root_track`` / ``fork_track`` so lineage is
+        group-by-parent contiguous (required by ``RolloutTrack.compute_advantages``):
+
+        - ``"ar"``    (root, ``parent_track=None``, grouped by prompt → N siblings):
+          the planning text. ``P*N`` samples.
+        - ``"image"`` (``parent_track="ar"``, grouped by caption → M siblings):
+          the rendered image. ``P*N*M`` samples.
+
+        The request carries :class:`ComposedSamplingParams` (``ar`` + ``diffusion``).
+        ``N == M == 1`` reproduces the flat 1:1 think-then-generate (the smoke path).
         """
         if req.sigmas is None:
             raise ValueError(
@@ -577,56 +586,68 @@ class BagelPipeline(Pipeline):
 
         prompts = list(texts.texts)
         n = len(prompts)
-        sample_ids = list(req.sample_ids) if req.sample_ids else [f"s{i}" for i in range(n)]
-        ar_sample_ids = [f"{sid}#think" for sid in sample_ids]
+        if not req.sample_ids:
+            req = replace(req, sample_ids=[f"s{i}" for i in range(n)])
+        n_rewrites = max(1, int(getattr(ar_params, "samples_per_prompt", 1) or 1))
+        n_images = max(1, int(getattr(diff_params, "samples_per_prompt", 1) or 1))
         image_shape = (int(diff_params.height), int(diff_params.width))
         ntk = self.bundle.new_token_ids
         tokenizer = self.bundle.tokenizer
 
-        # Stage 1 — AR plans the think text from [system, prompt] (bos/eos-wrapped
-        # text splits, as the vendor's two update_context_text calls do).
+        # ── Stage 1 — AR plans N think captions per prompt (P → P*N). The root
+        # "ar" track groups by prompt (parent_track=None, parent_ids=prompt); the
+        # N replicas share identical [system, prompt] splits and diverge only via
+        # temperature sampling, which gives the GRPO group its reward variance.
+        ar_shell = req.make_root_track(track_name="ar", branch=n_rewrites)
         ar_splits: List[List[Dict[str, Any]]] = []
         for prompt in prompts:
             sys_ids = [ntk["bos_token_id"]] + tokenizer.encode(GEN_THINK_SYSTEM_PROMPT) + [ntk["eos_token_id"]]
             pr_ids = [ntk["bos_token_id"]] + tokenizer.encode(prompt) + [ntk["eos_token_id"]]
-            ar_splits.append(
-                [
-                    {"kind": "text", "ids": torch.tensor(sys_ids, dtype=torch.long)},
-                    {"kind": "text", "ids": torch.tensor(pr_ids, dtype=torch.long)},
-                ]
-            )
+            for _ in range(n_rewrites):
+                ar_splits.append(
+                    [
+                        {"kind": "text", "ids": torch.tensor(sys_ids, dtype=torch.long)},
+                        {"kind": "text", "ids": torch.tensor(pr_ids, dtype=torch.long)},
+                    ]
+                )
         ar_conditions = BagelARConditions(prompt_splits=ar_splits)
         ar_segment = self.ar.autoregress(ar_conditions, sampling_params=ar_params)
         think_texts = self._detokenize(ar_segment)
+        ar_track = _track_with_field(ar_shell, "segment", ar_segment)
+        ar_track = _track_with_field(ar_track, "decoded", think_texts)
+        ar_track = _track_with_field(ar_track, "conditions", ar_conditions.to_dict())
 
-        # Stage 2 — diffusion conditioned on [system + prompt + think].
+        # ── Stage 2 — diffusion renders M images per caption (P*N → P*N*M),
+        # conditioned on [system + prompt + think]. Fork from "ar" so the image
+        # track groups by caption (parent_track="ar"). Ordering: image s ←
+        # caption a = s // M ← prompt a // N. Per-image x_T is keyed on
+        # (rollout_id, image sample id) via init_noise_group_ids so the M images
+        # differ (else the image group's std is 0 → no FlowGRPO gradient); with no
+        # driver latent shape present (e.g. CPU smoke) the engine draws its own.
+        img_shell = ar_track.fork_track(parent_name="ar", child_name="image", branch=n_images)
         contexts = [
-            self._build_think_contexts(GEN_THINK_SYSTEM_PROMPT, prompts[i], think_texts.texts[i])
-            for i in range(n)
+            self._build_think_contexts(
+                GEN_THINK_SYSTEM_PROMPT,
+                prompts[(s // n_images) // n_rewrites],
+                think_texts.texts[s // n_images],
+            )
+            for s in range(n * n_rewrites * n_images)
         ]
+        rid = int(req.stage_config.get("rollout_id", 0))
+        diff_req = replace(
+            req,
+            sample_ids=list(img_shell.sample_ids),
+            group_ids=list(img_shell.parent_ids),
+            init_noise_group_ids=[f"r{rid}:{sid}" for sid in img_shell.sample_ids],
+        )
         segment, conditions, images = self._diffuse_and_decode(
-            contexts, params=diff_params, req=req, image_shape=image_shape
+            contexts, params=diff_params, req=diff_req, image_shape=image_shape
         )
+        img_track = _track_with_field(img_shell, "segment", segment)
+        img_track = _track_with_field(img_track, "decoded", images)
+        img_track = _track_with_field(img_track, "conditions", conditions.to_dict())
 
-        return RolloutResp(
-            tracks={
-                "ar": RolloutTrack(
-                    sample_ids=ar_sample_ids,
-                    parent_ids=list(req.group_ids) if req.group_ids else None,
-                    conditions=ar_conditions.to_dict(),
-                    segment=ar_segment,
-                    decoded=think_texts,
-                ),
-                "image": RolloutTrack(
-                    sample_ids=sample_ids,
-                    parent_track="ar",
-                    parent_ids=ar_sample_ids,
-                    conditions=conditions.to_dict(),
-                    segment=segment,
-                    decoded=images,
-                ),
-            }
-        )
+        return RolloutResp(tracks={"ar": ar_track, "image": img_track})
 
 
 __all__ = ["BagelPipeline"]

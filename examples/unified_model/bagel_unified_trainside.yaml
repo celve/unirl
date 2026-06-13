@@ -1,0 +1,199 @@
+# @package _global_
+# BAGEL-7B-MoT unified think-then-generate (t2ti) RL — single shared backbone,
+# trainside composed rollout. GRPO on the AR <think> recaption track + FlowGRPO
+# on the diffusion image track, both backward-accumulating into ONE shared LoRA
+# (und ∪ gen targets) with ONE optimizer step (UnifiedModelTrainStack). PickScore
+# on the FINAL image is credit-assigned up the lineage to the recaption, so a
+# better plan earns higher image reward and the recaption learns.
+#
+# Geometry: P prompts → N captions/prompt (AR GRPO group) → M images/caption
+# (image GRPO group). Keep batch_size (P) a multiple of num_devices, and N,M >= 2
+# (GRPO needs group variance, else std=0 → zero advantage → no gradient).
+# Default P=8 N=4 M=4 → 32 AR + 128 image samples/rollout (16 images/worker on 8 GPUs).
+#
+# Launch (8-GPU single node):
+#   ENTRY=train_unified_trainside REPORT_TO_WANDB=true WANDB_ENTITY=... BAGEL_PATH=... \
+#     bash examples/run_experiment_single_node.sh unified_model/bagel_unified_trainside
+# Pairs with unirl/train_unified_trainside.py (UnifiedTrainsideTrainer).
+
+num_devices: 8
+batch_size: 8                  # P prompts/rollout; the pipeline fans out P→P*N→P*N*M
+num_rollouts: 10000            # intentionally large; stop manually
+transport_kind: colocate_store
+workers_per_device: 1
+
+logging:
+  report_to_wandb: true
+  project_name: bagel-unified-t2ti
+  run_name: null
+  entity: ${oc.env:WANDB_ENTITY,null}
+  tags: [bagel, t2ti, unified, trainside, grpo, flowgrpo]
+
+bundle:
+  _target_: unirl.models.bagel.bundle.BagelBundle.from_config
+  config:
+    _target_: unirl.models.bagel.config.BagelPipelineConfig
+    pretrained_model_ckpt_path: ${oc.env:BAGEL_PATH,ByteDance-Seed/BAGEL-7B-MoT}
+    model_precision: bf16
+    autocast_precision: bf16
+    trajectory_precision: fp32   # keep diffuse<->replay bit-exact (ratio=1); do NOT lower
+    logprob_precision: fp32
+    shift: 3.0
+    enable_vit: false            # pure t2ti (text→think→image); no und ViT needed
+    use_lora: true
+
+pipeline:
+  _target_: unirl.models.bagel.pipeline.BagelPipeline
+  autocast_precision: bf16
+  trajectory_precision: fp32
+  logprob_precision: fp32
+  shift: 3.0
+  strategy:
+    _target_: unirl.sde.kernels.FlowSDEStrategy
+
+backend:
+  _target_: unirl.train.backend.fsdp.FSDPBackend
+  block_class_names: ["Qwen2MoTDecoderLayer"]
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    param_dtype: bf16
+    master_dtype: fp32                 # v3 reward-collapse fix (fp32 LoRA master + bf16 compute)
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true        # 7B base: reshard to keep resident memory low
+    activation_checkpointing: true     # 7B + AR teacher-force + diffusion replay
+    use_torch_compile: false
+    root_wrap: false                   # vendored bagel calls embed/lm_head outside a root forward
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    learning_rate: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 1.0e-4
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 100000
+  # ONE shared LoRA adapter: union of the und (AR) + gen (diffusion) targets.
+  # peft matches by name; the two sets are disjoint (q_proj vs q_proj_moe_gen),
+  # so GRPO trains the und-LoRA, FlowGRPO trains the gen-LoRA, one step updates both.
+  lora_cfg:
+    _target_: unirl.train.configs.LoraConfig
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    target_modules:                    # = BAGEL_UND_LORA_TARGETS ∪ BAGEL_MOE_GEN_LORA_TARGETS
+      # und (AR recaption path — trained by GRPO):
+      - self_attn.q_proj
+      - self_attn.k_proj
+      - self_attn.v_proj
+      - self_attn.o_proj
+      - mlp.gate_proj
+      - mlp.up_proj
+      - mlp.down_proj
+      # gen (diffusion image path — trained by FlowGRPO):
+      - self_attn.q_proj_moe_gen
+      - self_attn.k_proj_moe_gen
+      - self_attn.v_proj_moe_gen
+      - self_attn.o_proj_moe_gen
+      - mlp_moe_gen.gate_proj
+      - mlp_moe_gen.up_proj
+      - mlp_moe_gen.down_proj
+
+rollout:
+  _target_: unirl.rollout.engine.trainside.engine.TrainsideRolloutEngine
+  stage_attrs: [ar, diffusion]         # eval-scope BOTH trainable stages around generate
+  forward_batch_size: 1                # navit bs=1; one sample per generate forward
+
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.pickscore.PickScoreRewardScorer
+    base_device: cuda
+    config:
+      _target_: unirl.reward.local.pickscore.PickScoreSpec
+      batch_size: 8
+      device: auto
+      processor_id: ${oc.env:PICKSCORE_PROCESSOR_ID,laion/CLIP-ViT-H-14-laion2B-s32B-b79K}
+      model_id: ${oc.env:PICKSCORE_MODEL_ID,yuvalkirstain/PickScore_v1}
+
+# Two algorithms over the one shared pipeline. UnifiedTrainsideTrainer reads
+# cfg.algorithm.ar (→ pipeline.ar) and cfg.algorithm.image (→ pipeline.diffusion).
+algorithm:
+  ar:
+    _target_: unirl.algorithms.grpo.GRPO
+    stage_attr: ar
+    clip_range: 1.0e-2                 # AR/LLM trust region (matches PE ar + hi3 ar)
+    clip_schedule: constant
+    conditions_cls:
+      _target_: hydra.utils.get_class
+      path: unirl.models.bagel.conditions.BagelARConditions
+    sampling_temperature: ${sampling.ar.temperature}
+  image:
+    _target_: unirl.algorithms.flowgrpo.FlowGRPO
+    stage_attr: diffusion
+    clip_range: 1.0e-5                 # diffusion trust region (= bagel_trainside_lora)
+    clip_schedule: constant
+    old_logp_source: rollout           # trainside: rollout's stored sde_logp is a valid pi_old anchor
+    conditions_cls:
+      _target_: hydra.utils.get_class
+      path: unirl.models.bagel.conditions.BagelDiffusionConditions
+    params: ${sampling.diffusion}
+
+# One stack: single shared backend + both algorithms → one optimizer step.
+stack:
+  _target_: unirl.train.unified_model_stack.UnifiedModelTrainStack
+  micro_batch_size: 1                  # navit bs=1 (BagelDiffusionConditions.single asserts bs==1)
+  max_grad_norm: 1.0
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: datasets/pickscore/train.txt        # relative to repo cwd
+      eval_data_path: datasets/pickscore/test.txt
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
+
+# ComposedSamplingParams drives the pipeline fan-out: ar.samples_per_prompt = N
+# captions/prompt, diffusion.samples_per_prompt = M images/caption.
+sampling:
+  _target_: unirl.types.sampling.ComposedSamplingParams
+  ar:
+    _target_: unirl.types.sampling.ARSamplingParams
+    samples_per_prompt: 4              # N captions/prompt (>1 → AR GRPO group variance)
+    temperature: 0.7                   # >0 so the N captions actually differ
+    max_new_tokens: 128
+    top_p: 0.9
+    top_k: 1024
+  diffusion:
+    _target_: unirl.models.bagel.diffusion.BagelDiffusionParams
+    samples_per_prompt: 4              # M images/caption (>1 → image GRPO group variance)
+    num_inference_steps: 14
+    guidance_scale: 1.0
+    cfg_text_scale: 1.0                # cfg=1 → single-forward "No CFG" path in _forward_flow
+    cfg_img_scale: 1.0
+    cfg_interval: [0.0, 1.0]
+    cfg_renorm_min: 0.0
+    cfg_renorm_type: global
+    eta: 1.0                           # SDE noise scale
+    height: 512
+    width: 512
+    seed: 42
+    init_same_noise: false             # per-sample x_T (driver recipe keys on image sample id)
+    autocast_precision: bf16
+    trajectory_precision: fp32
+    logprob_precision: fp32
+    scheduler:
+      # Sparse SDE: record SDE log-probs at 2 steps from the early half → lower-variance GRPO.
+      _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+      num_timesteps: ${..num_inference_steps}
+      timestep_fraction: [0.0, 0.5]
+      num_sde_steps: 2
