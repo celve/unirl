@@ -69,30 +69,24 @@ class Qwen3Bundle(Bundle):
         dtype = parse_torch_dtype(config.model_precision, field_name="model_precision")
 
         if config.meta_init_transformer:
-            # Meta-init (FSDP / VeOmni load_sharded path): architecture only on
-            # the meta device; the backend materializes + loads from the
-            # checkpoint root after sharding (AR layout: no transformer/
-            # subfolder, so the stashed dir is the root). NOTE: verify on pod
-            # that HF rotary inv_freq buffers survive to_empty — finalize_meta_init
-            # warns if any are non-persistent (would need stamp_init_state_restore).
+            # Meta-init (FSDP / VeOmni load_sharded path): parameters on the meta
+            # device, materialized + loaded by the backend from the checkpoint
+            # root after sharding (AR layout: no transformer/ subfolder, so the
+            # stashed dir is the root). init_empty_weights(include_buffers=False)
+            # keeps buffers/attrs real on CPU: HF rotary inv_freq / original_inv_freq
+            # are non-persistent buffers computed in __init__ and absent from the
+            # checkpoint, so to_empty later clobbers them -> garbage RoPE. Capture
+            # them straight off the model and stamp a deferred restore (drained
+            # post-load by apply_deferred_ops).
             from accelerate import init_empty_weights
             from transformers import AutoConfig
 
             hf_config = AutoConfig.from_pretrained(path, trust_remote_code=bool(config.trust_remote_code))
-            with init_empty_weights():
+            with init_empty_weights(include_buffers=False):
                 transformer = AutoModelForCausalLM.from_config(
                     hf_config, trust_remote_code=bool(config.trust_remote_code)
                 )
-            # HF rotary inv_freq / original_inv_freq are non-persistent buffers
-            # computed in __init__ and absent from the checkpoint, so to_empty
-            # leaves them uninitialized -> garbage RoPE. Capture them from a real
-            # CPU twin and stamp a deferred restore (drained post-load by
-            # apply_deferred_ops), mirroring sd3 / qwen_image.
-            cpu_twin = AutoModelForCausalLM.from_config(
-                hf_config, trust_remote_code=bool(config.trust_remote_code)
-            )
-            stamp_init_state_restore(transformer, cpu_twin)
-            del cpu_twin
+            stamp_init_state_restore(transformer)
             transformer = finalize_meta_init(transformer, dtype=dtype)
         else:
             transformer = AutoModelForCausalLM.from_pretrained(

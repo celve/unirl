@@ -47,25 +47,22 @@ class QwenVLBundle(Bundle):
         dtype = parse_torch_dtype(config.model_precision, field_name="model_precision")
 
         if config.meta_init_transformer:
-            # Meta-init (FSDP / VeOmni load_sharded path): architecture only on
-            # the meta device; the backend materializes + loads from the
-            # checkpoint root after sharding (the embedded ViT is part of the
-            # trainable tree, loaded with it — not a separate aux). NOTE: verify
-            # on pod that HF rotary inv_freq buffers survive to_empty;
-            # finalize_meta_init warns if any are non-persistent.
+            # Meta-init (FSDP / VeOmni load_sharded path): parameters on the meta
+            # device, materialized + loaded by the backend from the checkpoint
+            # root after sharding (the embedded ViT is part of the trainable tree,
+            # loaded with it — not a separate aux). init_empty_weights(
+            # include_buffers=False) keeps buffers/attrs real on CPU: HF rotary
+            # inv_freq is a non-persistent buffer computed in __init__ and absent
+            # from the checkpoint, so to_empty later clobbers it -> garbage RoPE.
+            # Capture it straight off the model and stamp a deferred restore
+            # (drained post-load).
             from accelerate import init_empty_weights
             from transformers import AutoConfig
 
             hf_config = AutoConfig.from_pretrained(path, trust_remote_code=bool(config.trust_remote_code))
-            with init_empty_weights():
+            with init_empty_weights(include_buffers=False):
                 transformer = Qwen2_5_VLForConditionalGeneration(hf_config)
-            # HF rotary inv_freq is a non-persistent buffer (computed in __init__,
-            # absent from the checkpoint); to_empty leaves it uninitialized ->
-            # garbage RoPE. Restore it from a real CPU twin via a deferred op
-            # (drained post-load), mirroring qwen3 / sd3.
-            cpu_twin = Qwen2_5_VLForConditionalGeneration(hf_config)
-            stamp_init_state_restore(transformer, cpu_twin)
-            del cpu_twin
+            stamp_init_state_restore(transformer)
             transformer = finalize_meta_init(transformer, dtype=dtype)
         else:
             transformer = Qwen2_5_VLForConditionalGeneration.from_pretrained(

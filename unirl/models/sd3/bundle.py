@@ -86,19 +86,20 @@ class SD3Bundle(Bundle):
         te_dtype = parse_torch_dtype(te_raw, field_name="text_encoder_dtype")
 
         if config.meta_init_transformer:
-            # VeOmniBackend lifecycle: architecture on the meta device (no
-            # weight allocation); real weights load post-parallelize from the
-            # stashed path. SD3's PatchEmbed registers its sincos pos_embed
-            # as a NON-PERSISTENT buffer — absent from checkpoints, clobbered
-            # by to_empty — so a throwaway CPU twin (SD3.5-medium ~2B params,
-            # transient) captures all init-computed state and stamps the
-            # deferred restore that the backend drains after the weight load.
+            # VeOmniBackend lifecycle: parameters on the meta device (no weight
+            # allocation); real weights load post-parallelize from the stashed
+            # path. SD3's PatchEmbed registers its sincos pos_embed as a
+            # NON-PERSISTENT buffer — absent from checkpoints, clobbered by
+            # to_empty. init_empty_weights(include_buffers=False) puts the params
+            # on meta while keeping that buffer real on CPU, so we capture it
+            # straight off the model and stamp the deferred restore the backend
+            # drains after the weight load.
+            from accelerate import init_empty_weights
+
             transformer_config = SD3Transformer2DModel.load_config(path, subfolder="transformer")
-            with torch.device("meta"):
+            with init_empty_weights(include_buffers=False):
                 transformer = SD3Transformer2DModel.from_config(transformer_config)
-            cpu_twin = SD3Transformer2DModel.from_config(transformer_config)
-            captured = stamp_init_state_restore(transformer, cpu_twin)
-            del cpu_twin
+            captured = stamp_init_state_restore(transformer)
             logger.info("meta_init_transformer: stamped restore for %d init-computed tensor(s)", captured)
             transformer = transformer.to(dtype)
             transformer.init_weights = lambda: None
