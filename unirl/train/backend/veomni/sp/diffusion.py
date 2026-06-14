@@ -331,10 +331,53 @@ def _wrap_wan(model, sp_group):
     logger.info("diffusion SP: wan boundary hooks installed")
 
 
+def _wrap_flux2(model, sp_group):
+    # flux2: dual->single blocks + text-strip (hidden[:, num_txt_tokens:]). Because
+    # num_txt_tokens == encoder_hidden_states.shape[1] and img_ids/txt_ids are
+    # forward ARGS (not derived from the sliced tensors), we can slice both streams
+    # at the MODEL input (the strip then removes the LOCAL text, leaving image-local)
+    # and gather the image-only output at the MODEL exit. pos_embed is called per
+    # stream (img_ids, txt_ids); slice each (cos, sin) so the in-forward cat is the
+    # joint sliced RoPE.
+    get_parallel_state, slice_input_tensor, gather_outputs, _, _ = _sp()
+
+    def model_pre(_m, args, kwargs):
+        if not get_parallel_state().ulysses_enabled:
+            return None
+        if kwargs.get("hidden_states") is not None:
+            kwargs["hidden_states"] = slice_input_tensor(kwargs["hidden_states"], dim=1, group=sp_group)
+        if kwargs.get("encoder_hidden_states") is not None:
+            kwargs["encoder_hidden_states"] = slice_input_tensor(kwargs["encoder_hidden_states"], dim=1, group=sp_group)
+        return args, kwargs
+
+    def rope_hook(_m, _inp, out):
+        if not get_parallel_state().ulysses_enabled:
+            return out
+        if isinstance(out, (tuple, list)):
+            return type(out)(slice_input_tensor(t, dim=0, group=sp_group) for t in out)
+        return slice_input_tensor(out, dim=0, group=sp_group)
+
+    def model_post(_m, _args, _kwargs, out):
+        if not get_parallel_state().ulysses_enabled:
+            return out
+        sample = out.sample if hasattr(out, "sample") else out[0]
+        sample = gather_outputs(sample, gather_dim=1, group=sp_group)
+        if hasattr(out, "sample"):
+            out.sample = sample
+            return out
+        return (sample, *out[1:])
+
+    model.register_forward_pre_hook(model_pre, with_kwargs=True)
+    model.pos_embed.register_forward_hook(rope_hook)
+    model.register_forward_hook(model_post, with_kwargs=True)
+    logger.info("diffusion SP: flux2 boundary hooks installed (model-level slice/gather)")
+
+
 FORWARD_WRAPPERS: Dict[str, Callable[[nn.Module, Any], None]] = {
     "QwenImageTransformer2DModel": _wrap_qwen_image,
     "SD3Transformer2DModel": _wrap_sd3,
     "WanTransformer3DModel": _wrap_wan,
+    "Flux2Transformer2DModel": _wrap_flux2,
 }
 
 
