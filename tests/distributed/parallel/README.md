@@ -23,6 +23,7 @@ torchrun --nproc_per_node=2 --master_port=29571 tests/distributed/parallel/<test
 | `sp_qwenimage_parity.py` | diffusion qwen-image (dispatch-patch), fwd | relerr ~2e-7 |
 | `sp_sd3_parity.py` | diffusion SD3 (processor-injection), fwd | relerr ~2e-7 |
 | `sp_wan_parity.py` | diffusion Wan (dispatch + image-self/text-cross attn, 5D, Wan RoPE), fwd | relerr ~2e-7 |
+| `sp_flux2_parity.py` | diffusion flux2 (dispatch + dual→single blocks + text-strip; model-level slice/gather), fwd | relerr ~2e-7 |
 | `sp_diffusion_backward.py` | diffusion qwen-image **backward** grad parity (MEAN-combine) | worst relerr ~6e-7 |
 
 Notes:
