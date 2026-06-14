@@ -54,7 +54,9 @@ def veomni_parallelize(
     """
     from unirl.train.backend.veomni import _compat
 
-    api = _compat.load()
+    _compat.ensure_installed()
+    from veomni.arguments import MixedPrecisionConfig
+    from veomni.distributed.torch_parallelize import parallelize_model_fsdp2
 
     target_dtype = parse_torch_dtype(param_dtype, field_name="training.fsdp.param_dtype")
     dtype_name = _DTYPE_NAMES.get(target_dtype)
@@ -65,12 +67,12 @@ def veomni_parallelize(
     # materializes storage in the target dtype. Mirrors fsdp_wrap's cast.
     model.to(target_dtype)
 
-    mixed_precision = api.MixedPrecisionConfig(
+    mixed_precision = MixedPrecisionConfig(
         enable=True,
         param_dtype=dtype_name,
         reduce_dtype="float32",
     )
-    api.parallelize_model_fsdp2(
+    parallelize_model_fsdp2(
         model,
         weights_path=None,
         enable_reshard_after_forward=bool(reshard_after_forward),

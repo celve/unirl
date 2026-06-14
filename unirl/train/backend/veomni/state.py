@@ -71,7 +71,10 @@ def clip_grad_norm(model: nn.Module, max_norm: float) -> Tensor:
     """
     from unirl.train.backend.veomni import _compat
 
-    result = _compat.load().clip_grad_norm(model, max_norm)
+    _compat.ensure_installed()
+    from veomni.distributed.fsdp2 import clip_grad_norm as _veomni_clip_grad_norm
+
+    result = _veomni_clip_grad_norm(model, max_norm)
     return _maybe_dtensor_to_tensor(result)
 
 
@@ -90,7 +93,10 @@ def veomni_offload(model: nn.Module) -> None:
         )
     from unirl.train.backend.veomni import _compat
 
-    _compat.load().offload_model_to_cpu(model)
+    _compat.ensure_installed()
+    from veomni.distributed.offloading import offload_model_to_cpu
+
+    offload_model_to_cpu(model)
     logger.debug("veomni_offload: offloaded params/grads to CPU")
 
 
@@ -98,7 +104,10 @@ def veomni_onload(model: nn.Module, device: torch.device) -> None:
     """Move the parallelized model back to ``device`` via VeOmni."""
     from unirl.train.backend.veomni import _compat
 
-    _compat.load().load_model_to_gpu(model, device)
+    _compat.ensure_installed()
+    from veomni.distributed.offloading import load_model_to_gpu
+
+    load_model_to_gpu(model, device)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     logger.debug("veomni_onload: onloaded params/grads to %s", device)

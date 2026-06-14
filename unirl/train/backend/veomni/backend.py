@@ -109,8 +109,10 @@ class VeOmniBackend(Remote):
         world = dist.get_world_size() if dist.is_initialized() else 1
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        api = _compat.load()
-        api.init_parallel_state(
+        _compat.ensure_installed()
+        from veomni.distributed.parallel_state import init_parallel_state
+
+        init_parallel_state(
             dp_size=world,
             dp_mode="fsdp2",
             device_type=self._device.type,

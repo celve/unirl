@@ -22,11 +22,11 @@ import — ``from ..models import load_model_weights,
 rank0_load_and_broadcast_weights`` — so the ``veomni.models`` stub must
 already carry those attributes (sourced from ``veomni.models.module_utils``,
 which is itself clean: safetensors + stable ``transformers.utils`` APIs)
-before ``torch_parallelize`` is imported.  :func:`load` handles the ordering.
+before ``torch_parallelize`` is imported.  :func:`ensure_installed` runs
+both stub steps in that order; call it before importing any veomni symbol.
 
 Zero veomni functions are replaced; this is selective importing, not
-behavior patching.  ``tests/test_compat_import.py`` audits the closure per
-veomni release (the dependency is exact-pinned in ``pyproject.toml``).
+behavior patching (the veomni dependency is exact-pinned in ``pyproject.toml``).
 """
 
 from __future__ import annotations
@@ -39,23 +39,9 @@ import logging
 import os
 import sys
 import types
-from dataclasses import dataclass
-from typing import Any, Callable, Optional, Tuple
+from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class VeomniApi:
-    """The slice of VeOmni consumed by :class:`VeOmniBackend`."""
-
-    init_parallel_state: Callable[..., None]
-    get_parallel_state: Callable[..., Any]
-    parallelize_model_fsdp2: Callable[..., Any]
-    clip_grad_norm: Callable[..., Any]
-    offload_model_to_cpu: Callable[..., None]
-    load_model_to_gpu: Callable[..., None]
-    MixedPrecisionConfig: type
 
 
 def _stub_package(name: str, path: str) -> types.ModuleType:
@@ -108,27 +94,20 @@ def _attach_models_names() -> None:
 
 
 @functools.cache
-def load() -> VeomniApi:
-    """Import the VeOmni slice behind the stubs and return it (cached)."""
+def ensure_installed() -> None:
+    """Install the ``sys.modules`` path stubs (cached, idempotent).
+
+    Runs *both* stub steps so that ``import veomni.distributed.*`` resolves
+    without executing veomni's package-root init. ``_attach_models_names``
+    must populate the ``veomni.models`` stub before anything imports
+    ``veomni.distributed.torch_parallelize`` (which name-imports those
+    attributes), so always run the pair together. Call this once before
+    importing any veomni symbol; keep those imports lazy (function-local),
+    since this module's importers load long before the stubs are installed.
+    """
     _install_path_stubs()
     _attach_models_names()
-
-    from veomni.arguments import MixedPrecisionConfig
-    from veomni.distributed.fsdp2 import clip_grad_norm
-    from veomni.distributed.offloading import load_model_to_gpu, offload_model_to_cpu
-    from veomni.distributed.parallel_state import get_parallel_state, init_parallel_state
-    from veomni.distributed.torch_parallelize import parallelize_model_fsdp2
-
-    logger.info("veomni distributed layer loaded via selective-import shim")
-    return VeomniApi(
-        init_parallel_state=init_parallel_state,
-        get_parallel_state=get_parallel_state,
-        parallelize_model_fsdp2=parallelize_model_fsdp2,
-        clip_grad_norm=clip_grad_norm,
-        offload_model_to_cpu=offload_model_to_cpu,
-        load_model_to_gpu=load_model_to_gpu,
-        MixedPrecisionConfig=MixedPrecisionConfig,
-    )
+    logger.info("veomni distributed layer installed via selective-import shim")
 
 
 def rank_world_local() -> Tuple[int, int, int]:
