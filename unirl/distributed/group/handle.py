@@ -227,9 +227,16 @@ class Handle:
         # Register role on each Worker with dist_env
         # Sequence parallelism (Ulysses): a VeOmni backend created with
         # fsdp_cfg.sp_size>1 lays out ranks as contiguous SP blocks matching
-        # VeOmni's mesh; every other role stays flat (sp=1). See _build_rank_infos.
+        # VeOmni's mesh; roles that hold an SP sibling (or get an explicit
+        # ``sp_size=`` layout hint) inherit it; everything else stays flat
+        # (sp=1). See _build_rank_infos / _sp_size_from_init_kwargs.
         sp_size = _sp_size_from_init_kwargs(init_kwargs, self.world_size)
         self.rank_infos = _build_rank_infos(self.world_size, sp_size)
+        # ``sp_size`` is a reserved handle-layout hint, not a role constructor
+        # arg (e.g. the trainside rollout, whose model is SP-parallelized but
+        # whose __init__ takes no sp_size) — consume it before forwarding.
+        if init_kwargs:
+            init_kwargs.pop("sp_size", None)
         ray.get(
             [
                 w.add_remote.remote(
