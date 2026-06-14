@@ -174,6 +174,15 @@ class VeOmniBackend(Remote):
             use_torch_compile=fsdp_cfg.use_torch_compile,
         )
 
+        # 6b. Ulysses sequence parallelism (no-op at sp_size=1): route attention
+        # through VeOmni's registered SP attn and wrap the decoder forward to
+        # slice the sequence in / gather hidden out. Installed AFTER
+        # veomni_parallelize (the GC -> FSDP -> SP order); gated at run time on
+        # ulysses_enabled, so safe to call unconditionally.
+        from unirl.train.backend.veomni.sp import apply_sequence_parallelism
+
+        apply_sequence_parallelism(model, self._sp_size)
+
         # 7. Real weights: load into the freshly-sharded module. Meta-init
         # bundles stash a safetensors dir; Pattern-A bundles materialize
         # themselves; eager bundles are rejected (eager_ok=False) — parallelize

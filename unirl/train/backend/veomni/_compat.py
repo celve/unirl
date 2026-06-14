@@ -110,6 +110,31 @@ def ensure_installed() -> None:
     logger.info("veomni distributed layer installed via selective-import shim")
 
 
+@functools.cache
+def ensure_attention_patch_installed() -> None:
+    """Register VeOmni's Ulysses SP attention into HF ``ALL_ATTENTION_FUNCTIONS``.
+
+    A model whose ``config._attn_implementation`` is
+    ``"veomni_flash_attention_2_with_sp"`` then routes attention through
+    VeOmni's Ulysses all-to-all wrapper (a no-op when ``ulysses_size == 1``).
+
+    Selective import, same discipline as :func:`ensure_installed`: we stub
+    ``veomni.ops`` and ``veomni.ops.kernels`` so their eager package inits never
+    run — ``veomni/ops/__init__.py`` imports liger / moe / cross-entropy kernels
+    (heavy, and absent under the ``--no-deps`` veomni install), none of which the
+    attention patch needs. ``veomni.ops.kernels.attention`` itself has clean deps
+    (transformers + ``veomni.distributed``). Cached / idempotent.
+    """
+    ensure_installed()
+    pkg_dir = list(sys.modules["veomni"].__path__)[0]
+    _stub_package("veomni.ops", os.path.join(pkg_dir, "ops"))
+    _stub_package("veomni.ops.kernels", os.path.join(pkg_dir, "ops", "kernels"))
+    from veomni.ops.kernels.attention import apply_veomni_attention_patch
+
+    apply_veomni_attention_patch()
+    logger.info("veomni Ulysses SP attention registered via selective-import shim")
+
+
 def rank_world_local() -> Tuple[int, int, int]:
     """Resolve ``(rank, world_size, local_rank)`` from the actor env.
 
