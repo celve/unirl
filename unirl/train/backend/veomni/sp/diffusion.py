@@ -109,38 +109,45 @@ def _wrap_qwen_image(model: nn.Module, sp_group: Any) -> None:
 
     state: Dict[str, int] = {}
 
-    def pre(_m, args, kwargs):
-        if not get_parallel_state().ulysses_enabled:
-            return None
-        hs = kwargs.get("hidden_states")
-        if hs is not None:
-            state["img_len"] = hs.shape[1]
-            kwargs["hidden_states"] = slice_input_tensor(hs, dim=1, group=sp_group)
-        ehs = kwargs.get("encoder_hidden_states")
-        if ehs is not None:
-            kwargs["encoder_hidden_states"] = slice_input_tensor(ehs, dim=1, group=sp_group)
-        return args, kwargs
-
     def rope_hook(_m, _inp, out):
+        # pos_embed runs AFTER text_seq_len is read from the full encoder, so the
+        # joint RoPE is built full-length; slice each stream's freqs to per-rank.
         if not get_parallel_state().ulysses_enabled:
             return out
         vid, txt = out  # (S_img, fd), (S_txt, fd) complex
         return (slice_input_tensor(vid, dim=0, group=sp_group), slice_input_tensor(txt, dim=0, group=sp_group))
 
+    def block0_pre(_m, args, kwargs):
+        # Slice the image + text streams at the FIRST block (after RoPE was built
+        # full-length). Subsequent blocks receive the sliced streams via the loop.
+        if not get_parallel_state().ulysses_enabled:
+            return None
+        new_args = list(args)
+        if "hidden_states" in kwargs:
+            state["img_len"] = kwargs["hidden_states"].shape[1]
+            kwargs["hidden_states"] = slice_input_tensor(kwargs["hidden_states"], dim=1, group=sp_group)
+        elif new_args:
+            state["img_len"] = new_args[0].shape[1]
+            new_args[0] = slice_input_tensor(new_args[0], dim=1, group=sp_group)
+        if "encoder_hidden_states" in kwargs:
+            kwargs["encoder_hidden_states"] = slice_input_tensor(kwargs["encoder_hidden_states"], dim=1, group=sp_group)
+        elif len(new_args) >= 2:
+            new_args[1] = slice_input_tensor(new_args[1], dim=1, group=sp_group)
+        return tuple(new_args), kwargs
+
     def norm_out_pre(_m, args, kwargs):
         if not get_parallel_state().ulysses_enabled:
             return None
-        hs = args[0]
-        hs = gather_outputs(hs, gather_dim=1, group=sp_group)
+        hs = gather_outputs(args[0], gather_dim=1, group=sp_group)
         true_len = state.get("img_len")
         if true_len is not None and hs.shape[1] > true_len:
             hs = hs[:, :true_len]
         return (hs, *args[1:]), kwargs
 
-    model.register_forward_pre_hook(pre, with_kwargs=True)
     model.pos_embed.register_forward_hook(rope_hook)
+    model.transformer_blocks[0].register_forward_pre_hook(block0_pre, with_kwargs=True)
     model.norm_out.register_forward_pre_hook(norm_out_pre, with_kwargs=True)
-    logger.info("diffusion SP: qwen-image boundary hooks installed (slice img/text + RoPE, gather at norm_out)")
+    logger.info("diffusion SP: qwen-image boundary hooks installed (slice img/text @ block0 + RoPE, gather @ norm_out)")
 
 
 # class name -> boundary-hook installer
