@@ -226,6 +226,14 @@ class VeOmniBackend(Remote):
         self._rollout_adapter_name: str = (
             str(ema_lora_cfg.shadow_adapter) if ema_lora_cfg is not None else "default"
         )
+        # No-sync gradient accumulation (see set_grad_sync); mirrors FSDPBackend.
+        # Only active under ZeRO-2 (reshard_after_forward=False); the train loop
+        # (TrainStack) toggles this per micro-batch, so the methods must exist
+        # even when deferral is off (default), where they are no-ops.
+        self._defer_grad_sync: bool = bool(fsdp_cfg.defer_grad_sync) and not bool(
+            fsdp_cfg.reshard_after_forward
+        )
+        self._grad_sync_enabled: bool = True
 
     @property
     def rollout_adapter_name(self) -> str:
@@ -233,6 +241,31 @@ class VeOmniBackend(Remote):
         mirrors FSDPBackend. EMA shadow (``"old"``) for NFT-style adapter EMA,
         else the trainable ``"default"``."""
         return self._rollout_adapter_name
+
+    def set_grad_sync(self, enable: bool) -> None:
+        """Toggle the FSDP2 gradient reduce-scatter for no-sync accumulation.
+
+        Mirrors FSDPBackend: VeOmni shards with the same ``fully_shard``
+        (``FSDPModule``) over the folded ``dp_shard_sp`` mesh, so the toggle is
+        identical — every FSDP module accumulates in its unsharded buffer and a
+        single reduce-scatter runs per optimizer step instead of one per micro.
+        No-op when deferral is off (the common case) or already in the wanted
+        state.
+        """
+        if not self._defer_grad_sync or enable == self._grad_sync_enabled:
+            return
+        from torch.distributed.fsdp import FSDPModule
+
+        for m in self.model.modules():
+            if isinstance(m, FSDPModule):
+                m.set_requires_gradient_sync(enable)
+                m.set_is_last_backward(enable)
+        self._grad_sync_enabled = enable
+
+    @property
+    def grad_sync_deferred(self) -> bool:
+        """True when no-sync accumulation is active (``defer_grad_sync`` under ZeRO-2)."""
+        return self._defer_grad_sync
 
     # ------------------------------------------------------------------
     # Training step
