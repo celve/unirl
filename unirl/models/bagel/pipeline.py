@@ -160,8 +160,12 @@ class BagelPipeline(Pipeline):
         cfg_img = deepcopy(gen)
         with torch.no_grad(), self._autocast_ctx():
             cfg_text = deepcopy(gen)  # snapshot before the prompt text → unconditional
-            gen = inf.update_context_text(prompt, gen)
-            cfg_img = inf.update_context_text(prompt, cfg_img)
+            # build_text_context = device-safe update_context_text: it moves the
+            # CPU-built packed ids onto the trainable's device before embed_tokens.
+            # The meta/VeOmni path attaches no accelerate hooks to auto-move them;
+            # a no-op on the eager path (already on device) → A/B-safe.
+            gen = self.bundle.build_text_context(prompt, gen)
+            cfg_img = self.bundle.build_text_context(prompt, cfg_img)
         return gen, cfg_text, cfg_img
 
     def generate(self, req: RolloutReq) -> RolloutResp:
