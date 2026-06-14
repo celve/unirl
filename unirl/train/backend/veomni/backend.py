@@ -221,6 +221,18 @@ class VeOmniBackend(Remote):
         self.model: nn.Module = model
         self._optimizer_step_count: int = 0
         self._eval_ema_active: bool = False
+        # Adapter the rollout samples under (weight-sync single source of truth);
+        # mirrors FSDPBackend: EMA shadow for NFT-style adapter EMA, else "default".
+        self._rollout_adapter_name: str = (
+            str(ema_lora_cfg.shadow_adapter) if ema_lora_cfg is not None else "default"
+        )
+
+    @property
+    def rollout_adapter_name(self) -> str:
+        """Adapter the rollout samples under (weight-sync single source of truth);
+        mirrors FSDPBackend. EMA shadow (``"old"``) for NFT-style adapter EMA,
+        else the trainable ``"default"``."""
+        return self._rollout_adapter_name
 
     # ------------------------------------------------------------------
     # Training step
