@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 SP_ATTN_IMPL = "veomni_flash_attention_2_with_sp"
 
+# Diagnostic: log the first few SP decoder forwards' per-rank seq lengths so a
+# data/layout desync (two SP ranks seeing different true_len) is visible.
+_DIAG = {"n": 0}
+
 
 def is_ar_causal_lm(model: nn.Module) -> bool:
     """HF causal-LM shape: a decoder (``.model``) + ``.lm_head`` + ``.config``."""
@@ -111,6 +115,16 @@ def _wrap_decoder_forward(decoder: nn.Module) -> None:
             true_len = input_ids.shape[1]
         else:
             return orig(*args, **kwargs)  # nothing to slice (decode-style call)
+
+        if _DIAG["n"] < 4:
+            _DIAG["n"] += 1
+            logger.info(
+                "SP decoder fwd: dp_rank=%s ulysses_rank=%s sp_size=%s true_len=%d",
+                getattr(ps, "dp_rank", "?"),
+                getattr(ps, "ulysses_rank", "?"),
+                getattr(ps, "sp_size", "?"),
+                true_len,
+            )
 
         if input_ids is not None:
             kwargs["input_ids"] = slice_input_tensor(input_ids, dim=1, group=spg)

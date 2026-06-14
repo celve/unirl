@@ -27,6 +27,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from itertools import count
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type
@@ -52,6 +53,9 @@ from unirl.distributed.utils import collect_leaves
 
 if TYPE_CHECKING:
     from unirl.distributed.group.device_pool import DevicePool
+
+
+logger = logging.getLogger(__name__)
 
 
 # ── Module-level counter for unique role_name generation ─────────────────────
@@ -232,6 +236,13 @@ class Handle:
         # (sp=1). See _build_rank_infos / _sp_size_from_init_kwargs.
         sp_size = _sp_size_from_init_kwargs(init_kwargs, self.world_size)
         self.rank_infos = _build_rank_infos(self.world_size, sp_size)
+        logger.info(
+            "Handle layout: role=%s world=%d dp_size=%d sp_size=%d",
+            self.role_name,
+            self.world_size,
+            self.rank_infos[0].dp_size,
+            self.rank_infos[0].sp_size,
+        )
         # ``sp_size`` is a reserved handle-layout hint, not a role constructor
         # arg (e.g. the trainside rollout, whose model is SP-parallelized but
         # whose __init__ takes no sp_size) — consume it before forwarding.
