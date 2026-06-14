@@ -91,6 +91,47 @@ def reset_role_name_counter() -> None:
     _role_name_counter.clear()
 
 
+def _sp_size_from_init_kwargs(init_kwargs: Optional[Dict[str, Any]], world_size: int) -> int:
+    """Ulysses ``sp_size`` for the rank layout, read from a backend's ``fsdp_cfg``.
+
+    The VeOmni training backend is created with an ``fsdp_cfg`` carrying
+    ``sp_size``; every other role omits it and stays sp=1 (the flat layout).
+    Returns 1 unless ``sp_size > 1`` and evenly divides ``world_size``.
+    """
+    if not init_kwargs:
+        return 1
+    sp = 1
+    fsdp_cfg = init_kwargs.get("fsdp_cfg")
+    if fsdp_cfg is not None:
+        sp = int(getattr(fsdp_cfg, "sp_size", 1) or 1)
+    elif "sp_size" in init_kwargs:
+        sp = int(init_kwargs.get("sp_size") or 1)
+    return sp if (sp > 1 and world_size % sp == 0) else 1
+
+
+def _build_rank_infos(world_size: int, sp_size: int = 1) -> List[RankInfo]:
+    """Contiguous (dp, sp) rank layout: rank ``i`` -> ``dp_rank i//sp``, ``sp_rank i%sp``.
+
+    Matches VeOmni's ``init_sequence_parallel`` SP grouping
+    (``range(j*sp, (j+1)*sp)``) so the controller's data dispatch and VeOmni's
+    sequence-parallel groups agree: ranks in one SP group share a ``dp_rank``
+    (DP_SCATTER feeds them the same shard) and only ``sp_rank==0`` is collected.
+    ``sp_size=1`` reproduces the flat one-rank-per-dp layout exactly.
+    """
+    dp_size = world_size // sp_size
+    return [
+        RankInfo(
+            rank=i,
+            world_size=world_size,
+            dp_rank=i // sp_size,
+            dp_size=dp_size,
+            sp_rank=i % sp_size,
+            sp_size=sp_size,
+        )
+        for i in range(world_size)
+    ]
+
+
 @dataclass(frozen=True)
 class HandleRef:
     """Serializable marker for a Handle.
@@ -163,10 +204,11 @@ class Handle:
         }
 
         # Register role on each Worker with dist_env
-        self.rank_infos = [
-            RankInfo(rank=i, world_size=self.world_size, dp_rank=i, dp_size=self.world_size)
-            for i in range(self.world_size)
-        ]
+        # Sequence parallelism (Ulysses): a VeOmni backend created with
+        # fsdp_cfg.sp_size>1 lays out ranks as contiguous SP blocks matching
+        # VeOmni's mesh; every other role stays flat (sp=1). See _build_rank_infos.
+        sp_size = _sp_size_from_init_kwargs(init_kwargs, self.world_size)
+        self.rank_infos = _build_rank_infos(self.world_size, sp_size)
         ray.get(
             [
                 w.add_remote.remote(

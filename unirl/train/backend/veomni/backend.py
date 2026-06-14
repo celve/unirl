@@ -112,8 +112,20 @@ class VeOmniBackend(Remote):
         _compat.ensure_installed()
         from veomni.distributed.parallel_state import init_parallel_state
 
+        # Ulysses sequence parallelism, folded into the FSDP shard mesh
+        # (include_sp_in_fsdp=True default): the shard mesh becomes
+        # dp_shard(world//sp) x ulysses(sp), so params shard across the whole
+        # world and grads reduce-scatter across SP ranks automatically (verified:
+        # docs/usp-derisk/sp_fsdp.py, no manual sp_size compensation). sp_size=1 is
+        # a true no-op: dp_size=world, ulysses_size=1 -> the prior 1D dp_shard mesh.
+        self._sp_size = int(getattr(fsdp_cfg, "sp_size", 1) or 1)
+        if world % self._sp_size != 0:
+            raise ValueError(
+                f"VeOmniBackend: world_size {world} not divisible by sp_size {self._sp_size}"
+            )
         init_parallel_state(
-            dp_size=world,
+            dp_size=world // self._sp_size,
+            ulysses_size=self._sp_size,
             dp_mode="fsdp2",
             device_type=self._device.type,
         )
