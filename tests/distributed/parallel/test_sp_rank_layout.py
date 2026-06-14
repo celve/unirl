@@ -70,8 +70,19 @@ def test_sp_pair_shares_dp_rank_so_dp_scatter_replicates():
 # ── _sp_size_from_init_kwargs: who adopts the SP layout ──
 
 
-def test_backend_reads_sp_from_fsdp_cfg():
+def test_backend_reads_sp_from_fsdp_cfg_object():
     assert _sp_size_from_init_kwargs({"fsdp_cfg": _FsdpCfg(2)}, world_size=8) == 2
+
+
+def test_backend_reads_sp_from_fsdp_cfg_DICT():
+    # The real representation: parse_hydra_cfg runs OmegaConf.to_container, so
+    # the backend handle's init_kwargs["fsdp_cfg"] is a PLAIN DICT. getattr() on
+    # a dict silently returns the default (1) — the bug that made the backend
+    # handle flat (dp=8) while its model mesh was dp=4/sp=2, hanging the
+    # Ulysses all-to-all. This is the case the object-based test missed.
+    assert _sp_size_from_init_kwargs({"fsdp_cfg": {"_target_": "x", "sp_size": 2}}, world_size=8) == 2
+    assert _sp_size_from_init_kwargs({"fsdp_cfg": {"sp_size": 1}}, world_size=8) == 1
+    assert _sp_size_from_init_kwargs({"fsdp_cfg": {}}, world_size=8) == 1
 
 
 def test_stack_inherits_sp_from_fsdp_backend_sibling():

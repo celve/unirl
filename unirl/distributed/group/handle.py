@@ -113,10 +113,22 @@ def _sp_size_from_init_kwargs(init_kwargs: Optional[Dict[str, Any]], world_size:
     """
     if not init_kwargs:
         return 1
+
+    def _cfg_get(cfg: Any, key: str, default: int) -> int:
+        # parse_hydra_cfg runs OmegaConf.to_container, so nested _target_ blocks
+        # (e.g. fsdp_cfg) arrive here as PLAIN DICTS, not instantiated configs —
+        # getattr(dict, "sp_size") would silently return the default. Read the
+        # key for dicts and the attr for instantiated configs alike.
+        if isinstance(cfg, dict):
+            val = cfg.get(key, default)
+        else:
+            val = getattr(cfg, key, default)
+        return int(val or default)
+
     sp = 1
     fsdp_cfg = init_kwargs.get("fsdp_cfg")
     if fsdp_cfg is not None:
-        sp = int(getattr(fsdp_cfg, "sp_size", 1) or 1)
+        sp = _cfg_get(fsdp_cfg, "sp_size", 1)
     elif "sp_size" in init_kwargs:
         sp = int(init_kwargs.get("sp_size") or 1)
     # Inherit from the largest SP-enabled sibling handle (case (b) above).
