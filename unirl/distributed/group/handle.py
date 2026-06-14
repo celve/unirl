@@ -92,11 +92,20 @@ def reset_role_name_counter() -> None:
 
 
 def _sp_size_from_init_kwargs(init_kwargs: Optional[Dict[str, Any]], world_size: int) -> int:
-    """Ulysses ``sp_size`` for the rank layout, read from a backend's ``fsdp_cfg``.
+    """Ulysses ``sp_size`` for the rank layout.
 
-    The VeOmni training backend is created with an ``fsdp_cfg`` carrying
-    ``sp_size``; every other role omits it and stays sp=1 (the flat layout).
-    Returns 1 unless ``sp_size > 1`` and evenly divides ``world_size``.
+    A role takes the SP layout if either (a) it is itself the VeOmni training
+    backend, created with an ``fsdp_cfg`` carrying ``sp_size`` (or a bare
+    ``sp_size`` kwarg), or (b) it holds a sibling ``HandleRef`` to an SP-enabled
+    role — e.g. the train stack (``fsdp_backend=<SP backend>``) or a trainside
+    rollout (which samples through the same SP model). Case (b) is essential:
+    such a role's ``DP_SCATTER`` must shard over the SAME ``dp_size`` as the
+    model's mesh, else the two ranks of an SP pair get different shards and the
+    Ulysses all-to-all desyncs (mismatched shapes -> NCCL hang). Layout-agnostic
+    siblings (``BROADCAST``-only weight sync) inherit it too but are unaffected.
+
+    Returns 1 unless the resolved ``sp_size > 1`` and evenly divides
+    ``world_size``.
     """
     if not init_kwargs:
         return 1
@@ -106,6 +115,10 @@ def _sp_size_from_init_kwargs(init_kwargs: Optional[Dict[str, Any]], world_size:
         sp = int(getattr(fsdp_cfg, "sp_size", 1) or 1)
     elif "sp_size" in init_kwargs:
         sp = int(init_kwargs.get("sp_size") or 1)
+    # Inherit from the largest SP-enabled sibling handle (case (b) above).
+    for value in init_kwargs.values():
+        if isinstance(value, HandleRef):
+            sp = max(sp, int(getattr(value, "sp_size", 1) or 1))
     return sp if (sp > 1 and world_size % sp == 0) else 1
 
 
@@ -143,9 +156,17 @@ class HandleRef:
 
     Only resolves on the same Worker as the referenced role — i.e. when the
     sibling lives on the same device slab and slot.
+
+    ``sp_size`` carries the referenced handle's Ulysses degree so a dependent
+    role (e.g. the train stack, which takes ``fsdp_backend=<SP backend>``)
+    inherits the SAME (dp, sp) rank layout. Without this, the dependent stays
+    flat (sp=1) and its ``DP_SCATTER`` splits a batch across all ``world_size``
+    ranks — feeding the two ranks of an SP pair *different* shards, which
+    desyncs the model's Ulysses all-to-all (mismatched shapes -> NCCL hang).
     """
 
     role_name: str
+    sp_size: int = 1
 
 
 class Handle:
@@ -233,6 +254,14 @@ class Handle:
     def dp_size(self) -> int:
         """Number of data-parallel groups."""
         return self.rank_infos[0].dp_size if self.rank_infos else self.world_size
+
+    @property
+    def sp_size(self) -> int:
+        """Ulysses sequence-parallel degree of this handle's rank layout (1 = flat).
+
+        Read by ``_to_marker`` when this handle is passed as a sibling so the
+        dependent role inherits the same (dp, sp) layout (see ``HandleRef``)."""
+        return self.rank_infos[0].sp_size if self.rank_infos else 1
 
     # ── User-facing initialize ──
 
