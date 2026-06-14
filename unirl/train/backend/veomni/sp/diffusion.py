@@ -241,7 +241,12 @@ def inject_sp_processors(model: nn.Module, sp_group: Any) -> int:
 # Per-model boundary hooks: slice streams + RoPE in, gather hidden out
 # ---------------------------------------------------------------------------
 
-def _install_boundary_hooks(model, sp_group, blocks_attr, norm_out_attr, rope_hook=None, rope_attr="pos_embed"):
+def _install_boundary_hooks(model, sp_group, blocks_attr, norm_out_attr, rope_hook=None,
+                            rope_attr="pos_embed", slice_encoder=True):
+    """Slice the image (+ optionally text) stream at the first block, gather the
+    image stream at the output norm. ``slice_encoder=False`` keeps the text full
+    (Wan cross-attention). Handles kwargs (qwen/sd3) and positional (wan) calls.
+    """
     get_parallel_state, slice_input_tensor, gather_outputs, _, _ = _sp()
     state: Dict[str, int] = {}
 
@@ -255,10 +260,11 @@ def _install_boundary_hooks(model, sp_group, blocks_attr, norm_out_attr, rope_ho
         elif new_args:
             state["img_len"] = new_args[0].shape[1]
             new_args[0] = slice_input_tensor(new_args[0], dim=1, group=sp_group)
-        if "encoder_hidden_states" in kwargs:
-            kwargs["encoder_hidden_states"] = slice_input_tensor(kwargs["encoder_hidden_states"], dim=1, group=sp_group)
-        elif len(new_args) >= 2:
-            new_args[1] = slice_input_tensor(new_args[1], dim=1, group=sp_group)
+        if slice_encoder:
+            if "encoder_hidden_states" in kwargs:
+                kwargs["encoder_hidden_states"] = slice_input_tensor(kwargs["encoder_hidden_states"], dim=1, group=sp_group)
+            elif len(new_args) >= 2:
+                new_args[1] = slice_input_tensor(new_args[1], dim=1, group=sp_group)
         return tuple(new_args), kwargs
 
     def norm_out_pre(_m, args, kwargs):
@@ -302,9 +308,33 @@ def _wrap_sd3(model, sp_group):
     logger.info("diffusion SP: sd3 boundary hooks installed")
 
 
+def _make_wan_rope_hook(sp_group):
+    get_parallel_state, slice_input_tensor, *_ = _sp()
+
+    def hook(_m, _inp, out):
+        # Wan rotary: (cos, sin), each (1, S_img, 1, D); slice the image seq dim.
+        if not get_parallel_state().ulysses_enabled:
+            return out
+        if isinstance(out, (tuple, list)):
+            return type(out)(slice_input_tensor(t, dim=1, group=sp_group) for t in out)
+        return slice_input_tensor(out, dim=1, group=sp_group)
+
+    return hook
+
+
+def _wrap_wan(model, sp_group):
+    # Wan: image self-attn (slice image) + text cross-attn (text stays FULL; the
+    # dispatch cross-attn guard skips its all-to-all). Block call is positional.
+    _install_boundary_hooks(model, sp_group, "blocks", "norm_out",
+                            rope_hook=_make_wan_rope_hook(sp_group), rope_attr="rope",
+                            slice_encoder=False)
+    logger.info("diffusion SP: wan boundary hooks installed")
+
+
 FORWARD_WRAPPERS: Dict[str, Callable[[nn.Module, Any], None]] = {
     "QwenImageTransformer2DModel": _wrap_qwen_image,
     "SD3Transformer2DModel": _wrap_sd3,
+    "WanTransformer3DModel": _wrap_wan,
 }
 
 
