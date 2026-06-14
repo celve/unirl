@@ -1081,6 +1081,18 @@ class SGLangLLMRolloutEngine(BaseRolloutEngine):
                 **(self.cfg.chat_template_kwargs or {}),
             )
 
+        # transformers 5.x apply_chat_template(tokenize=True) may return a
+        # BatchEncoding / tokenizers.Encoding / tensor instead of List[int];
+        # normalize to a flat list of int ids.
+        if hasattr(input_ids, "input_ids"):
+            input_ids = input_ids.input_ids
+        if hasattr(input_ids, "ids"):
+            input_ids = input_ids.ids
+        if hasattr(input_ids, "tolist"):
+            input_ids = input_ids.tolist()
+        if input_ids and isinstance(input_ids[0], (list, tuple)):
+            input_ids = list(input_ids[0])
+
         if not self._chat_template_logged:
             self._chat_template_logged = True
             decoded_preview = self._tokenizer.decode(input_ids[:30], skip_special_tokens=False)

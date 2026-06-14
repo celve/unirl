@@ -65,6 +65,7 @@ backend:
     fsdp_mode: full
     reshard_after_forward: false  # SD3.5-medium is small (~5 GB bf16 full); keep params gathered, skip bwd re-gather
     activation_checkpointing: false   # matches sd3_trainside (reference uses bf16_full_ac)
+    sp_size: 2  # Ulysses degree; 8-GPU pod -> dp=4, sp=2. heads(24)%2==0.
     use_torch_compile: false
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
