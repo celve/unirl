@@ -65,30 +65,27 @@ def load_trainable_weights(
         # boundaries where the model-bound deferred closure can be dropped. Without
         # this the train model keeps garbage RoPE -> garbage replay log-probs ->
         # the DRPO rollout/replay ratio collapses (~0.05) and nothing learns.
-        from unirl.models.types.meta_init import recompute_rotary_inv_freq, restore_init_state
+        from unirl.models.types.meta_init import restore_init_state
 
-        captured = getattr(bundle, "_meta_init_state", None)
-        n_recovered = restore_init_state(model, captured)
-        # RoPE safety net: recompute inv_freq from config directly on the loaded
-        # model, independent of whether the captured snapshot reached us across the
-        # live trainer's actor boundaries (the bundle carry can be dropped). This
-        # is the model the stage replays, so it fixes the AR rollout/replay ratio.
-        n_rope = recompute_rotary_inv_freq(model, device)
-        _ivf = None
-        for _m in model.modules():
-            if type(_m).__name__.endswith("RotaryEmbedding") and isinstance(getattr(_m, "inv_freq", None), torch.Tensor):
-                _ivf = _m.inv_freq[:4].float().tolist()
-                break
-        logger.warning(
-            "Rank %s: loaded trainable weights from %s — recover: has_capture=%s "
-            "restored=%d rotary_recomputed=%d id(model)=%s inv_freq.head=%s",
+        # Recover init-computed non-persistent buffers/attrs (RoPE inv_freq, sincos
+        # tables, …) captured on the bundle before meta-init's to_empty clobbered them.
+        n_recovered = restore_init_state(model, getattr(bundle, "_meta_init_state", None))
+        # Re-establish TIED weights (lm_head <-> embed_tokens). For tie_word_embeddings
+        # models, meta-init's to_empty breaks the tie and the checkpoint carries NO
+        # separate lm_head.weight, so it stays uninitialized -> uniform logits ->
+        # garbage replay log-probs (the DRPO rollout/replay ratio collapses to ~0.05
+        # and nothing learns; SGLang ties its own lm_head so old_logp is fine).
+        # tie_weights() re-points lm_head.weight at the loaded embed_tokens.weight.
+        retied = False
+        if getattr(getattr(model, "config", None), "tie_word_embeddings", False) and hasattr(model, "tie_weights"):
+            model.tie_weights()
+            retied = True
+        logger.info(
+            "Rank %s: loaded trainable weights from %s (recovered %d non-persistent tensor(s), retied=%s)",
             rank,
             weights_path,
-            captured is not None,
             n_recovered,
-            n_rope,
-            id(model),
-            _ivf,
+            retied,
         )
         return
 
