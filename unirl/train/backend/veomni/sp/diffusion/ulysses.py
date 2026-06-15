@@ -354,71 +354,20 @@ def _make_rope_slice_hook(sp_group, dim: int):
     return hook
 
 
-def _wrap_qwen_image(model, sp_group):
-    # qwen pos_embed returns (vid, txt) freqs; slice each on dim 0 (the per-stream freq dim).
-    _install_boundary_hooks(model, sp_group, "transformer_blocks", "norm_out",
-                            rope_hook=_make_rope_slice_hook(sp_group, dim=0), rope_attr="pos_embed")
-    logger.info("diffusion SP: qwen-image boundary hooks installed")
+FORWARD_WRAPPERS: Dict[str, Callable[[nn.Module, Any], None]] = {}
 
 
-def _wrap_sd3(model, sp_group):
-    # SD3 has learned positional embeddings baked into the patches (no RoPE).
-    _install_boundary_hooks(model, sp_group, "transformer_blocks", "norm_out")
-    logger.info("diffusion SP: sd3 boundary hooks installed")
+def register(class_name: str) -> Callable[[Callable], Callable]:
+    """Register a per-model boundary wrapper under its diffusers class name.
 
+    Used as a decorator in ``models/<name>.py``; the populated registry is consumed by
+    :func:`apply_diffusion_sequence_parallelism`, which MRO-walks it by class name.
+    """
+    def deco(fn: Callable) -> Callable:
+        FORWARD_WRAPPERS[class_name] = fn
+        return fn
 
-def _wrap_wan(model, sp_group):
-    # Wan: image self-attn (slice image) + text cross-attn (text stays FULL; the
-    # dispatch cross-attn guard skips its all-to-all). Block call is positional.
-    # Wan rotary: (cos, sin), each (1, S_img, 1, D); slice the image seq dim (dim 1).
-    _install_boundary_hooks(model, sp_group, "blocks", "norm_out",
-                            rope_hook=_make_rope_slice_hook(sp_group, dim=1), rope_attr="rope",
-                            slice_encoder=False)
-    logger.info("diffusion SP: wan boundary hooks installed")
-
-
-def _wrap_flux2(model, sp_group):
-    # flux2 uses the MODEL-level boundary (vs block-level for the others): dual->single
-    # blocks + text-strip (hidden[:, num_txt_tokens:]). Because num_txt_tokens ==
-    # encoder_hidden_states.shape[1] and img_ids/txt_ids are forward ARGS (not derived
-    # from the sliced tensors), we slice both streams at the MODEL input (the strip then
-    # removes the LOCAL text, leaving image-local) and gather the image-only output at the
-    # MODEL exit. pos_embed is called per stream (img_ids, txt_ids); slice each (cos, sin)
-    # on dim 0 so the in-forward cat is the joint sliced RoPE.
-    sp = _sp()
-    get_parallel_state, slice_input_tensor, gather_outputs = sp.get_parallel_state, sp.slice_input_tensor, sp.gather_outputs
-
-    def model_pre(_m, args, kwargs):
-        if not get_parallel_state().ulysses_enabled:
-            return None
-        if kwargs.get("hidden_states") is not None:
-            kwargs["hidden_states"] = slice_input_tensor(kwargs["hidden_states"], dim=1, group=sp_group)
-        if kwargs.get("encoder_hidden_states") is not None:
-            kwargs["encoder_hidden_states"] = slice_input_tensor(kwargs["encoder_hidden_states"], dim=1, group=sp_group)
-        return args, kwargs
-
-    def model_post(_m, _args, _kwargs, out):
-        if not get_parallel_state().ulysses_enabled:
-            return out
-        sample = out.sample if hasattr(out, "sample") else out[0]
-        sample = gather_outputs(sample, gather_dim=1, group=sp_group)
-        if hasattr(out, "sample"):
-            out.sample = sample
-            return out
-        return (sample, *out[1:])
-
-    model.register_forward_pre_hook(model_pre, with_kwargs=True)
-    model.pos_embed.register_forward_hook(_make_rope_slice_hook(sp_group, dim=0))
-    model.register_forward_hook(model_post, with_kwargs=True)
-    logger.info("diffusion SP: flux2 boundary hooks installed (model-level slice/gather)")
-
-
-FORWARD_WRAPPERS: Dict[str, Callable[[nn.Module, Any], None]] = {
-    "QwenImageTransformer2DModel": _wrap_qwen_image,
-    "SD3Transformer2DModel": _wrap_sd3,
-    "WanTransformer3DModel": _wrap_wan,
-    "Flux2Transformer2DModel": _wrap_flux2,
-}
+    return deco
 
 
 def apply_diffusion_sequence_parallelism(model: nn.Module, sp_size: int) -> None:
@@ -438,7 +387,7 @@ def apply_diffusion_sequence_parallelism(model: nn.Module, sp_size: int) -> None
         raise NotImplementedError(
             f"diffusion SP: attention SP wired, but no boundary spec for {cls} "
             f"(MRO: {[k.__name__ for k in type(model).__mro__]}). "
-            f"Add one to FORWARD_WRAPPERS in unirl.train.backend.veomni.sp.diffusion."
+            f"Add a models/<name>.py with @register(...) under unirl.train.backend.veomni.sp.diffusion."
         )
     wrapper(model, sp_group)
     logger.info("diffusion SP installed for %s (sp_size=%d)", cls, sp_size)
@@ -446,6 +395,3 @@ def apply_diffusion_sequence_parallelism(model: nn.Module, sp_size: int) -> None
 
 def is_diffusers_transformer(model: nn.Module) -> bool:
     return any(hasattr(m, "set_processor") and hasattr(m, "get_processor") for m in model.modules())
-
-
-__all__ = ["apply_diffusion_sequence_parallelism", "is_diffusers_transformer", "FORWARD_WRAPPERS"]
