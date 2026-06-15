@@ -35,13 +35,17 @@ stage_args:
       enable_lora: true
       # Colocate-memory trim: the AR stage only needs prompt + max_new_tokens
       # (~4096), not the model's full 22800 ctx. Capping max_model_len shrinks
-      # the KV-cache reservation (~21 GiB → a few GiB) and gpu_memory_util 0.9→0.7
-      # lowers the resident/slept footprint — both free room on the shared train
-      # cards (engine sleep keeps a few GiB on GPU 0-3, which the FSDP backward
-      # competes with). max_num_batched_tokens 32768→8192 also clears the
+      # the KV-cache reservation. gpu_memory_utilization IS the AR engine's
+      # RESIDENT footprint on GPU 0-3 during the colocate train step: vllm-omni's
+      # LLM-stage sleep does NOT release the CuMem reservation (observed:
+      # level=1 AND level=2 both freed 0 GiB, ~61 GiB stayed resident), so the
+      # slept engine and the FSDP train shard must coexist in 95 GiB. 0.7
+      # (~66 GiB) OOMed the train-step forward by ~48 MiB; 0.5 (~47 GiB: ~40 GiB
+      # weights + a few GiB KV, ample for max_num_seqs=1) leaves ~48 GiB for the
+      # train shard + backward. max_num_batched_tokens 32768→8192 also clears the
       # "exceeds max_num_seqs*max_model_len" boot warning.
       max_model_len: 8192
-      gpu_memory_utilization: 0.7
+      gpu_memory_utilization: 0.5
       enforce_eager: true
       trust_remote_code: true
       engine_output_type: latent
