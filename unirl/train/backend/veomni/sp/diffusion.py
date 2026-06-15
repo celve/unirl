@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, NamedTuple, Optional
 
 import torch
 import torch.nn.functional as F
@@ -37,7 +37,18 @@ from torch import Tensor, nn
 logger = logging.getLogger(__name__)
 
 
-def _sp():
+class _SP(NamedTuple):
+    """Named VeOmni SP handles (see :func:`_sp`) -- attribute access instead of
+    positional unpacking, so call sites read ``sp.slice_input_tensor`` not ``_, _, _``."""
+
+    get_parallel_state: Callable
+    slice_input_tensor: Callable
+    gather_outputs: Callable
+    gather_seq_scatter_heads: Callable
+    gather_heads_scatter_seq: Callable
+
+
+def _sp() -> _SP:
     """Lazy VeOmni handles (after the selective-import shim is installed)."""
     from unirl.train.backend.veomni import _compat
 
@@ -49,34 +60,44 @@ def _sp():
         gather_seq_scatter_heads,
     )
 
-    return (get_parallel_state, slice_input_tensor, gather_outputs,
-            gather_seq_scatter_heads, gather_heads_scatter_seq)
+    return _SP(get_parallel_state, slice_input_tensor, gather_outputs,
+               gather_seq_scatter_heads, gather_heads_scatter_seq)
 
 
 # ---------------------------------------------------------------------------
 # Mechanism 1: Ulysses all-to-all around dispatch_attention_fn (newer models)
 # ---------------------------------------------------------------------------
 
+def _reject_attn_mask(args: Any, kwargs: Any) -> None:
+    """diffusion SP v1 has no masked path; refuse if diffusers built an attn mask."""
+    if kwargs.get("attn_mask", args[0] if args else None) is not None:
+        raise NotImplementedError(
+            "diffusion SP v1 does not support an attention mask under Ulysses; "
+            "ensure each stream length is divisible by sp_size so no mask is built."
+        )
+
+
 def _make_ulysses_dispatch(orig_dispatch: Callable) -> Callable:
     import functools
 
-    get_parallel_state, _, _, gather_seq_scatter_heads, gather_heads_scatter_seq = _sp()
+    sp = _sp()
+    get_parallel_state = sp.get_parallel_state
+    gather_seq_scatter_heads = sp.gather_seq_scatter_heads
+    gather_heads_scatter_seq = sp.gather_heads_scatter_seq
 
     @functools.wraps(orig_dispatch)
     def ulysses_dispatch(query: Tensor, key: Tensor, value: Tensor, *args: Any, **kwargs: Any):
         ps = get_parallel_state()
-        if not ps.ulysses_enabled:
+        # Intervene only for SP self-attention. Disabled -> passthrough. Cross-attention
+        # (e.g. Wan text branch: sliced image Q vs full text K/V => unequal seq lengths)
+        # attends locally per rank and also passes through -- the image Q is already
+        # sliced to local by the boundary hook, so it must NOT be all-to-all'd.
+        if not ps.ulysses_enabled or query.shape[1] != key.shape[1]:
             return orig_dispatch(query, key, value, *args, **kwargs)
-        # Cross-attention (e.g. Wan text branch): sliced image query vs full text
-        # K/V -> different seq lengths; each rank attends locally, no all-to-all.
-        if query.shape[1] != key.shape[1]:
-            return orig_dispatch(query, key, value, *args, **kwargs)
-        attn_mask = kwargs.get("attn_mask", args[0] if args else None)
-        if attn_mask is not None:
-            raise NotImplementedError(
-                "diffusion SP v1 does not support an attention mask under Ulysses; "
-                "ensure each stream length is divisible by sp_size so no mask is built."
-            )
+        _reject_attn_mask(args, kwargs)  # v1: no masked path under Ulysses
+
+        # Self-attention joint all-to-all: each rank gathers the full sequence and keeps
+        # its slice of heads, attends over the full (order-invariant) set, then inverts.
         g = ps.sp_group
         query = gather_seq_scatter_heads(query, seq_dim=1, head_dim=2, group=g)
         key = gather_seq_scatter_heads(key, seq_dim=1, head_dim=2, group=g)
@@ -89,7 +110,15 @@ def _make_ulysses_dispatch(orig_dispatch: Callable) -> Callable:
 
 
 def _patch_attention_dispatch(model: nn.Module) -> bool:
-    """Patch ``dispatch_attention_fn`` in the model's module. Returns True if patched."""
+    """Wrap the model module's ``dispatch_attention_fn`` with the Ulysses all-to-all.
+
+    Newer diffusers transformers route EVERY attention call through a single
+    module-level ``dispatch_attention_fn(q, k, v, ...)`` indirection, so replacing
+    that one global intercepts all attention in the model without touching any
+    submodule. Returns False if the model's module has no such global (older models,
+    e.g. SD3 -> caller falls back to processor injection). Idempotent via the
+    ``_unirl_sp_patched`` flag on the wrapper.
+    """
     module = sys.modules.get(type(model).__module__)
     if module is None or not hasattr(module, "dispatch_attention_fn"):
         return False
@@ -139,8 +168,8 @@ class SPAttentionProcessor:
     def __init__(self, sp_group: Any, original_processor: Any = None):
         self.sp_group = sp_group
         self.original_processor = original_processor
-        _, _, _, gsh, ghs = _sp()
-        self._gather_seq, self._gather_heads = gsh, ghs
+        sp = _sp()
+        self._gather_seq, self._gather_heads = sp.gather_seq_scatter_heads, sp.gather_heads_scatter_seq
 
     def _a2a_sh(self, x):  # scatter heads, gather seq
         return self._gather_seq(x, seq_dim=1, head_dim=2, group=self.sp_group)
@@ -156,59 +185,78 @@ class SPAttentionProcessor:
         has_added_kv = hasattr(attn, "add_q_proj") and attn.add_q_proj is not None and is_cross
         b = hidden_states.shape[0]
 
-        query = attn.to_q(hidden_states)
         kv_in = hidden_states if (has_added_kv or not is_cross) else encoder_hidden_states
+        query, key, value, inner = self._project_qkv(attn, hidden_states, kv_in, b)
+        if has_added_kv:
+            query, key, value = self._prepend_added_kv(attn, encoder_hidden_states, query, key, value, b, inner)
+
+        if image_rotary_emb is not None:
+            query = apply_rotary_emb(query, image_rotary_emb)
+            key = apply_rotary_emb(key, image_rotary_emb)
+        scale = attn.scale if hasattr(attn, "scale") else (inner // attn.heads) ** -0.5
+
+        if has_added_kv:
+            return self._dual_stream_attend(attn, query, key, value, encoder_hidden_states.shape[1],
+                                            scale, attention_mask, b, inner)
+        return self._single_stream_attend(attn, query, key, value, is_cross, scale, attention_mask, b, inner)
+
+    def _project_qkv(self, attn, hidden_states, kv_in, b):
+        """Project Q/K/V and apply QK-norm before or after the head-reshape, matching the
+        processor's ``normalized_shape`` (``(inner,)`` -> before view, ``(hd,)`` -> after)."""
+        query = attn.to_q(hidden_states)
         key, value = attn.to_k(kv_in), attn.to_v(kv_in)
         inner = query.shape[-1]
         hd = inner // attn.heads
         nq = getattr(attn, "norm_q", None) is not None
         nk = getattr(attn, "norm_k", None) is not None
-        pre = bool(nq and hasattr(attn.norm_q, "normalized_shape") and attn.norm_q.normalized_shape == (inner,))
-        if pre:
+        norm_before_view = bool(nq and hasattr(attn.norm_q, "normalized_shape") and attn.norm_q.normalized_shape == (inner,))
+        if norm_before_view:
             if nq: query = attn.norm_q(query)
             if nk: key = attn.norm_k(key)
         query = query.view(b, -1, attn.heads, hd)
         key = key.view(b, -1, attn.heads, hd)
         value = value.view(b, -1, attn.heads, hd)
-        if not pre:
+        if not norm_before_view:
             if nq: query = attn.norm_q(query)
             if nk: key = attn.norm_k(key)
+        return query, key, value, inner
 
-        if has_added_kv:
-            eq = attn.add_q_proj(encoder_hidden_states).view(b, -1, attn.heads, hd)
-            ek = attn.add_k_proj(encoder_hidden_states).view(b, -1, attn.heads, hd)
-            ev = attn.add_v_proj(encoder_hidden_states).view(b, -1, attn.heads, hd)
-            if getattr(attn, "norm_added_q", None) is not None: eq = attn.norm_added_q(eq)
-            if getattr(attn, "norm_added_k", None) is not None: ek = attn.norm_added_k(ek)
-            query, key, value = torch.cat([eq, query], 1), torch.cat([ek, key], 1), torch.cat([ev, value], 1)
+    def _prepend_added_kv(self, attn, encoder_hidden_states, query, key, value, b, inner):
+        """Joint attention: project the encoder stream's added Q/K/V (+QK-norm) and prepend it."""
+        hd = inner // attn.heads
+        enc_q = attn.add_q_proj(encoder_hidden_states).view(b, -1, attn.heads, hd)
+        enc_k = attn.add_k_proj(encoder_hidden_states).view(b, -1, attn.heads, hd)
+        enc_v = attn.add_v_proj(encoder_hidden_states).view(b, -1, attn.heads, hd)
+        if getattr(attn, "norm_added_q", None) is not None: enc_q = attn.norm_added_q(enc_q)
+        if getattr(attn, "norm_added_k", None) is not None: enc_k = attn.norm_added_k(enc_k)
+        return torch.cat([enc_q, query], 1), torch.cat([enc_k, key], 1), torch.cat([enc_v, value], 1)
 
-        if image_rotary_emb is not None:
-            query = apply_rotary_emb(query, image_rotary_emb)
-            key = apply_rotary_emb(key, image_rotary_emb)
-        scale = attn.scale if hasattr(attn, "scale") else hd ** -0.5
+    def _dual_stream_attend(self, attn, query, key, value, enc_len, scale, attention_mask, b, inner):
+        """Joint streams [encoder|image] (or [image|encoder] for JointAttnProcessor2_0):
+        split, all-to-all each stream, attend over the joint set in the processor's order,
+        invert, split back into image/encoder outputs."""
+        encoder_first = type(self.original_processor).__name__ != "JointAttnProcessor2_0"
+        enc_q, img_q = query[:, :enc_len], query[:, enc_len:]
+        enc_k, img_k = key[:, :enc_len], key[:, enc_len:]
+        enc_v, img_v = value[:, :enc_len], value[:, enc_len:]
+        enc_q, enc_k, enc_v = self._a2a_sh(enc_q), self._a2a_sh(enc_k), self._a2a_sh(enc_v)
+        img_q, img_k, img_v = self._a2a_sh(img_q), self._a2a_sh(img_k), self._a2a_sh(img_v)
+        if encoder_first:
+            q, k, v = torch.cat([enc_q, img_q], 1), torch.cat([enc_k, img_k], 1), torch.cat([enc_v, img_v], 1)
+        else:
+            q, k, v = torch.cat([img_q, enc_q], 1), torch.cat([img_k, enc_k], 1), torch.cat([img_v, enc_v], 1)
+        out = _sdpa(q, k, v, scale, attention_mask)
+        full_enc, full_img = enc_q.shape[1], img_q.shape[1]
+        enc_out, img_out = (out[:, :full_enc], out[:, full_enc:]) if encoder_first else (out[:, full_img:], out[:, :full_img])
+        enc_out, img_out = self._a2a_hs(enc_out), self._a2a_hs(img_out)
+        hs = attn.to_out[0](img_out.reshape(b, -1, inner))
+        if len(attn.to_out) > 1: hs = attn.to_out[1](hs)
+        enc = enc_out.reshape(b, -1, inner)
+        if not getattr(attn, "context_pre_only", False): enc = attn.to_add_out(enc)
+        return hs, enc
 
-        if has_added_kv:
-            encoder_first = type(self.original_processor).__name__ != "JointAttnProcessor2_0"
-            el = encoder_hidden_states.shape[1]
-            eq, iq = query[:, :el], query[:, el:]
-            ek, ik = key[:, :el], key[:, el:]
-            ev, iv = value[:, :el], value[:, el:]
-            eq, ek, ev = self._a2a_sh(eq), self._a2a_sh(ek), self._a2a_sh(ev)
-            iq, ik, iv = self._a2a_sh(iq), self._a2a_sh(ik), self._a2a_sh(iv)
-            if encoder_first:
-                q, k, v = torch.cat([eq, iq], 1), torch.cat([ek, ik], 1), torch.cat([ev, iv], 1)
-            else:
-                q, k, v = torch.cat([iq, eq], 1), torch.cat([ik, ek], 1), torch.cat([iv, ev], 1)
-            out = _sdpa(q, k, v, scale, attention_mask)
-            fe, fi = eq.shape[1], iq.shape[1]
-            enc_out, img_out = (out[:, :fe], out[:, fe:]) if encoder_first else (out[:, fi:], out[:, :fi])
-            enc_out, img_out = self._a2a_hs(enc_out), self._a2a_hs(img_out)
-            hs = attn.to_out[0](img_out.reshape(b, -1, inner))
-            if len(attn.to_out) > 1: hs = attn.to_out[1](hs)
-            enc = enc_out.reshape(b, -1, inner)
-            if not getattr(attn, "context_pre_only", False): enc = attn.to_add_out(enc)
-            return hs, enc
-
+    def _single_stream_attend(self, attn, query, key, value, is_cross, scale, attention_mask, b, inner):
+        """Cross-attention: attend locally (no all-to-all). Self-attention: full all-to-all."""
         if is_cross:
             out = _sdpa(query, key, value, scale, attention_mask)
         else:
@@ -238,7 +286,11 @@ def inject_sp_processors(model: nn.Module, sp_group: Any) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Per-model boundary hooks: slice streams + RoPE in, gather hidden out
+# Per-model boundary hooks: slice streams + RoPE in, gather hidden out.
+# Three models use the BLOCK-level pattern (slice at blocks[0], gather at norm_out)
+# via _install_boundary_hooks; flux2 uses a MODEL-level pattern (slice both streams at
+# model input, gather image at model output) because its dual->single + text-strip
+# layout has no single block boundary -- kept inline in _wrap_flux2.
 # ---------------------------------------------------------------------------
 
 def _install_boundary_hooks(model, sp_group, blocks_attr, norm_out_attr, rope_hook=None,
@@ -247,7 +299,10 @@ def _install_boundary_hooks(model, sp_group, blocks_attr, norm_out_attr, rope_ho
     image stream at the output norm. ``slice_encoder=False`` keeps the text full
     (Wan cross-attention). Handles kwargs (qwen/sd3) and positional (wan) calls.
     """
-    get_parallel_state, slice_input_tensor, gather_outputs, _, _ = _sp()
+    sp = _sp()
+    get_parallel_state, slice_input_tensor, gather_outputs = sp.get_parallel_state, sp.slice_input_tensor, sp.gather_outputs
+    # block0_pre records the pre-slice image length; norm_out_pre reads it to drop SP
+    # divisibility padding after the gather.
     state: Dict[str, int] = {}
 
     def block0_pre(_m, args, kwargs):
@@ -282,23 +337,27 @@ def _install_boundary_hooks(model, sp_group, blocks_attr, norm_out_attr, rope_ho
         getattr(model, rope_attr).register_forward_hook(rope_hook)
 
 
-def _make_qwen_rope_hook(sp_group):
-    get_parallel_state, slice_input_tensor, *_ = _sp()
+def _make_rope_slice_hook(sp_group, dim: int):
+    """Slice RoPE freqs across SP ranks (each rank keeps its stream's slice). Handles a
+    single freqs tensor or a (cos, sin)/(vid, txt) tuple. pos_embed runs full (before
+    slicing), so the freqs arriving here are full-length."""
+    sp = _sp()
+    get_parallel_state, slice_input_tensor = sp.get_parallel_state, sp.slice_input_tensor
 
     def hook(_m, _inp, out):
-        # pos_embed runs after text_seq_len is read full, so RoPE is full-length;
-        # slice each stream's freqs (vid: image positions, txt: text positions).
         if not get_parallel_state().ulysses_enabled:
             return out
-        vid, txt = out
-        return (slice_input_tensor(vid, dim=0, group=sp_group), slice_input_tensor(txt, dim=0, group=sp_group))
+        if isinstance(out, (tuple, list)):
+            return type(out)(slice_input_tensor(t, dim=dim, group=sp_group) for t in out)
+        return slice_input_tensor(out, dim=dim, group=sp_group)
 
     return hook
 
 
 def _wrap_qwen_image(model, sp_group):
+    # qwen pos_embed returns (vid, txt) freqs; slice each on dim 0 (the per-stream freq dim).
     _install_boundary_hooks(model, sp_group, "transformer_blocks", "norm_out",
-                            rope_hook=_make_qwen_rope_hook(sp_group), rope_attr="pos_embed")
+                            rope_hook=_make_rope_slice_hook(sp_group, dim=0), rope_attr="pos_embed")
     logger.info("diffusion SP: qwen-image boundary hooks installed")
 
 
@@ -308,38 +367,26 @@ def _wrap_sd3(model, sp_group):
     logger.info("diffusion SP: sd3 boundary hooks installed")
 
 
-def _make_wan_rope_hook(sp_group):
-    get_parallel_state, slice_input_tensor, *_ = _sp()
-
-    def hook(_m, _inp, out):
-        # Wan rotary: (cos, sin), each (1, S_img, 1, D); slice the image seq dim.
-        if not get_parallel_state().ulysses_enabled:
-            return out
-        if isinstance(out, (tuple, list)):
-            return type(out)(slice_input_tensor(t, dim=1, group=sp_group) for t in out)
-        return slice_input_tensor(out, dim=1, group=sp_group)
-
-    return hook
-
-
 def _wrap_wan(model, sp_group):
     # Wan: image self-attn (slice image) + text cross-attn (text stays FULL; the
     # dispatch cross-attn guard skips its all-to-all). Block call is positional.
+    # Wan rotary: (cos, sin), each (1, S_img, 1, D); slice the image seq dim (dim 1).
     _install_boundary_hooks(model, sp_group, "blocks", "norm_out",
-                            rope_hook=_make_wan_rope_hook(sp_group), rope_attr="rope",
+                            rope_hook=_make_rope_slice_hook(sp_group, dim=1), rope_attr="rope",
                             slice_encoder=False)
     logger.info("diffusion SP: wan boundary hooks installed")
 
 
 def _wrap_flux2(model, sp_group):
-    # flux2: dual->single blocks + text-strip (hidden[:, num_txt_tokens:]). Because
-    # num_txt_tokens == encoder_hidden_states.shape[1] and img_ids/txt_ids are
-    # forward ARGS (not derived from the sliced tensors), we can slice both streams
-    # at the MODEL input (the strip then removes the LOCAL text, leaving image-local)
-    # and gather the image-only output at the MODEL exit. pos_embed is called per
-    # stream (img_ids, txt_ids); slice each (cos, sin) so the in-forward cat is the
-    # joint sliced RoPE.
-    get_parallel_state, slice_input_tensor, gather_outputs, _, _ = _sp()
+    # flux2 uses the MODEL-level boundary (vs block-level for the others): dual->single
+    # blocks + text-strip (hidden[:, num_txt_tokens:]). Because num_txt_tokens ==
+    # encoder_hidden_states.shape[1] and img_ids/txt_ids are forward ARGS (not derived
+    # from the sliced tensors), we slice both streams at the MODEL input (the strip then
+    # removes the LOCAL text, leaving image-local) and gather the image-only output at the
+    # MODEL exit. pos_embed is called per stream (img_ids, txt_ids); slice each (cos, sin)
+    # on dim 0 so the in-forward cat is the joint sliced RoPE.
+    sp = _sp()
+    get_parallel_state, slice_input_tensor, gather_outputs = sp.get_parallel_state, sp.slice_input_tensor, sp.gather_outputs
 
     def model_pre(_m, args, kwargs):
         if not get_parallel_state().ulysses_enabled:
@@ -349,13 +396,6 @@ def _wrap_flux2(model, sp_group):
         if kwargs.get("encoder_hidden_states") is not None:
             kwargs["encoder_hidden_states"] = slice_input_tensor(kwargs["encoder_hidden_states"], dim=1, group=sp_group)
         return args, kwargs
-
-    def rope_hook(_m, _inp, out):
-        if not get_parallel_state().ulysses_enabled:
-            return out
-        if isinstance(out, (tuple, list)):
-            return type(out)(slice_input_tensor(t, dim=0, group=sp_group) for t in out)
-        return slice_input_tensor(out, dim=0, group=sp_group)
 
     def model_post(_m, _args, _kwargs, out):
         if not get_parallel_state().ulysses_enabled:
@@ -368,7 +408,7 @@ def _wrap_flux2(model, sp_group):
         return (sample, *out[1:])
 
     model.register_forward_pre_hook(model_pre, with_kwargs=True)
-    model.pos_embed.register_forward_hook(rope_hook)
+    model.pos_embed.register_forward_hook(_make_rope_slice_hook(sp_group, dim=0))
     model.register_forward_hook(model_post, with_kwargs=True)
     logger.info("diffusion SP: flux2 boundary hooks installed (model-level slice/gather)")
 
@@ -383,8 +423,7 @@ FORWARD_WRAPPERS: Dict[str, Callable[[nn.Module, Any], None]] = {
 
 def apply_diffusion_sequence_parallelism(model: nn.Module, sp_size: int) -> None:
     """Attention SP (dispatch-patch or processor-injection, auto-detected) + boundary hooks."""
-    get_parallel_state, *_ = _sp()
-    sp_group = get_parallel_state().sp_group
+    sp_group = _sp().get_parallel_state().sp_group
 
     if not _patch_attention_dispatch(model):       # newer models
         inject_sp_processors(model, sp_group)      # older models (SD3)
