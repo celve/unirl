@@ -42,13 +42,19 @@ the sequence/activations across sp ranks). Per-rank peak, sp=1 (FSDP baseline)
 vs sp=2 (FSDP + Ulysses). The saving is activation memory, so it grows with
 sequence length.
 
-`sd3_mem_fsdp.py` — SD3.5-medium transformer (measured, 2×H20):
+`sd3_mem_fsdp.py` — SD3.5-medium transformer (measured, H20). world=4 so FSDP
+shards params ÷4 in EVERY column; only the Ulysses degree (sequence sharding)
+changes, isolating the activation saving. Reduction = sp=1 / sp:
 
-| latent (joint seq) | FSDP sp=1 | FSDP+SP sp=2 | reduction |
-|--------------------|-----------|--------------|-----------|
-| 128 (4352)         | 13.17 GB  | 9.76 GB      | 1.35×     |
-| 192 (9472)         | 21.40 GB  | 13.93 GB     | 1.54×     |
-| 256 (16640)        | 32.44 GB  | 19.53 GB     | 1.66×     |
+| latent (joint seq) | sp=1 (FSDP) | sp=2     | sp=4     | sp=4 reduction |
+|--------------------|-------------|----------|----------|----------------|
+| 128 (4352)         | 12.24 GB    | 8.82 GB  | 7.14 GB  | 1.71×          |
+| 192 (9472)         | 20.45 GB    | 12.97 GB | 9.22 GB  | 2.22×          |
+| 256 (16640)        | 31.51 GB    | 18.58 GB | 12.13 GB | 2.60×          |
+
+Both the per-sp reduction and the sp=4-vs-sp=2 gain grow with sequence length
+(activation memory ∝ seq/sp; fixed costs — sharded params, embeds, pos_embed —
+don't shard with the sequence, so returns are sub-linear but widen with length).
 
 `sp_mem_fsdp.py` — Qwen3-4B AR (needs the cu130 `.venv-sglang` env: the
 HF flash-attn kernel; de-risk on real Qwen3 fwd+bwd at L=16384 measured
