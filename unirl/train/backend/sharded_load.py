@@ -58,7 +58,22 @@ def load_trainable_weights(
     weights_path = getattr(bundle, "_transformer_weights_path", None)
     if weights_path is not None:
         load_sharded(model, weights_path, device=device, strict=False)
-        logger.info("Rank %s: loaded trainable weights from %s", rank, weights_path)
+        # Recover init-computed non-persistent state (RoPE inv_freq, sincos tables,
+        # …) clobbered by meta-init `to_empty` and not carried by the checkpoint.
+        # The bundle carries the capture (capture_init_state); restoring here — in
+        # the shared post-load path — is robust to the live trainer's Ray-actor
+        # boundaries where the model-bound deferred closure can be dropped. Without
+        # this the train model keeps garbage RoPE -> garbage replay log-probs ->
+        # the DRPO rollout/replay ratio collapses (~0.05) and nothing learns.
+        from unirl.models.types.meta_init import restore_init_state
+
+        n_recovered = restore_init_state(model, getattr(bundle, "_meta_init_state", None))
+        logger.info(
+            "Rank %s: loaded trainable weights from %s (recovered %d non-persistent tensor(s))",
+            rank,
+            weights_path,
+            n_recovered,
+        )
         return
 
     materialize = getattr(bundle, "materialize", None)

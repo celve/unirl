@@ -46,8 +46,6 @@ from .base import (
 )
 from .grpo import GRPO
 
-_DRPO_DBG_N = 0  # one-shot rollout/replay logp diagnostic (first 3 calls)
-
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -303,25 +301,6 @@ class DRPO(StageAlgorithm):
         # at pre-update weights. Either way the anchor is frozen, so the ratio
         # stays anchored across all num_updates_per_batch optimizer steps.
         old_logp = segment.log_probs.to(dtype=new_logp.dtype, device=new_logp.device)
-
-        global _DRPO_DBG_N
-        if _DRPO_DBG_N < 3:
-            _DRPO_DBG_N += 1
-            _n, _o = new_logp.detach().float(), old_logp.detach().float()
-            _t = segment.tokens
-            _pids = None
-            try:
-                _c = typed_conds.prompt
-                _pids = (_c.input_ids.shape, _c.input_ids[0, -6:].tolist()) if _c is not None and _c.input_ids is not None else None
-            except Exception as _e:  # noqa: BLE001
-                _pids = f"err:{_e}"
-            print(f"[DRPO_DBG] new_logp n={tuple(_n.shape)} mean={_n.mean():.3f} min={_n.min():.3f} "
-                  f"max={_n.max():.3f} head={[round(x,2) for x in _n[:6].tolist()]}", flush=True)
-            print(f"[DRPO_DBG] old_logp n={tuple(_o.shape)} mean={_o.mean():.3f} min={_o.min():.3f} "
-                  f"max={_o.max():.3f} head={[round(x,2) for x in _o[:6].tolist()]}", flush=True)
-            _corr = torch.corrcoef(torch.stack([_n, _o]))[0, 1].item() if _n.numel() > 1 else float("nan")
-            print(f"[DRPO_DBG] corr={_corr:.3f} lengths={segment.lengths[:4].tolist()} "
-                  f"resp_tok_head={_t[:6].tolist() if _t is not None else None} prompt(shape,tail)={_pids}", flush=True)
 
         # Expand per-sample advantages to per-token
         adv_per_token = GRPO._expand_advantages_to_tokens(

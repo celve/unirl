@@ -21,6 +21,7 @@ init-computed state never clobber each other.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 import torch
 from torch import nn
@@ -30,68 +31,93 @@ from unirl.train.deferred import _stamp
 logger = logging.getLogger(__name__)
 
 
-def stamp_init_state_restore(model: nn.Module) -> int:
-    """Capture ``model``'s own init-computed tensors; stamp the restore.
+def capture_init_state(model: nn.Module) -> dict:
+    """Capture ``model``'s init-computed non-persistent state as a picklable dict.
 
-    ``model`` must be built so its non-persistent buffers and plain
-    ``__dict__`` tensors are **real on CPU** (parameters may live on meta) —
-    i.e. under ``accelerate.init_empty_weights(include_buffers=False)``, *not*
-    ``with torch.device("meta")`` (which forces buffers to meta too). Raises
-    ``ValueError`` if any captured tensor is still on meta — the tell-tale of
-    the wrong build context, which would otherwise restore garbage.
+    Returns ``{"buffers": {fqn: cpu_tensor}, "attrs": {(mod, attr): cpu_tensor}}``
+    — every registered buffer NOT in ``state_dict()`` (non-persistent) plus every
+    plain ``__dict__`` tensor attribute, cloned to CPU so the capture survives any
+    transport (Ray pickling, a rebuilt module).
 
-    Returns the number of captured tensors. The captured values keep the
-    closure alive past the build; restored buffers are copied into the
-    materialized (device) buffers with dtype cast, plain attrs are re-attached
-    as CPU tensors (forwards ``.to(device)`` them on use, matching upstream
-    behavior).
+    ``model`` must be built so these tensors are **real on CPU** (parameters may
+    live on meta) — i.e. under ``accelerate.init_empty_weights(include_buffers=False)``,
+    *not* ``with torch.device("meta")`` (which forces buffers to meta too). Raises
+    ``ValueError`` if any captured tensor is still on meta — the tell-tale of the
+    wrong build context, which would otherwise restore garbage.
     """
     persistent = set(model.state_dict().keys())
     buffers = {
-        name: buf.detach().clone()
+        name: buf.detach().cpu().clone()
         for name, buf in model.named_buffers()
         if name not in persistent
     }
-
     attrs = {}
     for mod_name, module in model.named_modules():
         for attr, value in vars(module).items():
             if isinstance(value, torch.Tensor):
-                attrs[(mod_name, attr)] = value.detach().clone()
-
-    if not buffers and not attrs:
-        return 0
+                attrs[(mod_name, attr)] = value.detach().cpu().clone()
 
     on_meta = [name for name, value in buffers.items() if value.is_meta]
     on_meta += [f"{mod_name}.{attr}" for (mod_name, attr), value in attrs.items() if value.is_meta]
     if on_meta:
         raise ValueError(
-            "stamp_init_state_restore: captured init-state is on the meta device "
-            "— nothing real to restore. Build the model under "
+            "capture_init_state: captured init-state is on the meta device "
+            "— nothing real to capture. Build the model under "
             "accelerate.init_empty_weights(include_buffers=False) (parameters on "
             "meta, buffers/attrs real on CPU), not torch.device('meta'). "
             f"Offending tensor(s): {on_meta[:8]}"
         )
+    return {"buffers": buffers, "attrs": attrs}
 
-    def _restore(materialized: nn.Module) -> None:
-        modules = dict(materialized.named_modules())
-        for fqn, value in buffers.items():
-            mod_name, _, buf_name = fqn.rpartition(".")
-            owner = modules[mod_name] if mod_name else materialized
-            live = getattr(owner, buf_name)
-            live.copy_(value.to(device=live.device, dtype=live.dtype))
-        for (mod_name, attr), value in attrs.items():
-            owner = modules.get(mod_name)
-            if owner is not None:
-                owner.__dict__[attr] = value
+
+def restore_init_state(model: nn.Module, captured: Optional[dict]) -> int:
+    """Copy a :func:`capture_init_state` snapshot back onto a materialized module.
+
+    Buffers are ``copy_``-ed into the live (device) buffers with dtype/device cast;
+    plain attrs are re-attached as CPU tensors (forwards ``.to(device)`` them on
+    use, matching upstream). Idempotent and safe to call on a non-meta-init model
+    (``captured=None`` -> no-op). Returns the number of tensors restored.
+    """
+    if not captured:
+        return 0
+    buffers = captured.get("buffers", {})
+    attrs = captured.get("attrs", {})
+    modules = dict(model.named_modules())
+    for fqn, value in buffers.items():
+        mod_name, _, buf_name = fqn.rpartition(".")
+        owner = modules.get(mod_name) if mod_name else model
+        if owner is None or not hasattr(owner, buf_name):
+            continue
+        live = getattr(owner, buf_name)
+        live.copy_(value.to(device=live.device, dtype=live.dtype))
+    for (mod_name, attr), value in attrs.items():
+        owner = modules.get(mod_name)
+        if owner is not None:
+            owner.__dict__[attr] = value
+    n = len(buffers) + len(attrs)
+    if n:
         logger.info(
-            "meta-init restore: %d non-persistent buffer(s), %d plain attr(s)",
-            len(buffers),
-            len(attrs),
+            "restore_init_state: recovered %d non-persistent buffer(s) + plain attr(s)", n
         )
+    return n
 
-    _stamp(model, _restore)
-    return len(buffers) + len(attrs)
+
+def stamp_init_state_restore(model: nn.Module) -> int:
+    """Capture ``model``'s own init-computed tensors; stamp the deferred restore.
+
+    Thin wrapper over :func:`capture_init_state` + :func:`restore_init_state`: the
+    capture is closed over and replayed by ``apply_deferred_ops`` after the backend
+    materializes the module. This is the IN-PROCESS path; for the live trainer the
+    capture is *also* carried on the bundle and replayed by ``load_trainable_weights``
+    (the closure on ``model._deferred_ops`` can be lost when the bundle crosses Ray
+    actors). Both restores are idempotent. Returns the number of captured tensors.
+    """
+    captured = capture_init_state(model)
+    n = len(captured["buffers"]) + len(captured["attrs"])
+    if n == 0:
+        return 0
+    _stamp(model, lambda materialized: restore_init_state(materialized, captured))
+    return n
 
 
 def finalize_meta_init(transformer: nn.Module, *, dtype: torch.dtype) -> nn.Module:
@@ -127,4 +153,9 @@ def finalize_meta_init(transformer: nn.Module, *, dtype: torch.dtype) -> nn.Modu
     return transformer
 
 
-__all__ = ["stamp_init_state_restore", "finalize_meta_init"]
+__all__ = [
+    "stamp_init_state_restore",
+    "capture_init_state",
+    "restore_init_state",
+    "finalize_meta_init",
+]
