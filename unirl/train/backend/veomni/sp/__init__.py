@@ -8,7 +8,11 @@ a per-architecture patcher:
 * **AR** (HF causal-LMs, e.g. Qwen3) — :mod:`.ar`: route attention through
   VeOmni's registered ``veomni_flash_attention_2_with_sp`` and wrap the decoder
   forward to slice the sequence in / gather the hidden states out.
-* **Diffusion** (diffusers transformers) — :mod:`.diffusion` (Phase 2).
+* **Diffusion** (diffusers transformers) — :mod:`.diffusion`.
+* **HunyuanImage3** (composite custom-SDPA decoder) — :mod:`.hunyuan_image3`:
+  monkey-patch ``HunyuanImage3SDPAAttention`` with the Ulysses all-to-all and
+  wrap the decoder forward to slice the sequence in / gather hidden out (the
+  dense 4D mask stays full).
 
 A true no-op at ``sp_size == 1`` (returns before touching the model). SP itself
 is gated at run time on ``get_parallel_state().ulysses_enabled`` inside the
@@ -30,7 +34,11 @@ def apply_sequence_parallelism(model: nn.Module, sp_size: int) -> None:
     if sp_size <= 1:
         return
 
-    from unirl.train.backend.veomni.sp import ar, diffusion
+    from unirl.train.backend.veomni.sp import ar, diffusion, hunyuan_image3
+
+    if hunyuan_image3.is_hunyuan_image3_model(model):
+        hunyuan_image3.apply_hi3_sequence_parallelism(model, sp_size)
+        return
 
     if ar.is_ar_causal_lm(model):
         ar.apply_ar_sequence_parallelism(model, sp_size)

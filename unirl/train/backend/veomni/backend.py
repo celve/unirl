@@ -69,6 +69,7 @@ class VeOmniBackend(BaseFSDP2Backend):
         device: Optional[torch.device] = None,
         rank: int = 0,
         trainable_attr: str = "transformer",
+        wrap_root_leaves: bool = False,
         lora_cfg: Optional[LoraConfig] = None,
         ema_lora_cfg: Optional[EmaLoraConfig] = None,
         ema_cfg: Optional[EmaFullConfig] = None,
@@ -119,7 +120,16 @@ class VeOmniBackend(BaseFSDP2Backend):
         shadow = self._inject_structural(model, lora_cfg, ema_lora_cfg, ema_cfg)
 
         # Shard + materialize (to_empty; init_weights is a bundle-stamped no-op).
-        # Root-wrapped by VeOmni — single-module trainables only.
+        # Root-wrapped by VeOmni. ``wrap_root_leaves`` (HI3 / outer-wrapper
+        # composites) additionally gives each root-leaf-with-params (wte/ln_f)
+        # its own group so the outer wrapper can call them outside the decoder's
+        # managed forward. The tie flag lives on the bundle WRAPPER config — the
+        # wrapped decoder has no ``.config`` — and degrades to False (the safe
+        # separate-wrap default for the embedding-DTensor bug).
+        tie_word_embeddings = bool(
+            getattr(getattr(self._bundle, "transformer", None), "config", None)
+            and getattr(self._bundle.transformer.config, "tie_word_embeddings", False)
+        )
         veomni_parallelize(
             model,
             block_class_names=tuple(block_class_names),
@@ -128,6 +138,8 @@ class VeOmniBackend(BaseFSDP2Backend):
             reshard_after_forward=fsdp_cfg.reshard_after_forward,
             activation_checkpointing=fsdp_cfg.activation_checkpointing,
             use_torch_compile=fsdp_cfg.use_torch_compile,
+            tie_word_embeddings=tie_word_embeddings,
+            wrap_root_leaves=wrap_root_leaves,
         )
 
         # Ulysses sequence parallelism (no-op at sp_size=1): route attention
