@@ -16,10 +16,10 @@ Pairs with ``RolloutResp`` (in ``unirl/types/rollout_resp.py``). Carries:
 - ``sampling_params: Dict[str, BaseSamplingParams]`` — typed sampling config
   keyed by modality slot: ``"diffusion"`` → ``DiffusionSamplingParams`` and/or
   ``"ar"`` → ``ARSamplingParams``. Pure pipelines carry a single key; composed
-  (PE / unified-model) pipelines carry both. Use ``get_diffusion_params()`` /
-  ``get_ar_params()`` to extract a modality's sub-config and
-  ``total_samples_per_prompt()`` for the per-prompt fanout (product across
-  modalities).
+  (PE / unified-model) pipelines carry both. Read a modality's sub-config with
+  ``sampling_params.get("diffusion")`` / ``.get("ar")`` (``None`` when that
+  modality is absent) and use ``total_samples_per_prompt()`` for the per-prompt
+  fanout (product across modalities).
 - ``stage_config: Dict[str, Any]`` — model-specific routing metadata
   (``"task"``, ``"bot_task"``, ``"sys_type"``, ``"chat"``).
 - ``sigmas: Optional[torch.Tensor]`` — the σ schedule for this rollout,

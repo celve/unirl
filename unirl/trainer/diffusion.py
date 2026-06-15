@@ -15,7 +15,7 @@ from unirl.train.stack import TrainStepResult
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
 from unirl.types.prompts import RolloutInputs
 from unirl.types.rollout_req import RolloutReq
-from unirl.types.sampling import BaseSamplingParams, get_diffusion_params, total_samples_per_prompt
+from unirl.types.sampling import BaseSamplingParams, total_samples_per_prompt
 from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
 logger = logging.getLogger(__name__)
@@ -233,7 +233,7 @@ class DiffusionTrainer(BaseTrainer):
         if latent_shape_fn is None:
             return None
         try:
-            shape = latent_shape_fn(model_config=model_cfg, sampling_spec=get_diffusion_params(self.sampling_params))
+            shape = latent_shape_fn(model_config=model_cfg, sampling_spec=self.sampling_params.get("diffusion"))
         except NotImplementedError:
             return None
         return [int(x) for x in shape]
@@ -251,7 +251,7 @@ class DiffusionTrainer(BaseTrainer):
         resolved ``sde_indices`` ride to the engine.
         """
         inputs = inputs.expand(total_samples_per_prompt(self.sampling_params))
-        diffusion = get_diffusion_params(self.sampling_params)
+        diffusion = self.sampling_params.get("diffusion")
         sde_indices = diffusion.resolve_sde_indices(rollout_id)
         diffusion = dataclasses.replace(diffusion, sde_indices=sde_indices, scheduler=None)
         sampling_params = {**self.sampling_params, "diffusion": diffusion}
@@ -278,7 +278,7 @@ class DiffusionTrainer(BaseTrainer):
         init_noise_group_ids: list = []
         init_noise_latent_shape = self._noise_latent_shape
         if init_noise_latent_shape is not None:
-            if bool(getattr(get_diffusion_params(self.sampling_params), "init_same_noise", False)):
+            if bool(getattr(self.sampling_params.get("diffusion"), "init_same_noise", False)):
                 init_noise_group_ids = [f"r{rollout_id}:{g}" for g in inputs.group_ids]
             else:
                 init_noise_group_ids = [f"r{rollout_id}:{s}" for s in inputs.sample_ids]

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, List, Optional
 from unirl.types.primitives import Texts
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
-from unirl.types.sampling import DiffusionSamplingParams, get_diffusion_params
+from unirl.types.sampling import DiffusionSamplingParams
 
 from ..conditions import HunyuanImage3DiffusionConditions
 
@@ -46,7 +46,7 @@ def generate(pipeline: "HunyuanImage3Pipeline", req: RolloutReq) -> RolloutResp:
             f"{len(negatives.texts)} != text length {len(texts.texts)}"
         )
 
-    params: DiffusionSamplingParams = get_diffusion_params(req.sampling_params)
+    params: DiffusionSamplingParams = req.sampling_params.get("diffusion")
     bot_task: str = str(req.stage_config.get("bot_task", "image"))
 
     # Build the upstream multimodal input tensors. CFG-batched [cond, uncond]

@@ -13,7 +13,7 @@ from unirl.train.stack import TrainStepResult
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
 from unirl.types.prompts import RolloutInputs
 from unirl.types.rollout_req import RolloutReq
-from unirl.types.sampling import BaseSamplingParams, get_ar_params, total_samples_per_prompt
+from unirl.types.sampling import BaseSamplingParams, total_samples_per_prompt
 from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
 logger = logging.getLogger(__name__)
@@ -177,7 +177,7 @@ class ARTrainer(BaseTrainer):
             result,
             resp,
             step_time_s=time.perf_counter() - t0,
-            trunc_len=getattr(get_ar_params(self.sampling_params), "max_new_tokens", None),
+            trunc_len=getattr(self.sampling_params.get("ar"), "max_new_tokens", None),
         )
         return result, mean_reward
 
@@ -195,7 +195,7 @@ class ARTrainer(BaseTrainer):
         eval_inputs = self.data_source.get_eval_samples(self.eval_num_prompts)
         inputs = eval_inputs.expand(self.eval_samples_per_prompt)
         eval_ar = dataclasses.replace(
-            get_ar_params(self.sampling_params),
+            self.sampling_params.get("ar"),
             samples_per_prompt=self.eval_samples_per_prompt,
             temperature=self.eval_temperature,
         )

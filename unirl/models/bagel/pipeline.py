@@ -46,7 +46,6 @@ from unirl.types.noise_recipe import NoiseRecipe
 from unirl.types.primitives import Texts
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack
-from unirl.types.sampling import get_diffusion_params
 from unirl.types.segments.latent import LatentSegment
 
 from .conditions import BagelDiffusionConditions
@@ -178,7 +177,7 @@ class BagelPipeline(Pipeline):
                 f"BagelPipeline.generate: req.primitives['text'] must be Texts, "
                 f"got {type(texts).__name__ if texts is not None else 'None'}"
             )
-        params = get_diffusion_params(req.sampling_params)
+        params = req.sampling_params.get("diffusion")
         if not isinstance(params, BagelDiffusionParams):
             raise TypeError(
                 f"BagelPipeline.generate: sampling_params must be BagelDiffusionParams, got {type(params).__name__}"

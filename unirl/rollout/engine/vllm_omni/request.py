@@ -44,7 +44,6 @@ import torch
 from unirl.config.require import require
 from unirl.types.primitives import Image, Images, Texts
 from unirl.types.rollout_req import RolloutReq
-from unirl.types.sampling import get_ar_params, get_diffusion_params
 
 if TYPE_CHECKING:
     from unirl.rollout.engine.vllm_omni.config import VLLMOmniEngineConfig
@@ -167,7 +166,7 @@ def _to_omni_sd35_t2i(
         raise ValueError("modality='sd35_t2i' does not accept req.primitives['image']")
 
     texts = _texts_from_req(req)
-    diff_params = get_diffusion_params(req.sampling_params)
+    diff_params = req.sampling_params.get("diffusion")
 
     height = int(getattr(diff_params, "height", cfg.default_height))
     width = int(getattr(diff_params, "width", cfg.default_width))
@@ -275,7 +274,7 @@ def _to_omni_t2v(
         raise ValueError("modality='t2v' does not accept req.primitives['image']")
 
     texts = _texts_from_req(req)
-    diff_params = get_diffusion_params(req.sampling_params)
+    diff_params = req.sampling_params.get("diffusion")
 
     height = int(getattr(diff_params, "height", cfg.default_height))
     width = int(getattr(diff_params, "width", cfg.default_width))
@@ -386,7 +385,7 @@ def _to_omni_dit_recaption(
         raise ValueError(f"dit_recaption: cot_text count {len(cot.texts)} != prompt count {len(texts.texts)}.")
 
     _, sys_type, _ = _resolve_task("dit_recaption", req.stage_config or {})
-    diff_params = get_diffusion_params(req.sampling_params)
+    diff_params = req.sampling_params.get("diffusion")
     height = int(getattr(diff_params, "height", cfg.default_height))
     width = int(getattr(diff_params, "width", cfg.default_width))
 
@@ -488,8 +487,8 @@ def _to_omni_per_stage(
     if not has_image_input and req.primitives.get("image") is not None:
         raise ValueError(f"modality={modality!r} does not accept req.primitives['image']")
 
-    diff_params = get_diffusion_params(req.sampling_params)
-    ar_params = get_ar_params(req.sampling_params) or {}
+    diff_params = req.sampling_params.get("diffusion")
+    ar_params = req.sampling_params.get("ar") or {}
 
     height = int(getattr(diff_params, "height", cfg.default_height))
     width = int(getattr(diff_params, "width", cfg.default_width))
@@ -525,7 +524,7 @@ def _to_omni_per_stage(
     # AR sampling — applies to every modality (Stage 0 is always AR).
     # ``logprobs=1`` makes vLLM emit per-token logp on the sampled token
     # (read by ``ar_capture.extract_ar_segment``).
-    # ``ar_params`` is an ``ARSamplingParams`` dataclass (from get_ar_params) or
+    # ``ar_params`` is an ``ARSamplingParams`` dataclass (sampling_params["ar"]) or
     # ``{}`` when there is no AR sub-block — use getattr, which returns the
     # dataclass field for the former and the default for the latter (a plain
     # ``{}`` has no such attribute). NB the dataclass field is ``max_new_tokens``.

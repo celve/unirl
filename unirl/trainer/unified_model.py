@@ -71,7 +71,7 @@ from unirl.types.primitives import Texts
 from unirl.types.prompts import RolloutInputs
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, RolloutTrack, _track_with_field
-from unirl.types.sampling import BaseSamplingParams, get_ar_params, get_diffusion_params
+from unirl.types.sampling import BaseSamplingParams
 from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
 logger = logging.getLogger(__name__)
@@ -315,7 +315,7 @@ class UnifiedModelTrainer(BaseTrainer):
         schedule is resolved off the diffusion sub-block per rollout and stamped
         back onto a per-request copy.
         """
-        diff_params = get_diffusion_params(self.sampling_params)
+        diff_params = self.sampling_params.get("diffusion")
         sde_indices = diff_params.resolve_sde_indices(rollout_id)
         diffusion = dataclasses.replace(diff_params, sde_indices=sde_indices, scheduler=None)
         sampling_params = {**self.sampling_params, "diffusion": diffusion}
@@ -409,8 +409,8 @@ class UnifiedModelTrainer(BaseTrainer):
             raise TypeError("UnifiedModelTrainer.run_rollout: req.primitives['text'] must be a Texts primitive.")
         prompts = list(texts.texts)
 
-        ar_params = get_ar_params(req.sampling_params)
-        diff_params = get_diffusion_params(req.sampling_params)
+        ar_params = req.sampling_params.get("ar")
+        diff_params = req.sampling_params.get("diffusion")
         n_recaptions = int(ar_params.samples_per_prompt) if ar_params is not None else 1
         n_images = int(diff_params.samples_per_prompt)
 
@@ -547,8 +547,8 @@ class UnifiedModelTrainer(BaseTrainer):
         #    rank with req(P) > track(P*N*M/dp) → "not an integer multiple". A
         #    1:1 req shards together with the track (req==track per rank).
         img_track = resp.tracks[IMAGE_TRACK]
-        ar_params = get_ar_params(req.sampling_params)
-        diff_params = get_diffusion_params(req.sampling_params)
+        ar_params = req.sampling_params.get("ar")
+        diff_params = req.sampling_params.get("diffusion")
         n_rec = int(ar_params.samples_per_prompt) if ar_params is not None else 1
         n_img = int(diff_params.samples_per_prompt)
         orig_texts = req.primitives.get("text")
@@ -658,8 +658,8 @@ class UnifiedModelTrainer(BaseTrainer):
             # Two-level lineage: image sample k (0..P*N*M-1) descends from AR
             # sample k // M and original prompt k // (N*M). Index the smaller
             # prompt / recaption lists through those factors.
-            ar_params = get_ar_params(self.sampling_params)
-            diff_params = get_diffusion_params(self.sampling_params)
+            ar_params = self.sampling_params.get("ar")
+            diff_params = self.sampling_params.get("diffusion")
             n_rec = int(ar_params.samples_per_prompt) if ar_params is not None else 1
             n_img = max(1, int(diff_params.samples_per_prompt))
             n = max(len(sample_ids), n_imgs)

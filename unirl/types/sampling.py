@@ -35,37 +35,10 @@ def _is_param_dict(sampling: Any) -> bool:
 
     ``RolloutReq.sampling_params`` is a ``Dict[str, BaseSamplingParams]``. A bare
     ``DiffusionSamplingParams`` (or its raw OmegaConf node from a flat
-    ``cfg.sampling``) is NOT a param dict — those fall through to the flat path in
-    the accessors below.
+    ``cfg.sampling``) is NOT a param dict — :func:`total_samples_per_prompt` then
+    treats it as a single modality.
     """
     return isinstance(sampling, Mapping) and ("diffusion" in sampling or "ar" in sampling)
-
-
-def get_diffusion_params(sampling: Any) -> Optional["DiffusionSamplingParams"]:
-    """Extract the diffusion params from a modality dict, or pass a flat config through.
-
-    For the canonical ``{"diffusion": ..., "ar": ...}`` dict this returns the
-    ``"diffusion"`` entry (``None`` if absent). For a flat, single-modality config
-    (a bare ``DiffusionSamplingParams`` or its raw OmegaConf node) it returns the
-    object itself.
-    """
-    if sampling is None:
-        return None
-    if _is_param_dict(sampling):
-        return sampling.get("diffusion")
-    return sampling
-
-
-def get_ar_params(sampling: Any) -> Optional["ARSamplingParams"]:
-    """Extract the AR params from a modality dict, or a bare ``ARSamplingParams``.
-
-    Returns ``None`` when there is no AR component (e.g. a pure-diffusion config).
-    """
-    if sampling is None:
-        return None
-    if _is_param_dict(sampling):
-        return sampling.get("ar")
-    return sampling if isinstance(sampling, ARSamplingParams) else None
 
 
 def total_samples_per_prompt(sampling: Any) -> int:

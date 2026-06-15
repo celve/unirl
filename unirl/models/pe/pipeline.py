@@ -31,7 +31,6 @@ from unirl.models.types.pipeline import Pipeline
 from unirl.types.primitives import Texts
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.rollout_resp import RolloutResp, _track_with_field
-from unirl.types.sampling import get_ar_params, get_diffusion_params
 
 from .bundle import PEBundle
 
@@ -146,8 +145,8 @@ class PEPipeline(Pipeline):
                 "The LLM child requires the raw user prompt at primitives['text']."
             )
 
-        ar_params = get_ar_params(req.sampling_params)
-        diff_params = get_diffusion_params(req.sampling_params)
+        ar_params = req.sampling_params.get("ar")
+        diff_params = req.sampling_params.get("diffusion")
         n_rewrites = int(ar_params.samples_per_prompt) if ar_params is not None else 1
         n_images = int(diff_params.samples_per_prompt)
 
@@ -234,7 +233,7 @@ class PEPipeline(Pipeline):
             group_ids=list(group_ids),
             primitives={"text": texts},
             request_conditions={},
-            sampling_params={"ar": get_ar_params(req.sampling_params)},
+            sampling_params={"ar": req.sampling_params.get("ar")},
             stage_config={k: v for k, v in req.stage_config.items() if k in ("chat",)},
             sigmas=None,
         )
@@ -261,7 +260,7 @@ class PEPipeline(Pipeline):
             group_ids=list(group_ids),
             primitives={"text": texts},
             request_conditions=dict(req.request_conditions),
-            sampling_params={"diffusion": get_diffusion_params(req.sampling_params)},
+            sampling_params={"diffusion": req.sampling_params.get("diffusion")},
             sigmas=req.sigmas,
         )
 

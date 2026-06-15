@@ -18,7 +18,7 @@ from unirl.distributed.group.remote import Remote
 from unirl.types.reward import RewardRequest, RewardResponse
 from unirl.types.rollout_req import PrimitiveValue, RolloutReq
 from unirl.types.rollout_resp import RolloutTrack, _track_with_field
-from unirl.types.sampling import get_ar_params, total_samples_per_prompt
+from unirl.types.sampling import total_samples_per_prompt
 
 from .base import RewardBackend
 
@@ -238,7 +238,7 @@ class RewardService(Remote):
         #   "keep" — leave the raw score (= verl dapo, overlong disabled). No-op here.
         #   "soft" — verl DAPO graded overlong penalty (never a hard zero).
         # seg_lengths and rewards are shard-aligned (one entry per sample).
-        ar_params = get_ar_params(req.sampling_params)
+        ar_params = req.sampling_params.get("ar")
         if self.truncated_reward != "keep" and ar_params is not None and track.segment is not None:
             seg_lengths = getattr(track.segment, "lengths", None)
             if seg_lengths is not None and seg_lengths.numel() == rewards.numel():
