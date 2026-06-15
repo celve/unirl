@@ -44,6 +44,7 @@ def apply_ar_sequence_parallelism(model: nn.Module, sp_size: int) -> None:
     from unirl.train.backend.veomni import _compat
 
     _compat.ensure_attention_patch_installed()
+    _install_b1_dense_attn_patch()
 
     # Set the SP attn impl on the model config and every sub-config that carries
     # one (transformers resolves the attention fn per-forward via this field, so
@@ -60,6 +61,41 @@ def apply_ar_sequence_parallelism(model: nn.Module, sp_size: int) -> None:
         SP_ATTN_IMPL,
         sp_size,
     )
+
+
+def _install_b1_dense_attn_patch() -> None:
+    """Force the dense flash-attn path for B=1 under Ulysses.
+
+    VeOmni gathers q/k/v to the FULL sequence inside its SP flash-attention, but
+    the decoder still hands down the per-rank *local* ``position_ids``. With a
+    2D mask absent (our B=1 pad-strip drops it), transformers' flash-attn derives
+    the varlen ``cu_seqlens`` from that local ``position_ids`` (length S/sp) and
+    applies it to the full gathered q (length S) -> reshape mismatch off by
+    exactly sp. After the wrapper's strip, B=1 is a single dense causal sequence,
+    so we drop the packing hints for B=1 and let the kernel use the dense path
+    (``query_length`` = full seq). B>1 is untouched (keeps varlen). Idempotent.
+    """
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+    orig = ALL_ATTENTION_FUNCTIONS[SP_ATTN_IMPL]
+    if getattr(orig, "_unirl_b1_dense", False):
+        return
+
+    _PACK_KEYS = (
+        "position_ids", "cu_seq_lens_q", "cu_seq_lens_k",
+        "max_length_q", "max_length_k", "max_seqlen_q", "max_seqlen_k",
+    )
+
+    @functools.wraps(orig)
+    def _b1_dense(*args: Any, **kwargs: Any):
+        query = args[1] if len(args) > 1 else kwargs.get("query")
+        if query is not None and query.shape[0] == 1:
+            for k in _PACK_KEYS:
+                kwargs.pop(k, None)
+        return orig(*args, **kwargs)
+
+    _b1_dense._unirl_b1_dense = True
+    ALL_ATTENTION_FUNCTIONS.register(SP_ATTN_IMPL, _b1_dense)
 
 
 def _set_attn_impl(cfg: Any) -> None:
