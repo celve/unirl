@@ -35,6 +35,8 @@ from unirl.utils.dtypes import parse_torch_dtype
 from .bundle import Qwen3Bundle
 from .conditions import Qwen3ARConditions
 
+_REPLAY_DBG_DONE = False  # one-shot replay-model RoPE inv_freq diagnostic
+
 
 def _replay_aware_forward(
     self: Any,
@@ -63,6 +65,18 @@ def _replay_aware_forward(
             if f is not None and f is not _replay_aware_forward:
                 return f(self, **kw)
         raise RuntimeError("_replay_aware_forward: no class-level forward found in the MRO")
+
+    global _REPLAY_DBG_DONE
+    if not _REPLAY_DBG_DONE:
+        _REPLAY_DBG_DONE = True
+        try:
+            _re = self.model.rotary_emb
+            _ivf = getattr(_re, "inv_freq", None)
+            _h = _ivf[:4].float().tolist() if _ivf is not None else None
+            print(f"[REPLAY_DBG] id(transformer)={id(self)} id(decoder)={id(self.model)} "
+                  f"rotary={type(_re).__name__} inv_freq.head={_h}", flush=True)
+        except Exception as _e:  # noqa: BLE001
+            print(f"[REPLAY_DBG] err {_e}", flush=True)
 
     # Body in autocast (matmul bf16, norms fp32); the caller passes None off-CUDA.
     autocast_ctx = (

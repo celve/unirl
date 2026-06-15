@@ -74,14 +74,21 @@ def load_trainable_weights(
         # live trainer's actor boundaries (the bundle carry can be dropped). This
         # is the model the stage replays, so it fixes the AR rollout/replay ratio.
         n_rope = recompute_rotary_inv_freq(model, device)
+        _ivf = None
+        for _m in model.modules():
+            if type(_m).__name__.endswith("RotaryEmbedding") and isinstance(getattr(_m, "inv_freq", None), torch.Tensor):
+                _ivf = _m.inv_freq[:4].float().tolist()
+                break
         logger.warning(
             "Rank %s: loaded trainable weights from %s — recover: has_capture=%s "
-            "restored=%d rotary_recomputed=%d",
+            "restored=%d rotary_recomputed=%d id(model)=%s inv_freq.head=%s",
             rank,
             weights_path,
             captured is not None,
             n_recovered,
             n_rope,
+            id(model),
+            _ivf,
         )
         return
 
