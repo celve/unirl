@@ -32,10 +32,6 @@ logger = logging.getLogger(__name__)
 
 SP_ATTN_IMPL = "veomni_flash_attention_2_with_sp"
 
-# Diagnostic: log the first few SP decoder forwards' per-rank seq lengths so a
-# data/layout desync (two SP ranks seeing different true_len) is visible.
-_DIAG = {"n": 0}
-
 
 def is_ar_causal_lm(model: nn.Module) -> bool:
     """HF causal-LM shape: a decoder (``.model``) + ``.lm_head`` + ``.config``."""
@@ -116,24 +112,47 @@ def _wrap_decoder_forward(decoder: nn.Module) -> None:
         else:
             return orig(*args, **kwargs)  # nothing to slice (decode-style call)
 
-        if _DIAG["n"] < 4:
-            _DIAG["n"] += 1
-            logger.info(
-                "SP decoder fwd: dp_rank=%s ulysses_rank=%s sp_size=%s true_len=%d",
-                getattr(ps, "dp_rank", "?"),
-                getattr(ps, "ulysses_rank", "?"),
-                getattr(ps, "sp_size", "?"),
-                true_len,
-            )
+        batch = (inputs_embeds if inputs_embeds is not None else input_ids).shape[0]
+        mask2d = attention_mask if (attention_mask is not None and attention_mask.dim() == 2) else None
 
+        # B=1 + padding (the train micro geometry, micro_batch_size=1): a single
+        # left/right-padded sample's cumsum position_ids carries repeated zeros.
+        # VeOmni's SP attn gathers q/k/v to the full seq but forwards the *sliced*
+        # position_ids to flash-attn, whose varlen inference then reads those
+        # resets as bogus sequence boundaries -> wrong cu_seqlens -> corrupted
+        # logprobs. Strip the pad to a dense, monotonic-position_ids sequence
+        # (the validated no-pad path), then re-pad the hidden states so the
+        # downstream lm_head/logprob slice (which indexes the original padded
+        # layout) is unchanged. B>1 keeps the plain slice/gather path.
+        if batch == 1 and mask2d is not None and int(mask2d.sum().item()) < true_len:
+            nz = mask2d[0].nonzero(as_tuple=False).flatten()
+            s, e = int(nz[0].item()), int(nz[-1].item()) + 1  # contiguous real span [s, e)
+            real_len = e - s
+            if input_ids is not None:
+                kwargs["input_ids"] = slice_input_tensor(input_ids[:, s:e], dim=1, group=spg)
+            if inputs_embeds is not None:
+                kwargs["inputs_embeds"] = slice_input_tensor(inputs_embeds[:, s:e], dim=1, group=spg)
+            if position_ids is not None:
+                kwargs["position_ids"] = slice_input_tensor(position_ids[..., s:e], dim=position_ids.dim() - 1, group=spg)
+            kwargs["attention_mask"] = None  # pad stripped -> dense causal, nothing to mask
+            kwargs.pop("cache_position", None)
+            out = orig(*args, **kwargs)
+            h = gather_outputs(out.last_hidden_state, gather_dim=1, group=spg)
+            if h.shape[1] > real_len:  # drop SP divisibility padding
+                h = h[:, :real_len, :]
+            full = h.new_zeros((batch, true_len, h.shape[-1]))
+            full[:, s:e, :] = h
+            out.last_hidden_state = full
+            return out
+
+        # No padding (or B>1): plain slice in / gather out. attention_mask is left
+        # untouched (full) so it matches the all-to-all-gathered q/k/v.
         if input_ids is not None:
             kwargs["input_ids"] = slice_input_tensor(input_ids, dim=1, group=spg)
         if inputs_embeds is not None:
             kwargs["inputs_embeds"] = slice_input_tensor(inputs_embeds, dim=1, group=spg)
         if position_ids is not None:
             kwargs["position_ids"] = slice_input_tensor(position_ids, dim=position_ids.dim() - 1, group=spg)
-        if attention_mask is not None and attention_mask.dim() == 2:
-            kwargs["attention_mask"] = slice_input_tensor(attention_mask, dim=1, group=spg)
         # The decoder rebuilds cache_position for the local chunk length; a stale
         # full-length one would mismatch the sliced hidden states.
         kwargs.pop("cache_position", None)

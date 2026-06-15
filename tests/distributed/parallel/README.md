@@ -19,7 +19,8 @@ torchrun --nproc_per_node=2 --master_port=29571 tests/distributed/parallel/<test
 | `sp_parity.py` | VeOmni Ulysses primitives (slice/gather + all-to-all), fwd + grad (manual SUM/MEAN combine) | fwd exact; MEAN-grad relerr ~2e-7 |
 | `sp_fsdp.py` | **real FSDP2** over the folded `dp_shard_sp` mesh, grad parity (no sp_size comp) | relerr ~2e-7 |
 | `sp_ar_parity.py` | AR (Qwen3) registered SP attn + decoder slice/gather, logprob parity | exact (0.0) |
-| `sp_ar_varlen.py` | AR left-padded varlen logprob parity | exact (0.0) |
+| `sp_ar_varlen.py` | AR left-padded varlen logprob parity (B=2) | exact (0.0) |
+| `sp_ar_b1_varlen.py` | AR B=1 (train micro geometry) left-padded varlen — pad-strip path | relerr ~9e-4 |
 | `sp_qwenimage_parity.py` | diffusion qwen-image (dispatch-patch), fwd | relerr ~2e-7 |
 | `sp_sd3_parity.py` | diffusion SD3 (processor-injection), fwd | relerr ~2e-7 |
 | `sp_wan_parity.py` | diffusion Wan (dispatch + image-self/text-cross attn, 5D, Wan RoPE), fwd | relerr ~2e-7 |
