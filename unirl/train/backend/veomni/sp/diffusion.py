@@ -389,11 +389,16 @@ def apply_diffusion_sequence_parallelism(model: nn.Module, sp_size: int) -> None
     if not _patch_attention_dispatch(model):       # newer models
         inject_sp_processors(model, sp_group)      # older models (SD3)
 
+    # Walk the MRO, not just type(model).__name__: after veomni_parallelize the
+    # instance's class is a dynamic FSDP2 subclass (e.g. FSDPSD3Transformer2DModel)
+    # whose base is the real transformer class, so the bare-name registry would
+    # miss. The MRO still contains the original (e.g. SD3Transformer2DModel).
     cls = type(model).__name__
-    wrapper = FORWARD_WRAPPERS.get(cls)
+    wrapper = next((FORWARD_WRAPPERS[k.__name__] for k in type(model).__mro__ if k.__name__ in FORWARD_WRAPPERS), None)
     if wrapper is None:
         raise NotImplementedError(
-            f"diffusion SP: attention SP wired, but no boundary spec for {cls}. "
+            f"diffusion SP: attention SP wired, but no boundary spec for {cls} "
+            f"(MRO: {[k.__name__ for k in type(model).__mro__]}). "
             f"Add one to FORWARD_WRAPPERS in unirl.train.backend.veomni.sp.diffusion."
         )
     wrapper(model, sp_group)
