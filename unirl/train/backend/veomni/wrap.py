@@ -22,7 +22,7 @@ Runs in the backend constructor after structural injection
 from __future__ import annotations
 
 import logging
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
@@ -43,6 +43,7 @@ def veomni_parallelize(
     *,
     block_class_names: Tuple[str, ...],
     param_dtype: str = "bf16",
+    master_dtype: Optional[str] = None,
     reshard_after_forward: bool = True,
     activation_checkpointing: bool = False,
     use_torch_compile: bool = False,
@@ -51,6 +52,14 @@ def veomni_parallelize(
 
     ``block_class_names`` feeds VeOmni's ``basic_modules`` (its per-module
     ``fully_shard`` targets, unioned with the model's ``_no_split_modules``).
+
+    ``master_dtype`` (e.g. ``"fp32"``) keeps the sharded master weights + optimizer
+    states at that dtype while ``MixedPrecisionPolicy(param_dtype)`` still casts the
+    all-gathered compute copy to ``param_dtype`` (bf16) — the standard "fp32 master +
+    bf16 compute" recipe. Essential for full-finetune RL with tiny gradients (e.g.
+    DRPO/GRPO grad-norm ~1e-2): a bf16 master rounds those updates to zero. ``None``
+    (default) follows ``param_dtype`` for the master (the prior all-bf16 behavior;
+    fine for LoRA, where the trainable adapter update scale is large).
     """
     from unirl.train.backend.veomni import _compat
 
@@ -58,14 +67,17 @@ def veomni_parallelize(
     from veomni.arguments import MixedPrecisionConfig
     from veomni.distributed.torch_parallelize import parallelize_model_fsdp2
 
-    target_dtype = parse_torch_dtype(param_dtype, field_name="training.fsdp.param_dtype")
-    dtype_name = _DTYPE_NAMES.get(target_dtype)
+    compute_dtype = parse_torch_dtype(param_dtype, field_name="training.fsdp.param_dtype")
+    dtype_name = _DTYPE_NAMES.get(compute_dtype)
     if dtype_name is None:
         raise ValueError(f"veomni_parallelize: unsupported param_dtype {param_dtype!r}")
 
-    # bf16 master weights: cast on meta (dtype-only, no data) so to_empty
-    # materializes storage in the target dtype. Mirrors fsdp_wrap's cast.
-    model.to(target_dtype)
+    # Master-weight dtype: cast on meta (dtype-only, no data) so to_empty
+    # materializes storage in this dtype; MixedPrecisionPolicy(param_dtype) then
+    # casts the compute copy to bf16. master_dtype=None -> master follows
+    # param_dtype (all-bf16). Mirrors fsdp_wrap's master/compute split.
+    master_t = parse_torch_dtype(master_dtype, field_name="training.fsdp.master_dtype") if master_dtype else compute_dtype
+    model.to(master_t)
 
     mixed_precision = MixedPrecisionConfig(
         enable=True,

@@ -169,6 +169,7 @@ class VeOmniBackend(Remote):
             model,
             block_class_names=tuple(block_class_names),
             param_dtype=fsdp_cfg.param_dtype,
+            master_dtype=getattr(fsdp_cfg, "master_dtype", None),
             reshard_after_forward=fsdp_cfg.reshard_after_forward,
             activation_checkpointing=fsdp_cfg.activation_checkpointing,
             use_torch_compile=fsdp_cfg.use_torch_compile,

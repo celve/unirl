@@ -83,7 +83,11 @@ backend:
   trainable_attr: transformer
   fsdp_cfg:
     _target_: unirl.train.configs.FSDPConfig
-    param_dtype: bf16
+    param_dtype: bf16       # compute / all-gather dtype (MixedPrecisionPolicy)
+    master_dtype: fp32      # fp32 master weights + optimizer states. A bf16 master
+                            # rounds DRPO's ~1e-2 grad updates to zero (no learning);
+                            # full-finetune RL needs an fp32 master (mirrors the
+                            # FSDP recipe's model_precision: fp32).
     cpu_offload: false
     mixed_precision: true
     fsdp_mode: full
