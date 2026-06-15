@@ -302,6 +302,17 @@ class DRPO(StageAlgorithm):
         # stays anchored across all num_updates_per_batch optimizer steps.
         old_logp = segment.log_probs.to(dtype=new_logp.dtype, device=new_logp.device)
 
+        import os as _os
+        if _os.environ.get("DRPO_DEBUG"):
+            _n, _o = new_logp.detach().float(), old_logp.detach().float()
+            _t = segment.tokens
+            print(f"[DRPO_DBG] new_logp n={tuple(_n.shape)} mean={_n.mean():.3f} min={_n.min():.3f} "
+                  f"max={_n.max():.3f} head={[round(x,2) for x in _n[:6].tolist()]}", flush=True)
+            print(f"[DRPO_DBG] old_logp n={tuple(_o.shape)} mean={_o.mean():.3f} min={_o.min():.3f} "
+                  f"max={_o.max():.3f} head={[round(x,2) for x in _o[:6].tolist()]}", flush=True)
+            print(f"[DRPO_DBG] corr={torch.corrcoef(torch.stack([_n,_o]))[0,1].item():.3f} "
+                  f"lengths={segment.lengths[:4].tolist()} tok_head={_t[:6].tolist() if _t is not None else None}", flush=True)
+
         # Expand per-sample advantages to per-token
         adv_per_token = GRPO._expand_advantages_to_tokens(
             advantages, segment.lengths, dtype=new_logp.dtype, device=new_logp.device
