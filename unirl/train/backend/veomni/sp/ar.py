@@ -26,6 +26,7 @@ import functools
 import logging
 from typing import Any
 
+import torch
 from torch import nn
 
 logger = logging.getLogger(__name__)
@@ -128,18 +129,36 @@ def _wrap_decoder_forward(decoder: nn.Module) -> None:
             nz = mask2d[0].nonzero(as_tuple=False).flatten()
             s, e = int(nz[0].item()), int(nz[-1].item()) + 1  # contiguous real span [s, e)
             real_len = e - s
+            sp = max(1, int(getattr(ps, "ulysses_size", 1)))
+            # Round the real span UP to a multiple of sp and right-pad it
+            # ourselves with a MONOTONIC arange position_ids. We cannot let
+            # slice_input_tensor do the divisibility padding: it pads
+            # position_ids with zeros, and a trailing 0 reads as a sequence
+            # reset to flash-attn's varlen inference -> bogus cu_seqlens ->
+            # reshape error (off by exactly sp). With mask=None + monotonic
+            # position_ids the kernel takes the dense causal path; the few
+            # right-pad tokens attend causally and are dropped before re-pad,
+            # so they never affect the real tokens' hidden states.
+            target = ((real_len + sp - 1) // sp) * sp
+            pad = target - real_len
+            ref = input_ids if input_ids is not None else inputs_embeds
             if input_ids is not None:
-                kwargs["input_ids"] = slice_input_tensor(input_ids[:, s:e], dim=1, group=spg)
+                seq = input_ids[:, s:e]
+                if pad:
+                    seq = torch.cat([seq, seq.new_zeros((batch, pad))], dim=1)
+                kwargs["input_ids"] = slice_input_tensor(seq, dim=1, group=spg)
             if inputs_embeds is not None:
-                kwargs["inputs_embeds"] = slice_input_tensor(inputs_embeds[:, s:e], dim=1, group=spg)
-            if position_ids is not None:
-                kwargs["position_ids"] = slice_input_tensor(position_ids[..., s:e], dim=position_ids.dim() - 1, group=spg)
-            kwargs["attention_mask"] = None  # pad stripped -> dense causal, nothing to mask
+                emb = inputs_embeds[:, s:e]
+                if pad:
+                    emb = torch.cat([emb, emb.new_zeros((batch, pad, emb.shape[-1]))], dim=1)
+                kwargs["inputs_embeds"] = slice_input_tensor(emb, dim=1, group=spg)
+            pos_full = torch.arange(target, device=ref.device).unsqueeze(0).expand(batch, target).contiguous()
+            kwargs["position_ids"] = slice_input_tensor(pos_full, dim=1, group=spg)
+            kwargs["attention_mask"] = None  # dense causal, pad stripped
             kwargs.pop("cache_position", None)
             out = orig(*args, **kwargs)
             h = gather_outputs(out.last_hidden_state, gather_dim=1, group=spg)
-            if h.shape[1] > real_len:  # drop SP divisibility padding
-                h = h[:, :real_len, :]
+            h = h[:, :real_len, :]  # drop right-pad
             full = h.new_zeros((batch, true_len, h.shape[-1]))
             full[:, s:e, :] = h
             out.last_hidden_state = full

@@ -73,7 +73,10 @@ def main():
     m.eval()
 
     L = 418
-    real_lens = ([318] if B == 1 else [318, 380][:B]) if PAD else [L] * B
+    # Default real_len is ODD (317): the stripped span is not divisible by sp,
+    # so the pad-strip path must round it up itself with monotonic position_ids
+    # (an even default would mask the real e2e crash). Override with SP_REAL.
+    real_lens = ([int(os.environ.get("SP_REAL", "317"))] if B == 1 else [318, 380][:B]) if PAD else [L] * B
     pad_id = 0
     torch.manual_seed(123)
     ids = torch.full((B, L), pad_id, device=dev, dtype=torch.long)
