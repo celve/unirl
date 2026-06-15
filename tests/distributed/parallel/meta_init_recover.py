@@ -52,6 +52,23 @@ def main() -> None:
     assert restore_init_state(model, None) == 0
     print("PASS: meta-init RoPE inv_freq recover")
 
+    # --- Tied lm_head <-> embed_tokens (the DRPO-killer) ---------------------
+    # tie_word_embeddings models carry no separate lm_head.weight in the
+    # checkpoint; meta-init's to_empty can leave lm_head uninitialized -> uniform
+    # logits -> garbage replay log-probs. The backend calls model.tie_weights()
+    # after load to re-point lm_head at the loaded embeddings.
+    tcfg = Qwen3Config(
+        vocab_size=256, hidden_size=64, intermediate_size=128, num_hidden_layers=1,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=16, max_position_embeddings=128,
+        tie_word_embeddings=True,
+    )
+    with init_empty_weights(include_buffers=False):
+        tm = AutoModelForCausalLM.from_config(tcfg)
+    tm.to_empty(device="cpu")
+    tm.tie_weights()  # the fix
+    assert tm.lm_head.weight.data_ptr() == tm.model.embed_tokens.weight.data_ptr(), "lm_head not re-tied"
+    print("PASS: meta-init tied lm_head re-tie")
+
 
 if __name__ == "__main__":
     main()
