@@ -37,15 +37,16 @@ stage_args:
       # (~4096), not the model's full 22800 ctx. Capping max_model_len shrinks
       # the KV-cache reservation. gpu_memory_utilization IS the AR engine's
       # RESIDENT footprint on GPU 0-3 during the colocate train step: vllm-omni's
-      # LLM-stage sleep does NOT release the CuMem reservation (observed:
-      # level=1 AND level=2 both freed 0 GiB, ~61 GiB stayed resident), so the
-      # slept engine and the FSDP train shard must coexist in 95 GiB. 0.7
-      # (~66 GiB) OOMed the train-step forward by ~48 MiB; 0.5 (~47 GiB: ~40 GiB
-      # weights + a few GiB KV, ample for max_num_seqs=1) leaves ~48 GiB for the
-      # train shard + backward. max_num_batched_tokens 32768→8192 also clears the
-      # "exceeds max_num_seqs*max_model_len" boot warning.
+      # LLM-stage sleep does NOT release the CuMem reservation (observed: level=1
+      # AND level=2 both freed 0 GiB). So the slept engine and the FSDP train
+      # shard must coexist in 95 GiB. Weights+overhead are ~47.5 GiB (0.5 left
+      # 0 GiB for KV -> boot fails with "No available memory for the cache
+      # blocks"); 0.7 (~66 GiB) left only ~5 GiB headroom and OOMed the train
+      # forward by ~48 MiB. 0.6 (~57 GiB: ~47.5 weights + ~9.5 KV) boots and
+      # leaves ~14 GiB for the train shard + backward. max_num_batched_tokens
+      # 32768→8192 also clears the "exceeds max_num_seqs*max_model_len" warning.
       max_model_len: 8192
-      gpu_memory_utilization: 0.5
+      gpu_memory_utilization: 0.6
       enforce_eager: true
       trust_remote_code: true
       engine_output_type: latent
