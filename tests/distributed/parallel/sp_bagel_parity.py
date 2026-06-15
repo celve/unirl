@@ -101,6 +101,8 @@ def main():
 
     if world > 1:
         apply_sequence_parallelism(m, world)   # routes to the BAGEL adapter
+    m.eval()  # BAGEL runs the gen forward in eval mode (bundle.py:264); Qwen2Model.forward
+              # routes to forward_inference only when not training. Grads still flow in eval.
 
     cache = NaiveCache(N_LAYERS)
     for i, (k, v) in inp["_cache"].items():
@@ -115,10 +117,14 @@ def main():
     loss = hs[inp["packed_vae_token_indexes"]].float().pow(2).sum()
     loss.backward()
 
-    # full grad on a gen-expert param: replicated params -> sum slice-grads across SP
+    # Full grad on a gen-expert param. Each SP rank's grad is sp x its slice's
+    # contribution: gather_outputs' _Gather.backward all-reduce-SUMs the replicated
+    # output grad across the sp_group (x sp). Real training cancels this via FSDP's
+    # reduce-scatter MEAN over the folded dp_shard x ulysses mesh (the "no manual
+    # sp_size compensation" property, sp_fsdp.py) -> mimic it with all_reduce MEAN.
     g = m.model.layers[0].self_attn.q_proj_moe_gen.weight.grad.clone()
     if world > 1:
-        dist.all_reduce(g, op=dist.ReduceOp.SUM, group=get_parallel_state().sp_group)
+        dist.all_reduce(g, op=dist.ReduceOp.AVG, group=get_parallel_state().sp_group)
 
     if rank == 0:
         ps = get_parallel_state()
