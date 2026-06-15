@@ -56,9 +56,13 @@ def build_model(dev):
 
 
 def make_mask(b, l, dev):
-    m = torch.ones(l, l, dtype=torch.bool, device=dev).tril()
+    # Float additive mask (0 = attend, min = masked) — matches HI3's gen_text AR
+    # replay; sp=4 (L=66 -> pad 68) exercises the float branch of _extend_mask.
+    allow = torch.ones(l, l, dtype=torch.bool, device=dev).tril()
     a, c = l // 4, (3 * l) // 4
-    m[a:c, a:c] = True  # image block = bidirectional (non-causal)
+    allow[a:c, a:c] = True  # image block = bidirectional (non-causal)
+    m = torch.zeros(l, l, dtype=torch.float32, device=dev)
+    m.masked_fill_(~allow, torch.finfo(torch.float32).min)
     return m.view(1, 1, l, l).expand(b, 1, l, l).contiguous()
 
 

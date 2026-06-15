@@ -175,25 +175,30 @@ def _patch_hi3_attention(model: nn.Module) -> None:
     attn_cls.forward = sp_attn_forward
 
 
-def _extend_mask_causal(mask: torch.Tensor, true_len: int, padded_len: int) -> torch.Tensor:
-    """Extend a ``[B,1,L,L]`` bool mask to ``[B,1,L',L']`` for ``L'``-padded SP.
+def _extend_mask(mask: torch.Tensor, true_len: int, padded_len: int) -> torch.Tensor:
+    """Extend a ``[B,H,L,L]`` 4D mask to ``[B,H,L',L']`` for ``L'``-padded SP.
 
     The few right-pad tokens (``true_len:padded_len``, < sp of them, added only to
-    make the sequence divisible by sp) must be NaN-safe under SDPA: a fully-False
-    query row softmaxes over all ``-inf`` -> NaN, which would survive into the
-    (later-trimmed) pad rows. So build a CAUSAL ``[L',L']`` base (every query
-    attends at least itself) and overlay the real ``[L,L]`` mask in the top-left
-    (restoring the image-bidirectional blocks). Real queries never attend pad keys
-    (the causal base is False for ``key > query``); pad queries attend causally
-    (inert — their outputs are trimmed after the gather).
+    make the sequence divisible by sp) must be NaN-safe under SDPA: a fully-masked
+    query row softmaxes to NaN, which would survive into the (later-trimmed) pad
+    rows. So each pad query attends ONLY itself (its output is trimmed after the
+    gather), real queries never attend pad keys, and the real ``[L,L]`` region
+    keeps the original mask. Handles BOTH a bool mask (``True`` = attend) and a
+    float additive mask (``0`` = attend, large-negative = masked): HI3 uses a bool
+    mask for gen_image and an additive float mask for the gen_text AR replay.
     """
-    if mask.dtype != torch.bool:
-        raise ValueError(f"HI3 SP: expected a bool 4D attention_mask, got {mask.dtype}")
     b, h = mask.shape[0], mask.shape[1]
-    base = torch.tril(torch.ones(padded_len, padded_len, dtype=torch.bool, device=mask.device))
-    base = base.view(1, 1, padded_len, padded_len).expand(b, h, padded_len, padded_len).clone()
-    base[:, :, :true_len, :true_len] = mask
-    return base
+    dev = mask.device
+    idx = torch.arange(true_len, padded_len, device=dev)
+    if mask.dtype == torch.bool:
+        out = torch.zeros((b, h, padded_len, padded_len), dtype=torch.bool, device=dev)
+        out[:, :, :true_len, :true_len] = mask
+        out[:, :, idx, idx] = True  # each pad query attends itself (NaN-safe)
+        return out
+    out = torch.full((b, h, padded_len, padded_len), torch.finfo(mask.dtype).min, dtype=mask.dtype, device=dev)
+    out[:, :, :true_len, :true_len] = mask
+    out[:, :, idx, idx] = 0  # each pad query attends itself (NaN-safe)
+    return out
 
 
 def _wrap_hi3_decoder_forward(decoder: nn.Module) -> None:
@@ -203,8 +208,8 @@ def _wrap_hi3_decoder_forward(decoder: nn.Module) -> None:
     SDPA — no slicing). When the packed length is not a multiple of sp (the
     common ``B=1`` micro-batch, which HI3's collate does not pad), pads the
     sequence up to the next multiple of sp here — inputs, ``(cos, sin)``, and a
-    NaN-safe causal mask extension — then trims the gathered hidden back to the
-    true length. Idempotent; a run-time no-op unless ``ulysses_enabled``.
+    NaN-safe mask extension (bool or float additive) — then trims the gathered
+    hidden back to the true length. Idempotent; a run-time no-op unless ``ulysses_enabled``.
     Replacing ``.forward`` composes with FSDP2 (its hooks fire on ``__call__``).
     """
     if getattr(decoder.forward, "_unirl_hi3_sp_wrapped", False):
@@ -256,7 +261,7 @@ def _wrap_hi3_decoder_forward(decoder: nn.Module) -> None:
             )
         attention_mask = kwargs.get("attention_mask")
         if pad and attention_mask is not None:
-            kwargs["attention_mask"] = _extend_mask_causal(attention_mask, true_len, true_len + pad)
+            kwargs["attention_mask"] = _extend_mask(attention_mask, true_len, true_len + pad)
         # (no pad -> mask stays full; it broadcasts over the head-sharded SDPA)
 
         out = orig(*args, **kwargs)
