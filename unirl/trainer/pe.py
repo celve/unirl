@@ -34,7 +34,7 @@ from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
 from unirl.models.pe.pipeline import PEPipeline
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.base import BaseTrainer
+from unirl.trainer.base import BaseTrainer, build_sampling_dict
 from unirl.types.prompts import RolloutInputs
 from unirl.types.rollout_req import RolloutReq
 from unirl.types.sampling import BaseSamplingParams
@@ -87,8 +87,9 @@ class PETrainer(BaseTrainer):
         # Driver-side data iterator (not a Remote).
         self.data_source = instantiate(data_source_cfg)
 
-        # ComposedSamplingParams(ar=N, diffusion=M) — drives PEPipeline's fan-out.
-        self.sampling_params: BaseSamplingParams = instantiate(sampling_cfg)
+        # {"ar": ARSamplingParams(N), "diffusion": DiffusionSamplingParams(M)} —
+        # the modality-keyed sampling dict driving PEPipeline's two-level fan-out.
+        self.sampling_params: Dict[str, BaseSamplingParams] = build_sampling_dict(sampling_cfg)
 
         # Per-track weight-sync bridges; None trainside (shares the modules).
         self.diffusion_sync = None
@@ -148,7 +149,7 @@ class PETrainer(BaseTrainer):
         """Turn a data-source batch of ``P`` prompts into a typed ``RolloutReq``.
 
         No pre-expansion: ``PEPipeline`` fans out ``P → P*N → P*N*M`` internally
-        from ``ComposedSamplingParams`` (``ar.samples_per_prompt`` rewrites,
+        from the sampling dict (``ar.samples_per_prompt`` rewrites,
         ``diffusion.samples_per_prompt`` images each). The single-track trainer
         pre-expands here; PE must not, or it would double-count.
         """

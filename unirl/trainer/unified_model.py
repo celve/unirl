@@ -66,7 +66,7 @@ from unirl.distributed.group.placement import placement
 from unirl.distributed.tensor import TensorRef, hydrate
 from unirl.distributed.tensor.batch import Batch
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.base import BaseTrainer
+from unirl.trainer.base import BaseTrainer, build_sampling_dict
 from unirl.types.primitives import Texts
 from unirl.types.prompts import RolloutInputs
 from unirl.types.rollout_req import RolloutReq
@@ -173,7 +173,7 @@ class UnifiedModelTrainer(BaseTrainer):
         # Driver-side data iterator (not a Remote).
         self.data_source = instantiate(data_source_cfg)
 
-        self.sampling_params: BaseSamplingParams = instantiate(sampling_cfg)
+        self.sampling_params: Dict[str, BaseSamplingParams] = build_sampling_dict(sampling_cfg)
 
         # Set below from the `sync` block; None means no sync (e.g. trainside).
         self.weight_sync = None
@@ -318,7 +318,7 @@ class UnifiedModelTrainer(BaseTrainer):
         diff_params = get_diffusion_params(self.sampling_params)
         sde_indices = diff_params.resolve_sde_indices(rollout_id)
         diffusion = dataclasses.replace(diff_params, sde_indices=sde_indices, scheduler=None)
-        sampling_params = dataclasses.replace(self.sampling_params, diffusion=diffusion)
+        sampling_params = {**self.sampling_params, "diffusion": diffusion}
         return RolloutReq(
             sample_ids=list(inputs.sample_ids),
             group_ids=list(inputs.group_ids),
@@ -422,7 +422,7 @@ class UnifiedModelTrainer(BaseTrainer):
             group_ids=list(ar_shell.parent_ids),
             primitives={"text": ar_texts},
             request_conditions={},
-            sampling_params=ar_params,
+            sampling_params={"ar": ar_params},
         )
         ar_resp = ar_engine.generate(ar_req)
         ar_inner = ar_resp.tracks.get(AR_TRACK)
@@ -464,7 +464,7 @@ class UnifiedModelTrainer(BaseTrainer):
             group_ids=list(img_shell.parent_ids),
             primitives={"text": dit_prompts, "cot_text": dit_cot},
             request_conditions={},
-            sampling_params=diff_params,
+            sampling_params={"diffusion": diff_params},
             init_noise_group_ids=dit_noise_gids,
         )
         dit_resp = dit_engine.generate(dit_req)

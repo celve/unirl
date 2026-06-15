@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 
@@ -19,37 +20,70 @@ class BaseSamplingParams(ABC):
     Used as the type annotation / base class for the per-modality sampling
     config dataclasses.
 
-    Holds the universal ``samples_per_prompt`` field — the per-prompt
-    rollout fanout. For atomic params (Diffusion, AR) this is the samples
-    generated per upstream input to that modality. For composed params it
-    is the multiplicative total across modalities, computed in
-    ``__post_init__``.
+    Holds the universal ``samples_per_prompt`` field — the per-prompt rollout
+    fanout for this modality (the samples generated per upstream input to it).
+    The fanout across a multi-modality ``{"diffusion": ..., "ar": ...}`` sampling
+    dict is their product; see :func:`total_samples_per_prompt`.
     """
 
     samples_per_prompt: int = 1
 
 
-def get_diffusion_params(sampling: Any) -> "DiffusionSamplingParams":
-    """Extract ``DiffusionSamplingParams`` from either pure or composed config.
+def _is_param_dict(sampling: Any) -> bool:
+    """True iff ``sampling`` is a modality-keyed mapping (``"diffusion"`` / ``"ar"``)
+    rather than a single sampling-params object.
 
-    During the transition period, ``cfg.sampling`` may be either a bare
-    ``DiffusionSamplingParams`` (legacy recipes) or a
-    ``ComposedSamplingParams`` (composed recipes with ``.diffusion`` attr).
-    This helper normalizes access.
+    ``RolloutReq.sampling_params`` is a ``Dict[str, BaseSamplingParams]``. A bare
+    ``DiffusionSamplingParams`` (or its raw OmegaConf node from a flat
+    ``cfg.sampling``) is NOT a param dict — those fall through to the flat path in
+    the accessors below.
     """
-    return sampling.diffusion if hasattr(sampling, "diffusion") else sampling
+    return isinstance(sampling, Mapping) and ("diffusion" in sampling or "ar" in sampling)
+
+
+def get_diffusion_params(sampling: Any) -> Optional["DiffusionSamplingParams"]:
+    """Extract the diffusion params from a modality dict, or pass a flat config through.
+
+    For the canonical ``{"diffusion": ..., "ar": ...}`` dict this returns the
+    ``"diffusion"`` entry (``None`` if absent). For a flat, single-modality config
+    (a bare ``DiffusionSamplingParams`` or its raw OmegaConf node) it returns the
+    object itself.
+    """
+    if sampling is None:
+        return None
+    if _is_param_dict(sampling):
+        return sampling.get("diffusion")
+    return sampling
 
 
 def get_ar_params(sampling: Any) -> Optional["ARSamplingParams"]:
-    """Extract ``ARSamplingParams`` from composed or bare AR config.
+    """Extract the AR params from a modality dict, or a bare ``ARSamplingParams``.
 
-    Returns ``None`` for pure diffusion configs that have no AR component.
+    Returns ``None`` when there is no AR component (e.g. a pure-diffusion config).
     """
-    if hasattr(sampling, "ar"):
-        return sampling.ar
-    if isinstance(sampling, ARSamplingParams):
-        return sampling
-    return None
+    if sampling is None:
+        return None
+    if _is_param_dict(sampling):
+        return sampling.get("ar")
+    return sampling if isinstance(sampling, ARSamplingParams) else None
+
+
+def total_samples_per_prompt(sampling: Any) -> int:
+    """Per-prompt rollout fan-out: the product of each modality's ``samples_per_prompt``.
+
+    For a modality dict this multiplies across modalities (each prompt →
+    ``ar.samples_per_prompt`` AR outputs, each AR output →
+    ``diffusion.samples_per_prompt`` diffusion samples). For a single params object
+    it is that object's ``samples_per_prompt``. ``None`` / empty → ``1``.
+    """
+    if sampling is None:
+        return 1
+    if _is_param_dict(sampling):
+        total = 1
+        for params in sampling.values():
+            total *= int(getattr(params, "samples_per_prompt", 1))
+        return total
+    return int(getattr(sampling, "samples_per_prompt", 1))
 
 
 def is_forward_process(sde_indices: Optional[Sequence[int]]) -> bool:
@@ -155,23 +189,3 @@ class ARSamplingParams(BaseSamplingParams):
     top_p: float = 0.9
     top_k: int = 1024
     stop_token_id: int | None = None
-
-
-@dataclass(kw_only=True)
-class ComposedSamplingParams(BaseSamplingParams):
-    """Composed sampling config with per-modality typed sampling params.
-
-    ``kw_only=True`` is required because the inherited
-    ``samples_per_prompt`` has a default while ``diffusion`` / ``ar``
-    do not — without kw-only ordering, Python's dataclass rule
-    "non-default after default" would fire.
-    """
-
-    diffusion: Any  # DiffusionSamplingParams
-    ar: Any  # ARSamplingParams
-
-    def __post_init__(self) -> None:
-        # Per-prompt fanout for composed = product across modalities.
-        # Each prompt → ar.samples_per_prompt AR outputs, each AR output →
-        # diffusion.samples_per_prompt diffusion samples.
-        self.samples_per_prompt = int(self.diffusion.samples_per_prompt) * int(self.ar.samples_per_prompt)

@@ -42,10 +42,10 @@ class PEPipeline(Pipeline):
     Reads from ``RolloutReq``:
 
     - ``primitives["text"]: Texts`` — raw user prompts, fed to the LLM.
-    - ``sampling_params: ComposedSamplingParams`` — decomposed into
-      ``ARSamplingParams`` (``samples_per_prompt = N`` rewrites/prompt) for
-      the LLM child and ``DiffusionSamplingParams``
-      (``samples_per_prompt = M`` images/rewrite) for the diffusion child.
+    - ``sampling_params: Dict[str, BaseSamplingParams]`` — the ``"ar"`` entry
+      (``ARSamplingParams``, ``samples_per_prompt = N`` rewrites/prompt) drives
+      the LLM child and the ``"diffusion"`` entry (``DiffusionSamplingParams``,
+      ``samples_per_prompt = M`` images/rewrite) drives the diffusion child.
     - ``stage_config["chat"]: dict`` (optional) — forwarded to the LLM
       chat-template stage as a per-request system-instruction override.
     - ``sigmas: Tensor[T+1]`` — engine-pinned; forwarded to the diffusion
@@ -234,7 +234,7 @@ class PEPipeline(Pipeline):
             group_ids=list(group_ids),
             primitives={"text": texts},
             request_conditions={},
-            sampling_params=get_ar_params(req.sampling_params),
+            sampling_params={"ar": get_ar_params(req.sampling_params)},
             stage_config={k: v for k, v in req.stage_config.items() if k in ("chat",)},
             sigmas=None,
         )
@@ -261,7 +261,7 @@ class PEPipeline(Pipeline):
             group_ids=list(group_ids),
             primitives={"text": texts},
             request_conditions=dict(req.request_conditions),
-            sampling_params=get_diffusion_params(req.sampling_params),
+            sampling_params={"diffusion": get_diffusion_params(req.sampling_params)},
             sigmas=req.sigmas,
         )
 
