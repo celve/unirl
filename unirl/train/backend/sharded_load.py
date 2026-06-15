@@ -65,14 +65,23 @@ def load_trainable_weights(
         # boundaries where the model-bound deferred closure can be dropped. Without
         # this the train model keeps garbage RoPE -> garbage replay log-probs ->
         # the DRPO rollout/replay ratio collapses (~0.05) and nothing learns.
-        from unirl.models.types.meta_init import restore_init_state
+        from unirl.models.types.meta_init import recompute_rotary_inv_freq, restore_init_state
 
-        n_recovered = restore_init_state(model, getattr(bundle, "_meta_init_state", None))
-        logger.info(
-            "Rank %s: loaded trainable weights from %s (recovered %d non-persistent tensor(s))",
+        captured = getattr(bundle, "_meta_init_state", None)
+        n_recovered = restore_init_state(model, captured)
+        # RoPE safety net: recompute inv_freq from config directly on the loaded
+        # model, independent of whether the captured snapshot reached us across the
+        # live trainer's actor boundaries (the bundle carry can be dropped). This
+        # is the model the stage replays, so it fixes the AR rollout/replay ratio.
+        n_rope = recompute_rotary_inv_freq(model, device)
+        logger.warning(
+            "Rank %s: loaded trainable weights from %s — recover: has_capture=%s "
+            "restored=%d rotary_recomputed=%d",
             rank,
             weights_path,
+            captured is not None,
             n_recovered,
+            n_rope,
         )
         return
 

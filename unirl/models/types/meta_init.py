@@ -120,6 +120,43 @@ def stamp_init_state_restore(model: nn.Module) -> int:
     return n
 
 
+def recompute_rotary_inv_freq(model: nn.Module, device: torch.device) -> int:
+    """RoPE safety net: recompute ``*RotaryEmbedding`` ``inv_freq`` from config.
+
+    Complements :func:`restore_init_state` for the (common, critical) RoPE case:
+    re-instantiating each rotary module recomputes ``inv_freq`` deterministically
+    from its own ``config``, so it does NOT depend on a captured snapshot reaching
+    the materialized model across the live trainer's actor boundaries. Idempotent
+    and a no-op-equivalent on eager builds. Returns the number of rotary modules
+    refreshed. (General non-persistent state still flows through capture/restore;
+    this only covers HF rotary buffers, which is what breaks AR replay.)
+    """
+    n = 0
+    for module in model.modules():
+        if not type(module).__name__.endswith("RotaryEmbedding"):
+            continue
+        cfg = getattr(module, "config", None)
+        live = getattr(module, "inv_freq", None)
+        if cfg is None or not isinstance(live, torch.Tensor):
+            continue
+        try:
+            fresh = type(module)(config=cfg, device=device)
+        except Exception:  # noqa: BLE001 — unknown rotary signature; leave as-is
+            logger.warning("recompute_rotary_inv_freq: could not re-instantiate %s", type(module).__name__)
+            continue
+        fresh_inv_freq = getattr(fresh, "inv_freq", None)
+        if not isinstance(fresh_inv_freq, torch.Tensor) or fresh_inv_freq.shape != live.shape:
+            continue
+        with torch.no_grad():
+            live.copy_(fresh_inv_freq.to(device=live.device, dtype=live.dtype))
+        if isinstance(getattr(module, "original_inv_freq", None), torch.Tensor):
+            module.original_inv_freq = module.inv_freq
+        n += 1
+    if n:
+        logger.warning("recompute_rotary_inv_freq: refreshed %d rotary buffer(s) from config", n)
+    return n
+
+
 def finalize_meta_init(transformer: nn.Module, *, dtype: torch.dtype) -> nn.Module:
     """Finalize a transformer just built on the meta device for the backends'
     ``load_sharded`` path (shared by every meta-init bundle):
@@ -157,5 +194,6 @@ __all__ = [
     "stamp_init_state_restore",
     "capture_init_state",
     "restore_init_state",
+    "recompute_rotary_inv_freq",
     "finalize_meta_init",
 ]
