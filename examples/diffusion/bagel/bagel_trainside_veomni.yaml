@@ -81,6 +81,15 @@ backend:
     reshard_after_forward: true        # 7B base: reshard blocks to keep resident memory low
     activation_checkpointing: true     # 7B + 15-step replay: required
     use_torch_compile: false
+    # Ulysses sequence parallelism for BAGEL's packed gen forward (unirl.train.
+    # backend.veomni.sp.bagel): slices the query/latent stream across sp_size
+    # ranks, all-to-all in attention; the text KV-cache stays replicated. The
+    # folded dp_shard(world//sp) x ulysses(sp) mesh shards params across the whole
+    # world regardless, so this trades activation memory / O(S^2) attention for
+    # all-to-all comm (worth it at >=512px: ~1024 latent tokens; ~4096 at 1024px).
+    # GQA cap: BAGEL-7B-MoT is 28 query / 4 KV heads, so sp_size MUST be in {1,2,4}
+    # (sp=8 is rejected — 28 % 8 != 0). Default 1 = disabled (true no-op).
+    sp_size: 1
     # NOTE: no root_wrap here. VeOmni always root-shards (no toggle); Bagel's
     # direct embed_tokens / lm_head / forward_inference calls are handled by a
     # one-time root unshard in BagelBundle._unshard_root (auto-no-reshard pins it).

@@ -5,6 +5,10 @@
 ``veomni_parallelize`` (FSDP2 wrap), and dispatches by trainable-module class to
 a per-architecture patcher:
 
+* **BAGEL** (vendored packed-MoT ``Qwen2ForCausalLM``) — :mod:`.bagel`: checked
+  FIRST, because BAGEL's ``language_model`` also satisfies the AR shape test but
+  its packed ``forward_inference`` would silently bypass the AR patch. Slices the
+  query stream + wraps the direct ``flash_attn_varlen_func`` call.
 * **AR** (HF causal-LMs, e.g. Qwen3) — :mod:`.ar`: route attention through
   VeOmni's registered ``veomni_flash_attention_2_with_sp`` and wrap the decoder
   forward to slice the sequence in / gather the hidden states out.
@@ -30,7 +34,13 @@ def apply_sequence_parallelism(model: nn.Module, sp_size: int) -> None:
     if sp_size <= 1:
         return
 
-    from unirl.train.backend.veomni.sp import ar, diffusion
+    from unirl.train.backend.veomni.sp import ar, bagel, diffusion
+
+    # BAGEL first: its language_model is a Qwen2ForCausalLM (passes is_ar_causal_lm)
+    # but the AR patch would no-op on its packed forward_inference.
+    if bagel.is_bagel_mot(model):
+        bagel.apply_bagel_sequence_parallelism(model, sp_size)
+        return
 
     if ar.is_ar_causal_lm(model):
         ar.apply_ar_sequence_parallelism(model, sp_size)
