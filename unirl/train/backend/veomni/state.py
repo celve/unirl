@@ -1,65 +1,33 @@
-"""Sharded-state helpers for the VeOmni backend.
+"""VeOmni-specific sharded-state helpers.
 
-Same public surface as ``unirl.train.backend.fsdp.state`` so ``backend.py``
-reads identically across the two packages.  The DCP state-dict helpers are
-copied verbatim (they are FSDP2-generic — they operate on any module whose
-params are DTensors); grad clipping and offload/onload delegate to VeOmni's
-implementations via the :mod:`._compat` shim, which under EP (Phase 2) are
-the variants that understand VeOmni's extra-parallel placements.
+The FSDP2-generic DCP state-dict helpers are re-exported from
+:mod:`unirl.train.backend.sharded_state` (they operate on any module whose
+params are DTensors, so they are identical across backends); only the
+veomni-delegating bits live here — grad clipping and offload/onload, which under
+EP (Phase 2) are the variants that understand VeOmni's extra-parallel placements.
+
+Reached only through ``veomni/backend.py`` (itself behind the package's lazy
+``__getattr__``), so the module-level ``sharded_state`` import — which pulls
+torch — never runs on the torch-free config-compose path.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict, Iterator
 
 import torch
 from torch import Tensor, nn
-from torch.nn.parameter import Parameter
+
+from unirl.train.backend.sharded_state import (
+    StateDict,
+    _maybe_dtensor_to_tensor,
+    gather_state_dict,
+    load_model_state_dict,
+    move_optimizer_state,
+    trainable_params,
+)
 
 logger = logging.getLogger(__name__)
-
-StateDict = Dict[str, object]
-
-
-def gather_state_dict(model: nn.Module) -> StateDict:
-    """Rank-0 DCP gather.  Returns full state on rank 0, empty on others."""
-    from torch.distributed.checkpoint.state_dict import get_model_state_dict
-
-    options = _build_state_dict_options(full_state_dict=True, cpu_offload=True)
-    try:
-        full = dict(get_model_state_dict(model, options=options))
-    except TypeError:
-        full = dict(get_model_state_dict(model))
-
-    if _current_rank() != 0:
-        return {}
-    return _to_cpu_state_dict(full)
-
-
-def load_model_state_dict(model: nn.Module, state_dict: StateDict, *, strict: bool = True) -> None:
-    """Load a full state dict, broadcasting from rank 0 across ranks.
-
-    ``strict=False`` is used by the backend's post-parallelize weight load,
-    where injected adapter params (LoRA) are legitimately absent from the
-    base checkpoint.
-    """
-    from torch.distributed.checkpoint.state_dict import set_model_state_dict
-
-    options = _build_state_dict_options(
-        full_state_dict=True,
-        broadcast_from_rank0=True,
-        cpu_offload=False,
-        strict=strict,
-    )
-    try:
-        set_model_state_dict(model, state_dict, options=options)
-    except TypeError:
-        set_model_state_dict(model, state_dict)
-
-
-def trainable_params(model: nn.Module) -> Iterator[Parameter]:
-    return (p for p in model.parameters() if p.requires_grad)
 
 
 def clip_grad_norm(model: nn.Module, max_norm: float) -> Tensor:
@@ -113,62 +81,12 @@ def veomni_onload(model: nn.Module, device: torch.device) -> None:
     logger.debug("veomni_onload: onloaded params/grads to %s", device)
 
 
-# ------------------------------------------------------------------
-# Internal helpers (verbatim from unirl.train.backend.fsdp.state)
-# ------------------------------------------------------------------
-
-
-def _current_rank() -> int:
-    import torch.distributed as dist
-
-    if dist.is_available() and dist.is_initialized():
-        return int(dist.get_rank())
-    return 0
-
-
-def _build_state_dict_options(**kwargs: object) -> object:
-    from torch.distributed.checkpoint.state_dict import StateDictOptions
-
-    candidates = [
-        dict(kwargs),
-        {k: v for k, v in kwargs.items() if k != "strict"},
-        {k: v for k, v in kwargs.items() if k not in {"strict", "broadcast_from_rank0"}},
-        {k: v for k, v in kwargs.items() if k in {"full_state_dict", "cpu_offload"}},
-        {},
-    ]
-    for candidate in candidates:
-        try:
-            return StateDictOptions(**candidate)
-        except TypeError:
-            continue
-    return StateDictOptions()
-
-
-def _maybe_dtensor_to_tensor(value: object) -> object:
-    if hasattr(value, "full_tensor") and callable(getattr(value, "full_tensor")):
-        try:
-            return value.full_tensor()
-        except Exception:
-            return value
-    return value
-
-
-def _to_cpu_state_dict(state_dict: StateDict) -> StateDict:
-    converted: StateDict = {}
-    for key, value in state_dict.items():
-        tensor_or_obj = _maybe_dtensor_to_tensor(value)
-        if isinstance(tensor_or_obj, torch.Tensor):
-            converted[key] = tensor_or_obj.detach().cpu()
-        else:
-            converted[key] = tensor_or_obj
-    return converted
-
-
 __all__ = [
     "StateDict",
     "clip_grad_norm",
     "gather_state_dict",
     "load_model_state_dict",
+    "move_optimizer_state",
     "trainable_params",
     "veomni_offload",
     "veomni_onload",

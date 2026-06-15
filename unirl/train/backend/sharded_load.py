@@ -25,6 +25,8 @@ from typing import Dict
 import torch
 from torch import nn
 
+from unirl.train.backend.sharded_state import _build_state_dict_options, _current_rank
+
 logger = logging.getLogger(__name__)
 
 StateDict = Dict[str, object]
@@ -218,32 +220,6 @@ def _remap_lora_base_keys(state_dict: StateDict, model: nn.Module) -> StateDict:
                 continue
         remapped[key] = value
     return remapped
-
-
-def _current_rank() -> int:
-    import torch.distributed as dist
-
-    if dist.is_available() and dist.is_initialized():
-        return int(dist.get_rank())
-    return 0
-
-
-def _build_state_dict_options(**kwargs: object) -> object:
-    from torch.distributed.checkpoint.state_dict import StateDictOptions
-
-    candidates = [
-        dict(kwargs),
-        {k: v for k, v in kwargs.items() if k != "strict"},
-        {k: v for k, v in kwargs.items() if k not in {"strict", "broadcast_from_rank0"}},
-        {k: v for k, v in kwargs.items() if k in {"full_state_dict", "cpu_offload"}},
-        {},
-    ]
-    for candidate in candidates:
-        try:
-            return StateDictOptions(**candidate)
-        except TypeError:
-            continue
-    return StateDictOptions()
 
 
 __all__ = ["load_trainable_weights", "load_sharded", "_load_state_dict_sharded", "StateDict"]

@@ -1,51 +1,43 @@
 """VeOmniBackend — single-track training-state Remote on VeOmni FSDP2.
 
-Drop-in sibling of :class:`unirl.train.backend.fsdp.FSDPBackend` (byte-
-identical constructor signature, same public surface) whose wrap, grad
-clipping, and offload internals come from VeOmni's distributed layer via
-the :mod:`._compat` selective-import shim.  Recipes select it purely by
-``_target_``.
+Drop-in sibling of :class:`unirl.train.backend.fsdp.FSDPBackend`: both subclass
+:class:`~unirl.train.backend.base_backend.BaseFSDP2Backend`, which owns the
+training step, EMA swap, checkpoint envelope, and memory lifecycle. This leaf
+supplies only the constructor lifecycle and the five engine hooks, whose wrap /
+grad-clip / offload internals come from VeOmni's distributed layer via the
+:mod:`._compat` selective-import shim. Recipes select it purely by ``_target_``.
 
 Lifecycle differences vs FSDPBackend (all internal to construction):
 
-* The default process group is brought up *explicitly* (VeOmni builds its
-  device meshes before any ``fully_shard`` call, so torch's lazy auto-init
-  never gets the chance to fire), and ``init_parallel_state`` is invoked —
-  one VeOmni-wrapped model per process.
+* The default process group is brought up *explicitly* (VeOmni builds its device
+  meshes before any ``fully_shard`` call, so torch's lazy auto-init never fires),
+  and ``init_parallel_state`` is invoked — one VeOmni-wrapped model per process.
 * The trainable module must arrive on the **meta** device (the bundle's
   ``meta_init_transformer`` flag): VeOmni's parallelize materializes it via
-  ``to_empty`` and calls its (no-op-stamped) ``init_weights``; the real
-  weights are loaded *after* sharding — rank 0 reads the safetensors dir
-  stashed by the bundle and broadcasts (``strict=False``: injected adapter
-  params are legitimately absent and re-initialized by the deferred ops).
+  ``to_empty`` and calls its (no-op-stamped) ``init_weights``; the real weights
+  load *after* sharding (``eager_ok=False``).
 * LoRA/NFT/mirror injection runs on the meta module — exactly the contract
-  ``unirl.train.deferred`` documents — and ``apply_deferred_ops`` drains
-  the post-materialize resets *after* the weight load.
+  ``unirl.train.deferred`` documents — and ``apply_deferred_ops`` drains the
+  post-materialize resets *after* the weight load.
+
+Checkpointing: ``save``/``load`` are inherited from the base; the optimizer-state
+mechanism is supplied by the hooks below as a plain per-rank ``state_dict()``
+(NOT DCP) — VeOmni shards over a folded ``dp_shard x ulysses`` mesh where the DCP
+optimizer gather is unverified.
 """
 
 from __future__ import annotations
 
-import logging
-import math
-import os
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
-from torch import nn
 
-from unirl.distributed.group.dispatch import Dispatch, distributed
-from unirl.distributed.group.remote import Remote
 from unirl.models.types.bundle import Bundle
 from unirl.train.backend.base import LrSchedulerConfig, OptimizerConfig, resolve_trainable_module
+from unirl.train.backend.base_backend import BaseFSDP2Backend
 from unirl.train.backend.sharded_load import load_trainable_weights
-from unirl.train.backend.veomni.state import (
-    clip_grad_norm,
-    gather_state_dict,
-    load_model_state_dict,
-    trainable_params,
-    veomni_offload,
-    veomni_onload,
-)
+from unirl.train.backend.sharded_state import StateDict, move_optimizer_state
+from unirl.train.backend.veomni.state import clip_grad_norm, veomni_offload, veomni_onload
 from unirl.train.backend.veomni.wrap import veomni_parallelize
 from unirl.train.configs import (
     EmaFullConfig,
@@ -54,21 +46,16 @@ from unirl.train.configs import (
     LoraConfig,
 )
 from unirl.train.deferred import apply_deferred_ops
-from unirl.train.ema import EMA, Shadow, inject_mirror, inject_nft, make_decay_fn
-from unirl.train.lora import inject_lora
-from unirl.train.optim import build_lr_scheduler, build_optimizer
-
-logger = logging.getLogger(__name__)
 
 
-class VeOmniBackend(Remote):
+class VeOmniBackend(BaseFSDP2Backend):
     """Single-track VeOmni-FSDP2 training backend.
 
-    One-shot construction: after ``__init__`` returns the backend is fully
-    usable (model wrapped, weights loaded, optimizer/scheduler/EMA built).
-    ``device`` / ``rank`` kwargs are accepted for signature parity with
-    :class:`FSDPBackend` but resolved from the actor env + process group —
-    backends are constructed before ``Remote.setup()`` delivers rank info.
+    One-shot construction: after ``__init__`` returns the backend is fully usable
+    (model wrapped, weights loaded, optimizer/scheduler/EMA built). ``device`` /
+    ``rank`` kwargs are accepted for signature parity with :class:`FSDPBackend`
+    but resolved from the actor env + process group — backends are constructed
+    before ``Remote.setup()`` delivers rank info.
     """
 
     def __init__(
@@ -88,19 +75,13 @@ class VeOmniBackend(Remote):
         with_aux: Tuple[str, ...] = (),
     ) -> None:
         super().__init__()
-        if lora_cfg is not None and ema_lora_cfg is not None:
-            raise ValueError(
-                "VeOmniBackend: lora_cfg and ema_lora_cfg are mutually exclusive "
-                "(both inject LoRA adapters). Use ema_lora_cfg for NFT-style "
-                "adapter EMA, or lora_cfg for plain LoRA."
-            )
+        self._check_lora_exclusivity(lora_cfg, ema_lora_cfg)
         _validate_fsdp_cfg(fsdp_cfg)
 
         from unirl.train.backend.veomni import _compat
 
-        # 1-3. Distributed bring-up: device binding, default PG, VeOmni
-        # parallel state (1D dp_shard mesh; re-init warns + no-ops, which
-        # enforces one VeOmni-wrapped model per process).
+        # 1-3. Distributed bring-up: device binding, default PG, VeOmni parallel
+        # state (re-init warns + no-ops, enforcing one VeOmni-wrapped model/process).
         _, _, local_rank = _compat.rank_world_local()
         _compat.ensure_dist_initialized(local_rank)
         import torch.distributed as dist
@@ -133,38 +114,12 @@ class VeOmniBackend(Remote):
         self._bundle = bundle
         model = resolve_trainable_module(bundle, trainable_attr)
 
-        # 4-5. Structural injection on the meta module (the documented
+        # Structural injection on the meta module (the documented
         # unirl.train.deferred contract: mutate on meta, stamp resets).
-        shadow: Optional[Shadow] = None
+        shadow = self._inject_structural(model, lora_cfg, ema_lora_cfg, ema_cfg)
 
-        if ema_lora_cfg is not None:
-            shadow = inject_nft(
-                model,
-                rank=ema_lora_cfg.rank,
-                alpha=ema_lora_cfg.alpha,
-                target_modules=tuple(ema_lora_cfg.target_modules),
-                default=ema_lora_cfg.default_adapter,
-                shadow=ema_lora_cfg.shadow_adapter,
-                dropout=ema_lora_cfg.dropout,
-                bias=ema_lora_cfg.bias,
-                task_type=ema_lora_cfg.task_type,
-            )
-        elif lora_cfg is not None:
-            inject_lora(
-                model,
-                rank=lora_cfg.rank,
-                alpha=lora_cfg.alpha,
-                target_modules=tuple(lora_cfg.target_modules),
-                dropout=lora_cfg.dropout,
-                bias=lora_cfg.bias,
-                task_type=lora_cfg.task_type,
-            )
-
-        if ema_cfg is not None:
-            shadow = inject_mirror(model, prefix=ema_cfg.shadow_prefix)
-
-        # 6. Shard + materialize (to_empty; init_weights is a bundle-stamped
-        # no-op). Root-wrapped by VeOmni — single-module trainables only.
+        # Shard + materialize (to_empty; init_weights is a bundle-stamped no-op).
+        # Root-wrapped by VeOmni — single-module trainables only.
         veomni_parallelize(
             model,
             block_class_names=tuple(block_class_names),
@@ -175,7 +130,7 @@ class VeOmniBackend(Remote):
             use_torch_compile=fsdp_cfg.use_torch_compile,
         )
 
-        # 6b. Ulysses sequence parallelism (no-op at sp_size=1): route attention
+        # Ulysses sequence parallelism (no-op at sp_size=1): route attention
         # through VeOmni's registered SP attn and wrap the decoder forward to
         # slice the sequence in / gather hidden out. Installed AFTER
         # veomni_parallelize (the GC -> FSDP -> SP order); gated at run time on
@@ -184,10 +139,10 @@ class VeOmniBackend(Remote):
 
         apply_sequence_parallelism(model, self._sp_size)
 
-        # 7. Real weights: load into the freshly-sharded module. Meta-init
-        # bundles stash a safetensors dir; Pattern-A bundles materialize
-        # themselves; eager bundles are rejected (eager_ok=False) — parallelize
-        # already to_empty'd, so their weights are gone (FSDPBackend territory).
+        # Real weights: load into the freshly-sharded module. Meta-init bundles
+        # stash a safetensors dir; Pattern-A bundles materialize themselves; eager
+        # bundles are rejected (eager_ok=False) — parallelize already to_empty'd,
+        # so their weights are gone (FSDPBackend territory).
         load_trainable_weights(
             model,
             bundle,
@@ -197,256 +152,44 @@ class VeOmniBackend(Remote):
             eager_ok=False,
         )
 
-        # 8. Post-materialize resets (LoRA adapter init, mirror copies).
+        # Post-materialize resets (LoRA adapter init, mirror copies).
         apply_deferred_ops(model)
 
-        # 9-10. EMA, optimizer, scheduler — identical to FSDPBackend.
-        self.ema: Optional[EMA] = None
-        if shadow is not None:
-            active_cfg = ema_lora_cfg or ema_cfg
-            self.ema = EMA(
-                shadow=shadow,
-                decay_fn=make_decay_fn(active_cfg),
-                timing=active_cfg.timing,
-            )
-
-        self.optimizer: torch.optim.Optimizer = build_optimizer(
-            optimizer_cfg,
-            params=list(trainable_params(model)),
-        )
-        self.scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = build_lr_scheduler(
-            scheduler_cfg,
-            optimizer=self.optimizer,
+        self._finalize_construction(
+            model,
+            shadow,
+            optimizer_cfg=optimizer_cfg,
+            scheduler_cfg=scheduler_cfg,
+            lora_cfg=lora_cfg,
+            ema_lora_cfg=ema_lora_cfg,
+            ema_cfg=ema_cfg,
+            fsdp_cfg=fsdp_cfg,
         )
 
-        self.model: nn.Module = model
-        self._optimizer_step_count: int = 0
-        self._eval_ema_active: bool = False
-        # Adapter the rollout samples under (weight-sync single source of truth);
-        # mirrors FSDPBackend: EMA shadow for NFT-style adapter EMA, else "default".
-        self._rollout_adapter_name: str = (
-            str(ema_lora_cfg.shadow_adapter) if ema_lora_cfg is not None else "default"
-        )
-        # No-sync gradient accumulation (see set_grad_sync); mirrors FSDPBackend.
-        # Only active under ZeRO-2 (reshard_after_forward=False); the train loop
-        # (TrainStack) toggles this per micro-batch, so the methods must exist
-        # even when deferral is off (default), where they are no-ops.
-        self._defer_grad_sync: bool = bool(fsdp_cfg.defer_grad_sync) and not bool(
-            fsdp_cfg.reshard_after_forward
-        )
-        self._grad_sync_enabled: bool = True
-
-    @property
-    def rollout_adapter_name(self) -> str:
-        """Adapter the rollout samples under (weight-sync single source of truth);
-        mirrors FSDPBackend. EMA shadow (``"old"``) for NFT-style adapter EMA,
-        else the trainable ``"default"``."""
-        return self._rollout_adapter_name
-
-    def set_grad_sync(self, enable: bool) -> None:
-        """Toggle the FSDP2 gradient reduce-scatter for no-sync accumulation.
-
-        Mirrors FSDPBackend: VeOmni shards with the same ``fully_shard``
-        (``FSDPModule``) over the folded ``dp_shard_sp`` mesh, so the toggle is
-        identical — every FSDP module accumulates in its unsharded buffer and a
-        single reduce-scatter runs per optimizer step instead of one per micro.
-        No-op when deferral is off (the common case) or already in the wanted
-        state.
-        """
-        if not self._defer_grad_sync or enable == self._grad_sync_enabled:
-            return
-        from torch.distributed.fsdp import FSDPModule
-
-        for m in self.model.modules():
-            if isinstance(m, FSDPModule):
-                m.set_requires_gradient_sync(enable)
-                m.set_is_last_backward(enable)
-        self._grad_sync_enabled = enable
-
-    @property
-    def grad_sync_deferred(self) -> bool:
-        """True when no-sync accumulation is active (``defer_grad_sync`` under ZeRO-2)."""
-        return self._defer_grad_sync
-
     # ------------------------------------------------------------------
-    # Training step
+    # Engine hooks (VeOmni FSDP2)
     # ------------------------------------------------------------------
 
-    def zero_grad(self) -> None:
-        self.optimizer.zero_grad()
+    def _clip_grad_norm(self, max_grad_norm: float) -> torch.Tensor:
+        # VeOmni's clip takes the model (dispatches on EP / cpu-offload attrs).
+        return clip_grad_norm(self.model, max_grad_norm)
 
-    def optimizer_step(self, *, max_grad_norm: float) -> float:
-        """Clip (VeOmni FSDP2 clip), optimizer step, scheduler step, EMA step.
+    def _gather_optimizer_state(self) -> StateDict:
+        # Plain per-rank state_dict (NOT DCP): VeOmni shards over a folded
+        # dp_shard x ulysses mesh where the DCP optimizer gather is unverified.
+        # Every rank computes its dict; only dist rank 0's is written.
+        return self.optimizer.state_dict()
 
-        Same non-finite-norm safety valve as FSDPBackend: skip the whole
-        step on a NaN/Inf clipped norm — the norm is an all-rank scalar so
-        the skip is identical on every rank.
-        """
-        clipped = clip_grad_norm(self.model, float(max_grad_norm))
-        grad_norm = float(clipped.item()) if isinstance(clipped, torch.Tensor) else float(clipped or 0.0)
+    def _load_optimizer_state(self, optimizer_state: StateDict) -> None:
+        # Every rank loaded the full checkpoint, so the dict is real locally.
+        self.optimizer.load_state_dict(optimizer_state)
+        move_optimizer_state(self.optimizer, self._device)
 
-        if not math.isfinite(grad_norm):
-            logger.warning(
-                "VeOmniBackend.optimizer_step: non-finite grad norm (%s) at step %d; skipping step.",
-                grad_norm,
-                self._optimizer_step_count,
-            )
-            self.optimizer.zero_grad(set_to_none=True)
-            return grad_norm
-
-        self.optimizer.step()
-        if self.scheduler is not None:
-            self.scheduler.step()
-        if self.ema is not None:
-            self.ema.step(self._optimizer_step_count)
-        self._optimizer_step_count += 1
-        return grad_norm
-
-    def on_rollout_end(self) -> None:
-        if self.ema is not None:
-            self.ema.on_rollout_end(self._optimizer_step_count)
-
-    # ------------------------------------------------------------------
-    # Eval-EMA swap
-    # ------------------------------------------------------------------
-
-    @distributed(dispatch_mode=Dispatch.BROADCAST)
-    def apply_eval_ema(self) -> None:
-        if self.ema is None or self._eval_ema_active:
-            return
-        self.ema.apply_shadow()
-        self._eval_ema_active = True
-
-    @distributed(dispatch_mode=Dispatch.BROADCAST)
-    def restore_from_eval(self) -> None:
-        if self.ema is None or not self._eval_ema_active:
-            return
-        self.ema.restore_shadow()
-        self._eval_ema_active = False
-
-    # ------------------------------------------------------------------
-    # Checkpoint
-    # ------------------------------------------------------------------
-
-    def save(self, path: str) -> None:
-        """Gather state on all ranks; write to ``path/checkpoint.pt`` on rank 0."""
-        state: Dict[str, object] = {
-            "policy_state_dict": gather_state_dict(self.model),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-        }
-        if self.scheduler is not None:
-            state["scheduler_state_dict"] = self.scheduler.state_dict()
-
-        if self._rank != 0:
-            return
-        os.makedirs(path, exist_ok=True)
-        torch.save(state, os.path.join(path, "checkpoint.pt"))
-
-    def load(self, path: str) -> None:
-        checkpoint_path = os.path.join(path, "checkpoint.pt")
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"VeOmniBackend.load: checkpoint not found: {checkpoint_path}")
-        # map_location=cpu: loading straight to the live device would hold
-        # the full checkpoint alongside the resident model — at small world
-        # sizes (1-GPU smoke; large per-rank shards) that double-allocation
-        # OOMs. The broadcast load below moves weights into the DTensor
-        # shards; optimizer state is moved back to device explicitly.
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
-
-        load_model_state_dict(self.model, checkpoint["policy_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        for state in self.optimizer.state.values():
-            for k, v in state.items():
-                if isinstance(v, torch.Tensor):
-                    state[k] = v.to(self._device)
-        if self.scheduler is not None and "scheduler_state_dict" in checkpoint:
-            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-
-    # ------------------------------------------------------------------
-    # Memory lifecycle
-    # ------------------------------------------------------------------
-
-    @distributed(dispatch_mode=Dispatch.BROADCAST)
-    def onload(self) -> None:
-        """Move the train state (params + grads + optimizer) back to GPU."""
+    def _onload_model(self) -> None:
         veomni_onload(self.model, self._device)
-        for state in self.optimizer.state.values():
-            for k, v in state.items():
-                if isinstance(v, torch.Tensor):
-                    state[k] = v.to(self._device)
 
-    @distributed(dispatch_mode=Dispatch.BROADCAST)
-    def offload(self) -> None:
-        """Move the train state to CPU (VeOmni reshards the root first)."""
+    def _offload_model(self) -> None:
         veomni_offload(self.model)
-        for state in self.optimizer.state.values():
-            for k, v in state.items():
-                if isinstance(v, torch.Tensor):
-                    state[k] = v.cpu()
-        torch.cuda.empty_cache()
-
-    # ------------------------------------------------------------------
-    # Accessors
-    # ------------------------------------------------------------------
-
-    def trainable_module(self) -> nn.Module:
-        return self.model
-
-    # ------------------------------------------------------------------
-    # Smoke helpers
-    # ------------------------------------------------------------------
-
-    def compute_local_param_checksums(
-        self,
-        *,
-        names: List[str],
-        prefix: str = "",
-    ) -> Dict[str, str]:
-        from unirl.rollout.engine.vllm_omni.weight_sync.checksum import (
-            fingerprint_tensor,
-        )
-        from unirl.utils.peft_merge import raw_state_dict
-
-        target = set(names)
-        out: Dict[str, str] = {}
-        for raw_name, param in raw_state_dict(self.model):
-            prefixed = prefix + raw_name
-            if prefixed in target:
-                out[prefixed] = fingerprint_tensor(param)
-        return out
-
-    def randomize_weights_for_smoke(self, seed: int = 0) -> None:
-        from torch.distributed.tensor import DTensor
-
-        gen = torch.Generator(device=self._device)
-        gen.manual_seed(int(seed) + int(self._rank))
-        with torch.no_grad():
-            for p in trainable_params(self.model):
-                local = p.data
-                if isinstance(local, DTensor):
-                    shard = local.to_local()
-                    shard.copy_(
-                        torch.randn(
-                            shard.shape,
-                            dtype=shard.dtype,
-                            device=shard.device,
-                            generator=gen,
-                        )
-                    )
-                else:
-                    local.copy_(
-                        torch.randn(
-                            local.shape,
-                            dtype=local.dtype,
-                            device=local.device,
-                            generator=gen,
-                        )
-                    )
-        logger.info(
-            "Rank %s: randomize_weights_for_smoke complete (seed=%d)",
-            self._rank,
-            seed,
-        )
 
 
 # ----------------------------------------------------------------------
