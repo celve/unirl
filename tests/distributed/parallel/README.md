@@ -33,3 +33,23 @@ Notes:
 - v1 uses sequence lengths divisible by sp_size (no padding); full attention
   can't tolerate unmasked padding. AR handles left-padding (HF flash unpadding).
 - Requires the `[veomni]` extra + flash-attn in the env; needs >= N GPUs.
+
+## Memory benchmarks (USP advantage vs FSDP baseline)
+
+`torch.cuda.max_memory_allocated` for a forward+backward, FSDP2-sharded blocks
+(params sharded identically in both cases — the only difference is SP sharding
+the sequence/activations across sp ranks). Per-rank peak, sp=1 (FSDP baseline)
+vs sp=2 (FSDP + Ulysses). The saving is activation memory, so it grows with
+sequence length.
+
+`sd3_mem_fsdp.py` — SD3.5-medium transformer (measured, 2×H20):
+
+| latent (joint seq) | FSDP sp=1 | FSDP+SP sp=2 | reduction |
+|--------------------|-----------|--------------|-----------|
+| 128 (4352)         | 13.17 GB  | 9.76 GB      | 1.35×     |
+| 192 (9472)         | 21.40 GB  | 13.93 GB     | 1.54×     |
+| 256 (16640)        | 32.44 GB  | 19.53 GB     | 1.66×     |
+
+`sp_mem_fsdp.py` — Qwen3-4B AR (needs the cu130 `.venv-sglang` env: the
+HF flash-attn kernel; de-risk on real Qwen3 fwd+bwd at L=16384 measured
+14.45 GB (sp=1) vs 8.19 GB (sp=2) = 1.76×).
