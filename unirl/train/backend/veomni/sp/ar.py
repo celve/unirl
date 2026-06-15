@@ -16,6 +16,22 @@ Installed by the VeOmni backend after ``veomni_parallelize``. Two pieces:
    teacher-forced (rollout is the decoupled engine's job), gating on
    ``ulysses_enabled`` is sufficient; we never slice a decode step.
 
+**B=1 under SP — a two-point fix.** ``position_ids`` is read twice, at two
+layers, with the SP all-to-all gather *between* the reads — so no single layer
+can satisfy both and the B=1 fix is necessarily split:
+
+* RoPE, at the decoder top, needs the SP-*global* offset positions (rank ``r``'s
+  tokens live at ``r * S_local + i``). Supplied by the *boundary half*,
+  :func:`_sp_b1_dense_forward`.
+* varlen ``cu_seqlens`` inference, at the flash kernel, sees only the *local*
+  ``position_ids`` (length ``S/sp``) while q was gathered to the full ``S``, so
+  anything it infers is wrong by a factor of ``sp``. Suppressed by the *kernel
+  half*, :func:`_b1_dense` (registered by :func:`_install_b1_dense_attn_patch`).
+
+B>1 needs neither: it skips both branches, its full-length ``attention_mask``
+reaches the kernel intact, and HF's mask path builds correct ``cu_seqlens`` over
+the gathered q.
+
 Verified design: slice-in / gather-out + folded FSDP mesh needs no manual
 sp_size gradient compensation (docs/usp-derisk/sp_fsdp.py).
 """
@@ -64,16 +80,21 @@ def apply_ar_sequence_parallelism(model: nn.Module, sp_size: int) -> None:
 
 
 def _install_b1_dense_attn_patch() -> None:
-    """Force the dense flash-attn path for B=1 under Ulysses.
+    """B=1 dense path — KERNEL HALF (pairs with :func:`_sp_b1_dense_forward`, the
+    boundary half; see the module docstring's two-point-fix note).
 
-    VeOmni gathers q/k/v to the FULL sequence inside its SP flash-attention, but
-    the decoder still hands down the per-rank *local* ``position_ids``. With a
-    2D mask absent (our B=1 pad-strip drops it), transformers' flash-attn derives
-    the varlen ``cu_seqlens`` from that local ``position_ids`` (length S/sp) and
-    applies it to the full gathered q (length S) -> reshape mismatch off by
-    exactly sp. After the wrapper's strip, B=1 is a single dense causal sequence,
-    so we drop the packing hints for B=1 and let the kernel use the dense path
-    (``query_length`` = full seq). B>1 is untouched (keeps varlen). Idempotent.
+    VeOmni gathers q/k/v to the full sequence inside the attention fn, but the
+    per-token metadata the decoder hands down (``position_ids`` and any
+    ``cu_seqlens`` hints) is still *local* (length S/sp). Transformers' flash-attn
+    builds a varlen ``cu_seqlens`` from that short metadata and applies it to the
+    full gathered q -> reshape off by exactly sp. For B=1 the gathered q is a
+    single causal sequence, so we drop every local-length packing hint and let the
+    kernel take its dense path (``query_length`` is already the full gathered len).
+
+    Blunt on purpose: stripping the stale metadata is robust regardless of the
+    transformers version's packed-sequence heuristic (still required on the pod's
+    offset-aware 5.6.0). B>1 is untouched (its full mask drives the varlen path).
+    Idempotent.
     """
     from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
@@ -82,6 +103,8 @@ def _install_b1_dense_attn_patch() -> None:
         return
 
     _PACK_KEYS = (
+        # Local-length hints to strip for B=1; the last two are alt-spellings
+        # absent from the 5.x signature, popped defensively against renames.
         "position_ids", "cu_seq_lens_q", "cu_seq_lens_k",
         "max_length_q", "max_length_k", "max_seqlen_q", "max_seqlen_k",
     )
@@ -98,6 +121,60 @@ def _install_b1_dense_attn_patch() -> None:
     ALL_ATTENTION_FUNCTIONS.register(SP_ATTN_IMPL, _b1_dense)
 
 
+def _sp_b1_dense_forward(orig, args, kwargs, true_len, mask2d, ps, spg):
+    """B=1 dense path — BOUNDARY HALF (pairs with :func:`_b1_dense`, the kernel
+    half; see the module docstring's two-point-fix note).
+
+    The train micro geometry (``micro_batch_size=1`` → B=1): a single left/right-
+    padded sample's cumsum ``position_ids`` carries repeated zeros that flash-attn's
+    varlen inference reads as bogus sequence resets, corrupting the logprobs. Strip
+    the pad to a dense span with a MONOTONIC SP-global ``arange`` (RoPE-correct per
+    rank) and ``attention_mask=None`` (so the kernel half takes its dense path),
+    then re-pad the gathered hidden states into the original padded layout so the
+    downstream lm_head/logprob slice is unchanged.
+
+    We round the real span UP to a multiple of sp and pad it ourselves rather than
+    letting ``slice_input_tensor`` do the divisibility padding: it zero-pads
+    ``position_ids``, and a trailing 0 reads as a reset to varlen inference ->
+    off-by-sp reshape error. The few right-pad tokens attend causally and are
+    dropped before re-pad, so they never affect the real tokens' hidden states.
+    """
+    from veomni.distributed.sequence_parallel import gather_outputs, slice_input_tensor
+
+    input_ids = kwargs.get("input_ids")
+    inputs_embeds = kwargs.get("inputs_embeds")
+    batch = (inputs_embeds if inputs_embeds is not None else input_ids).shape[0]  # == 1
+
+    real_idx = mask2d[0].nonzero(as_tuple=False).flatten()
+    real_start, real_end = int(real_idx[0].item()), int(real_idx[-1].item()) + 1  # real span [real_start, real_end)
+    real_len = real_end - real_start
+    sp = max(1, int(getattr(ps, "ulysses_size", 1)))
+    padded_len = ((real_len + sp - 1) // sp) * sp  # round up to a multiple of sp
+    pad = padded_len - real_len
+    ref = input_ids if input_ids is not None else inputs_embeds
+    if input_ids is not None:
+        seq = input_ids[:, real_start:real_end]
+        if pad:
+            seq = torch.cat([seq, seq.new_zeros((batch, pad))], dim=1)
+        kwargs["input_ids"] = slice_input_tensor(seq, dim=1, group=spg)
+    if inputs_embeds is not None:
+        emb = inputs_embeds[:, real_start:real_end]
+        if pad:
+            emb = torch.cat([emb, emb.new_zeros((batch, pad, emb.shape[-1]))], dim=1)
+        kwargs["inputs_embeds"] = slice_input_tensor(emb, dim=1, group=spg)
+    global_pos = torch.arange(padded_len, device=ref.device).unsqueeze(0).expand(batch, padded_len).contiguous()
+    kwargs["position_ids"] = slice_input_tensor(global_pos, dim=1, group=spg)
+    kwargs["attention_mask"] = None  # dense causal, pad stripped
+    kwargs.pop("cache_position", None)
+    out = orig(*args, **kwargs)
+    hidden = gather_outputs(out.last_hidden_state, gather_dim=1, group=spg)
+    hidden = hidden[:, :real_len, :]  # drop right-pad
+    padded = hidden.new_zeros((batch, true_len, hidden.shape[-1]))
+    padded[:, real_start:real_end, :] = hidden
+    out.last_hidden_state = padded
+    return out
+
+
 def _set_attn_impl(cfg: Any) -> None:
     if hasattr(cfg, "_attn_implementation"):
         cfg._attn_implementation = SP_ATTN_IMPL
@@ -112,12 +189,42 @@ def _set_attn_impl(cfg: Any) -> None:
             pass
 
 
+def _sp_plain_forward(orig, args, kwargs, true_len, position_ids, spg):
+    """Plain slice-in / gather-out (no padding, or B>1).
+
+    ``attention_mask`` is left untouched (full) so it matches the all-to-all-
+    gathered q/k/v — B>1 varlen is handled by HF's mask path at the kernel, which
+    is why B>1 needs no kernel-half pop. ``cache_position`` is dropped: the decoder
+    rebuilds it for the local chunk length; a stale full-length one would mismatch
+    the sliced hidden states.
+    """
+    from veomni.distributed.sequence_parallel import gather_outputs, slice_input_tensor
+
+    input_ids = kwargs.get("input_ids")
+    inputs_embeds = kwargs.get("inputs_embeds")
+    if input_ids is not None:
+        kwargs["input_ids"] = slice_input_tensor(input_ids, dim=1, group=spg)
+    if inputs_embeds is not None:
+        kwargs["inputs_embeds"] = slice_input_tensor(inputs_embeds, dim=1, group=spg)
+    if position_ids is not None:
+        kwargs["position_ids"] = slice_input_tensor(position_ids, dim=position_ids.dim() - 1, group=spg)
+    kwargs.pop("cache_position", None)
+    out = orig(*args, **kwargs)
+    hidden = gather_outputs(out.last_hidden_state, gather_dim=1, group=spg)
+    if hidden.shape[1] > true_len:  # drop SP divisibility padding
+        hidden = hidden[:, :true_len, :]
+    out.last_hidden_state = hidden
+    return out
+
+
 def _wrap_decoder_forward(decoder: nn.Module) -> None:
     """Wrap ``decoder.forward``: slice seq-dim inputs in, gather hidden out.
 
     Idempotent. No-op at run time unless ``ulysses_enabled``. Replacing
     ``.forward`` composes with FSDP2 (its hooks fire on ``__call__``), exactly
-    like the dual-mode forward in unirl.models.qwen3.ar.
+    like the dual-mode forward in unirl.models.qwen3.ar. Dispatches B=1 padded
+    inputs to :func:`_sp_b1_dense_forward`, everything else to
+    :func:`_sp_plain_forward`.
     """
     if getattr(decoder.forward, "_unirl_sp_wrapped", False):
         return
@@ -128,7 +235,6 @@ def _wrap_decoder_forward(decoder: nn.Module) -> None:
 
     _compat.ensure_installed()
     from veomni.distributed.parallel_state import get_parallel_state
-    from veomni.distributed.sequence_parallel import gather_outputs, slice_input_tensor
 
     @functools.wraps(orig)
     def sp_forward(*args: Any, **kwargs: Any):
@@ -139,7 +245,7 @@ def _wrap_decoder_forward(decoder: nn.Module) -> None:
 
         input_ids = kwargs.get("input_ids")
         inputs_embeds = kwargs.get("inputs_embeds")
-        position_ids = kwargs.get("position_ids")
+        position_ids = kwargs.get("position_ids")  # captured pre-mutation for the plain path
         attention_mask = kwargs.get("attention_mask")
 
         if inputs_embeds is not None:
@@ -152,72 +258,11 @@ def _wrap_decoder_forward(decoder: nn.Module) -> None:
         batch = (inputs_embeds if inputs_embeds is not None else input_ids).shape[0]
         mask2d = attention_mask if (attention_mask is not None and attention_mask.dim() == 2) else None
 
-        # B=1 + padding (the train micro geometry, micro_batch_size=1): a single
-        # left/right-padded sample's cumsum position_ids carries repeated zeros.
-        # VeOmni's SP attn gathers q/k/v to the full seq but forwards the *sliced*
-        # position_ids to flash-attn, whose varlen inference then reads those
-        # resets as bogus sequence boundaries -> wrong cu_seqlens -> corrupted
-        # logprobs. Strip the pad to a dense, monotonic-position_ids sequence
-        # (the validated no-pad path), then re-pad the hidden states so the
-        # downstream lm_head/logprob slice (which indexes the original padded
-        # layout) is unchanged. B>1 keeps the plain slice/gather path.
+        # B=1 + padding -> dense-span boundary half; anything else -> plain
+        # slice/gather. See the module docstring's two-point-fix note.
         if batch == 1 and mask2d is not None and int(mask2d.sum().item()) < true_len:
-            nz = mask2d[0].nonzero(as_tuple=False).flatten()
-            s, e = int(nz[0].item()), int(nz[-1].item()) + 1  # contiguous real span [s, e)
-            real_len = e - s
-            sp = max(1, int(getattr(ps, "ulysses_size", 1)))
-            # Round the real span UP to a multiple of sp and right-pad it
-            # ourselves with a MONOTONIC arange position_ids. We cannot let
-            # slice_input_tensor do the divisibility padding: it pads
-            # position_ids with zeros, and a trailing 0 reads as a sequence
-            # reset to flash-attn's varlen inference -> bogus cu_seqlens ->
-            # reshape error (off by exactly sp). With mask=None + monotonic
-            # position_ids the kernel takes the dense causal path; the few
-            # right-pad tokens attend causally and are dropped before re-pad,
-            # so they never affect the real tokens' hidden states.
-            target = ((real_len + sp - 1) // sp) * sp
-            pad = target - real_len
-            ref = input_ids if input_ids is not None else inputs_embeds
-            if input_ids is not None:
-                seq = input_ids[:, s:e]
-                if pad:
-                    seq = torch.cat([seq, seq.new_zeros((batch, pad))], dim=1)
-                kwargs["input_ids"] = slice_input_tensor(seq, dim=1, group=spg)
-            if inputs_embeds is not None:
-                emb = inputs_embeds[:, s:e]
-                if pad:
-                    emb = torch.cat([emb, emb.new_zeros((batch, pad, emb.shape[-1]))], dim=1)
-                kwargs["inputs_embeds"] = slice_input_tensor(emb, dim=1, group=spg)
-            pos_full = torch.arange(target, device=ref.device).unsqueeze(0).expand(batch, target).contiguous()
-            kwargs["position_ids"] = slice_input_tensor(pos_full, dim=1, group=spg)
-            kwargs["attention_mask"] = None  # dense causal, pad stripped
-            kwargs.pop("cache_position", None)
-            out = orig(*args, **kwargs)
-            h = gather_outputs(out.last_hidden_state, gather_dim=1, group=spg)
-            h = h[:, :real_len, :]  # drop right-pad
-            full = h.new_zeros((batch, true_len, h.shape[-1]))
-            full[:, s:e, :] = h
-            out.last_hidden_state = full
-            return out
-
-        # No padding (or B>1): plain slice in / gather out. attention_mask is left
-        # untouched (full) so it matches the all-to-all-gathered q/k/v.
-        if input_ids is not None:
-            kwargs["input_ids"] = slice_input_tensor(input_ids, dim=1, group=spg)
-        if inputs_embeds is not None:
-            kwargs["inputs_embeds"] = slice_input_tensor(inputs_embeds, dim=1, group=spg)
-        if position_ids is not None:
-            kwargs["position_ids"] = slice_input_tensor(position_ids, dim=position_ids.dim() - 1, group=spg)
-        # The decoder rebuilds cache_position for the local chunk length; a stale
-        # full-length one would mismatch the sliced hidden states.
-        kwargs.pop("cache_position", None)
-
-        out = orig(*args, **kwargs)
-        hidden = gather_outputs(out.last_hidden_state, gather_dim=1, group=spg)
-        if hidden.shape[1] > true_len:  # drop SP divisibility padding
-            hidden = hidden[:, :true_len, :]
-        out.last_hidden_state = hidden
-        return out
+            return _sp_b1_dense_forward(orig, args, kwargs, true_len, mask2d, ps, spg)
+        return _sp_plain_forward(orig, args, kwargs, true_len, position_ids, spg)
 
     sp_forward._unirl_sp_wrapped = True
     decoder.forward = sp_forward
