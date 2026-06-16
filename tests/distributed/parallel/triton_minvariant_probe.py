@@ -56,9 +56,10 @@ def run(dtype, shard):
 
     cf = F.linear(x, w)
     cs = torch.cat([F.linear(x[i:i + shard], w) for i in range(0, tok, shard)])
-    tf = tmm(x, Bm)
     ts = torch.cat([tmm(x[i:i + shard], Bm) for i in range(0, tok, shard)])
-    print(f"  M_full={tok:5d} -> M_shard={shard:4d} | cuBLAS Δ={d(cf, cs):.3e} | Triton Δ={d(tf, ts):.3e}")
+    # cuBLAS full = what non-SP / generation uses; Triton-shard = the SP-with-fix forward.
+    print(f"  M_full={tok:5d} -> M_shard={shard:4d} | cuBLAS(full vs shard)Δ={d(cf, cs):.3e} | "
+          f"FIX: Triton-shard vs cuBLAS-full Δ={d(cf, ts):.3e}")
 
 
 for dt in (torch.bfloat16, torch.float32):
