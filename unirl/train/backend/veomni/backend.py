@@ -125,7 +125,9 @@ class VeOmniBackend(BaseFSDP2Backend):
         # experts through veomni's M-invariant bit-exact grouped-GEMM. The 80B
         # checkpoint per-expert keys are stacked at load (bundle.materialize). Experts
         # are frozen (LoRA targets qkv/o_proj), so no adapter/weight-sync collision.
-        if self._sp_size > 1:
+        import os as _os
+
+        if self._sp_size > 1 and not _os.environ.get("UNIRL_HI3_GATHER_MOE"):
             import logging as _logging
 
             from unirl.train.backend.veomni.sp import hunyuan_image3 as _hi3sp
