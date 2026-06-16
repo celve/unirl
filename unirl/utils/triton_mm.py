@@ -38,15 +38,9 @@ def _mm_kernel(A, B, C, M, N, K, sam, sak, sbk, sbn, scm, scn,
              mask=(om[:, None] < M) & (on[None, :] < N))
 
 
-def minvariant_linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-    """``F.linear`` (``x @ weight.T + bias``) via the fixed-tiling, M-invariant kernel.
-
-    ``x``: ``[..., in]``, ``weight``: ``[out, in]``. Falls back nowhere — call only
-    for the shapes/dtypes you want made M-invariant (the caller gates on M/dtype).
-    """
-    shp = x.shape
-    a = x.reshape(-1, shp[-1]).contiguous()
-    b = weight.t().contiguous()
+def _mm_minvariant(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """``a @ b`` with ``a``: ``[M, K]`` contiguous, ``b``: ``[K, N]`` contiguous, via the
+    fixed-tiling, M-invariant kernel (fixed K-reduction order, independent of M)."""
     M, K = a.shape
     N = b.shape[1]
     c = torch.empty((M, N), device=a.device, dtype=a.dtype)
@@ -54,8 +48,57 @@ def minvariant_linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor 
     grid = (triton.cdiv(M, BM), triton.cdiv(N, BN))
     _mm_kernel[grid](a, b, c, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1),
                      c.stride(0), c.stride(1), BM, BN, BK)
-    c = c.reshape(*shp[:-1], N)
-    return c + bias if bias is not None else c
+    return c
+
+
+class _MinvariantLinear(torch.autograd.Function):
+    """Autograd-aware M-invariant linear.
+
+    Forward goes through the fixed-tiling Triton matmul so the activation is
+    M-invariant (the SP shard at M=L/sp reproduces the non-SP / generation M=L
+    result bit-for-bit — what makes ``new_logp`` match ``old_logp``). Backward uses
+    plain cuBLAS matmuls: the gradient only has to be a *correct* gradient of that
+    forward (``grad_x = grad_out @ W``, ``grad_W = grad_out^T @ x``), it does not
+    need to be M-invariant, so there is no reason to pay the Triton cost there.
+
+    Without this, routing a grad-requiring linear through the bare kernel returns a
+    tensor with no ``grad_fn`` -> "element 0 ... does not require grad" at backward.
+    """
+
+    @staticmethod
+    def forward(ctx, x, weight, bias):
+        shp = x.shape
+        a = x.reshape(-1, shp[-1]).contiguous()
+        b = weight.t().contiguous()
+        c = _mm_minvariant(a, b)
+        ctx.save_for_backward(a, weight)
+        ctx.shp = shp
+        out = c.reshape(*shp[:-1], weight.shape[0])
+        return out + bias if bias is not None else out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        a, weight = ctx.saved_tensors          # a: [M, K], weight: [N, K]
+        n = weight.shape[0]
+        go = grad_out.reshape(-1, n)           # [M, N]
+        grad_x = grad_w = grad_b = None
+        if ctx.needs_input_grad[0]:
+            grad_x = (go @ weight).reshape(ctx.shp)        # [M,N] @ [N,K] -> [M,K]
+        if ctx.needs_input_grad[1]:
+            grad_w = go.t() @ a                            # [N,M] @ [M,K] -> [N,K]
+        if ctx.needs_input_grad[2]:
+            grad_b = go.sum(0)
+        return grad_x, grad_w, grad_b
+
+
+def minvariant_linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+    """``F.linear`` (``x @ weight.T + bias``) via the fixed-tiling, M-invariant kernel.
+
+    ``x``: ``[..., in]``, ``weight``: ``[out, in]``. Differentiable (see
+    ``_MinvariantLinear``). Falls back nowhere — call only for the shapes/dtypes you
+    want made M-invariant (the caller gates on M/dtype).
+    """
+    return _MinvariantLinear.apply(x, weight, bias)
 
 
 __all__ = ["minvariant_linear"]
