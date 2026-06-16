@@ -90,30 +90,32 @@ def main():
         apply_sequence_parallelism(m, world)
     m.eval()
 
-    # per-layer capture hooks + sub-module (attn / mlp) hooks for the first layers
+    # Dim-aware capture: captured[key] = (tensor, seq_dim). seq is dim=1 for most
+    # activations, dim=2 for the per-head q after qk-norm ([B, H, L, d]).
     captured = {}
-    for i, layer in enumerate(m.layers):
-        layer.register_forward_hook(lambda mod, inp, out, i=i: captured.__setitem__(i, out[0] if isinstance(out, (tuple, list)) else out))
-    # Fine-grained op-by-op trajectory through layer 0: see identity (=0) at the
-    # input, where the first non-zero appears (the qkv_proj GEMM), and how the
-    # attention propagates it. All these tensors carry seq on dim=1 (gatherable).
-    def t(out):
-        return out[0] if isinstance(out, (tuple, list)) else out
 
+    def cap(key, out, dim=1):
+        captured[key] = (out[0] if isinstance(out, (tuple, list)) else out, dim)
+
+    # accumulation: every layer's output, plus attn & mlp sub-steps for ALL layers
+    for i, layer in enumerate(m.layers):
+        layer.register_forward_hook(lambda mod, inp, out, i=i: cap(i, out, 1))
+        layer.self_attn.register_forward_hook(lambda mod, inp, out, i=i: cap(f"Y{i:02d}a_attn", out, 1))
+        layer.mlp.register_forward_hook(lambda mod, inp, out, i=i: cap(f"Y{i:02d}b_mlp", out, 1))
+
+    # fine op-by-op trajectory through layer 0
     L0 = m.layers[0]
-    L0.register_forward_pre_hook(lambda mod, args: captured.__setitem__("00_layer_input", args[0]))
-    for nm in ("input_layernorm", "ln1", "attention_layernorm"):
-        if hasattr(L0, nm):
-            getattr(L0, nm).register_forward_hook(lambda mod, inp, out: captured.__setitem__("01_input_ln", t(out)))
-            break
-    L0.self_attn.qkv_proj.register_forward_hook(lambda mod, inp, out: captured.__setitem__("02_qkv_proj", t(out)))
-    L0.self_attn.o_proj.register_forward_hook(lambda mod, inp, out: captured.__setitem__("03_o_proj", t(out)))
-    L0.self_attn.register_forward_hook(lambda mod, inp, out: captured.__setitem__("04_attn_out", t(out)))
-    for nm in ("post_attention_layernorm", "ln2", "post_attn_layernorm"):
-        if hasattr(L0, nm):
-            getattr(L0, nm).register_forward_hook(lambda mod, inp, out: captured.__setitem__("05_post_attn_ln", t(out)))
-            break
-    L0.mlp.register_forward_hook(lambda mod, inp, out: captured.__setitem__("06_mlp_out", t(out)))
+    L0.register_forward_pre_hook(lambda mod, args: cap("X00_layer_input", (args[0],), 1))
+    if hasattr(L0, "input_layernorm"):
+        L0.input_layernorm.register_forward_hook(lambda mod, inp, out: cap("X01_input_ln", out, 1))
+    L0.self_attn.qkv_proj.register_forward_hook(lambda mod, inp, out: cap("X02_qkv_proj", out, 1))
+    if hasattr(L0.self_attn, "query_layernorm"):
+        L0.self_attn.query_layernorm.register_forward_hook(lambda mod, inp, out: cap("X03_q_after_qknorm", out, 2))
+    L0.self_attn.o_proj.register_forward_hook(lambda mod, inp, out: cap("X04_o_proj", out, 1))
+    L0.self_attn.register_forward_hook(lambda mod, inp, out: cap("X05_attn_out", out, 1))
+    if hasattr(L0, "post_attention_layernorm"):
+        L0.post_attention_layernorm.register_forward_hook(lambda mod, inp, out: cap("X06_post_attn_ln", out, 1))
+    L0.mlp.register_forward_hook(lambda mod, inp, out: cap("X07_mlp_out", out, 1))
 
     b, d = 1, cfg.head_dim
     torch.manual_seed(123)
@@ -129,43 +131,53 @@ def main():
                     custom_pos_emb=(cos, sin), mode=MODE, use_cache=False, return_dict=True)
         sp = get_parallel_state().sp_group if world > 1 else None
 
-        def full(h):  # gather seq shards -> [B, L', D] -> trim to L
+        def full(h, dim):  # gather seq shards along `dim` -> trim to true L
             if world == 1:
                 return h.detach().float().cpu()
             g = [torch.empty_like(h) for _ in range(world)]
             dist.all_gather(g, h.contiguous(), group=sp)
-            return torch.cat(g, dim=1)[:, :L, :].detach().float().cpu()
+            o = torch.cat(g, dim=dim)
+            sl = [slice(None)] * o.dim()
+            sl[dim] = slice(0, L)
+            return o[tuple(sl)].detach().float().cpu()
 
-        subs = {k: full(captured[k]) for k in captured if isinstance(k, str)}
-        return [full(captured[i]) for i in range(LAYERS)], subs, full(out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0])
+        detail = {k: full(*captured[k]) for k in captured if isinstance(k, str)}
+        layers = [full(*captured[i]) for i in range(LAYERS)]
+        fin = full(out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0], 1)
+        return layers, detail, fin
 
-    layersA, subsA, finalA = run_once()
-    layersB, subsB, finalB = run_once()
+    layersA, detailA, finalA = run_once()
+    layersB, detailB, finalB = run_once()
 
     if rank == 0:
         det = max((a - b_).abs().max().item() for a, b_ in zip(layersA, layersB))
-        print(f"[{TAG}] world={world} DETERMINISM max|Δ| over 2 passes (per-layer)= {det:.3e}", flush=True)
+        print(f"[{TAG}] world={world} DETERMINISM (2 passes) max|Δ|= {det:.3e}", flush=True)
+
+        def stat(a, b):
+            d = (a - b).abs()
+            return d.max().item(), d.mean().item(), (d > 0).float().mean().item() * 100.0
+
+        def line(label, a, b):
+            mx, mn, pc = stat(a, b)
+            rel = mx / (a.abs().max().item() + 1e-9)
+            print(f"   {label:16s}: max={mx:.3e} rel={rel:.2e} mean={mn:.3e} %elems_differ={pc:6.3f}", flush=True)
+
         if world == 1:
-            torch.save({"layers": layersA, "subs": subsA, "final": finalA}, REF_PATH)
+            torch.save({"layers": layersA, "detail": detailA, "final": finalA}, REF_PATH)
             print(f"[{TAG}] saved reference (world=1).", flush=True)
         elif os.path.exists(REF_PATH):
             ref = torch.load(REF_PATH)
-            print(f"[{TAG}] TRAJECTORY through layer 0 (op by op), sp=1 vs sp={world}:", flush=True)
-            for k in sorted(subsA):
-                a, bb = ref["subs"][k], subsA[k]
-                diff = (a - bb).abs().max().item()
-                rel = diff / (a.abs().max().item() + 1e-9)
-                print(f"   {k:16s}: max|Δ|={diff:.3e}  rel={rel:.3e}", flush=True)
-            print(f"[{TAG}] ACCUMULATION across layers (layer output), sp=1 vs sp={world}:", flush=True)
+            print(f"[{TAG}] ========== sp=1 vs sp={world} ==========", flush=True)
+            print("LAYER-0 TRAJECTORY (op by op):", flush=True)
+            for k in sorted(k for k in detailA if k.startswith("X")):
+                line(k[3:], ref["detail"][k], detailA[k])
+            print("PER-LAYER SUB-STEPS (attn / mlp, every layer):", flush=True)
+            for k in sorted(k for k in detailA if k.startswith("Y")):
+                line(k[1:], ref["detail"][k], detailA[k])
+            print("ACCUMULATION (residual stream, layer output):", flush=True)
             for i in range(LAYERS):
-                a, bb = ref["layers"][i], layersA[i]
-                diff = (a - bb).abs().max().item()
-                rel = diff / (a.abs().max().item() + 1e-9)
-                print(f"   layer{i:2d}: max|Δ|={diff:.3e}  rel={rel:.3e}", flush=True)
-            fa, fb = ref["final"], finalA
-            fdiff = (fa - fb).abs().max().item()
-            frel = fdiff / (fa.abs().max().item() + 1e-9)
-            print(f"   FINAL : max|Δ|={fdiff:.3e}  rel={frel:.3e}  {'PASS' if frel < 1e-3 else 'DIVERGENT'}", flush=True)
+                line(f"layer{i:02d}", ref["layers"][i], layersA[i])
+            line("FINAL", ref["final"], finalA)
 
     dist.barrier()
     dist.destroy_process_group()
