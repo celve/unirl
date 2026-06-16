@@ -28,6 +28,8 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Mapping
 
+import torch
+
 from unirl.algorithms import AlgorithmStepResult, StageAlgorithm
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
@@ -185,6 +187,12 @@ class UnifiedModelTrainStack(Remote):
             partial, has_backward = self._train_one(name, tracks[name], training_progress=float(training_progress))
             results[name] = partial
             any_backward = any_backward or has_backward
+            # Release this track's cached (freed-but-reserved) blocks before the
+            # next track. On the HI3 colocate cards the AR replays free their
+            # activations but leave ~66GB reserved; without this the heavier
+            # gen_image replay (~58GB) can't allocate alongside that cache -> OOM.
+            # Cheap (2x/train-step) vs the replay forward/backward.
+            torch.cuda.empty_cache()
 
         if any_backward:
             grad_norm = float(self.fsdp_backend.optimizer_step(max_grad_norm=float(self.max_grad_norm)))
