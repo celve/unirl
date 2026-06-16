@@ -96,12 +96,42 @@ def build_model(dev):
     ModelCls = get_class_from_dynamic_module("modeling_hunyuan_image_3.HunyuanImage3Model", HI3_DIR)
     cfg = CfgCls.from_pretrained(HI3_DIR)
     cfg.num_hidden_layers = LAYERS
-    cfg.num_experts = 8
-    if isinstance(getattr(cfg, "moe_topk", None), list):
-        cfg.moe_topk = [min(x, 4) for x in cfg.moe_topk]
+    real = bool(os.environ.get("REAL_WEIGHTS"))
+    if not real:
+        cfg.num_experts = 8
+        if isinstance(getattr(cfg, "moe_topk", None), list):
+            cfg.moe_topk = [min(x, 4) for x in cfg.moe_topk]
     cfg._attn_implementation = "sdpa"
     torch.manual_seed(0)
-    return ModelCls(cfg).to(dev).to(DTYPE), cfg
+    m = ModelCls(cfg).to(dev).to(DTYPE)
+    if real:
+        _load_real_layer_weights(m, LAYERS, dev, DTYPE)
+    return m, cfg
+
+
+def _load_real_layer_weights(m, n_layers, dev, dtype):
+    """Load the REAL checkpoint weights for layers 0..n_layers-1 (+ non-layer decoder
+    params) so the parity test runs on the real bf16-rounding behavior the random-weight
+    bisect misses. Keeps full config (64 experts)."""
+    import glob
+
+    from safetensors.torch import safe_open
+
+    keep = set(range(n_layers))
+    sd = {}
+    for f in sorted(glob.glob(os.path.join(HI3_DIR, "*.safetensors"))):
+        with safe_open(f, framework="pt", device=str(dev)) as fh:
+            for k in fh.keys():
+                if not k.startswith("model."):
+                    continue
+                rest = k[len("model."):]
+                if rest.startswith("layers."):
+                    if int(rest.split(".")[1]) not in keep:
+                        continue
+                sd[rest] = fh.get_tensor(k).to(dtype)
+    res = m.load_state_dict(sd, strict=False)
+    miss = [x for x in res.missing_keys if not x.startswith(("embed", "wte", "tok"))]
+    print(f"[REAL_WEIGHTS] loaded {len(sd)} tensors; missing(non-embed)={len(miss)} unexpected={len(res.unexpected_keys)}", flush=True)
 
 
 def make_mask(b, l, dev):
