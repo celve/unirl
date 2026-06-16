@@ -163,7 +163,13 @@ def _install_minvariant_linear(moe_inter: "frozenset[int]") -> None:
                         xp = torch.cat([xf, xf.new_zeros(m * (sp - 1), xf.shape[-1])], dim=0)
                         yp = _orig(xp, weight, bias)
                         return yp[:m].reshape(*x.shape[:-1], n)
-                    if x.dtype in (torch.bfloat16, torch.float16) and (n in _dims or k in _dims):
+                    if x.dtype in (torch.bfloat16, torch.float16):
+                        # DIAGNOSTIC: route ALL non-gate bf16 GEMMs at M=shard through the
+                        # bit-exact M-invariant kernel (qkv/o_proj/shared-MLP/heads). The
+                        # bisect (random weights) showed these are M-stable, but the real
+                        # e2e ratio did not recover with experts-only, so test whether the
+                        # real-weight activations make them diverge. Experts bypass F.linear
+                        # (grouped path). If this recovers the ratio, narrow back by shape.
                         return minvariant_linear(x, weight, bias)
             except Exception:
                 pass
