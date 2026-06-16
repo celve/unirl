@@ -80,35 +80,65 @@ def apply_hi3_sequence_parallelism(model: nn.Module, sp_size: int) -> None:
 
     _patch_hi3_attention(model)
     _wrap_hi3_decoder_forward(model)
-    _install_minvariant_linear()
+
+    # MoE experts: when restructured to stacked params (backend pre-FSDP hook / bisect),
+    # run them through veomni's M-invariant grouped-GEMM. Falls back to per-expert
+    # F.linear routing if not restructured.
+    grouped = any(getattr(m, "_grouped", False) for m in model.modules())
+    if grouped:
+        from unirl.train.backend.veomni.sp.hi3_moe import patch_grouped_moe_forward
+
+        patch_grouped_moe_forward(model)
+
+    # The router gate (fp32, routing-sensitive) and the shared MLP's moe_inter-dim
+    # GEMM still go through F.linear; route them M-invariantly. Expert GEMMs (when
+    # grouped) bypass F.linear entirely.
+    moe_inter = _moe_inter_dims(cfg)
+    _install_minvariant_linear(moe_inter)
     logger.info(
-        "HI3 SP installed: attention all-to-all + decoder slice/gather wrapper (sp_size=%d)",
+        "HI3 SP installed: attention all-to-all + decoder wrapper + %s MoE (sp_size=%d)",
+        "grouped-GEMM" if grouped else "per-expert",
         sp_size,
     )
 
 
-def _install_minvariant_linear() -> None:
-    """Route small-M bf16 ``F.linear`` through the M-invariant Triton kernel under SP.
+def _moe_inter_dims(cfg) -> frozenset:
+    """The moe/shared-MLP intermediate dim(s) (N or K of the GEMMs that carry the
+    bf16 M-dependence). Used to shape-gate the M-invariant F.linear routing."""
+    dims = set()
+    for attr in ("moe_intermediate_size", "intermediate_size"):
+        v = getattr(cfg, attr, None)
+        if isinstance(v, (list, tuple)):
+            dims.update(int(x) for x in v)
+        elif isinstance(v, int):
+            dims.add(int(v))
+    return frozenset(dims)
 
-    The bf16 GEMM divergence that breaks the GRPO ratio under sequence-parallelism
-    is M-dependence: cuBLAS picks a different kernel for M=L/sp than for M=L, so the
-    SP train forward diverges from the non-SP/generation forward. It only bites at
-    small M (cuBLAS reuses the large-M kernel above M~64), so at the long replay
-    lengths only the MoE experts (a few routed tokens each) land in the divergent
-    regime. Route just those (``M < UNIRL_MINVARIANT_M``, default 256, bf16, SP
-    active) through the fixed-tiling kernel, which reproduces the cuBLAS large-M
-    (=generation) result in bf16. Large-M GEMMs stay on cuBLAS (fast, already
-    invariant). Global patch (not context-scoped) so it also covers the activation-
-    checkpointing recompute. Idempotent; ``UNIRL_MINVARIANT_M=0`` disables it.
+
+def _install_minvariant_linear(moe_inter: "frozenset[int]") -> None:
+    """Make the remaining (non-grouped) ``F.linear`` calls M-invariant under SP.
+
+    The bf16 GEMM divergence that breaks the GRPO ratio is cuBLAS M-dependence: a
+    different kernel (K-reduction order) at M=L/sp vs M=L. The expert GEMMs (the main
+    offender) go through veomni's M-invariant grouped-GEMM (see ``hi3_moe``). Two
+    cases remain on ``F.linear`` and are routed here, shape-gated:
+
+    * **router gate** (tiny N = num_experts, and/or fp32): its output drives a DISCRETE
+      top-k selection, hypersensitive to a 1-ULP logit change. Triton ``!=`` cuBLAS by
+      a hair would flip routing vs generation, so reproduce cuBLAS-M=L *exactly* by
+      padding the local L/sp tokens up to L and keeping the local rows (gate is tiny,
+      so the sp x padding is negligible).
+    * **shared MLP** ``down_proj`` (K = moe_intermediate): carries the same bf16
+      M-dependence as the experts; route through the fixed-tiling kernel (== cuBLAS
+      large-M in bf16).
+
+    Everything else (qkv/o_proj/lm_head — empirically M-stable above M~256) stays on
+    cuBLAS. Global patch so it also covers activation-checkpointing recompute.
+    Idempotent.
     """
-    import os
-
     import torch.nn.functional as F
 
     if getattr(F.linear, "_unirl_minvariant", False):
-        return
-    threshold = int(os.environ.get("UNIRL_MINVARIANT_M", "256"))
-    if threshold <= 0:
         return
 
     from veomni.distributed.parallel_state import get_parallel_state
@@ -117,31 +147,23 @@ def _install_minvariant_linear() -> None:
 
     _orig_linear = F.linear
 
-    def _patched_linear(x, weight, bias=None, _orig=_orig_linear, _t=threshold):
+    def _patched_linear(x, weight, bias=None, _orig=_orig_linear, _dims=moe_inter):
         if x.dim() >= 2:
             try:
                 ps = get_parallel_state()
-                if ps.ulysses_enabled:
-                    sp = int(getattr(ps, "ulysses_size", 1))
-                    m = 1
-                    for s in x.shape[:-1]:
-                        m *= int(s)
+                if ps.ulysses_enabled and int(getattr(ps, "ulysses_size", 1)) > 1:
                     n = int(weight.shape[0])
-                    if sp > 1 and (n <= 256 or x.dtype == torch.float32):
-                        # MoE router gate (tiny N = num_experts) or any fp32 op: the
-                        # gate output drives a DISCRETE top-k expert selection, which
-                        # is hypersensitive to logit differences. Triton != cuBLAS by
-                        # a hair, which would flip a few tokens' routing vs generation.
-                        # So reproduce cuBLAS M=L exactly: pad the local L/sp tokens up
-                        # to L, run the M=L kernel, keep the local rows. The gate is
-                        # tiny so the sp x padding is negligible.
+                    k = int(weight.shape[-1])
+                    if n <= 256 or x.dtype == torch.float32:
+                        sp = int(getattr(ps, "ulysses_size", 1))
+                        m = 1
+                        for s in x.shape[:-1]:
+                            m *= int(s)
                         xf = x.reshape(-1, x.shape[-1])
                         xp = torch.cat([xf, xf.new_zeros(m * (sp - 1), xf.shape[-1])], dim=0)
                         yp = _orig(xp, weight, bias)
                         return yp[:m].reshape(*x.shape[:-1], n)
-                    if x.dtype in (torch.bfloat16, torch.float16) and m < _t:
-                        # compute GEMMs (experts + small projections): Triton fixed-
-                        # tiling is FLOP-neutral and reproduces cuBLAS large-M in bf16.
+                    if x.dtype in (torch.bfloat16, torch.float16) and (n in _dims or k in _dims):
                         return minvariant_linear(x, weight, bias)
             except Exception:
                 pass
@@ -149,7 +171,7 @@ def _install_minvariant_linear() -> None:
 
     _patched_linear._unirl_minvariant = True  # type: ignore[attr-defined]
     F.linear = _patched_linear
-    logger.info("HI3 SP: M-invariant F.linear routing installed (M<%d, bf16)", threshold)
+    logger.info("HI3 SP: M-invariant F.linear routing installed (gate pad + moe_inter dims %s)", sorted(moe_inter))
 
 
 def _patch_hi3_attention(model: nn.Module) -> None:

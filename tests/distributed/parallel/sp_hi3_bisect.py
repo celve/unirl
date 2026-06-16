@@ -137,6 +137,14 @@ def main():
         torch.save(m.state_dict(), SD_PATH)
     dist.barrier()
     m.load_state_dict(torch.load(SD_PATH, map_location=dev))
+    if world > 1 and os.environ.get("GROUPED_MOE"):
+        # sp>1 only: restructure experts to stacked params so the SP adapter routes
+        # them through veomni's M-invariant grouped-GEMM. sp=1 stays per-expert cuBLAS
+        # (the reference), so FINAL=0 means grouped(M=shard) == cuBLAS(M=full) on real
+        # activations.
+        from unirl.train.backend.veomni.sp.hi3_moe import restructure_hi3_experts
+
+        restructure_hi3_experts(m)
     if world > 1:
         apply_sequence_parallelism(m, world)
     m.eval()
