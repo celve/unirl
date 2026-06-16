@@ -291,6 +291,74 @@ def patch_fp32_skip() -> None:
             _mod.from_layer = _patched_from_layer
 
 
+def patch_merged_lora_fused_tensor() -> None:
+    """Let vLLM's merged column/QKV LoRA ``set_lora`` accept a single fused 2-D B.
+
+    HI3's PEFT targets the *fused* ``qkv_proj`` (one module), so the synced
+    adapter carries one ``qkv_proj.lora_B`` of shape ``[q+k+v, r]`` (e.g.
+    ``[6144, 8]``) and one shared ``lora_A`` ``[r, in]``. The vLLM layer it
+    maps to, ``MergedQKVParallelLinearWithLoRA`` (subclass of
+    ``MergedColumnParallelLinearWithLoRA``), instead expects a *per-slice list*
+    ``[B_q, B_k, B_v]`` and iterates it inside ``slice_lora_b``. Handed the
+    single 2-D tensor, the ``enumerate`` walks its rows (each 1-D) and the
+    2-index slice raises ``IndexError: too many indices for tensor of
+    dimension 1`` on the very first weight-sync (``activate_adapter`` →
+    ``set_lora`` → ``slice_lora_b``). vLLM catches it per-worker and keeps
+    serving the *base* (un-adapted) DiT, so the RL reward never moves.
+
+    vLLM already solves this for its own
+    ``MergedColumnParallelLinearVariableSliceWithLoRA.set_lora`` (single fused
+    checkpoint tensors). We port that same split onto the base merged
+    ``set_lora`` so the QKV subclass inherits it: replicate a single ``lora_a``
+    across ``n_slices`` and split a single ``lora_b`` along dim 0 by the
+    (global) ``base_layer.output_sizes`` — verified global ``[q,k,v]`` in vLLM
+    0.20's ``QKVParallelLinear`` — then delegate to the original list-expecting
+    ``set_lora``, which TP-shards each slice per rank. Idempotent; a no-op for
+    already-split list inputs (every non-fused model), so it is safe globally.
+
+    Mirrors the SGLang fix (``patch_lora_slice_2d``) but TP-correct: HI3's DiT
+    engine is TP=4, so the per-slice split must precede ``slice_lora_b``'s
+    per-rank head slicing — a naive contiguous 2-D slice would be wrong.
+    """
+    try:
+        import torch as _torch
+        from vllm.lora.layers.column_parallel_linear import (
+            MergedColumnParallelLinearWithLoRA,
+        )
+    except (ImportError, AttributeError):
+        return  # vllm not available in this process; skip
+
+    cls = MergedColumnParallelLinearWithLoRA
+    _orig_set_lora = cls.set_lora
+    if getattr(_orig_set_lora, "_diffrl_fused_tensor_split", False):
+        return
+
+    def _patched_set_lora(self, index, lora_a, lora_b, *args, _orig=_orig_set_lora, **kwargs):
+        # A single fused 2-D B / shared A → the per-slice lists the merged
+        # set_lora expects. Lists pass through untouched (normal split adapters).
+        if isinstance(lora_a, _torch.Tensor):
+            lora_a = [lora_a] * self.n_slices
+        if isinstance(lora_b, _torch.Tensor):
+            output_sizes = list(self.base_layer.output_sizes)
+            if sum(output_sizes) != lora_b.shape[0]:
+                raise ValueError(
+                    "diffrl fused-LoRA split: lora_b rows "
+                    f"{lora_b.shape[0]} != sum(output_sizes)={sum(output_sizes)} "
+                    f"{output_sizes}; base_layer.output_sizes must be the global "
+                    "per-slice sizes (pre-TP-divide)."
+                )
+            chunks = []
+            start = 0
+            for size in output_sizes:
+                chunks.append(lora_b[start : start + size, :])
+                start += size
+            lora_b = chunks
+        return _orig(self, index, lora_a, lora_b, *args, **kwargs)
+
+    _patched_set_lora._diffrl_fused_tensor_split = True  # type: ignore[attr-defined]
+    cls.set_lora = _patched_set_lora
+
+
 def patch_lora_request_passthrough() -> None:
     """Forward ``lora_request`` through ``Omni.generate`` to ``engine.add_request``.
 
@@ -555,6 +623,7 @@ class VLLMOmniHijack:
         patch_dit_lora_loader()
         patch_ar_lora_loader()
         patch_fp32_skip()
+        patch_merged_lora_fused_tensor()
         patch_lora_request_passthrough()
         patch_per_request_ar_seed()
         patch_sigmas_passthrough()
