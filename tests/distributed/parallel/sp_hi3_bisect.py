@@ -69,6 +69,14 @@ if os.environ.get("TRITON_LINEAR"):
 
     _F.linear = _triton_linear
 
+if os.environ.get("BATCH_INVARIANT") and int(os.environ.get("WORLD_SIZE", "1")) > 1:
+    # Only the sp>1 run goes batch-invariant; sp=1 stays cuBLAS (the reference the
+    # rollout matches). FINAL=0 then means VeOmni's batch-invariant matmul reproduces
+    # cuBLAS-at-M=full on the *real* activations (not just random data).
+    from veomni.ops.batch_invariant_ops import enable_batch_invariant_mode
+
+    enable_batch_invariant_mode()
+
 HI3_DIR = os.environ.get(
     "HI3_MODEL_PATH", "/apdcephfs_fsgm3/share_305110755/hunyuan/linyuwu/HunyuanImage-3-Instruct"
 )
