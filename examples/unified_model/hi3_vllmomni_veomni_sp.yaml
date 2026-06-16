@@ -95,10 +95,14 @@ backend:
     reshard_after_forward: true
     activation_checkpointing: true
     use_torch_compile: false
-    # Ulysses sequence-parallel degree. 8-GPU pod -> dp=4 x sp=2; the packed
-    # multimodal sequence is sharded across sp ranks (HunyuanImage3SDPAAttention
-    # all-to-all). sp_size=1 is a true no-op (the FSDP-equivalent path).
-    sp_size: 2
+    # Ulysses sequence-parallel degree. 8-GPU pod -> dp=2 x sp=4: the packed
+    # multimodal sequence is sharded across 4 ranks (HunyuanImage3SDPAAttention
+    # all-to-all), ~halving the train-step activation memory vs sp=2 (the L/sp
+    # MLP/MoE shard AND the gathered q/k/v with H/sp heads both shrink) — needed
+    # for the unified AR+image colocate step to fit alongside the slept engine.
+    # Params still shard across all 8 (folded dp_shard x ulysses mesh, 20GB/rank).
+    # sp_size=1 is a true no-op (the FSDP-equivalent path).
+    sp_size: 4
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
     learning_rate: 1.0e-4
