@@ -126,21 +126,23 @@ def _install_minvariant_linear() -> None:
                     m = 1
                     for s in x.shape[:-1]:
                         m *= int(s)
-                    if x.dtype in (torch.bfloat16, torch.float16) and m < _t:
-                        # small-M bf16 (MoE experts + small projections): Triton
-                        # fixed-tiling reproduces cuBLAS large-M (=generation) in bf16.
-                        return minvariant_linear(x, weight, bias)
-                    if x.dtype == torch.float32 and sp > 1:
-                        # The MoE router gate is fp32, and fp32 cuBLAS is M-dependent
-                        # at ALL M -> a few tokens' top-k expert flips under SP. Pad
-                        # the local L/sp tokens up to L and run the M=L cuBLAS kernel,
-                        # reproducing the non-SP / generation routing exactly. The gate
-                        # is tiny (N=num_experts), so the sp x padding is cheap.
+                    n = int(weight.shape[0])
+                    if sp > 1 and (n <= 256 or x.dtype == torch.float32):
+                        # MoE router gate (tiny N = num_experts) or any fp32 op: the
+                        # gate output drives a DISCRETE top-k expert selection, which
+                        # is hypersensitive to logit differences. Triton != cuBLAS by
+                        # a hair, which would flip a few tokens' routing vs generation.
+                        # So reproduce cuBLAS M=L exactly: pad the local L/sp tokens up
+                        # to L, run the M=L kernel, keep the local rows. The gate is
+                        # tiny so the sp x padding is negligible.
                         xf = x.reshape(-1, x.shape[-1])
-                        pad = m * (sp - 1)
-                        xp = torch.cat([xf, xf.new_zeros(pad, xf.shape[-1])], dim=0)
+                        xp = torch.cat([xf, xf.new_zeros(m * (sp - 1), xf.shape[-1])], dim=0)
                         yp = _orig(xp, weight, bias)
-                        return yp[:m].reshape(*x.shape[:-1], weight.shape[0])
+                        return yp[:m].reshape(*x.shape[:-1], n)
+                    if x.dtype in (torch.bfloat16, torch.float16) and m < _t:
+                        # compute GEMMs (experts + small projections): Triton fixed-
+                        # tiling is FLOP-neutral and reproduces cuBLAS large-M in bf16.
+                        return minvariant_linear(x, weight, bias)
             except Exception:
                 pass
         return _orig(x, weight, bias)
