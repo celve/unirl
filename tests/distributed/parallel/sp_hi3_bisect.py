@@ -26,6 +26,49 @@ _compat.ensure_installed()
 from veomni.distributed.parallel_state import get_parallel_state, init_parallel_state  # noqa: E402
 from unirl.train.backend.veomni.sp import apply_sequence_parallelism  # noqa: E402
 
+if os.environ.get("TRITON_LINEAR"):
+    # Route every nn.Linear through a fixed-tiling Triton matmul -> M-invariant,
+    # so the SP (M=L/sp) and non-SP (M=L) forwards use the SAME K-reduction order.
+    import triton
+    import triton.language as tl
+    import torch.nn.functional as _F
+
+    @triton.jit
+    def _mmk(A, B, C, M, N, K, sam, sak, sbk, sbn, scm, scn,
+             BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+        pm = tl.program_id(0)
+        pn = tl.program_id(1)
+        om = pm * BM + tl.arange(0, BM)
+        on = pn * BN + tl.arange(0, BN)
+        ok = tl.arange(0, BK)
+        ap = A + om[:, None] * sam + ok[None, :] * sak
+        bp = B + ok[:, None] * sbk + on[None, :] * sbn
+        acc = tl.zeros((BM, BN), dtype=tl.float32)
+        for k in range(0, K, BK):
+            a = tl.load(ap, mask=(om[:, None] < M) & (ok[None, :] < K - k), other=0.0)
+            b = tl.load(bp, mask=(ok[:, None] < K - k) & (on[None, :] < N), other=0.0)
+            acc += tl.dot(a, b)
+            ap += BK * sak
+            bp += BK * sbk
+        tl.store(C + om[:, None] * scm + on[None, :] * scn, acc.to(C.dtype.element_ty),
+                 mask=(om[:, None] < M) & (on[None, :] < N))
+
+    def _triton_linear(x, weight, bias=None):
+        shp = x.shape
+        a = x.reshape(-1, shp[-1]).contiguous()
+        b = weight.t().contiguous()
+        M, K = a.shape
+        N = b.shape[1]
+        c = torch.empty((M, N), device=a.device, dtype=a.dtype)
+        BM, BN, BK = 128, 128, 32
+        grid = (triton.cdiv(M, BM), triton.cdiv(N, BN))
+        _mmk[grid](a, b, c, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1),
+                   c.stride(0), c.stride(1), BM, BN, BK)
+        c = c.reshape(*shp[:-1], N)
+        return c + bias if bias is not None else c
+
+    _F.linear = _triton_linear
+
 HI3_DIR = os.environ.get(
     "HI3_MODEL_PATH", "/apdcephfs_fsgm3/share_305110755/hunyuan/linyuwu/HunyuanImage-3-Instruct"
 )
