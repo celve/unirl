@@ -99,6 +99,12 @@ def main():
             lambda mod, inp, out, k=f"L{i}.attn": captured.__setitem__(k, out[0] if isinstance(out, (tuple, list)) else out))
         m.layers[i].mlp.register_forward_hook(
             lambda mod, inp, out, k=f"L{i}.mlp": captured.__setitem__(k, out[0] if isinstance(out, (tuple, list)) else out))
+    # The first raw GEMMs: qkv_proj/o_proj run on the LOCAL chunk (M=L/sp) under SP
+    # vs the full seq (M=L) non-SP, identical input rows -> isolates pure GEMM M-dep.
+    m.layers[0].self_attn.qkv_proj.register_forward_hook(
+        lambda mod, inp, out: captured.__setitem__("L0.qkv_proj", out[0] if isinstance(out, (tuple, list)) else out))
+    m.layers[0].self_attn.o_proj.register_forward_hook(
+        lambda mod, inp, out: captured.__setitem__("L0.o_proj", out[0] if isinstance(out, (tuple, list)) else out))
 
     b, d = 1, cfg.head_dim
     torch.manual_seed(123)
