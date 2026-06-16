@@ -320,6 +320,23 @@ class BucketedIPCReceiveMixin:
                 f"deserialised lora_tensors expected dict, got "
                 f"{type(lora_tensors).__name__}"
             )
+        # [LORAPROBE] one-shot diagnostic for the vLLM slice_lora_b IndexError
+        # ("too many indices for tensor of dimension 1"): log which lora_B is 1-D
+        # + the qkv/o_proj shapes, so we can see whether the fused qkv-B is sent
+        # un-split or a B tensor is shape-mangled in transfer.
+        if not getattr(type(self), "_unirl_loraprobe_done", False):
+            import logging as _lg
+
+            _sh = {k: tuple(v.shape) for k, v in lora_tensors.items() if hasattr(v, "shape")}
+            _bad = {k: s for k, s in _sh.items() if len(s) < 2}
+            _lg.getLogger(__name__).warning(
+                "[LORAPROBE] %d lora tensors | 1-D(bad)=%s | qkv=%s | o_proj=%s",
+                len(_sh),
+                _bad,
+                {k: s for k, s in _sh.items() if "qkv" in k.lower()},
+                {k: s for k, s in _sh.items() if "o_proj" in k.lower()},
+            )
+            type(self)._unirl_loraprobe_done = True
         from unirl.rollout.engine.vllm_omni.vllm_patches import (
             OmniTensorLoRARequest,
         )
