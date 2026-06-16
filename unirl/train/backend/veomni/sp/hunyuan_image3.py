@@ -80,10 +80,59 @@ def apply_hi3_sequence_parallelism(model: nn.Module, sp_size: int) -> None:
 
     _patch_hi3_attention(model)
     _wrap_hi3_decoder_forward(model)
+    _install_minvariant_linear()
     logger.info(
         "HI3 SP installed: attention all-to-all + decoder slice/gather wrapper (sp_size=%d)",
         sp_size,
     )
+
+
+def _install_minvariant_linear() -> None:
+    """Route small-M bf16 ``F.linear`` through the M-invariant Triton kernel under SP.
+
+    The bf16 GEMM divergence that breaks the GRPO ratio under sequence-parallelism
+    is M-dependence: cuBLAS picks a different kernel for M=L/sp than for M=L, so the
+    SP train forward diverges from the non-SP/generation forward. It only bites at
+    small M (cuBLAS reuses the large-M kernel above M~64), so at the long replay
+    lengths only the MoE experts (a few routed tokens each) land in the divergent
+    regime. Route just those (``M < UNIRL_MINVARIANT_M``, default 256, bf16, SP
+    active) through the fixed-tiling kernel, which reproduces the cuBLAS large-M
+    (=generation) result in bf16. Large-M GEMMs stay on cuBLAS (fast, already
+    invariant). Global patch (not context-scoped) so it also covers the activation-
+    checkpointing recompute. Idempotent; ``UNIRL_MINVARIANT_M=0`` disables it.
+    """
+    import os
+
+    import torch.nn.functional as F
+
+    if getattr(F.linear, "_unirl_minvariant", False):
+        return
+    threshold = int(os.environ.get("UNIRL_MINVARIANT_M", "256"))
+    if threshold <= 0:
+        return
+
+    from veomni.distributed.parallel_state import get_parallel_state
+
+    from unirl.utils.triton_mm import minvariant_linear
+
+    _orig_linear = F.linear
+
+    def _patched_linear(x, weight, bias=None, _orig=_orig_linear, _t=threshold):
+        if x.dtype in (torch.bfloat16, torch.float16) and x.dim() >= 2:
+            try:
+                if get_parallel_state().ulysses_enabled:
+                    m = 1
+                    for s in x.shape[:-1]:
+                        m *= int(s)
+                    if m < _t:
+                        return minvariant_linear(x, weight, bias)
+            except Exception:
+                pass
+        return _orig(x, weight, bias)
+
+    _patched_linear._unirl_minvariant = True  # type: ignore[attr-defined]
+    F.linear = _patched_linear
+    logger.info("HI3 SP: M-invariant F.linear routing installed (M<%d, bf16)", threshold)
 
 
 def _patch_hi3_attention(model: nn.Module) -> None:
