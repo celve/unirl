@@ -90,10 +90,15 @@ def main():
         apply_sequence_parallelism(m, world)
     m.eval()
 
-    # per-layer capture hooks
+    # per-layer capture hooks + sub-module (attn / mlp) hooks for the first layers
     captured = {}
     for i, layer in enumerate(m.layers):
         layer.register_forward_hook(lambda mod, inp, out, i=i: captured.__setitem__(i, out[0] if isinstance(out, (tuple, list)) else out))
+    for i in range(min(2, LAYERS)):
+        m.layers[i].self_attn.register_forward_hook(
+            lambda mod, inp, out, k=f"L{i}.attn": captured.__setitem__(k, out[0] if isinstance(out, (tuple, list)) else out))
+        m.layers[i].mlp.register_forward_hook(
+            lambda mod, inp, out, k=f"L{i}.mlp": captured.__setitem__(k, out[0] if isinstance(out, (tuple, list)) else out))
 
     b, d = 1, cfg.head_dim
     torch.manual_seed(123)
@@ -116,19 +121,26 @@ def main():
             dist.all_gather(g, h.contiguous(), group=sp)
             return torch.cat(g, dim=1)[:, :L, :].detach().float().cpu()
 
-        return [full(captured[i]) for i in range(LAYERS)], full(out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0])
+        subs = {k: full(captured[k]) for k in captured if isinstance(k, str)}
+        return [full(captured[i]) for i in range(LAYERS)], subs, full(out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0])
 
-    layersA, finalA = run_once()
-    layersB, finalB = run_once()
+    layersA, subsA, finalA = run_once()
+    layersB, subsB, finalB = run_once()
 
     if rank == 0:
         det = max((a - b_).abs().max().item() for a, b_ in zip(layersA, layersB))
         print(f"[{TAG}] world={world} DETERMINISM max|Δ| over 2 passes (per-layer)= {det:.3e}", flush=True)
         if world == 1:
-            torch.save({"layers": layersA, "final": finalA}, REF_PATH)
+            torch.save({"layers": layersA, "subs": subsA, "final": finalA}, REF_PATH)
             print(f"[{TAG}] saved reference (world=1).", flush=True)
         elif os.path.exists(REF_PATH):
             ref = torch.load(REF_PATH)
+            print(f"[{TAG}] SUB-MODULE sp=1 vs sp={world} (attn vs mlp, first layers):", flush=True)
+            for k in sorted(subsA):
+                a, bb = ref["subs"][k], subsA[k]
+                diff = (a - bb).abs().max().item()
+                rel = diff / (a.abs().max().item() + 1e-9)
+                print(f"   {k:10s}: max|Δ|={diff:.3e}  rel={rel:.3e}", flush=True)
             print(f"[{TAG}] PER-LAYER sp=1 vs sp={world}:", flush=True)
             for i in range(LAYERS):
                 a, bb = ref["layers"][i], layersA[i]
