@@ -199,14 +199,48 @@ class VeOmniBackend(BaseFSDP2Backend):
 
     def _onload_model(self) -> None:
         veomni_onload(self.model, self._device)
+        _memprobe(self.model, "post-onload (pre train-forward)")
 
     def _offload_model(self) -> None:
         veomni_offload(self.model)
+        _memprobe(self.model, "post-offload")
 
 
 # ----------------------------------------------------------------------
 # Construction helpers
 # ----------------------------------------------------------------------
+
+
+def _memprobe(model, tag: str) -> None:
+    """One-line GPU-0 memory breakdown (diagnostic for the HI3 colocate OOM).
+
+    Separates the trainable module's (sharded) param/buffer footprint from the
+    total resident memory, so a fixed non-activation hog (frozen composite,
+    optimizer, an unsharded copy) is distinguishable from forward activations.
+    """
+    import logging
+
+    import torch.distributed as dist
+
+    if not (torch.cuda.is_available() and (not dist.is_initialized() or dist.get_rank() == 0)):
+        return
+    alloc = torch.cuda.memory_allocated() / 1e9
+    resv = torch.cuda.memory_reserved() / 1e9
+    peak = torch.cuda.max_memory_allocated() / 1e9
+    pmem = bmem = 0
+    for p in model.parameters():
+        t = p.to_local() if hasattr(p, "to_local") else p
+        if t.is_cuda:
+            pmem += t.numel() * t.element_size()
+    for b in model.buffers():
+        t = b.to_local() if hasattr(b, "to_local") else b
+        if t.is_cuda:
+            bmem += t.numel() * t.element_size()
+    logging.getLogger(__name__).warning(
+        "[MEMPROBE %s] allocated=%.1fGB reserved=%.1fGB peak=%.1fGB | trainable param-local=%.1fGB buffers=%.1fGB",
+        tag, alloc, resv, peak, pmem / 1e9, bmem / 1e9,
+    )
+    torch.cuda.reset_peak_memory_stats()
 
 
 def _validate_fsdp_cfg(fsdp_cfg: FSDPConfig) -> None:

@@ -241,6 +241,16 @@ def _wrap_hi3_decoder_forward(decoder: nn.Module) -> None:
         if ref is None:
             return orig(*args, **kwargs)
         true_len = ref.shape[1]
+        _n = getattr(sp_forward, "_memprobe_n", 0)
+        if _n < 4:  # diagnostic: memory at decoder entry (after the composite's gen_image scatter)
+            import torch.distributed as dist
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                logger.warning(
+                    "[MEMPROBE sp_forward#%d] mode=%s B=%d L=%d sp=%d | allocated=%.1fGB reserved=%.1fGB",
+                    _n, kwargs.get("mode", "?"), ref.shape[0], true_len, sp,
+                    torch.cuda.memory_allocated() / 1e9, torch.cuda.memory_reserved() / 1e9,
+                )
+            sp_forward._memprobe_n = _n + 1
         pad = (-true_len) % sp  # tokens to add to reach a multiple of sp (0 if already divisible)
 
         if input_ids is not None:
