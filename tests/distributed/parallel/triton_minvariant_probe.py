@@ -43,26 +43,25 @@ def tmm(a, b, BM=128, BN=128, BK=32):
     return c
 
 
-def run(dtype):
-    TOK, H, O, SHARD = 512, 4096, 6144, 64  # full M=512, sharded into 8 x 64 (sp=8)
+def run(dtype, shard):
+    H, O = 4096, 6144
+    tok = shard * 8  # full M = 8 x shard (sp=8)
     torch.manual_seed(0)
     w = torch.randn(O, H, device="cuda", dtype=dtype)
-    x = torch.randn(TOK, H, device="cuda", dtype=dtype)
-    Bm = w.t().contiguous()  # [H, O]
+    x = torch.randn(tok, H, device="cuda", dtype=dtype)
+    Bm = w.t().contiguous()
 
-    def d(full, shard):
-        return (full.float() - shard.float()).abs().max().item()
+    def d(full, sh):
+        return (full.float() - sh.float()).abs().max().item()
 
     cf = F.linear(x, w)
-    cs = torch.cat([F.linear(x[i:i + SHARD], w) for i in range(0, TOK, SHARD)])
+    cs = torch.cat([F.linear(x[i:i + shard], w) for i in range(0, tok, shard)])
     tf = tmm(x, Bm)
-    ts = torch.cat([tmm(x[i:i + SHARD], Bm) for i in range(0, TOK, SHARD)])
-
-    print(f"== dtype={dtype} (full M={TOK} vs sharded M={SHARD}) ==")
-    print(f"  cuBLAS  full vs sharded : {d(cf, cs):.3e}   (the SP divergence seed)")
-    print(f"  Triton  full vs sharded : {d(tf, ts):.3e}   (target: 0 -> M-invariant)")
-    print(f"  Triton-full vs cuBLAS-full: {d(tf, cf):.3e}  (sanity: ~1 ULP, kernel diff)")
+    ts = torch.cat([tmm(x[i:i + shard], Bm) for i in range(0, tok, shard)])
+    print(f"  M_full={tok:5d} -> M_shard={shard:4d} | cuBLAS Δ={d(cf, cs):.3e} | Triton Δ={d(tf, ts):.3e}")
 
 
 for dt in (torch.bfloat16, torch.float32):
-    run(dt)
+    print(f"== dtype={dt} (qkv-shaped GEMM, full vs sp=8 shard) ==")
+    for shard in (8, 16, 32, 64, 128, 256, 512):
+        run(dt, shard)
