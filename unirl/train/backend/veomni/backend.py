@@ -119,6 +119,23 @@ class VeOmniBackend(BaseFSDP2Backend):
         # unirl.train.deferred contract: mutate on meta, stamp resets).
         shadow = self._inject_structural(model, lora_cfg, ema_lora_cfg, ema_cfg)
 
+        # HI3 grouped-MoE: when SP is on, restructure each HunyuanMoE's per-expert
+        # ModuleList into stacked frozen params (moe_gate_up/moe_down) on meta BEFORE
+        # fully_shard, so FSDP shards the stacked params and the SP adapter runs the
+        # experts through veomni's M-invariant bit-exact grouped-GEMM. The 80B
+        # checkpoint per-expert keys are stacked at load (bundle.materialize). Experts
+        # are frozen (LoRA targets qkv/o_proj), so no adapter/weight-sync collision.
+        if self._sp_size > 1:
+            from unirl.train.backend.veomni.sp import hunyuan_image3 as _hi3sp
+
+            if _hi3sp.is_hunyuan_image3_model(model):
+                from unirl.train.backend.veomni.sp.hi3_moe import restructure_hi3_experts
+
+                _n = restructure_hi3_experts(model)
+                logging.getLogger(__name__).info(
+                    "HI3 grouped-MoE: restructured %d MoE blocks to stacked experts (pre-FSDP)", _n
+                )
+
         # Shard + materialize (to_empty; init_weights is a bundle-stamped no-op).
         # Root-wrapped by VeOmni. ``wrap_root_leaves`` (HI3 / outer-wrapper
         # composites) additionally gives each root-leaf-with-params (wte/ln_f)

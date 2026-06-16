@@ -657,6 +657,29 @@ class HunyuanImage3Bundle(Bundle):
                     f"base_layer namespace.",
                     flush=True,
                 )
+
+            # HI3 grouped-MoE: the SP backend restructured each HunyuanMoE's per-expert
+            # ModuleList into stacked params (moe_gate_up [E,2I,H] in HI3 [up;gate] order,
+            # moe_down [E,H,I]). Stack the checkpoint's per-expert weights to match.
+            moe_gu_names = [n for n in expected_names if n.endswith(".moe_gate_up")]
+            n_stacked = 0
+            for gu_name in moe_gu_names:
+                pfx = gu_name[: -len(".moe_gate_up")]
+                ep = pfx + ".experts."
+                gu_keys = sorted(
+                    (k for k in sd if k.startswith(ep) and k.endswith(".gate_and_up_proj.weight")),
+                    key=lambda k: int(k[len(ep):].split(".", 1)[0]),
+                )
+                dn_keys = sorted(
+                    (k for k in sd if k.startswith(ep) and k.endswith(".down_proj.weight")),
+                    key=lambda k: int(k[len(ep):].split(".", 1)[0]),
+                )
+                if gu_keys:
+                    sd[pfx + ".moe_gate_up"] = torch.stack([sd.pop(k) for k in gu_keys])
+                    sd[pfx + ".moe_down"] = torch.stack([sd.pop(k) for k in dn_keys])
+                    n_stacked += 1
+            if n_stacked:
+                print(f"HI3 grouped-MoE: stacked per-expert ckpt into {n_stacked} moe blocks.", flush=True)
         else:
             sd = {}
 
