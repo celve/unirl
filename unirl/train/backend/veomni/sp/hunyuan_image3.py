@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 import sys
 from typing import Any
 
@@ -80,6 +81,21 @@ def apply_hi3_sequence_parallelism(model: nn.Module, sp_size: int) -> None:
 
     _patch_hi3_attention(model)
     _wrap_hi3_decoder_forward(model)
+
+    if os.environ.get("UNIRL_HI3_GATHER_MOE"):
+        # Isolation / reference fix: run the WHOLE MoE (gate + experts + shared) on the
+        # full gathered sequence so every expert sees M_e^full -> per-expert cuBLAS ==
+        # the no-SP baseline, bit-exact. Subsumes grouped + gate-pad + minvariant-shared
+        # (the entire MoE runs at full L, so none of the M-invariance hacks are needed).
+        # Requires per-expert ModuleList (backend skips the grouped restructure).
+        from unirl.train.backend.veomni.sp.hi3_moe import patch_gathered_moe_forward
+
+        patch_gathered_moe_forward(model)
+        logger.info(
+            "HI3 SP installed: attention all-to-all + decoder wrapper + gathered MoE (sp_size=%d)",
+            sp_size,
+        )
+        return
 
     # MoE experts: when restructured to stacked params (backend pre-FSDP hook / bisect),
     # run them through veomni's M-invariant grouped-GEMM. Falls back to per-expert
@@ -163,13 +179,10 @@ def _install_minvariant_linear(moe_inter: "frozenset[int]") -> None:
                         xp = torch.cat([xf, xf.new_zeros(m * (sp - 1), xf.shape[-1])], dim=0)
                         yp = _orig(xp, weight, bias)
                         return yp[:m].reshape(*x.shape[:-1], n)
-                    if x.dtype in (torch.bfloat16, torch.float16):
-                        # DIAGNOSTIC: route ALL non-gate bf16 GEMMs at M=shard through the
-                        # bit-exact M-invariant kernel (qkv/o_proj/shared-MLP/heads). The
-                        # bisect (random weights) showed these are M-stable, but the real
-                        # e2e ratio did not recover with experts-only, so test whether the
-                        # real-weight activations make them diverge. Experts bypass F.linear
-                        # (grouped path). If this recovers the ratio, narrow back by shape.
+                    if x.dtype in (torch.bfloat16, torch.float16) and (n in _dims or k in _dims):
+                        # shared-MLP moe_inter-dim GEMMs (experts go via the grouped path);
+                        # qkv/o_proj stay on cuBLAS (M-stable). Real-weight probes confirmed
+                        # both are bit-exact, so route only the moe_inter shapes for speed.
                         return minvariant_linear(x, weight, bias)
             except Exception:
                 pass

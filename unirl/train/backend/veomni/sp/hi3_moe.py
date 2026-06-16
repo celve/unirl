@@ -22,6 +22,8 @@ adapter); qkv/o_proj stay on cuBLAS.
 """
 from __future__ import annotations
 
+import functools
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -159,4 +161,49 @@ def patch_grouped_moe_forward(model: nn.Module) -> None:
             break
 
 
-__all__ = ["restructure_hi3_experts", "patch_grouped_moe_forward", "pin_group_gemm_block_k"]
+def patch_gathered_moe_forward(model: nn.Module) -> None:
+    """SP isolation / reference fix: run each ``HunyuanMoE`` on the FULL (gathered)
+    sequence so every expert sees its true ``M_e^full`` -> per-expert ``cuBLAS@M_e^full``
+    == the no-SP baseline, bit-exact. This eliminates the only residual M-dependence (the
+    grouped/large-M kernel disagrees with the per-M cuBLAS baseline on low-traffic
+    experts, which compounds over layers and breaks the GRPO ratio).
+
+    Gathers the MoE input across the sp group, runs the ORIGINAL per-expert forward at
+    full L, slices the output back to the local shard. The MoE is frozen (LoRA targets
+    only qkv/o_proj) and token-independent, so the redundant full-L compute is
+    gradient-correct (no cross-rank / no wgrad double-count). Costs MoE compute/memory
+    sharding under SP — EP (route tokens to expert owners) is the perf-equivalent
+    follow-up that keeps this exact numerics. Idempotent; a runtime no-op at sp<=1.
+
+    Requires the experts to be the ORIGINAL per-expert ModuleList (do NOT restructure to
+    the grouped/large-M path, which would defeat the point).
+    """
+    from veomni.distributed.parallel_state import get_parallel_state
+    from veomni.distributed.sequence_parallel import gather_outputs, slice_input_tensor
+
+    for m in model.modules():
+        cls = type(m)
+        if cls.__name__ != _HI3_MOE_CLASS or getattr(cls, "_unirl_gathered", False):
+            continue
+        orig = cls.forward
+
+        @functools.wraps(orig)
+        def _gathered(self, hidden_states, _orig=orig):  # noqa: ANN001
+            ps = get_parallel_state()
+            if not ps.ulysses_enabled or int(getattr(ps, "ulysses_size", 1)) <= 1:
+                return _orig(self, hidden_states)
+            spg = ps.sp_group
+            full = gather_outputs(hidden_states, gather_dim=1, group=spg)  # [B, L, H]
+            out = _orig(self, full)                                        # cuBLAS @ M_e^full
+            return slice_input_tensor(out, dim=1, group=spg)               # back to local shard
+
+        cls.forward = _gathered
+        cls._unirl_gathered = True  # type: ignore[attr-defined]
+
+
+__all__ = [
+    "restructure_hi3_experts",
+    "patch_grouped_moe_forward",
+    "patch_gathered_moe_forward",
+    "pin_group_gemm_block_k",
+]
