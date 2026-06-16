@@ -126,13 +126,15 @@ class VeOmniBackend(BaseFSDP2Backend):
         # checkpoint per-expert keys are stacked at load (bundle.materialize). Experts
         # are frozen (LoRA targets qkv/o_proj), so no adapter/weight-sync collision.
         if self._sp_size > 1:
+            import logging as _logging
+
             from unirl.train.backend.veomni.sp import hunyuan_image3 as _hi3sp
 
             if _hi3sp.is_hunyuan_image3_model(model):
                 from unirl.train.backend.veomni.sp.hi3_moe import restructure_hi3_experts
 
                 _n = restructure_hi3_experts(model)
-                logging.getLogger(__name__).info(
+                _logging.getLogger(__name__).info(
                     "HI3 grouped-MoE: restructured %d MoE blocks to stacked experts (pre-FSDP)", _n
                 )
 
