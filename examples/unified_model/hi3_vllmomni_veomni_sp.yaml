@@ -95,14 +95,16 @@ backend:
     reshard_after_forward: true
     activation_checkpointing: true
     use_torch_compile: false
-    # Ulysses sequence-parallel degree. 8-GPU pod -> dp=2 x sp=4: the packed
-    # multimodal sequence is sharded across 4 ranks (HunyuanImage3SDPAAttention
-    # all-to-all), ~halving the train-step activation memory vs sp=2 (the L/sp
-    # MLP/MoE shard AND the gathered q/k/v with H/sp heads both shrink) — needed
-    # for the unified AR+image colocate step to fit alongside the slept engine.
-    # Params still shard across all 8 (folded dp_shard x ulysses mesh, 20GB/rank).
-    # sp_size=1 is a true no-op (the FSDP-equivalent path).
-    sp_size: 4
+    # Ulysses sequence-parallel degree. 8-GPU pod -> dp=1 x sp=8 (the max): the
+    # packed multimodal sequence is sharded across all 8 ranks
+    # (HunyuanImage3SDPAAttention all-to-all). The unified colocate train step
+    # replays long sequences (gen_text L~5k, gen_image L~9.5k accumulated across
+    # samples_per_prompt images); sp=2 OOMed in the AR step, sp=4 cleared AR but
+    # OOMed in the gen_image replay (~61GB), so sp=8 ~halves the per-replay
+    # activation again to fit alongside the slept engine. Params shard across all
+    # 8 either way (folded dp_shard x ulysses mesh, ~20GB/rank). 8 KV heads / 8 =
+    # 1 KV head/rank — sp=8 is the ceiling for HI3 on a single 8-GPU node.
+    sp_size: 8
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
     learning_rate: 1.0e-4
