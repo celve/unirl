@@ -75,7 +75,11 @@ class _MinvariantLinear(torch.autograd.Function):
         shp = x.shape
         a = x.reshape(-1, shp[-1]).contiguous()
         c = _mm_minvariant(a, weight)
-        ctx.save_for_backward(a, weight)
+        # ``a`` is only needed in backward for grad_weight. For a frozen weight (the
+        # LoRA-frozen base — most linears) it is never needed, so don't pin it: this
+        # matches cuBLAS F.linear, which saves no input for a frozen linear. Saving it
+        # unconditionally pinned every base activation -> OOM under route-all.
+        ctx.save_for_backward(a if weight.requires_grad else None, weight)
         ctx.shp = shp
         out = c.reshape(*shp[:-1], weight.shape[0])
         return out + bias if bias is not None else out
