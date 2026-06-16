@@ -27,6 +27,7 @@ import functools
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint
 
 _HI3_MOE_CLASS = "HunyuanMoE"
 
@@ -194,7 +195,13 @@ def patch_gathered_moe_forward(model: nn.Module) -> None:
                 return _orig(self, hidden_states)
             spg = ps.sp_group
             full = gather_outputs(hidden_states, gather_dim=1, group=spg)  # [B, L, H]
-            out = _orig(self, full)                                        # cuBLAS @ M_e^full
+            # The full-L MoE is sp x the sharded activation; recompute it in backward
+            # (only the small [B,L,H] input is kept) so the redundant full-seq compute
+            # does not blow up the forward peak. Frozen experts -> dgrad-only recompute.
+            if torch.is_grad_enabled() and hidden_states.requires_grad:
+                out = torch.utils.checkpoint.checkpoint(_orig, self, full, use_reentrant=False)
+            else:
+                out = _orig(self, full)                                    # cuBLAS @ M_e^full
             return slice_input_tensor(out, dim=1, group=spg)               # back to local shard
 
         cls.forward = _gathered
