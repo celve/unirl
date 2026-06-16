@@ -38,16 +38,21 @@ def _mm_kernel(A, B, C, M, N, K, sam, sak, sbk, sbn, scm, scn,
              mask=(om[:, None] < M) & (on[None, :] < N))
 
 
-def _mm_minvariant(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """``a @ b`` with ``a``: ``[M, K]`` contiguous, ``b``: ``[K, N]`` contiguous, via the
-    fixed-tiling, M-invariant kernel (fixed K-reduction order, independent of M)."""
+def _mm_minvariant(a: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """``a @ weight.T`` with ``a``: ``[M, K]`` contiguous, ``weight``: ``[N, K]`` (the
+    row-major ``nn.Linear`` weight), via the fixed-tiling, M-invariant kernel.
+
+    ``weight`` is read transposed *through its strides* (``B[k,n] = weight[n,k]``) — no
+    transposed copy is materialized, which would otherwise allocate a full extra weight
+    per call (OOM under route-all). Same values, same fixed K-reduction order, so the
+    bf16 result is bit-identical to transposing first."""
     M, K = a.shape
-    N = b.shape[1]
+    N = weight.shape[0]
     c = torch.empty((M, N), device=a.device, dtype=a.dtype)
     BM, BN, BK = 128, 128, 32
     grid = (triton.cdiv(M, BM), triton.cdiv(N, BN))
-    _mm_kernel[grid](a, b, c, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1),
-                     c.stride(0), c.stride(1), BM, BN, BK)
+    _mm_kernel[grid](a, weight, c, M, N, K, a.stride(0), a.stride(1),
+                     weight.stride(1), weight.stride(0), c.stride(0), c.stride(1), BM, BN, BK)
     return c
 
 
@@ -69,8 +74,7 @@ class _MinvariantLinear(torch.autograd.Function):
     def forward(ctx, x, weight, bias):
         shp = x.shape
         a = x.reshape(-1, shp[-1]).contiguous()
-        b = weight.t().contiguous()
-        c = _mm_minvariant(a, b)
+        c = _mm_minvariant(a, weight)
         ctx.save_for_backward(a, weight)
         ctx.shp = shp
         out = c.reshape(*shp[:-1], weight.shape[0])
