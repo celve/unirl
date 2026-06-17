@@ -86,16 +86,13 @@ def _dump_vllm_out(request_output: Any, completion: Any, tokens: List[int], logp
     rank-0, JSON."""
     import os
 
-    path = os.environ.get("UNIRL_DUMP_VLLM_OUT")
-    if not path or os.path.exists(path):
+    # Hardcoded fallback + NO rank gate: extract_ar_segment runs in the rollout-engine
+    # worker, which does NOT inherit UNIRL_DUMP_VLLM_OUT and may not be dist-rank-0
+    # (so the env+rank gates silently skipped it). The os.path.exists() check keeps it
+    # write-once across all workers.
+    path = os.environ.get("UNIRL_DUMP_VLLM_OUT") or "/mnt/bj/lin431/vllm_ar_out.json"
+    if os.path.exists(path):
         return
-    try:
-        import torch.distributed as _dist
-
-        if _dist.is_initialized() and _dist.get_rank() != 0:
-            return
-    except Exception:
-        pass
     import json
 
     lps = getattr(completion, "logprobs", None)
