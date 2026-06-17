@@ -33,6 +33,7 @@ substitution.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from typing import Any, Dict, List, Optional, Tuple
@@ -507,7 +508,32 @@ class HunyuanImage3ARStage(ARStage[HunyuanImage3ARConditions]):
             # exploration knob, not part of the policy-gradient logp).
             raw_logits = logits[0, pl - 1 : pl - 1 + rl, :].float()
             log_probs_full = F.log_softmax(raw_logits, dim=-1)
-            flat.append(log_probs_full.gather(-1, resp_b.unsqueeze(-1)).squeeze(-1))  # [rl], fp32
+            tok_logp = log_probs_full.gather(-1, resp_b.unsqueeze(-1)).squeeze(-1)  # [rl], fp32
+            flat.append(tok_logp)
+            # DIAGNOSTIC: dump sample-0 of the first replay so new_logp (this train
+            # forward, SP) can be diffed per-token vs old_logp (vLLM) AND re-run at
+            # sp=1 offline (the ladder). Rank-0 only, once. Gated by UNIRL_DUMP_REPLAY.
+            _dump = os.environ.get("UNIRL_DUMP_REPLAY")
+            if _dump and b == 0 and not os.path.exists(_dump):
+                import torch.distributed as _dist
+
+                if (not _dist.is_initialized()) or _dist.get_rank() == 0:
+                    _old = segment.log_probs
+                    _old0 = _old[0] if isinstance(_old, (list, tuple)) else _old[cu[0] : cu[0] + rl]
+                    torch.save(
+                        {
+                            "full_ids": full_ids.detach().cpu(),
+                            "pl": int(pl),
+                            "rl": int(rl),
+                            "L_full": int(L_full),
+                            "resp_b": resp_b.detach().cpu(),
+                            "new_logp_sp8": tok_logp.detach().float().cpu(),
+                            "old_logp_vllm": _old0.detach().float().cpu(),
+                            "world_size": int(os.environ.get("WORLD_SIZE", "1")),
+                        },
+                        _dump,
+                    )
+                    print(f"[REPLAY_DUMP] saved b0 pl={pl} rl={rl} world={os.environ.get('WORLD_SIZE')} -> {_dump}", flush=True)
 
         if not flat:
             return torch.zeros(0, dtype=torch.float32, device=device)
