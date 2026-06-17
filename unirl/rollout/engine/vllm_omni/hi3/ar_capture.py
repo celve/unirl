@@ -79,6 +79,61 @@ def _flatten_logprobs(logprobs: Any, fallback_len: int) -> Optional[torch.Tensor
     return torch.tensor(values, dtype=torch.float32)
 
 
+def _dump_vllm_out(request_output: Any, completion: Any, tokens: List[int], logp: Optional[torch.Tensor]) -> None:
+    """DIAGNOSTIC (UNIRL_DUMP_VLLM_OUT=path): dump the RAW vLLM-Omni AR output for the
+    first request — prompt, generated tokens/text, and the per-step ``logprobs`` exactly
+    as vLLM hands them back — to see whether vLLM emits real or uniform log-probs. Once,
+    rank-0, JSON."""
+    import os
+
+    path = os.environ.get("UNIRL_DUMP_VLLM_OUT")
+    if not path or os.path.exists(path):
+        return
+    try:
+        import torch.distributed as _dist
+
+        if _dist.is_initialized() and _dist.get_rank() != 0:
+            return
+    except Exception:
+        pass
+    import json
+
+    lps = getattr(completion, "logprobs", None)
+    steps = []
+    for i, step in enumerate(list(lps or [])[:20]):
+        rec = {"i": i, "sampled_token_id": tokens[i] if i < len(tokens) else None, "step_type": type(step).__name__}
+        if isinstance(step, dict):
+            rec["entries"] = {
+                str(k): {"logprob": getattr(v, "logprob", None), "rank": getattr(v, "rank", None),
+                         "decoded": getattr(v, "decoded_token", None)}
+                for k, v in step.items()
+            }
+        else:
+            rec["logprob"] = getattr(step, "logprob", step)
+        steps.append(rec)
+    d = {
+        "n_prompt": len(getattr(request_output, "prompt_token_ids", []) or []),
+        "prompt_token_ids_head": list(getattr(request_output, "prompt_token_ids", []) or [])[:50],
+        "n_gen": len(tokens),
+        "gen_token_ids_head": tokens[:50],
+        "gen_text_head": (getattr(completion, "text", None) or "")[:400],
+        "sampling_params": str(getattr(request_output, "sampling_params", None))[:300],
+        "logprobs_type": type(lps).__name__,
+        "logprobs_len": (len(lps) if hasattr(lps, "__len__") else None),
+        "flattened_logp_head": ([round(float(x), 4) for x in logp[:20].tolist()] if logp is not None else None),
+        "flattened_logp_nunique": (int(logp.unique().numel()) if logp is not None else None),
+        "completion_public_attrs": [a for a in dir(completion) if not a.startswith("_")][:50],
+        "steps_head": steps,
+    }
+    try:
+        with open(path, "w") as f:
+            json.dump(d, f, indent=2, default=str)
+        print(f"[VLLM_OUT_DUMP] {path}: n_gen={len(tokens)} lp_type={d['logprobs_type']} "
+              f"lp_len={d['logprobs_len']} flat_nuniq={d['flattened_logp_nunique']}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[VLLM_OUT_DUMP] failed: {e}", flush=True)
+
+
 def _extract_completion(out: Any) -> Tuple[List[int], Optional[torch.Tensor]]:
     """Pull ``(token_ids, per_token_logp)`` out of an ``OmniRequestOutput`` shaped Stage 0 result."""
     request_output = getattr(out, "request_output", None)
@@ -90,6 +145,7 @@ def _extract_completion(out: Any) -> Tuple[List[int], Optional[torch.Tensor]]:
     completion = completions[0]
     tokens = list(getattr(completion, "token_ids", []) or [])
     logp = _flatten_logprobs(getattr(completion, "logprobs", None), fallback_len=len(tokens))
+    _dump_vllm_out(request_output, completion, tokens, logp)
     return tokens, logp
 
 
