@@ -62,6 +62,7 @@ from unirl.distributed.tensor.ref import hydrate
 from unirl.types.conditions import Condition
 from unirl.types.media_preview import MediaPreview
 from unirl.types.primitives import Audios, Images, Texts, Videos
+from unirl.types.sampling import BaseSamplingParams
 from unirl.types.segments import Segment
 from unirl.utils.shard_balance import lpt_shard_permutation, shard_token_spread
 
@@ -106,6 +107,23 @@ class RolloutTrack(Batch):
     component_rewards: Optional[Dict[str, torch.Tensor]] = concat_field(default=None)
     advantages: Optional[torch.Tensor] = concat_field(default=None)
     status: Optional[torch.Tensor] = concat_field(default=None)
+
+    # ---- folded from RolloutReq (LIN-446 endomorphism refactor) ----------------
+    # Raw/identity inputs populated on an INPUT Part (the prompt, turn 0). Default
+    # empty so every existing (generation) track is unchanged.
+    primitives: Dict[str, Union[Texts, Images, Videos, Audios]] = field(kind=FieldKind.CONCAT, default_factory=dict)
+    metadata: List[Optional[Dict[str, Any]]] = concat_field(default_factory=list)
+    # Generation-control fields ride a GENERATION Part's shell (the next turn to be
+    # produced). ``shared_field`` for params/σ bakes in the aligned-batch assumption
+    # (every row same schedule); see docs/rollout-sample-refactor.md §4, §6.
+    sampling_params: Dict[str, BaseSamplingParams] = shared_field(default_factory=dict)
+    sigmas: Optional[torch.Tensor] = shared_field(default=None)
+    stage_config: Dict[str, Any] = shared_field(default_factory=dict)
+    init_noise_group_ids: List[str] = concat_field(default_factory=list)
+    init_noise_latent_shape: Optional[List[int]] = shared_field(default=None)
+    # Lifecycle: "input" = a given prompt Part (no log_probs/loss_mask, untrained);
+    # "generation" = a produced turn (default, so existing tracks stay generation).
+    stage: str = shared_field(default="generation")
 
     @property
     def batch_size(self) -> int:
