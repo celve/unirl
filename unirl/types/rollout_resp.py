@@ -718,4 +718,10 @@ class RolloutResp(Batch):
         raise ValueError(f"compute_track_advantages: group_key must be 'parent' or 'root'; got {group_key!r}")
 
 
-__all__ = ["RolloutResp", "RolloutTrack", "Decoded"]
+# Target-vocabulary aliases for the Sample/Part refactor (LIN-446). During the
+# dual-path migration these name the *same* classes (logic-neutral); the physical
+# rename (RolloutResp -> Sample, RolloutTrack -> Part) lands as the final phase.
+Sample = RolloutResp
+Part = RolloutTrack
+
+__all__ = ["RolloutResp", "RolloutTrack", "Sample", "Part", "Decoded"]

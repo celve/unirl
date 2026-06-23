@@ -21,6 +21,10 @@ _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "RolloutReq": ("unirl.types.rollout_req", "RolloutReq"),
     "RolloutResp": ("unirl.types.rollout_resp", "RolloutResp"),
     "RolloutTrack": ("unirl.types.rollout_resp", "RolloutTrack"),
+    # Target-vocabulary aliases for the Sample/Part refactor (LIN-446); same
+    # classes as RolloutResp/RolloutTrack during the dual-path migration.
+    "Sample": ("unirl.types.rollout_resp", "Sample"),
+    "Part": ("unirl.types.rollout_resp", "Part"),
     "ARSamplingParams": ("unirl.types.sampling", "ARSamplingParams"),
     "BaseSamplingParams": ("unirl.types.sampling", "BaseSamplingParams"),
     "DiffusionSamplingParams": ("unirl.types.sampling", "DiffusionSamplingParams"),
