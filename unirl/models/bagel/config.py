@@ -69,6 +69,15 @@ class BagelPipelineConfig:
     vae_dtype: Any = None
     device: Any = None
 
+    # VeOmniBackend lifecycle: build the MoT transformer on the meta device
+    # (architecture only, no weight allocation). VeOmni's parallelize asserts
+    # meta init, materializes storage via ``to_empty``, and the backend loads
+    # real weights post-shard via ``BagelBundle.materialize`` (rank-0 read of
+    # ``ema.safetensors`` + broadcast). FSDPBackend recipes leave this False
+    # (eager ``load_checkpoint_and_dispatch``). Routes ``from_config`` to
+    # ``from_meta_config`` (gen-only; not compatible with ``enable_vit``).
+    meta_init_transformer: bool = False
+
     # Stage-level precision / numerical policy (operator/runtime knobs, not
     # per-request shape). bf16 trajectory matches flow_grpo's BAGEL setup; the
     # SDE log-prob step itself runs in fp32 inside the vendored kernel.
