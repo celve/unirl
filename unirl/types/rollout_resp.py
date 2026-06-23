@@ -281,6 +281,54 @@ class RolloutTrack(Batch):
             decoded=None,
         )
 
+    # ---- unified fan-out (LIN-446 endomorphism refactor) -------------------
+
+    def fork(
+        self,
+        parent_name: str,
+        child_name: str,
+        branch: int,
+        *,
+        sampling_params: Optional[Dict[str, BaseSamplingParams]] = None,
+        sigmas: Optional[torch.Tensor] = None,
+        stage_config: Optional[Dict[str, Any]] = None,
+        init_noise_group_ids: Optional[List[str]] = None,
+        init_noise_latent_shape: Optional[List[int]] = None,
+        new_segment: Optional[Segment] = None,
+    ) -> "RolloutTrack":
+        """Append a child *generation* Part shell — the sole fan-out edge.
+
+        Unifies ``RolloutReq.make_root_track`` + :meth:`fork_track`: with the
+        input/prompt now its own root Part, every fan-out (including the first)
+        is a ``fork``. Produces ``branch`` children per parent sample in
+        group-by-parent order (ids/lineage identical to :meth:`fork_track`),
+        sets generation-control fields on the shell, and leaves ``segment``
+        unfilled (``step`` fills it). Conditions are **not** assembled here —
+        they are derived from the ancestor prefix via
+        :meth:`RolloutResp.conditions_for` (LIN-446 §4.5).
+        """
+        if not self.sample_ids:
+            raise ValueError("RolloutTrack.fork: parent has no sample_ids")
+        if branch < 1:
+            raise ValueError(f"RolloutTrack.fork: branch must be >= 1, got {branch}")
+
+        prefix = child_name[0] if child_name else "c"
+        child_sample_ids = [f"{pid}/{prefix}{j}" for pid in self.sample_ids for j in range(branch)]
+        child_parent_ids = [pid for pid in self.sample_ids for _ in range(branch)]
+
+        return RolloutTrack(
+            sample_ids=child_sample_ids,
+            parent_ids=child_parent_ids,
+            parent_track=parent_name,
+            segment=new_segment,
+            stage="generation",
+            sampling_params=dict(sampling_params) if sampling_params else {},
+            sigmas=sigmas,
+            stage_config=dict(stage_config) if stage_config else {},
+            init_noise_group_ids=list(init_noise_group_ids) if init_noise_group_ids else [],
+            init_noise_latent_shape=list(init_noise_latent_shape) if init_noise_latent_shape else None,
+        )
+
     # ---- per-group advantage computation -----------------------------------
 
     def compute_advantages(
@@ -734,6 +782,57 @@ class RolloutResp(Batch):
             root_labels = _root_group_per_sample(self, track_name)
             return track.compute_advantages(group_ids=root_labels, **adv_kwargs)
         raise ValueError(f"compute_track_advantages: group_key must be 'parent' or 'root'; got {group_key!r}")
+
+    # ---- derived conditioning context (LIN-446 §4.5) -----------------------
+
+    def _prefix_index_map(self, part_name: str) -> List[Tuple[str, List[int]]]:
+        """For each ancestor Part of ``part_name`` (parent→root order), the
+        per-target-row index into that ancestor's samples.
+
+        Resolves, for every row of ``tracks[part_name]``, the aligned row in each
+        ancestor by following ``parent_ids`` up the ``parent_track`` chain — the
+        lineage walk (mirroring :func:`_root_group_per_sample`) that lets a child
+        read what its ancestors actually produced rather than a fork-time copy.
+        """
+        out: List[Tuple[str, List[int]]] = []
+        name = self.tracks[part_name].parent_track
+        cur_parent_ids = self.tracks[part_name].parent_ids
+        while name is not None:
+            anc = self.tracks[name]
+            if cur_parent_ids is None:
+                raise RuntimeError(
+                    f"conditions_for: part {part_name!r} chain reaches {name!r} via None parent_ids; lineage broken."
+                )
+            sid_to_idx = {sid: i for i, sid in enumerate(anc.sample_ids)}
+            idx = [sid_to_idx[pid] for pid in cur_parent_ids]
+            out.append((name, idx))
+            cur_parent_ids = [anc.parent_ids[i] for i in idx] if anc.parent_ids is not None else None
+            name = anc.parent_track
+        return out
+
+    def conditions_for(self, part_name: str, *, encoder: Optional[Callable[..., Any]] = None) -> Dict[str, Condition]:
+        """Derive ``part_name``'s conditioning context from its ancestor prefix.
+
+        Walks the lineage (via :meth:`_prefix_index_map`), gathers each ancestor
+        Part's ``segment`` rows aligned 1:1 to this Part's samples, and promotes
+        them to ``Condition``s via ``Segment.as_condition()`` (encoder-free, e.g.
+        a produced image latent) or ``Segment.as_condition_with(encoder)`` (text
+        re-embed). Returns a dict keyed by ancestor Part name. Replaces the stored
+        ``conditions`` field: the model owns which ancestors/keys it consumes;
+        this is the row-aligned promotion machinery (LIN-446 §4.5).
+        """
+        conds: Dict[str, Condition] = {}
+        for anc_name, idx in self._prefix_index_map(part_name):
+            seg = self.tracks[anc_name].segment
+            if seg is None:
+                continue
+            aligned = seg.select(torch.tensor(idx, dtype=torch.long)) if idx else seg
+            cond = aligned.as_condition()
+            if cond is None and encoder is not None:
+                cond = aligned.as_condition_with(encoder)
+            if cond is not None:
+                conds[anc_name] = cond
+        return conds
 
 
 # Target-vocabulary aliases for the Sample/Part refactor (LIN-446). During the
