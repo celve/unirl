@@ -1,0 +1,188 @@
+# @package _global_
+# BAGEL-7B-MoT x PickScore x LoRA trainside GRPO on the VeOmni FSDP2 backend
+# (8-GPU single node) — the A/B-parity twin of bagel_trainside_lora.yaml, swapping
+# FSDPBackend -> VeOmniBackend with meta-init + optional Ulysses sequence parallelism.
+#
+# Two structural differences from the eager recipe:
+#   (1) bundle.config.meta_init_transformer: true — the MoT is built on the meta
+#       device; VeOmni's parallelize asserts meta init + materializes via to_empty,
+#       and the backend loads real weights post-shard from ema.safetensors via
+#       BagelBundle.materialize (rank-0 broadcast). Avoids the per-rank 7B spike.
+#   (2) backend._target_ = VeOmniBackend.
+#
+# Differences forced by VeOmni v1 (accepted for bring-up):
+#   - bf16 master (no master_dtype): VeOmni casts the whole model to param_dtype;
+#     it has no separate fp32-master lever. The eager recipe's fp32 LoRA master is
+#     unavailable here; the trainside ratio==1 anchor (old_logp_source: rollout)
+#     keeps updates well-conditioned over the runs verified so far.
+#   - no root_wrap toggle: VeOmni always root-shards. Bagel's direct
+#     embed_tokens / lm_head / forward_inference calls (outside a root forward) are
+#     handled by a one-time root unshard in BagelBundle._unshard_root.
+#
+# Ulysses SP: set backend.fsdp_cfg.sp_size to 2 or 4 to shard the packed gen
+# sequence across ranks (mesh dp_shard(world//sp) x ulysses(sp); SP adapter in
+# unirl.train.backend.veomni.sp.bagel). GQA cap: BAGEL-7B-MoT is 28 query / 4 KV
+# heads, so sp_size MUST be in {1,2,4} (sp=8 is rejected — 28 % 8 != 0). Default 1
+# = disabled (true no-op). Verified: sp=4 reward parity with sp=1, parity test
+# forward bit-identical + grad relerr 3.8e-3 (tests/distributed/parallel/sp_bagel_parity.py).
+#
+# Compose: cd unirl && PYTHONPATH=$PWD python -m unirl.train_diffusion \
+#            --config-name diffusion/bagel/bagel_trainside_veomni --cfg job --resolve
+
+num_devices: 8
+batch_size: 16                 # prompts_per_rollout (one UniRL rollout ~ one flow_grpo epoch)
+adv_use_global_std: false      # per-group GRPO normalization (mainline default)
+num_rollouts: 10000            # intentionally large; stop manually
+
+transport_kind: colocate_store
+workers_per_device: 1
+
+logging:
+  report_to_wandb: false        # flip to true to enable wandb (rank-0/driver only)
+  project_name: unirl
+  run_name: null
+  entity: null
+  tags: null
+
+bundle:
+  _target_: unirl.models.bagel.bundle.BagelBundle.from_config
+  config:
+    _target_: unirl.models.bagel.config.BagelPipelineConfig
+    pretrained_model_ckpt_path: ${oc.env:BAGEL_PATH,ByteDance-Seed/BAGEL-7B-MoT}   # MUST be a pod-local dir: the post-shard load reads <path>/ema.safetensors
+    model_precision: bf16
+    shift: 3.0
+    use_lora: true
+    # VeOmniBackend lifecycle: build the MoT on meta; real weights loaded
+    # post-parallelize by the backend via BagelBundle.materialize. Gen-only.
+    meta_init_transformer: true
+
+pipeline:
+  _target_: unirl.models.bagel.pipeline.BagelPipeline
+  # bf16 heads + bf16 transformer compute under autocast bf16 (vendor stays
+  # byte-pristine). VeOmni v1 has no fp32-master lever (see header).
+  autocast_precision: bf16
+  trajectory_precision: fp32   # keep diffuse<->replay bit-exact (ratio=1); do NOT lower
+  logprob_precision: fp32
+  shift: 3.0
+  strategy:
+    _target_: unirl.sde.kernels.FlowSDEStrategy
+
+backend:
+  _target_: unirl.train.backend.veomni.VeOmniBackend
+  block_class_names: ["Qwen2MoTDecoderLayer"]
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    param_dtype: bf16                  # COMPUTE + master dtype (VeOmni v1: no separate fp32 master)
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true        # 7B base: reshard blocks to keep resident memory low
+    activation_checkpointing: true     # 7B + 15-step replay: required
+    use_torch_compile: false
+    # NOTE: no root_wrap / master_dtype here. VeOmni always root-shards (no toggle);
+    # Bagel's direct embed_tokens / lm_head / forward_inference calls are handled by
+    # a one-time root unshard in BagelBundle._unshard_root (auto-no-reshard pins it).
+    # Ulysses sequence parallelism for BAGEL's packed gen forward
+    # (unirl.train.backend.veomni.sp.bagel): slices the query/latent stream across
+    # sp_size ranks, all-to-all in attention; the text KV-cache stays replicated.
+    # GQA cap: 28 query / 4 KV heads -> sp_size MUST be in {1,2,4} (sp=8 rejected).
+    # Default 1 = disabled (true no-op); set 2 or 4 for SP.
+    sp_size: 1
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    learning_rate: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 1.0e-4               # flow_grpo base default (NOT SD3's 0.0)
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 100000
+  lora_cfg:
+    _target_: unirl.train.configs.LoraConfig
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    target_modules:                    # = BAGEL_MOE_GEN_LORA_TARGETS (gen experts only)
+      - self_attn.q_proj_moe_gen
+      - self_attn.k_proj_moe_gen
+      - self_attn.v_proj_moe_gen
+      - self_attn.o_proj_moe_gen
+      - mlp_moe_gen.gate_proj
+      - mlp_moe_gen.up_proj
+      - mlp_moe_gen.down_proj
+
+rollout:
+  _target_: unirl.rollout.engine.trainside.engine.TrainsideRolloutEngine
+  stage_attrs: [diffusion]
+  forward_batch_size: 1                # navit bs=1; one sample per generate call
+
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.pickscore.PickScoreRewardScorer
+    base_device: cuda
+    config:
+      _target_: unirl.reward.local.pickscore.PickScoreSpec
+      batch_size: 8
+      device: auto
+      # Env-overridable: a pod can point these at a pre-staged local /root copy (offline, fast)
+      # via PICKSCORE_{PROCESSOR,MODEL}_ID; unset -> HF hub ids (original proxy-download behavior).
+      processor_id: ${oc.env:PICKSCORE_PROCESSOR_ID,laion/CLIP-ViT-H-14-laion2B-s32B-b79K}
+      model_id: ${oc.env:PICKSCORE_MODEL_ID,yuvalkirstain/PickScore_v1}
+
+algorithm:
+  _target_: unirl.algorithms.flowgrpo.FlowGRPO
+  stage_attr: diffusion
+  clip_range: 1.0e-5                   # flow_grpo clip_range_lt/gt
+  clip_schedule: constant
+  # Bagel samples and trains at bs=1 (same micro-geometry), so the rollout's
+  # stored sde_logp is a valid pi_old anchor → ratio=1 on update 1 without replay.
+  old_logp_source: rollout
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.bagel.conditions.BagelDiffusionConditions
+  params: ${sampling}
+
+stack:
+  _target_: unirl.train.stack.TrainStack
+  micro_batch_size: 1
+  max_grad_norm: 1.0
+  num_updates_per_batch: 2             # 2 optimizer updates/rollout (disjoint mini-batches)
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: datasets/pickscore/train.txt        # relative to repo cwd (Hydra 1.3 no-chdir)
+      eval_data_path: datasets/pickscore/test.txt
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
+
+# Bagel diffusion sampling params (one object shared by trainer expand + diffusion stage).
+sampling:
+  _target_: unirl.models.bagel.diffusion.BagelDiffusionParams
+  num_inference_steps: 14              # STEPS (σ schedule = steps+1 = 15 points; == old 15-point bagel schedule, 14 stepped)
+  guidance_scale: 1.0                  # cfg=1 (bagel uses cfg_text_scale below; kept consistent)
+  cfg_text_scale: 1.0                  # cfg=1 → single-forward "No CFG" path in _forward_flow
+  cfg_img_scale: 1.0
+  cfg_interval: [0.0, 1.0]
+  cfg_renorm_min: 0.0
+  cfg_renorm_type: global
+  eta: 1.0                             # SDE noise scale (= flow_grpo noise_level); consumed by FlowSDEStrategy
+  samples_per_prompt: 16
+  height: 512
+  width: 512
+  seed: 42
+  init_same_noise: false               # per-sample x_T (NoiseRecipe r{rollout}:{sample}); diverse GRPO groups
+  scheduler:
+    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    num_timesteps: ${..num_inference_steps}
+    timestep_fraction: [0.0, 0.5]
+    num_sde_steps: 2
