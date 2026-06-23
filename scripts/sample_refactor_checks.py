@@ -142,6 +142,31 @@ def check_ar_conditions_derivation():
     print("[ok] AR conditions derivation: input Part -> TextTokenCondition byte-matches stored (real tokens + padding)")
 
 
+def check_fanout_relocation_equiv():
+    """(E) fan-out relocation: GRPO advantages from input-Part + fork(N) match the old
+    pre-expanded flat track (parent_ids=group_ids). Locks the semantic that lets the
+    trainer drop inputs.expand(N) in favor of fork-in-step under input-as-root."""
+    p, n = 2, 3
+    rewards = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])  # P*N, two prompt groups
+    toks = [torch.arange(2) for _ in range(p * n)]
+    # OLD: single flat ar track, parent_ids = group_ids (prompt repeated N)
+    old = RolloutTrack(
+        sample_ids=[f"s{i}" for i in range(p * n)],
+        parent_ids=[f"g{q}" for q in range(p) for _ in range(n)],
+        segment=TextSegment.pack(tokens=toks),
+    )
+    old_adv = _track_with_field(old, "rewards", rewards).compute_advantages(normalize=True, scope="group").advantages
+    # NEW: input Part (P deduped prompts) + ar = fork(N); group by root
+    inp = RolloutTrack(
+        sample_ids=[f"g{q}" for q in range(p)], stage="input", segment=TextSegment.pack(tokens=[torch.arange(2) for _ in range(p)])
+    )
+    ar = _track_with_field(inp.fork("input", "ar", n), "rewards", rewards)
+    s = RolloutResp(tracks={"input": inp, "ar": ar})
+    new_adv = s.compute_track_advantages("ar", group_key="root", normalize=True).advantages
+    assert torch.allclose(old_adv, new_adv), (old_adv, new_adv)
+    print("[ok] fan-out relocation: input-Part + fork(N) advantages == old pre-expanded parent_ids=group_ids")
+
+
 if __name__ == "__main__":
     check_aliases()
     check_backward_compat_defaults()
@@ -152,4 +177,5 @@ if __name__ == "__main__":
     check_conditions_for_two_level()
     check_reward_advantage_input_as_root()
     check_ar_conditions_derivation()
+    check_fanout_relocation_equiv()
     print(f"\nALL CORE-TYPE CHECKS PASSED (torch {torch.__version__})")
