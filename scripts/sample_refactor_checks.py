@@ -111,6 +111,37 @@ def check_reward_advantage_input_as_root():
     print("[ok] reward/advantage (input-as-root): GRPO groups by prompt; propagate_rewards aggregates ar->input")
 
 
+def check_ar_conditions_derivation():
+    """AR (C)+(I): derive the prompt TextTokenCondition from an input Part and prove
+    it byte-matches the stored (chat_stage-style) condition, incl. the real tokens
+    packed_replay consumes. Skips where qwen3 model deps are absent (local CPU)."""
+    try:
+        from unirl.models.qwen3.conditions import Qwen3ARConditions
+    except Exception as exc:  # heavy model package deps not present locally
+        print(f"[skip] AR conditions derivation (qwen3 import unavailable: {type(exc).__name__})")
+        return
+    from unirl.types.conditions import TextTokenCondition
+
+    rows = [torch.tensor([5, 6, 7]), torch.tensor([8, 9]), torch.tensor([10, 11, 12, 13])]
+    bmax = max(int(r.numel()) for r in rows)
+    stored_ids = torch.zeros((len(rows), bmax), dtype=torch.long)
+    stored_mask = torch.zeros((len(rows), bmax), dtype=torch.long)
+    for i, r in enumerate(rows):  # how chat_stage right-pads (pad 0, masked)
+        stored_ids[i, : r.numel()] = r
+        stored_mask[i, : r.numel()] = 1
+    stored = TextTokenCondition(input_ids=stored_ids, attention_mask=stored_mask)
+
+    inp = RolloutTrack(sample_ids=[f"p{i}" for i in range(len(rows))], stage="input", segment=TextSegment.pack(tokens=rows))
+    derived = Qwen3ARConditions.from_input_segment(inp.segment).prompt
+
+    assert torch.equal(derived.input_ids, stored.input_ids), (derived.input_ids, stored.input_ids)
+    assert torch.equal(derived.attention_mask, stored.attention_mask)
+    for i, r in enumerate(rows):  # the invariant packed_replay actually consumes
+        n = int(derived.attention_mask[i].sum())
+        assert torch.equal(derived.input_ids[i, :n], r)
+    print("[ok] AR conditions derivation: input Part -> TextTokenCondition byte-matches stored (real tokens + padding)")
+
+
 if __name__ == "__main__":
     check_aliases()
     check_backward_compat_defaults()
@@ -120,4 +151,5 @@ if __name__ == "__main__":
     check_conditions_for_single_level()
     check_conditions_for_two_level()
     check_reward_advantage_input_as_root()
+    check_ar_conditions_derivation()
     print(f"\nALL CORE-TYPE CHECKS PASSED (torch {torch.__version__})")

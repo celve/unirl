@@ -56,5 +56,34 @@ class Qwen3ARConditions(Batch):
             raise ValueError("Qwen3ARConditions.to_dict: prompt field is None")
         return {"prompt": self.prompt}
 
+    @classmethod
+    def from_input_segment(cls, segment, *, pad_id: int = 0) -> "Qwen3ARConditions":
+        """Derive the AR prompt condition from an INPUT Part's packed token segment.
+
+        The (C)+(I) half of the Sample/Part refactor (LIN-446 §3, §4.5): instead of
+        *storing* the prompt condition at rollout time, rebuild the right-padded
+        :class:`TextTokenCondition` from the input Part's per-sample prompt tokens
+        (a packed ``TextSegment``). ``packed_replay`` reads only the *real* tokens
+        per sample (``attention_mask.sum()`` then ``input_ids[:real]``), so the pad
+        width/value are immaterial — this reproduces the exact prompt context the
+        rollout conditioned on. This is the model-owned assembly rule that the
+        generic ``Sample.conditions_for`` walker delegates to for the AR path.
+        """
+        tokens = segment.tokens
+        cu = segment.cu_seqlens
+        if tokens is None or cu is None:
+            raise ValueError("Qwen3ARConditions.from_input_segment: segment lacks packed tokens / cu_seqlens")
+        bounds = [int(c) for c in cu.tolist()]
+        rows = [tokens[bounds[i] : bounds[i + 1]] for i in range(len(bounds) - 1)]
+        batch = len(rows)
+        max_len = max((int(r.numel()) for r in rows), default=0)
+        input_ids = tokens.new_full((batch, max_len), int(pad_id))
+        attention_mask = tokens.new_zeros((batch, max_len))
+        for i, row in enumerate(rows):
+            n = int(row.numel())
+            input_ids[i, :n] = row
+            attention_mask[i, :n] = 1
+        return cls(prompt=TextTokenCondition(input_ids=input_ids, attention_mask=attention_mask))
+
 
 __all__ = ["Qwen3ARConditions"]
