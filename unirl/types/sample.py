@@ -4,7 +4,10 @@ See ``docs/rollout-sample-refactor.md``. One recursive type for the rollout
 boundary (``step: Sample -> Sample``), replacing the ``RolloutReq → RolloutResp``
 pair. A ``Sample`` holds an ordered ``parts: List[Part]`` whose position *is* the
 lineage chain — a part's parent is the entry before it (index ``i-1``), so parts
-carry no name/key. A *request* is a ``Sample`` with only input Part(s); ``fork``
+carry no name/key. Within a part, each sample's parent is recovered from its id
+path (``sample_ids``; see ``docs/sample-id-design.md`` and
+:mod:`unirl.types.sample_id`), not a stored index. A *request* is a ``Sample`` with
+only input Part(s); ``fork``
 appends a generation shell and the fill step populates it. Conditioning is collected
 from the ancestor prefix as primitives (:meth:`Sample.conditioning`), not stored.
 Reward/advantage/split machinery is ported from ``rollout_resp.py``.
@@ -15,7 +18,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from dataclasses import fields as dc_fields
-from typing import Any, Dict, List, Literal, Optional, Sequence, Type, TypeVar, Union
+from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 
 import torch
 
@@ -30,39 +33,33 @@ from unirl.distributed.tensor.batch import (
 from unirl.distributed.tensor.ref import hydrate
 from unirl.types.media_preview import MediaPreview
 from unirl.types.primitives import Audios, Images, Texts, Videos
+from unirl.types.sample_id import child_id, parent_id
 from unirl.types.sampling import BaseSamplingParams
 from unirl.types.segments import Segment
 from unirl.utils.shard_balance import lpt_shard_permutation, shard_token_spread
 
 logger = logging.getLogger(__name__)
 
-TP = TypeVar("TP", bound="Part")
-TS = TypeVar("TS", bound="Sample")
-
 # A Part's content in raw/primitive form (text / image / …) — the counterpart of
 # the encoded ``segment``: given content on an input Part, decoded output on a
 # generation Part. One value (a Part is single-modality).
 Primitive = Union[Texts, Images, Videos, Audios]
 
-# Per-Part lifecycle: "input" (given prompt, untrained) vs "generation" (produced).
-STAGE_INPUT = "input"
-STAGE_GENERATION = "generation"
-_VALID_STAGES = frozenset({STAGE_INPUT, STAGE_GENERATION})
-
 
 @dataclass
 class Part(Batch):
-    """One rollout slice — single modality, single lifecycle stage.
+    """One rollout slice — a single modality.
 
     A node in a :class:`Sample`'s positional chain: its parent is the preceding
-    entry in ``Sample.parts`` (index ``i-1``); ``parent_index[i]`` is sample ``i``'s
-    parent *row* in that part, and ``parent_index is None`` marks a root. ``segment`` holds
-    the encoded payload, ``primitive`` the same content in raw form. Conditioning is
-    collected from the prefix (:meth:`Sample.conditioning`), not stored.
+    entry in ``Sample.parts`` (index ``i-1``). Each sample's parent *within* that
+    preceding part is recovered from its id path (``parent_id(sample_ids[i])``,
+    located by id; see :mod:`unirl.types.sample_id`) — there is no stored parent
+    index; :attr:`is_root` marks the chain head. ``segment`` holds the encoded
+    payload, ``primitive`` the same content in raw form. Conditioning is collected
+    from the prefix (:meth:`Sample.conditioning`), not stored.
     """
 
     sample_ids: List[str] = concat_field(default_factory=list)
-    parent_index: Optional[List[int]] = concat_field(default=None)
 
     segment: Optional[Segment] = field(kind=FieldKind.CONCAT, default=None)
     primitive: Optional[Primitive] = field(kind=FieldKind.CONCAT, default=None)
@@ -73,44 +70,36 @@ class Part(Batch):
     advantages: Optional[torch.Tensor] = concat_field(default=None)
     status: Optional[torch.Tensor] = concat_field(default=None)
 
-    # Generation control — rides a generation Part's shell, set at fork. ``shared``
-    # params/σ encode the aligned-batch assumption (every row same schedule).
-    metadata: List[Optional[Dict[str, Any]]] = concat_field(default_factory=list)
-    sampling_params: Dict[str, BaseSamplingParams] = shared_field(default_factory=dict)
-    sigmas: Optional[torch.Tensor] = shared_field(default=None)
-    stage_config: Dict[str, Any] = shared_field(default_factory=dict)
-    init_noise_group_ids: List[str] = concat_field(default_factory=list)
-    init_noise_latent_shape: Optional[List[int]] = shared_field(default=None)
-
-    stage: str = shared_field(default=STAGE_GENERATION)
+    metadata: List[Dict[str, Any]] = concat_field(default_factory=list)
+    # The sampling params this part was generated under (provenance; set at fork).
+    sampling_params: Optional[BaseSamplingParams] = shared_field(default=None)
 
     @classmethod
     def input(
-        cls: Type[TP],
+        cls,
         sample_ids: List[str],
         segment: Optional[Segment] = None,
         *,
         primitive: Optional[Primitive] = None,
         metadata: Optional[List[Optional[Dict[str, Any]]]] = None,
-        stage_config: Optional[Dict[str, Any]] = None,
-        init_noise_group_ids: Optional[List[str]] = None,
-        init_noise_latent_shape: Optional[List[int]] = None,
-    ) -> TP:
+    ) -> "Part":
         """Build a turn-0 input Part (the prompt, a root; untrained).
 
         ``segment`` is the encoded prompt; ``primitive`` optionally carries the same
         content in raw form (what :meth:`Sample.conditioning` surfaces). Always a
-        root (``parent_index=None``).
+        root — its ids carry no lineage segment, so they must not contain the ``/``
+        path delimiter (this is the boundary where driver-supplied ids enter).
         """
+        bad = [s for s in sample_ids if "/" in s]
+        if bad:
+            raise ValueError(
+                f"Part.input: root sample_ids must not contain '/' (the lineage delimiter); offending ids: {bad[:3]!r}"
+            )
         return cls(
             sample_ids=list(sample_ids),
             segment=segment,
-            stage=STAGE_INPUT,
             primitive=primitive,
             metadata=list(metadata) if metadata else [],
-            stage_config=dict(stage_config) if stage_config else {},
-            init_noise_group_ids=list(init_noise_group_ids) if init_noise_group_ids else [],
-            init_noise_latent_shape=list(init_noise_latent_shape) if init_noise_latent_shape else None,
         )
 
     @property
@@ -120,14 +109,18 @@ class Part(Batch):
         return super().batch_size
 
     @property
-    def group_ids(self) -> List[Union[int, str]]:
-        """Grouping labels: ``parent_index`` (int; siblings = one group), or
-        ``sample_ids`` (str) for a root (each sample its own group)."""
-        if self.parent_index is not None:
-            return list(self.parent_index)
-        return list(self.sample_ids)
+    def is_root(self) -> bool:
+        """Whether this is a chain head (input/root) — its sample ids carry no
+        lineage segment. An empty part is not a root (no samples to root)."""
+        return bool(self.sample_ids) and not any("/" in sid for sid in self.sample_ids)
 
-    def split(self: TP) -> List[TP]:
+    @property
+    def group_ids(self) -> List[str]:
+        """Grouping labels: each sample's parent id (siblings = one group), or its
+        own id for a root (each sample its own group)."""
+        return [p if (p := parent_id(sid)) is not None else sid for sid in self.sample_ids]
+
+    def split(self) -> List["Part"]:
         """Split into one Part per :attr:`group_ids` equivalence class."""
         gids = self.group_ids
         if not gids:
@@ -135,13 +128,13 @@ class Part(Batch):
         groups: Dict[str, List[int]] = {}
         for i, gid in enumerate(gids):
             groups.setdefault(gid, []).append(i)
-        results: List[TP] = []
+        results: List["Part"] = []
         for gid in dict.fromkeys(gids):
             indices = torch.tensor(groups[gid], dtype=torch.long)
             results.append(self.select(indices))
         return results
 
-    def balance_shards(self: TP, num_shards: int, *, min_spread: float = 0.05) -> TP:
+    def balance_shards(self, num_shards: int, *, min_spread: float = 0.05) -> "Part":
         """Reorder samples so ``num_shards`` equal contiguous shards carry ~equal
         tokens (verl ``balance_batch`` parity, greedy LPT). No-op when balancing
         can't apply or shards are already within ``min_spread``."""
@@ -168,19 +161,16 @@ class Part(Batch):
         self,
         branch: int,
         *,
-        sampling_params: Optional[Dict[str, BaseSamplingParams]] = None,
-        sigmas: Optional[torch.Tensor] = None,
-        stage_config: Optional[Dict[str, Any]] = None,
-        init_noise_group_ids: Optional[List[str]] = None,
-        init_noise_latent_shape: Optional[List[int]] = None,
+        sampling_params: Optional[BaseSamplingParams] = None,
         new_segment: Optional[Segment] = None,
     ) -> "Part":
         """Create a child generation shell — ``N`` self-samples → ``N*branch``.
 
         The mechanic behind :meth:`Sample.fork` (which appends the child so its
-        parent is positionally ``self``). Child ``parent_index`` is each parent
-        row repeated ``branch``× group-by-parent; ids ``f"{sid}/{j}"``. Control rides
-        the shell; ``segment`` is left for the fill step. No conditioning assembled
+        parent is positionally ``self``). Child ids extend each parent id with one
+        ``/{branch}`` segment, group-by-parent contiguous (siblings adjacent) — so the
+        id *is* the lineage and ``parent_id`` recovers the parent. Control rides the
+        shell; ``segment`` is left for the fill step. No conditioning assembled
         (collected via :meth:`Sample.conditioning`).
         """
         if not self.sample_ids:
@@ -188,33 +178,26 @@ class Part(Batch):
         if branch < 1:
             raise ValueError(f"Part.fork: branch must be >= 1, got {branch}")
 
-        child_sample_ids = [f"{pid}/{j}" for pid in self.sample_ids for j in range(branch)]
-        child_parent_index = [r for r in range(len(self.sample_ids)) for _ in range(branch)]
+        child_sample_ids = [child_id(pid, j) for pid in self.sample_ids for j in range(branch)]
 
         return Part(
             sample_ids=child_sample_ids,
-            parent_index=child_parent_index,
             segment=new_segment,
-            stage=STAGE_GENERATION,
-            sampling_params=dict(sampling_params) if sampling_params else {},
-            sigmas=sigmas,
-            stage_config=dict(stage_config) if stage_config else {},
-            init_noise_group_ids=list(init_noise_group_ids) if init_noise_group_ids else [],
-            init_noise_latent_shape=list(init_noise_latent_shape) if init_noise_latent_shape else None,
+            sampling_params=sampling_params,
         )
 
     def compute_advantages(
-        self: TP,
+        self,
         normalize: bool = True,
         eps: float = 1e-8,
         scope: str = "group",
         use_global_std: bool = False,
         group_ids: Optional[List[str]] = None,
-    ) -> TP:
+    ) -> "Part":
         """GRPO per-group advantage ``(reward - group_mean) / (group_std + eps)``.
 
-        Groups are :attr:`group_ids` (``parent_index``, or per-sample for a root) and
-        must be group-by-parent contiguous, so the reduce is one ``view`` reshape.
+        Groups are :attr:`group_ids` (each sample's parent id, or per-sample for a
+        root) and must be group-by-parent contiguous, so the reduce is one ``view``.
         ``scope="global"`` normalizes over the whole batch; ``use_global_std`` keeps
         per-group means but one batch-wide std; ``group_ids`` overrides the grouping
         (e.g. to group at a coarser lineage level). Population std
@@ -242,7 +225,7 @@ class Part(Batch):
                 f"compute_advantages: group_ids length {len(group_ids)} != sample count {n}; "
                 f"the override must be one label per sample."
             )
-        group_labels = self.parent_index if group_ids is None else list(group_ids)
+        group_labels = list(group_ids) if group_ids is not None else (None if self.is_root else self.group_ids)
 
         # Root (no grouping labels): each sample is its own group → advantage 0.
         if group_labels is None:
@@ -277,7 +260,7 @@ class Part(Batch):
         return _part_with_field(self, "advantages", adv.flatten())
 
 
-def _part_with_field(part: TP, field_name: str, value: Any) -> TP:
+def _part_with_field(part: Part, field_name: str, value: Any) -> Part:
     """Copy of ``part`` with one field replaced."""
     kwargs: Dict[str, Any] = {f.name: getattr(part, f.name) for f in dc_fields(part)}
     kwargs[field_name] = value
@@ -288,7 +271,7 @@ def _part_with_field(part: TP, field_name: str, value: Any) -> TP:
 class Sample(Batch):
     """Rollout container — an ordered ``parts: List[Part]`` (the merged
     ``RolloutReq`` + ``RolloutResp``). Position is lineage (parent = the preceding
-    part); per-Part invariants (chain foreign-keys, ``stage``) are checked in
+    part); per-Part invariants (the chain foreign-keys) are checked in
     :meth:`__post_init__`."""
 
     parts: List[Part] = field(kind=FieldKind.CONCAT, default_factory=list)
@@ -296,32 +279,28 @@ class Sample(Batch):
 
     def __post_init__(self) -> None:
         for i, p in enumerate(self.parts):
-            if p.stage not in _VALID_STAGES:
-                raise ValueError(f"Sample.parts[{i}].stage={p.stage!r} not in {sorted(_VALID_STAGES)}")
-            n = len(p.sample_ids)
-            if p.parent_index is None:
+            if len(p.sample_ids) == 0:
+                continue  # empty part: no lineage to validate
+            if p.is_root:
                 # Only the head (index 0) may be a root — position is lineage.
                 if i != 0:
                     raise ValueError(
-                        f"Sample.parts[{i}] has parent_index=None but is not the head; only the first part may be a root."
+                        f"Sample.parts[{i}] is a root (ids carry no lineage segment) but is not the head; "
+                        f"only the first part may be a root."
                     )
                 continue
-            if len(p.parent_index) != n:
-                raise ValueError(
-                    f"Sample.parts[{i}]: parent_index length {len(p.parent_index)} != sample_ids length {n}"
-                )
             if i == 0:
-                raise ValueError("Sample.parts[0] has parent_index set; the head has no parent.")
-            prev_n = len(self.parts[i - 1].sample_ids)
-            bad = [r for r in p.parent_index if not (0 <= r < prev_n)]
+                raise ValueError("Sample.parts[0] is non-root; the head has no parent.")
+            prev_ids = set(self.parts[i - 1].sample_ids)
+            bad = [sid for sid in p.sample_ids if parent_id(sid) not in prev_ids]
             if bad:
                 raise ValueError(
-                    f"Sample.parts[{i}].parent_index: {len(bad)} rows out of range [0, {prev_n}) for the "
-                    f"preceding part (index {i - 1}); first bad: {bad[:3]!r}"
+                    f"Sample.parts[{i}]: {len(bad)} ids whose parent id is not in the preceding part "
+                    f"(index {i - 1}); first bad: {bad[:3]!r}"
                 )
 
     @classmethod
-    def concat(cls: Type[TS], items: Sequence[TS]) -> TS:
+    def concat(cls, items: Sequence["Sample"]) -> "Sample":
         """Concat Samples (e.g. DP gather): concat each part position-wise across
         shards. All shards carry the same parts in the same order (shards of one
         Sample). ``reward_compute_s`` reduces by max."""
@@ -334,13 +313,10 @@ class Sample(Batch):
         return cls(parts=merged, reward_compute_s=max(it.reward_compute_s for it in items))
 
     @classmethod
-    def request(cls: Type[TS], *input_parts: Part) -> TS:
+    def request(cls, *input_parts: Part) -> "Sample":
         """A *request* — a ``Sample`` of only input Part(s), e.g.
         ``Sample.request(Part.input(ids, seg))``. (Multi-input multimodal needs the
         inputs chained so only the head is a root; future work, §3.)"""
-        for i, p in enumerate(input_parts):
-            if p.stage != STAGE_INPUT:
-                raise ValueError(f"Sample.request: part {i} has stage {p.stage!r}; a request holds only input Parts.")
         return cls(parts=list(input_parts))
 
     @property
@@ -349,12 +325,12 @@ class Sample(Batch):
         across parts when the root isn't unique."""
         if not self.parts:
             return 0
-        roots = [p for p in self.parts if p.parent_index is None]
+        roots = [p for p in self.parts if p.is_root]
         if len(roots) == 1:
             return roots[0].batch_size
         return max(p.batch_size for p in self.parts)
 
-    def split(self: TS) -> List[TS]:
+    def split(self) -> List["Sample"]:
         """Split into one ``Sample`` per root-group, tree-complete: each shard holds
         one prompt's whole subtree across all parts. Requires a unique root."""
         if not self.parts:
@@ -365,16 +341,18 @@ class Sample(Batch):
             return [self]
 
         # Root-group label per sample, propagated forward along the chain (parent =
-        # preceding part): head is its own group; each child indexes the parent's labels.
+        # preceding part): head is its own group; each child inherits its parent's
+        # label, located by parent id (position-independent).
         per_part_root_groups: List[List[str]] = []
-        for part in self.parts:
-            if part.parent_index is None:
+        for i, part in enumerate(self.parts):
+            if part.is_root:
                 per_part_root_groups.append(list(part.group_ids))
             else:
-                prev = per_part_root_groups[-1]
-                per_part_root_groups.append([prev[r] for r in part.parent_index])
+                prev_part = self.parts[i - 1]
+                sid_to_grp = dict(zip(prev_part.sample_ids, per_part_root_groups[-1]))
+                per_part_root_groups.append([sid_to_grp[parent_id(sid)] for sid in part.sample_ids])
 
-        results: List[TS] = []
+        results: List["Sample"] = []
         for rgid in dict.fromkeys(root_gids):
             shard_parts: List[Part] = []
             for i, part in enumerate(self.parts):
@@ -388,16 +366,12 @@ class Sample(Batch):
         return results
 
     def fork(
-        self: TS,
+        self,
         branch: int,
         *,
-        sampling_params: Optional[Dict[str, BaseSamplingParams]] = None,
-        sigmas: Optional[torch.Tensor] = None,
-        stage_config: Optional[Dict[str, Any]] = None,
-        init_noise_group_ids: Optional[List[str]] = None,
-        init_noise_latent_shape: Optional[List[int]] = None,
+        sampling_params: Optional[BaseSamplingParams] = None,
         new_segment: Optional[Segment] = None,
-    ) -> TS:
+    ) -> "Sample":
         """Append a generation shell forked from the frontier (the last part) — the
         sole fan-out edge (§5), the "fork" half of ``step: fork → fill``."""
         if not self.parts:
@@ -405,15 +379,11 @@ class Sample(Batch):
         child = self.parts[-1].fork(
             branch,
             sampling_params=sampling_params,
-            sigmas=sigmas,
-            stage_config=stage_config,
-            init_noise_group_ids=init_noise_group_ids,
-            init_noise_latent_shape=init_noise_latent_shape,
             new_segment=new_segment,
         )
         return type(self)(parts=[*self.parts, child], reward_compute_s=self.reward_compute_s)
 
-    def propagate_rewards(self: TS, op: Literal["mean", "max", "sum"] = "mean") -> TS:
+    def propagate_rewards(self, op: Literal["mean", "max", "sum"] = "mean") -> "Sample":
         """Aggregate child rewards up the chain (leaf → root) into unscored parents.
         Walks ``parts`` in reverse; per parent, reduces the successor's rewards
         ``view(n_parent, branch).reduce(dim=1)``. Direct rewards win. Single-child
@@ -426,7 +396,7 @@ class Sample(Batch):
             if i + 1 >= len(new_parts):
                 continue
             child = new_parts[i + 1]
-            if child.parent_index is None:  # successor isn't a child of this part
+            if child.is_root:  # successor isn't a child of this part
                 continue
             if child.rewards is None:
                 raise ValueError(
@@ -460,19 +430,35 @@ class Sample(Batch):
         samples, in chronological order (root → frontier-parent). The model encodes
         these into its own conditions, mapping position → turn via the fixed
         schedule. Undecoded ancestors (``primitive is None``) are skipped; to get a
-        non-frontier part's conditioning (replay), call this on ``parts[:i+1]``."""
+        non-frontier part's conditioning (replay), call this on ``parts[:i+1]``.
+
+        Ancestors are walked by id: ``active_ids`` are the ancestor ids aligned to
+        the frontier's samples, climbed one level per step via ``parent_id``; each
+        level's rows are looked up by id (position-independent)."""
         if not self.parts:
             return []
+        frontier = self.parts[-1]
+        if frontier.is_root:
+            return []
         out: List[Primitive] = []
-        ridx = self.parts[-1].parent_index
-        anc = len(self.parts) - 2 if ridx is not None else None
-        while anc is not None:
-            prim = self.parts[anc].primitive
-            if prim is not None:
-                out.append(prim.select(torch.tensor(ridx, dtype=torch.long)))
-            nxt = self.parts[anc].parent_index
-            ridx = [nxt[r] for r in ridx] if nxt is not None else None
-            anc = anc - 1 if nxt is not None else None
+        active_ids = [parent_id(sid) for sid in frontier.sample_ids]
+        anc = len(self.parts) - 2
+        while anc >= 0:
+            part = self.parts[anc]
+            sid_to_row = {sid: r for r, sid in enumerate(part.sample_ids)}
+            try:
+                rows = [sid_to_row[aid] for aid in active_ids]
+            except KeyError as e:
+                raise ValueError(
+                    f"Sample.conditioning: ancestor id {e.args[0]!r} not found in part {anc}; "
+                    f"lineage chain is malformed."
+                ) from None
+            if part.primitive is not None:
+                out.append(part.primitive.select(torch.tensor(rows, dtype=torch.long)))
+            if part.is_root:
+                break
+            active_ids = [parent_id(aid) for aid in active_ids]
+            anc -= 1
         out.reverse()  # chronological: root → frontier-parent
         return out
 
@@ -481,6 +467,4 @@ __all__ = [
     "Sample",
     "Part",
     "Primitive",
-    "STAGE_INPUT",
-    "STAGE_GENERATION",
 ]
