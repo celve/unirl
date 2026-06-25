@@ -344,7 +344,7 @@ class AsyncARTrainer(ARTrainer):
             part.rewards = hydrate(part.rewards)
             mean_reward = float(part.rewards.to(torch.float32).mean().item())
         part = part.compute_advantages(normalize=self.normalize_adv_by_std, scope=self.adv_normalization_scope)
-        sample = Sample(parts=[*sample.parts[:-1], part], reward_compute_s=sample.reward_compute_s)
+        sample = sample.with_parts([*sample.parts[:-1], part])
         train_part = part
         if self.balance_shards:
             train_part = part.balance_shards(self._train_devices)  # over the TRAIN slab DP size

@@ -225,7 +225,6 @@ class BaseTrainer:
         sample: Any,
         *,
         rollout_id: int,
-        media_prompts: Optional[Dict[str, List[str]]] = None,
     ) -> None:
         """Upload media previews (if due this rollout) then free decoded payloads.
 
@@ -241,8 +240,7 @@ class BaseTrainer:
            shard), cap to ``media_max_items``, and upload it at the same
            ``rollout/step`` value :meth:`UniRLWandBLogger.log_rollout_step` uses,
            so the panels align. Captions default to the frontier-aligned prompt
-           texts (``Sample.conditioning``); ``media_prompts`` overrides them per
-           gen-Part name (``"ar"`` / ``"image"``) for multi-track recipes.
+           texts (``Sample.conditioning``).
         2. **Free the per-rollout payloads.** ``primitive`` (generated
            Images/Videos/Texts) is consumed upstream by reward scoring and never
            read by training (which uses only segment/conditions/advantages);
@@ -255,12 +253,11 @@ class BaseTrainer:
         """
         from unirl.types.primitives import Images, Texts
 
-        gen_parts = [p for p in sample.parts if p.sampling_params is not None]
+        gen_parts = sample.gen_parts()
         wb = self.wandb_logger
         if wb is not None and wb.should_log_media(rollout_id):
             from unirl.types.media_preview import build_media_preview_for_part
 
-            prompts_by_name = media_prompts or {}
             multi = len(gen_parts) > 1
             # Frontier-aligned conditioning: captions (the prompt Texts) + the
             # it2i source image (the chained image input Part), row-aligned 1:1
@@ -275,7 +272,7 @@ class BaseTrainer:
                     preview = build_media_preview_for_part(
                         part=part,
                         max_items=wb.media_max_items,
-                        prompts=prompts_by_name.get(name, default_prompts),
+                        prompts=default_prompts,
                         input_image=input_image,
                     )
                 if preview is None:

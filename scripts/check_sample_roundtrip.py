@@ -240,6 +240,37 @@ def check_root_group_ids() -> None:
     _check(sample.root_group_ids(1) == ["p0", "p0", "p1", "p1"], "ar part grouped by root prompt")
 
 
+def check_gen_part_accessors() -> None:
+    """``Sample.gen_parts``/``gen_part``/``gen_part_index`` locate stages by
+    ``sampling_params`` TYPE (the migration's part-location convention; mirrors
+    the engine-side ``ar_gen_part``/``diffusion_gen_part``). ``with_parts`` swaps
+    parts while preserving ``reward_compute_s``."""
+    inp = Part.input(["p0", "p1"], primitive=Texts(texts=["a cat", "a dog"]))
+    ar = inp.fork(2, sampling_params=ARSamplingParams())
+    img = ar.fork(1, sampling_params=DiffusionSamplingParams(num_inference_steps=4, height=256, width=256))
+    sample = Sample(parts=[inp, ar, img], reward_compute_s=1.5)
+
+    gps = sample.gen_parts()
+    _check(len(gps) == 2 and gps[0] is ar and gps[1] is img, "gen_parts skips the input Part")
+    _check(sample.gen_part(ARSamplingParams) is ar, "gen_part locates the AR stage by type")
+    _check(sample.gen_part(DiffusionSamplingParams) is img, "gen_part locates the diffusion stage by type")
+    _check(sample.gen_part_index(ARSamplingParams) == 1, "gen_part_index: AR at position 1")
+    _check(sample.gen_part_index(DiffusionSamplingParams) == 2, "gen_part_index: diffusion at position 2")
+
+    # A request with no diffusion stage → clear ValueError, not a bare StopIteration.
+    try:
+        Sample(parts=[inp, ar]).gen_part(DiffusionSamplingParams)
+        raised = False
+    except ValueError:
+        raised = True
+    _check(raised, "gen_part raises ValueError when the stage type is absent")
+
+    # with_parts swaps the parts list but carries reward_compute_s forward.
+    swapped = sample.with_parts([inp, ar])
+    _check(len(swapped.parts) == 2 and swapped.parts[1] is ar, "with_parts replaces the parts list")
+    _check(swapped.reward_compute_s == 1.5, "with_parts preserves reward_compute_s")
+
+
 _CHECKS: Tuple[Callable[[], None], ...] = (
     check_part_extraction,
     check_assemble_sample,
@@ -249,6 +280,7 @@ _CHECKS: Tuple[Callable[[], None], ...] = (
     check_multi_input_image_chain,
     check_cot_text_chain,
     check_root_group_ids,
+    check_gen_part_accessors,
 )
 
 

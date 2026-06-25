@@ -450,6 +450,36 @@ class Sample(Batch):
             return []
         return self._root_groups_per_part()[part_index]
 
+    def gen_parts(self) -> List[Part]:
+        """The generated (non-input) Parts — those carrying ``sampling_params``.
+        Input Parts (the prompt head and any :meth:`Part.input_child`) have
+        ``sampling_params is None`` and are skipped."""
+        return [p for p in self.parts if p.sampling_params is not None]
+
+    def gen_part(self, params_type: type) -> Part:
+        """The first gen Part whose ``sampling_params`` is an instance of
+        ``params_type`` (e.g. ``ARSamplingParams`` / ``DiffusionSamplingParams``)
+        — locating a stage by TYPE, not position (the migration's convention;
+        mirrors the engine-side ``ar_gen_part`` / ``diffusion_gen_part`` readers)."""
+        for p in self.parts:
+            if isinstance(p.sampling_params, params_type):
+                return p
+        raise ValueError(f"Sample.gen_part: no Part with sampling_params of type {params_type.__name__}")
+
+    def gen_part_index(self, params_type: type) -> int:
+        """Index of :meth:`gen_part` — for write-back (e.g. replacing a Part with
+        its advantage-filled version via :meth:`with_parts`)."""
+        for i, p in enumerate(self.parts):
+            if isinstance(p.sampling_params, params_type):
+                return i
+        raise ValueError(f"Sample.gen_part_index: no Part with sampling_params of type {params_type.__name__}")
+
+    def with_parts(self, parts: List[Part]) -> "Sample":
+        """A copy carrying replacement ``parts`` but the same ``reward_compute_s``
+        — the idiom for swapping in advantage-filled Parts without dropping the
+        accumulated reward-compute time."""
+        return type(self)(parts=list(parts), reward_compute_s=self.reward_compute_s)
+
     def fork(
         self,
         branch: int,

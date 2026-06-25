@@ -171,7 +171,7 @@ class ARTrainer(BaseTrainer):
             part = part.compute_advantages(
                 normalize=self.normalize_adv_by_std, scope=self.adv_normalization_scope
             )
-            sample = Sample(parts=[*sample.parts[:-1], part], reward_compute_s=sample.reward_compute_s)
+            sample = sample.with_parts([*sample.parts[:-1], part])
 
         self._dump_rollout_samples(sample, rollout_id)
         self._drop_decoded(sample, rollout_id=rollout_id)

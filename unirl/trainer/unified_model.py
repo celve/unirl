@@ -75,12 +75,6 @@ from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
 logger = logging.getLogger(__name__)
 
-# Track names produced by the vLLM-Omni HI3 rollout (see
-# ``rollout/engine/vllm_omni/response.py``): "ar" is the root (TextSegment,
-# groups by prompt), "image" is its 1:1 child (LatentSegment).
-AR_TRACK = "ar"
-IMAGE_TRACK = "image"
-
 
 def deep_hydrate(obj: Any) -> Any:
     """Materialize every ``TensorRef`` leaf in ``obj`` to a real tensor, in place.
@@ -384,8 +378,8 @@ class UnifiedModelTrainer(BaseTrainer):
         derives the noise key from the gen Part ids).
         """
         input_part = sample.parts[0]
-        ar_shell = next(p for p in sample.parts[1:] if isinstance(p.sampling_params, ARSamplingParams))
-        image_shell = next(p for p in sample.parts[1:] if isinstance(p.sampling_params, DiffusionSamplingParams))
+        ar_shell = sample.gen_part(ARSamplingParams)
+        image_shell = sample.gen_part(DiffusionSamplingParams)
         prompts = input_part.primitive
         if not isinstance(prompts, Texts):
             raise TypeError("UnifiedModelTrainer.run_rollout: input Part.primitive must be a Texts primitive.")
@@ -499,8 +493,8 @@ class UnifiedModelTrainer(BaseTrainer):
 
         # Locate the two gen Parts by sampling-params type (the image Part is the
         # frontier of the unified [input, ar, image] lineage).
-        ar_idx = next(i for i, p in enumerate(sample.parts) if isinstance(p.sampling_params, ARSamplingParams))
-        img_idx = next(i for i, p in enumerate(sample.parts) if isinstance(p.sampling_params, DiffusionSamplingParams))
+        ar_idx = sample.gen_part_index(ARSamplingParams)
+        img_idx = sample.gen_part_index(DiffusionSamplingParams)
 
         # 1. Score the frontier (image) Part only — the AR TextSegment is not
         #    directly scorable; its reward is credit-assigned below. The reward
@@ -531,10 +525,10 @@ class UnifiedModelTrainer(BaseTrainer):
         new_parts = list(sample.parts)
         for idx in (ar_idx, img_idx):
             new_parts[idx] = new_parts[idx].compute_advantages(normalize=True)
-        sample = type(sample)(parts=new_parts, reward_compute_s=sample.reward_compute_s)
+        sample = sample.with_parts(new_parts)
 
         # Captions for the image previews fall back to the frontier-aligned prompt
-        # texts (``Sample.conditioning``), so no media_prompts override is needed.
+        # texts (``Sample.conditioning``), so no per-track caption override is needed.
         self._drop_decoded(sample, rollout_id=rollout_id)
         # 5. Two backward (shared backbone) → one optimizer step.
         results: Dict[str, TrainStepResult] = self.stack.train_track(

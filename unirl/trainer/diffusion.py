@@ -413,7 +413,7 @@ class DiffusionTrainer(BaseTrainer):
             part.rewards = hydrate(part.rewards)
             mean_reward = float(part.rewards.to(torch.float32).mean().item())
             part = part.compute_advantages(normalize=True, use_global_std=self._adv_use_global_std)
-            sample = Sample(parts=[*sample.parts[:-1], part], reward_compute_s=sample.reward_compute_s)
+            sample = sample.with_parts([*sample.parts[:-1], part])
 
         self._drop_decoded(sample, rollout_id=rollout_id)
         result = self.stack.train_track(sample.parts[-1], training_progress=float(training_progress))

@@ -297,8 +297,8 @@ class PETrainer(BaseTrainer):
 
         # Locate the two gen Parts by sampling-params type (the composed engine's
         # convention; the diffusion/image Part is the frontier).
-        ar_idx = next(i for i, p in enumerate(sample.parts) if isinstance(p.sampling_params, ARSamplingParams))
-        diff_idx = next(i for i, p in enumerate(sample.parts) if isinstance(p.sampling_params, DiffusionSamplingParams))
+        ar_idx = sample.gen_part_index(ARSamplingParams)
+        diff_idx = sample.gen_part_index(DiffusionSamplingParams)
         parts_by_name = {"ar": ar_idx, "diffusion": diff_idx}
 
         # 1. Score the frontier (image) Part only — the AR TextSegment is not
@@ -337,10 +337,10 @@ class PETrainer(BaseTrainer):
                 new_parts[idx] = new_parts[idx].compute_advantages(normalize=True, group_ids=sample.root_group_ids(idx))
             else:
                 new_parts[idx] = new_parts[idx].compute_advantages(normalize=True)
-        sample = type(sample)(parts=new_parts, reward_compute_s=sample.reward_compute_s)
+        sample = sample.with_parts(new_parts)
 
         # Captions for the image previews fall back to the frontier-aligned prompt
-        # texts (``Sample.conditioning``), so no media_prompts override is needed.
+        # texts (``Sample.conditioning``), so no per-track caption override is needed.
         self._drop_decoded(sample, rollout_id=rollout_id)
         # 5. Route each TRAINED Part to its own stack (each DP_SCATTER-sharded on
         #    dispatch). A frozen LLM trains the diffusion Part only.
