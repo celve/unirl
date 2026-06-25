@@ -140,8 +140,7 @@ def build_media_preview_for_part(
     is the it2i source image (the chained image input Part's ``Images``), paired
     beside the output as an edit preview when present.
 
-    Two parallel modality paths, mirroring the legacy
-    ``RolloutResponse.attach_media_preview``:
+    Two parallel modality paths:
 
     - **Image path** (``isinstance(part.primitive, Images)``): unbinds
       ``Images.pixels`` along batch dim into per-sample 3D ``[C, H, W]``
