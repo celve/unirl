@@ -33,7 +33,7 @@ from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
 from unirl.train.backend.fsdp import FSDPBackend
 from unirl.train.stack import TrainStepResult, _build_micro_batch_slices
-from unirl.types.rollout_resp import RolloutTrack
+from unirl.types.sample import Part
 from unirl.utils.misc import aggregate_numeric_metrics
 
 logger = logging.getLogger(__name__)
@@ -75,21 +75,21 @@ class UnifiedModelTrainStack(Remote):
         self.micro_batch_size = int(micro_batch_size)
         self.max_grad_norm = float(max_grad_norm)
 
-    def prepare_segment(self, name: str, resp_track: RolloutTrack) -> None:
+    def prepare_segment(self, name: str, part: Part) -> None:
         """Pre-step hook for one algorithm — no-op if its ``segment`` is None
         or the algorithm has no ``prepare_segment`` (GRPO doesn't)."""
-        if resp_track.segment is None:
+        if part.segment is None:
             return
         algorithm = self.algorithms[name]
         prepare = getattr(algorithm, "prepare_segment", None)
         if prepare is None:
             return
-        prepare(conditions=resp_track.conditions, segment=resp_track.segment)
+        prepare(conditions=part.conditions, segment=part.segment)
 
     def _train_one(
         self,
         name: str,
-        resp_track: RolloutTrack,
+        part: Part,
         *,
         training_progress: float,
     ) -> tuple[TrainStepResult, bool]:
@@ -99,13 +99,13 @@ class UnifiedModelTrainStack(Remote):
         shared ``optimizer_step`` are owned by :meth:`train` so both algorithms
         accumulate into one step.
         """
-        if resp_track.advantages is None:
+        if part.advantages is None:
             raise ValueError(
                 f"UnifiedModelTrainStack.train: track {name!r} has advantages=None; "
                 "upstream advantage pipeline must populate it before training."
             )
 
-        bs = int(resp_track.batch_size)
+        bs = int(part.batch_size)
         micro_slices = _build_micro_batch_slices(total_size=bs, micro_batch_size=int(self.micro_batch_size))
         if not micro_slices:
             raise ValueError(f"UnifiedModelTrainStack.train: empty batch for track {name!r} (batch_size={bs}).")
@@ -118,7 +118,7 @@ class UnifiedModelTrainStack(Remote):
 
         single_micro = len(micro_slices) == 1 and micro_slices[0] == (0, bs)
         for start, end in micro_slices:
-            micro_track = resp_track if single_micro else resp_track.slice(start, end)
+            micro_track = part if single_micro else part.slice(start, end)
             result = algorithm.compute_loss_and_backward(
                 conditions=micro_track.conditions,
                 segment=micro_track.segment,
@@ -149,8 +149,8 @@ class UnifiedModelTrainStack(Remote):
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def train_track(
         self,
-        ar_track: RolloutTrack,
-        image_track: RolloutTrack,
+        ar_part: Part,
+        image_part: Part,
         *,
         training_progress: float,
     ) -> Dict[str, TrainStepResult]:
@@ -170,10 +170,10 @@ class UnifiedModelTrainStack(Remote):
         # One to_device here covers both algorithms' replays (AR teacher-force +
         # diffusion step) and their conditions — no per-replay device juggling.
         device = self.fsdp_backend._device
-        ar_track = ar_track.to_device(device)
-        image_track = image_track.to_device(device)
+        ar_part = ar_part.to_device(device)
+        image_part = image_part.to_device(device)
 
-        tracks = {"ar": ar_track, "image": image_track}
+        tracks = {"ar": ar_part, "image": image_part}
         for name in self.algorithms:
             self.prepare_segment(name, tracks[name])
 

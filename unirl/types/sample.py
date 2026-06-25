@@ -405,17 +405,7 @@ class Sample(Batch):
         if not root_gids:
             return [self]
 
-        # Root-group label per sample, propagated forward along the chain (parent =
-        # preceding part): head is its own group; each child inherits its parent's
-        # label, located by parent id (position-independent).
-        per_part_root_groups: List[List[str]] = []
-        for i, part in enumerate(self.parts):
-            if part.is_root:
-                per_part_root_groups.append(list(part.group_ids))
-            else:
-                prev_part = self.parts[i - 1]
-                sid_to_grp = dict(zip(prev_part.sample_ids, per_part_root_groups[-1]))
-                per_part_root_groups.append([sid_to_grp[parent_id(sid)] for sid in part.sample_ids])
+        per_part_root_groups = self._root_groups_per_part()
 
         results: List["Sample"] = []
         for rgid in dict.fromkeys(root_gids):
@@ -429,6 +419,36 @@ class Sample(Batch):
                 shard_parts.append(part.select(torch.tensor(indices, dtype=torch.long)))
             results.append(type(self)(parts=shard_parts))
         return results
+
+    def _root_groups_per_part(self) -> List[List[str]]:
+        """Root-prompt group label for every sample of every part.
+
+        Propagated forward along the chain (parent = preceding part): the head is
+        its own group; each child inherits its parent's label, located by parent id
+        (position-independent). Assumes a unique root head — the chain invariant
+        :meth:`__post_init__` enforces."""
+        per_part: List[List[str]] = []
+        for i, part in enumerate(self.parts):
+            if part.is_root:
+                per_part.append(list(part.group_ids))
+            else:
+                prev_part = self.parts[i - 1]
+                sid_to_grp = dict(zip(prev_part.sample_ids, per_part[-1]))
+                per_part.append([sid_to_grp[parent_id(sid)] for sid in part.sample_ids])
+        return per_part
+
+    def root_group_ids(self, part_index: int) -> List[str]:
+        """Root-prompt group label per sample of ``parts[part_index]`` — its lineage
+        climbed to the root part.
+
+        Groups a descendant Part by the prompt it descends from (coarser than its
+        immediate parent) for GRPO — the replacement for the old
+        ``RolloutResp.compute_track_advantages(group_key="root")``. The labels stay
+        group-by-parent contiguous (the lineage keeps a prompt's samples
+        consecutive), as :meth:`Part.compute_advantages` ``group_ids`` requires."""
+        if not self.parts:
+            return []
+        return self._root_groups_per_part()[part_index]
 
     def fork(
         self,

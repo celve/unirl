@@ -222,6 +222,24 @@ def check_cot_text_chain() -> None:
     _expect_raises(lambda: cot_text_from_sample(bad), ValueError, "cot/prompt count mismatch must raise")
 
 
+def check_root_group_ids() -> None:
+    """``Sample.root_group_ids(i)`` climbs each sample of ``parts[i]`` to its root
+    prompt — coarser than ``Part.group_ids`` (immediate parent). The PE/unified
+    ``compute_track_advantages(group_key="root")`` replacement; the labels stay
+    group-by-parent contiguous for ``Part.compute_advantages(group_ids=...)``."""
+    # P=2 prompts, N=2 AR children each, M=1 image each → [input, ar(4), image(4)].
+    inp = Part.input(["p0", "p1"], primitive=Texts(texts=["a cat", "a dog"]))
+    ar = inp.fork(2, sampling_params=ARSamplingParams())
+    img = ar.fork(1, sampling_params=DiffusionSamplingParams(num_inference_steps=4, height=256, width=256))
+    sample = Sample(parts=[inp, ar, img])
+
+    _check(list(img.sample_ids) == ["p0/0/0", "p0/1/0", "p1/0/0", "p1/1/0"], "image fan-out ids")
+    _check(sample.root_group_ids(2) == ["p0", "p0", "p1", "p1"], "image part grouped by ROOT prompt")
+    _check(img.group_ids == ["p0/0", "p0/1", "p1/0", "p1/1"], "Part.group_ids stays immediate-parent (4 groups)")
+    _check(sample.root_group_ids(0) == ["p0", "p1"], "root part: each prompt is its own group")
+    _check(sample.root_group_ids(1) == ["p0", "p0", "p1", "p1"], "ar part grouped by root prompt")
+
+
 _CHECKS: Tuple[Callable[[], None], ...] = (
     check_part_extraction,
     check_assemble_sample,
@@ -230,6 +248,7 @@ _CHECKS: Tuple[Callable[[], None], ...] = (
     check_split_concat_roundtrip,
     check_multi_input_image_chain,
     check_cot_text_chain,
+    check_root_group_ids,
 )
 
 
