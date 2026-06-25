@@ -110,13 +110,19 @@ def compute_rollout_sample_metrics(*, sample: Any, trunc_len: Optional[int] = No
 
     metrics: Dict[str, float] = {}
 
-    metrics["num_samples"] = float(int(getattr(sample, "batch_size", 0)))
-
     parts = getattr(sample, "parts", None)
     if not isinstance(parts, list):
+        metrics["num_samples"] = float(int(getattr(sample, "batch_size", 0)))
         return metrics
 
     gen_parts = [p for p in parts if getattr(p, "sampling_params", None) is not None]
+    # num_samples = the generated-sample count (frontier gen Part), restoring the
+    # pre-migration resp.batch_size. sample.batch_size is the root prompt count P,
+    # which under-reports by the fan-out factor (N for AR/diffusion, N*M for the
+    # PE/unified image stage).
+    metrics["num_samples"] = (
+        float(int(gen_parts[-1].batch_size)) if gen_parts else float(int(getattr(sample, "batch_size", 0)))
+    )
     multi = len(gen_parts) > 1
     for part in gen_parts:
         name = "ar" if isinstance(part.sampling_params, ARSamplingParams) else "image"
