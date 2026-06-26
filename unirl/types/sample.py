@@ -73,6 +73,11 @@ class Part(Batch):
     rewards: Optional[torch.Tensor] = concat_field(default=None)
     component_rewards: Optional[Dict[str, torch.Tensor]] = concat_field(default=None)
     advantages: Optional[torch.Tensor] = concat_field(default=None)
+    # Per-sample grouping labels the GRPO advantages were computed under (recorded
+    # by :meth:`compute_advantages`). May be COARSER than ``group_ids`` (e.g. a
+    # root-prompt scope passes ``Sample.root_group_ids``), so metrics that bucket
+    # by the advantage baseline must read this, not the immediate-parent ``group_ids``.
+    advantage_group_ids: Optional[List[str]] = concat_field(default=None)
     status: Optional[torch.Tensor] = concat_field(default=None)
 
     metadata: List[Dict[str, Any]] = concat_field(default_factory=list)
@@ -313,7 +318,11 @@ class Part(Batch):
             adv = (reshaped - mean) / std
         else:
             adv = reshaped - mean
-        return _part_with_field(self, "advantages", adv.flatten())
+        # Record the grouping the advantages were computed under so reward/zero-std
+        # metrics bucket by the actual GRPO baseline (which may be coarser than
+        # ``group_ids`` when a ``group_ids`` override is passed, e.g. root scope).
+        result = _part_with_field(self, "advantages", adv.flatten())
+        return _part_with_field(result, "advantage_group_ids", list(group_labels))
 
 
 def _part_with_field(part: Part, field_name: str, value: Any) -> Part:
@@ -406,12 +415,20 @@ class Sample(Batch):
             return [self]
 
         per_part_root_groups = self._root_groups_per_part()
+        # One pass per part: bucket sample indices by root-group label (was an
+        # O(num_groups x batch) rescan of each part's labels for every group).
+        per_part_buckets: List[Dict[str, List[int]]] = []
+        for labels in per_part_root_groups:
+            buckets: Dict[str, List[int]] = {}
+            for k, rg in enumerate(labels):
+                buckets.setdefault(rg, []).append(k)
+            per_part_buckets.append(buckets)
 
         results: List["Sample"] = []
         for rgid in dict.fromkeys(root_gids):
             shard_parts: List[Part] = []
             for i, part in enumerate(self.parts):
-                indices = [k for k, rg in enumerate(per_part_root_groups[i]) if rg == rgid]
+                indices = per_part_buckets[i].get(rgid)
                 if not indices:
                     raise RuntimeError(
                         f"Sample.split: part {i} has no samples in root group {rgid!r}; lineage tree is malformed."
@@ -479,6 +496,29 @@ class Sample(Batch):
         — the idiom for swapping in advantage-filled Parts without dropping the
         accumulated reward-compute time."""
         return type(self)(parts=list(parts), reward_compute_s=self.reward_compute_s)
+
+    def slice(self, start: int, end: int) -> "Sample":
+        """Shard ``[start, end)`` along the batch dim (the P root prompts) by whole
+        prompt-TREE, not by the ``parts`` list.
+
+        A ``Sample``'s batch dim is its P root prompts, but its only CONCAT field
+        is ``parts`` (length = #stages, 2-3) — so the inherited ``Batch.slice``
+        would wrongly slice the parts list and hand every shard the full Sample.
+        Route through :meth:`split`/:meth:`concat` so each shard holds whole prompt
+        subtrees across all parts. This is the hook ``@distributed(DP_SCATTER)``
+        (via ``Batch.chunk`` -> ``slice``) and trainside micro-batching rely on."""
+        picked = self.split()[start:end]
+        parts = Sample.concat(picked).parts if picked else []
+        return type(self)(parts=parts, reward_compute_s=self.reward_compute_s)
+
+    def select(self, indices: "torch.Tensor") -> "Sample":
+        """Gather whole root prompt-trees by index (shuffle / subsample), mirroring
+        :meth:`slice`'s tree-sharding rather than the inherited parts-list select."""
+        groups = self.split()
+        idx = indices.tolist() if hasattr(indices, "tolist") else list(indices)
+        picked = [groups[int(i)] for i in idx]
+        parts = Sample.concat(picked).parts if picked else []
+        return type(self)(parts=parts, reward_compute_s=self.reward_compute_s)
 
     def fork(
         self,

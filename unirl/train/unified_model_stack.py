@@ -33,7 +33,8 @@ from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
 from unirl.train.backend.fsdp import FSDPBackend
 from unirl.train.stack import TrainStepResult, _build_micro_batch_slices
-from unirl.types.sample import Part
+from unirl.types.sample import Part, Sample
+from unirl.types.sampling import ARSamplingParams, DiffusionSamplingParams
 from unirl.utils.misc import aggregate_numeric_metrics
 
 logger = logging.getLogger(__name__)
@@ -149,19 +150,26 @@ class UnifiedModelTrainStack(Remote):
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def train_track(
         self,
-        ar_part: Part,
-        image_part: Part,
+        sample: Sample,
         *,
         training_progress: float,
     ) -> Dict[str, TrainStepResult]:
         """Driver-callable: prepare → backward(ar) + backward(image) → ONE step.
 
-        Both tracks arrive DP_SCATTER-sharded (each DP worker gets its shard of
-        both). ``prepare_segment`` (image only) populates ``segment.sde_logp``;
-        the two ``compute_loss_and_backward`` calls accumulate gradients into the
-        shared backbone's single LoRA adapter; one ``optimizer_step`` applies
-        them; per-shard loss/grad_norm/metrics merge back via ``pytree_merge``.
+        Takes the whole ``[input, ar, image]`` lineage so DP_SCATTER shards it by
+        whole prompt-tree (``Sample.chunk`` → tree-shard), landing both stages on
+        this worker with a CONSISTENT prompt set. Passing the two Parts separately
+        was wrong at dp>1: ``infer_batch_size`` takes the first arg (``ar``=P*N), so
+        the P*N*M image Part trips ``pytree_chunk``'s batch-mismatch branch and gets
+        REPLICATED to every rank. ``prepare_segment`` (image only) populates
+        ``segment.sde_logp``; the two ``compute_loss_and_backward`` calls accumulate
+        gradients into the shared backbone's single LoRA adapter; one
+        ``optimizer_step`` applies them; per-shard results merge back on collect.
         """
+        # Recover this rank's two stage Parts from its tree-shard (located by
+        # sampling-params type, the migration's convention).
+        ar_part = sample.gen_part(ARSamplingParams)
+        image_part = sample.gen_part(DiffusionSamplingParams)
         # Move both tracks onto this worker's model device before any replay.
         # The HI3 rollout tracks are hydrated to CPU on the driver (the two
         # anchored engines return single transport handles that the driver

@@ -125,7 +125,7 @@ def compute_rollout_sample_metrics(*, sample: Any, trunc_len: Optional[int] = No
     )
     multi = len(gen_parts) > 1
     for part in gen_parts:
-        name = "ar" if isinstance(part.sampling_params, ARSamplingParams) else "image"
+        name = "ar" if isinstance(part.sampling_params, ARSamplingParams) else "diffusion"
         prefix = f"{name}_" if multi else ""
         rewards = getattr(part, "rewards", None)
         if torch.is_tensor(rewards) and rewards.numel() > 0:
@@ -133,7 +133,9 @@ def compute_rollout_sample_metrics(*, sample: Any, trunc_len: Optional[int] = No
             metrics.update(_tensor_stats(f"{prefix}reward", rewards_f))
             zero_cnt, group_cnt = _zero_std_group_counts_from_ids(
                 rewards_f,
-                getattr(part, "group_ids", None),
+                # Bucket by the grouping the advantages were actually computed under
+                # (may be coarser than the immediate-parent group_ids, e.g. PE root scope).
+                getattr(part, "advantage_group_ids", None) or getattr(part, "group_ids", None),
             )
             if group_cnt > 0:
                 metrics[f"{prefix}zero_std_group_ratio"] = float(zero_cnt) / float(group_cnt)

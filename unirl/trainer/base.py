@@ -266,13 +266,17 @@ class BaseTrainer:
             default_prompts = next((list(c.texts) for c in cond if isinstance(c, Texts)), None)
             input_image = next((c for c in cond if isinstance(c, Images)), None)
             for part in gen_parts:
-                name = "ar" if isinstance(part.sampling_params, ARSamplingParams) else "image"
+                name = "ar" if isinstance(part.sampling_params, ARSamplingParams) else "diffusion"
                 preview = part.media_preview
                 if preview is None and part.primitive is not None:
+                    # default_prompts is frontier-aligned (Sample.conditioning), so caption
+                    # only the frontier gen Part; a non-frontier image Part (none today — the
+                    # non-frontier AR Part is text → returns None) would otherwise be paired
+                    # with the wrong-length caption list.
                     preview = build_media_preview_for_part(
                         part=part,
                         max_items=wb.media_max_items,
-                        prompts=default_prompts,
+                        prompts=default_prompts if part is sample.parts[-1] else None,
                         input_image=input_image,
                     )
                 if preview is None:

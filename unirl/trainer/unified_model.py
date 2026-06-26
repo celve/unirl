@@ -42,7 +42,7 @@ One ``train_step``::
     reward.score_and_attach(sample)              # only the frontier image Part is scorable
     sample.propagate_rewards("mean")             # image reward → ar Part
     part.compute_advantages() per Part           # ar groups by prompt, image by recaption
-    unified_model_stack.train_track(ar_part, image_part)  # 2 backward → 1 optimizer step
+    unified_model_stack.train_track(sample)      # tree-shard lineage → 2 backward → 1 step
 
 Pairs with ``examples/unified_model/hi3_vllmomni.yaml`` and ``unirl/train_unified_model.py``.
 Deferred (same as the reference trainers): multi-epoch replay, checkpoint /
@@ -309,7 +309,13 @@ class UnifiedModelTrainer(BaseTrainer):
         diff_params = self.sampling_params.get("diffusion")
         ar_params = self.sampling_params.get("ar")
         sde_indices = diff_params.resolve_sde_indices(rollout_id)
-        diffusion = dataclasses.replace(diff_params, sde_indices=sde_indices, scheduler=None)
+        # Driver-x_T opt-out: env DISABLE_DRIVER_XT (parity with DiffusionTrainer) OR a
+        # recipe-set params flag. The hi3 DiT adapter skips init_noise_group_ids when
+        # set, so every engine falls back to its own RNG (the debug escape hatch).
+        disable_xt = bool(os.environ.get("DISABLE_DRIVER_XT")) or bool(getattr(diff_params, "disable_driver_xt", False))
+        diffusion = dataclasses.replace(
+            diff_params, sde_indices=sde_indices, scheduler=None, disable_driver_xt=disable_xt
+        )
         root_ids = [f"r{rollout_id}:{sid}" for sid in inputs.sample_ids]
         input_part = Part.input(
             root_ids,
@@ -420,7 +426,13 @@ class UnifiedModelTrainer(BaseTrainer):
         dit_prompts = Texts(texts=[prompts.texts[i // n_rec] for i in range(n_ar) for _ in range(n_img)])
         dit_cot = Texts(texts=[recaptions.texts[i] for i in range(n_ar) for _ in range(n_img)])
         n_total = len(dit_prompts.texts)
-        dit_input = Part.input([f"r{rid}:d{k}" for k in range(n_total)], primitive=dit_prompts)
+        # Re-root from the globally-unique image-shell lineage (flatten the path into a
+        # legal root id) rather than replica-local ``d{k}``: the DiT engine derives the
+        # x_T noise key from these ids, and ``d{k}`` restarts at 0 per dp>1 replica so
+        # images on different replicas would collide on identical noise. The shell ids
+        # are row-aligned with ``dit_prompts`` and the map-back is positional, so only
+        # the noise key changes — restoring the pre-migration lineage-based key.
+        dit_input = Part.input([sid.replace("/", "_") for sid in image_shell.sample_ids], primitive=dit_prompts)
         cot_input = dit_input.input_child(dit_cot)
         dit_out = dit_engine.generate(
             Sample.request(dit_input, cot_input).fork(1, sampling_params=image_shell.sampling_params)
@@ -530,10 +542,12 @@ class UnifiedModelTrainer(BaseTrainer):
         # Captions for the image previews fall back to the frontier-aligned prompt
         # texts (``Sample.conditioning``), so no per-track caption override is needed.
         self._drop_decoded(sample, rollout_id=rollout_id)
-        # 5. Two backward (shared backbone) → one optimizer step.
+        # 5. Two backward (shared backbone) → one optimizer step. Pass the whole
+        #    [input, ar, image] lineage so the stack DP-scatters it as a unit
+        #    (Sample.chunk tree-shards both stages at the SAME prompt boundaries);
+        #    passing the two Parts separately replicates the P*N*M image Part at dp>1.
         results: Dict[str, TrainStepResult] = self.stack.train_track(
-            sample.parts[ar_idx],
-            sample.parts[img_idx],
+            sample,
             training_progress=float(training_progress),
         )
         self.wandb_logger.log_rollout_step(

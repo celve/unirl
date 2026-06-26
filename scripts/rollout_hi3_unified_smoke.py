@@ -108,10 +108,9 @@ def _unified_request(prompts: list[str], rid: int = 0) -> Sample:
 
 
 def _shells(sample: Sample):
-    input_part = sample.parts[0]
-    ar_shell = next(p for p in sample.parts[1:] if isinstance(p.sampling_params, ARSamplingParams))
-    image_shell = next(p for p in sample.parts[1:] if isinstance(p.sampling_params, DiffusionSamplingParams))
-    return input_part, ar_shell, image_shell
+    # gen_part raises a descriptive ValueError if a shell is missing (vs a bare
+    # StopIteration leaking out of the helper).
+    return sample.parts[0], sample.gen_part(ARSamplingParams), sample.gen_part(DiffusionSamplingParams)
 
 
 def _build_engine(modality: str) -> VLLMOmniRolloutEngine:
