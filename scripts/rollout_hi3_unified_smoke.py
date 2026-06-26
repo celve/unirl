@@ -206,11 +206,13 @@ def run_dit(prompts: list[str], rid: int = 0) -> int:
         ]
         _log(f"using {n_ar} SYNTHETIC recaptions (DiT half runs standalone)")
 
-    # Level 2: P*N*M pre-expanded (original prompt + recaption cot_text), re-rooted flat (1:1).
+    # Level 2: P*N*M pre-expanded (original prompt + recaption cot_text), re-rooted flat
+    # (1:1) from the globally-unique image-shell lineage (flatten '/' into a legal root
+    # id), mirroring _run_rollout_one so the engine-derived x_T key stays dp>1-unique.
     dit_prompts = Texts(texts=[prompts[i // n_rec] for i in range(n_ar) for _ in range(n_img)])
     dit_cot = Texts(texts=[recaptions[i] for i in range(n_ar) for _ in range(n_img)])
     n_total = len(dit_prompts.texts)
-    dit_input = Part.input([f"r{rid}:d{k}" for k in range(n_total)], primitive=dit_prompts)
+    dit_input = Part.input([sid.replace("/", "_") for sid in image_shell.sample_ids], primitive=dit_prompts)
     cot_input = dit_input.input_child(dit_cot)
     dit_request = Sample.request(dit_input, cot_input).fork(1, sampling_params=image_shell.sampling_params)
     _log(f"DiT request: {len(dit_request.parts)} parts (prompt input, cot_text input child, image frontier); "
