@@ -334,6 +334,42 @@ def check_advantage_group_ids_recorded() -> None:
     _check(a_root.advantage_group_ids != list(image.group_ids), "root grouping is coarser than immediate group_ids")
 
 
+def check_rollout_metric_naming() -> None:
+    """Multi-stage rollout metrics name the diffusion stage ``diffusion`` (matching
+    the train-side track key), not ``image`` — so PE's ``rollout/*`` and ``train/*``
+    panels correlate."""
+    from unirl.utils.wandb_metrics import compute_rollout_sample_metrics
+
+    inp = Part.input(["p0", "p1"], primitive=Texts(texts=["a", "b"]))
+    ar = _part_with_field(inp.fork(2, sampling_params=ARSamplingParams()), "rewards", torch.arange(4, dtype=torch.float32))
+    img = _part_with_field(
+        ar.fork(1, sampling_params=DiffusionSamplingParams(num_inference_steps=4, height=256, width=256)),
+        "rewards",
+        torch.arange(4, dtype=torch.float32),
+    )
+    m = compute_rollout_sample_metrics(sample=Sample(parts=[inp, ar, img]))
+    _check(any(k.startswith("diffusion_") for k in m), "diffusion stage logs under the 'diffusion_' prefix")
+    _check(not any(k.startswith("image_") for k in m), "no stale 'image_' prefix")
+
+
+def check_disable_driver_xt_flag() -> None:
+    """``DiffusionSamplingParams`` carries the ``disable_driver_xt`` opt-out (default
+    off), settable per-recipe and via ``dataclasses.replace`` (how the unified trainer
+    stamps the env onto the params)."""
+    import dataclasses
+
+    d = DiffusionSamplingParams(num_inference_steps=4, height=256, width=256)
+    _check(d.disable_driver_xt is False, "disable_driver_xt defaults to False")
+    _check(dataclasses.replace(d, disable_driver_xt=True).disable_driver_xt is True, "replace sets the flag")
+    _check(
+        DiffusionSamplingParams(
+            num_inference_steps=4, height=256, width=256, disable_driver_xt=True
+        ).disable_driver_xt
+        is True,
+        "recipe can construct with the flag set",
+    )
+
+
 _CHECKS: Tuple[Callable[[], None], ...] = (
     check_part_extraction,
     check_assemble_sample,
@@ -347,6 +383,8 @@ _CHECKS: Tuple[Callable[[], None], ...] = (
     check_sample_dp_chunk,
     check_unified_dit_noise_ids_unique,
     check_advantage_group_ids_recorded,
+    check_rollout_metric_naming,
+    check_disable_driver_xt_flag,
 )
 
 
