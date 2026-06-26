@@ -23,7 +23,10 @@ stage_args:
       max_batch_size: 4
     engine_args:
       model_stage: diffusion
-      enforce_eager: true
+      # LIN-493 A/B: enforce_eager false enables regional torch.compile of the
+      # SD3 DiT blocks (_repeated_blocks=["SD3TransformerBlock"]). Perf probe
+      # vs the eager baseline; watch rollout_replay_logp_absdiff vs clip 1e-4.
+      enforce_eager: false  # LIN493_EAGER_FALSE
       distributed_executor_backend: "mp"
       vae_use_slicing: false
       vae_use_tiling: false
