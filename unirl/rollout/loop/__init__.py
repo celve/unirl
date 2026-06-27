@@ -5,8 +5,8 @@ One class per module: :class:`~unirl.rollout.loop.engine_port.RolloutEnginePort`
 :class:`~unirl.rollout.loop.agent_loop.AgentLoop`.
 """
 
-from unirl.rollout.loop.agent_loop import AgentLoop, Turn
+from unirl.rollout.loop.agent_loop import AgentLoop
 from unirl.rollout.loop.engine_port import RolloutEnginePort
 from unirl.rollout.loop.environment import Environment
 
-__all__ = ["AgentLoop", "Environment", "RolloutEnginePort", "Turn"]
+__all__ = ["AgentLoop", "Environment", "RolloutEnginePort"]

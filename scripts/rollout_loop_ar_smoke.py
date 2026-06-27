@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-"""GPU smoke: drive the ``AgentLoop`` over the REAL SGLang AR engine (Qwen3, LIN-492).
+"""GPU smoke: drive the env-driven ``AgentLoop`` over the REAL SGLang AR engine (Qwen3, LIN-492).
 
-Boots the real ``SGLangRolloutEngine`` (model_family "text", Qwen3-4B) and runs an
-``AgentLoop`` over it — proving the agent-loop abstraction drives a real rollout engine
-end-to-end (not just the ``FakeEngine`` in ``rollout_loop_smoke.py``). The single-turn loop
-is the AR analogue of ``rollout_ar_smoke.py`` routed through ``AgentLoop`` (the PRIMARY,
-hard-asserted contract); a 2-turn loop additionally probes multi-turn AR over the real engine
-(SECONDARY — informational, since real-engine multi-turn is a later phase, not prototype scope).
-
-Run on a GPU pod (1 free GPU), in the sglang venv:
+Boots the real ``SGLangRolloutEngine`` (model_family "text", Qwen3-4B) and runs an ``AgentLoop`` over
+it, driven by a stub ``FixedTurnsEnv`` — proving the env-driven loop drives a real rollout engine
+end-to-end (not just the ``FakeEngine`` in ``rollout_loop_smoke.py``). PRIMARY (hard-asserted): one AR
+turn. SECONDARY (informational): a 2-turn loop with an observation between turns — the real agentic
+shape ``gen -> observation -> gen`` — since real-engine multi-turn is a later phase, not prototype scope.
 
     QWEN3_PATH=/root/unirl/models/local/Qwen3-4B-Base \
     CUDA_VISIBLE_DEVICES=0 .venv-sglang/bin/python scripts/rollout_loop_ar_smoke.py
 
-Exits 0 on PASS (single-turn AgentLoop over the real engine), non-zero on failure.
+Exits 0 on PASS (PRIMARY single-turn over the real engine), non-zero on failure.
 """
 
 from __future__ import annotations
@@ -21,6 +18,7 @@ from __future__ import annotations
 import os
 import sys
 import traceback
+from typing import Optional, Tuple
 
 import torch
 
@@ -28,7 +26,7 @@ from unirl.rollout.engine.sglang.config import SGLangEngineConfig
 from unirl.rollout.engine.sglang.engine import SGLangRolloutEngine
 from unirl.rollout.loop import AgentLoop
 from unirl.types.primitives import Texts
-from unirl.types.sample import Part, Sample
+from unirl.types.sample import Part, Primitive, Sample
 from unirl.types.sample_id import parent_id
 from unirl.types.sampling import ARSamplingParams
 from unirl.types.segments.text import TextSegment
@@ -38,22 +36,29 @@ def _log(msg: str) -> None:
     print(f"[loop-ar-smoke] {msg}", flush=True)
 
 
-def build_request(n: int) -> tuple[Sample, ARSamplingParams]:
-    """A bare ``[input]`` request (2 prompts) + the AR params the loop forks with."""
+class FixedTurnsEnv:
+    """Stub environment: drives exactly ``turns`` generations, then ``done``. Stands in for a real
+    Environment so the loop runs a fixed number of turns over the real engine."""
+
+    def __init__(self, turns: int) -> None:
+        self._remaining = turns
+
+    def reset(self, request: Sample) -> Sample:
+        return request
+
+    def step(self, sample: Sample) -> Tuple[Optional[Primitive], bool, dict]:
+        self._remaining -= 1
+        if self._remaining <= 0:
+            return None, True, {}
+        ids = sample.parts[-1].sample_ids
+        return Texts(texts=[f"<obs>{sid}</obs>" for sid in ids]), False, {}
+
+
+def build_request(n: int) -> Tuple[Sample, ARSamplingParams]:
     prompts = ["The capital of France is", "Two plus two equals"]
     input_part = Part.input([f"p{i}" for i in range(len(prompts))], primitive=Texts(texts=prompts), control={})
     ar_params = ARSamplingParams(samples_per_prompt=n, temperature=0.7, max_new_tokens=48, top_p=0.9, top_k=20)
     return Sample.request(input_part), ar_params
-
-
-def _assert_ar_gen(gen, n_expect: int, input_ids: set) -> None:
-    assert len(gen.sample_ids) == n_expect, f"expected {n_expect} samples; got {len(gen.sample_ids)}"
-    assert all(parent_id(sid) in input_ids for sid in gen.sample_ids), "gen ids must be children of the input prompts"
-    assert isinstance(gen.segment, TextSegment), f"segment must be TextSegment; got {type(gen.segment)}"
-    assert isinstance(gen.primitive, Texts) and len(gen.primitive.texts) == n_expect, (
-        "decoded Texts missing/wrong count"
-    )
-    assert gen.sampling_params is not None, "gen Part must carry sampling_params (trainable)"
 
 
 def main() -> int:
@@ -78,43 +83,47 @@ def main() -> int:
         _log("constructing SGLangRolloutEngine (boots sglang + loads Qwen3) ...")
         engine = SGLangRolloutEngine(config, rank=0)
 
-        # ---- PRIMARY: single-turn AgentLoop over the real engine (hard-asserted) ----
+        # ---- PRIMARY: env-driven single-turn AgentLoop over the real engine (hard-asserted) ----
         request, ar_params = build_request(n)
         input_ids = set(request.parts[0].sample_ids)
-        loop = AgentLoop(plan=[(n, ar_params)], environment=None)
-        _log("running single-turn AgentLoop.run(engine, request) ...")
+        loop = AgentLoop(environment=FixedTurnsEnv(1), sampling_params=ar_params, max_turns=4)
+        _log("running env-driven AgentLoop (1 turn) over the real engine ...")
         out = loop.run(engine, request)
 
         assert len(out.parts) == 2, f"expected [input, ar_gen]; got {len(out.parts)} parts"
         gen = out.parts[-1]
-        _assert_ar_gen(gen, 2 * n, input_ids)
-        gps = out.gen_parts()
-        assert len(gps) == 1 and gps[0] is gen, "gen_parts must be exactly the AR gen Part"
-        _log(f"PRIMARY PASS: single-turn AgentLoop produced {2 * n} Qwen completions via the real engine")
+        assert len(gen.sample_ids) == 2 * n, f"expected {2 * n} samples; got {len(gen.sample_ids)}"
+        assert all(parent_id(s) in input_ids for s in gen.sample_ids), "gen ids must be children of the prompts"
+        assert isinstance(gen.segment, TextSegment), f"segment must be TextSegment; got {type(gen.segment)}"
+        assert isinstance(gen.primitive, Texts) and len(gen.primitive.texts) == 2 * n, "decoded Texts missing/wrong"
+        assert len(out.gen_parts()) == 1 and out.gen_parts()[0] is gen, "gen_parts must be exactly the AR gen Part"
+        _log(f"PRIMARY PASS: env-driven single-turn loop produced {2 * n} Qwen completions via the real engine")
         for i, t in enumerate(gen.primitive.texts):
             _log(f"  sample[{i}] id={gen.sample_ids[i]} text={t[:80]!r}")
 
-        # ---- SECONDARY (informational): 2-turn AR loop, multi-part history via conditioning ----
-        _log("probing 2-turn AR AgentLoop (multi-part history) — informational ...")
+        # ---- SECONDARY (informational): 2-turn loop, gen -> observation -> gen (real agentic shape) ----
+        _log("probing 2-turn env-driven loop (gen -> observation -> gen) — informational ...")
         try:
-            request2, ar_params2 = build_request(n)
-            turn2 = ARSamplingParams(samples_per_prompt=1, temperature=0.7, max_new_tokens=32, top_p=0.9, top_k=20)
-            loop2 = AgentLoop(plan=[(n, ar_params2), (1, turn2)], environment=None, max_turns=2)
+            request2, ar2 = build_request(n)
+            loop2 = AgentLoop(environment=FixedTurnsEnv(2), sampling_params=ar2, max_turns=4)
             out2 = loop2.run(engine, request2)
-            ok2 = len(out2.parts) == 3 and isinstance(out2.parts[-1].segment, TextSegment)
+            ok2 = (
+                len(out2.parts) == 4 and len(out2.gen_parts()) == 2 and isinstance(out2.parts[-1].segment, TextSegment)
+            )
             _log(
-                f"SECONDARY: 2-turn loop -> {len(out2.parts)} parts, gen_parts={len(out2.gen_parts())}, "
-                f"frontier seg={type(out2.parts[-1].segment).__name__} => {'PASS ✅' if ok2 else 'unexpected shape'}"
+                f"SECONDARY: 2-turn loop -> {len(out2.parts)} parts (expect [input, gen, obs, gen]), "
+                f"gen_parts={len(out2.gen_parts())}, frontier seg={type(out2.parts[-1].segment).__name__} "
+                f"=> {'PASS ✅' if ok2 else 'unexpected shape'}"
             )
             if not ok2:
-                _log("SECONDARY: multi-turn AR over the real engine is a follow-up phase (not prototype scope)")
+                _log("SECONDARY: real-engine multi-turn-with-observation is a follow-up phase (not prototype scope)")
         except Exception as e2:  # noqa: BLE001
             _log(
-                f"SECONDARY: multi-turn AR raised ({type(e2).__name__}: {e2}) — expected; "
-                f"real-engine multi-turn is a later phase, not in this prototype's scope"
+                f"SECONDARY: multi-turn raised ({type(e2).__name__}: {e2}) — expected; "
+                f"real-engine multi-turn-with-observation is a later phase, not in this prototype's scope"
             )
 
-        _log("AGENT-LOOP AR SMOKE PASSED ✅  (AgentLoop drives the real Qwen SGLang engine)")
+        _log("AGENT-LOOP AR SMOKE PASSED ✅  (env-driven AgentLoop drives the real Qwen SGLang engine)")
         return 0
     except Exception:
         _log("AGENT-LOOP AR SMOKE FAILED ❌")

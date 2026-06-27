@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""CPU oracle for the AgentLoop prototype (LIN-492).
+"""CPU oracle for the environment-driven AgentLoop (LIN-492).
 
-Exercises the synchronous ``AgentLoop`` + ``Sample.observe`` on fabricated Samples with a
-model-free ``FakeEngine`` and a ``StubEnv`` — no GPU, no backend. Mirrors
-``scripts/check_sample_roundtrip.py`` (``check_*`` contracts, ``main() -> int``, non-zero
-exit on the first failure). Guards the loop mechanics — fork → fill → observe → conditioning,
-lineage, masking, split/concat — so a broken loop or ``observe`` surfaces here instead of
-mid-rollout.
+Exercises the synchronous, env-driven ``AgentLoop`` on fabricated Samples with a model-free
+``FakeEngine`` and stub environments — no GPU, no backend. Mirrors
+``scripts/check_sample_roundtrip.py`` (``check_*`` contracts, ``main() -> int``, non-zero exit on
+first failure). The load-bearing check is **tool-call-driven termination**: the loop runs exactly as
+long as the (fake) model emits a marker, proving the loop is driven by the environment's ``done``,
+not a fixed plan or counter.
 
     python scripts/rollout_loop_smoke.py
 """
@@ -19,7 +19,8 @@ from typing import Callable, List, Optional, Tuple
 from unirl.rollout.loop import AgentLoop
 from unirl.types.primitives import Texts
 from unirl.types.sample import Part, Primitive, Sample
-from unirl.types.sampling import ARSamplingParams, DiffusionSamplingParams
+from unirl.types.sample_id import parent_id
+from unirl.types.sampling import ARSamplingParams
 
 
 def _check(cond: bool, msg: str) -> None:
@@ -28,10 +29,8 @@ def _check(cond: bool, msg: str) -> None:
 
 
 class FakeEngine:
-    """Model-free engine: fills the frontier gen shell with a deterministic ``Texts``
-    primitive keyed off its ``sample_ids`` (segment left None — the loop mechanics need only
-    ids + primitive). Mirrors ``check_generate_fills_frontier`` in check_sample_roundtrip.py.
-    """
+    """Model-free engine: fills the frontier gen shell with a deterministic ``Texts`` primitive
+    keyed off its ``sample_ids`` (segment left None). Mirrors ``check_generate_fills_frontier``."""
 
     def generate(self, sample: Sample) -> Sample:
         shell = sample.parts[-1]
@@ -39,22 +38,52 @@ class FakeEngine:
         return sample.with_parts([*sample.parts[:-1], filled])
 
 
-class StubEnv:
-    """World-initiated stub: returns a ``Texts`` observation for ``turns`` generations, then
-    signals done. Stands in for a real environment to exercise observation re-entry."""
+class MarkerFakeEngine:
+    """Fake engine that emits a ``<call>`` marker for the first ``marker_turns`` generations, then
+    plain text — lets ``MarkerEnv`` terminate the loop based on the model's *output content*."""
+
+    def __init__(self, marker_turns: int) -> None:
+        self.marker_turns = marker_turns
+        self.calls = 0
+
+    def generate(self, sample: Sample) -> Sample:
+        shell = sample.parts[-1]
+        emit = self.calls < self.marker_turns
+        self.calls += 1
+        body = "<call>tool</call>" if emit else "final"
+        filled = shell.fill(primitive=Texts(texts=[f"{body}::{sid}" for sid in shell.sample_ids]))
+        return sample.with_parts([*sample.parts[:-1], filled])
+
+
+class FixedTurnsEnv:
+    """Drives exactly ``turns`` generations, then ``done`` — an environment that owns the turn count."""
 
     def __init__(self, turns: int) -> None:
-        self._left = turns
+        self._remaining = turns
 
     def reset(self, request: Sample) -> Sample:
         return request
 
     def step(self, sample: Sample) -> Tuple[Optional[Primitive], bool, dict]:
-        self._left -= 1
-        if self._left <= 0:
+        self._remaining -= 1
+        if self._remaining <= 0:
             return None, True, {}
+        ids = sample.parts[-1].sample_ids
+        return Texts(texts=[f"obs::{sid}" for sid in ids]), False, {}
+
+
+class MarkerEnv:
+    """Tool-call-driven: continue while the model's output contains ``<call>``, else ``done``."""
+
+    def reset(self, request: Sample) -> Sample:
+        return request
+
+    def step(self, sample: Sample) -> Tuple[Optional[Primitive], bool, dict]:
         frontier = sample.parts[-1]
-        return Texts(texts=[f"obs::{sid}" for sid in frontier.sample_ids]), False, {}
+        if not any("<call>" in t for t in frontier.primitive.texts):
+            return None, True, {}  # no tool call -> trajectory done
+        ids = frontier.sample_ids
+        return Texts(texts=[f"<tool_response>ok</tool_response>::{sid}" for sid in ids]), False, {}
 
 
 def _request(prompts: List[str]) -> Sample:
@@ -62,57 +91,51 @@ def _request(prompts: List[str]) -> Sample:
     return Sample.request(Part.input(ids, primitive=Texts(texts=prompts)))
 
 
-def check_fixed_plan_composed_shape() -> None:
-    """A fixed 2-turn plan (no env) builds ``[input, ar, diffusion]`` with correct path ids —
-    the Composed shape expressed purely as *config* of the generic loop."""
-    loop = AgentLoop(
-        plan=[
-            (1, ARSamplingParams()),
-            (1, DiffusionSamplingParams(num_inference_steps=4, height=256, width=256)),
-        ],
-        environment=None,
+def check_grpo_fanout_and_turns() -> None:
+    """Turn 0 fans out to n=``samples_per_prompt``; continuations fork 1 each. ``FixedTurnsEnv(2)``
+    drives 2 gen turns with one observation between them: ``[input, gen0(n), obs0(n), gen1(n)]``."""
+    sp = ARSamplingParams(samples_per_prompt=3)
+    loop = AgentLoop(environment=FixedTurnsEnv(2), sampling_params=sp, max_turns=8)
+    out = loop.run(FakeEngine(), _request(["solve"]))
+    _check(len(out.parts) == 4, f"FixedTurnsEnv(2) -> [input, gen, obs, gen]; got {len(out.parts)} parts")
+    _check(len(out.parts[1].sample_ids) == 3, "turn 0 fans out to samples_per_prompt=3")
+    _check(len(out.parts[3].sample_ids) == 3, "continuation forks 1 per sample (3 -> 3)")
+    _check(
+        all(parent_id(s) in set(out.parts[2].sample_ids) for s in out.parts[3].sample_ids),
+        "gen1 ids are children of the observation Part (continuation off the frontier)",
     )
-    out = loop.run(FakeEngine(), _request(["a cat", "a dog"]))
-    _check(len(out.parts) == 3, "fixed 2-turn plan yields [input, ar, diffusion]")
-    _check(list(out.parts[1].sample_ids) == ["p0/0", "p1/0"], "ar path ids preserved")
-    _check(list(out.parts[2].sample_ids) == ["p0/0/0", "p1/0/0"], "diffusion path ids preserved")
-    _check(isinstance(out.parts[1].sampling_params, ARSamplingParams), "ar params preserved")
-    _check(isinstance(out.parts[2].sampling_params, DiffusionSamplingParams), "diffusion params preserved")
-    _check(isinstance(out.parts[1].primitive, Texts), "ar gen Part was filled with a primitive")
+
+
+def check_single_turn() -> None:
+    """``FixedTurnsEnv(1)`` -> exactly one gen turn, no observation: ``[input, gen]``."""
+    loop = AgentLoop(environment=FixedTurnsEnv(1), sampling_params=ARSamplingParams(samples_per_prompt=2), max_turns=8)
+    out = loop.run(FakeEngine(), _request(["a", "b"]))
+    _check(len(out.parts) == 2, f"single turn -> [input, gen]; got {len(out.parts)}")
+    _check(len(out.gen_parts()) == 1, "exactly one gen Part")
 
 
 def check_gen_parts_masking() -> None:
-    """``gen_parts()`` == the generated Parts; the input Part (no sampling_params) is excluded."""
-    loop = AgentLoop(plan=[(2, ARSamplingParams())], environment=None)
+    """gen Parts are trainable; observation Parts (no sampling_params) are excluded, even mid-chain."""
+    loop = AgentLoop(environment=FixedTurnsEnv(3), sampling_params=ARSamplingParams(samples_per_prompt=1), max_turns=8)
     out = loop.run(FakeEngine(), _request(["x"]))
-    gps = out.gen_parts()
-    _check(len(gps) == 1 and gps[0] is out.parts[1], "gen_parts is exactly the AR gen Part")
-    _check(out.parts[0].sampling_params is None, "input Part carries no sampling_params (excluded)")
-    _check(
-        list(out.parts[1].sample_ids) == ["p0/0", "p0/1"],
-        "branch=2 fans the single prompt (p0) out to 2 samples",
-    )
-
-
-def check_agentic_observe_masking_and_conditioning() -> None:
-    """An agentic plan (repeat AR + StubEnv) interleaves mask-0 observe Parts: they are
-    excluded from ``gen_parts()``, and ``conditioning()`` surfaces every ancestor primitive."""
-    loop = AgentLoop(plan=(1, ARSamplingParams()), environment=StubEnv(turns=3), max_turns=8)
-    out = loop.run(FakeEngine(), _request(["solve it"]))
-    # 3 gen turns + 2 interleaved observations: [input, gen, obs, gen, obs, gen]
-    _check(len(out.parts) == 6, f"expected 6 parts (input + 3 gen + 2 obs), got {len(out.parts)}")
-    gps = out.gen_parts()
-    _check(len(gps) == 3, "exactly the 3 AR gen Parts are trainable")
+    _check(len(out.parts) == 6, f"3 turns -> [input, gen, obs, gen, obs, gen]; got {len(out.parts)}")
+    _check(len(out.gen_parts()) == 3, "exactly the 3 gen Parts are trainable")
     obs_parts = [p for p in out.parts[1:] if p.sampling_params is None]
-    _check(len(obs_parts) == 2, "2 mask-0 observe Parts present and excluded from gen_parts")
+    _check(len(obs_parts) == 2, "2 mask-0 observation Parts present and excluded from gen_parts")
+
+
+def check_conditioning() -> None:
+    """``conditioning()`` surfaces every ancestor primitive after N turns (prompt + gens + observations)."""
+    loop = AgentLoop(environment=FixedTurnsEnv(3), sampling_params=ARSamplingParams(samples_per_prompt=1), max_turns=8)
+    out = loop.run(FakeEngine(), _request(["solve it"]))
     cond = out.conditioning()
-    _check(len(cond) == 5, f"frontier conditioning sees 5 ancestors (prompt + 2 gen + 2 obs), got {len(cond)}")
+    _check(len(cond) == 5, f"frontier conditioning sees 5 ancestors (prompt + 2 gen + 2 obs); got {len(cond)}")
     _check(all(isinstance(c, Texts) for c in cond), "conditioning surfaces the Texts primitives")
 
 
 def check_split_concat_roundtrip() -> None:
     """``split()`` -> ``concat()`` round-trips the multi-part agentic tree ids (dp-shard safety)."""
-    loop = AgentLoop(plan=(1, ARSamplingParams()), environment=StubEnv(turns=2), max_turns=8)
+    loop = AgentLoop(environment=FixedTurnsEnv(2), sampling_params=ARSamplingParams(samples_per_prompt=1), max_turns=8)
     out = loop.run(FakeEngine(), _request(["a", "b"]))
     merged = Sample.concat(out.split())
     _check(
@@ -121,11 +144,26 @@ def check_split_concat_roundtrip() -> None:
     )
 
 
+def check_tool_call_driven_termination() -> None:
+    """THE load-bearing check: the loop runs exactly as long as the model emits ``<call>``. The
+    environment's ``done`` (not a plan / counter) drives termination. ``MarkerFakeEngine`` emits the
+    marker for 2 turns then stops -> the loop must produce exactly 3 gen turns (2 with a call + 1 final)."""
+    loop = AgentLoop(environment=MarkerEnv(), sampling_params=ARSamplingParams(samples_per_prompt=1), max_turns=16)
+    out = loop.run(MarkerFakeEngine(marker_turns=2), _request(["question"]))
+    _check(
+        len(out.gen_parts()) == 3, f"loop should run 3 gen turns (2 with <call> + 1 final); got {len(out.gen_parts())}"
+    )
+    _check("final" in out.parts[-1].primitive.texts[0], "final gen Part has no tool call (loop stopped there)")
+    _check(len(out.parts) == 6, f"[input, gen, obs, gen, obs, gen]; got {len(out.parts)}")
+
+
 _CHECKS: Tuple[Callable[[], None], ...] = (
-    check_fixed_plan_composed_shape,
+    check_grpo_fanout_and_turns,
+    check_single_turn,
     check_gen_parts_masking,
-    check_agentic_observe_masking_and_conditioning,
+    check_conditioning,
     check_split_concat_roundtrip,
+    check_tool_call_driven_termination,
 )
 
 
