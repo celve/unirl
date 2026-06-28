@@ -539,6 +539,16 @@ class Sample(Batch):
                 return p
         raise ValueError(f"Sample.gen_part: no Part with sampling_params of type {params_type.__name__}")
 
+    def gen_part_or_none(self, params_type: type) -> Optional[Part]:
+        """:meth:`gen_part`, but returns ``None`` instead of raising when no Part of
+        ``params_type`` is present — the Optional replacement for the file-level
+        ``diffusion_gen_part`` / ``ar_gen_part`` readers (e.g. a text-out / AR-only
+        request carries no diffusion stage)."""
+        for p in self.parts:
+            if isinstance(p.sampling_params, params_type):
+                return p
+        return None
+
     def gen_part_index(self, params_type: type) -> int:
         """Index of :meth:`gen_part` — for write-back (e.g. replacing a Part with
         its advantage-filled version via :meth:`with_parts`)."""
@@ -704,6 +714,12 @@ class Sample(Batch):
                 f"{[primitive_modality_key(t.content) for t in ts]}"
             )
         return ts, images
+
+    def has_image_input(self) -> bool:
+        """Whether any non-frontier Part carries an ``Images`` primitive — the
+        boolean replacement for the retired ``image_input_part`` reject/require
+        guards."""
+        return any(isinstance(p.primitive, Images) for p in self.parts[:-1])
 
     def replace_frontier(self, part: Part) -> "Sample":
         """Swap the frontier (last) part, preserving the chain (``parts[:-1]``) and
