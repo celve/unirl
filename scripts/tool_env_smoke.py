@@ -143,6 +143,15 @@ def check_tool_schemas() -> None:
     _check(fn["parameters"]["required"] == ["expression"], "'expression' is required")
 
 
+def check_observation_role_is_tool() -> None:
+    """The tool result rides back as a 'tool'-role turn (LIN-503 role-aware rendering) so the chat
+    template wraps it as <tool_response>; the generation is 'assistant' and the prompt is 'user'."""
+    out = _loop(ToolEnvironment([CalculatorTool()])).run(ScriptedEngine([TOOLCALL, FINAL]), _request(["1234*5678?"]))
+    _check(out.parts[0].resolved_role() == "user", f"prompt renders as 'user'; got {out.parts[0].resolved_role()!r}")
+    _check(out.parts[1].resolved_role() == "assistant", f"gen renders as 'assistant'; got {out.parts[1].resolved_role()!r}")
+    _check(out.parts[2].resolved_role() == "tool", f"observation renders as 'tool'; got {out.parts[2].resolved_role()!r}")
+
+
 _CHECKS: Tuple[Callable[[], None], ...] = (
     check_tool_call_driven_termination,
     check_multi_tool_turns,
@@ -152,6 +161,7 @@ _CHECKS: Tuple[Callable[[], None], ...] = (
     check_parse_tool_call,
     check_calculator,
     check_tool_schemas,
+    check_observation_role_is_tool,
 )
 
 
