@@ -105,8 +105,11 @@ def main() -> int:
         max_new_tokens=512,
         temperature=0.7,
         top_p=0.9,
-        concurrency=16,
+        concurrency=8,
         chat_template_kwargs={"tools": schemas},
+        # Leave headroom on the 95 GB H20: the default mem_fraction_static=0.88 reserves ~92 GB and
+        # OOMs on the growing multi-turn prefill's transient logprob allocation (chained tasks).
+        engine_kwargs={"mem_fraction_static": 0.70},
     )
 
     engine = None
