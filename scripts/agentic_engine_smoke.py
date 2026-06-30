@@ -53,10 +53,13 @@ def main() -> int:
     if not model_path:
         _log("ERROR: set QWEN3_INSTRUCT_PATH to a local Qwen3-Instruct dir")
         return 2
-    num_gpus = int(os.environ.get("AGENTIC_NUM_GPUS", "2"))
+    num_gpus = int(os.environ.get("AGENTIC_NUM_GPUS", "2"))  # GPUs the agentic handle claims
+    pool_gpus = int(os.environ.get("AGENTIC_POOL_GPUS", "8"))  # node's total GPUs (DevicePool span)
     if num_gpus < 2:
         _log("ERROR: this smoke wants AGENTIC_NUM_GPUS>=2 (multi-worker slab)")
         return 2
+    if pool_gpus % num_gpus != 0 and num_gpus % pool_gpus != 0:
+        pool_gpus = num_gpus  # keep DevicePool's num_devices % devices_per_node == 0
     _log(f"torch {torch.__version__} cuda={torch.version.cuda}; gpus={num_gpus}; model={model_path}")
 
     import ray
@@ -89,7 +92,9 @@ def main() -> int:
     # worker_max_concurrency>=3 is REQUIRED on rank 0: it runs `generate` (the routing
     # loop, blocked in ray.get) + its own `run_drain` + serves `next_task` pulls
     # concurrently on the threaded actor (design §5 / risk #2). 8 leaves headroom.
-    pool = DevicePool(num_devices=num_gpus, worker_max_concurrency=8)
+    # DevicePool spans the node's GPUs (num_devices % devices_per_node must be 0);
+    # the agentic handle below claims `num_gpus` of them via create_remote(device_ids=...).
+    pool = DevicePool(num_devices=pool_gpus, devices_per_node=pool_gpus, worker_max_concurrency=8)
     pool.setup()
 
     engine = None
