@@ -27,6 +27,9 @@ import torch
 from unirl.distributed.group.device_pool import DevicePool
 from unirl.rollout.engine.agentic import AgenticRolloutEngine, AgenticRolloutEngineConfig
 from unirl.rollout.engine.sglang.config import SGLangEngineConfig
+from unirl.distributed.tensor import TensorRef
+from unirl.distributed.tensor.ref import hydrate
+from unirl.distributed.utils import collect_leaves
 from unirl.rollout.loop import CalculatorTool, ToolEnvironment
 from unirl.types.primitives import Texts
 from unirl.types.sample import Part, Sample
@@ -149,6 +152,27 @@ def main() -> int:
             # informational for direct-answer prompts; required for calculator prompts
             if "calculator" in _text or "calculate" in _text.lower():
                 assert hit, f"{pid}: no sibling trajectory contained {expected!r}"
+
+        # ---- risk #1: the token-id tensors must survive the cross-worker rank-0
+        #      aggregation. The text checks above are ref-free; the gen `segment`s
+        #      are the trainable output. Hydrate every TensorRef from the driver —
+        #      a ref wrongly rebound to the wrong worker's store fails here.
+        n_seg = n_hyd = n_real = 0
+        for i, traj in enumerate(out):
+            gen = traj.gen_parts()
+            assert gen and gen[-1].segment is not None, f"traj {i} ({traj.parts[0].sample_ids[0]}) has no gen segment"
+            n_seg += 1
+            for r in collect_leaves(traj, TensorRef):
+                t = hydrate(r)  # raises / mis-resolves if the cross-worker ref is broken
+                assert t is not None and hasattr(t, "shape"), f"traj {i}: TensorRef did not hydrate ({t!r})"
+                n_hyd += 1
+            n_real += len(collect_leaves(traj, torch.Tensor))
+        _log(
+            f"tensor check: {n_seg}/{len(out)} trajectories carry a gen segment; "
+            f"hydrated {n_hyd} TensorRefs + {n_real} real tensors from the driver"
+        )
+        assert n_seg == len(out), "every trajectory must carry generated token tensors"
+        assert (n_hyd + n_real) > 0, "trajectories carry no token tensors (tensor path not exercised)"
 
         _log(f"AGENTIC SMOKE PASSED ✅  ({P * N} trajectories, ragged depths {min(depths)}–{max(depths)})")
         return 0
