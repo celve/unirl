@@ -58,6 +58,10 @@ def main() -> int:
         return 2
     num_gpus = int(os.environ.get("AGENTIC_NUM_GPUS", "2"))  # GPUs the agentic handle claims
     pool_gpus = int(os.environ.get("AGENTIC_POOL_GPUS", "8"))  # node's total GPUs (DevicePool span)
+    # Small cap forces the n×P tasks to spread across workers (a single worker
+    # can't grab them all up front) — needed to actually exercise cross-worker
+    # rank-0 aggregation (risk #1). Default 8 keeps the original behaviour.
+    per_worker_conc = int(os.environ.get("AGENTIC_PER_WORKER_CONC", "8"))
     if num_gpus < 2:
         _log("ERROR: this smoke wants AGENTIC_NUM_GPUS>=2 (multi-worker slab)")
         return 2
@@ -89,7 +93,7 @@ def main() -> int:
         episode_sampling=ARSamplingParams(
             samples_per_prompt=N, temperature=0.7, max_new_tokens=512, top_p=0.9, top_k=20
         ),
-        per_worker_concurrency=8,
+        per_worker_concurrency=per_worker_conc,
     )
 
     # worker_max_concurrency>=3 is REQUIRED on rank 0: it runs `generate` (the routing
@@ -173,6 +177,33 @@ def main() -> int:
         )
         assert n_seg == len(out), "every trajectory must carry generated token tensors"
         assert (n_hyd + n_real) > 0, "trajectories carry no token tensors (tensor path not exercised)"
+
+        # ---- risk #1, the decisive evidence: which worker PRODUCED each gen
+        #      segment, and via which store. The gen tokens/logprobs are CPU
+        #      tensors (text.py:189) → packed as plasma-backed refs (object_ref
+        #      set, store_key=None), so local() does ray.get(object_ref) from the
+        #      GLOBAL object store and the RANK_ZERO rebind-to-worker0 is moot.
+        #      Require gen segments produced on >=2 distinct workers (the cross-
+        #      worker boundary was actually crossed) AND report the store split.
+        gen_src: set = set()
+        n_plasma = n_store = 0
+        for traj in out:
+            for p in traj.gen_parts():
+                for r in collect_leaves(p.segment, TensorRef):
+                    for s in r.spans:
+                        gen_src.add(str(s.handle.source_id))
+                        if getattr(s.handle, "object_ref", None) is not None:
+                            n_plasma += 1
+                        else:
+                            n_store += 1
+        _log(
+            f"gen-segment provenance: produced on {len(gen_src)} distinct workers {sorted(gen_src)}; "
+            f"spans {n_plasma} plasma-backed (global object store) / {n_store} worker-local-store"
+        )
+        assert len(gen_src) >= 2, (
+            f"gen segments all produced on one worker {sorted(gen_src)} — the cross-worker rank-0 "
+            f"aggregation was NOT exercised; lower AGENTIC_PER_WORKER_CONC to force spread"
+        )
 
         _log(f"AGENTIC SMOKE PASSED ✅  ({P * N} trajectories, ragged depths {min(depths)}–{max(depths)})")
         return 0
