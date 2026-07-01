@@ -8,9 +8,10 @@
 #
 # Data: a small jsonl of arithmetic word-problems with a numeric answer, e.g.
 #   {"prompt": "What is 1234 * 5678? Use the calculator tool, then put the final
-#               answer in <answer>...</answer>.", "answer": "7006652"}
-# (MultimodalRLDataSource lifts the loose "answer" into metadata; the trainer reads
-#  metadata["answer"] for the verifier.)
+#               answer in <answer>...</answer>.", "metadata": {"answer": "7006652"}}
+# The gold answer MUST be nested under "metadata" — MultimodalRLDataSource reads the
+# per-row "metadata" dict verbatim (a top-level "answer" is NOT lifted); the trainer
+# reads metadata["answer"] for the verifier.
 #
 # Run (single node, >=2 GPUs; rank 0 owns the driver + the agentic coordinator):
 #   QWEN3_INSTRUCT_PATH=/path/to/Qwen3-4B-Instruct DATA_PATH=data/calc_math/train.jsonl \
@@ -180,7 +181,7 @@ data_source:
   _target_: unirl.data.data_source.MultimodalRLDataSource
   args:
     run:
-      data_path: ${oc.env:DATA_PATH} # jsonl: {"prompt": ..., "answer": ...}
+      data_path: ${oc.env:DATA_PATH} # jsonl: {"prompt": ..., "metadata": {"answer": ...}}
       eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}} # unused (eval_interval=0); defaults to train
       seed: 42
     algorithm:

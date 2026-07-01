@@ -174,7 +174,7 @@ data_source:
   _target_: unirl.data.data_source.MultimodalRLDataSource
   args:
     run:
-      data_path: ${oc.env:DATA_PATH} # ASearcher jsonl: {"prompt": ..., "answer": ...}
+      data_path: ${oc.env:DATA_PATH} # ASearcher jsonl: {"prompt": ..., "metadata": {"answer": ...}}
       eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}} # unused (eval_interval=0); defaults to train
       seed: 42
     algorithm:

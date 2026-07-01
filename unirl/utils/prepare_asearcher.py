@@ -1,8 +1,10 @@
-"""Prepare ASearcher deep-research training data as ``{prompt, answer}`` jsonl (LIN-519).
+"""Prepare ASearcher deep-research training data as jsonl (LIN-519).
 
-Writes one jsonl line per example — ``{"prompt": <question>, "answer": <reference>}``
-— which ``MultimodalRLDataSource`` loads and whose ``answer`` the trainer lifts into
-metadata for the LLM-judge reward. Sibling of ``prepare_dapo_math.py``.
+Writes one jsonl line per example in the schema ``MultimodalRLDataSource`` expects —
+``{"prompt": <question>, "metadata": {"answer": <reference>}}`` (the data source reads
+the per-row ``metadata`` dict verbatim; a top-level ``answer`` is NOT lifted). The
+trainer then reads ``metadata["answer"]`` as the gold for the LLM-judge reward. Sibling
+of ``prepare_dapo_math.py``.
 
   # download from HF (inclusionAI/ASearcher-train-data) and convert:
   python -m unirl.utils.prepare_asearcher --out-dir data/asearcher
@@ -67,7 +69,13 @@ def main() -> None:
             answer = _norm_answer(_first(row, _ANSWER_KEYS))
             if not question or not answer:
                 continue
-            out.write(json.dumps({"prompt": str(question).strip(), "answer": answer}, ensure_ascii=False) + "\n")
+            out.write(
+                json.dumps(
+                    {"prompt": str(question).strip(), "metadata": {"answer": answer}},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
             kept += 1
             if args.limit and kept >= args.limit:
                 break
