@@ -60,7 +60,9 @@ def main() -> None:
     out_path = os.path.join(args.out_dir, f"{args.split}.jsonl")
     with open(out_path, "w", encoding="utf-8") as f:
         for i in range(len(games)):
-            row = {"prompt": f"{_PLACEHOLDER} (game {i})", "metadata": {"game_index": i}}
+            # Carry the exact game FILE so the env plays precisely this row's game
+            # (index alone drifts once the list is filtered/sampled).
+            row = {"prompt": f"{_PLACEHOLDER} (game {i})", "metadata": {"game_index": i, "game_file": games[i]}}
             f.write(json.dumps(row) + "\n")
     print(f"wrote {len(games)} rows -> {out_path}")
 

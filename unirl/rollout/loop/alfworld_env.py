@@ -198,13 +198,13 @@ class AlfworldEnv:
         with self._lock:
             self._free.append(template)
 
-    def _open_episode(self, game_index: int) -> Tuple[Any, Any]:
-        """Check out a template restricted to one game, ``init_env`` it (cheap), and
+    def _open_episode(self, game_file: Optional[str]) -> Tuple[Any, Any]:
+        """Check out a template restricted to one game FILE, ``init_env`` it (cheap), and
         return ``(tw_env, template)``. Restricting ``game_files`` to one game makes the
         ``n`` GRPO siblings share the same task deterministically. Overridable in tests."""
         template = self._acquire_template()
-        if self._games and hasattr(template, "game_files"):
-            template.game_files = [self._games[game_index % len(self._games)]]
+        if game_file and hasattr(template, "game_files"):
+            template.game_files = [game_file]
         tw = template.init_env(batch_size=1)
         return tw, template
 
@@ -218,9 +218,14 @@ class AlfworldEnv:
         root = request.parts[0]
         sid = str(root.sample_ids[0])
         meta = (root.metadata or [None])[0] or {}
-        game_index = int(meta.get("game_index", 0))
+        # Prefer the exact game FILE from the data row (author-selected set); fall back to
+        # indexing this worker's game list. Using the file path avoids any index-alignment
+        # drift between prepare_alfworld's (filtered/sampled) list and the env's glob.
+        game_file = meta.get("game_file")
+        if not game_file and self._games:
+            game_file = self._games[int(meta.get("game_index", 0)) % len(self._games)]
 
-        tw, template = self._open_episode(game_index)
+        tw, template = self._open_episode(game_file)
         obs, info = tw.reset()
 
         with self._lock:
@@ -239,6 +244,15 @@ class AlfworldEnv:
             control=control,
         )
         return Sample.request(new_root)
+
+    async def areset(self, request: Sample) -> Sample:
+        """Async :meth:`reset`: run the blocking episode open (env construct + game load
+        + ``tw.reset``) in the loop's executor so the many concurrent trajectories'
+        resets don't serialize on the coordinator's event loop (otherwise a GPU-idle
+        per-rollout bottleneck). Episode bookkeeping stays lock-guarded, so concurrent
+        executor threads are safe."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.reset, request)
 
     async def astep(self, sample: Sample) -> Tuple[Optional[Primitive], bool, dict]:
         """Async :meth:`step`: run the blocking simulator in the loop's executor so a

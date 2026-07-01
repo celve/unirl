@@ -212,7 +212,11 @@ class AgenticRolloutEngine(BaseRolloutEngine):
         sample = task
         env_reward: Optional[float] = None
         try:
-            sample = self._env.reset(task)  # [input(1)], root id = prompt id
+            # Prefer an async reset (env may run a blocking open in an executor) so many
+            # trajectories' resets overlap instead of serializing on this loop; fall back
+            # to the sync reset for stateless tool envs.
+            areset = getattr(self._env, "areset", None)
+            sample = await areset(task) if areset is not None else self._env.reset(task)  # [input(1)]
             for _ in range(self._max_turns):
                 sample = await self._inner.agenerate(sample.fork(1, sampling_params=self._sp))  # +[gen(1)]
                 observation, done, info = await self._env.astep(sample)  # async tool boundary (§7)
