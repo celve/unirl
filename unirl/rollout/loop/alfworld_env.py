@@ -158,32 +158,38 @@ class AlfworldEnv:
     # ALFWorld backend — lazy + isolated so tests can inject a mock episode.
     # ------------------------------------------------------------------
     def _ensure_backend(self) -> None:
+        # Double-checked lock: with async reset, concurrent executor threads all reach
+        # here on the first rollout; only ONE may run the setup (it mutates sys.argv
+        # around load_config(), which is not thread-safe).
         if self._ready:
             return
-        import alfworld.agents.environment as environment
-        import alfworld.agents.modules.generic as generic
+        with self._lock:
+            if self._ready:
+                return
+            import alfworld.agents.environment as environment
+            import alfworld.agents.modules.generic as generic
 
-        cfg_file = self._config_file or os.environ.get("ALFWORLD_CONFIG", "")
-        if not cfg_file or not os.path.exists(cfg_file):
-            raise FileNotFoundError(
-                "AlfworldEnv needs an ALFWorld base config. Set $ALFWORLD_CONFIG (or the "
-                f"env's config_file) to a readable base_config.yaml; got {cfg_file!r}."
-            )
-        # generic.load_config() argparses sys.argv for the config path — swap argv.
-        old_argv = sys.argv
-        try:
-            sys.argv = ["alfworld", cfg_file]
-            cfg = generic.load_config()
-        finally:
-            sys.argv = old_argv
-        cfg["env"]["type"] = "AlfredTWEnv"  # force the text-only variant
+            cfg_file = self._config_file or os.environ.get("ALFWORLD_CONFIG", "")
+            if not cfg_file or not os.path.exists(cfg_file):
+                raise FileNotFoundError(
+                    "AlfworldEnv needs an ALFWorld base config. Set $ALFWORLD_CONFIG (or the "
+                    f"env's config_file) to a readable base_config.yaml; got {cfg_file!r}."
+                )
+            # generic.load_config() argparses sys.argv for the config path — swap argv.
+            old_argv = sys.argv
+            try:
+                sys.argv = ["alfworld", cfg_file]
+                cfg = generic.load_config()
+            finally:
+                sys.argv = old_argv
+            cfg["env"]["type"] = "AlfredTWEnv"  # force the text-only variant
 
-        self._alfworld_cfg = cfg
-        self._environment = environment
-        self._games = list_alfworld_games(self._split)
-        if not self._games:
-            logger.warning("AlfworldEnv: no game files under $ALFWORLD_DATA (split=%s).", self._split)
-        self._ready = True
+            self._alfworld_cfg = cfg
+            self._environment = environment
+            self._games = list_alfworld_games(self._split)
+            if not self._games:
+                logger.warning("AlfworldEnv: no game files under $ALFWORLD_DATA (split=%s).", self._split)
+            self._ready = True
 
     def _acquire_template(self) -> Any:
         """A reusable AlfredTWEnv (constructed on demand; the engine caps concurrency)."""
