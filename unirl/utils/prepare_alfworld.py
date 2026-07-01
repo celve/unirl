@@ -31,12 +31,22 @@ def main() -> None:
     ap.add_argument("--out-dir", default="data/alfworld")
     ap.add_argument("--split", default="train")
     ap.add_argument("--limit", type=int, default=0, help="cap number of games (0 = all)")
+    ap.add_argument(
+        "--task-filter",
+        default="",
+        help="keep only games whose path contains this substring, e.g. a task type "
+        "(pick_and_place_simple, look_at_obj_in_light, ...). A homogeneous, learnable "
+        "set gives GRPO more mixed-outcome groups -> a stronger, cleaner learning signal.",
+    )
     args = ap.parse_args()
 
     games = list_alfworld_games(args.split)
+    if args.task_filter:
+        games = [g for g in games if args.task_filter in g]
     if not games:
         raise SystemExit(
-            "No ALFWorld games found. Set $ALFWORLD_DATA and run `alfworld-download` first."
+            "No ALFWorld games found (check $ALFWORLD_DATA / --task-filter). "
+            "Run `alfworld-download` first."
         )
     if args.limit and args.limit < len(games):
         # Evenly spaced across the sorted games so a small fixed set spans task types

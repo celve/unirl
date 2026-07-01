@@ -225,7 +225,14 @@ class AlfworldEnv:
 
         frontier = sample.parts[-1].primitive
         action = _parse_action(frontier.texts[0] if isinstance(frontier, Texts) and frontier.texts else "")
-        obs, scores, dones, infos = ep.env.step([action])
+        try:
+            obs, scores, dones, infos = ep.env.step([action])
+        except Exception as exc:  # noqa: BLE001 — TextWorld's PDDL parser raises on some states
+            logger.warning("AlfworldEnv: env.step failed (%s: %s); ending episode.", type(exc).__name__, exc)
+            with self._lock:
+                self._episodes.pop(eid, None)
+            # Drop (don't reuse) a template whose game engine just errored.
+            return None, True, {"reward": ep.reward, "success": 0.0, "steps": ep.steps, "error": True}
         ep.steps += 1
 
         success = self._success(scores, infos)
