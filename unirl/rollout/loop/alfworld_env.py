@@ -251,15 +251,6 @@ class AlfworldEnv:
         )
         return Sample.request(new_root)
 
-    async def areset(self, request: Sample) -> Sample:
-        """Async :meth:`reset`: run the blocking episode open (env construct + game load
-        + ``tw.reset``) in the loop's executor so the many concurrent trajectories'
-        resets don't serialize on the coordinator's event loop (otherwise a GPU-idle
-        per-rollout bottleneck). Episode bookkeeping stays lock-guarded, so concurrent
-        executor threads are safe."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self.reset, request)
-
     async def astep(self, sample: Sample) -> Tuple[Optional[Primitive], bool, dict]:
         """Async :meth:`step`: run the blocking simulator in the loop's executor so a
         slow env yields the worker's shared loop to sibling trajectories."""
