@@ -73,9 +73,15 @@ class AgenticRolloutEngine(BaseRolloutEngine):
 
         deps = dict(device=device, rank=rank, model_config=model_config)
         # Each worker builds its OWN local inner engine + environment.
-        self._inner: BaseRolloutEngine = config.inner.make_engine(strategy=strategy, **deps)
         self._env = config.env  # an Environment (built per worker via its _target_); must be re-entrant
         require(self._env is not None, "AgenticRolloutEngine requires an env (config.env)")
+        # Single source of truth for tool schemas (LIN-519): advertise the env's
+        # tools to the model through the inner engine's chat template, so a recipe
+        # never restates the schema JSON (which could silently drift from the env's
+        # actual tools). Mutates the inner CONFIG before it is built; an explicit
+        # ``inner.chat_template_kwargs.tools`` in the recipe still wins.
+        self._maybe_inject_tool_schemas(config.inner, self._env)
+        self._inner: BaseRolloutEngine = config.inner.make_engine(strategy=strategy, **deps)
 
         self._sp = config.episode_sampling  # per-turn sampling params; carries n via samples_per_prompt
         self._n = total_samples_per_prompt(self._sp)  # GRPO group size
@@ -99,6 +105,19 @@ class AgenticRolloutEngine(BaseRolloutEngine):
     def _run_coro(self, coro: Any) -> Any:
         # Drive on the inner engine's loop under the inner's lock (shared quiesce).
         return self._inner._run_coro(coro)
+
+    @staticmethod
+    def _maybe_inject_tool_schemas(inner_cfg: Any, env: Any) -> None:
+        """Copy the env's tool JSON-schemas into the inner engine's chat-template
+        kwargs so the model is told about the tools without the recipe restating
+        them. No-op when the env exposes no ``tool_schemas`` or the inner config
+        has no ``chat_template_kwargs``; an explicit ``tools`` entry is preserved."""
+        get_schemas = getattr(env, "tool_schemas", None)
+        if not callable(get_schemas) or not hasattr(inner_cfg, "chat_template_kwargs"):
+            return
+        ctk = dict(inner_cfg.chat_template_kwargs or {})
+        ctk.setdefault("tools", get_schemas())
+        inner_cfg.chat_template_kwargs = ctk
 
     # ------------------------------------------------------------------
     # Coordinator (rank 0) — the NCCLWeightSync pattern

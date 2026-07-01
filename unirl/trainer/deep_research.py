@@ -1,0 +1,226 @@
+"""DeepResearchTrainer — multi-turn agentic RL over the AgenticRolloutEngine (LIN-519).
+
+A sibling of :class:`~unirl.trainer.ar.ARTrainer` for the AGENTIC path. The rollout is
+the rank-0-coordinated
+:class:`~unirl.rollout.engine.agentic.engine.AgenticRolloutEngine`, whose ``generate``
+returns a FLAT ``List[Sample]`` of variable-depth, independently terminated
+trajectories (one per GRPO sibling) — not a single batched Sample. So this trainer
+overrides only:
+
+- ``__init__`` — wire the rank-0 coordinator (``set_workers``);
+- ``_build_request_sample`` — emit JUST the prompts (no ``fork``: the engine fans the
+  ``n`` GRPO siblings internally) with the per-turn ``stop`` on the root control bag;
+- ``train_step`` — consume the trajectory list: judge each trajectory's ``<answer>``
+  with the reward backend, compute GROUP-relative GRPO advantages over the ``n``
+  siblings of each prompt, assign each trajectory's scalar advantage to ALL its
+  assistant turns, concatenate every turn into ONE training Part (padded to a DP
+  multiple), and run ONE optimizer step.
+
+Everything else — worker construction, weight sync, checkpointing, the ``train`` loop
+— is inherited from ``ARTrainer`` / ``BaseTrainer`` unchanged.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import time
+from typing import Dict, List, Optional, Tuple
+
+import torch
+
+from unirl.algorithms.normalizers import build_group_index_map
+from unirl.distributed.tensor import hydrate
+from unirl.train.stack import TrainStepResult
+from unirl.trainer.ar import ARTrainer
+from unirl.types.primitives import Texts
+from unirl.types.prompts import RolloutInputs
+from unirl.types.sample import Part, Sample, _part_with_field
+from unirl.types.sampling import BaseSamplingParams
+
+logger = logging.getLogger(__name__)
+
+_ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
+
+
+def _extract_answer(text: Optional[str]) -> str:
+    """The last ``<answer>…</answer>`` span, else the whole text (the verifier is
+    tolerant of an unwrapped / ``\\boxed{}`` answer)."""
+    if not text:
+        return ""
+    matches = list(_ANSWER_RE.finditer(text))
+    return matches[-1].group(1).strip() if matches else text.strip()
+
+
+class DeepResearchTrainer(ARTrainer):
+    """Agentic (multi-turn tool-use) RL trainer over the ``AgenticRolloutEngine``."""
+
+    def __init__(self, *, stop: Optional[List[str]] = None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        # Per-turn stop: a tool-call turn ends at ``</tool_call>`` and yields to the
+        # tool; a final-answer turn runs to EOS. Rides the request root's control bag
+        # (``resolve_sampling`` reads ``control["ar"]``).
+        self._stop = list(stop) if stop else ["</tool_call>"]
+        # Wire the rank-0 coordinator (``AgenticRolloutEngine.set_workers`` — the
+        # ``NCCLWeightSync.set_rollout_targets`` shape). ``.workers`` / ``.role_name``
+        # are ``Handle`` attributes.
+        self.rollout.set_workers(self.rollout.workers, self.rollout.role_name)
+
+    def _build_request_sample(
+        self,
+        inputs: RolloutInputs,
+        rollout_id: int,
+        *,
+        sampling: Optional[Dict[str, BaseSamplingParams]] = None,
+    ) -> Sample:
+        """The ``P`` prompts as a single root input Part — NO ``fork`` (the agentic
+        engine fans the ``n`` GRPO siblings itself) — with the per-turn ``stop`` on the
+        root control bag and ``metadata`` (the ground-truth answer) carried for the
+        reward judge."""
+        del sampling  # the engine's ``episode_sampling`` owns per-turn params + ``n``
+        root_ids = [f"r{rollout_id}:{sid}" for sid in inputs.sample_ids]
+        text = Part.input(
+            root_ids,
+            primitive=inputs.primitives["text"],
+            metadata=list(inputs.metadata) if inputs.metadata else None,
+            control={"ar": {"stop": list(self._stop)}},
+        )
+        return Sample.request(text)
+
+    def train_step(
+        self,
+        sample: Sample,
+        *,
+        training_progress: float = 0.0,
+        sync_weights: bool = False,
+        rollout_id: int = 0,
+    ) -> Tuple[TrainStepResult, float]:
+        """One agentic ``rollout → judge → advantage → optimizer step`` pass.
+
+        Returns ``(train_result, mean_reward)`` for the progress line.
+        """
+        t0 = time.perf_counter()
+
+        # 1) Rollout — the barrier multi-turn generate. On-policy: sync first.
+        self.rollout.wake_up()
+        if sync_weights and self.weight_sync is not None:
+            self.weight_sync.sync()
+        trajs: List[Sample] = self.rollout.generate(sample)[0]  # BROADCAST+RANK_ZERO -> [List[Sample]]
+        self.rollout.sleep()
+
+        # 2) Per-trajectory question / predicted answer / ground truth / group id.
+        #    The ``n`` siblings of a prompt share its root id (group-by-root).
+        root = sample.parts[0]
+        root_meta = root.metadata or [None] * len(root.sample_ids)
+        gt_by_root = {sid: (md or {}).get("answer") for sid, md in zip(root.sample_ids, root_meta)}
+        questions: List[str] = []
+        predictions: List[str] = []
+        answers: List[Optional[str]] = []
+        group_ids: List[str] = []
+        for tr in trajs:
+            root_id = tr.parts[0].sample_ids[0]
+            q_prim = tr.parts[0].primitive
+            questions.append(q_prim.texts[0] if (q_prim is not None and q_prim.texts) else "")
+            gens = tr.gen_parts()
+            term = ""
+            if gens and gens[-1].primitive is not None and gens[-1].primitive.texts:
+                term = gens[-1].primitive.texts[0]
+            predictions.append(_extract_answer(term))
+            answers.append(gt_by_root.get(root_id))
+            group_ids.append(root_id)
+
+        # 3) Reward — ONE fresh flat scoring Sample, scored once. (``score_and_attach``
+        #    rejects precomputed frontier rewards, so a FRESH sample is required; its
+        #    frontier carries no ``segment`` so the truncation-shaping branch is skipped.)
+        m = len(trajs)
+        ar_sp = self.sampling_params.get("ar")
+        score_in = Part.input(
+            [f"score{rollout_id}:{i}" for i in range(m)],
+            primitive=Texts(texts=list(questions)),
+            metadata=[{"answer": a} for a in answers],
+        )
+        scoring = (
+            Sample.request(score_in)
+            .fork(1, sampling_params=ar_sp)  # frontier is a gen Part (reward/adv panels read gen_parts)
+            .with_filled_frontier(primitive=Texts(texts=list(predictions)))
+        )
+        scoring = self.reward.score_and_attach(scoring)
+        rewards = hydrate(scoring.parts[-1].rewards).to(torch.float32)
+        mean_reward = float(rewards.mean().item()) if rewards.numel() else 0.0
+
+        # 4) GROUP-relative GRPO advantage over the ``n`` siblings per prompt.
+        advantages = self._group_advantages(rewards, group_ids)
+
+        # 5) Assign each trajectory's scalar advantage to ALL its assistant turns; gather.
+        train_parts: List[Part] = []
+        for i, tr in enumerate(trajs):
+            adv_i = float(advantages[i].item())
+            for gp in tr.gen_parts():
+                gp = _part_with_field(gp, "advantages", torch.full((gp.batch_size,), adv_i, dtype=torch.float32))
+                gp = _part_with_field(gp, "primitive", None)  # free decoded text before train
+                train_parts.append(gp)
+
+        depths = [len(tr.gen_parts()) for tr in trajs]
+        if not train_parts:  # pathological: every sampled trajectory failed to generate
+            logger.warning("DeepResearchTrainer rollout %d produced no trainable turns.", rollout_id)
+            return TrainStepResult(0.0, 0.0, 0.0, False, [], {}), mean_reward
+
+        # 6) ONE training Part -> pad to a DP multiple (zero-advantage rows) -> ONE step.
+        train_part = Part.concat(train_parts)
+        train_part = self._pad_to_dp_multiple(train_part)
+        result = self.stack.train_track(train_part, training_progress=float(training_progress))
+
+        # Logging: reuse the scored Sample (its gen frontier carries reward + advantage).
+        log_sample = scoring.with_parts(
+            [*scoring.parts[:-1], _part_with_field(scoring.parts[-1], "advantages", advantages)]
+        )
+        self.wandb_logger.log_rollout_step(
+            rollout_id,
+            result,
+            log_sample,
+            step_time_s=time.perf_counter() - t0,
+            extra_metrics={
+                "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
+                "agent/max_turns": max(depths) if depths else 0,
+                "agent/genless_trajectories": sum(1 for d in depths if d == 0),
+                "agent/train_rows": int(train_part.batch_size),
+            },
+        )
+        return result, mean_reward
+
+    def _group_advantages(self, rewards: torch.Tensor, group_ids: List[str]) -> torch.Tensor:
+        """Group-relative GRPO advantages, ``ARTrainer.compute_advantages`` parity
+        (population std), over the ``n`` siblings of each prompt (grouped by root id;
+        completion order is fine). ``adv_normalization_scope='global'`` z-scores the
+        whole batch; ``normalize_adv_by_std=False`` mean-centers only."""
+        r = rewards.to(torch.float32)
+        if self.adv_normalization_scope == "global":
+            centered = r - r.mean()
+            return centered / (r.std(unbiased=False) + 1e-8) if self.normalize_adv_by_std else centered
+        adv = torch.zeros_like(r)
+        for idxs in build_group_index_map(group_ids).values():
+            idx = torch.tensor(idxs, dtype=torch.long)
+            g = r[idx]
+            centered = g - g.mean()
+            adv[idx] = centered / (g.std(unbiased=False) + 1e-8) if self.normalize_adv_by_std else centered
+        return adv
+
+    def _pad_to_dp_multiple(self, part: Part) -> Part:
+        """Pad ``part`` up to a multiple of the train DP size by replicating the
+        shortest row with advantage 0 (zero gradient for GRPO/DRPO/CPPO), so the ragged
+        Σ-turns batch satisfies ``pytree_chunk``'s divisibility check."""
+        dp = int(getattr(self.stack, "dp_size", self.num_devices))
+        pad = (-int(part.batch_size)) % dp
+        if pad == 0:
+            return part
+        lengths = part.segment.lengths if part.segment is not None else None
+        src = int(torch.argmin(lengths).item()) if (lengths is not None and lengths.numel()) else 0
+        pad_block = part.select(torch.full((pad,), src, dtype=torch.long))
+        pad_block = _part_with_field(pad_block, "advantages", torch.zeros(pad, dtype=torch.float32))
+        return Part.concat([part, pad_block])
+
+    def evaluate(self, rollout_id: int) -> float:
+        raise NotImplementedError(
+            "DeepResearchTrainer.evaluate is not implemented: the agentic engine returns "
+            "List[Sample], not a Sample. Set eval_interval=0 (agentic eval is a follow-up)."
+        )
