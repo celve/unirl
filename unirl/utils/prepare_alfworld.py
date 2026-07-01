@@ -1,12 +1,14 @@
 """Prepare ALFWorld rollout-driver rows for UniRL (LIN-519).
 
 ALFWorld tasks live in the environment — the *prompt* is the env's reset observation,
-not a jsonl field. This emits N trivial driver rows, one per game,
-``{"prompt": "", "metadata": {"game_index": i}}``, so ``MultimodalRLDataSource`` drives
-N rollouts and :meth:`AlfworldEnv.reset` maps each ``game_index`` to a game. The index
-ordering matches :func:`unirl.rollout.loop.alfworld_env.list_alfworld_games`, so the row
-and the env agree on which game an index selects (and the ``n`` GRPO siblings of a
-prompt share the same game).
+not a jsonl field. This emits N driver rows, one per game,
+``{"prompt": <placeholder>, "metadata": {"game_index": i}}``, so
+``MultimodalRLDataSource`` drives N rollouts and :meth:`AlfworldEnv.reset` maps each
+``game_index`` to a game. The index ordering matches
+:func:`unirl.rollout.loop.alfworld_env.list_alfworld_games`, so the row and the env
+agree on which game an index selects (and the ``n`` GRPO siblings of a prompt share the
+same game). The prompt is a non-empty placeholder only because the data source rejects
+empty-prompt rows — :meth:`AlfworldEnv.reset` discards it and uses the env observation.
 
   ALFWORLD_DATA=/path/to/alfworld/data python -m unirl.utils.prepare_alfworld --out-dir data/alfworld
 """
@@ -18,6 +20,10 @@ import json
 import os
 
 from unirl.rollout.loop.alfworld_env import list_alfworld_games
+
+# Non-empty so the data source keeps the row; AlfworldEnv.reset() replaces it with the
+# environment's initial observation, so the text itself is never used for generation.
+_PLACEHOLDER = "Begin the ALFWorld household task."
 
 
 def main() -> None:
@@ -39,7 +45,8 @@ def main() -> None:
     out_path = os.path.join(args.out_dir, f"{args.split}.jsonl")
     with open(out_path, "w", encoding="utf-8") as f:
         for i in range(len(games)):
-            f.write(json.dumps({"prompt": "", "metadata": {"game_index": i}}) + "\n")
+            row = {"prompt": f"{_PLACEHOLDER} (game {i})", "metadata": {"game_index": i}}
+            f.write(json.dumps(row) + "\n")
     print(f"wrote {len(games)} rows -> {out_path}")
 
 
