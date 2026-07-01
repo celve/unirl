@@ -44,7 +44,8 @@ def _env(monkeypatch, solve_on: str = "win", max_steps: int = 5) -> AlfworldEnv:
     env = AlfworldEnv(split="train", max_steps=max_steps)
     env._ready = True  # bypass the lazy alfworld import
     env._games = ["g0", "g1"]
-    monkeypatch.setattr(env, "_open_episode", lambda gi: _FakeTW(solve_on))
+    # _open_episode returns (tw_env, pooled_template); the mock needs no template
+    monkeypatch.setattr(env, "_open_episode", lambda gi: (_FakeTW(solve_on), None))
     return env
 
 

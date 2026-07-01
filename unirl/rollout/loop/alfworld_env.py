@@ -17,6 +17,10 @@ share the *game* (selected by ``metadata['game_index']``, identical across sibli
 but get *separate* episodes. The terminal task-success is emitted as the trajectory
 reward through ``info['reward']``; the engine attaches it to the trajectory and
 :class:`~unirl.trainer.agentic_env.AgenticEnvTrainer` reads it (no reward backend).
+
+Constructing an ``AlfredTWEnv`` scans all game files (~5s), so we build a small pool of
+templates lazily and reuse them (``init_env`` per episode is ~0s); each template is
+checked out to one episode at a time (the engine caps concurrency), then released.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ import asyncio
 import logging
 import os
 import re
+import sys
 import threading
 from glob import glob
 from typing import Any, Dict, List, Optional, Tuple
@@ -51,14 +56,13 @@ def list_alfworld_games(split: str = "train", data_dir: Optional[str] = None) ->
 
     Shared by :class:`AlfworldEnv` and ``unirl.utils.prepare_alfworld`` so a data row's
     ``game_index`` maps to the same game on both sides. Globs ``$ALFWORLD_DATA`` (or
-    ``data_dir``) for the ``*.tw-pddl`` task games (verified against the installed
-    package layout on setup)."""
+    ``data_dir``) for the ``game.tw-pddl`` task games."""
     root = data_dir or os.environ.get("ALFWORLD_DATA", "")
     if not root:
         return []
     patterns = [
+        os.path.join(root, "json_2.1.1", split, "**", "game.tw-pddl"),
         os.path.join(root, "json_2.1.1", split, "**", "*.tw-pddl"),
-        os.path.join(root, split, "**", "*.tw-pddl"),
         os.path.join(root, "**", split, "**", "*.tw-pddl"),
     ]
     for pat in patterns:
@@ -68,17 +72,6 @@ def list_alfworld_games(split: str = "train", data_dir: Optional[str] = None) ->
     return []
 
 
-class _Episode:
-    """Per-trajectory ALFWorld episode state."""
-
-    __slots__ = ("env", "reward", "steps")
-
-    def __init__(self, env: Any) -> None:
-        self.env = env
-        self.reward = 0.0
-        self.steps = 0
-
-
 def _parse_action(text: Optional[str]) -> str:
     """The command after the last ``Action:``; fallback to the last non-empty line."""
     matches = _ACTION_RE.findall(text or "")
@@ -86,6 +79,18 @@ def _parse_action(text: Optional[str]) -> str:
         return matches[-1].strip()
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     return lines[-1] if lines else ""
+
+
+class _Episode:
+    """Per-trajectory ALFWorld episode: the live gym env, its pooled template, and state."""
+
+    __slots__ = ("env", "template", "reward", "steps")
+
+    def __init__(self, env: Any, template: Any) -> None:
+        self.env = env
+        self.template = template
+        self.reward = 0.0
+        self.steps = 0
 
 
 class AlfworldEnv:
@@ -112,7 +117,9 @@ class AlfworldEnv:
         self._lock = threading.Lock()
         self._counter = 0
         self._games: List[str] = []
-        self._alfworld: Any = None
+        # Lazy, reused AlfredTWEnv templates (construct scans all games ~5s → reuse).
+        self._free: List[Any] = []
+        self._environment: Any = None
         self._alfworld_cfg: Any = None
         self._ready = False
 
@@ -125,24 +132,50 @@ class AlfworldEnv:
         import alfworld.agents.environment as environment
         import alfworld.agents.modules.generic as generic
 
-        cfg = generic.load_config(self._config_file) if self._config_file else generic.load_config()
+        cfg_file = self._config_file or os.environ.get("ALFWORLD_CONFIG", "")
+        if not cfg_file or not os.path.exists(cfg_file):
+            raise FileNotFoundError(
+                "AlfworldEnv needs an ALFWorld base config. Set $ALFWORLD_CONFIG (or the "
+                f"env's config_file) to a readable base_config.yaml; got {cfg_file!r}."
+            )
+        # generic.load_config() argparses sys.argv for the config path — swap argv.
+        old_argv = sys.argv
+        try:
+            sys.argv = ["alfworld", cfg_file]
+            cfg = generic.load_config()
+        finally:
+            sys.argv = old_argv
+        cfg["env"]["type"] = "AlfredTWEnv"  # force the text-only variant
+
         self._alfworld_cfg = cfg
-        self._alfworld = environment
+        self._environment = environment
         self._games = list_alfworld_games(self._split)
         if not self._games:
-            logger.warning("AlfworldEnv: no game files found under $ALFWORLD_DATA (split=%s).", self._split)
+            logger.warning("AlfworldEnv: no game files under $ALFWORLD_DATA (split=%s).", self._split)
         self._ready = True
 
-    def _open_episode(self, game_index: int) -> Any:
-        """Build a ``batch_size=1`` ALFWorld env restricted to a single game and reset
-        it; return the TextWorld env handle (``.step([a]) -> (obs, scores, dones, infos)``,
-        ``.reset() -> (obs, info)``). Overridable in tests. Restricting ``game_files``
-        to one game makes the ``n`` GRPO siblings share the same task deterministically."""
-        env_type = self._alfworld_cfg["env"]["type"]
-        env = self._alfworld.get_environment(env_type)(self._alfworld_cfg, train_eval=self._split)
-        if self._games and hasattr(env, "game_files"):
-            env.game_files = [self._games[game_index % len(self._games)]]
-        return env.init_env(batch_size=1)
+    def _acquire_template(self) -> Any:
+        """A reusable AlfredTWEnv (constructed on demand; the engine caps concurrency)."""
+        with self._lock:
+            if self._free:
+                return self._free.pop()
+        return self._environment.get_environment("AlfredTWEnv")(self._alfworld_cfg, train_eval=self._split)
+
+    def _release_template(self, template: Any) -> None:
+        if template is None:
+            return
+        with self._lock:
+            self._free.append(template)
+
+    def _open_episode(self, game_index: int) -> Tuple[Any, Any]:
+        """Check out a template restricted to one game, ``init_env`` it (cheap), and
+        return ``(tw_env, template)``. Restricting ``game_files`` to one game makes the
+        ``n`` GRPO siblings share the same task deterministically. Overridable in tests."""
+        template = self._acquire_template()
+        if self._games and hasattr(template, "game_files"):
+            template.game_files = [self._games[game_index % len(self._games)]]
+        tw = template.init_env(batch_size=1)
+        return tw, template
 
     # ------------------------------------------------------------------
     # Engine protocol
@@ -156,13 +189,13 @@ class AlfworldEnv:
         meta = (root.metadata or [None])[0] or {}
         game_index = int(meta.get("game_index", 0))
 
-        tw = self._open_episode(game_index)
+        tw, template = self._open_episode(game_index)
         obs, info = tw.reset()
 
         with self._lock:
             self._counter += 1
             eid = f"{sid}#ep{self._counter}"
-            self._episodes[eid] = _Episode(tw)
+            self._episodes[eid] = _Episode(tw, template)
 
         control = dict(root.control or {})
         control["alfworld"] = {"episode_id": eid}
@@ -202,7 +235,7 @@ class AlfworldEnv:
         if done:
             with self._lock:
                 self._episodes.pop(eid, None)
-            self._close(ep.env)
+            self._release_template(ep.template)
             return None, True, {"reward": ep.reward, "success": success, "steps": ep.steps}
 
         observation = Texts(texts=[self._format(obs, infos, first=False)])
@@ -219,15 +252,13 @@ class AlfworldEnv:
     @staticmethod
     def _first(seq: Any, default: Any) -> Any:
         if isinstance(seq, (list, tuple)):
-            return seq[0] if seq else default
+            return seq[0] if len(seq) else default
         return seq if seq is not None else default
 
     def _success(self, scores: Any, infos: Any) -> float:
         """ALFWorld terminal success → 1.0/0.0. Prefers ``infos['won']``, falls back
         to a goal-progress score of 1.0."""
-        won = None
-        if isinstance(infos, dict):
-            won = self._first(infos.get("won"), None)
+        won = self._first(infos.get("won"), None) if isinstance(infos, dict) else None
         if won is not None:
             return 1.0 if bool(won) else 0.0
         try:
@@ -237,9 +268,7 @@ class AlfworldEnv:
 
     def _format(self, obs: Any, info: Any, *, first: bool) -> str:
         text = str(self._first(obs, obs))[: self._max_obs_chars]
-        cmds = None
-        if isinstance(info, dict):
-            cmds = self._first(info.get("admissible_commands"), None)
+        cmds = self._first(info.get("admissible_commands"), None) if isinstance(info, dict) else None
         blocks: List[str] = []
         if first:
             blocks.append(_SYSTEM)
@@ -247,13 +276,6 @@ class AlfworldEnv:
         if cmds:
             blocks.append("Admissible actions: " + ", ".join(str(c) for c in cmds))
         return "\n\n".join(blocks)
-
-    @staticmethod
-    def _close(env: Any) -> None:
-        try:
-            env.close()
-        except Exception:  # noqa: BLE001 — best-effort cleanup
-            pass
 
 
 __all__ = ["AlfworldEnv", "list_alfworld_games"]
